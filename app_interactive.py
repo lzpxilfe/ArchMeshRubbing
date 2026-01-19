@@ -145,6 +145,30 @@ class TransformPanel(QWidget):
         rot_layout.addRow("Z:", self.rot_z)
         layout.addWidget(rot_group)
         
+        # 스케일 그룹
+        scale_group = QGroupBox("📏 스케일")
+        scale_group.setStyleSheet("QGroupBox { font-weight: bold; }")
+        scale_layout = QFormLayout(scale_group)
+        
+        self.scale_slider = QSlider(Qt.Orientation.Horizontal)
+        self.scale_slider.setRange(10, 1000)  # 0.1x ~ 10x (10배율로 저장)
+        self.scale_slider.setValue(100)  # 1.0x
+        self.scale_slider.valueChanged.connect(self.on_scale_changed)
+        
+        self.scale_spin = QDoubleSpinBox()
+        self.scale_spin.setRange(0.1, 10.0)
+        self.scale_spin.setValue(1.0)
+        self.scale_spin.setSingleStep(0.1)
+        self.scale_spin.setDecimals(2)
+        self.scale_spin.valueChanged.connect(self.on_scale_spin_changed)
+        
+        scale_inner = QHBoxLayout()
+        scale_inner.addWidget(self.scale_slider, 3)
+        scale_inner.addWidget(self.scale_spin, 1)
+        scale_layout.addRow("배율:", scale_inner)
+        
+        layout.addWidget(scale_group)
+        
         # 빠른 정렬 버튼
         align_group = QGroupBox("⚡ 빠른 정렬")
         align_group.setStyleSheet("QGroupBox { font-weight: bold; }")
@@ -210,6 +234,23 @@ class TransformPanel(QWidget):
         self.rot_x.setValue(0)
         self.rot_y.setValue(0)
         self.rot_z.setValue(0)
+        self.scale_slider.setValue(100)
+        self.scale_spin.setValue(1.0)
+    
+    def on_scale_changed(self, value):
+        """슬라이더에서 스케일 변경"""
+        scale = value / 100.0
+        self.scale_spin.blockSignals(True)
+        self.scale_spin.setValue(scale)
+        self.scale_spin.blockSignals(False)
+        self.viewport.set_mesh_scale(scale)
+    
+    def on_scale_spin_changed(self, value):
+        """스핀박스에서 스케일 변경"""
+        self.scale_slider.blockSignals(True)
+        self.scale_slider.setValue(int(value * 100))
+        self.scale_slider.blockSignals(False)
+        self.viewport.set_mesh_scale(value)
     
     def enterEvent(self, event):
         self.help_widget.set_transform_help()

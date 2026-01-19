@@ -71,16 +71,24 @@ class TrackballCamera:
         # 수직 각도 제한 (-89 ~ 89도)
         self.elevation = max(-89.0, min(89.0, self.elevation))
     
-    def pan(self, delta_x: float, delta_y: float, sensitivity: float = 0.1):
-        """카메라 이동 (Pan)"""
+    def pan(self, delta_x: float, delta_y: float, sensitivity: float = 0.3):
+        """카메라 이동 (Pan) - 더 자연스럽게"""
         # 카메라의 오른쪽/위쪽 방향 계산
         az_rad = np.radians(self.azimuth)
+        el_rad = np.radians(self.elevation)
         
+        # 카메라 기준 오른쪽 벡터
         right = np.array([np.cos(az_rad), 0, -np.sin(az_rad)])
-        up = np.array([0, 1, 0])
         
-        # Pan 적용
-        pan_speed = self.distance * sensitivity * 0.01
+        # 카메라 기준 위쪽 벡터 (elevation 고려)
+        up = np.array([
+            -np.sin(el_rad) * np.sin(az_rad),
+            np.cos(el_rad),
+            -np.sin(el_rad) * np.cos(az_rad)
+        ])
+        
+        # Pan 속도 = 거리에 비례하되 적당한 배율
+        pan_speed = self.distance * sensitivity * 0.005
         self.pan_offset += right * (-delta_x * pan_speed)
         self.pan_offset += up * (delta_y * pan_speed)
     
@@ -165,6 +173,7 @@ class Viewport3D(QOpenGLWidget):
         # 변환
         self.mesh_translation = np.array([0.0, 0.0, 0.0])
         self.mesh_rotation = np.array([0.0, 0.0, 0.0])  # 도
+        self.mesh_scale = 1.0  # 스케일 배율
         
         # VBO 데이터
         self.vbo_id = None
@@ -328,6 +337,7 @@ class Viewport3D(QOpenGLWidget):
         glRotatef(self.mesh_rotation[0], 1, 0, 0)
         glRotatef(self.mesh_rotation[1], 0, 1, 0)
         glRotatef(self.mesh_rotation[2], 0, 0, 1)
+        glScalef(self.mesh_scale, self.mesh_scale, self.mesh_scale)
         
         # 메쉬 색상
         glColor3f(*self.mesh_color)
@@ -478,6 +488,11 @@ class Viewport3D(QOpenGLWidget):
     def set_mesh_rotation(self, rx: float, ry: float, rz: float):
         """메쉬 회전 (도)"""
         self.mesh_rotation = np.array([rx, ry, rz])
+        self.update()
+    
+    def set_mesh_scale(self, scale: float):
+        """메쉬 스케일"""
+        self.mesh_scale = scale
         self.update()
     
     def mousePressEvent(self, event: QMouseEvent):
