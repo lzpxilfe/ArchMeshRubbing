@@ -254,97 +254,84 @@ class Viewport3D(QOpenGLWidget):
         self.draw_fitted_arc()
     
     def draw_grid(self):
-        """무한 격자 바닥면 그리기 (카메라 중심 기준)"""
+        """무한 격자 바닥면 그리기 (항상 카메라 주변에 표시)"""
         glDisable(GL_LIGHTING)
         
         spacing = self.grid_spacing
-        size = self.grid_size
         
-        # 카메라 중심 위치를 격자 간격에 맞춰 스냅
+        # 격자 크기를 카메라 거리에 비례하게 설정
+        view_range = max(self.camera.distance * 2, self.grid_size)
+        half_range = view_range / 2
+        
+        # 카메라가 보는 곳을 중심으로 격자 스냅
         cam_center = self.camera.look_at
         snap_x = round(cam_center[0] / spacing) * spacing
         snap_z = round(cam_center[2] / spacing) * spacing
         
-        half_size = size / 2
-        
-        # 메인 격자
-        glColor3f(0.8, 0.8, 0.8)
+        # 메인 격자 (1단위)
+        glColor3f(0.82, 0.82, 0.82)
         glLineWidth(1.0)
         
         glBegin(GL_LINES)
-        steps = int(size / spacing)
-        for i in range(steps + 1):
-            offset = -half_size + i * spacing
-            # X 방향 선 (카메라 기준으로 이동)
-            x_val = snap_x + offset
-            glVertex3f(x_val, 0, snap_z - half_size)
-            glVertex3f(x_val, 0, snap_z + half_size)
+        steps = int(view_range / spacing) + 2
+        for i in range(-steps // 2, steps // 2 + 1):
+            # X 방향 선
+            x_val = snap_x + i * spacing
+            glVertex3f(x_val, 0, snap_z - half_range)
+            glVertex3f(x_val, 0, snap_z + half_range)
             # Z 방향 선
-            z_val = snap_z + offset
-            glVertex3f(snap_x - half_size, 0, z_val)
-            glVertex3f(snap_x + half_size, 0, z_val)
+            z_val = snap_z + i * spacing
+            glVertex3f(snap_x - half_range, 0, z_val)
+            glVertex3f(snap_x + half_range, 0, z_val)
         glEnd()
         
-        # 주요 격자 (10단위)
+        # 주요 격자 (10단위) - 더 굵게
         major_spacing = spacing * 10
-        glColor3f(0.65, 0.65, 0.65)
-        glLineWidth(2.0)
+        glColor3f(0.7, 0.7, 0.7)
+        glLineWidth(1.5)
         
         glBegin(GL_LINES)
         snap_major_x = round(cam_center[0] / major_spacing) * major_spacing
         snap_major_z = round(cam_center[2] / major_spacing) * major_spacing
-        steps_major = int(size / major_spacing) + 2
+        steps_major = int(view_range / major_spacing) + 4
         for i in range(-steps_major, steps_major + 1):
             val_x = snap_major_x + i * major_spacing
             val_z = snap_major_z + i * major_spacing
-            glVertex3f(val_x, 0, snap_z - half_size)
-            glVertex3f(val_x, 0, snap_z + half_size)
-            glVertex3f(snap_x - half_size, 0, val_z)
-            glVertex3f(snap_x + half_size, 0, val_z)
-        glEnd()
-        
-        # 원점 축 강조 (빨강/파랑)
-        glLineWidth(2.0)
-        glBegin(GL_LINES)
-        # X축 (빨강)
-        glColor3f(0.8, 0.3, 0.3)
-        glVertex3f(snap_x - half_size, 0, 0)
-        glVertex3f(snap_x + half_size, 0, 0)
-        # Z축 (파랑)
-        glColor3f(0.3, 0.3, 0.8)
-        glVertex3f(0, 0, snap_z - half_size)
-        glVertex3f(0, 0, snap_z + half_size)
+            glVertex3f(val_x, 0, snap_z - half_range)
+            glVertex3f(val_x, 0, snap_z + half_range)
+            glVertex3f(snap_x - half_range, 0, val_z)
+            glVertex3f(snap_x + half_range, 0, val_z)
         glEnd()
         
         glLineWidth(1.0)
         glEnable(GL_LIGHTING)
     
     def draw_axes(self):
-        """XYZ 축 그리기 (원점에서)"""
+        """XYZ 축 그리기 (무한히 뻗어나감)"""
         glDisable(GL_LIGHTING)
         
-        axis_length = 10.0  # 10cm
+        # 축 길이를 카메라 거리에 비례하게 설정 (사실상 무한)
+        axis_length = max(self.camera.distance * 3, 1000.0)
         
-        glLineWidth(3.0)
+        glLineWidth(2.5)
         glBegin(GL_LINES)
         
-        # X축 (빨강)
-        glColor3f(1.0, 0.2, 0.2)
-        glVertex3f(0, 0, 0)
+        # X축 (빨강) - 양방향으로 무한히
+        glColor3f(0.9, 0.2, 0.2)
+        glVertex3f(-axis_length, 0, 0)
         glVertex3f(axis_length, 0, 0)
         
-        # Y축 (초록)
-        glColor3f(0.2, 1.0, 0.2)
-        glVertex3f(0, 0, 0)
+        # Y축 (초록) - 양방향으로 무한히
+        glColor3f(0.2, 0.8, 0.2)
+        glVertex3f(0, -axis_length, 0)
         glVertex3f(0, axis_length, 0)
         
-        # Z축 (파랑)
-        glColor3f(0.2, 0.2, 1.0)
-        glVertex3f(0, 0, 0)
+        # Z축 (파랑) - 양방향으로 무한히
+        glColor3f(0.2, 0.2, 0.9)
+        glVertex3f(0, 0, -axis_length)
         glVertex3f(0, 0, axis_length)
         
         glEnd()
-        
         glLineWidth(1.0)
         glEnable(GL_LIGHTING)
     
