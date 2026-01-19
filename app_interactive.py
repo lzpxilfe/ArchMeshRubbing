@@ -1,6 +1,7 @@
 """
 ArchMeshRubbing v2 - Complete Interactive Application
-CloudCompare 스타일 인터랙티브 3D 뷰어 + 펼침 + 표면 선택
+Copyright (C) 2026 balguljang2 (lzpxilfe)
+Licensed under the GNU General Public License v2.0 (GPL2)
 """
 
 import sys
@@ -19,7 +20,11 @@ from PyQt6.QtCore import Qt, QTimer, QSize, pyqtSignal, QThread
 from PyQt6.QtGui import QAction, QIcon, QKeySequence, QFont, QPixmap
 
 # Add src to path
-sys.path.insert(0, str(Path(__file__).parent / 'src'))
+if getattr(sys, 'frozen', False):
+    basedir = sys._MEIPASS
+else:
+    basedir = str(Path(__file__).parent)
+sys.path.insert(0, str(Path(basedir) / 'src'))
 
 from src.gui.viewport_3d import Viewport3D
 from src.core.mesh_loader import MeshLoader
@@ -63,7 +68,7 @@ class HelpWidget(QTextEdit):
                 <tr><td><b>F</b></td><td>메쉬에 맞춤</td></tr>
             </table>
         """)
-    
+
     def set_transform_help(self):
         self.setHtml("""
             <h3 style="margin:0; color:#2c5282;">📐 정치 (Positioning)</h3>
@@ -99,6 +104,94 @@ class HelpWidget(QTextEdit):
             <b>선택 확장/축소:</b> 인접 면 포함/제외
             </p>
         """)
+
+
+class SplashScreen(QWidget):
+    """프로세스 시작 시 보여주는 스플래시 화면"""
+    
+    def __init__(self):
+        super().__init__(None, Qt.WindowType.FramelessWindowHint | Qt.WindowType.SplashScreen | Qt.WindowType.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setFixedSize(500, 300)
+        self.init_ui()
+        
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        
+        # 메인 카드 (그림자 효과용)
+        card = QFrame()
+        card.setStyleSheet("""
+            QFrame {
+                background-color: white;
+                border-radius: 15px;
+                border: 1px solid #e0e0e0;
+            }
+        """)
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(30, 30, 30, 20)
+        
+        # 아이콘
+        self.icon_label = QLabel()
+        icon_path = get_icon_path()
+        if icon_path:
+            pix = QPixmap(icon_path).scaled(80, 80, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            self.icon_label.setPixmap(pix)
+        self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        card_layout.addWidget(self.icon_label)
+        
+        # 타이틀
+        title = QLabel("ArchMeshRubbing v2")
+        title.setStyleSheet("""
+            font-size: 24px;
+            font-weight: bold;
+            color: #2c5282;
+            margin-top: 10px;
+        """)
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        card_layout.addWidget(title)
+        
+        # 버전 정보 추가 (사용자 확인용)
+        version = QLabel("Version: 2026.01.19.v3")
+        version.setStyleSheet("color: #a0aec0; font-size: 10px; margin-bottom: 5px;")
+        version.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        card_layout.addWidget(version)
+        
+        # 서브타이틀
+        subtitle = QLabel("고고학용 3D 메쉬 탁본 도구")
+        subtitle.setStyleSheet("color: #718096; font-size: 14px;")
+        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        card_layout.addWidget(subtitle)
+        
+        card_layout.addStretch()
+        
+        # 로딩 상태
+        self.loading_label = QLabel("Initializing engine...")
+        self.loading_label.setStyleSheet("color: #a0aec0; font-size: 11px;")
+        self.loading_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        card_layout.addWidget(self.loading_label)
+        
+        # 저작권 정보 (사용자 요청 사항)
+        copyright_label = QLabel("© 2026 balguljang2 (github.com/lzpxilfe).")
+        copyright_label.setStyleSheet("color: #cbd5e0; font-size: 10px; margin-top: 5px;")
+        copyright_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        card_layout.addWidget(copyright_label)
+        
+        license_label = QLabel("Licensed under GNU GPL v2")
+        license_label.setStyleSheet("""
+            color: #a0aec0; 
+            font-size: 9px; 
+            font-weight: bold;
+            border-top: 1px solid #f7fafc;
+            padding-top: 3px;
+        """)
+        license_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        card_layout.addWidget(license_label)
+        
+        layout.addWidget(card)
+        
+    def showMessage(self, message):
+        self.loading_label.setText(message)
+        QApplication.processEvents()
 
 
 class TransformPanel(QWidget):
@@ -225,8 +318,9 @@ class TransformPanel(QWidget):
         if self.viewport.mesh is None:
             return
         # 메쉬는 이미 load_mesh에서 로컬 원점에 맞춰져 있으므로, 
-        # bounds[0][1]은 로컬 원점으로부터 바닥까지의 거리입니다.
-        min_y = self.viewport.mesh.bounds[0][1]
+        # bounds[0][1]은 원점으로부터의 로컬 바닥 위치입니다.
+        # 실제 월드상 바닥 위치는 로컬 바닥 * 스케일 만큼 떨어져 있습니다.
+        min_y = self.viewport.mesh.bounds[0][1] * self.viewport.mesh_scale
         self.trans_y.setValue(-min_y)
     
     def reset_transform(self):
@@ -706,9 +800,10 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         
-        self.setWindowTitle("ArchMeshRubbing v2 - 고고학 메쉬 탁본 도구")
-        self.setMinimumSize(1400, 900)
+        self.setWindowTitle("ArchMeshRubbing v2 (Build 260119-3)")
+        self.resize(1400, 900)
         
+        # 메인 위젯
         # 드래그 앤 드롭 활성화
         self.setAcceptDrops(True)
         
@@ -967,6 +1062,11 @@ class MainWindow(QMainWindow):
         self.statusbar.addPermanentWidget(self.status_mesh)
         self.statusbar.addPermanentWidget(self.status_grid)
         self.statusbar.addPermanentWidget(self.status_unit)
+        
+        # 버전 표시 (사용자 확인용)
+        self.status_ver = QLabel("v2026.01.19.v3")
+        self.status_ver.setStyleSheet("color: #a0aec0; font-size: 10px; margin-left: 10px;")
+        self.statusbar.addPermanentWidget(self.status_ver)
     
     def open_file(self):
         filepath, _ = QFileDialog.getOpenFileName(
@@ -1130,31 +1230,56 @@ class MainWindow(QMainWindow):
         msg.setText("""
             <h2>ArchMeshRubbing v2</h2>
             <p>고고학 메쉬 탁본 도구</p>
+            <p style="font-size: 11px; color: #718096;">© 2026 balguljang2 (lzpxilfe) / Licensed under GPLv2</p>
             <hr>
             <p><b>조작법:</b></p>
             <ul>
                 <li>좌클릭 드래그: 회전</li>
                 <li>우클릭 드래그: 이동</li>
                 <li>스크롤: 확대/축소</li>
-                <li>1/3/7: 전면/측면/상단 뷰</li>
+                <li>1~6: 다방향 프리셋 뷰</li>
             </ul>
         """)
         msg.exec()
 
 
 def main():
-    app = QApplication(sys.argv)
-    app.setStyle('Fusion')
-    
-    # 아이콘 설정
-    icon_path = get_icon_path()
-    if icon_path:
-        app.setWindowIcon(QIcon(icon_path))
-    
-    window = MainWindow()
-    window.show()
-    
-    sys.exit(app.exec())
+    try:
+        app = QApplication(sys.argv)
+        app.setStyle('Fusion')
+        
+        # 아이콘 설정
+        icon_path = get_icon_path()
+        if icon_path:
+            app.setWindowIcon(QIcon(icon_path))
+        
+        # 1. 스플래시 화면 표시
+        splash = SplashScreen()
+        splash.show()
+        splash.setCursor(Qt.CursorShape.WaitCursor)
+        
+        splash.showMessage("Loading standard libraries...")
+        QTimer.singleShot(500, lambda: splash.showMessage("Configuring OpenGL context..."))
+        
+        # 2. 메인 윈도우 생성
+        splash.showMessage("Initializing UI components...")
+        window = MainWindow()
+        
+        # 3. 마무리 및 스플래시 닫기
+        QTimer.singleShot(1500, lambda: (splash.close(), window.show()))
+        
+        sys.exit(app.exec())
+    except Exception as e:
+        # 치명적 오류 팝업 (EXE 등에서 유용)
+        import traceback
+        err_msg = f"Application crashed on startup:\n\n{e}\n\n{traceback.format_exc()}"
+        print(err_msg)
+        try:
+            temp_app = QApplication.instance() or QApplication(sys.argv)
+            QMessageBox.critical(None, "Fatal Startup Error", err_msg)
+        except:
+            pass
+        sys.exit(1)
 
 
 if __name__ == '__main__':

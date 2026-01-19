@@ -1,6 +1,7 @@
 """
 3D Viewport Widget with OpenGL
-CloudCompare 스타일 카메라 조작이 가능한 3D 뷰포트
+Copyright (C) 2026 balguljang2 (lzpxilfe)
+Licensed under the GNU General Public License v2.0 (GPL2)
 """
 
 import numpy as np
@@ -13,6 +14,7 @@ from PyQt6.QtOpenGLWidgets import QOpenGLWidget
 
 from OpenGL.GL import *
 from OpenGL.GLU import *
+import ctypes
 
 
 class TrackballCamera:
@@ -37,8 +39,9 @@ class TrackballCamera:
         # Pan 오프셋
         self.pan_offset = np.array([0.0, 0.0, 0.0])
         
-        # 줌 제한 - 대폭 확장하여 무한한 느낌 제공
+        # 줌 제한 - 대폭 확장
         self.min_distance = 0.01
+        # 1,000,000cm = 10km까지 확대 가능하게 하여 무한한 느낌 제공
         self.max_distance = 1000000.0
     
     @property
@@ -226,9 +229,9 @@ class Viewport3D(QOpenGLWidget):
         # 폴리곤 모드
         glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
         
-        # 안티앨리어싱
-        glEnable(GL_LINE_SMOOTH)
-        glHint(GL_LINE_SMOOTH_HINT, GL_NICEST)
+        # 안티앨리어싱 (일부 드라이버에서 불안정할 수 있어 비활성화)
+        # glEnable(GL_LINE_SMOOTH)
+        # glHint(GL_LINE_SMOOTH_HINT, GL_NICEST)
     
     def resizeGL(self, width: int, height: int):
         """뷰포트 크기 변경"""
@@ -290,11 +293,12 @@ class Viewport3D(QOpenGLWidget):
             if view_range < self.camera.distance * 0.5 and level < 1000:
                 continue
                 
-            view_range = min(view_range, 1000000.0) # 최대 10km
+            view_range = min(view_range, 100000.0) # 최대 1km (안정성을 위해 10km에서 1km로 조정)
             half_range = view_range / 2
             
             # 투명도 조절 (레벨이 높을수록, 혹은 카메라 중심에서 멀수록 연하게)
-            alpha = max(0.1, min(0.4, 2.0 / (level ** 0.5)))
+            # 최소 알파를 0.15로 높여 무한한 격자가 항상 보이도록 함
+            alpha = max(0.15, min(0.4, 2.0 / (level ** 0.5)))
             glColor4f(0.7, 0.7, 0.7, alpha)
             
             snap_x = round(cam_center[0] / spacing) * spacing
@@ -321,6 +325,7 @@ class Viewport3D(QOpenGLWidget):
         glDisable(GL_LIGHTING)
         
         # 축 길이를 카메라 거리에 비례하여 대폭 확장 (사실상 끝이 안 보이게)
+        # 기본 10km 이상으로 설정하여 무한한 느낌 강화
         axis_length = max(self.camera.distance * 100, 1000000.0)
         
         glLineWidth(3.0)
@@ -414,8 +419,8 @@ class Viewport3D(QOpenGLWidget):
         # 메쉬와 동일한 위치로 이동 (회전은 미적용, 즉 월드 축 기준)
         glTranslatef(*self.mesh_translation)
         
-        # 기즈모 크기 설정 (메쉬를 감싸는 정도)
-        size = self.gizmo_size
+        # 기즈모 크기 설정 (메쉬를 감싸는 정도, 메쉬 스케일 반영)
+        size = self.gizmo_size * self.mesh_scale
         
         # X축 회전 고리 (빨강)
         glColor3f(1.0, 0.2, 0.2)
@@ -495,8 +500,8 @@ class Viewport3D(QOpenGLWidget):
         """메쉬 로드 및 최적화"""
         self.mesh = mesh
         
-        # 1. 메쉬 자체를 원점으로 센터링 (기즈모 일치를 위해 가장 확실한 방법)
-        # trimesh.centroid를 이용해 무게중심을 원점에 맞춤
+        # 1. 메쉬 자체를 원점으로 센터링
+        # MeshData 클래스에 정의된 centroid(평균) 또는 bounds를 기반으로 함
         center = mesh.centroid
         mesh.vertices -= center
         mesh.compute_normals()
@@ -572,6 +577,9 @@ class Viewport3D(QOpenGLWidget):
             # 기즈모를 잡을 수 있는 너비 (카메라 거리에 비례)
             threshold = self.camera.distance * 0.03
             
+            # 스케일이 적용된 기즈모 크기
+            scaled_gizmo_size = self.gizmo_size * self.mesh_scale
+            
             # 각 축의 평면 법선
             planes = {
                 'X': np.array([1, 0, 0]),
@@ -591,7 +599,7 @@ class Viewport3D(QOpenGLWidget):
                         dist_to_center = np.linalg.norm(hit_pt - gizmo_center)
                         
                         # 고리(원) 근처를 클릭했는지 확인 (더 관대한 임계값)
-                        if abs(dist_to_center - self.gizmo_size) < threshold:
+                        if abs(dist_to_center - scaled_gizmo_size) < threshold:
                             if t < min_ray_t:
                                 min_ray_t = t
                                 best_axis = axis
@@ -650,30 +658,33 @@ class Viewport3D(QOpenGLWidget):
     
     def mousePressEvent(self, event: QMouseEvent):
         """마우스 버튼 눌림"""
-        # Shift+클릭: 곡률 측정용 점 찍기
-        if (event.modifiers() & Qt.KeyboardModifier.ShiftModifier and 
-            event.button() == Qt.MouseButton.LeftButton and
-            self.curvature_pick_mode and self.mesh is not None):
-            
-            point = self.pick_point_on_mesh(event.pos().x(), event.pos().y())
-            if point is not None:
-                self.picked_points.append(point)
-                self.update()
-            return
-        
-        # 기즈모 클릭 체크 (메쉬가 있을 때만)
-        if event.button() == Qt.MouseButton.LeftButton and self.mesh is not None:
-            axis = self.hit_test_gizmo(event.pos().x(), event.pos().y())
-            if axis:
-                self.active_gizmo_axis = axis
-                angle = self._calculate_gizmo_angle(event.pos().x(), event.pos().y())
-                if angle is not None:
-                    self.gizmo_drag_start = angle
+        try:
+            # Shift+클릭: 곡률 측정용 점 찍기
+            if (event.modifiers() & Qt.KeyboardModifier.ShiftModifier and 
+                event.button() == Qt.MouseButton.LeftButton and
+                self.curvature_pick_mode and self.mesh is not None):
+                
+                point = self.pick_point_on_mesh(event.pos().x(), event.pos().y())
+                if point is not None:
+                    self.picked_points.append(point)
                     self.update()
-                    return
-        
-        self.last_mouse_pos = event.pos()
-        self.mouse_button = event.button()
+                return
+            
+            # 기즈모 클릭 체크 (메쉬가 있을 때만)
+            if event.button() == Qt.MouseButton.LeftButton and self.mesh is not None:
+                axis = self.hit_test_gizmo(event.pos().x(), event.pos().y())
+                if axis:
+                    self.active_gizmo_axis = axis
+                    angle = self._calculate_gizmo_angle(event.pos().x(), event.pos().y())
+                    if angle is not None:
+                        self.gizmo_drag_start = angle
+                        self.update()
+                        return
+            
+            self.last_mouse_pos = event.pos()
+            self.mouse_button = event.button()
+        except Exception as e:
+            print(f"Mouse press error: {e}")
     
     def mouseReleaseEvent(self, event: QMouseEvent):
         """마우스 버튼 놓음"""
@@ -685,74 +696,77 @@ class Viewport3D(QOpenGLWidget):
     
     def mouseMoveEvent(self, event: QMouseEvent):
         """마우스 이동 (드래그)"""
-        # 1. 기즈모 드래그 (메쉬가 있을 때만)
-        if self.active_gizmo_axis and self.mesh is not None and self.gizmo_drag_start is not None:
-            angle_info = self._calculate_gizmo_angle(event.pos().x(), event.pos().y())
-            if angle_info is not None:
-                current_angle = angle_info
-                delta_angle = np.degrees(current_angle - self.gizmo_drag_start)
-                
-                if self.active_gizmo_axis == 'X':
-                    self.mesh_rotation[0] += delta_angle
-                elif self.active_gizmo_axis == 'Y':
-                    self.mesh_rotation[1] -= delta_angle
-                elif self.active_gizmo_axis == 'Z':
-                    self.mesh_rotation[2] += delta_angle
+        try:
+            # 1. 기즈모 드래그 (메쉬가 있을 때만)
+            if self.active_gizmo_axis and self.mesh is not None and self.gizmo_drag_start is not None:
+                angle_info = self._calculate_gizmo_angle(event.pos().x(), event.pos().y())
+                if angle_info is not None:
+                    current_angle = angle_info
+                    delta_angle = np.degrees(current_angle - self.gizmo_drag_start)
                     
-                self.gizmo_drag_start = current_angle
-                self.meshTransformChanged.emit()
-                self.update()
+                    if self.active_gizmo_axis == 'X':
+                        self.mesh_rotation[0] += delta_angle
+                    elif self.active_gizmo_axis == 'Y':
+                        self.mesh_rotation[1] -= delta_angle
+                    elif self.active_gizmo_axis == 'Z':
+                        self.mesh_rotation[2] += delta_angle
+                        
+                    self.gizmo_drag_start = current_angle
+                    self.meshTransformChanged.emit()
+                    self.update()
+                    return
+                
+            # 2. 기즈모 호버 하이라이트
+            if event.buttons() == Qt.MouseButtons.NoButton and self.mesh is not None:
+                axis = self.hit_test_gizmo(event.pos().x(), event.pos().y())
+                if axis != self.active_gizmo_axis:
+                    self.active_gizmo_axis = axis
+                    self.update()
+                return
+
+            # 3. 카메라 및 메쉬 일반 드래그 조작 (메쉬 없어도 카메라 조작은 가능해야 함)
+            if self.last_mouse_pos is None:
                 return
             
-        # 2. 기즈모 호버 하이라이트
-        if event.buttons() == Qt.MouseButtons.NoButton and self.mesh is not None:
-            axis = self.hit_test_gizmo(event.pos().x(), event.pos().y())
-            if axis != self.active_gizmo_axis:
-                self.active_gizmo_axis = axis
-                self.update()
-            return
-
-        # 3. 카메라 및 메쉬 일반 드래그 조작 (메쉬 없어도 카메라 조작은 가능해야 함)
-        if self.last_mouse_pos is None:
-            return
-        
-        dx = event.pos().x() - self.last_mouse_pos.x()
-        dy = event.pos().y() - self.last_mouse_pos.y()
-        
-        modifiers = event.modifiers()
-        
-        # Ctrl+드래그: 메쉬 직접 이동 (기존 기능 유지)
-        if modifiers & Qt.KeyboardModifier.ControlModifier:
-            az_rad = np.radians(self.camera.azimuth)
-            move_speed = self.camera.distance * 0.002
+            dx = event.pos().x() - self.last_mouse_pos.x()
+            dy = event.pos().y() - self.last_mouse_pos.y()
             
-            dx_world = -dx * np.cos(az_rad) * move_speed
-            dz_world = -dx * np.sin(az_rad) * move_speed
-            dy_world = -dy * move_speed
+            modifiers = event.modifiers()
             
-            self.mesh_translation[0] += dx_world
-            self.mesh_translation[1] += dy_world
-            self.mesh_translation[2] += dz_world
+            # Ctrl+드래그: 메쉬 직접 이동 (기존 기능 유지)
+            if (modifiers & Qt.KeyboardModifier.ControlModifier) and self.mesh is not None:
+                az_rad = np.radians(self.camera.azimuth)
+                move_speed = self.camera.distance * 0.002
+                
+                dx_world = -dx * np.cos(az_rad) * move_speed
+                dz_world = -dx * np.sin(az_rad) * move_speed
+                dy_world = -dy * move_speed
+                
+                self.mesh_translation[0] += dx_world
+                self.mesh_translation[1] += dy_world
+                self.mesh_translation[2] += dz_world
+                
+                self.meshTransformChanged.emit()
             
-            self.meshTransformChanged.emit()
-        
-        # Alt+드래그: 메쉬 3축 자유 회전 (기존 기능 유지)
-        elif modifiers & Qt.KeyboardModifier.AltModifier:
-            rot_speed = 0.5
-            self.mesh_rotation[1] += dx * rot_speed
-            self.mesh_rotation[0] += dy * rot_speed
-            self.meshTransformChanged.emit()
-        
-        # 일반 조작 (카메라)
-        elif self.mouse_button == Qt.MouseButton.LeftButton:
-            self.camera.rotate(dx, dy)
-        elif self.mouse_button == Qt.MouseButton.RightButton:
-            self.camera.pan(dx, dy)
-        elif self.mouse_button == Qt.MouseButton.MiddleButton:
-            self.camera.rotate(dx, dy)
-        
-        self.last_mouse_pos = event.pos()
-        self.update()
+            # Alt+드래그: 메쉬 3축 자유 회전 (기존 기능 유지)
+            elif (modifiers & Qt.KeyboardModifier.AltModifier) and self.mesh is not None:
+                rot_speed = 0.5
+                self.mesh_rotation[1] += dx * rot_speed
+                self.mesh_rotation[0] += dy * rot_speed
+                self.meshTransformChanged.emit()
+            
+            # 일반 조작 (카메라)
+            elif self.mouse_button == Qt.MouseButton.LeftButton:
+                self.camera.rotate(dx, dy)
+            elif self.mouse_button == Qt.MouseButton.RightButton:
+                self.camera.pan(dx, dy)
+            elif self.mouse_button == Qt.MouseButton.MiddleButton:
+                self.camera.rotate(dx, dy)
+            
+            self.last_mouse_pos = event.pos()
+            self.update()
+        except Exception as e:
+            print(f"Mouse move error: {e}")
 
     def _calculate_gizmo_angle(self, screen_x, screen_y):
         """기즈모 중심에서 마우스 포인터까지의 각도 계산 (화면 공간)"""
