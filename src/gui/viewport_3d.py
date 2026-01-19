@@ -145,6 +145,7 @@ class Viewport3D(QOpenGLWidget):
     # 시그널
     meshLoaded = pyqtSignal(object)  # 메쉬 로드됨
     selectionChanged = pyqtSignal(list)  # 선택 변경됨
+    meshTransformChanged = pyqtSignal()  # 직접 조작으로 변환됨
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -253,12 +254,16 @@ class Viewport3D(QOpenGLWidget):
         self.draw_fitted_arc()
     
     def draw_grid(self):
-        """가변 격자 바닥면 그리기"""
+        """무한 격자 바닥면 그리기 (카메라 중심 기준)"""
         glDisable(GL_LIGHTING)
         
-        # 메쉬 크기에 따라 격자 범위 확장
-        size = self.grid_size
         spacing = self.grid_spacing
+        size = self.grid_size
+        
+        # 카메라 중심 위치를 격자 간격에 맞춰 스냅
+        cam_center = self.camera.look_at
+        snap_x = round(cam_center[0] / spacing) * spacing
+        snap_z = round(cam_center[2] / spacing) * spacing
         
         half_size = size / 2
         
@@ -267,33 +272,51 @@ class Viewport3D(QOpenGLWidget):
         glLineWidth(1.0)
         
         glBegin(GL_LINES)
-        # 0을 중심으로 spacing 간격으로 그리기
         steps = int(size / spacing)
         for i in range(steps + 1):
-            val = -half_size + i * spacing
-            # X 방향 선
-            glVertex3f(val, 0, -half_size)
-            glVertex3f(val, 0, half_size)
+            offset = -half_size + i * spacing
+            # X 방향 선 (카메라 기준으로 이동)
+            x_val = snap_x + offset
+            glVertex3f(x_val, 0, snap_z - half_size)
+            glVertex3f(x_val, 0, snap_z + half_size)
             # Z 방향 선
-            glVertex3f(-half_size, 0, val)
-            glVertex3f(half_size, 0, val)
+            z_val = snap_z + offset
+            glVertex3f(snap_x - half_size, 0, z_val)
+            glVertex3f(snap_x + half_size, 0, z_val)
         glEnd()
         
         # 주요 격자 (10단위)
         major_spacing = spacing * 10
-        glColor3f(0.7, 0.7, 0.7)
-        glLineWidth(1.5)
+        glColor3f(0.65, 0.65, 0.65)
+        glLineWidth(2.0)
         
         glBegin(GL_LINES)
-        steps_major = int(size / major_spacing)
-        for i in range(steps_major + 1):
-            val = -half_size + i * major_spacing
-            glVertex3f(val, 0, -half_size)
-            glVertex3f(val, 0, half_size)
-            glVertex3f(-half_size, 0, val)
-            glVertex3f(half_size, 0, val)
+        snap_major_x = round(cam_center[0] / major_spacing) * major_spacing
+        snap_major_z = round(cam_center[2] / major_spacing) * major_spacing
+        steps_major = int(size / major_spacing) + 2
+        for i in range(-steps_major, steps_major + 1):
+            val_x = snap_major_x + i * major_spacing
+            val_z = snap_major_z + i * major_spacing
+            glVertex3f(val_x, 0, snap_z - half_size)
+            glVertex3f(val_x, 0, snap_z + half_size)
+            glVertex3f(snap_x - half_size, 0, val_z)
+            glVertex3f(snap_x + half_size, 0, val_z)
         glEnd()
         
+        # 원점 축 강조 (빨강/파랑)
+        glLineWidth(2.0)
+        glBegin(GL_LINES)
+        # X축 (빨강)
+        glColor3f(0.8, 0.3, 0.3)
+        glVertex3f(snap_x - half_size, 0, 0)
+        glVertex3f(snap_x + half_size, 0, 0)
+        # Z축 (파랑)
+        glColor3f(0.3, 0.3, 0.8)
+        glVertex3f(0, 0, snap_z - half_size)
+        glVertex3f(0, 0, snap_z + half_size)
+        glEnd()
+        
+        glLineWidth(1.0)
         glEnable(GL_LIGHTING)
     
     def draw_axes(self):
@@ -524,14 +547,43 @@ class Viewport3D(QOpenGLWidget):
         dx = event.pos().x() - self.last_mouse_pos.x()
         dy = event.pos().y() - self.last_mouse_pos.y()
         
-        if self.mouse_button == Qt.MouseButton.LeftButton:
-            # 좌클릭: 회전
+        modifiers = event.modifiers()
+        
+        # Ctrl+드래그: 메쉬 직접 이동
+        if modifiers & Qt.KeyboardModifier.ControlModifier and self.mesh is not None:
+            # 카메라 기준 이동 방향 계산
+            az_rad = np.radians(self.camera.azimuth)
+            move_speed = self.camera.distance * 0.002
+            
+            # 좌우 이동: X/Z 평면
+            dx_world = -dx * np.cos(az_rad) * move_speed
+            dz_world = -dx * np.sin(az_rad) * move_speed
+            # 상하 이동: Y축
+            dy_world = -dy * move_speed
+            
+            self.mesh_translation[0] += dx_world
+            self.mesh_translation[1] += dy_world
+            self.mesh_translation[2] += dz_world
+            
+            # UI 업데이트 시그널 발생용 (TransformPanel 동기화)
+            self.meshTransformChanged.emit()
+        
+        # Alt+드래그: 메쉬 직접 회전
+        elif modifiers & Qt.KeyboardModifier.AltModifier and self.mesh is not None:
+            rot_speed = 0.5
+            self.mesh_rotation[1] += dx * rot_speed  # Y축 회전
+            self.mesh_rotation[0] += dy * rot_speed  # X축 회전
+            self.meshTransformChanged.emit()
+        
+        # 일반 조작
+        elif self.mouse_button == Qt.MouseButton.LeftButton:
+            # 좌클릭: 카메라 회전
             self.camera.rotate(dx, dy)
         elif self.mouse_button == Qt.MouseButton.RightButton:
-            # 우클릭: 이동
+            # 우클릭: 카메라 이동
             self.camera.pan(dx, dy)
         elif self.mouse_button == Qt.MouseButton.MiddleButton:
-            # 가운데 버튼: 회전 (CloudCompare 스타일)
+            # 가운데 버튼: 카메라 회전
             self.camera.rotate(dx, dy)
         
         self.last_mouse_pos = event.pos()

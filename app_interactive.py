@@ -740,6 +740,7 @@ class MainWindow(QMainWindow):
         
         self.viewport = Viewport3D()
         self.viewport.meshLoaded.connect(self.on_mesh_loaded)
+        self.viewport.meshTransformChanged.connect(self.sync_transform_panel)
         viewport_layout.addWidget(self.viewport, 1)
         
         # 도움말 위젯
@@ -1020,6 +1021,30 @@ class MainWindow(QMainWindow):
     def on_mesh_loaded(self, mesh):
         self.props_panel.update_mesh_info(mesh, self.current_filepath)
         self.transform_panel.center_mesh()
+    
+    def sync_transform_panel(self):
+        """뷰포트 직접 조작 후 TransformPanel 동기화"""
+        # 스핀박스 시그널 블록하고 값 설정
+        self.transform_panel.trans_x.blockSignals(True)
+        self.transform_panel.trans_y.blockSignals(True)
+        self.transform_panel.trans_z.blockSignals(True)
+        self.transform_panel.rot_x.blockSignals(True)
+        self.transform_panel.rot_y.blockSignals(True)
+        self.transform_panel.rot_z.blockSignals(True)
+        
+        self.transform_panel.trans_x.setValue(self.viewport.mesh_translation[0])
+        self.transform_panel.trans_y.setValue(self.viewport.mesh_translation[1])
+        self.transform_panel.trans_z.setValue(self.viewport.mesh_translation[2])
+        self.transform_panel.rot_x.setValue(self.viewport.mesh_rotation[0])
+        self.transform_panel.rot_y.setValue(self.viewport.mesh_rotation[1])
+        self.transform_panel.rot_z.setValue(self.viewport.mesh_rotation[2])
+        
+        self.transform_panel.trans_x.blockSignals(False)
+        self.transform_panel.trans_y.blockSignals(False)
+        self.transform_panel.trans_z.blockSignals(False)
+        self.transform_panel.rot_x.blockSignals(False)
+        self.transform_panel.rot_y.blockSignals(False)
+        self.transform_panel.rot_z.blockSignals(False)
     
     def on_selection_action(self, action: str, data):
         self.status_info.setText(f"선택 작업: {action}")
