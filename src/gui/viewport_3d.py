@@ -151,7 +151,8 @@ class Viewport3D(QOpenGLWidget):
         # 렌더링 설정
         self.grid_size = 100  # cm
         self.grid_spacing = 1  # cm (1cm 격자)
-        self.background_color = (0.2, 0.2, 0.25, 1.0)
+        # 아이콘 배경색과 유사한 미색 (Cream/Beige)
+        self.background_color = (0.96, 0.96, 0.94, 1.0) # #F5F5F0
         
         # 메쉬 데이터
         self.mesh = None
@@ -235,7 +236,7 @@ class Viewport3D(QOpenGLWidget):
         half_size = self.grid_size / 2
         
         # 메인 격자 (1cm)
-        glColor3f(0.4, 0.4, 0.45)
+        glColor3f(0.8, 0.8, 0.8)  # 더 밝고 부드러운 회색 (밝은 배경용)
         glLineWidth(1.0)
         
         glBegin(GL_LINES)
@@ -248,9 +249,9 @@ class Viewport3D(QOpenGLWidget):
             glVertex3f(half_size, 0, i)
         glEnd()
         
-        # 10cm 마다 굵은 선
-        glColor3f(0.5, 0.5, 0.55)
-        glLineWidth(2.0)
+        # 10cm 마다 조금 더 진한 선
+        glColor3f(0.7, 0.7, 0.7)
+        glLineWidth(1.5)
         
         glBegin(GL_LINES)
         for i in range(-int(half_size), int(half_size) + 1, 10):
