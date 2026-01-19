@@ -248,6 +248,24 @@ class FlattenPanel(QWidget):
         self.combo_direction.setToolTip("펼침 시 기준이 되는 주축")
         curve_layout.addRow("펼침 방향:", self.combo_direction)
         
+        # 곡률 측정 버튼 추가
+        measure_layout = QHBoxLayout()
+        self.btn_measure = QPushButton("📏 곡률 측정")
+        self.btn_measure.setCheckable(True)
+        self.btn_measure.setToolTip("Shift+클릭으로 메쉬 위에 점을 3개 이상 찍으면 곡률을 계산합니다")
+        measure_layout.addWidget(self.btn_measure)
+        
+        self.btn_fit_arc = QPushButton("🔄 원호 피팅")
+        self.btn_fit_arc.setToolTip("찍은 점들로 원호를 피팅하고 반지름을 계산합니다")
+        measure_layout.addWidget(self.btn_fit_arc)
+        
+        self.btn_clear_points = QPushButton("🗑️")
+        self.btn_clear_points.setToolTip("찍은 점 초기화")
+        self.btn_clear_points.setFixedWidth(40)
+        measure_layout.addWidget(self.btn_clear_points)
+        
+        curve_layout.addRow(measure_layout)
+        
         layout.addWidget(curve_group)
         
         # 펼침 방법
@@ -740,6 +758,12 @@ class MainWindow(QMainWindow):
         
         self.flatten_panel = FlattenPanel(self.help_widget)
         self.flatten_panel.flattenRequested.connect(self.on_flatten_requested)
+        
+        # 곡률 측정 버튼 연결
+        self.flatten_panel.btn_measure.toggled.connect(self.toggle_curvature_mode)
+        self.flatten_panel.btn_fit_arc.clicked.connect(self.fit_curvature_arc)
+        self.flatten_panel.btn_clear_points.clicked.connect(self.clear_curvature_points)
+        
         scroll3.setWidget(self.flatten_panel)
         tab3_layout.addWidget(scroll3)
         
@@ -891,10 +915,12 @@ class MainWindow(QMainWindow):
         self.setStatusBar(self.statusbar)
         
         self.status_info = QLabel("📂 파일을 열거나 드래그하세요")
-        self.status_grid = QLabel("격자: 1cm")
+        self.status_mesh = QLabel("") # 메쉬 정보 (정점, 면)
+        self.status_grid = QLabel("격자: -")
         self.status_unit = QLabel("단위: cm")
         
         self.statusbar.addWidget(self.status_info, 1)
+        self.statusbar.addPermanentWidget(self.status_mesh)
         self.statusbar.addPermanentWidget(self.status_grid)
         self.statusbar.addPermanentWidget(self.status_unit)
     
@@ -931,6 +957,7 @@ class MainWindow(QMainWindow):
     def load_mesh(self, filepath: str):
         try:
             self.status_info.setText(f"⏳ 로딩 중: {Path(filepath).name}")
+            self.status_mesh.setText("")
             QApplication.processEvents()
             
             mesh = self.mesh_loader.load(filepath, unit='cm')
@@ -938,11 +965,16 @@ class MainWindow(QMainWindow):
             self.current_filepath = filepath
             
             self.viewport.load_mesh(mesh)
+            
+            # 상태바 업데이트
             self.status_info.setText(f"✅ 로드됨: {Path(filepath).name}")
+            self.status_mesh.setText(f"V: {len(mesh.vertices):,} | F: {len(mesh.faces):,}")
+            self.status_grid.setText(f"격자: {self.viewport.grid_spacing}cm")
             
         except Exception as e:
             QMessageBox.critical(self, "오류", f"파일 로드 실패:\n{e}")
             self.status_info.setText("❌ 로드 실패")
+            self.status_mesh.setText("")
     
     def on_mesh_loaded(self, mesh):
         self.props_panel.update_mesh_info(mesh, self.current_filepath)
@@ -981,6 +1013,43 @@ class MainWindow(QMainWindow):
         self.viewport.camera.azimuth = azimuth
         self.viewport.camera.elevation = elevation
         self.viewport.update()
+    
+    def toggle_curvature_mode(self, enabled: bool):
+        """곡률 측정 모드 토글"""
+        self.viewport.curvature_pick_mode = enabled
+        if enabled:
+            self.status_info.setText("📏 곡률 측정 모드: Shift+클릭으로 메쉬에 점을 찍으세요")
+        else:
+            self.status_info.setText("📏 곡률 측정 모드 종료")
+    
+    def fit_curvature_arc(self):
+        """찍은 점들로 원호 피팅"""
+        if len(self.viewport.picked_points) < 3:
+            QMessageBox.warning(self, "경고", "최소 3개의 점이 필요합니다.\nShift+클릭으로 메쉬 위에 점을 찍으세요.")
+            return
+        
+        from src.core.curvature_fitter import CurvatureFitter
+        
+        fitter = CurvatureFitter()
+        arc = fitter.fit_arc(self.viewport.picked_points)
+        
+        if arc is None:
+            QMessageBox.warning(self, "경고", "원호 피팅에 실패했습니다.\n점들이 일직선 위에 있거나 너무 가까울 수 있습니다.")
+            return
+        
+        self.viewport.fitted_arc = arc
+        self.viewport.update()
+        
+        # 펼침 패널의 곡률 반경에 자동 입력 (mm → cm 변환 없이 그대로)
+        radius_mm = arc.radius * 10  # cm → mm
+        self.flatten_panel.spin_radius.setValue(radius_mm)
+        
+        self.status_info.setText(f"✅ 원호 피팅 완료: 반지름 = {arc.radius:.2f} cm ({radius_mm:.1f} mm)")
+    
+    def clear_curvature_points(self):
+        """곡률 측정용 점 초기화"""
+        self.viewport.clear_curvature_picks()
+        self.status_info.setText("🗑️ 측정 점 초기화됨")
     
     def show_about(self):
         icon_path = get_icon_path()

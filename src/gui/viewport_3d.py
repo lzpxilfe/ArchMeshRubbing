@@ -166,6 +166,16 @@ class Viewport3D(QOpenGLWidget):
         self.mesh_translation = np.array([0.0, 0.0, 0.0])
         self.mesh_rotation = np.array([0.0, 0.0, 0.0])  # 도
         
+        # VBO 데이터
+        self.vbo_id = None
+        self.vertex_count = 0
+        self.using_vbo = False
+        
+        # 곡률 피팅 모드
+        self.curvature_pick_mode = False
+        self.picked_points = []  # 3D 점 리스트
+        self.fitted_arc = None   # FittedArc 객체
+        
         # UI 설정
         self.setMinimumSize(400, 300)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -228,39 +238,51 @@ class Viewport3D(QOpenGLWidget):
         # 메쉬 그리기
         if self.mesh is not None:
             self.draw_mesh()
+        
+        # 곡률 피팅 시각화
+        self.draw_picked_points()
+        self.draw_fitted_arc()
     
     def draw_grid(self):
-        """1cm 격자 바닥면 그리기"""
+        """가변 격자 바닥면 그리기"""
         glDisable(GL_LIGHTING)
         
-        half_size = self.grid_size / 2
+        # 메쉬 크기에 따라 격자 범위 확장
+        size = self.grid_size
+        spacing = self.grid_spacing
         
-        # 메인 격자 (1cm)
-        glColor3f(0.8, 0.8, 0.8)  # 더 밝고 부드러운 회색 (밝은 배경용)
+        half_size = size / 2
+        
+        # 메인 격자
+        glColor3f(0.8, 0.8, 0.8)
         glLineWidth(1.0)
         
         glBegin(GL_LINES)
-        for i in range(-int(half_size), int(half_size) + 1, self.grid_spacing):
+        # 0을 중심으로 spacing 간격으로 그리기
+        steps = int(size / spacing)
+        for i in range(steps + 1):
+            val = -half_size + i * spacing
             # X 방향 선
-            glVertex3f(i, 0, -half_size)
-            glVertex3f(i, 0, half_size)
+            glVertex3f(val, 0, -half_size)
+            glVertex3f(val, 0, half_size)
             # Z 방향 선
-            glVertex3f(-half_size, 0, i)
-            glVertex3f(half_size, 0, i)
+            glVertex3f(-half_size, 0, val)
+            glVertex3f(half_size, 0, val)
         glEnd()
         
-        # 10cm 마다 조금 더 진한 선
+        # 주요 격자 (10단위)
+        major_spacing = spacing * 10
         glColor3f(0.7, 0.7, 0.7)
         glLineWidth(1.5)
         
         glBegin(GL_LINES)
-        for i in range(-int(half_size), int(half_size) + 1, 10):
-            # X 방향 선
-            glVertex3f(i, 0, -half_size)
-            glVertex3f(i, 0, half_size)
-            # Z 방향 선
-            glVertex3f(-half_size, 0, i)
-            glVertex3f(half_size, 0, i)
+        steps_major = int(size / major_spacing)
+        for i in range(steps_major + 1):
+            val = -half_size + i * major_spacing
+            glVertex3f(val, 0, -half_size)
+            glVertex3f(val, 0, half_size)
+            glVertex3f(-half_size, 0, val)
+            glVertex3f(half_size, 0, val)
         glEnd()
         
         glEnable(GL_LIGHTING)
@@ -310,26 +332,40 @@ class Viewport3D(QOpenGLWidget):
         # 메쉬 색상
         glColor3f(*self.mesh_color)
         
-        # 삼각형 렌더링
-        vertices = self.mesh.vertices
-        faces = self.mesh.faces
-        normals = self.mesh.face_normals if self.mesh.face_normals is not None else None
-        
-        glBegin(GL_TRIANGLES)
-        for i, face in enumerate(faces):
-            # 면 법선
-            if normals is not None:
-                glNormal3fv(normals[i])
+        if self.using_vbo and self.vbo_id is not None:
+            # VBO 방식 렌더링 (매우 빠름)
+            glEnableClientState(GL_VERTEX_ARRAY)
+            glEnableClientState(GL_NORMAL_ARRAY)
             
-            # 선택된 면은 다른 색상
-            if i in self.selected_faces:
-                glColor3f(1.0, 0.5, 0.0)
-            else:
-                glColor3f(*self.mesh_color)
+            glBindBuffer(GL_ARRAY_BUFFER, self.vbo_id)
+            glVertexPointer(3, GL_FLOAT, 24, ctypes.c_void_p(0))
+            glNormalPointer(GL_FLOAT, 24, ctypes.c_void_p(12))
             
-            for vi in face:
-                glVertex3fv(vertices[vi])
-        glEnd()
+            glDrawArrays(GL_TRIANGLES, 0, self.vertex_count)
+            
+            glBindBuffer(GL_ARRAY_BUFFER, 0)
+            glDisableClientState(GL_NORMAL_ARRAY)
+            glDisableClientState(GL_VERTEX_ARRAY)
+        else:
+            # Immediate Mode (느림, 대체용)
+            vertices = self.mesh.vertices
+            faces = self.mesh.faces
+            normals = self.mesh.face_normals
+            
+            glBegin(GL_TRIANGLES)
+            for i, face in enumerate(faces):
+                if normals is not None:
+                    glNormal3fv(normals[i])
+                
+                # 선택된 면 강조
+                if i in self.selected_faces:
+                    glColor3f(1.0, 0.5, 0.0)
+                else:
+                    glColor3f(*self.mesh_color)
+                    
+                for vi in face:
+                    glVertex3fv(vertices[vi])
+            glEnd()
         
         # 와이어프레임 오버레이 (선택 사항)
         # self.draw_wireframe()
@@ -359,7 +395,7 @@ class Viewport3D(QOpenGLWidget):
         glEnable(GL_LIGHTING)
     
     def load_mesh(self, mesh):
-        """메쉬 로드"""
+        """메쉬 로드 및 최적화"""
         self.mesh = mesh
         self.mesh.compute_normals()
         
@@ -367,14 +403,72 @@ class Viewport3D(QOpenGLWidget):
         center = mesh.centroid
         self.mesh_translation = -center
         
-        # 카메라를 메쉬에 맞춤
-        bounds = mesh.bounds
-        size = np.linalg.norm(bounds[1] - bounds[0])
-        self.camera.distance = size * 2
-        self.camera.center = np.array([0.0, 0.0, 0.0])
+        # 카메라 및 격자 스케일 조정
+        self.update_grid_scale()
+        
+        # VBO 데이터 생성
+        self.update_vbo()
         
         self.meshLoaded.emit(mesh)
         self.update()
+
+    def update_grid_scale(self):
+        """메쉬 크기에 맞춰 격자 스케일 조정"""
+        if self.mesh is None:
+            return
+            
+        bounds = self.mesh.bounds
+        extents = bounds[1] - bounds[0]
+        max_dim = np.max(extents)
+        
+        # 적절한 격자 크기 계산 (메쉬의 2~3배)
+        if max_dim < 10:  # 10cm 미만
+            self.grid_spacing = 1.0  # 1cm
+            self.grid_size = 20.0
+        elif max_dim < 100:  # 1m 미만
+            self.grid_spacing = 5.0  # 5cm
+            self.grid_size = 150.0
+        else:  # 1m 이상
+            self.grid_spacing = 10.0  # 10cm
+            self.grid_size = max_dim * 1.5
+            
+        # 카메라를 메쉬에 맞춤
+        self.camera.distance = max_dim * 2
+        self.camera.center = np.array([0.0, 0.0, 0.0])
+
+    def update_vbo(self):
+        """VBO 생성 및 데이터 전송"""
+        if self.mesh is None:
+            return
+            
+        try:
+            # 면 정점 데이터 구성 (pos, normal)
+            # trimesh의 faces를 이용해 정점을 나열 (삼각형 하나당 3개 정점)
+            v_indices = self.mesh.faces.flatten()
+            vertices = self.mesh.vertices[v_indices].astype(np.float32)
+            
+            # 면 법선을 각 정점에 할당 (평면 셰이딩 방식)
+            # trimesh.face_normals는 면당 하나이므로 반복 필요
+            normals = np.repeat(self.mesh.face_normals, 3, axis=0).astype(np.float32)
+            
+            # 데이터 인터리빙 (pos, normal, pos, normal...)
+            # 각 정점당 (x,y,z, nx,ny,nz) = 6 floats
+            data = np.hstack([vertices, normals]).flatten()
+            self.vertex_count = len(vertices)
+            
+            # VBO 생성
+            if self.vbo_id is None:
+                self.vbo_id = glGenBuffers(1)
+            
+            glBindBuffer(GL_ARRAY_BUFFER, self.vbo_id)
+            glBufferData(GL_ARRAY_BUFFER, data.nbytes, data, GL_STATIC_DRAW)
+            glBindBuffer(GL_ARRAY_BUFFER, 0)
+            
+            self.using_vbo = True
+            
+        except Exception as e:
+            print(f"VBO creation failed: {e}")
+            self.using_vbo = False
     
     def set_mesh_translation(self, x: float, y: float, z: float):
         """메쉬 이동"""
@@ -388,6 +482,17 @@ class Viewport3D(QOpenGLWidget):
     
     def mousePressEvent(self, event: QMouseEvent):
         """마우스 버튼 눌림"""
+        # Shift+클릭: 곡률 측정용 점 찍기
+        if (event.modifiers() & Qt.KeyboardModifier.ShiftModifier and 
+            event.button() == Qt.MouseButton.LeftButton and
+            self.curvature_pick_mode and self.mesh is not None):
+            
+            point = self.pick_point_on_mesh(event.pos().x(), event.pos().y())
+            if point is not None:
+                self.picked_points.append(point)
+                self.update()
+            return
+        
         self.last_mouse_pos = event.pos()
         self.mouse_button = event.button()
     
@@ -462,6 +567,111 @@ class Viewport3D(QOpenGLWidget):
             self.camera.azimuth = 0
             self.camera.elevation = -89
             self.update()
+    
+    def pick_point_on_mesh(self, screen_x: int, screen_y: int):
+        """
+        화면 좌표를 메쉬 표면의 3D 좌표로 변환 (Ray Casting)
+        
+        Args:
+            screen_x, screen_y: 화면 좌표
+            
+        Returns:
+            3D 점 (numpy array) 또는 None
+        """
+        if self.mesh is None:
+            return None
+        
+        # OpenGL 뷰포트, 투영, 모델뷰 행렬 가져오기
+        self.makeCurrent()
+        
+        viewport = glGetIntegerv(GL_VIEWPORT)
+        modelview = glGetDoublev(GL_MODELVIEW_MATRIX)
+        projection = glGetDoublev(GL_PROJECTION_MATRIX)
+        
+        # 화면 Y 좌표 반전 (OpenGL은 아래가 0)
+        win_y = viewport[3] - screen_y
+        
+        # 깊이 버퍼에서 깊이 값 읽기
+        depth = glReadPixels(screen_x, win_y, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT)
+        depth_value = depth[0][0]
+        
+        # 배경을 클릭한 경우
+        if depth_value >= 1.0:
+            return None
+        
+        # 화면 좌표를 월드 좌표로 변환
+        world_x, world_y, world_z = gluUnProject(
+            screen_x, win_y, depth_value,
+            modelview, projection, viewport
+        )
+        
+        return np.array([world_x, world_y, world_z])
+    
+    def draw_picked_points(self):
+        """찍은 점들을 빨간 구로 시각화"""
+        if not self.picked_points:
+            return
+        
+        glDisable(GL_LIGHTING)
+        glColor3f(1.0, 0.2, 0.2)  # 빨간색
+        
+        for point in self.picked_points:
+            glPushMatrix()
+            glTranslatef(point[0], point[1], point[2])
+            
+            # 간단한 점 대신 십자 마커
+            size = 0.5  # cm
+            glLineWidth(3.0)
+            glBegin(GL_LINES)
+            glVertex3f(-size, 0, 0)
+            glVertex3f(size, 0, 0)
+            glVertex3f(0, -size, 0)
+            glVertex3f(0, size, 0)
+            glVertex3f(0, 0, -size)
+            glVertex3f(0, 0, size)
+            glEnd()
+            
+            glPopMatrix()
+        
+        glLineWidth(1.0)
+        glEnable(GL_LIGHTING)
+    
+    def draw_fitted_arc(self):
+        """피팅된 원호 시각화"""
+        if self.fitted_arc is None:
+            return
+        
+        from src.core.curvature_fitter import CurvatureFitter
+        
+        glDisable(GL_LIGHTING)
+        glColor3f(0.2, 0.8, 0.2)  # 초록색
+        glLineWidth(2.0)
+        
+        # 원호 점들 생성
+        fitter = CurvatureFitter()
+        arc_points = fitter.generate_arc_points(self.fitted_arc, 64)
+        
+        # 원 그리기
+        glBegin(GL_LINE_LOOP)
+        for point in arc_points:
+            glVertex3fv(point)
+        glEnd()
+        
+        # 중심에서 원주까지 선 (반지름 표시)
+        glColor3f(1.0, 1.0, 0.0)  # 노란색
+        glBegin(GL_LINES)
+        glVertex3fv(self.fitted_arc.center)
+        glVertex3fv(arc_points[0])
+        glEnd()
+        
+        glLineWidth(1.0)
+        glEnable(GL_LIGHTING)
+    
+    def clear_curvature_picks(self):
+        """곡률 측정용 점들 초기화"""
+        self.picked_points = []
+        self.fitted_arc = None
+        self.update()
 
 
 # 테스트용 스탠드얼론 실행
