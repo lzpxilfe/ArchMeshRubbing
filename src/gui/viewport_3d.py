@@ -120,15 +120,18 @@ class TrackballCamera:
         
     def apply(self):
         """OpenGL에 카메라 변환 적용"""
-        pos = self.position
-        target = self.look_at
-        up = self.up_vector
-        
-        gluLookAt(
-            pos[0], pos[1], pos[2],
-            target[0], target[1], target[2],
-            up[0], up[1], up[2]
-        )
+        try:
+            pos = self.position
+            target = self.look_at
+            up = self.up_vector
+            
+            gluLookAt(
+                pos[0], pos[1], pos[2],
+                target[0], target[1], target[2],
+                up[0], up[1], up[2]
+            )
+        except Exception:
+            pass
 
 
 class Viewport3D(QOpenGLWidget):
@@ -264,65 +267,61 @@ class Viewport3D(QOpenGLWidget):
         self.draw_fitted_arc()
     
     def draw_grid(self):
-        """무한 격자 바닥면 그리기 (항상 카메라 주변에 표시)"""
+        """진정한 무한 격자 바닥면 그리기 (카메라 거리에 따라 동적 스케일링)"""
         glDisable(GL_LIGHTING)
+        glEnable(GL_BLEND)
         
-        spacing = self.grid_spacing
+        # 카메라 거리에 따라 기본 간격 결정 (최소 1cm, 최대 10km)
+        base_spacing = self.grid_spacing
+        levels = [1, 10, 100, 1000] # 1cm, 10cm, 1m, 10m 단위
         
-        # 격자 범위를 대폭 확장 (카메라 거리의 15배, 최대 500m)
-        view_range = min(max(self.camera.distance * 15, 10000.0), 50000.0)
-        half_range = view_range / 2
-        
-        # 카메라가 보는 곳을 중심으로 격자 스냅
         cam_center = self.camera.look_at
-        snap_x = round(cam_center[0] / spacing) * spacing
-        snap_z = round(cam_center[2] / spacing) * spacing
         
-        # 1. 메인 격자 (1단위) - 연하게 표시
-        glColor3f(0.85, 0.85, 0.85)
-        glLineWidth(1.0)
-        
-        glBegin(GL_LINES)
-        steps = int(view_range / spacing) + 2
-        for i in range(-steps // 2, steps // 2 + 1):
-            offset = i * spacing
-            x_val = snap_x + offset
-            glVertex3f(x_val, 0, snap_z - half_range)
-            glVertex3f(x_val, 0, snap_z + half_range)
+        for level in levels:
+            spacing = base_spacing * level
             
-            z_val = snap_z + offset
-            glVertex3f(snap_x - half_range, 0, z_val)
-            glVertex3f(snap_x + half_range, 0, z_val)
-        glEnd()
-        
-        # 2. 주요 격자 (10단위) - 조금 더 진하게
-        major_spacing = spacing * 10
-        glColor3f(0.75, 0.75, 0.75)
-        glLineWidth(1.5)
-        
-        glBegin(GL_LINES)
-        steps_major = int(view_range / major_spacing) + 2
-        snap_major_x = round(cam_center[0] / major_spacing) * major_spacing
-        snap_major_z = round(cam_center[2] / major_spacing) * major_spacing
-        for i in range(-steps_major // 2, steps_major // 2 + 1):
-            x_val = snap_major_x + i * major_spacing
-            glVertex3f(x_val, 0, snap_z - half_range)
-            glVertex3f(x_val, 0, snap_z + half_range)
+            # 카메라 거리에 비해 너무 조밀한 격자는 생략하여 성능/가시성 확보
+            if spacing < self.camera.distance * 0.01:
+                continue
+                
+            # 카메라 거리에 비해 너무 드문 격자도 드로잉 범위 조절
+            view_range = spacing * 100
+            # 너무 멀리 있는 격자는 생략
+            if view_range < self.camera.distance * 0.5 and level < 1000:
+                continue
+                
+            view_range = min(view_range, 1000000.0) # 최대 10km
+            half_range = view_range / 2
             
-            z_val = snap_major_z + i * major_spacing
-            glVertex3f(snap_x - half_range, 0, z_val)
-            glVertex3f(snap_x + half_range, 0, z_val)
-        glEnd()
-        
-        glLineWidth(1.0)
+            # 투명도 조절 (레벨이 높을수록, 혹은 카메라 중심에서 멀수록 연하게)
+            alpha = max(0.1, min(0.4, 2.0 / (level ** 0.5)))
+            glColor4f(0.7, 0.7, 0.7, alpha)
+            
+            snap_x = round(cam_center[0] / spacing) * spacing
+            snap_z = round(cam_center[2] / spacing) * spacing
+            
+            glLineWidth(1.0 if level == 1 else 1.5)
+            glBegin(GL_LINES)
+            steps = 100
+            for i in range(-steps // 2, steps // 2 + 1):
+                offset = i * spacing
+                x_val = snap_x + offset
+                glVertex3f(x_val, 0, snap_z - half_range)
+                glVertex3f(x_val, 0, snap_z + half_range)
+                
+                z_val = snap_z + offset
+                glVertex3f(snap_x - half_range, 0, z_val)
+                glVertex3f(snap_x + half_range, 0, z_val)
+            glEnd()
+            
         glEnable(GL_LIGHTING)
     
     def draw_axes(self):
         """XYZ 축 그리기 (무한히 뻗어나감)"""
         glDisable(GL_LIGHTING)
         
-        # 축 길이를 대폭 확장 (1km)
-        axis_length = max(self.camera.distance * 20, 100000.0)
+        # 축 길이를 카메라 거리에 비례하여 대폭 확장 (사실상 끝이 안 보이게)
+        axis_length = max(self.camera.distance * 100, 1000000.0)
         
         glLineWidth(3.0)
         glBegin(GL_LINES)
@@ -496,13 +495,13 @@ class Viewport3D(QOpenGLWidget):
         """메쉬 로드 및 최적화"""
         self.mesh = mesh
         
-        # 1. 메쉬 자체를 원점으로 센터링 (데이터 정규화)
-        # bounds의 평균을 원점으로 하여 기즈모와 정확히 정렬
-        center = mesh.bounds.mean(axis=0)
+        # 1. 메쉬 자체를 원점으로 센터링 (기즈모 일치를 위해 가장 확실한 방법)
+        # trimesh.centroid를 이용해 무게중심을 원점에 맞춤
+        center = mesh.centroid
         mesh.vertices -= center
         mesh.compute_normals()
         
-        # 2. 이동/회전값 초기화 (원점에 로드됨)
+        # 2. 이동/회전값 초기화
         self.mesh_translation = np.array([0.0, 0.0, 0.0])
         self.mesh_rotation = np.array([0.0, 0.0, 0.0])
         self.mesh_scale = 1.0
@@ -662,14 +661,16 @@ class Viewport3D(QOpenGLWidget):
                 self.update()
             return
         
-        # 기즈모 클릭 체크
+        # 기즈모 클릭 체크 (메쉬가 있을 때만)
         if event.button() == Qt.MouseButton.LeftButton and self.mesh is not None:
             axis = self.hit_test_gizmo(event.pos().x(), event.pos().y())
             if axis:
                 self.active_gizmo_axis = axis
-                self.gizmo_drag_start = self._calculate_gizmo_angle(event.pos().x(), event.pos().y())
-                self.update()
-                return
+                angle = self._calculate_gizmo_angle(event.pos().x(), event.pos().y())
+                if angle is not None:
+                    self.gizmo_drag_start = angle
+                    self.update()
+                    return
         
         self.last_mouse_pos = event.pos()
         self.mouse_button = event.button()

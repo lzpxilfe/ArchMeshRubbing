@@ -221,11 +221,13 @@ class TransformPanel(QWidget):
         self.trans_z.setValue(0.0)
     
     def align_to_floor(self):
+        """메쉬의 바닥면을 월드 바닥(y=0)에 맞춤"""
         if self.viewport.mesh is None:
             return
+        # 메쉬는 이미 load_mesh에서 로컬 원점에 맞춰져 있으므로, 
+        # bounds[0][1]은 로컬 원점으로부터 바닥까지의 거리입니다.
         min_y = self.viewport.mesh.bounds[0][1]
-        current_y = self.trans_y.value()
-        self.trans_y.setValue(current_y - min_y)
+        self.trans_y.setValue(-min_y)
     
     def reset_transform(self):
         self.trans_x.setValue(0)
