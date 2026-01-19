@@ -186,6 +186,12 @@ class Viewport3D(QOpenGLWidget):
         self.picked_points = []  # 3D 점 리스트
         self.fitted_arc = None   # FittedArc 객체
         
+        # 회전 기즈모
+        self.show_gizmo = True  # 메쉬가 있을 때 기즈모 표시
+        self.active_gizmo_axis = None  # 'X', 'Y', 'Z' 또는 None
+        self.gizmo_size = 20.0  # cm (메쉬 크기에 맞춰 조정됨)
+        self.gizmo_drag_start = None  # 드래그 시작 각도
+        
         # UI 설정
         self.setMinimumSize(400, 300)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -248,6 +254,7 @@ class Viewport3D(QOpenGLWidget):
         # 메쉬 그리기
         if self.mesh is not None:
             self.draw_mesh()
+            self.draw_rotation_gizmo()
         
         # 곡률 피팅 시각화
         self.draw_picked_points()
@@ -392,6 +399,73 @@ class Viewport3D(QOpenGLWidget):
         
         glPopMatrix()
     
+    def draw_rotation_gizmo(self):
+        """회전 기즈모(고리) 그리기"""
+        if not self.show_gizmo or self.mesh is None:
+            return
+        
+        glDisable(GL_LIGHTING)
+        glDisable(GL_DEPTH_TEST)  # 메쉬 위에 항상 보이게 함
+        
+        glPushMatrix()
+        # 메쉬와 동일한 위치로 이동 (회전은 미적용, 즉 월드 축 기준)
+        glTranslatef(*self.mesh_translation)
+        
+        # 기즈모 크기 설정 (메쉬를 감싸는 정도)
+        size = self.gizmo_size
+        
+        # X축 회전 고리 (빨강)
+        glColor3f(1.0, 0.2, 0.2)
+        if self.active_gizmo_axis == 'X':
+            glLineWidth(5.0)
+            glColor3f(1.0, 0.8, 0.0) # 선택 시 노란색
+        else:
+            glLineWidth(2.5)
+        
+        glPushMatrix()
+        glRotatef(90, 0, 1, 0) # Y축 기준으로 90도 돌려서 X축 평면에 맞춤
+        self._draw_gizmo_circle(size)
+        glPopMatrix()
+        
+        # Y축 회전 고리 (초록)
+        glColor3f(0.2, 1.0, 0.2)
+        if self.active_gizmo_axis == 'Y':
+            glLineWidth(5.0)
+            glColor3f(1.0, 0.8, 0.0)
+        else:
+            glLineWidth(2.5)
+            
+        glPushMatrix()
+        glRotatef(90, 1, 0, 0) # X축 기준으로 90도 돌려서 Y축 평면에 맞춤
+        self._draw_gizmo_circle(size)
+        glPopMatrix()
+        
+        # Z축 회전 고리 (파랑)
+        glColor3f(0.2, 0.2, 1.0)
+        if self.active_gizmo_axis == 'Z':
+            glLineWidth(5.0)
+            glColor3f(1.0, 0.8, 0.0)
+        else:
+            glLineWidth(2.5)
+            
+        self._draw_gizmo_circle(size) # 기본적으로 Z축 평면(XY평면)
+        
+        glPopMatrix()
+        
+        glLineWidth(1.0)
+        glEnable(GL_DEPTH_TEST)
+        glEnable(GL_LIGHTING)
+
+    def _draw_gizmo_circle(self, radius, segments=64):
+        """기즈모용 원 그리기"""
+        glBegin(GL_LINE_LOOP)
+        for i in range(segments):
+            angle = 2.0 * np.pi * i / segments
+            x = radius * np.cos(angle)
+            y = radius * np.sin(angle)
+            glVertex3f(x, y, 0)
+        glEnd()
+
     def draw_wireframe(self):
         """와이어프레임 오버레이"""
         if self.mesh is None:
@@ -455,6 +529,63 @@ class Viewport3D(QOpenGLWidget):
         # 카메라를 메쉬에 맞춤
         self.camera.distance = max_dim * 2
         self.camera.center = np.array([0.0, 0.0, 0.0])
+        
+        # 기즈모 크기 (메쉬 대각선 크기의 절반 정도)
+        self.gizmo_size = max_dim * 0.7
+    
+    def hit_test_gizmo(self, screen_x, screen_y):
+        """기즈모 고리 클릭 검사 (광선-평면 교차 방식)"""
+        if self.mesh is None:
+            return None
+        
+        self.makeCurrent()
+        viewport = glGetIntegerv(GL_VIEWPORT)
+        modelview = glGetDoublev(GL_MODELVIEW_MATRIX)
+        projection = glGetDoublev(GL_PROJECTION_MATRIX)
+        
+        win_y = viewport[3] - screen_y
+        
+        # 1. 클릭 지점에서 광선(Ray) 생성
+        near_pt = gluUnProject(screen_x, win_y, 0.0, modelview, projection, viewport)
+        far_pt = gluUnProject(screen_x, win_y, 1.0, modelview, projection, viewport)
+        
+        ray_origin = np.array(near_pt)
+        ray_dir = np.array(far_pt) - ray_origin
+        ray_len = np.linalg.norm(ray_dir)
+        if ray_len < 1e-6: return None
+        ray_dir /= ray_len
+        
+        # 2. 각 회전 평면과 광선의 교점 찾기
+        best_axis = None
+        min_ray_t = float('inf')
+        # 기즈모를 잡을 수 있는 너비 (카메라 거리에 비례)
+        threshold = self.camera.distance * 0.02
+        
+        # 각 축의 평면 법선
+        planes = {
+            'X': np.array([1, 0, 0]),
+            'Y': np.array([0, 1, 0]),
+            'Z': np.array([0, 0, 1])
+        }
+        
+        gizmo_center = self.mesh_translation
+        
+        for axis, normal in planes.items():
+            # 광선-평면 교점
+            denom = np.dot(ray_dir, normal)
+            if abs(denom) > 1e-4:
+                t = np.dot(gizmo_center - ray_origin, normal) / denom
+                if t > 0:
+                    hit_pt = ray_origin + t * ray_dir
+                    dist_to_center = np.linalg.norm(hit_pt - gizmo_center)
+                    
+                    # 고리(원) 근처를 클릭했는지 확인
+                    if abs(dist_to_center - self.gizmo_size) < threshold:
+                        if t < min_ray_t:
+                            min_ray_t = t
+                            best_axis = axis
+                            
+        return best_axis
 
     def update_vbo(self):
         """VBO 생성 및 데이터 전송"""
@@ -518,16 +649,57 @@ class Viewport3D(QOpenGLWidget):
                 self.update()
             return
         
+        # 기즈모 클릭 체크
+        if event.button() == Qt.MouseButton.LeftButton and self.mesh is not None:
+            axis = self.hit_test_gizmo(event.pos().x(), event.pos().y())
+            if axis:
+                self.active_gizmo_axis = axis
+                self.gizmo_drag_start = self._calculate_gizmo_angle(event.pos().x(), event.pos().y())
+                self.update()
+                return
+        
         self.last_mouse_pos = event.pos()
         self.mouse_button = event.button()
     
     def mouseReleaseEvent(self, event: QMouseEvent):
         """마우스 버튼 놓음"""
+        self.active_gizmo_axis = None
+        self.gizmo_drag_start = None
         self.last_mouse_pos = None
         self.mouse_button = None
+        self.update()
     
     def mouseMoveEvent(self, event: QMouseEvent):
         """마우스 이동 (드래그)"""
+        if self.mesh is None:
+            return
+            
+        # 기즈모 드래그 중인 경우
+        if self.active_gizmo_axis:
+            current_angle = self._calculate_gizmo_angle(event.pos().x(), event.pos().y())
+            delta_angle = np.degrees(current_angle - self.gizmo_drag_start)
+            
+            # 카메라 방향에 따라 회전 방향 반전이 필요할 수 있음 (일단 기본 구현)
+            if self.active_gizmo_axis == 'X':
+                self.mesh_rotation[0] += delta_angle
+            elif self.active_gizmo_axis == 'Y':
+                self.mesh_rotation[1] -= delta_angle # Y축은 화면상 반시계방향이 플러스
+            elif self.active_gizmo_axis == 'Z':
+                self.mesh_rotation[2] += delta_angle
+                
+            self.gizmo_drag_start = current_angle
+            self.meshTransformChanged.emit()
+            self.update()
+            return
+            
+        # 호버 시 기즈모 하이라이트 (버튼이 안 눌렸을 때)
+        if event.buttons() == Qt.MouseButtons.NoButton:
+            axis = self.hit_test_gizmo(event.pos().x(), event.pos().y())
+            if axis != self.active_gizmo_axis:
+                self.active_gizmo_axis = axis
+                self.update()
+            return
+
         if self.last_mouse_pos is None:
             return
         
@@ -536,45 +708,56 @@ class Viewport3D(QOpenGLWidget):
         
         modifiers = event.modifiers()
         
-        # Ctrl+드래그: 메쉬 직접 이동
-        if modifiers & Qt.KeyboardModifier.ControlModifier and self.mesh is not None:
-            # 카메라 기준 이동 방향 계산
+        # Ctrl+드래그: 메쉬 직접 이동 (기존 기능 유지)
+        if modifiers & Qt.KeyboardModifier.ControlModifier:
             az_rad = np.radians(self.camera.azimuth)
             move_speed = self.camera.distance * 0.002
             
-            # 좌우 이동: X/Z 평면
             dx_world = -dx * np.cos(az_rad) * move_speed
             dz_world = -dx * np.sin(az_rad) * move_speed
-            # 상하 이동: Y축
             dy_world = -dy * move_speed
             
             self.mesh_translation[0] += dx_world
             self.mesh_translation[1] += dy_world
             self.mesh_translation[2] += dz_world
             
-            # UI 업데이트 시그널 발생용 (TransformPanel 동기화)
             self.meshTransformChanged.emit()
         
-        # Alt+드래그: 메쉬 직접 회전
-        elif modifiers & Qt.KeyboardModifier.AltModifier and self.mesh is not None:
+        # Alt+드래그: 메쉬 3축 자유 회전 (기존 기능 유지)
+        elif modifiers & Qt.KeyboardModifier.AltModifier:
             rot_speed = 0.5
-            self.mesh_rotation[1] += dx * rot_speed  # Y축 회전
-            self.mesh_rotation[0] += dy * rot_speed  # X축 회전
+            self.mesh_rotation[1] += dx * rot_speed
+            self.mesh_rotation[0] += dy * rot_speed
             self.meshTransformChanged.emit()
         
-        # 일반 조작
+        # 일반 조작 (카메라)
         elif self.mouse_button == Qt.MouseButton.LeftButton:
-            # 좌클릭: 카메라 회전
             self.camera.rotate(dx, dy)
         elif self.mouse_button == Qt.MouseButton.RightButton:
-            # 우클릭: 카메라 이동
             self.camera.pan(dx, dy)
         elif self.mouse_button == Qt.MouseButton.MiddleButton:
-            # 가운데 버튼: 카메라 회전
             self.camera.rotate(dx, dy)
         
         self.last_mouse_pos = event.pos()
         self.update()
+
+    def _calculate_gizmo_angle(self, screen_x, screen_y):
+        """기즈모 중심에서 마우스 포인터까지의 각도 계산 (화면 공간)"""
+        self.makeCurrent()
+        viewport = glGetIntegerv(GL_VIEWPORT)
+        modelview = glGetDoublev(GL_MODELVIEW_MATRIX)
+        projection = glGetDoublev(GL_PROJECTION_MATRIX)
+        
+        win_y = viewport[3] - screen_y
+        
+        # 기즈모 중심의 화면 좌표 투영
+        p_screen = gluProject(*self.mesh_translation, modelview, projection, viewport)
+        
+        # 중심에서의 마우스 상대 벡터
+        dx = screen_x - p_screen[0]
+        dy = win_y - p_screen[1]
+        
+        return np.arctan2(dy, dx)
     
     def wheelEvent(self, event: QWheelEvent):
         """마우스 휠 (줌)"""
