@@ -235,7 +235,7 @@ class Viewport3D(QOpenGLWidget):
         glLoadIdentity()
         
         aspect = width / height if height > 0 else 1.0
-        # Far plane을 대폭 늘려 광활한 공간 확보
+        # Far plane을 대폭 늘려 광활한 공간 확보 (기존 2000 -> 1,000,000)
         gluPerspective(45.0, aspect, 0.1, 1000000.0)
         
         glMatrixMode(GL_MODELVIEW)
@@ -269,7 +269,7 @@ class Viewport3D(QOpenGLWidget):
         
         spacing = self.grid_spacing
         
-        # 격자 범위를 대폭 확장 (최대 50,000cm = 500m)
+        # 격자 범위를 대폭 확장 (카메라 거리의 15배, 최대 500m)
         view_range = min(max(self.camera.distance * 15, 10000.0), 50000.0)
         half_range = view_range / 2
         
@@ -278,8 +278,8 @@ class Viewport3D(QOpenGLWidget):
         snap_x = round(cam_center[0] / spacing) * spacing
         snap_z = round(cam_center[2] / spacing) * spacing
         
-        # 1. 메인 격자 (1단위) - 아주 연하고 투명하게
-        glColor4f(0.85, 0.85, 0.85, 0.3)
+        # 1. 메인 격자 (1단위) - 연하게 표시
+        glColor3f(0.85, 0.85, 0.85)
         glLineWidth(1.0)
         
         glBegin(GL_LINES)
@@ -297,7 +297,7 @@ class Viewport3D(QOpenGLWidget):
         
         # 2. 주요 격자 (10단위) - 조금 더 진하게
         major_spacing = spacing * 10
-        glColor4f(0.7, 0.7, 0.7, 0.6)
+        glColor3f(0.75, 0.75, 0.75)
         glLineWidth(1.5)
         
         glBegin(GL_LINES)
@@ -502,7 +502,7 @@ class Viewport3D(QOpenGLWidget):
         mesh.vertices -= center
         mesh.compute_normals()
         
-        # 2. 이동값 초기화
+        # 2. 이동/회전값 초기화 (원점에 로드됨)
         self.mesh_translation = np.array([0.0, 0.0, 0.0])
         self.mesh_rotation = np.array([0.0, 0.0, 0.0])
         self.mesh_scale = 1.0
@@ -684,14 +684,13 @@ class Viewport3D(QOpenGLWidget):
     
     def mouseMoveEvent(self, event: QMouseEvent):
         """마우스 이동 (드래그)"""
-        # 기즈모 드래그 중인 경우
+        # 1. 기즈모 드래그 (메쉬가 있을 때만)
         if self.active_gizmo_axis and self.mesh is not None and self.gizmo_drag_start is not None:
             angle_info = self._calculate_gizmo_angle(event.pos().x(), event.pos().y())
             if angle_info is not None:
                 current_angle = angle_info
                 delta_angle = np.degrees(current_angle - self.gizmo_drag_start)
                 
-                # 회전 속도 보정
                 if self.active_gizmo_axis == 'X':
                     self.mesh_rotation[0] += delta_angle
                 elif self.active_gizmo_axis == 'Y':
@@ -704,7 +703,7 @@ class Viewport3D(QOpenGLWidget):
                 self.update()
                 return
             
-        # 호버 시 기즈모 하이라이트
+        # 2. 기즈모 호버 하이라이트
         if event.buttons() == Qt.MouseButtons.NoButton and self.mesh is not None:
             axis = self.hit_test_gizmo(event.pos().x(), event.pos().y())
             if axis != self.active_gizmo_axis:
@@ -712,6 +711,7 @@ class Viewport3D(QOpenGLWidget):
                 self.update()
             return
 
+        # 3. 카메라 및 메쉬 일반 드래그 조작 (메쉬 없어도 카메라 조작은 가능해야 함)
         if self.last_mouse_pos is None:
             return
         
