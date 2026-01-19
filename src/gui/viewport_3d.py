@@ -37,9 +37,9 @@ class TrackballCamera:
         # Pan 오프셋
         self.pan_offset = np.array([0.0, 0.0, 0.0])
         
-        # 줌 제한
-        self.min_distance = 1.0
-        self.max_distance = 1000.0
+        # 줌 제한 - 대폭 확장하여 무한한 느낌 제공
+        self.min_distance = 0.01
+        self.max_distance = 1000000.0
     
     @property
     def position(self) -> np.ndarray:
@@ -204,10 +204,12 @@ class Viewport3D(QOpenGLWidget):
         glEnable(GL_DEPTH_TEST)
         glDepthFunc(GL_LESS)
         
-        # 조명
+        glEnable(GL_DEPTH_TEST)
         glEnable(GL_LIGHTING)
         glEnable(GL_LIGHT0)
         glEnable(GL_COLOR_MATERIAL)
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
         
         # 광원 설정
         light_pos = [50.0, 100.0, 50.0, 0.0]
@@ -233,7 +235,8 @@ class Viewport3D(QOpenGLWidget):
         glLoadIdentity()
         
         aspect = width / height if height > 0 else 1.0
-        gluPerspective(45.0, aspect, 0.1, 2000.0)
+        # Far plane을 대폭 늘려 광활한 공간 확보
+        gluPerspective(45.0, aspect, 0.1, 1000000.0)
         
         glMatrixMode(GL_MODELVIEW)
     
@@ -266,7 +269,7 @@ class Viewport3D(QOpenGLWidget):
         
         spacing = self.grid_spacing
         
-        # 격자 범위를 대폭 확장 (최대 10,000cm)
+        # 격자 범위를 대폭 확장 (최대 50,000cm = 500m)
         view_range = min(max(self.camera.distance * 15, 10000.0), 50000.0)
         half_range = view_range / 2
         
@@ -275,8 +278,8 @@ class Viewport3D(QOpenGLWidget):
         snap_x = round(cam_center[0] / spacing) * spacing
         snap_z = round(cam_center[2] / spacing) * spacing
         
-        # 1. 메인 격자 (1단위) - 아주 연하게
-        glColor3f(0.85, 0.85, 0.85)
+        # 1. 메인 격자 (1단위) - 아주 연하고 투명하게
+        glColor4f(0.85, 0.85, 0.85, 0.3)
         glLineWidth(1.0)
         
         glBegin(GL_LINES)
@@ -294,7 +297,7 @@ class Viewport3D(QOpenGLWidget):
         
         # 2. 주요 격자 (10단위) - 조금 더 진하게
         major_spacing = spacing * 10
-        glColor3f(0.75, 0.75, 0.75)
+        glColor4f(0.7, 0.7, 0.7, 0.6)
         glLineWidth(1.5)
         
         glBegin(GL_LINES)
@@ -318,8 +321,8 @@ class Viewport3D(QOpenGLWidget):
         """XYZ 축 그리기 (무한히 뻗어나감)"""
         glDisable(GL_LIGHTING)
         
-        # 축 길이를 카메라 거리에 비례하게 설정 (매우 크게)
-        axis_length = max(self.camera.distance * 20, 10000.0)
+        # 축 길이를 대폭 확장 (1km)
+        axis_length = max(self.camera.distance * 20, 100000.0)
         
         glLineWidth(3.0)
         glBegin(GL_LINES)
@@ -494,11 +497,12 @@ class Viewport3D(QOpenGLWidget):
         self.mesh = mesh
         
         # 1. 메쉬 자체를 원점으로 센터링 (데이터 정규화)
-        center = mesh.centroid
+        # bounds의 평균을 원점으로 하여 기즈모와 정확히 정렬
+        center = mesh.bounds.mean(axis=0)
         mesh.vertices -= center
         mesh.compute_normals()
         
-        # 2. 이동값 초기화 (원점에 로드됨)
+        # 2. 이동값 초기화
         self.mesh_translation = np.array([0.0, 0.0, 0.0])
         self.mesh_rotation = np.array([0.0, 0.0, 0.0])
         self.mesh_scale = 1.0
