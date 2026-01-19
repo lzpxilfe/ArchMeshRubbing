@@ -266,8 +266,8 @@ class Viewport3D(QOpenGLWidget):
         
         spacing = self.grid_spacing
         
-        # 격자 크기를 카메라 거리에 비례하게 설정
-        view_range = max(self.camera.distance * 2, self.grid_size)
+        # 격자 범위를 대폭 확장 (최대 10,000cm)
+        view_range = min(max(self.camera.distance * 15, 10000.0), 50000.0)
         half_range = view_range / 2
         
         # 카메라가 보는 곳을 중심으로 격자 스냅
@@ -275,39 +275,40 @@ class Viewport3D(QOpenGLWidget):
         snap_x = round(cam_center[0] / spacing) * spacing
         snap_z = round(cam_center[2] / spacing) * spacing
         
-        # 메인 격자 (1단위)
-        glColor3f(0.82, 0.82, 0.82)
+        # 1. 메인 격자 (1단위) - 아주 연하게
+        glColor3f(0.85, 0.85, 0.85)
         glLineWidth(1.0)
         
         glBegin(GL_LINES)
         steps = int(view_range / spacing) + 2
         for i in range(-steps // 2, steps // 2 + 1):
-            # X 방향 선
-            x_val = snap_x + i * spacing
+            offset = i * spacing
+            x_val = snap_x + offset
             glVertex3f(x_val, 0, snap_z - half_range)
             glVertex3f(x_val, 0, snap_z + half_range)
-            # Z 방향 선
-            z_val = snap_z + i * spacing
+            
+            z_val = snap_z + offset
             glVertex3f(snap_x - half_range, 0, z_val)
             glVertex3f(snap_x + half_range, 0, z_val)
         glEnd()
         
-        # 주요 격자 (10단위) - 더 굵게
+        # 2. 주요 격자 (10단위) - 조금 더 진하게
         major_spacing = spacing * 10
-        glColor3f(0.7, 0.7, 0.7)
+        glColor3f(0.75, 0.75, 0.75)
         glLineWidth(1.5)
         
         glBegin(GL_LINES)
+        steps_major = int(view_range / major_spacing) + 2
         snap_major_x = round(cam_center[0] / major_spacing) * major_spacing
         snap_major_z = round(cam_center[2] / major_spacing) * major_spacing
-        steps_major = int(view_range / major_spacing) + 4
-        for i in range(-steps_major, steps_major + 1):
-            val_x = snap_major_x + i * major_spacing
-            val_z = snap_major_z + i * major_spacing
-            glVertex3f(val_x, 0, snap_z - half_range)
-            glVertex3f(val_x, 0, snap_z + half_range)
-            glVertex3f(snap_x - half_range, 0, val_z)
-            glVertex3f(snap_x + half_range, 0, val_z)
+        for i in range(-steps_major // 2, steps_major // 2 + 1):
+            x_val = snap_major_x + i * major_spacing
+            glVertex3f(x_val, 0, snap_z - half_range)
+            glVertex3f(x_val, 0, snap_z + half_range)
+            
+            z_val = snap_major_z + i * major_spacing
+            glVertex3f(snap_x - half_range, 0, z_val)
+            glVertex3f(snap_x + half_range, 0, z_val)
         glEnd()
         
         glLineWidth(1.0)
@@ -317,23 +318,23 @@ class Viewport3D(QOpenGLWidget):
         """XYZ 축 그리기 (무한히 뻗어나감)"""
         glDisable(GL_LIGHTING)
         
-        # 축 길이를 카메라 거리에 비례하게 설정 (사실상 무한)
-        axis_length = max(self.camera.distance * 3, 1000.0)
+        # 축 길이를 카메라 거리에 비례하게 설정 (매우 크게)
+        axis_length = max(self.camera.distance * 20, 10000.0)
         
-        glLineWidth(2.5)
+        glLineWidth(3.0)
         glBegin(GL_LINES)
         
-        # X축 (빨강) - 양방향으로 무한히
+        # X축 (빨강)
         glColor3f(0.9, 0.2, 0.2)
         glVertex3f(-axis_length, 0, 0)
         glVertex3f(axis_length, 0, 0)
         
-        # Y축 (초록) - 양방향으로 무한히
+        # Y축 (초록)
         glColor3f(0.2, 0.8, 0.2)
         glVertex3f(0, -axis_length, 0)
         glVertex3f(0, axis_length, 0)
         
-        # Z축 (파랑) - 양방향으로 무한히
+        # Z축 (파랑)
         glColor3f(0.2, 0.2, 0.9)
         glVertex3f(0, 0, -axis_length)
         glVertex3f(0, 0, axis_length)
@@ -491,11 +492,16 @@ class Viewport3D(QOpenGLWidget):
     def load_mesh(self, mesh):
         """메쉬 로드 및 최적화"""
         self.mesh = mesh
-        self.mesh.compute_normals()
         
-        # 메쉬 중심을 원점으로
+        # 1. 메쉬 자체를 원점으로 센터링 (데이터 정규화)
         center = mesh.centroid
-        self.mesh_translation = -center
+        mesh.vertices -= center
+        mesh.compute_normals()
+        
+        # 2. 이동값 초기화 (원점에 로드됨)
+        self.mesh_translation = np.array([0.0, 0.0, 0.0])
+        self.mesh_rotation = np.array([0.0, 0.0, 0.0])
+        self.mesh_scale = 1.0
         
         # 카메라 및 격자 스케일 조정
         self.update_grid_scale()
@@ -538,54 +544,57 @@ class Viewport3D(QOpenGLWidget):
         if self.mesh is None:
             return None
         
-        self.makeCurrent()
-        viewport = glGetIntegerv(GL_VIEWPORT)
-        modelview = glGetDoublev(GL_MODELVIEW_MATRIX)
-        projection = glGetDoublev(GL_PROJECTION_MATRIX)
-        
-        win_y = viewport[3] - screen_y
-        
-        # 1. 클릭 지점에서 광선(Ray) 생성
-        near_pt = gluUnProject(screen_x, win_y, 0.0, modelview, projection, viewport)
-        far_pt = gluUnProject(screen_x, win_y, 1.0, modelview, projection, viewport)
-        
-        ray_origin = np.array(near_pt)
-        ray_dir = np.array(far_pt) - ray_origin
-        ray_len = np.linalg.norm(ray_dir)
-        if ray_len < 1e-6: return None
-        ray_dir /= ray_len
-        
-        # 2. 각 회전 평면과 광선의 교점 찾기
-        best_axis = None
-        min_ray_t = float('inf')
-        # 기즈모를 잡을 수 있는 너비 (카메라 거리에 비례)
-        threshold = self.camera.distance * 0.02
-        
-        # 각 축의 평면 법선
-        planes = {
-            'X': np.array([1, 0, 0]),
-            'Y': np.array([0, 1, 0]),
-            'Z': np.array([0, 0, 1])
-        }
-        
-        gizmo_center = self.mesh_translation
-        
-        for axis, normal in planes.items():
-            # 광선-평면 교점
-            denom = np.dot(ray_dir, normal)
-            if abs(denom) > 1e-4:
-                t = np.dot(gizmo_center - ray_origin, normal) / denom
-                if t > 0:
-                    hit_pt = ray_origin + t * ray_dir
-                    dist_to_center = np.linalg.norm(hit_pt - gizmo_center)
-                    
-                    # 고리(원) 근처를 클릭했는지 확인
-                    if abs(dist_to_center - self.gizmo_size) < threshold:
-                        if t < min_ray_t:
-                            min_ray_t = t
-                            best_axis = axis
-                            
-        return best_axis
+        try:
+            self.makeCurrent()
+            viewport = glGetIntegerv(GL_VIEWPORT)
+            modelview = glGetDoublev(GL_MODELVIEW_MATRIX)
+            projection = glGetDoublev(GL_PROJECTION_MATRIX)
+            
+            win_y = viewport[3] - screen_y
+            
+            # 1. 클릭 지점에서 광선(Ray) 생성
+            near_pt = gluUnProject(screen_x, win_y, 0.0, modelview, projection, viewport)
+            far_pt = gluUnProject(screen_x, win_y, 1.0, modelview, projection, viewport)
+            if not near_pt or not far_pt: return None
+            
+            ray_origin = np.array(near_pt)
+            ray_dir = np.array(far_pt) - ray_origin
+            ray_len = np.linalg.norm(ray_dir)
+            if ray_len < 1e-6: return None
+            ray_dir /= ray_len
+            
+            # 2. 각 회전 평면과 광선의 교점 찾기
+            best_axis = None
+            min_ray_t = float('inf')
+            # 기즈모를 잡을 수 있는 너비 (카메라 거리에 비례)
+            threshold = self.camera.distance * 0.03
+            
+            # 각 축의 평면 법선
+            planes = {
+                'X': np.array([1, 0, 0]),
+                'Y': np.array([0, 1, 0]),
+                'Z': np.array([0, 0, 1])
+            }
+            
+            gizmo_center = self.mesh_translation
+            
+            for axis, normal in planes.items():
+                # 광선-평면 교점
+                denom = np.dot(ray_dir, normal)
+                if abs(denom) > 1e-4:
+                    t = np.dot(gizmo_center - ray_origin, normal) / denom
+                    if t > 0:
+                        hit_pt = ray_origin + t * ray_dir
+                        dist_to_center = np.linalg.norm(hit_pt - gizmo_center)
+                        
+                        # 고리(원) 근처를 클릭했는지 확인 (더 관대한 임계값)
+                        if abs(dist_to_center - self.gizmo_size) < threshold:
+                            if t < min_ray_t:
+                                min_ray_t = t
+                                best_axis = axis
+            return best_axis
+        except Exception:
+            return None
 
     def update_vbo(self):
         """VBO 생성 및 데이터 전송"""
@@ -671,29 +680,28 @@ class Viewport3D(QOpenGLWidget):
     
     def mouseMoveEvent(self, event: QMouseEvent):
         """마우스 이동 (드래그)"""
-        if self.mesh is None:
-            return
-            
         # 기즈모 드래그 중인 경우
-        if self.active_gizmo_axis:
-            current_angle = self._calculate_gizmo_angle(event.pos().x(), event.pos().y())
-            delta_angle = np.degrees(current_angle - self.gizmo_drag_start)
-            
-            # 카메라 방향에 따라 회전 방향 반전이 필요할 수 있음 (일단 기본 구현)
-            if self.active_gizmo_axis == 'X':
-                self.mesh_rotation[0] += delta_angle
-            elif self.active_gizmo_axis == 'Y':
-                self.mesh_rotation[1] -= delta_angle # Y축은 화면상 반시계방향이 플러스
-            elif self.active_gizmo_axis == 'Z':
-                self.mesh_rotation[2] += delta_angle
+        if self.active_gizmo_axis and self.mesh is not None and self.gizmo_drag_start is not None:
+            angle_info = self._calculate_gizmo_angle(event.pos().x(), event.pos().y())
+            if angle_info is not None:
+                current_angle = angle_info
+                delta_angle = np.degrees(current_angle - self.gizmo_drag_start)
                 
-            self.gizmo_drag_start = current_angle
-            self.meshTransformChanged.emit()
-            self.update()
-            return
+                # 회전 속도 보정
+                if self.active_gizmo_axis == 'X':
+                    self.mesh_rotation[0] += delta_angle
+                elif self.active_gizmo_axis == 'Y':
+                    self.mesh_rotation[1] -= delta_angle
+                elif self.active_gizmo_axis == 'Z':
+                    self.mesh_rotation[2] += delta_angle
+                    
+                self.gizmo_drag_start = current_angle
+                self.meshTransformChanged.emit()
+                self.update()
+                return
             
-        # 호버 시 기즈모 하이라이트 (버튼이 안 눌렸을 때)
-        if event.buttons() == Qt.MouseButtons.NoButton:
+        # 호버 시 기즈모 하이라이트
+        if event.buttons() == Qt.MouseButtons.NoButton and self.mesh is not None:
             axis = self.hit_test_gizmo(event.pos().x(), event.pos().y())
             if axis != self.active_gizmo_axis:
                 self.active_gizmo_axis = axis
@@ -743,21 +751,26 @@ class Viewport3D(QOpenGLWidget):
 
     def _calculate_gizmo_angle(self, screen_x, screen_y):
         """기즈모 중심에서 마우스 포인터까지의 각도 계산 (화면 공간)"""
-        self.makeCurrent()
-        viewport = glGetIntegerv(GL_VIEWPORT)
-        modelview = glGetDoublev(GL_MODELVIEW_MATRIX)
-        projection = glGetDoublev(GL_PROJECTION_MATRIX)
-        
-        win_y = viewport[3] - screen_y
-        
-        # 기즈모 중심의 화면 좌표 투영
-        p_screen = gluProject(*self.mesh_translation, modelview, projection, viewport)
-        
-        # 중심에서의 마우스 상대 벡터
-        dx = screen_x - p_screen[0]
-        dy = win_y - p_screen[1]
-        
-        return np.arctan2(dy, dx)
+        try:
+            self.makeCurrent()
+            viewport = glGetIntegerv(GL_VIEWPORT)
+            modelview = glGetDoublev(GL_MODELVIEW_MATRIX)
+            projection = glGetDoublev(GL_PROJECTION_MATRIX)
+            
+            win_y = viewport[3] - screen_y
+            
+            # 기즈모 중심의 화면 좌표 투영
+            p_screen = gluProject(*self.mesh_translation, modelview, projection, viewport)
+            if not p_screen: return None
+            
+            # 중심에서의 마우스 상대 벡터
+            dx = screen_x - p_screen[0]
+            dy = win_y - p_screen[1]
+            
+            if abs(dx) < 1e-6 and abs(dy) < 1e-6: return 0.0
+            return np.arctan2(dy, dx)
+        except Exception:
+            return None
     
     def wheelEvent(self, event: QWheelEvent):
         """마우스 휠 (줌)"""

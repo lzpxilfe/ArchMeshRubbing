@@ -213,12 +213,12 @@ class TransformPanel(QWidget):
         self.transformChanged.emit()
     
     def center_mesh(self):
+        """메쉬를 월드 원점(0,0,0)으로 이동"""
         if self.viewport.mesh is None:
             return
-        center = self.viewport.mesh.centroid
-        self.trans_x.setValue(-center[0])
-        self.trans_y.setValue(-center[1])
-        self.trans_z.setValue(-center[2])
+        self.trans_x.setValue(0.0)
+        self.trans_y.setValue(0.0)
+        self.trans_z.setValue(0.0)
     
     def align_to_floor(self):
         if self.viewport.mesh is None:
