@@ -1043,7 +1043,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         
-        self.setWindowTitle("ArchMeshRubbing v2.2 (Build 260120-Ultimate)")
+        self.setWindowTitle("ArchMeshRubbing v1.0.0")
         self.resize(1400, 900)
         
         # 메인 위젯
@@ -1312,7 +1312,7 @@ class MainWindow(QMainWindow):
         self.statusbar.addPermanentWidget(self.status_unit)
         
         # 버전 표시 (사용자 확인용)
-        self.status_ver = QLabel("v2026.01.20-Final")
+        self.status_ver = QLabel("v1.0.0")
         self.status_ver.setStyleSheet("color: #a0aec0; font-size: 10px; margin-left: 10px;")
         self.statusbar.addPermanentWidget(self.status_ver)
     
