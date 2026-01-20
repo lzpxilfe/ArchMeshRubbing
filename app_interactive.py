@@ -399,10 +399,15 @@ class TransformPanel(QWidget):
         btn_center.setToolTip("메쉬 중심을 원점(0,0,0)으로 이동")
         align_layout.addWidget(btn_center)
         
-        btn_floor = QPushButton("⬇️ 바닥에 정렬")
+        btn_floor = QPushButton("⬇️ 바닥에 자동 정렬")
         btn_floor.clicked.connect(self.align_to_floor)
-        btn_floor.setToolTip("메쉬 하단을 Y=0 평면에 맞춤")
+        btn_floor.setToolTip("메쉬의 가장 낮은 점을 찾아 Y=0 평면에 맞춤")
         align_layout.addWidget(btn_floor)
+        
+        self.btn_pick_floor = QPushButton("🎯 바닥 지점 직접 클릭")
+        self.btn_pick_floor.clicked.connect(self.start_floor_picking)
+        self.btn_pick_floor.setToolTip("메쉬 위에서 바닥에 닿을 지점을 직접 클릭하세요")
+        align_layout.addWidget(self.btn_pick_floor)
         
         btn_reset = QPushButton("🔄 변환 초기화")
         btn_reset.clicked.connect(self.reset_transform)
@@ -440,6 +445,14 @@ class TransformPanel(QWidget):
             self.viewport.update()
             self.transformChanged.emit()
     
+    def start_floor_picking(self):
+        """바닥 지점 피킹 모드 시작"""
+        if self.viewport.selected_obj is None:
+            return
+        self.viewport.picking_mode = 'floor'
+        self.viewport.status_info = "📍 바닥에 닿을 메쉬의 지점을 클릭하세요..."
+        self.viewport.update()
+        
     def center_mesh(self):
         """메쉬를 월드 원점(0,0,0)으로 이동"""
         if self.viewport.selected_obj is None:
@@ -447,6 +460,8 @@ class TransformPanel(QWidget):
         self.trans_x.setValue(0.0)
         self.trans_y.setValue(0.0)
         self.trans_z.setValue(0.0)
+        self.viewport.camera.center = np.array([0.0, 0.0, 0.0])
+        self.viewport.update()
     
     def align_to_floor(self):
         """
@@ -486,7 +501,10 @@ class TransformPanel(QWidget):
         min_y = rotated_vertices[:, 1].min()
         
         # Y를 -min_y로 설정하면 가장 낮은 점이 Y=0에 닿음
+        #setValue가 이벤트를 발생시켜 viewport.update()를 호출함
         self.trans_y.setValue(-min_y)
+        # 즉시 UI 동기화
+        self.viewport.update()
     
     def reset_transform(self):
         self.trans_x.setValue(0)
@@ -1055,6 +1073,7 @@ class MainWindow(QMainWindow):
         self.viewport.selectionChanged.connect(self.on_selection_changed)
         self.viewport.meshLoaded.connect(self.on_mesh_loaded)
         self.viewport.meshTransformChanged.connect(self.sync_transform_panel)
+        self.viewport.floorPointPicked.connect(self.on_floor_point_picked)
         
         # 도움말 위젯 (오버레이처럼 작동하도록 뷰포트 위에 띄우거나 하단에 배치 가능)
         # 일단은 뷰포트 하단에 고정
@@ -1125,6 +1144,21 @@ class MainWindow(QMainWindow):
         # 씬 패널을 기본으로 표시
         self.scene_dock.raise_()
     
+    def on_floor_point_picked(self, point):
+        """사용자가 클릭한 점을 Y=0 바닥에 맞춤"""
+        obj = self.viewport.selected_obj
+        if not obj: return
+        
+        # 현재 Y 위치에서 점의 월드 Y만큼 빼주면 바닥에 닿음
+        # 하지만 point는 이미 월드 좌표이므로, 현재 translation.y에서 point.y를 빼주면 됨
+        old_y = obj.translation[1]
+        new_y = old_y - point[1]
+        
+        # UI 업데이트가 자동으로 obj.translation을 바꿈
+        self.transform_panel.trans_y.setValue(new_y)
+        self.viewport.status_info = "✅ 바닥 정렬 완료"
+        self.viewport.update()
+
     def on_arc_deleted(self, obj_idx, arc_idx):
         """특정 객체의 특정 원호 삭제"""
         if 0 <= obj_idx < len(self.viewport.objects):

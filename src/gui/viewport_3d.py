@@ -208,6 +208,7 @@ class Viewport3D(QOpenGLWidget):
     meshLoaded = pyqtSignal(object)  # 메쉬 로드됨
     meshTransformChanged = pyqtSignal()  # 직접 조작으로 변환됨
     selectionChanged = pyqtSignal(int) # 선택된 객체 인덱스
+    floorPointPicked = pyqtSignal(np.ndarray) # 바닥면 점 선택됨
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -239,6 +240,12 @@ class Viewport3D(QOpenGLWidget):
         self.picked_points = []
         self.fitted_arc = None
         
+        # 상태 표시용 텍스트
+        self.status_info = ""
+        
+        # 피킹 모드 ('none', 'curvature', 'floor')
+        self.picking_mode = 'none'
+        
         # 키보드 조작 타이머 (WASD 연속 이동용)
         self.keys_pressed = set()
         self.move_timer = QTimer()
@@ -249,6 +256,11 @@ class Viewport3D(QOpenGLWidget):
         self.setMinimumSize(400, 300)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
+        # 타이머 (for continuous update, e.g., for status info)
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.update)
+        self.timer.start(16)  # ~60 FPS
+    
     @property
     def selected_obj(self) -> Optional[SceneObject]:
         if 0 <= self.selected_index < len(self.objects):
@@ -323,6 +335,9 @@ class Viewport3D(QOpenGLWidget):
         # 4. 회전 기즈모 (선택된 객체에만)
         if self.selected_obj:
             self.draw_rotation_gizmo(self.selected_obj)
+            
+        # 5. UI 오버레이 (HUD)
+        self.draw_orientation_hud()
     
     def draw_ground_plane(self):
         """반투명 바닥면 그리기 (Y=0) - 위에서만 보임"""
@@ -406,11 +421,9 @@ class Viewport3D(QOpenGLWidget):
         """XYZ 축 그리기 (무한히 뻗어나감)"""
         glDisable(GL_LIGHTING)
         
-        # 축 길이를 카메라 거리에 비례하여 대폭 확장 (사실상 끝이 안 보이게)
-        # 기본 10km 이상으로 설정하여 무한한 느낌 강화
         axis_length = max(self.camera.distance * 100, 1000000.0)
         
-        glLineWidth(3.0)
+        glLineWidth(2.0)
         glBegin(GL_LINES)
         
         # X축 (빨강)
@@ -430,6 +443,60 @@ class Viewport3D(QOpenGLWidget):
         
         glEnd()
         glLineWidth(1.0)
+        glEnable(GL_LIGHTING)
+        
+    def draw_orientation_hud(self):
+        """우측 하단에 작은 방향 가이드(HUD) 그리기"""
+        glDisable(GL_DEPTH_TEST)
+        glDisable(GL_LIGHTING)
+        
+        # 1. 뷰포트 정보 저장
+        viewport = glGetIntegerv(GL_VIEWPORT)
+        w, h = viewport[2], viewport[3]
+        
+        # 2. 현재 뷰 행렬 가져오기 (회전 정보 추출용)
+        view_matrix = glGetDoublev(GL_MODELVIEW_MATRIX)
+        
+        # 3. HUD용 전용 뷰포트 설정 (우측 하단 80x80)
+        hud_size = 100
+        margin = 10
+        glViewport(w - hud_size - margin, margin, hud_size, hud_size)
+        
+        glMatrixMode(GL_PROJECTION)
+        glPushMatrix()
+        glLoadIdentity()
+        glOrtho(-1.5, 1.5, -1.5, 1.5, -2, 2)
+        
+        glMatrixMode(GL_MODELVIEW)
+        glPushMatrix()
+        glLoadIdentity()
+        
+        # 4. 뷰 행렬에서 회전만 적용 (이동 제거)
+        rot_matrix = list(view_matrix)
+        rot_matrix[12] = 0; rot_matrix[13] = 0; rot_matrix[14] = 0
+        glLoadMatrixd(rot_matrix)
+        
+        # 5. 축 그리기 (X:Red, Y:Green, Z:Blue)
+        glLineWidth(3.0)
+        glBegin(GL_LINES)
+        # X: Red
+        glColor3f(1.0, 0.2, 0.2)
+        glVertex3f(0, 0, 0); glVertex3f(1, 0, 0)
+        # Y: Green
+        glColor3f(0.2, 1.0, 0.2)
+        glVertex3f(0, 0, 0); glVertex3f(0, 1, 0)
+        # Z: Blue
+        glColor3f(0.2, 0.2, 1.0)
+        glVertex3f(0, 0, 0); glVertex3f(0, 0, 1)
+        glEnd()
+        
+        # 6. 복구
+        glPopMatrix()
+        glMatrixMode(GL_PROJECTION)
+        glPopMatrix()
+        glMatrixMode(GL_MODELVIEW)
+        glViewport(0, 0, w, h)
+        glEnable(GL_DEPTH_TEST)
         glEnable(GL_LIGHTING)
     
     def draw_scene_object(self, obj: SceneObject, is_selected: bool = False):
@@ -589,6 +656,7 @@ class Viewport3D(QOpenGLWidget):
             
         self.camera.distance = max_dim * 2
         self.camera.center = obj.translation.copy()
+        self.camera.pan_offset = np.array([0.0, 0.0, 0.0])
         self.gizmo_size = max_dim * 0.7
     
     def hit_test_gizmo(self, screen_x, screen_y):
@@ -722,8 +790,10 @@ class Viewport3D(QOpenGLWidget):
     def mousePressEvent(self, event: QMouseEvent):
         """마우스 버튼 눌림"""
         try:
-            # Shift+클릭: 곡률 측정용 점 찍기
-            if (event.modifiers() & Qt.KeyboardModifier.ShiftModifier and 
+            modifiers = event.modifiers()
+
+            # Shift+클릭: 곡률 측정용 점 찍기 (기존 로직)
+            if (modifiers & Qt.KeyboardModifier.ShiftModifier and 
                 event.button() == Qt.MouseButton.LeftButton and
                 self.curvature_pick_mode):
                 
@@ -733,8 +803,26 @@ class Viewport3D(QOpenGLWidget):
                     self.update()
                 return
             
-            # 기즈모 클릭 체크
-            if event.button() == Qt.MouseButton.LeftButton:
+            # 1. 일반 클릭 (객체 선택 또는 피킹 모드 처리)
+            if event.button() == Qt.MouseButton.LeftButton and modifiers == Qt.KeyboardModifier.NoModifier:
+                # 만약 피킹 모드가 활성화된 경우
+                if self.picking_mode == 'curvature':
+                    point = self.pick_point_on_mesh(event.pos().x(), event.pos().y())
+                    if point is not None:
+                        self.picked_points.append(point)
+                        self.update()
+                        return
+                        
+                elif self.picking_mode == 'floor':
+                    point = self.pick_point_on_mesh(event.pos().x(), event.pos().y())
+                    if point is not None:
+                        # 신호 발생 (MainWindow로 전달)
+                        self.floorPointPicked.emit(point)
+                        self.picking_mode = 'none' # 모드 종료
+                        self.update()
+                        return
+
+                # 기즈모 선택 검사
                 axis = self.hit_test_gizmo(event.pos().x(), event.pos().y())
                 if axis:
                     self.active_gizmo_axis = axis
