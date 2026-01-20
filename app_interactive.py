@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
     QTreeWidgetItem, QGroupBox, QDoubleSpinBox, QFormLayout,
     QSlider, QSpinBox, QStatusBar, QToolBar, QSplitter, QFrame,
     QMessageBox, QTabWidget, QTextEdit, QProgressBar, QComboBox,
-    QCheckBox, QScrollArea, QSizePolicy, QButtonGroup
+    QCheckBox, QScrollArea, QSizePolicy, QButtonGroup, QDialog
 )
 from PyQt6.QtCore import Qt, QTimer, QSize, pyqtSignal, QThread
 from PyQt6.QtGui import QAction, QIcon, QKeySequence, QFont, QPixmap
@@ -1043,7 +1043,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         
-        self.setWindowTitle("ArchMeshRubbing v2 (Build 260119-3)")
+        self.setWindowTitle("ArchMeshRubbing v2.1 (Build 260120-Final)")
         self.resize(1400, 900)
         
         # 메인 위젯
@@ -1089,7 +1089,7 @@ class MainWindow(QMainWindow):
         self.scene_panel.visibilityChanged.connect(self.on_visibility_changed)
         self.scene_panel.arcDeleted.connect(self.on_arc_deleted)
         self.scene_dock.setWidget(self.scene_panel)
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.scene_dock)
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.scene_dock)
         
         # 2. 정치 패널 (도킹)
         self.transform_dock = QDockWidget("📐 정치 (변환)", self)
@@ -1135,13 +1135,11 @@ class MainWindow(QMainWindow):
         self.export_dock.setWidget(self.export_panel)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.export_dock)
         
-        # 패널들을 탭으로 묶기
-        self.tabifyDockWidget(self.scene_dock, self.transform_dock)
-        self.tabifyDockWidget(self.transform_dock, self.selection_dock)
-        self.tabifyDockWidget(self.selection_dock, self.flatten_dock)
-        self.tabifyDockWidget(self.flatten_dock, self.export_dock)
+        # 씬 패널은 좌측에 독립적으로 유지하거나 다른 패널과 분리
+        # (tabify 대신 좌측 영역 유지)
         
-        # 씬 패널을 기본으로 표시
+        # 씬 패널을 기본으로 표시 (좌측)
+        self.scene_dock.show()
         self.scene_dock.raise_()
     
     def on_floor_point_picked(self, point):
@@ -1252,11 +1250,13 @@ class MainWindow(QMainWindow):
         
         toolbar.addSeparator()
         
-        action_reset = QAction("🔄 뷰 초기화", self)
-        action_reset.triggered.connect(self.reset_view)
-        toolbar.addAction(action_reset)
+        action_reset_fit = QAction("🎯 정치 초기화 (Match)", self)
+        action_reset_fit.setToolTip("메쉬의 변환을 리셋하고 원점으로 맞춤 (정치)")
+        action_reset_fit.triggered.connect(self.reset_transform_and_center)
+        toolbar.addAction(action_reset_fit)
         
-        action_fit = QAction("🎯 맞춤", self)
+        action_fit = QAction("🔍 뷰 맞춤", self)
+        action_fit.setToolTip("메쉬가 화면에 꽉 차도록 카메라 조정")
         action_fit.triggered.connect(self.fit_view)
         toolbar.addAction(action_fit)
         
@@ -1308,7 +1308,7 @@ class MainWindow(QMainWindow):
         self.statusbar.addPermanentWidget(self.status_unit)
         
         # 버전 표시 (사용자 확인용)
-        self.status_ver = QLabel("v2026.01.19.v3")
+        self.status_ver = QLabel("v2026.01.20-Final")
         self.status_ver.setStyleSheet("color: #a0aec0; font-size: 10px; margin-left: 10px;")
         self.statusbar.addPermanentWidget(self.status_ver)
     
@@ -1453,6 +1453,13 @@ class MainWindow(QMainWindow):
                 self.status_info.setText(f"내보내기: {filepath}")
                 # TODO: 실제 내보내기 구현
     
+    def reset_transform_and_center(self):
+        """정치 초기화: 변환 리셋 + 원점 중심 이동"""
+        if self.viewport.selected_obj:
+            self.transform_panel.reset_transform()
+            self.transform_panel.center_mesh()
+            self.status_info.setText("✅ 정치 초기화 완료 (0,0,0)")
+            
     def reset_view(self):
         self.viewport.camera.reset()
         self.viewport.update()
