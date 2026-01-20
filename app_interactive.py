@@ -1043,7 +1043,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         
-        self.setWindowTitle("ArchMeshRubbing v2.1 (Build 260120-Final)")
+        self.setWindowTitle("ArchMeshRubbing v2.2 (Build 260120-Ultimate)")
         self.resize(1400, 900)
         
         # 메인 위젯
@@ -1135,12 +1135,16 @@ class MainWindow(QMainWindow):
         self.export_dock.setWidget(self.export_panel)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.export_dock)
         
-        # 씬 패널은 좌측에 독립적으로 유지하거나 다른 패널과 분리
-        # (tabify 대신 좌측 영역 유지)
-        
-        # 씬 패널을 기본으로 표시 (좌측)
+        # 씬 패널은 좌측에 독립적으로 유지
         self.scene_dock.show()
         self.scene_dock.raise_()
+        
+        # 우측 패널들만 탭으로 묶기
+        self.tabifyDockWidget(self.transform_dock, self.selection_dock)
+        self.tabifyDockWidget(self.selection_dock, self.flatten_dock)
+        self.tabifyDockWidget(self.flatten_dock, self.export_dock)
+        
+        self.transform_dock.raise_() 
     
     def on_floor_point_picked(self, point):
         """사용자가 클릭한 점을 Y=0 바닥에 맞춤"""

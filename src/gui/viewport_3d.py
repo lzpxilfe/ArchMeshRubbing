@@ -269,14 +269,16 @@ class Viewport3D(QOpenGLWidget):
     
     def initializeGL(self):
         """OpenGL 초기화"""
-        glClearColor(*self.bg_color)
-        
+        glClearColor(0.95, 0.95, 0.95, 1.0) # 밝은 배경 (CloudCompare 스타일)
+        # 기본 설정
         glEnable(GL_DEPTH_TEST)
-        glDepthFunc(GL_LESS)
-        
         glEnable(GL_LIGHTING)
         glEnable(GL_LIGHT0)
-        glEnable(GL_COLOR_MATERIAL)
+        glLightfv(GL_LIGHT0, GL_POSITION, [1.0, 1.0, 1.0, 0.0])
+        
+        # 선 부드럽게 (안티앨리어싱)
+        glEnable(GL_LINE_SMOOTH)
+        glHint(GL_LINE_SMOOTH_HINT, GL_NICEST)
         glEnable(GL_BLEND)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
         
@@ -421,9 +423,13 @@ class Viewport3D(QOpenGLWidget):
         """XYZ 축 그리기 (무한히 뻗어나감)"""
         glDisable(GL_LIGHTING)
         
+        # 바닥 격자와의 Z-fighting 방지를 위해 아주 살짝 위로 띄움 (+1mm)
+        glPushMatrix()
+        glTranslatef(0, 0.1, 0)
+        
         axis_length = max(self.camera.distance * 100, 1000000.0)
         
-        glLineWidth(2.0)
+        glLineWidth(2.5) # 약간 더 두껍게
         glBegin(GL_LINES)
         
         # X축 (빨강)
@@ -442,6 +448,8 @@ class Viewport3D(QOpenGLWidget):
         glVertex3f(0, 0, axis_length)
         
         glEnd()
+        glPopMatrix()
+        
         glLineWidth(1.0)
         glEnable(GL_LIGHTING)
         
