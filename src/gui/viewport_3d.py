@@ -175,6 +175,9 @@ class SceneObject:
         self.rotation = np.array([0.0, 0.0, 0.0])
         self.scale = 1.0
         
+        # 피팅된 원호들 (메쉬와 함께 이동)
+        self.fitted_arcs = []
+        
         # 렌더링 리소스
         self.vbo_id = None
         self.vertex_count = 0
@@ -221,8 +224,8 @@ class Viewport3D(QOpenGLWidget):
         self.selected_index = -1
         
         # 렌더링 설정
-        self.grid_size = 200.0  # cm (더 크게)
-        self.grid_spacing = 10.0 # cm
+        self.grid_size = 500.0  # cm (더 크게 확장)
+        self.grid_spacing = 1.0  # cm (1.0 = 1cm)
         self.bg_color = [0.96, 0.96, 0.94, 1.0] # #F5F5F0 (Cream/Beige)
         
         # 기즈모 설정
@@ -303,6 +306,7 @@ class Viewport3D(QOpenGLWidget):
         self.camera.apply()
         
         # 1. 격자 및 축
+        self.draw_ground_plane()  # 반투명 바닥
         self.draw_grid()
         self.draw_axes()
         
@@ -319,6 +323,33 @@ class Viewport3D(QOpenGLWidget):
         # 4. 회전 기즈모 (선택된 객체에만)
         if self.selected_obj:
             self.draw_rotation_gizmo(self.selected_obj)
+    
+    def draw_ground_plane(self):
+        """반투명 바닥면 그리기 (Y=0) - 위에서만 보임"""
+        glDisable(GL_LIGHTING)
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        
+        # 뒷면 제거 (아래에서 보면 안 보이게)
+        glEnable(GL_CULL_FACE)
+        glCullFace(GL_BACK)
+        
+        # 바닥면 크기 (카메라 거리에 비례)
+        size = max(self.camera.distance * 3, 200.0)
+        
+        # 반투명 회색 바닥 (약간 따뜻한 톤)
+        glColor4f(0.85, 0.82, 0.78, 0.4)  # 베이지-그레이, 40% 불투명
+        
+        # 정점 순서: 반시계 방향 = 위쪽이 앞면
+        glBegin(GL_QUADS)
+        glVertex3f(-size, 0, -size)
+        glVertex3f(-size, 0, size)
+        glVertex3f(size, 0, size)
+        glVertex3f(size, 0, -size)
+        glEnd()
+        
+        glDisable(GL_CULL_FACE)
+        glEnable(GL_LIGHTING)
     
     def draw_grid(self):
         """진정한 무한 격자 바닥면 그리기 (카메라 거리에 따라 동적 스케일링)"""
@@ -450,23 +481,26 @@ class Viewport3D(QOpenGLWidget):
         # 기즈모 크기 설정 (객체 스케일 반영)
         size = self.gizmo_size * obj.scale
         
+        # 하이라이트용 축 (hover 또는 active)
+        highlight_axis = self.active_gizmo_axis or getattr(self, '_hover_axis', None)
+        
         # X축
         glColor3f(1.0, 0.2, 0.2)
-        if self.active_gizmo_axis == 'X':
+        if highlight_axis == 'X':
             glLineWidth(5.0); glColor3f(1.0, 0.8, 0.0)
         else: glLineWidth(2.5)
         glPushMatrix(); glRotatef(90, 0, 1, 0); self._draw_gizmo_circle(size); glPopMatrix()
         
         # Y축
         glColor3f(0.2, 1.0, 0.2)
-        if self.active_gizmo_axis == 'Y':
+        if highlight_axis == 'Y':
             glLineWidth(5.0); glColor3f(1.0, 0.8, 0.0)
         else: glLineWidth(2.5)
         glPushMatrix(); glRotatef(90, 1, 0, 0); self._draw_gizmo_circle(size); glPopMatrix()
         
         # Z축
         glColor3f(0.2, 0.2, 1.0)
-        if self.active_gizmo_axis == 'Z':
+        if highlight_axis == 'Z':
             glLineWidth(5.0); glColor3f(1.0, 0.8, 0.0)
         else: glLineWidth(2.5)
         self._draw_gizmo_circle(size)
@@ -549,9 +583,9 @@ class Viewport3D(QOpenGLWidget):
         extents = bounds[1] - bounds[0]
         max_dim = np.max(extents)
         
-        if max_dim < 10:  self.grid_spacing = 1.0; self.grid_size = 20.0
-        elif max_dim < 100: self.grid_spacing = 5.0; self.grid_size = 150.0
-        else: self.grid_spacing = 10.0; self.grid_size = max_dim * 1.5
+        if max_dim < 50:  self.grid_spacing = 1.0; self.grid_size = 100.0  # 1cm grid for small objects
+        elif max_dim < 200: self.grid_spacing = 5.0; self.grid_size = 500.0  # 5cm grid
+        else: self.grid_spacing = 10.0; self.grid_size = max_dim * 1.5      # 10cm grid for large objects
             
         self.camera.distance = max_dim * 2
         self.camera.center = obj.translation.copy()
@@ -747,8 +781,8 @@ class Viewport3D(QOpenGLWidget):
             obj = self.selected_obj
             modifiers = event.modifiers()
             
-            # 1. 기즈모 드래그 (좌클릭 + 기즈모 활성 상태)
-            if self.active_gizmo_axis and obj and self.mouse_button == Qt.MouseButton.LeftButton and self.gizmo_drag_start is not None:
+            # 1. 기즈모 드래그 (좌클릭 + 기즈모 드래그 시작됨)
+            if self.gizmo_drag_start is not None and self.active_gizmo_axis and obj and self.mouse_button == Qt.MouseButton.LeftButton:
                 angle_info = self._calculate_gizmo_angle(event.pos().x(), event.pos().y())
                 if angle_info is not None:
                     current_angle = angle_info
@@ -763,11 +797,12 @@ class Viewport3D(QOpenGLWidget):
                     self.update()
                     return
                 
-            # 2. 기즈모 호버 하이라이트 (버튼 안 눌렸을 때)
-            if event.buttons() == Qt.MouseButtons.NoButton:
+            # 2. 기즈모 호버 하이라이트 (버튼 안 눌렸을 때만)
+            if event.buttons() == Qt.MouseButton.NoButton:
                 axis = self.hit_test_gizmo(event.pos().x(), event.pos().y())
-                if axis != self.active_gizmo_axis:
-                    self.active_gizmo_axis = axis
+                # 호버 시 하이라이트만 변경, active_gizmo_axis는 클릭 시에만 설정
+                if axis != getattr(self, '_hover_axis', None):
+                    self._hover_axis = axis
                     self.update()
                 return
             
@@ -787,9 +822,22 @@ class Viewport3D(QOpenGLWidget):
                 return
             
             elif (modifiers & Qt.KeyboardModifier.AltModifier) and obj:
-                rot_speed = 0.5
-                obj.rotation[1] += dx * rot_speed
-                obj.rotation[0] += dy * rot_speed
+                # 트랙볼 스타일 회전 - 카메라 시점 기준으로 더 직관적
+                rot_speed = 0.8  # 더 빠르게
+                
+                # 카메라 방향을 고려한 회전
+                az_rad = np.radians(self.camera.azimuth)
+                
+                # 화면 수평 드래그 -> 카메라 시점 기준 Y축 회전 (턴테이블)
+                # 화면 수직 드래그 -> 카메라 시점 기준 X축 회전 (피칭)
+                obj.rotation[1] += dx * rot_speed  # 수평 = Y축 회전
+                
+                # 수직 드래그는 카메라 방향에 따라 X 또는 Z축에 분배
+                pitch_x = dy * rot_speed * np.cos(az_rad)
+                pitch_z = -dy * rot_speed * np.sin(az_rad)
+                obj.rotation[0] += pitch_x
+                obj.rotation[2] += pitch_z
+                
                 self.meshTransformChanged.emit()
                 self.update()
                 return
@@ -931,19 +979,29 @@ class Viewport3D(QOpenGLWidget):
         glEnable(GL_LIGHTING)
     
     def draw_fitted_arc(self):
-        """피팅된 원호 시각화"""
-        if self.fitted_arc is None:
+        """피팅된 원호 시각화 (선택된 객체에 부착됨)"""
+        obj = self.selected_obj
+        if not obj or not obj.fitted_arcs:
+            # 임시 원호도 그리기 (아직 객체에 부착 안 된 경우)
+            if self.fitted_arc is not None:
+                self._draw_single_arc(self.fitted_arc, None)
             return
         
+        # 객체에 부착된 모든 원호 그리기
+        for arc in obj.fitted_arcs:
+            self._draw_single_arc(arc, obj)
+    
+    def _draw_single_arc(self, arc, obj):
+        """단일 원호 그리기 (이제 항상 월드 좌표 기준)"""
         from src.core.curvature_fitter import CurvatureFitter
         
         glDisable(GL_LIGHTING)
         glColor3f(0.2, 0.8, 0.2)  # 초록색
-        glLineWidth(2.0)
+        glLineWidth(3.0)
         
         # 원호 점들 생성
         fitter = CurvatureFitter()
-        arc_points = fitter.generate_arc_points(self.fitted_arc, 64)
+        arc_points = fitter.generate_arc_points(arc, 64)
         
         # 원 그리기
         glBegin(GL_LINE_LOOP)
@@ -954,7 +1012,7 @@ class Viewport3D(QOpenGLWidget):
         # 중심에서 원주까지 선 (반지름 표시)
         glColor3f(1.0, 1.0, 0.0)  # 노란색
         glBegin(GL_LINES)
-        glVertex3fv(self.fitted_arc.center)
+        glVertex3fv(arc.center)
         glVertex3fv(arc_points[0])
         glEnd()
         

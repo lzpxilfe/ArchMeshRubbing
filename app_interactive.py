@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QTimer, QSize, pyqtSignal, QThread
 from PyQt6.QtGui import QAction, QIcon, QKeySequence, QFont, QPixmap
 import numpy as np
+import trimesh
 
 # Add src to path
 if getattr(sys, 'frozen', False):
@@ -204,10 +205,46 @@ class SplashScreen(QWidget):
         QApplication.processEvents()
 
 
+class UnitSelectionDialog(QDialog):
+    """메쉬 로딩 시 단위를 선택하는 다이얼로그"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("단위 선택")
+        self.setFixedWidth(250)
+        
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("파일의 단위를 선택하세요:"))
+        
+        self.combo = QComboBox()
+        self.combo.addItems(["Millimeters (mm)", "Centimeters (cm)", "Meters (m)"])
+        # 기본값 설정 (보통 STL은 mm인 경우가 많음)
+        self.combo.setCurrentIndex(0) 
+        layout.addWidget(self.combo)
+        
+        btn_layout = QHBoxLayout()
+        ok_btn = QPushButton("확인")
+        ok_btn.clicked.connect(self.accept)
+        cancel_btn = QPushButton("취소")
+        cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(ok_btn)
+        btn_layout.addWidget(cancel_btn)
+        
+        layout.addLayout(btn_layout)
+
+    def get_scale_factor(self):
+        """cm 단위로 변환하기 위한 배율 반환"""
+        idx = self.combo.currentIndex()
+        if idx == 0: return 0.1  # mm -> cm
+        if idx == 1: return 1.0  # cm -> cm
+        if idx == 2: return 100.0 # m -> cm
+        return 1.0
+
+
 class ScenePanel(QWidget):
-    """씬 내의 객체 목록을 보여주는 패널"""
+    """씬 내의 객체 목록과 부착된 요소를 보여주는 트리 패널"""
     selectionChanged = pyqtSignal(int)
     visibilityChanged = pyqtSignal(int, bool)
+    arcDeleted = pyqtSignal(int, int) # object_idx, arc_idx
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -215,37 +252,66 @@ class ScenePanel(QWidget):
         layout.setContentsMargins(5, 5, 5, 5)
         
         self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["객체 이름", "가시성", "폴리곤"])
+        self.tree.setHeaderLabels(["이름", "상태", "값"])
         self.tree.setColumnWidth(1, 40)
         self.tree.setAlternatingRowColors(True)
-        self.tree.setStyleSheet("QTreeWidget { font-size: 11px; }")
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self.show_context_menu)
         
         layout.addWidget(self.tree)
-        
         self.tree.itemClicked.connect(self.on_item_clicked)
     
     def update_list(self, objects, selected_index):
+        """객체 및 부착된 원호 리스트 갱신"""
+        self.tree.blockSignals(True)
         self.tree.clear()
         for i, obj in enumerate(objects):
-            item = QTreeWidgetItem([
+            # 메쉬 노드
+            mesh_item = QTreeWidgetItem([
                 obj.name,
                 "👁️" if obj.visible else "👓",
                 f"{len(obj.mesh.faces):,}"
             ])
-            item.setData(0, Qt.ItemDataRole.UserRole, i)
-            self.tree.addTopLevelItem(item)
+            mesh_item.setData(0, Qt.ItemDataRole.UserRole, ("mesh", i))
+            self.tree.addTopLevelItem(mesh_item)
             
+            # 부착된 원호들
+            for j, arc in enumerate(obj.fitted_arcs):
+                arc_item = QTreeWidgetItem(mesh_item)
+                arc_item.setText(0, f"원호 #{j+1}")
+                arc_item.setText(1, "📏")
+                arc_item.setText(2, f"R={arc.radius:.2f}cm") # cm로 표시
+                arc_item.setData(0, Qt.ItemDataRole.UserRole, ("arc", i, j))
+            
+            mesh_item.setExpanded(True)
             if i == selected_index:
-                self.tree.setCurrentItem(item)
+                self.tree.setCurrentItem(mesh_item)
+        self.tree.blockSignals(False)
                 
     def on_item_clicked(self, item, column):
-        index = item.data(0, Qt.ItemDataRole.UserRole)
-        if column == 1: # 가시성 토글
-            visible = item.text(1) == "👓"
-            item.setText(1, "👁️" if visible else "👓")
-            self.visibilityChanged.emit(index, visible)
-        else:
-            self.selectionChanged.emit(index)
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        if not data: return
+        
+        if data[0] == "mesh":
+            index = data[1]
+            if column == 1: # 가시성 토글
+                visible = item.text(1) == "👓"
+                item.setText(1, "👁️" if visible else "👓")
+                self.visibilityChanged.emit(index, visible)
+            else:
+                self.selectionChanged.emit(index)
+
+    def show_context_menu(self, pos):
+        item = self.tree.itemAt(pos)
+        if not item: return
+        
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        if data and data[0] == "arc":
+            menu = QMenu(self) # 원인: 부모 위젯 지정
+            delete_action = menu.addAction("🗑️ 원호 삭제")
+            action = menu.exec(self.tree.mapToGlobal(pos))
+            if action == delete_action:
+                self.arcDeleted.emit(data[1], data[2])
 
 
 class TransformPanel(QWidget):
@@ -336,6 +402,12 @@ class TransformPanel(QWidget):
         btn_reset.setToolTip("모든 변환을 초기값으로 되돌림")
         align_layout.addWidget(btn_reset)
         
+        btn_bake = QPushButton("🔥 회전 적용 (축 재설정)")
+        btn_bake.clicked.connect(self.bake_rotation)
+        btn_bake.setToolTip("현재 회전을 메쉬에 굽고 회전값을 0으로 리셋")
+        btn_bake.setStyleSheet("QPushButton { background-color: #faf0e6; }")
+        align_layout.addWidget(btn_bake)
+        
         layout.addWidget(align_group)
         layout.addStretch()
     
@@ -370,13 +442,43 @@ class TransformPanel(QWidget):
         self.trans_z.setValue(0.0)
     
     def align_to_floor(self):
-        """메쉬의 바닥면을 월드 바닥(y=0)에 맞춤"""
-        if self.viewport.selected_obj is None:
+        """
+        메쉬를 바닥(Y=0)에 '놓기'
+        현재 회전 상태를 유지한 채로, 메쉬의 가장 낮은 점이 Y=0에 닿도록 이동합니다.
+        마치 실제 유물을 바닥에 놓는 것처럼 동작합니다.
+        """
+        obj = self.viewport.selected_obj
+        if obj is None:
             return
-        # 메쉬는 이미 load_mesh에서 로컬 원점에 맞춰져 있으므로, 
-        # bounds[0][1]은 원점으로부터의 로컬 바닥 위치입니다.
-        # 실제 월드상 바닥 위치는 로컬 바닥 * 스케일 만큼 떨어져 있습니다.
-        min_y = self.viewport.selected_obj.mesh.bounds[0][1] * self.viewport.selected_obj.scale
+        
+        # 로컬 정점들에 현재 회전을 적용하여 월드 좌표 계산
+        vertices = obj.mesh.vertices.copy()
+        
+        # 회전 적용 (X -> Y -> Z 순서, OpenGL과 동일)
+        rx, ry, rz = np.radians(obj.rotation)
+        
+        # X축 회전
+        cos_x, sin_x = np.cos(rx), np.sin(rx)
+        rot_x = np.array([[1, 0, 0], [0, cos_x, -sin_x], [0, sin_x, cos_x]])
+        
+        # Y축 회전
+        cos_y, sin_y = np.cos(ry), np.sin(ry)
+        rot_y = np.array([[cos_y, 0, sin_y], [0, 1, 0], [-sin_y, 0, cos_y]])
+        
+        # Z축 회전
+        cos_z, sin_z = np.cos(rz), np.sin(rz)
+        rot_z = np.array([[cos_z, -sin_z, 0], [sin_z, cos_z, 0], [0, 0, 1]])
+        
+        # 전체 회전 행렬 (OpenGL 순서: X -> Y -> Z)
+        rotation_matrix = rot_z @ rot_y @ rot_x
+        
+        # 모든 정점에 회전 및 스케일 적용
+        rotated_vertices = (rotation_matrix @ vertices.T).T * obj.scale
+        
+        # 회전된 정점들 중 가장 낮은 Y값 찾기
+        min_y = rotated_vertices[:, 1].min()
+        
+        # Y를 -min_y로 설정하면 가장 낮은 점이 Y=0에 닿음
         self.trans_y.setValue(-min_y)
     
     def reset_transform(self):
@@ -388,6 +490,51 @@ class TransformPanel(QWidget):
         self.rot_z.setValue(0)
         self.scale_slider.setValue(100)
         self.scale_spin.setValue(1.0)
+    
+    def bake_rotation(self):
+        """
+        현재 회전을 메쉬 정점에 적용하고 회전값을 0으로 리셋
+        이렇게 하면 현재 자세가 새로운 '기본' 자세가 되고,
+        XYZ 축이 현재 메쉬 방향에 맞춰 재설정됩니다.
+        """
+        obj = self.viewport.selected_obj
+        if obj is None:
+            return
+        
+        # 회전 행렬 계산
+        rx, ry, rz = np.radians(obj.rotation)
+        
+        cos_x, sin_x = np.cos(rx), np.sin(rx)
+        rot_x = np.array([[1, 0, 0], [0, cos_x, -sin_x], [0, sin_x, cos_x]])
+        
+        cos_y, sin_y = np.cos(ry), np.sin(ry)
+        rot_y = np.array([[cos_y, 0, sin_y], [0, 1, 0], [-sin_y, 0, cos_y]])
+        
+        cos_z, sin_z = np.cos(rz), np.sin(rz)
+        rot_z = np.array([[cos_z, -sin_z, 0], [sin_z, cos_z, 0], [0, 0, 1]])
+        
+        rotation_matrix = rot_z @ rot_y @ rot_x
+        
+        # 모든 정점에 회전 적용
+        obj.mesh.vertices = (rotation_matrix @ obj.mesh.vertices.T).T
+        
+        # 법선 벡터도 회전 적용
+        obj.mesh.face_normals = (rotation_matrix @ obj.mesh.face_normals.T).T
+        if hasattr(obj.mesh, 'vertex_normals') and obj.mesh.vertex_normals is not None:
+            obj.mesh.vertex_normals = (rotation_matrix @ obj.mesh.vertex_normals.T).T
+        
+        # 회전값 리셋
+        obj.rotation = np.array([0.0, 0.0, 0.0])
+        
+        # VBO 업데이트
+        self.viewport.update_vbo(obj)
+        
+        # UI 업데이트
+        self.rot_x.setValue(0)
+        self.rot_y.setValue(0)
+        self.rot_z.setValue(0)
+        
+        self.viewport.update()
     
     def on_scale_changed(self, value):
         """슬라이더에서 스케일 변경"""
@@ -462,6 +609,17 @@ class FlattenPanel(QWidget):
         measure_layout.addWidget(self.btn_clear_points)
         
         curve_layout.addRow(measure_layout)
+        
+        # 원호 관리
+        arc_layout = QHBoxLayout()
+        arc_label = QLabel("부착된 원호:")
+        arc_layout.addWidget(arc_label)
+        arc_layout.addStretch()
+        
+        self.btn_clear_arcs = QPushButton("🗑️ 모든 원호 삭제")
+        self.btn_clear_arcs.setToolTip("선택된 객체의 모든 원호 삭제")
+        arc_layout.addWidget(self.btn_clear_arcs)
+        curve_layout.addRow(arc_layout)
         
         layout.addWidget(curve_group)
         
@@ -882,132 +1040,93 @@ class MainWindow(QMainWindow):
         self.init_statusbar()
     
     def init_ui(self):
-        # 중앙 위젯
-        central = QWidget()
-        self.setCentralWidget(central)
-        
-        main_layout = QHBoxLayout(central)
-        main_layout.setContentsMargins(5, 5, 5, 5)
-        main_layout.setSpacing(5)
-        
-        # 왼쪽: 3D 뷰포트
-        viewport_container = QWidget()
-        viewport_layout = QVBoxLayout(viewport_container)
-        viewport_layout.setContentsMargins(0, 0, 0, 0)
-        
+        # 중앙 위젯 (3D 뷰포트)
         self.viewport = Viewport3D()
+        self.setCentralWidget(self.viewport)
+        
         # 씬 매니저 연결
         self.viewport.selectionChanged.connect(self.on_selection_changed)
-        
-        # (기존 연결)
         self.viewport.meshLoaded.connect(self.on_mesh_loaded)
         self.viewport.meshTransformChanged.connect(self.sync_transform_panel)
-        viewport_layout.addWidget(self.viewport, 1)
         
-        # 도움말 위젯
+        # 도움말 위젯 (오버레이처럼 작동하도록 뷰포트 위에 띄우거나 하단에 배치 가능)
+        # 일단은 뷰포트 하단에 고정
         self.help_widget = HelpWidget()
-        viewport_layout.addWidget(self.help_widget)
         
-        main_layout.addWidget(viewport_container, 3)
+        # 도킹 위젯 설정
+        self.setDockOptions(QMainWindow.DockOption.AnimatedDocks | QMainWindow.DockOption.AllowTabbedDocks)
         
-        # 오른쪽: 도구 패널들 (탭)
-        right_panel = QTabWidget()
-        right_panel.setMinimumWidth(320)
-        right_panel.setMaximumWidth(400)
-        
-        # 탭 0: 씬
-        tab0 = QWidget()
-        tab0_layout = QVBoxLayout(tab0)
-        tab0_layout.setContentsMargins(0, 0, 0, 0)
-
-        scroll0 = QScrollArea()
-        scroll0.setWidgetResizable(True)
-        scroll0_content = QWidget()
-        scroll0_layout = QVBoxLayout(scroll0_content)
-
+        # 1. 씬 패널 (도킹)
+        self.scene_dock = QDockWidget("🌲 씬 (레이어)", self)
         self.scene_panel = ScenePanel()
         self.scene_panel.selectionChanged.connect(self.viewport.select_object)
         self.scene_panel.visibilityChanged.connect(self.on_visibility_changed)
-        scroll0_layout.addWidget(self.scene_panel)
-        scroll0_layout.addStretch() # Ensure content aligns top
-
-        scroll0.setWidget(scroll0_content)
-        tab0_layout.addWidget(scroll0)
-        right_panel.addTab(tab0, "🌲 씬")
+        self.scene_panel.arcDeleted.connect(self.on_arc_deleted)
+        self.scene_dock.setWidget(self.scene_panel)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.scene_dock)
         
-        # 탭 1: 속성 + 변환
-        tab1 = QWidget()
-        tab1_layout = QVBoxLayout(tab1)
-        tab1_layout.setContentsMargins(0, 0, 0, 0)
-        
-        scroll1 = QScrollArea()
-        scroll1.setWidgetResizable(True)
-        scroll1_content = QWidget()
-        scroll1_layout = QVBoxLayout(scroll1_content)
+        # 2. 정치 패널 (도킹)
+        self.transform_dock = QDockWidget("📐 정치 (변환)", self)
+        transform_scroll = QScrollArea()
+        transform_scroll.setWidgetResizable(True)
+        transform_content = QWidget()
+        transform_layout = QVBoxLayout(transform_content)
         
         self.props_panel = PropertiesPanel()
-        scroll1_layout.addWidget(self.props_panel)
+        transform_layout.addWidget(self.props_panel)
         
         self.transform_panel = TransformPanel(self.viewport, self.help_widget)
-        scroll1_layout.addWidget(self.transform_panel)
+        transform_layout.addWidget(self.transform_panel)
+        transform_layout.addStretch()
         
-        scroll1.setWidget(scroll1_content)
-        tab1_layout.addWidget(scroll1)
+        transform_scroll.setWidget(transform_content)
+        self.transform_dock.setWidget(transform_scroll)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.transform_dock)
         
-        right_panel.addTab(tab1, "📐 정치")
-        
-        # 탭 2: 선택
-        tab2 = QWidget()
-        tab2_layout = QVBoxLayout(tab2)
-        tab2_layout.setContentsMargins(0, 0, 0, 0)
-        
-        scroll2 = QScrollArea()
-        scroll2.setWidgetResizable(True)
-        
+        # 3. 선택 패널 (도킹)
+        self.selection_dock = QDockWidget("✋ 선택 및 영역", self)
         self.selection_panel = SelectionPanel(self.help_widget)
         self.selection_panel.selectionChanged.connect(self.on_selection_action)
-        scroll2.setWidget(self.selection_panel)
-        tab2_layout.addWidget(scroll2)
+        self.selection_dock.setWidget(self.selection_panel)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.selection_dock)
         
-        right_panel.addTab(tab2, "✋ 선택")
-        
-        # 탭 3: 펼침
-        tab3 = QWidget()
-        tab3_layout = QVBoxLayout(tab3)
-        tab3_layout.setContentsMargins(0, 0, 0, 0)
-        
-        scroll3 = QScrollArea()
-        scroll3.setWidgetResizable(True)
-        
+        # 4. 펼침 패널 (도킹)
+        self.flatten_dock = QDockWidget("🗺️ 펼침 (Flatten)", self)
         self.flatten_panel = FlattenPanel(self.help_widget)
         self.flatten_panel.flattenRequested.connect(self.on_flatten_requested)
-        
-        # 곡률 측정 버튼 연결
         self.flatten_panel.btn_measure.toggled.connect(self.toggle_curvature_mode)
         self.flatten_panel.btn_fit_arc.clicked.connect(self.fit_curvature_arc)
         self.flatten_panel.btn_clear_points.clicked.connect(self.clear_curvature_points)
+        self.flatten_panel.btn_clear_arcs.clicked.connect(self.clear_all_arcs)
         
-        scroll3.setWidget(self.flatten_panel)
-        tab3_layout.addWidget(scroll3)
+        self.flatten_dock.setWidget(self.flatten_panel)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.flatten_dock)
         
-        right_panel.addTab(tab3, "🗺️ 펼침")
-        
-        # 탭 4: 내보내기
-        tab4 = QWidget()
-        tab4_layout = QVBoxLayout(tab4)
-        tab4_layout.setContentsMargins(0, 0, 0, 0)
-        
-        scroll4 = QScrollArea()
-        scroll4.setWidgetResizable(True)
-        
+        # 5. 내보내기 패널 (도킹)
+        self.export_dock = QDockWidget("📤 내보내기", self)
         self.export_panel = ExportPanel()
         self.export_panel.exportRequested.connect(self.on_export_requested)
-        scroll4.setWidget(self.export_panel)
-        tab4_layout.addWidget(scroll4)
+        self.export_dock.setWidget(self.export_panel)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.export_dock)
         
-        right_panel.addTab(tab4, "📤 내보내기")
+        # 패널들을 탭으로 묶기
+        self.tabifyDockWidget(self.scene_dock, self.transform_dock)
+        self.tabifyDockWidget(self.transform_dock, self.selection_dock)
+        self.tabifyDockWidget(self.selection_dock, self.flatten_dock)
+        self.tabifyDockWidget(self.flatten_dock, self.export_dock)
         
-        main_layout.addWidget(right_panel, 1)
+        # 씬 패널을 기본으로 표시
+        self.scene_dock.raise_()
+    
+    def on_arc_deleted(self, obj_idx, arc_idx):
+        """특정 객체의 특정 원호 삭제"""
+        if 0 <= obj_idx < len(self.viewport.objects):
+            obj = self.viewport.objects[obj_idx]
+            if 0 <= arc_idx < len(obj.fitted_arcs):
+                del obj.fitted_arcs[arc_idx]
+                self.scene_panel.update_list(self.viewport.objects, self.viewport.selected_index)
+                self.viewport.update()
+                self.status_info.setText(f"🗑️ 원호 #{arc_idx+1} 삭제됨")
     
     def init_menu(self):
         menubar = self.menuBar()
@@ -1161,7 +1280,11 @@ class MainWindow(QMainWindow):
         )
         
         if filepath:
-            self.load_mesh(filepath)
+            # 단위 선택 다이얼로그
+            dialog = UnitSelectionDialog(self)
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                scale_factor = dialog.get_scale_factor()
+                self.load_mesh(filepath, scale_factor)
     
     def dragEnterEvent(self, event):
         """드래그 진입 이벤트"""
@@ -1180,19 +1303,30 @@ class MainWindow(QMainWindow):
         urls = event.mimeData().urls()
         if urls:
             filepath = urls[0].toLocalFile()
-            self.load_mesh(filepath)
+            # 드롭 시에도 단위 선택 다이얼로그 표시
+            dialog = UnitSelectionDialog(self)
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                scale_factor = dialog.get_scale_factor()
+                self.load_mesh(filepath, scale_factor)
     
-    def load_mesh(self, filepath: str):
+    def load_mesh(self, filepath: str, scale_factor: float = 1.0):
         try:
             self.status_info.setText(f"⏳ 로딩 중: {Path(filepath).name}")
             self.status_mesh.setText("")
             QApplication.processEvents()
             
-            mesh = self.mesh_loader.load(filepath, unit='cm')
+            # 메쉬 로드
+            mesh = trimesh.load(filepath)
+            
+            # 단위 변환 적용
+            if scale_factor != 1.0:
+                mesh.apply_scale(scale_factor)
+                
             self.current_mesh = mesh
             self.current_filepath = filepath
             
-            self.viewport.add_mesh_object(mesh, name=Path(filepath).stem)
+            # 뷰포트에 추가
+            self.viewport.add_mesh_object(mesh, name=Path(filepath).name)
             
             # 상태바 업데이트
             self.status_info.setText(f"✅ 로드됨: {Path(filepath).name}")
@@ -1301,33 +1435,58 @@ class MainWindow(QMainWindow):
             self.status_info.setText("📏 곡률 측정 모드 종료")
     
     def fit_curvature_arc(self):
-        """찍은 점들로 원호 피팅"""
+        """찍은 点들로 원호 피팅 (월드 좌표계 고정)"""
         if len(self.viewport.picked_points) < 3:
             QMessageBox.warning(self, "경고", "최소 3개의 점이 필요합니다.\nShift+클릭으로 메쉬 위에 점을 찍으세요.")
             return
         
+        obj = self.viewport.selected_obj
+        if obj is None:
+            QMessageBox.warning(self, "경고", "먼저 메쉬를 선택하세요.")
+            return
+        
         from src.core.curvature_fitter import CurvatureFitter
         
+        # 월드 좌표 점들을 그대로 사용 (메쉬와 분리하기 위해)
+        world_points = self.viewport.picked_points
+        
         fitter = CurvatureFitter()
-        arc = fitter.fit_arc(self.viewport.picked_points)
+        arc = fitter.fit_arc(world_points)
         
         if arc is None:
             QMessageBox.warning(self, "경고", "원호 피팅에 실패했습니다.\n점들이 일직선 위에 있거나 너무 가까울 수 있습니다.")
             return
         
-        self.viewport.fitted_arc = arc
+        # 객체에 원호 부착 (데이터 구조는 유지하되 렌더링 시 변환 적용 안 함)
+        obj.fitted_arcs.append(arc)
+        
+        # 임시 데이터 초기화
+        self.viewport.fitted_arc = None
+        self.viewport.picked_points = []
         self.viewport.update()
         
-        # 펼침 패널의 곡률 반경에 자동 입력 (mm → cm 변환 없이 그대로)
+        # 펼침 패널의 곡률 반경에 자동 입력
         radius_mm = arc.radius * 10  # cm → mm
         self.flatten_panel.spin_radius.setValue(radius_mm)
         
-        self.status_info.setText(f"✅ 원호 피팅 완료: 반지름 = {arc.radius:.2f} cm ({radius_mm:.1f} mm)")
+        self.scene_panel.update_list(self.viewport.objects, self.viewport.selected_index)
+        arc_count = len(obj.fitted_arcs)
+        self.status_info.setText(f"✅ 원호 #{arc_count} 생성됨 (월드 고정): 반지름 = {arc.radius:.2f} cm ({radius_mm:.1f} mm)")
     
     def clear_curvature_points(self):
         """곡률 측정용 점 초기화"""
         self.viewport.clear_curvature_picks()
         self.status_info.setText("🗑️ 측정 점 초기화됨")
+    
+    def clear_all_arcs(self):
+        """선택된 객체의 모든 원호 삭제"""
+        obj = self.viewport.selected_obj
+        if obj and obj.fitted_arcs:
+            count = len(obj.fitted_arcs)
+            obj.fitted_arcs = []
+            self.scene_panel.update_list(self.viewport.objects, self.viewport.selected_index)
+            self.viewport.update()
+            self.status_info.setText(f"🗑️ {count}개 원호 삭제됨")
     
     def show_about(self):
         icon_path = get_icon_path()
