@@ -18,6 +18,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QTimer, QSize, pyqtSignal, QThread
 from PyQt6.QtGui import QAction, QIcon, QKeySequence, QFont, QPixmap
+import numpy as np
 
 # Add src to path
 if getattr(sys, 'frozen', False):
@@ -93,6 +94,17 @@ class HelpWidget(QTextEdit):
             </p>
         """)
     
+    def set_scene_help(self):
+        self.setHtml("""
+            <h3 style="margin:0; color:#2c5282;">🌲 씬 트리 (Scene)</h3>
+            <p style="font-size:11px;">
+            현재 작업 중인 객체 목록입니다.<br>
+            <b>클릭:</b> 객체 선택 및 기즈모 활성화<br>
+            <b>눈 아이콘:</b> 가시성 토글<br>
+            <b>더블클릭:</b> 객체 이름 변경
+            </p>
+        """)
+    
     def set_selection_help(self):
         self.setHtml("""
             <h3 style="margin:0; color:#2c5282;">✋ 표면 선택</h3>
@@ -162,8 +174,6 @@ class SplashScreen(QWidget):
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         card_layout.addWidget(subtitle)
         
-        card_layout.addStretch()
-        
         # 로딩 상태
         self.loading_label = QLabel("Initializing engine...")
         self.loading_label.setStyleSheet("color: #a0aec0; font-size: 11px;")
@@ -192,6 +202,50 @@ class SplashScreen(QWidget):
     def showMessage(self, message):
         self.loading_label.setText(message)
         QApplication.processEvents()
+
+
+class ScenePanel(QWidget):
+    """씬 내의 객체 목록을 보여주는 패널"""
+    selectionChanged = pyqtSignal(int)
+    visibilityChanged = pyqtSignal(int, bool)
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(5, 5, 5, 5)
+        
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(["객체 이름", "가시성", "폴리곤"])
+        self.tree.setColumnWidth(1, 40)
+        self.tree.setAlternatingRowColors(True)
+        self.tree.setStyleSheet("QTreeWidget { font-size: 11px; }")
+        
+        layout.addWidget(self.tree)
+        
+        self.tree.itemClicked.connect(self.on_item_clicked)
+    
+    def update_list(self, objects, selected_index):
+        self.tree.clear()
+        for i, obj in enumerate(objects):
+            item = QTreeWidgetItem([
+                obj.name,
+                "👁️" if obj.visible else "👓",
+                f"{len(obj.mesh.faces):,}"
+            ])
+            item.setData(0, Qt.ItemDataRole.UserRole, i)
+            self.tree.addTopLevelItem(item)
+            
+            if i == selected_index:
+                self.tree.setCurrentItem(item)
+                
+    def on_item_clicked(self, item, column):
+        index = item.data(0, Qt.ItemDataRole.UserRole)
+        if column == 1: # 가시성 토글
+            visible = item.text(1) == "👓"
+            item.setText(1, "👁️" if visible else "👓")
+            self.visibilityChanged.emit(index, visible)
+        else:
+            self.selectionChanged.emit(index)
 
 
 class TransformPanel(QWidget):
@@ -293,21 +347,23 @@ class TransformPanel(QWidget):
         return spin
     
     def on_transform_changed(self):
-        self.viewport.set_mesh_translation(
-            self.trans_x.value(),
-            self.trans_y.value(),
-            self.trans_z.value()
-        )
-        self.viewport.set_mesh_rotation(
-            self.rot_x.value(),
-            self.rot_y.value(),
-            self.rot_z.value()
-        )
-        self.transformChanged.emit()
+        if self.viewport.selected_obj:
+            self.viewport.selected_obj.translation = np.array([
+                self.trans_x.value(),
+                self.trans_y.value(),
+                self.trans_z.value()
+            ])
+            self.viewport.selected_obj.rotation = np.array([
+                self.rot_x.value(),
+                self.rot_y.value(),
+                self.rot_z.value()
+            ])
+            self.viewport.update()
+            self.transformChanged.emit()
     
     def center_mesh(self):
         """메쉬를 월드 원점(0,0,0)으로 이동"""
-        if self.viewport.mesh is None:
+        if self.viewport.selected_obj is None:
             return
         self.trans_x.setValue(0.0)
         self.trans_y.setValue(0.0)
@@ -315,12 +371,12 @@ class TransformPanel(QWidget):
     
     def align_to_floor(self):
         """메쉬의 바닥면을 월드 바닥(y=0)에 맞춤"""
-        if self.viewport.mesh is None:
+        if self.viewport.selected_obj is None:
             return
         # 메쉬는 이미 load_mesh에서 로컬 원점에 맞춰져 있으므로, 
         # bounds[0][1]은 원점으로부터의 로컬 바닥 위치입니다.
         # 실제 월드상 바닥 위치는 로컬 바닥 * 스케일 만큼 떨어져 있습니다.
-        min_y = self.viewport.mesh.bounds[0][1] * self.viewport.mesh_scale
+        min_y = self.viewport.selected_obj.mesh.bounds[0][1] * self.viewport.selected_obj.scale
         self.trans_y.setValue(-min_y)
     
     def reset_transform(self):
@@ -339,14 +395,18 @@ class TransformPanel(QWidget):
         self.scale_spin.blockSignals(True)
         self.scale_spin.setValue(scale)
         self.scale_spin.blockSignals(False)
-        self.viewport.set_mesh_scale(scale)
+        if self.viewport.selected_obj:
+            self.viewport.selected_obj.scale = scale
+            self.viewport.update()
     
     def on_scale_spin_changed(self, value):
         """스핀박스에서 스케일 변경"""
         self.scale_slider.blockSignals(True)
         self.scale_slider.setValue(int(value * 100))
         self.scale_slider.blockSignals(False)
-        self.viewport.set_mesh_scale(value)
+        if self.viewport.selected_obj:
+            self.viewport.selected_obj.scale = value
+            self.viewport.update()
     
     def enterEvent(self, event):
         self.help_widget.set_transform_help()
@@ -836,6 +896,10 @@ class MainWindow(QMainWindow):
         viewport_layout.setContentsMargins(0, 0, 0, 0)
         
         self.viewport = Viewport3D()
+        # 씬 매니저 연결
+        self.viewport.selectionChanged.connect(self.on_selection_changed)
+        
+        # (기존 연결)
         self.viewport.meshLoaded.connect(self.on_mesh_loaded)
         self.viewport.meshTransformChanged.connect(self.sync_transform_panel)
         viewport_layout.addWidget(self.viewport, 1)
@@ -850,6 +914,26 @@ class MainWindow(QMainWindow):
         right_panel = QTabWidget()
         right_panel.setMinimumWidth(320)
         right_panel.setMaximumWidth(400)
+        
+        # 탭 0: 씬
+        tab0 = QWidget()
+        tab0_layout = QVBoxLayout(tab0)
+        tab0_layout.setContentsMargins(0, 0, 0, 0)
+
+        scroll0 = QScrollArea()
+        scroll0.setWidgetResizable(True)
+        scroll0_content = QWidget()
+        scroll0_layout = QVBoxLayout(scroll0_content)
+
+        self.scene_panel = ScenePanel()
+        self.scene_panel.selectionChanged.connect(self.viewport.select_object)
+        self.scene_panel.visibilityChanged.connect(self.on_visibility_changed)
+        scroll0_layout.addWidget(self.scene_panel)
+        scroll0_layout.addStretch() # Ensure content aligns top
+
+        scroll0.setWidget(scroll0_content)
+        tab0_layout.addWidget(scroll0)
+        right_panel.addTab(tab0, "🌲 씬")
         
         # 탭 1: 속성 + 변환
         tab1 = QWidget()
@@ -1108,7 +1192,7 @@ class MainWindow(QMainWindow):
             self.current_mesh = mesh
             self.current_filepath = filepath
             
-            self.viewport.load_mesh(mesh)
+            self.viewport.add_mesh_object(mesh, name=Path(filepath).stem)
             
             # 상태바 업데이트
             self.status_info.setText(f"✅ 로드됨: {Path(filepath).name}")
@@ -1121,11 +1205,26 @@ class MainWindow(QMainWindow):
             self.status_mesh.setText("")
     
     def on_mesh_loaded(self, mesh):
+        self.scene_panel.update_list(self.viewport.objects, self.viewport.selected_index)
         self.props_panel.update_mesh_info(mesh, self.current_filepath)
-        self.transform_panel.center_mesh()
-    
+        self.sync_transform_panel()
+        
+    def on_selection_changed(self, index):
+        self.scene_panel.update_list(self.viewport.objects, index)
+        self.sync_transform_panel()
+        
+    def on_visibility_changed(self, index, visible):
+        if 0 <= index < len(self.viewport.objects):
+            self.viewport.objects[index].visible = visible
+            self.viewport.update()
+            
     def sync_transform_panel(self):
-        """뷰포트 직접 조작 후 TransformPanel 동기화"""
+        obj = self.viewport.selected_obj
+        if not obj: 
+            # Clear transform panel if no object is selected
+            self.transform_panel.reset_transform()
+            return
+        
         # 스핀박스 시그널 블록하고 값 설정
         self.transform_panel.trans_x.blockSignals(True)
         self.transform_panel.trans_y.blockSignals(True)
@@ -1133,13 +1232,17 @@ class MainWindow(QMainWindow):
         self.transform_panel.rot_x.blockSignals(True)
         self.transform_panel.rot_y.blockSignals(True)
         self.transform_panel.rot_z.blockSignals(True)
+        self.transform_panel.scale_spin.blockSignals(True)
+        self.transform_panel.scale_slider.blockSignals(True)
         
-        self.transform_panel.trans_x.setValue(self.viewport.mesh_translation[0])
-        self.transform_panel.trans_y.setValue(self.viewport.mesh_translation[1])
-        self.transform_panel.trans_z.setValue(self.viewport.mesh_translation[2])
-        self.transform_panel.rot_x.setValue(self.viewport.mesh_rotation[0])
-        self.transform_panel.rot_y.setValue(self.viewport.mesh_rotation[1])
-        self.transform_panel.rot_z.setValue(self.viewport.mesh_rotation[2])
+        self.transform_panel.trans_x.setValue(obj.translation[0])
+        self.transform_panel.trans_y.setValue(obj.translation[1])
+        self.transform_panel.trans_z.setValue(obj.translation[2])
+        self.transform_panel.rot_x.setValue(obj.rotation[0])
+        self.transform_panel.rot_y.setValue(obj.rotation[1])
+        self.transform_panel.rot_z.setValue(obj.rotation[2])
+        self.transform_panel.scale_spin.setValue(obj.scale)
+        self.transform_panel.scale_slider.setValue(int(obj.scale * 100))
         
         self.transform_panel.trans_x.blockSignals(False)
         self.transform_panel.trans_y.blockSignals(False)
@@ -1147,6 +1250,8 @@ class MainWindow(QMainWindow):
         self.transform_panel.rot_x.blockSignals(False)
         self.transform_panel.rot_y.blockSignals(False)
         self.transform_panel.rot_z.blockSignals(False)
+        self.transform_panel.scale_spin.blockSignals(False)
+        self.transform_panel.scale_slider.blockSignals(False)
     
     def on_selection_action(self, action: str, data):
         self.status_info.setText(f"선택 작업: {action}")
@@ -1173,7 +1278,12 @@ class MainWindow(QMainWindow):
         self.viewport.update()
     
     def fit_view(self):
-        if self.current_mesh is not None:
+        obj = self.viewport.selected_obj
+        if obj:
+            self.viewport.camera.fit_to_bounds(obj.mesh.bounds)
+            self.viewport.camera.center = obj.translation.copy()
+            self.viewport.update()
+        elif self.current_mesh is not None:
             self.viewport.camera.fit_to_bounds(self.current_mesh.bounds)
             self.viewport.update()
     
