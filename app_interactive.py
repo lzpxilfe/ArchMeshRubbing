@@ -207,23 +207,27 @@ class SplashScreen(QWidget):
 
 class UnitSelectionDialog(QDialog):
     """메쉬 로딩 시 단위를 선택하는 다이얼로그"""
+    last_index = 0  # 클래스 변수로 마지막 선택 기억
+    
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("단위 선택")
-        self.setFixedWidth(250)
+        self.setFixedWidth(280)
         
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("파일의 단위를 선택하세요:"))
+        label = QLabel("파일의 원본 단위를 선택하세요:\n(숫자 184.9가 18.49cm가 되려면 mm 선택)")
+        label.setStyleSheet("color: #4a5568; font-size: 11px;")
+        layout.addWidget(label)
         
         self.combo = QComboBox()
-        self.combo.addItems(["Millimeters (mm)", "Centimeters (cm)", "Meters (m)"])
-        # 기본값 설정 (보통 STL은 mm인 경우가 많음)
-        self.combo.setCurrentIndex(0) 
+        self.combo.addItems(["Millimeters (mm) -> 1/10 축소", "Centimeters (cm) -> 그대로", "Meters (m) -> 100배 확대"])
+        self.combo.setCurrentIndex(UnitSelectionDialog.last_index) 
         layout.addWidget(self.combo)
         
         btn_layout = QHBoxLayout()
         ok_btn = QPushButton("확인")
-        ok_btn.clicked.connect(self.accept)
+        ok_btn.setDefault(True)
+        ok_btn.clicked.connect(self.accept_and_save)
         cancel_btn = QPushButton("취소")
         cancel_btn.clicked.connect(self.reject)
         btn_layout.addWidget(ok_btn)
@@ -231,12 +235,15 @@ class UnitSelectionDialog(QDialog):
         
         layout.addLayout(btn_layout)
 
+    def accept_and_save(self):
+        UnitSelectionDialog.last_index = self.combo.currentIndex()
+        self.accept()
+
     def get_scale_factor(self):
-        """cm 단위로 변환하기 위한 배율 반환"""
         idx = self.combo.currentIndex()
-        if idx == 0: return 0.1  # mm -> cm
-        if idx == 1: return 1.0  # cm -> cm
-        if idx == 2: return 100.0 # m -> cm
+        if idx == 0: return 0.1
+        if idx == 1: return 1.0
+        if idx == 2: return 100.0
         return 1.0
 
 
@@ -1318,9 +1325,14 @@ class MainWindow(QMainWindow):
             # 메쉬 로드
             mesh = trimesh.load(filepath)
             
-            # 단위 변환 적용
+            # 단위 변환 적용 (예: mm 파일의 184.9 -> cm 기준 18.49로 변환)
             if scale_factor != 1.0:
                 mesh.apply_scale(scale_factor)
+            
+            # 메쉬의 물리적 중심(Centroid)을 (0,0,0)으로 이동
+            # 이렇게 해야 '중심 이동' 버튼을 눌렀을 때 화면 한가운데에 정확히 옵니다.
+            centroid = mesh.vertices.mean(axis=0)
+            mesh.vertices -= centroid
                 
             self.current_mesh = mesh
             self.current_filepath = filepath
@@ -1329,7 +1341,7 @@ class MainWindow(QMainWindow):
             self.viewport.add_mesh_object(mesh, name=Path(filepath).name)
             
             # 상태바 업데이트
-            self.status_info.setText(f"✅ 로드됨: {Path(filepath).name}")
+            self.status_info.setText(f"✅ 로드됨: {Path(filepath).name} (원점 정렬 완료)")
             self.status_mesh.setText(f"V: {len(mesh.vertices):,} | F: {len(mesh.faces):,}")
             self.status_grid.setText(f"격자: {self.viewport.grid_spacing}cm")
             
