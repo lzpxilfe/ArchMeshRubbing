@@ -28,6 +28,13 @@ def main():
     dist_dir = project_dir / "dist"
     exe_path = dist_dir / "ArchMeshRubbing.exe"
     
+    print("Cleaning old build artifacts...")
+    for folder in ["build", "dist"]:
+        path = project_dir / folder
+        if path.exists():
+            print(f"Removing {path}...")
+            shutil.rmtree(path)
+
     print("Building (PyInstaller)...")
     try:
         subprocess.run(["pyinstaller", "--noconfirm", str(spec_file)], check=True)

@@ -1,5 +1,5 @@
 """
-ArchMeshRubbing v2 - Complete Interactive Application
+ArchMeshRubbing v1.0.1 - Complete Interactive Application
 Copyright (C) 2026 balguljang2 (lzpxilfe)
 Licensed under the GNU General Public License v2.0 (GPL2)
 """
@@ -17,16 +17,17 @@ from PyQt6.QtWidgets import (
     QCheckBox, QScrollArea, QSizePolicy, QButtonGroup, QDialog
 )
 from PyQt6.QtCore import Qt, QTimer, QSize, pyqtSignal, QThread
-from PyQt6.QtGui import QAction, QIcon, QKeySequence, QFont, QPixmap
+from PyQt6.QtGui import QAction, QIcon, QKeySequence, QFont, QPixmap, QShortcut
 import numpy as np
 import trimesh
 
 # Add src to path
+# Add basedir to path so 'src' package can be found
 if getattr(sys, 'frozen', False):
     basedir = sys._MEIPASS
 else:
     basedir = str(Path(__file__).parent)
-sys.path.insert(0, str(Path(basedir) / 'src'))
+sys.path.insert(0, basedir)
 
 from src.gui.viewport_3d import Viewport3D
 from src.core.mesh_loader import MeshLoader
@@ -34,7 +35,7 @@ from src.core.mesh_loader import MeshLoader
 
 def get_icon_path():
     """아이콘 경로 반환"""
-    icon_path = Path(__file__).parent / "resources" / "icons" / "app_icon.png"
+    icon_path = Path(basedir) / "resources" / "icons" / "app_icon.png"
     if icon_path.exists():
         return str(icon_path)
     return None
@@ -153,7 +154,7 @@ class SplashScreen(QWidget):
         card_layout.addWidget(self.icon_label)
         
         # 타이틀
-        title = QLabel("ArchMeshRubbing v2")
+        title = QLabel("ArchMeshRubbing v1")
         title.setStyleSheet("""
             font-size: 24px;
             font-weight: bold;
@@ -164,7 +165,7 @@ class SplashScreen(QWidget):
         card_layout.addWidget(title)
         
         # 버전 정보 추가 (사용자 확인용)
-        version = QLabel("Version: 2026.01.19.v3")
+        version = QLabel("Version: 1.0.1")
         version.setStyleSheet("color: #a0aec0; font-size: 10px; margin-bottom: 5px;")
         version.setAlignment(Qt.AlignmentFlag.AlignCenter)
         card_layout.addWidget(version)
@@ -321,6 +322,71 @@ class ScenePanel(QWidget):
                 self.arcDeleted.emit(data[1], data[2])
 
 
+class TransformToolbar(QToolBar):
+    """상단 고정 정치(변환) 툴바"""
+    def __init__(self, viewport: Viewport3D, parent=None):
+        super().__init__("정치 도구", parent)
+        self.viewport = viewport
+        self.setIconSize(QSize(24, 24))
+        self.init_ui()
+
+    def init_ui(self):
+        # 이동 (cm)
+        self.addWidget(QLabel(" 📍 이동: "))
+        self.trans_x = self._create_spin(-10000, 10000, "X")
+        self.trans_y = self._create_spin(-10000, 10000, "Y")
+        self.trans_z = self._create_spin(-10000, 10000, "Z")
+        self.addWidget(self.trans_x)
+        self.addWidget(self.trans_y)
+        self.addWidget(self.trans_z)
+        
+        self.addSeparator()
+        
+        # 회전 (deg)
+        self.addWidget(QLabel(" 🔄 회전: "))
+        self.rot_x = self._create_spin(-360, 360, "Rx")
+        self.rot_y = self._create_spin(-360, 360, "Ry")
+        self.rot_z = self._create_spin(-360, 360, "Rz")
+        self.addWidget(self.rot_x)
+        self.addWidget(self.rot_y)
+        self.addWidget(self.rot_z)
+        
+        self.addSeparator()
+        
+        # 배율
+        self.addWidget(QLabel(" 🔍 배율: "))
+        self.scale_spin = QDoubleSpinBox()
+        self.scale_spin.setRange(0.01, 100.0)
+        self.scale_spin.setValue(1.0)
+        self.scale_spin.setSingleStep(0.1)
+        self.scale_spin.setFixedWidth(70)
+        self.addWidget(self.scale_spin)
+        
+        self.addSeparator()
+        
+        # 버튼들
+        self.btn_bake = QPushButton("📌 정치 확정")
+        self.btn_bake.setToolTip("현재 변환을 메쉬에 영구 적용하고 위치를 고정합니다")
+        self.btn_bake.setStyleSheet("QPushButton { font-weight: bold; padding: 2px 10px; }")
+        self.addWidget(self.btn_bake)
+        
+        self.btn_reset = QPushButton("🔄 초기화")
+        self.addWidget(self.btn_reset)
+        
+        self.btn_flat = QPushButton("🌓 Flat Shading")
+        self.btn_flat.setCheckable(True)
+        self.btn_flat.setToolTip("명암 없이 메쉬를 밝게 봅니다 (회전 시 어두워짐 방지)")
+        self.addWidget(self.btn_flat)
+
+    def _create_spin(self, min_v, max_v, prefix=""):
+        spin = QDoubleSpinBox()
+        spin.setRange(min_v, max_v)
+        spin.setDecimals(2)
+        spin.setPrefix(f"{prefix}: ")
+        spin.setFixedWidth(90)
+        return spin
+
+
 class TransformPanel(QWidget):
     """메쉬 변환 패널 (이동/회전)"""
     
@@ -337,97 +403,29 @@ class TransformPanel(QWidget):
         layout.setContentsMargins(5, 5, 5, 5)
         layout.setSpacing(10)
         
-        # 이동 그룹
-        trans_group = QGroupBox("📍 이동 (cm)")
-        trans_group.setStyleSheet("QGroupBox { font-weight: bold; }")
-        trans_layout = QFormLayout(trans_group)
-        
-        self.trans_x = self._create_spinbox(-1000, 1000, 2)
-        self.trans_y = self._create_spinbox(-1000, 1000, 2)
-        self.trans_z = self._create_spinbox(-1000, 1000, 2)
-        
-        trans_layout.addRow("X:", self.trans_x)
-        trans_layout.addRow("Y:", self.trans_y)
-        trans_layout.addRow("Z:", self.trans_z)
-        layout.addWidget(trans_group)
-        
-        # 회전 그룹
-        rot_group = QGroupBox("🔄 회전 (°)")
-        rot_group.setStyleSheet("QGroupBox { font-weight: bold; }")
-        rot_layout = QFormLayout(rot_group)
-        
-        self.rot_x = self._create_spinbox(-180, 180, 1)
-        self.rot_y = self._create_spinbox(-180, 180, 1)
-        self.rot_z = self._create_spinbox(-180, 180, 1)
-        
-        rot_layout.addRow("X:", self.rot_x)
-        rot_layout.addRow("Y:", self.rot_y)
-        rot_layout.addRow("Z:", self.rot_z)
-        layout.addWidget(rot_group)
-        
-        # 스케일 그룹
-        scale_group = QGroupBox("📏 스케일")
-        scale_group.setStyleSheet("QGroupBox { font-weight: bold; }")
-        scale_layout = QFormLayout(scale_group)
-        
-        self.scale_slider = QSlider(Qt.Orientation.Horizontal)
-        self.scale_slider.setRange(10, 1000)  # 0.1x ~ 10x (10배율로 저장)
-        self.scale_slider.setValue(100)  # 1.0x
-        self.scale_slider.valueChanged.connect(self.on_scale_changed)
-        
-        self.scale_spin = QDoubleSpinBox()
-        self.scale_spin.setRange(0.1, 10.0)
-        self.scale_spin.setValue(1.0)
-        self.scale_spin.setSingleStep(0.1)
-        self.scale_spin.setDecimals(2)
-        self.scale_spin.valueChanged.connect(self.on_scale_spin_changed)
-        
-        scale_inner = QHBoxLayout()
-        scale_inner.addWidget(self.scale_slider, 3)
-        scale_inner.addWidget(self.scale_spin, 1)
-        scale_layout.addRow("배율:", scale_inner)
-        
-        layout.addWidget(scale_group)
-        
-        # 빠른 정렬 버튼
-        align_group = QGroupBox("⚡ 빠른 정렬")
+        # 바닥면 정렬 도구 (간소화)
+        align_group = QGroupBox("⚡ 바닥면 정렬")
         align_group.setStyleSheet("QGroupBox { font-weight: bold; }")
         align_layout = QVBoxLayout(align_group)
         
-        btn_center = QPushButton("🎯 중심으로 이동")
-        btn_center.clicked.connect(self.center_mesh)
-        btn_center.setToolTip("메쉬 중심을 원점(0,0,0)으로 이동")
-        align_layout.addWidget(btn_center)
+        self.btn_draw_floor = QPushButton("✏️ 바닥 면 그리기")
+        self.btn_draw_floor.clicked.connect(self.start_floor_drawing)
+        self.btn_draw_floor.setToolTip("메쉬 위에 바닥이 될 3개 점을 찍어 바닥면을 그리세요\n실시간으로 면이 표시됩니다")
+        self.btn_draw_floor.setStyleSheet("QPushButton { padding: 8px; font-weight: bold; }")
+        align_layout.addWidget(self.btn_draw_floor)
         
-        btn_floor = QPushButton("⬇️ 바닥에 자동 정렬")
-        btn_floor.clicked.connect(self.align_to_floor)
-        btn_floor.setToolTip("메쉬의 가장 낮은 점을 찾아 Y=0 평면에 맞춤")
-        align_layout.addWidget(btn_floor)
-        
-        self.btn_pick_floor = QPushButton("🎯 바닥 지점 직접 클릭")
-        self.btn_pick_floor.clicked.connect(self.start_floor_picking)
-        self.btn_pick_floor.setToolTip("메쉬 위에서 바닥에 닿을 지점을 직접 클릭하세요")
-        align_layout.addWidget(self.btn_pick_floor)
-        
-        btn_reset = QPushButton("🔄 변환 초기화")
-        btn_reset.clicked.connect(self.reset_transform)
-        btn_reset.setToolTip("모든 변환을 초기값으로 되돌림")
-        align_layout.addWidget(btn_reset)
-        
-        btn_bake = QPushButton("🔥 회전 적용 (축 재설정)")
-        btn_bake.clicked.connect(self.bake_rotation)
-        btn_bake.setToolTip("현재 회전을 메쉬에 굽고 회전값을 0으로 리셋")
-        btn_bake.setStyleSheet("QPushButton { background-color: #faf0e6; }")
-        align_layout.addWidget(btn_bake)
+        # 상태 표시
+        self.floor_status = QLabel("3점을 클릭하면 바닥면이 정렬됩니다")
+        self.floor_status.setStyleSheet("color: #718096; font-size: 10px;")
+        align_layout.addWidget(self.floor_status)
         
         layout.addWidget(align_group)
         layout.addStretch()
-    
+
     def _create_spinbox(self, min_val, max_val, decimals):
         spin = QDoubleSpinBox()
         spin.setRange(min_val, max_val)
         spin.setDecimals(decimals)
-        spin.valueChanged.connect(self.on_transform_changed)
         return spin
     
     def on_transform_changed(self):
@@ -445,144 +443,18 @@ class TransformPanel(QWidget):
             self.viewport.update()
             self.transformChanged.emit()
     
-    def start_floor_picking(self):
-        """바닥 지점 피킹 모드 시작"""
-        if self.viewport.selected_obj is None:
-            return
-        self.viewport.picking_mode = 'floor'
-        self.viewport.status_info = "📍 바닥에 닿을 메쉬의 지점을 클릭하세요..."
-        self.viewport.update()
-        
-    def center_mesh(self):
-        """메쉬를 월드 원점(0,0,0)으로 이동"""
-        if self.viewport.selected_obj is None:
-            return
-        self.trans_x.setValue(0.0)
-        self.trans_y.setValue(0.0)
-        self.trans_z.setValue(0.0)
-        self.viewport.camera.center = np.array([0.0, 0.0, 0.0])
-        self.viewport.update()
-    
-    def align_to_floor(self):
-        """
-        메쉬를 바닥(Y=0)에 '놓기'
-        현재 회전 상태를 유지한 채로, 메쉬의 가장 낮은 점이 Y=0에 닿도록 이동합니다.
-        마치 실제 유물을 바닥에 놓는 것처럼 동작합니다.
-        """
-        obj = self.viewport.selected_obj
-        if obj is None:
-            return
-        
-        # 로컬 정점들에 현재 회전을 적용하여 월드 좌표 계산
-        vertices = obj.mesh.vertices.copy()
-        
-        # 회전 적용 (X -> Y -> Z 순서, OpenGL과 동일)
-        rx, ry, rz = np.radians(obj.rotation)
-        
-        # X축 회전
-        cos_x, sin_x = np.cos(rx), np.sin(rx)
-        rot_x = np.array([[1, 0, 0], [0, cos_x, -sin_x], [0, sin_x, cos_x]])
-        
-        # Y축 회전
-        cos_y, sin_y = np.cos(ry), np.sin(ry)
-        rot_y = np.array([[cos_y, 0, sin_y], [0, 1, 0], [-sin_y, 0, cos_y]])
-        
-        # Z축 회전
-        cos_z, sin_z = np.cos(rz), np.sin(rz)
-        rot_z = np.array([[cos_z, -sin_z, 0], [sin_z, cos_z, 0], [0, 0, 1]])
-        
-        # 전체 회전 행렬 (OpenGL 순서: X -> Y -> Z)
-        rotation_matrix = rot_z @ rot_y @ rot_x
-        
-        # 모든 정점에 회전 및 스케일 적용
-        rotated_vertices = (rotation_matrix @ vertices.T).T * obj.scale
-        
-        # 회전된 정점들 중 가장 낮은 Y값 찾기
-        min_y = rotated_vertices[:, 1].min()
-        
-        # Y를 -min_y로 설정하면 가장 낮은 점이 Y=0에 닿음
-        #setValue가 이벤트를 발생시켜 viewport.update()를 호출함
-        self.trans_y.setValue(-min_y)
-        # 즉시 UI 동기화
-        self.viewport.update()
-    
-    def reset_transform(self):
-        self.trans_x.setValue(0)
-        self.trans_y.setValue(0)
-        self.trans_z.setValue(0)
-        self.rot_x.setValue(0)
-        self.rot_y.setValue(0)
-        self.rot_z.setValue(0)
-        self.scale_slider.setValue(100)
-        self.scale_spin.setValue(1.0)
-    
-    def bake_rotation(self):
-        """
-        현재 회전을 메쉬 정점에 적용하고 회전값을 0으로 리셋
-        이렇게 하면 현재 자세가 새로운 '기본' 자세가 되고,
-        XYZ 축이 현재 메쉬 방향에 맞춰 재설정됩니다.
-        """
-        obj = self.viewport.selected_obj
-        if obj is None:
-            return
-        
-        # 회전 행렬 계산
-        rx, ry, rz = np.radians(obj.rotation)
-        
-        cos_x, sin_x = np.cos(rx), np.sin(rx)
-        rot_x = np.array([[1, 0, 0], [0, cos_x, -sin_x], [0, sin_x, cos_x]])
-        
-        cos_y, sin_y = np.cos(ry), np.sin(ry)
-        rot_y = np.array([[cos_y, 0, sin_y], [0, 1, 0], [-sin_y, 0, cos_y]])
-        
-        cos_z, sin_z = np.cos(rz), np.sin(rz)
-        rot_z = np.array([[cos_z, -sin_z, 0], [sin_z, cos_z, 0], [0, 0, 1]])
-        
-        rotation_matrix = rot_z @ rot_y @ rot_x
-        
-        # 모든 정점에 회전 적용
-        obj.mesh.vertices = (rotation_matrix @ obj.mesh.vertices.T).T
-        
-        # 법선 벡터도 회전 적용
-        obj.mesh.face_normals = (rotation_matrix @ obj.mesh.face_normals.T).T
-        if hasattr(obj.mesh, 'vertex_normals') and obj.mesh.vertex_normals is not None:
-            obj.mesh.vertex_normals = (rotation_matrix @ obj.mesh.vertex_normals.T).T
-        
-        # 회전값 리셋
-        obj.rotation = np.array([0.0, 0.0, 0.0])
-        
-        # VBO 업데이트
-        self.viewport.update_vbo(obj)
-        
-        # UI 업데이트
-        self.rot_x.setValue(0)
-        self.rot_y.setValue(0)
-        self.rot_z.setValue(0)
-        
-        self.viewport.update()
-    
-    def on_scale_changed(self, value):
-        """슬라이더에서 스케일 변경"""
-        scale = value / 100.0
-        self.scale_spin.blockSignals(True)
-        self.scale_spin.setValue(scale)
-        self.scale_spin.blockSignals(False)
-        if self.viewport.selected_obj:
-            self.viewport.selected_obj.scale = scale
-            self.viewport.update()
-    
-    def on_scale_spin_changed(self, value):
-        """스핀박스에서 스케일 변경"""
-        self.scale_slider.blockSignals(True)
-        self.scale_slider.setValue(int(value * 100))
-        self.scale_slider.blockSignals(False)
-        if self.viewport.selected_obj:
-            self.viewport.selected_obj.scale = value
-            self.viewport.update()
-    
     def enterEvent(self, event):
         self.help_widget.set_transform_help()
         super().enterEvent(event)
+    
+    def start_floor_drawing(self):
+        """바닥 면 그리기 모드 시작 - MainWindow로 위임"""
+        main_window = self.window()
+        if hasattr(main_window, 'start_floor_picking'):
+            main_window.start_floor_picking()
+            # 상태 업데이트
+            if hasattr(self, 'floor_status'):
+                self.floor_status.setText("📍 점 찍는 중... (0/3)")
 
 
 class FlattenPanel(QWidget):
@@ -1074,6 +946,30 @@ class MainWindow(QMainWindow):
         self.viewport.meshLoaded.connect(self.on_mesh_loaded)
         self.viewport.meshTransformChanged.connect(self.sync_transform_panel)
         self.viewport.floorPointPicked.connect(self.on_floor_point_picked)
+        self.viewport.floorFacePicked.connect(self.on_floor_face_picked)
+        self.viewport.alignToBrushSelected.connect(self.on_align_to_brush_selected)
+        self.viewport.floorAlignmentConfirmed.connect(self.on_floor_alignment_confirmed)
+        
+        # 단축키 설정 (Undo: Ctrl+Z)
+        self.undo_shortcut = QShortcut(QKeySequence("Ctrl+Z"), self)
+        self.undo_shortcut.activated.connect(self.viewport.undo)
+        
+        # 상단 정치 툴바 추가
+        self.trans_toolbar = TransformToolbar(self.viewport, self)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.trans_toolbar)
+        
+        # 툴바 신호 연결
+        self.trans_toolbar.trans_x.valueChanged.connect(self.on_toolbar_transform_changed)
+        self.trans_toolbar.trans_y.valueChanged.connect(self.on_toolbar_transform_changed)
+        self.trans_toolbar.trans_z.valueChanged.connect(self.on_toolbar_transform_changed)
+        self.trans_toolbar.rot_x.valueChanged.connect(self.on_toolbar_transform_changed)
+        self.trans_toolbar.rot_y.valueChanged.connect(self.on_toolbar_transform_changed)
+        self.trans_toolbar.rot_z.valueChanged.connect(self.on_toolbar_transform_changed)
+        self.trans_toolbar.scale_spin.valueChanged.connect(self.on_toolbar_transform_changed)
+        
+        self.trans_toolbar.btn_bake.clicked.connect(self.on_bake_all_clicked)
+        self.trans_toolbar.btn_reset.clicked.connect(self.reset_transform)
+        self.trans_toolbar.btn_flat.toggled.connect(self.toggle_flat_shading)
         
         # 도움말 위젯 (오버레이처럼 작동하도록 뷰포트 위에 띄우거나 하단에 배치 가능)
         # 일단은 뷰포트 하단에 고정
@@ -1082,16 +978,7 @@ class MainWindow(QMainWindow):
         # 도킹 위젯 설정
         self.setDockOptions(QMainWindow.DockOption.AnimatedDocks | QMainWindow.DockOption.AllowTabbedDocks)
         
-        # 1. 씬 패널 (도킹)
-        self.scene_dock = QDockWidget("🌲 씬 (레이어)", self)
-        self.scene_panel = ScenePanel()
-        self.scene_panel.selectionChanged.connect(self.viewport.select_object)
-        self.scene_panel.visibilityChanged.connect(self.on_visibility_changed)
-        self.scene_panel.arcDeleted.connect(self.on_arc_deleted)
-        self.scene_dock.setWidget(self.scene_panel)
-        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.scene_dock)
-        
-        # 2. 정치 패널 (도킹)
+        # 1. 정치 패널 (도킹) - 우측 상단
         self.transform_dock = QDockWidget("📐 정치 (변환)", self)
         transform_scroll = QScrollArea()
         transform_scroll.setWidgetResizable(True)
@@ -1109,14 +996,14 @@ class MainWindow(QMainWindow):
         self.transform_dock.setWidget(transform_scroll)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.transform_dock)
         
-        # 3. 선택 패널 (도킹)
+        # 2. 선택 패널 (도킹)
         self.selection_dock = QDockWidget("✋ 선택 및 영역", self)
         self.selection_panel = SelectionPanel(self.help_widget)
         self.selection_panel.selectionChanged.connect(self.on_selection_action)
         self.selection_dock.setWidget(self.selection_panel)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.selection_dock)
         
-        # 4. 펼침 패널 (도킹)
+        # 3. 펼침 패널 (도킹)
         self.flatten_dock = QDockWidget("🗺️ 펼침 (Flatten)", self)
         self.flatten_panel = FlattenPanel(self.help_widget)
         self.flatten_panel.flattenRequested.connect(self.on_flatten_requested)
@@ -1128,38 +1015,194 @@ class MainWindow(QMainWindow):
         self.flatten_dock.setWidget(self.flatten_panel)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.flatten_dock)
         
-        # 5. 내보내기 패널 (도킹)
+        # 4. 내보내기 패널 (도킹)
         self.export_dock = QDockWidget("📤 내보내기", self)
         self.export_panel = ExportPanel()
         self.export_panel.exportRequested.connect(self.on_export_requested)
         self.export_dock.setWidget(self.export_panel)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.export_dock)
         
-        # 씬 패널은 좌측에 독립적으로 유지
-        self.scene_dock.show()
-        self.scene_dock.raise_()
+        # 5. 씬 패널 (도킹) - 우측 하단에 독립 배치
+        self.scene_dock = QDockWidget("🌲 씬 (레이어)", self)
+        self.scene_panel = ScenePanel()
+        self.scene_panel.selectionChanged.connect(self.viewport.select_object)
+        self.scene_panel.visibilityChanged.connect(self.on_visibility_changed)
+        self.scene_panel.arcDeleted.connect(self.on_arc_deleted)
+        self.scene_dock.setWidget(self.scene_panel)
+        # 씬 패널을 하단에 배치 (우측 영역 하단)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.scene_dock)
         
-        # 우측 패널들만 탭으로 묶기
+        # 우측 상단 패널들 탭으로 묶기 (4개만)
         self.tabifyDockWidget(self.transform_dock, self.selection_dock)
         self.tabifyDockWidget(self.selection_dock, self.flatten_dock)
         self.tabifyDockWidget(self.flatten_dock, self.export_dock)
+        # 씬 패널은 탭에 포함하지 않음 (독립)
+
         
-        self.transform_dock.raise_() 
-    
-    def on_floor_point_picked(self, point):
-        """사용자가 클릭한 점을 Y=0 바닥에 맞춤"""
+        # 씬 패널을 탭 패널 아래에 분할 (우측 하단)
+        self.splitDockWidget(self.transform_dock, self.scene_dock, Qt.Orientation.Vertical)
+        
+        # 씬 패널 높이 비율 조정 (탭:씬 = 400:250)
+        self.resizeDocks([self.transform_dock, self.scene_dock], [400, 250], Qt.Orientation.Vertical)
+        
+        # 정치 탭 활성화
+        self.transform_dock.raise_()
+
+    def start_floor_picking(self):
+        """3점 바닥 정렬 모드 시작"""
+        if self.viewport.selected_obj is None:
+            return
+        self.viewport.picking_mode = 'floor_3point'
+        self.viewport.floor_picks = []
+        self.viewport.status_info = "📍 바닥 평면이 될 3점을 순서대로 클릭하세요 (1/3)..."
+        self.viewport.update()
+
+    def start_floor_picking_face(self):
+        """면 선택 바닥 정렬 모드 시작"""
+        if self.viewport.selected_obj is None:
+            return
+        self.viewport.picking_mode = 'floor_face'
+        self.viewport.status_info = "📐 바닥면이 될 삼각형 면(Triangle)을 클릭하세요..."
+        self.viewport.update()
+
+    def start_floor_picking_brush(self):
+        """브러시 바닥 정렬 모드 시작"""
+        if self.viewport.selected_obj is None:
+            return
+        self.viewport.picking_mode = 'floor_brush'
+        self.viewport.brush_selected_faces.clear()
+        self.viewport.status_info = "🖌️ 바닥이 될 영역을 마우스 왼쪽 버튼으로 드래그하듯이 그리세요..."
+        self.viewport.update()
+
+    def on_align_to_brush_selected(self):
+        """브러시로 선택된 영역의 평균 법선으로 정렬"""
+        obj = self.viewport.selected_obj
+        if not obj or not self.viewport.brush_selected_faces:
+            return
+            
+        faces = obj.mesh.faces
+        vertices = obj.mesh.vertices
+        
+        total_normal = np.array([0.0, 0.0, 0.0])
+        total_area = 0.0
+        
+        for face_idx in self.viewport.brush_selected_faces:
+            f = faces[face_idx]
+            v0 = vertices[f[0]]
+            v1 = vertices[f[1]]
+            v2 = vertices[f[2]]
+            
+            n = np.cross(v1 - v0, v2 - v0)
+            area = np.linalg.norm(n) / 2.0
+            if area > 1e-9:
+                total_normal += n # n의 길이가 area*2이므로 가중 합산됨
+                total_area += area
+        
+        if total_area < 1e-9:
+            self.viewport.status_info = "❌ 유효한 면이 선택되지 않았습니다."
+            self.viewport.update()
+            return
+            
+        avg_normal = total_normal / np.linalg.norm(total_normal)
+        self.align_mesh_to_normal(avg_normal)
+        
+        count = len(self.viewport.brush_selected_faces)
+        self.viewport.brush_selected_faces.clear()
+        self.viewport.status_info = f"✅ 브러시 영역({count}개 면) 기준 바닥 정렬 완료"
+        self.viewport.update()
+
+    def align_mesh_to_normal(self, normal):
+        """주어진 법선 벡터를 월드 Z축(0,0,1)으로 정렬 (Bake)"""
         obj = self.viewport.selected_obj
         if not obj: return
         
-        # 현재 Y 위치에서 점의 월드 Y만큼 빼주면 바닥에 닿음
-        # 하지만 point는 이미 월드 좌표이므로, 현재 translation.y에서 point.y를 빼주면 됨
-        old_y = obj.translation[1]
-        new_y = old_y - point[1]
+        if normal[2] < 0: normal = -normal
+        target = np.array([0.0, 0.0, 1.0])
+        axis = np.cross(normal, target)
+        axis_norm = np.linalg.norm(axis)
         
-        # UI 업데이트가 자동으로 obj.translation을 바꿈
-        self.transform_panel.trans_y.setValue(new_y)
-        self.viewport.status_info = "✅ 바닥 정렬 완료"
+        if axis_norm > 1e-6:
+            axis = axis / axis_norm
+            angle = np.arccos(np.clip(np.dot(normal, target), -1.0, 1.0))
+            K = np.array([[0, -axis[2], axis[1]], [axis[2], 0, -axis[0]], [-axis[1], axis[0], 0]])
+            R = np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * (K @ K)
+            
+            obj.mesh.vertices = (R @ obj.mesh.vertices.T).T
+            obj.mesh.compute_normals()
+            obj.rotation = np.array([0.0, 0.0, 0.0])
+            self.viewport.update_vbo(obj)
+            self.sync_transform_panel()
+            return R
+        return np.eye(3)
+
+    def on_floor_face_picked(self, vertices):
+        """바닥면(삼각형) 선택됨 - Enter를 눌러야 정렬됨"""
+        if len(vertices) != 3: return
+        self.viewport.floor_picks = [v.copy() for v in vertices]
+        self.viewport.status_info = "✅ 면(3점) 선택됨. Enter를 누르면 정렬됩니다."
         self.viewport.update()
+
+    def on_floor_point_picked(self, point):
+        """바닥 정렬용 점 선택 - 점이 추가되면 상태바 업데이트 (3점 이상 시 Enter로 확정 가능)"""
+        obj = self.viewport.selected_obj
+        if not obj: return
+        
+        if not hasattr(self.viewport, 'floor_picks'):
+            self.viewport.floor_picks = []
+        
+        # 중복 방지
+        if not any(np.array_equal(point, p) for p in self.viewport.floor_picks):
+            self.viewport.floor_picks.append(point.copy())
+            
+        count = len(self.viewport.floor_picks)
+        
+        if count < 3:
+            self.viewport.status_info = f"📍 바닥면 점 찍기 ({count}/3+ 점 필요, 첫 점 클릭 시 스냅)..."
+        else:
+            self.viewport.status_info = f"✅ 점 {count}개 선택됨. 첫 점을 다시 찍거나 Enter로 확정하세요."
+        
+        self.viewport.update()
+
+    def on_floor_alignment_confirmed(self):
+        """Enter 키 입력 시 호출: 선택된 점들(3개 이상)을 기반으로 평면 정렬 수행"""
+        obj = self.viewport.selected_obj
+        if not obj or not self.viewport.floor_picks:
+            return
+            
+        points = np.array(self.viewport.floor_picks)
+        if len(points) < 3:
+            self.viewport.status_info = "❌ 최소 3개의 점이 필요합니다"
+            self.viewport.update()
+            return
+            
+        # 1. 평면 피팅 (Least Squares using SVD)
+        # 중심점 계산
+        centroid = np.mean(points, axis=0)
+        # 중심점에서 뺀 좌표들
+        centered_points = points - centroid
+        # SVD 수행
+        _, _, vh = np.linalg.svd(centered_points)
+        normal = vh[2, :] # 법선 벡터
+        
+        # 법선 방향 확인 (Z+ 방향을 향하도록)
+        if normal[2] < 0:
+            normal = -normal
+            
+        # 2. 정렬 수행
+        self.viewport.save_undo_state() # 정렬 전 상태 저장
+        R = self.align_mesh_to_normal(normal)
+        
+        # 3. 바닥 높이 맞춤 (선택된 점들의 평균 높이를 Z=0으로)
+        if R is not None:
+            new_centroid = R @ centroid
+            obj.translation[2] = -new_centroid[2]
+            self.sync_transform_panel()
+        
+        self.viewport.status_info = f"✨ {len(points)}개 점을 기반으로 바닥 정렬 완료"
+        self.viewport.floor_picks = []
+        self.viewport.picking_mode = 'none'
+        self.viewport.update()
+        self.viewport.meshTransformChanged.emit()
 
     def on_arc_deleted(self, obj_idx, arc_idx):
         """특정 객체의 특정 원호 삭제"""
@@ -1254,15 +1297,11 @@ class MainWindow(QMainWindow):
         
         toolbar.addSeparator()
         
-        action_reset_fit = QAction("🎯 정치 초기화 (Match)", self)
-        action_reset_fit.setToolTip("메쉬의 변환을 리셋하고 원점으로 맞춤 (정치)")
-        action_reset_fit.triggered.connect(self.reset_transform_and_center)
-        toolbar.addAction(action_reset_fit)
-        
         action_fit = QAction("🔍 뷰 맞춤", self)
         action_fit.setToolTip("메쉬가 화면에 꽉 차도록 카메라 조정")
         action_fit.triggered.connect(self.fit_view)
         toolbar.addAction(action_fit)
+
         
         toolbar.addSeparator()
         
@@ -1360,27 +1399,25 @@ class MainWindow(QMainWindow):
             self.status_mesh.setText("")
             QApplication.processEvents()
             
-            # 메쉬 로드
-            mesh = trimesh.load(filepath)
+            # MeshLoader를 사용하여 MeshData 객체로 로드 (compute_normals 메서드 포함)
+            mesh_data = self.mesh_loader.load(filepath)
             
             # 단위 변환 적용 (예: mm 파일의 184.9 -> cm 기준 18.49로 변환)
             if scale_factor != 1.0:
-                mesh.apply_scale(scale_factor)
-            
-            # 메쉬의 물리적 중심(Centroid)을 (0,0,0)으로 이동
-            # 이렇게 해야 '중심 이동' 버튼을 눌렀을 때 화면 한가운데에 정확히 옵니다.
-            centroid = mesh.vertices.mean(axis=0)
-            mesh.vertices -= centroid
+                mesh_data.vertices *= scale_factor
+                # 캐시 초기화
+                mesh_data._bounds = None
+                mesh_data._centroid = None
                 
-            self.current_mesh = mesh
+            self.current_mesh = mesh_data
             self.current_filepath = filepath
             
-            # 뷰포트에 추가
-            self.viewport.add_mesh_object(mesh, name=Path(filepath).name)
+            # 뷰포트에 추가 (MeshData 객체)
+            self.viewport.add_mesh_object(mesh_data, name=Path(filepath).name)
             
             # 상태바 업데이트
             self.status_info.setText(f"✅ 로드됨: {Path(filepath).name} (원점 정렬 완료)")
-            self.status_mesh.setText(f"V: {len(mesh.vertices):,} | F: {len(mesh.faces):,}")
+            self.status_mesh.setText(f"V: {mesh_data.n_vertices:,} | F: {mesh_data.n_faces:,}")
             self.status_grid.setText(f"격자: {self.viewport.grid_spacing}cm")
             
         except Exception as e:
@@ -1405,37 +1442,76 @@ class MainWindow(QMainWindow):
     def sync_transform_panel(self):
         obj = self.viewport.selected_obj
         if not obj: 
-            # Clear transform panel if no object is selected
-            self.transform_panel.reset_transform()
             return
         
-        # 스핀박스 시그널 블록하고 값 설정
-        self.transform_panel.trans_x.blockSignals(True)
-        self.transform_panel.trans_y.blockSignals(True)
-        self.transform_panel.trans_z.blockSignals(True)
-        self.transform_panel.rot_x.blockSignals(True)
-        self.transform_panel.rot_y.blockSignals(True)
-        self.transform_panel.rot_z.blockSignals(True)
-        self.transform_panel.scale_spin.blockSignals(True)
-        self.transform_panel.scale_slider.blockSignals(True)
+        # 툴바 동기화
+        self.trans_toolbar.trans_x.blockSignals(True)
+        self.trans_toolbar.trans_y.blockSignals(True)
+        self.trans_toolbar.trans_z.blockSignals(True)
+        self.trans_toolbar.rot_x.blockSignals(True)
+        self.trans_toolbar.rot_y.blockSignals(True)
+        self.trans_toolbar.rot_z.blockSignals(True)
+        self.trans_toolbar.scale_spin.blockSignals(True)
         
-        self.transform_panel.trans_x.setValue(obj.translation[0])
-        self.transform_panel.trans_y.setValue(obj.translation[1])
-        self.transform_panel.trans_z.setValue(obj.translation[2])
-        self.transform_panel.rot_x.setValue(obj.rotation[0])
-        self.transform_panel.rot_y.setValue(obj.rotation[1])
-        self.transform_panel.rot_z.setValue(obj.rotation[2])
-        self.transform_panel.scale_spin.setValue(obj.scale)
-        self.transform_panel.scale_slider.setValue(int(obj.scale * 100))
+        self.trans_toolbar.trans_x.setValue(obj.translation[0])
+        self.trans_toolbar.trans_y.setValue(obj.translation[1])
+        self.trans_toolbar.trans_z.setValue(obj.translation[2])
+        self.trans_toolbar.rot_x.setValue(obj.rotation[0])
+        self.trans_toolbar.rot_y.setValue(obj.rotation[1])
+        self.trans_toolbar.rot_z.setValue(obj.rotation[2])
+        self.trans_toolbar.scale_spin.setValue(obj.scale)
         
-        self.transform_panel.trans_x.blockSignals(False)
-        self.transform_panel.trans_y.blockSignals(False)
-        self.transform_panel.trans_z.blockSignals(False)
-        self.transform_panel.rot_x.blockSignals(False)
-        self.transform_panel.rot_y.blockSignals(False)
-        self.transform_panel.rot_z.blockSignals(False)
-        self.transform_panel.scale_spin.blockSignals(False)
-        self.transform_panel.scale_slider.blockSignals(False)
+        self.trans_toolbar.trans_x.blockSignals(False)
+        self.trans_toolbar.trans_y.blockSignals(False)
+        self.trans_toolbar.trans_z.blockSignals(False)
+        self.trans_toolbar.rot_x.blockSignals(False)
+        self.trans_toolbar.rot_y.blockSignals(False)
+        self.trans_toolbar.rot_z.blockSignals(False)
+        self.trans_toolbar.scale_spin.blockSignals(False)
+
+    def on_toolbar_transform_changed(self):
+        """툴바에서 값이 변경된 경우"""
+        obj = self.viewport.selected_obj
+        if not obj: return
+        
+        obj.translation = np.array([
+            self.trans_toolbar.trans_x.value(),
+            self.trans_toolbar.trans_y.value(),
+            self.trans_toolbar.trans_z.value()
+        ])
+        obj.rotation = np.array([
+            self.trans_toolbar.rot_x.value(),
+            self.trans_toolbar.rot_y.value(),
+            self.trans_toolbar.rot_z.value()
+        ])
+        obj.scale = self.trans_toolbar.scale_spin.value()
+        self.viewport.update()
+
+    def on_bake_all_clicked(self):
+        """현재 변환을 메쉬에 영구 정착 (정치 신청)"""
+        obj = self.viewport.selected_obj
+        if not obj: return
+        
+        self.viewport.bake_object_transform(obj)
+        self.sync_transform_panel() # 툴바 값 리셋됨
+        self.viewport.status_info = f"{obj.name} 정치(Bake) 완료. 변환값이 초기화되었습니다."
+        self.viewport.update()
+
+    def toggle_flat_shading(self, enabled):
+        """Flat Shading 모드 토글"""
+        self.viewport.flat_shading = enabled
+        self.viewport.update()
+
+    def reset_transform(self):
+        """모든 변환 초기화"""
+        obj = self.viewport.selected_obj
+        if not obj: return
+        
+        obj.translation = np.array([0.0, 0.0, 0.0])
+        obj.rotation = np.array([0.0, 0.0, 0.0])
+        obj.scale = 1.0
+        self.sync_transform_panel()
+        self.viewport.update()
     
     def on_selection_action(self, action: str, data):
         self.status_info.setText(f"선택 작업: {action}")
@@ -1458,11 +1534,60 @@ class MainWindow(QMainWindow):
                 # TODO: 실제 내보내기 구현
     
     def reset_transform_and_center(self):
-        """정치 초기화: 변환 리셋 + 원점 중심 이동"""
+        """변환 리셋 + 원점 중심 이동"""
         if self.viewport.selected_obj:
             self.transform_panel.reset_transform()
             self.transform_panel.center_mesh()
-            self.status_info.setText("✅ 정치 초기화 완료 (0,0,0)")
+            self.status_info.setText("✅ 변환 초기화 완료")
+    
+    def bake_and_center(self):
+        """정치: 현재 회전을 메쉬 버텍스에 영구 적용하고 변환 리셋"""
+        obj = self.viewport.selected_obj
+        if obj is None:
+            return
+        
+        # 회전 행렬 계산
+        rx, ry, rz = np.radians(obj.rotation)
+        
+        cos_x, sin_x = np.cos(rx), np.sin(rx)
+        rot_x = np.array([[1, 0, 0], [0, cos_x, -sin_x], [0, sin_x, cos_x]])
+        
+        cos_y, sin_y = np.cos(ry), np.sin(ry)
+        rot_y = np.array([[cos_y, 0, sin_y], [0, 1, 0], [-sin_y, 0, cos_y]])
+        
+        cos_z, sin_z = np.cos(rz), np.sin(rz)
+        rot_z = np.array([[cos_z, -sin_z, 0], [sin_z, cos_z, 0], [0, 0, 1]])
+        
+        rotation_matrix = rot_z @ rot_y @ rot_x
+        
+        # 메쉬 버텍스에 회전과 스케일 적용
+        obj.mesh.vertices = (rotation_matrix @ obj.mesh.vertices.T).T * obj.scale
+        
+        # 법선 다시 계산
+        obj.mesh.compute_normals()
+        
+        # 중심을 원점으로 이동
+        centroid = obj.mesh.vertices.mean(axis=0)
+        obj.mesh.vertices -= centroid
+        
+        # VBO 업데이트
+        self.viewport.update_vbo(obj)
+        
+        # 변환 리셋
+        obj.translation = np.array([0.0, 0.0, 0.0])
+        obj.rotation = np.array([0.0, 0.0, 0.0])
+        obj.scale = 1.0
+        
+        self.sync_transform_panel()
+        self.viewport.update()
+        self.status_info.setText("✅ 정치 완료 - 회전이 메쉬에 적용됨")
+    
+    def return_to_origin(self):
+        """카메라를 원점으로 이동"""
+        self.viewport.camera.center = np.array([0.0, 0.0, 0.0])
+        self.viewport.camera.pan_offset = np.array([0.0, 0.0, 0.0])
+        self.viewport.update()
+        self.status_info.setText("🏠 카메라 원점 복귀")
             
     def reset_view(self):
         self.viewport.camera.reset()
@@ -1471,12 +1596,13 @@ class MainWindow(QMainWindow):
     def fit_view(self):
         obj = self.viewport.selected_obj
         if obj:
-            self.viewport.camera.fit_to_bounds(obj.mesh.bounds)
-            self.viewport.camera.center = obj.translation.copy()
+            # 월드 좌표계 바운드로 획득
+            self.viewport.camera.fit_to_bounds(obj.get_world_bounds())
             self.viewport.update()
         elif self.current_mesh is not None:
             self.viewport.camera.fit_to_bounds(self.current_mesh.bounds)
             self.viewport.update()
+
     
     def set_view(self, azimuth: float, elevation: float):
         self.viewport.camera.azimuth = azimuth
@@ -1486,8 +1612,9 @@ class MainWindow(QMainWindow):
     def toggle_curvature_mode(self, enabled: bool):
         """곡률 측정 모드 토글"""
         self.viewport.curvature_pick_mode = enabled
+        self.viewport.picking_mode = 'curvature' if enabled else 'none'
         if enabled:
-            self.status_info.setText("📏 곡률 측정 모드: Shift+클릭으로 메쉬에 점을 찍으세요")
+            self.status_info.setText("📏 곡률 측정 모드: 메쉬 위를 클릭하여 점을 찍으세요")
         else:
             self.status_info.setText("📏 곡률 측정 모드 종료")
     
@@ -1548,13 +1675,13 @@ class MainWindow(QMainWindow):
     def show_about(self):
         icon_path = get_icon_path()
         msg = QMessageBox(self)
-        msg.setWindowTitle("ArchMeshRubbing v2")
+        msg.setWindowTitle("ArchMeshRubbing v1.0.0")
         
         if icon_path:
             msg.setIconPixmap(QPixmap(icon_path).scaled(64, 64, Qt.AspectRatioMode.KeepAspectRatio))
         
         msg.setText("""
-            <h2>ArchMeshRubbing v2</h2>
+            <h2>ArchMeshRubbing v1.0.0</h2>
             <p>고고학 메쉬 탁본 도구</p>
             <p style="font-size: 11px; color: #718096;">© 2026 balguljang2 (lzpxilfe) / Licensed under GPLv2</p>
             <hr>
@@ -1584,22 +1711,20 @@ def main():
         splash.show()
         splash.setCursor(Qt.CursorShape.WaitCursor)
         
-        splash.showMessage("Loading standard libraries...")
-        QTimer.singleShot(500, lambda: splash.showMessage("Configuring OpenGL context..."))
+        splash.showMessage("Loading engine...")
         
         # 2. 메인 윈도우 생성
-        splash.showMessage("Initializing UI components...")
+        splash.showMessage("Initializing Main Window...")
         window = MainWindow()
         
         # 3. 마무리 및 스플래시 닫기
-        QTimer.singleShot(1500, lambda: (splash.close(), window.show()))
+        splash.showMessage("Ready!")
+        QTimer.singleShot(1000, lambda: (splash.close(), window.show()))
         
         sys.exit(app.exec())
     except Exception as e:
-        # 치명적 오류 팝업 (EXE 등에서 유용)
         import traceback
         err_msg = f"Application crashed on startup:\n\n{e}\n\n{traceback.format_exc()}"
-        print(err_msg)
         try:
             temp_app = QApplication.instance() or QApplication(sys.argv)
             QMessageBox.critical(None, "Fatal Startup Error", err_msg)

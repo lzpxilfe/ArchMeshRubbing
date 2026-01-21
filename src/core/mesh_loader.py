@@ -91,17 +91,36 @@ class MeshData:
     
     @property
     def surface_area(self) -> float:
-        """총 표면적 계산"""
+        """총 표면적 계산 (대형 메쉬 안전 처리)"""
         if self._surface_area is None:
-            # 삼각형 면적 계산
-            v0 = self.vertices[self.faces[:, 0]]
-            v1 = self.vertices[self.faces[:, 1]]
-            v2 = self.vertices[self.faces[:, 2]]
-            
-            # 외적의 크기 / 2 = 삼각형 면적
-            cross = np.cross(v1 - v0, v2 - v0)
-            areas = np.linalg.norm(cross, axis=1) / 2.0
-            self._surface_area = float(areas.sum())
+            try:
+                # 면이 너무 많으면 (100만 이상) 추정값 사용
+                if len(self.faces) > 1000000:
+                    # 샘플링으로 추정 (10만 면만 계산)
+                    sample_size = 100000
+                    indices = np.random.choice(len(self.faces), sample_size, replace=False)
+                    sample_faces = self.faces[indices]
+                    
+                    v0 = self.vertices[sample_faces[:, 0]]
+                    v1 = self.vertices[sample_faces[:, 1]]
+                    v2 = self.vertices[sample_faces[:, 2]]
+                    
+                    cross = np.cross(v1 - v0, v2 - v0)
+                    sample_area = np.linalg.norm(cross, axis=1).sum() / 2.0
+                    # 비율로 전체 추정
+                    self._surface_area = float(sample_area * len(self.faces) / sample_size)
+                else:
+                    # 정상 계산
+                    v0 = self.vertices[self.faces[:, 0]]
+                    v1 = self.vertices[self.faces[:, 1]]
+                    v2 = self.vertices[self.faces[:, 2]]
+                    
+                    cross = np.cross(v1 - v0, v2 - v0)
+                    areas = np.linalg.norm(cross, axis=1) / 2.0
+                    self._surface_area = float(areas.sum())
+            except MemoryError:
+                # 메모리 부족 시 추정값 반환
+                self._surface_area = -1.0  # 계산 불가 표시
         return self._surface_area
     
     @property
