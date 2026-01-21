@@ -415,6 +415,29 @@ class MeshLoader:
         return info
 
 
+class MeshProcessor:
+    """메쉬 처리 및 저장 유틸리티"""
+    
+    def save_mesh(self, mesh_data: Union[MeshData, 'trimesh.Trimesh'], filepath: str):
+        """
+        메쉬를 파일로 저장
+        
+        Args:
+            mesh_data: MeshData 또는 trimesh.Trimesh 객체
+            filepath: 저장할 파일 경로
+        """
+        filepath = str(filepath)
+        
+        if isinstance(mesh_data, MeshData):
+            # trimesh 객체로 변환
+            mesh = mesh_data.to_trimesh()
+        else:
+            mesh = mesh_data
+            
+        # trimesh export 기능 사용
+        mesh.export(filepath)
+
+
 # 간단한 테스트용
 if __name__ == '__main__':
     import sys

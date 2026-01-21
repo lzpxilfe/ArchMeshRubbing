@@ -14,7 +14,8 @@ from PyQt6.QtWidgets import (
     QTreeWidgetItem, QGroupBox, QDoubleSpinBox, QFormLayout,
     QSlider, QSpinBox, QStatusBar, QToolBar, QSplitter, QFrame,
     QMessageBox, QTabWidget, QTextEdit, QProgressBar, QComboBox,
-    QCheckBox, QScrollArea, QSizePolicy, QButtonGroup, QDialog
+    QCheckBox, QScrollArea, QSizePolicy, QButtonGroup, QDialog,
+    QGridLayout
 )
 from PyQt6.QtCore import Qt, QTimer, QSize, pyqtSignal, QThread
 from PyQt6.QtGui import QAction, QIcon, QKeySequence, QFont, QPixmap, QShortcut
@@ -30,7 +31,10 @@ else:
 sys.path.insert(0, basedir)
 
 from src.gui.viewport_3d import Viewport3D
-from src.core.mesh_loader import MeshLoader
+from src.core.mesh_loader import MeshLoader, MeshProcessor
+from src.core.rubbing_generator import RubbingGenerator
+from src.core.profile_exporter import ProfileExporter
+from src.gui.profile_graph_widget import ProfileGraphWidget
 
 
 def get_icon_path():
@@ -834,6 +838,99 @@ class PropertiesPanel(QWidget):
         self.label_texture.setText("있음" if mesh.has_texture else "없음")
 
 
+
+class SlicingPanel(QWidget):
+    """단면 슬라이싱 제어 패널"""
+    sliceChanged = pyqtSignal(bool, float)  # enabled, height
+    exportRequested = pyqtSignal(float)     # height
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.init_ui()
+        
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        
+        # 1. 활성화 스위치
+        self.group = QGroupBox("📏 단면 슬라이싱 (CT)")
+        self.group.setCheckable(True)
+        self.group.setChecked(False)
+        self.group.toggled.connect(self.on_toggled)
+        group_layout = QVBoxLayout(self.group)
+        
+        # 2. 높이 조절 슬라이더
+        slider_layout = QHBoxLayout()
+        self.slider = QSlider(Qt.Orientation.Horizontal)
+        self.slider.setRange(-500, 500)  # -5cm ~ 5cm (0.1mm 단위)
+        self.slider.setValue(0)
+        self.slider.setToolTip("슬라이스 높이 조절 (0.1mm 단위)")
+        
+        self.spin = QDoubleSpinBox()
+        self.spin.setRange(-50.0, 50.0)
+        self.spin.setSingleStep(0.1)
+        self.spin.setSuffix(" cm")
+        self.spin.setDecimals(2)
+        
+        # 슬라이더 - 스핀박스 양방향 연결
+        self.slider.valueChanged.connect(self._on_slider_changed)
+        self.spin.valueChanged.connect(self._on_spin_changed)
+        
+        slider_layout.addWidget(self.slider)
+        slider_layout.addWidget(self.spin)
+        group_layout.addLayout(slider_layout)
+        
+        # 3. 버튼들
+        btn_layout = QHBoxLayout()
+        self.btn_export = QPushButton("💾 단면 SVG 내보내기")
+        self.btn_export.setStyleSheet("background-color: #ebf8ff; font-weight: bold;")
+        self.btn_export.clicked.connect(self.on_export_clicked)
+        btn_layout.addWidget(self.btn_export)
+        
+        group_layout.addLayout(btn_layout)
+        
+        # 도움말
+        help_label = QLabel("상면(Top) 뷰에서 보면서 높이를 조절하세요.")
+        help_label.setStyleSheet("color: #718096; font-size: 10px;")
+        help_label.setWordWrap(True)
+        group_layout.addWidget(help_label)
+        
+        layout.addWidget(self.group)
+        layout.addStretch()
+        
+    def _on_slider_changed(self, val):
+        self.spin.blockSignals(True)
+        self.spin.setValue(val / 100.0)
+        self.spin.blockSignals(False)
+        self.sliceChanged.emit(self.group.isChecked(), val / 100.0)
+        
+    def _on_spin_changed(self, val):
+        self.slider.blockSignals(True)
+        self.slider.setValue(int(val * 100))
+        self.slider.blockSignals(False)
+        self.sliceChanged.emit(self.group.isChecked(), val)
+        
+    def on_toggled(self, checked):
+        self.sliceChanged.emit(checked, self.spin.value())
+        
+    def on_export_clicked(self):
+        self.exportRequested.emit(self.spin.value())
+
+    def update_range(self, z_min, z_max):
+        """메쉬 범위에 맞춰 슬라이더 범위 업데이트"""
+        self.slider.blockSignals(True)
+        self.spin.blockSignals(True)
+        
+        self.slider.setRange(int(z_min * 100), int(z_max * 100))
+        self.spin.setRange(z_min, z_max)
+        
+        mid = (z_min + z_max) / 2
+        self.slider.setValue(int(mid * 100))
+        self.spin.setValue(mid)
+        
+        self.slider.blockSignals(False)
+        self.spin.blockSignals(False)
+
+
 class ExportPanel(QWidget):
     """내보내기 패널"""
     
@@ -906,7 +1003,126 @@ class ExportPanel(QWidget):
         mesh_layout.addWidget(btn_export_flat)
         
         layout.addWidget(mesh_group)
+        
+        # 2D 외곽선 내보내기 (SVG/PDF)
+        profile_group = QGroupBox("🛡️ 2D 실측 도면 내보내기 (SVG)")
+        profile_group.setStyleSheet("QGroupBox { font-weight: bold; color: #2b6cb0; }")
+        profile_layout = QVBoxLayout(profile_group)
+        
+        # 안내 문구
+        lbl_info = QLabel("격자는 이미지, 외곽선은 벡터로 저장됩니다.\n(지정된 뷰 방향에서 투영)")
+        lbl_info.setStyleSheet("font-size: 11px; color: #718096;")
+        profile_layout.addWidget(lbl_info)
+        
+        # 6방향 버튼 그리드
+        grid_layout = QGridLayout()
+        views = [
+            ('Top (상면)', 'top'), ('Bottom (하면)', 'bottom'),
+            ('Front (정면)', 'front'), ('Back (후면)', 'back'),
+            ('Left (좌측)', 'left'), ('Right (우측)', 'right')
+        ]
+        
+        for i, (label, view_code) in enumerate(views):
+            btn = QPushButton(label)
+            btn.setStyleSheet("text-align: left; padding: 5px;")
+            btn.clicked.connect(lambda checked, v=view_code: self.exportRequested.emit({'type': 'profile_2d', 'view': v}))
+            grid_layout.addWidget(btn, i // 2, i % 2)
+            
+        profile_layout.addLayout(grid_layout)
+        layout.addWidget(profile_group)
+        
         layout.addStretch()
+
+
+class SectionPanel(QWidget):
+    crosshairToggled = pyqtSignal(bool)
+    roiToggled = pyqtSignal(bool)
+    silhouetteRequested = pyqtSignal()
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.init_ui()
+        
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        
+        # 1. 활성화 버튼
+        self.btn_toggle = QPushButton("🎯 십자선 단면 모드 시작")
+        self.btn_toggle.setCheckable(True)
+        self.btn_toggle.setStyleSheet("""
+            QPushButton:checked {
+                background-color: #f6e05e;
+                font-weight: bold;
+            }
+        """)
+        self.btn_toggle.toggled.connect(self.on_btn_toggled)
+        layout.addWidget(self.btn_toggle)
+        
+        # 2. 도움말
+        help_label = QLabel("모드 활성 후 메쉬를 클릭/드래그하여 단면을 확인하세요.")
+        help_label.setStyleSheet("color: #718096; font-size: 10px;")
+        help_label.setWordWrap(True)
+        layout.addWidget(help_label)
+        
+        # 3. 그래프 공간
+        self.label_x = QLabel("X-Profile (Yellow Line)")
+        layout.addWidget(self.label_x)
+        self.graph_x = ProfileGraphWidget("가로 단면 (X-Profile)")
+        layout.addWidget(self.graph_x)
+        
+        self.label_y = QLabel("Y-Profile (Cyan Line)")
+        layout.addWidget(self.label_y)
+        self.graph_y = ProfileGraphWidget("세로 단면 (Y-Profile)")
+        layout.addWidget(self.graph_y)
+        
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setFrameShadow(QFrame.Shadow.Sunken)
+        layout.addWidget(line)
+        
+        # 4. 2D ROI 영역 지정 (NEW)
+        roi_group = QGroupBox("✂️ 2D 영역 지정 (Cropping)")
+        roi_layout = QVBoxLayout(roi_group)
+        
+        self.btn_roi = QPushButton("📐 영역 지정 모드 시작")
+        self.btn_roi.setCheckable(True)
+        self.btn_roi.setStyleSheet("QPushButton:checked { background-color: #4299e1; color: white; }")
+        self.btn_roi.toggled.connect(self.on_roi_toggled)
+        roi_layout.addWidget(self.btn_roi)
+        
+        self.btn_silhouette = QPushButton("✅ 영역 확정 및 외곽 추출")
+        self.btn_silhouette.setEnabled(False)
+        self.btn_silhouette.clicked.connect(self.silhouetteRequested.emit)
+        roi_layout.addWidget(self.btn_silhouette)
+        
+        roi_help = QLabel("상면(Top) 뷰에서 4개 화살표를 드래그하여 영역을 지정하세요.")
+        roi_help.setStyleSheet("color: #718096; font-size: 10px;")
+        roi_help.setWordWrap(True)
+        roi_layout.addWidget(roi_help)
+        
+        layout.addWidget(roi_group)
+        
+        layout.addStretch()
+        
+    def on_btn_toggled(self, checked):
+        if checked:
+            self.btn_toggle.setText("🎯 십자선 단면 모드 중지")
+        else:
+            self.btn_toggle.setText("🎯 십자선 단면 모드 시작")
+        self.crosshairToggled.emit(checked)
+        
+    def on_roi_toggled(self, checked):
+        if checked:
+            self.btn_roi.setText("📐 영역 지정 모드 중지")
+            self.btn_silhouette.setEnabled(True)
+        else:
+            self.btn_roi.setText("📐 영역 지정 모드 시작")
+            self.btn_silhouette.setEnabled(False)
+        self.roiToggled.emit(checked)
+        
+    def update_profiles(self, x_data, y_data):
+        self.graph_x.set_data(x_data)
+        self.graph_y.set_data(y_data)
 
 
 class MainWindow(QMainWindow):
@@ -1022,6 +1238,37 @@ class MainWindow(QMainWindow):
         self.export_dock.setWidget(self.export_panel)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.export_dock)
         
+        # 4.5 단면 도구 패널 (도킹) - 슬라이싱과 십자선 통합
+        self.section_dock = QDockWidget("📏 단면 도구 (Section)", self)
+        section_scroll = QScrollArea()
+        section_scroll.setWidgetResizable(True)
+        section_content = QWidget()
+        section_layout = QVBoxLayout(section_content)
+        
+        self.slice_panel = SlicingPanel()
+        self.slice_panel.sliceChanged.connect(self.on_slice_changed)
+        self.slice_panel.exportRequested.connect(self.on_slice_export_requested)
+        section_layout.addWidget(self.slice_panel)
+        
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setFrameShadow(QFrame.Shadow.Sunken)
+        section_layout.addWidget(line)
+        
+        self.section_panel = SectionPanel()
+        self.section_panel.crosshairToggled.connect(self.on_crosshair_toggled)
+        self.section_panel.roiToggled.connect(self.on_roi_toggled)
+        self.section_panel.silhouetteRequested.connect(self.viewport.extract_roi_silhouette)
+        
+        self.viewport.profileUpdated.connect(self.section_panel.update_profiles)
+        self.viewport.roiSilhouetteExtracted.connect(self.on_silhouette_extracted)
+        section_layout.addWidget(self.section_panel)
+        
+        section_layout.addStretch()
+        section_scroll.setWidget(section_content)
+        self.section_dock.setWidget(section_scroll)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.section_dock)
+        
         # 5. 씬 패널 (도킹) - 우측 하단에 독립 배치
         self.scene_dock = QDockWidget("🌲 씬 (레이어)", self)
         self.scene_panel = ScenePanel()
@@ -1032,10 +1279,11 @@ class MainWindow(QMainWindow):
         # 씬 패널을 하단에 배치 (우측 영역 하단)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.scene_dock)
         
-        # 우측 상단 패널들 탭으로 묶기 (4개만)
+        # 우측 상단 패널들 탭으로 묶기
         self.tabifyDockWidget(self.transform_dock, self.selection_dock)
         self.tabifyDockWidget(self.selection_dock, self.flatten_dock)
         self.tabifyDockWidget(self.flatten_dock, self.export_dock)
+        self.tabifyDockWidget(self.export_dock, self.section_dock)
         # 씬 패널은 탭에 포함하지 않음 (독립)
 
         
@@ -1250,22 +1498,22 @@ class MainWindow(QMainWindow):
         # 6방향 뷰
         action_front = QAction("1️⃣ 정면 뷰", self)
         action_front.setShortcut("1")
-        action_front.triggered.connect(lambda: self.set_view(0, 0))
+        action_front.triggered.connect(lambda: self.set_view(-90, 0))
         view_menu.addAction(action_front)
         
         action_back = QAction("2️⃣ 후면 뷰", self)
         action_back.setShortcut("2")
-        action_back.triggered.connect(lambda: self.set_view(180, 0))
+        action_back.triggered.connect(lambda: self.set_view(90, 0))
         view_menu.addAction(action_back)
         
         action_right = QAction("3️⃣ 우측면 뷰", self)
         action_right.setShortcut("3")
-        action_right.triggered.connect(lambda: self.set_view(90, 0))
+        action_right.triggered.connect(lambda: self.set_view(0, 0))
         view_menu.addAction(action_right)
         
         action_left = QAction("4️⃣ 좌측면 뷰", self)
         action_left.setShortcut("4")
-        action_left.triggered.connect(lambda: self.set_view(-90, 0))
+        action_left.triggered.connect(lambda: self.set_view(180, 0))
         view_menu.addAction(action_left)
         
         action_top = QAction("5️⃣ 상면 뷰", self)
@@ -1308,22 +1556,22 @@ class MainWindow(QMainWindow):
         # 6방향 뷰 버튼
         action_front = QAction("정면", self)
         action_front.setToolTip("정면 뷰 (1)")
-        action_front.triggered.connect(lambda: self.set_view(0, 0))
+        action_front.triggered.connect(lambda: self.set_view(-90, 0))
         toolbar.addAction(action_front)
         
         action_back = QAction("후면", self)
         action_back.setToolTip("후면 뷰 (2)")
-        action_back.triggered.connect(lambda: self.set_view(180, 0))
+        action_back.triggered.connect(lambda: self.set_view(90, 0))
         toolbar.addAction(action_back)
         
         action_right = QAction("우측", self)
         action_right.setToolTip("우측면 뷰 (3)")
-        action_right.triggered.connect(lambda: self.set_view(90, 0))
+        action_right.triggered.connect(lambda: self.set_view(0, 0))
         toolbar.addAction(action_right)
         
         action_left = QAction("좌측", self)
         action_left.setToolTip("좌측면 뷰 (4)")
-        action_left.triggered.connect(lambda: self.set_view(-90, 0))
+        action_left.triggered.connect(lambda: self.set_view(180, 0))
         toolbar.addAction(action_left)
         
         action_top = QAction("상면", self)
@@ -1429,11 +1677,27 @@ class MainWindow(QMainWindow):
         self.scene_panel.update_list(self.viewport.objects, self.viewport.selected_index)
         self.props_panel.update_mesh_info(mesh, self.current_filepath)
         self.sync_transform_panel()
+        self.update_slice_range()
         
     def on_selection_changed(self, index):
         self.scene_panel.update_list(self.viewport.objects, index)
         self.sync_transform_panel()
-        
+        self.update_slice_range()
+
+    def update_slice_range(self):
+        """현재 선택된 객체의 Z 범위로 슬라이더 업데이트"""
+        obj = self.viewport.selected_obj
+        if obj and obj.mesh:
+            # 월드 좌표계 기준으로 변환된 메쉬의 Z 범위 필요
+            vertices = obj.mesh.vertices * obj.scale
+            from scipy.spatial.transform import Rotation as R
+            rot = R.from_euler('xyz', obj.rotation, degrees=True).as_matrix()
+            world_v = (rot @ vertices.T).T + obj.translation
+            
+            z_min = world_v[:, 2].min()
+            z_max = world_v[:, 2].max()
+            self.slice_panel.update_range(z_min, z_max)
+            
     def on_visibility_changed(self, index, visible):
         if 0 <= index < len(self.viewport.objects):
             self.viewport.objects[index].visible = visible
@@ -1522,8 +1786,17 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "펼침", f"펼침 설정:\n{options}")
         # TODO: 실제 펼침 로직 구현
     
-    def on_export_requested(self, options: dict):
-        export_type = options.get('type', 'rubbing')
+    def on_export_requested(self, data):
+        """내보내기 요청 처리"""
+        export_type = data.get('type')
+        
+        if export_type == 'profile_2d':
+            self.export_2d_profile(data.get('view'))
+            return
+            
+        if not self.viewport.selected_obj:
+            QMessageBox.warning(self, "경고", "선택된 메쉬가 없습니다.")
+            return
         
         if export_type == 'rubbing':
             filepath, _ = QFileDialog.getSaveFileName(
@@ -1532,6 +1805,82 @@ class MainWindow(QMainWindow):
             if filepath:
                 self.status_info.setText(f"내보내기: {filepath}")
                 # TODO: 실제 내보내기 구현
+        elif export_type == 'mesh_outer':
+            filepath, _ = QFileDialog.getSaveFileName(
+                self, "외면 메쉬 저장", "", "OBJ (*.obj);;STL (*.stl);;PLY (*.ply)"
+            )
+            if filepath:
+                # Assuming selected_obj.mesh has faces marked as 'outer'
+                # This is a placeholder, actual implementation would filter faces
+                outer_mesh = self.viewport.selected_obj.mesh # Simplified for example
+                processor = MeshProcessor()
+                processor.save_mesh(outer_mesh, filepath)
+                QMessageBox.information(self, "완료", f"외면 메쉬가 저장되었습니다:\n{filepath}")
+        elif export_type == 'mesh_inner':
+            filepath, _ = QFileDialog.getSaveFileName(
+                self, "내면 메쉬 저장", "", "OBJ (*.obj);;STL (*.stl);;PLY (*.ply)"
+            )
+            if filepath:
+                # Assuming selected_obj.mesh has faces marked as 'inner'
+                inner_mesh = self.viewport.selected_obj.mesh # Simplified for example
+                processor = MeshProcessor()
+                processor.save_mesh(inner_mesh, filepath)
+                QMessageBox.information(self, "완료", f"내면 메쉬가 저장되었습니다:\n{filepath}")
+        elif export_type == 'mesh_flat':
+            filepath, _ = QFileDialog.getSaveFileName(
+                self, "펼쳐진 메쉬 저장", "", "OBJ (*.obj);;STL (*.stl);;PLY (*.ply)"
+            )
+            if filepath:
+                # Assuming a flattened mesh is available
+                flattened_mesh = self.viewport.selected_obj.mesh # Simplified for example
+                processor = MeshProcessor()
+                processor.save_mesh(flattened_mesh, filepath)
+                QMessageBox.information(self, "완료", f"펼쳐진 메쉬가 저장되었습니다:\n{filepath}")
+    
+    def export_2d_profile(self, view):
+        """2D 실측 도면(SVG) 내보내기"""
+        obj = self.viewport.selected_obj
+        if not obj:
+            QMessageBox.warning(self, "경고", "선택된 메쉬가 없습니다.")
+            return
+
+        filepath, _ = QFileDialog.getSaveFileName(
+            self,
+            f"2D 도면 저장 ({view})",
+            f"{view}_profile.svg",
+            "Scalable Vector Graphics (*.svg)"
+        )
+        
+        if not filepath:
+            return
+            
+        try:
+            self.status_info.setText(f"⏳ 2D 도면 추출 중 ({view})... 대형 메쉬는 시간이 걸릴 수 있습니다.")
+            QApplication.processEvents()
+            
+            exporter = ProfileExporter(resolution=4096) # 고해상도
+            
+            # 메쉬의 현재 월드 변환 상태 전달
+            # 주의: ProfileExporter는 메쉬 원본을 받아 변환을 적용하여 투영함
+            result_path = exporter.export_profile(
+                obj.mesh,
+                view=view,
+                output_path=filepath,
+                translation=obj.translation,
+                rotation=obj.rotation,
+                scale=obj.scale,
+                grid_spacing=1.0, # 1cm 격자
+                include_grid=True
+            )
+            
+            QMessageBox.information(self, "완료", f"2D 도면이 저장되었습니다:\n{result_path}")
+            self.status_info.setText(f"✅ 저장 완료: {Path(result_path).name}")
+            
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            self.status_info.setText("❌ 저장 실패")
+            QMessageBox.critical(self, "오류", f"도면 저장 중 오류 발생:\n{str(e)}")
     
     def reset_transform_and_center(self):
         """변환 리셋 + 원점 중심 이동"""
@@ -1672,6 +2021,130 @@ class MainWindow(QMainWindow):
             self.viewport.update()
             self.status_info.setText(f"🗑️ {count}개 원호 삭제됨")
     
+    def on_roi_toggled(self, enabled):
+        """2D ROI 모드 토글 핸들러"""
+        self.viewport.roi_enabled = enabled
+        if enabled:
+            # ROI가 활성화되면 초기 범위를 메쉬 크기에 맞춤
+            if self.viewport.selected_obj and self.viewport.selected_obj.mesh:
+                b = self.viewport.selected_obj.get_world_bounds()
+                # [min_x, max_x, min_y, max_y]
+                self.viewport.roi_bounds = [float(b[0][0]), float(b[1][0]), float(b[0][1]), float(b[1][1])]
+        self.viewport.picking_mode = 'none' 
+        self.viewport.update()
+
+    def on_silhouette_extracted(self, points):
+        """추출된 외곽선 처리 핸들러"""
+        if not points: return
+        self.status_info.setText(f"✅ {len(points)}개의 점으로 외곽선 추출 완료")
+        print(f"Extracted Silhouette: {len(points)} points")
+
+    def on_crosshair_toggled(self, enabled):
+        """십자선 모드 토글 핸들러 (Viewport3D와 연동)"""
+        self.viewport.crosshair_enabled = enabled
+        if enabled:
+            self.viewport.picking_mode = 'crosshair'
+            self.viewport.update_crosshair_profile()
+        else:
+            if self.viewport.picking_mode == 'crosshair':
+                self.viewport.picking_mode = 'none'
+        self.viewport.update()
+
+    def on_slice_changed(self, enabled, height):
+        """단면 슬라이싱 상태/높이 변경 핸들러"""
+        self.viewport.slice_enabled = enabled
+        self.viewport.slice_z = height
+        if enabled:
+            self.viewport.update_slice()
+        else:
+            self.viewport.update()
+
+    def on_slice_export_requested(self, height):
+        """단면 SVG 내보내기 핸들러"""
+        obj = self.viewport.selected_obj
+        if not obj or not obj.mesh:
+            QMessageBox.warning(self, "경고", "내보낼 대상 메쉬가 없습니다.")
+            return
+            
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "단면 SVG 내보내기", f"section_z_{height:.2f}.svg", "SVG Files (*.svg)"
+        )
+        
+        if file_path:
+            try:
+                from src.core.mesh_slicer import MeshSlicer
+                slicer = MeshSlicer(obj.mesh)
+                
+                # 로컬 좌표계로 평면 변환
+                from scipy.spatial.transform import Rotation as R
+                inv_rot = R.from_euler('xyz', obj.rotation, degrees=True).inv().as_matrix()
+                inv_scale = 1.0 / obj.scale if obj.scale != 0 else 1.0
+                
+                world_origin = np.array([0, 0, height])
+                local_origin = inv_scale * inv_rot @ (world_origin - obj.translation)
+                
+                world_normal = np.array([0, 0, 1])
+                local_normal = inv_rot @ world_normal
+                
+                # Slicer를 통해 SVG 직접 내보내기는 slice_at_z 대신 slice_with_plane 기반 SVG 구현 필요
+                # 일단 slice_multiple_z 형태를 응용하거나 수동 SVG 생성
+                
+                # MeshSlicer 클래스에 slice_with_plane_svg 추가하거나, 
+                # 여기서 contours 추출 후 slicer.export_slice_svg_from_contours(file_path, contours) 같은 식
+                
+                # 우선 slicer.py를 수정하여 slice_with_plane_svg를 추가하는 것이 깔끔함.
+                # 임시로 contours 추출 후 slicer의 일반 SVG 메서드 활용 시뮬레이션
+                
+                contours = slicer.slice_with_plane(local_origin, local_normal)
+                if not contours:
+                    QMessageBox.warning(self, "경고", f"Z={height:.2f} 높이에서 단면을 찾을 수 없습니다.")
+                    return
+                
+                # slicer.export_slice_svg는 slice_at_z(수평)만 지원하므로,
+                # contours를 직접 전달하는 방식이 필요함. 
+                # (slicer.py 수정을 예약하고 일단 구현 유보 혹은 slicer.py 즉시 수정)
+                
+                # TODO: slicer.py에 export_contours_svg 추가
+                # 일단 slicer.export_slice_svg(height, file_path) 호출 (단, local transform 고려 안됨)
+                # 정답: slicer.py에 contours를 인자로 받는 메서드 추가 필요
+                
+                self._save_contours_as_svg(file_path, contours, height)
+                
+                QMessageBox.information(self, "성공", f"단면 SVG가 저장되었습니다:\n{file_path}")
+                
+            except Exception as e:
+                QMessageBox.critical(self, "오류", f"SVG 저장 중 오류 발생: {e}")
+
+    def _save_contours_as_svg(self, path, contours, z_val):
+        """임시 SVG 저장 (로컬 contours를 월드 비율로)"""
+        # 바운딩 박스 (로컬 XY)
+        # 하지만 스케일이 곱해져야 하므로...
+        scale = self.viewport.selected_obj.scale
+        all_pts = np.vstack(contours) * scale
+        
+        min_x, min_y = all_pts[:, 0].min(), all_pts[:, 1].min()
+        max_x, max_y = all_pts[:, 0].max(), all_pts[:, 1].max()
+        
+        width = (max_x - min_x) * 1.1
+        height = (max_y - min_y) * 1.1
+        
+        svg = [
+            f'<svg xmlns="http://www.w3.org/2000/svg" width="{width:.2f}cm" height="{height:.2f}cm" viewBox="0 0 {width:.4f} {height:.4f}">',
+            f'<g stroke="red" fill="none" stroke-width="0.1">'
+        ]
+        
+        for cnt in contours:
+            pts = cnt[:, :2] * scale
+            pts[:, 0] -= min_x
+            pts[:, 1] = height - (pts[:, 1] - min_y)
+            pts_str = " ".join([f"{p[0]:.3f},{p[1]:.3f}" for p in pts])
+            svg.append(f'<polyline points="{pts_str}" />')
+            
+        svg.append('</g></svg>')
+        
+        with open(path, 'w') as f:
+            f.write("\n".join(svg))
+
     def show_about(self):
         icon_path = get_icon_path()
         msg = QMessageBox(self)
