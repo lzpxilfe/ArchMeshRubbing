@@ -8,9 +8,10 @@ import numpy as np
 from typing import Optional, Tuple
 
 from PyQt6.QtWidgets import QWidget, QApplication
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QMouseEvent, QWheelEvent, QPainter, QColor
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QSize
+from PyQt6.QtGui import QMouseEvent, QWheelEvent, QPainter, QColor, QImage
 from PyQt6.QtOpenGLWidgets import QOpenGLWidget
+from PyQt6.QtOpenGL import QOpenGLFramebufferObject
 
 from OpenGL.GL import *
 from OpenGL.GLU import *
@@ -86,25 +87,32 @@ class TrackballCamera:
         self.elevation = max(-89.0, min(89.0, self.elevation))
     
     def pan(self, delta_x: float, delta_y: float, sensitivity: float = 0.3):
-        """카메라 이동 (Pan) - Z-up 좌표계, 잡고 끌어오는 방식"""
+        """카메라 이동 (Pan) - 언제나 화면 기준으로 직관적으로 이동"""
         az_rad = np.radians(self.azimuth)
         el_rad = np.radians(self.elevation)
         
-        # 카메라 기준 오른쪽 벡터 (XY 평면에서)
+        # 1. 화면 오른쪽 벡터
         right = np.array([-np.sin(az_rad), np.cos(az_rad), 0])
         
-        # 카메라 기준 위쪽 벡터 (Z-up 고려)
-        up = np.array([
-            -np.sin(el_rad) * np.cos(az_rad),
-            -np.sin(el_rad) * np.sin(az_rad),
-            np.cos(el_rad)
+        # 2. 화면 위쪽 벡터 (시선 방향과 right에 수직)
+        # 시선 방향 (normalized)
+        view_dir = np.array([
+            -np.cos(el_rad) * np.cos(az_rad),
+            -np.cos(el_rad) * np.sin(az_rad),
+            -np.sin(el_rad)
         ])
         
-        # Pan 속도 = 거리에 비례하되 적당한 배율
+        # 실제 up = right x view_dir
+        up = np.cross(right, view_dir)
+        
+        # Pan 속도 = 거리에 비례
         pan_speed = self.distance * sensitivity * 0.005
-        # 잡고 끌어오는 방향으로 (마우스 이동 반대방향으로 카메라 이동)
+        
+        # "Steering" 모드 (사용자의 "마우스 반대로" 요청 반영)
+        # 마우스 오른쪽 -> 배경 왼쪽 : pan_offset이 +right 방향으로 가야 함
+        # 마우스 위쪽 -> 배경 아래쪽 : pan_offset이 -up 방향으로 가야 함
         self.pan_offset += right * (delta_x * pan_speed)
-        self.pan_offset += up * (-delta_y * pan_speed)
+        self.pan_offset -= up * (delta_y * pan_speed)
     
     def zoom(self, delta: float, sensitivity: float = 1.1):
         """카메라 줌"""
@@ -139,24 +147,25 @@ class TrackballCamera:
         self.elevation = 30.0
         
     def move_relative(self, dx: float, dy: float, dz: float, sensitivity: float = 1.0):
-        """카메라 로컬 좌표계 기준 이동 (WASD) - Z-up"""
+        """카메라 로컬 좌표계 기준 이동 (WASD) - 현재 뷰 기준 직관적 방향"""
         az_rad = np.radians(self.azimuth)
         
         # 1. 오른쪽 벡터 (A/D)
         right = np.array([-np.sin(az_rad), np.cos(az_rad), 0])
         
-        # 2. 위쪽 벡터 (Q/E)
-        up = np.array([0, 0, 1]) 
+        # 2. 전진 벡터 (W/S) - 카메라가 바라보는 방향의 수평 투영
+        forward_h = np.array([-np.cos(az_rad), -np.sin(az_rad), 0])
         
-        # 3. 전진 벡터 (W/S) - 카메라가 바라보는 방향
-        forward = np.array([-np.cos(az_rad), -np.sin(az_rad), 0])
+        # 3. 위쪽 벡터 (Q/E) - 월드 Z
+        up_v = np.array([0, 0, 1]) 
         
         # 이동 속도
-        move_speed = (self.distance * 0.03 + 3.0) * sensitivity
+        move_speed = (self.distance * 0.03 + 2.0) * sensitivity
         
+        # 인자 적용 (dx:좌우, dy:상하, dz:전후)
         self.center += right * (dx * move_speed)
-        self.center += up * (dy * move_speed)
-        self.center += forward * (dz * move_speed)
+        self.center += up_v * (dy * move_speed)
+        self.center += forward_h * (dz * move_speed)
 
 
 
@@ -316,6 +325,13 @@ class Viewport3D(QOpenGLWidget):
         self.roi_bounds = [-10.0, 10.0, -10.0, 10.0] # [min_x, max_x, min_y, max_y]
         self.active_roi_edge = None # 현재 드래그 중인 모서리 ('left', 'right', 'top', 'bottom')
         
+        # 드래그 조작용 최적화 변수
+        self._drag_depth = 0.0
+        self._cached_viewport = None
+        self._cached_modelview = None
+        self._cached_projection = None
+        self._hover_axis = None
+        
         # 키보드 조작 타이머 (WASD 연속 이동용)
         self.keys_pressed = set()
         self.move_timer = QTimer()
@@ -444,8 +460,8 @@ class Viewport3D(QOpenGLWidget):
         if self.roi_enabled:
             self.draw_roi_box()
         
-        # 4. 회전 기즈모 (선택된 객체에만)
-        if self.selected_obj:
+        # 4. 회전 기즈모 (선택된 객체에만, 피킹 모드 아닐 때만)
+        if self.selected_obj and self.picking_mode == 'none':
             self.draw_rotation_gizmo(self.selected_obj)
             # 메쉬 치수/중심점 오버레이
             self.draw_mesh_dimensions(self.selected_obj)
@@ -1598,6 +1614,13 @@ class Viewport3D(QOpenGLWidget):
                 if axis:
                     self.save_undo_state() # 변환 시작 전 상태 저장
                     self.active_gizmo_axis = axis
+                    
+                    # 캐시 매트릭스 저장 (성능 최적화)
+                    self.makeCurrent()
+                    self._cached_viewport = glGetIntegerv(GL_VIEWPORT)
+                    self._cached_modelview = glGetDoublev(GL_MODELVIEW_MATRIX)
+                    self._cached_projection = glGetDoublev(GL_PROJECTION_MATRIX)
+                    
                     angle = self._calculate_gizmo_angle(event.pos().x(), event.pos().y())
                     if angle is not None:
                         self.gizmo_drag_start = angle
@@ -1616,15 +1639,18 @@ class Viewport3D(QOpenGLWidget):
                 elif self.picking_mode == 'floor_3point':
                     point = self.pick_point_on_mesh(event.pos().x(), event.pos().y())
                     if point is not None:
+                        # 로컬 좌표로 변환하여 전달 (작업 도중 객체가 움직여도 점이 붙어있게 함)
+                        local_pt = point - self.selected_obj.translation
+                        
                         # 1. 스냅 검사 (첫 번째 점과 가까우면 확정)
                         if len(self.floor_picks) >= 3:
                             first_pt = self.floor_picks[0]
-                            dist = np.linalg.norm(point - first_pt)
+                            dist = np.linalg.norm(local_pt - first_pt)
                             if dist < 0.15: # 스냅 거리 확대 (15cm)
                                 self.floorAlignmentConfirmed.emit()
                                 return
                                 
-                        self.floorPointPicked.emit(point)
+                        self.floorPointPicked.emit(local_pt)
                         self.update()
                     return
                         
@@ -1665,6 +1691,23 @@ class Viewport3D(QOpenGLWidget):
             obj = self.selected_obj
             if obj and (modifiers & Qt.KeyboardModifier.ShiftModifier or modifiers & Qt.KeyboardModifier.ControlModifier):
                  self.save_undo_state() # 변환 시작 전 상태 저장
+                 
+                 # Ctrl+드래그(이동)를 위한 초기 깊이값 저장 (마우스가 가리키는 지점의 깊이)
+                 if modifiers & Qt.KeyboardModifier.ControlModifier:
+                     self.makeCurrent()
+                     self._cached_viewport = glGetIntegerv(GL_VIEWPORT)
+                     self._cached_modelview = glGetDoublev(GL_MODELVIEW_MATRIX)
+                     self._cached_projection = glGetDoublev(GL_PROJECTION_MATRIX)
+                     
+                     win_y = self._cached_viewport[3] - event.pos().y()
+                     depth = glReadPixels(event.pos().x(), win_y, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT)
+                     self._drag_depth = depth[0][0]
+                     
+                     # 배경을 클릭한 경우 객체 중심의 깊이 사용
+                     if self._drag_depth >= 1.0:
+                         obj_win_pos = gluProject(*obj.translation, self._cached_modelview, self._cached_projection, self._cached_viewport)
+                         if obj_win_pos:
+                             self._drag_depth = obj_win_pos[2]
                  return
             
             # 4. 휠 클릭: 포커스 이동 (Focus move)
@@ -1690,9 +1733,13 @@ class Viewport3D(QOpenGLWidget):
         self.mouse_button = None
         self.active_gizmo_axis = None
         self.gizmo_drag_start = None
-        self.gizmo_drag_start = None
         self.last_mouse_pos = None
-        self.mouse_button = None
+        
+        # 캐시 초기화
+        self._cached_viewport = None
+        self._cached_modelview = None
+        self._cached_projection = None
+        
         self.update()
     
     def mouseMoveEvent(self, event: QMouseEvent):
@@ -1702,8 +1749,10 @@ class Viewport3D(QOpenGLWidget):
                 self.last_mouse_pos = event.pos()
                 return
 
-            dx = event.pos().x() - self.last_mouse_pos.x()
-            dy = event.pos().y() - self.last_mouse_pos.y()
+            # 이전 위치 저장 및 현재 위치 갱신 (드래그 계산용)
+            prev_pos = self.last_mouse_pos
+            dx = event.pos().x() - prev_pos.x()
+            dy = event.pos().y() - prev_pos.y()
             self.last_mouse_pos = event.pos()
             
             obj = self.selected_obj
@@ -1716,8 +1765,8 @@ class Viewport3D(QOpenGLWidget):
                     current_angle = angle_info
                     delta_angle = np.degrees(current_angle - self.gizmo_drag_start)
                     
-                    # "자동차 핸들" 직관성: 카메라 시각과 회전축 사이의 방향성 고려
-                    # 축 방향과 카메라 시선 방향의 도트 곱을 통해 부호 결정
+                    # "자동차 핸들" 직관성: 마우스의 회전 방향을 메쉬 회전에 1:1 매칭
+                    # 카메라 시선과 회전축의 방향성(도트곱)을 통해 visual CW/CCW를 결정
                     view_dir = self.camera.look_at - self.camera.position
                     view_dir /= np.linalg.norm(view_dir)
                     
@@ -1726,8 +1775,9 @@ class Viewport3D(QOpenGLWidget):
                     elif self.active_gizmo_axis == 'Y': axis_vec[1] = 1.0
                     elif self.active_gizmo_axis == 'Z': axis_vec[2] = 1.0
                     
-                    # 시선이 축과 마주보고 있는지 뒤에서 보는지 판단
-                    flip = -1.0 if np.dot(view_dir, axis_vec) > 0 else 1.0
+                    # 시각적 반전 여부 결정 (핸들을 돌리는 방향과 메쉬가 도는 방향 일치)
+                    dot = np.dot(view_dir, axis_vec)
+                    flip = 1.0 if dot > 0 else -1.0
                     
                     if self.active_gizmo_axis == 'X': obj.rotation[0] += delta_angle * flip
                     elif self.active_gizmo_axis == 'Y': obj.rotation[1] += delta_angle * flip
@@ -1747,28 +1797,35 @@ class Viewport3D(QOpenGLWidget):
                     self.update()
                 return
             
-            # 3. 객체 직접 조작 (Ctrl+드래그 = 메쉬 이동, 드래그 방향 = 화면상의 이동 방향)
-            if (modifiers & Qt.KeyboardModifier.ControlModifier) and obj:
-                # 카메라 파라미터 획득
-                az_rad = np.radians(self.camera.azimuth)
-                el_rad = np.radians(self.camera.elevation)
-                move_speed = self.camera.distance * 0.001
+            # 3. 객체 직접 조작 (Ctrl+드래그 = 메쉬 이동, 마우스 커서를 정확히 따라감)
+            if (modifiers & Qt.KeyboardModifier.ControlModifier) and obj and self._cached_viewport is not None:
+                # 마우스 프레스 시 캡처된 깊이와 매트릭스 재사용 (성능 향상)
+                curr_win_y = self._cached_viewport[3] - event.pos().y()
+                prev_win_y = self._cached_viewport[3] - prev_pos.y()
                 
-                # 뷰포트 평면의 '오른쪽' 벡터 (ux, uy, uz)와 '위쪽' 벡터 (vx, vy, vz) 계산
-                # 오른쪽 벡터 (수평 드래그용)
-                ux = np.cos(az_rad)
-                uy = np.sin(az_rad)
-                uz = 0
+                curr_world = gluUnProject(event.pos().x(), curr_win_y, self._drag_depth, 
+                                          self._cached_modelview, self._cached_projection, self._cached_viewport)
+                prev_world = gluUnProject(prev_pos.x(), prev_win_y, self._drag_depth, 
+                                          self._cached_modelview, self._cached_projection, self._cached_viewport)
                 
-                # 위쪽 벡터 (수직 드래그용)
-                vx = -np.sin(el_rad) * np.sin(az_rad)
-                vy = np.sin(el_rad) * np.cos(az_rad)
-                vz = np.cos(el_rad)
-                
-                # 이동량 계산: 화면의 dx, dy를 월드 좌표계 이동으로 투영
-                obj.translation[0] += (dx * ux + dy * vx) * move_speed
-                obj.translation[1] += (dx * uy + dy * vy) * move_speed
-                obj.translation[2] += (dx * uz + dy * vz) * move_speed
+                if curr_world and prev_world:
+                    delta_world = np.array(curr_world) - np.array(prev_world)
+                    
+                    # 6개 좌표계 정렬 뷰에서는 2차원 이동 강제 (직관성 향상)
+                    el = self.camera.elevation
+                    az = self.camera.azimuth % 360
+                    
+                    if abs(el) > 85: # 상면(90) / 하면(-90)
+                        delta_world[2] = 0
+                    elif abs(el) < 5: # 정면, 후면, 좌, 우
+                        # 정면(-90/270), 후면(90) -> Y축 고정
+                        if abs(az - 90) < 5 or abs(az - 270) < 5:
+                            delta_world[1] = 0
+                        # 우측(0/360), 좌측(180) -> X축 고정
+                        elif abs(az) < 5 or abs(az - 360) < 5 or abs(az - 180) < 5:
+                            delta_world[0] = 0
+                            
+                    obj.translation += delta_world
                 
                 self.meshTransformChanged.emit()
                 self.update()
@@ -1867,10 +1924,16 @@ class Viewport3D(QOpenGLWidget):
         if not obj or not self.active_gizmo_axis: return None
         
         try:
-            self.makeCurrent()
-            viewport = glGetIntegerv(GL_VIEWPORT)
-            modelview = glGetDoublev(GL_MODELVIEW_MATRIX)
-            projection = glGetDoublev(GL_PROJECTION_MATRIX)
+            # 캐시된 매트릭스가 있으면 사용 (성능 최적화)
+            if self._cached_viewport is not None:
+                viewport = self._cached_viewport
+                modelview = self._cached_modelview
+                projection = self._cached_projection
+            else:
+                self.makeCurrent()
+                viewport = glGetIntegerv(GL_VIEWPORT)
+                modelview = glGetDoublev(GL_MODELVIEW_MATRIX)
+                projection = glGetDoublev(GL_PROJECTION_MATRIX)
             
             # 기즈모 중심(오브젝트 위치)을 화면으로 투영
             obj_pos = obj.translation
@@ -1978,6 +2041,66 @@ class Viewport3D(QOpenGLWidget):
         
         return None
 
+    def capture_high_res_image(self, width: int = 2048, height: int = 2048):
+        """고해상도 오프스크린 렌더링"""
+        self.makeCurrent()
+        
+        # 1. FBO 생성
+        fbo = QOpenGLFramebufferObject(width, height, QOpenGLFramebufferObject.Attachment.Depth)
+        fbo.bind()
+        
+        # 2. 렌더링 설정 (오프스크린용)
+        glViewport(0, 0, width, height)
+        
+        glMatrixMode(GL_PROJECTION)
+        glPushMatrix()
+        glLoadIdentity()
+        aspect = width / height
+        gluPerspective(45.0, aspect, 0.1, 1000000.0)
+        
+        glMatrixMode(GL_MODELVIEW)
+        glPushMatrix()
+        
+        # 3. 그리기 (UI 제외하고 깨끗하게)
+        glClearColor(1.0, 1.0, 1.0, 1.0) # 화이트 배경
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+        glLoadIdentity()
+        
+        self.camera.apply()
+        
+        # 광원
+        glEnable(GL_LIGHTING)
+        glLightModelfv(GL_LIGHT_MODEL_AMBIENT, [0.4, 0.4, 0.4, 1.0])
+        glLightfv(GL_LIGHT0, GL_POSITION, [0.0, 0.0, 1.0, 0.0])
+        glLightfv(GL_LIGHT0, GL_DIFFUSE, [0.6, 0.6, 0.6, 1.0])
+        
+        # 메쉬만 렌더링 (그리드나 HUD 제외)
+        for i, obj in enumerate(self.objects):
+            if not obj.visible: continue
+            self.draw_scene_object(obj, is_selected=(i == self.selected_index))
+        
+        # 4. 행렬 캡처 (SVG 투영 정렬용)
+        mv = glGetDoublev(GL_MODELVIEW_MATRIX)
+        proj = glGetDoublev(GL_PROJECTION_MATRIX)
+        vp = glGetIntegerv(GL_VIEWPORT)
+        
+        glFlush()
+        qimage = fbo.toImage()
+        
+        # 5. 복구
+        glMatrixMode(GL_PROJECTION)
+        glPopMatrix()
+        glMatrixMode(GL_MODELVIEW)
+        glPopMatrix()
+        
+        fbo.release()
+        
+        # 원래 뷰포트 복구
+        glViewport(0, 0, self.width(), self.height())
+        self.update()
+        
+        return qimage, mv, proj, vp
+        
     def pick_point_on_mesh(self, screen_x: int, screen_y: int):
         """화면 좌표를 메쉬 표면의 3D 좌표로 변환"""
         if not self.objects: return None

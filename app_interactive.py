@@ -21,6 +21,8 @@ from PyQt6.QtCore import Qt, QTimer, QSize, pyqtSignal, QThread
 from PyQt6.QtGui import QAction, QIcon, QKeySequence, QFont, QPixmap, QShortcut
 import numpy as np
 import trimesh
+from PIL import Image
+import io
 
 # Add src to path
 # Add basedir to path so 'src' package can be found
@@ -1364,7 +1366,6 @@ class MainWindow(QMainWindow):
         obj = self.viewport.selected_obj
         if not obj: return
         
-        if normal[2] < 0: normal = -normal
         target = np.array([0.0, 0.0, 1.0])
         axis = np.cross(normal, target)
         axis_norm = np.linalg.norm(axis)
@@ -1404,10 +1405,11 @@ class MainWindow(QMainWindow):
             
         count = len(self.viewport.floor_picks)
         
+        # (0/3) 같은 제한적 표현 제거
         if count < 3:
-            self.viewport.status_info = f"📍 바닥면 점 찍기 ({count}/3+ 점 필요, 첫 점 클릭 시 스냅)..."
+            self.viewport.status_info = f"📍 바닥면 점 찍기 (현재 {count}개 선택됨, 3점 이상 필요)..."
         else:
-            self.viewport.status_info = f"✅ 점 {count}개 선택됨. 첫 점을 다시 찍거나 Enter로 확정하세요."
+            self.viewport.status_info = f"✅ 점 {count}개 선택됨. 계속 추가하거나 Enter로 확정하세요."
         
         self.viewport.update()
 
@@ -1423,30 +1425,48 @@ class MainWindow(QMainWindow):
             self.viewport.update()
             return
             
-        # 1. 평면 피팅 (Least Squares using SVD)
-        # 중심점 계산
-        centroid = np.mean(points, axis=0)
-        # 중심점에서 뺀 좌표들
-        centered_points = points - centroid
-        # SVD 수행
-        _, _, vh = np.linalg.svd(centered_points)
-        normal = vh[2, :] # 법선 벡터
+        # 1. 메쉬 정치 확정 (Bake)
+        # 선택된 점들이 로컬 좌표계이므로, 현재 메쉬의 모든 변환을 정점에 미리 적용해둠
+        self.viewport.bake_object_transform(obj)
         
-        # 법선 방향 확인 (Z+ 방향을 향하도록)
-        if normal[2] < 0:
-            normal = -normal
-            
-        # 2. 정렬 수행
-        self.viewport.save_undo_state() # 정렬 전 상태 저장
+        # 2. 평면 피팅
+        centroid = np.mean(points, axis=0)
+        centered_points = points - centroid
+        _, _, vh = np.linalg.svd(centered_points)
+        normal = vh[2, :] # 초기 법선 (방향은 아직 불확실)
+        
+        # 3. 정렬 수행
+        self.viewport.save_undo_state()
         R = self.align_mesh_to_normal(normal)
         
-        # 3. 바닥 높이 맞춤 (선택된 점들의 평균 높이를 Z=0으로)
+        # 4. 상하 반전 체크 (Bulk-Height Comparison)
         if R is not None:
-            new_centroid = R @ centroid
-            obj.translation[2] = -new_centroid[2]
-            self.sync_transform_panel()
+            # 회전 후 찍은 점들의 평균 Z
+            points_rotated = (R @ points.T).T
+            avg_pick_z = np.mean(points_rotated[:, 2])
+            
+            # 회전 후 전체 메쉬의 평균 Z
+            avg_mesh_z = np.mean(obj.mesh.vertices[:, 2])
+            
+            # 메쉬 몸통(평균)이 찍은 점들보다 낮으면 upside-down 상태
+            if avg_mesh_z < avg_pick_z:
+                # 180도 추가 회전 (X축 기준)
+                R_flip = np.array([[1, 0, 0], [0, -1, 0], [0, 0, -1]])
+                obj.mesh.vertices = (R_flip @ obj.mesh.vertices.T).T
+                obj.mesh.compute_normals()
+                self.viewport.update_vbo(obj)
         
-        self.viewport.status_info = f"✨ {len(points)}개 점을 기반으로 바닥 정렬 완료"
+        # 5. 바닥 높이 맞춤 (가라앉지 않도록 Z >= 0 보장)
+        if R is not None:
+            min_z = obj.mesh.vertices[:, 2].min()
+            obj.mesh.vertices[:, 2] -= min_z
+            obj.translation[2] = 0
+            
+            self.viewport.update_vbo(obj)
+            self.sync_transform_panel()
+            self.viewport.status_info = f"✅ 바닥 정렬 완료 (점 {len(points)}개 기반 평면 보정)"
+            self.viewport.update()
+        
         self.viewport.floor_picks = []
         self.viewport.picking_mode = 'none'
         self.viewport.update()
@@ -1855,13 +1875,18 @@ class MainWindow(QMainWindow):
             return
             
         try:
-            self.status_info.setText(f"⏳ 2D 도면 추출 중 ({view})... 대형 메쉬는 시간이 걸릴 수 있습니다.")
-            QApplication.processEvents()
+            # 1. 고해상도 이미지 캡처 (300dpi급) 및 정렬용 행렬 획득
+            # 10cm 크기 기와가 1200픽셀 정도면 충분함 (2048~4096 권장)
+            qimage, mv, proj, vp = self.viewport.capture_high_res_image(width=3072, height=3072)
             
-            exporter = ProfileExporter(resolution=4096) # 고해상도
+            # QImage -> PIL Image 변환
+            buffer = io.BytesIO()
+            qimage.save(buffer, "PNG")
+            pil_img = Image.open(buffer)
             
-            # 메쉬의 현재 월드 변환 상태 전달
-            # 주의: ProfileExporter는 메쉬 원본을 받아 변환을 적용하여 투영함
+            # 2. 프로파일 추출 및 SVG 내보내기
+            exporter = ProfileExporter(resolution=2048) # 추출 해상도
+            
             result_path = exporter.export_profile(
                 obj.mesh,
                 view=view,
@@ -1870,7 +1895,9 @@ class MainWindow(QMainWindow):
                 rotation=obj.rotation,
                 scale=obj.scale,
                 grid_spacing=1.0, # 1cm 격자
-                include_grid=True
+                include_grid=True,
+                viewport_image=pil_img,
+                opengl_matrices=(mv, proj, vp) # 정밀 정렬을 위한 행렬 전달
             )
             
             QMessageBox.information(self, "완료", f"2D 도면이 저장되었습니다:\n{result_path}")
