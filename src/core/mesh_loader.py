@@ -53,7 +53,7 @@ class MeshData:
         if self.normals is not None:
             self.normals = np.asarray(self.normals, dtype=np.float64)
         if self.face_normals is not None:
-            self.face_normals = np.asarray(self.face_normals, dtype=np.float64)
+            self.face_normals = np.asarray(self.face_normals, dtype=np.float32)
         if self.uv_coords is not None:
             self.uv_coords = np.asarray(self.uv_coords, dtype=np.float64)
     
@@ -128,8 +128,12 @@ class MeshData:
         """텍스처 존재 여부"""
         return self.texture is not None and self.uv_coords is not None
     
-    def compute_normals(self) -> None:
+    def compute_normals(self, *, compute_vertex_normals: bool = True, force: bool = False) -> None:
         """법선 벡터 계산 (없는 경우)"""
+        if force:
+            self.face_normals = None
+            self.normals = None
+
         if self.face_normals is None:
             v0 = self.vertices[self.faces[:, 0]]
             v1 = self.vertices[self.faces[:, 1]]
@@ -138,9 +142,9 @@ class MeshData:
             cross = np.cross(v1 - v0, v2 - v0)
             norms = np.linalg.norm(cross, axis=1, keepdims=True)
             norms[norms == 0] = 1  # 0으로 나누기 방지
-            self.face_normals = cross / norms
+            self.face_normals = (cross / norms).astype(np.float32, copy=False)
         
-        if self.normals is None:
+        if compute_vertex_normals and self.normals is None:
             # 정점 법선 = 인접 면 법선의 평균
             self.normals = np.zeros_like(self.vertices, dtype=np.float64)
             faces = self.faces
@@ -317,8 +321,10 @@ class MeshData:
         return cls(
             vertices=mesh.vertices,
             faces=mesh.faces,
-            normals=mesh.vertex_normals if len(mesh.vertex_normals) > 0 else None,
-            face_normals=mesh.face_normals if len(mesh.face_normals) > 0 else None,
+            # NOTE: huge mesh(특히 STL)에서 vertex_normals 계산이 로딩 시간을 크게 증가시킵니다.
+            #       기본은 skip하고, 필요할 때 compute_normals()로 생성합니다.
+            normals=None,
+            face_normals=None,
             uv_coords=uv_coords,
             texture=texture,
             unit=unit,
@@ -453,7 +459,8 @@ class MeshLoader:
         mesh_data = MeshData.from_trimesh(mesh, filepath=filepath, unit=unit)
         
         # 법선 계산 (없는 경우)
-        mesh_data.compute_normals()
+        # 로딩 시점에는 face normals만 계산 (vertex normals는 필요 시점에 계산)
+        mesh_data.compute_normals(compute_vertex_normals=False)
         
         return mesh_data
     

@@ -213,18 +213,47 @@ class ProfileExporter:
         if opengl_matrices:
             mv, proj, vp = opengl_matrices
             # 1. 월드 변환 적용
-            vertices = mesh.vertices.copy() * scale
+            # 얼굴(삼각형) 샘플링을 먼저 해서 필요한 정점만 변환/투영 (대형 메쉬 성능)
+            faces = getattr(mesh, "faces", None)
+            if faces is None:
+                faces = []
+            faces = np.asarray(faces, dtype=np.int32)
+
+            if len(faces) > self.MAX_FACES_FOR_RASTERIZE:
+                step = max(1, int(len(faces) // self.MAX_FACES_FOR_RASTERIZE))
+                faces = faces[::step]
+                if len(faces) > self.MAX_FACES_FOR_RASTERIZE:
+                    faces = faces[: self.MAX_FACES_FOR_RASTERIZE]
+
+            if faces.size == 0:
+                bounds = {
+                    'min': np.array([0, 0]),
+                    'max': np.array([vp[2] / 100.0, vp[3] / 100.0]),
+                    'size': np.array([vp[2] / 100.0, vp[3] / 100.0]),
+                    'px_per_cm': 100.0,
+                    'is_pixels': True,
+                    'vp_size': (vp[2], vp[3]),
+                    'matrices': (mv, proj, vp),
+                    'world_bounds': np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]], dtype=np.float64),
+                }
+                return [], bounds
+
+            unique_idx = np.unique(faces.reshape(-1))
+            faces = np.searchsorted(unique_idx, faces).astype(np.int32, copy=False)
+
+            vertices = np.asarray(mesh.vertices[unique_idx], dtype=np.float64) * float(scale)
             if rotation is not None:
                 from scipy.spatial.transform import Rotation as R
                 r = R.from_euler('xyz', rotation, degrees=True)
                 vertices = r.apply(vertices)
             if translation is not None:
-                vertices += translation
+                vertices = vertices + translation
             
             # 2. OpenGL 정사영 (Screen Space)
             # Clip Space = P * M * V
             v_homo = np.hstack([vertices, np.ones((len(vertices), 1))])
-            v_clip = v_homo @ (mv @ proj) # (N, 4)
+            mvp = mv @ proj
+            v_clip = v_homo @ mvp # (N, 4)
             # NDC
             v_ndc = v_clip[:, :3] / v_clip[:, 3:]
             # Screen
@@ -240,23 +269,57 @@ class ProfileExporter:
             
             # 4. 월드 스케일 계산 (SVG cm 단위를 위해)
             # 중심점에서 ±1cm 거리에 있는 점들을 투영해서 픽셀 거리 측정
-            center_world = vertices.mean(axis=0)
-            p1 = center_world.copy(); p1[0] += 1.0
             def project_pt(p):
                 vh = np.append(p, 1.0)
-                vc = vh @ (mv @ proj)
+                vc = vh @ mvp
+                if abs(float(vc[3])) < 1e-12:
+                    return np.array([0.0, 0.0], dtype=np.float64)
                 vn = vc[:3] / vc[3]
-                return np.array([(vn[0]+1)/2 * vp[2], vp[3] - (vn[1]+1)/2 * vp[3]])
-            
-            px_per_cm = np.linalg.norm(project_pt(center_world) - project_pt(p1))
-            if px_per_cm < 1e-6: px_per_cm = 100.0 # Fallback
+                return np.array([(vn[0] + 1) / 2 * vp[2], vp[3] - (vn[1] + 1) / 2 * vp[3]])
+
+            # world bounds는 전체 정점 변환 없이 bounds corner 8개만 변환해서 계산
+            try:
+                lb = np.asarray(mesh.bounds, dtype=np.float64)
+                corners = np.array(
+                    [
+                        [lb[0, 0], lb[0, 1], lb[0, 2]],
+                        [lb[1, 0], lb[0, 1], lb[0, 2]],
+                        [lb[0, 0], lb[1, 1], lb[0, 2]],
+                        [lb[1, 0], lb[1, 1], lb[0, 2]],
+                        [lb[0, 0], lb[0, 1], lb[1, 2]],
+                        [lb[1, 0], lb[0, 1], lb[1, 2]],
+                        [lb[0, 0], lb[1, 1], lb[1, 2]],
+                        [lb[1, 0], lb[1, 1], lb[1, 2]],
+                    ],
+                    dtype=np.float64,
+                )
+                corners = corners * float(scale)
+                if rotation is not None:
+                    from scipy.spatial.transform import Rotation as R
+                    r = R.from_euler('xyz', rotation, degrees=True)
+                    corners = r.apply(corners)
+                if translation is not None:
+                    corners = corners + translation
+
+                w_min = corners.min(axis=0)
+                w_max = corners.max(axis=0)
+            except Exception:
+                w_min = vertices.min(axis=0)
+                w_max = vertices.max(axis=0)
+
+            center_world = (w_min + w_max) / 2.0
+            axis = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+            if view in {"left", "right"}:
+                axis = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+            p1 = center_world + axis
+
+            px_per_cm = float(np.linalg.norm(project_pt(center_world) - project_pt(p1)))
+            if px_per_cm < 1e-6:
+                px_per_cm = 100.0 # Fallback
             
             # 5. 이미 렌더링된 이미지가 있으므로 래스터화는 외곽선 추출용으로만 사용
             grid_w, grid_h = vp[2], vp[3]
             occupancy = np.zeros((grid_h, grid_w), dtype=np.uint8)
-            faces = getattr(mesh, "faces", None)
-            if faces is None:
-                faces = []
             faces = np.asarray(faces, dtype=np.int32)
 
             # 대용량 메쉬는 모든 면을 채우면 매우 느림 -> stride 샘플링
@@ -290,6 +353,7 @@ class ProfileExporter:
                 'is_pixels': True, 
                 'vp_size': (vp[2], vp[3]),
                 'matrices': (mv, proj, vp),
+                'world_bounds': np.array([w_min, w_max], dtype=np.float64),
                 'vertices_world': vertices # 그리드 범위 계산용
             }
             return contours, bounds
@@ -390,8 +454,15 @@ class ProfileExporter:
                 return (vn[0]+1)/2 * img_w, img_h - (vn[1]+1)/2 * img_h
 
             # 가시 범위 계산 (메쉬 주변)
-            v_world = bounds['vertices_world']
-            w_min, w_max = v_world.min(axis=0), v_world.max(axis=0)
+            if 'world_bounds' in bounds:
+                wb = np.asarray(bounds['world_bounds'], dtype=np.float64)
+                if wb.shape == (2, 3):
+                    w_min, w_max = wb[0], wb[1]
+                else:
+                    w_min, w_max = wb.min(axis=0), wb.max(axis=0)
+            else:
+                v_world = bounds['vertices_world']
+                w_min, w_max = v_world.min(axis=0), v_world.max(axis=0)
             pad = 20.0 # 20cm 여유
             
             # 세로선 (X축)

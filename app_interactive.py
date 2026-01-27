@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (
     QSlider, QSpinBox, QStatusBar, QToolBar, QSplitter, QFrame,
     QMessageBox, QTabWidget, QTextEdit, QProgressBar, QComboBox,
     QCheckBox, QScrollArea, QSizePolicy, QButtonGroup, QDialog,
-    QGridLayout
+    QGridLayout, QProgressDialog
 )
 from PyQt6.QtCore import Qt, QTimer, QSize, pyqtSignal, QThread, QBuffer, QByteArray, QIODevice
 from PyQt6.QtCore import QSettings
@@ -38,6 +38,124 @@ from src.core.mesh_loader import MeshLoader, MeshProcessor
 from src.core.rubbing_generator import RubbingGenerator
 from src.core.profile_exporter import ProfileExporter
 from src.gui.profile_graph_widget import ProfileGraphWidget
+
+
+class MeshLoadThread(QThread):
+    loaded = pyqtSignal(object, str)
+    failed = pyqtSignal(str)
+
+    def __init__(self, filepath: str, scale_factor: float, default_unit: str):
+        super().__init__()
+        self._filepath = str(filepath)
+        self._scale_factor = float(scale_factor)
+        self._default_unit = str(default_unit)
+
+    def run(self):
+        try:
+            loader = MeshLoader(default_unit=self._default_unit)
+            mesh_data = loader.load(self._filepath)
+
+            if self._scale_factor != 1.0:
+                mesh_data.vertices *= self._scale_factor
+                mesh_data._bounds = None
+                mesh_data._centroid = None
+                mesh_data._surface_area = None
+
+            self.loaded.emit(mesh_data, self._filepath)
+        except Exception as e:
+            self.failed.emit(str(e))
+
+
+class SliceComputeThread(QThread):
+    computed = pyqtSignal(float, object)  # z_height, world_contours
+    failed = pyqtSignal(float, str)       # z_height, message
+
+    def __init__(self, mesh_data, translation, rotation, scale: float, z_height: float):
+        super().__init__()
+        self._mesh_data = mesh_data
+        self._translation = np.asarray(translation, dtype=np.float64)
+        self._rotation = np.asarray(rotation, dtype=np.float64)
+        self._scale = float(scale)
+        self._z = float(z_height)
+
+    def run(self):
+        try:
+            from src.core.mesh_slicer import MeshSlicer
+            from scipy.spatial.transform import Rotation as R
+
+            slicer = MeshSlicer(self._mesh_data.to_trimesh())
+
+            inv_rot = R.from_euler('xyz', self._rotation, degrees=True).inv().as_matrix()
+            inv_scale = 1.0 / self._scale if self._scale != 0 else 1.0
+
+            world_origin = np.array([0.0, 0.0, self._z], dtype=np.float64)
+            local_origin = inv_scale * inv_rot @ (world_origin - self._translation)
+
+            world_normal = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+            local_normal = inv_rot @ world_normal
+
+            contours_local = slicer.slice_with_plane(local_origin, local_normal)
+
+            rot_mat = R.from_euler('xyz', self._rotation, degrees=True).as_matrix()
+            world_contours = []
+            for cnt in contours_local:
+                w_cnt = (rot_mat @ (cnt * self._scale).T).T + self._translation
+                world_contours.append(w_cnt)
+
+            self.computed.emit(self._z, world_contours)
+        except Exception as e:
+            self.failed.emit(self._z, str(e))
+
+
+class ProfileExportThread(QThread):
+    done = pyqtSignal(str)
+    failed = pyqtSignal(str)
+
+    def __init__(
+        self,
+        mesh_data,
+        view: str,
+        output_path: str,
+        translation: np.ndarray,
+        rotation: np.ndarray,
+        scale: float,
+        viewport_image: Image.Image,
+        opengl_matrices: tuple,
+        resolution: int = 2048,
+        grid_spacing: float = 1.0,
+        include_grid: bool = True,
+    ):
+        super().__init__()
+        self._mesh_data = mesh_data
+        self._view = str(view)
+        self._output_path = str(output_path)
+        self._translation = np.asarray(translation, dtype=np.float64)
+        self._rotation = np.asarray(rotation, dtype=np.float64)
+        self._scale = float(scale)
+        self._viewport_image = viewport_image
+        self._opengl_matrices = opengl_matrices
+        self._resolution = int(resolution)
+        self._grid_spacing = float(grid_spacing)
+        self._include_grid = bool(include_grid)
+
+    def run(self):
+        try:
+            exporter = ProfileExporter(resolution=self._resolution)
+            result_path = exporter.export_profile(
+                self._mesh_data,
+                view=self._view,
+                output_path=self._output_path,
+                translation=self._translation,
+                rotation=self._rotation,
+                scale=self._scale,
+                grid_spacing=self._grid_spacing,
+                include_grid=self._include_grid,
+                viewport_image=self._viewport_image,
+                opengl_matrices=self._opengl_matrices,
+            )
+            self.done.emit(str(result_path))
+        except Exception as e:
+            self.failed.emit(str(e))
 
 
 def get_icon_path():
@@ -1255,6 +1373,13 @@ class MainWindow(QMainWindow):
 
         # 평면화(Flatten) 결과 캐시: (obj id + transform + options) -> FlattenedMesh
         self._flattened_cache = {}
+
+        # Slice(CT) 계산은 디바운스 + 백그라운드 스레드로 처리 (UI 끊김 방지)
+        self._slice_debounce_timer = QTimer(self)
+        self._slice_debounce_timer.setSingleShot(True)
+        self._slice_debounce_timer.timeout.connect(self._request_slice_compute)
+        self._slice_compute_thread = None
+        self._slice_pending_height = None
         
         self.init_ui()
         self.init_menu()
@@ -1595,7 +1720,8 @@ class MainWindow(QMainWindow):
                 obj.mesh._surface_area = None
             except Exception:
                 pass
-            obj.mesh.compute_normals()
+            obj.mesh.compute_normals(compute_vertex_normals=False, force=True)
+            obj._trimesh = None
             obj.rotation = np.array([0.0, 0.0, 0.0])
             self.viewport.update_vbo(obj)
             self.sync_transform_panel()
@@ -1676,7 +1802,8 @@ class MainWindow(QMainWindow):
                     obj.mesh._surface_area = None
                 except Exception:
                     pass
-                obj.mesh.compute_normals()
+                obj.mesh.compute_normals(compute_vertex_normals=False, force=True)
+                obj._trimesh = None
                 self.viewport.update_vbo(obj)
         
         # 5. 바닥 높이 맞춤 (가라앉지 않도록 Z >= 0 보장)
@@ -1688,6 +1815,7 @@ class MainWindow(QMainWindow):
                 obj.mesh._centroid = None
             except Exception:
                 pass
+            obj._trimesh = None
             obj.translation[2] = 0
 
             self.viewport.update_vbo(obj)
@@ -1911,6 +2039,9 @@ class MainWindow(QMainWindow):
                 self.load_mesh(filepath, scale_factor)
     
     def load_mesh(self, filepath: str, scale_factor: float = 1.0):
+        self._start_async_load(filepath, scale_factor)
+        return
+
         try:
             self.status_info.setText(f"⏳ 로딩 중: {Path(filepath).name}")
             self.status_mesh.setText("")
@@ -1942,6 +2073,104 @@ class MainWindow(QMainWindow):
             self.status_info.setText("❌ 로드 실패")
             self.status_mesh.setText("")
     
+    def _start_async_load(self, filepath: str, scale_factor: float):
+        thread = getattr(self, "_mesh_load_thread", None)
+        if thread is not None and thread.isRunning():
+            QMessageBox.information(self, "로딩 중", "이미 다른 메쉬를 로딩 중입니다.")
+            return
+
+        name = Path(filepath).name
+        self.status_info.setText(f"로딩 중: {name}")
+        self.status_mesh.setText("")
+
+        dlg = QProgressDialog(f"메쉬 로딩 중: {name}", None, 0, 0, self)
+        dlg.setWindowTitle("로딩")
+        dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
+        dlg.setCancelButton(None)
+        dlg.setMinimumDuration(0)
+        dlg.show()
+        self._mesh_load_dialog = dlg
+
+        self._mesh_load_thread = MeshLoadThread(
+            filepath=str(filepath),
+            scale_factor=float(scale_factor),
+            default_unit=str(getattr(self.mesh_loader, "default_unit", "cm")),
+        )
+        self._mesh_load_thread.loaded.connect(self._on_mesh_load_thread_loaded)
+        self._mesh_load_thread.failed.connect(self._on_mesh_load_thread_failed)
+        self._mesh_load_thread.finished.connect(self._on_mesh_load_thread_finished)
+        self._mesh_load_thread.start()
+
+    def _on_mesh_load_thread_loaded(self, mesh_data, filepath: str):
+        try:
+            dlg = getattr(self, "_mesh_load_dialog", None)
+            if dlg is not None:
+                dlg.setLabelText("장면에 추가하는 중...")
+                QApplication.processEvents()
+
+            self.current_mesh = mesh_data
+            self.current_filepath = filepath
+
+            self.viewport.add_mesh_object(mesh_data, name=Path(filepath).name)
+
+            self.status_info.setText(f"로드됨: {Path(filepath).name}")
+            self.status_mesh.setText(f"V: {mesh_data.n_vertices:,} | F: {mesh_data.n_faces:,}")
+            self.status_grid.setText(f"격자: {self.viewport.grid_spacing}cm")
+        finally:
+            dlg = getattr(self, "_mesh_load_dialog", None)
+            if dlg is not None:
+                dlg.close()
+                self._mesh_load_dialog = None
+
+    def _on_mesh_load_thread_failed(self, message: str):
+        dlg = getattr(self, "_mesh_load_dialog", None)
+        if dlg is not None:
+            dlg.close()
+            self._mesh_load_dialog = None
+
+        QMessageBox.critical(self, "오류", f"파일 로드 실패:\n{message}")
+        self.status_info.setText("로드 실패")
+        self.status_mesh.setText("")
+
+    def _on_mesh_load_thread_finished(self):
+        thread = getattr(self, "_mesh_load_thread", None)
+        if thread is not None:
+            try:
+                thread.deleteLater()
+            except Exception:
+                pass
+        self._mesh_load_thread = None
+
+    def _on_profile_export_done(self, result_path: str):
+        dlg = getattr(self, "_profile_export_dialog", None)
+        if dlg is not None:
+            dlg.close()
+            self._profile_export_dialog = None
+
+        QMessageBox.information(self, "완료", f"2D 도면(SVG)이 저장되었습니다:\n{result_path}")
+        try:
+            self.status_info.setText(f"내보내기 완료: {Path(result_path).name}")
+        except Exception:
+            self.status_info.setText("내보내기 완료")
+
+    def _on_profile_export_failed(self, message: str):
+        dlg = getattr(self, "_profile_export_dialog", None)
+        if dlg is not None:
+            dlg.close()
+            self._profile_export_dialog = None
+
+        self.status_info.setText("내보내기 실패")
+        QMessageBox.critical(self, "오류", f"2D 도면(SVG) 내보내기 실패:\n{message}")
+
+    def _on_profile_export_finished(self):
+        thread = getattr(self, "_profile_export_thread", None)
+        if thread is not None:
+            try:
+                thread.deleteLater()
+            except Exception:
+                pass
+        self._profile_export_thread = None
+
     def on_mesh_loaded(self, mesh):
         self.scene_panel.update_list(self.viewport.objects, self.viewport.selected_index)
         self.props_panel.update_mesh_info(mesh, self.current_filepath)
@@ -2429,6 +2658,39 @@ class MainWindow(QMainWindow):
             # 2. 프로파일 추출 및 SVG 내보내기
             exporter = ProfileExporter(resolution=2048) # 추출 해상도
 
+            running = getattr(self, "_profile_export_thread", None)
+            if running is not None and running.isRunning():
+                QMessageBox.information(self, "내보내기", "이미 내보내기 작업이 진행 중입니다.")
+                return
+
+            dlg = QProgressDialog("2D 도면(SVG) 내보내는 중...", None, 0, 0, self)
+            dlg.setWindowTitle("내보내기")
+            dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
+            dlg.setCancelButton(None)
+            dlg.setMinimumDuration(0)
+            dlg.show()
+            self._profile_export_dialog = dlg
+
+            self._profile_export_thread = ProfileExportThread(
+                mesh_data=obj.mesh,
+                view=view,
+                output_path=filepath,
+                translation=obj.translation.copy(),
+                rotation=obj.rotation.copy(),
+                scale=float(obj.scale),
+                viewport_image=pil_img,
+                opengl_matrices=(mv, proj, vp),
+                resolution=2048,
+                grid_spacing=1.0,
+                include_grid=True,
+            )
+            self._profile_export_thread.done.connect(self._on_profile_export_done)
+            self._profile_export_thread.failed.connect(self._on_profile_export_failed)
+            self._profile_export_thread.finished.connect(self._on_profile_export_finished)
+            self._profile_export_thread.start()
+            self.status_info.setText(f"내보내기 시작: {Path(filepath).name}")
+            return
+
             result_path = exporter.export_profile(
                 obj.mesh,
                 view=view,
@@ -2500,7 +2762,8 @@ class MainWindow(QMainWindow):
             pass
         
         # 법선 다시 계산
-        obj.mesh.compute_normals()
+        obj.mesh.compute_normals(compute_vertex_normals=False, force=True)
+        obj._trimesh = None
         
         # 중심을 원점으로 이동
         centroid = obj.mesh.vertices.mean(axis=0)
@@ -2679,7 +2942,7 @@ class MainWindow(QMainWindow):
         self.viewport.crosshair_enabled = enabled
         if enabled:
             self.viewport.picking_mode = 'crosshair'
-            self.viewport.update_crosshair_profile()
+            self.viewport.schedule_crosshair_profile_update(0)
         else:
             if self.viewport.picking_mode == 'crosshair':
                 self.viewport.picking_mode = 'none'
@@ -2718,14 +2981,96 @@ class MainWindow(QMainWindow):
             self.viewport.clear_line_section()
         self.viewport.update()
 
+    def _request_slice_compute(self):
+        if not getattr(self.viewport, "slice_enabled", False):
+            return
+
+        obj = self.viewport.selected_obj
+        if obj is None or obj.mesh is None:
+            self.viewport.slice_contours = []
+            self.viewport.update()
+            return
+
+        height = float(self._slice_pending_height) if self._slice_pending_height is not None else float(self.viewport.slice_z)
+
+        thread = getattr(self, "_slice_compute_thread", None)
+        if thread is not None and thread.isRunning():
+            # 이미 계산 중이면 최신 요청만 기억해두고 종료 후 재요청
+            self._slice_pending_height = height
+            return
+
+        # 지금 값으로 계산 시작
+        self._slice_pending_height = None
+        self._slice_compute_thread = SliceComputeThread(
+            mesh_data=obj.mesh,
+            translation=obj.translation.copy(),
+            rotation=obj.rotation.copy(),
+            scale=float(obj.scale),
+            z_height=height,
+        )
+        self._slice_compute_thread.computed.connect(self._on_slice_computed)
+        self._slice_compute_thread.failed.connect(self._on_slice_compute_failed)
+        self._slice_compute_thread.finished.connect(self._on_slice_compute_finished)
+        self._slice_compute_thread.start()
+
+    def _on_slice_computed(self, z_height: float, contours):
+        if not getattr(self.viewport, "slice_enabled", False):
+            return
+
+        # 사용자가 높이를 바꿨으면(또는 pending이 있으면) 오래된 결과는 버림
+        if self._slice_pending_height is not None:
+            return
+        if not np.isclose(float(self.viewport.slice_z), float(z_height), atol=1e-6):
+            return
+
+        self.viewport.slice_contours = contours or []
+        self.viewport.update()
+
+    def _on_slice_compute_failed(self, z_height: float, message: str):
+        if not getattr(self.viewport, "slice_enabled", False):
+            return
+        self.viewport.slice_contours = []
+        self.viewport.update()
+        # 너무 잦은 팝업 방지: 상태바에만 표시
+        try:
+            self.status_info.setText(f"단면 계산 실패 (Z={float(z_height):.2f}cm): {message}")
+        except Exception:
+            pass
+
+    def _on_slice_compute_finished(self):
+        thread = getattr(self, "_slice_compute_thread", None)
+        if thread is not None:
+            try:
+                thread.deleteLater()
+            except Exception:
+                pass
+        self._slice_compute_thread = None
+
+        if getattr(self.viewport, "slice_enabled", False) and self._slice_pending_height is not None:
+            # 다음 요청이 대기 중이면 바로 처리
+            self._slice_debounce_timer.start(1)
+
     def on_slice_changed(self, enabled, height):
         """단면 슬라이싱 상태/높이 변경 핸들러"""
         self.viewport.slice_enabled = enabled
-        self.viewport.slice_z = height
+        self.viewport.slice_z = float(height)
+
         if enabled:
-            self.viewport.update_slice()
-        else:
+            # plane은 즉시 갱신, 실제 단면 계산은 디바운스 + 스레드
+            self.viewport.slice_contours = []
             self.viewport.update()
+
+            self._slice_pending_height = float(height)
+            self._slice_debounce_timer.start(150)
+            return
+
+        self._slice_pending_height = None
+        try:
+            self._slice_debounce_timer.stop()
+        except Exception:
+            pass
+        self.viewport.slice_contours = []
+        self.viewport.update()
 
     def on_slice_export_requested(self, height):
         """단면 SVG 내보내기 핸들러"""

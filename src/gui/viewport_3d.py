@@ -9,7 +9,7 @@ import numpy as np
 from typing import Optional, Tuple
 
 from PyQt6.QtWidgets import QWidget, QApplication
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QSize
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QSize, QThread
 from PyQt6.QtGui import QMouseEvent, QWheelEvent, QPainter, QColor, QImage
 from PyQt6.QtOpenGLWidgets import QOpenGLWidget
 from PyQt6.QtOpenGL import QOpenGLFramebufferObject
@@ -20,6 +20,173 @@ import ctypes
 
 from ..core.mesh_loader import MeshData
 from ..core.mesh_slicer import MeshSlicer
+
+
+class _CrosshairProfileThread(QThread):
+    computed = pyqtSignal(object)  # {"cx","cy","x_profile","y_profile","world_x","world_y"}
+    failed = pyqtSignal(str)
+
+    def __init__(self, mesh: MeshData, translation: np.ndarray, rotation_deg: np.ndarray, scale: float, cx: float, cy: float):
+        super().__init__()
+        self._mesh = mesh
+        self._translation = np.asarray(translation, dtype=np.float64)
+        self._rotation = np.asarray(rotation_deg, dtype=np.float64)
+        self._scale = float(scale)
+        self._cx = float(cx)
+        self._cy = float(cy)
+
+    def run(self):
+        try:
+            from scipy.spatial.transform import Rotation as R
+
+            obj = self._mesh.to_trimesh()
+            slicer = MeshSlicer(obj)
+
+            inv_rot = R.from_euler('xyz', self._rotation, degrees=True).inv().as_matrix()
+            inv_scale = 1.0 / self._scale if self._scale != 0 else 1.0
+
+            def world_to_local(pt_world: np.ndarray) -> np.ndarray:
+                return inv_scale * (inv_rot @ (pt_world - self._translation))
+
+            rot_mat = R.from_euler('xyz', self._rotation, degrees=True).as_matrix()
+
+            def local_to_world(pts_local: np.ndarray) -> np.ndarray:
+                return (rot_mat @ (pts_local * self._scale).T).T + self._translation
+
+            # Plane X-profile (Y = cy): origin can be any point on plane
+            w_orig_x = np.array([0.0, self._cy, 0.0], dtype=np.float64)
+            w_norm_x = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+            l_orig_x = world_to_local(w_orig_x)
+            l_norm_x = inv_rot @ w_norm_x
+
+            # Plane Y-profile (X = cx)
+            w_orig_y = np.array([self._cx, 0.0, 0.0], dtype=np.float64)
+            w_norm_y = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+            l_orig_y = world_to_local(w_orig_y)
+            l_norm_y = inv_rot @ w_norm_y
+
+            contours_x = slicer.slice_with_plane(l_orig_x, l_norm_x)
+            contours_y = slicer.slice_with_plane(l_orig_y, l_norm_y)
+
+            x_profile = []
+            y_profile = []
+            world_x = np.zeros((0, 3), dtype=np.float64)
+            world_y = np.zeros((0, 3), dtype=np.float64)
+
+            if contours_x:
+                pts_local = np.vstack(contours_x)
+                pts_world = local_to_world(pts_local)
+                order = np.argsort(pts_world[:, 0])
+                world_x = pts_world[order]
+                x_profile = world_x[:, [0, 2]].tolist()
+
+            if contours_y:
+                pts_local = np.vstack(contours_y)
+                pts_world = local_to_world(pts_local)
+                order = np.argsort(pts_world[:, 1])
+                world_y = pts_world[order]
+                y_profile = world_y[:, [1, 2]].tolist()
+
+            self.computed.emit(
+                {
+                    "cx": self._cx,
+                    "cy": self._cy,
+                    "x_profile": x_profile,
+                    "y_profile": y_profile,
+                    "world_x": world_x,
+                    "world_y": world_y,
+                }
+            )
+        except Exception as e:
+            self.failed.emit(str(e))
+
+
+class _LineSectionProfileThread(QThread):
+    computed = pyqtSignal(object)  # {"p0","p1","profile","contours"}
+    failed = pyqtSignal(str)
+
+    def __init__(self, mesh: MeshData, translation: np.ndarray, rotation_deg: np.ndarray, scale: float, p0: np.ndarray, p1: np.ndarray):
+        super().__init__()
+        self._mesh = mesh
+        self._translation = np.asarray(translation, dtype=np.float64)
+        self._rotation = np.asarray(rotation_deg, dtype=np.float64)
+        self._scale = float(scale)
+        self._p0 = np.asarray(p0, dtype=np.float64)
+        self._p1 = np.asarray(p1, dtype=np.float64)
+
+    def run(self):
+        try:
+            from scipy.spatial.transform import Rotation as R
+
+            p0 = self._p0
+            p1 = self._p1
+
+            d = p1 - p0
+            d[2] = 0.0
+            length = float(np.linalg.norm(d))
+            if length < 1e-6:
+                self.computed.emit({"p0": p0, "p1": p1, "profile": [], "contours": []})
+                return
+
+            d_unit = d / length
+            world_normal = np.array([d_unit[1], -d_unit[0], 0.0], dtype=np.float64)
+            world_origin = p0
+
+            inv_rot = R.from_euler('xyz', self._rotation, degrees=True).inv().as_matrix()
+            inv_scale = 1.0 / self._scale if self._scale != 0 else 1.0
+            local_origin = inv_scale * inv_rot @ (world_origin - self._translation)
+            local_normal = inv_rot @ world_normal
+
+            slicer = MeshSlicer(self._mesh.to_trimesh())
+            contours_local = slicer.slice_with_plane(local_origin, local_normal)
+
+            rot_mat = R.from_euler('xyz', self._rotation, degrees=True).as_matrix()
+            trans = self._translation
+            scale = self._scale
+
+            world_contours = []
+            for cnt in contours_local:
+                world_contours.append((rot_mat @ (cnt * scale).T).T + trans)
+
+            best_profile = []
+            best_span = 0.0
+
+            margin = max(length * 0.02, 0.2)
+            t_min = -margin
+            t_max = length + margin
+
+            for cnt in world_contours:
+                if cnt is None or len(cnt) < 2:
+                    continue
+                t = (cnt - p0) @ d_unit
+                mask = (t >= t_min) & (t <= t_max)
+                if int(mask.sum()) < 2:
+                    continue
+
+                t_f = t[mask]
+                z_f = cnt[mask, 2]
+                span = float(t_f.max() - t_f.min())
+                if span <= best_span:
+                    continue
+
+                order = np.argsort(t_f)
+                t_sorted = t_f[order]
+                z_sorted = z_f[order]
+                t_sorted = t_sorted - float(t_sorted.min())
+
+                best_profile = list(zip(t_sorted.tolist(), z_sorted.tolist()))
+                best_span = span
+
+            self.computed.emit(
+                {
+                    "p0": p0,
+                    "p1": p1,
+                    "profile": best_profile,
+                    "contours": world_contours,
+                }
+            )
+        except Exception as e:
+            self.failed.emit(str(e))
 
 
 class TrackballCamera:
@@ -340,6 +507,11 @@ class Viewport3D(QOpenGLWidget):
         self.x_profile = [] # X축 단면 데이터 [(dist, z), ...]
         self.y_profile = [] # Y축 단면 데이터 [(dist, z), ...]
         self._crosshair_last_update = 0.0
+        self._crosshair_profile_thread = None
+        self._crosshair_pending_pos = None
+        self._crosshair_profile_timer = QTimer(self)
+        self._crosshair_profile_timer.setSingleShot(True)
+        self._crosshair_profile_timer.timeout.connect(self._request_crosshair_profile_compute)
         
         # 2D ROI (Region of Interest)
         self.roi_enabled = False
@@ -354,6 +526,11 @@ class Viewport3D(QOpenGLWidget):
         self.line_profile = []          # [(dist, z), ...]
         self.line_section_contours = [] # world-space contours
         self._line_section_last_update = 0.0
+        self._line_profile_thread = None
+        self._line_pending_segment = None
+        self._line_profile_timer = QTimer(self)
+        self._line_profile_timer.setSingleShot(True)
+        self._line_profile_timer.timeout.connect(self._request_line_profile_compute)
 
         # Floor penetration highlight (z < 0)
         self.floor_penetration_highlight = True
@@ -827,6 +1004,189 @@ class Viewport3D(QOpenGLWidget):
 
         glLineWidth(1.0)
         glEnable(GL_LIGHTING)
+
+    def schedule_crosshair_profile_update(self, delay_ms: int = 120):
+        if not self.crosshair_enabled:
+            return
+        self._crosshair_pending_pos = np.array(self.crosshair_pos, dtype=np.float64)
+        self._crosshair_profile_timer.start(max(0, int(delay_ms)))
+
+    def _request_crosshair_profile_compute(self):
+        if not self.crosshair_enabled:
+            return
+
+        obj = self.selected_obj
+        if obj is None or obj.mesh is None:
+            self.x_profile = []
+            self.y_profile = []
+            self._world_x_profile = []
+            self._world_y_profile = []
+            self.profileUpdated.emit([], [])
+            self.update()
+            return
+
+        thread = getattr(self, "_crosshair_profile_thread", None)
+        if thread is not None and thread.isRunning():
+            return
+
+        pos = self._crosshair_pending_pos
+        if pos is None:
+            pos = np.array(self.crosshair_pos, dtype=np.float64)
+        self._crosshair_pending_pos = None
+
+        self._crosshair_profile_thread = _CrosshairProfileThread(
+            obj.mesh,
+            obj.translation.copy(),
+            obj.rotation.copy(),
+            float(obj.scale),
+            float(pos[0]),
+            float(pos[1]),
+        )
+        self._crosshair_profile_thread.computed.connect(self._on_crosshair_profile_computed)
+        self._crosshair_profile_thread.failed.connect(self._on_crosshair_profile_failed)
+        self._crosshair_profile_thread.finished.connect(self._on_crosshair_profile_finished)
+        self._crosshair_profile_thread.start()
+
+    def _on_crosshair_profile_computed(self, result: dict):
+        if not self.crosshair_enabled:
+            return
+        if self._crosshair_pending_pos is not None:
+            return
+
+        cx = float(result.get("cx", 0.0))
+        cy = float(result.get("cy", 0.0))
+        if not np.allclose(np.asarray(self.crosshair_pos, dtype=np.float64), [cx, cy], atol=1e-6):
+            return
+
+        self.x_profile = result.get("x_profile", []) or []
+        self.y_profile = result.get("y_profile", []) or []
+        world_x = result.get("world_x", None)
+        world_y = result.get("world_y", None)
+        self._world_x_profile = world_x if world_x is not None else []
+        self._world_y_profile = world_y if world_y is not None else []
+
+        self.profileUpdated.emit(self.x_profile, self.y_profile)
+        self.update()
+
+    def _on_crosshair_profile_failed(self, message: str):
+        self.x_profile = []
+        self.y_profile = []
+        self._world_x_profile = []
+        self._world_y_profile = []
+        try:
+            self.profileUpdated.emit([], [])
+        except Exception:
+            pass
+        self.update()
+
+    def _on_crosshair_profile_finished(self):
+        thread = getattr(self, "_crosshair_profile_thread", None)
+        if thread is not None:
+            try:
+                thread.deleteLater()
+            except Exception:
+                pass
+        self._crosshair_profile_thread = None
+
+        if self.crosshair_enabled and self._crosshair_pending_pos is not None:
+            self._crosshair_profile_timer.start(1)
+
+    def schedule_line_profile_update(self, delay_ms: int = 120):
+        if not getattr(self, "line_section_enabled", False):
+            return
+        if self.line_section_start is None or self.line_section_end is None:
+            return
+        self._line_pending_segment = (
+            np.array(self.line_section_start, dtype=np.float64),
+            np.array(self.line_section_end, dtype=np.float64),
+        )
+        self._line_profile_timer.start(max(0, int(delay_ms)))
+
+    def _request_line_profile_compute(self):
+        if not getattr(self, "line_section_enabled", False):
+            return
+
+        obj = self.selected_obj
+        if obj is None or obj.mesh is None:
+            self.line_profile = []
+            self.line_section_contours = []
+            try:
+                self.lineProfileUpdated.emit([])
+            except Exception:
+                pass
+            self.update()
+            return
+
+        thread = getattr(self, "_line_profile_thread", None)
+        if thread is not None and thread.isRunning():
+            return
+
+        segment = self._line_pending_segment
+        if segment is None:
+            if self.line_section_start is None or self.line_section_end is None:
+                return
+            segment = (
+                np.array(self.line_section_start, dtype=np.float64),
+                np.array(self.line_section_end, dtype=np.float64),
+            )
+        self._line_pending_segment = None
+
+        p0, p1 = segment
+        self._line_profile_thread = _LineSectionProfileThread(
+            obj.mesh,
+            obj.translation.copy(),
+            obj.rotation.copy(),
+            float(obj.scale),
+            p0,
+            p1,
+        )
+        self._line_profile_thread.computed.connect(self._on_line_profile_computed)
+        self._line_profile_thread.failed.connect(self._on_line_profile_failed)
+        self._line_profile_thread.finished.connect(self._on_line_profile_finished)
+        self._line_profile_thread.start()
+
+    def _on_line_profile_computed(self, result: dict):
+        if not getattr(self, "line_section_enabled", False):
+            return
+        if self._line_pending_segment is not None:
+            return
+
+        if self.line_section_start is None or self.line_section_end is None:
+            return
+
+        p0 = np.asarray(result.get("p0", self.line_section_start), dtype=np.float64)
+        p1 = np.asarray(result.get("p1", self.line_section_end), dtype=np.float64)
+
+        if not np.allclose(np.asarray(self.line_section_start, dtype=np.float64), p0, atol=1e-6):
+            return
+        if not np.allclose(np.asarray(self.line_section_end, dtype=np.float64), p1, atol=1e-6):
+            return
+
+        self.line_profile = result.get("profile", []) or []
+        self.line_section_contours = result.get("contours", []) or []
+        self.lineProfileUpdated.emit(self.line_profile)
+        self.update()
+
+    def _on_line_profile_failed(self, message: str):
+        self.line_profile = []
+        self.line_section_contours = []
+        try:
+            self.lineProfileUpdated.emit([])
+        except Exception:
+            pass
+        self.update()
+
+    def _on_line_profile_finished(self):
+        thread = getattr(self, "_line_profile_thread", None)
+        if thread is not None:
+            try:
+                thread.deleteLater()
+            except Exception:
+                pass
+        self._line_profile_thread = None
+
+        if getattr(self, "line_section_enabled", False) and self._line_pending_segment is not None:
+            self._line_profile_timer.start(1)
 
     def update_line_section_profile(self):
         """현재 선형 단면(라인)으로부터 프로파일 추출"""
@@ -1569,7 +1929,8 @@ class Viewport3D(QOpenGLWidget):
             mesh._surface_area = None
         except Exception:
             pass
-        mesh.compute_normals()
+        # 로딩 시점에는 face normals만 필요 (vertex normals는 필요할 때 계산)
+        mesh.compute_normals(compute_vertex_normals=False)
         
         new_obj = SceneObject(mesh, name)
         self.objects.append(new_obj)
@@ -1686,12 +2047,25 @@ class Viewport3D(QOpenGLWidget):
     def update_vbo(self, obj: SceneObject):
         """객체의 VBO 생성 및 데이터 전송"""
         try:
-            v_indices = obj.mesh.faces.flatten()
-            vertices = obj.mesh.vertices[v_indices].astype(np.float32)
-            normals = np.repeat(obj.mesh.face_normals, 3, axis=0).astype(np.float32)
-            
-            data = np.hstack([vertices, normals]).flatten()
-            obj.vertex_count = len(vertices)
+            if obj is None or obj.mesh is None:
+                return
+
+            if obj.mesh.face_normals is None:
+                obj.mesh.compute_normals(compute_vertex_normals=False)
+
+            faces = obj.mesh.faces
+            v_indices = faces.reshape(-1)
+            vertex_count = int(v_indices.size)
+
+            # [vx,vy,vz,nx,ny,nz] float32 interleaved (avoid huge temporaries)
+            data = np.empty((vertex_count, 6), dtype=np.float32)
+            np.take(obj.mesh.vertices, v_indices, axis=0, out=data[:, :3])
+
+            # face normals repeated 3 times (broadcast assignment, no big temp)
+            n_faces = int(faces.shape[0])
+            data[:, 3:].reshape((n_faces, 3, 3))[:] = obj.mesh.face_normals[:, None, :]
+
+            obj.vertex_count = vertex_count
             
             if obj.vbo_id is None:
                 obj.vbo_id = glGenBuffers(1)
@@ -1787,7 +2161,8 @@ class Viewport3D(QOpenGLWidget):
             pass
         
         # 법선 재계산
-        obj.mesh.compute_normals()
+        obj.mesh.compute_normals(compute_vertex_normals=False, force=True)
+        obj._trimesh = None
         
         # 4. 모든 변환값 0으로 리셋 (이제 메쉬 정점 자체가 월드 좌표)
         obj.translation = np.array([0.0, 0.0, 0.0])
@@ -1922,7 +2297,7 @@ class Viewport3D(QOpenGLWidget):
                         point = self.pick_point_on_plane_z(event.pos().x(), event.pos().y(), z=0.0)
                     if point is not None:
                         self.crosshair_pos = point[:2]
-                        self.update_crosshair_profile()
+                        self.schedule_crosshair_profile_update(0)
                         self._crosshair_last_update = time.monotonic()
                         self.update()
                     return
@@ -1981,12 +2356,12 @@ class Viewport3D(QOpenGLWidget):
             if self.line_section_dragging:
                 self.line_section_dragging = False
                 self._line_section_last_update = 0.0
-                self.update_line_section_profile()
+                self.schedule_line_profile_update(0)
 
         if self.mouse_button == Qt.MouseButton.LeftButton and self.picking_mode == 'crosshair':
             # 드래그 스로틀로 인해 마지막 위치가 반영되지 않을 수 있어, 릴리즈 시 1회 확정 업데이트
             self._crosshair_last_update = 0.0
-            self.update_crosshair_profile()
+            self.schedule_crosshair_profile_update(0)
 
         self.mouse_button = None
         self.active_gizmo_axis = None
@@ -2151,7 +2526,7 @@ class Viewport3D(QOpenGLWidget):
                     now = time.monotonic()
                     if now - self._line_section_last_update > 0.08:
                         self._line_section_last_update = now
-                        self.update_line_section_profile()
+                        self.schedule_line_profile_update(150)
                     else:
                         self.update()
                 return
@@ -2166,7 +2541,7 @@ class Viewport3D(QOpenGLWidget):
                     now = time.monotonic()
                     if now - self._crosshair_last_update > 0.08:
                         self._crosshair_last_update = now
-                        self.update_crosshair_profile()
+                        self.schedule_crosshair_profile_update(150)
                     self.update()
                 return
             
