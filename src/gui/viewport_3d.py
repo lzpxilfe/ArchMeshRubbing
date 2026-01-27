@@ -372,6 +372,12 @@ class SceneObject:
         self.translation = np.array([0.0, 0.0, 0.0])
         self.rotation = np.array([0.0, 0.0, 0.0])
         self.scale = 1.0
+
+        # 정치 고정 상태 (Bake 이후 복귀용)
+        self.fixed_state_valid = False
+        self.fixed_translation = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+        self.fixed_rotation = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+        self.fixed_scale = 1.0
         
         # 피팅된 원호들 (메쉬와 함께 이동)
         self.fitted_arcs = []
@@ -518,6 +524,13 @@ class Viewport3D(QOpenGLWidget):
         self.roi_bounds = [-10.0, 10.0, -10.0, 10.0] # [min_x, max_x, min_y, max_y]
         self.active_roi_edge = None # 현재 드래그 중인 모서리 ('left', 'right', 'top', 'bottom')
 
+        # Cut guide lines (2 polylines on top view, SVG export용)
+        self.cut_lines_enabled = False
+        self.cut_lines = [[], []]  # 각 요소는 world 좌표 점 리스트 [np.array([x,y,z]), ...]
+        self.cut_line_active = 0   # 0 or 1
+        self.cut_line_drawing = False
+        self.cut_line_preview = None  # np.array([x,y,z]) - 마지막 점에서 이어지는 프리뷰
+
         # Line section (top-view cut line)
         self.line_section_enabled = False
         self.line_section_dragging = False
@@ -617,6 +630,8 @@ class Viewport3D(QOpenGLWidget):
         # 바닥 관통(z<0) 하이라이트용 클리핑 평면 갱신 (카메라 이동/회전에 따라 매 프레임 필요)
         if self.floor_penetration_highlight:
             self._update_floor_penetration_clip_plane()
+        if self.roi_enabled:
+            self._update_roi_clip_planes()
         
         # 0. 광원 위치 업데이트 (밝고 균일한 조명)
         if not self.flat_shading:
@@ -646,10 +661,32 @@ class Viewport3D(QOpenGLWidget):
         self.draw_axes()
         
         # 2. 모든 메쉬 객체 렌더링
+        sel = int(self.selected_index) if self.selected_index is not None else -1
         for i, obj in enumerate(self.objects):
             if not obj.visible:
                 continue
-            self.draw_scene_object(obj, is_selected=(i == self.selected_index))
+
+            if self.roi_enabled and i == sel:
+                try:
+                    glEnable(GL_CLIP_PLANE1)
+                    glEnable(GL_CLIP_PLANE2)
+                    glEnable(GL_CLIP_PLANE3)
+                    glEnable(GL_CLIP_PLANE4)
+                except Exception:
+                    pass
+
+                self.draw_scene_object(obj, is_selected=True)
+
+                try:
+                    glDisable(GL_CLIP_PLANE1)
+                    glDisable(GL_CLIP_PLANE2)
+                    glDisable(GL_CLIP_PLANE3)
+                    glDisable(GL_CLIP_PLANE4)
+                except Exception:
+                    pass
+                continue
+
+            self.draw_scene_object(obj, is_selected=(i == sel))
             
         # 3. 곡률 피팅 요소
         self.draw_picked_points()
@@ -666,6 +703,10 @@ class Viewport3D(QOpenGLWidget):
         # 3.7 십자선 단면
         if self.crosshair_enabled:
             self.draw_crosshair()
+
+        # 3.7.25 단면선(2개) 가이드
+        if self.cut_lines_enabled or any(len(l) > 0 for l in getattr(self, "cut_lines", [])):
+            self.draw_cut_lines()
 
         # 3.7.5 선형 단면 (Top-view cut line)
         if self.line_section_enabled:
@@ -691,6 +732,21 @@ class Viewport3D(QOpenGLWidget):
             glClipPlane(GL_CLIP_PLANE0, (0.0, 0.0, -1.0, 0.0))
         except Exception:
             # OpenGL 컨텍스트/프로파일에 따라 지원이 안 될 수 있음
+            pass
+
+    def _update_roi_clip_planes(self):
+        """ROI bounds(x/y)로 선택 메쉬를 크로핑하는 4개 클리핑 평면 정의"""
+        try:
+            x1, x2, y1, y2 = self.roi_bounds
+            # Keep: x >= x1
+            glClipPlane(GL_CLIP_PLANE1, (1.0, 0.0, 0.0, -float(x1)))
+            # Keep: x <= x2
+            glClipPlane(GL_CLIP_PLANE2, (-1.0, 0.0, 0.0, float(x2)))
+            # Keep: y >= y1
+            glClipPlane(GL_CLIP_PLANE3, (0.0, 1.0, 0.0, -float(y1)))
+            # Keep: y <= y2
+            glClipPlane(GL_CLIP_PLANE4, (0.0, -1.0, 0.0, float(y2)))
+        except Exception:
             pass
     
     def draw_ground_plane(self):
@@ -963,6 +1019,56 @@ class Viewport3D(QOpenGLWidget):
             pass
         self.update()
 
+    def set_cut_lines_enabled(self, enabled: bool):
+        self.cut_lines_enabled = bool(enabled)
+        if enabled:
+            self.picking_mode = 'cut_lines'
+            # 프리뷰를 위해 마우스 트래킹 활성화
+            self.setMouseTracking(True)
+        else:
+            if self.picking_mode == 'cut_lines':
+                self.picking_mode = 'none'
+            self.cut_line_drawing = False
+            self.cut_line_preview = None
+            self.setMouseTracking(False)
+        self.update()
+
+    def clear_cut_line(self, index: int):
+        try:
+            idx = int(index)
+            if idx not in (0, 1):
+                return
+            self.cut_lines[idx] = []
+            if self.cut_line_active == idx:
+                self.cut_line_drawing = False
+                self.cut_line_preview = None
+        except Exception:
+            return
+        self.update()
+
+    def clear_cut_lines(self):
+        self.cut_lines = [[], []]
+        self.cut_line_drawing = False
+        self.cut_line_preview = None
+        self.update()
+
+    def get_cut_lines_world(self):
+        """내보내기용: 단면선(2개) 월드 좌표 반환 (순수 python list)"""
+        out = []
+        for line in getattr(self, "cut_lines", [[], []]):
+            pts = []
+            for p in line:
+                try:
+                    arr = np.asarray(p, dtype=np.float64).reshape(-1)
+                    if arr.size >= 3:
+                        pts.append([float(arr[0]), float(arr[1]), float(arr[2])])
+                    elif arr.size == 2:
+                        pts.append([float(arr[0]), float(arr[1]), 0.0])
+                except Exception:
+                    continue
+            out.append(pts)
+        return out
+
     def draw_line_section(self):
         """상면(Top)에서 그은 직선 단면 시각화"""
         if self.line_section_start is None or self.line_section_end is None:
@@ -1003,6 +1109,76 @@ class Viewport3D(QOpenGLWidget):
                 glEnd()
 
         glLineWidth(1.0)
+        glEnable(GL_LIGHTING)
+
+    def _cutline_constrain_ortho(self, last_pt: np.ndarray, candidate: np.ndarray) -> np.ndarray:
+        """CAD Ortho: 마지막 점 기준으로 X/Y 중 하나만 변화"""
+        last_pt = np.asarray(last_pt, dtype=np.float64)
+        candidate = np.asarray(candidate, dtype=np.float64).copy()
+        dx = float(candidate[0] - last_pt[0])
+        dy = float(candidate[1] - last_pt[1])
+        if abs(dx) >= abs(dy):
+            candidate[1] = last_pt[1]
+        else:
+            candidate[0] = last_pt[0]
+        return candidate
+
+    def draw_cut_lines(self):
+        """단면선(2개) 가이드 라인 시각화 (항상 화면 위로)"""
+        lines = getattr(self, "cut_lines", [[], []])
+        if not lines:
+            return
+
+        glDisable(GL_LIGHTING)
+        glDisable(GL_DEPTH_TEST)
+
+        z = 0.08  # 바닥에서 살짝 띄움
+        colors = [
+            (1.0, 0.25, 0.25, 0.95),  # red-ish
+            (0.15, 0.55, 1.0, 0.95),  # blue-ish
+        ]
+
+        for i, line in enumerate(lines):
+            if not line:
+                continue
+            col = colors[i % 2]
+            glColor4f(*col)
+            glLineWidth(2.5 if int(self.cut_line_active) == i else 2.0)
+
+            if len(line) == 1:
+                p0 = np.asarray(line[0], dtype=np.float64)
+                glPointSize(7.0)
+                glBegin(GL_POINTS)
+                glVertex3f(float(p0[0]), float(p0[1]), z)
+                glEnd()
+                glPointSize(1.0)
+                continue
+
+            glBegin(GL_LINE_STRIP)
+            for p in line:
+                p0 = np.asarray(p, dtype=np.float64)
+                glVertex3f(float(p0[0]), float(p0[1]), z)
+            glEnd()
+
+        # 프리뷰 세그먼트
+        if self.cut_line_drawing and self.cut_line_preview is not None:
+            try:
+                idx = int(self.cut_line_active)
+                active = lines[idx]
+                if active:
+                    p_last = np.asarray(active[-1], dtype=np.float64)
+                    p_prev = np.asarray(self.cut_line_preview, dtype=np.float64)
+                    glColor4f(*colors[idx % 2])
+                    glLineWidth(2.0)
+                    glBegin(GL_LINES)
+                    glVertex3f(float(p_last[0]), float(p_last[1]), z)
+                    glVertex3f(float(p_prev[0]), float(p_prev[1]), z)
+                    glEnd()
+            except Exception:
+                pass
+
+        glLineWidth(1.0)
+        glEnable(GL_DEPTH_TEST)
         glEnable(GL_LIGHTING)
 
     def schedule_crosshair_profile_update(self, delay_ms: int = 120):
@@ -1353,35 +1529,14 @@ class Viewport3D(QOpenGLWidget):
     def draw_roi_box(self):
         """2D ROI (크로핑 영역) 및 핸들 시각화"""
         glDisable(GL_LIGHTING)
+        glDisable(GL_DEPTH_TEST)
         glEnable(GL_BLEND)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
         
         x1, x2, y1, y2 = self.roi_bounds
-        z = 0.05 # 바닥에서 살짝 띄움
-        
-        # 1. 반투명 배경 (영역 내부)
-        glColor4f(0.0, 0.5, 1.0, 0.1)
-        glBegin(GL_QUADS)
-        glVertex3f(x1, y1, z)
-        glVertex3f(x2, y1, z)
-        glVertex3f(x2, y2, z)
-        glVertex3f(x1, y2, z)
-        glEnd()
-        
-        # 2. 테두리 점선
-        glLineWidth(2.0)
-        glColor4f(0.0, 0.4, 0.8, 0.8)
-        glEnable(GL_LINE_STIPPLE)
-        glLineStipple(1, 0x00FF)
-        glBegin(GL_LINE_LOOP)
-        glVertex3f(x1, y1, z)
-        glVertex3f(x2, y1, z)
-        glVertex3f(x2, y2, z)
-        glVertex3f(x1, y2, z)
-        glEnd()
-        glDisable(GL_LINE_STIPPLE)
-        
-        # 3. 4방향 화살표 핸들 (간이 삼각형)
+        z = 0.08 # 바닥에서 살짝 띄움 (Z-fight 방지)
+
+        # 4방향 화살표 핸들 (간이 삼각형) - 화살표만 보이게
         def draw_arrow(cx, cy, direction):
             size = self.camera.distance * 0.015
             glBegin(GL_TRIANGLES)
@@ -1417,6 +1572,8 @@ class Viewport3D(QOpenGLWidget):
         glColor4fv(get_color('right'));  draw_arrow(x2, mid_y, 'right')
         
         glLineWidth(1.0)
+        glDisable(GL_BLEND)
+        glEnable(GL_DEPTH_TEST)
         glEnable(GL_LIGHTING)
 
     def extract_roi_silhouette(self):
@@ -2123,6 +2280,14 @@ class Viewport3D(QOpenGLWidget):
             obj.scale != 1.0
         )
         if not has_transform:
+            # 변환이 없어도 "현재 상태"를 고정 상태로 기록
+            try:
+                obj.fixed_translation = np.asarray(obj.translation, dtype=np.float64).copy()
+                obj.fixed_rotation = np.asarray(obj.rotation, dtype=np.float64).copy()
+                obj.fixed_scale = float(obj.scale)
+                obj.fixed_state_valid = True
+            except Exception:
+                pass
             return
         
         # 1. 회전 행렬 계산
@@ -2168,9 +2333,35 @@ class Viewport3D(QOpenGLWidget):
         obj.translation = np.array([0.0, 0.0, 0.0])
         obj.rotation = np.array([0.0, 0.0, 0.0])
         obj.scale = 1.0
+
+        # 4.5 고정 상태 갱신 (실수로 움직여도 복귀 가능)
+        try:
+            obj.fixed_translation = obj.translation.copy()
+            obj.fixed_rotation = obj.rotation.copy()
+            obj.fixed_scale = float(obj.scale)
+            obj.fixed_state_valid = True
+        except Exception:
+            pass
         
         # 5. VBO 업데이트
         self.update_vbo(obj)
+        self.update()
+        self.meshTransformChanged.emit()
+
+    def restore_fixed_state(self, obj: SceneObject):
+        """정치 확정 이후의 '고정 상태'로 변환값 복귀"""
+        if not obj:
+            return
+        if not getattr(obj, "fixed_state_valid", False):
+            return
+
+        try:
+            obj.translation = np.asarray(obj.fixed_translation, dtype=np.float64).copy()
+            obj.rotation = np.asarray(obj.fixed_rotation, dtype=np.float64).copy()
+            obj.scale = float(obj.fixed_scale)
+        except Exception:
+            return
+
         self.update()
         self.meshTransformChanged.emit()
 
@@ -2289,7 +2480,32 @@ class Viewport3D(QOpenGLWidget):
                         self._line_section_last_update = 0.0
                         self.update()
                     return
-                
+
+                elif self.picking_mode == 'cut_lines':
+                    if event.button() != Qt.MouseButton.LeftButton:
+                        return
+                    pt = self.pick_point_on_plane_z(event.pos().x(), event.pos().y(), z=0.0)
+                    if pt is None:
+                        return
+
+                    idx = int(getattr(self, "cut_line_active", 0))
+                    if idx not in (0, 1):
+                        idx = 0
+                    line = self.cut_lines[idx]
+                    p = np.array([pt[0], pt[1], 0.0], dtype=np.float64)
+                    if len(line) == 0:
+                        line.append(p)
+                    else:
+                        last = np.asarray(line[-1], dtype=np.float64)
+                        p2 = self._cutline_constrain_ortho(last, p)
+                        if float(np.linalg.norm(p2[:2] - last[:2])) > 1e-6:
+                            line.append(p2)
+
+                    self.cut_line_drawing = True
+                    self.cut_line_preview = None
+                    self.update()
+                    return
+                 
                 elif self.picking_mode == 'crosshair':
                     point = self.pick_point_on_mesh(event.pos().x(), event.pos().y())
                     if point is None:
@@ -2378,6 +2594,28 @@ class Viewport3D(QOpenGLWidget):
     def mouseMoveEvent(self, event: QMouseEvent):
         """마우스 이동 (드래그)"""
         try:
+            # 단면선(2개) 프리뷰: 마우스 트래킹(버튼 없이 이동)에서도 동작
+            if self.picking_mode == 'cut_lines' and getattr(self, "cut_line_drawing", False):
+                if self.mouse_button is None or self.mouse_button == Qt.MouseButton.LeftButton:
+                    pt = self.pick_point_on_plane_z(event.pos().x(), event.pos().y(), z=0.0)
+                    if pt is not None:
+                        p = np.array([pt[0], pt[1], 0.0], dtype=np.float64)
+                        try:
+                            idx = int(getattr(self, "cut_line_active", 0))
+                            idx = idx if idx in (0, 1) else 0
+                            line = self.cut_lines[idx]
+                            if line:
+                                last = np.asarray(line[-1], dtype=np.float64)
+                                self.cut_line_preview = self._cutline_constrain_ortho(last, p)
+                            else:
+                                self.cut_line_preview = p
+                        except Exception:
+                            self.cut_line_preview = p
+                        self.update()
+                # 버튼 없이 이동 중이면 카메라 드래그 로직을 타지 않도록 조기 종료
+                if self.mouse_button is None:
+                    return
+
             if self.last_mouse_pos is None:
                 self.last_mouse_pos = event.pos()
                 return
@@ -2633,6 +2871,49 @@ class Viewport3D(QOpenGLWidget):
         if event.key() in (Qt.Key.Key_W, Qt.Key.Key_A, Qt.Key.Key_S, Qt.Key.Key_D, Qt.Key.Key_Q, Qt.Key.Key_E):
             if not self.move_timer.isActive():
                 self.move_timer.start()
+
+        # 0. 단면선(2개) 도구 단축키
+        if self.picking_mode == 'cut_lines':
+            key = event.key()
+            if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                self.cut_line_drawing = False
+                self.cut_line_preview = None
+                # 첫 번째 선을 끝냈고 두 번째가 비어있으면 자동 전환
+                try:
+                    if int(self.cut_line_active) == 0 and not self.cut_lines[1]:
+                        self.cut_line_active = 1
+                except Exception:
+                    pass
+                self.update()
+                return
+            if key in (Qt.Key.Key_Backspace, Qt.Key.Key_Delete):
+                try:
+                    idx = int(getattr(self, "cut_line_active", 0))
+                    idx = idx if idx in (0, 1) else 0
+                    line = self.cut_lines[idx]
+                    if line:
+                        line.pop()
+                    if not line:
+                        self.cut_line_drawing = False
+                        self.cut_line_preview = None
+                    self.update()
+                except Exception:
+                    pass
+                return
+            if key == Qt.Key.Key_Tab:
+                try:
+                    self.cut_line_active = 1 - int(getattr(self, "cut_line_active", 0))
+                    self.cut_line_preview = None
+                    self.update()
+                except Exception:
+                    pass
+                return
+            if key == Qt.Key.Key_Escape:
+                # 도구는 유지하고, 현재 프리뷰/드로잉만 취소
+                self.cut_line_drawing = False
+                self.cut_line_preview = None
+                self.update()
+                return
         
         # 1. Enter/Return 키: 바닥 정렬 확정
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):

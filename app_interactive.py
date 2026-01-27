@@ -121,6 +121,7 @@ class ProfileExportThread(QThread):
         scale: float,
         viewport_image: Image.Image,
         opengl_matrices: tuple,
+        cut_lines_world: list,
         resolution: int = 2048,
         grid_spacing: float = 1.0,
         include_grid: bool = True,
@@ -134,6 +135,7 @@ class ProfileExportThread(QThread):
         self._scale = float(scale)
         self._viewport_image = viewport_image
         self._opengl_matrices = opengl_matrices
+        self._cut_lines_world = cut_lines_world
         self._resolution = int(resolution)
         self._grid_spacing = float(grid_spacing)
         self._include_grid = bool(include_grid)
@@ -152,6 +154,7 @@ class ProfileExportThread(QThread):
                 include_grid=self._include_grid,
                 viewport_image=self._viewport_image,
                 opengl_matrices=self._opengl_matrices,
+                cut_lines_world=self._cut_lines_world,
             )
             self.done.emit(str(result_path))
         except Exception as e:
@@ -494,6 +497,11 @@ class TransformToolbar(QToolBar):
         self.btn_bake.setToolTip("현재 변환을 메쉬에 영구 적용하고 위치를 고정합니다")
         self.btn_bake.setStyleSheet("QPushButton { font-weight: bold; padding: 2px 10px; }")
         self.addWidget(self.btn_bake)
+
+        self.btn_fixed = QPushButton("🔒 고정상태로")
+        self.btn_fixed.setToolTip("정치 확정(Bake) 이후의 고정 상태로 되돌립니다 (실수로 이동/회전했을 때)")
+        self.btn_fixed.setEnabled(False)
+        self.addWidget(self.btn_fixed)
         
         self.btn_reset = QPushButton("🔄 초기화")
         self.addWidget(self.btn_reset)
@@ -1222,6 +1230,9 @@ class ExportPanel(QWidget):
 class SectionPanel(QWidget):
     crosshairToggled = pyqtSignal(bool)
     lineSectionToggled = pyqtSignal(bool)
+    cutLineActiveChanged = pyqtSignal(int)
+    cutLineClearRequested = pyqtSignal(int)
+    cutLinesClearAllRequested = pyqtSignal()
     roiToggled = pyqtSignal(bool)
     silhouetteRequested = pyqtSignal()
     
@@ -1266,23 +1277,36 @@ class SectionPanel(QWidget):
         line.setFrameShadow(QFrame.Shadow.Sunken)
         layout.addWidget(line)
 
-        # 4. 선형 단면 (직선) - 상면에서 라인으로 자르기
-        line_group = QGroupBox("📐 선형 단면 (Line Section)")
+        # 4. 단면선(2개) - 상면에서 가로/세로(꺾임 가능) 가이드 라인
+        line_group = QGroupBox("✏️ 단면선 (2개)")
         line_layout = QVBoxLayout(line_group)
 
-        self.btn_line = QPushButton("📐 직선 단면 모드 시작")
+        self.btn_line = QPushButton("✏️ 단면선 그리기 시작")
         self.btn_line.setCheckable(True)
         self.btn_line.setStyleSheet("QPushButton:checked { background-color: #ed8936; color: white; font-weight: bold; }")
         self.btn_line.toggled.connect(self.on_line_toggled)
         line_layout.addWidget(self.btn_line)
 
-        line_help = QLabel("상면(Top) 뷰에서 클릭-드래그로 단면선을 그리세요. (Shift=수평/수직 고정)")
+        sel_row = QHBoxLayout()
+        sel_row.addWidget(QLabel("활성 선:"))
+        self.combo_cutline = QComboBox()
+        self.combo_cutline.addItems(["가로(1)", "세로(2)"])
+        self.combo_cutline.currentIndexChanged.connect(self.cutLineActiveChanged.emit)
+        sel_row.addWidget(self.combo_cutline, 1)
+
+        self.btn_cutline_clear = QPushButton("🧹 현재 선 지우기")
+        self.btn_cutline_clear.clicked.connect(lambda: self.cutLineClearRequested.emit(int(self.combo_cutline.currentIndex())))
+        sel_row.addWidget(self.btn_cutline_clear)
+
+        self.btn_cutline_clear_all = QPushButton("🧹 모두 지우기")
+        self.btn_cutline_clear_all.clicked.connect(self.cutLinesClearAllRequested.emit)
+        sel_row.addWidget(self.btn_cutline_clear_all)
+        line_layout.addLayout(sel_row)
+
+        line_help = QLabel("상면(Top) 뷰에서 클릭으로 점을 추가해 단면선을 그리세요. (자동 수평/수직)\nEnter=확정, Backspace=한 점 취소, Tab=선 전환")
         line_help.setStyleSheet("color: #718096; font-size: 10px;")
         line_help.setWordWrap(True)
         line_layout.addWidget(line_help)
-
-        self.graph_line = ProfileGraphWidget("직선 단면 (Line-Profile)")
-        line_layout.addWidget(self.graph_line)
 
         layout.addWidget(line_group)
 
@@ -1324,10 +1348,9 @@ class SectionPanel(QWidget):
 
     def on_line_toggled(self, checked):
         if checked:
-            self.btn_line.setText("📐 직선 단면 모드 중지")
+            self.btn_line.setText("✏️ 단면선 그리기 중지")
         else:
-            self.btn_line.setText("📐 직선 단면 모드 시작")
-            self.graph_line.set_data([])
+            self.btn_line.setText("✏️ 단면선 그리기 시작")
         self.lineSectionToggled.emit(checked)
         
     def on_roi_toggled(self, checked):
@@ -1344,7 +1367,8 @@ class SectionPanel(QWidget):
         self.graph_y.set_data(y_data)
 
     def update_line_profile(self, line_data):
-        self.graph_line.set_data(line_data)
+        # 호환 유지: 이전 '직선 단면' 그래프는 더 이상 사용하지 않음
+        pass
 
 
 class MainWindow(QMainWindow):
@@ -1420,6 +1444,7 @@ class MainWindow(QMainWindow):
         self.trans_toolbar.scale_spin.valueChanged.connect(self.on_toolbar_transform_changed)
         
         self.trans_toolbar.btn_bake.clicked.connect(self.on_bake_all_clicked)
+        self.trans_toolbar.btn_fixed.clicked.connect(self.restore_fixed_state)
         self.trans_toolbar.btn_reset.clicked.connect(self.reset_transform)
         self.trans_toolbar.btn_flat.toggled.connect(self.toggle_flat_shading)
         
@@ -1502,6 +1527,9 @@ class MainWindow(QMainWindow):
         self.section_panel = SectionPanel()
         self.section_panel.crosshairToggled.connect(self.on_crosshair_toggled)
         self.section_panel.lineSectionToggled.connect(self.on_line_section_toggled)
+        self.section_panel.cutLineActiveChanged.connect(self.on_cut_line_active_changed)
+        self.section_panel.cutLineClearRequested.connect(self.on_cut_line_clear_requested)
+        self.section_panel.cutLinesClearAllRequested.connect(self.on_cut_lines_clear_all_requested)
         self.section_panel.roiToggled.connect(self.on_roi_toggled)
         self.section_panel.silhouetteRequested.connect(self.viewport.extract_roi_silhouette)
 
@@ -2205,6 +2233,12 @@ class MainWindow(QMainWindow):
         obj = self.viewport.selected_obj
         if not obj: 
             return
+
+        # 고정 상태 버튼 활성/비활성
+        try:
+            self.trans_toolbar.btn_fixed.setEnabled(bool(getattr(obj, "fixed_state_valid", False)))
+        except Exception:
+            pass
         
         # 툴바 동기화
         self.trans_toolbar.trans_x.blockSignals(True)
@@ -2258,6 +2292,16 @@ class MainWindow(QMainWindow):
         self.sync_transform_panel() # 툴바 값 리셋됨
         self.viewport.status_info = f"{obj.name} 정치(Bake) 완료. 변환값이 초기화되었습니다."
         self.viewport.update()
+
+    def restore_fixed_state(self):
+        """정치 확정 이후의 고정 상태로 복귀"""
+        obj = self.viewport.selected_obj
+        if not obj:
+            return
+
+        self.viewport.restore_fixed_state(obj)
+        self.sync_transform_panel()
+        self.viewport.status_info = f"{obj.name} 고정 상태로 복귀"
 
     def toggle_flat_shading(self, enabled):
         """Flat Shading 모드 토글"""
@@ -2680,6 +2724,7 @@ class MainWindow(QMainWindow):
                 scale=float(obj.scale),
                 viewport_image=pil_img,
                 opengl_matrices=(mv, proj, vp),
+                cut_lines_world=self.viewport.get_cut_lines_world(),
                 resolution=2048,
                 grid_spacing=1.0,
                 include_grid=True,
@@ -2890,9 +2935,8 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
 
-            if getattr(self.viewport, "line_section_enabled", False):
-                self.viewport.line_section_enabled = False
-                self.viewport.clear_line_section()
+            if getattr(self.viewport, "cut_lines_enabled", False):
+                self.viewport.set_cut_lines_enabled(False)
                 try:
                     self.section_panel.btn_line.blockSignals(True)
                     self.section_panel.btn_line.setChecked(False)
@@ -2917,9 +2961,8 @@ class MainWindow(QMainWindow):
     def on_crosshair_toggled(self, enabled):
         """십자선 모드 토글 핸들러 (Viewport3D와 연동)"""
         # 십자선/선형 단면은 입력(드래그) 충돌 -> 상호 배타로 처리
-        if enabled and getattr(self.viewport, "line_section_enabled", False):
-            self.viewport.line_section_enabled = False
-            self.viewport.clear_line_section()
+        if enabled and getattr(self.viewport, "cut_lines_enabled", False):
+            self.viewport.set_cut_lines_enabled(False)
             try:
                 self.section_panel.btn_line.blockSignals(True)
                 self.section_panel.btn_line.setChecked(False)
@@ -2949,8 +2992,8 @@ class MainWindow(QMainWindow):
         self.viewport.update()
 
     def on_line_section_toggled(self, enabled):
-        """선형 단면(직선) 모드 토글 핸들러"""
-        # 십자선/선형 단면은 입력(드래그) 충돌 -> 상호 배타로 처리
+        """단면선(2개) 모드 토글 핸들러"""
+        # 십자선/단면선/ROI는 입력 충돌 -> 상호 배타로 처리
         if enabled and self.viewport.crosshair_enabled:
             self.viewport.crosshair_enabled = False
             try:
@@ -2972,14 +3015,32 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
-        self.viewport.line_section_enabled = enabled
-        if enabled:
-            self.viewport.picking_mode = 'line_section'
-        else:
-            if self.viewport.picking_mode == 'line_section':
-                self.viewport.picking_mode = 'none'
-            self.viewport.clear_line_section()
-        self.viewport.update()
+        self.viewport.set_cut_lines_enabled(enabled)
+
+    def on_cut_line_active_changed(self, index: int):
+        """단면선(2개) 중 활성 선 변경"""
+        try:
+            self.viewport.cut_line_active = int(index)
+            self.viewport.cut_line_preview = None
+            self.viewport.update()
+        except Exception:
+            pass
+
+    def on_cut_line_clear_requested(self, index: int):
+        """현재 활성 단면선 지우기"""
+        try:
+            self.viewport.clear_cut_line(int(index))
+            self.viewport.update()
+        except Exception:
+            pass
+
+    def on_cut_lines_clear_all_requested(self):
+        """단면선 전체 지우기"""
+        try:
+            self.viewport.clear_cut_lines()
+            self.viewport.update()
+        except Exception:
+            pass
 
     def _request_slice_compute(self):
         if not getattr(self.viewport, "slice_enabled", False):
