@@ -547,7 +547,10 @@ class ProfileExporter:
             
         # 2. 외곽선 벡터 삽입
         if contours:
-            svg_parts.append(f'<g id="outline" stroke="{stroke_color}" fill="none" stroke-width="{stroke_width}">')
+            svg_parts.append(
+                f'<g id="outline" stroke="{stroke_color}" fill="none" stroke-width="{stroke_width}" '
+                f'stroke-linejoin="round" stroke-linecap="round">'
+            )
             for contour in contours:
                 if len(contour) < 2: continue
                 # 좌표 변환
@@ -566,8 +569,12 @@ class ProfileExporter:
                    svg_pts[:, 0] -= min_coords[0]
                    svg_pts[:, 1] = svg_height - (svg_pts[:, 1] - min_coords[1])
                 
-                points_str = " ".join([f"{p[0]:.6f},{p[1]:.6f}" for p in svg_pts])
-                svg_parts.append(f'<polygon points="{points_str}" />')
+                # CAD import 시 "한 개의 선(연속 폴리라인)"으로 들어오도록 단일 path로 출력
+                d_parts = [f'M {svg_pts[0,0]:.6f} {svg_pts[0,1]:.6f}']
+                for p in svg_pts[1:]:
+                    d_parts.append(f'L {p[0]:.6f} {p[1]:.6f}')
+                d_parts.append('Z')
+                svg_parts.append(f'<path d="{" ".join(d_parts)}" />')
             svg_parts.append('</g>')
             
         svg_parts.append('</svg>')
@@ -610,6 +617,6 @@ class ProfileExporter:
         
         return self.export_svg(
             contours, bounds, background_image,
-            stroke_width=0.05,
+            stroke_width=0.015,  # 0.15mm
             output_path=output_path
         )
