@@ -122,6 +122,7 @@ class ProfileExportThread(QThread):
         viewport_image: Image.Image,
         opengl_matrices: tuple,
         cut_lines_world: list,
+        cut_profiles_world: list,
         resolution: int = 2048,
         grid_spacing: float = 1.0,
         include_grid: bool = True,
@@ -136,6 +137,7 @@ class ProfileExportThread(QThread):
         self._viewport_image = viewport_image
         self._opengl_matrices = opengl_matrices
         self._cut_lines_world = cut_lines_world
+        self._cut_profiles_world = cut_profiles_world
         self._resolution = int(resolution)
         self._grid_spacing = float(grid_spacing)
         self._include_grid = bool(include_grid)
@@ -155,6 +157,7 @@ class ProfileExportThread(QThread):
                 viewport_image=self._viewport_image,
                 opengl_matrices=self._opengl_matrices,
                 cut_lines_world=self._cut_lines_world,
+                cut_profiles_world=self._cut_profiles_world,
             )
             self.done.emit(str(result_path))
         except Exception as e:
@@ -2685,7 +2688,21 @@ class MainWindow(QMainWindow):
                 'right': (0.0, 0.0),
             }
             if view in view_map:
-                cam.fit_to_bounds(obj.get_world_bounds())
+                # 메쉬 + 단면(바닥 배치)까지 화면에 들어오도록 bounds 확장
+                bounds = np.asarray(obj.get_world_bounds(), dtype=np.float64)
+                try:
+                    extra_pts = []
+                    for ln in getattr(self.viewport, "cut_section_world", []) or []:
+                        for p in ln or []:
+                            extra_pts.append(np.asarray(p, dtype=np.float64))
+                    if extra_pts:
+                        ep = np.vstack(extra_pts)
+                        bounds[0] = np.minimum(bounds[0], ep.min(axis=0))
+                        bounds[1] = np.maximum(bounds[1], ep.max(axis=0))
+                except Exception:
+                    pass
+
+                cam.fit_to_bounds(bounds)
                 cam.azimuth, cam.elevation = view_map[view]
 
             # 1. 고해상도 이미지 캡처 및 정렬용 행렬 획득
@@ -2725,6 +2742,7 @@ class MainWindow(QMainWindow):
                 viewport_image=pil_img,
                 opengl_matrices=(mv, proj, vp),
                 cut_lines_world=self.viewport.get_cut_lines_world(),
+                cut_profiles_world=self.viewport.get_cut_sections_world(),
                 resolution=2048,
                 grid_spacing=1.0,
                 include_grid=True,
@@ -2949,6 +2967,15 @@ class MainWindow(QMainWindow):
                 b = self.viewport.selected_obj.get_world_bounds()
                 # [min_x, max_x, min_y, max_y]
                 self.viewport.roi_bounds = [float(b[0][0]), float(b[1][0]), float(b[0][1]), float(b[1][1])]
+            try:
+                self.viewport.schedule_roi_edges_update(0)
+            except Exception:
+                pass
+        else:
+            try:
+                self.viewport.roi_cut_edges = {"x1": [], "x2": [], "y1": [], "y2": []}
+            except Exception:
+                pass
         self.viewport.picking_mode = 'none' 
         self.viewport.update()
 

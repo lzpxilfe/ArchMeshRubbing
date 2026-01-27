@@ -663,7 +663,8 @@ class ProfileExporter:
                        include_grid: bool = True,
                        viewport_image: Image.Image = None,
                        opengl_matrices: tuple = None,
-                       cut_lines_world: list = None) -> str:
+                       cut_lines_world: list = None,
+                       cut_profiles_world: list = None) -> str:
         """
         메쉬의 2D 프로파일을 SVG로 내보내는 통합 메서드.
         """
@@ -728,6 +729,42 @@ class ProfileExporter:
                     )
             except Exception:
                 extra_paths = []
+
+        if cut_profiles_world and opengl_matrices and view in {"top", "bottom"}:
+            try:
+                mv, proj, vp = opengl_matrices
+                mvp = mv @ proj
+
+                def project_world_to_px(pts_world: np.ndarray) -> np.ndarray:
+                    pts_world = np.asarray(pts_world, dtype=np.float64)
+                    if pts_world.ndim != 2:
+                        return np.zeros((0, 2), dtype=np.float64)
+                    if pts_world.shape[1] == 2:
+                        pts_world = np.hstack([pts_world, np.zeros((len(pts_world), 1), dtype=np.float64)])
+                    v_homo = np.hstack([pts_world[:, :3], np.ones((len(pts_world), 1), dtype=np.float64)])
+                    v_clip = v_homo @ mvp
+                    v_ndc = v_clip[:, :3] / v_clip[:, 3:]
+                    x = (v_ndc[:, 0] + 1.0) / 2.0 * float(vp[2])
+                    y = float(vp[3]) - (v_ndc[:, 1] + 1.0) / 2.0 * float(vp[3])
+                    return np.stack([x, y], axis=1)
+
+                for i, line in enumerate(cut_profiles_world):
+                    if not line or len(line) < 2:
+                        continue
+                    pts_w = np.asarray(line, dtype=np.float64)
+                    pts_px = project_world_to_px(pts_w)
+                    if pts_px.shape[0] < 2:
+                        continue
+                    extra_paths.append(
+                        {
+                            "id": f"section_profile_{i+1}",
+                            "points": pts_px,
+                            "stroke": "#111111",
+                            "stroke_width": 0.015,  # 0.15mm
+                        }
+                    )
+            except Exception:
+                pass
 
         return self.export_svg(
             contours, bounds, background_image,

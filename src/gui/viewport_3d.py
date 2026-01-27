@@ -189,6 +189,195 @@ class _LineSectionProfileThread(QThread):
             self.failed.emit(str(e))
 
 
+class _CutPolylineSectionProfileThread(QThread):
+    computed = pyqtSignal(object)  # {"index","profile"} profile=[(s,z),...]
+    failed = pyqtSignal(str)
+
+    def __init__(
+        self,
+        mesh: MeshData,
+        translation: np.ndarray,
+        rotation_deg: np.ndarray,
+        scale: float,
+        index: int,
+        polyline_world: list,
+    ):
+        super().__init__()
+        self._mesh = mesh
+        self._translation = np.asarray(translation, dtype=np.float64)
+        self._rotation = np.asarray(rotation_deg, dtype=np.float64)
+        self._scale = float(scale)
+        self._index = int(index)
+        self._polyline_world = polyline_world
+
+    def run(self):
+        try:
+            from scipy.spatial.transform import Rotation as R
+
+            pts = np.asarray(self._polyline_world, dtype=np.float64)
+            if pts.ndim != 2 or pts.shape[0] < 2:
+                self.computed.emit({"index": self._index, "profile": []})
+                return
+            if pts.shape[1] == 2:
+                pts = np.hstack([pts, np.zeros((len(pts), 1), dtype=np.float64)])
+            pts = pts[:, :3].copy()
+            pts[:, 2] = 0.0
+
+            # remove consecutive duplicates
+            keep = [0]
+            for i in range(1, len(pts)):
+                if float(np.linalg.norm(pts[i, :2] - pts[keep[-1], :2])) > 1e-6:
+                    keep.append(i)
+            pts = pts[keep]
+            if len(pts) < 2:
+                self.computed.emit({"index": self._index, "profile": []})
+                return
+
+            inv_rot = R.from_euler('xyz', self._rotation, degrees=True).inv().as_matrix()
+            inv_scale = 1.0 / self._scale if self._scale != 0 else 1.0
+            rot_mat = R.from_euler('xyz', self._rotation, degrees=True).as_matrix()
+
+            slicer = MeshSlicer(self._mesh.to_trimesh())
+
+            profile_pts: list[tuple[float, float]] = []
+            s_offset = 0.0
+
+            for si in range(len(pts) - 1):
+                p0 = pts[si]
+                p1 = pts[si + 1]
+                d = p1 - p0
+                d[2] = 0.0
+                seg_len = float(np.linalg.norm(d))
+                if seg_len < 1e-6:
+                    continue
+
+                d_unit = d / seg_len
+                world_normal = np.array([d_unit[1], -d_unit[0], 0.0], dtype=np.float64)
+                world_origin = p0
+
+                local_origin = inv_scale * inv_rot @ (world_origin - self._translation)
+                local_normal = inv_rot @ world_normal
+
+                contours_local = slicer.slice_with_plane(local_origin, local_normal)
+                if not contours_local:
+                    s_offset += seg_len
+                    continue
+
+                world_contours = []
+                for cnt in contours_local:
+                    if cnt is None or len(cnt) < 2:
+                        continue
+                    world_contours.append((rot_mat @ (cnt * self._scale).T).T + self._translation)
+
+                best = None
+                best_span = 0.0
+                margin = max(seg_len * 0.02, 0.2)
+                t_min = -margin
+                t_max = seg_len + margin
+
+                for cnt in world_contours:
+                    t = (cnt - p0) @ d_unit
+                    mask = (t >= t_min) & (t <= t_max)
+                    if int(mask.sum()) < 2:
+                        continue
+                    t_f = t[mask]
+                    span = float(t_f.max() - t_f.min())
+                    if span <= best_span:
+                        continue
+                    best_span = span
+                    best = (t_f.copy(), cnt[mask, 2].copy())
+
+                if best is None:
+                    s_offset += seg_len
+                    continue
+
+                t_f, z_f = best
+                order = np.argsort(t_f)
+                t_sorted = t_f[order]
+                z_sorted = z_f[order]
+
+                # clamp into segment [0, seg_len]
+                t_sorted = np.clip(t_sorted, 0.0, seg_len)
+
+                # downsample if too dense
+                if len(t_sorted) > 3000:
+                    step = int(len(t_sorted) // 3000) + 1
+                    t_sorted = t_sorted[::step]
+                    z_sorted = z_sorted[::step]
+
+                # append with cumulative distance
+                for t_val, z_val in zip(t_sorted.tolist(), z_sorted.tolist()):
+                    s_val = s_offset + float(t_val)
+                    if profile_pts and abs(profile_pts[-1][0] - s_val) < 1e-6:
+                        continue
+                    profile_pts.append((s_val, float(z_val)))
+
+                s_offset += seg_len
+
+            self.computed.emit({"index": self._index, "profile": profile_pts})
+        except Exception as e:
+            self.failed.emit(str(e))
+
+
+class _RoiCutEdgesThread(QThread):
+    computed = pyqtSignal(object)  # {"x1": [...], "x2": [...], "y1": [...], "y2": [...]}
+    failed = pyqtSignal(str)
+
+    def __init__(
+        self,
+        mesh: MeshData,
+        translation: np.ndarray,
+        rotation_deg: np.ndarray,
+        scale: float,
+        roi_bounds: list,
+    ):
+        super().__init__()
+        self._mesh = mesh
+        self._translation = np.asarray(translation, dtype=np.float64)
+        self._rotation = np.asarray(rotation_deg, dtype=np.float64)
+        self._scale = float(scale)
+        self._roi_bounds = np.asarray(roi_bounds, dtype=np.float64).reshape(-1)
+
+    def run(self):
+        try:
+            from scipy.spatial.transform import Rotation as R
+
+            if self._roi_bounds.size < 4:
+                self.computed.emit({"x1": [], "x2": [], "y1": [], "y2": []})
+                return
+
+            x1, x2, y1, y2 = [float(v) for v in self._roi_bounds[:4]]
+            inv_rot = R.from_euler('xyz', self._rotation, degrees=True).inv().as_matrix()
+            inv_scale = 1.0 / self._scale if self._scale != 0 else 1.0
+            rot_mat = R.from_euler('xyz', self._rotation, degrees=True).as_matrix()
+
+            slicer = MeshSlicer(self._mesh.to_trimesh())
+
+            def slice_world_plane(world_origin: np.ndarray, world_normal: np.ndarray):
+                world_origin = np.asarray(world_origin, dtype=np.float64)
+                world_normal = np.asarray(world_normal, dtype=np.float64)
+                local_origin = inv_scale * inv_rot @ (world_origin - self._translation)
+                local_normal = inv_rot @ world_normal
+                contours_local = slicer.slice_with_plane(local_origin, local_normal)
+                out = []
+                for cnt in contours_local or []:
+                    if cnt is None or len(cnt) < 2:
+                        continue
+                    out.append((rot_mat @ (cnt * self._scale).T).T + self._translation)
+                return out
+
+            # 4개의 경계 평면에서 단면선(경계선) 추출
+            edges = {
+                "x1": slice_world_plane(np.array([x1, 0.0, 0.0]), np.array([1.0, 0.0, 0.0])),
+                "x2": slice_world_plane(np.array([x2, 0.0, 0.0]), np.array([1.0, 0.0, 0.0])),
+                "y1": slice_world_plane(np.array([0.0, y1, 0.0]), np.array([0.0, 1.0, 0.0])),
+                "y2": slice_world_plane(np.array([0.0, y2, 0.0]), np.array([0.0, 1.0, 0.0])),
+            }
+            self.computed.emit(edges)
+        except Exception as e:
+            self.failed.emit(str(e))
+
+
 class TrackballCamera:
     """
     Trackball 스타일 카메라 (Z-up 좌표계)
@@ -523,6 +712,12 @@ class Viewport3D(QOpenGLWidget):
         self.roi_enabled = False
         self.roi_bounds = [-10.0, 10.0, -10.0, 10.0] # [min_x, max_x, min_y, max_y]
         self.active_roi_edge = None # 현재 드래그 중인 모서리 ('left', 'right', 'top', 'bottom')
+        self.roi_cut_edges = {"x1": [], "x2": [], "y1": [], "y2": []}  # ROI 잘림 경계선(월드 좌표)
+        self._roi_edges_pending_bounds = None
+        self._roi_edges_thread = None
+        self._roi_edges_timer = QTimer(self)
+        self._roi_edges_timer.setSingleShot(True)
+        self._roi_edges_timer.timeout.connect(self._request_roi_edges_compute)
 
         # Cut guide lines (2 polylines on top view, SVG export용)
         self.cut_lines_enabled = False
@@ -530,6 +725,13 @@ class Viewport3D(QOpenGLWidget):
         self.cut_line_active = 0   # 0 or 1
         self.cut_line_drawing = False
         self.cut_line_preview = None  # np.array([x,y,z]) - 마지막 점에서 이어지는 프리뷰
+        self.cut_section_profiles = [[], []]  # 각 선의 (s,z) 프로파일 [(dist, z), ...]
+        self.cut_section_world = [[], []]     # 바닥에 배치된 단면 폴리라인(월드 좌표)
+        self._cut_section_pending_index = None
+        self._cut_section_thread = None
+        self._cut_section_timer = QTimer(self)
+        self._cut_section_timer.setSingleShot(True)
+        self._cut_section_timer.timeout.connect(self._request_cut_section_compute)
 
         # Line section (top-view cut line)
         self.line_section_enabled = False
@@ -714,6 +916,7 @@ class Viewport3D(QOpenGLWidget):
              
         # 3.8 2D ROI 크로핑 영역
         if self.roi_enabled:
+            self.draw_roi_cut_edges()
             self.draw_roi_box()
         
         # 4. 회전 기즈모 (선택된 객체에만, 피킹 모드 아닐 때만)
@@ -1039,6 +1242,8 @@ class Viewport3D(QOpenGLWidget):
             if idx not in (0, 1):
                 return
             self.cut_lines[idx] = []
+            self.cut_section_profiles[idx] = []
+            self.cut_section_world[idx] = []
             if self.cut_line_active == idx:
                 self.cut_line_drawing = False
                 self.cut_line_preview = None
@@ -1050,6 +1255,8 @@ class Viewport3D(QOpenGLWidget):
         self.cut_lines = [[], []]
         self.cut_line_drawing = False
         self.cut_line_preview = None
+        self.cut_section_profiles = [[], []]
+        self.cut_section_world = [[], []]
         self.update()
 
     def get_cut_lines_world(self):
@@ -1068,6 +1275,119 @@ class Viewport3D(QOpenGLWidget):
                     continue
             out.append(pts)
         return out
+
+    def get_cut_sections_world(self):
+        """내보내기용: 바닥에 배치된 단면(프로파일) 폴리라인 2개 월드 좌표 반환"""
+        out = []
+        for line in getattr(self, "cut_section_world", [[], []]):
+            pts = []
+            for p in line:
+                try:
+                    arr = np.asarray(p, dtype=np.float64).reshape(-1)
+                    if arr.size >= 3:
+                        pts.append([float(arr[0]), float(arr[1]), float(arr[2])])
+                    elif arr.size == 2:
+                        pts.append([float(arr[0]), float(arr[1]), 0.0])
+                except Exception:
+                    continue
+            out.append(pts)
+        return out
+
+    def schedule_cut_section_update(self, index: int, delay_ms: int = 0):
+        self._cut_section_pending_index = int(index)
+        self._cut_section_timer.start(max(0, int(delay_ms)))
+
+    def _layout_cut_section_world(self, profile: list, index: int):
+        obj = self.selected_obj
+        if obj is None or not profile:
+            return []
+
+        try:
+            b = obj.get_world_bounds()
+            min_x, min_y = float(b[0][0]), float(b[0][1])
+            max_x, max_y = float(b[1][0]), float(b[1][1])
+            span_x = max_x - min_x
+            span_y = max_y - min_y
+            margin = max(5.0, max(span_x, span_y) * 0.05)
+
+            s = np.array([p[0] for p in profile], dtype=np.float64)
+            z = np.array([p[1] for p in profile], dtype=np.float64)
+            z_min = float(np.nanmin(z)) if len(z) else 0.0
+
+            pts_world = []
+            if int(index) == 0:
+                # 가로: 메쉬 상단에 배치 (s -> X, z -> Y)
+                base_x = min_x
+                base_y = max_y + margin
+                for si, zi in zip(s.tolist(), z.tolist()):
+                    pts_world.append([base_x + float(si), base_y + (float(zi) - z_min), 0.0])
+            else:
+                # 세로: 메쉬 우측에 배치 (z -> X, s -> Y)
+                base_x = max_x + margin
+                base_y = min_y
+                for si, zi in zip(s.tolist(), z.tolist()):
+                    pts_world.append([base_x + (float(zi) - z_min), base_y + float(si), 0.0])
+            return pts_world
+        except Exception:
+            return []
+
+    def _request_cut_section_compute(self):
+        if not self.cut_lines_enabled and self.picking_mode != 'cut_lines':
+            return
+
+        obj = self.selected_obj
+        if obj is None or obj.mesh is None:
+            return
+
+        thread = getattr(self, "_cut_section_thread", None)
+        if thread is not None and thread.isRunning():
+            return
+
+        idx = self._cut_section_pending_index
+        self._cut_section_pending_index = None
+        if idx is None:
+            return
+        idx = int(idx)
+        if idx not in (0, 1):
+            return
+
+        poly = self.cut_lines[idx]
+        if poly is None or len(poly) < 2:
+            self.cut_section_profiles[idx] = []
+            self.cut_section_world[idx] = []
+            self.update()
+            return
+
+        self._cut_section_thread = _CutPolylineSectionProfileThread(
+            obj.mesh,
+            translation=obj.translation.copy(),
+            rotation_deg=obj.rotation.copy(),
+            scale=float(obj.scale),
+            index=idx,
+            polyline_world=[np.asarray(p, dtype=np.float64).copy() for p in poly],
+        )
+        self._cut_section_thread.computed.connect(self._on_cut_section_computed)
+        self._cut_section_thread.failed.connect(self._on_cut_section_failed)
+        self._cut_section_thread.start()
+
+    def _on_cut_section_computed(self, result: object):
+        try:
+            idx = int(result.get("index", -1))
+            profile = result.get("profile", [])
+        except Exception:
+            return
+
+        if idx not in (0, 1):
+            return
+
+        self.cut_section_profiles[idx] = profile
+        self.cut_section_world[idx] = self._layout_cut_section_world(profile, idx)
+        self.update()
+
+    def _on_cut_section_failed(self, message: str):
+        # 실패해도 UI는 계속 동작해야 함
+        # print(f"Cut section compute failed: {message}")
+        pass
 
     def draw_line_section(self):
         """상면(Top)에서 그은 직선 단면 시각화"""
@@ -1176,6 +1496,21 @@ class Viewport3D(QOpenGLWidget):
                     glEnd()
             except Exception:
                 pass
+
+        # 단면 프로파일(바닥 배치) 렌더링
+        profiles = getattr(self, "cut_section_world", [[], []])
+        z_profile = 0.12
+        if profiles:
+            glColor4f(0.1, 0.1, 0.1, 0.9)
+            glLineWidth(2.0)
+            for pts in profiles:
+                if pts is None or len(pts) < 2:
+                    continue
+                glBegin(GL_LINE_STRIP)
+                for p in pts:
+                    p0 = np.asarray(p, dtype=np.float64)
+                    glVertex3f(float(p0[0]), float(p0[1]), z_profile)
+                glEnd()
 
         glLineWidth(1.0)
         glEnable(GL_DEPTH_TEST)
@@ -1538,25 +1873,31 @@ class Viewport3D(QOpenGLWidget):
 
         # 4방향 화살표 핸들 (간이 삼각형) - 화살표만 보이게
         def draw_arrow(cx, cy, direction):
-            size = self.camera.distance * 0.015
-            glBegin(GL_TRIANGLES)
+            size = max(3.0, self.camera.distance * 0.03)
+
             if direction == 'top': # Y+
-                glVertex3f(cx - size/2, cy, z)
-                glVertex3f(cx + size/2, cy, z)
-                glVertex3f(cx, cy + size, z)
+                verts = [(cx - size/2, cy, z), (cx + size/2, cy, z), (cx, cy + size, z)]
             elif direction == 'bottom': # Y-
-                glVertex3f(cx - size/2, cy, z)
-                glVertex3f(cx + size/2, cy, z)
-                glVertex3f(cx, cy - size, z)
+                verts = [(cx - size/2, cy, z), (cx + size/2, cy, z), (cx, cy - size, z)]
             elif direction == 'left': # X-
-                glVertex3f(cx, cy - size/2, z)
-                glVertex3f(cx, cy + size/2, z)
-                glVertex3f(cx - size, cy, z)
-            elif direction == 'right': # X+
-                glVertex3f(cx, cy - size/2, z)
-                glVertex3f(cx, cy + size/2, z)
-                glVertex3f(cx + size, cy, z)
+                verts = [(cx, cy - size/2, z), (cx, cy + size/2, z), (cx - size, cy, z)]
+            else: # right (X+)
+                verts = [(cx, cy - size/2, z), (cx, cy + size/2, z), (cx + size, cy, z)]
+
+            # Fill
+            glBegin(GL_TRIANGLES)
+            for vx, vy, vz in verts:
+                glVertex3f(float(vx), float(vy), float(vz))
             glEnd()
+
+            # Outline (high contrast)
+            glColor4f(0.0, 0.0, 0.0, 0.85)
+            glLineWidth(2.0)
+            glBegin(GL_LINE_LOOP)
+            for vx, vy, vz in verts:
+                glVertex3f(float(vx), float(vy), float(vz))
+            glEnd()
+            glLineWidth(1.0)
 
         # 각 모서리 중앙에 화살표 표시
         mid_x = (x1 + x2) / 2
@@ -1564,7 +1905,7 @@ class Viewport3D(QOpenGLWidget):
         
         # 활성 상태에 따라 색상 변경
         def get_color(edge):
-            return [1, 1, 0, 1] if self.active_roi_edge == edge else [0, 0.8, 1, 1]
+            return [1.0, 0.6, 0.0, 1.0] if self.active_roi_edge == edge else [0.0, 0.95, 1.0, 1.0]
 
         glColor4fv(get_color('bottom')); draw_arrow(mid_x, y1, 'bottom')
         glColor4fv(get_color('top'));    draw_arrow(mid_x, y2, 'top')
@@ -1575,6 +1916,102 @@ class Viewport3D(QOpenGLWidget):
         glDisable(GL_BLEND)
         glEnable(GL_DEPTH_TEST)
         glEnable(GL_LIGHTING)
+
+    def draw_roi_cut_edges(self):
+        """ROI 클리핑으로 생기는 잘림 경계선(단면선) 오버레이"""
+        edges = getattr(self, "roi_cut_edges", None)
+        if not edges:
+            return
+
+        glDisable(GL_LIGHTING)
+        glDisable(GL_DEPTH_TEST)
+        glLineWidth(2.5)
+
+        active = getattr(self, "active_roi_edge", None)
+        plane_active = {
+            "left": "x1",
+            "right": "x2",
+            "bottom": "y1",
+            "top": "y2",
+        }.get(active, None)
+
+        colors = {
+            "x1": (1.0, 0.35, 0.25, 0.9),
+            "x2": (1.0, 0.35, 0.25, 0.9),
+            "y1": (0.25, 0.75, 1.0, 0.9),
+            "y2": (0.25, 0.75, 1.0, 0.9),
+        }
+
+        for key, contours in edges.items():
+            if not contours:
+                continue
+            col = colors.get(key, (1.0, 1.0, 0.0, 0.9))
+            if plane_active == key:
+                col = (1.0, 1.0, 0.2, 1.0)
+                glLineWidth(3.5)
+            else:
+                glLineWidth(2.5)
+
+            glColor4f(*col)
+            for cnt in contours:
+                try:
+                    if cnt is None or len(cnt) < 2:
+                        continue
+                    glBegin(GL_LINE_STRIP)
+                    for pt in cnt:
+                        glVertex3fv(pt)
+                    glEnd()
+                except Exception:
+                    continue
+
+        glLineWidth(1.0)
+        glEnable(GL_DEPTH_TEST)
+        glEnable(GL_LIGHTING)
+
+    def schedule_roi_edges_update(self, delay_ms: int = 150):
+        if not getattr(self, "roi_enabled", False):
+            return
+        self._roi_edges_pending_bounds = [float(v) for v in self.roi_bounds]
+        self._roi_edges_timer.start(max(0, int(delay_ms)))
+
+    def _request_roi_edges_compute(self):
+        if not getattr(self, "roi_enabled", False):
+            return
+
+        obj = self.selected_obj
+        if obj is None or obj.mesh is None:
+            return
+
+        thread = getattr(self, "_roi_edges_thread", None)
+        if thread is not None and thread.isRunning():
+            return
+
+        bounds = self._roi_edges_pending_bounds
+        self._roi_edges_pending_bounds = None
+        if bounds is None:
+            bounds = [float(v) for v in self.roi_bounds]
+
+        self._roi_edges_thread = _RoiCutEdgesThread(
+            obj.mesh,
+            translation=obj.translation.copy(),
+            rotation_deg=obj.rotation.copy(),
+            scale=float(obj.scale),
+            roi_bounds=bounds,
+        )
+        self._roi_edges_thread.computed.connect(self._on_roi_edges_computed)
+        self._roi_edges_thread.failed.connect(self._on_roi_edges_failed)
+        self._roi_edges_thread.start()
+
+    def _on_roi_edges_computed(self, edges: object):
+        try:
+            self.roi_cut_edges = dict(edges)
+        except Exception:
+            return
+        self.update()
+
+    def _on_roi_edges_failed(self, message: str):
+        # print(f"ROI edge compute failed: {message}")
+        pass
 
     def extract_roi_silhouette(self):
         """지정된 ROI 영역의 메쉬 외곽(실루엣) 추출"""
@@ -2492,6 +2929,9 @@ class Viewport3D(QOpenGLWidget):
                     if idx not in (0, 1):
                         idx = 0
                     line = self.cut_lines[idx]
+                    # 기존 단면 결과는 편집 시 무효화
+                    self.cut_section_profiles[idx] = []
+                    self.cut_section_world[idx] = []
                     p = np.array([pt[0], pt[1], 0.0], dtype=np.float64)
                     if len(line) == 0:
                         line.append(p)
@@ -2803,6 +3243,7 @@ class Viewport3D(QOpenGLWidget):
                     elif self.active_roi_edge == 'bottom': self.roi_bounds[2] = min(wy, self.roi_bounds[3] - 0.1)
                     elif self.active_roi_edge == 'top':    self.roi_bounds[3] = max(wy, self.roi_bounds[2] + 0.1)
                     
+                    self.schedule_roi_edges_update(120)
                     self.update()
                 return
 
@@ -2876,11 +3317,18 @@ class Viewport3D(QOpenGLWidget):
         if self.picking_mode == 'cut_lines':
             key = event.key()
             if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                idx_done = int(getattr(self, "cut_line_active", 0))
                 self.cut_line_drawing = False
                 self.cut_line_preview = None
+                # 단면(프로파일) 계산 요청
+                try:
+                    if idx_done in (0, 1) and len(self.cut_lines[idx_done]) >= 2:
+                        self.schedule_cut_section_update(idx_done, delay_ms=0)
+                except Exception:
+                    pass
                 # 첫 번째 선을 끝냈고 두 번째가 비어있으면 자동 전환
                 try:
-                    if int(self.cut_line_active) == 0 and not self.cut_lines[1]:
+                    if idx_done == 0 and not self.cut_lines[1]:
                         self.cut_line_active = 1
                 except Exception:
                     pass
@@ -2893,6 +3341,8 @@ class Viewport3D(QOpenGLWidget):
                     line = self.cut_lines[idx]
                     if line:
                         line.pop()
+                        self.cut_section_profiles[idx] = []
+                        self.cut_section_world[idx] = []
                     if not line:
                         self.cut_line_drawing = False
                         self.cut_line_preview = None
