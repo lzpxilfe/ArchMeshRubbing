@@ -2645,7 +2645,7 @@ class MainWindow(QMainWindow):
                 cam.azimuth, cam.elevation = view_map[view]
 
             # 1. 고해상도 이미지 캡처 및 정렬용 행렬 획득
-            qimage, mv, proj, vp = self.viewport.capture_high_res_image(width=2048, height=2048)
+            qimage, mv, proj, vp = self.viewport.capture_high_res_image(width=2048, height=2048, only_selected=True)
 
             # QImage -> PIL Image 변환 (Qt QBuffer 사용)
             ba = QByteArray()

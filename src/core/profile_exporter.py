@@ -205,79 +205,20 @@ class ProfileExporter:
                            translation: np.ndarray = None,
                            rotation: np.ndarray = None,
                            scale: float = 1.0,
-                           opengl_matrices: tuple = None) -> tuple:
+                           opengl_matrices: tuple = None,
+                           viewport_image: Image.Image = None) -> tuple:
         """
         메쉬를 투영하여 단일 외곽선(폴리라인)을 추출합니다.
         opengl_matrices: (modelview, projection, viewport) - 제공 시 실제 렌더링 화면과 완벽히 일치시킴
+        viewport_image: OpenGL 캡처 이미지(PIL). 제공 시 화면과 100% 일치하는 외곽선을 이미지 기반으로 추출
         """
         if opengl_matrices:
             mv, proj, vp = opengl_matrices
-            # 1. 월드 변환 적용
-            # 얼굴(삼각형) 샘플링을 먼저 해서 필요한 정점만 변환/투영 (대형 메쉬 성능)
-            faces = getattr(mesh, "faces", None)
-            if faces is None:
-                faces = []
-            faces = np.asarray(faces, dtype=np.int32)
-
-            if len(faces) > self.MAX_FACES_FOR_RASTERIZE:
-                step = max(1, int(len(faces) // self.MAX_FACES_FOR_RASTERIZE))
-                faces = faces[::step]
-                if len(faces) > self.MAX_FACES_FOR_RASTERIZE:
-                    faces = faces[: self.MAX_FACES_FOR_RASTERIZE]
-
-            if faces.size == 0:
-                bounds = {
-                    'min': np.array([0, 0]),
-                    'max': np.array([vp[2] / 100.0, vp[3] / 100.0]),
-                    'size': np.array([vp[2] / 100.0, vp[3] / 100.0]),
-                    'px_per_cm': 100.0,
-                    'is_pixels': True,
-                    'vp_size': (vp[2], vp[3]),
-                    'matrices': (mv, proj, vp),
-                    'world_bounds': np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]], dtype=np.float64),
-                }
-                return [], bounds
-
-            unique_idx = np.unique(faces.reshape(-1))
-            faces = np.searchsorted(unique_idx, faces).astype(np.int32, copy=False)
-
-            vertices = np.asarray(mesh.vertices[unique_idx], dtype=np.float64) * float(scale)
-            if rotation is not None:
-                from scipy.spatial.transform import Rotation as R
-                r = R.from_euler('xyz', rotation, degrees=True)
-                vertices = r.apply(vertices)
-            if translation is not None:
-                vertices = vertices + translation
-            
-            # 2. OpenGL 정사영 (Screen Space)
-            # Clip Space = P * M * V
-            v_homo = np.hstack([vertices, np.ones((len(vertices), 1))])
             mvp = mv @ proj
-            v_clip = v_homo @ mvp # (N, 4)
-            # NDC
-            v_ndc = v_clip[:, :3] / v_clip[:, 3:]
-            # Screen
-            proj_2d = np.zeros((len(vertices), 2))
-            proj_2d[:, 0] = (v_ndc[:, 0] + 1) / 2 * vp[2]
-            proj_2d[:, 1] = (v_ndc[:, 1] + 1) / 2 * vp[3]
-            # OpenGL Y축 반전 보정 (이미지 좌표계로)
-            proj_2d[:, 1] = vp[3] - proj_2d[:, 1]
-            
-            # 3. 바운딩 박스 (픽셀단위)
-            min_px = proj_2d.min(axis=0)
-            max_px = proj_2d.max(axis=0)
-            
-            # 4. 월드 스케일 계산 (SVG cm 단위를 위해)
-            # 중심점에서 ±1cm 거리에 있는 점들을 투영해서 픽셀 거리 측정
-            def project_pt(p):
-                vh = np.append(p, 1.0)
-                vc = vh @ mvp
-                if abs(float(vc[3])) < 1e-12:
-                    return np.array([0.0, 0.0], dtype=np.float64)
-                vn = vc[:3] / vc[3]
-                return np.array([(vn[0] + 1) / 2 * vp[2], vp[3] - (vn[1] + 1) / 2 * vp[3]])
 
-            # world bounds는 전체 정점 변환 없이 bounds corner 8개만 변환해서 계산
+            # 1) 월드 bounds 계산 (전체 정점 변환 없이 bounds corner 8개만 변환)
+            w_min = None
+            w_max = None
             try:
                 lb = np.asarray(mesh.bounds, dtype=np.float64)
                 corners = np.array(
@@ -300,12 +241,30 @@ class ProfileExporter:
                     corners = r.apply(corners)
                 if translation is not None:
                     corners = corners + translation
-
                 w_min = corners.min(axis=0)
                 w_max = corners.max(axis=0)
             except Exception:
-                w_min = vertices.min(axis=0)
-                w_max = vertices.max(axis=0)
+                pass
+
+            if w_min is None or w_max is None:
+                v_all = np.asarray(mesh.vertices, dtype=np.float64) * float(scale)
+                if rotation is not None:
+                    from scipy.spatial.transform import Rotation as R
+                    r = R.from_euler('xyz', rotation, degrees=True)
+                    v_all = r.apply(v_all)
+                if translation is not None:
+                    v_all = v_all + translation
+                w_min = v_all.min(axis=0)
+                w_max = v_all.max(axis=0)
+
+            # 2) px_per_cm 계산 (world 좌표 1.0을 1cm로 가정)
+            def project_pt(p):
+                vh = np.append(p, 1.0)
+                vc = vh @ mvp
+                if abs(float(vc[3])) < 1e-12:
+                    return np.array([0.0, 0.0], dtype=np.float64)
+                vn = vc[:3] / vc[3]
+                return np.array([(vn[0] + 1) / 2 * vp[2], vp[3] - (vn[1] + 1) / 2 * vp[3]])
 
             center_world = (w_min + w_max) / 2.0
             axis = np.array([1.0, 0.0, 0.0], dtype=np.float64)
@@ -315,46 +274,118 @@ class ProfileExporter:
 
             px_per_cm = float(np.linalg.norm(project_pt(center_world) - project_pt(p1)))
             if px_per_cm < 1e-6:
-                px_per_cm = 100.0 # Fallback
-            
-            # 5. 이미 렌더링된 이미지가 있으므로 래스터화는 외곽선 추출용으로만 사용
-            grid_w, grid_h = vp[2], vp[3]
-            occupancy = np.zeros((grid_h, grid_w), dtype=np.uint8)
-            faces = np.asarray(faces, dtype=np.int32)
+                px_per_cm = 100.0  # Fallback
 
-            # 대용량 메쉬는 모든 면을 채우면 매우 느림 -> stride 샘플링
-            if len(faces) > self.MAX_FACES_FOR_RASTERIZE:
-                step = max(1, int(len(faces) // self.MAX_FACES_FOR_RASTERIZE))
-                faces = faces[::step]
+            # 3) 외곽선 추출: viewport_image가 있으면 이미지 기반(가장 견고/빠름)
+            grid_w = int(vp[2])
+            grid_h = int(vp[3])
+            if viewport_image is not None:
+                try:
+                    img_rgba = viewport_image.convert("RGBA")
+                    rgb = np.asarray(img_rgba, dtype=np.uint8)[..., :3]
+                    if rgb.shape[1] != grid_w or rgb.shape[0] != grid_h:
+                        # 캡처 사이즈가 vp와 다르면 vp를 이미지 기준으로 맞춤
+                        grid_w = int(rgb.shape[1])
+                        grid_h = int(rgb.shape[0])
+                        vp = np.array([0, 0, grid_w, grid_h], dtype=np.int32)
+
+                    corners_rgb = np.stack(
+                        [rgb[0, 0], rgb[0, -1], rgb[-1, 0], rgb[-1, -1]], axis=0
+                    ).astype(np.int16)
+                    bg = np.median(corners_rgb, axis=0).astype(np.int16)
+
+                    diff = np.max(np.abs(rgb.astype(np.int16) - bg[None, None, :]), axis=2)
+                    mask = diff > 8
+                    if int(mask.sum()) < 64:
+                        # 매우 밝은 메쉬/조명 등으로 diff가 거의 없을 때: 단순 백색 임계값으로 fallback
+                        mask = rgb.mean(axis=2) < 254
+
+                    if HAS_CV2:
+                        occ = (mask.astype(np.uint8) * 255)
+                        k = np.ones((3, 3), dtype=np.uint8)
+                        occ = cv2.morphologyEx(occ, cv2.MORPH_CLOSE, k, iterations=2)
+                        occ = cv2.morphologyEx(occ, cv2.MORPH_OPEN, k, iterations=1)
+                        occupancy = occ
+                    else:
+                        if HAS_SCIPY:
+                            mask = ndimage.binary_closing(mask, structure=np.ones((3, 3), dtype=bool), iterations=2)
+                            mask = ndimage.binary_opening(mask, structure=np.ones((3, 3), dtype=bool), iterations=1)
+                        occupancy = (mask.astype(np.uint8) * 255)
+                except Exception:
+                    viewport_image = None  # fallback to geometry rasterize
+
+            if viewport_image is None:
+                # (Fallback) geometry rasterize 기반 외곽선 추출
+                faces = getattr(mesh, "faces", None)
+                if faces is None:
+                    faces = []
+                faces = np.asarray(faces, dtype=np.int32)
+                if faces.size == 0:
+                    bounds = {
+                        'min': np.array([0, 0]),
+                        'max': np.array([grid_w / px_per_cm, grid_h / px_per_cm]),
+                        'size': np.array([grid_w / px_per_cm, grid_h / px_per_cm]),
+                        'px_per_cm': px_per_cm,
+                        'is_pixels': True,
+                        'vp_size': (grid_w, grid_h),
+                        'grid_size': (grid_w, grid_h),
+                        'matrices': (mv, proj, vp),
+                        'world_bounds': np.array([w_min, w_max], dtype=np.float64),
+                    }
+                    return [], bounds
+
                 if len(faces) > self.MAX_FACES_FOR_RASTERIZE:
-                    faces = faces[: self.MAX_FACES_FOR_RASTERIZE]
-            if HAS_CV2:
-                img_v = proj_2d.astype(np.int32)
-                for face in faces:
-                    cv2.fillPoly(occupancy, [img_v[face]], 255)
-            else:
-                img = Image.new('L', (grid_w, grid_h), 0)
-                draw = ImageDraw.Draw(img)
-                for face in faces:
-                    draw.polygon([(int(p[0]), int(p[1])) for p in proj_2d[face]], fill=255)
-                occupancy = np.array(img)
+                    step = max(1, int(len(faces) // self.MAX_FACES_FOR_RASTERIZE))
+                    faces = faces[::step]
+                    if len(faces) > self.MAX_FACES_FOR_RASTERIZE:
+                        faces = faces[: self.MAX_FACES_FOR_RASTERIZE]
+
+                unique_idx = np.unique(faces.reshape(-1))
+                faces = np.searchsorted(unique_idx, faces).astype(np.int32, copy=False)
+
+                vertices = np.asarray(mesh.vertices[unique_idx], dtype=np.float64) * float(scale)
+                if rotation is not None:
+                    from scipy.spatial.transform import Rotation as R
+                    r = R.from_euler('xyz', rotation, degrees=True)
+                    vertices = r.apply(vertices)
+                if translation is not None:
+                    vertices = vertices + translation
+
+                v_homo = np.hstack([vertices, np.ones((len(vertices), 1))])
+                v_clip = v_homo @ mvp  # (N, 4)
+                v_ndc = v_clip[:, :3] / v_clip[:, 3:]
+                proj_2d = np.zeros((len(vertices), 2))
+                proj_2d[:, 0] = (v_ndc[:, 0] + 1) / 2 * grid_w
+                proj_2d[:, 1] = (v_ndc[:, 1] + 1) / 2 * grid_h
+                proj_2d[:, 1] = grid_h - proj_2d[:, 1]
+
+                if HAS_CV2:
+                    occupancy = np.zeros((grid_h, grid_w), dtype=np.uint8)
+                    img_v = proj_2d.astype(np.int32)
+                    for face in faces:
+                        cv2.fillPoly(occupancy, [img_v[face]], 255)
+                else:
+                    img = Image.new('L', (grid_w, grid_h), 0)
+                    draw = ImageDraw.Draw(img)
+                    for face in faces:
+                        draw.polygon([(int(p[0]), int(p[1])) for p in proj_2d[face]], fill=255)
+                    occupancy = np.array(img)
 
             contours = []
             contour_px = _extract_main_contour(occupancy)
             if len(contour_px) > 0:
                 contours.append(contour_px.astype(float))
-            
-                # 6. 바운드 설정 (cm 단위 크기)
+
             bounds = {
                 'min': np.array([0, 0]),
-                'max': np.array([vp[2]/px_per_cm, vp[3]/px_per_cm]),
-                'size': np.array([vp[2]/px_per_cm, vp[3]/px_per_cm]),
+                'max': np.array([grid_w / px_per_cm, grid_h / px_per_cm]),
+                'size': np.array([grid_w / px_per_cm, grid_h / px_per_cm]),
                 'px_per_cm': px_per_cm,
-                'is_pixels': True, 
-                'vp_size': (vp[2], vp[3]),
+                'is_pixels': True,
+                'vp_size': (grid_w, grid_h),
+                'grid_size': (grid_w, grid_h),
                 'matrices': (mv, proj, vp),
                 'world_bounds': np.array([w_min, w_max], dtype=np.float64),
-                'vertices_world': vertices # 그리드 범위 계산용
             }
             return contours, bounds
 
@@ -598,7 +629,13 @@ class ProfileExporter:
         메쉬의 2D 프로파일을 SVG로 내보내는 통합 메서드.
         """
         contours, bounds = self.extract_silhouette(
-            mesh, view, translation, rotation, scale, opengl_matrices
+            mesh,
+            view,
+            translation,
+            rotation,
+            scale,
+            opengl_matrices,
+            viewport_image=viewport_image,
         )
         
         background_image = None

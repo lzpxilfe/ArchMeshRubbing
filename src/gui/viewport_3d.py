@@ -2716,7 +2716,7 @@ class Viewport3D(QOpenGLWidget):
         
         return None
 
-    def capture_high_res_image(self, width: int = 2048, height: int = 2048):
+    def capture_high_res_image(self, width: int = 2048, height: int = 2048, *, only_selected: bool = False):
         """고해상도 오프스크린 렌더링"""
         self.makeCurrent()
         
@@ -2750,9 +2750,13 @@ class Viewport3D(QOpenGLWidget):
         glLightfv(GL_LIGHT0, GL_DIFFUSE, [0.6, 0.6, 0.6, 1.0])
         
         # 메쉬만 렌더링 (그리드나 HUD 제외)
+        sel = int(self.selected_index) if self.selected_index is not None else -1
         for i, obj in enumerate(self.objects):
-            if not obj.visible: continue
-            self.draw_scene_object(obj, is_selected=(i == self.selected_index))
+            if not obj.visible:
+                continue
+            if only_selected and sel >= 0 and i != sel:
+                continue
+            self.draw_scene_object(obj, is_selected=(i == sel))
         
         # 4. 행렬 캡처 (SVG 투영 정렬용)
         mv = glGetDoublev(GL_MODELVIEW_MATRIX)
