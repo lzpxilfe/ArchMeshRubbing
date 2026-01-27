@@ -142,9 +142,13 @@ class MeshData:
         
         if self.normals is None:
             # 정점 법선 = 인접 면 법선의 평균
-            self.normals = np.zeros_like(self.vertices)
-            for i, face in enumerate(self.faces):
-                self.normals[face] += self.face_normals[i]
+            self.normals = np.zeros_like(self.vertices, dtype=np.float64)
+            faces = self.faces
+            face_normals = np.asarray(self.face_normals, dtype=np.float64)
+            # Python loop 대신 벡터화된 누적 (대용량 메쉬 로딩 속도 개선)
+            np.add.at(self.normals, faces[:, 0], face_normals)
+            np.add.at(self.normals, faces[:, 1], face_normals)
+            np.add.at(self.normals, faces[:, 2], face_normals)
             
             norms = np.linalg.norm(self.normals, axis=1, keepdims=True)
             norms[norms == 0] = 1
