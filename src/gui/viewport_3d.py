@@ -713,6 +713,7 @@ class Viewport3D(QOpenGLWidget):
         self.roi_bounds = [-10.0, 10.0, -10.0, 10.0] # [min_x, max_x, min_y, max_y]
         self.active_roi_edge = None # 현재 드래그 중인 모서리 ('left', 'right', 'top', 'bottom')
         self.roi_cut_edges = {"x1": [], "x2": [], "y1": [], "y2": []}  # ROI 잘림 경계선(월드 좌표)
+        self.roi_section_world = {"x": [], "y": []}  # ROI로 얻은 단면(바닥 배치)
         self._roi_edges_pending_bounds = None
         self._roi_edges_thread = None
         self._roi_edges_timer = QTimer(self)
@@ -918,6 +919,9 @@ class Viewport3D(QOpenGLWidget):
         if self.roi_enabled:
             self.draw_roi_cut_edges()
             self.draw_roi_box()
+
+        # 3.9 ROI 단면(얇은 슬라이스) 바닥 배치
+        self.draw_roi_section_plots()
         
         # 4. 회전 기즈모 (선택된 객체에만, 피킹 모드 아닐 때만)
         if self.selected_obj and self.picking_mode == 'none':
@@ -1277,7 +1281,7 @@ class Viewport3D(QOpenGLWidget):
         return out
 
     def get_cut_sections_world(self):
-        """내보내기용: 바닥에 배치된 단면(프로파일) 폴리라인 2개 월드 좌표 반환"""
+        """내보내기용: 바닥에 배치된 단면(프로파일) 폴리라인들(단면선/ROI) 월드 좌표 반환"""
         out = []
         for line in getattr(self, "cut_section_world", [[], []]):
             pts = []
@@ -1291,6 +1295,28 @@ class Viewport3D(QOpenGLWidget):
                 except Exception:
                     continue
             out.append(pts)
+
+        # ROI로 생성된 단면(있는 경우)도 함께 내보내기
+        try:
+            roi_sec = getattr(self, "roi_section_world", {}) or {}
+            for key in ("x", "y"):
+                line = roi_sec.get(key, None)
+                if not line or len(line) < 2:
+                    continue
+                pts = []
+                for p in line:
+                    try:
+                        arr = np.asarray(p, dtype=np.float64).reshape(-1)
+                        if arr.size >= 3:
+                            pts.append([float(arr[0]), float(arr[1]), float(arr[2])])
+                        elif arr.size == 2:
+                            pts.append([float(arr[0]), float(arr[1]), 0.0])
+                    except Exception:
+                        continue
+                if len(pts) >= 2:
+                    out.append(pts)
+        except Exception:
+            pass
         return out
 
     def schedule_cut_section_update(self, index: int, delay_ms: int = 0):
@@ -1968,6 +1994,41 @@ class Viewport3D(QOpenGLWidget):
         glEnable(GL_DEPTH_TEST)
         glEnable(GL_LIGHTING)
 
+    def draw_roi_section_plots(self):
+        """ROI로 생성된 단면을 바닥에 배치해 표시 (세로=우측, 가로=상단)"""
+        roi_sec = getattr(self, "roi_section_world", None)
+        if not roi_sec:
+            return
+
+        lines = []
+        try:
+            lx = roi_sec.get("x", [])
+            ly = roi_sec.get("y", [])
+            if lx and len(lx) >= 2:
+                lines.append(lx)
+            if ly and len(ly) >= 2:
+                lines.append(ly)
+        except Exception:
+            return
+
+        if not lines:
+            return
+
+        glDisable(GL_LIGHTING)
+        glDisable(GL_DEPTH_TEST)
+        glColor4f(0.05, 0.05, 0.05, 0.9)
+        glLineWidth(2.0)
+        z_plot = 0.12
+        for pts in lines:
+            glBegin(GL_LINE_STRIP)
+            for p in pts:
+                p0 = np.asarray(p, dtype=np.float64)
+                glVertex3f(float(p0[0]), float(p0[1]), z_plot)
+            glEnd()
+        glLineWidth(1.0)
+        glEnable(GL_DEPTH_TEST)
+        glEnable(GL_LIGHTING)
+
     def schedule_roi_edges_update(self, delay_ms: int = 150):
         if not getattr(self, "roi_enabled", False):
             return
@@ -2007,6 +2068,64 @@ class Viewport3D(QOpenGLWidget):
             self.roi_cut_edges = dict(edges)
         except Exception:
             return
+
+        # ROI가 '얇아졌을 때' 단면을 바닥에 배치 (회전해서 봐도 단면 확인 가능)
+        self.roi_section_world = {"x": [], "y": []}
+        try:
+            obj = self.selected_obj
+            if obj is not None:
+                b = np.asarray(obj.get_world_bounds(), dtype=np.float64)
+                min_x, min_y = float(b[0][0]), float(b[0][1])
+                max_x, max_y = float(b[1][0]), float(b[1][1])
+                span_x = max_x - min_x
+                span_y = max_y - min_y
+                margin = max(5.0, max(span_x, span_y) * 0.05)
+
+                x1, x2, y1, y2 = [float(v) for v in self.roi_bounds]
+                thin_th = 1.0  # cm: 이보다 얇으면 "단면"으로 간주
+
+                def pick_main(contours):
+                    if not contours:
+                        return None
+                    best = None
+                    best_n = 0
+                    for c in contours:
+                        try:
+                            n = int(len(c))
+                        except Exception:
+                            n = 0
+                        if n > best_n:
+                            best_n = n
+                            best = c
+                    return best
+
+                # 세로 단면 (좌우 폭이 매우 얇을 때) -> 우측에 배치 (Y-Z)
+                if abs(x2 - x1) <= thin_th:
+                    main = pick_main(self.roi_cut_edges.get("x1", []) or self.roi_cut_edges.get("x2", []))
+                    if main is not None and len(main) >= 2:
+                        main = np.asarray(main, dtype=np.float64)
+                        z_min = float(np.min(main[:, 2]))
+                        base_x = max_x + margin
+                        pts = []
+                        for pt in main:
+                            # z(높이) -> X, y -> Y (메쉬와 겹치지 않게 X만 우측으로 이동)
+                            pts.append([base_x + (float(pt[2]) - z_min), float(pt[1]), 0.0])
+                        self.roi_section_world["x"] = pts
+
+                # 가로 단면 (상하 폭이 매우 얇을 때) -> 상단에 배치 (X-Z)
+                if abs(y2 - y1) <= thin_th:
+                    main = pick_main(self.roi_cut_edges.get("y1", []) or self.roi_cut_edges.get("y2", []))
+                    if main is not None and len(main) >= 2:
+                        main = np.asarray(main, dtype=np.float64)
+                        z_min = float(np.min(main[:, 2]))
+                        base_y = max_y + margin
+                        pts = []
+                        for pt in main:
+                            # z(높이) -> Y, x -> X (메쉬와 겹치지 않게 Y만 상단으로 이동)
+                            pts.append([float(pt[0]), base_y + (float(pt[2]) - z_min), 0.0])
+                        self.roi_section_world["y"] = pts
+        except Exception:
+            pass
         self.update()
 
     def _on_roi_edges_failed(self, message: str):

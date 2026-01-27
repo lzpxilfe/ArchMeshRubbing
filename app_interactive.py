@@ -2692,7 +2692,7 @@ class MainWindow(QMainWindow):
                 bounds = np.asarray(obj.get_world_bounds(), dtype=np.float64)
                 try:
                     extra_pts = []
-                    for ln in getattr(self.viewport, "cut_section_world", []) or []:
+                    for ln in self.viewport.get_cut_sections_world() or []:
                         for p in ln or []:
                             extra_pts.append(np.asarray(p, dtype=np.float64))
                     if extra_pts:
