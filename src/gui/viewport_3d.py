@@ -4,6 +4,7 @@ Copyright (C) 2026 balguljang2 (lzpxilfe)
 Licensed under the GNU General Public License v2.0 (GPL2)
 """
 
+import time
 import numpy as np
 from typing import Optional, Tuple
 
@@ -87,32 +88,39 @@ class TrackballCamera:
         self.elevation = max(-89.0, min(89.0, self.elevation))
     
     def pan(self, delta_x: float, delta_y: float, sensitivity: float = 0.3):
-        """카메라 이동 (Pan) - 언제나 화면 기준으로 직관적으로 이동"""
-        az_rad = np.radians(self.azimuth)
-        el_rad = np.radians(self.elevation)
-        
-        # 1. 화면 오른쪽 벡터
-        right = np.array([-np.sin(az_rad), np.cos(az_rad), 0])
-        
-        # 2. 화면 위쪽 벡터 (시선 방향과 right에 수직)
-        # 시선 방향 (normalized)
-        view_dir = np.array([
-            -np.cos(el_rad) * np.cos(az_rad),
-            -np.cos(el_rad) * np.sin(az_rad),
-            -np.sin(el_rad)
-        ])
-        
-        # 실제 up = right x view_dir
-        up = np.cross(right, view_dir)
-        
+        """카메라 이동 (Pan) - 마우스 드래그 방향대로 화면이 '따라오게'"""
+        # forward(시선)과 up(상면/하면 특수 처리 포함)으로 화면 기준 right/up 벡터 구성
+        view_dir = self.look_at - self.position
+        v_norm = float(np.linalg.norm(view_dir))
+        if v_norm < 1e-12:
+            return
+        forward = view_dir / v_norm
+
+        up_ref = self.up_vector.astype(np.float64)
+        u_norm = float(np.linalg.norm(up_ref))
+        if u_norm < 1e-12:
+            up_ref = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        else:
+            up_ref = up_ref / u_norm
+
+        right = np.cross(forward, up_ref)
+        r_norm = float(np.linalg.norm(right))
+        if r_norm < 1e-12:
+            return
+        right = right / r_norm
+
+        up = np.cross(right, forward)
+        u2_norm = float(np.linalg.norm(up))
+        if u2_norm > 1e-12:
+            up = up / u2_norm
+
         # Pan 속도 = 거리에 비례
         pan_speed = self.distance * sensitivity * 0.005
-        
-        # "Steering" 모드 (사용자의 "마우스 반대로" 요청 반영)
-        # 마우스 오른쪽 -> 배경 왼쪽 : pan_offset이 +right 방향으로 가야 함
-        # 마우스 위쪽 -> 배경 아래쪽 : pan_offset이 -up 방향으로 가야 함
-        self.pan_offset += right * (delta_x * pan_speed)
-        self.pan_offset -= up * (delta_y * pan_speed)
+
+        # Grab-style: 마우스 방향대로 화면(메쉬)이 움직이게 카메라는 반대로 이동
+        # delta_y는 화면 아래로 갈수록 증가(QT 좌표계)
+        self.pan_offset -= right * (delta_x * pan_speed)
+        self.pan_offset += up * (delta_y * pan_speed)
     
     def zoom(self, delta: float, sensitivity: float = 1.1):
         """카메라 줌"""
@@ -191,6 +199,7 @@ class SceneObject:
         self.mesh = mesh
         self.name = name
         self.visible = True
+        self.color = [0.72, 0.72, 0.78]
         
         # 개별 변환 상태
         self.translation = np.array([0.0, 0.0, 0.0])
@@ -227,12 +236,22 @@ class SceneObject:
             [lb[0,0], lb[0,1], lb[1,2]], [lb[1,0], lb[0,1], lb[1,2]],
             [lb[0,0], lb[1,1], lb[1,2]], [lb[1,0], lb[1,1], lb[1,2]]
         ])
-        
+
         # 월드 변환 적용 (R * (S * V) + T)
-        from scipy.spatial.transform import Rotation as R
-        rot_mat = R.from_euler('xyz', self.rotation, degrees=True).as_matrix()
-        world_v = (rot_mat @ (v * self.scale).T).T + self.translation
-        
+        rx, ry, rz = np.radians(self.rotation)
+        cx, sx = float(np.cos(rx)), float(np.sin(rx))
+        cy, sy = float(np.cos(ry)), float(np.sin(ry))
+        cz, sz = float(np.cos(rz)), float(np.sin(rz))
+
+        rot_x = np.array([[1.0, 0.0, 0.0], [0.0, cx, -sx], [0.0, sx, cx]], dtype=np.float64)
+        rot_y = np.array([[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]], dtype=np.float64)
+        rot_z = np.array([[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]], dtype=np.float64)
+
+        # OpenGL 적용 순서(glRotatef X->Y->Z)와 동일한 intrinsic 'xyz' (Rx @ Ry @ Rz)
+        rot_mat = rot_x @ rot_y @ rot_z
+
+        world_v = (rot_mat @ (v * float(self.scale)).T).T + self.translation
+
         return np.array([world_v.min(axis=0), world_v.max(axis=0)])
         
     def cleanup(self):
@@ -260,10 +279,11 @@ class Viewport3D(QOpenGLWidget):
     meshTransformChanged = pyqtSignal()  # 직접 조작으로 변환됨
     selectionChanged = pyqtSignal(int) # 선택된 객체 인덱스
     floorPointPicked = pyqtSignal(np.ndarray) # 바닥면 점 선택됨
-    floorFacePicked = pyqtSignal(list)        # 바닥면 3점(면) 선택됨
+    floorFacePicked = pyqtSignal(list)        # 바닥면(면) 선택됨
     alignToBrushSelected = pyqtSignal()      # 브러시 선택 영역으로 정렬 요청
     floorAlignmentConfirmed = pyqtSignal()   # Enter 키로 정렬 확정 시 발생
     profileUpdated = pyqtSignal(list, list)  # x_profile, y_profile
+    lineProfileUpdated = pyqtSignal(list)    # line_profile
     roiSilhouetteExtracted = pyqtSignal(list) # 2D silhouette points
     
     def __init__(self, parent=None):
@@ -303,7 +323,7 @@ class Viewport3D(QOpenGLWidget):
         # 피킹 모드 ('none', 'curvature', 'floor_3point', 'floor_face', 'floor_brush')
         self.picking_mode = 'none'
         self.brush_selected_faces = set() # 브러시로 선택된 면 인덱스
-        self.floor_picks = []  # 바닥 3점 정렬용 점 리스트
+        self.floor_picks = []  # 바닥면 지정용 점 리스트
         
         # Undo/Redo 시스템
         self.undo_stack = []
@@ -319,11 +339,24 @@ class Viewport3D(QOpenGLWidget):
         self.crosshair_pos = np.array([0.0, 0.0]) # XY 위치
         self.x_profile = [] # X축 단면 데이터 [(dist, z), ...]
         self.y_profile = [] # Y축 단면 데이터 [(dist, z), ...]
+        self._crosshair_last_update = 0.0
         
         # 2D ROI (Region of Interest)
         self.roi_enabled = False
         self.roi_bounds = [-10.0, 10.0, -10.0, 10.0] # [min_x, max_x, min_y, max_y]
         self.active_roi_edge = None # 현재 드래그 중인 모서리 ('left', 'right', 'top', 'bottom')
+
+        # Line section (top-view cut line)
+        self.line_section_enabled = False
+        self.line_section_dragging = False
+        self.line_section_start = None  # np.ndarray([x, y, z])
+        self.line_section_end = None    # np.ndarray([x, y, z])
+        self.line_profile = []          # [(dist, z), ...]
+        self.line_section_contours = [] # world-space contours
+        self._line_section_last_update = 0.0
+
+        # Floor penetration highlight (z < 0)
+        self.floor_penetration_highlight = True
         
         # 드래그 조작용 최적화 변수
         self._drag_depth = 0.0
@@ -334,18 +367,15 @@ class Viewport3D(QOpenGLWidget):
         
         # 키보드 조작 타이머 (WASD 연속 이동용)
         self.keys_pressed = set()
-        self.move_timer = QTimer()
+        self.move_timer = QTimer(self)
         self.move_timer.timeout.connect(self.process_keyboard_navigation)
-        self.move_timer.start(16) # ~60fps
+        self.move_timer.setInterval(16) # ~60fps (필요 시만 start/stop)
         
         # UI 설정
         self.setMinimumSize(400, 300)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
-        # 타이머 (for continuous update, e.g., for status info)
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self.update)
-        self.timer.start(16)  # ~60 FPS
+        # 렌더링은 입력/상태 변경 시에만 update()하도록 유지 (상시 60FPS 렌더링은 대용량 메쉬에서 버벅임 유발)
     
     @property
     def selected_obj(self) -> Optional[SceneObject]:
@@ -406,6 +436,10 @@ class Viewport3D(QOpenGLWidget):
         
         # 카메라 적용
         self.camera.apply()
+
+        # 바닥 관통(z<0) 하이라이트용 클리핑 평면 갱신 (카메라 이동/회전에 따라 매 프레임 필요)
+        if self.floor_penetration_highlight:
+            self._update_floor_penetration_clip_plane()
         
         # 0. 광원 위치 업데이트 (밝고 균일한 조명)
         if not self.flat_shading:
@@ -455,7 +489,11 @@ class Viewport3D(QOpenGLWidget):
         # 3.7 십자선 단면
         if self.crosshair_enabled:
             self.draw_crosshair()
-            
+
+        # 3.7.5 선형 단면 (Top-view cut line)
+        if self.line_section_enabled:
+            self.draw_line_section()
+             
         # 3.8 2D ROI 크로핑 영역
         if self.roi_enabled:
             self.draw_roi_box()
@@ -468,6 +506,15 @@ class Viewport3D(QOpenGLWidget):
             
         # 5. UI 오버레이 (HUD)
         self.draw_orientation_hud()
+
+    def _update_floor_penetration_clip_plane(self):
+        """월드 바닥(Z=0) 기준으로 '아래쪽'만 남기는 클리핑 평면 정의"""
+        try:
+            # Plane: z = 0, keep z <= 0  => -z >= 0
+            glClipPlane(GL_CLIP_PLANE0, (0.0, 0.0, -1.0, 0.0))
+        except Exception:
+            # OpenGL 컨텍스트/프로파일에 따라 지원이 안 될 수 있음
+            pass
     
     def draw_ground_plane(self):
         """반투명 바닥면 그리기 (Z=0, XY 평면) - Z-up 좌표계"""
@@ -489,9 +536,12 @@ class Viewport3D(QOpenGLWidget):
         touching_floor = False
         if self.selected_obj:
             obj = self.selected_obj
-            world_z = obj.mesh.vertices[:, 2] + obj.translation[2]
-            near_floor_count = np.sum(world_z < 0.1) # 바닥 아래로 내려갔거나 거의 닿음
-            touching_floor = near_floor_count > 10 # 10개 이상의 점만 있어도 닿음으로 표시 (더 민감하게)
+            try:
+                # 전체 버텍스 스캔은 대용량 메쉬에서 매우 느림 -> 월드 바운드로 근사
+                wb = obj.get_world_bounds()
+                touching_floor = float(wb[0][2]) < 0.1
+            except Exception:
+                touching_floor = False
         
         # 바닥 색상: 닿으면 선명한 초록, 아니면 연한 회색/베이지
         if touching_floor:
@@ -704,23 +754,169 @@ class Viewport3D(QOpenGLWidget):
             
         # 3. 실제 추출된 포인트들 렌더링 (월드 좌표계)
         # X 프로파일: X축 방향으로 가로지르는 선 (Y = cy)
-        if hasattr(self, '_world_x_profile') and self._world_x_profile:
+        world_x_profile = getattr(self, '_world_x_profile', None)
+        if world_x_profile is not None and len(world_x_profile) > 0:
             glColor3f(1.0, 1.0, 0.0) # Yellow
             glBegin(GL_LINE_STRIP)
-            for pt in self._world_x_profile:
+            for pt in world_x_profile:
                 glVertex3fv(pt)
             glEnd()
             
         # Y 프로파일: Y축 방향으로 가로지르는 선 (X = cx)
-        if hasattr(self, '_world_y_profile') and self._world_y_profile:
+        world_y_profile = getattr(self, '_world_y_profile', None)
+        if world_y_profile is not None and len(world_y_profile) > 0:
             glColor3f(0.0, 1.0, 1.0) # Cyan
             glBegin(GL_LINE_STRIP)
-            for pt in self._world_y_profile:
+            for pt in world_y_profile:
                 glVertex3fv(pt)
             glEnd()
             
         glLineWidth(1.0)
         glEnable(GL_LIGHTING)
+
+    def clear_line_section(self):
+        """선형 단면(라인) 데이터 초기화"""
+        self.line_section_start = None
+        self.line_section_end = None
+        self.line_profile = []
+        self.line_section_contours = []
+        try:
+            self.lineProfileUpdated.emit([])
+        except Exception:
+            pass
+        self.update()
+
+    def draw_line_section(self):
+        """상면(Top)에서 그은 직선 단면 시각화"""
+        if self.line_section_start is None or self.line_section_end is None:
+            return
+
+        glDisable(GL_LIGHTING)
+
+        p0 = self.line_section_start
+        p1 = self.line_section_end
+
+        # 1) 바닥 평면 위 커팅 라인 (오렌지)
+        z = 0.05
+        glLineWidth(2.5)
+        glColor4f(1.0, 0.55, 0.0, 0.85)
+        glBegin(GL_LINES)
+        glVertex3f(float(p0[0]), float(p0[1]), z)
+        glVertex3f(float(p1[0]), float(p1[1]), z)
+        glEnd()
+
+        # 2) 엔드포인트 마커
+        glPointSize(6.0)
+        glBegin(GL_POINTS)
+        glVertex3f(float(p0[0]), float(p0[1]), z)
+        glVertex3f(float(p1[0]), float(p1[1]), z)
+        glEnd()
+        glPointSize(1.0)
+
+        # 3) 메쉬 단면선 (라임)
+        if self.line_section_contours:
+            glLineWidth(3.0)
+            glColor3f(0.2, 1.0, 0.2)
+            for contour in self.line_section_contours:
+                if len(contour) < 2:
+                    continue
+                glBegin(GL_LINE_STRIP)
+                for pt in contour:
+                    glVertex3fv(pt)
+                glEnd()
+
+        glLineWidth(1.0)
+        glEnable(GL_LIGHTING)
+
+    def update_line_section_profile(self):
+        """현재 선형 단면(라인)으로부터 프로파일 추출"""
+        if not self.selected_obj or self.selected_obj.mesh is None:
+            self.clear_line_section()
+            return
+
+        if self.line_section_start is None or self.line_section_end is None:
+            self.line_profile = []
+            self.line_section_contours = []
+            self.lineProfileUpdated.emit([])
+            self.update()
+            return
+
+        p0 = np.array(self.line_section_start, dtype=float)
+        p1 = np.array(self.line_section_end, dtype=float)
+
+        d = p1 - p0
+        d[2] = 0.0
+        length = float(np.linalg.norm(d))
+        if length < 1e-6:
+            self.line_profile = []
+            self.line_section_contours = []
+            self.lineProfileUpdated.emit([])
+            self.update()
+            return
+
+        d_unit = d / length
+        # 수직 단면 평면의 법선 (XY에서 라인에 수직)
+        world_normal = np.array([d_unit[1], -d_unit[0], 0.0], dtype=float)
+        world_origin = p0
+
+        obj = self.selected_obj
+        from scipy.spatial.transform import Rotation as R
+        inv_rot = R.from_euler('xyz', obj.rotation, degrees=True).inv().as_matrix()
+        inv_scale = 1.0 / obj.scale if obj.scale != 0 else 1.0
+
+        local_origin = inv_scale * inv_rot @ (world_origin - obj.translation)
+        local_normal = inv_rot @ world_normal
+
+        slicer = MeshSlicer(obj.to_trimesh())
+        contours_local = slicer.slice_with_plane(local_origin, local_normal)
+
+        # 월드 좌표로 변환(렌더링/프로파일용)
+        rot_mat = R.from_euler('xyz', obj.rotation, degrees=True).as_matrix()
+        trans = obj.translation
+        scale = obj.scale
+
+        world_contours = []
+        for cnt in contours_local:
+            w_cnt = (rot_mat @ (cnt * scale).T).T + trans
+            world_contours.append(w_cnt)
+        self.line_section_contours = world_contours
+
+        # 프로파일: (거리, 높이) - 라인 방향으로 투영
+        best_profile = []
+        best_span = 0.0
+
+        # 라인 세그먼트 범위로 필터링 (약간 여유)
+        margin = max(length * 0.02, 0.2)
+        t_min = -margin
+        t_max = length + margin
+
+        for cnt in world_contours:
+            if cnt is None or len(cnt) < 2:
+                continue
+            t = (cnt - p0) @ d_unit
+            mask = (t >= t_min) & (t <= t_max)
+            if int(mask.sum()) < 2:
+                continue
+
+            t_f = t[mask]
+            z_f = cnt[mask, 2]
+            span = float(t_f.max() - t_f.min())
+            if span <= best_span:
+                continue
+
+            order = np.argsort(t_f)
+            t_sorted = t_f[order]
+            z_sorted = z_f[order]
+
+            # 그래프는 0부터 시작하도록 shift
+            t_sorted = t_sorted - float(t_sorted.min())
+
+            best_profile = list(zip(t_sorted.tolist(), z_sorted.tolist()))
+            best_span = span
+
+        self.line_profile = best_profile
+        self.lineProfileUpdated.emit(self.line_profile)
+        self.update()
 
     def update_crosshair_profile(self):
         """현재 십자선 위치에서 단면 프로파일 추출"""
@@ -1117,19 +1313,37 @@ class Viewport3D(QOpenGLWidget):
             # VBO 방식 렌더링
             glEnableClientState(GL_VERTEX_ARRAY)
             glEnableClientState(GL_NORMAL_ARRAY)
-            
+
             glBindBuffer(GL_ARRAY_BUFFER, obj.vbo_id)
             glVertexPointer(3, GL_FLOAT, 24, ctypes.c_void_p(0))
             glNormalPointer(GL_FLOAT, 24, ctypes.c_void_p(12))
-            
+
+            # 1) 기본 색상 렌더링
             glDrawArrays(GL_TRIANGLES, 0, obj.vertex_count)
-            
+
+            # 2) 바닥 관통(z<0) 영역을 초록색으로 덮어쓰기(클리핑 평면 이용, CPU 스캔 없음)
+            if self.floor_penetration_highlight:
+                try:
+                    wb = obj.get_world_bounds()
+                    if float(wb[0][2]) < 0.0:
+                        glEnable(GL_CLIP_PLANE0)
+                        glDepthMask(GL_FALSE)
+                        glEnable(GL_POLYGON_OFFSET_FILL)
+                        glPolygonOffset(-1.0, -1.0)
+                        glColor3f(0.0, 1.0, 0.2)
+                        glDrawArrays(GL_TRIANGLES, 0, obj.vertex_count)
+                        glDisable(GL_POLYGON_OFFSET_FILL)
+                        glDepthMask(GL_TRUE)
+                        glDisable(GL_CLIP_PLANE0)
+                except Exception:
+                    pass
+
             glBindBuffer(GL_ARRAY_BUFFER, 0)
             glDisableClientState(GL_NORMAL_ARRAY)
             glDisableClientState(GL_VERTEX_ARRAY)
         
-        # 바닥 접촉 면 하이라이트 (Z=0 근처 면을 초록색으로)
-        if is_selected:
+        # 바닥 접촉 면 하이라이트는 정치(바닥 정렬) 관련 모드에서만 표시 (대용량 메쉬 성능)
+        if is_selected and self.picking_mode in {'floor_3point', 'floor_face', 'floor_brush'}:
             self._draw_floor_contact_faces(obj)
         
         glPopMatrix()
@@ -1219,11 +1433,11 @@ class Viewport3D(QOpenGLWidget):
         """메쉬 중심점 십자선 표시 (드래그로 이동 가능)"""
         if obj.mesh is None:
             return
-        
-        # 월드 좌표에서 바운딩 박스 계산
-        vertices = obj.mesh.vertices + obj.translation
-        min_pt = vertices.min(axis=0)
-        max_pt = vertices.max(axis=0)
+
+        # 월드 좌표에서 바운딩 박스 계산 (대용량 메쉬에서도 O(1))
+        wb = obj.get_world_bounds()
+        min_pt = wb[0]
+        max_pt = wb[1]
         
         center_x = (min_pt[0] + max_pt[0]) / 2
         center_y = (min_pt[1] + max_pt[1]) / 2
@@ -1348,6 +1562,13 @@ class Viewport3D(QOpenGLWidget):
         # 메쉬 자체를 원점으로 센터링 (로컬 좌표계 생성)
         center = mesh.centroid
         mesh.vertices -= center
+        # 캐시 무효화 (vertices 변경)
+        try:
+            mesh._bounds = None
+            mesh._centroid = None
+            mesh._surface_area = None
+        except Exception:
+            pass
         mesh.compute_normals()
         
         new_obj = SceneObject(mesh, name)
@@ -1542,7 +1763,8 @@ class Viewport3D(QOpenGLWidget):
         cos_z, sin_z = np.cos(rz), np.sin(rz)
         rot_z = np.array([[cos_z, -sin_z, 0], [sin_z, cos_z, 0], [0, 0, 1]])
         
-        rotation_matrix = rot_z @ rot_y @ rot_x
+        # OpenGL 렌더링(glRotate X->Y->Z)과 동일한 합성 회전
+        rotation_matrix = rot_x @ rot_y @ rot_z
         
         # 2. 정점 변환 (S -> R -> T 순서, 렌더링과 동일)
         # 스케일
@@ -1556,6 +1778,13 @@ class Viewport3D(QOpenGLWidget):
         
         # 3. 데이터 업데이트
         obj.mesh.vertices = vertices.astype(np.float32)
+        # 캐시 무효화 (vertices 변경)
+        try:
+            obj.mesh._bounds = None
+            obj.mesh._centroid = None
+            obj.mesh._surface_area = None
+        except Exception:
+            pass
         
         # 법선 재계산
         obj.mesh.compute_normals()
@@ -1671,12 +1900,30 @@ class Viewport3D(QOpenGLWidget):
                     self._pick_brush_face(event.pos())
                     self.update()
                     return
+
+                elif self.picking_mode == 'line_section':
+                    pt = self.pick_point_on_plane_z(event.pos().x(), event.pos().y(), z=0.0)
+                    if pt is not None:
+                        self.line_section_enabled = True
+                        self.line_section_dragging = True
+                        self.line_section_start = np.array([pt[0], pt[1], 0.0], dtype=float)
+                        self.line_section_end = self.line_section_start.copy()
+                        self.line_section_contours = []
+                        self.line_profile = []
+                        self.lineProfileUpdated.emit([])
+                        self._line_section_last_update = 0.0
+                        self.update()
+                    return
                 
                 elif self.picking_mode == 'crosshair':
                     point = self.pick_point_on_mesh(event.pos().x(), event.pos().y())
+                    if point is None:
+                        # 메쉬 픽이 실패해도(잔존 파손 등) 바닥 평면에서 십자선 이동 가능
+                        point = self.pick_point_on_plane_z(event.pos().x(), event.pos().y(), z=0.0)
                     if point is not None:
                         self.crosshair_pos = point[:2]
                         self.update_crosshair_profile()
+                        self._crosshair_last_update = time.monotonic()
                         self.update()
                     return
 
@@ -1729,7 +1976,18 @@ class Viewport3D(QOpenGLWidget):
                 self.alignToBrushSelected.emit()
             self.picking_mode = 'none'
             self.update()
-            
+
+        if self.mouse_button == Qt.MouseButton.LeftButton and self.picking_mode == 'line_section':
+            if self.line_section_dragging:
+                self.line_section_dragging = False
+                self._line_section_last_update = 0.0
+                self.update_line_section_profile()
+
+        if self.mouse_button == Qt.MouseButton.LeftButton and self.picking_mode == 'crosshair':
+            # 드래그 스로틀로 인해 마지막 위치가 반영되지 않을 수 있어, 릴리즈 시 1회 확정 업데이트
+            self._crosshair_last_update = 0.0
+            self.update_crosshair_profile()
+
         self.mouse_button = None
         self.active_gizmo_axis = None
         self.gizmo_drag_start = None
@@ -1847,7 +2105,7 @@ class Viewport3D(QOpenGLWidget):
                 self.update()
                 return
             
-            elif (modifiers & Qt.KeyboardModifier.ShiftModifier) and obj and self.mouse_button == Qt.MouseButton.LeftButton:
+            elif (modifiers & Qt.KeyboardModifier.ShiftModifier) and obj and self.mouse_button == Qt.MouseButton.LeftButton and self.picking_mode != 'line_section':
                 # 직관적 회전: 드래그 방향 = 회전 방향 (카메라 기준)
                 rot_speed = 0.5
                 
@@ -1870,13 +2128,45 @@ class Viewport3D(QOpenGLWidget):
                 self._pick_brush_face(event.pos())
                 self.update()
                 return
+
+            # 0.4 선형 단면(라인) 드래그 처리
+            if self.picking_mode == 'line_section' and self.line_section_dragging and self.mouse_button == Qt.MouseButton.LeftButton:
+                pt = self.pick_point_on_plane_z(event.pos().x(), event.pos().y(), z=0.0)
+                if pt is not None and self.line_section_start is not None:
+                    end = np.array([pt[0], pt[1], 0.0], dtype=float)
+
+                    # Shift: CAD Ortho (수평/수직 고정)
+                    if modifiers & Qt.KeyboardModifier.ShiftModifier:
+                        start = np.array(self.line_section_start, dtype=float)
+                        dx_l = float(end[0] - start[0])
+                        dy_l = float(end[1] - start[1])
+                        if abs(dx_l) >= abs(dy_l):
+                            end[1] = start[1]
+                        else:
+                            end[0] = start[0]
+
+                    self.line_section_end = end
+
+                    # 연산 비용(슬라이싱) 절약을 위해 약간 스로틀링
+                    now = time.monotonic()
+                    if now - self._line_section_last_update > 0.08:
+                        self._line_section_last_update = now
+                        self.update_line_section_profile()
+                    else:
+                        self.update()
+                return
             
             # 0.5 십자선 드래그 처리
             if self.picking_mode == 'crosshair' and self.mouse_button == Qt.MouseButton.LeftButton:
                 point = self.pick_point_on_mesh(event.pos().x(), event.pos().y())
+                if point is None:
+                    point = self.pick_point_on_plane_z(event.pos().x(), event.pos().y(), z=0.0)
                 if point is not None:
                     self.crosshair_pos = point[:2]
-                    self.update_crosshair_profile()
+                    now = time.monotonic()
+                    if now - self._crosshair_last_update > 0.08:
+                        self._crosshair_last_update = now
+                        self.update_crosshair_profile()
                     self.update()
                 return
             
@@ -1885,7 +2175,9 @@ class Viewport3D(QOpenGLWidget):
                 # XY 평면으로 투영하여 마우스 월드 좌표 획득 (z=0으로 가정)
                 # pick_point_on_mesh는 메쉬 표면을 찍으므로, 여기서는 단순히 레이-평면 교차 사용
                 # 도움을 위해 pick_point_on_mesh 활용 가능하나 바닥일 때 고려
-                ray_origin, ray_dir = self.camera.get_ray(event.pos().x(), event.pos().y(), self.width(), self.height())
+                ray_origin, ray_dir = self.get_ray(event.pos().x(), event.pos().y())
+                if ray_origin is None or ray_dir is None:
+                    return
                 # Plane: Z=0, Normal=[0,0,1]
                 denom = ray_dir[2]
                 if abs(denom) > 1e-6:
@@ -1963,6 +2255,9 @@ class Viewport3D(QOpenGLWidget):
     def keyPressEvent(self, event):
         """키보드 입력"""
         self.keys_pressed.add(event.key())
+        if event.key() in (Qt.Key.Key_W, Qt.Key.Key_A, Qt.Key.Key_S, Qt.Key.Key_D, Qt.Key.Key_Q, Qt.Key.Key_E):
+            if not self.move_timer.isActive():
+                self.move_timer.start()
         
         # 1. Enter/Return 키: 바닥 정렬 확정
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
@@ -1998,6 +2293,9 @@ class Viewport3D(QOpenGLWidget):
         """키 뗌 처리"""
         if event.key() in self.keys_pressed:
             self.keys_pressed.remove(event.key())
+        if not (self.keys_pressed & {Qt.Key.Key_W, Qt.Key.Key_A, Qt.Key.Key_S, Qt.Key.Key_D, Qt.Key.Key_Q, Qt.Key.Key_E}):
+            if self.move_timer.isActive():
+                self.move_timer.stop()
         super().keyReleaseEvent(event)
 
     def process_keyboard_navigation(self):
@@ -2019,7 +2317,9 @@ class Viewport3D(QOpenGLWidget):
     
     def _hit_test_roi(self, pos):
         """ROI 핸들(화살표) 클릭 검사"""
-        ray_origin, ray_dir = self.camera.get_ray(pos.x(), pos.y(), self.width(), self.height())
+        ray_origin, ray_dir = self.get_ray(pos.x(), pos.y())
+        if ray_origin is None or ray_dir is None:
+            return None
         # Z=0 평면상의 좌표 계산
         if abs(ray_dir[2]) < 1e-6: return None
         t = -ray_origin[2] / ray_dir[2]
@@ -2100,6 +2400,46 @@ class Viewport3D(QOpenGLWidget):
         self.update()
         
         return qimage, mv, proj, vp
+
+    def get_ray(self, screen_x: int, screen_y: int):
+        """화면 좌표에서 월드 레이(origin, dir) 계산"""
+        try:
+            self.makeCurrent()
+
+            viewport = glGetIntegerv(GL_VIEWPORT)
+            modelview = glGetDoublev(GL_MODELVIEW_MATRIX)
+            projection = glGetDoublev(GL_PROJECTION_MATRIX)
+
+            win_y = viewport[3] - screen_y
+
+            near_pt = gluUnProject(screen_x, win_y, 0.0, modelview, projection, viewport)
+            far_pt = gluUnProject(screen_x, win_y, 1.0, modelview, projection, viewport)
+            if not near_pt or not far_pt:
+                return None, None
+
+            ray_origin = np.array(near_pt, dtype=float)
+            ray_dir = np.array(far_pt, dtype=float) - ray_origin
+            norm = float(np.linalg.norm(ray_dir))
+            if norm < 1e-12:
+                return None, None
+            ray_dir /= norm
+
+            return ray_origin, ray_dir
+        except Exception:
+            return None, None
+
+    def pick_point_on_plane_z(self, screen_x: int, screen_y: int, z: float = 0.0):
+        """화면 좌표에서 Z=z 평면과의 교점(월드 좌표) 계산"""
+        ray_origin, ray_dir = self.get_ray(screen_x, screen_y)
+        if ray_origin is None or ray_dir is None:
+            return None
+        denom = float(ray_dir[2])
+        if abs(denom) < 1e-8:
+            return None
+        t = (float(z) - float(ray_origin[2])) / denom
+        if t < 0:
+            return None
+        return ray_origin + t * ray_dir
         
     def pick_point_on_mesh(self, screen_x: int, screen_y: int):
         """화면 좌표를 메쉬 표면의 3D 좌표로 변환"""
@@ -2263,7 +2603,7 @@ class Viewport3D(QOpenGLWidget):
         glEnable(GL_LIGHTING)
     
     def draw_floor_picks(self):
-        """바닥 정렬용 3점 시각화 (점 + 연결선)"""
+        """바닥면 지정 점 시각화 (점 + 연결선)"""
         if not self.floor_picks:
             return
         
@@ -2298,7 +2638,7 @@ class Viewport3D(QOpenGLWidget):
                 glVertex3fv(point)
             glEnd()
             
-            # 반투명 영역 면 표시 (3점 이상 시)
+            # 반투명 영역 면 표시 (충분한 점이 모이면)
             if len(self.floor_picks) >= 3:
                 glEnable(GL_BLEND)
                 glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)

@@ -318,7 +318,12 @@ class ARAPFlattener:
         Tutte 임베딩 - 경계를 원에 고정하고 내부를 조화 매핑
         """
         n = mesh.n_vertices
-        boundary = mesh.get_boundary_vertices()
+
+        loops = mesh.get_boundary_loops()
+        boundary = loops[0] if loops else mesh.get_boundary_vertices()
+        if loops:
+            # 가장 큰 경계 루프를 사용
+            boundary = max(loops, key=lambda a: int(a.size))
         
         if len(boundary) < 3:
             # 닫힌 메쉬는 LSCM으로 대체
@@ -388,14 +393,11 @@ class ARAPFlattener:
         
         uv = initial_uv.copy()
         
-        # 엣지 정보 수집
-        edges = mesh.get_edges()
+        # 기준 2D 좌표계 (메쉬가 어떤 방향을 향하든 안정적으로 동작하도록)
+        reference_basis = self._compute_reference_basis(mesh)
         
         # 코탄젠트 가중치 계산
         weights = self._compute_cotangent_weights(mesh)
-        
-        # 라플라시안 행렬 (가중치 적용)
-        L = self._build_laplacian(mesh, weights)
         
         # 경계 정점
         boundary = mesh.get_boundary_vertices()
@@ -427,14 +429,14 @@ class ARAPFlattener:
         
         for iteration in range(self.max_iterations):
             # Step 1: 로컬 회전 최적화
-            rotations = self._compute_local_rotations(mesh, uv, weights)
+            rotations = self._compute_local_rotations(mesh, uv, weights, reference_basis)
             
             # Step 2: 글로벌 위치 최적화
             uv = self._solve_global_step(mesh, uv, rotations, weights, 
-                                          fixed_indices, free_indices)
+                                          fixed_indices, free_indices, reference_basis)
             
             # 에너지 계산 및 수렴 확인
-            energy = self._compute_arap_energy(mesh, uv, rotations, weights)
+            energy = self._compute_arap_energy(mesh, uv, rotations, weights, reference_basis)
             
             if abs(prev_energy - energy) < self.tolerance:
                 break
@@ -442,6 +444,33 @@ class ARAPFlattener:
             prev_energy = energy
         
         return uv
+
+    def _compute_reference_basis(self, mesh: MeshData) -> np.ndarray:
+        """
+        3D 엣지를 2D로 투영하기 위한 기준 축(2x3)을 계산합니다.
+
+        현재 구현은 PCA 기반으로 "가장 잘 맞는" 2D 평면을 잡아,
+        메쉬의 방향과 무관하게 ARAP이 동작하도록 합니다.
+        """
+        vertices = mesh.vertices.astype(np.float64, copy=False)
+        centered = vertices - vertices.mean(axis=0)
+
+        cov = np.cov(centered.T)
+        eigenvalues, eigenvectors = np.linalg.eigh(cov)
+        order = np.argsort(eigenvalues)[::-1]
+        axes = eigenvectors[:, order]  # columns
+
+        u = axes[:, 0].copy()
+        v = axes[:, 1].copy()
+
+        # 축 부호를 결정적으로 고정 (PCA 부호 뒤집힘 방지)
+        for axis in (u, v):
+            idx = int(np.argmax(np.abs(axis)))
+            if axis[idx] < 0:
+                axis *= -1
+
+        # 2x3 투영 행렬
+        return np.vstack([u, v])
     
     def _compute_cotangent_weights(self, mesh: MeshData) -> Dict[Tuple[int, int], float]:
         """코탄젠트 가중치 계산"""
@@ -490,7 +519,8 @@ class ARAPFlattener:
         return L
     
     def _compute_local_rotations(self, mesh: MeshData, uv: np.ndarray,
-                                  weights: Dict[Tuple[int, int], float]) -> np.ndarray:
+                                  weights: Dict[Tuple[int, int], float],
+                                  reference_basis: np.ndarray) -> np.ndarray:
         """
         각 정점에 대한 최적 로컬 회전 계산
         SVD를 사용한 Procrustes 분석
@@ -517,7 +547,7 @@ class ARAPFlattener:
             for j, w in neighbors[i]:
                 # 원본 3D 엣지 (xy 평면에 투영)
                 e_3d = vertices[j] - vertices[i]
-                e_orig = e_3d[:2]  # 간단히 xy 투영
+                e_orig = reference_basis @ e_3d
                 
                 # 현재 2D 엣지
                 e_curr = uv[j] - uv[i]
@@ -541,7 +571,8 @@ class ARAPFlattener:
                            rotations: np.ndarray,
                            weights: Dict[Tuple[int, int], float],
                            fixed_indices: np.ndarray,
-                           free_indices: np.ndarray) -> np.ndarray:
+                           free_indices: np.ndarray,
+                           reference_basis: np.ndarray) -> np.ndarray:
         """글로벌 위치 최적화 단계"""
         n = mesh.n_vertices
         vertices = mesh.vertices
@@ -551,7 +582,7 @@ class ARAPFlattener:
         
         for (i, j), w in weights.items():
             e_3d = vertices[j] - vertices[i]
-            e_orig = e_3d[:2]
+            e_orig = reference_basis @ e_3d
             
             # 두 정점의 회전 평균 적용
             R_avg = (rotations[i] + rotations[j]) / 2
@@ -592,14 +623,15 @@ class ARAPFlattener:
     
     def _compute_arap_energy(self, mesh: MeshData, uv: np.ndarray,
                              rotations: np.ndarray,
-                             weights: Dict[Tuple[int, int], float]) -> float:
+                             weights: Dict[Tuple[int, int], float],
+                             reference_basis: np.ndarray) -> float:
         """ARAP 에너지 계산"""
         vertices = mesh.vertices
         energy = 0.0
         
         for (i, j), w in weights.items():
             e_3d = vertices[j] - vertices[i]
-            e_orig = e_3d[:2]
+            e_orig = reference_basis @ e_3d
             e_curr = uv[j] - uv[i]
             
             R = rotations[i]

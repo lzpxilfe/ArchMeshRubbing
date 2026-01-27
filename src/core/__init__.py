@@ -8,6 +8,7 @@ from .orthographic_projector import OrthographicProjector, ProjectionResult
 from .surface_visualizer import SurfaceVisualizer, RubbingImage
 from .surface_separator import SurfaceSeparator, SeparatedSurfaces
 from .region_selector import RegionSelector, SelectionResult
+from .flattened_svg_exporter import FlattenedSVGExporter, SVGExportOptions
 
 __all__ = [
     # Mesh loading
@@ -28,4 +29,7 @@ __all__ = [
     # Region selection
     'RegionSelector',
     'SelectionResult',
+    # Flattened SVG export
+    'FlattenedSVGExporter',
+    'SVGExportOptions',
 ]

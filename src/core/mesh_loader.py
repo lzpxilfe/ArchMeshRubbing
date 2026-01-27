@@ -158,23 +158,116 @@ class MeshData:
                 edge = tuple(sorted([face[i], face[(i + 1) % 3]]))
                 edges.add(edge)
         return np.array(list(edges), dtype=np.int32)
-    
-    def get_boundary_vertices(self) -> np.ndarray:
-        """경계 정점 인덱스 반환 (열린 메쉬의 경우)"""
-        edge_count = {}
+
+    def get_boundary_edges(self) -> np.ndarray:
+        """
+        경계 엣지 목록 반환 (K, 2)
+
+        열린 메쉬(open surface)에서 한 면에만 속하는 엣지를 경계로 간주합니다.
+        """
+        edge_count: dict[tuple[int, int], int] = {}
         for face in self.faces:
             for i in range(3):
-                edge = tuple(sorted([face[i], face[(i + 1) % 3]]))
+                a = int(face[i])
+                b = int(face[(i + 1) % 3])
+                edge = (a, b) if a < b else (b, a)
                 edge_count[edge] = edge_count.get(edge, 0) + 1
-        
-        # 경계 엣지: 한 면에만 속하는 엣지
+
         boundary_edges = [e for e, c in edge_count.items() if c == 1]
-        boundary_verts = set()
-        for e in boundary_edges:
-            boundary_verts.add(e[0])
-            boundary_verts.add(e[1])
-        
-        return np.array(list(boundary_verts), dtype=np.int32)
+        if not boundary_edges:
+            return np.zeros((0, 2), dtype=np.int32)
+        return np.asarray(boundary_edges, dtype=np.int32)
+
+    def get_boundary_loops(self) -> List[np.ndarray]:
+        """
+        경계 루프(들)을 정렬된 정점 인덱스 배열로 반환합니다.
+
+        Returns:
+            List[np.ndarray]: 각 루프는 (L,) 형태의 정점 인덱스 배열 (반복된 시작점 없음)
+        """
+        boundary_edges = self.get_boundary_edges()
+        if len(boundary_edges) == 0:
+            return []
+
+        # 인접 리스트 구성 (경계 그래프)
+        adjacency: dict[int, list[int]] = {}
+        unused_edges: set[tuple[int, int]] = set()
+        for a, b in boundary_edges:
+            a_i = int(a)
+            b_i = int(b)
+            adjacency.setdefault(a_i, []).append(b_i)
+            adjacency.setdefault(b_i, []).append(a_i)
+            unused_edges.add((a_i, b_i) if a_i < b_i else (b_i, a_i))
+
+        loops: list[np.ndarray] = []
+
+        while unused_edges:
+            # 시작 엣지 하나 선택
+            start_edge = next(iter(unused_edges))
+            a0, b0 = start_edge
+            unused_edges.remove(start_edge)
+
+            loop = [a0, b0]
+            prev = a0
+            curr = b0
+
+            # 경계 루프 추적
+            while True:
+                neighbors = adjacency.get(curr, [])
+                if not neighbors:
+                    break
+
+                # prev가 아닌 이웃 중 아직 사용되지 않은 엣지를 우선 선택
+                next_v = None
+                for cand in neighbors:
+                    if cand == prev:
+                        continue
+                    e = (curr, cand) if curr < cand else (cand, curr)
+                    if e in unused_edges:
+                        next_v = cand
+                        unused_edges.remove(e)
+                        break
+
+                if next_v is None:
+                    # 더 이상 진행 불가 (비정상/분기 경계 등)
+                    break
+
+                if next_v == loop[0]:
+                    # 루프 닫힘
+                    break
+
+                loop.append(next_v)
+                prev, curr = curr, next_v
+
+                # 안전장치: 무한루프 방지
+                if len(loop) > len(boundary_edges) + 1:
+                    break
+
+            # 너무 짧은 체인은 제외 (삼각형 이상)
+            if len(loop) >= 3:
+                loops.append(np.asarray(loop, dtype=np.int32))
+
+        return loops
+    
+    def get_boundary_vertices(self) -> np.ndarray:
+        """
+        경계 정점 인덱스 반환 (열린 메쉬의 경우)
+
+        - 가능하면 가장 큰 경계 루프를 정렬된 순서로 반환합니다.
+        - 루프 추적이 불가한 경우(비정상 메쉬 등)에는 유니크 정점 집합을 반환합니다.
+        """
+        loops = self.get_boundary_loops()
+        if loops:
+            # 가장 긴 루프 선택 (정점 수 기준)
+            main = max(loops, key=lambda a: int(a.size))
+            return main.copy()
+
+        boundary_edges = self.get_boundary_edges()
+        if len(boundary_edges) == 0:
+            return np.zeros((0,), dtype=np.int32)
+
+        boundary_verts = np.unique(boundary_edges.reshape(-1))
+        return boundary_verts.astype(np.int32)
     
     def center_at_origin(self) -> 'MeshData':
         """중심을 원점으로 이동한 새 메쉬 반환"""
@@ -338,7 +431,12 @@ class MeshLoader:
         unit = unit or self.default_unit
         
         # trimesh로 로드
-        mesh = trimesh.load(str(filepath), force='mesh')
+        try:
+            # 대용량 메쉬 로드 성능: 불필요한 후처리(process) 비활성화
+            mesh = trimesh.load(str(filepath), force='mesh', process=False, maintain_order=True)
+        except TypeError:
+            # 구버전 trimesh 호환
+            mesh = trimesh.load(str(filepath), force='mesh')
         
         # Scene인 경우 단일 메쉬로 병합
         if isinstance(mesh, trimesh.Scene):
@@ -396,7 +494,10 @@ class MeshLoader:
         
         # 가능하면 정점/면 수도 빠르게 파악
         try:
-            mesh = trimesh.load(str(filepath), force='mesh')
+            try:
+                mesh = trimesh.load(str(filepath), force='mesh', process=False, maintain_order=True)
+            except TypeError:
+                mesh = trimesh.load(str(filepath), force='mesh')
             if isinstance(mesh, trimesh.Scene):
                 meshes = [g for g in mesh.geometry.values() if isinstance(g, trimesh.Trimesh)]
                 total_verts = sum(m.vertices.shape[0] for m in meshes)

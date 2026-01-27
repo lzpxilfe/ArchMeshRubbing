@@ -14,6 +14,172 @@ try:
 except ImportError:
     HAS_CV2 = False
 
+try:
+    from scipy import ndimage
+    HAS_SCIPY = True
+except ImportError:
+    HAS_SCIPY = False
+
+
+def _rdp_simplify(points: np.ndarray, epsilon: float) -> np.ndarray:
+    """
+    Ramer–Douglas–Peucker polyline simplification.
+
+    Args:
+        points: (N, 2) polyline points
+        epsilon: max perpendicular distance (same unit as points)
+    """
+    points = np.asarray(points, dtype=np.float64)
+    if len(points) < 3:
+        return points
+
+    start = points[0]
+    end = points[-1]
+    line = end - start
+    line_len = float(np.hypot(line[0], line[1]))
+    if line_len < 1e-12:
+        dists = np.hypot(*(points - start).T)
+    else:
+        # 2D "cross product magnitude" gives twice triangle area => perpendicular distance.
+        dists = np.abs(line[0] * (points[:, 1] - start[1]) - line[1] * (points[:, 0] - start[0])) / line_len
+
+    idx = int(np.argmax(dists))
+    if dists[idx] > epsilon:
+        left = _rdp_simplify(points[: idx + 1], epsilon)
+        right = _rdp_simplify(points[idx:], epsilon)
+        return np.vstack([left[:-1], right])
+    return np.vstack([start, end])
+
+
+def _trace_main_contour_binary(mask: np.ndarray) -> np.ndarray:
+    """
+    Extract an ordered outer contour from a binary mask without OpenCV.
+
+    Returns:
+        (N, 2) float array in pixel coordinates (x, y), y-down.
+    """
+    if not HAS_SCIPY:
+        raise RuntimeError("SciPy is required for contour extraction when OpenCV is not available")
+
+    mask = np.asarray(mask, dtype=bool)
+    if not mask.any():
+        return np.zeros((0, 2), dtype=np.float64)
+
+    labels, num = ndimage.label(mask)
+    if num <= 0:
+        return np.zeros((0, 2), dtype=np.float64)
+
+    counts = np.bincount(labels.ravel())
+    if len(counts) <= 1:
+        return np.zeros((0, 2), dtype=np.float64)
+    counts[0] = 0
+    main_label = int(np.argmax(counts))
+    comp = labels == main_label
+
+    # Find boundary pixels
+    eroded = ndimage.binary_erosion(comp, structure=np.ones((3, 3), dtype=bool), border_value=0)
+    boundary = comp & ~eroded
+    coords = np.argwhere(boundary)
+    if coords.size == 0:
+        # Fallback: single pixel/component
+        coords = np.argwhere(comp)
+        if coords.size == 0:
+            return np.zeros((0, 2), dtype=np.float64)
+
+    # Choose a deterministic start: top-most, then left-most.
+    start_idx = int(np.lexsort((coords[:, 1], coords[:, 0]))[0])
+    sy, sx = coords[start_idx]
+
+    # Pad to simplify neighbor checks.
+    comp_p = np.pad(comp, 1, mode='constant', constant_values=False)
+    sy += 1
+    sx += 1
+
+    # Moore-neighbor tracing around the component (8-connectivity).
+    # Directions in clockwise order starting from NW.
+    dirs = np.array(
+        [
+            (-1, -1),
+            (-1, 0),
+            (-1, 1),
+            (0, 1),
+            (1, 1),
+            (1, 0),
+            (1, -1),
+            (0, -1),
+        ],
+        dtype=int,
+    )
+    dir_map = {(int(dy), int(dx)): i for i, (dy, dx) in enumerate(dirs)}
+
+    b0 = (int(sy), int(sx))
+    b = b0
+    c0 = (b0[0], b0[1] - 1)  # west neighbor
+    c = c0
+
+    contour_xy: list[list[float]] = []
+    max_steps = int(comp_p.size)  # generous upper bound
+
+    for _ in range(max_steps):
+        # store (x, y) in unpadded coordinates
+        contour_xy.append([float(b[1] - 1), float(b[0] - 1)])
+
+        dy = c[0] - b[0]
+        dx = c[1] - b[1]
+        d = dir_map.get((int(dy), int(dx)), 7)
+
+        found = False
+        # Scan neighbors clockwise, starting just after the backtrack direction.
+        for step in range(1, 9):
+            dn = (d + step) % 8
+            nb = (b[0] + int(dirs[dn][0]), b[1] + int(dirs[dn][1]))
+            if comp_p[nb]:
+                # The "previous" neighbor is the one before nb in scanning order.
+                prev_dir = (dn - 1) % 8
+                c = (b[0] + int(dirs[prev_dir][0]), b[1] + int(dirs[prev_dir][1]))
+                b = nb
+                found = True
+                break
+
+        if not found:
+            break
+
+        if b == b0 and c == c0:
+            break
+
+    return np.asarray(contour_xy, dtype=np.float64)
+
+
+def _extract_main_contour(occupancy: np.ndarray) -> np.ndarray:
+    """
+    occupancy: (H, W) uint8 image where 0=background, 255=filled.
+    Returns (N, 2) float points in pixel coords (x, y), y-down.
+    """
+    if occupancy.size == 0:
+        return np.zeros((0, 2), dtype=np.float64)
+
+    if HAS_CV2:
+        found_contours, _ = cv2.findContours(occupancy, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_TC89_KCOS)
+        if not found_contours:
+            return np.zeros((0, 2), dtype=np.float64)
+        main_cnt = max(found_contours, key=cv2.contourArea)
+        epsilon = 0.0002 * cv2.arcLength(main_cnt, True)
+        approx = cv2.approxPolyDP(main_cnt, epsilon, True)
+        return approx.reshape(-1, 2).astype(np.float64)
+
+    contour = _trace_main_contour_binary(occupancy > 0)
+    if len(contour) < 3:
+        return contour
+
+    # Simplify (closed polygon)
+    closed = np.vstack([contour, contour[0]])
+    perimeter = float(np.sum(np.hypot(np.diff(closed[:, 0]), np.diff(closed[:, 1]))))
+    epsilon = max(0.5, 0.0002 * perimeter)
+    simplified = _rdp_simplify(closed, epsilon)
+    if len(simplified) >= 2 and np.allclose(simplified[0], simplified[-1]):
+        simplified = simplified[:-1]
+    return simplified
+
 
 class ProfileExporter:
     """메쉬의 2D 실루엣을 추출하고 SVG로 내보냅니다."""
@@ -88,25 +254,32 @@ class ProfileExporter:
             # 5. 이미 렌더링된 이미지가 있으므로 래스터화는 외곽선 추출용으로만 사용
             grid_w, grid_h = vp[2], vp[3]
             occupancy = np.zeros((grid_h, grid_w), dtype=np.uint8)
+            faces = getattr(mesh, "faces", None)
+            if faces is None:
+                faces = []
+            faces = np.asarray(faces, dtype=np.int32)
+
+            # 대용량 메쉬는 모든 면을 채우면 매우 느림 -> stride 샘플링
+            if len(faces) > self.MAX_FACES_FOR_RASTERIZE:
+                step = max(1, int(len(faces) // self.MAX_FACES_FOR_RASTERIZE))
+                faces = faces[::step]
+                if len(faces) > self.MAX_FACES_FOR_RASTERIZE:
+                    faces = faces[: self.MAX_FACES_FOR_RASTERIZE]
             if HAS_CV2:
                 img_v = proj_2d.astype(np.int32)
-                for face in mesh.faces:
+                for face in faces:
                     cv2.fillPoly(occupancy, [img_v[face]], 255)
             else:
                 img = Image.new('L', (grid_w, grid_h), 0)
                 draw = ImageDraw.Draw(img)
-                for face in mesh.faces:
+                for face in faces:
                     draw.polygon([(int(p[0]), int(p[1])) for p in proj_2d[face]], fill=255)
                 occupancy = np.array(img)
-                
-            found_contours, _ = cv2.findContours(occupancy, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_TC89_KCOS)
+
             contours = []
-            if found_contours:
-                main_cnt = max(found_contours, key=cv2.contourArea)
-                epsilon = 0.0002 * cv2.arcLength(main_cnt, True)
-                approx = cv2.approxPolyDP(main_cnt, epsilon, True)
-                # 픽셀 좌표 contours
-                contours.append(approx.reshape(-1, 2).astype(float))
+            contour_px = _extract_main_contour(occupancy)
+            if len(contour_px) > 0:
+                contours.append(contour_px.astype(float))
             
                 # 6. 바운드 설정 (cm 단위 크기)
             bounds = {
@@ -176,15 +349,12 @@ class ProfileExporter:
             for face in mesh.faces: 
                 draw.polygon([(int(p[0]), int(p[1])) for p in img_v[face]], fill=255)
             occupancy = np.array(img)
-        
-        found_contours, _ = cv2.findContours(occupancy, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_TC89_KCOS)
+
+        contour_px = _extract_main_contour(occupancy)
         contours = []
-        if found_contours:
-            main_cnt = max(found_contours, key=cv2.contourArea)
-            epsilon = 0.0002 * cv2.arcLength(main_cnt, True)
-            approx = cv2.approxPolyDP(main_cnt, epsilon, True)
-            img_pts = approx.reshape(-1, 2).astype(float)
-            
+        if len(contour_px) > 0:
+            img_pts = contour_px.astype(float)
+
             # 이미지 좌표 -> 실제 좌표 변환
             real_pts = np.zeros_like(img_pts)
             real_pts[:, 0] = img_pts[:, 0] / (grid_w - 1) * size[0] + min_coords[0]
@@ -309,10 +479,21 @@ class ProfileExporter:
             svg_parts.append(f'<g id="outline" stroke="{stroke_color}" fill="none" stroke-width="{stroke_width}">')
             for contour in contours:
                 if len(contour) < 2: continue
-                # 좌표 변환 (SVG Y축 반전)
+                # 좌표 변환
                 svg_pts = contour.copy()
-                svg_pts[:, 0] -= min_coords[0]
-                svg_pts[:, 1] = svg_height - (svg_pts[:, 1] - min_coords[1])
+                
+                # is_pixels (OpenGL 투영)인 경우 이미 Viewport 상단(0) 기준이므로 그대로 사용 가능하나
+                # extract_silhouette에서 vp[3] - proj_2d[:, 1]로 이미 뒤집었는지 확인 필요
+                # 현재 코드: proj_2d[:, 1] = vp[3] - proj_2d[:, 1] (라인 69) -> 이미지 좌표계(Top-Left 0)
+                # 따라서 min_coords=0이므로 그대로 두면 됨.
+                if bounds.get('is_pixels'):
+                   # 픽셀 좌표 -> cm 단위로 스케일링만 수행
+                   px_per_cm = bounds['px_per_cm']
+                   svg_pts = svg_pts / px_per_cm
+                else:
+                   # 월드 좌표 (Top-Down 투영 등) -> Y축 반전 필요 (SVG는 Y가 아래로 증가, 월드는 위로 증가)
+                   svg_pts[:, 0] -= min_coords[0]
+                   svg_pts[:, 1] = svg_height - (svg_pts[:, 1] - min_coords[1])
                 
                 points_str = " ".join([f"{p[0]:.6f},{p[1]:.6f}" for p in svg_pts])
                 svg_parts.append(f'<polygon points="{points_str}" />')
@@ -333,12 +514,13 @@ class ProfileExporter:
                        scale: float = 1.0,
                        grid_spacing: float = 1.0,
                        include_grid: bool = True,
-                       viewport_image: Image.Image = None) -> str:
+                       viewport_image: Image.Image = None,
+                       opengl_matrices: tuple = None) -> str:
         """
         메쉬의 2D 프로파일을 SVG로 내보내는 통합 메서드.
         """
         contours, bounds = self.extract_silhouette(
-            mesh, view, translation, rotation, scale
+            mesh, view, translation, rotation, scale, opengl_matrices
         )
         
         background_image = None
