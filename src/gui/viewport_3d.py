@@ -341,82 +341,112 @@ class _CutPolylineSectionProfileThread(QThread):
 
             slicer = MeshSlicer(self._mesh.to_trimesh())
 
-            profile_pts: list[tuple[float, float]] = []
-            s_offset = 0.0
+            # 단면선이 꺾여 있어도, "외곽선 단면"은 하나의 평면 단면으로 정의되어야 1:1과 왜곡 없는 결과가 나옴.
+            # 따라서 폴리라인의 첫/마지막 점을 잇는 직선 기준으로 단면 평면을 정의한다.
+            p0 = pts[0]
+            p1 = pts[-1]
+            d = (p1 - p0).astype(np.float64)
+            d[2] = 0.0
+            length = float(np.linalg.norm(d))
+            if length < 1e-6:
+                self.computed.emit({"index": self._index, "profile": []})
+                return
 
-            for si in range(len(pts) - 1):
-                p0 = pts[si]
-                p1 = pts[si + 1]
-                d = p1 - p0
-                d[2] = 0.0
-                seg_len = float(np.linalg.norm(d))
-                if seg_len < 1e-6:
+            d_unit = d / length
+            world_normal = np.array([d_unit[1], -d_unit[0], 0.0], dtype=np.float64)
+
+            local_origin = inv_scale * inv_rot @ (p0 - self._translation)
+            local_normal = inv_rot @ world_normal
+
+            contours_local = slicer.slice_with_plane(local_origin.tolist(), local_normal.tolist())
+            if not contours_local:
+                self.computed.emit({"index": self._index, "profile": []})
+                return
+
+            world_contours = []
+            for cnt in contours_local:
+                if cnt is None or len(cnt) < 2:
                     continue
+                world_contours.append((rot_mat @ (cnt * self._scale).T).T + self._translation)
 
-                d_unit = d / seg_len
-                world_normal = np.array([d_unit[1], -d_unit[0], 0.0], dtype=np.float64)
-                world_origin = p0
-
-                local_origin = inv_scale * inv_rot @ (world_origin - self._translation)
-                local_normal = inv_rot @ world_normal
-
-                contours_local = slicer.slice_with_plane(local_origin.tolist(), local_normal.tolist())
-                if not contours_local:
-                    s_offset += seg_len
+            # 가장 긴 단면(투영 길이 기준) 선택
+            best_tz = None
+            best_span = 0.0
+            eps = 1e-6
+            for cnt in world_contours:
+                t = (cnt - p0) @ d_unit
+                mask = (t >= -eps) & (t <= length + eps)
+                if int(mask.sum()) < 2:
                     continue
-
-                world_contours = []
-                for cnt in contours_local:
-                    if cnt is None or len(cnt) < 2:
-                        continue
-                    world_contours.append((rot_mat @ (cnt * self._scale).T).T + self._translation)
-
-                best = None
-                best_span = 0.0
-                margin = max(seg_len * 0.02, 0.2)
-                t_min = -margin
-                t_max = seg_len + margin
-
-                for cnt in world_contours:
-                    t = (cnt - p0) @ d_unit
-                    mask = (t >= t_min) & (t <= t_max)
-                    if int(mask.sum()) < 2:
-                        continue
-                    t_f = t[mask]
-                    span = float(t_f.max() - t_f.min())
-                    if span <= best_span:
-                        continue
-                    best_span = span
-                    best = (t_f.copy(), cnt[mask, 2].copy())
-
-                if best is None:
-                    s_offset += seg_len
+                t_f = t[mask]
+                z_f = cnt[mask, 2]
+                span = float(t_f.max() - t_f.min())
+                if span <= best_span:
                     continue
+                best_span = span
+                best_tz = (t_f.copy(), z_f.copy())
 
-                t_f, z_f = best
-                order = np.argsort(t_f)
-                t_sorted = t_f[order]
-                z_sorted = z_f[order]
+            if best_tz is None:
+                self.computed.emit({"index": self._index, "profile": []})
+                return
 
-                # clamp into segment [0, seg_len]
-                t_sorted = np.clip(t_sorted, 0.0, seg_len)
+            t_f, z_f = best_tz
+            # 실제 메쉬와의 교차 구간만 사용 (라인 길이보다 길게 나오는 왜곡 방지)
+            t0 = float(np.nanmin(t_f))
+            t1 = float(np.nanmax(t_f))
+            if not np.isfinite(t0) or not np.isfinite(t1) or (t1 - t0) < 1e-6:
+                self.computed.emit({"index": self._index, "profile": []})
+                return
 
-                # downsample if too dense
-                if len(t_sorted) > 3000:
-                    step = int(len(t_sorted) // 3000) + 1
-                    t_sorted = t_sorted[::step]
-                    z_sorted = z_sorted[::step]
+            t_f = t_f - t0  # rebase to 0
 
-                # append with cumulative distance
-                for t_val, z_val in zip(t_sorted.tolist(), z_sorted.tolist()):
-                    s_val = s_offset + float(t_val)
-                    if profile_pts and abs(profile_pts[-1][0] - s_val) < 1e-6:
-                        continue
-                    profile_pts.append((s_val, float(z_val)))
+            # 외곽선만: (t,z) 포인트 클라우드로부터 상/하 외곽선(envelope) 생성
+            t = np.asarray(t_f, dtype=np.float64)
+            z = np.asarray(z_f, dtype=np.float64)
+            finite = np.isfinite(t) & np.isfinite(z)
+            t = t[finite]
+            z = z[finite]
+            if t.size < 2:
+                self.computed.emit({"index": self._index, "profile": []})
+                return
 
-                s_offset += seg_len
+            total_len = float(np.nanmax(t))
+            # 0.1mm~0.5mm 수준으로 binning (단위=cm 가정)
+            bin_size = float(max(0.01, total_len / 2000.0))
+            bins = np.floor(t / bin_size).astype(np.int64)
+            order = np.argsort(bins)
+            bins = bins[order]
+            t = t[order]
+            z = z[order]
 
-            self.computed.emit({"index": self._index, "profile": profile_pts})
+            upper: list[tuple[float, float]] = []
+            lower: list[tuple[float, float]] = []
+            i = 0
+            n = int(len(bins))
+            while i < n:
+                b0 = int(bins[i])
+                j = i + 1
+                while j < n and int(bins[j]) == b0:
+                    j += 1
+                t_bin = float(b0) * bin_size
+                z_slice = z[i:j]
+                upper.append((t_bin, float(np.max(z_slice))))
+                lower.append((t_bin, float(np.min(z_slice))))
+                i = j
+
+            if len(upper) < 2 or len(lower) < 2:
+                self.computed.emit({"index": self._index, "profile": []})
+                return
+
+            # 닫힌 외곽선 폴리라인(상단 -> 하단 역순)
+            outline: list[tuple[float, float]] = []
+            outline.extend(upper)
+            outline.extend(reversed(lower))
+            # close explicitly for stable export/visualization
+            if outline and (abs(outline[0][0] - outline[-1][0]) > 1e-6 or abs(outline[0][1] - outline[-1][1]) > 1e-6):
+                outline.append(outline[0])
+
+            self.computed.emit({"index": self._index, "profile": outline})
         except Exception as e:
             self.failed.emit(str(e))
 
@@ -1735,14 +1765,13 @@ class Viewport3D(QOpenGLWidget):
                 # 가로: 메쉬 상단에 배치 (s -> X, z -> Y)
                 base_x = min_x
                 base_y = max_y + margin
-                for si, zi in zip(s.tolist(), z.tolist()):
-                    pts_world.append([base_x + (float(si) - s_min), base_y + (float(zi) - z_min), 0.0])
             else:
-                # 세로: 메쉬 우측에 배치 (z -> X, s -> Y)
+                # 세로: 메쉬 우측에 배치 (s -> X, z -> Y) - 높이가 위로 향하도록 통일
                 base_x = max_x + margin
                 base_y = min_y
-                for si, zi in zip(s.tolist(), z.tolist()):
-                    pts_world.append([base_x + (float(zi) - z_min), base_y + (float(si) - s_min), 0.0])
+
+            for si, zi in zip(s.tolist(), z.tolist()):
+                pts_world.append([base_x + (float(si) - s_min), base_y + (float(zi) - z_min), 0.0])
             return pts_world
         except Exception:
             return []
@@ -2897,12 +2926,20 @@ class Viewport3D(QOpenGLWidget):
                     main = pick_main(self.roi_cut_edges.get("x1", []) or self.roi_cut_edges.get("x2", []))
                     if main is not None and len(main) >= 2:
                         main = np.asarray(main, dtype=np.float64)
+                        y_min = float(np.min(main[:, 1]))
                         z_min = float(np.min(main[:, 2]))
                         base_x = max_x + margin
+                        base_y = float(b[0][1])
                         pts = []
                         for pt in main:
-                            # z(높이) -> X, y -> Y (메쉬와 겹치지 않게 X만 우측으로 이동)
-                            pts.append([base_x + (float(pt[2]) - z_min), float(pt[1]), 0.0])
+                            # YZ 단면을 "가로=Y, 세로=Z"로 배치 (높이가 위로 향하도록)
+                            pts.append(
+                                [
+                                    base_x + (float(pt[1]) - y_min),
+                                    base_y + (float(pt[2]) - z_min),
+                                    0.0,
+                                ]
+                            )
                         self.roi_section_world["x"] = pts
 
                 # 가로 단면 (상하 폭이 매우 얇을 때) -> 상단에 배치 (X-Z)
@@ -2910,12 +2947,20 @@ class Viewport3D(QOpenGLWidget):
                     main = pick_main(self.roi_cut_edges.get("y1", []) or self.roi_cut_edges.get("y2", []))
                     if main is not None and len(main) >= 2:
                         main = np.asarray(main, dtype=np.float64)
+                        x_min = float(np.min(main[:, 0]))
                         z_min = float(np.min(main[:, 2]))
                         base_y = max_y + margin
+                        base_x = float(b[0][0])
                         pts = []
                         for pt in main:
-                            # z(높이) -> Y, x -> X (메쉬와 겹치지 않게 Y만 상단으로 이동)
-                            pts.append([float(pt[0]), base_y + (float(pt[2]) - z_min), 0.0])
+                            # XZ 단면을 "가로=X, 세로=Z"로 배치 (높이가 위로 향하도록)
+                            pts.append(
+                                [
+                                    base_x + (float(pt[0]) - x_min),
+                                    base_y + (float(pt[2]) - z_min),
+                                    0.0,
+                                ]
+                            )
                         self.roi_section_world["y"] = pts
         except Exception:
             pass
@@ -4490,8 +4535,18 @@ class Viewport3D(QOpenGLWidget):
         
         return None
 
-    def capture_high_res_image(self, width: int = 2048, height: int = 2048, *, only_selected: bool = False):
-        """고해상도 오프스크린 렌더링"""
+    def capture_high_res_image(
+        self,
+        width: int = 2048,
+        height: int = 2048,
+        *,
+        only_selected: bool = False,
+        orthographic: bool = False,
+    ):
+        """고해상도 오프스크린 렌더링
+
+        `orthographic=True`를 사용하면 정사영(glOrtho)으로 캡처하여 1:1 스케일 도면에 유리합니다.
+        """
         self.makeCurrent()
         
         # 1. FBO 생성
@@ -4505,7 +4560,8 @@ class Viewport3D(QOpenGLWidget):
         glPushMatrix()
         glLoadIdentity()
         aspect = width / height
-        gluPerspective(45.0, aspect, 0.1, 1000000.0)
+        if not orthographic:
+            gluPerspective(45.0, aspect, 0.1, 1000000.0)
         
         glMatrixMode(GL_MODELVIEW)
         glPushMatrix()
@@ -4516,6 +4572,89 @@ class Viewport3D(QOpenGLWidget):
         glLoadIdentity()
         
         self.camera.apply()
+
+        if orthographic:
+            try:
+                mv_raw = glGetDoublev(GL_MODELVIEW_MATRIX)
+                mv = np.asarray(mv_raw, dtype=np.float64).reshape(4, 4).T
+
+                sel = int(self.selected_index) if self.selected_index is not None else -1
+                bounds_list = []
+                for i, obj in enumerate(self.objects):
+                    if not obj.visible:
+                        continue
+                    if only_selected and sel >= 0 and i != sel:
+                        continue
+                    try:
+                        b = np.asarray(obj.get_world_bounds(), dtype=np.float64)
+                        if b.shape == (2, 3):
+                            bounds_list.append(b)
+                    except Exception:
+                        continue
+
+                if bounds_list:
+                    wb = np.vstack(bounds_list)
+                    w_min = wb.min(axis=0)
+                    w_max = wb.max(axis=0)
+                else:
+                    w_min = np.array([-1.0, -1.0, -1.0], dtype=np.float64)
+                    w_max = np.array([1.0, 1.0, 1.0], dtype=np.float64)
+
+                corners = np.array(
+                    [
+                        [w_min[0], w_min[1], w_min[2]],
+                        [w_max[0], w_min[1], w_min[2]],
+                        [w_min[0], w_max[1], w_min[2]],
+                        [w_max[0], w_max[1], w_min[2]],
+                        [w_min[0], w_min[1], w_max[2]],
+                        [w_max[0], w_min[1], w_max[2]],
+                        [w_min[0], w_max[1], w_max[2]],
+                        [w_max[0], w_max[1], w_max[2]],
+                    ],
+                    dtype=np.float64,
+                )
+                v_h = np.hstack([corners, np.ones((8, 1), dtype=np.float64)])
+                eye = v_h @ mv
+
+                x_min, x_max = float(np.min(eye[:, 0])), float(np.max(eye[:, 0]))
+                y_min, y_max = float(np.min(eye[:, 1])), float(np.max(eye[:, 1]))
+                z_min, z_max = float(np.min(eye[:, 2])), float(np.max(eye[:, 2]))
+
+                pad_x = max(1e-6, (x_max - x_min) * 0.05)
+                pad_y = max(1e-6, (y_max - y_min) * 0.05)
+                x_min -= pad_x
+                x_max += pad_x
+                y_min -= pad_y
+                y_max += pad_y
+
+                world_w = max(1e-6, x_max - x_min)
+                world_h = max(1e-6, y_max - y_min)
+                target_aspect = float(aspect) if aspect > 1e-9 else 1.0
+                cur_aspect = float(world_w / world_h)
+                if cur_aspect > target_aspect:
+                    new_h = world_w / target_aspect
+                    d = (new_h - world_h) * 0.5
+                    y_min -= d
+                    y_max += d
+                else:
+                    new_w = world_h * target_aspect
+                    d = (new_w - world_w) * 0.5
+                    x_min -= d
+                    x_max += d
+
+                pad_z = max(1e-6, (z_max - z_min) * 0.1)
+                near = max(0.1, float(-z_max - pad_z))
+                far = max(near + 0.1, float(-z_min + pad_z))
+
+                glMatrixMode(GL_PROJECTION)
+                glLoadIdentity()
+                glOrtho(float(x_min), float(x_max), float(y_min), float(y_max), float(near), float(far))
+                glMatrixMode(GL_MODELVIEW)
+            except Exception:
+                glMatrixMode(GL_PROJECTION)
+                glLoadIdentity()
+                gluPerspective(45.0, aspect, 0.1, 1000000.0)
+                glMatrixMode(GL_MODELVIEW)
         
         # 광원
         glEnable(GL_LIGHTING)

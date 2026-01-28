@@ -211,7 +211,10 @@ class ProfileExporter:
         viewport_image: OpenGL 캡처 이미지(PIL). 제공 시 화면과 100% 일치하는 외곽선을 이미지 기반으로 추출
         """
         if opengl_matrices:
-            mv, proj, vp = opengl_matrices
+            mv_raw, proj_raw, vp = opengl_matrices
+            # PyOpenGL matrices are column-major; transpose for our row-vector convention (v @ M).
+            mv = np.asarray(mv_raw, dtype=np.float64).reshape(4, 4).T
+            proj = np.asarray(proj_raw, dtype=np.float64).reshape(4, 4).T
             mvp = mv @ proj
 
             # 1) 월드 bounds 계산 (전체 정점 변환 없이 bounds corner 8개만 변환)
@@ -256,6 +259,7 @@ class ProfileExporter:
                 w_max = v_all.max(axis=0)
 
             # 2) px_per_cm 계산 (world 좌표 1.0을 1cm로 가정)
+            # 정사영(glOrtho)인 경우 projection 행렬에서 직접 스케일을 얻는 것이 가장 정확하다.
             def project_pt(p):
                 vh = np.append(p, 1.0)
                 vc = vh @ mvp
@@ -264,15 +268,25 @@ class ProfileExporter:
                 vn = vc[:3] / vc[3]
                 return np.array([(vn[0] + 1) / 2 * vp[2], vp[3] - (vn[1] + 1) / 2 * vp[3]])
 
-            center_world = (w_min + w_max) / 2.0
-            axis = np.array([1.0, 0.0, 0.0], dtype=np.float64)
-            if view in {"left", "right"}:
-                axis = np.array([0.0, 1.0, 0.0], dtype=np.float64)
-            p1 = center_world + axis
+            px_per_cm = None
+            try:
+                if abs(float(proj[3, 3]) - 1.0) < 1e-9 and abs(float(proj[3, 2])) < 1e-9:
+                    px_per_cm_x = abs(float(vp[2]) * float(proj[0, 0]) / 2.0)
+                    px_per_cm_y = abs(float(vp[3]) * float(proj[1, 1]) / 2.0)
+                    px_per_cm = float((px_per_cm_x + px_per_cm_y) * 0.5)
+            except Exception:
+                px_per_cm = None
 
-            px_per_cm = float(np.linalg.norm(project_pt(center_world) - project_pt(p1)))
-            if px_per_cm < 1e-6:
-                px_per_cm = 100.0  # Fallback
+            if px_per_cm is None or px_per_cm < 1e-6:
+                center_world = (w_min + w_max) / 2.0
+                axis = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+                if view in {"left", "right"}:
+                    axis = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+                p1 = center_world + axis
+
+                px_per_cm = float(np.linalg.norm(project_pt(center_world) - project_pt(p1)))
+                if px_per_cm < 1e-6:
+                    px_per_cm = 100.0  # Fallback
 
             # 3) 외곽선 추출: viewport_image가 있으면 이미지 기반(가장 견고/빠름)
             grid_w = int(vp[2])
@@ -478,12 +492,15 @@ class ProfileExporter:
 
         if bounds.get('is_pixels') and 'matrices' in bounds:
             # 1. 행렬 기반 격자 투영
-            mv, proj, vp = bounds['matrices']
+            mv_raw, proj_raw, vp = bounds['matrices']
+            mv = np.asarray(mv_raw, dtype=np.float64).reshape(4, 4).T
+            proj = np.asarray(proj_raw, dtype=np.float64).reshape(4, 4).T
+            mvp = mv @ proj
             
             # 투류용 헬퍼
             def w_to_i(wx, wy, wz=0):
                 vh = np.array([wx, wy, wz, 1.0])
-                vc = vh @ (mv @ proj)
+                vc = vh @ mvp
                 if abs(vc[3]) < 1e-6:
                     return None
                 vn = vc[:3] / vc[3]
@@ -707,7 +724,9 @@ class ProfileExporter:
         extra_paths = []
         if cut_lines_world and opengl_matrices and view in {"top", "bottom"}:
             try:
-                mv, proj, vp = opengl_matrices
+                mv_raw, proj_raw, vp = opengl_matrices
+                mv = np.asarray(mv_raw, dtype=np.float64).reshape(4, 4).T
+                proj = np.asarray(proj_raw, dtype=np.float64).reshape(4, 4).T
                 mvp = mv @ proj
 
                 def project_world_to_px(pts_world: np.ndarray) -> np.ndarray:
@@ -744,7 +763,9 @@ class ProfileExporter:
 
         if cut_profiles_world and opengl_matrices and view in {"top", "bottom"}:
             try:
-                mv, proj, vp = opengl_matrices
+                mv_raw, proj_raw, vp = opengl_matrices
+                mv = np.asarray(mv_raw, dtype=np.float64).reshape(4, 4).T
+                proj = np.asarray(proj_raw, dtype=np.float64).reshape(4, 4).T
                 mvp = mv @ proj
 
                 def project_world_to_px(pts_world: np.ndarray) -> np.ndarray:
