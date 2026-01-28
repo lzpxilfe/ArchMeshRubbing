@@ -618,7 +618,7 @@ class ProfileExporter:
                 for p in svg_pts[1:]:
                     d_parts.append(f'L {p[0]:.6f} {p[1]:.6f}')
                 d_parts.append('Z')
-                svg_parts.append(f'<path d="{" ".join(d_parts)}" />')
+                svg_parts.append(f'<path d="{" ".join(d_parts)}" fill="none" />')
             svg_parts.append('</g>')
 
         # 3. 추가 선(단면 가이드 등) 삽입
@@ -654,7 +654,7 @@ class ProfileExporter:
 
                 id_attr = f' id="{path_id}"' if path_id else ""
                 svg_parts.append(
-                    f'<path{id_attr} d="{" ".join(d_parts)}" stroke="{stroke}" stroke-width="{sw}" />'
+                    f'<path{id_attr} d="{" ".join(d_parts)}" fill="none" stroke="{stroke}" stroke-width="{sw}" />'
                 )
             svg_parts.append('</g>')
              

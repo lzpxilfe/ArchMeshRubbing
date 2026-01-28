@@ -3415,8 +3415,8 @@ class MainWindow(QMainWindow):
             pts[:, 0] -= min_x
             pts[:, 1] = height - (pts[:, 1] - min_y)
             pts_str = " ".join([f"{p[0]:.3f},{p[1]:.3f}" for p in pts])
-            svg.append(f'<polyline points="{pts_str}" />')
-            
+            svg.append(f'<polyline points="{pts_str}" fill="none" />')
+             
         svg.append('</g></svg>')
         
         with open(path, 'w', encoding='utf-8') as f:

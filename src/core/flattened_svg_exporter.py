@@ -98,7 +98,7 @@ class FlattenedSVGExporter:
                 tri = pts[face].copy()
                 tri_svg = to_svg_xy(tri)
                 p = " ".join([f"{xy[0]:.6f},{xy[1]:.6f}" for xy in tri_svg])
-                svg_parts.append(f'<polygon points="{p}" />')
+                svg_parts.append(f'<polygon points="{p}" fill="none" />')
             svg_parts.append('</g>')
 
         if options.include_outline:
@@ -112,14 +112,14 @@ class FlattenedSVGExporter:
                     poly = uv_real[loop].copy()
                     poly_svg = to_svg_xy(poly)
                     p = " ".join([f"{xy[0]:.6f},{xy[1]:.6f}" for xy in poly_svg])
-                    svg_parts.append(f'<polyline points="{p}" />')
+                    svg_parts.append(f'<polyline points="{p}" fill="none" />')
             else:
                 # 닫힌 메쉬 등 경계가 없으면 UV convex hull로 대체
                 hull = self._convex_hull_2d(uv_real)
                 if len(hull) >= 3:
                     poly_svg = to_svg_xy(uv_real[hull].copy())
                     p = " ".join([f"{xy[0]:.6f},{xy[1]:.6f}" for xy in poly_svg])
-                    svg_parts.append(f'<polygon points="{p}" />')
+                    svg_parts.append(f'<polygon points="{p}" fill="none" />')
 
             svg_parts.append('</g>')
 

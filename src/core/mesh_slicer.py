@@ -161,7 +161,7 @@ class MeshSlicer:
             svg_pts[:, 1] = height - (svg_pts[:, 1] - min_y)
             
             points_str = " ".join([f"{p[0]:.3f},{p[1]:.3f}" for p in svg_pts])
-            svg_parts.append(f'<polyline points="{points_str}" />')
+            svg_parts.append(f'<polyline points="{points_str}" fill="none" />')
         svg_parts.append('</g>')
         
         svg_parts.append('</svg>')
