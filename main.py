@@ -15,12 +15,6 @@ sys.path.insert(0, str(Path(__file__).parent / 'src'))
 
 def run_cli():
     """커맨드라인 인터페이스 실행"""
-    from src.core.mesh_loader import MeshLoader
-    from src.core.flattener import ARAPFlattener
-    from src.core.orthographic_projector import OrthographicProjector
-    from src.core.surface_visualizer import SurfaceVisualizer
-    from src.core.surface_separator import SurfaceSeparator
-    
     if len(sys.argv) < 2:
         print_help()
         return
@@ -157,7 +151,7 @@ def process_mesh(filepath: str):
         traceback.print_exc()
 
 
-def flatten_mesh(filepath: str, output_path: str = None):
+def flatten_mesh(filepath: str, output_path: str | None = None):
     """메쉬 평면화만 수행"""
     from src.core.mesh_loader import MeshLoader
     from src.core.flattener import ARAPFlattener
@@ -193,7 +187,7 @@ def flatten_mesh(filepath: str, output_path: str = None):
         traceback.print_exc()
 
 
-def project_mesh(filepath: str, output_path: str = None):
+def project_mesh(filepath: str, output_path: str | None = None):
     """정사투영 이미지 생성"""
     from src.core.mesh_loader import MeshLoader
     from src.core.orthographic_projector import OrthographicProjector
@@ -211,7 +205,7 @@ def project_mesh(filepath: str, output_path: str = None):
         
         # 정렬
         aligned = projector.align_mesh(mesh, method='pca')
-        print(f"  Aligned mesh using PCA")
+        print("  Aligned mesh using PCA")
         
         # 투영
         result = projector.project(aligned, direction='top', render_mode='depth')
@@ -275,14 +269,13 @@ def separate_mesh(filepath: str):
 
 def run_gui():
     """GUI 애플리케이션 실행"""
-    try:
-        from PyQt6.QtWidgets import QApplication
-        # from src.gui.main_window import MainWindow  # Coming soon
-        
-        print("GUI is under development. Check back soon!")
-        
-    except ImportError:
+    import importlib.util
+
+    if importlib.util.find_spec("PyQt6") is None:
         print("PyQt6 is not installed. Install with: pip install PyQt6")
+        return
+
+    print("GUI is under development. Check back soon!")
 
 
 if __name__ == '__main__':

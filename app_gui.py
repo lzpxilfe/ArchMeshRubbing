@@ -4,17 +4,15 @@ ArchMeshRubbing GUI - Main Window
 """
 
 import sys
-import os
 from pathlib import Path
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QFileDialog, QProgressBar, QTextEdit,
     QGroupBox, QRadioButton, QSpinBox, QComboBox, QMessageBox,
-    QSplitter, QFrame, QCheckBox
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData
-from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QFont, QPixmap
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtGui import QDragEnterEvent, QDragLeaveEvent, QDropEvent, QFont
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
@@ -134,17 +132,27 @@ class DropArea(QLabel):
         """)
         self.setAcceptDrops(True)
     
-    def dragEnterEvent(self, event: QDragEnterEvent):
-        if event.mimeData().hasUrls():
+    def dragEnterEvent(self, a0: QDragEnterEvent | None):
+        if a0 is None:
+            return
+        event = a0
+        mime = event.mimeData()
+        if mime is not None and mime.hasUrls():
             event.acceptProposedAction()
             self.setStyleSheet(self.styleSheet().replace("#f5f5f5", "#d4edda"))
-    
-    def dragLeaveEvent(self, event):
+
+    def dragLeaveEvent(self, a0: QDragLeaveEvent | None):
+        if a0 is None:
+            return
         self.setStyleSheet(self.styleSheet().replace("#d4edda", "#f5f5f5"))
-    
-    def dropEvent(self, event: QDropEvent):
+
+    def dropEvent(self, a0: QDropEvent | None):
+        if a0 is None:
+            return
+        event = a0
         self.setStyleSheet(self.styleSheet().replace("#d4edda", "#f5f5f5"))
-        urls = event.mimeData().urls()
+        mime = event.mimeData()
+        urls = mime.urls() if mime is not None else []
         if urls:
             filepath = urls[0].toLocalFile()
             self.fileDropped.emit(filepath)

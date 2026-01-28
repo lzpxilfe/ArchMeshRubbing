@@ -7,7 +7,7 @@ Supports: OBJ, PLY, STL, OFF formats
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Tuple, List, Union
+from typing import Optional, List, Union
 import numpy as np
 
 try:
@@ -87,6 +87,7 @@ class MeshData:
         """메쉬 중심점"""
         if self._centroid is None:
             self._centroid = self.vertices.mean(axis=0)
+        assert self._centroid is not None
         return self._centroid
     
     @property
@@ -302,21 +303,23 @@ class MeshData:
         return mesh
     
     @classmethod
-    def from_trimesh(cls, mesh: 'trimesh.Trimesh', 
+    def from_trimesh(cls, mesh: 'trimesh.Trimesh',
                      filepath: Optional[Path] = None,
                      unit: str = 'mm') -> 'MeshData':
         """trimesh 객체에서 생성"""
         # 텍스처 추출 시도
         texture = None
         uv_coords = None
-        
-        if hasattr(mesh.visual, 'uv') and mesh.visual.uv is not None:
-            uv_coords = mesh.visual.uv
-        
-        if hasattr(mesh.visual, 'material'):
-            material = mesh.visual.material
-            if hasattr(material, 'image') and material.image is not None:
-                texture = np.array(material.image)
+
+        visual = getattr(mesh, "visual", None)
+        uv = getattr(visual, "uv", None) if visual is not None else None
+        if uv is not None:
+            uv_coords = uv
+
+        material = getattr(visual, "material", None) if visual is not None else None
+        image = getattr(material, "image", None) if material is not None else None
+        if image is not None:
+            texture = np.array(image)
         
         return cls(
             vertices=mesh.vertices,
@@ -454,7 +457,10 @@ class MeshLoader:
             if len(meshes) == 0:
                 raise ValueError(f"No valid mesh found in: {filepath}")
             mesh = trimesh.util.concatenate(meshes)
-        
+
+        if not isinstance(mesh, trimesh.Trimesh):
+            raise TypeError(f"Expected trimesh.Trimesh, got {type(mesh).__name__}")
+
         # MeshData로 변환
         mesh_data = MeshData.from_trimesh(mesh, filepath=filepath, unit=unit)
         
@@ -513,13 +519,18 @@ class MeshLoader:
                 meshes = [g for g in mesh.geometry.values() if isinstance(g, trimesh.Trimesh)]
                 total_verts = sum(m.vertices.shape[0] for m in meshes)
                 total_faces = sum(m.faces.shape[0] for m in meshes)
-            else:
+            elif isinstance(mesh, trimesh.Trimesh):
                 total_verts = mesh.vertices.shape[0]
                 total_faces = mesh.faces.shape[0]
-            
+            else:
+                total_verts = 0
+                total_faces = 0
+
             info['n_vertices'] = total_verts
             info['n_faces'] = total_faces
-            info['has_texture'] = hasattr(mesh.visual, 'uv') and mesh.visual.uv is not None
+            visual = getattr(mesh, "visual", None)
+            uv = getattr(visual, "uv", None) if visual is not None else None
+            info['has_texture'] = uv is not None
             
         except Exception as e:
             info['error'] = str(e)

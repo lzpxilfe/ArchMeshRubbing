@@ -6,7 +6,7 @@ Region Selector Module
 """
 
 from dataclasses import dataclass
-from typing import Optional, List, Tuple, Union
+from typing import Optional
 import numpy as np
 
 from .mesh_loader import MeshData
@@ -22,7 +22,7 @@ class SelectionResult:
         remaining_mesh: 나머지 영역의 메쉬
         selected_face_indices: 선택된 면 인덱스
     """
-    selected_mesh: MeshData
+    selected_mesh: Optional[MeshData]
     remaining_mesh: Optional[MeshData]
     selected_face_indices: np.ndarray
 
@@ -237,6 +237,9 @@ class RegionSelector:
             SelectionResult: 선택 결과
         """
         mesh.compute_normals()
+        normals = mesh.normals
+        if normals is None:
+            raise RuntimeError("Mesh normals are required for curvature selection")
         
         # 정점별 곡률 추정
         n = mesh.n_vertices
@@ -253,10 +256,10 @@ class RegionSelector:
             if len(neighbors) == 0:
                 continue
             
-            normal_i = mesh.normals[i]
+            normal_i = normals[i]
             angle_diffs = []
             for j in neighbors:
-                normal_j = mesh.normals[j]
+                normal_j = normals[j]
                 dot = np.clip(np.dot(normal_i, normal_j), -1, 1)
                 angle = np.arccos(dot)
                 angle_diffs.append(angle)

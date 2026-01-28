@@ -124,7 +124,7 @@ class SurfaceSeparator:
             return np.array([0, 0, 1])
     
     def separate_by_selection(self, mesh: MeshData,
-                              selected_face_indices: np.ndarray) -> Tuple[MeshData, MeshData]:
+                              selected_face_indices: np.ndarray) -> Tuple[MeshData, MeshData | None]:
         """
         선택된 면으로 수동 분리
         
@@ -184,6 +184,9 @@ class SurfaceSeparator:
     def _estimate_vertex_curvature(self, mesh: MeshData) -> np.ndarray:
         """정점별 곡률 추정 (간단한 방법)"""
         mesh.compute_normals()
+        normals = mesh.normals
+        if normals is None:
+            raise RuntimeError("Mesh normals are required for curvature estimation")
         
         n = mesh.n_vertices
         curvatures = np.zeros(n)
@@ -201,12 +204,12 @@ class SurfaceSeparator:
             if len(neighbors) == 0:
                 continue
             
-            normal_i = mesh.normals[i]
+            normal_i = normals[i]
             
             # 이웃 법선과의 각도 차이
             angle_diffs = []
             for j in neighbors:
-                normal_j = mesh.normals[j]
+                normal_j = normals[j]
                 dot = np.clip(np.dot(normal_i, normal_j), -1, 1)
                 angle = np.arccos(dot)
                 angle_diffs.append(angle)
@@ -225,7 +228,6 @@ class SurfaceSeparator:
         Returns:
             분리된 메쉬 목록
         """
-        n = mesh.n_vertices
         m = mesh.n_faces
         
         # 면 인접성 그래프 구성

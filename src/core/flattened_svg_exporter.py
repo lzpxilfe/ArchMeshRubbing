@@ -68,7 +68,7 @@ class FlattenedSVGExporter:
             f'<svg xmlns="http://www.w3.org/2000/svg" '
             f'width="{width:.4f}{svg_unit}" height="{height:.4f}{svg_unit}" '
             f'viewBox="0 0 {width:.6f} {height:.6f}">',
-            f'<!-- Produced by ArchMeshRubbing (Flattened SVG) -->',
+            '<!-- Produced by ArchMeshRubbing (Flattened SVG) -->',
         ]
 
         if options.include_grid and options.grid_spacing > 0:
@@ -171,4 +171,3 @@ class FlattenedSVGExporter:
 
         hull = lower[:-1] + upper[:-1]
         return np.asarray(hull, dtype=np.int32)
-

@@ -2,7 +2,6 @@
 Rubbing Generator Module
 탁본(Rubbing) 이미지를 생성하는 모듈
 """
-import numpy as np
 
 class RubbingGenerator:
     """

@@ -6,36 +6,33 @@ Licensed under the GNU General Public License v2.0 (GPL2)
 
 import sys
 from pathlib import Path
-from typing import Optional
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QFileDialog, QDockWidget, QTreeWidget,
     QTreeWidgetItem, QGroupBox, QDoubleSpinBox, QFormLayout,
-    QSlider, QSpinBox, QStatusBar, QToolBar, QSplitter, QFrame,
-    QMessageBox, QTabWidget, QTextEdit, QProgressBar, QComboBox,
+    QSlider, QSpinBox, QStatusBar, QToolBar, QFrame,
+    QMessageBox, QTextEdit, QProgressBar, QComboBox,
     QCheckBox, QScrollArea, QSizePolicy, QButtonGroup, QDialog,
-    QGridLayout, QProgressDialog
+    QGridLayout, QProgressDialog, QMenu
 )
 from PyQt6.QtCore import Qt, QTimer, QSize, pyqtSignal, QThread, QBuffer, QByteArray, QIODevice
 from PyQt6.QtCore import QSettings
-from PyQt6.QtGui import QAction, QIcon, QKeySequence, QFont, QPixmap, QShortcut
+from PyQt6.QtGui import QAction, QIcon, QKeySequence, QPixmap, QShortcut
 import numpy as np
-import trimesh
 from PIL import Image
 import io
 
 # Add src to path
 # Add basedir to path so 'src' package can be found
 if getattr(sys, 'frozen', False):
-    basedir = sys._MEIPASS
+    basedir = getattr(sys, "_MEIPASS", str(Path(__file__).parent))
 else:
     basedir = str(Path(__file__).parent)
 sys.path.insert(0, basedir)
 
 from src.gui.viewport_3d import Viewport3D
 from src.core.mesh_loader import MeshLoader, MeshProcessor
-from src.core.rubbing_generator import RubbingGenerator
 from src.core.profile_exporter import ProfileExporter
 from src.gui.profile_graph_widget import ProfileGraphWidget
 
@@ -255,7 +252,12 @@ class SplashScreen(QWidget):
     """프로세스 시작 시 보여주는 스플래시 화면"""
     
     def __init__(self):
-        super().__init__(None, Qt.WindowType.FramelessWindowHint | Qt.WindowType.SplashScreen | Qt.WindowType.WindowStaysOnTopHint)
+        super().__init__(
+            None,
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.SplashScreen
+            | Qt.WindowType.WindowStaysOnTopHint,
+        )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setFixedSize(500, 300)
         self.init_ui()
@@ -279,7 +281,12 @@ class SplashScreen(QWidget):
         self.icon_label = QLabel()
         icon_path = get_icon_path()
         if icon_path:
-            pix = QPixmap(icon_path).scaled(80, 80, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            pix = QPixmap(icon_path).scaled(
+                80,
+                80,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
             self.icon_label.setPixmap(pix)
         self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         card_layout.addWidget(self.icon_label)
@@ -373,9 +380,12 @@ class UnitSelectionDialog(QDialog):
 
     def get_scale_factor(self):
         idx = self.combo.currentIndex()
-        if idx == 0: return 0.1
-        if idx == 1: return 1.0
-        if idx == 2: return 100.0
+        if idx == 0:
+            return 0.1
+        if idx == 1:
+            return 1.0
+        if idx == 2:
+            return 100.0
         return 1.0
 
 
@@ -384,6 +394,10 @@ class ScenePanel(QWidget):
     selectionChanged = pyqtSignal(int)
     visibilityChanged = pyqtSignal(int, bool)
     arcDeleted = pyqtSignal(int, int) # object_idx, arc_idx
+    layerVisibilityChanged = pyqtSignal(int, int, bool)  # object_idx, layer_idx, visible
+    layerDeleted = pyqtSignal(int, int)  # object_idx, layer_idx
+    layerMoveRequested = pyqtSignal(int, int, float, float)  # object_idx, layer_idx, dx, dy
+    layerOffsetResetRequested = pyqtSignal(int, int)  # object_idx, layer_idx
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -421,6 +435,26 @@ class ScenePanel(QWidget):
                 arc_item.setText(1, "📏")
                 arc_item.setText(2, f"R={arc.radius:.2f}cm") # cm로 표시
                 arc_item.setData(0, Qt.ItemDataRole.UserRole, ("arc", i, j))
+
+            # 저장된 단면/가이드 레이어
+            for k, layer in enumerate(getattr(obj, "polyline_layers", []) or []):
+                layer_item = QTreeWidgetItem(mesh_item)
+                name = str(layer.get("name", "")).strip() or f"레이어 #{k+1}"
+                layer_item.setText(0, name)
+
+                visible = bool(layer.get("visible", True))
+                layer_item.setText(1, "👁️" if visible else "👓")
+
+                pts = layer.get("points", []) or []
+                kind = str(layer.get("kind", "")).strip()
+                if kind == "section_profile":
+                    kind_label = "단면"
+                elif kind == "cut_line":
+                    kind_label = "단면선"
+                else:
+                    kind_label = kind or "레이어"
+                layer_item.setText(2, f"{kind_label} ({len(pts):,})")
+                layer_item.setData(0, Qt.ItemDataRole.UserRole, ("layer", i, k))
             
             mesh_item.setExpanded(True)
             if i == selected_index:
@@ -429,7 +463,8 @@ class ScenePanel(QWidget):
                 
     def on_item_clicked(self, item, column):
         data = item.data(0, Qt.ItemDataRole.UserRole)
-        if not data: return
+        if not data:
+            return
         
         if data[0] == "mesh":
             index = data[1]
@@ -439,18 +474,51 @@ class ScenePanel(QWidget):
                 self.visibilityChanged.emit(index, visible)
             else:
                 self.selectionChanged.emit(index)
+        elif data[0] == "layer":
+            obj_idx = int(data[1])
+            layer_idx = int(data[2])
+            if column == 1:
+                visible = item.text(1) == "👓"
+                item.setText(1, "👁️" if visible else "👓")
+                self.layerVisibilityChanged.emit(obj_idx, layer_idx, visible)
 
     def show_context_menu(self, pos):
         item = self.tree.itemAt(pos)
-        if not item: return
+        if not item:
+            return
         
         data = item.data(0, Qt.ItemDataRole.UserRole)
-        if data and data[0] == "arc":
+        if not data:
+            return
+
+        if data[0] == "arc":
             menu = QMenu(self) # 원인: 부모 위젯 지정
             delete_action = menu.addAction("🗑️ 원호 삭제")
             action = menu.exec(self.tree.mapToGlobal(pos))
             if action == delete_action:
                 self.arcDeleted.emit(data[1], data[2])
+        elif data[0] == "layer":
+            menu = QMenu(self)
+            move_left = menu.addAction("왼쪽 5cm")
+            move_right = menu.addAction("오른쪽 5cm")
+            move_up = menu.addAction("위로 5cm")
+            move_down = menu.addAction("아래로 5cm")
+            reset_offset = menu.addAction("오프셋 초기화")
+            menu.addSeparator()
+            delete_action = menu.addAction("🗑️ 레이어 삭제")
+            action = menu.exec(self.tree.mapToGlobal(pos))
+            if action == move_left:
+                self.layerMoveRequested.emit(int(data[1]), int(data[2]), -5.0, 0.0)
+            elif action == move_right:
+                self.layerMoveRequested.emit(int(data[1]), int(data[2]), 5.0, 0.0)
+            elif action == move_up:
+                self.layerMoveRequested.emit(int(data[1]), int(data[2]), 0.0, 5.0)
+            elif action == move_down:
+                self.layerMoveRequested.emit(int(data[1]), int(data[2]), 0.0, -5.0)
+            elif action == reset_offset:
+                self.layerOffsetResetRequested.emit(int(data[1]), int(data[2]))
+            elif action == delete_action:
+                self.layerDeleted.emit(int(data[1]), int(data[2]))
 
 
 class TransformToolbar(QToolBar):
@@ -546,7 +614,10 @@ class TransformPanel(QWidget):
 
         self.btn_draw_floor = QPushButton("✏️ 바닥 면 그리기")
         self.btn_draw_floor.clicked.connect(self.start_floor_drawing)
-        self.btn_draw_floor.setToolTip("메쉬 위에 바닥이 될 점들을 찍어 바닥면을 지정하세요\n점을 계속 추가할 수 있고, Enter로 확정합니다")
+        self.btn_draw_floor.setToolTip(
+            "메쉬 위에 바닥이 될 점들을 찍어 바닥면을 지정하세요\n"
+            "점을 계속 추가할 수 있고, Enter로 확정합니다"
+        )
         self.btn_draw_floor.setStyleSheet("QPushButton { padding: 8px; font-weight: bold; }")
         align_layout.addWidget(self.btn_draw_floor)
 
@@ -557,27 +628,6 @@ class TransformPanel(QWidget):
         
         layout.addWidget(align_group)
         layout.addStretch()
-
-    def _create_spinbox(self, min_val, max_val, decimals):
-        spin = QDoubleSpinBox()
-        spin.setRange(min_val, max_val)
-        spin.setDecimals(decimals)
-        return spin
-    
-    def on_transform_changed(self):
-        if self.viewport.selected_obj:
-            self.viewport.selected_obj.translation = np.array([
-                self.trans_x.value(),
-                self.trans_y.value(),
-                self.trans_z.value()
-            ])
-            self.viewport.selected_obj.rotation = np.array([
-                self.rot_x.value(),
-                self.rot_y.value(),
-                self.rot_z.value()
-            ])
-            self.viewport.update()
-            self.transformChanged.emit()
     
     def enterEvent(self, event):
         self.help_widget.set_transform_help()
@@ -586,11 +636,10 @@ class TransformPanel(QWidget):
     def start_floor_drawing(self):
         """바닥 면 그리기 모드 시작 - MainWindow로 위임"""
         main_window = self.window()
-        if hasattr(main_window, 'start_floor_picking'):
-            main_window.start_floor_picking()
-            # 상태 업데이트
-            if hasattr(self, 'floor_status'):
-                self.floor_status.setText("📍 점 찍는 중... (Enter로 확정)")
+        start_floor_picking = getattr(main_window, "start_floor_picking", None)
+        if callable(start_floor_picking):
+            start_floor_picking()
+            self.floor_status.setText("📍 점 찍는 중... (Enter로 확정)")
 
 
 class FlattenPanel(QWidget):
@@ -1221,7 +1270,11 @@ class ExportPanel(QWidget):
         for i, (label, view_code) in enumerate(views):
             btn = QPushButton(label)
             btn.setStyleSheet("text-align: left; padding: 5px;")
-            btn.clicked.connect(lambda checked, v=view_code: self.exportRequested.emit({'type': 'profile_2d', 'view': v}))
+            btn.clicked.connect(
+                lambda checked, v=view_code: self.exportRequested.emit(
+                    {"type": "profile_2d", "view": v}
+                )
+            )
             grid_layout.addWidget(btn, i // 2, i % 2)
             
         profile_layout.addLayout(grid_layout)
@@ -1236,6 +1289,7 @@ class SectionPanel(QWidget):
     cutLineActiveChanged = pyqtSignal(int)
     cutLineClearRequested = pyqtSignal(int)
     cutLinesClearAllRequested = pyqtSignal()
+    saveSectionLayersRequested = pyqtSignal()
     roiToggled = pyqtSignal(bool)
     silhouetteRequested = pyqtSignal()
     
@@ -1286,7 +1340,10 @@ class SectionPanel(QWidget):
 
         self.btn_line = QPushButton("✏️ 단면선 그리기 시작")
         self.btn_line.setCheckable(True)
-        self.btn_line.setStyleSheet("QPushButton:checked { background-color: #ed8936; color: white; font-weight: bold; }")
+        self.btn_line.setStyleSheet(
+            "QPushButton:checked { background-color: #ed8936; "
+            "color: white; font-weight: bold; }"
+        )
         self.btn_line.toggled.connect(self.on_line_toggled)
         line_layout.addWidget(self.btn_line)
 
@@ -1298,7 +1355,9 @@ class SectionPanel(QWidget):
         sel_row.addWidget(self.combo_cutline, 1)
 
         self.btn_cutline_clear = QPushButton("🧹 현재 선 지우기")
-        self.btn_cutline_clear.clicked.connect(lambda: self.cutLineClearRequested.emit(int(self.combo_cutline.currentIndex())))
+        self.btn_cutline_clear.clicked.connect(
+            lambda: self.cutLineClearRequested.emit(int(self.combo_cutline.currentIndex()))
+        )
         sel_row.addWidget(self.btn_cutline_clear)
 
         self.btn_cutline_clear_all = QPushButton("🧹 모두 지우기")
@@ -1306,10 +1365,18 @@ class SectionPanel(QWidget):
         sel_row.addWidget(self.btn_cutline_clear_all)
         line_layout.addLayout(sel_row)
 
-        line_help = QLabel("상면(Top) 뷰에서 클릭으로 점을 추가해 단면선을 그리세요. (자동 수평/수직)\nEnter=확정, Backspace=한 점 취소, Tab=선 전환")
+        line_help = QLabel(
+            "상면(Top) 뷰에서 클릭으로 점을 추가해 단면선을 그리세요. (자동 수평/수직)\n"
+            "Enter=확정, Backspace=한 점 취소, Tab=선 전환"
+        )
         line_help.setStyleSheet("color: #718096; font-size: 10px;")
         line_help.setWordWrap(True)
         line_layout.addWidget(line_help)
+
+        self.btn_save_section_layers = QPushButton("단면을 레이어로 저장")
+        self.btn_save_section_layers.setToolTip("현재 단면선/단면 결과를 레이어로 스냅샷 저장합니다.")
+        self.btn_save_section_layers.clicked.connect(self.saveSectionLayersRequested.emit)
+        line_layout.addWidget(self.btn_save_section_layers)
 
         layout.addWidget(line_group)
 
@@ -1535,10 +1602,12 @@ class MainWindow(QMainWindow):
         self.section_panel.cutLinesClearAllRequested.connect(self.on_cut_lines_clear_all_requested)
         self.section_panel.roiToggled.connect(self.on_roi_toggled)
         self.section_panel.silhouetteRequested.connect(self.viewport.extract_roi_silhouette)
+        self.section_panel.saveSectionLayersRequested.connect(self.on_save_section_layers_requested)
 
         self.viewport.profileUpdated.connect(self.section_panel.update_profiles)
         self.viewport.lineProfileUpdated.connect(self.section_panel.update_line_profile)
         self.viewport.roiSilhouetteExtracted.connect(self.on_silhouette_extracted)
+        self.viewport.cutLinesAutoEnded.connect(self._on_cut_lines_auto_ended)
         section_layout.addWidget(self.section_panel)
 
         section_layout.addStretch()
@@ -1552,6 +1621,10 @@ class MainWindow(QMainWindow):
         self.scene_panel.selectionChanged.connect(self.viewport.select_object)
         self.scene_panel.visibilityChanged.connect(self.on_visibility_changed)
         self.scene_panel.arcDeleted.connect(self.on_arc_deleted)
+        self.scene_panel.layerVisibilityChanged.connect(self.on_layer_visibility_changed)
+        self.scene_panel.layerDeleted.connect(self.on_layer_deleted)
+        self.scene_panel.layerMoveRequested.connect(self.on_layer_move_requested)
+        self.scene_panel.layerOffsetResetRequested.connect(self.on_layer_offset_reset_requested)
         self.scene_dock.setWidget(self.scene_panel)
 
         # 공통 도킹/플로팅 옵션
@@ -1662,9 +1735,11 @@ class MainWindow(QMainWindow):
         settings.remove("ui/state_version")
         self._apply_default_dock_layout()
 
-    def closeEvent(self, event):
+    def closeEvent(self, a0):
         self._save_ui_state()
-        super().closeEvent(event)
+        if a0 is None:
+            return
+        super().closeEvent(a0)
 
     def start_floor_picking(self):
         """바닥면 그리기(점 찍기) 모드 시작"""
@@ -1732,7 +1807,8 @@ class MainWindow(QMainWindow):
     def align_mesh_to_normal(self, normal):
         """주어진 법선 벡터를 월드 Z축(0,0,1)으로 정렬 (Bake)"""
         obj = self.viewport.selected_obj
-        if not obj: return
+        if not obj:
+            return
         
         target = np.array([0.0, 0.0, 1.0])
         axis = np.cross(normal, target)
@@ -1761,7 +1837,8 @@ class MainWindow(QMainWindow):
 
     def on_floor_face_picked(self, vertices):
         """바닥면(면 선택) - Enter를 눌러야 정렬됨"""
-        if len(vertices) != 3: return
+        if len(vertices) != 3:
+            return
         self.viewport.floor_picks = [v.copy() for v in vertices]
         self.viewport.status_info = "✅ 면 선택됨. Enter를 누르면 정렬됩니다."
         self.viewport.update()
@@ -1769,7 +1846,8 @@ class MainWindow(QMainWindow):
     def on_floor_point_picked(self, point):
         """바닥면 점 선택 - 점이 추가되면 상태바 업데이트"""
         obj = self.viewport.selected_obj
-        if not obj: return
+        if not obj:
+            return
         
         if not hasattr(self.viewport, 'floor_picks'):
             self.viewport.floor_picks = []
@@ -1869,11 +1947,45 @@ class MainWindow(QMainWindow):
                 self.viewport.update()
                 self.status_info.setText(f"🗑️ 원호 #{arc_idx+1} 삭제됨")
     
+    def on_layer_visibility_changed(self, obj_idx: int, layer_idx: int, visible: bool):
+        try:
+            self.viewport.set_polyline_layer_visible(int(obj_idx), int(layer_idx), bool(visible))
+            self.viewport.update()
+        except Exception:
+            pass
+
+    def on_layer_deleted(self, obj_idx: int, layer_idx: int):
+        try:
+            self.viewport.delete_polyline_layer(int(obj_idx), int(layer_idx))
+            self.scene_panel.update_list(self.viewport.objects, self.viewport.selected_index)
+            self.viewport.update()
+            self.status_info.setText("레이어 삭제됨")
+        except Exception:
+            pass
+
+    def on_layer_move_requested(self, obj_idx: int, layer_idx: int, dx: float, dy: float):
+        try:
+            self.viewport.move_polyline_layer(int(obj_idx), int(layer_idx), float(dx), float(dy))
+            self.viewport.update()
+        except Exception:
+            pass
+
+    def on_layer_offset_reset_requested(self, obj_idx: int, layer_idx: int):
+        try:
+            self.viewport.reset_polyline_layer_offset(int(obj_idx), int(layer_idx))
+            self.viewport.update()
+        except Exception:
+            pass
+
     def init_menu(self):
         menubar = self.menuBar()
+        if menubar is None:
+            return
         
         # 파일 메뉴
         file_menu = menubar.addMenu("파일(&F)")
+        if file_menu is None:
+            return
         
         action_open = QAction("📂 열기(&O)", self)
         action_open.setShortcut(QKeySequence.StandardKey.Open)
@@ -1889,6 +2001,8 @@ class MainWindow(QMainWindow):
         
         # 보기 메뉴
         view_menu = menubar.addMenu("보기(&V)")
+        if view_menu is None:
+            return
         
         action_reset_view = QAction("🔄 뷰 초기화(&R)", self)
         action_reset_view.setShortcut("R")
@@ -1940,20 +2054,21 @@ class MainWindow(QMainWindow):
         view_menu.addAction(action_reset_layout)
 
         panels_menu = view_menu.addMenu("패널 표시/숨김")
-        panels_menu.addAction(self.info_dock.toggleViewAction())
-        panels_menu.addAction(self.transform_dock.toggleViewAction())
-        panels_menu.addAction(self.selection_dock.toggleViewAction())
-        panels_menu.addAction(self.flatten_dock.toggleViewAction())
-        panels_menu.addAction(self.section_dock.toggleViewAction())
-        panels_menu.addAction(self.export_dock.toggleViewAction())
-        panels_menu.addAction(self.scene_dock.toggleViewAction())
+        if panels_menu is not None:
+            panels_menu.addAction(self.info_dock.toggleViewAction())
+            panels_menu.addAction(self.transform_dock.toggleViewAction())
+            panels_menu.addAction(self.selection_dock.toggleViewAction())
+            panels_menu.addAction(self.flatten_dock.toggleViewAction())
+            panels_menu.addAction(self.section_dock.toggleViewAction())
+            panels_menu.addAction(self.export_dock.toggleViewAction())
+            panels_menu.addAction(self.scene_dock.toggleViewAction())
         
         # 도움말 메뉴
         help_menu = menubar.addMenu("도움말(&H)")
-        
-        action_about = QAction("ℹ️ 정보(&A)", self)
-        action_about.triggered.connect(self.show_about)
-        help_menu.addAction(action_about)
+        if help_menu is not None:
+            action_about = QAction("ℹ️ 정보(&A)", self)
+            action_about.triggered.connect(self.show_about)
+            help_menu.addAction(action_about)
     
     def init_toolbar(self):
         toolbar = QToolBar("메인 툴바")
@@ -2046,21 +2161,35 @@ class MainWindow(QMainWindow):
                 scale_factor = dialog.get_scale_factor()
                 self.load_mesh(filepath, scale_factor)
     
-    def dragEnterEvent(self, event):
+    def dragEnterEvent(self, a0):
         """드래그 진입 이벤트"""
-        if event.mimeData().hasUrls():
-            urls = event.mimeData().urls()
+        if a0 is None:
+            return
+
+        mime_data = a0.mimeData()
+        if mime_data is None:
+            return
+
+        if mime_data.hasUrls():
+            urls = mime_data.urls()
             if urls:
                 filepath = urls[0].toLocalFile()
                 ext = Path(filepath).suffix.lower()
                 if ext in ['.obj', '.ply', '.stl', '.off', '.gltf', '.glb']:
-                    event.acceptProposedAction()
+                    a0.acceptProposedAction()
                     return
-        event.ignore()
+        a0.ignore()
     
-    def dropEvent(self, event):
+    def dropEvent(self, a0):
         """드롭 이벤트"""
-        urls = event.mimeData().urls()
+        if a0 is None:
+            return
+
+        mime_data = a0.mimeData()
+        if mime_data is None:
+            return
+
+        urls = mime_data.urls()
         if urls:
             filepath = urls[0].toLocalFile()
             # 드롭 시에도 단위 선택 다이얼로그 표시
@@ -2271,7 +2400,8 @@ class MainWindow(QMainWindow):
     def on_toolbar_transform_changed(self):
         """툴바에서 값이 변경된 경우"""
         obj = self.viewport.selected_obj
-        if not obj: return
+        if not obj:
+            return
         
         obj.translation = np.array([
             self.trans_toolbar.trans_x.value(),
@@ -2289,7 +2419,8 @@ class MainWindow(QMainWindow):
     def on_bake_all_clicked(self):
         """현재 변환을 메쉬에 영구 정착 (정치 신청)"""
         obj = self.viewport.selected_obj
-        if not obj: return
+        if not obj:
+            return
         
         self.viewport.bake_object_transform(obj)
         self.sync_transform_panel() # 툴바 값 리셋됨
@@ -2314,7 +2445,8 @@ class MainWindow(QMainWindow):
     def reset_transform(self):
         """모든 변환 초기화"""
         obj = self.viewport.selected_obj
-        if not obj: return
+        if not obj:
+            return
         
         obj.translation = np.array([0.0, 0.0, 0.0])
         obj.rotation = np.array([0.0, 0.0, 0.0])
@@ -2714,7 +2846,7 @@ class MainWindow(QMainWindow):
             qbuf.open(QIODevice.OpenModeFlag.WriteOnly)
             qimage.save(qbuf, "PNG")
             qbuf.close()
-            pil_img = Image.open(io.BytesIO(bytes(ba)))
+            pil_img = Image.open(io.BytesIO(ba.data()))
 
             # 2. 프로파일 추출 및 SVG 내보내기
             exporter = ProfileExporter(resolution=2048) # 추출 해상도
@@ -2788,11 +2920,14 @@ class MainWindow(QMainWindow):
                     pass
     
     def reset_transform_and_center(self):
-        """변환 리셋 + 원점 중심 이동"""
-        if self.viewport.selected_obj:
-            self.transform_panel.reset_transform()
-            self.transform_panel.center_mesh()
-            self.status_info.setText("✅ 변환 초기화 완료")
+        """변환 리셋 + 뷰 맞춤"""
+        obj = self.viewport.selected_obj
+        if obj is None:
+            return
+
+        self.reset_transform()
+        self.fit_view()
+        self.status_info.setText("🔄 변환 초기화 + 뷰 맞춤 완료")
     
     def bake_and_center(self):
         """정치: 현재 회전을 메쉬 버텍스에 영구 적용하고 변환 리셋"""
@@ -2899,13 +3034,18 @@ class MainWindow(QMainWindow):
         from src.core.curvature_fitter import CurvatureFitter
         
         # 월드 좌표 점들을 그대로 사용 (메쉬와 분리하기 위해)
-        world_points = self.viewport.picked_points
+        world_points = np.asarray(self.viewport.picked_points, dtype=np.float64)
         
         fitter = CurvatureFitter()
         arc = fitter.fit_arc(world_points)
         
         if arc is None:
-            QMessageBox.warning(self, "경고", "원호 피팅에 실패했습니다.\n점들이 일직선 위에 있거나 너무 가까울 수 있습니다.")
+            QMessageBox.warning(
+                self,
+                "경고",
+                "원호 피팅에 실패했습니다.\n"
+                "점들이 일직선 위에 있거나 너무 가까울 수 있습니다.",
+            )
             return
         
         # 객체에 원호 부착 (데이터 구조는 유지하되 렌더링 시 변환 적용 안 함)
@@ -2922,7 +3062,10 @@ class MainWindow(QMainWindow):
         
         self.scene_panel.update_list(self.viewport.objects, self.viewport.selected_index)
         arc_count = len(obj.fitted_arcs)
-        self.status_info.setText(f"✅ 원호 #{arc_count} 생성됨 (월드 고정): 반지름 = {arc.radius:.2f} cm ({radius_mm:.1f} mm)")
+        self.status_info.setText(
+            f"✅ 원호 #{arc_count} 생성됨 (월드 고정): 반지름 = {arc.radius:.2f} cm "
+            f"({radius_mm:.1f} mm)"
+        )
     
     def clear_curvature_points(self):
         """곡률 측정용 점 초기화"""
@@ -2981,7 +3124,8 @@ class MainWindow(QMainWindow):
 
     def on_silhouette_extracted(self, points):
         """추출된 외곽선 처리 핸들러"""
-        if not points: return
+        if not points:
+            return
         self.status_info.setText(f"✅ {len(points)}개의 점으로 외곽선 추출 완료")
         print(f"Extracted Silhouette: {len(points)} points")
 
@@ -3069,6 +3213,28 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def on_save_section_layers_requested(self):
+        """현재 단면/가이드 결과를 레이어로 저장(스냅샷)."""
+        try:
+            added = int(self.viewport.save_current_sections_to_layers())
+        except Exception:
+            added = 0
+
+        if added <= 0:
+            self.status_info.setText("저장할 단면 레이어가 없습니다.")
+            return
+
+        self.scene_panel.update_list(self.viewport.objects, self.viewport.selected_index)
+        self.status_info.setText(f"단면 레이어 {added}개 저장됨")
+
+    def _on_cut_lines_auto_ended(self):
+        """Viewport에서 Enter로 단면선(2개) 입력을 마무리하면 버튼 상태도 맞춰줌"""
+        try:
+            if self.section_panel.btn_line.isChecked():
+                self.section_panel.btn_line.setChecked(False)
+        except Exception:
+            pass
+
     def _request_slice_compute(self):
         if not getattr(self.viewport, "slice_enabled", False):
             return
@@ -3079,7 +3245,11 @@ class MainWindow(QMainWindow):
             self.viewport.update()
             return
 
-        height = float(self._slice_pending_height) if self._slice_pending_height is not None else float(self.viewport.slice_z)
+        height = (
+            float(self._slice_pending_height)
+            if self._slice_pending_height is not None
+            else float(self.viewport.slice_z)
+        )
 
         thread = getattr(self, "_slice_compute_thread", None)
         if thread is not None and thread.isRunning():
@@ -3220,7 +3390,10 @@ class MainWindow(QMainWindow):
         """임시 SVG 저장 (로컬 contours를 월드 비율로)"""
         # 바운딩 박스 (로컬 XY)
         # 하지만 스케일이 곱해져야 하므로...
-        scale = self.viewport.selected_obj.scale
+        obj = self.viewport.selected_obj
+        if obj is None:
+            return
+        scale = float(obj.scale)
         all_pts = np.vstack(contours) * scale
         
         min_x, min_y = all_pts[:, 0].min(), all_pts[:, 1].min()
@@ -3230,8 +3403,11 @@ class MainWindow(QMainWindow):
         height = (max_y - min_y) * 1.1
         
         svg = [
-            f'<svg xmlns="http://www.w3.org/2000/svg" width="{width:.2f}cm" height="{height:.2f}cm" viewBox="0 0 {width:.4f} {height:.4f}">',
-            f'<g stroke="red" fill="none" stroke-width="0.1">'
+            (
+                f'<svg xmlns="http://www.w3.org/2000/svg" width="{width:.2f}cm" '
+                f'height="{height:.2f}cm" viewBox="0 0 {width:.4f} {height:.4f}">'
+            ),
+            '<g stroke="red" fill="none" stroke-width="0.1">',
         ]
         
         for cnt in contours:
@@ -3243,7 +3419,7 @@ class MainWindow(QMainWindow):
             
         svg.append('</g></svg>')
         
-        with open(path, 'w') as f:
+        with open(path, 'w', encoding='utf-8') as f:
             f.write("\n".join(svg))
 
     def show_about(self):
@@ -3300,9 +3476,11 @@ def main():
         import traceback
         err_msg = f"Application crashed on startup:\n\n{e}\n\n{traceback.format_exc()}"
         try:
-            temp_app = QApplication.instance() or QApplication(sys.argv)
+            app = QApplication.instance()
+            if app is None:
+                app = QApplication(sys.argv)
             QMessageBox.critical(None, "Fatal Startup Error", err_msg)
-        except:
+        except Exception:
             pass
         sys.exit(1)
 

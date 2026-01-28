@@ -6,7 +6,7 @@ Orthographic Projector Module
 """
 
 from dataclasses import dataclass
-from typing import Optional, Tuple, Literal
+from typing import Optional, Literal
 import numpy as np
 from PIL import Image
 
@@ -342,7 +342,7 @@ class OrthographicProjector:
                                    mesh.vertices[:, 2].max())
     
     def project_with_texture(self, mesh: MeshData,
-                             direction: str = 'top',
+                             direction: Literal['top', 'bottom', 'front', 'back', 'left', 'right'] = 'top',
                              resolution: Optional[int] = None) -> ProjectionResult:
         """
         텍스처가 있는 메쉬의 정사투영

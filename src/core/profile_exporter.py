@@ -6,19 +6,17 @@ import numpy as np
 from PIL import Image, ImageDraw
 import io
 import base64
-from pathlib import Path
+from typing import cast
 
 try:
     import cv2
-    HAS_CV2 = True
 except ImportError:
-    HAS_CV2 = False
+    cv2 = None  # type: ignore[assignment]
 
 try:
     from scipy import ndimage
-    HAS_SCIPY = True
 except ImportError:
-    HAS_SCIPY = False
+    ndimage = None  # type: ignore[assignment]
 
 
 def _rdp_simplify(points: np.ndarray, epsilon: float) -> np.ndarray:
@@ -58,14 +56,14 @@ def _trace_main_contour_binary(mask: np.ndarray) -> np.ndarray:
     Returns:
         (N, 2) float array in pixel coordinates (x, y), y-down.
     """
-    if not HAS_SCIPY:
+    if ndimage is None:
         raise RuntimeError("SciPy is required for contour extraction when OpenCV is not available")
 
     mask = np.asarray(mask, dtype=bool)
     if not mask.any():
         return np.zeros((0, 2), dtype=np.float64)
 
-    labels, num = ndimage.label(mask)
+    labels, num = cast(tuple[np.ndarray, int], ndimage.label(mask))
     if num <= 0:
         return np.zeros((0, 2), dtype=np.float64)
 
@@ -78,7 +76,7 @@ def _trace_main_contour_binary(mask: np.ndarray) -> np.ndarray:
 
     # Find boundary pixels
     eroded = ndimage.binary_erosion(comp, structure=np.ones((3, 3), dtype=bool), border_value=0)
-    boundary = comp & ~eroded
+    boundary = comp & np.logical_not(eroded)
     coords = np.argwhere(boundary)
     if coords.size == 0:
         # Fallback: single pixel/component
@@ -158,7 +156,7 @@ def _extract_main_contour(occupancy: np.ndarray) -> np.ndarray:
     if occupancy.size == 0:
         return np.zeros((0, 2), dtype=np.float64)
 
-    if HAS_CV2:
+    if cv2 is not None:
         found_contours, _ = cv2.findContours(occupancy, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_TC89_KCOS)
         if not found_contours:
             return np.zeros((0, 2), dtype=np.float64)
@@ -201,12 +199,12 @@ class ProfileExporter:
     def __init__(self, resolution: int = 1024):
         self.resolution = resolution
     
-    def extract_silhouette(self, mesh, view: str = 'top', 
-                           translation: np.ndarray = None,
-                           rotation: np.ndarray = None,
+    def extract_silhouette(self, mesh, view: str = 'top',
+                           translation: np.ndarray | None = None,
+                           rotation: np.ndarray | None = None,
                            scale: float = 1.0,
-                           opengl_matrices: tuple = None,
-                           viewport_image: Image.Image = None) -> tuple:
+                           opengl_matrices: tuple | None = None,
+                           viewport_image: Image.Image | None = None) -> tuple:
         """
         메쉬를 투영하여 단일 외곽선(폴리라인)을 추출합니다.
         opengl_matrices: (modelview, projection, viewport) - 제공 시 실제 렌더링 화면과 완벽히 일치시킴
@@ -279,6 +277,7 @@ class ProfileExporter:
             # 3) 외곽선 추출: viewport_image가 있으면 이미지 기반(가장 견고/빠름)
             grid_w = int(vp[2])
             grid_h = int(vp[3])
+            occupancy = np.zeros((grid_h, grid_w), dtype=np.uint8)
             if viewport_image is not None:
                 try:
                     img_rgba = viewport_image.convert("RGBA")
@@ -288,6 +287,7 @@ class ProfileExporter:
                         grid_w = int(rgb.shape[1])
                         grid_h = int(rgb.shape[0])
                         vp = np.array([0, 0, grid_w, grid_h], dtype=np.int32)
+                        occupancy = np.zeros((grid_h, grid_w), dtype=np.uint8)
 
                     corners_rgb = np.stack(
                         [rgb[0, 0], rgb[0, -1], rgb[-1, 0], rgb[-1, -1]], axis=0
@@ -300,14 +300,14 @@ class ProfileExporter:
                         # 매우 밝은 메쉬/조명 등으로 diff가 거의 없을 때: 단순 백색 임계값으로 fallback
                         mask = rgb.mean(axis=2) < 254
 
-                    if HAS_CV2:
+                    if cv2 is not None:
                         occ = (mask.astype(np.uint8) * 255)
                         k = np.ones((3, 3), dtype=np.uint8)
                         occ = cv2.morphologyEx(occ, cv2.MORPH_CLOSE, k, iterations=2)
                         occ = cv2.morphologyEx(occ, cv2.MORPH_OPEN, k, iterations=1)
                         occupancy = occ
                     else:
-                        if HAS_SCIPY:
+                        if ndimage is not None:
                             mask = ndimage.binary_closing(mask, structure=np.ones((3, 3), dtype=bool), iterations=2)
                             mask = ndimage.binary_opening(mask, structure=np.ones((3, 3), dtype=bool), iterations=1)
                         occupancy = (mask.astype(np.uint8) * 255)
@@ -359,8 +359,8 @@ class ProfileExporter:
                 proj_2d[:, 1] = (v_ndc[:, 1] + 1) / 2 * grid_h
                 proj_2d[:, 1] = grid_h - proj_2d[:, 1]
 
-                if HAS_CV2:
-                    occupancy = np.zeros((grid_h, grid_w), dtype=np.uint8)
+                occupancy = np.zeros((grid_h, grid_w), dtype=np.uint8)
+                if cv2 is not None:
                     img_v = proj_2d.astype(np.int32)
                     for face in faces:
                         cv2.fillPoly(occupancy, [img_v[face]], 255)
@@ -407,9 +407,12 @@ class ProfileExporter:
         
         # 2D 투영 (실제 좌표)
         proj_2d = vertices[:, [ax0, ax1]]
-        if view == 'back': proj_2d[:, 0] = -proj_2d[:, 0]
-        if view == 'left': proj_2d[:, 0] = -proj_2d[:, 0]
-        if view == 'bottom': proj_2d[:, 1] = -proj_2d[:, 1]
+        if view == 'back':
+            proj_2d[:, 0] = -proj_2d[:, 0]
+        if view == 'left':
+            proj_2d[:, 0] = -proj_2d[:, 0]
+        if view == 'bottom':
+            proj_2d[:, 1] = -proj_2d[:, 1]
         
         # 바운딩 박스 (실제 좌표)
         min_coords = proj_2d.min(axis=0)
@@ -434,9 +437,10 @@ class ProfileExporter:
             return img_pts
 
         occupancy = np.zeros((grid_h, grid_w), dtype=np.uint8)
-        if HAS_CV2:
+        if cv2 is not None:
             img_v = real_to_img(proj_2d).astype(np.int32)
-            for face in mesh.faces: cv2.fillPoly(occupancy, [img_v[face]], 255)
+            for face in mesh.faces:
+                cv2.fillPoly(occupancy, [img_v[face]], 255)
         else:
             img = Image.new('L', (grid_w, grid_h), 0)
             draw = ImageDraw.Draw(img)
@@ -480,7 +484,8 @@ class ProfileExporter:
             def w_to_i(wx, wy, wz=0):
                 vh = np.array([wx, wy, wz, 1.0])
                 vc = vh @ (mv @ proj)
-                if abs(vc[3]) < 1e-6: return None
+                if abs(vc[3]) < 1e-6:
+                    return None
                 vn = vc[:3] / vc[3]
                 return (vn[0]+1)/2 * img_w, img_h - (vn[1]+1)/2 * img_h
 
@@ -503,8 +508,10 @@ class ProfileExporter:
             
             x = x_start
             while x <= x_end:
-                p1 = w_to_i(x, y_start); p2 = w_to_i(x, y_end)
-                if p1 and p2: draw.line([p1, p2], fill=line_color, width=1)
+                p1 = w_to_i(x, y_start)
+                p2 = w_to_i(x, y_end)
+                if p1 and p2:
+                    draw.line([p1, p2], fill=line_color, width=1)
                 x += grid_spacing
                 
             # 가로선 (Y축)
@@ -514,8 +521,10 @@ class ProfileExporter:
             
             y = y_start_grid
             while y <= y_end_grid:
-                p1 = w_to_i(x_start_f, y); p2 = w_to_i(x_end_f, y)
-                if p1 and p2: draw.line([p1, p2], fill=line_color, width=1)
+                p1 = w_to_i(x_start_f, y)
+                p2 = w_to_i(x_end_f, y)
+                if p1 and p2:
+                    draw.line([p1, p2], fill=line_color, width=1)
                 y += grid_spacing
         else:
             # 2. 고전적 평면 투영 (정사영 베이스)
@@ -526,13 +535,15 @@ class ProfileExporter:
             x = np.ceil(min_coords[0] / grid_spacing) * grid_spacing
             while x <= min_coords[0] + size[0]:
                 px = int((x - min_coords[0]) / size[0] * (img_w - 1))
-                if 0 <= px < img_w: draw.line([(px, 0), (px, img_h - 1)], fill=line_color, width=1)
+                if 0 <= px < img_w:
+                    draw.line([(px, 0), (px, img_h - 1)], fill=line_color, width=1)
                 x += grid_spacing
             # 가로선 (Y)
             y = np.ceil(min_coords[1] / grid_spacing) * grid_spacing
             while y <= min_coords[1] + size[1]:
                 py = int((1 - (y - min_coords[1]) / size[1]) * (img_h - 1))
-                if 0 <= py < img_h: draw.line([(0, py), (img_w - 1, py)], fill=line_color, width=1)
+                if 0 <= py < img_h:
+                    draw.line([(0, py), (img_w - 1, py)], fill=line_color, width=1)
                 y += grid_spacing
             
         # 3. Multiply Blend
@@ -542,11 +553,11 @@ class ProfileExporter:
         return Image.fromarray(result_arr)
     
     def export_svg(self, contours: list, bounds: dict,
-                    background_image: Image.Image = None,
+                    background_image: Image.Image | None = None,
                     stroke_color: str = "#000000", # 기본 검정색
                     stroke_width: float = 0.05,    # 0.5mm
-                    extra_paths: list = None,
-                    output_path: str = None) -> str:
+                    extra_paths: list | None = None,
+                    output_path: str | None = None) -> str:
         """
         최종 SVG 생성 (배경 이미지 + 단일 벡터 외곽선)
         """
@@ -559,8 +570,8 @@ class ProfileExporter:
         svg_parts = [
             '<?xml version="1.0" encoding="UTF-8" standalone="no"?>',
             '<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">',
-            f'<svg xmlns="http://www.w3.org/2000/svg" ',
-            f'xmlns:xlink="http://www.w3.org/1999/xlink" ',
+            '<svg xmlns="http://www.w3.org/2000/svg" ',
+            'xmlns:xlink="http://www.w3.org/1999/xlink" ',
             f'width="{svg_width:.2f}cm" height="{svg_height:.2f}cm" ',
             f'viewBox="0 0 {svg_width:.6f} {svg_height:.6f}">',
             f'<!-- Produced by ArchMeshRubbing - Resolution: {background_image.size if background_image else "Vector Only"} -->',
@@ -584,7 +595,8 @@ class ProfileExporter:
                 f'stroke-linejoin="round" stroke-linecap="round">'
             )
             for contour in contours:
-                if len(contour) < 2: continue
+                if len(contour) < 2:
+                    continue
                 # 좌표 변환
                 svg_pts = contour.copy()
                 
@@ -656,15 +668,15 @@ class ProfileExporter:
         return content
         
     def export_profile(self, mesh, view: str, output_path: str,
-                       translation: np.ndarray = None,
-                       rotation: np.ndarray = None,
+                       translation: np.ndarray | None = None,
+                       rotation: np.ndarray | None = None,
                        scale: float = 1.0,
                        grid_spacing: float = 1.0,
                        include_grid: bool = True,
-                       viewport_image: Image.Image = None,
-                       opengl_matrices: tuple = None,
-                       cut_lines_world: list = None,
-                       cut_profiles_world: list = None) -> str:
+                       viewport_image: Image.Image | None = None,
+                       opengl_matrices: tuple | None = None,
+                       cut_lines_world: list | None = None,
+                       cut_profiles_world: list | None = None) -> str:
         """
         메쉬의 2D 프로파일을 SVG로 내보내는 통합 메서드.
         """

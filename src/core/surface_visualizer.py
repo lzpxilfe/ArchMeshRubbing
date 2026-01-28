@@ -6,12 +6,10 @@ Surface Visualizer Module
 """
 
 from dataclasses import dataclass
-from typing import Optional, Tuple, Literal
 import numpy as np
 from PIL import Image
 from scipy import ndimage
 
-from .mesh_loader import MeshData
 from .flattener import FlattenedMesh
 
 
@@ -120,7 +118,7 @@ class RubbingImage:
         label = f"{nice_bar_size:.0f} {self.unit}"
         try:
             font = ImageFont.truetype("arial.ttf", 12)
-        except:
+        except OSError:
             font = ImageFont.load_default()
         
         text_bbox = draw.textbbox((0, 0), label, font=font)
@@ -269,8 +267,8 @@ class SurfaceVisualizer:
     
     def _fill_holes(self, image: np.ndarray, valid_mask: np.ndarray) -> np.ndarray:
         """빈 영역을 주변 값으로 채움"""
-        from scipy.ndimage import distance_transform_edt, binary_dilation
-        
+        from scipy.ndimage import binary_dilation
+
         result = image.copy()
         
         # 유효한 영역 확장

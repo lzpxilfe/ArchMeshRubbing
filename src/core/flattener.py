@@ -6,11 +6,10 @@ Based on: "As-Rigid-As-Possible Surface Modeling" (Sorkine & Alexa, 2007)
 """
 
 from dataclasses import dataclass, field
-from typing import Optional, Tuple, List, Dict
+from typing import Optional, Tuple, Dict
 import numpy as np
 from scipy import sparse
-from scipy.sparse.linalg import spsolve, lsqr
-from scipy.spatial import Delaunay
+from scipy.sparse.linalg import spsolve
 
 from .mesh_loader import MeshData
 
@@ -209,8 +208,7 @@ class ARAPFlattener:
         rows = []
         cols = []
         vals_real = []
-        vals_imag = []
-        
+
         for fi, face in enumerate(faces):
             v0, v1, v2 = vertices[face]
             
@@ -373,12 +371,12 @@ class ARAPFlattener:
                         vals.append(-1.0 / len(neighbors))
         
         L = sparse.coo_matrix((vals, (rows, cols)), shape=(n, n)).tocsr()
-        
+
         # 풀이
         uv = np.zeros((n, 2))
-        uv[:, 0] = spsolve(L, b[:, 0])
-        uv[:, 1] = spsolve(L, b[:, 1])
-        
+        uv[:, 0] = np.asarray(spsolve(L, b[:, 0])).ravel()
+        uv[:, 1] = np.asarray(spsolve(L, b[:, 1])).ravel()
+
         return uv
     
     def _arap_optimize(self, mesh: MeshData, initial_uv: np.ndarray,
@@ -388,9 +386,7 @@ class ARAPFlattener:
         로컬 회전과 글로벌 위치를 번갈아 최적화
         """
         n = mesh.n_vertices
-        vertices = mesh.vertices
-        faces = mesh.faces
-        
+
         uv = initial_uv.copy()
         
         # 기준 2D 좌표계 (메쉬가 어떤 방향을 향하든 안정적으로 동작하도록)
@@ -503,7 +499,7 @@ class ARAPFlattener:
         
         return weights
     
-    def _build_laplacian(self, mesh: MeshData, 
+    def _build_laplacian(self, mesh: MeshData,
                          weights: Dict[Tuple[int, int], float]) -> sparse.csr_matrix:
         """코탄젠트 가중치 라플라시안 행렬"""
         n = mesh.n_vertices
@@ -515,8 +511,8 @@ class ARAPFlattener:
             cols.extend([j, i, i, j])
             vals.extend([-w, -w, w, w])
         
-        L = sparse.coo_matrix((vals, (rows, cols)), shape=(n, n)).tocsr()
-        return L
+        coo = sparse.coo_matrix((vals, (rows, cols)), shape=(n, n))
+        return sparse.csr_matrix(coo)
     
     def _compute_local_rotations(self, mesh: MeshData, uv: np.ndarray,
                                   weights: Dict[Tuple[int, int], float],
@@ -609,16 +605,16 @@ class ARAPFlattener:
             
             # 풀이
             new_uv = uv.copy()
-            new_uv[free_indices, 0] = spsolve(L_reduced.tocsr(), b_reduced[:, 0])
-            new_uv[free_indices, 1] = spsolve(L_reduced.tocsr(), b_reduced[:, 1])
-            
+            new_uv[free_indices, 0] = np.asarray(spsolve(L_reduced.tocsr(), b_reduced[:, 0])).ravel()
+            new_uv[free_indices, 1] = np.asarray(spsolve(L_reduced.tocsr(), b_reduced[:, 1])).ravel()
+
             return new_uv
         else:
             # 모든 정점이 자유 (원점 고정)
             L += sparse.eye(n) * 1e-8
             new_uv = np.zeros((n, 2))
-            new_uv[:, 0] = spsolve(L.tocsr(), b[:, 0])
-            new_uv[:, 1] = spsolve(L.tocsr(), b[:, 1])
+            new_uv[:, 0] = np.asarray(spsolve(L.tocsr(), b[:, 0])).ravel()
+            new_uv[:, 1] = np.asarray(spsolve(L.tocsr(), b[:, 1])).ravel()
             return new_uv
     
     def _compute_arap_energy(self, mesh: MeshData, uv: np.ndarray,
@@ -654,9 +650,9 @@ class ARAPFlattener:
         
         if area_2d < 1e-10:
             return 1.0
-        
+
         # 스케일 = sqrt(3D 면적 / 2D 면적)
-        return np.sqrt(area_3d / area_2d)
+        return float(np.sqrt(area_3d / area_2d))
     
     def _compute_distortion(self, mesh: MeshData, uv: np.ndarray) -> np.ndarray:
         """각 면의 왜곡도 계산 (0 = 왜곡 없음)"""

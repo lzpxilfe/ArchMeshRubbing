@@ -4,7 +4,7 @@ Curvature Fitter - 3D 점들로부터 원호 피팅
 """
 
 import numpy as np
-from typing import Tuple, List, Optional
+from typing import Tuple, Optional
 from dataclasses import dataclass
 
 
@@ -201,7 +201,7 @@ if __name__ == '__main__':
     result = fitter.fit_arc(test_points)
     
     if result:
-        print(f"피팅 결과:")
+        print("피팅 결과:")
         print(f"  중심: {result.center}")
         print(f"  반지름: {result.radius:.2f} cm")
         print(f"  법선: {result.normal}")

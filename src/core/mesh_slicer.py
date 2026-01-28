@@ -3,7 +3,7 @@
 평면으로 메쉬를 자르고 단면 폴리라인을 추출합니다.
 """
 import numpy as np
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Sequence
 import trimesh
 
 
@@ -27,12 +27,12 @@ class MeshSlicer:
         Returns:
             단면 폴리라인 리스트 (각 폴리라인은 Nx3 배열)
         """
-        plane_origin = [0, 0, z_height]
-        plane_normal = [0, 0, 1]  # Z+ 방향
-        
+        plane_origin = [0.0, 0.0, float(z_height)]
+        plane_normal = [0.0, 0.0, 1.0]  # Z+ 방향
+
         return self.slice_with_plane(plane_origin, plane_normal)
-    
-    def slice_with_plane(self, origin: List[float], normal: List[float]) -> List[np.ndarray]:
+
+    def slice_with_plane(self, origin: Sequence[float], normal: Sequence[float]) -> List[np.ndarray]:
         """
         임의의 평면으로 메쉬를 자릅니다.
         
@@ -133,7 +133,7 @@ class MeshSlicer:
         # SVG 생성
         svg_parts = [
             '<?xml version="1.0" encoding="UTF-8"?>',
-            f'<svg xmlns="http://www.w3.org/2000/svg" ',
+            '<svg xmlns="http://www.w3.org/2000/svg" ',
             f'width="{width:.2f}cm" height="{height:.2f}cm" ',
             f'viewBox="0 0 {width:.4f} {height:.4f}">',
             f'<title>Cross Section at Z={z_height:.2f}</title>',

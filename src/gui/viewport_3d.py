@@ -6,16 +6,118 @@ Licensed under the GNU General Public License v2.0 (GPL2)
 
 import time
 import numpy as np
-from typing import Optional, Tuple
+from typing import Any, Optional, cast
 
-from PyQt6.QtWidgets import QWidget, QApplication
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QSize, QThread
-from PyQt6.QtGui import QMouseEvent, QWheelEvent, QPainter, QColor, QImage
+from PyQt6.QtWidgets import QApplication
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QThread
+from PyQt6.QtGui import QKeyEvent, QMouseEvent, QWheelEvent
 from PyQt6.QtOpenGLWidgets import QOpenGLWidget
 from PyQt6.QtOpenGL import QOpenGLFramebufferObject
 
-from OpenGL.GL import *
-from OpenGL.GLU import *
+from OpenGL.GL import (
+    GL_ALL_ATTRIB_BITS,
+    GL_AMBIENT,
+    GL_AMBIENT_AND_DIFFUSE,
+    GL_ARRAY_BUFFER,
+    GL_BLEND,
+    GL_CLIP_PLANE0,
+    GL_CLIP_PLANE1,
+    GL_CLIP_PLANE2,
+    GL_CLIP_PLANE3,
+    GL_CLIP_PLANE4,
+    GL_COLOR_BUFFER_BIT,
+    GL_COLOR_MATERIAL,
+    GL_CULL_FACE,
+    GL_DEPTH_BUFFER_BIT,
+    GL_DEPTH_COMPONENT,
+    GL_DEPTH_TEST,
+    GL_DIFFUSE,
+    GL_FALSE,
+    GL_FILL,
+    GL_FLOAT,
+    GL_FRONT_AND_BACK,
+    GL_LIGHT_MODEL_AMBIENT,
+    GL_LIGHT0,
+    GL_LIGHT1,
+    GL_LIGHTING,
+    GL_LINE,
+    GL_LINE_LOOP,
+    GL_LINE_SMOOTH,
+    GL_LINE_SMOOTH_HINT,
+    GL_LINE_STRIP,
+    GL_LINES,
+    GL_MODELVIEW,
+    GL_MODELVIEW_MATRIX,
+    GL_NICEST,
+    GL_NORMAL_ARRAY,
+    GL_NORMALIZE,
+    GL_ONE_MINUS_SRC_ALPHA,
+    GL_POINTS,
+    GL_POLYGON_OFFSET_FILL,
+    GL_POSITION,
+    GL_PROJECTION,
+    GL_PROJECTION_MATRIX,
+    GL_QUADS,
+    GL_SHININESS,
+    GL_SPECULAR,
+    GL_SRC_ALPHA,
+    GL_STATIC_DRAW,
+    GL_TRIANGLE_FAN,
+    GL_TRIANGLES,
+    GL_TRUE,
+    GL_VERTEX_ARRAY,
+    GL_VIEWPORT,
+    glBegin,
+    glBindBuffer,
+    glBlendFunc,
+    glBufferData,
+    glClear,
+    glClearColor,
+    glClipPlane,
+    glColor3f,
+    glColor4f,
+    glColor4fv,
+    glColorMaterial,
+    glDeleteBuffers,
+    glDepthMask,
+    glDisable,
+    glDisableClientState,
+    glDrawArrays,
+    glEnable,
+    glEnableClientState,
+    glEnd,
+    glFlush,
+    glGenBuffers,
+    glGetDoublev,
+    glGetIntegerv,
+    glHint,
+    glLightfv,
+    glLightModelfv,
+    glLineWidth,
+    glLoadIdentity,
+    glLoadMatrixd,
+    glMaterialf,
+    glMaterialfv,
+    glMatrixMode,
+    glNormalPointer,
+    glOrtho,
+    glPointSize,
+    glPolygonMode,
+    glPolygonOffset,
+    glPopAttrib,
+    glPopMatrix,
+    glPushAttrib,
+    glPushMatrix,
+    glReadPixels,
+    glRotatef,
+    glScalef,
+    glTranslatef,
+    glVertex3f,
+    glVertex3fv,
+    glVertexPointer,
+    glViewport,
+)
+from OpenGL.GLU import gluLookAt, gluPerspective, gluProject, gluUnProject
 import ctypes
 
 from ..core.mesh_loader import MeshData
@@ -65,8 +167,8 @@ class _CrosshairProfileThread(QThread):
             l_orig_y = world_to_local(w_orig_y)
             l_norm_y = inv_rot @ w_norm_y
 
-            contours_x = slicer.slice_with_plane(l_orig_x, l_norm_x)
-            contours_y = slicer.slice_with_plane(l_orig_y, l_norm_y)
+            contours_x = slicer.slice_with_plane(l_orig_x.tolist(), l_norm_x.tolist())
+            contours_y = slicer.slice_with_plane(l_orig_y.tolist(), l_norm_y.tolist())
 
             x_profile = []
             y_profile = []
@@ -258,7 +360,7 @@ class _CutPolylineSectionProfileThread(QThread):
                 local_origin = inv_scale * inv_rot @ (world_origin - self._translation)
                 local_normal = inv_rot @ world_normal
 
-                contours_local = slicer.slice_with_plane(local_origin, local_normal)
+                contours_local = slicer.slice_with_plane(local_origin.tolist(), local_normal.tolist())
                 if not contours_local:
                     s_offset += seg_len
                     continue
@@ -570,6 +672,10 @@ class SceneObject:
         
         # 피팅된 원호들 (메쉬와 함께 이동)
         self.fitted_arcs = []
+
+        # Saved overlay polylines (e.g., section/cut results) attached to this object.
+        # Each item is a dict: {name, kind, points([[x,y,z],...]), visible, color([r,g,b,a]), width}
+        self.polyline_layers = []
         
         # 렌더링 리소스
         self.vbo_id = None
@@ -621,7 +727,7 @@ class SceneObject:
             # OpenGL 컨텍스트가 활성화된 상태에서 호출되어야 함
             try:
                 glDeleteBuffers(1, [self.vbo_id])
-            except:
+            except Exception:
                 pass
 
 
@@ -647,6 +753,7 @@ class Viewport3D(QOpenGLWidget):
     profileUpdated = pyqtSignal(list, list)  # x_profile, y_profile
     lineProfileUpdated = pyqtSignal(list)    # line_profile
     roiSilhouetteExtracted = pyqtSignal(list) # 2D silhouette points
+    cutLinesAutoEnded = pyqtSignal()         # 단면선(2개) 입력 모드가 자동 종료됨
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -712,7 +819,10 @@ class Viewport3D(QOpenGLWidget):
         self.roi_enabled = False
         self.roi_bounds = [-10.0, 10.0, -10.0, 10.0] # [min_x, max_x, min_y, max_y]
         self.active_roi_edge = None # 현재 드래그 중인 모서리 ('left', 'right', 'top', 'bottom')
-        self.roi_cut_edges = {"x1": [], "x2": [], "y1": [], "y2": []}  # ROI 잘림 경계선(월드 좌표)
+        self.roi_rect_dragging = False  # 캡쳐 뜨듯이 드래그로 ROI 박스 지정
+        self.roi_rect_start = None      # np.array([x,y])
+        self.roi_cut_edges: dict[str, list[np.ndarray]] = {"x1": [], "x2": [], "y1": [], "y2": []}  # ROI 잘림 경계선(월드 좌표)
+        self.roi_cap_verts: dict[str, np.ndarray | None] = {"x1": None, "x2": None, "y1": None, "y2": None}  # ROI 캡(삼각형) 버텍스
         self.roi_section_world = {"x": [], "y": []}  # ROI로 얻은 단면(바닥 배치)
         self._roi_edges_pending_bounds = None
         self._roi_edges_thread = None
@@ -809,14 +919,14 @@ class Viewport3D(QOpenGLWidget):
         # glEnable(GL_LINE_SMOOTH)
         # glHint(GL_LINE_SMOOTH_HINT, GL_NICEST)
     
-    def resizeGL(self, width: int, height: int):
+    def resizeGL(self, w: int, h: int):
         """뷰포트 크기 변경"""
-        glViewport(0, 0, width, height)
+        glViewport(0, 0, w, h)
         
         glMatrixMode(GL_PROJECTION)
         glLoadIdentity()
         
-        aspect = width / height if height > 0 else 1.0
+        aspect = w / h if h > 0 else 1.0
         # Far plane을 대폭 늘려 광활한 공간 확보 (기존 2000 -> 1,000,000)
         gluPerspective(45.0, aspect, 0.1, 1000000.0)
         
@@ -824,7 +934,7 @@ class Viewport3D(QOpenGLWidget):
     
     def paintGL(self):
         """그리기"""
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+        glClear(int(GL_COLOR_BUFFER_BIT) | int(GL_DEPTH_BUFFER_BIT))
         glLoadIdentity()
         
         # 카메라 적용
@@ -879,6 +989,8 @@ class Viewport3D(QOpenGLWidget):
                     pass
 
                 self.draw_scene_object(obj, is_selected=True)
+                # ROI로 잘린 면을 채워 단면 확인이 쉽게 보이도록 캡(뚜껑) 렌더링
+                self.draw_roi_caps()
 
                 try:
                     glDisable(GL_CLIP_PLANE1)
@@ -908,7 +1020,7 @@ class Viewport3D(QOpenGLWidget):
             self.draw_crosshair()
 
         # 3.7.25 단면선(2개) 가이드
-        if self.cut_lines_enabled or any(len(l) > 0 for l in getattr(self, "cut_lines", [])):
+        if self.cut_lines_enabled or any(len(line) > 0 for line in getattr(self, "cut_lines", [])) or self._has_visible_polyline_layers():
             self.draw_cut_lines()
 
         # 3.7.5 선형 단면 (Top-view cut line)
@@ -925,7 +1037,8 @@ class Viewport3D(QOpenGLWidget):
         
         # 4. 회전 기즈모 (선택된 객체에만, 피킹 모드 아닐 때만)
         if self.selected_obj and self.picking_mode == 'none':
-            self.draw_rotation_gizmo(self.selected_obj)
+            if not self.roi_enabled:
+                self.draw_rotation_gizmo(self.selected_obj)
             # 메쉬 치수/중심점 오버레이
             self.draw_mesh_dimensions(self.selected_obj)
             
@@ -1120,11 +1233,17 @@ class Viewport3D(QOpenGLWidget):
 
     def update_slice(self):
         """현재 Z 높이에서 단면 재추출"""
-        if not self.selected_obj or self.selected_obj.mesh is None:
+        obj = self.selected_obj
+        if obj is None or obj.mesh is None:
             self.slice_contours = []
             return
-            
-        slicer = MeshSlicer(self.selected_obj.to_trimesh())
+
+        tm = obj.to_trimesh()
+        if tm is None:
+            self.slice_contours = []
+            return
+
+        slicer = MeshSlicer(cast(Any, tm))
         
         # 객체의 로컬 Z 좌표로 변환 필요 (현재는 월드 Z 기준 슬라이스 구현)
         # TODO: 객체 변환(회전, 이동) 반영 처리
@@ -1133,25 +1252,25 @@ class Viewport3D(QOpenGLWidget):
         # (월드 Z) -> (로컬 좌표)
         # 로직: P_world = R * (S * P_local) + T
         # P_local = (1/S) * R^T * (P_world - T)
-        
+
         from scipy.spatial.transform import Rotation as R
-        inv_rot = R.from_euler('xyz', self.selected_obj.rotation, degrees=True).inv().as_matrix()
-        inv_scale = 1.0 / self.selected_obj.scale if self.selected_obj.scale != 0 else 1.0
+        inv_rot = R.from_euler('xyz', obj.rotation, degrees=True).inv().as_matrix()
+        inv_scale = 1.0 / obj.scale if obj.scale != 0 else 1.0
         
         # 월드 평면 [0, 0, 1] dot (P - [0, 0, Z_slice]) = 0
         # 로프 좌표에서의 평면 origin과 normal 계산
-        world_origin = np.array([0, 0, self.slice_z])
-        local_origin = inv_scale * inv_rot @ (world_origin - self.selected_obj.translation)
-        
-        world_normal = np.array([0,0,1])
+        world_origin = np.array([0.0, 0.0, float(self.slice_z)], dtype=np.float64)
+        local_origin = inv_scale * inv_rot @ (world_origin - obj.translation)
+
+        world_normal = np.array([0.0, 0.0, 1.0], dtype=np.float64)
         local_normal = inv_rot @ world_normal # 회전만 적용 (법선벡터이므로)
-        
-        self.slice_contours = slicer.slice_with_plane(local_origin, local_normal)
+
+        self.slice_contours = slicer.slice_with_plane(local_origin.tolist(), local_normal.tolist())
         
         # 추출된 로컬 좌표 단면을 월드 좌표로 변환하여 저장 (렌더링용)
-        rot_mat = R.from_euler('xyz', self.selected_obj.rotation, degrees=True).as_matrix()
-        scale = self.selected_obj.scale
-        trans = self.selected_obj.translation
+        rot_mat = R.from_euler('xyz', obj.rotation, degrees=True).as_matrix()
+        scale = obj.scale
+        trans = obj.translation
         
         world_contours = []
         for cnt in self.slice_contours:
@@ -1226,12 +1345,226 @@ class Viewport3D(QOpenGLWidget):
             pass
         self.update()
 
+    def _unique_polyline_layer_name(self, obj: SceneObject, base: str) -> str:
+        base = str(base).strip() or "Layer"
+        try:
+            existing = {str(layer.get("name", "")).strip() for layer in getattr(obj, "polyline_layers", []) or []}
+        except Exception:
+            existing = set()
+        if base not in existing:
+            return base
+        n = 2
+        while f"{base} {n}" in existing:
+            n += 1
+        return f"{base} {n}"
+
+    def save_current_sections_to_layers(self) -> int:
+        """현재 단면/가이드 결과를 스냅샷 레이어로 저장."""
+        obj = self.selected_obj
+        if obj is None:
+            return 0
+
+        if not hasattr(obj, "polyline_layers") or obj.polyline_layers is None:
+            obj.polyline_layers = []
+
+        def to_points_list(points) -> list:
+            out_pts = []
+            for p in points or []:
+                try:
+                    arr = np.asarray(p, dtype=np.float64).reshape(-1)
+                except Exception:
+                    continue
+                if arr.size >= 3:
+                    out_pts.append([float(arr[0]), float(arr[1]), float(arr[2])])
+                elif arr.size == 2:
+                    out_pts.append([float(arr[0]), float(arr[1]), 0.0])
+            return out_pts
+
+        added = 0
+
+        # 1) Cut guide lines (top view)
+        names = ["단면선-가로", "단면선-세로"]
+        colors = [
+            (1.0, 0.25, 0.25, 0.95),
+            (0.15, 0.55, 1.0, 0.95),
+        ]
+        for i, line in enumerate(getattr(self, "cut_lines", [[], []]) or []):
+            pts = to_points_list(line)
+            if len(pts) < 2:
+                continue
+            name = self._unique_polyline_layer_name(obj, names[i] if i < len(names) else f"단면선-{i+1}")
+            obj.polyline_layers.append(
+                {
+                    "name": name,
+                    "kind": "cut_line",
+                    "points": pts,
+                    "visible": True,
+                    "offset": [0.0, 0.0],
+                    "color": list(colors[i % len(colors)]),
+                    "width": 2.0,
+                }
+            )
+            added += 1
+
+        # 2) Section profiles laid on the floor
+        sec_names = ["단면-가로", "단면-세로"]
+        for i, line in enumerate(getattr(self, "cut_section_world", [[], []]) or []):
+            pts = to_points_list(line)
+            if len(pts) < 2:
+                continue
+            name = self._unique_polyline_layer_name(obj, sec_names[i] if i < len(sec_names) else f"단면-{i+1}")
+            obj.polyline_layers.append(
+                {
+                    "name": name,
+                    "kind": "section_profile",
+                    "points": pts,
+                    "visible": True,
+                    "offset": [0.0, 0.0],
+                    "color": [0.1, 0.1, 0.1, 0.9],
+                    "width": 2.0,
+                }
+            )
+            added += 1
+
+        # 3) ROI section profiles (if any)
+        try:
+            roi_sec = getattr(self, "roi_section_world", {}) or {}
+            for key in ("x", "y"):
+                line = roi_sec.get(key, None)
+                pts = to_points_list(line)
+                if len(pts) < 2:
+                    continue
+                axis = "가로" if key == "x" else "세로"
+                name = self._unique_polyline_layer_name(obj, f"ROI-단면-{axis}")
+                obj.polyline_layers.append(
+                    {
+                        "name": name,
+                        "kind": "section_profile",
+                        "points": pts,
+                        "visible": True,
+                        "offset": [0.0, 0.0],
+                        "color": [0.1, 0.35, 0.1, 0.9],
+                        "width": 2.0,
+                    }
+                )
+                added += 1
+        except Exception:
+            pass
+
+        if added:
+            self.update()
+        return int(added)
+
+    def set_polyline_layer_visible(self, object_index: int, layer_index: int, visible: bool):
+        try:
+            oi = int(object_index)
+            li = int(layer_index)
+        except Exception:
+            return
+        if not (0 <= oi < len(self.objects)):
+            return
+        obj = self.objects[oi]
+        layers = getattr(obj, "polyline_layers", None)
+        if not layers or not (0 <= li < len(layers)):
+            return
+        try:
+            layers[li]["visible"] = bool(visible)
+        except Exception:
+            return
+        self.update()
+
+    def delete_polyline_layer(self, object_index: int, layer_index: int):
+        try:
+            oi = int(object_index)
+            li = int(layer_index)
+        except Exception:
+            return
+        if not (0 <= oi < len(self.objects)):
+            return
+        obj = self.objects[oi]
+        layers = getattr(obj, "polyline_layers", None)
+        if not layers or not (0 <= li < len(layers)):
+            return
+        try:
+            layers.pop(li)
+        except Exception:
+            return
+        self.update()
+
+    def move_polyline_layer(self, object_index: int, layer_index: int, dx: float, dy: float):
+        try:
+            oi = int(object_index)
+            li = int(layer_index)
+        except Exception:
+            return
+        if not (0 <= oi < len(self.objects)):
+            return
+        obj = self.objects[oi]
+        layers = getattr(obj, "polyline_layers", None)
+        if not layers or not (0 <= li < len(layers)):
+            return
+
+        layer = layers[li]
+        try:
+            off = layer.get("offset", None)
+        except Exception:
+            off = None
+        if not (isinstance(off, (list, tuple)) and len(off) >= 2):
+            off = [0.0, 0.0]
+
+        try:
+            off_x = float(off[0]) + float(dx)
+            off_y = float(off[1]) + float(dy)
+        except Exception:
+            return
+
+        layer["offset"] = [off_x, off_y]
+        self.update()
+
+    def reset_polyline_layer_offset(self, object_index: int, layer_index: int):
+        try:
+            oi = int(object_index)
+            li = int(layer_index)
+        except Exception:
+            return
+        if not (0 <= oi < len(self.objects)):
+            return
+        obj = self.objects[oi]
+        layers = getattr(obj, "polyline_layers", None)
+        if not layers or not (0 <= li < len(layers)):
+            return
+        try:
+            layers[li]["offset"] = [0.0, 0.0]
+        except Exception:
+            return
+        self.update()
+
+    def _has_visible_polyline_layers(self) -> bool:
+        obj = self.selected_obj
+        if obj is None:
+            return False
+        layers = getattr(obj, "polyline_layers", None) or []
+        for layer in layers:
+            try:
+                if not bool(layer.get("visible", True)):
+                    continue
+                pts = layer.get("points", None)
+                if pts is not None and len(pts) >= 2:
+                    return True
+            except Exception:
+                continue
+        return False
+
     def set_cut_lines_enabled(self, enabled: bool):
         self.cut_lines_enabled = bool(enabled)
         if enabled:
             self.picking_mode = 'cut_lines'
             # 프리뷰를 위해 마우스 트래킹 활성화
             self.setMouseTracking(True)
+            try:
+                self.setFocus()
+            except Exception:
+                pass
         else:
             if self.picking_mode == 'cut_lines':
                 self.picking_mode = 'none'
@@ -1278,6 +1611,35 @@ class Viewport3D(QOpenGLWidget):
                 except Exception:
                     continue
             out.append(pts)
+
+        # Saved polyline layers (visible)
+        obj = self.selected_obj
+        if obj is not None:
+            for layer in getattr(obj, "polyline_layers", []) or []:
+                try:
+                    if not bool(layer.get("visible", True)):
+                        continue
+                    if str(layer.get("kind", "")) != "cut_line":
+                        continue
+                    off = layer.get("offset", None)
+                    if not (isinstance(off, (list, tuple)) and len(off) >= 2):
+                        off = (0.0, 0.0)
+                    try:
+                        off_x = float(off[0])
+                        off_y = float(off[1])
+                    except Exception:
+                        off_x, off_y = (0.0, 0.0)
+                    pts = []
+                    for p in layer.get("points", []) or []:
+                        arr = np.asarray(p, dtype=np.float64).reshape(-1)
+                        if arr.size >= 3:
+                            pts.append([float(arr[0]) + off_x, float(arr[1]) + off_y, float(arr[2])])
+                        elif arr.size == 2:
+                            pts.append([float(arr[0]) + off_x, float(arr[1]) + off_y, 0.0])
+                    if len(pts) >= 2:
+                        out.append(pts)
+                except Exception:
+                    continue
         return out
 
     def get_cut_sections_world(self):
@@ -1317,6 +1679,35 @@ class Viewport3D(QOpenGLWidget):
                     out.append(pts)
         except Exception:
             pass
+
+        # Saved polyline layers (visible)
+        obj = self.selected_obj
+        if obj is not None:
+            for layer in getattr(obj, "polyline_layers", []) or []:
+                try:
+                    if not bool(layer.get("visible", True)):
+                        continue
+                    if str(layer.get("kind", "")) != "section_profile":
+                        continue
+                    off = layer.get("offset", None)
+                    if not (isinstance(off, (list, tuple)) and len(off) >= 2):
+                        off = (0.0, 0.0)
+                    try:
+                        off_x = float(off[0])
+                        off_y = float(off[1])
+                    except Exception:
+                        off_x, off_y = (0.0, 0.0)
+                    pts = []
+                    for p in layer.get("points", []) or []:
+                        arr = np.asarray(p, dtype=np.float64).reshape(-1)
+                        if arr.size >= 3:
+                            pts.append([float(arr[0]) + off_x, float(arr[1]) + off_y, float(arr[2])])
+                        elif arr.size == 2:
+                            pts.append([float(arr[0]) + off_x, float(arr[1]) + off_y, 0.0])
+                    if len(pts) >= 2:
+                        out.append(pts)
+                except Exception:
+                    continue
         return out
 
     def schedule_cut_section_update(self, index: int, delay_ms: int = 0):
@@ -1332,12 +1723,11 @@ class Viewport3D(QOpenGLWidget):
             b = obj.get_world_bounds()
             min_x, min_y = float(b[0][0]), float(b[0][1])
             max_x, max_y = float(b[1][0]), float(b[1][1])
-            span_x = max_x - min_x
-            span_y = max_y - min_y
-            margin = max(5.0, max(span_x, span_y) * 0.05)
+            margin = 5.0
 
             s = np.array([p[0] for p in profile], dtype=np.float64)
             z = np.array([p[1] for p in profile], dtype=np.float64)
+            s_min = float(np.nanmin(s)) if len(s) else 0.0
             z_min = float(np.nanmin(z)) if len(z) else 0.0
 
             pts_world = []
@@ -1346,21 +1736,18 @@ class Viewport3D(QOpenGLWidget):
                 base_x = min_x
                 base_y = max_y + margin
                 for si, zi in zip(s.tolist(), z.tolist()):
-                    pts_world.append([base_x + float(si), base_y + (float(zi) - z_min), 0.0])
+                    pts_world.append([base_x + (float(si) - s_min), base_y + (float(zi) - z_min), 0.0])
             else:
                 # 세로: 메쉬 우측에 배치 (z -> X, s -> Y)
                 base_x = max_x + margin
                 base_y = min_y
                 for si, zi in zip(s.tolist(), z.tolist()):
-                    pts_world.append([base_x + (float(zi) - z_min), base_y + float(si), 0.0])
+                    pts_world.append([base_x + (float(zi) - z_min), base_y + (float(si) - s_min), 0.0])
             return pts_world
         except Exception:
             return []
 
     def _request_cut_section_compute(self):
-        if not self.cut_lines_enabled and self.picking_mode != 'cut_lines':
-            return
-
         obj = self.selected_obj
         if obj is None or obj.mesh is None:
             return
@@ -1394,9 +1781,25 @@ class Viewport3D(QOpenGLWidget):
         )
         self._cut_section_thread.computed.connect(self._on_cut_section_computed)
         self._cut_section_thread.failed.connect(self._on_cut_section_failed)
+        self._cut_section_thread.finished.connect(self._on_cut_section_finished)
         self._cut_section_thread.start()
 
+    def _on_cut_section_finished(self):
+        thread = getattr(self, "_cut_section_thread", None)
+        if thread is not None:
+            try:
+                thread.deleteLater()
+            except Exception:
+                pass
+        self._cut_section_thread = None
+
+        # 대기 중인 최신 요청이 있으면 즉시 다시 시도
+        if self._cut_section_pending_index is not None:
+            self._cut_section_timer.start(1)
+
     def _on_cut_section_computed(self, result: object):
+        if not isinstance(result, dict):
+            return
         try:
             idx = int(result.get("index", -1))
             profile = result.get("profile", [])
@@ -1537,6 +1940,48 @@ class Viewport3D(QOpenGLWidget):
                     p0 = np.asarray(p, dtype=np.float64)
                     glVertex3f(float(p0[0]), float(p0[1]), z_profile)
                 glEnd()
+
+        # Saved polyline layers
+        obj = self.selected_obj
+        if obj is not None:
+            layers = getattr(obj, "polyline_layers", None) or []
+            for layer in layers:
+                try:
+                    if not bool(layer.get("visible", True)):
+                        continue
+                    pts = layer.get("points", None) or []
+                    if len(pts) < 2:
+                        continue
+                    kind = str(layer.get("kind", ""))
+                    off = layer.get("offset", None)
+                    if not (isinstance(off, (list, tuple)) and len(off) >= 2):
+                        off = (0.0, 0.0)
+                    try:
+                        off_x = float(off[0])
+                        off_y = float(off[1])
+                    except Exception:
+                        off_x, off_y = (0.0, 0.0)
+                    col = layer.get("color", None)
+                    if col is None:
+                        col = (0.2, 0.2, 0.2, 0.7)
+                    try:
+                        r, g, b, a = [float(x) for x in col[:4]]
+                    except Exception:
+                        r, g, b, a = (0.2, 0.2, 0.2, 0.7)
+
+                    w = float(layer.get("width", 1.6))
+                    glColor4f(r, g, b, a)
+                    glLineWidth(max(1.0, w))
+                    z_use = z if kind == "cut_line" else z_profile
+
+                    glBegin(GL_LINE_STRIP)
+                    for p in pts:
+                        arr = np.asarray(p, dtype=np.float64).reshape(-1)
+                        if arr.size >= 2:
+                            glVertex3f(float(arr[0]) + off_x, float(arr[1]) + off_y, float(z_use))
+                    glEnd()
+                except Exception:
+                    continue
 
         glLineWidth(1.0)
         glEnable(GL_DEPTH_TEST)
@@ -1764,8 +2209,11 @@ class Viewport3D(QOpenGLWidget):
         local_origin = inv_scale * inv_rot @ (world_origin - obj.translation)
         local_normal = inv_rot @ world_normal
 
-        slicer = MeshSlicer(obj.to_trimesh())
-        contours_local = slicer.slice_with_plane(local_origin, local_normal)
+        tm = obj.to_trimesh()
+        if tm is None:
+            return []
+        slicer = MeshSlicer(cast(Any, tm))
+        contours_local = slicer.slice_with_plane(local_origin.tolist(), local_normal.tolist())
 
         # 월드 좌표로 변환(렌더링/프로파일용)
         rot_mat = R.from_euler('xyz', obj.rotation, degrees=True).as_matrix()
@@ -1847,15 +2295,21 @@ class Viewport3D(QOpenGLWidget):
         l_norm_x = inv_rot @ w_norm_x # 법선은 회전만
         
         # MeshData.section 에러 수정을 위해 to_trimesh() 사용
-        slicer = MeshSlicer(obj.to_trimesh())
-        contours_x = slicer.slice_with_plane(l_orig_x, l_norm_x)
+        tm = obj.to_trimesh()
+        if tm is None:
+            self.x_profile = []
+            self.y_profile = []
+            return
+
+        slicer = MeshSlicer(cast(Any, tm))
+        contours_x = slicer.slice_with_plane(l_orig_x.tolist(), l_norm_x.tolist())
         
         # 3. Y축 방향 단면 (평면: X = cx)
         w_orig_y = np.array([cx, 0, 0])
         w_norm_y = np.array([1, 0, 0]) # X축에 수직인 평면
         l_orig_y = get_world_to_local(w_orig_y.reshape(1,3))[0]
         l_norm_y = inv_rot @ w_norm_y
-        contours_y = slicer.slice_with_plane(l_orig_y, l_norm_y)
+        contours_y = slicer.slice_with_plane(l_orig_y.tolist(), l_norm_y.tolist())
         
         # 4. 결과 처리 (그래프용 가공)
         # X 프로파일 (X축 따라 이동 시의 Z값)
@@ -1933,10 +2387,14 @@ class Viewport3D(QOpenGLWidget):
         def get_color(edge):
             return [1.0, 0.6, 0.0, 1.0] if self.active_roi_edge == edge else [0.0, 0.95, 1.0, 1.0]
 
-        glColor4fv(get_color('bottom')); draw_arrow(mid_x, y1, 'bottom')
-        glColor4fv(get_color('top'));    draw_arrow(mid_x, y2, 'top')
-        glColor4fv(get_color('left'));   draw_arrow(x1, mid_y, 'left')
-        glColor4fv(get_color('right'));  draw_arrow(x2, mid_y, 'right')
+        glColor4fv(get_color('bottom'))
+        draw_arrow(mid_x, y1, 'bottom')
+        glColor4fv(get_color('top'))
+        draw_arrow(mid_x, y2, 'top')
+        glColor4fv(get_color('left'))
+        draw_arrow(x1, mid_y, 'left')
+        glColor4fv(get_color('right'))
+        draw_arrow(x2, mid_y, 'right')
         
         glLineWidth(1.0)
         glDisable(GL_BLEND)
@@ -1954,12 +2412,14 @@ class Viewport3D(QOpenGLWidget):
         glLineWidth(2.5)
 
         active = getattr(self, "active_roi_edge", None)
-        plane_active = {
-            "left": "x1",
-            "right": "x2",
-            "bottom": "y1",
-            "top": "y2",
-        }.get(active, None)
+        plane_active = None
+        if isinstance(active, str):
+            plane_active = {
+                "left": "x1",
+                "right": "x2",
+                "bottom": "y1",
+                "top": "y2",
+            }.get(active)
 
         colors = {
             "x1": (1.0, 0.35, 0.25, 0.9),
@@ -1993,6 +2453,316 @@ class Viewport3D(QOpenGLWidget):
         glLineWidth(1.0)
         glEnable(GL_DEPTH_TEST)
         glEnable(GL_LIGHTING)
+
+    def draw_roi_caps(self):
+        """ROI로 잘린 단면을 '캡(뚜껑) 면'으로 채워 렌더링.
+
+        NOTE: ROI 클립 플레인(GL_CLIP_PLANE1~4)이 enable 된 상태에서 호출하는 것을 권장.
+        """
+        caps = getattr(self, "roi_cap_verts", None)
+        if not caps:
+            return
+
+        glDisable(GL_LIGHTING)
+        glDisable(GL_CULL_FACE)
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        glEnable(GL_POLYGON_OFFSET_FILL)
+        glPolygonOffset(-1.0, -1.0)
+
+        glBegin(GL_TRIANGLES)
+        for key, verts in caps.items():
+            if verts is None:
+                continue
+
+            # 살짝 색을 구분(좌우 x-plane은 붉은톤, 상하 y-plane은 푸른톤)
+            if str(key).startswith("x"):
+                glColor4f(1.0, 0.88, 0.88, 0.22)
+            else:
+                glColor4f(0.88, 0.94, 1.0, 0.22)
+
+            try:
+                for v in verts:
+                    glVertex3f(float(v[0]), float(v[1]), float(v[2]))
+            except Exception:
+                continue
+        glEnd()
+
+        glDisable(GL_POLYGON_OFFSET_FILL)
+        glDisable(GL_BLEND)
+        glEnable(GL_LIGHTING)
+
+    @staticmethod
+    def _polygon_area2(points_2d: np.ndarray) -> float:
+        """2D 폴리곤 signed area*2 (shoelace)."""
+        pts = np.asarray(points_2d, dtype=np.float64).reshape(-1, 2)
+        if pts.shape[0] < 3:
+            return 0.0
+        x = pts[:, 0]
+        y = pts[:, 1]
+        return float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))
+
+    @staticmethod
+    def _sanitize_polygon_2d(points_2d: np.ndarray, max_points: int = 800, eps: float = 1e-6) -> Optional[np.ndarray]:
+        """triangulation용 2D 폴리라인 정리(중복 제거/닫힘 제거/다운샘플)."""
+        try:
+            pts = np.asarray(points_2d, dtype=np.float64).reshape(-1, 2)
+        except Exception:
+            return None
+
+        if pts.shape[0] < 3:
+            return None
+
+        finite = np.isfinite(pts).all(axis=1)
+        pts = pts[finite]
+        if pts.shape[0] < 3:
+            return None
+
+        # 닫힌 루프면 마지막 점 제거
+        try:
+            if float(np.linalg.norm(pts[0] - pts[-1])) <= eps:
+                pts = pts[:-1]
+        except Exception:
+            pass
+
+        if pts.shape[0] < 3:
+            return None
+
+        # 연속 중복 제거
+        if pts.shape[0] >= 2:
+            d = np.linalg.norm(np.diff(pts, axis=0), axis=1)
+            keep = np.ones((pts.shape[0],), dtype=bool)
+            keep[1:] = d > eps
+            pts = pts[keep]
+
+        if pts.shape[0] < 3:
+            return None
+
+        # 너무 조밀하면 다운샘플
+        if int(pts.shape[0]) > int(max_points):
+            step = int(np.ceil(float(pts.shape[0]) / float(max_points)))
+            step = max(1, step)
+            pts = pts[::step]
+
+        if pts.shape[0] < 3:
+            return None
+
+        # 다운샘플 후 다시 정리
+        try:
+            if float(np.linalg.norm(pts[0] - pts[-1])) <= eps:
+                pts = pts[:-1]
+        except Exception:
+            pass
+
+        if pts.shape[0] < 3:
+            return None
+
+        if pts.shape[0] >= 2:
+            d = np.linalg.norm(np.diff(pts, axis=0), axis=1)
+            keep = np.ones((pts.shape[0],), dtype=bool)
+            keep[1:] = d > eps
+            pts = pts[keep]
+
+        if pts.shape[0] < 3:
+            return None
+        return pts
+
+    @staticmethod
+    def _point_in_triangle(p: np.ndarray, a: np.ndarray, b: np.ndarray, c: np.ndarray, eps: float = 1e-12) -> bool:
+        """2D point-in-triangle (including boundary)."""
+
+        def sign(p1, p2, p3):
+            return float((p1[0] - p3[0]) * (p2[1] - p3[1]) - (p2[0] - p3[0]) * (p1[1] - p3[1]))
+
+        d1 = sign(p, a, b)
+        d2 = sign(p, b, c)
+        d3 = sign(p, c, a)
+        has_neg = (d1 < -eps) or (d2 < -eps) or (d3 < -eps)
+        has_pos = (d1 > eps) or (d2 > eps) or (d3 > eps)
+        return not (has_neg and has_pos)
+
+    @classmethod
+    def _triangulate_ear_clip(cls, polygon_2d: np.ndarray, eps: float = 1e-12) -> Optional[list]:
+        """단일 루프(홀 없음)용 ear-clipping 삼각분할. 실패 시 None."""
+        pts = np.asarray(polygon_2d, dtype=np.float64).reshape(-1, 2)
+        n = int(pts.shape[0])
+        if n < 3:
+            return None
+
+        # CCW로 정렬
+        idx_map = list(range(n))  # pts 인덱스 -> 입력 polygon_2d 인덱스
+        if cls._polygon_area2(pts) < 0.0:
+            pts = pts[::-1].copy()
+            idx_map = idx_map[::-1]
+
+        V = list(range(int(pts.shape[0])))
+        tris = []
+
+        def cross(a, b, c):
+            return float((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]))
+
+        max_iter = max(1000, n * n)
+        it = 0
+        while len(V) > 3 and it < max_iter:
+            it += 1
+            ear_found = False
+            m = len(V)
+            for k in range(m):
+                i_prev = V[(k - 1) % m]
+                i = V[k]
+                i_next = V[(k + 1) % m]
+                a = pts[i_prev]
+                b = pts[i]
+                c = pts[i_next]
+
+                # convex check (CCW)
+                if cross(a, b, c) <= eps:
+                    continue
+
+                # ear test: no other point inside triangle
+                is_ear = True
+                for j in V:
+                    if j in (i_prev, i, i_next):
+                        continue
+                    if cls._point_in_triangle(pts[j], a, b, c, eps=eps):
+                        is_ear = False
+                        break
+
+                if not is_ear:
+                    continue
+
+                tris.append((idx_map[i_prev], idx_map[i], idx_map[i_next]))
+                del V[k]
+                ear_found = True
+                break
+
+            if not ear_found:
+                break
+
+        if len(V) == 3:
+            tris.append((idx_map[V[0]], idx_map[V[1]], idx_map[V[2]]))
+
+        return tris if tris else None
+
+    @staticmethod
+    def _triangulate_convex_hull(points_2d: np.ndarray) -> Optional[list]:
+        """fallback: convex hull fan triangulation."""
+        pts = np.asarray(points_2d, dtype=np.float64).reshape(-1, 2)
+        if pts.shape[0] < 3:
+            return None
+        try:
+            from scipy.spatial import ConvexHull
+        except Exception:
+            return None
+        try:
+            hull = ConvexHull(pts)
+        except Exception:
+            return None
+        hull_idx = list(getattr(hull, "vertices", []) or [])
+        if len(hull_idx) < 3:
+            return None
+        tris = []
+        a0 = hull_idx[0]
+        for i in range(1, len(hull_idx) - 1):
+            tris.append((a0, hull_idx[i], hull_idx[i + 1]))
+        return tris if tris else None
+
+    def _rebuild_roi_caps(self):
+        """현재 ROI 잘림 경계선(roi_cut_edges)로 캡(삼각형) 버텍스를 갱신."""
+        self.roi_cap_verts = {"x1": None, "x2": None, "y1": None, "y2": None}
+        if not getattr(self, "roi_enabled", False):
+            return
+
+        edges = getattr(self, "roi_cut_edges", None) or {}
+        if not edges:
+            return
+
+        try:
+            x1, x2, y1, y2 = [float(v) for v in self.roi_bounds]
+        except Exception:
+            return
+
+        plane_value = {"x1": x1, "x2": x2, "y1": y1, "y2": y2}
+
+        for key in ("x1", "x2", "y1", "y2"):
+            contours = edges.get(key, None)
+            if not contours:
+                continue
+
+            # 가장 큰(면적 기준) 루프 1개만 캡으로 사용
+            best_pts2d = None
+            best_area = 0.0
+            cloud_pts2d = []
+            for cnt in contours:
+                try:
+                    pts3 = np.asarray(cnt, dtype=np.float64).reshape(-1, 3)
+                except Exception:
+                    continue
+
+                if key.startswith("x"):
+                    pts2 = pts3[:, [1, 2]]  # (y,z)
+                else:
+                    pts2 = pts3[:, [0, 2]]  # (x,z)
+
+                if pts2.shape[0] >= 2:
+                    cloud_pts2d.append(pts2)
+                if pts2.shape[0] < 3:
+                    continue
+
+                pts2 = self._sanitize_polygon_2d(pts2, max_points=800, eps=1e-6)
+                if pts2 is None or pts2.shape[0] < 3:
+                    continue
+
+                area = abs(self._polygon_area2(pts2)) * 0.5
+                if area > best_area:
+                    best_area = area
+                    best_pts2d = pts2
+
+            # 루프를 못 만들면(예: 선분 조각만 존재) 전체 점으로 convex hull 캡
+            if best_pts2d is None or best_pts2d.shape[0] < 3:
+                if not cloud_pts2d:
+                    continue
+                try:
+                    pts_cloud = np.vstack(cloud_pts2d)
+                except Exception:
+                    continue
+                finite = np.isfinite(pts_cloud).all(axis=1)
+                pts_cloud = pts_cloud[finite]
+                if pts_cloud.shape[0] < 3:
+                    continue
+                if int(pts_cloud.shape[0]) > 5000:
+                    step = int(np.ceil(float(pts_cloud.shape[0]) / 5000.0))
+                    step = max(1, step)
+                    pts_cloud = pts_cloud[::step]
+                best_pts2d = np.asarray(pts_cloud, dtype=np.float64).reshape(-1, 2)
+                tris = self._triangulate_convex_hull(best_pts2d)
+                if tris is None:
+                    continue
+            else:
+                tris = self._triangulate_ear_clip(best_pts2d, eps=1e-12)
+                if tris is None:
+                    tris = self._triangulate_convex_hull(best_pts2d)
+                if tris is None:
+                    continue
+
+            pv = float(plane_value[key])
+            verts = []
+            try:
+                if key.startswith("x"):
+                    for i0, i1, i2 in tris:
+                        for idx in (i0, i1, i2):
+                            y, z = best_pts2d[int(idx)]
+                            verts.append((pv, float(y), float(z)))
+                else:
+                    for i0, i1, i2 in tris:
+                        for idx in (i0, i1, i2):
+                            x, z = best_pts2d[int(idx)]
+                            verts.append((float(x), pv, float(z)))
+            except Exception:
+                continue
+
+            if verts:
+                self.roi_cap_verts[key] = np.asarray(verts, dtype=np.float32)
 
     def draw_roi_section_plots(self):
         """ROI로 생성된 단면을 바닥에 배치해 표시 (세로=우측, 가로=상단)"""
@@ -2061,13 +2831,39 @@ class Viewport3D(QOpenGLWidget):
         )
         self._roi_edges_thread.computed.connect(self._on_roi_edges_computed)
         self._roi_edges_thread.failed.connect(self._on_roi_edges_failed)
+        self._roi_edges_thread.finished.connect(self._on_roi_edges_finished)
         self._roi_edges_thread.start()
 
+    def _on_roi_edges_finished(self):
+        thread = getattr(self, "_roi_edges_thread", None)
+        if thread is not None:
+            try:
+                thread.deleteLater()
+            except Exception:
+                pass
+        self._roi_edges_thread = None
+
+        # 드래그 중 최신 bounds가 대기 중이면 다시 계산
+        if getattr(self, "roi_enabled", False) and self._roi_edges_pending_bounds is not None:
+            self._roi_edges_timer.start(1)
+
     def _on_roi_edges_computed(self, edges: object):
-        try:
-            self.roi_cut_edges = dict(edges)
-        except Exception:
+        if not isinstance(edges, dict):
             return
+
+        cleaned: dict[str, list[np.ndarray]] = {"x1": [], "x2": [], "y1": [], "y2": []}
+        for key in ("x1", "x2", "y1", "y2"):
+            val = edges.get(key, [])
+            if isinstance(val, list):
+                cleaned[key] = cast(list[np.ndarray], val)
+
+        self.roi_cut_edges = cleaned
+
+        # ROI 캡(잘린 면 채우기) 갱신
+        try:
+            self._rebuild_roi_caps()
+        except Exception:
+            pass
 
         # ROI가 '얇아졌을 때' 단면을 바닥에 배치 (회전해서 봐도 단면 확인 가능)
         self.roi_section_world = {"x": [], "y": []}
@@ -2075,11 +2871,8 @@ class Viewport3D(QOpenGLWidget):
             obj = self.selected_obj
             if obj is not None:
                 b = np.asarray(obj.get_world_bounds(), dtype=np.float64)
-                min_x, min_y = float(b[0][0]), float(b[0][1])
                 max_x, max_y = float(b[1][0]), float(b[1][1])
-                span_x = max_x - min_x
-                span_y = max_y - min_y
-                margin = max(5.0, max(span_x, span_y) * 0.05)
+                margin = 5.0
 
                 x1, x2, y1, y2 = [float(v) for v in self.roi_bounds]
                 thin_th = 1.0  # cm: 이보다 얇으면 "단면"으로 간주
@@ -2162,7 +2955,7 @@ class Viewport3D(QOpenGLWidget):
             silhouette = points_2d[hull.vertices]
             # 다시 2D 리스트 형태로 반환
             self.roiSilhouetteExtracted.emit(silhouette.tolist())
-        except:
+        except Exception:
             pass
 
     
@@ -2283,13 +3076,16 @@ class Viewport3D(QOpenGLWidget):
         glBegin(GL_LINES)
         # X: Red
         glColor3f(1.0, 0.2, 0.2)
-        glVertex3f(0, 0, 0); glVertex3f(1, 0, 0)
+        glVertex3f(0, 0, 0)
+        glVertex3f(1, 0, 0)
         # Y: Green
         glColor3f(0.2, 1.0, 0.2)
-        glVertex3f(0, 0, 0); glVertex3f(0, 1, 0)
+        glVertex3f(0, 0, 0)
+        glVertex3f(0, 1, 0)
         # Z: Blue
         glColor3f(0.2, 0.2, 1.0)
-        glVertex3f(0, 0, 0); glVertex3f(0, 0, 1)
+        glVertex3f(0, 0, 0)
+        glVertex3f(0, 0, 1)
         glEnd()
         
         # 5.5 축 라벨 (X, Y, Z) - 각 축 끝에 표시
@@ -2566,26 +3362,40 @@ class Viewport3D(QOpenGLWidget):
         # X축
         glColor3f(1.0, 0.2, 0.2)
         if highlight_axis == 'X':
-            glLineWidth(5.0); glColor3f(1.0, 0.8, 0.0)
-        else: glLineWidth(2.5)
-        glPushMatrix(); glRotatef(90, 0, 1, 0); self._draw_gizmo_circle(size); glPopMatrix()
+            glLineWidth(5.0)
+            glColor3f(1.0, 0.8, 0.0)
+        else:
+            glLineWidth(2.5)
+        glPushMatrix()
+        glRotatef(90, 0, 1, 0)
+        self._draw_gizmo_circle(size)
+        glPopMatrix()
         
         # Y축
         glColor3f(0.2, 1.0, 0.2)
         if highlight_axis == 'Y':
-            glLineWidth(5.0); glColor3f(1.0, 0.8, 0.0)
-        else: glLineWidth(2.5)
-        glPushMatrix(); glRotatef(90, 1, 0, 0); self._draw_gizmo_circle(size); glPopMatrix()
+            glLineWidth(5.0)
+            glColor3f(1.0, 0.8, 0.0)
+        else:
+            glLineWidth(2.5)
+        glPushMatrix()
+        glRotatef(90, 1, 0, 0)
+        self._draw_gizmo_circle(size)
+        glPopMatrix()
         
         # Z축
         glColor3f(0.2, 0.2, 1.0)
         if highlight_axis == 'Z':
-            glLineWidth(5.0); glColor3f(1.0, 0.8, 0.0)
-        else: glLineWidth(2.5)
+            glLineWidth(5.0)
+            glColor3f(1.0, 0.8, 0.0)
+        else:
+            glLineWidth(2.5)
         self._draw_gizmo_circle(size)
         
         glPopMatrix()
-        glLineWidth(1.0); glEnable(GL_DEPTH_TEST); glEnable(GL_LIGHTING)
+        glLineWidth(1.0)
+        glEnable(GL_DEPTH_TEST)
+        glEnable(GL_LIGHTING)
 
     def _draw_gizmo_circle(self, radius, segments=64):
         """기즈모용 원 그리기"""
@@ -2670,9 +3480,18 @@ class Viewport3D(QOpenGLWidget):
         extents = bounds[1] - bounds[0]
         max_dim = np.max(extents)
         
-        if max_dim < 50:  self.grid_spacing = 1.0; self.grid_size = 100.0  # 1cm grid for small objects
-        elif max_dim < 200: self.grid_spacing = 5.0; self.grid_size = 500.0  # 5cm grid
-        else: self.grid_spacing = 10.0; self.grid_size = max_dim * 1.5      # 10cm grid for large objects
+        if max_dim < 50:
+            # 1cm grid for small objects
+            self.grid_spacing = 1.0
+            self.grid_size = 100.0
+        elif max_dim < 200:
+            # 5cm grid
+            self.grid_spacing = 5.0
+            self.grid_size = 500.0
+        else:
+            # 10cm grid for large objects
+            self.grid_spacing = 10.0
+            self.grid_size = max_dim * 1.5
             
         self.camera.distance = max_dim * 2
         self.camera.center = obj.translation.copy()
@@ -2682,7 +3501,8 @@ class Viewport3D(QOpenGLWidget):
     def hit_test_gizmo(self, screen_x, screen_y):
         """기즈모 고리 클릭 검사"""
         obj = self.selected_obj
-        if not obj: return None
+        if not obj:
+            return None
         
         try:
             self.makeCurrent()
@@ -2693,12 +3513,14 @@ class Viewport3D(QOpenGLWidget):
             
             # Project object center to screen to get a reference point for gizmo size
             obj_screen_pos = gluProject(*obj.translation, modelview, projection, viewport)
-            if not obj_screen_pos: return None
+            if not obj_screen_pos:
+                return None
 
             # Calculate a world-space ray from screen coordinates
             near_pt = gluUnProject(screen_x, win_y, 0.0, modelview, projection, viewport)
             far_pt = gluUnProject(screen_x, win_y, 1.0, modelview, projection, viewport)
-            if not near_pt or not far_pt: return None
+            if not near_pt or not far_pt:
+                return None
             
             ray_origin = np.array(near_pt)
             ray_dir = np.array(far_pt) - ray_origin
@@ -2753,8 +3575,7 @@ class Viewport3D(QOpenGLWidget):
                                 min_ray_t = t
                                 best_axis = axis
             return best_axis
-        except Exception as e:
-            # print(f"Gizmo hit test error: {e}")
+        except Exception:
             return None
 
     def update_vbo(self, obj: SceneObject):
@@ -2827,7 +3648,8 @@ class Viewport3D(QOpenGLWidget):
         - 이동/회전/배율 값이 모두 0으로 리셋
         - 이후 0에서부터 세부 조정 가능
         """
-        if not obj: return
+        if not obj:
+            return
         
         # 변환이 없으면 스킵
         has_transform = (
@@ -2924,7 +3746,8 @@ class Viewport3D(QOpenGLWidget):
     def save_undo_state(self):
         """현재 선택된 객체의 변환 상태를 스택에 저장"""
         obj = self.selected_obj
-        if not obj: return
+        if not obj:
+            return
         
         state = {
             'obj': obj,
@@ -2951,7 +3774,10 @@ class Viewport3D(QOpenGLWidget):
         self.meshTransformChanged.emit()
         self.status_info = "↩️ 변환 취소됨"
     
-    def mousePressEvent(self, event: QMouseEvent):
+    def mousePressEvent(self, a0: QMouseEvent | None):
+        if a0 is None:
+            return
+        event = a0
         """마우스 버튼 눌림"""
         try:
             self.last_mouse_pos = event.pos()
@@ -2960,23 +3786,24 @@ class Viewport3D(QOpenGLWidget):
 
             # 1. 일반 클릭 (객체 선택 또는 피킹 모드 처리) - 좌클릭만 처리
             if event.button() == Qt.MouseButton.LeftButton:
-                # 기즈모 선택 검사 (가장 우선순위)
-                axis = self.hit_test_gizmo(event.pos().x(), event.pos().y())
-                if axis:
-                    self.save_undo_state() # 변환 시작 전 상태 저장
-                    self.active_gizmo_axis = axis
-                    
-                    # 캐시 매트릭스 저장 (성능 최적화)
-                    self.makeCurrent()
-                    self._cached_viewport = glGetIntegerv(GL_VIEWPORT)
-                    self._cached_modelview = glGetDoublev(GL_MODELVIEW_MATRIX)
-                    self._cached_projection = glGetDoublev(GL_PROJECTION_MATRIX)
-                    
-                    angle = self._calculate_gizmo_angle(event.pos().x(), event.pos().y())
-                    if angle is not None:
-                        self.gizmo_drag_start = angle
-                        self.update()
-                        return
+                # 기즈모 선택 검사 (가장 우선순위) - ROI 모드에서는 숨김/비활성
+                if self.picking_mode == 'none' and not getattr(self, "roi_enabled", False):
+                    axis = self.hit_test_gizmo(event.pos().x(), event.pos().y())
+                    if axis:
+                        self.save_undo_state() # 변환 시작 전 상태 저장
+                        self.active_gizmo_axis = axis
+
+                        # 캐시 매트릭스 저장 (성능 최적화)
+                        self.makeCurrent()
+                        self._cached_viewport = glGetIntegerv(GL_VIEWPORT)
+                        self._cached_modelview = glGetDoublev(GL_MODELVIEW_MATRIX)
+                        self._cached_projection = glGetDoublev(GL_PROJECTION_MATRIX)
+
+                        angle = self._calculate_gizmo_angle(event.pos().x(), event.pos().y())
+                        if angle is not None:
+                            self.gizmo_drag_start = angle
+                            self.update()
+                            return
 
                 # 피킹 모드 처리
                 if self.picking_mode == 'curvature' and (modifiers & Qt.KeyboardModifier.ShiftModifier):
@@ -2990,8 +3817,11 @@ class Viewport3D(QOpenGLWidget):
                 elif self.picking_mode == 'floor_3point':
                     point = self.pick_point_on_mesh(event.pos().x(), event.pos().y())
                     if point is not None:
+                        obj = self.selected_obj
+                        if obj is None:
+                            return
                         # 로컬 좌표로 변환하여 전달 (작업 도중 객체가 움직여도 점이 붙어있게 함)
-                        local_pt = point - self.selected_obj.translation
+                        local_pt = point - obj.translation
                         
                         # 1. 스냅 검사 (첫 번째 점과 가까우면 확정)
                         if len(self.floor_picks) >= 3:
@@ -3084,6 +3914,17 @@ class Viewport3D(QOpenGLWidget):
                         self.update()
                         return
 
+                    # 핸들이 아니면: 캡쳐 뜨듯이 드래그로 ROI 박스 새로 지정
+                    pt = self.pick_point_on_plane_z(event.pos().x(), event.pos().y(), z=0.0)
+                    if pt is not None:
+                        self.roi_rect_dragging = True
+                        self.roi_rect_start = np.array([float(pt[0]), float(pt[1])], dtype=np.float64)
+                        # 초기에는 최소 크기를 확보해(0.1cm) 이후 드래그로 확장
+                        self.roi_bounds = [float(pt[0]), float(pt[0]) + 0.1, float(pt[1]), float(pt[1]) + 0.1]
+                        self.schedule_roi_edges_update(0)
+                        self.update()
+                        return
+
             # 3. 객체 조작 (Shift/Ctrl + 드래그)
             obj = self.selected_obj
             if obj and (modifiers & Qt.KeyboardModifier.ShiftModifier or modifiers & Qt.KeyboardModifier.ControlModifier):
@@ -3097,8 +3938,11 @@ class Viewport3D(QOpenGLWidget):
                      self._cached_projection = glGetDoublev(GL_PROJECTION_MATRIX)
                      
                      win_y = self._cached_viewport[3] - event.pos().y()
-                     depth = glReadPixels(event.pos().x(), win_y, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT)
-                     self._drag_depth = depth[0][0]
+                     depth = cast(Any, glReadPixels(event.pos().x(), win_y, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT))
+                     try:
+                         self._drag_depth = float(depth[0][0])
+                     except Exception:
+                         self._drag_depth = 1.0
                      
                      # 배경을 클릭한 경우 객체 중심의 깊이 사용
                      if self._drag_depth >= 1.0:
@@ -3119,7 +3963,9 @@ class Viewport3D(QOpenGLWidget):
         except Exception as e:
             print(f"Mouse press error: {e}")
 
-    def mouseReleaseEvent(self, event: QMouseEvent):
+    def mouseReleaseEvent(self, a0: QMouseEvent | None):
+        if a0 is None:
+            return
         """마우스 버튼 놓음"""
         if self.mouse_button == Qt.MouseButton.LeftButton and self.picking_mode == 'floor_brush':
             if self.brush_selected_faces:
@@ -3138,6 +3984,15 @@ class Viewport3D(QOpenGLWidget):
             self._crosshair_last_update = 0.0
             self.schedule_crosshair_profile_update(0)
 
+        if self.mouse_button == Qt.MouseButton.LeftButton and getattr(self, "roi_enabled", False):
+            # ROI 드래그(핸들/사각형) 종료 시 최종 상태로 1회 확정 계산
+            if getattr(self, "roi_rect_dragging", False):
+                self.roi_rect_dragging = False
+                self.roi_rect_start = None
+            if getattr(self, "active_roi_edge", None):
+                self.active_roi_edge = None
+            self.schedule_roi_edges_update(0)
+
         self.mouse_button = None
         self.active_gizmo_axis = None
         self.gizmo_drag_start = None
@@ -3150,7 +4005,10 @@ class Viewport3D(QOpenGLWidget):
         
         self.update()
     
-    def mouseMoveEvent(self, event: QMouseEvent):
+    def mouseMoveEvent(self, a0: QMouseEvent | None):
+        if a0 is None:
+            return
+        event = a0
         """마우스 이동 (드래그)"""
         try:
             # 단면선(2개) 프리뷰: 마우스 트래킹(버튼 없이 이동)에서도 동작
@@ -3201,17 +4059,23 @@ class Viewport3D(QOpenGLWidget):
                     view_dir /= np.linalg.norm(view_dir)
                     
                     axis_vec = np.zeros(3)
-                    if self.active_gizmo_axis == 'X': axis_vec[0] = 1.0
-                    elif self.active_gizmo_axis == 'Y': axis_vec[1] = 1.0
-                    elif self.active_gizmo_axis == 'Z': axis_vec[2] = 1.0
+                    if self.active_gizmo_axis == 'X':
+                        axis_vec[0] = 1.0
+                    elif self.active_gizmo_axis == 'Y':
+                        axis_vec[1] = 1.0
+                    elif self.active_gizmo_axis == 'Z':
+                        axis_vec[2] = 1.0
                     
                     # 시각적 반전 여부 결정 (핸들을 돌리는 방향과 메쉬가 도는 방향 일치)
                     dot = np.dot(view_dir, axis_vec)
                     flip = 1.0 if dot > 0 else -1.0
                     
-                    if self.active_gizmo_axis == 'X': obj.rotation[0] += delta_angle * flip
-                    elif self.active_gizmo_axis == 'Y': obj.rotation[1] += delta_angle * flip
-                    elif self.active_gizmo_axis == 'Z': obj.rotation[2] += delta_angle * flip
+                    if self.active_gizmo_axis == 'X':
+                        obj.rotation[0] += delta_angle * flip
+                    elif self.active_gizmo_axis == 'Y':
+                        obj.rotation[1] += delta_angle * flip
+                    elif self.active_gizmo_axis == 'Z':
+                        obj.rotation[2] += delta_angle * flip
                         
                     self.gizmo_drag_start = current_angle
                     self.meshTransformChanged.emit()
@@ -3341,7 +4205,27 @@ class Viewport3D(QOpenGLWidget):
                         self.schedule_crosshair_profile_update(150)
                     self.update()
                 return
-            
+
+            # 0.55 ROI 사각형 드래그(캡쳐처럼 지정)
+            if getattr(self, "roi_enabled", False) and getattr(self, "roi_rect_dragging", False) and self.mouse_button == Qt.MouseButton.LeftButton:
+                pt = self.pick_point_on_plane_z(event.pos().x(), event.pos().y(), z=0.0)
+                if pt is not None and self.roi_rect_start is not None:
+                    x0, y0 = float(self.roi_rect_start[0]), float(self.roi_rect_start[1])
+                    x1, y1 = float(pt[0]), float(pt[1])
+                    min_x = min(x0, x1)
+                    max_x = max(x0, x1)
+                    min_y = min(y0, y1)
+                    max_y = max(y0, y1)
+                    # 최소 크기 확보 (0.1cm)
+                    if max_x - min_x < 0.1:
+                        max_x = min_x + 0.1
+                    if max_y - min_y < 0.1:
+                        max_y = min_y + 0.1
+                    self.roi_bounds = [min_x, max_x, min_y, max_y]
+                    self.schedule_roi_edges_update(120)
+                    self.update()
+                return
+             
             # 0.6 ROI 핸들 드래그 처리
             if self.roi_enabled and self.active_roi_edge and self.mouse_button == Qt.MouseButton.LeftButton:
                 # XY 평면으로 투영하여 마우스 월드 좌표 획득 (z=0으로 가정)
@@ -3357,10 +4241,14 @@ class Viewport3D(QOpenGLWidget):
                     hit_pt = ray_origin + t * ray_dir
                     wx, wy = hit_pt[0], hit_pt[1]
                     
-                    if self.active_roi_edge == 'left':   self.roi_bounds[0] = min(wx, self.roi_bounds[1] - 0.1)
-                    elif self.active_roi_edge == 'right':  self.roi_bounds[1] = max(wx, self.roi_bounds[0] + 0.1)
-                    elif self.active_roi_edge == 'bottom': self.roi_bounds[2] = min(wy, self.roi_bounds[3] - 0.1)
-                    elif self.active_roi_edge == 'top':    self.roi_bounds[3] = max(wy, self.roi_bounds[2] + 0.1)
+                    if self.active_roi_edge == 'left':
+                        self.roi_bounds[0] = min(wx, self.roi_bounds[1] - 0.1)
+                    elif self.active_roi_edge == 'right':
+                        self.roi_bounds[1] = max(wx, self.roi_bounds[0] + 0.1)
+                    elif self.active_roi_edge == 'bottom':
+                        self.roi_bounds[2] = min(wy, self.roi_bounds[3] - 0.1)
+                    elif self.active_roi_edge == 'top':
+                        self.roi_bounds[3] = max(wy, self.roi_bounds[2] + 0.1)
                     
                     self.schedule_roi_edges_update(120)
                     self.update()
@@ -3386,7 +4274,8 @@ class Viewport3D(QOpenGLWidget):
     def _calculate_gizmo_angle(self, screen_x, screen_y):
         """기즈모 중심 기준 2D 화면 공간에서의 각도 계산 (가장 직관적인 원형 드래그 방식)"""
         obj = self.selected_obj
-        if not obj or not self.active_gizmo_axis: return None
+        if not obj or not self.active_gizmo_axis:
+            return None
         
         try:
             # 캐시된 매트릭스가 있으면 사용 (성능 최적화)
@@ -3403,7 +4292,8 @@ class Viewport3D(QOpenGLWidget):
             # 기즈모 중심(오브젝트 위치)을 화면으로 투영
             obj_pos = obj.translation
             win_pos = gluProject(obj_pos[0], obj_pos[1], obj_pos[2], modelview, projection, viewport)
-            if not win_pos: return None
+            if not win_pos:
+                return None
             
             center_x = win_pos[0]
             center_y = viewport[3] - win_pos[1]
@@ -3415,17 +4305,22 @@ class Viewport3D(QOpenGLWidget):
             
             angle = np.arctan2(dy, dx)
             return angle
-        except Exception as e:
-            # print(f"Gizmo angle error: {e}")
+        except Exception:
             return None
     
-    def wheelEvent(self, event: QWheelEvent):
+    def wheelEvent(self, a0: QWheelEvent | None):
+        if a0 is None:
+            return
+        event = a0
         """마우스 휠 (줌)"""
         delta = event.angleDelta().y()
         self.camera.zoom(delta)
         self.update()
-    
-    def keyPressEvent(self, event):
+
+    def keyPressEvent(self, a0: QKeyEvent | None):
+        if a0 is None:
+            return
+        event = a0
         """키보드 입력"""
         self.keys_pressed.add(event.key())
         if event.key() in (Qt.Key.Key_W, Qt.Key.Key_A, Qt.Key.Key_S, Qt.Key.Key_D, Qt.Key.Key_Q, Qt.Key.Key_E):
@@ -3446,9 +4341,24 @@ class Viewport3D(QOpenGLWidget):
                 except Exception:
                     pass
                 # 첫 번째 선을 끝냈고 두 번째가 비어있으면 자동 전환
+                # 다른 선이 비어있으면 자동 전환(가로/세로 어느 쪽부터 시작해도 OK)
                 try:
-                    if idx_done == 0 and not self.cut_lines[1]:
-                        self.cut_line_active = 1
+                    other = 1 - int(idx_done) if idx_done in (0, 1) else 1
+                    if other in (0, 1) and not self.cut_lines[other]:
+                        self.cut_line_active = other
+                except Exception:
+                    pass
+
+                # 두 선이 모두 완성(>=2점)되면 입력 모드 자동 종료 (선은 화면/내보내기에 남김)
+                try:
+                    done0 = len(self.cut_lines[0]) >= 2
+                    done1 = len(self.cut_lines[1]) >= 2
+                    if done0 and done1:
+                        self.set_cut_lines_enabled(False)
+                        try:
+                            self.cutLinesAutoEnded.emit()
+                        except Exception:
+                            pass
                 except Exception:
                     pass
                 self.update()
@@ -3514,7 +4424,10 @@ class Viewport3D(QOpenGLWidget):
             
         super().keyPressEvent(event)
 
-    def keyReleaseEvent(self, event):
+    def keyReleaseEvent(self, a0: QKeyEvent | None):
+        if a0 is None:
+            return
+        event = a0
         """키 뗌 처리"""
         if event.key() in self.keys_pressed:
             self.keys_pressed.remove(event.key())
@@ -3529,12 +4442,18 @@ class Viewport3D(QOpenGLWidget):
             return
             
         dx, dy, dz = 0, 0, 0
-        if Qt.Key.Key_W in self.keys_pressed: dz += 1
-        if Qt.Key.Key_S in self.keys_pressed: dz -= 1
-        if Qt.Key.Key_A in self.keys_pressed: dx -= 1
-        if Qt.Key.Key_D in self.keys_pressed: dx += 1
-        if Qt.Key.Key_Q in self.keys_pressed: dy += 1
-        if Qt.Key.Key_E in self.keys_pressed: dy -= 1
+        if Qt.Key.Key_W in self.keys_pressed:
+            dz += 1
+        if Qt.Key.Key_S in self.keys_pressed:
+            dz -= 1
+        if Qt.Key.Key_A in self.keys_pressed:
+            dx -= 1
+        if Qt.Key.Key_D in self.keys_pressed:
+            dx += 1
+        if Qt.Key.Key_Q in self.keys_pressed:
+            dy += 1
+        if Qt.Key.Key_E in self.keys_pressed:
+            dy -= 1
         
         if dx != 0 or dy != 0 or dz != 0:
             self.camera.move_relative(dx, dy, dz)
@@ -3546,7 +4465,8 @@ class Viewport3D(QOpenGLWidget):
         if ray_origin is None or ray_dir is None:
             return None
         # Z=0 평면상의 좌표 계산
-        if abs(ray_dir[2]) < 1e-6: return None
+        if abs(ray_dir[2]) < 1e-6:
+            return None
         t = -ray_origin[2] / ray_dir[2]
         hit_pt = ray_origin + t * ray_dir
         wx, wy = hit_pt[0], hit_pt[1]
@@ -3559,10 +4479,14 @@ class Viewport3D(QOpenGLWidget):
         threshold = self.camera.distance * 0.05
         
         # 각 핸들 위치와 거리 체크
-        if np.hypot(wx - mid_x, wy - y1) < threshold: return 'bottom'
-        if np.hypot(wx - mid_x, wy - y2) < threshold: return 'top'
-        if np.hypot(wx - x1, wy - mid_y) < threshold: return 'left'
-        if np.hypot(wx - x2, wy - mid_y) < threshold: return 'right'
+        if np.hypot(wx - mid_x, wy - y1) < threshold:
+            return 'bottom'
+        if np.hypot(wx - mid_x, wy - y2) < threshold:
+            return 'top'
+        if np.hypot(wx - x1, wy - mid_y) < threshold:
+            return 'left'
+        if np.hypot(wx - x2, wy - mid_y) < threshold:
+            return 'right'
         
         return None
 
@@ -3588,7 +4512,7 @@ class Viewport3D(QOpenGLWidget):
         
         # 3. 그리기 (UI 제외하고 깨끗하게)
         glClearColor(1.0, 1.0, 1.0, 1.0) # 화이트 배경
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+        glClear(int(GL_COLOR_BUFFER_BIT) | int(GL_DEPTH_BUFFER_BIT))
         glLoadIdentity()
         
         self.camera.apply()
@@ -3672,9 +4596,11 @@ class Viewport3D(QOpenGLWidget):
         
     def pick_point_on_mesh(self, screen_x: int, screen_y: int):
         """화면 좌표를 메쉬 표면의 3D 좌표로 변환"""
-        if not self.objects: return None
+        if not self.objects:
+            return None
         obj = self.selected_obj
-        if not obj: return None
+        if not obj:
+            return None
         
         # OpenGL 뷰포트, 투영, 모델뷰 행렬 가져오기
         self.makeCurrent()
@@ -3687,8 +4613,11 @@ class Viewport3D(QOpenGLWidget):
         win_y = viewport[3] - screen_y
         
         # 깊이 버퍼에서 깊이 값 읽기
-        depth = glReadPixels(screen_x, win_y, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT)
-        depth_value = depth[0][0]
+        depth = cast(Any, glReadPixels(screen_x, win_y, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT))
+        try:
+            depth_value = float(depth[0][0])
+        except Exception:
+            return None
         
         # 배경을 클릭한 경우
         if depth_value >= 1.0:
@@ -3715,7 +4644,8 @@ class Viewport3D(QOpenGLWidget):
     def pick_face_at_point(self, point: np.ndarray, return_index=False):
         """특정 3D 좌표가 포함된 삼각형 면의 정점 3개를 반환"""
         obj = self.selected_obj
-        if not obj or obj.mesh is None: return None
+        if not obj or obj.mesh is None:
+            return None
         
         # 메쉬 로컬 좌표로 변환
         inv_trans = -obj.translation
