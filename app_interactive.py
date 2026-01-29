@@ -1366,8 +1366,10 @@ class SectionPanel(QWidget):
         line_layout.addLayout(sel_row)
 
         line_help = QLabel(
-            "상면(Top) 뷰에서 클릭으로 점을 추가해 단면선을 그리세요. (자동 수평/수직)\n"
-            "Enter=확정, Backspace=한 점 취소, Tab=선 전환"
+            "상면(Top) 뷰에서 좌클릭 2번으로 단면선(선분 1개, 2점)을 그리세요. (자동 수평/수직)\n"
+            "Enter/우클릭=확정, Backspace/Delete=끝점 취소, Tab=선 전환\n"
+            "가로/세로는 각각 1개 선만 유지됩니다.\n"
+            "Shift/Ctrl/Alt + 드래그: 메쉬 이동/회전 (점 추가 안 됨)"
         )
         line_help.setStyleSheet("color: #718096; font-size: 10px;")
         line_help.setWordWrap(True)
@@ -2415,6 +2417,7 @@ class MainWindow(QMainWindow):
         ])
         obj.scale = self.trans_toolbar.scale_spin.value()
         self.viewport.update()
+        self.viewport.meshTransformChanged.emit()
 
     def on_bake_all_clicked(self):
         """현재 변환을 메쉬에 영구 정착 (정치 신청)"""
@@ -2453,6 +2456,7 @@ class MainWindow(QMainWindow):
         obj.scale = 1.0
         self.sync_transform_panel()
         self.viewport.update()
+        self.viewport.meshTransformChanged.emit()
     
     def on_selection_action(self, action: str, data):
         self.status_info.setText(f"선택 작업: {action}")
@@ -3198,6 +3202,7 @@ class MainWindow(QMainWindow):
         try:
             self.viewport.cut_line_active = int(index)
             self.viewport.cut_line_preview = None
+            self.viewport.cut_line_drawing = len(self.viewport.cut_lines[int(index)]) == 1
             self.viewport.update()
         except Exception:
             pass
@@ -3233,7 +3238,7 @@ class MainWindow(QMainWindow):
         self.status_info.setText(f"단면 레이어 {added}개 저장됨")
 
     def _on_cut_lines_auto_ended(self):
-        """Viewport에서 Enter로 단면선(2개) 입력을 마무리하면 버튼 상태도 맞춰줌"""
+        """Viewport에서 단면선(2개) 입력이 자동 종료되면 버튼 상태도 맞춰줌"""
         try:
             if self.section_panel.btn_line.isChecked():
                 self.section_panel.btn_line.setChecked(False)

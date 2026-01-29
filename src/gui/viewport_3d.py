@@ -439,14 +439,8 @@ class _CutPolylineSectionProfileThread(QThread):
                 return
 
             # 닫힌 외곽선 폴리라인(상단 -> 하단 역순)
-            outline: list[tuple[float, float]] = []
-            outline.extend(upper)
-            outline.extend(reversed(lower))
-            # close explicitly for stable export/visualization
-            if outline and (abs(outline[0][0] - outline[-1][0]) > 1e-6 or abs(outline[0][1] - outline[-1][1]) > 1e-6):
-                outline.append(outline[0])
-
-            self.computed.emit({"index": self._index, "profile": outline})
+            # 단면은 "선"만 필요: 동일 t에서의 상단(z max) 프로파일만 사용
+            self.computed.emit({"index": self._index, "profile": upper})
         except Exception as e:
             self.failed.emit(str(e))
 
@@ -854,6 +848,8 @@ class Viewport3D(QOpenGLWidget):
         self.roi_cut_edges: dict[str, list[np.ndarray]] = {"x1": [], "x2": [], "y1": [], "y2": []}  # ROI 잘림 경계선(월드 좌표)
         self.roi_cap_verts: dict[str, np.ndarray | None] = {"x1": None, "x2": None, "y1": None, "y2": None}  # ROI 캡(삼각형) 버텍스
         self.roi_section_world = {"x": [], "y": []}  # ROI로 얻은 단면(바닥 배치)
+        # ROI 단면 "채움"(캡) 표시. 기본은 외곽선만 보이도록 OFF.
+        self.roi_caps_enabled = False
         self._roi_edges_pending_bounds = None
         self._roi_edges_thread = None
         self._roi_edges_timer = QTimer(self)
@@ -866,9 +862,14 @@ class Viewport3D(QOpenGLWidget):
         self.cut_line_active = 0   # 0 or 1
         self.cut_line_drawing = False
         self.cut_line_preview = None  # np.array([x,y,z]) - 마지막 점에서 이어지는 프리뷰
+        # 단면선 입력: '클릭' vs '드래그' 구분(이동/회전 중 점이 찍히는 문제 방지)
+        self._cut_line_left_press_pos = None
+        self._cut_line_left_dragged = False
+        self._cut_line_right_press_pos = None
+        self._cut_line_right_dragged = False
         self.cut_section_profiles = [[], []]  # 각 선의 (s,z) 프로파일 [(dist, z), ...]
         self.cut_section_world = [[], []]     # 바닥에 배치된 단면 폴리라인(월드 좌표)
-        self._cut_section_pending_index = None
+        self._cut_section_pending_indices: set[int] = set()
         self._cut_section_thread = None
         self._cut_section_timer = QTimer(self)
         self._cut_section_timer.setSingleShot(True)
@@ -907,6 +908,9 @@ class Viewport3D(QOpenGLWidget):
         # UI 설정
         self.setMinimumSize(400, 300)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+        # 변환(이동/회전/스케일) 후 단면/ROI 등 파생 데이터를 디바운스 갱신
+        self.meshTransformChanged.connect(self._on_mesh_transform_changed)
 
         # 렌더링은 입력/상태 변경 시에만 update()하도록 유지 (상시 60FPS 렌더링은 대용량 메쉬에서 버벅임 유발)
     
@@ -1020,7 +1024,8 @@ class Viewport3D(QOpenGLWidget):
 
                 self.draw_scene_object(obj, is_selected=True)
                 # ROI로 잘린 면을 채워 단면 확인이 쉽게 보이도록 캡(뚜껑) 렌더링
-                self.draw_roi_caps()
+                if bool(getattr(self, "roi_caps_enabled", False)):
+                    self.draw_roi_caps()
 
                 try:
                     glDisable(GL_CLIP_PLANE1)
@@ -1595,11 +1600,19 @@ class Viewport3D(QOpenGLWidget):
                 self.setFocus()
             except Exception:
                 pass
+            try:
+                self.cut_line_drawing = len(self.cut_lines[int(self.cut_line_active)]) == 1
+            except Exception:
+                self.cut_line_drawing = False
         else:
             if self.picking_mode == 'cut_lines':
                 self.picking_mode = 'none'
             self.cut_line_drawing = False
             self.cut_line_preview = None
+            self._cut_line_left_press_pos = None
+            self._cut_line_left_dragged = False
+            self._cut_line_right_press_pos = None
+            self._cut_line_right_dragged = False
             self.setMouseTracking(False)
         self.update()
 
@@ -1611,6 +1624,10 @@ class Viewport3D(QOpenGLWidget):
             self.cut_lines[idx] = []
             self.cut_section_profiles[idx] = []
             self.cut_section_world[idx] = []
+            try:
+                self._cut_section_pending_indices.discard(idx)
+            except Exception:
+                pass
             if self.cut_line_active == idx:
                 self.cut_line_drawing = False
                 self.cut_line_preview = None
@@ -1624,6 +1641,10 @@ class Viewport3D(QOpenGLWidget):
         self.cut_line_preview = None
         self.cut_section_profiles = [[], []]
         self.cut_section_world = [[], []]
+        try:
+            self._cut_section_pending_indices.clear()
+        except Exception:
+            pass
         self.update()
 
     def get_cut_lines_world(self):
@@ -1741,8 +1762,42 @@ class Viewport3D(QOpenGLWidget):
         return out
 
     def schedule_cut_section_update(self, index: int, delay_ms: int = 0):
-        self._cut_section_pending_index = int(index)
+        try:
+            idx = int(index)
+        except Exception:
+            return
+        if idx not in (0, 1):
+            return
+        self._cut_section_pending_indices.add(idx)
         self._cut_section_timer.start(max(0, int(delay_ms)))
+
+    def _on_mesh_transform_changed(self):
+        """메쉬 변환 시, 단면/ROI 등 의존 데이터를 디바운스 갱신."""
+        try:
+            if getattr(self, "crosshair_enabled", False):
+                self.schedule_crosshair_profile_update(150)
+        except Exception:
+            pass
+
+        try:
+            if getattr(self, "line_section_enabled", False):
+                self.schedule_line_profile_update(150)
+        except Exception:
+            pass
+
+        try:
+            if getattr(self, "roi_enabled", False):
+                self.schedule_roi_edges_update(150)
+        except Exception:
+            pass
+
+        try:
+            lines = getattr(self, "cut_lines", [[], []]) or [[], []]
+            for idx in (0, 1):
+                if idx < len(lines) and lines[idx] and len(lines[idx]) >= 2:
+                    self.schedule_cut_section_update(idx, delay_ms=150)
+        except Exception:
+            pass
 
     def _layout_cut_section_world(self, profile: list, index: int):
         obj = self.selected_obj
@@ -1753,25 +1808,41 @@ class Viewport3D(QOpenGLWidget):
             b = obj.get_world_bounds()
             min_x, min_y = float(b[0][0]), float(b[0][1])
             max_x, max_y = float(b[1][0]), float(b[1][1])
-            margin = 5.0
+            extent_x = float(max_x - min_x)
+            extent_y = float(max_y - min_y)
+            margin = max(2.0, 0.05 * max(extent_x, extent_y))
 
             s = np.array([p[0] for p in profile], dtype=np.float64)
             z = np.array([p[1] for p in profile], dtype=np.float64)
-            s_min = float(np.nanmin(s)) if len(s) else 0.0
-            z_min = float(np.nanmin(z)) if len(z) else 0.0
+            finite = np.isfinite(s) & np.isfinite(z)
+            s = s[finite]
+            z = z[finite]
+            if s.size < 2 or z.size < 2:
+                return []
+
+            s_min = float(np.nanmin(s))
+            s_max = float(np.nanmax(s))
+            z_min = float(np.nanmin(z))
+            s_span = max(1e-6, float(s_max - s_min))
 
             pts_world = []
-            if int(index) == 0:
+            idx = int(index)
+            if idx == 0:
                 # 가로: 메쉬 상단에 배치 (s -> X, z -> Y)
                 base_x = min_x
                 base_y = max_y + margin
+                scale_s = max(1e-6, extent_x) / s_span
             else:
                 # 세로: 메쉬 우측에 배치 (s -> X, z -> Y) - 높이가 위로 향하도록 통일
                 base_x = max_x + margin
                 base_y = min_y
+                scale_s = max(1e-6, extent_y) / s_span
 
             for si, zi in zip(s.tolist(), z.tolist()):
-                pts_world.append([base_x + (float(si) - s_min), base_y + (float(zi) - z_min), 0.0])
+                if idx == 0:
+                    pts_world.append([base_x + (float(si) - s_min) * scale_s, base_y + (float(zi) - z_min), 0.0])
+                else:
+                    pts_world.append([base_x + (float(zi) - z_min), base_y + (float(si) - s_min) * scale_s, 0.0])
             return pts_world
         except Exception:
             return []
@@ -1785,11 +1856,19 @@ class Viewport3D(QOpenGLWidget):
         if thread is not None and thread.isRunning():
             return
 
-        idx = self._cut_section_pending_index
-        self._cut_section_pending_index = None
-        if idx is None:
+        pending = getattr(self, "_cut_section_pending_indices", None)
+        if not pending:
             return
-        idx = int(idx)
+
+        try:
+            preferred = int(getattr(self, "cut_line_active", 0))
+        except Exception:
+            preferred = 0
+        if preferred in pending:
+            idx = preferred
+        else:
+            idx = min(pending)
+        pending.discard(idx)
         if idx not in (0, 1):
             return
 
@@ -1823,7 +1902,7 @@ class Viewport3D(QOpenGLWidget):
         self._cut_section_thread = None
 
         # 대기 중인 최신 요청이 있으면 즉시 다시 시도
-        if self._cut_section_pending_index is not None:
+        if getattr(self, "_cut_section_pending_indices", None):
             self._cut_section_timer.start(1)
 
     def _on_cut_section_computed(self, result: object):
@@ -1867,13 +1946,6 @@ class Viewport3D(QOpenGLWidget):
         glEnd()
 
         # 2) 엔드포인트 마커
-        glPointSize(6.0)
-        glBegin(GL_POINTS)
-        glVertex3f(float(p0[0]), float(p0[1]), z)
-        glVertex3f(float(p1[0]), float(p1[1]), z)
-        glEnd()
-        glPointSize(1.0)
-
         # 3) 메쉬 단면선 (라임)
         if self.line_section_contours:
             glLineWidth(3.0)
@@ -1900,6 +1972,42 @@ class Viewport3D(QOpenGLWidget):
         else:
             candidate[0] = last_pt[0]
         return candidate
+
+    def _finish_cut_lines_current(self):
+        """Enter/우클릭으로 현재 활성 단면선 입력을 마무리."""
+        idx_done = int(getattr(self, "cut_line_active", 0))
+        self.cut_line_drawing = False
+        self.cut_line_preview = None
+
+        # 단면(프로파일) 계산 요청
+        try:
+            if idx_done in (0, 1) and len(self.cut_lines[idx_done]) >= 2:
+                self.schedule_cut_section_update(idx_done, delay_ms=0)
+        except Exception:
+            pass
+
+        # 다른 선이 비어 있으면 자동 전환
+        try:
+            other = 1 - int(idx_done) if idx_done in (0, 1) else 1
+            if other in (0, 1) and not self.cut_lines[other]:
+                self.cut_line_active = other
+        except Exception:
+            pass
+
+        # 둘 다 완성(>=2)이면 모드 자동 종료
+        try:
+            done0 = len(self.cut_lines[0]) >= 2
+            done1 = len(self.cut_lines[1]) >= 2
+            if done0 and done1:
+                self.set_cut_lines_enabled(False)
+                try:
+                    self.cutLinesAutoEnded.emit()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        self.update()
 
     def draw_cut_lines(self):
         """단면선(2개) 가이드 라인 시각화 (항상 화면 위로)"""
@@ -3912,32 +4020,19 @@ class Viewport3D(QOpenGLWidget):
                         self.update()
                     return
 
-                elif self.picking_mode == 'cut_lines':
+                elif self.picking_mode == 'cut_lines' and not (
+                    modifiers
+                    & (
+                        Qt.KeyboardModifier.ShiftModifier
+                        | Qt.KeyboardModifier.ControlModifier
+                        | Qt.KeyboardModifier.AltModifier
+                    )
+                ):
                     if event.button() != Qt.MouseButton.LeftButton:
                         return
-                    pt = self.pick_point_on_plane_z(event.pos().x(), event.pos().y(), z=0.0)
-                    if pt is None:
-                        return
-
-                    idx = int(getattr(self, "cut_line_active", 0))
-                    if idx not in (0, 1):
-                        idx = 0
-                    line = self.cut_lines[idx]
-                    # 기존 단면 결과는 편집 시 무효화
-                    self.cut_section_profiles[idx] = []
-                    self.cut_section_world[idx] = []
-                    p = np.array([pt[0], pt[1], 0.0], dtype=np.float64)
-                    if len(line) == 0:
-                        line.append(p)
-                    else:
-                        last = np.asarray(line[-1], dtype=np.float64)
-                        p2 = self._cutline_constrain_ortho(last, p)
-                        if float(np.linalg.norm(p2[:2] - last[:2])) > 1e-6:
-                            line.append(p2)
-
-                    self.cut_line_drawing = True
-                    self.cut_line_preview = None
-                    self.update()
+                    # 실제 점 추가는 mouseRelease에서 "클릭"으로 판정됐을 때만 수행
+                    self._cut_line_left_press_pos = event.pos()
+                    self._cut_line_left_dragged = False
                     return
                  
                 elif self.picking_mode == 'crosshair':
@@ -3969,6 +4064,12 @@ class Viewport3D(QOpenGLWidget):
                         self.schedule_roi_edges_update(0)
                         self.update()
                         return
+
+            # 단면선 모드: 우클릭은 "확정"(click) 용도로 사용 (드래그 시에는 Pan 유지)
+            if self.picking_mode == "cut_lines" and event.button() == Qt.MouseButton.RightButton:
+                self._cut_line_right_press_pos = event.pos()
+                self._cut_line_right_dragged = False
+                return
 
             # 3. 객체 조작 (Shift/Ctrl + 드래그)
             obj = self.selected_obj
@@ -4011,7 +4112,78 @@ class Viewport3D(QOpenGLWidget):
     def mouseReleaseEvent(self, a0: QMouseEvent | None):
         if a0 is None:
             return
+        event = a0
         """마우스 버튼 놓음"""
+
+        # 단면선(2개): 좌클릭=점 추가(클릭으로만), 우클릭=현재 선 확정
+        if self.picking_mode == "cut_lines":
+            modifiers = event.modifiers()
+
+            if event.button() == Qt.MouseButton.RightButton:
+                try:
+                    if getattr(self, "_cut_line_right_press_pos", None) is not None and not bool(
+                        getattr(self, "_cut_line_right_dragged", False)
+                    ):
+                        self._finish_cut_lines_current()
+                except Exception:
+                    pass
+                self._cut_line_right_press_pos = None
+                self._cut_line_right_dragged = False
+
+            if event.button() == Qt.MouseButton.LeftButton:
+                try:
+                    modified = bool(
+                        modifiers
+                        & (
+                            Qt.KeyboardModifier.ShiftModifier
+                            | Qt.KeyboardModifier.ControlModifier
+                            | Qt.KeyboardModifier.AltModifier
+                        )
+                    )
+                    if (
+                        not modified
+                        and getattr(self, "_cut_line_left_press_pos", None) is not None
+                        and not bool(getattr(self, "_cut_line_left_dragged", False))
+                    ):
+                        pt = self.pick_point_on_plane_z(event.pos().x(), event.pos().y(), z=0.0)
+                        if pt is not None:
+                            idx = int(getattr(self, "cut_line_active", 0))
+                            if idx not in (0, 1):
+                                idx = 0
+                            line = self.cut_lines[idx]
+
+                            # 기존 단면 결과는 편집 시 무효화
+                            self.cut_section_profiles[idx] = []
+                            self.cut_section_world[idx] = []
+
+                            p = np.array([pt[0], pt[1], 0.0], dtype=np.float64)
+
+                            # 가로/세로 각각 1개의 "선분"(2점)만 허용
+                            if len(line) == 0:
+                                line.append(p)
+                                self.cut_line_drawing = True
+                                self.cut_line_preview = None
+                            elif len(line) == 1:
+                                start = np.asarray(line[0], dtype=np.float64)
+                                p2 = self._cutline_constrain_ortho(start, p)
+                                if float(np.linalg.norm(p2[:2] - start[:2])) > 1e-6:
+                                    line.append(p2)
+                                    self.cut_line_drawing = False
+                                    self.cut_line_preview = None
+                                else:
+                                    # 너무 짧으면 무시하고 계속 프리뷰 유지
+                                    self.cut_line_drawing = True
+                            else:
+                                # 이미 2점(선분) 완성된 경우 추가 입력 무시
+                                self.cut_line_drawing = False
+                                self.cut_line_preview = None
+
+                            self.update()
+                except Exception:
+                    pass
+                self._cut_line_left_press_pos = None
+                self._cut_line_left_dragged = False
+
         if self.mouse_button == Qt.MouseButton.LeftButton and self.picking_mode == 'floor_brush':
             if self.brush_selected_faces:
                 self.alignToBrushSelected.emit()
@@ -4056,6 +4228,26 @@ class Viewport3D(QOpenGLWidget):
         event = a0
         """마우스 이동 (드래그)"""
         try:
+            # 단면선 모드: 드래그 중에는 "클릭"으로 오인하지 않도록 플래그 처리
+            if self.picking_mode == "cut_lines":
+                threshold_px = 6
+                if (
+                    self.mouse_button == Qt.MouseButton.LeftButton
+                    and getattr(self, "_cut_line_left_press_pos", None) is not None
+                    and not bool(getattr(self, "_cut_line_left_dragged", False))
+                ):
+                    pos0 = self._cut_line_left_press_pos
+                    if abs(int(event.pos().x()) - int(pos0.x())) + abs(int(event.pos().y()) - int(pos0.y())) > threshold_px:
+                        self._cut_line_left_dragged = True
+                if (
+                    self.mouse_button == Qt.MouseButton.RightButton
+                    and getattr(self, "_cut_line_right_press_pos", None) is not None
+                    and not bool(getattr(self, "_cut_line_right_dragged", False))
+                ):
+                    pos0 = self._cut_line_right_press_pos
+                    if abs(int(event.pos().x()) - int(pos0.x())) + abs(int(event.pos().y()) - int(pos0.y())) > threshold_px:
+                        self._cut_line_right_dragged = True
+
             # 단면선(2개) 프리뷰: 마우스 트래킹(버튼 없이 이동)에서도 동작
             if self.picking_mode == 'cut_lines' and getattr(self, "cut_line_drawing", False):
                 if self.mouse_button is None or self.mouse_button == Qt.MouseButton.LeftButton:
@@ -4376,37 +4568,7 @@ class Viewport3D(QOpenGLWidget):
         if self.picking_mode == 'cut_lines':
             key = event.key()
             if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-                idx_done = int(getattr(self, "cut_line_active", 0))
-                self.cut_line_drawing = False
-                self.cut_line_preview = None
-                # 단면(프로파일) 계산 요청
-                try:
-                    if idx_done in (0, 1) and len(self.cut_lines[idx_done]) >= 2:
-                        self.schedule_cut_section_update(idx_done, delay_ms=0)
-                except Exception:
-                    pass
-                # 첫 번째 선을 끝냈고 두 번째가 비어있으면 자동 전환
-                # 다른 선이 비어있으면 자동 전환(가로/세로 어느 쪽부터 시작해도 OK)
-                try:
-                    other = 1 - int(idx_done) if idx_done in (0, 1) else 1
-                    if other in (0, 1) and not self.cut_lines[other]:
-                        self.cut_line_active = other
-                except Exception:
-                    pass
-
-                # 두 선이 모두 완성(>=2점)되면 입력 모드 자동 종료 (선은 화면/내보내기에 남김)
-                try:
-                    done0 = len(self.cut_lines[0]) >= 2
-                    done1 = len(self.cut_lines[1]) >= 2
-                    if done0 and done1:
-                        self.set_cut_lines_enabled(False)
-                        try:
-                            self.cutLinesAutoEnded.emit()
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-                self.update()
+                self._finish_cut_lines_current()
                 return
             if key in (Qt.Key.Key_Backspace, Qt.Key.Key_Delete):
                 try:
@@ -4417,6 +4579,9 @@ class Viewport3D(QOpenGLWidget):
                         line.pop()
                         self.cut_section_profiles[idx] = []
                         self.cut_section_world[idx] = []
+                    if len(line) == 1:
+                        self.cut_line_drawing = True
+                        self.cut_line_preview = None
                     if not line:
                         self.cut_line_drawing = False
                         self.cut_line_preview = None
@@ -4428,6 +4593,7 @@ class Viewport3D(QOpenGLWidget):
                 try:
                     self.cut_line_active = 1 - int(getattr(self, "cut_line_active", 0))
                     self.cut_line_preview = None
+                    self.cut_line_drawing = len(self.cut_lines[int(self.cut_line_active)]) == 1
                     self.update()
                 except Exception:
                     pass
