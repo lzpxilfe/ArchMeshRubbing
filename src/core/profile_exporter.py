@@ -419,18 +419,18 @@ class ProfileExporter:
                     faces = []
                 faces = np.asarray(faces, dtype=np.int32)
                 if faces.size == 0:
-                    bounds = {
-                        'min': np.array([0, 0]),
-                        'max': np.array([grid_w / px_per_cm, grid_h / px_per_cm]),
-                        'size': np.array([grid_w / px_per_cm, grid_h / px_per_cm]),
-                        'px_per_cm': px_per_cm,
-                        'is_pixels': True,
-                        'vp_size': (grid_w, grid_h),
-                        'grid_size': (grid_w, grid_h),
-                        'matrices': (mv, proj, vp),
-                        'world_bounds': np.array([w_min, w_max], dtype=np.float64),
-                    }
-                    return [], bounds
+                     bounds = {
+                         'min': np.array([0, 0]),
+                         'max': np.array([grid_w / px_per_cm, grid_h / px_per_cm]),
+                         'size': np.array([grid_w / px_per_cm, grid_h / px_per_cm]),
+                         'px_per_cm': px_per_cm,
+                         'is_pixels': True,
+                         'vp_size': (grid_w, grid_h),
+                         'grid_size': (grid_w, grid_h),
+                        'matrices': (mv_raw, proj_raw, vp) if _PROFILE_EXPORT_SAFE else (mv, proj, vp),
+                         'world_bounds': np.array([w_min, w_max], dtype=np.float64),
+                     }
+                     return [], bounds
 
                 if len(faces) > self.MAX_FACES_FOR_RASTERIZE:
                     step = max(1, int(len(faces) // self.MAX_FACES_FOR_RASTERIZE))
