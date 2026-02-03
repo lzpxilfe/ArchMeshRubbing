@@ -369,78 +369,60 @@ class _CutPolylineSectionProfileThread(QThread):
                     continue
                 world_contours.append((rot_mat @ (cnt * self._scale).T).T + self._translation)
 
-            # 가장 긴 단면(투영 길이 기준) 선택
-            best_tz = None
-            best_span = 0.0
-            eps = 1e-6
+            # "작은 사각형(계단)"처럼 보이는 binning/envelope 대신,
+            # 메쉬-평면 교차 폴리라인(단면 외곽)을 그대로 사용한다.
+            best_profile = None
+            best_score = -1.0
+
             for cnt in world_contours:
-                t = (cnt - p0) @ d_unit
-                mask = (t >= -eps) & (t <= length + eps)
-                if int(mask.sum()) < 2:
+                arr = np.asarray(cnt, dtype=np.float64).reshape(-1, 3)
+                if arr.shape[0] < 2:
                     continue
-                t_f = t[mask]
-                z_f = cnt[mask, 2]
-                span = float(t_f.max() - t_f.min())
-                if span <= best_span:
+
+                s = (arr - p0) @ d_unit
+                z = arr[:, 2]
+                finite = np.isfinite(s) & np.isfinite(z)
+                s = s[finite]
+                z = z[finite]
+                if s.size < 2:
                     continue
-                best_span = span
-                best_tz = (t_f.copy(), z_f.copy())
 
-            if best_tz is None:
+                # consecutive duplicates 제거
+                if s.size >= 2:
+                    ds = np.hypot(np.diff(s), np.diff(z))
+                    keep = np.ones((s.size,), dtype=bool)
+                    keep[1:] = ds > 1e-6
+                    s = s[keep]
+                    z = z[keep]
+                if s.size < 2:
+                    continue
+
+                # 닫힘 보장
+                try:
+                    if float(np.hypot(s[0] - s[-1], z[0] - z[-1])) > 1e-6:
+                        s = np.append(s, s[0])
+                        z = np.append(z, z[0])
+                except Exception:
+                    pass
+
+                # 여러 루프가 있으면 "가장 바깥"을 고르기 위해 (s,z) 면적 최대를 선택
+                score = float(np.nanmax(s) - np.nanmin(s))
+                if s.size >= 4:
+                    try:
+                        area2 = float(np.dot(s[:-1], z[1:]) - np.dot(z[:-1], s[1:]))
+                        score = max(score, abs(area2))
+                    except Exception:
+                        pass
+
+                if score > best_score:
+                    best_score = score
+                    best_profile = list(zip(s.tolist(), z.tolist()))
+
+            if best_profile is None or len(best_profile) < 2:
                 self.computed.emit({"index": self._index, "profile": []})
                 return
 
-            t_f, z_f = best_tz
-            # 실제 메쉬와의 교차 구간만 사용 (라인 길이보다 길게 나오는 왜곡 방지)
-            t0 = float(np.nanmin(t_f))
-            t1 = float(np.nanmax(t_f))
-            if not np.isfinite(t0) or not np.isfinite(t1) or (t1 - t0) < 1e-6:
-                self.computed.emit({"index": self._index, "profile": []})
-                return
-
-            t_f = t_f - t0  # rebase to 0
-
-            # 외곽선만: (t,z) 포인트 클라우드로부터 상/하 외곽선(envelope) 생성
-            t = np.asarray(t_f, dtype=np.float64)
-            z = np.asarray(z_f, dtype=np.float64)
-            finite = np.isfinite(t) & np.isfinite(z)
-            t = t[finite]
-            z = z[finite]
-            if t.size < 2:
-                self.computed.emit({"index": self._index, "profile": []})
-                return
-
-            total_len = float(np.nanmax(t))
-            # 0.1mm~0.5mm 수준으로 binning (단위=cm 가정)
-            bin_size = float(max(0.01, total_len / 2000.0))
-            bins = np.floor(t / bin_size).astype(np.int64)
-            order = np.argsort(bins)
-            bins = bins[order]
-            t = t[order]
-            z = z[order]
-
-            upper: list[tuple[float, float]] = []
-            lower: list[tuple[float, float]] = []
-            i = 0
-            n = int(len(bins))
-            while i < n:
-                b0 = int(bins[i])
-                j = i + 1
-                while j < n and int(bins[j]) == b0:
-                    j += 1
-                t_bin = float(b0) * bin_size
-                z_slice = z[i:j]
-                upper.append((t_bin, float(np.max(z_slice))))
-                lower.append((t_bin, float(np.min(z_slice))))
-                i = j
-
-            if len(upper) < 2 or len(lower) < 2:
-                self.computed.emit({"index": self._index, "profile": []})
-                return
-
-            # 닫힌 외곽선 폴리라인(상단 -> 하단 역순)
-            # 단면은 "선"만 필요: 동일 t에서의 상단(z max) 프로파일만 사용
-            self.computed.emit({"index": self._index, "profile": upper})
+            self.computed.emit({"index": self._index, "profile": best_profile})
         except Exception as e:
             self.failed.emit(str(e))
 
