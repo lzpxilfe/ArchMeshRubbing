@@ -1816,16 +1816,37 @@ class Viewport3D(QOpenGLWidget):
                 base_y = max_y + margin
                 scale_s = max(1e-6, extent_x) / s_span
             else:
-                # 세로: 메쉬 우측에 배치 (s -> X, z -> Y) - 높이가 위로 향하도록 통일
+                # 세로: 메쉬 우측에 배치 (z -> X, s -> Y)
                 base_x = max_x + margin
                 base_y = min_y
                 scale_s = max(1e-6, extent_y) / s_span
+
+            flip_s = False
+            if idx != 0:
+                # 사용자가 단면선을 위->아래(또는 오른쪽->왼쪽)로 그리면,
+                # s 축 방향이 뒤집혀 결과가 상/하가 뒤집혀 보일 수 있음.
+                # 단면선의 진행 방향이 +Y(세로) / +X(가로)가 되도록 s 축을 거울상으로 뒤집는다.
+                try:
+                    lines = getattr(self, "cut_lines", [[], []]) or [[], []]
+                    if idx < len(lines) and lines[idx] and len(lines[idx]) >= 2:
+                        p0 = np.asarray(lines[idx][0], dtype=np.float64).reshape(-1)
+                        p1 = np.asarray(lines[idx][-1], dtype=np.float64).reshape(-1)
+                        if p0.size >= 2 and p1.size >= 2:
+                            dx = float(p1[0] - p0[0])
+                            dy = float(p1[1] - p0[1])
+                            if abs(dy) >= abs(dx):
+                                flip_s = dy < 0.0
+                            else:
+                                flip_s = dx < 0.0
+                except Exception:
+                    flip_s = False
 
             for si, zi in zip(s.tolist(), z.tolist()):
                 if idx == 0:
                     pts_world.append([base_x + (float(si) - s_min) * scale_s, base_y + (float(zi) - z_min), 0.0])
                 else:
-                    pts_world.append([base_x + (float(si) - s_min) * scale_s, base_y + (float(zi) - z_min), 0.0])
+                    s_term = (s_max - float(si)) if flip_s else (float(si) - s_min)
+                    pts_world.append([base_x + (float(zi) - z_min), base_y + s_term * scale_s, 0.0])
             return pts_world
         except Exception:
             return []
