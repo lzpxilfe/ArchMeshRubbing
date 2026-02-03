@@ -236,7 +236,8 @@ def _extract_main_contour(occupancy: np.ndarray) -> np.ndarray:
 
     cv2 = _get_cv2()
     if cv2 is not None:
-        res = cv2.findContours(occupancy, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_TC89_KCOS)
+        chain_mode = cv2.CHAIN_APPROX_NONE if _PROFILE_EXPORT_SAFE else cv2.CHAIN_APPROX_TC89_KCOS
+        res = cv2.findContours(occupancy, cv2.RETR_EXTERNAL, chain_mode)
         if len(res) == 2:
             found_contours, _ = res
         else:
@@ -246,7 +247,10 @@ def _extract_main_contour(occupancy: np.ndarray) -> np.ndarray:
         main_cnt = max(found_contours, key=cv2.contourArea)
         epsilon = 0.0002 * cv2.arcLength(main_cnt, True)
         approx = cv2.approxPolyDP(main_cnt, epsilon, True)
-        return approx.reshape(-1, 2).astype(np.float64)
+        approx_pts = approx.reshape(-1, 2).astype(np.float64)
+        if approx_pts.shape[0] >= 3:
+            return approx_pts
+        return main_cnt.reshape(-1, 2).astype(np.float64)
 
     contour = _trace_main_contour_binary(occupancy > 0)
     if len(contour) < 3:
@@ -259,6 +263,8 @@ def _extract_main_contour(occupancy: np.ndarray) -> np.ndarray:
     simplified = _rdp_simplify(closed, epsilon)
     if len(simplified) >= 2 and np.allclose(simplified[0], simplified[-1]):
         simplified = simplified[:-1]
+    if len(simplified) < 3:
+        return contour
     return simplified
 
 
@@ -824,10 +830,15 @@ class ProfileExporter:
                         pts_world = np.hstack([pts_world, np.zeros((len(pts_world), 1), dtype=np.float64)])
                     v_homo = np.hstack([pts_world[:, :3], np.ones((len(pts_world), 1), dtype=np.float64)])
                     v_clip = v_homo @ mvp
-                    v_ndc = v_clip[:, :3] / v_clip[:, 3:]
+                    w = v_clip[:, 3]
+                    valid = np.abs(w) > 1e-12
+                    v_ndc = np.zeros((len(v_clip), 3), dtype=np.float64)
+                    v_ndc[valid] = v_clip[valid, :3] / w[valid, None]
                     x = (v_ndc[:, 0] + 1.0) / 2.0 * float(vp[2])
                     y = float(vp[3]) - (v_ndc[:, 1] + 1.0) / 2.0 * float(vp[3])
-                    return np.stack([x, y], axis=1)
+                    pts = np.stack([x, y], axis=1)
+                    finite = valid & np.isfinite(pts).all(axis=1)
+                    return pts[finite]
 
                 colors = ["#ff4040", "#2b8cff"]
                 for i, line in enumerate(cut_lines_world):
@@ -837,6 +848,10 @@ class ProfileExporter:
                     pts_px = project_world_to_px(pts_w)
                     if pts_px.shape[0] < 2:
                         continue
+                    if _PROFILE_EXPORT_SAFE:
+                        max_dim = max(float(vp[2]), float(vp[3]), 1.0)
+                        if float(np.nanmax(np.abs(pts_px))) > max_dim * 10.0:
+                            continue
                     extra_paths.append(
                         {
                             "id": f"cut_line_{i+1}",
@@ -863,10 +878,15 @@ class ProfileExporter:
                         pts_world = np.hstack([pts_world, np.zeros((len(pts_world), 1), dtype=np.float64)])
                     v_homo = np.hstack([pts_world[:, :3], np.ones((len(pts_world), 1), dtype=np.float64)])
                     v_clip = v_homo @ mvp
-                    v_ndc = v_clip[:, :3] / v_clip[:, 3:]
+                    w = v_clip[:, 3]
+                    valid = np.abs(w) > 1e-12
+                    v_ndc = np.zeros((len(v_clip), 3), dtype=np.float64)
+                    v_ndc[valid] = v_clip[valid, :3] / w[valid, None]
                     x = (v_ndc[:, 0] + 1.0) / 2.0 * float(vp[2])
                     y = float(vp[3]) - (v_ndc[:, 1] + 1.0) / 2.0 * float(vp[3])
-                    return np.stack([x, y], axis=1)
+                    pts = np.stack([x, y], axis=1)
+                    finite = valid & np.isfinite(pts).all(axis=1)
+                    return pts[finite]
 
                 for i, line in enumerate(cut_profiles_world):
                     if not line or len(line) < 2:
@@ -875,6 +895,10 @@ class ProfileExporter:
                     pts_px = project_world_to_px(pts_w)
                     if pts_px.shape[0] < 2:
                         continue
+                    if _PROFILE_EXPORT_SAFE:
+                        max_dim = max(float(vp[2]), float(vp[3]), 1.0)
+                        if float(np.nanmax(np.abs(pts_px))) > max_dim * 10.0:
+                            continue
                     extra_paths.append(
                         {
                             "id": f"section_profile_{i+1}",
