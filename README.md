@@ -18,9 +18,33 @@ pip install -r requirements.txt
 
 ## 실행
 
+### GUI (추천)
+
 ```bash
-python main.py
+python app_interactive.py
 ```
+
+### CLI
+
+```bash
+python main.py --help
+```
+
+## 2D 실측 도면(SVG) 내보내기
+
+- GUI에서 `상/하/전/후/좌/우` 뷰를 본 뒤 **2D 실측 도면 내보내기(SVG)** 메뉴로 저장할 수 있습니다.
+
+## 단축키
+
+- `[` / `]`: 회전 기즈모 크기 줄이기/키우기
+- `F`: 선택 객체 화면 맞춤
+- `R`: 카메라 리셋
+
+## 환경 변수 (트러블슈팅)
+
+- `ARCHMESHRUBBING_PROFILE_EXPORT_SAFE=1`: SVG 외곽선/가이드 투영을 보수적으로 처리 (Illustrator에서 `격자 + 긴 직선`만 보일 때 권장)
+- `ARCHMESHRUBBING_DISABLE_OPENCV=1`: OpenCV 비활성화 (SciPy 기반 경로 사용)
+- `ARCHMESHRUBBING_CV2_IMPORT_TIMEOUT=2.0`: OpenCV import smoke-test 타임아웃(초)
 
 ## 지원 포맷
 
