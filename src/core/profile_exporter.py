@@ -16,6 +16,10 @@ from typing import cast
 _CV2_MODULE: ModuleType | None = None
 _CV2_CHECKED = False
 _CV2_DISABLED = os.environ.get("ARCHMESHRUBBING_DISABLE_OPENCV", "").strip().lower() in {"1", "true", "yes", "on"}
+_PROFILE_EXPORT_SAFE = (
+    os.environ.get("ARCHMESHRUBBING_PROFILE_EXPORT_SAFE", "").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
 
 try:
     _CV2_IMPORT_TIMEOUT_SECONDS = float(os.environ.get("ARCHMESHRUBBING_CV2_IMPORT_TIMEOUT", "2.0"))
@@ -87,22 +91,40 @@ def _rdp_simplify(points: np.ndarray, epsilon: float) -> np.ndarray:
     if len(points) < 3:
         return points
 
-    start = points[0]
-    end = points[-1]
-    line = end - start
-    line_len = float(np.hypot(line[0], line[1]))
-    if line_len < 1e-12:
-        dists = np.hypot(*(points - start).T)
-    else:
-        # 2D "cross product magnitude" gives twice triangle area => perpendicular distance.
-        dists = np.abs(line[0] * (points[:, 1] - start[1]) - line[1] * (points[:, 0] - start[0])) / line_len
+    keep = np.zeros((len(points),), dtype=bool)
+    keep[0] = True
+    keep[-1] = True
 
-    idx = int(np.argmax(dists))
-    if dists[idx] > epsilon:
-        left = _rdp_simplify(points[: idx + 1], epsilon)
-        right = _rdp_simplify(points[idx:], epsilon)
-        return np.vstack([left[:-1], right])
-    return np.vstack([start, end])
+    stack: list[tuple[int, int]] = [(0, len(points) - 1)]
+    while stack:
+        start_idx, end_idx = stack.pop()
+        if end_idx <= start_idx + 1:
+            continue
+
+        start = points[start_idx]
+        end = points[end_idx]
+        line = end - start
+        line_len = float(np.hypot(line[0], line[1]))
+
+        inner = points[start_idx + 1 : end_idx]
+        if inner.size == 0:
+            continue
+
+        if line_len < 1e-12:
+            dists = np.hypot(*(inner - start).T)
+        else:
+            vec = inner - start
+            dists = np.abs(line[0] * vec[:, 1] - line[1] * vec[:, 0]) / line_len
+
+        rel = int(np.argmax(dists))
+        max_dist = float(dists[rel])
+        if max_dist > epsilon:
+            mid_idx = start_idx + 1 + rel
+            keep[mid_idx] = True
+            stack.append((start_idx, mid_idx))
+            stack.append((mid_idx, end_idx))
+
+    return points[keep]
 
 
 def _trace_main_contour_binary(mask: np.ndarray) -> np.ndarray:
@@ -214,7 +236,11 @@ def _extract_main_contour(occupancy: np.ndarray) -> np.ndarray:
 
     cv2 = _get_cv2()
     if cv2 is not None:
-        found_contours, _ = cv2.findContours(occupancy, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_TC89_KCOS)
+        res = cv2.findContours(occupancy, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_TC89_KCOS)
+        if len(res) == 2:
+            found_contours, _ = res
+        else:
+            _, found_contours, _ = res
         if not found_contours:
             return np.zeros((0, 2), dtype=np.float64)
         main_cnt = max(found_contours, key=cv2.contourArea)
@@ -456,7 +482,7 @@ class ProfileExporter:
                 'is_pixels': True,
                 'vp_size': (grid_w, grid_h),
                 'grid_size': (grid_w, grid_h),
-                'matrices': (mv, proj, vp),
+                'matrices': (mv_raw, proj_raw, vp) if _PROFILE_EXPORT_SAFE else (mv, proj, vp),
                 'world_bounds': np.array([w_min, w_max], dtype=np.float64),
             }
             return contours, bounds
@@ -498,14 +524,17 @@ class ProfileExporter:
         grid_res = max(self.resolution, 2048)
         aspect = size[0] / size[1] if size[1] > 0 else 1.0
         if aspect >= 1:
-            grid_w, grid_h = grid_res, max(1, int(grid_res / aspect))
+            grid_w, grid_h = grid_res, max(2, int(grid_res / aspect))
         else:
-            grid_h, grid_w = grid_res, max(1, int(grid_res * aspect))
+            grid_h, grid_w = grid_res, max(2, int(grid_res * aspect))
         
+        size_safe = np.asarray(size, dtype=np.float64)
+        size_safe = np.where(np.abs(size_safe) < 1e-12, 1e-12, size_safe)
+
         def real_to_img(pts):
             img_pts = np.zeros_like(pts)
-            img_pts[:, 0] = (pts[:, 0] - min_coords[0]) / size[0] * (grid_w - 1)
-            img_pts[:, 1] = (1 - (pts[:, 1] - min_coords[1]) / size[1]) * (grid_h - 1)
+            img_pts[:, 0] = (pts[:, 0] - min_coords[0]) / size_safe[0] * (grid_w - 1)
+            img_pts[:, 1] = (1 - (pts[:, 1] - min_coords[1]) / size_safe[1]) * (grid_h - 1)
             return img_pts
 
         occupancy = np.zeros((grid_h, grid_w), dtype=np.uint8)
@@ -528,8 +557,8 @@ class ProfileExporter:
 
             # 이미지 좌표 -> 실제 좌표 변환
             real_pts = np.zeros_like(img_pts)
-            real_pts[:, 0] = img_pts[:, 0] / (grid_w - 1) * size[0] + min_coords[0]
-            real_pts[:, 1] = (1 - img_pts[:, 1] / (grid_h - 1)) * size[1] + min_coords[1]
+            real_pts[:, 0] = img_pts[:, 0] / (grid_w - 1) * size_safe[0] + min_coords[0]
+            real_pts[:, 1] = (1 - img_pts[:, 1] / (grid_h - 1)) * size_safe[1] + min_coords[1]
             contours.append(real_pts)
         
         bounds = {
