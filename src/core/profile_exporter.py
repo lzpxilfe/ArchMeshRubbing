@@ -415,6 +415,23 @@ class ProfileExporter:
                             mask = ndimage.binary_closing(mask, structure=np.ones((3, 3), dtype=bool), iterations=2)
                             mask = ndimage.binary_opening(mask, structure=np.ones((3, 3), dtype=bool), iterations=1)
                         occupancy = (mask.astype(np.uint8) * 255)
+
+                    # If segmentation failed (too few pixels / line-like), fall back to geometry rasterization.
+                    try:
+                        occ_mask = occupancy > 0
+                        filled = int(occ_mask.sum())
+                        min_fill = max(256, int(occupancy.size * 0.0001))
+                        if filled < min_fill:
+                            viewport_image = None
+                        else:
+                            ys, xs = np.where(occ_mask)
+                            if xs.size < 2 or ys.size < 2:
+                                viewport_image = None
+                            else:
+                                if (int(xs.max() - xs.min()) < 4) or (int(ys.max() - ys.min()) < 4):
+                                    viewport_image = None
+                    except Exception:
+                        viewport_image = None
                 except Exception:
                     viewport_image = None  # fallback to geometry rasterize
 
