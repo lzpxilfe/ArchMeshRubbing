@@ -159,9 +159,26 @@ class SurfaceVisualizer:
         Returns:
             RubbingImage: 탁본 이미지
         """
+        width_pixels = int(width_pixels)
+        if width_pixels < 1:
+            width_pixels = 1
+
+        if flattened is None or getattr(flattened, "uv", None) is None or getattr(flattened, "faces", None) is None:
+            raise ValueError("Flattened mesh is missing uv/faces.")
+        if flattened.uv.ndim != 2 or flattened.uv.shape[0] == 0:
+            raise ValueError("Flattened mesh has no UV vertices.")
+        if flattened.faces.ndim != 2 or flattened.faces.shape[0] == 0:
+            raise ValueError("Flattened mesh has no faces.")
+
         # 이미지 크기 계산
-        aspect_ratio = flattened.height / flattened.width
-        height_pixels = int(width_pixels * aspect_ratio)
+        w_real = float(flattened.width)
+        h_real = float(flattened.height)
+        if not np.isfinite(w_real) or not np.isfinite(h_real) or w_real <= 1e-12:
+            raise ValueError("Flattened mesh has invalid dimensions.")
+        aspect_ratio = h_real / w_real
+        if not np.isfinite(aspect_ratio) or aspect_ratio <= 0:
+            aspect_ratio = 1.0
+        height_pixels = max(1, int(width_pixels * aspect_ratio))
         
         # 깊이맵 생성
         depth_map = self._create_depth_map(flattened, width_pixels, height_pixels)

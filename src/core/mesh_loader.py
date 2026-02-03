@@ -47,8 +47,50 @@ class MeshData:
     
     def __post_init__(self):
         """데이터 검증 및 타입 변환"""
-        self.vertices = np.asarray(self.vertices, dtype=np.float64)
-        self.faces = np.asarray(self.faces, dtype=np.int32)
+        # vertices: (N, 3) 보장
+        vertices = np.asarray(self.vertices, dtype=np.float64)
+        if vertices.ndim == 1:
+            if vertices.size % 3 == 0:
+                vertices = vertices.reshape(-1, 3)
+            else:
+                vertices = vertices.reshape(0, 3)
+        elif vertices.ndim == 2:
+            if vertices.shape[1] == 2:
+                vertices = np.hstack([vertices, np.zeros((vertices.shape[0], 1), dtype=np.float64)])
+            elif vertices.shape[1] >= 3:
+                vertices = vertices[:, :3]
+            else:
+                vertices = vertices.reshape(0, 3)
+        else:
+            vertices = vertices.reshape(0, 3)
+        self.vertices = vertices
+
+        # faces: (M, 3) 보장
+        faces = np.asarray(self.faces, dtype=np.int32)
+        if faces.size == 0:
+            faces = faces.reshape(0, 3)
+        elif faces.ndim == 1:
+            if faces.size % 3 == 0:
+                faces = faces.reshape(-1, 3)
+            else:
+                faces = faces.reshape(0, 3)
+        elif faces.ndim == 2:
+            if faces.shape[1] < 3:
+                faces = faces.reshape(0, 3)
+            else:
+                faces = faces[:, :3]
+        else:
+            faces = faces.reshape(0, 3)
+
+        # 인덱스가 깨진 경우(파일 손상/비정상 로드) 크래시 방지용 필터링
+        try:
+            if self.vertices.shape[0] > 0 and faces.shape[0] > 0:
+                valid = (faces >= 0) & (faces < int(self.vertices.shape[0]))
+                keep = np.all(valid, axis=1)
+                faces = faces[keep]
+        except Exception:
+            pass
+        self.faces = faces
         
         if self.normals is not None:
             self.normals = np.asarray(self.normals, dtype=np.float64)
@@ -71,6 +113,9 @@ class MeshData:
     def bounds(self) -> np.ndarray:
         """경계 박스 [[min_x, min_y, min_z], [max_x, max_y, max_z]]"""
         if self._bounds is None:
+            if self.vertices.ndim != 2 or self.vertices.size == 0:
+                self._bounds = np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]], dtype=np.float64)
+                return self._bounds
             self._bounds = np.array([
                 self.vertices.min(axis=0),
                 self.vertices.max(axis=0)
@@ -95,6 +140,17 @@ class MeshData:
         """총 표면적 계산 (대형 메쉬 안전 처리)"""
         if self._surface_area is None:
             try:
+                faces = np.asarray(self.faces)
+                if (
+                    self.vertices.ndim != 2
+                    or self.vertices.size == 0
+                    or faces.ndim != 2
+                    or faces.shape[1] < 3
+                    or faces.size == 0
+                ):
+                    self._surface_area = 0.0
+                    return self._surface_area
+
                 # 면이 너무 많으면 (100만 이상) 추정값 사용
                 if len(self.faces) > 1000000:
                     # 샘플링으로 추정 (10만 면만 계산)
@@ -134,6 +190,20 @@ class MeshData:
         if force:
             self.face_normals = None
             self.normals = None
+
+        faces = np.asarray(self.faces)
+        if (
+            self.vertices.ndim != 2
+            or faces.ndim != 2
+            or faces.shape[1] < 3
+            or self.vertices.size == 0
+            or faces.size == 0
+        ):
+            if self.face_normals is None:
+                self.face_normals = np.zeros((0, 3), dtype=np.float32)
+            if compute_vertex_normals and self.normals is None:
+                self.normals = np.zeros_like(self.vertices, dtype=np.float64)
+            return
 
         if self.face_normals is None:
             v0 = self.vertices[self.faces[:, 0]]

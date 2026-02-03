@@ -36,8 +36,46 @@ class FlattenedMesh:
     _bounds: Optional[np.ndarray] = field(default=None, repr=False)
     
     def __post_init__(self):
-        self.uv = np.asarray(self.uv, dtype=np.float64)
-        self.faces = np.asarray(self.faces, dtype=np.int32)
+        uv = np.asarray(self.uv, dtype=np.float64)
+        if uv.ndim == 1:
+            if uv.size % 2 == 0:
+                uv = uv.reshape(-1, 2)
+            else:
+                uv = uv.reshape(0, 2)
+        elif uv.ndim == 2:
+            if uv.shape[1] >= 2:
+                uv = uv[:, :2]
+            else:
+                uv = uv.reshape(0, 2)
+        else:
+            uv = uv.reshape(0, 2)
+        self.uv = uv
+
+        faces = np.asarray(self.faces, dtype=np.int32)
+        if faces.size == 0:
+            faces = faces.reshape(0, 3)
+        elif faces.ndim == 1:
+            if faces.size % 3 == 0:
+                faces = faces.reshape(-1, 3)
+            else:
+                faces = faces.reshape(0, 3)
+        elif faces.ndim == 2:
+            if faces.shape[1] < 3:
+                faces = faces.reshape(0, 3)
+            else:
+                faces = faces[:, :3]
+        else:
+            faces = faces.reshape(0, 3)
+
+        # UV 인덱스가 깨진 경우(부분 실패/손상) 크래시 방지용 필터링
+        try:
+            if self.uv.shape[0] > 0 and faces.shape[0] > 0:
+                valid = (faces >= 0) & (faces < int(self.uv.shape[0]))
+                keep = np.all(valid, axis=1)
+                faces = faces[keep]
+        except Exception:
+            pass
+        self.faces = faces
     
     @property
     def n_vertices(self) -> int:
@@ -51,10 +89,18 @@ class FlattenedMesh:
     def bounds(self) -> np.ndarray:
         """2D 경계 [[min_u, min_v], [max_u, max_v]]"""
         if self._bounds is None:
-            self._bounds = np.array([
-                self.uv.min(axis=0),
-                self.uv.max(axis=0)
-            ])
+            uv = np.asarray(self.uv, dtype=np.float64)
+            if uv.ndim != 2 or uv.size == 0:
+                self._bounds = np.array([[0.0, 0.0], [0.0, 0.0]], dtype=np.float64)
+                return self._bounds
+
+            finite = np.all(np.isfinite(uv), axis=1)
+            uv_f = uv[finite]
+            if uv_f.size == 0:
+                self._bounds = np.array([[0.0, 0.0], [0.0, 0.0]], dtype=np.float64)
+                return self._bounds
+
+            self._bounds = np.array([uv_f.min(axis=0), uv_f.max(axis=0)])
         return self._bounds
     
     @property
@@ -88,6 +134,15 @@ class FlattenedMesh:
     
     def normalize(self) -> 'FlattenedMesh':
         """UV 좌표를 [0, 1] 범위로 정규화"""
+        if self.uv.ndim != 2 or self.uv.size == 0:
+            return FlattenedMesh(
+                uv=self.uv.copy(),
+                faces=self.faces,
+                original_mesh=self.original_mesh,
+                distortion_per_face=self.distortion_per_face,
+                scale=float(self.scale),
+            )
+
         min_uv = self.uv.min(axis=0)
         max_uv = self.uv.max(axis=0)
         extent = max_uv - min_uv
