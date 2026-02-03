@@ -1825,7 +1825,7 @@ class Viewport3D(QOpenGLWidget):
                 if idx == 0:
                     pts_world.append([base_x + (float(si) - s_min) * scale_s, base_y + (float(zi) - z_min), 0.0])
                 else:
-                    pts_world.append([base_x + (float(zi) - z_min), base_y + (float(si) - s_min) * scale_s, 0.0])
+                    pts_world.append([base_x + (float(si) - s_min) * scale_s, base_y + (float(zi) - z_min), 0.0])
             return pts_world
         except Exception:
             return []
