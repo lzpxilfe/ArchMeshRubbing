@@ -784,6 +784,7 @@ class Viewport3D(QOpenGLWidget):
         self.show_gizmo = True
         self.active_gizmo_axis = None
         self.gizmo_size = 10.0
+        self.gizmo_radius_factor = 1.15
         self.gizmo_drag_start = None
         
         # 곡률 측정 모드
@@ -3631,7 +3632,25 @@ class Viewport3D(QOpenGLWidget):
         self.camera.distance = max_dim * 2
         self.camera.center = obj.translation.copy()
         self.camera.pan_offset = np.array([0.0, 0.0, 0.0])
-        self.gizmo_size = max_dim * 0.7
+        self.update_gizmo_size()
+
+    def update_gizmo_size(self):
+        """선택된 메쉬 크기에 맞춰 회전 기즈모 반경 조정"""
+        obj = self.selected_obj
+        if not obj or getattr(obj, "mesh", None) is None:
+            return
+
+        try:
+            bounds = obj.mesh.bounds
+            extents = bounds[1] - bounds[0]
+            max_dim = float(np.max(extents))
+        except Exception:
+            return
+
+        factor = float(getattr(self, "gizmo_radius_factor", 1.15))
+        factor = max(1.01, min(3.0, factor))
+        self.gizmo_radius_factor = factor
+        self.gizmo_size = max_dim * 0.5 * factor
     
     def hit_test_gizmo(self, screen_x, screen_y):
         """기즈모 고리 클릭 검사"""
@@ -4614,7 +4633,20 @@ class Viewport3D(QOpenGLWidget):
             self.update()
         elif key == Qt.Key.Key_F:
             self.fit_view_to_selected_object()
-            
+        else:
+            key_dec = getattr(Qt.Key, "Key_BracketLeft", -1)
+            key_inc = getattr(Qt.Key, "Key_BracketRight", -1)
+            if key == key_dec:
+                self.gizmo_radius_factor = max(1.01, float(self.gizmo_radius_factor) * 0.9)
+                self.update_gizmo_size()
+                self.status_info = f"? 기즈모 크기: x{self.gizmo_radius_factor:.2f}"
+                self.update()
+            elif key == key_inc:
+                self.gizmo_radius_factor = min(3.0, float(self.gizmo_radius_factor) / 0.9)
+                self.update_gizmo_size()
+                self.status_info = f"? 기즈모 크기: x{self.gizmo_radius_factor:.2f}"
+                self.update()
+             
         super().keyPressEvent(event)
 
     def keyReleaseEvent(self, a0: QKeyEvent | None):
