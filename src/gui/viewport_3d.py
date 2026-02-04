@@ -486,6 +486,252 @@ class _RoiCutEdgesThread(QThread):
             self.failed.emit(str(e))
 
 
+class _SurfaceLassoSelectThread(QThread):
+    computed = pyqtSignal(object)  # {"indices": np.ndarray, "stats": {...}}
+    failed = pyqtSignal(str)
+
+    def __init__(
+        self,
+        vertices: np.ndarray,
+        faces: np.ndarray,
+        translation: np.ndarray,
+        rotation_deg: np.ndarray,
+        scale: float,
+        modelview: np.ndarray,
+        projection: np.ndarray,
+        viewport: np.ndarray,
+        poly_gl: np.ndarray,
+        bbox_gl: tuple[int, int, int, int],
+        depth_origin: tuple[int, int],
+        depth_map: np.ndarray | None,
+        *,
+        depth_tol: float = 0.01,
+        max_selected_faces: int = 400000,
+    ):
+        super().__init__()
+        self._vertices = np.asarray(vertices)
+        self._faces = np.asarray(faces)
+        self._translation = np.asarray(translation, dtype=np.float64).reshape(-1)
+        self._rotation = np.asarray(rotation_deg, dtype=np.float64).reshape(-1)
+        self._scale = float(scale)
+        self._mv = np.asarray(modelview, dtype=np.float64).reshape(4, 4)
+        self._proj = np.asarray(projection, dtype=np.float64).reshape(4, 4)
+        self._viewport = np.asarray(viewport, dtype=np.int32).reshape(-1)
+        self._poly = np.asarray(poly_gl, dtype=np.float64).reshape(-1, 2)
+        self._bbox_gl = (
+            int(bbox_gl[0]),
+            int(bbox_gl[1]),
+            int(bbox_gl[2]),
+            int(bbox_gl[3]),
+        )
+        self._depth_origin = (int(depth_origin[0]), int(depth_origin[1]))
+        self._depth = None if depth_map is None else np.asarray(depth_map)
+        self._depth_tol = float(depth_tol)
+        self._max_selected = int(max_selected_faces)
+
+    def run(self):
+        try:
+            faces = np.asarray(self._faces, dtype=np.int32)
+            vertices = np.asarray(self._vertices, dtype=np.float64)
+            if faces.ndim != 2 or faces.shape[1] < 3 or vertices.ndim != 2 or vertices.shape[1] < 3:
+                self.computed.emit({"indices": np.zeros((0,), dtype=np.int32), "stats": {"selected": 0}})
+                return
+
+            n_faces = int(faces.shape[0])
+            if n_faces <= 0:
+                self.computed.emit({"indices": np.zeros((0,), dtype=np.int32), "stats": {"selected": 0}})
+                return
+
+            poly = np.asarray(self._poly, dtype=np.float64)
+            if poly.shape[0] < 3:
+                self.computed.emit({"indices": np.zeros((0,), dtype=np.int32), "stats": {"selected": 0}})
+                return
+
+            vp = np.asarray(self._viewport, dtype=np.int32).reshape(-1)
+            if vp.size < 4:
+                self.computed.emit({"indices": np.zeros((0,), dtype=np.int32), "stats": {"selected": 0}})
+                return
+
+            vx, vy, vw, vh = [int(v) for v in vp[:4]]
+            vw = max(1, vw)
+            vh = max(1, vh)
+            mv = np.asarray(self._mv, dtype=np.float64)
+            proj = np.asarray(self._proj, dtype=np.float64)
+
+            depth = self._depth
+            if depth is not None:
+                depth = np.asarray(depth, dtype=np.float32)
+                if depth.ndim >= 3:
+                    depth = np.squeeze(depth)
+                if depth.ndim != 2:
+                    depth = None
+
+            dx0, dy0 = self._depth_origin
+
+            # BBox in GL coords (clamped to viewport)
+            bb = self._bbox_gl
+            bbox_x0 = int(np.clip(bb[0], vx, vx + vw - 1))
+            bbox_y0 = int(np.clip(bb[1], vy, vy + vh - 1))
+            bbox_x1 = int(np.clip(bb[2], vx, vx + vw - 1))
+            bbox_y1 = int(np.clip(bb[3], vy, vy + vh - 1))
+
+            poly_x = poly[:, 0]
+            poly_y = poly[:, 1]
+
+            def points_in_poly(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+                inside = np.zeros_like(x, dtype=bool)
+                j = int(len(poly_x) - 1)
+                for i in range(int(len(poly_x))):
+                    xi = float(poly_x[i])
+                    yi = float(poly_y[i])
+                    xj = float(poly_x[j])
+                    yj = float(poly_y[j])
+                    denom = (yj - yi) if abs(yj - yi) > 1e-12 else 1e-12
+                    intersect = ((yi > y) != (yj > y)) & (x < (xj - xi) * (y - yi) / denom + xi)
+                    inside ^= intersect
+                    j = i
+                return inside
+
+            # Object transform (local -> world)
+            trans = self._translation
+            if trans.size < 3:
+                trans = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+            rot = self._rotation
+            if rot.size < 3:
+                rot = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+            scale = float(self._scale) if abs(float(self._scale)) > 1e-12 else 1.0
+
+            rx, ry, rz = np.radians(rot[:3])
+            cx, sx = float(np.cos(rx)), float(np.sin(rx))
+            cy, sy = float(np.cos(ry)), float(np.sin(ry))
+            cz, sz = float(np.cos(rz)), float(np.sin(rz))
+            rot_x = np.array([[1.0, 0.0, 0.0], [0.0, cx, -sx], [0.0, sx, cx]], dtype=np.float64)
+            rot_y = np.array([[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]], dtype=np.float64)
+            rot_z = np.array([[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]], dtype=np.float64)
+            rot_mat = rot_x @ rot_y @ rot_z
+
+            tol = float(max(0.0, self._depth_tol))
+            max_sel = max(1, int(self._max_selected))
+
+            out: list[np.ndarray] = []
+            out_count = 0
+            total_candidates = 0
+
+            chunk = 200000
+            for start in range(0, n_faces, chunk):
+                if self.isInterruptionRequested():
+                    break
+                end = min(n_faces, start + chunk)
+                f = faces[start:end, :3]
+                if f.size == 0:
+                    continue
+
+                # Face centroids in local coords
+                try:
+                    v0 = vertices[f[:, 0], :3]
+                    v1 = vertices[f[:, 1], :3]
+                    v2 = vertices[f[:, 2], :3]
+                except Exception:
+                    continue
+                cent = (v0 + v1 + v2) / 3.0
+
+                # Local -> world
+                cent_w = (rot_mat @ (cent * scale).T).T + trans[:3]
+
+                # Project (row-vector convention)
+                ones = np.ones((cent_w.shape[0], 1), dtype=np.float64)
+                v_h = np.hstack([cent_w.astype(np.float64, copy=False), ones])
+                clip = v_h @ mv @ proj
+                w = clip[:, 3]
+                valid = np.isfinite(w) & (w > 1e-12)
+                if not np.any(valid):
+                    continue
+
+                idx_chunk = np.arange(start, end, dtype=np.int32)
+                idx_valid = idx_chunk[valid]
+                clip_v = clip[valid, :]
+                w_v = w[valid]
+
+                ndc = clip_v[:, :3] / w_v[:, None]
+                win_x = (ndc[:, 0] + 1.0) * 0.5 * float(vw) + float(vx)
+                win_y = (ndc[:, 1] + 1.0) * 0.5 * float(vh) + float(vy)
+                win_z = (ndc[:, 2] + 1.0) * 0.5
+
+                ok = (
+                    np.isfinite(win_x)
+                    & np.isfinite(win_y)
+                    & np.isfinite(win_z)
+                    & (win_z >= 0.0)
+                    & (win_z <= 1.0)
+                    & (win_x >= float(bbox_x0) - 1.0)
+                    & (win_x <= float(bbox_x1) + 1.0)
+                    & (win_y >= float(bbox_y0) - 1.0)
+                    & (win_y <= float(bbox_y1) + 1.0)
+                )
+                if not np.any(ok):
+                    continue
+
+                idx_ok = idx_valid[ok]
+                x_ok = win_x[ok]
+                y_ok = win_y[ok]
+                z_ok = win_z[ok]
+
+                inside = points_in_poly(x_ok, y_ok)
+                if not np.any(inside):
+                    continue
+
+                idx_in = idx_ok[inside]
+                x_in = x_ok[inside]
+                y_in = y_ok[inside]
+                z_in = z_ok[inside]
+                total_candidates += int(idx_in.size)
+
+                if depth is not None and depth.size != 0:
+                    # Depth test against current depth buffer (keep visible-ish faces)
+                    px = np.rint(x_in).astype(np.int32)
+                    py = np.rint(y_in).astype(np.int32)
+                    px = np.clip(px, bbox_x0, bbox_x1) - int(dx0)
+                    py = np.clip(py, bbox_y0, bbox_y1) - int(dy0)
+                    try:
+                        dpx = depth[py, px]
+                    except Exception:
+                        dpx = None
+                    if dpx is None:
+                        keep = np.ones((idx_in.size,), dtype=bool)
+                    else:
+                        dpx = np.asarray(dpx, dtype=np.float32)
+                        keep = np.isfinite(dpx) & (dpx < 1.0) & (z_in <= (dpx.astype(np.float64) + tol))
+                    idx_in = idx_in[keep]
+
+                if idx_in.size:
+                    out.append(np.asarray(idx_in, dtype=np.int32, order="C"))
+                    out_count += int(idx_in.size)
+                    if out_count >= max_sel:
+                        break
+
+            if not out:
+                self.computed.emit(
+                    {
+                        "indices": np.zeros((0,), dtype=np.int32),
+                        "stats": {"selected": 0, "candidates": int(total_candidates)},
+                    }
+                )
+                return
+
+            indices = np.unique(np.concatenate(out)).astype(np.int32, copy=False)
+            if indices.size > max_sel:
+                indices = indices[:max_sel].copy()
+
+            self.computed.emit(
+                {
+                    "indices": indices,
+                    "stats": {"selected": int(indices.size), "candidates": int(total_candidates)},
+                }
+            )
+        except Exception as e:
+            self.failed.emit(str(e))
+
+
 class TrackballCamera:
     """
     Trackball 스타일 카메라 (Z-up 좌표계)
@@ -817,6 +1063,14 @@ class Viewport3D(QOpenGLWidget):
         self._surface_paint_points_max = 250
         self._surface_paint_left_press_pos = None
         self._surface_paint_left_dragged = False
+        # Surface area(lasso) selection in screen-space
+        self.surface_lasso_points = []  # [(x,y), ...] in widget coords
+        self.surface_lasso_preview = None  # QPoint | None
+        self._surface_area_left_press_pos = None
+        self._surface_area_left_dragged = False
+        self._surface_area_right_press_pos = None
+        self._surface_area_right_dragged = False
+        self._surface_lasso_thread = None
         self.floor_picks = []  # 바닥면 지정용 점 리스트
         
         # Undo/Redo 시스템
@@ -1050,6 +1304,8 @@ class Viewport3D(QOpenGLWidget):
 
         # 3.2 표면 지정(찍은 점) 표시
         self.draw_surface_paint_points()
+        # 3.3 표면 지정(면적/Area) 올가미 오버레이
+        self.draw_surface_lasso_overlay()
 
         # 3.5 바닥 정렬 점 표시
         self.draw_floor_picks()
@@ -3381,7 +3637,7 @@ class Viewport3D(QOpenGLWidget):
             glPopMatrix()
 
         # 표면 지정 하이라이트 (outer/inner/migu)
-        if is_selected and self.picking_mode in {'paint_surface_face', 'paint_surface_brush'}:
+        if is_selected and self.picking_mode in {'paint_surface_face', 'paint_surface_brush', 'paint_surface_area'}:
             try:
                 target = str(getattr(self, "_surface_paint_target", "outer")).strip().lower()
                 face_set = self._get_surface_target_set(obj, target)
@@ -4166,6 +4422,16 @@ class Viewport3D(QOpenGLWidget):
                     self._surface_paint_left_dragged = False
                     return
 
+                elif self.picking_mode == 'paint_surface_area':
+                    # Lasso polygon: add vertex on mouseRelease only (avoid accidental points while orbiting).
+                    self._surface_area_left_press_pos = event.pos()
+                    self._surface_area_left_dragged = False
+                    try:
+                        self.surface_lasso_preview = event.pos()
+                    except Exception:
+                        pass
+                    return
+
                 elif self.picking_mode == 'paint_surface_brush':
                     remove = bool(modifiers & Qt.KeyboardModifier.AltModifier)
                     self._pick_surface_brush_face(event.pos(), remove=remove)
@@ -4235,6 +4501,16 @@ class Viewport3D(QOpenGLWidget):
             if self.picking_mode == "cut_lines" and event.button() == Qt.MouseButton.RightButton:
                 self._cut_line_right_press_pos = event.pos()
                 self._cut_line_right_dragged = False
+                return
+
+            # 표면 지정(면적/Area): 우클릭은 "확정"(click) 용도로 사용 (드래그 시에는 Pan 유지)
+            if self.picking_mode == "paint_surface_area" and event.button() == Qt.MouseButton.RightButton:
+                self._surface_area_right_press_pos = event.pos()
+                self._surface_area_right_dragged = False
+                try:
+                    self.surface_lasso_preview = event.pos()
+                except Exception:
+                    pass
                 return
 
             # 3. 객체 조작 (Shift/Ctrl + 드래그)
@@ -4370,6 +4646,41 @@ class Viewport3D(QOpenGLWidget):
             self._surface_paint_left_press_pos = None
             self._surface_paint_left_dragged = False
 
+        # 표면 지정(면적/Area): 좌클릭=점 추가(클릭일 때만), 우클릭=확정(클릭일 때만)
+        if self.picking_mode == "paint_surface_area":
+            if event.button() == Qt.MouseButton.LeftButton:
+                try:
+                    if (
+                        getattr(self, "_surface_area_left_press_pos", None) is not None
+                        and not bool(getattr(self, "_surface_area_left_dragged", False))
+                    ):
+                        thr = getattr(self, "_surface_lasso_thread", None)
+                        if thr is not None and bool(getattr(thr, "isRunning", lambda: False)()):
+                            self.status_info = "⏳ 면적 선택 계산 중…"
+                        else:
+                            self.surface_lasso_points.append((int(event.pos().x()), int(event.pos().y())))
+                            try:
+                                self.surface_lasso_preview = event.pos()
+                            except Exception:
+                                pass
+                        self.update()
+                except Exception:
+                    pass
+                self._surface_area_left_press_pos = None
+                self._surface_area_left_dragged = False
+
+            if event.button() == Qt.MouseButton.RightButton:
+                try:
+                    if (
+                        getattr(self, "_surface_area_right_press_pos", None) is not None
+                        and not bool(getattr(self, "_surface_area_right_dragged", False))
+                    ):
+                        self._finish_surface_lasso(event.modifiers())
+                except Exception:
+                    pass
+                self._surface_area_right_press_pos = None
+                self._surface_area_right_dragged = False
+
         if self.mouse_button == Qt.MouseButton.LeftButton and self.picking_mode == 'floor_brush':
             if self.brush_selected_faces:
                 self.alignToBrushSelected.emit()
@@ -4450,6 +4761,36 @@ class Viewport3D(QOpenGLWidget):
                     pos0 = self._surface_paint_left_press_pos
                     if abs(int(event.pos().x()) - int(pos0.x())) + abs(int(event.pos().y()) - int(pos0.y())) > threshold_px:
                         self._surface_paint_left_dragged = True
+
+            # 표면 지정(면적/Area): 미리보기 + 드래그 판정
+            if self.picking_mode == "paint_surface_area":
+                threshold_px = 6
+                try:
+                    self.surface_lasso_preview = event.pos()
+                except Exception:
+                    pass
+
+                if (
+                    self.mouse_button == Qt.MouseButton.LeftButton
+                    and getattr(self, "_surface_area_left_press_pos", None) is not None
+                    and not bool(getattr(self, "_surface_area_left_dragged", False))
+                ):
+                    pos0 = self._surface_area_left_press_pos
+                    if abs(int(event.pos().x()) - int(pos0.x())) + abs(int(event.pos().y()) - int(pos0.y())) > threshold_px:
+                        self._surface_area_left_dragged = True
+
+                if (
+                    self.mouse_button == Qt.MouseButton.RightButton
+                    and getattr(self, "_surface_area_right_press_pos", None) is not None
+                    and not bool(getattr(self, "_surface_area_right_dragged", False))
+                ):
+                    pos0 = self._surface_area_right_press_pos
+                    if abs(int(event.pos().x()) - int(pos0.x())) + abs(int(event.pos().y()) - int(pos0.y())) > threshold_px:
+                        self._surface_area_right_dragged = True
+
+                self.update()
+                if self.mouse_button is None:
+                    return
 
             # 단면선(2개) 프리뷰: 마우스 트래킹(버튼 없이 이동)에서도 동작
             if self.picking_mode == 'cut_lines' and getattr(self, "cut_line_drawing", False):
@@ -4832,6 +5173,29 @@ class Viewport3D(QOpenGLWidget):
                 self.update()
                 return
         
+        # 0.1 면적(Area) 도구 단축키
+        if self.picking_mode == "paint_surface_area":
+            key = event.key()
+            if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                self._finish_surface_lasso(event.modifiers())
+                return
+            if key in (Qt.Key.Key_Backspace, Qt.Key.Key_Delete):
+                try:
+                    if getattr(self, "surface_lasso_points", None):
+                        self.surface_lasso_points.pop()
+                    self.update()
+                except Exception:
+                    pass
+                return
+            if key == Qt.Key.Key_Escape:
+                self.clear_surface_lasso()
+                self.picking_mode = "none"
+                if not bool(getattr(self, "cut_lines_enabled", False)):
+                    self.setMouseTracking(False)
+                self.status_info = "⭕ 작업 취소됨"
+                self.update()
+                return
+
         # 1. Enter/Return 키: 바닥 정렬 확정
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             if self.picking_mode in ('floor_3point', 'floor_face', 'floor_brush'):
@@ -5266,6 +5630,244 @@ class Viewport3D(QOpenGLWidget):
             ]
         except Exception:
             self.surface_paint_points = []
+
+    def clear_surface_lasso(self) -> None:
+        """면적(Area) 올가미(다각형) 오버레이를 초기화합니다."""
+        try:
+            self._cancel_surface_lasso_thread()
+        except Exception:
+            pass
+        try:
+            self.surface_lasso_points = []
+            self.surface_lasso_preview = None
+            self._surface_area_left_press_pos = None
+            self._surface_area_left_dragged = False
+            self._surface_area_right_press_pos = None
+            self._surface_area_right_dragged = False
+        except Exception:
+            self.surface_lasso_points = []
+            self.surface_lasso_preview = None
+
+    def _cancel_surface_lasso_thread(self) -> None:
+        thr = getattr(self, "_surface_lasso_thread", None)
+        if thr is None:
+            return
+        # Detach first so late signals are ignored.
+        self._surface_lasso_thread = None
+        try:
+            if thr.isRunning():
+                thr.requestInterruption()
+        except Exception:
+            pass
+
+    def _finish_surface_lasso(self, modifiers) -> None:
+        """현재 올가미(다각형) 영역에 포함되는 '보이는' 면을 한 번에 지정합니다."""
+        obj = self.selected_obj
+        if obj is None or getattr(obj, "mesh", None) is None:
+            self.status_info = "⚠️ 먼저 메쉬를 선택해 주세요."
+            self.clear_surface_lasso()
+            self.update()
+            return
+
+        pts = list(getattr(self, "surface_lasso_points", None) or [])
+        if len(pts) < 3:
+            self.status_info = "📐 면적(Area): 점을 3개 이상 찍어주세요. (우클릭/Enter=확정)"
+            self.update()
+            return
+
+        thr = getattr(self, "_surface_lasso_thread", None)
+        try:
+            if thr is not None and thr.isRunning():
+                self.status_info = "⏳ 면적 선택 계산 중…"
+                self.update()
+                return
+        except Exception:
+            pass
+
+        # Snapshot state at confirm time
+        target = str(getattr(self, "_surface_paint_target", "outer")).strip().lower()
+        if target not in {"outer", "inner", "migu"}:
+            target = "outer"
+        self._surface_lasso_apply_target = target
+        self._surface_lasso_apply_modifiers = modifiers
+
+        self.makeCurrent()
+        viewport = glGetIntegerv(GL_VIEWPORT)
+        mv_raw = glGetDoublev(GL_MODELVIEW_MATRIX)
+        proj_raw = glGetDoublev(GL_PROJECTION_MATRIX)
+
+        try:
+            mv = np.asarray(mv_raw, dtype=np.float64).reshape(4, 4).T
+            proj = np.asarray(proj_raw, dtype=np.float64).reshape(4, 4).T
+        except Exception:
+            mv = np.eye(4, dtype=np.float64)
+            proj = np.eye(4, dtype=np.float64)
+
+        try:
+            vw, vh = int(viewport[2]), int(viewport[3])
+        except Exception:
+            vw, vh = int(self.width()), int(self.height())
+        vw = max(1, vw)
+        vh = max(1, vh)
+
+        # Widget-space bbox (clamped to viewport)
+        try:
+            xs = np.array([int(p[0]) for p in pts], dtype=np.int32)
+            ys = np.array([int(p[1]) for p in pts], dtype=np.int32)
+        except Exception:
+            xs = np.array([], dtype=np.int32)
+            ys = np.array([], dtype=np.int32)
+
+        if xs.size < 3 or ys.size < 3:
+            self.status_info = "📐 면적(Area): 점 입력이 올바르지 않습니다."
+            self.clear_surface_lasso()
+            self.update()
+            return
+
+        x0 = int(np.clip(int(xs.min()), 0, vw - 1))
+        x1 = int(np.clip(int(xs.max()), 0, vw - 1))
+        y0 = int(np.clip(int(ys.min()), 0, vh - 1))
+        y1 = int(np.clip(int(ys.max()), 0, vh - 1))
+
+        # Convert to GL pixel coords (bottom-left origin)
+        gl_x0 = x0
+        gl_x1 = x1
+        gl_y0 = int(np.clip(vh - y1 - 1, 0, vh - 1))
+        gl_y1 = int(np.clip(vh - y0 - 1, 0, vh - 1))
+
+        width = int(max(1, gl_x1 - gl_x0 + 1))
+        height = int(max(1, gl_y1 - gl_y0 + 1))
+
+        # Read depth buffer for occlusion filtering (best-effort).
+        depth_map = None
+        try:
+            depth_raw = cast(Any, glReadPixels(gl_x0, gl_y0, width, height, GL_DEPTH_COMPONENT, GL_FLOAT))
+            depth_map = np.asarray(depth_raw, dtype=np.float32)
+            depth_map = np.squeeze(depth_map)
+            if depth_map.ndim != 2:
+                depth_map = depth_map.reshape((height, width))
+        except Exception:
+            depth_map = None
+
+        # Polygon points in GL coords
+        try:
+            poly_gl = np.array([[float(p[0]), float(vh - int(p[1]) - 1)] for p in pts], dtype=np.float64)
+        except Exception:
+            poly_gl = np.zeros((0, 2), dtype=np.float64)
+
+        try:
+            tol = float(getattr(self, "_surface_area_depth_tol", 0.01))
+        except Exception:
+            tol = 0.01
+        try:
+            max_sel = int(getattr(self, "_surface_area_max_selected_faces", 400000))
+        except Exception:
+            max_sel = 400000
+
+        self.status_info = "📐 면적(Area): 보이는 면 계산 중…"
+        self.update()
+
+        try:
+            thr2 = _SurfaceLassoSelectThread(
+                obj.mesh.vertices,
+                obj.mesh.faces,
+                np.asarray(getattr(obj, "translation", [0.0, 0.0, 0.0]), dtype=np.float64),
+                np.asarray(getattr(obj, "rotation", [0.0, 0.0, 0.0]), dtype=np.float64),
+                float(getattr(obj, "scale", 1.0)),
+                mv,
+                proj,
+                np.asarray(viewport, dtype=np.int32),
+                poly_gl,
+                (int(gl_x0), int(gl_y0), int(gl_x1), int(gl_y1)),
+                (int(gl_x0), int(gl_y0)),
+                depth_map,
+                depth_tol=tol,
+                max_selected_faces=max_sel,
+            )
+            thr2.computed.connect(self._on_surface_lasso_computed)
+            thr2.failed.connect(self._on_surface_lasso_failed)
+            self._surface_lasso_thread = thr2
+            thr2.start()
+        except Exception as e:
+            self._surface_lasso_thread = None
+            self.status_info = f"⚠️ 면적(Area) 계산 시작 실패: {e}"
+            self.update()
+
+    def _on_surface_lasso_failed(self, msg: str) -> None:
+        if self.sender() is not getattr(self, "_surface_lasso_thread", None):
+            return
+        self._surface_lasso_thread = None
+        self.status_info = f"⚠️ 면적(Area) 실패: {msg}"
+        self.update()
+
+    def _on_surface_lasso_computed(self, result: object) -> None:
+        if self.sender() is not getattr(self, "_surface_lasso_thread", None):
+            return
+        self._surface_lasso_thread = None
+
+        obj = self.selected_obj
+        if obj is None or getattr(obj, "mesh", None) is None:
+            self.status_info = "⚠️ 면적(Area): 선택 대상이 없습니다."
+            self.clear_surface_lasso()
+            self.update()
+            return
+
+        indices = None
+        stats = {}
+        try:
+            if isinstance(result, dict):
+                indices = result.get("indices", None)
+                stats = result.get("stats", {}) or {}
+        except Exception:
+            indices = None
+            stats = {}
+
+        if indices is None:
+            self.status_info = "📐 면적(Area): 선택된 면이 없습니다."
+            self.clear_surface_lasso()
+            self.update()
+            return
+
+        try:
+            idx_arr = np.asarray(indices, dtype=np.int32).reshape(-1)
+        except Exception:
+            idx_arr = np.zeros((0,), dtype=np.int32)
+
+        target = str(getattr(self, "_surface_lasso_apply_target", getattr(self, "_surface_paint_target", "outer"))).strip().lower()
+        if target not in {"outer", "inner", "migu"}:
+            target = "outer"
+        modifiers = getattr(self, "_surface_lasso_apply_modifiers", Qt.KeyboardModifier.NoModifier)
+
+        target_set = self._get_surface_target_set(obj, target)
+        remove = bool(modifiers & Qt.KeyboardModifier.AltModifier)
+
+        if idx_arr.size:
+            ids = idx_arr.tolist()
+            if remove:
+                target_set.difference_update(ids)
+            else:
+                target_set.update(ids)
+                for s in self._get_other_surface_sets(obj, target):
+                    s.difference_update(ids)
+
+        self._emit_surface_assignment_changed(obj)
+
+        try:
+            selected_n = int(stats.get("selected", int(idx_arr.size)))
+            cand_n = int(stats.get("candidates", 0))
+        except Exception:
+            selected_n = int(idx_arr.size)
+            cand_n = 0
+
+        op = "제거" if remove else "추가"
+        msg = f"📐 면적(Area) [{target}]: {op} {selected_n:,} faces"
+        if cand_n:
+            msg += f" (후보 {cand_n:,})"
+        self.status_info = msg
+
+        # Keep tool active, but clear the polygon for the next stroke.
+        self.clear_surface_lasso()
+        self.update()
 
     def _get_surface_target_set(self, obj: SceneObject, target: str) -> set[int]:
         target = str(target or "").strip().lower()
@@ -5774,6 +6376,86 @@ class Viewport3D(QOpenGLWidget):
                     continue
                 glVertex3f(x, y, z)
             glEnd()
+
+        except Exception:
+            try:
+                glEnd()
+            except Exception:
+                pass
+        finally:
+            try:
+                glDisable(GL_BLEND)
+                glEnable(GL_DEPTH_TEST)
+                glEnable(GL_LIGHTING)
+            except Exception:
+                pass
+
+    def draw_surface_lasso_overlay(self) -> None:
+        """면적(Area) 도구의 화면 올가미(다각형) 오버레이"""
+        try:
+            if self.picking_mode != "paint_surface_area":
+                return
+
+            pts = getattr(self, "surface_lasso_points", None) or []
+            preview = getattr(self, "surface_lasso_preview", None)
+            if not pts and preview is None:
+                return
+
+            self.makeCurrent()
+            viewport = glGetIntegerv(GL_VIEWPORT)
+            w, h = int(viewport[2]), int(viewport[3])
+            if w <= 1 or h <= 1:
+                return
+
+            glDisable(GL_LIGHTING)
+            glDisable(GL_DEPTH_TEST)
+            glEnable(GL_BLEND)
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+
+            # 2D ortho in pixel coords (top-left origin)
+            glMatrixMode(GL_PROJECTION)
+            glPushMatrix()
+            glLoadIdentity()
+            glOrtho(0.0, float(w), float(h), 0.0, -1.0, 1.0)
+
+            glMatrixMode(GL_MODELVIEW)
+            glPushMatrix()
+            glLoadIdentity()
+
+            # Line strip (polygon preview)
+            glLineWidth(2.0)
+            glColor4f(0.1, 0.6, 1.0, 0.85)
+            glBegin(GL_LINE_STRIP)
+            for xy in pts:
+                try:
+                    x, y = float(xy[0]), float(xy[1])
+                except Exception:
+                    continue
+                glVertex3f(x, y, 0.0)
+            if preview is not None:
+                try:
+                    glVertex3f(float(preview.x()), float(preview.y()), 0.0)
+                except Exception:
+                    pass
+            glEnd()
+
+            # Vertices
+            glPointSize(6.0)
+            glColor4f(0.95, 0.95, 0.95, 0.95)
+            glBegin(GL_POINTS)
+            for xy in pts:
+                try:
+                    x, y = float(xy[0]), float(xy[1])
+                except Exception:
+                    continue
+                glVertex3f(x, y, 0.0)
+            glEnd()
+
+            # Restore matrices
+            glPopMatrix()
+            glMatrixMode(GL_PROJECTION)
+            glPopMatrix()
+            glMatrixMode(GL_MODELVIEW)
 
         except Exception:
             try:

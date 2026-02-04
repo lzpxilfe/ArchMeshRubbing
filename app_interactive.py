@@ -794,6 +794,16 @@ class FlattenPanel(QWidget):
             lambda: self.selectionRequested.emit("surface_tool", {"tool": "brush", "target": self.current_surface_target()})
         )
         tool_row.addWidget(self.btn_surface_brush)
+
+        self.btn_surface_area = QPushButton("📐 면적(Area)")
+        self.btn_surface_area.setToolTip("화면에서 다각형을 그려 보이는 면을 한 번에 지정합니다.\n우클릭/Enter=확정, Backspace=되돌리기, ESC=취소")
+        self.btn_surface_area.clicked.connect(
+            lambda: self.selectionRequested.emit(
+                "surface_tool",
+                {"tool": "area", "target": self.current_surface_target()},
+            )
+        )
+        tool_row.addWidget(self.btn_surface_area)
         surface_layout.addLayout(tool_row)
 
         self.label_surface_assignment = QLabel("외면: 0 / 내면: 0 / 미구: 0")
@@ -2588,12 +2598,34 @@ class MainWindow(QMainWindow):
 
             if tool == "click":
                 self.viewport.picking_mode = "paint_surface_face"
+                try:
+                    if not bool(getattr(self.viewport, "cut_lines_enabled", False)):
+                        self.viewport.setMouseTracking(False)
+                except Exception:
+                    pass
                 self.viewport.status_info = (
                     f"👆 찍기(자동 확장) [{target}]: 클릭=영역 지정, Shift/Ctrl=추가, Alt=제거 (ESC로 종료)"
                 )
             elif tool == "brush":
                 self.viewport.picking_mode = "paint_surface_brush"
+                try:
+                    if not bool(getattr(self.viewport, "cut_lines_enabled", False)):
+                        self.viewport.setMouseTracking(False)
+                except Exception:
+                    pass
                 self.viewport.status_info = f"🖌️ 보정(브러시) [{target}]: 드래그=칠하기, Alt=지우기 (ESC로 종료)"
+            elif tool == "area":
+                self.viewport.picking_mode = "paint_surface_area"
+                try:
+                    self.viewport.clear_surface_lasso()
+                    self.viewport.setMouseTracking(True)
+                    self.viewport.setFocus()
+                except Exception:
+                    pass
+                self.viewport.status_info = (
+                    f"📐 면적(Area) [{target}]: 좌클릭=점 추가(드래그=회전), "
+                    f"우클릭/Enter=확정, Backspace=되돌리기, Alt=제거 (ESC로 종료)"
+                )
             else:
                 QMessageBox.information(self, "안내", "선택 도구를 확인할 수 없습니다.")
                 return
@@ -2626,6 +2658,7 @@ class MainWindow(QMainWindow):
                 obj.outer_face_indices.clear()
             try:
                 self.viewport.clear_surface_paint_points(target)
+                self.viewport.clear_surface_lasso()
             except Exception:
                 pass
             self.viewport.status_info = f"표면 지정 비움: {target}"
@@ -2636,6 +2669,7 @@ class MainWindow(QMainWindow):
             obj.migu_face_indices.clear()
             try:
                 self.viewport.clear_surface_paint_points(None)
+                self.viewport.clear_surface_lasso()
             except Exception:
                 pass
             self.viewport.status_info = "표면 지정 전체 초기화"
