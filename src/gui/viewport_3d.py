@@ -684,6 +684,11 @@ class _SurfaceLassoSelectThread(QThread):
             vh = max(1, vh)
             mv = np.asarray(self._mv, dtype=np.float64)
             proj = np.asarray(self._proj, dtype=np.float64)
+            # Row-vector projection matrix: (P*M*v)^T = v^T*M^T*P^T
+            try:
+                mvp_t = mv.T @ proj.T
+            except Exception:
+                mvp_t = None
 
             depth = self._depth
             if depth is not None:
@@ -742,6 +747,8 @@ class _SurfaceLassoSelectThread(QThread):
 
             out: list[np.ndarray] = []
             out_count = 0
+            out_no_depth: list[np.ndarray] = []
+            out_no_depth_count = 0
             total_candidates = 0
 
             chunk = 200000
@@ -768,7 +775,10 @@ class _SurfaceLassoSelectThread(QThread):
                 # Project (row-vector convention)
                 ones = np.ones((cent_w.shape[0], 1), dtype=np.float64)
                 v_h = np.hstack([cent_w.astype(np.float64, copy=False), ones])
-                clip = v_h @ mv @ proj
+                if mvp_t is None:
+                    clip = v_h @ mv @ proj
+                else:
+                    clip = v_h @ mvp_t
                 w = clip[:, 3]
                 valid = np.isfinite(w) & (w > 1e-12)
                 if not np.any(valid):
@@ -814,6 +824,17 @@ class _SurfaceLassoSelectThread(QThread):
                 total_candidates += int(idx_in.size)
 
                 if depth is not None and depth.size != 0:
+                    # Keep a fallback set (no depth filtering) in case depth test is too strict/mismatched.
+                    if idx_in.size and out_no_depth_count < max_sel:
+                        try:
+                            remain = max_sel - out_no_depth_count
+                            if remain > 0:
+                                take = idx_in[:remain]
+                                out_no_depth.append(np.asarray(take, dtype=np.int32, order="C"))
+                                out_no_depth_count += int(take.size)
+                        except Exception:
+                            pass
+
                     # Depth test against current depth buffer (keep visible-ish faces)
                     px = np.rint(x_in).astype(np.int32)
                     py = np.rint(y_in).astype(np.int32)
@@ -837,13 +858,29 @@ class _SurfaceLassoSelectThread(QThread):
                         break
 
             if not out:
-                self.computed.emit(
-                    {
-                        "indices": np.zeros((0,), dtype=np.int32),
-                        "stats": {"selected": 0, "candidates": int(total_candidates)},
-                    }
-                )
-                return
+                if depth is not None and out_no_depth:
+                    indices = np.unique(np.concatenate(out_no_depth)).astype(np.int32, copy=False)
+                    if indices.size > max_sel:
+                        indices = indices[:max_sel].copy()
+                    self.computed.emit(
+                        {
+                            "indices": indices,
+                            "stats": {
+                                "selected": int(indices.size),
+                                "candidates": int(total_candidates),
+                                "depth_fallback": True,
+                            },
+                        }
+                    )
+                    return
+                else:
+                    self.computed.emit(
+                        {
+                            "indices": np.zeros((0,), dtype=np.int32),
+                            "stats": {"selected": 0, "candidates": int(total_candidates)},
+                        }
+                    )
+                    return
 
             indices = np.unique(np.concatenate(out)).astype(np.int32, copy=False)
             if indices.size > max_sel:
