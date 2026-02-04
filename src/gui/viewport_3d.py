@@ -691,6 +691,9 @@ class SceneObject:
         self.inner_face_indices = set()
         self.migu_face_indices = set()
         self._trimesh = None # Lazy-loaded trimesh object
+        self._face_centroids = None
+        self._face_centroid_kdtree = None
+        self._face_centroid_faces_count = 0
         
     def to_trimesh(self):
         """trimesh 객체 반환 (캐싱)"""
@@ -804,6 +807,7 @@ class Viewport3D(QOpenGLWidget):
         self.picking_mode = 'none'
         self.brush_selected_faces = set() # 브러시로 선택된 면 인덱스
         self._selection_brush_mode = "replace"  # replace|add|remove
+        self._selection_brush_last_pick = 0.0
         self.floor_picks = []  # 바닥면 지정용 점 리스트
         
         # Undo/Redo 시스템
@@ -3804,6 +3808,14 @@ class Viewport3D(QOpenGLWidget):
             glBindBuffer(GL_ARRAY_BUFFER, obj.vbo_id)
             glBufferData(GL_ARRAY_BUFFER, data.nbytes, data, GL_STATIC_DRAW)
             glBindBuffer(GL_ARRAY_BUFFER, 0)
+
+            # Picking cache invalidate (mesh vertices may have changed)
+            try:
+                obj._face_centroid_kdtree = None
+                obj._face_centroids = None
+                obj._face_centroid_faces_count = 0
+            except Exception:
+                pass
         except Exception as e:
             print(f"VBO creation failed for {obj.name}: {e}")
     
@@ -4496,7 +4508,15 @@ class Viewport3D(QOpenGLWidget):
 
             # 0.1 선택 브러시 처리 (SelectionPanel)
             if self.mouse_button == Qt.MouseButton.LeftButton and self.picking_mode == 'select_brush':
-                self._pick_selection_brush_face(event.pos())
+                now = time.monotonic()
+                if now - float(getattr(self, "_selection_brush_last_pick", 0.0)) >= 0.03:
+                    self._selection_brush_last_pick = now
+                    self._pick_selection_brush_face(event.pos())
+                    try:
+                        obj = self.selected_obj
+                        self.faceSelectionChanged.emit(len(obj.selected_faces) if obj is not None else 0)
+                    except Exception:
+                        pass
                 self.update()
                 return
 
@@ -5121,23 +5141,128 @@ class Viewport3D(QOpenGLWidget):
         vertices = obj.mesh.vertices
         faces = obj.mesh.faces
         
+        n_faces = int(getattr(obj.mesh, "n_faces", 0))
+        if n_faces <= 0 or faces is None or len(faces) == 0:
+            return None
+
+        # Fast candidate search via cached face-centroid KDTree
+        centroids = getattr(obj, "_face_centroids", None)
+        tree = getattr(obj, "_face_centroid_kdtree", None)
+        cached_n = int(getattr(obj, "_face_centroid_faces_count", 0) or 0)
+        if centroids is None or cached_n != n_faces:
+            try:
+                f = np.asarray(faces, dtype=np.int32)
+                v = np.asarray(vertices, dtype=np.float64)
+                v0 = v[f[:, 0]]
+                v1 = v[f[:, 1]]
+                v2 = v[f[:, 2]]
+                centroids = ((v0 + v1 + v2) / 3.0).astype(np.float32, copy=False)
+            except Exception:
+                centroids = None
+
+            tree = None
+            if centroids is not None and centroids.size != 0:
+                try:
+                    from scipy.spatial import cKDTree
+
+                    tree = cKDTree(centroids)
+                except Exception:
+                    tree = None
+
+            try:
+                obj._face_centroids = centroids
+                obj._face_centroid_kdtree = tree
+                obj._face_centroid_faces_count = int(n_faces)
+            except Exception:
+                pass
+
+        cand = None
+        k = min(12, n_faces)
+        if tree is not None:
+            try:
+                _d, idx = tree.query(np.asarray(lp[:3], dtype=np.float64), k=int(k))
+                cand = np.atleast_1d(idx).astype(np.int32, copy=False)
+            except Exception:
+                cand = None
+
+        if cand is None:
+            if centroids is None or centroids.size == 0:
+                return None
+            diff = np.asarray(centroids, dtype=np.float64) - np.asarray(lp[:3], dtype=np.float64)
+            dist2 = np.einsum("ij,ij->i", diff, diff)
+            cand = np.array([int(np.argmin(dist2))], dtype=np.int32)
+
+        def point_triangle_dist2(p: np.ndarray, a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float:
+            # From "Real-Time Collision Detection" (Christer Ericson)
+            ab = b - a
+            ac = c - a
+            ap = p - a
+            d1 = float(np.dot(ab, ap))
+            d2 = float(np.dot(ac, ap))
+            if d1 <= 0.0 and d2 <= 0.0:
+                return float(np.dot(ap, ap))
+
+            bp = p - b
+            d3 = float(np.dot(ab, bp))
+            d4 = float(np.dot(ac, bp))
+            if d3 >= 0.0 and d4 <= d3:
+                return float(np.dot(bp, bp))
+
+            vc = d1 * d4 - d3 * d2
+            if vc <= 0.0 and d1 >= 0.0 and d3 <= 0.0:
+                v = d1 / (d1 - d3)
+                proj = a + v * ab
+                d = p - proj
+                return float(np.dot(d, d))
+
+            cp = p - c
+            d5 = float(np.dot(ab, cp))
+            d6 = float(np.dot(ac, cp))
+            if d6 >= 0.0 and d5 <= d6:
+                return float(np.dot(cp, cp))
+
+            vb = d5 * d2 - d1 * d6
+            if vb <= 0.0 and d2 >= 0.0 and d6 <= 0.0:
+                w = d2 / (d2 - d6)
+                proj = a + w * ac
+                d = p - proj
+                return float(np.dot(d, d))
+
+            va = d3 * d6 - d5 * d4
+            if va <= 0.0 and (d4 - d3) >= 0.0 and (d5 - d6) >= 0.0:
+                w = (d4 - d3) / ((d4 - d3) + (d5 - d6))
+                proj = b + w * (c - b)
+                d = p - proj
+                return float(np.dot(d, d))
+
+            denom = 1.0 / (va + vb + vc)
+            v = vb * denom
+            w = vc * denom
+            proj = a + ab * v + ac * w
+            d = p - proj
+            return float(np.dot(d, d))
+
+        p = np.asarray(lp[:3], dtype=np.float64)
         best_face_idx = -1
-        min_dist = float('inf')
-        
-        # 최적화: 클릭한 지점 주변의 삼각형을 더 잘 찾기 위해
-        for idx, face in enumerate(faces):
-            v0 = vertices[face[0]]
-            v1 = vertices[face[1]]
-            v2 = vertices[face[2]]
-            
-            centroid = (v0 + v1 + v2) / 3.0
-            dist = np.linalg.norm(lp - centroid)
-            if dist < min_dist:
-                min_dist = dist
-                best_face_idx = idx
-            
-            if dist < 0.05: # 더 정밀하게
-                break
+        best_d2 = float("inf")
+
+        for idx in cand.tolist():
+            try:
+                fi = int(idx)
+                if fi < 0 or fi >= n_faces:
+                    continue
+                face = faces[fi]
+                a = np.asarray(vertices[int(face[0])], dtype=np.float64)
+                b = np.asarray(vertices[int(face[1])], dtype=np.float64)
+                c = np.asarray(vertices[int(face[2])], dtype=np.float64)
+                d2 = point_triangle_dist2(p, a, b, c)
+                if d2 < best_d2:
+                    best_d2 = d2
+                    best_face_idx = fi
+                    if best_d2 <= 1e-12:
+                        break
+            except Exception:
+                continue
                 
         if best_face_idx != -1:
             best_face = faces[best_face_idx]

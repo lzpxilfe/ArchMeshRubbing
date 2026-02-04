@@ -646,6 +646,7 @@ class FlattenPanel(QWidget):
     """펼침 설정 패널 (Phase B)"""
     
     flattenRequested = pyqtSignal(dict)
+    selectionRequested = pyqtSignal(str, object)
     
     def __init__(self, help_widget: HelpWidget, parent=None):
         super().__init__(parent)
@@ -759,6 +760,56 @@ class FlattenPanel(QWidget):
         adv_layout.addLayout(iter_layout)
         
         layout.addWidget(adv_group)
+
+        # 표면 선택/지정 (내/외면)
+        surface_group = QGroupBox("✋ 표면 선택/지정 (내/외면)")
+        surface_group.setStyleSheet("QGroupBox { font-weight: bold; }")
+        surface_layout = QVBoxLayout(surface_group)
+
+        tool_row = QHBoxLayout()
+        self.btn_surface_click = QPushButton("👆 클릭 선택")
+        self.btn_surface_click.setToolTip("클릭=토글, Shift/Ctrl=추가, Alt=제거")
+        self.btn_surface_click.clicked.connect(
+            lambda: self.selectionRequested.emit("tool", {"tool": "click"})
+        )
+        tool_row.addWidget(self.btn_surface_click)
+
+        self.btn_surface_brush = QPushButton("🖌️ 브러시 선택")
+        self.btn_surface_brush.setToolTip("드래그=선택, Shift=추가, Alt=제거")
+        self.btn_surface_brush.clicked.connect(
+            lambda: self.selectionRequested.emit("tool", {"tool": "brush"})
+        )
+        tool_row.addWidget(self.btn_surface_brush)
+        surface_layout.addLayout(tool_row)
+
+        self.label_surface_selection = QLabel("선택된 면: 0개")
+        self.label_surface_selection.setStyleSheet("font-weight: bold; color: #2c5282;")
+        surface_layout.addWidget(self.label_surface_selection)
+
+        assign_row = QHBoxLayout()
+        btn_outer = QPushButton("🌞 선택 → 외면")
+        btn_outer.setStyleSheet("background-color: #ebf8ff; color: #2b6cb0;")
+        btn_outer.clicked.connect(lambda: self.selectionRequested.emit("assign_outer", None))
+        assign_row.addWidget(btn_outer)
+
+        btn_inner = QPushButton("🌙 선택 → 내면")
+        btn_inner.setStyleSheet("background-color: #faf5ff; color: #6b46c1;")
+        btn_inner.clicked.connect(lambda: self.selectionRequested.emit("assign_inner", None))
+        assign_row.addWidget(btn_inner)
+        surface_layout.addLayout(assign_row)
+
+        action_row = QHBoxLayout()
+        btn_auto = QPushButton("🤖 내/외면 자동 감지")
+        btn_auto.setToolTip("법선 방향으로 내/외면을 자동 분리해 저장합니다")
+        btn_auto.clicked.connect(lambda: self.selectionRequested.emit("auto_surface", None))
+        action_row.addWidget(btn_auto)
+
+        btn_clear = QPushButton("🧹 선택 해제")
+        btn_clear.clicked.connect(lambda: self.selectionRequested.emit("clear", None))
+        action_row.addWidget(btn_clear)
+        surface_layout.addLayout(action_row)
+
+        layout.addWidget(surface_group)
         
         # 실행 버튼
         self.btn_flatten = QPushButton("🚀 펼침 실행")
@@ -795,6 +846,16 @@ class FlattenPanel(QWidget):
             'iterations': self.spin_iterations.value(),
         }
         self.flattenRequested.emit(options)
+
+    def update_surface_selection_count(self, count: int) -> None:
+        try:
+            c = int(count)
+        except Exception:
+            c = 0
+        try:
+            self.label_surface_selection.setText(f"선택된 면: {c:,}개")
+        except Exception:
+            pass
     
     def enterEvent(self, event):
         self.help_widget.set_flatten_help()
@@ -1562,32 +1623,26 @@ class MainWindow(QMainWindow):
         transform_scroll.setWidget(transform_content)
         self.transform_dock.setWidget(transform_scroll)
 
-        # 3) 선택/영역
-        self.selection_dock = QDockWidget("✋ 선택 및 영역", self)
-        self.selection_dock.setObjectName("dock_selection")
-        self.selection_panel = SelectionPanel(self.help_widget)
-        self.selection_panel.selectionChanged.connect(self.on_selection_action)
-        self.selection_dock.setWidget(self.selection_panel)
-
-        # 4) 펼침
+        # 3) 펼침
         self.flatten_dock = QDockWidget("🗺️ 펼침 (Flatten)", self)
         self.flatten_dock.setObjectName("dock_flatten")
         self.flatten_panel = FlattenPanel(self.help_widget)
         self.flatten_panel.flattenRequested.connect(self.on_flatten_requested)
+        self.flatten_panel.selectionRequested.connect(self.on_selection_action)
         self.flatten_panel.btn_measure.toggled.connect(self.toggle_curvature_mode)
         self.flatten_panel.btn_fit_arc.clicked.connect(self.fit_curvature_arc)
         self.flatten_panel.btn_clear_points.clicked.connect(self.clear_curvature_points)
         self.flatten_panel.btn_clear_arcs.clicked.connect(self.clear_all_arcs)
         self.flatten_dock.setWidget(self.flatten_panel)
 
-        # 5) 내보내기
+        # 4) 내보내기
         self.export_dock = QDockWidget("📤 내보내기", self)
         self.export_dock.setObjectName("dock_export")
         self.export_panel = ExportPanel()
         self.export_panel.exportRequested.connect(self.on_export_requested)
         self.export_dock.setWidget(self.export_panel)
 
-        # 6) 단면 도구 (슬라이싱 + 십자선 + 라인)
+        # 5) 단면 도구 (슬라이싱 + 십자선 + 라인)
         self.section_dock = QDockWidget("📏 단면 도구 (Section)", self)
         self.section_dock.setObjectName("dock_section")
         section_scroll = QScrollArea()
@@ -1642,7 +1697,6 @@ class MainWindow(QMainWindow):
         for dock in [
             self.info_dock,
             self.transform_dock,
-            self.selection_dock,
             self.flatten_dock,
             self.section_dock,
             self.export_dock,
@@ -1666,7 +1720,6 @@ class MainWindow(QMainWindow):
         for dock in [
             self.info_dock,
             self.transform_dock,
-            self.selection_dock,
             self.flatten_dock,
             self.section_dock,
             self.export_dock,
@@ -1685,25 +1738,23 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.TopDockWidgetArea, self.transform_dock)
         self.splitDockWidget(self.info_dock, self.transform_dock, Qt.Orientation.Horizontal)
 
-        # 우측: 선택/영역 + 펼침 + 단면(도구)은 탭, 씬은 우측 하단
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.selection_dock)
+        # 우측: 펼침 + 단면(도구) + 내보내기는 탭, 씬은 우측 하단
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.flatten_dock)
-        self.tabifyDockWidget(self.selection_dock, self.flatten_dock)
 
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.section_dock)
-        self.tabifyDockWidget(self.selection_dock, self.section_dock)
+        self.tabifyDockWidget(self.flatten_dock, self.section_dock)
 
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.export_dock)
-        self.tabifyDockWidget(self.selection_dock, self.export_dock)
+        self.tabifyDockWidget(self.flatten_dock, self.export_dock)
 
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.scene_dock)
-        self.splitDockWidget(self.selection_dock, self.scene_dock, Qt.Orientation.Vertical)
+        self.splitDockWidget(self.flatten_dock, self.scene_dock, Qt.Orientation.Vertical)
 
         # 크기 비율(대략적인 기본값)
         self.resizeDocks([self.info_dock, self.transform_dock], [650, 750], Qt.Orientation.Horizontal)
-        self.resizeDocks([self.selection_dock, self.scene_dock], [780, 220], Qt.Orientation.Vertical)
+        self.resizeDocks([self.flatten_dock, self.scene_dock], [780, 220], Qt.Orientation.Vertical)
 
-        self.selection_dock.raise_()
+        self.flatten_dock.raise_()
 
     def _restore_ui_state(self):
         settings = self._settings()
@@ -2068,7 +2119,6 @@ class MainWindow(QMainWindow):
         if panels_menu is not None:
             panels_menu.addAction(self.info_dock.toggleViewAction())
             panels_menu.addAction(self.transform_dock.toggleViewAction())
-            panels_menu.addAction(self.selection_dock.toggleViewAction())
             panels_menu.addAction(self.flatten_dock.toggleViewAction())
             panels_menu.addAction(self.section_dock.toggleViewAction())
             panels_menu.addAction(self.export_dock.toggleViewAction())
@@ -2354,13 +2404,15 @@ class MainWindow(QMainWindow):
         self.update_slice_range()
         try:
             obj = self.viewport.selected_obj
-            self.selection_panel.update_selection_count(len(getattr(obj, "selected_faces", []) or []))
+            self.flatten_panel.update_surface_selection_count(
+                len(getattr(obj, "selected_faces", []) or [])
+            )
         except Exception:
             pass
 
     def on_face_selection_changed(self, count: int):
         try:
-            self.selection_panel.update_selection_count(int(count))
+            self.flatten_panel.update_surface_selection_count(int(count))
         except Exception:
             pass
 
@@ -2592,7 +2644,7 @@ class MainWindow(QMainWindow):
             self.status_info.setText(f"선택 작업: {action}")
 
         try:
-            self.selection_panel.update_selection_count(len(obj.selected_faces))
+            self.flatten_panel.update_surface_selection_count(len(obj.selected_faces))
         except Exception:
             pass
         self.viewport.update()
