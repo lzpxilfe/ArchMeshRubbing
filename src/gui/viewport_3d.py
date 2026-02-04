@@ -1063,8 +1063,8 @@ class Viewport3D(QOpenGLWidget):
         self._surface_paint_points_max = 250
         self._surface_paint_left_press_pos = None
         self._surface_paint_left_dragged = False
-        # Surface area(lasso) selection in screen-space
-        self.surface_lasso_points = []  # [(x,y), ...] in widget coords
+        # Surface area(lasso) selection via mesh-snapped world points
+        self.surface_lasso_points = []  # [np.ndarray(3,), ...] in world coords
         self.surface_lasso_preview = None  # QPoint | None
         self._surface_area_left_press_pos = None
         self._surface_area_left_dragged = False
@@ -4658,11 +4658,18 @@ class Viewport3D(QOpenGLWidget):
                         if thr is not None and bool(getattr(thr, "isRunning", lambda: False)()):
                             self.status_info = "⏳ 면적 선택 계산 중…"
                         else:
-                            self.surface_lasso_points.append((int(event.pos().x()), int(event.pos().y())))
-                            try:
-                                self.surface_lasso_preview = event.pos()
-                            except Exception:
-                                pass
+                            p = self.pick_point_on_mesh(event.pos().x(), event.pos().y())
+                            if p is None:
+                                self.status_info = "⚠️ 메쉬 위를 클릭해 점을 찍어 주세요."
+                            else:
+                                try:
+                                    self.surface_lasso_points.append(np.asarray(p[:3], dtype=np.float64))
+                                except Exception:
+                                    self.surface_lasso_points.append(p)
+                                try:
+                                    self.surface_lasso_preview = event.pos()
+                                except Exception:
+                                    pass
                         self.update()
                 except Exception:
                     pass
@@ -5669,8 +5676,8 @@ class Viewport3D(QOpenGLWidget):
             self.update()
             return
 
-        pts = list(getattr(self, "surface_lasso_points", None) or [])
-        if len(pts) < 3:
+        pts_world = list(getattr(self, "surface_lasso_points", None) or [])
+        if len(pts_world) < 3:
             self.status_info = "📐 면적(Area): 점을 3개 이상 찍어주세요. (우클릭/Enter=확정)"
             self.update()
             return
@@ -5704,36 +5711,47 @@ class Viewport3D(QOpenGLWidget):
             proj = np.eye(4, dtype=np.float64)
 
         try:
-            vw, vh = int(viewport[2]), int(viewport[3])
+            vx, vy, vw, vh = [int(v) for v in viewport[:4]]
         except Exception:
-            vw, vh = int(self.width()), int(self.height())
+            vx, vy, vw, vh = 0, 0, int(self.width()), int(self.height())
         vw = max(1, vw)
         vh = max(1, vh)
 
-        # Widget-space bbox (clamped to viewport)
-        try:
-            xs = np.array([int(p[0]) for p in pts], dtype=np.int32)
-            ys = np.array([int(p[1]) for p in pts], dtype=np.int32)
-        except Exception:
-            xs = np.array([], dtype=np.int32)
-            ys = np.array([], dtype=np.int32)
+        # Project world points -> GL window coords (bottom-left origin)
+        proj_xy: list[tuple[float, float]] = []
+        for p in pts_world:
+            try:
+                px, py, _pz = gluProject(
+                    float(p[0]),
+                    float(p[1]),
+                    float(p[2]),
+                    mv_raw,
+                    proj_raw,
+                    viewport,
+                )
+                if not (np.isfinite(px) and np.isfinite(py)):
+                    continue
+                proj_xy.append((float(px), float(py)))
+            except Exception:
+                continue
 
-        if xs.size < 3 or ys.size < 3:
+        if len(proj_xy) < 3:
             self.status_info = "📐 면적(Area): 점 입력이 올바르지 않습니다."
-            self.clear_surface_lasso()
             self.update()
             return
 
-        x0 = int(np.clip(int(xs.min()), 0, vw - 1))
-        x1 = int(np.clip(int(xs.max()), 0, vw - 1))
-        y0 = int(np.clip(int(ys.min()), 0, vh - 1))
-        y1 = int(np.clip(int(ys.max()), 0, vh - 1))
+        poly_gl = np.asarray(proj_xy, dtype=np.float64)
 
-        # Convert to GL pixel coords (bottom-left origin)
-        gl_x0 = x0
-        gl_x1 = x1
-        gl_y0 = int(np.clip(vh - y1 - 1, 0, vh - 1))
-        gl_y1 = int(np.clip(vh - y0 - 1, 0, vh - 1))
+        # Bounding box in GL coords (clamped to viewport)
+        try:
+            gl_x0 = int(np.clip(int(np.floor(float(np.min(poly_gl[:, 0])))), vx, vx + vw - 1))
+            gl_x1 = int(np.clip(int(np.ceil(float(np.max(poly_gl[:, 0])))), vx, vx + vw - 1))
+            gl_y0 = int(np.clip(int(np.floor(float(np.min(poly_gl[:, 1])))), vy, vy + vh - 1))
+            gl_y1 = int(np.clip(int(np.ceil(float(np.max(poly_gl[:, 1])))), vy, vy + vh - 1))
+        except Exception:
+            self.status_info = "📐 면적(Area): 점 입력이 올바르지 않습니다."
+            self.update()
+            return
 
         width = int(max(1, gl_x1 - gl_x0 + 1))
         height = int(max(1, gl_y1 - gl_y0 + 1))
@@ -5748,12 +5766,6 @@ class Viewport3D(QOpenGLWidget):
                 depth_map = depth_map.reshape((height, width))
         except Exception:
             depth_map = None
-
-        # Polygon points in GL coords
-        try:
-            poly_gl = np.array([[float(p[0]), float(vh - int(p[1]) - 1)] for p in pts], dtype=np.float64)
-        except Exception:
-            poly_gl = np.zeros((0, 2), dtype=np.float64)
 
         try:
             tol = float(getattr(self, "_surface_area_depth_tol", 0.01))
@@ -6403,9 +6415,30 @@ class Viewport3D(QOpenGLWidget):
 
             self.makeCurrent()
             viewport = glGetIntegerv(GL_VIEWPORT)
-            w, h = int(viewport[2]), int(viewport[3])
+            try:
+                vx, vy, w, h = [int(v) for v in viewport[:4]]
+            except Exception:
+                vx, vy, w, h = 0, 0, int(self.width()), int(self.height())
             if w <= 1 or h <= 1:
                 return
+
+            # Project world points -> widget coords (top-left origin)
+            modelview = glGetDoublev(GL_MODELVIEW_MATRIX)
+            projection = glGetDoublev(GL_PROJECTION_MATRIX)
+            screen_pts: list[tuple[float, float]] = []
+            for p in pts:
+                try:
+                    win = gluProject(float(p[0]), float(p[1]), float(p[2]), modelview, projection, viewport)
+                    if not win:
+                        continue
+                    xw, yw = float(win[0]), float(win[1])
+                    # viewport origin may not be (0,0)
+                    sx = xw - float(vx)
+                    sy = float(vy + h) - yw
+                    if np.isfinite(sx) and np.isfinite(sy):
+                        screen_pts.append((sx, sy))
+                except Exception:
+                    continue
 
             glDisable(GL_LIGHTING)
             glDisable(GL_DEPTH_TEST)
@@ -6426,7 +6459,7 @@ class Viewport3D(QOpenGLWidget):
             glLineWidth(2.0)
             glColor4f(0.1, 0.6, 1.0, 0.85)
             glBegin(GL_LINE_STRIP)
-            for xy in pts:
+            for xy in screen_pts:
                 try:
                     x, y = float(xy[0]), float(xy[1])
                 except Exception:
@@ -6443,7 +6476,7 @@ class Viewport3D(QOpenGLWidget):
             glPointSize(6.0)
             glColor4f(0.95, 0.95, 0.95, 0.95)
             glBegin(GL_POINTS)
-            for xy in pts:
+            for xy in screen_pts:
                 try:
                     x, y = float(xy[0]), float(xy[1])
                 except Exception:

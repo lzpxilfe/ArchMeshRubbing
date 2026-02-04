@@ -796,7 +796,10 @@ class FlattenPanel(QWidget):
         tool_row.addWidget(self.btn_surface_brush)
 
         self.btn_surface_area = QPushButton("📐 면적(Area)")
-        self.btn_surface_area.setToolTip("화면에서 다각형을 그려 보이는 면을 한 번에 지정합니다.\n우클릭/Enter=확정, Backspace=되돌리기, ESC=취소")
+        self.btn_surface_area.setToolTip(
+            "메쉬 위에 점을 찍어 다각형을 만들고, 보이는 면을 한 번에 지정합니다.\n"
+            "좌클릭=점 추가(드래그=회전), 우클릭/Enter=확정, Backspace=되돌리기, ESC=취소"
+        )
         self.btn_surface_area.clicked.connect(
             lambda: self.selectionRequested.emit(
                 "surface_tool",
@@ -2623,7 +2626,7 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
                 self.viewport.status_info = (
-                    f"📐 면적(Area) [{target}]: 좌클릭=점 추가(드래그=회전), "
+                    f"📐 면적(Area) [{target}]: 메쉬 위 좌클릭=점 추가(드래그=회전), "
                     f"우클릭/Enter=확정, Backspace=되돌리기, Alt=제거 (ESC로 종료)"
                 )
             else:
