@@ -813,6 +813,8 @@ class Viewport3D(QOpenGLWidget):
         self._selection_brush_last_pick = 0.0
         self._surface_paint_target = "outer"  # outer|inner|migu
         self._surface_brush_last_pick = 0.0
+        self.surface_paint_points = []  # [(np.ndarray(3,), target), ...] in world coords
+        self._surface_paint_points_max = 250
         self.floor_picks = []  # 바닥면 지정용 점 리스트
         
         # Undo/Redo 시스템
@@ -999,10 +1001,12 @@ class Viewport3D(QOpenGLWidget):
             # Flat shading 시에는 모든 면이 일정 밝기로 보이게
             glColor3f(0.8, 0.8, 0.8)
         
-        # 1. 격자 및 축
+        # 1. 격자 및 축 (Depth buffer에는 기록하지 않음: 메쉬 피킹/깊이 안정화)
+        glDepthMask(GL_FALSE)
         self.draw_ground_plane()  # 반투명 바닥
         self.draw_grid()
         self.draw_axes()
+        glDepthMask(GL_TRUE)
         
         # 2. 모든 메쉬 객체 렌더링
         sel = int(self.selected_index) if self.selected_index is not None else -1
@@ -1035,18 +1039,24 @@ class Viewport3D(QOpenGLWidget):
 
             self.draw_scene_object(obj, is_selected=(i == sel))
             
-        # 3. 곡률 피팅 요소
+        # 3. 오버레이 요소 (Depth write off: depth buffer는 메쉬만 유지)
+        glDepthMask(GL_FALSE)
+
+        # 3.1 곡률 피팅 요소
         self.draw_picked_points()
         self.draw_fitted_arc()
-        
+
+        # 3.2 표면 지정(찍은 점) 표시
+        self.draw_surface_paint_points()
+
         # 3.5 바닥 정렬 점 표시
         self.draw_floor_picks()
-        
+
         # 3.6 단면 슬라이스 평면 및 단면선
         if self.slice_enabled:
             self.draw_slice_plane()
             self.draw_slice_contours()
-            
+
         # 3.7 십자선 단면
         if self.crosshair_enabled:
             self.draw_crosshair()
@@ -1063,6 +1073,8 @@ class Viewport3D(QOpenGLWidget):
         if self.roi_enabled:
             self.draw_roi_cut_edges()
             self.draw_roi_box()
+
+        glDepthMask(GL_TRUE)
 
         # 3.9 ROI 단면(얇은 슬라이스) 바닥 배치
         self.draw_roi_section_plots()
@@ -4152,7 +4164,7 @@ class Viewport3D(QOpenGLWidget):
                         res = self.pick_face_at_point(point, return_index=True)
                         if res:
                             idx, _verts = res
-                            self._apply_surface_seed_pick(int(idx), modifiers)
+                            self._apply_surface_seed_pick(int(idx), modifiers, picked_point_world=point)
                         self.update()
                     return
 
@@ -5178,6 +5190,21 @@ class Viewport3D(QOpenGLWidget):
         except Exception:
             pass
 
+    def _record_surface_paint_point(self, point: np.ndarray, target: str) -> None:
+        try:
+            p = np.asarray(point, dtype=np.float64).reshape(-1)
+            if p.size < 3 or not np.isfinite(p[:3]).all():
+                return
+            t = str(target or "").strip().lower()
+            if t not in {"outer", "inner", "migu"}:
+                t = "outer"
+            self.surface_paint_points.append((p[:3].copy(), t))
+            max_n = int(getattr(self, "_surface_paint_points_max", 250))
+            if max_n > 0 and len(self.surface_paint_points) > max_n:
+                del self.surface_paint_points[: max(1, len(self.surface_paint_points) - max_n)]
+        except Exception:
+            pass
+
     def _get_surface_target_set(self, obj: SceneObject, target: str) -> set[int]:
         target = str(target or "").strip().lower()
         if target == "inner":
@@ -5313,6 +5340,10 @@ class Viewport3D(QOpenGLWidget):
         point = self.pick_point_on_mesh(pos.x(), pos.y())
         if point is None:
             return
+        try:
+            self._record_surface_paint_point(point, getattr(self, "_surface_paint_target", "outer"))
+        except Exception:
+            pass
 
         res = self.pick_face_at_point(point, return_index=True)
         if not res:
@@ -5333,7 +5364,7 @@ class Viewport3D(QOpenGLWidget):
 
         self._emit_surface_assignment_changed(obj)
 
-    def _apply_surface_seed_pick(self, seed_face_idx: int, modifiers) -> None:
+    def _apply_surface_seed_pick(self, seed_face_idx: int, modifiers, *, picked_point_world: np.ndarray | None = None) -> None:
         obj = self.selected_obj
         if obj is None or obj.mesh is None:
             return
@@ -5344,6 +5375,12 @@ class Viewport3D(QOpenGLWidget):
         patch = self._grow_smooth_patch(obj, int(seed_face_idx), max_angle_deg=30.0)
         if not patch:
             return
+
+        if picked_point_world is not None:
+            try:
+                self._record_surface_paint_point(picked_point_world, target)
+            except Exception:
+                pass
 
         if modifiers & Qt.KeyboardModifier.AltModifier:
             target_set.difference_update(patch)
@@ -5575,6 +5612,52 @@ class Viewport3D(QOpenGLWidget):
         
         glEnable(GL_DEPTH_TEST)
         glEnable(GL_LIGHTING)
+
+    def draw_surface_paint_points(self):
+        """표면 지정(외/내/미구) 중 찍은 점 표시"""
+        pts = getattr(self, "surface_paint_points", None)
+        if not pts:
+            return
+
+        try:
+            glDisable(GL_LIGHTING)
+            glDisable(GL_DEPTH_TEST)  # 항상 보이게
+            glEnable(GL_BLEND)
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+
+            glPointSize(7.0)
+            glBegin(GL_POINTS)
+            for p, target in pts:
+                try:
+                    t = str(target or "").strip().lower()
+                except Exception:
+                    t = "outer"
+                if t == "inner":
+                    glColor4f(0.75, 0.35, 1.0, 0.95)
+                elif t == "migu":
+                    glColor4f(0.25, 0.85, 0.35, 0.95)
+                else:
+                    glColor4f(0.25, 0.65, 1.0, 0.95)
+
+                try:
+                    x, y, z = float(p[0]), float(p[1]), float(p[2])
+                except Exception:
+                    continue
+                glVertex3f(x, y, z)
+            glEnd()
+
+        except Exception:
+            try:
+                glEnd()
+            except Exception:
+                pass
+        finally:
+            try:
+                glDisable(GL_BLEND)
+                glEnable(GL_DEPTH_TEST)
+                glEnable(GL_LIGHTING)
+            except Exception:
+                pass
     
     def draw_fitted_arc(self):
         """피팅된 원호 시각화 (선택된 객체에 부착됨)"""
