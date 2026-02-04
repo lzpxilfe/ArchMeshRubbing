@@ -115,6 +115,8 @@ class RubbingSheetExporter:
         *,
         cut_lines_world: Optional[list] = None,
         cut_profiles_world: Optional[list] = None,
+        outer_face_indices: Optional[list[int] | np.ndarray] = None,
+        inner_face_indices: Optional[list[int] | np.ndarray] = None,
         options: SheetExportOptions | None = None,
     ) -> str:
         options = options or SheetExportOptions()
@@ -132,8 +134,32 @@ class RubbingSheetExporter:
             options=options,
         )
 
-        # 2) Split mesh into outer/inner using face normals vs +Z
-        outer_mesh, inner_mesh = self._split_outer_inner(mesh, threshold=float(options.normal_split_threshold))
+        # 2) Split mesh into outer/inner (prefer user-assigned face indices if provided)
+        outer_mesh = None
+        inner_mesh = None
+        if outer_face_indices is not None:
+            try:
+                idx = np.asarray(outer_face_indices, dtype=np.int32).reshape(-1)
+                if idx.size > 0:
+                    outer_mesh = mesh.extract_submesh(idx)
+            except Exception:
+                outer_mesh = None
+        if inner_face_indices is not None:
+            try:
+                idx = np.asarray(inner_face_indices, dtype=np.int32).reshape(-1)
+                if idx.size > 0:
+                    inner_mesh = mesh.extract_submesh(idx)
+            except Exception:
+                inner_mesh = None
+
+        if outer_mesh is None or inner_mesh is None:
+            auto_outer, auto_inner = self._split_outer_inner(
+                mesh, threshold=float(options.normal_split_threshold)
+            )
+            if outer_mesh is None:
+                outer_mesh = auto_outer
+            if inner_mesh is None:
+                inner_mesh = auto_inner
 
         # 3) Flatten + rubbing images
         outer_flat, outer_rub = self._flatten_and_rub(outer_mesh, svg_unit=svg_unit, unit_scale=unit_scale, options=options)

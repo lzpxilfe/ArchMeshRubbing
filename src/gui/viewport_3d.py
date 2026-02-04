@@ -687,6 +687,9 @@ class SceneObject:
         self.vbo_id = None
         self.vertex_count = 0
         self.selected_faces = set()
+        self.outer_face_indices = set()
+        self.inner_face_indices = set()
+        self.migu_face_indices = set()
         self._trimesh = None # Lazy-loaded trimesh object
         
     def to_trimesh(self):
@@ -760,6 +763,7 @@ class Viewport3D(QOpenGLWidget):
     lineProfileUpdated = pyqtSignal(list)    # line_profile
     roiSilhouetteExtracted = pyqtSignal(list) # 2D silhouette points
     cutLinesAutoEnded = pyqtSignal()         # 단면선(2개) 입력 모드가 자동 종료됨
+    faceSelectionChanged = pyqtSignal(int)   # 선택된 face 개수 변경
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -799,6 +803,7 @@ class Viewport3D(QOpenGLWidget):
         # 피킹 모드 ('none', 'curvature', 'floor_3point', 'floor_face', 'floor_brush')
         self.picking_mode = 'none'
         self.brush_selected_faces = set() # 브러시로 선택된 면 인덱스
+        self._selection_brush_mode = "replace"  # replace|add|remove
         self.floor_picks = []  # 바닥면 지정용 점 리스트
         
         # Undo/Redo 시스템
@@ -3334,6 +3339,23 @@ class Viewport3D(QOpenGLWidget):
             glDisable(GL_POLYGON_OFFSET_FILL)
             glEnable(GL_LIGHTING)
             glPopMatrix()
+
+        # 선택된 면 하이라이트 (SelectionPanel)
+        if is_selected and self.picking_mode in {'select_face', 'select_brush'} and obj.selected_faces:
+            glPushMatrix()
+            glDisable(GL_LIGHTING)
+            glPolygonOffset(-1.0, -1.0)
+            glEnable(GL_POLYGON_OFFSET_FILL)
+            glColor3f(1.0, 0.8, 0.0)
+            glBegin(GL_TRIANGLES)
+            for face_idx in obj.selected_faces:
+                f = obj.mesh.faces[int(face_idx)]
+                for v_idx in f:
+                    glVertex3fv(obj.mesh.vertices[v_idx])
+            glEnd()
+            glDisable(GL_POLYGON_OFFSET_FILL)
+            glEnable(GL_LIGHTING)
+            glPopMatrix()
         
         if obj.vbo_id is not None:
             # VBO 방식 렌더링
@@ -4028,6 +4050,49 @@ class Viewport3D(QOpenGLWidget):
                     self.update()
                     return
 
+                elif self.picking_mode == 'select_face':
+                    point = self.pick_point_on_mesh(event.pos().x(), event.pos().y())
+                    if point is not None:
+                        res = self.pick_face_at_point(point, return_index=True)
+                        if res:
+                            idx, _verts = res
+                            obj = self.selected_obj
+                            if obj is None:
+                                return
+                            idx = int(idx)
+                            if modifiers & Qt.KeyboardModifier.AltModifier:
+                                obj.selected_faces.discard(idx)
+                            elif modifiers & (
+                                Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.ControlModifier
+                            ):
+                                obj.selected_faces.add(idx)
+                            else:
+                                if idx in obj.selected_faces:
+                                    obj.selected_faces.discard(idx)
+                                else:
+                                    obj.selected_faces.add(idx)
+                            self.faceSelectionChanged.emit(len(obj.selected_faces))
+                        self.update()
+                    return
+
+                elif self.picking_mode == 'select_brush':
+                    obj = self.selected_obj
+                    if obj is None or obj.mesh is None:
+                        return
+                    if modifiers & Qt.KeyboardModifier.AltModifier:
+                        self._selection_brush_mode = "remove"
+                    elif modifiers & Qt.KeyboardModifier.ShiftModifier:
+                        self._selection_brush_mode = "add"
+                    else:
+                        self._selection_brush_mode = "replace"
+
+                    if self._selection_brush_mode == "replace":
+                        obj.selected_faces.clear()
+                    self._pick_selection_brush_face(event.pos())
+                    self.faceSelectionChanged.emit(len(obj.selected_faces))
+                    self.update()
+                    return
+
                 elif self.picking_mode == 'line_section':
                     pt = self.pick_point_on_plane_z(event.pos().x(), event.pos().y(), z=0.0)
                     if pt is not None:
@@ -4210,6 +4275,11 @@ class Viewport3D(QOpenGLWidget):
             if self.brush_selected_faces:
                 self.alignToBrushSelected.emit()
             self.picking_mode = 'none'
+            self.update()
+
+        if self.mouse_button == Qt.MouseButton.LeftButton and self.picking_mode == 'select_brush':
+            obj = self.selected_obj
+            self.faceSelectionChanged.emit(len(obj.selected_faces) if obj is not None else 0)
             self.update()
 
         if self.mouse_button == Qt.MouseButton.LeftButton and self.picking_mode == 'line_section':
@@ -4421,6 +4491,12 @@ class Viewport3D(QOpenGLWidget):
             # 0. 브러시 피킹 처리
             if self.mouse_button == Qt.MouseButton.LeftButton and self.picking_mode == 'floor_brush':
                 self._pick_brush_face(event.pos())
+                self.update()
+                return
+
+            # 0.1 선택 브러시 처리 (SelectionPanel)
+            if self.mouse_button == Qt.MouseButton.LeftButton and self.picking_mode == 'select_brush':
+                self._pick_selection_brush_face(event.pos())
                 self.update()
                 return
 
@@ -4981,15 +5057,66 @@ class Viewport3D(QOpenGLWidget):
                 idx, v = res
                 self.brush_selected_faces.add(idx)
 
+    def _pick_selection_brush_face(self, pos):
+        """SelectionPanel용 브러시 선택 (obj.selected_faces에 반영)"""
+        obj = self.selected_obj
+        if not obj or obj.mesh is None:
+            return
+
+        point = self.pick_point_on_mesh(pos.x(), pos.y())
+        if point is None:
+            return
+
+        res = self.pick_face_at_point(point, return_index=True)
+        if not res:
+            return
+        idx, _verts = res
+        idx = int(idx)
+
+        mode = str(getattr(self, "_selection_brush_mode", "replace"))
+        if mode == "remove":
+            obj.selected_faces.discard(idx)
+        else:
+            obj.selected_faces.add(idx)
+
     def pick_face_at_point(self, point: np.ndarray, return_index=False):
         """특정 3D 좌표가 포함된 삼각형 면의 정점 3개를 반환"""
         obj = self.selected_obj
         if not obj or obj.mesh is None:
             return None
         
-        # 메쉬 로컬 좌표로 변환
-        inv_trans = -obj.translation
-        lp = point + inv_trans
+        # 메쉬 로컬 좌표로 변환 (T/R/S 역변환)
+        try:
+            trans = np.asarray(getattr(obj, "translation", [0.0, 0.0, 0.0]), dtype=np.float64).reshape(-1)
+            if trans.size < 3:
+                trans = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+            rot_deg = np.asarray(getattr(obj, "rotation", [0.0, 0.0, 0.0]), dtype=np.float64).reshape(-1)
+            if rot_deg.size < 3:
+                rot_deg = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+            scale = float(getattr(obj, "scale", 1.0))
+            if abs(scale) < 1e-12:
+                scale = 1.0
+
+            rx, ry, rz = np.radians(rot_deg[:3])
+            cx, sx = float(np.cos(rx)), float(np.sin(rx))
+            cy, sy = float(np.cos(ry)), float(np.sin(ry))
+            cz, sz = float(np.cos(rz)), float(np.sin(rz))
+
+            rot_x = np.array([[1.0, 0.0, 0.0], [0.0, cx, -sx], [0.0, sx, cx]], dtype=np.float64)
+            rot_y = np.array([[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]], dtype=np.float64)
+            rot_z = np.array([[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]], dtype=np.float64)
+            rot_mat = rot_x @ rot_y @ rot_z
+        except Exception:
+            trans = np.asarray(getattr(obj, "translation", [0.0, 0.0, 0.0]), dtype=np.float64).reshape(-1)
+            if trans.size < 3:
+                trans = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+            scale = 1.0
+            rot_mat = np.eye(3, dtype=np.float64)
+
+        pt = np.asarray(point, dtype=np.float64).reshape(-1)
+        if pt.size < 3:
+            return None
+        lp = (rot_mat.T @ (pt[:3] - trans[:3])) / float(scale)
         
         vertices = obj.mesh.vertices
         faces = obj.mesh.faces
@@ -5014,9 +5141,11 @@ class Viewport3D(QOpenGLWidget):
                 
         if best_face_idx != -1:
             best_face = faces[best_face_idx]
-            v_list = [vertices[best_face[0]] + obj.translation, 
-                      vertices[best_face[1]] + obj.translation, 
-                      vertices[best_face[2]] + obj.translation]
+            v_list = []
+            for vi in best_face:
+                v = np.asarray(vertices[int(vi)], dtype=np.float64)
+                w = (rot_mat @ (v[:3] * float(scale))) + trans[:3]
+                v_list.append(w)
             if return_index:
                 return best_face_idx, v_list
             return v_list

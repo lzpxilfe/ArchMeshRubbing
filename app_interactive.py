@@ -828,12 +828,14 @@ class SelectionPanel(QWidget):
         self.btn_click.setCheckable(True)
         self.btn_click.setChecked(True)
         self.btn_click.setToolTip("Shift+클릭으로 면 선택")
+        self.btn_click.clicked.connect(lambda: self.selectionChanged.emit("tool", {"tool": "click"}))
         self.tool_button_group.addButton(self.btn_click, 0)
         tool_layout.addWidget(self.btn_click)
         
         self.btn_brush = QPushButton("🖌️ 브러시 선택")
         self.btn_brush.setCheckable(True)
         self.btn_brush.setToolTip("드래그로 여러 면 선택")
+        self.btn_brush.clicked.connect(lambda: self.selectionChanged.emit("tool", {"tool": "brush"}))
         self.tool_button_group.addButton(self.btn_brush, 1)
         tool_layout.addWidget(self.btn_brush)
         
@@ -850,6 +852,7 @@ class SelectionPanel(QWidget):
         self.btn_lasso = QPushButton("⭕ 올가미 선택")
         self.btn_lasso.setCheckable(True)
         self.btn_lasso.setToolTip("자유형 영역으로 선택")
+        self.btn_lasso.clicked.connect(lambda: self.selectionChanged.emit("tool", {"tool": "lasso"}))
         self.tool_button_group.addButton(self.btn_lasso, 2)
         tool_layout.addWidget(self.btn_lasso)
         
@@ -1501,6 +1504,7 @@ class MainWindow(QMainWindow):
         self.viewport.floorFacePicked.connect(self.on_floor_face_picked)
         self.viewport.alignToBrushSelected.connect(self.on_align_to_brush_selected)
         self.viewport.floorAlignmentConfirmed.connect(self.on_floor_alignment_confirmed)
+        self.viewport.faceSelectionChanged.connect(self.on_face_selection_changed)
         
         # 단축키 설정 (Undo: Ctrl+Z)
         self.undo_shortcut = QShortcut(QKeySequence("Ctrl+Z"), self)
@@ -2348,6 +2352,17 @@ class MainWindow(QMainWindow):
         self.scene_panel.update_list(self.viewport.objects, index)
         self.sync_transform_panel()
         self.update_slice_range()
+        try:
+            obj = self.viewport.selected_obj
+            self.selection_panel.update_selection_count(len(getattr(obj, "selected_faces", []) or []))
+        except Exception:
+            pass
+
+    def on_face_selection_changed(self, count: int):
+        try:
+            self.selection_panel.update_selection_count(int(count))
+        except Exception:
+            pass
 
     def update_slice_range(self):
         """현재 선택된 객체의 Z 범위로 슬라이더 업데이트"""
@@ -2464,8 +2479,123 @@ class MainWindow(QMainWindow):
         self.viewport.meshTransformChanged.emit()
     
     def on_selection_action(self, action: str, data):
-        self.status_info.setText(f"선택 작업: {action}")
-        # TODO: 실제 선택 로직 구현
+        action = str(action or "").strip()
+
+        # 1) Tool mode switch (no mesh required)
+        if action == "tool":
+            tool = ""
+            try:
+                tool = str((data or {}).get("tool", "")).strip().lower()
+            except Exception:
+                tool = ""
+
+            if tool == "click":
+                self.viewport.picking_mode = "select_face"
+                self.viewport.status_info = "🖱️ 면 선택: 클릭=토글, Shift/Ctrl=추가, Alt=제거 (ESC로 종료)"
+            elif tool == "brush":
+                self.viewport.picking_mode = "select_brush"
+                self.viewport.status_info = "🖌️ 브러시 선택: 드래그=선택, Shift=추가, Alt=제거 (ESC로 종료)"
+            else:
+                QMessageBox.information(self, "안내", "올가미 선택은 아직 구현되지 않았습니다.")
+                return
+
+            self.viewport.update()
+            return
+
+        # 2) Actions that need a selected mesh
+        obj = self.viewport.selected_obj
+        if not obj or not getattr(obj, "mesh", None):
+            QMessageBox.warning(self, "경고", "먼저 메쉬를 선택해 주세요.")
+            return
+
+        if not hasattr(obj, "selected_faces") or obj.selected_faces is None:
+            obj.selected_faces = set()
+
+        selected_faces: set[int] = set(int(x) for x in (obj.selected_faces or set()))
+        obj.selected_faces = selected_faces
+
+        if action == "clear":
+            selected_faces.clear()
+            self.viewport.status_info = "선택 해제"
+
+        elif action == "invert":
+            try:
+                all_faces = set(range(int(obj.mesh.n_faces)))
+                obj.selected_faces = all_faces - selected_faces
+                selected_faces = obj.selected_faces
+                self.viewport.status_info = "선택 반전"
+            except Exception:
+                pass
+
+        elif action in {"grow", "shrink"}:
+            if not selected_faces:
+                return
+            try:
+                from src.core.region_selector import RegionSelector
+
+                selector = RegionSelector()
+                arr = np.asarray(sorted(selected_faces), dtype=np.int32)
+                if action == "grow":
+                    new_arr = selector.grow_selection(obj.mesh, arr, iterations=1)
+                    self.viewport.status_info = "선택 확장"
+                else:
+                    new_arr = selector.shrink_selection(obj.mesh, arr, iterations=1)
+                    self.viewport.status_info = "선택 축소"
+                obj.selected_faces = set(int(x) for x in np.asarray(new_arr).reshape(-1).tolist())
+                selected_faces = obj.selected_faces
+            except Exception:
+                pass
+
+        elif action == "auto_surface":
+            try:
+                from src.core.surface_separator import SurfaceSeparator
+
+                separator = SurfaceSeparator()
+                mesh = self._build_world_mesh(obj)
+                result = separator.auto_detect_surfaces(mesh)
+                obj.outer_face_indices = set(int(x) for x in result.outer_face_indices.tolist())
+                obj.inner_face_indices = set(int(x) for x in result.inner_face_indices.tolist())
+
+                self.viewport.status_info = (
+                    f"자동 분리 완료: outer {len(obj.outer_face_indices):,} / inner {len(obj.inner_face_indices):,}"
+                )
+                QMessageBox.information(
+                    self,
+                    "완료",
+                    f"자동 분리 결과를 저장했습니다.\n\n"
+                    f"- outer: {len(obj.outer_face_indices):,} faces\n"
+                    f"- inner: {len(obj.inner_face_indices):,} faces",
+                )
+            except Exception as e:
+                QMessageBox.critical(self, "오류", f"자동 분리 실패:\n{e}")
+                return
+
+        elif action == "auto_edge":
+            QMessageBox.information(self, "안내", "미구/경계 자동 선택은 아직 구현되지 않았습니다.")
+            return
+
+        elif action in {"assign_outer", "assign_inner", "assign_migu"}:
+            if not selected_faces:
+                QMessageBox.warning(self, "경고", "먼저 면을 선택해 주세요.")
+                return
+            if action == "assign_outer":
+                obj.outer_face_indices = set(selected_faces)
+                self.viewport.status_info = f"외면 지정: {len(obj.outer_face_indices):,} faces"
+            elif action == "assign_inner":
+                obj.inner_face_indices = set(selected_faces)
+                self.viewport.status_info = f"내면 지정: {len(obj.inner_face_indices):,} faces"
+            else:
+                obj.migu_face_indices = set(selected_faces)
+                self.viewport.status_info = f"미구 지정: {len(obj.migu_face_indices):,} faces"
+
+        else:
+            self.status_info.setText(f"선택 작업: {action}")
+
+        try:
+            self.selection_panel.update_selection_count(len(obj.selected_faces))
+        except Exception:
+            pass
+        self.viewport.update()
         
     def _flatten_cache_key(self, obj, options: dict) -> tuple:
         method = str(options.get('method', 'ARAP')).strip()
@@ -2733,12 +2863,16 @@ class MainWindow(QMainWindow):
                     mesh = self._build_world_mesh(obj)
                     cut_lines_world = self.viewport.get_cut_lines_world()
                     cut_profiles_world = self.viewport.get_cut_sections_world()
+                    outer_idx = sorted(list(getattr(obj, "outer_face_indices", set()) or []))
+                    inner_idx = sorted(list(getattr(obj, "inner_face_indices", set()) or []))
 
                     exporter.export(
                         mesh,
                         filepath,
                         cut_lines_world=cut_lines_world,
                         cut_profiles_world=cut_profiles_world,
+                        outer_face_indices=outer_idx if outer_idx else None,
+                        inner_face_indices=inner_idx if inner_idx else None,
                         options=SheetExportOptions(
                             dpi=dpi,
                             flatten_iterations=iterations,
