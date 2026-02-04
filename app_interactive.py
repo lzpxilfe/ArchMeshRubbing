@@ -2624,12 +2624,20 @@ class MainWindow(QMainWindow):
                 obj.migu_face_indices.clear()
             else:
                 obj.outer_face_indices.clear()
+            try:
+                self.viewport.clear_surface_paint_points(target)
+            except Exception:
+                pass
             self.viewport.status_info = f"표면 지정 비움: {target}"
 
         elif action == "surface_clear_all":
             obj.outer_face_indices.clear()
             obj.inner_face_indices.clear()
             obj.migu_face_indices.clear()
+            try:
+                self.viewport.clear_surface_paint_points(None)
+            except Exception:
+                pass
             self.viewport.status_info = "표면 지정 전체 초기화"
 
         elif action == "auto_surface":

@@ -815,6 +815,8 @@ class Viewport3D(QOpenGLWidget):
         self._surface_brush_last_pick = 0.0
         self.surface_paint_points = []  # [(np.ndarray(3,), target), ...] in world coords
         self._surface_paint_points_max = 250
+        self._surface_paint_left_press_pos = None
+        self._surface_paint_left_dragged = False
         self.floor_picks = []  # 바닥면 지정용 점 리스트
         
         # Undo/Redo 시스템
@@ -4159,13 +4161,9 @@ class Viewport3D(QOpenGLWidget):
                     return
 
                 elif self.picking_mode == 'paint_surface_face':
-                    point = self.pick_point_on_mesh(event.pos().x(), event.pos().y())
-                    if point is not None:
-                        res = self.pick_face_at_point(point, return_index=True)
-                        if res:
-                            idx, _verts = res
-                            self._apply_surface_seed_pick(int(idx), modifiers, picked_point_world=point)
-                        self.update()
+                    # Click-to-apply on mouseRelease only (avoid accidental selection while orbiting).
+                    self._surface_paint_left_press_pos = event.pos()
+                    self._surface_paint_left_dragged = False
                     return
 
                 elif self.picking_mode == 'paint_surface_brush':
@@ -4352,6 +4350,26 @@ class Viewport3D(QOpenGLWidget):
                 self._cut_line_left_press_pos = None
                 self._cut_line_left_dragged = False
 
+        # 표면 지정(찍기): 드래그가 아니면 릴리즈에서 1회 적용
+        if self.picking_mode == "paint_surface_face" and event.button() == Qt.MouseButton.LeftButton:
+            try:
+                if (
+                    getattr(self, "_surface_paint_left_press_pos", None) is not None
+                    and not bool(getattr(self, "_surface_paint_left_dragged", False))
+                ):
+                    modifiers = event.modifiers()
+                    point = self.pick_point_on_mesh(event.pos().x(), event.pos().y())
+                    if point is not None:
+                        res = self.pick_face_at_point(point, return_index=True)
+                        if res:
+                            idx, _verts = res
+                            self._apply_surface_seed_pick(int(idx), modifiers, picked_point_world=point)
+                        self.update()
+            except Exception:
+                pass
+            self._surface_paint_left_press_pos = None
+            self._surface_paint_left_dragged = False
+
         if self.mouse_button == Qt.MouseButton.LeftButton and self.picking_mode == 'floor_brush':
             if self.brush_selected_faces:
                 self.alignToBrushSelected.emit()
@@ -4420,6 +4438,18 @@ class Viewport3D(QOpenGLWidget):
                     pos0 = self._cut_line_right_press_pos
                     if abs(int(event.pos().x()) - int(pos0.x())) + abs(int(event.pos().y()) - int(pos0.y())) > threshold_px:
                         self._cut_line_right_dragged = True
+
+            # 표면 지정(찍기): 드래그는 카메라 회전으로 간주하고, 릴리즈에서만 "클릭" 처리
+            if self.picking_mode == "paint_surface_face":
+                threshold_px = 6
+                if (
+                    self.mouse_button == Qt.MouseButton.LeftButton
+                    and getattr(self, "_surface_paint_left_press_pos", None) is not None
+                    and not bool(getattr(self, "_surface_paint_left_dragged", False))
+                ):
+                    pos0 = self._surface_paint_left_press_pos
+                    if abs(int(event.pos().x()) - int(pos0.x())) + abs(int(event.pos().y()) - int(pos0.y())) > threshold_px:
+                        self._surface_paint_left_dragged = True
 
             # 단면선(2개) 프리뷰: 마우스 트래킹(버튼 없이 이동)에서도 동작
             if self.picking_mode == 'cut_lines' and getattr(self, "cut_line_drawing", False):
@@ -4813,6 +4843,8 @@ class Viewport3D(QOpenGLWidget):
             if self.picking_mode != 'none':
                 self.picking_mode = 'none'
                 self.floor_picks = []
+                self._surface_paint_left_press_pos = None
+                self._surface_paint_left_dragged = False
                 self.status_info = "⭕ 작업 취소됨"
                 self.update()
                 return
@@ -5143,8 +5175,23 @@ class Viewport3D(QOpenGLWidget):
             screen_x, win_y, depth_value,
             modelview, projection, viewport
         )
-        
-        return np.array([world_x, world_y, world_z])
+
+        pt = np.array([world_x, world_y, world_z], dtype=np.float64)
+
+        # Extra guard: ensure the picked point is near the selected object's world bounds.
+        # This prevents accidental picks on other geometry / stale depth artifacts.
+        try:
+            wb = np.asarray(obj.get_world_bounds(), dtype=np.float64)
+            if wb.shape == (2, 3) and np.isfinite(wb).all() and np.isfinite(pt).all():
+                ext = wb[1] - wb[0]
+                max_dim = float(np.max(np.abs(ext))) if ext.size == 3 else 0.0
+                margin = max(0.05, max_dim * 0.005)  # ~0.5mm@cm-units; relative for large meshes
+                if np.any(pt < (wb[0] - margin)) or np.any(pt > (wb[1] + margin)):
+                    return None
+        except Exception:
+            pass
+
+        return pt
     
 
     def _pick_brush_face(self, pos):
@@ -5204,6 +5251,21 @@ class Viewport3D(QOpenGLWidget):
                 del self.surface_paint_points[: max(1, len(self.surface_paint_points) - max_n)]
         except Exception:
             pass
+
+    def clear_surface_paint_points(self, target: str | None = None) -> None:
+        """표면 지정(찍은 점) 표시를 지웁니다."""
+        try:
+            if target is None:
+                self.surface_paint_points = []
+                return
+            t = str(target or "").strip().lower()
+            if t not in {"outer", "inner", "migu"}:
+                t = "outer"
+            self.surface_paint_points = [
+                (p, tt) for (p, tt) in (self.surface_paint_points or []) if str(tt).strip().lower() != t
+            ]
+        except Exception:
+            self.surface_paint_points = []
 
     def _get_surface_target_set(self, obj: SceneObject, target: str) -> set[int]:
         target = str(target or "").strip().lower()
@@ -5294,14 +5356,22 @@ class Viewport3D(QOpenGLWidget):
         if normals is None:
             return {int(seed_face_idx)}
 
-        adjacency = self._get_face_adjacency(obj)
-        if adjacency is None:
-            return {int(seed_face_idx)}
-
         n_faces = int(getattr(mesh, "n_faces", 0) or 0)
         seed = int(seed_face_idx)
         if seed < 0 or seed >= n_faces:
             return set()
+
+        # Safety limits to keep the UI responsive on huge meshes.
+        try:
+            max_faces = int(getattr(self, "_surface_grow_max_faces", 120000))
+        except Exception:
+            max_faces = 120000
+        max_faces = max(1, max_faces)
+        try:
+            time_budget_s = float(getattr(self, "_surface_grow_time_budget_s", 0.35))
+        except Exception:
+            time_budget_s = 0.35
+        time_budget_s = max(0.05, min(time_budget_s, 3.0))
 
         cos_thr = float(np.cos(np.radians(float(max_angle_deg))))
         visited: set[int] = {seed}
@@ -5312,15 +5382,74 @@ class Viewport3D(QOpenGLWidget):
         except Exception:
             return {seed}
 
+        # Prefer edge adjacency on moderate meshes; fall back to centroid-KNN for very large meshes.
+        adjacency = None
+        try:
+            edge_adj_max = int(getattr(self, "_surface_grow_edge_adj_max_faces", 250000))
+        except Exception:
+            edge_adj_max = 250000
+        if n_faces <= max(5000, edge_adj_max):
+            adjacency = self._get_face_adjacency(obj)
+
+        centroids = getattr(obj, "_face_centroids", None)
+        tree = getattr(obj, "_face_centroid_kdtree", None)
+        if adjacency is None:
+            if centroids is None or int(getattr(obj, "_face_centroid_faces_count", 0) or 0) != n_faces:
+                try:
+                    f = np.asarray(getattr(mesh, "faces", None), dtype=np.int32)
+                    v = np.asarray(getattr(mesh, "vertices", None), dtype=np.float64)
+                    v0 = v[f[:, 0]]
+                    v1 = v[f[:, 1]]
+                    v2 = v[f[:, 2]]
+                    centroids = ((v0 + v1 + v2) / 3.0).astype(np.float32, copy=False)
+                except Exception:
+                    centroids = None
+                tree = None
+                if centroids is not None and centroids.size != 0:
+                    try:
+                        from scipy.spatial import cKDTree
+
+                        tree = cKDTree(centroids)
+                    except Exception:
+                        tree = None
+                try:
+                    obj._face_centroids = centroids
+                    obj._face_centroid_kdtree = tree
+                    obj._face_centroid_faces_count = int(n_faces)
+                except Exception:
+                    pass
+
+        start_t = time.monotonic()
         while stack:
+            if len(visited) >= max_faces:
+                break
+            if time.monotonic() - start_t > time_budget_s:
+                break
             fi = stack.pop()
             try:
                 n0 = fn[fi, :3]
             except Exception:
                 continue
-            for nb in adjacency[fi]:
+
+            if adjacency is not None:
+                neigh = adjacency[fi]
+            elif tree is not None and centroids is not None:
+                try:
+                    k = int(getattr(self, "_surface_grow_knn", 18))
+                except Exception:
+                    k = 18
+                k = max(6, min(k, 64, n_faces))
+                try:
+                    _d, idx = tree.query(np.asarray(centroids[int(fi)], dtype=np.float64), k=int(k))
+                    neigh = np.atleast_1d(idx).astype(np.int32, copy=False).tolist()
+                except Exception:
+                    neigh = []
+            else:
+                neigh = []
+
+            for nb in neigh:
                 nb_i = int(nb)
-                if nb_i in visited:
+                if nb_i == fi or nb_i in visited or nb_i < 0 or nb_i >= n_faces:
                     continue
                 try:
                     n1 = fn[nb_i, :3]
