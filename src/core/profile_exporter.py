@@ -348,35 +348,43 @@ class ProfileExporter:
                 w_min = v_all.min(axis=0)
                 w_max = v_all.max(axis=0)
 
+            vp = np.asarray(vp, dtype=np.float64).reshape(-1)
+            if vp.size < 4:
+                vp = np.array([0.0, 0.0, 1024.0, 1024.0], dtype=np.float64)
+
             # 2) px_per_cm 계산 (world 좌표 1.0을 1cm로 가정)
             # 정사영(glOrtho)인 경우 projection 행렬에서 직접 스케일을 얻는 것이 가장 정확하다.
-            def project_pt(p):
+            def project_pt(p, vp_local):
                 vh = np.append(p, 1.0)
                 vc = vh @ mvp
                 if abs(float(vc[3])) < 1e-12:
                     return np.array([0.0, 0.0], dtype=np.float64)
                 vn = vc[:3] / vc[3]
-                return np.array([(vn[0] + 1) / 2 * vp[2], vp[3] - (vn[1] + 1) / 2 * vp[3]])
+                return np.array([(vn[0] + 1) / 2 * vp_local[2], vp_local[3] - (vn[1] + 1) / 2 * vp_local[3]])
 
-            px_per_cm = None
-            try:
-                if abs(float(proj[3, 3]) - 1.0) < 1e-9 and abs(float(proj[3, 2])) < 1e-9:
-                    px_per_cm_x = abs(float(vp[2]) * float(proj[0, 0]) / 2.0)
-                    px_per_cm_y = abs(float(vp[3]) * float(proj[1, 1]) / 2.0)
-                    px_per_cm = float((px_per_cm_x + px_per_cm_y) * 0.5)
-            except Exception:
-                px_per_cm = None
+            def compute_px_per_cm(vp_local) -> float:
+                px = None
+                try:
+                    if abs(float(proj[3, 3]) - 1.0) < 1e-9 and abs(float(proj[3, 2])) < 1e-9:
+                        px_x = abs(float(vp_local[2]) * float(proj[0, 0]) / 2.0)
+                        px_y = abs(float(vp_local[3]) * float(proj[1, 1]) / 2.0)
+                        px = float((px_x + px_y) * 0.5)
+                except Exception:
+                    px = None
 
-            if px_per_cm is None or px_per_cm < 1e-6:
-                center_world = (w_min + w_max) / 2.0
-                axis = np.array([1.0, 0.0, 0.0], dtype=np.float64)
-                if view in {"left", "right"}:
-                    axis = np.array([0.0, 1.0, 0.0], dtype=np.float64)
-                p1 = center_world + axis
+                if px is None or px < 1e-6:
+                    center_world = (w_min + w_max) / 2.0
+                    axis = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+                    if view in {"left", "right"}:
+                        axis = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+                    p1 = center_world + axis
 
-                px_per_cm = float(np.linalg.norm(project_pt(center_world) - project_pt(p1)))
-                if px_per_cm < 1e-6:
-                    px_per_cm = 100.0  # Fallback
+                    px = float(np.linalg.norm(project_pt(center_world, vp_local) - project_pt(p1, vp_local)))
+                    if px < 1e-6:
+                        px = 100.0  # Fallback
+                return float(px)
+
+            px_per_cm = compute_px_per_cm(vp)
 
             # 3) 외곽선 추출: viewport_image가 있으면 이미지 기반(가장 견고/빠름)
             grid_w = int(vp[2])
@@ -390,7 +398,8 @@ class ProfileExporter:
                         # 캡처 사이즈가 vp와 다르면 vp를 이미지 기준으로 맞춤
                         grid_w = int(rgb.shape[1])
                         grid_h = int(rgb.shape[0])
-                        vp = np.array([0, 0, grid_w, grid_h], dtype=np.int32)
+                        vp = np.array([0.0, 0.0, float(grid_w), float(grid_h)], dtype=np.float64)
+                        px_per_cm = compute_px_per_cm(vp)
                         occupancy = np.zeros((grid_h, grid_w), dtype=np.uint8)
 
                     corners_rgb = np.stack(
@@ -450,7 +459,7 @@ class ProfileExporter:
                          'is_pixels': True,
                          'vp_size': (grid_w, grid_h),
                          'grid_size': (grid_w, grid_h),
-                        'matrices': (mv_raw, proj_raw, vp) if _PROFILE_EXPORT_SAFE else (mv, proj, vp),
+                        'matrices': (mv_raw, proj_raw, vp),
                          'world_bounds': np.array([w_min, w_max], dtype=np.float64),
                      }
                      return [], bounds
@@ -474,11 +483,21 @@ class ProfileExporter:
 
                 v_homo = np.hstack([vertices, np.ones((len(vertices), 1))])
                 v_clip = v_homo @ mvp  # (N, 4)
-                v_ndc = v_clip[:, :3] / v_clip[:, 3:]
-                proj_2d = np.zeros((len(vertices), 2))
+                w = v_clip[:, 3]
+                valid_w = np.abs(w) > 1e-12
+                v_ndc = np.full((len(v_clip), 3), np.nan, dtype=np.float64)
+                v_ndc[valid_w] = v_clip[valid_w, :3] / w[valid_w, None]
+
+                proj_2d = np.empty((len(vertices), 2), dtype=np.float64)
                 proj_2d[:, 0] = (v_ndc[:, 0] + 1) / 2 * grid_w
                 proj_2d[:, 1] = (v_ndc[:, 1] + 1) / 2 * grid_h
                 proj_2d[:, 1] = grid_h - proj_2d[:, 1]
+
+                finite = valid_w & np.isfinite(proj_2d).all(axis=1)
+                max_dim = max(float(grid_w), float(grid_h), 1.0)
+                finite &= np.max(np.abs(proj_2d), axis=1) <= max_dim * 10.0
+                if not bool(np.all(finite)):
+                    faces = faces[np.all(finite[faces], axis=1)]
 
                 occupancy = np.zeros((grid_h, grid_w), dtype=np.uint8)
                 if cv2_mod is not None:
@@ -505,7 +524,7 @@ class ProfileExporter:
                 'is_pixels': True,
                 'vp_size': (grid_w, grid_h),
                 'grid_size': (grid_w, grid_h),
-                'matrices': (mv_raw, proj_raw, vp) if _PROFILE_EXPORT_SAFE else (mv, proj, vp),
+                'matrices': (mv_raw, proj_raw, vp),
                 'world_bounds': np.array([w_min, w_max], dtype=np.float64),
             }
             return contours, bounds
@@ -741,6 +760,8 @@ class ProfileExporter:
                    svg_pts[:, 1] = svg_height - (svg_pts[:, 1] - min_coords[1])
                 
                 # CAD import 시 "한 개의 선(연속 폴리라인)"으로 들어오도록 단일 path로 출력
+                if not np.isfinite(svg_pts).all():
+                    continue
                 d_parts = [f'M {svg_pts[0,0]:.6f} {svg_pts[0,1]:.6f}']
                 for p in svg_pts[1:]:
                     d_parts.append(f'L {p[0]:.6f} {p[1]:.6f}')
@@ -775,6 +796,8 @@ class ProfileExporter:
                     svg_pts[:, 0] -= min_coords[0]
                     svg_pts[:, 1] = svg_height - (svg_pts[:, 1] - min_coords[1])
 
+                if not np.isfinite(svg_pts).all():
+                    continue
                 d_parts = [f'M {svg_pts[0,0]:.6f} {svg_pts[0,1]:.6f}']
                 for p in svg_pts[1:]:
                     d_parts.append(f'L {p[0]:.6f} {p[1]:.6f}')
@@ -839,44 +862,62 @@ class ProfileExporter:
                 proj = np.asarray(proj_raw, dtype=np.float64).reshape(4, 4).T
                 mvp = mv @ proj
 
-                def project_world_to_px(pts_world: np.ndarray) -> np.ndarray:
+                def project_world_to_px_segments(pts_world: np.ndarray) -> list[np.ndarray]:
                     pts_world = np.asarray(pts_world, dtype=np.float64)
-                    if pts_world.ndim != 2:
-                        return np.zeros((0, 2), dtype=np.float64)
+                    if pts_world.ndim != 2 or pts_world.shape[0] < 2 or pts_world.shape[1] < 2:
+                        return []
                     if pts_world.shape[1] == 2:
                         pts_world = np.hstack([pts_world, np.zeros((len(pts_world), 1), dtype=np.float64)])
                     v_homo = np.hstack([pts_world[:, :3], np.ones((len(pts_world), 1), dtype=np.float64)])
                     v_clip = v_homo @ mvp
                     w = v_clip[:, 3]
                     valid = np.abs(w) > 1e-12
-                    v_ndc = np.zeros((len(v_clip), 3), dtype=np.float64)
+                    v_ndc = np.full((len(v_clip), 3), np.nan, dtype=np.float64)
                     v_ndc[valid] = v_clip[valid, :3] / w[valid, None]
                     x = (v_ndc[:, 0] + 1.0) / 2.0 * float(vp[2])
                     y = float(vp[3]) - (v_ndc[:, 1] + 1.0) / 2.0 * float(vp[3])
                     pts = np.stack([x, y], axis=1)
                     finite = valid & np.isfinite(pts).all(axis=1)
-                    return pts[finite]
+                    max_dim = max(float(vp[2]), float(vp[3]), 1.0)
+                    finite &= np.max(np.abs(pts), axis=1) <= max_dim * 10.0
+
+                    jump = max_dim * 1.5
+                    segments: list[np.ndarray] = []
+                    current: list[np.ndarray] = []
+                    for ok, p in zip(finite, pts):
+                        if bool(ok):
+                            if current and float(np.linalg.norm(p - current[-1])) > jump:
+                                if len(current) >= 2:
+                                    segments.append(np.asarray(current, dtype=np.float64))
+                                current = [p]
+                            else:
+                                current.append(p)
+                        else:
+                            if len(current) >= 2:
+                                segments.append(np.asarray(current, dtype=np.float64))
+                            current = []
+                    if len(current) >= 2:
+                        segments.append(np.asarray(current, dtype=np.float64))
+                    return segments
 
                 colors = ["#ff4040", "#2b8cff"]
                 for i, line in enumerate(cut_lines_world):
                     if not line or len(line) < 2:
                         continue
                     pts_w = np.asarray(line, dtype=np.float64)
-                    pts_px = project_world_to_px(pts_w)
-                    if pts_px.shape[0] < 2:
-                        continue
-                    if _PROFILE_EXPORT_SAFE:
-                        max_dim = max(float(vp[2]), float(vp[3]), 1.0)
-                        if float(np.nanmax(np.abs(pts_px))) > max_dim * 10.0:
+                    segments = project_world_to_px_segments(pts_w)
+                    for seg_i, pts_px in enumerate(segments):
+                        if pts_px.shape[0] < 2:
                             continue
-                    extra_paths.append(
-                        {
-                            "id": f"cut_line_{i+1}",
-                            "points": pts_px,
-                            "stroke": colors[i % len(colors)],
-                            "stroke_width": 0.015,  # 0.15mm
-                        }
-                    )
+                        path_id = f"cut_line_{i+1}" if len(segments) == 1 else f"cut_line_{i+1}_{seg_i+1}"
+                        extra_paths.append(
+                            {
+                                "id": path_id,
+                                "points": pts_px,
+                                "stroke": colors[i % len(colors)],
+                                "stroke_width": 0.015,  # 0.15mm
+                            }
+                        )
             except Exception:
                 extra_paths = []
 
@@ -887,43 +928,65 @@ class ProfileExporter:
                 proj = np.asarray(proj_raw, dtype=np.float64).reshape(4, 4).T
                 mvp = mv @ proj
 
-                def project_world_to_px(pts_world: np.ndarray) -> np.ndarray:
+                def project_world_to_px_segments(pts_world: np.ndarray) -> list[np.ndarray]:
                     pts_world = np.asarray(pts_world, dtype=np.float64)
-                    if pts_world.ndim != 2:
-                        return np.zeros((0, 2), dtype=np.float64)
+                    if pts_world.ndim != 2 or pts_world.shape[0] < 2 or pts_world.shape[1] < 2:
+                        return []
                     if pts_world.shape[1] == 2:
                         pts_world = np.hstack([pts_world, np.zeros((len(pts_world), 1), dtype=np.float64)])
                     v_homo = np.hstack([pts_world[:, :3], np.ones((len(pts_world), 1), dtype=np.float64)])
                     v_clip = v_homo @ mvp
                     w = v_clip[:, 3]
                     valid = np.abs(w) > 1e-12
-                    v_ndc = np.zeros((len(v_clip), 3), dtype=np.float64)
+                    v_ndc = np.full((len(v_clip), 3), np.nan, dtype=np.float64)
                     v_ndc[valid] = v_clip[valid, :3] / w[valid, None]
                     x = (v_ndc[:, 0] + 1.0) / 2.0 * float(vp[2])
                     y = float(vp[3]) - (v_ndc[:, 1] + 1.0) / 2.0 * float(vp[3])
                     pts = np.stack([x, y], axis=1)
                     finite = valid & np.isfinite(pts).all(axis=1)
-                    return pts[finite]
+                    max_dim = max(float(vp[2]), float(vp[3]), 1.0)
+                    finite &= np.max(np.abs(pts), axis=1) <= max_dim * 10.0
+
+                    jump = max_dim * 1.5
+                    segments: list[np.ndarray] = []
+                    current: list[np.ndarray] = []
+                    for ok, p in zip(finite, pts):
+                        if bool(ok):
+                            if current and float(np.linalg.norm(p - current[-1])) > jump:
+                                if len(current) >= 2:
+                                    segments.append(np.asarray(current, dtype=np.float64))
+                                current = [p]
+                            else:
+                                current.append(p)
+                        else:
+                            if len(current) >= 2:
+                                segments.append(np.asarray(current, dtype=np.float64))
+                            current = []
+                    if len(current) >= 2:
+                        segments.append(np.asarray(current, dtype=np.float64))
+                    return segments
 
                 for i, line in enumerate(cut_profiles_world):
                     if not line or len(line) < 2:
                         continue
                     pts_w = np.asarray(line, dtype=np.float64)
-                    pts_px = project_world_to_px(pts_w)
-                    if pts_px.shape[0] < 2:
-                        continue
-                    if _PROFILE_EXPORT_SAFE:
-                        max_dim = max(float(vp[2]), float(vp[3]), 1.0)
-                        if float(np.nanmax(np.abs(pts_px))) > max_dim * 10.0:
+                    segments = project_world_to_px_segments(pts_w)
+                    for seg_i, pts_px in enumerate(segments):
+                        if pts_px.shape[0] < 2:
                             continue
-                    extra_paths.append(
-                        {
-                            "id": f"section_profile_{i+1}",
-                            "points": pts_px,
-                            "stroke": "#111111",
-                            "stroke_width": 0.015,  # 0.15mm
-                        }
-                    )
+                        path_id = (
+                            f"section_profile_{i+1}"
+                            if len(segments) == 1
+                            else f"section_profile_{i+1}_{seg_i+1}"
+                        )
+                        extra_paths.append(
+                            {
+                                "id": path_id,
+                                "points": pts_px,
+                                "stroke": "#111111",
+                                "stroke_width": 0.015,  # 0.15mm
+                            }
+                        )
             except Exception:
                 pass
 
