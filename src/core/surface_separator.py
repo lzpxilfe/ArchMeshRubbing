@@ -61,8 +61,8 @@ class SurfaceSeparator:
         Returns:
             SeparatedSurfaces: 분리된 표면들
         """
-        # 법선 계산
-        mesh.compute_normals()
+        # 법선 계산 (내/외면 분리는 face normals만 필요)
+        mesh.compute_normals(compute_vertex_normals=False)
         
         if mesh.face_normals is None:
             raise ValueError("Failed to compute face normals")
@@ -101,27 +101,28 @@ class SurfaceSeparator:
         
         면적 가중 평균 법선을 기준으로 사용합니다.
         """
-        vertices = mesh.vertices
-        faces = mesh.faces
-        
-        # 면적 가중 법선 합
-        weighted_normal = np.zeros(3)
-        
-        for i, face in enumerate(faces):
-            v0, v1, v2 = vertices[face]
+        try:
+            vertices = np.asarray(mesh.vertices, dtype=np.float64)
+            faces = np.asarray(mesh.faces, dtype=np.int32)
+            if vertices.ndim != 2 or vertices.shape[0] == 0:
+                return np.array([0.0, 0.0, 1.0], dtype=np.float64)
+            if faces.ndim != 2 or faces.shape[0] == 0 or faces.shape[1] < 3:
+                return np.array([0.0, 0.0, 1.0], dtype=np.float64)
+
+            v0 = vertices[faces[:, 0]]
+            v1 = vertices[faces[:, 1]]
+            v2 = vertices[faces[:, 2]]
+
             cross = np.cross(v1 - v0, v2 - v0)
-            area = np.linalg.norm(cross) / 2
-            
-            if area > 1e-10:
-                normal = cross / (area * 2)  # 정규화된 법선
-                weighted_normal += normal * area
-        
-        norm = np.linalg.norm(weighted_normal)
-        if norm > 1e-10:
-            return weighted_normal / norm
-        else:
-            # 기본값: Z축
-            return np.array([0, 0, 1])
+            weighted_normal = np.sum(cross, axis=0)
+            norm = float(np.linalg.norm(weighted_normal))
+            if norm > 1e-10:
+                return (weighted_normal / norm).astype(np.float64, copy=False)
+        except Exception:
+            pass
+
+        # 기본값: Z축
+        return np.array([0.0, 0.0, 1.0], dtype=np.float64)
     
     def separate_by_selection(self, mesh: MeshData,
                               selected_face_indices: np.ndarray) -> Tuple[MeshData, MeshData | None]:

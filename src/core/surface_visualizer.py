@@ -42,7 +42,13 @@ class RubbingImage:
     @property
     def pixels_per_unit(self) -> float:
         """단위당 픽셀 수"""
-        return self.width_pixels / self.width_real
+        try:
+            w = float(self.width_real)
+        except Exception:
+            return 0.0
+        if not np.isfinite(w) or w <= 1e-12:
+            return 0.0
+        return float(self.width_pixels) / w
     
     def to_pil_image(self) -> Image.Image:
         """PIL Image로 변환"""
@@ -76,6 +82,10 @@ class RubbingImage:
     def _add_scale_bar(self, img: Image.Image) -> Image.Image:
         """스케일 바 추가"""
         from PIL import ImageDraw, ImageFont
+
+        ppu = float(self.pixels_per_unit)
+        if not np.isfinite(ppu) or ppu <= 1e-12:
+            return img
         
         # 이미지 복사
         img = img.convert('RGB')
@@ -86,7 +96,7 @@ class RubbingImage:
         target_bar_pixels = int(img.width * target_bar_ratio)
         
         # 실제 크기에 맞는 깔끔한 숫자로 조정
-        bar_real_size = target_bar_pixels / self.pixels_per_unit
+        bar_real_size = float(target_bar_pixels) / ppu
         
         # 깔끔한 숫자로 반올림 (1, 2, 5, 10, 20, 50, 100...)
         nice_values = [1, 2, 5, 10, 20, 50, 100, 200, 500]
@@ -97,7 +107,7 @@ class RubbingImage:
         nice_bar_size = nice_normalized * magnitude
         
         # 실제 픽셀 크기
-        bar_pixels = int(nice_bar_size * self.pixels_per_unit)
+        bar_pixels = int(float(nice_bar_size) * ppu)
         
         # 스케일 바 위치 (오른쪽 하단)
         margin = 20
@@ -392,8 +402,26 @@ class SurfaceVisualizer:
         Returns:
             RubbingImage: 깊이맵 이미지
         """
-        aspect_ratio = flattened.height / flattened.width
-        height_pixels = int(width_pixels * aspect_ratio)
+        width_pixels = int(width_pixels)
+        if width_pixels < 1:
+            width_pixels = 1
+
+        if flattened is None or getattr(flattened, "uv", None) is None or getattr(flattened, "faces", None) is None:
+            raise ValueError("Flattened mesh is missing uv/faces.")
+        if flattened.uv.ndim != 2 or flattened.uv.shape[0] == 0:
+            raise ValueError("Flattened mesh has no UV vertices.")
+        if flattened.faces.ndim != 2 or flattened.faces.shape[0] == 0:
+            raise ValueError("Flattened mesh has no faces.")
+
+        w_real = float(flattened.width)
+        h_real = float(flattened.height)
+        if not np.isfinite(w_real) or not np.isfinite(h_real) or w_real <= 1e-12:
+            raise ValueError("Flattened mesh has invalid dimensions.")
+
+        aspect_ratio = h_real / w_real
+        if not np.isfinite(aspect_ratio) or aspect_ratio <= 0:
+            aspect_ratio = 1.0
+        height_pixels = max(1, int(width_pixels * aspect_ratio))
         
         depth_map = self._create_depth_map(flattened, width_pixels, height_pixels)
         
@@ -421,8 +449,26 @@ class SurfaceVisualizer:
         Returns:
             RubbingImage: 곡률맵 이미지
         """
-        aspect_ratio = flattened.height / flattened.width
-        height_pixels = int(width_pixels * aspect_ratio)
+        width_pixels = int(width_pixels)
+        if width_pixels < 1:
+            width_pixels = 1
+
+        if flattened is None or getattr(flattened, "uv", None) is None or getattr(flattened, "faces", None) is None:
+            raise ValueError("Flattened mesh is missing uv/faces.")
+        if flattened.uv.ndim != 2 or flattened.uv.shape[0] == 0:
+            raise ValueError("Flattened mesh has no UV vertices.")
+        if flattened.faces.ndim != 2 or flattened.faces.shape[0] == 0:
+            raise ValueError("Flattened mesh has no faces.")
+
+        w_real = float(flattened.width)
+        h_real = float(flattened.height)
+        if not np.isfinite(w_real) or not np.isfinite(h_real) or w_real <= 1e-12:
+            raise ValueError("Flattened mesh has invalid dimensions.")
+
+        aspect_ratio = h_real / w_real
+        if not np.isfinite(aspect_ratio) or aspect_ratio <= 0:
+            aspect_ratio = 1.0
+        height_pixels = max(1, int(width_pixels * aspect_ratio))
         
         depth_map = self._create_depth_map(flattened, width_pixels, height_pixels)
         

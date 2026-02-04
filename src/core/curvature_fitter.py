@@ -113,9 +113,10 @@ class CurvatureFitter:
         # 최소자승법 풀이
         result, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
         
-        a, b_val, c = result
-        center_2d = np.array([a, b_val])
-        radius = np.sqrt(c + a**2 + b_val**2)
+        a, b_val, c = [float(v) for v in result]
+        center_2d = np.array([a, b_val], dtype=np.float64)
+        radius2 = float(c + a * a + b_val * b_val)
+        radius = float(np.sqrt(max(radius2, 0.0)))
         
         return center_2d, radius
     

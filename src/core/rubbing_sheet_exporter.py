@@ -25,6 +25,8 @@ from .flattener import ARAPFlattener, FlattenedMesh
 from .mesh_loader import MeshData
 from .profile_exporter import ProfileExporter
 from .surface_visualizer import SurfaceVisualizer
+from .unit_utils import resolve_svg_unit as _resolve_unit
+from .unit_utils import mm_to_svg_units as _mm_to_svg_units
 
 
 @dataclass(frozen=True)
@@ -52,28 +54,6 @@ class SheetExportOptions:
     include_labels: bool = True
     label_font_size_mm: float = 3.5
     label_gap_mm: float = 1.5
-
-
-def _resolve_unit(mesh_unit: str, requested: Optional[str]) -> tuple[str, float]:
-    unit = (requested or mesh_unit or "mm").lower()
-
-    if unit in {"mm", "millimeter", "millimeters"}:
-        return "mm", 1.0
-    if unit in {"cm", "centimeter", "centimeters"}:
-        return "cm", 1.0
-    if unit in {"m", "meter", "meters"}:
-        # SVG에서 m는 불편하므로 cm로 변환
-        return "cm", 100.0
-
-    return "mm", 1.0
-
-
-def _mm_to_svg_units(mm: float, svg_unit: str) -> float:
-    if svg_unit == "mm":
-        return float(mm)
-    if svg_unit == "cm":
-        return float(mm) / 10.0
-    return float(mm)
 
 
 def _encode_png_data_uri(img: Image.Image) -> str:
