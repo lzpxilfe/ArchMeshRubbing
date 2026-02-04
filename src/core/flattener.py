@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Tuple, Dict
 import numpy as np
 from scipy import sparse
-from scipy.sparse.linalg import spsolve
+from scipy.sparse.linalg import spsolve, splu
 
 from .mesh_loader import MeshData
 
@@ -209,30 +209,352 @@ class ARAPFlattener:
         Returns:
             FlattenedMesh: 평면화 결과
         """
-        # 1. 초기 파라미터화
-        if initial_method == 'lscm':
-            initial_uv = self._lscm_parameterization(mesh)
-        elif initial_method == 'tutte':
-            initial_uv = self._tutte_parameterization(mesh)
-        else:
-            raise ValueError(f"Unknown initial method: {initial_method}")
-        
-        # 2. ARAP 최적화
-        optimized_uv = self._arap_optimize(mesh, initial_uv, boundary_type)
-        
-        # 3. 스케일 계산 (원본 표면적 보존)
-        scale = self._compute_scale(mesh, optimized_uv)
-        
-        # 4. 왜곡도 계산
-        distortion = self._compute_distortion(mesh, optimized_uv)
-        
+        if mesh is None:
+            raise ValueError("mesh is None")
+
+        # 입력 메쉬 정리(퇴화 삼각형/NaN 제거 + 사용 정점만 유지)
+        mesh = self._sanitize_mesh(mesh)
+        if mesh.n_vertices == 0 or mesh.n_faces == 0:
+            return FlattenedMesh(
+                uv=np.zeros((mesh.n_vertices, 2), dtype=np.float64),
+                faces=mesh.faces,
+                original_mesh=mesh,
+                distortion_per_face=np.zeros((mesh.n_faces,), dtype=np.float64),
+                scale=1.0,
+            )
+
+        components = self._face_connected_components(mesh.faces)
+        if len(components) <= 1:
+            # 1) 초기 파라미터화 (안정적인 fallback 포함)
+            initial_uv = self._safe_initial_parameterization(mesh, initial_method)
+
+            # 2) ARAP 최적화 (UV는 mesh 단위 스케일 유지)
+            optimized_uv = self._arap_optimize(mesh, initial_uv, boundary_type)
+            optimized_uv = self._orient_uv_pca(optimized_uv)
+
+            # 3) 왜곡도 계산 (UV가 mesh 단위이므로 scale=1.0 고정)
+            distortion = self._compute_distortion(mesh, optimized_uv)
+
+            return FlattenedMesh(
+                uv=optimized_uv,
+                faces=mesh.faces,
+                original_mesh=mesh,
+                distortion_per_face=distortion,
+                scale=1.0,
+            )
+
+        # 여러 연결 컴포넌트: 각각 펼친 뒤 가로로 패킹
+        components = sorted(components, key=lambda a: int(a.size), reverse=True)
+        uv_all = np.zeros((mesh.n_vertices, 2), dtype=np.float64)
+        cursor_x = 0.0
+        gap = 1.0
+        try:
+            ext = np.asarray(mesh.extents, dtype=np.float64).reshape(-1)
+            if ext.size >= 1 and np.isfinite(ext).all():
+                gap = float(max(1.0, 0.02 * float(np.max(ext))))
+        except Exception:
+            gap = 1.0
+
+        for face_indices in components:
+            comp_mesh, vmap = self._extract_submesh_with_mapping(mesh, face_indices)
+            if comp_mesh.n_vertices == 0 or comp_mesh.n_faces == 0:
+                continue
+
+            comp_initial = self._safe_initial_parameterization(comp_mesh, initial_method)
+            comp_uv = self._arap_optimize(comp_mesh, comp_initial, boundary_type)
+            comp_uv = np.asarray(comp_uv, dtype=np.float64)
+            if comp_uv.ndim != 2 or comp_uv.shape[0] == 0 or comp_uv.shape[1] < 2:
+                continue
+            comp_uv = comp_uv[:, :2].copy()
+            comp_uv = self._orient_uv_pca(comp_uv)
+
+            finite = np.all(np.isfinite(comp_uv), axis=1)
+            if np.any(finite):
+                min_uv = comp_uv[finite].min(axis=0)
+            else:
+                min_uv = np.zeros((2,), dtype=np.float64)
+            comp_uv[~finite] = 0.0
+            comp_uv -= min_uv
+            comp_uv[:, 0] += cursor_x
+
+            uv_all[vmap] = comp_uv
+
+            if np.any(finite):
+                max_x = float(np.max(comp_uv[finite, 0]))
+                width = max(0.0, max_x - cursor_x)
+                cursor_x += width + gap
+            else:
+                cursor_x += gap
+
+        distortion = self._compute_distortion(mesh, uv_all)
+
         return FlattenedMesh(
-            uv=optimized_uv,
+            uv=uv_all,
             faces=mesh.faces,
             original_mesh=mesh,
             distortion_per_face=distortion,
-            scale=scale
+            scale=1.0,
         )
+
+    def _safe_initial_parameterization(self, mesh: MeshData, initial_method: str) -> np.ndarray:
+        """LSCM/Tutte 초기 UV 생성이 실패해도 항상 UV를 반환합니다."""
+        method = str(initial_method or "lscm").lower().strip()
+        try:
+            if method == "tutte":
+                return self._tutte_parameterization(mesh)
+            if method == "lscm":
+                return self._lscm_parameterization(mesh)
+        except Exception:
+            pass
+
+        # fallback: Tutte -> LSCM -> PCA projection
+        try:
+            return self._tutte_parameterization(mesh)
+        except Exception:
+            pass
+        try:
+            return self._lscm_parameterization(mesh)
+        except Exception:
+            pass
+
+        basis = self._compute_reference_basis(mesh)  # (2, 3)
+        vertices = np.asarray(mesh.vertices, dtype=np.float64)
+        uv = (basis @ vertices.T).T
+        return np.asarray(uv, dtype=np.float64)
+
+    def _sanitize_mesh(self, mesh: MeshData) -> MeshData:
+        """
+        펼침/선택 등 후처리 안정성을 위해 메쉬를 정리합니다.
+        - NaN/Inf 정점이 포함된 face 제거
+        - 중복 인덱스(face 퇴화) 제거
+        - 면적이 거의 0인 삼각형 제거
+        - 사용 정점만 남기도록 reindex
+        """
+        if mesh is None:
+            raise ValueError("mesh is None")
+
+        vertices = np.asarray(mesh.vertices, dtype=np.float64)
+        faces = np.asarray(mesh.faces, dtype=np.int32)
+        if vertices.ndim != 2 or vertices.shape[0] == 0 or faces.ndim != 2 or faces.shape[0] == 0:
+            return mesh
+
+        faces = faces[:, :3].astype(np.int32, copy=False)
+        a = faces[:, 0]
+        b = faces[:, 1]
+        c = faces[:, 2]
+
+        mask = (a != b) & (b != c) & (a != c)
+        finite_v = np.isfinite(vertices).all(axis=1)
+        mask &= finite_v[a] & finite_v[b] & finite_v[c]
+
+        faces = faces[mask]
+        if faces.shape[0] == 0:
+            return MeshData(
+                vertices=np.zeros((0, 3), dtype=np.float64),
+                faces=np.zeros((0, 3), dtype=np.int32),
+                normals=None,
+                face_normals=None,
+                uv_coords=None,
+                texture=mesh.texture,
+                unit=mesh.unit,
+                filepath=mesh.filepath,
+            )
+
+        v0 = vertices[faces[:, 0]]
+        v1 = vertices[faces[:, 1]]
+        v2 = vertices[faces[:, 2]]
+        area2 = np.linalg.norm(np.cross(v1 - v0, v2 - v0), axis=1)
+        faces = faces[area2 > 1e-12]
+        if faces.shape[0] == 0:
+            return MeshData(
+                vertices=np.zeros((0, 3), dtype=np.float64),
+                faces=np.zeros((0, 3), dtype=np.int32),
+                normals=None,
+                face_normals=None,
+                uv_coords=None,
+                texture=mesh.texture,
+                unit=mesh.unit,
+                filepath=mesh.filepath,
+            )
+
+        unique_verts = np.unique(faces.reshape(-1)).astype(np.int32, copy=False)
+        new_vertices = vertices[unique_verts]
+        new_faces = np.searchsorted(unique_verts, faces).astype(np.int32, copy=False)
+
+        new_uv = None
+        if mesh.uv_coords is not None:
+            try:
+                uv = np.asarray(mesh.uv_coords, dtype=np.float64)
+                if uv.ndim == 2 and uv.shape[0] == vertices.shape[0] and uv.shape[1] >= 2:
+                    new_uv = uv[unique_verts][:, :2].copy()
+            except Exception:
+                new_uv = None
+
+        return MeshData(
+            vertices=new_vertices,
+            faces=new_faces,
+            normals=None,
+            face_normals=None,
+            uv_coords=new_uv,
+            texture=mesh.texture,
+            unit=mesh.unit,
+            filepath=mesh.filepath,
+        )
+
+    def _orient_uv_pca(self, uv: np.ndarray) -> np.ndarray:
+        """UV를 2D PCA로 회전시켜 axis-aligned 배치에 가깝게 정렬합니다."""
+        uv = np.asarray(uv, dtype=np.float64)
+        if uv.ndim != 2 or uv.shape[0] == 0:
+            return np.zeros((0, 2), dtype=np.float64)
+
+        out = uv[:, :2].copy()
+        finite = np.isfinite(out).all(axis=1)
+        if np.count_nonzero(finite) < 2:
+            out[~finite] = 0.0
+            return out
+
+        pts = out[finite]
+        mean = pts.mean(axis=0)
+        centered = pts - mean
+
+        cov = centered.T @ centered
+        if cov.shape == (2, 2) and centered.shape[0] > 0:
+            cov = cov / float(centered.shape[0])
+
+        try:
+            evals, evecs = np.linalg.eigh(cov)
+        except np.linalg.LinAlgError:
+            out[~finite] = 0.0
+            return out
+
+        order = np.argsort(evals)[::-1]
+        axes = evecs[:, order]
+
+        # 부호 고정(결정적) + 우수(right-handed) 유지
+        for k in range(2):
+            axis = axes[:, k]
+            idx = int(np.argmax(np.abs(axis)))
+            if axis[idx] < 0:
+                axes[:, k] *= -1
+        if float(np.linalg.det(axes)) < 0:
+            axes[:, 1] *= -1
+
+        out[finite] = (pts - mean) @ axes
+        out[~finite] = 0.0
+        return out
+
+    def _face_connected_components(self, faces: np.ndarray) -> list[np.ndarray]:
+        """면(face) adjacency(공유 edge) 기준 연결 컴포넌트를 찾습니다."""
+        faces = np.asarray(faces, dtype=np.int32)
+        if faces.ndim != 2 or faces.shape[0] == 0:
+            return []
+
+        faces = faces[:, :3].astype(np.int32, copy=False)
+        m = int(faces.shape[0])
+        parent = np.arange(m, dtype=np.int32)
+        rank = np.zeros(m, dtype=np.int8)
+
+        def find(x: int) -> int:
+            x = int(x)
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = int(parent[x])
+            return x
+
+        def union(a_idx: int, b_idx: int) -> None:
+            ra = find(a_idx)
+            rb = find(b_idx)
+            if ra == rb:
+                return
+            if rank[ra] < rank[rb]:
+                parent[ra] = rb
+            elif rank[ra] > rank[rb]:
+                parent[rb] = ra
+            else:
+                parent[rb] = ra
+                rank[ra] = np.int8(rank[ra] + 1)
+
+        edge_to_face: dict[tuple[int, int], int] = {}
+        for fi, face in enumerate(faces):
+            a, b, c = int(face[0]), int(face[1]), int(face[2])
+            for u, v in ((a, b), (b, c), (c, a)):
+                if u > v:
+                    u, v = v, u
+                key = (u, v)
+                prev = edge_to_face.get(key)
+                if prev is None:
+                    edge_to_face[key] = int(fi)
+                else:
+                    union(int(fi), int(prev))
+
+        groups: dict[int, list[int]] = {}
+        for fi in range(m):
+            root = find(fi)
+            groups.setdefault(root, []).append(fi)
+
+        return [np.asarray(g, dtype=np.int32) for g in groups.values()]
+
+    def _extract_submesh_with_mapping(
+        self, mesh: MeshData, face_indices: np.ndarray
+    ) -> tuple[MeshData, np.ndarray]:
+        """face_indices로 submesh를 만들고, (submesh_vertex -> original_vertex) 매핑을 함께 반환합니다."""
+        face_indices = np.asarray(face_indices, dtype=np.int32).reshape(-1)
+        faces = np.asarray(mesh.faces, dtype=np.int32)
+        vertices = np.asarray(mesh.vertices, dtype=np.float64)
+
+        if face_indices.size == 0 or faces.ndim != 2 or faces.shape[0] == 0:
+            empty = MeshData(
+                vertices=np.zeros((0, 3), dtype=np.float64),
+                faces=np.zeros((0, 3), dtype=np.int32),
+                normals=None,
+                face_normals=None,
+                uv_coords=None,
+                texture=mesh.texture,
+                unit=mesh.unit,
+                filepath=mesh.filepath,
+            )
+            return empty, np.zeros((0,), dtype=np.int32)
+
+        valid = (face_indices >= 0) & (face_indices < int(faces.shape[0]))
+        face_indices = face_indices[valid]
+        if face_indices.size == 0:
+            empty = MeshData(
+                vertices=np.zeros((0, 3), dtype=np.float64),
+                faces=np.zeros((0, 3), dtype=np.int32),
+                normals=None,
+                face_normals=None,
+                uv_coords=None,
+                texture=mesh.texture,
+                unit=mesh.unit,
+                filepath=mesh.filepath,
+            )
+            return empty, np.zeros((0,), dtype=np.int32)
+
+        selected_faces = faces[face_indices][:, :3]
+        unique_verts = np.unique(selected_faces.reshape(-1)).astype(np.int32, copy=False)
+        new_vertices = vertices[unique_verts]
+        new_faces = np.searchsorted(unique_verts, selected_faces).astype(np.int32, copy=False)
+
+        new_uv = None
+        if mesh.uv_coords is not None:
+            try:
+                uv = np.asarray(mesh.uv_coords, dtype=np.float64)
+                if uv.ndim == 2 and uv.shape[0] == vertices.shape[0] and uv.shape[1] >= 2:
+                    new_uv = uv[unique_verts][:, :2].copy()
+            except Exception:
+                new_uv = None
+
+        submesh = MeshData(
+            vertices=new_vertices,
+            faces=new_faces,
+            normals=None,
+            face_normals=None,
+            uv_coords=new_uv,
+            texture=mesh.texture,
+            unit=mesh.unit,
+            filepath=mesh.filepath,
+        )
+        return submesh, unique_verts
     
     def _lscm_parameterization(self, mesh: MeshData) -> np.ndarray:
         """
@@ -245,16 +567,17 @@ class ARAPFlattener:
         vertices = mesh.vertices
         faces = mesh.faces
         
-        # 경계 정점 찾기
-        boundary = mesh.get_boundary_vertices()
-        
-        if len(boundary) < 2:
-            # 닫힌 메쉬: 임의로 두 정점 고정
-            boundary = np.array([0, n // 2])
-        
-        # 두 경계 정점을 고정 (0, 0)과 (1, 0)
-        fixed_verts = boundary[:2]
-        fixed_pos = np.array([[0.0, 0.0], [1.0, 0.0]])
+        # 경계 정점 찾기 (없으면 전체 정점에서 앵커 선택)
+        boundary = np.asarray(mesh.get_boundary_vertices(), dtype=np.int32).reshape(-1)
+        candidates = boundary if boundary.size >= 2 else np.arange(n, dtype=np.int32)
+
+        fixed_verts = self._pick_anchor_pair(mesh, candidates)
+        dist = float(np.linalg.norm(vertices[fixed_verts[1]] - vertices[fixed_verts[0]]))
+        if not np.isfinite(dist) or dist < 1e-9:
+            dist = 1.0
+
+        # 두 앵커 정점을 mesh 단위로 고정 (0, 0)과 (dist, 0)
+        fixed_pos = np.array([[0.0, 0.0], [dist, 0.0]], dtype=np.float64)
         
         # LSCM 방정식 구성
         # 각 삼각형에 대해 등각 조건 설정
@@ -382,9 +705,18 @@ class ARAPFlattener:
             # 닫힌 메쉬는 LSCM으로 대체
             return self._lscm_parameterization(mesh)
         
-        # 경계 정점을 원에 배치
+        # 경계 정점을 원에 배치 (mesh 단위 스케일 유지: perimeter 기반 radius)
+        verts = np.asarray(mesh.vertices, dtype=np.float64)
+        b_pts = verts[boundary]
+        if b_pts.shape[0] >= 2:
+            diffs = b_pts[(np.arange(len(boundary)) + 1) % len(boundary)] - b_pts
+            perim = float(np.linalg.norm(diffs, axis=1).sum())
+        else:
+            perim = 0.0
+        radius = perim / (2.0 * np.pi) if perim > 1e-12 else 1.0
+
         angles = np.linspace(0, 2*np.pi, len(boundary), endpoint=False)
-        boundary_uv = np.column_stack([np.cos(angles), np.sin(angles)])
+        boundary_uv = np.column_stack([np.cos(angles), np.sin(angles)]) * radius
         
         # 라플라시안 행렬 구성
         is_boundary = np.zeros(n, dtype=bool)
@@ -437,64 +769,262 @@ class ARAPFlattener:
     def _arap_optimize(self, mesh: MeshData, initial_uv: np.ndarray,
                        boundary_type: str) -> np.ndarray:
         """
-        ARAP 최적화 반복
-        로컬 회전과 글로벌 위치를 번갈아 최적화
+        ARAP 최적화 반복 (3D -> 2D ARAP 파라미터화)
+
+        - (u_j - u_i) 2D 엣지와 (p_j - p_i) 3D 엣지를 직접 매칭하고,
+          정점별 2x3 회전(R_i)을 SVD(Procrustes)로 추정합니다.
+        - 기존처럼 3D를 먼저 어떤 평면으로 투영하면(예: PCA) 곡률이 큰 메쉬에서
+          엣지 길이 정보가 크게 훼손될 수 있어, 곡면 펼침에 부적합합니다.
         """
         n = mesh.n_vertices
+        vertices = np.asarray(mesh.vertices, dtype=np.float64)
+        faces = np.asarray(mesh.faces, dtype=np.int32)
+        if (
+            n <= 0
+            or vertices.ndim != 2
+            or vertices.shape[0] == 0
+            or faces.ndim != 2
+            or faces.shape[0] == 0
+        ):
+            return np.zeros((n, 2), dtype=np.float64)
 
-        uv = initial_uv.copy()
-        
-        # 기준 2D 좌표계 (메쉬가 어떤 방향을 향하든 안정적으로 동작하도록)
-        reference_basis = self._compute_reference_basis(mesh)
-        
-        # 코탄젠트 가중치 계산
-        weights = self._compute_cotangent_weights(mesh)
-        
-        # 경계 정점
-        boundary = mesh.get_boundary_vertices()
-        is_boundary = np.zeros(n, dtype=bool)
-        is_boundary[boundary] = True
-        
-        # 경계 조건에 따른 고정 정점 설정
-        if boundary_type == 'fixed_circle' and len(boundary) >= 3:
-            # 경계를 원에 고정
-            fixed_mask = is_boundary
-        elif boundary_type == 'fixed_rect' and len(boundary) >= 4:
-            # 경계를 사각형에 고정
-            fixed_mask = is_boundary
+        uv = np.asarray(initial_uv, dtype=np.float64)
+        if uv.ndim != 2 or uv.shape[0] != n or uv.shape[1] < 2:
+            uv = np.zeros((n, 2), dtype=np.float64)
         else:
-            # 자유 경계: 두 정점만 고정 (회전/이동 방지)
-            fixed_mask = np.zeros(n, dtype=bool)
-            if len(boundary) >= 2:
-                fixed_mask[boundary[0]] = True
-                fixed_mask[boundary[len(boundary)//2]] = True
-            else:
-                fixed_mask[0] = True
-                fixed_mask[n//2] = True
-        
-        fixed_indices = np.where(fixed_mask)[0]
-        free_indices = np.where(~fixed_mask)[0]
-        
-        # ARAP 반복
-        prev_energy = float('inf')
-        
-        for iteration in range(self.max_iterations):
+            uv = uv[:, :2].copy()
+
+        # fallback용 기준 투영(고립 정점/SVD 실패 시 사용)
+        reference_basis = self._compute_reference_basis(mesh)  # (2,3)
+
+        weights = self._compute_cotangent_weights(mesh)
+        if not weights:
+            return (reference_basis @ vertices.T).T
+
+        neighbors = self._build_vertex_neighbors(n, weights)
+
+        boundary = np.asarray(mesh.get_boundary_vertices(), dtype=np.int32).reshape(-1)
+        fixed_indices, fixed_uv, uv = self._build_fixed_constraints(
+            mesh,
+            uv,
+            boundary_type=str(boundary_type or "free"),
+            boundary=boundary,
+        )
+        fixed_indices = np.asarray(fixed_indices, dtype=np.int32).reshape(-1)
+        fixed_uv = np.asarray(fixed_uv, dtype=np.float64).reshape(-1, 2)
+
+        if fixed_indices.size > 0:
+            uv[fixed_indices] = fixed_uv
+
+        # 라플라시안(고정) + reduced system factorization (반복마다 RHS만 변경)
+        L = self._build_laplacian(mesh, weights).tocsc()
+        all_idx = np.arange(n, dtype=np.int32)
+
+        fixed_mask = np.zeros(n, dtype=bool)
+        if fixed_indices.size > 0:
+            fixed_mask[fixed_indices] = True
+        free_indices = all_idx[~fixed_mask]
+        if free_indices.size == 0:
+            return uv
+
+        L_ff = L[free_indices][:, free_indices].tocsc()
+        reg = 1e-8
+        L_ff_reg = L_ff + sparse.eye(L_ff.shape[0], format="csc") * reg
+        try:
+            lu = splu(L_ff_reg)
+            use_lu = True
+        except Exception:
+            lu = None
+            use_lu = False
+            L_ff_reg = L_ff_reg.tocsr()
+
+        L_fc = None
+        if fixed_indices.size > 0:
+            try:
+                L_fc = L[free_indices][:, fixed_indices].tocsc()
+            except Exception:
+                L_fc = None
+
+        prev_energy: float | None = None
+        max_iter = int(max(0, self.max_iterations))
+        tol = float(self.tolerance)
+
+        for _ in range(max_iter):
             # Step 1: 로컬 회전 최적화
-            rotations = self._compute_local_rotations(mesh, uv, weights, reference_basis)
-            
+            rotations = self._compute_local_rotations(
+                mesh,
+                uv,
+                neighbors=neighbors,
+                reference_basis=reference_basis,
+            )
+
             # Step 2: 글로벌 위치 최적화
-            uv = self._solve_global_step(mesh, uv, rotations, weights, 
-                                          fixed_indices, free_indices, reference_basis)
-            
-            # 에너지 계산 및 수렴 확인
-            energy = self._compute_arap_energy(mesh, uv, rotations, weights, reference_basis)
-            
-            if abs(prev_energy - energy) < self.tolerance:
-                break
-            
+            b = self._compute_global_rhs(mesh, rotations, weights)
+            rhs = b[free_indices].copy()
+            if fixed_indices.size > 0 and L_fc is not None:
+                rhs -= (L_fc @ uv[fixed_indices])
+
+            new_uv = uv.copy()
+            if use_lu and lu is not None:
+                new_uv[free_indices, 0] = np.asarray(lu.solve(rhs[:, 0])).ravel()
+                new_uv[free_indices, 1] = np.asarray(lu.solve(rhs[:, 1])).ravel()
+            else:
+                new_uv[free_indices, 0] = np.asarray(spsolve(L_ff_reg, rhs[:, 0])).ravel()
+                new_uv[free_indices, 1] = np.asarray(spsolve(L_ff_reg, rhs[:, 1])).ravel()
+
+            uv = new_uv
+            if fixed_indices.size > 0:
+                uv[fixed_indices] = fixed_uv
+
+            # 수렴 확인
+            energy = self._compute_arap_energy(mesh, uv, rotations, weights)
+            if prev_energy is not None:
+                if abs(prev_energy - energy) <= tol * max(1.0, prev_energy):
+                    break
             prev_energy = energy
-        
+
         return uv
+
+    def _pick_anchor_pair(self, mesh: MeshData, candidates: np.ndarray) -> np.ndarray:
+        """후보 정점 집합에서 대략적인 지름(가장 먼 두 점) 쌍을 선택합니다."""
+        candidates = np.asarray(candidates, dtype=np.int32).reshape(-1)
+        n = int(mesh.n_vertices)
+        if n <= 0:
+            return np.array([0, 0], dtype=np.int32)
+        if candidates.size < 2:
+            a = int(candidates[0]) if candidates.size == 1 else 0
+            b = 1 if n > 1 else a
+            return np.array([a, b], dtype=np.int32)
+
+        verts = np.asarray(mesh.vertices, dtype=np.float64)
+        a0 = int(candidates[0])
+        d0 = np.linalg.norm(verts[candidates] - verts[a0], axis=1)
+        b = int(candidates[int(np.argmax(d0))])
+        d1 = np.linalg.norm(verts[candidates] - verts[b], axis=1)
+        a = int(candidates[int(np.argmax(d1))])
+        if a == b:
+            for cand in candidates:
+                if int(cand) != b:
+                    a = int(cand)
+                    break
+        return np.array([b, a], dtype=np.int32)
+
+    def _align_uv_to_anchors(self, uv: np.ndarray, a: int, b: int, target_dist: float) -> np.ndarray:
+        """UV를 (a)->(0,0), (b)->(target_dist,0)로 오도록 similarity 정렬합니다."""
+        uv = np.asarray(uv, dtype=np.float64)
+        if uv.ndim != 2 or uv.shape[0] == 0 or uv.shape[1] < 2:
+            return np.zeros((int(uv.shape[0]) if uv.ndim == 2 else 0, 2), dtype=np.float64)
+
+        a = int(a)
+        b = int(b)
+        if a < 0 or b < 0 or a >= uv.shape[0] or b >= uv.shape[0]:
+            return uv[:, :2].copy()
+
+        p0 = uv[a, :2].copy()
+        p1 = uv[b, :2].copy()
+        v = p1 - p0
+        norm = float(np.linalg.norm(v))
+        if not np.isfinite(norm) or norm < 1e-12:
+            out = uv[:, :2].copy()
+            out[a] = (0.0, 0.0)
+            out[b] = (float(target_dist), 0.0)
+            return out
+
+        angle = float(np.arctan2(v[1], v[0]))
+        c = float(np.cos(-angle))
+        s = float(np.sin(-angle))
+        rot = np.array([[c, -s], [s, c]], dtype=np.float64)
+
+        scale = float(target_dist) / norm if np.isfinite(target_dist) and float(target_dist) > 0 else 1.0
+        out = (uv[:, :2] - p0) @ rot.T
+        out *= scale
+        out[a] = (0.0, 0.0)
+        out[b] = (float(target_dist), 0.0)
+        return out
+
+    def _build_fixed_constraints(
+        self,
+        mesh: MeshData,
+        uv: np.ndarray,
+        *,
+        boundary_type: str,
+        boundary: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """boundary_type에 따라 고정 정점/좌표를 구성하고, 필요 시 UV를 정렬합니다."""
+        n = int(mesh.n_vertices)
+        verts = np.asarray(mesh.vertices, dtype=np.float64)
+        boundary_type = str(boundary_type or "free").lower().strip()
+        boundary = np.asarray(boundary, dtype=np.int32).reshape(-1)
+
+        if boundary_type == "fixed_circle" and boundary.size >= 3:
+            b_pts = verts[boundary]
+            diffs = b_pts[(np.arange(len(boundary)) + 1) % len(boundary)] - b_pts
+            perim = float(np.linalg.norm(diffs, axis=1).sum())
+            radius = perim / (2.0 * np.pi) if perim > 1e-12 else 1.0
+            angles = np.linspace(0.0, 2.0 * np.pi, len(boundary), endpoint=False)
+            boundary_uv = np.column_stack([np.cos(angles), np.sin(angles)]) * radius
+            new_uv = np.asarray(uv, dtype=np.float64).copy()
+            new_uv[boundary] = boundary_uv
+            return boundary.copy(), boundary_uv.astype(np.float64, copy=False), new_uv
+
+        if boundary_type == "fixed_rect" and boundary.size >= 4:
+            b_pts = verts[boundary]
+            seg = b_pts[(np.arange(len(boundary)) + 1) % len(boundary)] - b_pts
+            seg_len = np.linalg.norm(seg, axis=1)
+            perim = float(seg_len.sum())
+            if perim <= 1e-12:
+                return boundary.copy(), uv[boundary][:, :2].copy(), np.asarray(uv, dtype=np.float64).copy()
+
+            basis = self._compute_reference_basis(mesh)
+            proj = (basis @ b_pts.T).T
+            ext = proj.max(axis=0) - proj.min(axis=0)
+            w = float(max(ext[0], 1e-6))
+            h = float(max(ext[1], 1e-6))
+            rect_perim = 2.0 * (w + h)
+            s = perim / rect_perim if rect_perim > 1e-12 else 1.0
+            w *= s
+            h *= s
+
+            cum = np.concatenate([[0.0], np.cumsum(seg_len)])
+            t = cum[:-1] / perim * (2.0 * (w + h))
+            out = np.zeros((len(boundary), 2), dtype=np.float64)
+            for i, ti in enumerate(t):
+                if ti < w:
+                    out[i] = (ti, 0.0)
+                elif ti < w + h:
+                    out[i] = (w, ti - w)
+                elif ti < 2.0 * w + h:
+                    out[i] = (w - (ti - (w + h)), h)
+                else:
+                    out[i] = (0.0, h - (ti - (2.0 * w + h)))
+
+            new_uv = np.asarray(uv, dtype=np.float64).copy()
+            new_uv[boundary] = out
+            return boundary.copy(), out, new_uv
+
+        # 자유 경계: 두 정점만 고정 (회전/이동 방지)
+        candidates = boundary if boundary.size >= 2 else np.arange(n, dtype=np.int32)
+        anchors = self._pick_anchor_pair(mesh, candidates)
+        dist = float(np.linalg.norm(verts[anchors[1]] - verts[anchors[0]]))
+        if not np.isfinite(dist) or dist < 1e-9:
+            dist = 1.0
+        new_uv = self._align_uv_to_anchors(uv, anchors[0], anchors[1], dist)
+        fixed_uv = new_uv[anchors][:, :2].copy()
+        return anchors.astype(np.int32, copy=False), fixed_uv, new_uv
+
+    def _build_vertex_neighbors(
+        self, n: int, weights: Dict[Tuple[int, int], float]
+    ) -> list[list[tuple[int, float]]]:
+        neighbors: list[list[tuple[int, float]]] = [[] for _ in range(int(n))]
+        for (i, j), w in weights.items():
+            ii = int(i)
+            jj = int(j)
+            if ii < 0 or jj < 0 or ii >= n or jj >= n:
+                continue
+            ww = float(w)
+            neighbors[ii].append((jj, ww))
+            neighbors[jj].append((ii, ww))
+        return neighbors
 
     def _compute_reference_basis(self, mesh: MeshData) -> np.ndarray:
         """
@@ -569,127 +1099,96 @@ class ARAPFlattener:
         coo = sparse.coo_matrix((vals, (rows, cols)), shape=(n, n))
         return sparse.csr_matrix(coo)
     
-    def _compute_local_rotations(self, mesh: MeshData, uv: np.ndarray,
-                                  weights: Dict[Tuple[int, int], float],
-                                  reference_basis: np.ndarray) -> np.ndarray:
+    def _compute_local_rotations(
+        self,
+        mesh: MeshData,
+        uv: np.ndarray,
+        *,
+        neighbors: list[list[tuple[int, float]]],
+        reference_basis: np.ndarray,
+    ) -> np.ndarray:
         """
-        각 정점에 대한 최적 로컬 회전 계산
-        SVD를 사용한 Procrustes 분석
+        각 정점에 대한 최적 로컬 회전(R_i: 2x3) 계산
+        - SVD(Procrustes)로 row-orthonormal 2x3 회전 추정
         """
         n = mesh.n_vertices
-        vertices = mesh.vertices
-        
-        rotations = np.zeros((n, 2, 2))
-        
-        # 각 정점의 이웃 정보
-        neighbors = [[] for _ in range(n)]
-        for (i, j), w in weights.items():
-            neighbors[i].append((j, w))
-            neighbors[j].append((i, w))
-        
+        vertices = np.asarray(mesh.vertices, dtype=np.float64)
+        uv = np.asarray(uv, dtype=np.float64)
+
+        rotations = np.zeros((n, 2, 3), dtype=np.float64)
+        default_R = np.asarray(reference_basis, dtype=np.float64).reshape(2, 3)
+
         for i in range(n):
-            if len(neighbors[i]) == 0:
-                rotations[i] = np.eye(2)
+            nbrs = neighbors[i] if i < len(neighbors) else []
+            if not nbrs:
+                rotations[i] = default_R
                 continue
-            
-            # 공분산 행렬 계산
-            S = np.zeros((2, 2))
-            
-            for j, w in neighbors[i]:
-                # 원본 3D 엣지 (xy 평면에 투영)
-                e_3d = vertices[j] - vertices[i]
-                e_orig = reference_basis @ e_3d
-                
-                # 현재 2D 엣지
-                e_curr = uv[j] - uv[i]
-                
-                S += w * np.outer(e_curr, e_orig)
-            
-            # SVD로 최적 회전 추출
-            U, _, Vt = np.linalg.svd(S)
-            R = U @ Vt
-            
-            # 반사 방지
-            if np.linalg.det(R) < 0:
-                U[:, -1] *= -1
-                R = U @ Vt
-            
-            rotations[i] = R
-        
+
+            S = np.zeros((2, 3), dtype=np.float64)
+            pi = vertices[i]
+            ui = uv[i, :2]
+            for j, w in nbrs:
+                e3d = vertices[j] - pi
+                e_uv = uv[j, :2] - ui
+                S += float(w) * np.outer(e_uv, e3d)
+
+            try:
+                U, _, Vt = np.linalg.svd(S, full_matrices=True)
+            except np.linalg.LinAlgError:
+                rotations[i] = default_R
+                continue
+
+            M = np.zeros((2, 3), dtype=np.float64)
+            M[0, 0] = 1.0
+            M[1, 1] = 1.0
+            rotations[i] = U @ M @ Vt
+
         return rotations
     
-    def _solve_global_step(self, mesh: MeshData, uv: np.ndarray,
-                           rotations: np.ndarray,
-                           weights: Dict[Tuple[int, int], float],
-                           fixed_indices: np.ndarray,
-                           free_indices: np.ndarray,
-                           reference_basis: np.ndarray) -> np.ndarray:
-        """글로벌 위치 최적화 단계"""
-        n = mesh.n_vertices
-        vertices = mesh.vertices
-        
-        # 우변 계산
-        b = np.zeros((n, 2))
-        
-        for (i, j), w in weights.items():
-            e_3d = vertices[j] - vertices[i]
-            e_orig = reference_basis @ e_3d
-            
-            # 두 정점의 회전 평균 적용
-            R_avg = (rotations[i] + rotations[j]) / 2
-            rotated_edge = R_avg @ e_orig
-            
-            b[i] -= w * rotated_edge
-            b[j] += w * rotated_edge
-        
-        # 라플라시안 행렬
-        L = self._build_laplacian(mesh, weights)
-        
-        # 고정 정점 처리
-        if len(fixed_indices) > 0:
-            # 고정 정점 값을 우변으로 이동
-            for idx in fixed_indices:
-                b -= L[:, idx].toarray().flatten()[:, np.newaxis] * uv[idx]
-            
-            # 시스템 축소
-            L_reduced = L[np.ix_(free_indices, free_indices)]
-            b_reduced = b[free_indices]
-            
-            # 정규화 추가
-            L_reduced += sparse.eye(len(free_indices)) * 1e-8
-            
-            # 풀이
-            new_uv = uv.copy()
-            new_uv[free_indices, 0] = np.asarray(spsolve(L_reduced.tocsr(), b_reduced[:, 0])).ravel()
-            new_uv[free_indices, 1] = np.asarray(spsolve(L_reduced.tocsr(), b_reduced[:, 1])).ravel()
+    def _compute_global_rhs(
+        self,
+        mesh: MeshData,
+        rotations: np.ndarray,
+        weights: Dict[Tuple[int, int], float],
+    ) -> np.ndarray:
+        """Global step RHS b (n,2): sum w_ij * 0.5*(R_i + R_j) @ (p_j - p_i)."""
+        n = int(mesh.n_vertices)
+        vertices = np.asarray(mesh.vertices, dtype=np.float64)
+        b = np.zeros((n, 2), dtype=np.float64)
 
-            return new_uv
-        else:
-            # 모든 정점이 자유 (원점 고정)
-            L += sparse.eye(n) * 1e-8
-            new_uv = np.zeros((n, 2))
-            new_uv[:, 0] = np.asarray(spsolve(L.tocsr(), b[:, 0])).ravel()
-            new_uv[:, 1] = np.asarray(spsolve(L.tocsr(), b[:, 1])).ravel()
-            return new_uv
-    
-    def _compute_arap_energy(self, mesh: MeshData, uv: np.ndarray,
-                             rotations: np.ndarray,
-                             weights: Dict[Tuple[int, int], float],
-                             reference_basis: np.ndarray) -> float:
-        """ARAP 에너지 계산"""
-        vertices = mesh.vertices
-        energy = 0.0
-        
         for (i, j), w in weights.items():
-            e_3d = vertices[j] - vertices[i]
-            e_orig = reference_basis @ e_3d
-            e_curr = uv[j] - uv[i]
-            
-            R = rotations[i]
-            diff = e_curr - R @ e_orig
-            energy += w * np.dot(diff, diff)
-        
-        return energy
+            ii = int(i)
+            jj = int(j)
+            e = vertices[jj] - vertices[ii]  # 3D
+            R_avg = 0.5 * (rotations[ii] + rotations[jj])  # (2,3)
+            rotated_edge = R_avg @ e  # (2,)
+            ww = float(w)
+            b[ii] -= ww * rotated_edge
+            b[jj] += ww * rotated_edge
+
+        return b
+    
+    def _compute_arap_energy(
+        self,
+        mesh: MeshData,
+        uv: np.ndarray,
+        rotations: np.ndarray,
+        weights: Dict[Tuple[int, int], float],
+    ) -> float:
+        """ARAP 에너지 계산"""
+        vertices = np.asarray(mesh.vertices, dtype=np.float64)
+        uv = np.asarray(uv, dtype=np.float64)
+        energy = 0.0
+
+        for (i, j), w in weights.items():
+            ii = int(i)
+            jj = int(j)
+            e_3d = vertices[jj] - vertices[ii]
+            e_uv = uv[jj, :2] - uv[ii, :2]
+            diff = e_uv - (rotations[ii] @ e_3d)
+            energy += float(w) * float(np.dot(diff, diff))
+
+        return float(energy)
     
     def _compute_scale(self, mesh: MeshData, uv: np.ndarray) -> float:
         """원본 표면적을 보존하는 스케일 계산"""

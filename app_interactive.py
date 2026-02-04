@@ -2776,14 +2776,13 @@ class MainWindow(QMainWindow):
             # ARAP 최적화 없이 LSCM 결과만 사용
             flattener = ARAPFlattener(max_iterations=0)
             uv = flattener._lscm_parameterization(mesh)
-            scale = flattener._compute_scale(mesh, uv)
             distortion = flattener._compute_distortion(mesh, uv)
             return FlattenedMesh(
                 uv=uv,
                 faces=mesh.faces,
                 original_mesh=mesh,
                 distortion_per_face=distortion,
-                scale=scale
+                scale=1.0
             )
 
         if 'ARAP' in method:
