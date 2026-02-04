@@ -761,53 +761,65 @@ class FlattenPanel(QWidget):
         
         layout.addWidget(adv_group)
 
-        # 표면 선택/지정 (내/외면)
+        # 표면 선택/지정 (내/외면/미구)
         surface_group = QGroupBox("✋ 표면 선택/지정 (내/외면)")
         surface_group.setStyleSheet("QGroupBox { font-weight: bold; }")
         surface_layout = QVBoxLayout(surface_group)
 
+        target_row = QHBoxLayout()
+        target_row.addWidget(QLabel("대상:"))
+        self.combo_surface_target = QComboBox()
+        self.combo_surface_target.addItems(["🌞 외면", "🌙 내면", "🧩 미구"])
+        self.combo_surface_target.setToolTip("지정할 표면 그룹 선택")
+        self.combo_surface_target.currentIndexChanged.connect(
+            lambda _i: self.selectionRequested.emit("surface_target", self.current_surface_target())
+        )
+        target_row.addWidget(self.combo_surface_target)
+        surface_layout.addLayout(target_row)
+
         tool_row = QHBoxLayout()
-        self.btn_surface_click = QPushButton("👆 클릭 선택")
-        self.btn_surface_click.setToolTip("클릭=토글, Shift/Ctrl=추가, Alt=제거")
+        self.btn_surface_click = QPushButton("👆 찍기(자동 확장)")
+        self.btn_surface_click.setToolTip(
+            "클릭한 면이 속한 '매끈한 연결 영역'을 자동 확장해 지정합니다.\n"
+            "Shift/Ctrl=추가, Alt=제거, ESC=종료"
+        )
         self.btn_surface_click.clicked.connect(
-            lambda: self.selectionRequested.emit("tool", {"tool": "click"})
+            lambda: self.selectionRequested.emit("surface_tool", {"tool": "click", "target": self.current_surface_target()})
         )
         tool_row.addWidget(self.btn_surface_click)
 
-        self.btn_surface_brush = QPushButton("🖌️ 브러시 선택")
-        self.btn_surface_brush.setToolTip("드래그=선택, Shift=추가, Alt=제거")
+        self.btn_surface_brush = QPushButton("🖌️ 보정(브러시)")
+        self.btn_surface_brush.setToolTip("드래그로 칠해서 보정합니다. Alt=지우기, ESC=종료")
         self.btn_surface_brush.clicked.connect(
-            lambda: self.selectionRequested.emit("tool", {"tool": "brush"})
+            lambda: self.selectionRequested.emit("surface_tool", {"tool": "brush", "target": self.current_surface_target()})
         )
         tool_row.addWidget(self.btn_surface_brush)
         surface_layout.addLayout(tool_row)
 
-        self.label_surface_selection = QLabel("선택된 면: 0개")
-        self.label_surface_selection.setStyleSheet("font-weight: bold; color: #2c5282;")
-        surface_layout.addWidget(self.label_surface_selection)
-
-        assign_row = QHBoxLayout()
-        btn_outer = QPushButton("🌞 선택 → 외면")
-        btn_outer.setStyleSheet("background-color: #ebf8ff; color: #2b6cb0;")
-        btn_outer.clicked.connect(lambda: self.selectionRequested.emit("assign_outer", None))
-        assign_row.addWidget(btn_outer)
-
-        btn_inner = QPushButton("🌙 선택 → 내면")
-        btn_inner.setStyleSheet("background-color: #faf5ff; color: #6b46c1;")
-        btn_inner.clicked.connect(lambda: self.selectionRequested.emit("assign_inner", None))
-        assign_row.addWidget(btn_inner)
-        surface_layout.addLayout(assign_row)
+        self.label_surface_assignment = QLabel("외면: 0 / 내면: 0 / 미구: 0")
+        self.label_surface_assignment.setStyleSheet("font-weight: bold; color: #2c5282;")
+        surface_layout.addWidget(self.label_surface_assignment)
 
         action_row = QHBoxLayout()
-        btn_auto = QPushButton("🤖 내/외면 자동 감지")
-        btn_auto.setToolTip("법선 방향으로 내/외면을 자동 분리해 저장합니다")
-        btn_auto.clicked.connect(lambda: self.selectionRequested.emit("auto_surface", None))
-        action_row.addWidget(btn_auto)
+        btn_clear_target = QPushButton("🗑️ 현재 비우기")
+        btn_clear_target.setToolTip("현재 대상(외/내/미구) 지정 면을 모두 비웁니다.")
+        btn_clear_target.clicked.connect(
+            lambda: self.selectionRequested.emit("surface_clear_target", self.current_surface_target())
+        )
+        action_row.addWidget(btn_clear_target)
 
-        btn_clear = QPushButton("🧹 선택 해제")
-        btn_clear.clicked.connect(lambda: self.selectionRequested.emit("clear", None))
-        action_row.addWidget(btn_clear)
+        btn_clear_all = QPushButton("🧼 전체 초기화")
+        btn_clear_all.setToolTip("외면/내면/미구 지정을 모두 초기화합니다.")
+        btn_clear_all.clicked.connect(lambda: self.selectionRequested.emit("surface_clear_all", None))
+        action_row.addWidget(btn_clear_all)
         surface_layout.addLayout(action_row)
+
+        auto_row = QHBoxLayout()
+        btn_auto = QPushButton("🤖 자동 분리(실험)")
+        btn_auto.setToolTip("완전 자동은 메쉬/정렬 상태에 따라 실패할 수 있습니다. 결과가 이상하면 수동 '찍기'로 지정하세요.")
+        btn_auto.clicked.connect(lambda: self.selectionRequested.emit("auto_surface", None))
+        auto_row.addWidget(btn_auto)
+        surface_layout.addLayout(auto_row)
 
         layout.addWidget(surface_group)
         
@@ -847,13 +859,28 @@ class FlattenPanel(QWidget):
         }
         self.flattenRequested.emit(options)
 
-    def update_surface_selection_count(self, count: int) -> None:
+    def current_surface_target(self) -> str:
         try:
-            c = int(count)
+            idx = int(self.combo_surface_target.currentIndex())
         except Exception:
-            c = 0
+            idx = 0
+        return "inner" if idx == 1 else ("migu" if idx == 2 else "outer")
+
+    def update_surface_assignment_counts(self, outer: int, inner: int, migu: int) -> None:
         try:
-            self.label_surface_selection.setText(f"선택된 면: {c:,}개")
+            o = int(outer)
+        except Exception:
+            o = 0
+        try:
+            i = int(inner)
+        except Exception:
+            i = 0
+        try:
+            m = int(migu)
+        except Exception:
+            m = 0
+        try:
+            self.label_surface_assignment.setText(f"외면: {o:,} / 내면: {i:,} / 미구: {m:,}")
         except Exception:
             pass
     
@@ -1565,7 +1592,7 @@ class MainWindow(QMainWindow):
         self.viewport.floorFacePicked.connect(self.on_floor_face_picked)
         self.viewport.alignToBrushSelected.connect(self.on_align_to_brush_selected)
         self.viewport.floorAlignmentConfirmed.connect(self.on_floor_alignment_confirmed)
-        self.viewport.faceSelectionChanged.connect(self.on_face_selection_changed)
+        self.viewport.surfaceAssignmentChanged.connect(self.on_surface_assignment_changed)
         
         # 단축키 설정 (Undo: Ctrl+Z)
         self.undo_shortcut = QShortcut(QKeySequence("Ctrl+Z"), self)
@@ -2404,15 +2431,17 @@ class MainWindow(QMainWindow):
         self.update_slice_range()
         try:
             obj = self.viewport.selected_obj
-            self.flatten_panel.update_surface_selection_count(
-                len(getattr(obj, "selected_faces", []) or [])
+            self.flatten_panel.update_surface_assignment_counts(
+                len(getattr(obj, "outer_face_indices", set()) or set()),
+                len(getattr(obj, "inner_face_indices", set()) or set()),
+                len(getattr(obj, "migu_face_indices", set()) or set()),
             )
         except Exception:
             pass
 
-    def on_face_selection_changed(self, count: int):
+    def on_surface_assignment_changed(self, outer: int, inner: int, migu: int) -> None:
         try:
-            self.flatten_panel.update_surface_selection_count(int(count))
+            self.flatten_panel.update_surface_assignment_counts(int(outer), int(inner), int(migu))
         except Exception:
             pass
 
@@ -2533,22 +2562,40 @@ class MainWindow(QMainWindow):
     def on_selection_action(self, action: str, data):
         action = str(action or "").strip()
 
-        # 1) Tool mode switch (no mesh required)
-        if action == "tool":
+        # 1) Surface target / tool switch (no mesh required)
+        if action == "surface_target":
+            target = str(data or "").strip().lower()
+            if target not in {"outer", "inner", "migu"}:
+                target = "outer"
+            self.viewport._surface_paint_target = target
+            self.viewport.status_info = f"✋ 표면 지정 대상: {target} (찍기/브러시 버튼으로 시작)"
+            self.viewport.update()
+            return
+
+        if action in {"surface_tool", "tool"}:
             tool = ""
+            target = "outer"
             try:
                 tool = str((data or {}).get("tool", "")).strip().lower()
+                target = str((data or {}).get("target", "outer")).strip().lower()
             except Exception:
                 tool = ""
+                target = "outer"
+
+            if target not in {"outer", "inner", "migu"}:
+                target = "outer"
+            self.viewport._surface_paint_target = target
 
             if tool == "click":
-                self.viewport.picking_mode = "select_face"
-                self.viewport.status_info = "🖱️ 면 선택: 클릭=토글, Shift/Ctrl=추가, Alt=제거 (ESC로 종료)"
+                self.viewport.picking_mode = "paint_surface_face"
+                self.viewport.status_info = (
+                    f"👆 찍기(자동 확장) [{target}]: 클릭=영역 지정, Shift/Ctrl=추가, Alt=제거 (ESC로 종료)"
+                )
             elif tool == "brush":
-                self.viewport.picking_mode = "select_brush"
-                self.viewport.status_info = "🖌️ 브러시 선택: 드래그=선택, Shift=추가, Alt=제거 (ESC로 종료)"
+                self.viewport.picking_mode = "paint_surface_brush"
+                self.viewport.status_info = f"🖌️ 보정(브러시) [{target}]: 드래그=칠하기, Alt=지우기 (ESC로 종료)"
             else:
-                QMessageBox.information(self, "안내", "올가미 선택은 아직 구현되지 않았습니다.")
+                QMessageBox.information(self, "안내", "선택 도구를 확인할 수 없습니다.")
                 return
 
             self.viewport.update()
@@ -2560,43 +2607,30 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "경고", "먼저 메쉬를 선택해 주세요.")
             return
 
-        if not hasattr(obj, "selected_faces") or obj.selected_faces is None:
-            obj.selected_faces = set()
+        if not hasattr(obj, "outer_face_indices") or obj.outer_face_indices is None:
+            obj.outer_face_indices = set()
+        if not hasattr(obj, "inner_face_indices") or obj.inner_face_indices is None:
+            obj.inner_face_indices = set()
+        if not hasattr(obj, "migu_face_indices") or obj.migu_face_indices is None:
+            obj.migu_face_indices = set()
 
-        selected_faces: set[int] = set(int(x) for x in (obj.selected_faces or set()))
-        obj.selected_faces = selected_faces
+        if action == "surface_clear_target":
+            target = str(data or "").strip().lower()
+            if target not in {"outer", "inner", "migu"}:
+                target = "outer"
+            if target == "inner":
+                obj.inner_face_indices.clear()
+            elif target == "migu":
+                obj.migu_face_indices.clear()
+            else:
+                obj.outer_face_indices.clear()
+            self.viewport.status_info = f"표면 지정 비움: {target}"
 
-        if action == "clear":
-            selected_faces.clear()
-            self.viewport.status_info = "선택 해제"
-
-        elif action == "invert":
-            try:
-                all_faces = set(range(int(obj.mesh.n_faces)))
-                obj.selected_faces = all_faces - selected_faces
-                selected_faces = obj.selected_faces
-                self.viewport.status_info = "선택 반전"
-            except Exception:
-                pass
-
-        elif action in {"grow", "shrink"}:
-            if not selected_faces:
-                return
-            try:
-                from src.core.region_selector import RegionSelector
-
-                selector = RegionSelector()
-                arr = np.asarray(sorted(selected_faces), dtype=np.int32)
-                if action == "grow":
-                    new_arr = selector.grow_selection(obj.mesh, arr, iterations=1)
-                    self.viewport.status_info = "선택 확장"
-                else:
-                    new_arr = selector.shrink_selection(obj.mesh, arr, iterations=1)
-                    self.viewport.status_info = "선택 축소"
-                obj.selected_faces = set(int(x) for x in np.asarray(new_arr).reshape(-1).tolist())
-                selected_faces = obj.selected_faces
-            except Exception:
-                pass
+        elif action == "surface_clear_all":
+            obj.outer_face_indices.clear()
+            obj.inner_face_indices.clear()
+            obj.migu_face_indices.clear()
+            self.viewport.status_info = "표면 지정 전체 초기화"
 
         elif action == "auto_surface":
             try:
@@ -2626,25 +2660,15 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "안내", "미구/경계 자동 선택은 아직 구현되지 않았습니다.")
             return
 
-        elif action in {"assign_outer", "assign_inner", "assign_migu"}:
-            if not selected_faces:
-                QMessageBox.warning(self, "경고", "먼저 면을 선택해 주세요.")
-                return
-            if action == "assign_outer":
-                obj.outer_face_indices = set(selected_faces)
-                self.viewport.status_info = f"외면 지정: {len(obj.outer_face_indices):,} faces"
-            elif action == "assign_inner":
-                obj.inner_face_indices = set(selected_faces)
-                self.viewport.status_info = f"내면 지정: {len(obj.inner_face_indices):,} faces"
-            else:
-                obj.migu_face_indices = set(selected_faces)
-                self.viewport.status_info = f"미구 지정: {len(obj.migu_face_indices):,} faces"
-
         else:
             self.status_info.setText(f"선택 작업: {action}")
 
         try:
-            self.flatten_panel.update_surface_selection_count(len(obj.selected_faces))
+            self.flatten_panel.update_surface_assignment_counts(
+                len(obj.outer_face_indices),
+                len(obj.inner_face_indices),
+                len(obj.migu_face_indices),
+            )
         except Exception:
             pass
         self.viewport.update()

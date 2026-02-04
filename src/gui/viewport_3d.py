@@ -694,6 +694,8 @@ class SceneObject:
         self._face_centroids = None
         self._face_centroid_kdtree = None
         self._face_centroid_faces_count = 0
+        self._face_adjacency = None
+        self._face_adjacency_faces_count = 0
         
     def to_trimesh(self):
         """trimesh 객체 반환 (캐싱)"""
@@ -767,6 +769,7 @@ class Viewport3D(QOpenGLWidget):
     roiSilhouetteExtracted = pyqtSignal(list) # 2D silhouette points
     cutLinesAutoEnded = pyqtSignal()         # 단면선(2개) 입력 모드가 자동 종료됨
     faceSelectionChanged = pyqtSignal(int)   # 선택된 face 개수 변경
+    surfaceAssignmentChanged = pyqtSignal(int, int, int)  # outer/inner/migu faces count
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -808,6 +811,8 @@ class Viewport3D(QOpenGLWidget):
         self.brush_selected_faces = set() # 브러시로 선택된 면 인덱스
         self._selection_brush_mode = "replace"  # replace|add|remove
         self._selection_brush_last_pick = 0.0
+        self._surface_paint_target = "outer"  # outer|inner|migu
+        self._surface_brush_last_pick = 0.0
         self.floor_picks = []  # 바닥면 지정용 점 리스트
         
         # Undo/Redo 시스템
@@ -3360,6 +3365,40 @@ class Viewport3D(QOpenGLWidget):
             glDisable(GL_POLYGON_OFFSET_FILL)
             glEnable(GL_LIGHTING)
             glPopMatrix()
+
+        # 표면 지정 하이라이트 (outer/inner/migu)
+        if is_selected and self.picking_mode in {'paint_surface_face', 'paint_surface_brush'}:
+            try:
+                target = str(getattr(self, "_surface_paint_target", "outer")).strip().lower()
+                face_set = self._get_surface_target_set(obj, target)
+                max_faces = int(getattr(self, "_surface_overlay_max_faces", 150000))
+                if face_set and len(face_set) <= max_faces:
+                    if target == "inner":
+                        color = (0.75, 0.35, 1.0, 0.28)
+                    elif target == "migu":
+                        color = (0.25, 0.85, 0.35, 0.28)
+                    else:
+                        color = (0.25, 0.65, 1.0, 0.28)
+
+                    glPushMatrix()
+                    glDisable(GL_LIGHTING)
+                    glEnable(GL_BLEND)
+                    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+                    glPolygonOffset(-1.0, -1.0)
+                    glEnable(GL_POLYGON_OFFSET_FILL)
+                    glColor4f(*color)
+                    glBegin(GL_TRIANGLES)
+                    for face_idx in face_set:
+                        f = obj.mesh.faces[int(face_idx)]
+                        for v_idx in f:
+                            glVertex3fv(obj.mesh.vertices[v_idx])
+                    glEnd()
+                    glDisable(GL_POLYGON_OFFSET_FILL)
+                    glDisable(GL_BLEND)
+                    glEnable(GL_LIGHTING)
+                    glPopMatrix()
+            except Exception:
+                pass
         
         if obj.vbo_id is not None:
             # VBO 방식 렌더링
@@ -3814,6 +3853,8 @@ class Viewport3D(QOpenGLWidget):
                 obj._face_centroid_kdtree = None
                 obj._face_centroids = None
                 obj._face_centroid_faces_count = 0
+                obj._face_adjacency = None
+                obj._face_adjacency_faces_count = 0
             except Exception:
                 pass
         except Exception as e:
@@ -4102,6 +4143,22 @@ class Viewport3D(QOpenGLWidget):
                         obj.selected_faces.clear()
                     self._pick_selection_brush_face(event.pos())
                     self.faceSelectionChanged.emit(len(obj.selected_faces))
+                    self.update()
+                    return
+
+                elif self.picking_mode == 'paint_surface_face':
+                    point = self.pick_point_on_mesh(event.pos().x(), event.pos().y())
+                    if point is not None:
+                        res = self.pick_face_at_point(point, return_index=True)
+                        if res:
+                            idx, _verts = res
+                            self._apply_surface_seed_pick(int(idx), modifiers)
+                        self.update()
+                    return
+
+                elif self.picking_mode == 'paint_surface_brush':
+                    remove = bool(modifiers & Qt.KeyboardModifier.AltModifier)
+                    self._pick_surface_brush_face(event.pos(), remove=remove)
                     self.update()
                     return
 
@@ -4517,6 +4574,16 @@ class Viewport3D(QOpenGLWidget):
                         self.faceSelectionChanged.emit(len(obj.selected_faces) if obj is not None else 0)
                     except Exception:
                         pass
+                self.update()
+                return
+
+            # 0.2 표면 지정 브러시 처리 (outer/inner/migu)
+            if self.mouse_button == Qt.MouseButton.LeftButton and self.picking_mode == 'paint_surface_brush':
+                now = time.monotonic()
+                if now - float(getattr(self, "_surface_brush_last_pick", 0.0)) >= 0.03:
+                    self._surface_brush_last_pick = now
+                    remove = bool(modifiers & Qt.KeyboardModifier.AltModifier)
+                    self._pick_surface_brush_face(event.pos(), remove=remove)
                 self.update()
                 return
 
@@ -5098,6 +5165,201 @@ class Viewport3D(QOpenGLWidget):
             obj.selected_faces.discard(idx)
         else:
             obj.selected_faces.add(idx)
+
+    def _emit_surface_assignment_changed(self, obj: SceneObject | None) -> None:
+        if obj is None:
+            return
+        try:
+            self.surfaceAssignmentChanged.emit(
+                len(getattr(obj, "outer_face_indices", set()) or set()),
+                len(getattr(obj, "inner_face_indices", set()) or set()),
+                len(getattr(obj, "migu_face_indices", set()) or set()),
+            )
+        except Exception:
+            pass
+
+    def _get_surface_target_set(self, obj: SceneObject, target: str) -> set[int]:
+        target = str(target or "").strip().lower()
+        if target == "inner":
+            if not hasattr(obj, "inner_face_indices") or obj.inner_face_indices is None:
+                obj.inner_face_indices = set()
+            return obj.inner_face_indices
+        if target == "migu":
+            if not hasattr(obj, "migu_face_indices") or obj.migu_face_indices is None:
+                obj.migu_face_indices = set()
+            return obj.migu_face_indices
+        if not hasattr(obj, "outer_face_indices") or obj.outer_face_indices is None:
+            obj.outer_face_indices = set()
+        return obj.outer_face_indices
+
+    def _get_other_surface_sets(self, obj: SceneObject, target: str) -> list[set[int]]:
+        t = str(target or "").strip().lower()
+        sets: list[set[int]] = []
+        for name in ("outer", "inner", "migu"):
+            if name == t:
+                continue
+            try:
+                sets.append(self._get_surface_target_set(obj, name))
+            except Exception:
+                continue
+        return sets
+
+    def _get_face_adjacency(self, obj: SceneObject):
+        mesh = getattr(obj, "mesh", None)
+        if mesh is None or getattr(mesh, "faces", None) is None:
+            return None
+        n_faces = int(getattr(mesh, "n_faces", 0) or 0)
+        cached_n = int(getattr(obj, "_face_adjacency_faces_count", 0) or 0)
+        adjacency = getattr(obj, "_face_adjacency", None)
+        if adjacency is not None and cached_n == n_faces:
+            return adjacency
+
+        try:
+            faces = np.asarray(mesh.faces, dtype=np.int32)
+            if faces.ndim != 2 or faces.shape[1] < 3 or n_faces <= 0:
+                return None
+        except Exception:
+            return None
+
+        adjacency = [[] for _ in range(n_faces)]
+        edge_to_face: dict[tuple[int, int], int] = {}
+
+        for fi in range(n_faces):
+            try:
+                a = int(faces[fi, 0])
+                b = int(faces[fi, 1])
+                c = int(faces[fi, 2])
+            except Exception:
+                continue
+            edges = ((a, b), (b, c), (c, a))
+            for u, v in edges:
+                if u == v:
+                    continue
+                e = (u, v) if u < v else (v, u)
+                other = edge_to_face.get(e)
+                if other is None:
+                    edge_to_face[e] = fi
+                    continue
+                if other != fi:
+                    adjacency[fi].append(other)
+                    adjacency[other].append(fi)
+
+        try:
+            obj._face_adjacency = adjacency
+            obj._face_adjacency_faces_count = int(n_faces)
+        except Exception:
+            pass
+
+        return adjacency
+
+    def _grow_smooth_patch(self, obj: SceneObject, seed_face_idx: int, *, max_angle_deg: float = 30.0) -> set[int]:
+        mesh = getattr(obj, "mesh", None)
+        if mesh is None:
+            return {int(seed_face_idx)}
+
+        try:
+            if getattr(mesh, "face_normals", None) is None:
+                mesh.compute_normals(compute_vertex_normals=False)
+        except Exception:
+            pass
+
+        normals = getattr(mesh, "face_normals", None)
+        if normals is None:
+            return {int(seed_face_idx)}
+
+        adjacency = self._get_face_adjacency(obj)
+        if adjacency is None:
+            return {int(seed_face_idx)}
+
+        n_faces = int(getattr(mesh, "n_faces", 0) or 0)
+        seed = int(seed_face_idx)
+        if seed < 0 or seed >= n_faces:
+            return set()
+
+        cos_thr = float(np.cos(np.radians(float(max_angle_deg))))
+        visited: set[int] = {seed}
+        stack: list[int] = [seed]
+
+        try:
+            fn = np.asarray(normals, dtype=np.float64)
+        except Exception:
+            return {seed}
+
+        while stack:
+            fi = stack.pop()
+            try:
+                n0 = fn[fi, :3]
+            except Exception:
+                continue
+            for nb in adjacency[fi]:
+                nb_i = int(nb)
+                if nb_i in visited:
+                    continue
+                try:
+                    n1 = fn[nb_i, :3]
+                    if float(np.dot(n0, n1)) >= cos_thr:
+                        visited.add(nb_i)
+                        stack.append(nb_i)
+                except Exception:
+                    continue
+
+        return visited
+
+    def _pick_surface_brush_face(self, pos, *, remove: bool) -> None:
+        obj = self.selected_obj
+        if obj is None or obj.mesh is None:
+            return
+
+        point = self.pick_point_on_mesh(pos.x(), pos.y())
+        if point is None:
+            return
+
+        res = self.pick_face_at_point(point, return_index=True)
+        if not res:
+            return
+        idx, _verts = res
+        idx = int(idx)
+
+        target = str(getattr(self, "_surface_paint_target", "outer"))
+        target_set = self._get_surface_target_set(obj, target)
+
+        if remove:
+            target_set.discard(idx)
+        else:
+            target_set.add(idx)
+            # Keep sets exclusive
+            for s in self._get_other_surface_sets(obj, target):
+                s.discard(idx)
+
+        self._emit_surface_assignment_changed(obj)
+
+    def _apply_surface_seed_pick(self, seed_face_idx: int, modifiers) -> None:
+        obj = self.selected_obj
+        if obj is None or obj.mesh is None:
+            return
+
+        target = str(getattr(self, "_surface_paint_target", "outer"))
+        target_set = self._get_surface_target_set(obj, target)
+
+        patch = self._grow_smooth_patch(obj, int(seed_face_idx), max_angle_deg=30.0)
+        if not patch:
+            return
+
+        if modifiers & Qt.KeyboardModifier.AltModifier:
+            target_set.difference_update(patch)
+        elif modifiers & (Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.ControlModifier):
+            target_set.update(patch)
+            for s in self._get_other_surface_sets(obj, target):
+                s.difference_update(patch)
+        else:
+            if int(seed_face_idx) in target_set:
+                target_set.difference_update(patch)
+            else:
+                target_set.update(patch)
+                for s in self._get_other_surface_sets(obj, target):
+                    s.difference_update(patch)
+
+        self._emit_surface_assignment_changed(obj)
 
     def pick_face_at_point(self, point: np.ndarray, return_index=False):
         """특정 3D 좌표가 포함된 삼각형 면의 정점 3개를 반환"""
