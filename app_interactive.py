@@ -1246,6 +1246,11 @@ class ExportPanel(QWidget):
         btn_export_flat_svg.setToolTip("평면화(Flatten) 결과의 외곽선을 실측 SVG로 저장합니다")
         btn_export_flat_svg.clicked.connect(lambda: self.exportRequested.emit({'type': 'flat_svg'}))
         mesh_layout.addWidget(btn_export_flat_svg)
+
+        btn_export_sheet_svg = QPushButton("통합 SVG (실측+단면+내/외면 탁본)")
+        btn_export_sheet_svg.setToolTip("Top outline + cut lines/sections + outer/inner rubbing in one SVG")
+        btn_export_sheet_svg.clicked.connect(lambda: self.exportRequested.emit({'type': 'sheet_svg'}))
+        mesh_layout.addWidget(btn_export_sheet_svg)
         
         layout.addWidget(mesh_group)
         
@@ -2706,6 +2711,48 @@ class MainWindow(QMainWindow):
                     traceback.print_exc()
                     self.status_info.setText("❌ 저장 실패")
                     QMessageBox.critical(self, "오류", f"SVG 저장 중 오류 발생:\n{e}")
+
+        elif export_type == 'sheet_svg':
+            filepath, _ = QFileDialog.getSaveFileName(
+                self,
+                "통합 SVG 저장 (실측+단면+내/외면 탁본)",
+                "rubbing_sheet.svg",
+                "Scalable Vector Graphics (*.svg)",
+            )
+            if filepath:
+                try:
+                    from src.core.rubbing_sheet_exporter import (
+                        RubbingSheetExporter,
+                        SheetExportOptions,
+                    )
+
+                    dpi = int(self.export_panel.spin_dpi.value())
+                    iterations = int(flatten_options.get("iterations", 30))
+
+                    exporter = RubbingSheetExporter()
+                    mesh = self._build_world_mesh(obj)
+                    cut_lines_world = self.viewport.get_cut_lines_world()
+                    cut_profiles_world = self.viewport.get_cut_sections_world()
+
+                    exporter.export(
+                        mesh,
+                        filepath,
+                        cut_lines_world=cut_lines_world,
+                        cut_profiles_world=cut_profiles_world,
+                        options=SheetExportOptions(
+                            dpi=dpi,
+                            flatten_iterations=iterations,
+                        ),
+                    )
+
+                    QMessageBox.information(self, "?꾨즺", f"통합 SVG가 저장되었습니다:\n{filepath}")
+                    self.status_info.setText(f"??????꾨즺: {Path(filepath).name}")
+                except Exception as e:
+                    import traceback
+
+                    traceback.print_exc()
+                    self.status_info.setText("??????ㅽ뙣")
+                    QMessageBox.critical(self, "?ㅻ쪟", f"통합 SVG 저장 중 오류 발생:\n{e}")
 
         elif export_type == 'mesh_outer':
             filepath, _ = QFileDialog.getSaveFileName(
