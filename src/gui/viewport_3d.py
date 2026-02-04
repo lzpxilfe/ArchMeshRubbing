@@ -4823,7 +4823,7 @@ class Viewport3D(QOpenGLWidget):
                                             dx0 = float(event.pos().x()) - sx0
                                             dy0 = float(event.pos().y()) - sy0
                                             if float(np.hypot(dx0, dy0)) <= float(snap_px):
-                                                self._finish_surface_lasso(event.modifiers())
+                                                self._finish_surface_lasso(event.modifiers(), seed_pos=event.pos())
                                                 self._surface_area_left_press_pos = None
                                                 self._surface_area_left_dragged = False
                                                 return
@@ -4866,7 +4866,7 @@ class Viewport3D(QOpenGLWidget):
                         getattr(self, "_surface_area_right_press_pos", None) is not None
                         and not bool(getattr(self, "_surface_area_right_dragged", False))
                     ):
-                        self._finish_surface_lasso(event.modifiers())
+                        self._finish_surface_lasso(event.modifiers(), seed_pos=event.pos())
                 except Exception:
                     pass
                 self._surface_area_right_press_pos = None
@@ -5368,7 +5368,7 @@ class Viewport3D(QOpenGLWidget):
         if self.picking_mode == "paint_surface_area":
             key = event.key()
             if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-                self._finish_surface_lasso(event.modifiers())
+                self._finish_surface_lasso(event.modifiers(), seed_pos=getattr(self, "surface_lasso_preview", None))
                 return
             if key in (Qt.Key.Key_Backspace, Qt.Key.Key_Delete):
                 try:
@@ -5855,7 +5855,7 @@ class Viewport3D(QOpenGLWidget):
         except Exception:
             pass
 
-    def _finish_surface_lasso(self, modifiers) -> None:
+    def _finish_surface_lasso(self, modifiers, *, seed_pos=None) -> None:
         """현재 올가미(다각형) 영역에 포함되는 '보이는' 면을 한 번에 지정합니다."""
         obj = self.selected_obj
         if obj is None or getattr(obj, "mesh", None) is None:
@@ -5886,8 +5886,22 @@ class Viewport3D(QOpenGLWidget):
         self._surface_lasso_apply_target = target
         self._surface_lasso_apply_modifiers = modifiers
 
-        # Magic-wand seed: pick a face near the polygon centroid (more stable than using boundary vertices).
+        # Magic-wand seed: prefer the confirm click position (user intent) if available,
+        # then try polygon centroid, then fall back to last picked vertex face.
         seed_face_idx = -1
+        if seed_pos is not None:
+            try:
+                px = int(getattr(seed_pos, "x", lambda: -1)())
+                py = int(getattr(seed_pos, "y", lambda: -1)())
+                if px >= 0 and py >= 0:
+                    p_seed = self.pick_point_on_mesh(px, py)
+                    if p_seed is not None:
+                        res = self.pick_face_at_point(np.asarray(p_seed, dtype=np.float64), return_index=True)
+                        if res:
+                            seed_face_idx = int(res[0])
+            except Exception:
+                seed_face_idx = -1
+
         try:
             pts_arr = np.asarray(pts_world, dtype=np.float64).reshape(-1, 3)
             if pts_arr.size >= 9:
@@ -6082,9 +6096,17 @@ class Viewport3D(QOpenGLWidget):
         except Exception:
             selected_n = int(idx_arr.size)
             cand_n = 0
+        wand_info = ""
+        try:
+            wand_n = int(stats.get("wand_selected", 0) or 0)
+            wand_c = int(stats.get("wand_candidates", 0) or 0)
+            if wand_n and wand_c:
+                wand_info = f" / 완드 {wand_n:,}/{wand_c:,}"
+        except Exception:
+            wand_info = ""
 
         op = "제거" if remove else "추가"
-        msg = f"📐 면적(Area) [{target}]: {op} {selected_n:,} faces"
+        msg = f"📐 면적(Area) [{target}]: {op} {selected_n:,} faces{wand_info}"
         if cand_n:
             msg += f" (후보 {cand_n:,})"
         self.status_info = msg
@@ -6667,9 +6689,33 @@ class Viewport3D(QOpenGLWidget):
             glPushMatrix()
             glLoadIdentity()
 
+            # Snap-ready state (mouse near the start vertex)
+            snap_px = 0
+            try:
+                snap_px = int(getattr(self, "_surface_area_close_snap_px", 12))
+            except Exception:
+                snap_px = 12
+            snap_ready = False
+            if (
+                snap_px > 0
+                and preview is not None
+                and len(screen_pts) >= 3
+                and np.isfinite(screen_pts[0][0])
+                and np.isfinite(screen_pts[0][1])
+            ):
+                try:
+                    dx = float(preview.x()) - float(screen_pts[0][0])
+                    dy = float(preview.y()) - float(screen_pts[0][1])
+                    snap_ready = float(np.hypot(dx, dy)) <= float(snap_px)
+                except Exception:
+                    snap_ready = False
+
             # Line strip (polygon preview)
             glLineWidth(2.0)
-            glColor4f(0.1, 0.6, 1.0, 0.85)
+            if snap_ready:
+                glColor4f(0.2, 0.95, 0.35, 0.9)
+            else:
+                glColor4f(0.1, 0.6, 1.0, 0.85)
             glBegin(GL_LINE_STRIP)
             for xy in screen_pts:
                 try:
@@ -6684,17 +6730,65 @@ class Viewport3D(QOpenGLWidget):
                     pass
             glEnd()
 
-            # Vertices
-            glPointSize(6.0)
-            glColor4f(0.95, 0.95, 0.95, 0.95)
-            glBegin(GL_POINTS)
-            for xy in screen_pts:
+            # Snap ring around the first vertex
+            if screen_pts and snap_px > 0:
                 try:
-                    x, y = float(xy[0]), float(xy[1])
+                    cx0, cy0 = float(screen_pts[0][0]), float(screen_pts[0][1])
+                    seg = 28
+                    glLineWidth(1.5)
+                    if snap_ready:
+                        glColor4f(0.2, 0.95, 0.35, 0.85)
+                    else:
+                        glColor4f(0.75, 0.75, 0.75, 0.55)
+                    glBegin(GL_LINE_LOOP)
+                    for j in range(seg):
+                        a = 2.0 * float(np.pi) * float(j) / float(seg)
+                        glVertex3f(cx0 + float(snap_px) * float(np.cos(a)), cy0 + float(snap_px) * float(np.sin(a)), 0.0)
+                    glEnd()
+
+                    # Optional closure hint line
+                    if snap_ready and preview is not None:
+                        glLineWidth(2.0)
+                        glColor4f(0.2, 0.95, 0.35, 0.75)
+                        glBegin(GL_LINES)
+                        glVertex3f(float(preview.x()), float(preview.y()), 0.0)
+                        glVertex3f(cx0, cy0, 0.0)
+                        glEnd()
                 except Exception:
-                    continue
-                glVertex3f(x, y, 0.0)
-            glEnd()
+                    try:
+                        glEnd()
+                    except Exception:
+                        pass
+
+            # Vertices (start vertex emphasized)
+            if screen_pts:
+                try:
+                    cx0, cy0 = float(screen_pts[0][0]), float(screen_pts[0][1])
+                    glPointSize(9.0)
+                    glBegin(GL_POINTS)
+                    if snap_ready:
+                        glColor4f(0.2, 0.95, 0.35, 0.95)
+                    else:
+                        glColor4f(1.0, 1.0, 1.0, 0.95)
+                    glVertex3f(cx0, cy0, 0.0)
+                    glEnd()
+                except Exception:
+                    try:
+                        glEnd()
+                    except Exception:
+                        pass
+
+            if len(screen_pts) > 1:
+                glPointSize(6.0)
+                glColor4f(0.95, 0.95, 0.95, 0.95)
+                glBegin(GL_POINTS)
+                for xy in screen_pts[1:]:
+                    try:
+                        x, y = float(xy[0]), float(xy[1])
+                    except Exception:
+                        continue
+                    glVertex3f(x, y, 0.0)
+                glEnd()
 
             # Restore matrices
             glPopMatrix()
