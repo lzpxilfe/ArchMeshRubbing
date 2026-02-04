@@ -43,6 +43,19 @@ class FlattenedSVGExporter:
 
         # UV → 실측 좌표(원본 단위) → SVG 단위로 변환
         uv_real = flattened.uv.astype(np.float64) * float(flattened.scale)
+        if uv_real.ndim != 2 or uv_real.shape[0] == 0:
+            svg_parts: list[str] = [
+                '<?xml version="1.0" encoding="UTF-8" standalone="no"?>',
+                '<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" '
+                '"http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">',
+                f'<svg xmlns="http://www.w3.org/2000/svg" width="1{svg_unit}" height="1{svg_unit}" viewBox="0 0 1 1">',
+                '<!-- Produced by ArchMeshRubbing (Flattened SVG) -->',
+                '<!-- Empty UV: nothing to export -->',
+                '</svg>',
+            ]
+            output_path.write_text("\n".join(svg_parts), encoding="utf-8")
+            return str(output_path)
+
         min_uv = uv_real.min(axis=0)
         max_uv = uv_real.max(axis=0)
 
@@ -95,7 +108,12 @@ class FlattenedSVGExporter:
             faces = flattened.faces
             pts = uv_real.copy()
             for face in faces:
-                tri = pts[face].copy()
+                try:
+                    if int(np.max(face)) >= int(pts.shape[0]):
+                        continue
+                    tri = pts[face].copy()
+                except Exception:
+                    continue
                 tri_svg = to_svg_xy(tri)
                 p = " ".join([f"{xy[0]:.6f},{xy[1]:.6f}" for xy in tri_svg])
                 svg_parts.append(f'<polygon points="{p}" fill="none" />')
@@ -109,7 +127,12 @@ class FlattenedSVGExporter:
             loops = flattened.original_mesh.get_boundary_loops()
             if loops:
                 for loop in loops:
-                    poly = uv_real[loop].copy()
+                    try:
+                        if int(np.max(loop)) >= int(uv_real.shape[0]):
+                            continue
+                        poly = uv_real[loop].copy()
+                    except Exception:
+                        continue
                     poly_svg = to_svg_xy(poly)
                     p = " ".join([f"{xy[0]:.6f},{xy[1]:.6f}" for xy in poly_svg])
                     svg_parts.append(f'<polyline points="{p}" fill="none" />')

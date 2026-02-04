@@ -47,3 +47,7 @@ Thumbs.db
 *.obj
 *.ply
 *.off
+
+# Local scratch exports
+__smoke_*.svg
+__test_*.svg

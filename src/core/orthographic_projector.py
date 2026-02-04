@@ -103,13 +103,18 @@ class OrthographicProjector:
         Returns:
             정렬된 메쉬
         """
-        vertices = mesh.vertices.copy()
+        vertices = np.asarray(getattr(mesh, "vertices", np.zeros((0, 3))), dtype=np.float64).copy()
+        if vertices.ndim != 2 or vertices.shape[0] == 0:
+            return mesh
         
         # 중심을 원점으로
         centroid = vertices.mean(axis=0)
         vertices -= centroid
         
         if method == 'pca':
+            if vertices.shape[0] < 3:
+                method = 'bbox'
+
             # PCA로 주축 찾기
             cov = np.cov(vertices.T)
             eigenvalues, eigenvectors = np.linalg.eigh(cov)
@@ -168,6 +173,20 @@ class OrthographicProjector:
             ProjectionResult: 투영 결과
         """
         resolution = resolution or self.resolution
+
+        vertices = np.asarray(getattr(mesh, "vertices", np.zeros((0, 3))), dtype=np.float64)
+        faces = np.asarray(getattr(mesh, "faces", np.zeros((0, 3))), dtype=np.int32)
+        if vertices.ndim != 2 or vertices.shape[0] == 0:
+            blank = np.zeros((1, 1), dtype=np.uint8)
+            depth_map = np.full((1, 1), np.nan, dtype=np.float64)
+            return ProjectionResult(
+                image=blank,
+                depth_map=depth_map,
+                scale=1.0,
+                bounds=np.array([[0.0, 0.0], [0.0, 0.0]], dtype=np.float64),
+                direction=direction,
+                unit=getattr(mesh, "unit", "mm"),
+            )
         
         # 투영 축 결정
         axis_map = {
@@ -180,8 +199,12 @@ class OrthographicProjector:
         }
         
         depth_axis, x_axis, y_axis, flip_depth = axis_map[direction]
-        
-        vertices = mesh.vertices
+
+        # NOTE: MeshData는 triangles를 가정하지만, 방어적으로 최소 3개 인덱스만 사용
+        if faces.ndim != 2 or faces.shape[1] < 3:
+            faces = np.zeros((0, 3), dtype=np.int32)
+        else:
+            faces = faces[:, :3]
         
         # 투영 좌표
         x_coords = vertices[:, x_axis]
@@ -192,13 +215,24 @@ class OrthographicProjector:
             z_coords = -z_coords
         
         # 바운딩 박스
-        x_min, x_max = x_coords.min(), x_coords.max()
-        y_min, y_max = y_coords.min(), y_coords.max()
-        z_min, z_max = z_coords.min(), z_coords.max()
+        x_min, x_max = float(x_coords.min()), float(x_coords.max())
+        y_min, y_max = float(y_coords.min()), float(y_coords.max())
+        z_min, z_max = float(z_coords.min()), float(z_coords.max())
         
         # 이미지 크기 계산 (종횡비 유지)
-        width = x_max - x_min
-        height = y_max - y_min
+        width = float(x_max - x_min)
+        height = float(y_max - y_min)
+        if not np.isfinite(width) or not np.isfinite(height) or (abs(width) < 1e-12 and abs(height) < 1e-12):
+            blank = np.zeros((1, 1), dtype=np.uint8)
+            depth_map = np.full((1, 1), np.nan, dtype=np.float64)
+            return ProjectionResult(
+                image=blank,
+                depth_map=depth_map,
+                scale=1.0,
+                bounds=np.array([[x_min, y_min], [x_max, y_max]], dtype=np.float64),
+                direction=direction,
+                unit=getattr(mesh, "unit", "mm"),
+            )
         
         if width > height:
             img_width = resolution
@@ -217,7 +251,7 @@ class OrthographicProjector:
         depth_buffer = np.full((img_height, img_width), np.inf)
         
         # 래스터화
-        for face in mesh.faces:
+        for face in faces:
             self._rasterize_triangle(
                 x_coords[face], y_coords[face], z_coords[face],
                 x_min, x_max, y_min, y_max,
@@ -255,8 +289,14 @@ class OrthographicProjector:
                             depth_buffer: np.ndarray) -> None:
         """삼각형 래스터화 (Z-버퍼 알고리즘)"""
         # 화면 좌표로 변환
-        sx = ((x - x_min) / (x_max - x_min) * (img_width - 1)).astype(np.float64)
-        sy = ((y - y_min) / (y_max - y_min) * (img_height - 1)).astype(np.float64)
+        dx = float(x_max - x_min)
+        dy = float(y_max - y_min)
+        if abs(dx) < 1e-12:
+            dx = 1e-12
+        if abs(dy) < 1e-12:
+            dy = 1e-12
+        sx = ((x - x_min) / dx * (img_width - 1)).astype(np.float64)
+        sy = ((y - y_min) / dy * (img_height - 1)).astype(np.float64)
         sy = (img_height - 1) - sy  # Y축 뒤집기
         
         # 바운딩 박스

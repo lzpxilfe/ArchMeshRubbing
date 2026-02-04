@@ -369,78 +369,60 @@ class _CutPolylineSectionProfileThread(QThread):
                     continue
                 world_contours.append((rot_mat @ (cnt * self._scale).T).T + self._translation)
 
-            # 가장 긴 단면(투영 길이 기준) 선택
-            best_tz = None
-            best_span = 0.0
-            eps = 1e-6
+            # "작은 사각형(계단)"처럼 보이는 binning/envelope 대신,
+            # 메쉬-평면 교차 폴리라인(단면 외곽)을 그대로 사용한다.
+            best_profile = None
+            best_score = -1.0
+
             for cnt in world_contours:
-                t = (cnt - p0) @ d_unit
-                mask = (t >= -eps) & (t <= length + eps)
-                if int(mask.sum()) < 2:
+                arr = np.asarray(cnt, dtype=np.float64).reshape(-1, 3)
+                if arr.shape[0] < 2:
                     continue
-                t_f = t[mask]
-                z_f = cnt[mask, 2]
-                span = float(t_f.max() - t_f.min())
-                if span <= best_span:
+
+                s = (arr - p0) @ d_unit
+                z = arr[:, 2]
+                finite = np.isfinite(s) & np.isfinite(z)
+                s = s[finite]
+                z = z[finite]
+                if s.size < 2:
                     continue
-                best_span = span
-                best_tz = (t_f.copy(), z_f.copy())
 
-            if best_tz is None:
+                # consecutive duplicates 제거
+                if s.size >= 2:
+                    ds = np.hypot(np.diff(s), np.diff(z))
+                    keep = np.ones((s.size,), dtype=bool)
+                    keep[1:] = ds > 1e-6
+                    s = s[keep]
+                    z = z[keep]
+                if s.size < 2:
+                    continue
+
+                # 닫힘 보장
+                try:
+                    if float(np.hypot(s[0] - s[-1], z[0] - z[-1])) > 1e-6:
+                        s = np.append(s, s[0])
+                        z = np.append(z, z[0])
+                except Exception:
+                    pass
+
+                # 여러 루프가 있으면 "가장 바깥"을 고르기 위해 (s,z) 면적 최대를 선택
+                score = float(np.nanmax(s) - np.nanmin(s))
+                if s.size >= 4:
+                    try:
+                        area2 = float(np.dot(s[:-1], z[1:]) - np.dot(z[:-1], s[1:]))
+                        score = max(score, abs(area2))
+                    except Exception:
+                        pass
+
+                if score > best_score:
+                    best_score = score
+                    best_profile = list(zip(s.tolist(), z.tolist()))
+
+            if best_profile is None or len(best_profile) < 2:
                 self.computed.emit({"index": self._index, "profile": []})
                 return
 
-            t_f, z_f = best_tz
-            # 실제 메쉬와의 교차 구간만 사용 (라인 길이보다 길게 나오는 왜곡 방지)
-            t0 = float(np.nanmin(t_f))
-            t1 = float(np.nanmax(t_f))
-            if not np.isfinite(t0) or not np.isfinite(t1) or (t1 - t0) < 1e-6:
-                self.computed.emit({"index": self._index, "profile": []})
-                return
-
-            t_f = t_f - t0  # rebase to 0
-
-            # 외곽선만: (t,z) 포인트 클라우드로부터 상/하 외곽선(envelope) 생성
-            t = np.asarray(t_f, dtype=np.float64)
-            z = np.asarray(z_f, dtype=np.float64)
-            finite = np.isfinite(t) & np.isfinite(z)
-            t = t[finite]
-            z = z[finite]
-            if t.size < 2:
-                self.computed.emit({"index": self._index, "profile": []})
-                return
-
-            total_len = float(np.nanmax(t))
-            # 0.1mm~0.5mm 수준으로 binning (단위=cm 가정)
-            bin_size = float(max(0.01, total_len / 2000.0))
-            bins = np.floor(t / bin_size).astype(np.int64)
-            order = np.argsort(bins)
-            bins = bins[order]
-            t = t[order]
-            z = z[order]
-
-            upper: list[tuple[float, float]] = []
-            lower: list[tuple[float, float]] = []
-            i = 0
-            n = int(len(bins))
-            while i < n:
-                b0 = int(bins[i])
-                j = i + 1
-                while j < n and int(bins[j]) == b0:
-                    j += 1
-                t_bin = float(b0) * bin_size
-                z_slice = z[i:j]
-                upper.append((t_bin, float(np.max(z_slice))))
-                lower.append((t_bin, float(np.min(z_slice))))
-                i = j
-
-            if len(upper) < 2 or len(lower) < 2:
-                self.computed.emit({"index": self._index, "profile": []})
-                return
-
-            # 닫힌 외곽선 폴리라인(상단 -> 하단 역순)
-            # 단면은 "선"만 필요: 동일 t에서의 상단(z max) 프로파일만 사용
-            self.computed.emit({"index": self._index, "profile": upper})
+            self.computed.emit({"index": self._index, "profile": best_profile})
         except Exception as e:
             self.failed.emit(str(e))
 
@@ -705,6 +687,9 @@ class SceneObject:
         self.vbo_id = None
         self.vertex_count = 0
         self.selected_faces = set()
+        self.outer_face_indices = set()
+        self.inner_face_indices = set()
+        self.migu_face_indices = set()
         self._trimesh = None # Lazy-loaded trimesh object
         
     def to_trimesh(self):
@@ -778,6 +763,7 @@ class Viewport3D(QOpenGLWidget):
     lineProfileUpdated = pyqtSignal(list)    # line_profile
     roiSilhouetteExtracted = pyqtSignal(list) # 2D silhouette points
     cutLinesAutoEnded = pyqtSignal()         # 단면선(2개) 입력 모드가 자동 종료됨
+    faceSelectionChanged = pyqtSignal(int)   # 선택된 face 개수 변경
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -802,6 +788,7 @@ class Viewport3D(QOpenGLWidget):
         self.show_gizmo = True
         self.active_gizmo_axis = None
         self.gizmo_size = 10.0
+        self.gizmo_radius_factor = 1.15
         self.gizmo_drag_start = None
         
         # 곡률 측정 모드
@@ -816,6 +803,7 @@ class Viewport3D(QOpenGLWidget):
         # 피킹 모드 ('none', 'curvature', 'floor_3point', 'floor_face', 'floor_brush')
         self.picking_mode = 'none'
         self.brush_selected_faces = set() # 브러시로 선택된 면 인덱스
+        self._selection_brush_mode = "replace"  # replace|add|remove
         self.floor_picks = []  # 바닥면 지정용 점 리스트
         
         # Undo/Redo 시스템
@@ -1833,16 +1821,37 @@ class Viewport3D(QOpenGLWidget):
                 base_y = max_y + margin
                 scale_s = max(1e-6, extent_x) / s_span
             else:
-                # 세로: 메쉬 우측에 배치 (s -> X, z -> Y) - 높이가 위로 향하도록 통일
+                # 세로: 메쉬 우측에 배치 (z -> X, s -> Y)
                 base_x = max_x + margin
                 base_y = min_y
                 scale_s = max(1e-6, extent_y) / s_span
+
+            flip_s = False
+            if idx != 0:
+                # 사용자가 단면선을 위->아래(또는 오른쪽->왼쪽)로 그리면,
+                # s 축 방향이 뒤집혀 결과가 상/하가 뒤집혀 보일 수 있음.
+                # 단면선의 진행 방향이 +Y(세로) / +X(가로)가 되도록 s 축을 거울상으로 뒤집는다.
+                try:
+                    lines = getattr(self, "cut_lines", [[], []]) or [[], []]
+                    if idx < len(lines) and lines[idx] and len(lines[idx]) >= 2:
+                        p0 = np.asarray(lines[idx][0], dtype=np.float64).reshape(-1)
+                        p1 = np.asarray(lines[idx][-1], dtype=np.float64).reshape(-1)
+                        if p0.size >= 2 and p1.size >= 2:
+                            dx = float(p1[0] - p0[0])
+                            dy = float(p1[1] - p0[1])
+                            if abs(dy) >= abs(dx):
+                                flip_s = dy < 0.0
+                            else:
+                                flip_s = dx < 0.0
+                except Exception:
+                    flip_s = False
 
             for si, zi in zip(s.tolist(), z.tolist()):
                 if idx == 0:
                     pts_world.append([base_x + (float(si) - s_min) * scale_s, base_y + (float(zi) - z_min), 0.0])
                 else:
-                    pts_world.append([base_x + (float(zi) - z_min), base_y + (float(si) - s_min) * scale_s, 0.0])
+                    s_term = (s_max - float(si)) if flip_s else (float(si) - s_min)
+                    pts_world.append([base_x + (float(zi) - z_min), base_y + s_term * scale_s, 0.0])
             return pts_world
         except Exception:
             return []
@@ -3330,6 +3339,23 @@ class Viewport3D(QOpenGLWidget):
             glDisable(GL_POLYGON_OFFSET_FILL)
             glEnable(GL_LIGHTING)
             glPopMatrix()
+
+        # 선택된 면 하이라이트 (SelectionPanel)
+        if is_selected and self.picking_mode in {'select_face', 'select_brush'} and obj.selected_faces:
+            glPushMatrix()
+            glDisable(GL_LIGHTING)
+            glPolygonOffset(-1.0, -1.0)
+            glEnable(GL_POLYGON_OFFSET_FILL)
+            glColor3f(1.0, 0.8, 0.0)
+            glBegin(GL_TRIANGLES)
+            for face_idx in obj.selected_faces:
+                f = obj.mesh.faces[int(face_idx)]
+                for v_idx in f:
+                    glVertex3fv(obj.mesh.vertices[v_idx])
+            glEnd()
+            glDisable(GL_POLYGON_OFFSET_FILL)
+            glEnable(GL_LIGHTING)
+            glPopMatrix()
         
         if obj.vbo_id is not None:
             # VBO 방식 렌더링
@@ -3649,7 +3675,25 @@ class Viewport3D(QOpenGLWidget):
         self.camera.distance = max_dim * 2
         self.camera.center = obj.translation.copy()
         self.camera.pan_offset = np.array([0.0, 0.0, 0.0])
-        self.gizmo_size = max_dim * 0.7
+        self.update_gizmo_size()
+
+    def update_gizmo_size(self):
+        """선택된 메쉬 크기에 맞춰 회전 기즈모 반경 조정"""
+        obj = self.selected_obj
+        if not obj or getattr(obj, "mesh", None) is None:
+            return
+
+        try:
+            bounds = obj.mesh.bounds
+            extents = bounds[1] - bounds[0]
+            max_dim = float(np.max(extents))
+        except Exception:
+            return
+
+        factor = float(getattr(self, "gizmo_radius_factor", 1.15))
+        factor = max(1.01, min(3.0, factor))
+        self.gizmo_radius_factor = factor
+        self.gizmo_size = max_dim * 0.5 * factor
     
     def hit_test_gizmo(self, screen_x, screen_y):
         """기즈모 고리 클릭 검사"""
@@ -4006,6 +4050,49 @@ class Viewport3D(QOpenGLWidget):
                     self.update()
                     return
 
+                elif self.picking_mode == 'select_face':
+                    point = self.pick_point_on_mesh(event.pos().x(), event.pos().y())
+                    if point is not None:
+                        res = self.pick_face_at_point(point, return_index=True)
+                        if res:
+                            idx, _verts = res
+                            obj = self.selected_obj
+                            if obj is None:
+                                return
+                            idx = int(idx)
+                            if modifiers & Qt.KeyboardModifier.AltModifier:
+                                obj.selected_faces.discard(idx)
+                            elif modifiers & (
+                                Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.ControlModifier
+                            ):
+                                obj.selected_faces.add(idx)
+                            else:
+                                if idx in obj.selected_faces:
+                                    obj.selected_faces.discard(idx)
+                                else:
+                                    obj.selected_faces.add(idx)
+                            self.faceSelectionChanged.emit(len(obj.selected_faces))
+                        self.update()
+                    return
+
+                elif self.picking_mode == 'select_brush':
+                    obj = self.selected_obj
+                    if obj is None or obj.mesh is None:
+                        return
+                    if modifiers & Qt.KeyboardModifier.AltModifier:
+                        self._selection_brush_mode = "remove"
+                    elif modifiers & Qt.KeyboardModifier.ShiftModifier:
+                        self._selection_brush_mode = "add"
+                    else:
+                        self._selection_brush_mode = "replace"
+
+                    if self._selection_brush_mode == "replace":
+                        obj.selected_faces.clear()
+                    self._pick_selection_brush_face(event.pos())
+                    self.faceSelectionChanged.emit(len(obj.selected_faces))
+                    self.update()
+                    return
+
                 elif self.picking_mode == 'line_section':
                     pt = self.pick_point_on_plane_z(event.pos().x(), event.pos().y(), z=0.0)
                     if pt is not None:
@@ -4188,6 +4275,11 @@ class Viewport3D(QOpenGLWidget):
             if self.brush_selected_faces:
                 self.alignToBrushSelected.emit()
             self.picking_mode = 'none'
+            self.update()
+
+        if self.mouse_button == Qt.MouseButton.LeftButton and self.picking_mode == 'select_brush':
+            obj = self.selected_obj
+            self.faceSelectionChanged.emit(len(obj.selected_faces) if obj is not None else 0)
             self.update()
 
         if self.mouse_button == Qt.MouseButton.LeftButton and self.picking_mode == 'line_section':
@@ -4399,6 +4491,12 @@ class Viewport3D(QOpenGLWidget):
             # 0. 브러시 피킹 처리
             if self.mouse_button == Qt.MouseButton.LeftButton and self.picking_mode == 'floor_brush':
                 self._pick_brush_face(event.pos())
+                self.update()
+                return
+
+            # 0.1 선택 브러시 처리 (SelectionPanel)
+            if self.mouse_button == Qt.MouseButton.LeftButton and self.picking_mode == 'select_brush':
+                self._pick_selection_brush_face(event.pos())
                 self.update()
                 return
 
@@ -4632,7 +4730,20 @@ class Viewport3D(QOpenGLWidget):
             self.update()
         elif key == Qt.Key.Key_F:
             self.fit_view_to_selected_object()
-            
+        else:
+            key_dec = getattr(Qt.Key, "Key_BracketLeft", -1)
+            key_inc = getattr(Qt.Key, "Key_BracketRight", -1)
+            if key == key_dec:
+                self.gizmo_radius_factor = max(1.01, float(self.gizmo_radius_factor) * 0.9)
+                self.update_gizmo_size()
+                self.status_info = f"? 기즈모 크기: x{self.gizmo_radius_factor:.2f}"
+                self.update()
+            elif key == key_inc:
+                self.gizmo_radius_factor = min(3.0, float(self.gizmo_radius_factor) / 0.9)
+                self.update_gizmo_size()
+                self.status_info = f"? 기즈모 크기: x{self.gizmo_radius_factor:.2f}"
+                self.update()
+             
         super().keyPressEvent(event)
 
     def keyReleaseEvent(self, a0: QKeyEvent | None):
@@ -4946,15 +5057,66 @@ class Viewport3D(QOpenGLWidget):
                 idx, v = res
                 self.brush_selected_faces.add(idx)
 
+    def _pick_selection_brush_face(self, pos):
+        """SelectionPanel용 브러시 선택 (obj.selected_faces에 반영)"""
+        obj = self.selected_obj
+        if not obj or obj.mesh is None:
+            return
+
+        point = self.pick_point_on_mesh(pos.x(), pos.y())
+        if point is None:
+            return
+
+        res = self.pick_face_at_point(point, return_index=True)
+        if not res:
+            return
+        idx, _verts = res
+        idx = int(idx)
+
+        mode = str(getattr(self, "_selection_brush_mode", "replace"))
+        if mode == "remove":
+            obj.selected_faces.discard(idx)
+        else:
+            obj.selected_faces.add(idx)
+
     def pick_face_at_point(self, point: np.ndarray, return_index=False):
         """특정 3D 좌표가 포함된 삼각형 면의 정점 3개를 반환"""
         obj = self.selected_obj
         if not obj or obj.mesh is None:
             return None
         
-        # 메쉬 로컬 좌표로 변환
-        inv_trans = -obj.translation
-        lp = point + inv_trans
+        # 메쉬 로컬 좌표로 변환 (T/R/S 역변환)
+        try:
+            trans = np.asarray(getattr(obj, "translation", [0.0, 0.0, 0.0]), dtype=np.float64).reshape(-1)
+            if trans.size < 3:
+                trans = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+            rot_deg = np.asarray(getattr(obj, "rotation", [0.0, 0.0, 0.0]), dtype=np.float64).reshape(-1)
+            if rot_deg.size < 3:
+                rot_deg = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+            scale = float(getattr(obj, "scale", 1.0))
+            if abs(scale) < 1e-12:
+                scale = 1.0
+
+            rx, ry, rz = np.radians(rot_deg[:3])
+            cx, sx = float(np.cos(rx)), float(np.sin(rx))
+            cy, sy = float(np.cos(ry)), float(np.sin(ry))
+            cz, sz = float(np.cos(rz)), float(np.sin(rz))
+
+            rot_x = np.array([[1.0, 0.0, 0.0], [0.0, cx, -sx], [0.0, sx, cx]], dtype=np.float64)
+            rot_y = np.array([[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]], dtype=np.float64)
+            rot_z = np.array([[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]], dtype=np.float64)
+            rot_mat = rot_x @ rot_y @ rot_z
+        except Exception:
+            trans = np.asarray(getattr(obj, "translation", [0.0, 0.0, 0.0]), dtype=np.float64).reshape(-1)
+            if trans.size < 3:
+                trans = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+            scale = 1.0
+            rot_mat = np.eye(3, dtype=np.float64)
+
+        pt = np.asarray(point, dtype=np.float64).reshape(-1)
+        if pt.size < 3:
+            return None
+        lp = (rot_mat.T @ (pt[:3] - trans[:3])) / float(scale)
         
         vertices = obj.mesh.vertices
         faces = obj.mesh.faces
@@ -4979,9 +5141,11 @@ class Viewport3D(QOpenGLWidget):
                 
         if best_face_idx != -1:
             best_face = faces[best_face_idx]
-            v_list = [vertices[best_face[0]] + obj.translation, 
-                      vertices[best_face[1]] + obj.translation, 
-                      vertices[best_face[2]] + obj.translation]
+            v_list = []
+            for vi in best_face:
+                v = np.asarray(vertices[int(vi)], dtype=np.float64)
+                w = (rot_mat @ (v[:3] * float(scale))) + trans[:3]
+                v_list.append(w)
             if return_index:
                 return best_face_idx, v_list
             return v_list
