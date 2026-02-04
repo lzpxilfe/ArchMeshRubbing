@@ -507,6 +507,11 @@ class _SurfaceLassoSelectThread(QThread):
         *,
         depth_tol: float = 0.01,
         max_selected_faces: int = 400000,
+        wand_seed_face_idx: int | None = None,
+        wand_enabled: bool = True,
+        wand_angle_deg: float = 30.0,
+        wand_knn_k: int = 12,
+        wand_time_budget_s: float = 2.0,
     ):
         super().__init__()
         self._vertices = np.asarray(vertices)
@@ -528,6 +533,128 @@ class _SurfaceLassoSelectThread(QThread):
         self._depth = None if depth_map is None else np.asarray(depth_map)
         self._depth_tol = float(depth_tol)
         self._max_selected = int(max_selected_faces)
+        try:
+            self._wand_seed = int(wand_seed_face_idx) if wand_seed_face_idx is not None else -1
+        except Exception:
+            self._wand_seed = -1
+        self._wand_enabled = bool(wand_enabled)
+        self._wand_angle_deg = float(wand_angle_deg)
+        self._wand_knn_k = int(wand_knn_k)
+        self._wand_time_budget_s = float(wand_time_budget_s)
+
+    def _wand_refine(
+        self,
+        vertices: np.ndarray,
+        faces: np.ndarray,
+        candidate_faces: np.ndarray,
+        *,
+        seed_face_idx: int,
+    ) -> tuple[np.ndarray, dict]:
+        stats: dict = {}
+        try:
+            if not bool(self._wand_enabled):
+                return candidate_faces, stats
+            if candidate_faces is None:
+                return np.zeros((0,), dtype=np.int32), stats
+            cand = np.asarray(candidate_faces, dtype=np.int32).reshape(-1)
+            if cand.size < 1:
+                return cand, stats
+
+            seed = int(seed_face_idx)
+            if seed < 0 or seed >= int(faces.shape[0]):
+                seed = int(cand[0])
+
+            # Centroids and normals for candidate faces (local coords)
+            f = faces[cand, :3].astype(np.int32, copy=False)
+            v0 = vertices[f[:, 0], :3].astype(np.float64, copy=False)
+            v1 = vertices[f[:, 1], :3].astype(np.float64, copy=False)
+            v2 = vertices[f[:, 2], :3].astype(np.float64, copy=False)
+            cent = ((v0 + v1 + v2) / 3.0).astype(np.float32, copy=False)
+
+            n = np.cross(v1 - v0, v2 - v0)
+            nn = np.linalg.norm(n, axis=1)
+            nn = np.where(nn > 1e-12, nn, 1.0)
+            normals = (n / nn[:, None]).astype(np.float32, copy=False)
+
+            # KNN adjacency on centroids
+            k = int(max(2, self._wand_knn_k))
+            k = min(k, int(cent.shape[0]))
+            if k <= 1:
+                return cand, {"wand_selected": int(cand.size), "wand_seed": seed}
+
+            try:
+                from scipy.spatial import cKDTree
+
+                tree = cKDTree(cent)
+                _d, nbr = tree.query(cent, k=k)
+                nbr = np.asarray(nbr, dtype=np.int32)
+            except Exception:
+                return cand, stats
+
+            # Seed position in candidate list
+            seed_pos_arr = np.where(cand == seed)[0]
+            if seed_pos_arr.size:
+                seed_pos = int(seed_pos_arr[0])
+            else:
+                # Nearest candidate to seed face centroid
+                try:
+                    sf = faces[seed, :3].astype(np.int32, copy=False)
+                    sc = (
+                        (vertices[int(sf[0]), :3] + vertices[int(sf[1]), :3] + vertices[int(sf[2]), :3])
+                        / 3.0
+                    ).astype(np.float32, copy=False)
+                    _d2, seed_pos2 = tree.query(np.asarray(sc, dtype=np.float32), k=1)
+                    seed_pos = int(np.asarray(seed_pos2).reshape(-1)[0])
+                except Exception:
+                    seed_pos = 0
+
+            # Region grow by local normal smoothness (magic-wand-like)
+            from collections import deque
+
+            cos_thr = float(np.cos(np.radians(float(self._wand_angle_deg))))
+            time_budget = float(max(0.1, self._wand_time_budget_s))
+
+            visited = np.zeros((cand.size,), dtype=bool)
+            visited[seed_pos] = True
+            q = deque([seed_pos])
+            visited_count = 1
+            start_t = time.monotonic()
+
+            while q:
+                if self.isInterruptionRequested():
+                    break
+                if time.monotonic() - start_t > time_budget:
+                    break
+                i = int(q.popleft())
+                n0 = normals[i]
+                nb = nbr[i]
+                if nb.ndim == 0:
+                    continue
+                nb = nb[nb != i]
+                if nb.size == 0:
+                    continue
+                mask = ~visited[nb]
+                nb = nb[mask]
+                if nb.size == 0:
+                    continue
+                dots = (normals[nb] @ n0.astype(np.float32, copy=False)).astype(np.float32, copy=False)
+                good = nb[dots >= cos_thr]
+                if good.size:
+                    visited[good] = True
+                    visited_count += int(good.size)
+                    q.extend(int(x) for x in good.tolist())
+
+            out = cand[visited]
+            stats = {
+                "wand_seed": int(seed),
+                "wand_selected": int(out.size),
+                "wand_candidates": int(cand.size),
+                "wand_angle_deg": float(self._wand_angle_deg),
+                "wand_time_s": float(time.monotonic() - start_t),
+            }
+            return out, stats
+        except Exception:
+            return candidate_faces, stats
 
     def run(self):
         try:
@@ -722,10 +849,22 @@ class _SurfaceLassoSelectThread(QThread):
             if indices.size > max_sel:
                 indices = indices[:max_sel].copy()
 
+            # Magic-wand-like refinement: keep the smooth connected patch inside the polygon.
+            wand_stats: dict = {}
+            try:
+                seed = int(getattr(self, "_wand_seed", -1))
+                if seed >= 0 and bool(getattr(self, "_wand_enabled", True)) and indices.size:
+                    indices, wand_stats = self._wand_refine(vertices, faces, indices, seed_face_idx=seed)
+                    indices = np.unique(np.asarray(indices, dtype=np.int32).reshape(-1)).astype(np.int32, copy=False)
+                    if indices.size > max_sel:
+                        indices = indices[:max_sel].copy()
+            except Exception:
+                wand_stats = {}
+
             self.computed.emit(
                 {
                     "indices": indices,
-                    "stats": {"selected": int(indices.size), "candidates": int(total_candidates)},
+                    "stats": {"selected": int(indices.size), "candidates": int(total_candidates), **(wand_stats or {})},
                 }
             )
         except Exception as e:
@@ -1065,12 +1204,17 @@ class Viewport3D(QOpenGLWidget):
         self._surface_paint_left_dragged = False
         # Surface area(lasso) selection via mesh-snapped world points
         self.surface_lasso_points = []  # [np.ndarray(3,), ...] in world coords
+        self.surface_lasso_face_indices = []  # [int, ...] per vertex (best-effort)
         self.surface_lasso_preview = None  # QPoint | None
         self._surface_area_left_press_pos = None
         self._surface_area_left_dragged = False
         self._surface_area_right_press_pos = None
         self._surface_area_right_dragged = False
         self._surface_lasso_thread = None
+        self._surface_area_close_snap_px = 12
+        self._surface_area_wand_angle_deg = 30.0
+        self._surface_area_wand_knn_k = 12
+        self._surface_area_wand_time_budget_s = 2.0
         self.floor_picks = []  # 바닥면 지정용 점 리스트
         
         # Undo/Redo 시스템
@@ -4658,6 +4802,34 @@ class Viewport3D(QOpenGLWidget):
                         if thr is not None and bool(getattr(thr, "isRunning", lambda: False)()):
                             self.status_info = "⏳ 면적 선택 계산 중…"
                         else:
+                            # Snap-close: click near the first point to close & confirm.
+                            try:
+                                snap_px = int(getattr(self, "_surface_area_close_snap_px", 12))
+                            except Exception:
+                                snap_px = 12
+                            if snap_px > 0 and len(getattr(self, "surface_lasso_points", []) or []) >= 3:
+                                try:
+                                    p0 = np.asarray(self.surface_lasso_points[0], dtype=np.float64).reshape(-1)
+                                    if p0.size >= 3:
+                                        self.makeCurrent()
+                                        vp0 = glGetIntegerv(GL_VIEWPORT)
+                                        mv0 = glGetDoublev(GL_MODELVIEW_MATRIX)
+                                        pr0 = glGetDoublev(GL_PROJECTION_MATRIX)
+                                        win = gluProject(float(p0[0]), float(p0[1]), float(p0[2]), mv0, pr0, vp0)
+                                        if win:
+                                            vx0, vy0, vw0, vh0 = [int(v) for v in vp0[:4]]
+                                            sx0 = float(win[0]) - float(vx0)
+                                            sy0 = float(vy0 + vh0) - float(win[1])
+                                            dx0 = float(event.pos().x()) - sx0
+                                            dy0 = float(event.pos().y()) - sy0
+                                            if float(np.hypot(dx0, dy0)) <= float(snap_px):
+                                                self._finish_surface_lasso(event.modifiers())
+                                                self._surface_area_left_press_pos = None
+                                                self._surface_area_left_dragged = False
+                                                return
+                                except Exception:
+                                    pass
+
                             p = self.pick_point_on_mesh(event.pos().x(), event.pos().y())
                             if p is None:
                                 self.status_info = "⚠️ 메쉬 위를 클릭해 점을 찍어 주세요."
@@ -4666,6 +4838,18 @@ class Viewport3D(QOpenGLWidget):
                                     self.surface_lasso_points.append(np.asarray(p[:3], dtype=np.float64))
                                 except Exception:
                                     self.surface_lasso_points.append(p)
+                                try:
+                                    res = self.pick_face_at_point(np.asarray(p, dtype=np.float64), return_index=True)
+                                    if res:
+                                        fi, _v = res
+                                        self.surface_lasso_face_indices.append(int(fi))
+                                    else:
+                                        self.surface_lasso_face_indices.append(-1)
+                                except Exception:
+                                    try:
+                                        self.surface_lasso_face_indices.append(-1)
+                                    except Exception:
+                                        pass
                                 try:
                                     self.surface_lasso_preview = event.pos()
                                 except Exception:
@@ -5190,6 +5374,8 @@ class Viewport3D(QOpenGLWidget):
                 try:
                     if getattr(self, "surface_lasso_points", None):
                         self.surface_lasso_points.pop()
+                    if getattr(self, "surface_lasso_face_indices", None):
+                        self.surface_lasso_face_indices.pop()
                     self.update()
                 except Exception:
                     pass
@@ -5646,6 +5832,7 @@ class Viewport3D(QOpenGLWidget):
             pass
         try:
             self.surface_lasso_points = []
+            self.surface_lasso_face_indices = []
             self.surface_lasso_preview = None
             self._surface_area_left_press_pos = None
             self._surface_area_left_dragged = False
@@ -5653,6 +5840,7 @@ class Viewport3D(QOpenGLWidget):
             self._surface_area_right_dragged = False
         except Exception:
             self.surface_lasso_points = []
+            self.surface_lasso_face_indices = []
             self.surface_lasso_preview = None
 
     def _cancel_surface_lasso_thread(self) -> None:
@@ -5697,6 +5885,25 @@ class Viewport3D(QOpenGLWidget):
             target = "outer"
         self._surface_lasso_apply_target = target
         self._surface_lasso_apply_modifiers = modifiers
+
+        # Magic-wand seed: pick a face near the polygon centroid (more stable than using boundary vertices).
+        seed_face_idx = -1
+        try:
+            pts_arr = np.asarray(pts_world, dtype=np.float64).reshape(-1, 3)
+            if pts_arr.size >= 9:
+                centroid_world = np.mean(pts_arr[:, :3], axis=0)
+                res = self.pick_face_at_point(np.asarray(centroid_world, dtype=np.float64), return_index=True)
+                if res:
+                    seed_face_idx = int(res[0])
+        except Exception:
+            seed_face_idx = -1
+        if seed_face_idx < 0:
+            try:
+                fi_list = getattr(self, "surface_lasso_face_indices", None) or []
+                if fi_list:
+                    seed_face_idx = int(fi_list[-1])
+            except Exception:
+                seed_face_idx = -1
 
         self.makeCurrent()
         viewport = glGetIntegerv(GL_VIEWPORT)
@@ -5795,6 +6002,11 @@ class Viewport3D(QOpenGLWidget):
                 depth_map,
                 depth_tol=tol,
                 max_selected_faces=max_sel,
+                wand_seed_face_idx=seed_face_idx if seed_face_idx >= 0 else None,
+                wand_enabled=True,
+                wand_angle_deg=float(getattr(self, "_surface_area_wand_angle_deg", 30.0) or 30.0),
+                wand_knn_k=int(getattr(self, "_surface_area_wand_knn_k", 12) or 12),
+                wand_time_budget_s=float(getattr(self, "_surface_area_wand_time_budget_s", 2.0) or 2.0),
             )
             thr2.computed.connect(self._on_surface_lasso_computed)
             thr2.failed.connect(self._on_surface_lasso_failed)

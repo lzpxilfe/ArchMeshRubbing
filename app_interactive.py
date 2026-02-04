@@ -798,6 +798,7 @@ class FlattenPanel(QWidget):
         self.btn_surface_area = QPushButton("📐 면적(Area)")
         self.btn_surface_area.setToolTip(
             "메쉬 위에 점을 찍어 다각형을 만들고, 보이는 면을 한 번에 지정합니다.\n"
+            "시작점 근처 클릭=스냅 닫힘(자동 확정)\n"
             "좌클릭=점 추가(드래그=회전), 우클릭/Enter=확정, Backspace=되돌리기, ESC=취소"
         )
         self.btn_surface_area.clicked.connect(
