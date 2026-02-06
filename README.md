@@ -15,6 +15,7 @@
 
 ```bash
 pip install -r requirements.txt
+pip install -r requirements-optional.txt  # optional
 ```
 
 ## 실행
@@ -69,6 +70,7 @@ python main.py --help
 - `ARCHMESHRUBBING_PROFILE_EXPORT_SAFE=1`: SVG 외곽선/가이드 투영을 보수적으로 처리 (Illustrator에서 `격자 + 긴 직선`만 보일 때 권장)
 - `ARCHMESHRUBBING_DISABLE_OPENCV=1`: OpenCV 비활성화 (SciPy 기반 경로 사용)
 - `ARCHMESHRUBBING_CV2_IMPORT_TIMEOUT=2.0`: OpenCV import smoke-test 타임아웃(초)
+- `ARCHMESHRUBBING_LOG_LEVEL=DEBUG`: 디버그 로그 활성화 (Windows 기본 로그 경로: `%LOCALAPPDATA%\\ArchMeshRubbing\\logs\\archmeshrubbing.log`)
 
 ## 지원 포맷
 
@@ -79,4 +81,4 @@ python main.py --help
 
 ## 라이선스
 
-MIT License
+GNU General Public License v2.0 (GPLv2) — 자세한 내용은 `LICENSE` 파일을 참고하세요.

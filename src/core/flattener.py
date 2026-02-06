@@ -7,11 +7,15 @@ Based on: "As-Rigid-As-Possible Surface Modeling" (Sorkine & Alexa, 2007)
 
 from dataclasses import dataclass, field
 from typing import Optional, Tuple, Dict
+import logging
 import numpy as np
 from scipy import sparse
 from scipy.sparse.linalg import spsolve, splu
 
+from .logging_utils import log_once
 from .mesh_loader import MeshData
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
@@ -74,7 +78,13 @@ class FlattenedMesh:
                 keep = np.all(valid, axis=1)
                 faces = faces[keep]
         except Exception:
-            pass
+            log_once(
+                _LOGGER,
+                "flattener:FlattenedMesh_post_init_face_filter",
+                logging.WARNING,
+                "FlattenedMesh.__post_init__ face index filtering failed",
+                exc_info=True,
+            )
         self.faces = faces
     
     @property
@@ -305,17 +315,17 @@ class ARAPFlattener:
             if method == "lscm":
                 return self._lscm_parameterization(mesh)
         except Exception:
-            pass
+            _LOGGER.debug("Initial UV parameterization failed (method=%s)", method, exc_info=True)
 
         # fallback: Tutte -> LSCM -> PCA projection
         try:
             return self._tutte_parameterization(mesh)
         except Exception:
-            pass
+            _LOGGER.debug("Fallback Tutte parameterization failed", exc_info=True)
         try:
             return self._lscm_parameterization(mesh)
         except Exception:
-            pass
+            _LOGGER.debug("Fallback LSCM parameterization failed", exc_info=True)
 
         basis = self._compute_reference_basis(mesh)  # (2, 3)
         vertices = np.asarray(mesh.vertices, dtype=np.float64)
@@ -344,7 +354,7 @@ class ARAPFlattener:
         c = faces[:, 2]
 
         mask = (a != b) & (b != c) & (a != c)
-        finite_v = np.isfinite(vertices).all(axis=1)
+        finite_v = np.all(np.isfinite(vertices), axis=1)
         mask &= finite_v[a] & finite_v[b] & finite_v[c]
 
         faces = faces[mask]
@@ -408,7 +418,7 @@ class ARAPFlattener:
             return np.zeros((0, 2), dtype=np.float64)
 
         out = uv[:, :2].copy()
-        finite = np.isfinite(out).all(axis=1)
+        finite = np.all(np.isfinite(out), axis=1)
         if np.count_nonzero(finite) < 2:
             out[~finite] = 0.0
             return out
@@ -1124,16 +1134,16 @@ class ARAPFlattener:
                 rotations[i] = default_R
                 continue
 
-            S = np.zeros((2, 3), dtype=np.float64)
+            s_mat = np.zeros((2, 3), dtype=np.float64)
             pi = vertices[i]
             ui = uv[i, :2]
             for j, w in nbrs:
                 e3d = vertices[j] - pi
                 e_uv = uv[j, :2] - ui
-                S += float(w) * np.outer(e_uv, e3d)
+                s_mat += float(w) * np.outer(e_uv, e3d)
 
             try:
-                U, _, Vt = np.linalg.svd(S, full_matrices=True)
+                U, _, Vt = np.linalg.svd(s_mat, full_matrices=True)
             except np.linalg.LinAlgError:
                 rotations[i] = default_R
                 continue
@@ -1261,6 +1271,379 @@ class ARAPFlattener:
             distortions[fi] = (area_distortion + stretch_distortion) / 2
         
         return np.clip(distortions, 0, 1)
+
+
+def _similarity_align_2d(source: np.ndarray, target: np.ndarray) -> np.ndarray:
+    """
+    Similarity-align `source` to `target` (2D) using least-squares Procrustes.
+
+    Returns:
+        Aligned source with same shape as input.
+    """
+    src = np.asarray(source, dtype=np.float64)
+    tgt = np.asarray(target, dtype=np.float64)
+    if src.ndim != 2 or tgt.ndim != 2 or src.shape[0] != tgt.shape[0] or src.shape[1] < 2 or tgt.shape[1] < 2:
+        return src[:, :2].copy() if src.ndim == 2 and src.shape[1] >= 2 else np.zeros((0, 2), dtype=np.float64)
+
+    src2 = src[:, :2].copy()
+    tgt2 = tgt[:, :2].copy()
+    finite = np.all(np.isfinite(src2), axis=1) & np.all(np.isfinite(tgt2), axis=1)
+    if int(finite.sum()) < 2:
+        return src2
+
+    a = src2[finite]
+    b = tgt2[finite]
+    a_mean = a.mean(axis=0)
+    b_mean = b.mean(axis=0)
+    a0 = a - a_mean
+    b0 = b - b_mean
+
+    denom = float(np.sum(a0 * a0))
+    if not np.isfinite(denom) or denom < 1e-12:
+        out = src2
+        out[finite] = b
+        return out
+
+    h = a0.T @ b0
+    try:
+        u, s, vt = np.linalg.svd(h)
+    except Exception:
+        return src2
+
+    r = u @ vt
+    if float(np.linalg.det(r)) < 0:
+        u[:, -1] *= -1.0
+        r = u @ vt
+
+    scale = float(np.sum(s)) / denom
+    if not np.isfinite(scale) or abs(scale) < 1e-12:
+        scale = 1.0
+
+    aligned = (src2 - a_mean) @ r.T
+    aligned *= scale
+    aligned += b_mean
+    return aligned
+
+
+def _mesh_total_area_3d(mesh: MeshData) -> float:
+    vertices = np.asarray(mesh.vertices, dtype=np.float64)
+    faces = np.asarray(mesh.faces, dtype=np.int32)
+    if vertices.ndim != 2 or vertices.shape[0] == 0 or faces.ndim != 2 or faces.shape[0] == 0:
+        return 0.0
+
+    tri = vertices[faces[:, :3]]
+    e1 = tri[:, 1] - tri[:, 0]
+    e2 = tri[:, 2] - tri[:, 0]
+    a = np.linalg.norm(np.cross(e1, e2), axis=1) * 0.5
+    a = a[np.isfinite(a)]
+    return float(a.sum()) if a.size else 0.0
+
+
+def _mesh_total_area_2d(mesh: MeshData, uv: np.ndarray) -> float:
+    pts = np.asarray(uv, dtype=np.float64)
+    faces = np.asarray(mesh.faces, dtype=np.int32)
+    if pts.ndim != 2 or pts.shape[0] == 0 or faces.ndim != 2 or faces.shape[0] == 0:
+        return 0.0
+
+    tri = pts[faces[:, :3], :2]
+    e1 = tri[:, 1] - tri[:, 0]
+    e2 = tri[:, 2] - tri[:, 0]
+    cross = e1[:, 0] * e2[:, 1] - e1[:, 1] * e2[:, 0]
+    a = np.abs(cross) * 0.5
+    a = a[np.isfinite(a)]
+    return float(a.sum()) if a.size else 0.0
+
+
+def _normalize_cylinder_axis_choice(choice: str) -> str:
+    c = str(choice or "").strip().lower()
+    if c in {"x", "x축", "x축 기준", "x axis"}:
+        return "x"
+    if c in {"y", "y축", "y축 기준", "y axis"}:
+        return "y"
+    if c in {"z", "z축", "z축 기준", "z axis"}:
+        return "z"
+    if c in {"auto", "자동", "자동 감지", "automatic"}:
+        return "auto"
+    return "auto"
+
+
+def _axis_unit_vector(axis: str) -> np.ndarray:
+    a = _normalize_cylinder_axis_choice(axis)
+    if a == "x":
+        return np.array([1.0, 0.0, 0.0], dtype=np.float64)
+    if a == "y":
+        return np.array([0.0, 1.0, 0.0], dtype=np.float64)
+    return np.array([0.0, 0.0, 1.0], dtype=np.float64)
+
+
+def _choose_best_axis_xyz(vertices: np.ndarray) -> str:
+    v = np.asarray(vertices, dtype=np.float64)
+    if v.ndim != 2 or v.shape[0] < 4 or v.shape[1] < 3:
+        return "z"
+
+    best_axis = "z"
+    best_score = float("inf")
+    for ax in ("x", "y", "z"):
+        axis = _axis_unit_vector(ax)
+        t = v @ axis
+        perp = v - t[:, None] * axis[None, :]
+        center = perp.mean(axis=0)
+        r = np.linalg.norm(perp - center[None, :], axis=1)
+        r = r[np.isfinite(r)]
+        if r.size < 4:
+            continue
+        med = float(np.median(r))
+        if not np.isfinite(med) or med < 1e-9:
+            continue
+        score = float(np.std(r) / med)
+        if score < best_score:
+            best_score = score
+            best_axis = ax
+
+    return best_axis
+
+
+def _angles_to_min_range(angles: np.ndarray) -> tuple[np.ndarray, float, float]:
+    """
+    Shift angles by a seam angle to minimize the covered range, then wrap to [0, 2pi).
+
+    Returns:
+        (angles_wrapped, seam_angle, span)
+    """
+    a = np.asarray(angles, dtype=np.float64).reshape(-1)
+    a = a[np.isfinite(a)]
+    if a.size < 2:
+        seam = 0.0
+        out = np.zeros_like(np.asarray(angles, dtype=np.float64).reshape(-1))
+        return out, seam, 0.0
+
+    a_sorted = np.sort(a)
+    diffs = np.diff(a_sorted)
+    wrap_gap = (a_sorted[0] + 2.0 * np.pi) - a_sorted[-1]
+    gaps = np.concatenate([diffs, [wrap_gap]])
+    k = int(np.argmax(gaps))
+
+    if k == a_sorted.size - 1:
+        start = float(a_sorted[-1])
+        gap = float(wrap_gap)
+        seam = start + gap * 0.5
+    else:
+        start = float(a_sorted[k])
+        end = float(a_sorted[k + 1])
+        seam = (start + end) * 0.5
+
+    # Shift and wrap to [0, 2pi)
+    raw = np.asarray(angles, dtype=np.float64).reshape(-1) - seam
+    wrapped = np.mod(raw, 2.0 * np.pi)
+    span = float(np.nanmax(wrapped) - np.nanmin(wrapped)) if wrapped.size else 0.0
+    return wrapped, float(seam), span
+
+
+def cylindrical_parameterization(
+    mesh: MeshData,
+    *,
+    axis: str = "auto",
+    radius: float | None = None,
+) -> np.ndarray:
+    """
+    Simple cylindrical unwrapping (developable approximation).
+
+    Args:
+        mesh: MeshData
+        axis: 'auto' | 'x' | 'y' | 'z' (Korean UI strings are also accepted)
+        radius: cylinder radius in mesh/world units. If None, estimate from vertices.
+
+    Returns:
+        (N, 2) UV in mesh/world units.
+    """
+    vertices = np.asarray(mesh.vertices, dtype=np.float64)
+    if vertices.ndim != 2 or vertices.shape[0] == 0 or vertices.shape[1] < 3:
+        return np.zeros((0, 2), dtype=np.float64)
+
+    axis_choice = _normalize_cylinder_axis_choice(axis)
+    if axis_choice == "auto":
+        axis_choice = _choose_best_axis_xyz(vertices)
+
+    a = _axis_unit_vector(axis_choice)
+    # Orthonormal basis (b1, b2) spanning plane perpendicular to axis a
+    temp = np.array([1.0, 0.0, 0.0], dtype=np.float64) if abs(float(a[0])) < 0.9 else np.array([0.0, 1.0, 0.0], dtype=np.float64)
+    b1 = np.cross(a, temp)
+    b1_norm = float(np.linalg.norm(b1))
+    if not np.isfinite(b1_norm) or b1_norm < 1e-12:
+        b1 = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+        b1_norm = float(np.linalg.norm(b1))
+    b1 /= b1_norm
+    b2 = np.cross(a, b1)
+
+    # Project to axis and perpendicular plane
+    t = vertices @ a  # (N,)
+    perp = vertices - t[:, None] * a[None, :]
+    center = perp.mean(axis=0)
+    r_vec = perp - center[None, :]
+
+    x = r_vec @ b1
+    y = r_vec @ b2
+    theta = np.arctan2(y, x)  # [-pi, pi]
+
+    theta_wrapped, _seam, _span = _angles_to_min_range(theta)
+
+    r = np.linalg.norm(r_vec, axis=1)
+    if radius is None:
+        r_f = r[np.isfinite(r)]
+        radius_val = float(np.median(r_f)) if r_f.size else 1.0
+    else:
+        try:
+            radius_val = float(radius)
+        except Exception:
+            radius_val = 0.0
+        if not np.isfinite(radius_val) or abs(radius_val) < 1e-12:
+            r_f = r[np.isfinite(r)]
+            radius_val = float(np.median(r_f)) if r_f.size else 1.0
+
+    radius_val = abs(float(radius_val))
+    if radius_val < 1e-6:
+        radius_val = 1.0
+
+    u = theta_wrapped * radius_val
+    v = t.astype(np.float64, copy=False)
+
+    uv = np.stack([u, v], axis=1)
+    if not np.isfinite(uv).all():
+        uv = np.nan_to_num(uv, nan=0.0, posinf=0.0, neginf=0.0)
+    return uv
+
+
+def flatten_with_method(
+    mesh: MeshData,
+    *,
+    method: str = "arap",
+    iterations: int = 30,
+    distortion: float = 0.5,
+    boundary_type: str = "free",
+    initial_method: str = "lscm",
+    cylinder_axis: str = "auto",
+    cylinder_radius: float | None = None,
+) -> FlattenedMesh:
+    """
+    Convenience wrapper to flatten a mesh with selectable models.
+
+    Supported methods:
+      - 'arap': shape-preserving (LSCM init + ARAP optimize)
+      - 'lscm': conformal (angle-preserving) init only
+      - 'area': area-prioritized blend (Tutte ↔ LSCM), controlled by `distortion`
+      - 'cylinder': cylindrical unwrapping
+
+    Notes:
+      - `distortion` in [0..1]: 0=area priority, 1=angle priority (for method='area').
+      - `cylinder_radius` is in mesh/world units; if None, it is estimated.
+    """
+    raw_method = str(method or "arap").strip()
+    m_text = raw_method.lower()
+    if "arap" in m_text:
+        m = "arap"
+    elif "lscm" in m_text:
+        m = "lscm"
+    elif ("area" in m_text) or ("면적" in raw_method):
+        m = "area"
+    elif ("cyl" in m_text) or ("원통" in raw_method):
+        m = "cylinder"
+    else:
+        m = m_text
+    iters = int(iterations)
+    if iters < 0:
+        iters = 0
+
+    flattener = ARAPFlattener(max_iterations=max(1, iters) if m == "arap" else 0)
+
+    if m == "arap":
+        return flattener.flatten(mesh, boundary_type=str(boundary_type or "free"), initial_method=str(initial_method or "lscm"))
+
+    mesh_s = flattener._sanitize_mesh(mesh)
+    if mesh_s.n_vertices == 0 or mesh_s.n_faces == 0:
+        return FlattenedMesh(
+            uv=np.zeros((mesh_s.n_vertices, 2), dtype=np.float64),
+            faces=mesh_s.faces,
+            original_mesh=mesh_s,
+            distortion_per_face=np.zeros((mesh_s.n_faces,), dtype=np.float64),
+            scale=1.0,
+        )
+
+    if m == "lscm":
+        uv = flattener._safe_initial_parameterization(mesh_s, "lscm")
+        uv = np.asarray(uv, dtype=np.float64)
+        if uv.ndim != 2 or uv.shape[0] != mesh_s.n_vertices or uv.shape[1] < 2:
+            uv = np.zeros((mesh_s.n_vertices, 2), dtype=np.float64)
+        else:
+            uv = uv[:, :2].copy()
+        uv = flattener._orient_uv_pca(uv)
+        distortion_arr = flattener._compute_distortion(mesh_s, uv)
+        return FlattenedMesh(
+            uv=uv,
+            faces=mesh_s.faces,
+            original_mesh=mesh_s,
+            distortion_per_face=distortion_arr,
+            scale=1.0,
+        )
+
+    if m in {"area", "area_preserve", "area-preserve", "area_preserving"}:
+        w = float(distortion)
+        if not np.isfinite(w):
+            w = 0.5
+        w = float(np.clip(w, 0.0, 1.0))
+
+        uv_area = flattener._safe_initial_parameterization(mesh_s, "tutte")
+        uv_angle = flattener._safe_initial_parameterization(mesh_s, "lscm")
+        uv_area = np.asarray(uv_area, dtype=np.float64)
+        uv_angle = np.asarray(uv_angle, dtype=np.float64)
+        if uv_area.ndim != 2 or uv_area.shape[0] != mesh_s.n_vertices or uv_area.shape[1] < 2:
+            uv_area = np.zeros((mesh_s.n_vertices, 2), dtype=np.float64)
+        else:
+            uv_area = uv_area[:, :2].copy()
+        if uv_angle.ndim != 2 or uv_angle.shape[0] != mesh_s.n_vertices or uv_angle.shape[1] < 2:
+            uv_angle = np.zeros((mesh_s.n_vertices, 2), dtype=np.float64)
+        else:
+            uv_angle = uv_angle[:, :2].copy()
+
+        uv_area_aligned = _similarity_align_2d(uv_area, uv_angle)
+        uv = (1.0 - w) * uv_area_aligned + w * uv_angle
+        uv = np.asarray(uv, dtype=np.float64)
+        uv = flattener._orient_uv_pca(uv)
+
+        # Global area scale match (helps keep real-world sizing consistent).
+        a3 = _mesh_total_area_3d(mesh_s)
+        a2 = _mesh_total_area_2d(mesh_s, uv)
+        if a3 > 1e-12 and a2 > 1e-12:
+            s = float(np.sqrt(a3 / a2))
+            if np.isfinite(s) and s > 1e-9:
+                uv *= s
+
+        distortion_arr = flattener._compute_distortion(mesh_s, uv)
+        return FlattenedMesh(
+            uv=uv,
+            faces=mesh_s.faces,
+            original_mesh=mesh_s,
+            distortion_per_face=distortion_arr,
+            scale=1.0,
+        )
+
+    if m in {"cylinder", "cyl", "cylindrical"}:
+        uv = cylindrical_parameterization(mesh_s, axis=cylinder_axis, radius=cylinder_radius)
+        uv = np.asarray(uv, dtype=np.float64)
+        if uv.ndim != 2 or uv.shape[0] != mesh_s.n_vertices or uv.shape[1] < 2:
+            uv = np.zeros((mesh_s.n_vertices, 2), dtype=np.float64)
+        else:
+            uv = uv[:, :2].copy()
+        uv = flattener._orient_uv_pca(uv)
+        distortion_arr = flattener._compute_distortion(mesh_s, uv)
+        return FlattenedMesh(
+            uv=uv,
+            faces=mesh_s.faces,
+            original_mesh=mesh_s,
+            distortion_per_face=distortion_arr,
+            scale=1.0,
+        )
+
+    raise NotImplementedError(f"Unsupported flatten method: {method}")
 
 
 # 테스트용

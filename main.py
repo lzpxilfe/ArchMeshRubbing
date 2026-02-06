@@ -7,14 +7,24 @@ Main entry point
 
 import sys
 import os
+import logging
 from pathlib import Path
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
 
+_LOGGER = logging.getLogger(__name__)
+
 
 def run_cli():
     """커맨드라인 인터페이스 실행"""
+    try:
+        from src.core.logging_utils import setup_logging
+
+        setup_logging()
+    except Exception:
+        pass
+
     if len(sys.argv) < 2:
         print_help()
         return

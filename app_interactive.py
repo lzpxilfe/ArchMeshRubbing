@@ -5,7 +5,11 @@ Licensed under the GNU General Public License v2.0 (GPL2)
 """
 
 import sys
+import logging
+import subprocess
+from datetime import datetime
 from pathlib import Path
+from typing import Any, Callable
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -23,6 +27,57 @@ import numpy as np
 from PIL import Image
 import io
 
+_LOGGER = logging.getLogger(__name__)
+_log_path: Path | None = None
+APP_NAME = "ArchMeshRubbing"
+APP_VERSION = "1.0.1"
+
+
+def _safe_git_info(repo_dir: str) -> tuple[str | None, bool]:
+    try:
+        sha = (
+            subprocess.check_output(["git", "-C", repo_dir, "rev-parse", "--short", "HEAD"], stderr=subprocess.DEVNULL)
+            .decode("utf-8", errors="replace")
+            .strip()
+        )
+        dirty = bool(
+            subprocess.check_output(["git", "-C", repo_dir, "status", "--porcelain"], stderr=subprocess.DEVNULL)
+            .decode("utf-8", errors="replace")
+            .strip()
+        )
+        return (sha or None), dirty
+    except Exception:
+        return None, False
+
+
+def _collect_debug_info(*, basedir: str) -> str:
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    sha, dirty = _safe_git_info(basedir)
+    sha_s = f"{sha}{'*' if dirty else ''}" if sha else "unknown"
+
+    def mod_path(name: str) -> str:
+        try:
+            import importlib
+
+            m = importlib.import_module(name)
+            return str(getattr(m, "__file__", "<no __file__>"))
+        except Exception as e:
+            return f"<import failed: {type(e).__name__}: {e}>"
+
+    parts = [
+        f"time: {ts}",
+        f"app: {APP_NAME} v{APP_VERSION} (git {sha_s})",
+        f"python: {sys.executable}",
+        f"cwd: {Path.cwd()}",
+        f"basedir: {basedir}",
+        "modules:",
+        f"  app_interactive: {__file__}",
+        f"  src.gui.viewport_3d: {mod_path('src.gui.viewport_3d')}",
+        f"  src.core.surface_separator: {mod_path('src.core.surface_separator')}",
+        f"  src.core.flattener: {mod_path('src.core.flattener')}",
+    ]
+    return "\n".join(parts)
+
 # Add src to path
 # Add basedir to path so 'src' package can be found
 if getattr(sys, 'frozen', False):
@@ -31,10 +86,10 @@ else:
     basedir = str(Path(__file__).parent)
 sys.path.insert(0, basedir)
 
-from src.gui.viewport_3d import Viewport3D
-from src.core.mesh_loader import MeshLoader, MeshProcessor
-from src.core.profile_exporter import ProfileExporter
-from src.gui.profile_graph_widget import ProfileGraphWidget
+from src.gui.viewport_3d import Viewport3D  # noqa: E402
+from src.core.mesh_loader import MeshLoader, MeshProcessor  # noqa: E402
+from src.core.profile_exporter import ProfileExporter  # noqa: E402
+from src.gui.profile_graph_widget import ProfileGraphWidget  # noqa: E402
 
 
 class MeshLoadThread(QThread):
@@ -60,7 +115,8 @@ class MeshLoadThread(QThread):
 
             self.loaded.emit(mesh_data, self._filepath)
         except Exception as e:
-            self.failed.emit(str(e))
+            _LOGGER.exception("Mesh load failed: %s", self._filepath)
+            self.failed.emit(f"{type(e).__name__}: {e}")
 
 
 class SliceComputeThread(QThread):
@@ -101,7 +157,8 @@ class SliceComputeThread(QThread):
 
             self.computed.emit(self._z, world_contours)
         except Exception as e:
-            self.failed.emit(self._z, str(e))
+            _LOGGER.exception("Slice compute failed (z=%s)", self._z)
+            self.failed.emit(self._z, f"{type(e).__name__}: {e}")
 
 
 class ProfileExportThread(QThread):
@@ -117,9 +174,9 @@ class ProfileExportThread(QThread):
         rotation: np.ndarray,
         scale: float,
         viewport_image: Image.Image,
-        opengl_matrices: tuple,
-        cut_lines_world: list,
-        cut_profiles_world: list,
+        opengl_matrices: tuple[Any, Any, Any],
+        cut_lines_world: list[Any],
+        cut_profiles_world: list[Any],
         resolution: int = 2048,
         grid_spacing: float = 1.0,
         include_grid: bool = True,
@@ -158,7 +215,26 @@ class ProfileExportThread(QThread):
             )
             self.done.emit(str(result_path))
         except Exception as e:
-            self.failed.emit(str(e))
+            _LOGGER.exception("Profile export failed (%s -> %s)", self._view, self._output_path)
+            self.failed.emit(f"{type(e).__name__}: {e}")
+
+
+class TaskThread(QThread):
+    done = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, task_name: str, fn: Callable[[], Any]):
+        super().__init__()
+        self._task_name = str(task_name)
+        self._fn = fn
+
+    def run(self):
+        try:
+            result = self._fn()
+            self.done.emit(result)
+        except Exception as e:
+            _LOGGER.exception("Task failed: %s", self._task_name)
+            self.failed.emit(f"{type(e).__name__}: {e}")
 
 
 def get_icon_path():
@@ -175,7 +251,10 @@ class HelpWidget(QTextEdit):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setReadOnly(True)
-        self.setMaximumHeight(150)
+        try:
+            self.setMinimumHeight(120)
+        except Exception:
+            pass
         self.setStyleSheet("""
             QTextEdit {
                 background-color: #f8f9fa;
@@ -237,13 +316,24 @@ class HelpWidget(QTextEdit):
     
     def set_selection_help(self):
         self.setHtml("""
-            <h3 style="margin:0; color:#2c5282;">✋ 표면 선택</h3>
+            <h3 style="margin:0; color:#2c5282;">✋ 표면(내/외면) 선택</h3>
             <p style="font-size:11px;">
-            내면/외면, 미구 등 영역을 선택합니다.<br>
-            <b>Shift+클릭:</b> 면 선택/해제<br>
-            <b>브러시:</b> 드래그로 여러 면 선택<br>
-            <b>자동 분리:</b> 법선 방향으로 자동 구분<br>
-            <b>선택 확장/축소:</b> 인접 면 포함/제외
+            내면/외면/미구(경계)를 지정하는 도구입니다.<br><br>
+
+            <b>📊 내면/외면 자동 감지</b><br>
+            - 클릭: <b>법선</b> 기반 자동 분리 (일반 메쉬에 빠름)<br>
+            - <b>Shift + 클릭:</b> <b>상면/하면(보이는 면)</b> 기반 자동 분리 (기와/얇은 쉘에 유리)<br><br>
+
+            <b>🖱️ 찍기(표면 클릭)</b><br>
+            - 클릭: <b>한 면</b>만 토글(추가/해제)<br>
+            - <b>Shift/Ctrl + 클릭:</b> <b>매직완드처럼 조금씩 확장</b> (Shift/Ctrl 클릭을 반복할수록 더 넓게)<br>
+            - <b>Alt:</b> 삭제 모드<br><br>
+
+            <b>🖌️ 브러시</b><br>
+            - 드래그: 칠하는 면을 추가, <b>Alt+드래그</b>: 삭제<br><br>
+
+            <b>⭕ 올가미(면적)</b><br>
+            - 좌클릭으로 점 추가 → 첫 점 근처 클릭 또는 우클릭으로 확정<br>
             </p>
         """)
 
@@ -966,7 +1056,7 @@ class SelectionPanel(QWidget):
         auto_layout = QVBoxLayout(auto_group)
         
         btn_auto_surface = QPushButton("📊 내면/외면 자동 감지")
-        btn_auto_surface.setToolTip("법선 방향으로 내면/외면 자동 분류")
+        btn_auto_surface.setToolTip("클릭=법선 기반, Shift+클릭=상/하면(보이는 면) 기반으로 자동 분류")
         btn_auto_surface.clicked.connect(lambda: self.selectionChanged.emit('auto_surface', None))
         auto_layout.addWidget(btn_auto_surface)
         
@@ -1476,8 +1566,8 @@ class SectionPanel(QWidget):
         line_layout.addLayout(sel_row)
 
         line_help = QLabel(
-            "상면(Top) 뷰에서 좌클릭 2번으로 단면선(선분 1개, 2점)을 그리세요. (자동 수평/수직)\n"
-            "Enter/우클릭=확정, Backspace/Delete=끝점 취소, Tab=선 전환\n"
+            "상면(Top) 뷰에서 좌클릭으로 점을 추가해 단면선(꺾인 폴리라인)을 그리세요. (자동 수평/수직)\n"
+            "Enter/우클릭=현재 선 확정, Backspace/Delete=마지막 점 취소, Tab=선 전환\n"
             "가로/세로는 각각 1개 선만 유지됩니다.\n"
             "Shift/Ctrl/Alt + 드래그: 메쉬 이동/회전 (점 추가 안 됨)"
         )
@@ -1556,12 +1646,14 @@ class SectionPanel(QWidget):
 class MainWindow(QMainWindow):
     """메인 윈도우"""
 
-    UI_STATE_VERSION = 1
+    UI_STATE_VERSION = 2
     
     def __init__(self):
         super().__init__()
         
-        self.setWindowTitle("ArchMeshRubbing v1.0.0")
+        sha, dirty = _safe_git_info(str(Path(basedir)))
+        sha_s = f"{sha}{'*' if dirty else ''}" if sha else "unknown"
+        self.setWindowTitle(f"{APP_NAME} v{APP_VERSION} ({sha_s})")
         self.resize(1400, 900)
         
         # 메인 위젯
@@ -1576,6 +1668,13 @@ class MainWindow(QMainWindow):
         self.mesh_loader = MeshLoader(default_unit='cm')
         self.current_mesh = None
         self.current_filepath = None
+
+        self._mesh_load_dialog: QProgressDialog | None = None
+        self._mesh_load_thread: MeshLoadThread | None = None
+        self._profile_export_dialog: QProgressDialog | None = None
+        self._profile_export_thread: ProfileExportThread | None = None
+        self._task_dialog: QProgressDialog | None = None
+        self._task_thread: TaskThread | None = None
 
         # 평면화(Flatten) 결과 캐시: (obj id + transform + options) -> FlattenedMesh
         self._flattened_cache = {}
@@ -1634,7 +1733,14 @@ class MainWindow(QMainWindow):
         # 도움말 위젯 (오버레이처럼 작동하도록 뷰포트 위에 띄우거나 하단에 배치 가능)
         # 일단은 뷰포트 하단에 고정
         self.help_widget = HelpWidget()
-        
+        self.help_dock = QDockWidget("❓ 도움말", self)
+        self.help_dock.setObjectName("dock_help")
+        self.help_dock.setWidget(self.help_widget)
+        try:
+            self.help_dock.setMinimumHeight(140)
+        except Exception:
+            pass
+
         # 도킹 위젯 설정
         self.setDockOptions(
             QMainWindow.DockOption.AnimatedDocks
@@ -1742,6 +1848,7 @@ class MainWindow(QMainWindow):
             self.section_dock,
             self.export_dock,
             self.scene_dock,
+            self.help_dock,
         ]:
             dock.setAllowedAreas(Qt.DockWidgetArea.AllDockWidgetAreas)
             dock.setFeatures(
@@ -1765,6 +1872,7 @@ class MainWindow(QMainWindow):
             self.section_dock,
             self.export_dock,
             self.scene_dock,
+            self.help_dock,
         ]:
             # 기존 배치가 남아있으면(중복 split/tabify 등) 레이아웃이 꼬일 수 있어 초기화
             try:
@@ -1791,9 +1899,13 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.scene_dock)
         self.splitDockWidget(self.flatten_dock, self.scene_dock, Qt.Orientation.Vertical)
 
+        # 하단: 컨텍스트 도움말(선택/툴 사용법)
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.help_dock)
+
         # 크기 비율(대략적인 기본값)
         self.resizeDocks([self.info_dock, self.transform_dock], [650, 750], Qt.Orientation.Horizontal)
         self.resizeDocks([self.flatten_dock, self.scene_dock], [780, 220], Qt.Orientation.Vertical)
+        self.resizeDocks([self.help_dock], [220], Qt.Orientation.Vertical)
 
         self.flatten_dock.raise_()
 
@@ -2164,6 +2276,7 @@ class MainWindow(QMainWindow):
             panels_menu.addAction(self.section_dock.toggleViewAction())
             panels_menu.addAction(self.export_dock.toggleViewAction())
             panels_menu.addAction(self.scene_dock.toggleViewAction())
+            panels_menu.addAction(self.help_dock.toggleViewAction())
         
         # 도움말 메뉴
         help_menu = menubar.addMenu("도움말(&H)")
@@ -2171,6 +2284,11 @@ class MainWindow(QMainWindow):
             action_about = QAction("ℹ️ 정보(&A)", self)
             action_about.triggered.connect(self.show_about)
             help_menu.addAction(action_about)
+
+            action_debug = QAction("디버그 정보 복사", self)
+            action_debug.setToolTip("실행 중인 코드/버전/모듈 경로 정보를 클립보드로 복사합니다.")
+            action_debug.triggered.connect(self.copy_debug_info)
+            help_menu.addAction(action_debug)
     
     def init_toolbar(self):
         toolbar = QToolBar("메인 툴바")
@@ -2244,9 +2362,21 @@ class MainWindow(QMainWindow):
         self.statusbar.addPermanentWidget(self.status_unit)
         
         # 버전 표시 (사용자 확인용)
-        self.status_ver = QLabel("v1.0.0")
+        sha, dirty = _safe_git_info(str(Path(basedir)))
+        sha_s = f"{sha}{'*' if dirty else ''}" if sha else "unknown"
+        self.status_ver = QLabel(f"v{APP_VERSION} ({sha_s})")
         self.status_ver.setStyleSheet("color: #a0aec0; font-size: 10px; margin-left: 10px;")
         self.statusbar.addPermanentWidget(self.status_ver)
+
+    def copy_debug_info(self) -> None:
+        try:
+            info = _collect_debug_info(basedir=str(Path(basedir)))
+            cb = QApplication.clipboard()
+            if cb is not None:
+                cb.setText(info)
+            QMessageBox.information(self, "디버그 정보", "클립보드에 복사했습니다.\n\n(이 내용과 함께 문제 상황을 알려주시면 재현/디버깅이 빨라집니다.)")
+        except Exception as e:
+            QMessageBox.critical(self, "오류", f"디버그 정보 생성 실패:\n{type(e).__name__}: {e}")
     
     def open_file(self):
         filepath, _ = QFileDialog.getOpenFileName(
@@ -2303,37 +2433,6 @@ class MainWindow(QMainWindow):
     def load_mesh(self, filepath: str, scale_factor: float = 1.0):
         self._start_async_load(filepath, scale_factor)
         return
-
-        try:
-            self.status_info.setText(f"⏳ 로딩 중: {Path(filepath).name}")
-            self.status_mesh.setText("")
-            QApplication.processEvents()
-            
-            # MeshLoader를 사용하여 MeshData 객체로 로드 (compute_normals 메서드 포함)
-            mesh_data = self.mesh_loader.load(filepath)
-            
-            # 단위 변환 적용 (예: mm 파일의 184.9 -> cm 기준 18.49로 변환)
-            if scale_factor != 1.0:
-                mesh_data.vertices *= scale_factor
-                # 캐시 초기화
-                mesh_data._bounds = None
-                mesh_data._centroid = None
-                
-            self.current_mesh = mesh_data
-            self.current_filepath = filepath
-            
-            # 뷰포트에 추가 (MeshData 객체)
-            self.viewport.add_mesh_object(mesh_data, name=Path(filepath).name)
-            
-            # 상태바 업데이트
-            self.status_info.setText(f"✅ 로드됨: {Path(filepath).name} (원점 정렬 완료)")
-            self.status_mesh.setText(f"V: {mesh_data.n_vertices:,} | F: {mesh_data.n_faces:,}")
-            self.status_grid.setText(f"격자: {self.viewport.grid_spacing}cm")
-            
-        except Exception as e:
-            QMessageBox.critical(self, "오류", f"파일 로드 실패:\n{e}")
-            self.status_info.setText("❌ 로드 실패")
-            self.status_mesh.setText("")
     
     def _start_async_load(self, filepath: str, scale_factor: float):
         thread = getattr(self, "_mesh_load_thread", None)
@@ -2390,7 +2489,15 @@ class MainWindow(QMainWindow):
             dlg.close()
             self._mesh_load_dialog = None
 
-        QMessageBox.critical(self, "오류", f"파일 로드 실패:\n{message}")
+        msg = f"파일 로드 실패:\n{message}"
+        try:
+            from src.core.logging_utils import format_exception_message
+
+            msg = format_exception_message("파일 로드 실패:", message, log_path=_log_path)
+        except Exception:
+            pass
+
+        QMessageBox.critical(self, "오류", msg)
         self.status_info.setText("로드 실패")
         self.status_mesh.setText("")
 
@@ -2422,7 +2529,15 @@ class MainWindow(QMainWindow):
             self._profile_export_dialog = None
 
         self.status_info.setText("내보내기 실패")
-        QMessageBox.critical(self, "오류", f"2D 도면(SVG) 내보내기 실패:\n{message}")
+        msg = f"2D 도면(SVG) 내보내기 실패:\n{message}"
+        try:
+            from src.core.logging_utils import format_exception_message
+
+            msg = format_exception_message("2D 도면(SVG) 내보내기 실패:", message, log_path=_log_path)
+        except Exception:
+            pass
+
+        QMessageBox.critical(self, "오류", msg)
 
     def _on_profile_export_finished(self):
         thread = getattr(self, "_profile_export_thread", None)
@@ -2432,6 +2547,81 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         self._profile_export_thread = None
+
+    def _format_error_message(self, prefix: str, message: str) -> str:
+        try:
+            from src.core.logging_utils import format_exception_message
+
+            return format_exception_message(prefix, message, log_path=_log_path)
+        except Exception:
+            return f"{prefix}\n\n{message}"
+
+    def _start_task(
+        self,
+        *,
+        title: str,
+        label: str,
+        thread: TaskThread,
+        on_done: Callable[[Any], None],
+        on_failed: Callable[[str], None] | None = None,
+    ) -> bool:
+        existing = getattr(self, "_task_thread", None)
+        if existing is not None and existing.isRunning():
+            QMessageBox.information(self, "작업 중", "이미 다른 작업이 진행 중입니다. 완료 후 다시 시도하세요.")
+            return False
+
+        dlg = QProgressDialog(str(label), None, 0, 0, self)
+        dlg.setWindowTitle(str(title))
+        dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
+        dlg.setCancelButton(None)
+        dlg.setMinimumDuration(0)
+        dlg.show()
+
+        self._task_dialog = dlg
+        self._task_thread = thread
+
+        def _close_dialog():
+            d = getattr(self, "_task_dialog", None)
+            if d is not None:
+                try:
+                    d.close()
+                except Exception:
+                    pass
+                self._task_dialog = None
+
+        def _cleanup_thread():
+            t = getattr(self, "_task_thread", None)
+            if t is not None:
+                try:
+                    t.deleteLater()
+                except Exception:
+                    pass
+            self._task_thread = None
+
+        def _default_failed(message: str):
+            QMessageBox.critical(self, "오류", self._format_error_message("작업 실패:", message))
+
+        def _safe_invoke(callback: Callable[[Any], None], arg: Any):
+            try:
+                callback(arg)
+            except Exception as e:
+                _LOGGER.exception("Task callback failed")
+                QMessageBox.critical(
+                    self,
+                    "오류",
+                    self._format_error_message(
+                        "내부 오류:",
+                        f"{type(e).__name__}: {e}",
+                    ),
+                )
+
+        thread.done.connect(lambda result: (_close_dialog(), _safe_invoke(on_done, result)))
+        thread.failed.connect(
+            lambda msg: (_close_dialog(), _safe_invoke(on_failed or _default_failed, msg))
+        )
+        thread.finished.connect(lambda: (_close_dialog(), _cleanup_thread()))
+        thread.start()
+        return True
 
     def on_mesh_loaded(self, mesh):
         self.scene_panel.update_list(self.viewport.objects, self.viewport.selected_index)
@@ -2666,6 +2856,10 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             self.viewport.status_info = f"표면 지정 비움: {target}"
+            try:
+                self.viewport._emit_surface_assignment_changed(obj)
+            except Exception:
+                pass
 
         elif action == "surface_clear_all":
             obj.outer_face_indices.clear()
@@ -2677,6 +2871,10 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             self.viewport.status_info = "표면 지정 전체 초기화"
+            try:
+                self.viewport._emit_surface_assignment_changed(obj)
+            except Exception:
+                pass
 
         elif action == "auto_surface":
             try:
@@ -2684,19 +2882,27 @@ class MainWindow(QMainWindow):
 
                 separator = SurfaceSeparator()
                 mesh = self._build_world_mesh(obj)
-                result = separator.auto_detect_surfaces(mesh)
+                modifiers = QApplication.keyboardModifiers()
+                use_views = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+                result = separator.auto_detect_surfaces(mesh, method="views" if use_views else "normals")
                 obj.outer_face_indices = set(int(x) for x in result.outer_face_indices.tolist())
                 obj.inner_face_indices = set(int(x) for x in result.inner_face_indices.tolist())
 
                 self.viewport.status_info = (
-                    f"자동 분리 완료: outer {len(obj.outer_face_indices):,} / inner {len(obj.inner_face_indices):,}"
+                    f"✅ 자동 분리 적용({('view' if use_views else 'normal')}): outer {len(obj.outer_face_indices):,} / inner {len(obj.inner_face_indices):,} (현재 메쉬에 저장됨)"
                 )
+                try:
+                    self.viewport._emit_surface_assignment_changed(obj)
+                except Exception:
+                    pass
                 QMessageBox.information(
                     self,
                     "완료",
-                    f"자동 분리 결과를 저장했습니다.\n\n"
-                    f"- outer: {len(obj.outer_face_indices):,} faces\n"
-                    f"- inner: {len(obj.inner_face_indices):,} faces",
+                    f"자동 분리 결과를 현재 메쉬에 적용했습니다. (파일 저장은 아직 하지 않았습니다.)\n\n"
+                    f"- outer(외면): {len(obj.outer_face_indices):,} faces\n"
+                    f"- inner(내면): {len(obj.inner_face_indices):,} faces\n\n"
+                    f"표시: 외면=파랑, 내면=보라 오버레이\n"
+                    f"저장: 내보내기 탭에서 SVG/이미지로 내보내세요.",
                 )
             except Exception as e:
                 QMessageBox.critical(self, "오류", f"자동 분리 실패:\n{e}")
@@ -2719,35 +2925,63 @@ class MainWindow(QMainWindow):
             pass
         self.viewport.update()
         
-    def _flatten_cache_key(self, obj, options: dict) -> tuple:
+    def _flatten_cache_key(self, obj, options: dict[str, Any]) -> tuple[object, ...]:
         method = str(options.get('method', 'ARAP')).strip()
         iterations = int(options.get('iterations', 30))
         boundary = str(options.get('boundary', 'free')).strip()
         initial = str(options.get('initial', 'lscm')).strip()
+        distortion = float(options.get("distortion", 0.5))
+        radius = float(options.get("radius", 0.0))
+        direction = str(options.get("direction", "auto")).strip()
+        auto_cut = bool(options.get("auto_cut", False))
+        multiband = bool(options.get("multiband", False))
 
         t = tuple(np.round(np.asarray(obj.translation, dtype=np.float64), 6).tolist())
         r = tuple(np.round(np.asarray(obj.rotation, dtype=np.float64), 6).tolist())
         s = float(np.round(float(obj.scale), 6))
 
-        return (id(obj), t, r, s, method, iterations, boundary, initial)
+        return (
+            id(obj),
+            t,
+            r,
+            s,
+            method,
+            iterations,
+            boundary,
+            initial,
+            float(np.round(distortion, 6)),
+            float(np.round(radius, 6)),
+            direction,
+            auto_cut,
+            multiband,
+        )
 
     def _build_world_mesh(self, obj):
         """
         현재 화면에 보이는 변환값(T/R/S)을 적용한 MeshData 복사본을 생성합니다.
         (원본 obj.mesh는 변경하지 않습니다)
         """
+        base = obj.mesh
+        return MainWindow._build_world_mesh_from_transform(
+            base,
+            translation=getattr(obj, "translation", None),
+            rotation=getattr(obj, "rotation", None),
+            scale=float(getattr(obj, "scale", 1.0)),
+        )
+
+    @staticmethod
+    def _build_world_mesh_from_transform(base, *, translation, rotation, scale: float):
         from src.core.mesh_loader import MeshData
         from scipy.spatial.transform import Rotation as R
 
-        base = obj.mesh
-        vertices = base.vertices.astype(np.float64) * float(obj.scale)
+        vertices = base.vertices.astype(np.float64) * float(scale)
 
-        if obj.rotation is not None and not np.allclose(obj.rotation, [0, 0, 0]):
-            rot = R.from_euler('xyz', obj.rotation, degrees=True).as_matrix()
+        if rotation is not None and not np.allclose(rotation, [0, 0, 0]):
+            rot = R.from_euler('xyz', rotation, degrees=True).as_matrix()
             vertices = (rot @ vertices.T).T
 
-        if obj.translation is not None and not np.allclose(obj.translation, [0, 0, 0]):
-            vertices = vertices + np.asarray(obj.translation, dtype=np.float64)
+        if translation is not None and not np.allclose(translation, [0, 0, 0]):
+            vertices = vertices + np.asarray(translation, dtype=np.float64)
 
         mesh = MeshData(
             vertices=vertices,
@@ -2759,39 +2993,59 @@ class MainWindow(QMainWindow):
             unit=base.unit,
             filepath=base.filepath
         )
-        mesh.compute_normals()
+        mesh.compute_normals(compute_vertex_normals=False)
         return mesh
 
-    def _compute_flattened(self, obj, options: dict):
-        from src.core.flattener import ARAPFlattener, FlattenedMesh
+    @staticmethod
+    def _compute_flattened_mesh(mesh, options: dict[str, Any]):
+        from src.core.flattener import flatten_with_method
 
         method = str(options.get('method', 'ARAP (형태 보존)'))
         iterations = int(options.get('iterations', 30))
         boundary_type = str(options.get('boundary', 'free'))
         initial = str(options.get('initial', 'lscm'))
+        distortion = float(options.get("distortion", 0.5))
+        radius_mm = float(options.get("radius", 0.0))
+        direction = str(options.get("direction", "auto"))
 
+        def normalize_method(text: str) -> str:
+            t = str(text or "").strip().lower()
+            if "arap" in t:
+                return "arap"
+            if "lscm" in t:
+                return "lscm"
+            if ("면적" in text) or ("area" in t):
+                return "area"
+            if ("원통" in text) or ("cyl" in t):
+                return "cylinder"
+            return "arap"
+
+        # FlattenPanel의 radius는 mm 입력이므로, mesh.unit 기준으로 world 단위로 환산
+        unit = str(getattr(mesh, "unit", "cm") or "cm").strip().lower()
+        if unit == "mm":
+            radius_world = radius_mm
+        elif unit == "m":
+            radius_world = radius_mm / 1000.0
+        else:
+            # default: cm
+            radius_world = radius_mm / 10.0
+
+        return flatten_with_method(
+            mesh,
+            method=normalize_method(method),
+            iterations=iterations,
+            distortion=distortion,
+            boundary_type=boundary_type,
+            initial_method=initial,
+            cylinder_axis=direction,
+            cylinder_radius=radius_world,
+        )
+
+    def _compute_flattened(self, obj, options: dict[str, Any]):
         mesh = self._build_world_mesh(obj)
+        return self._compute_flattened_mesh(mesh, options)
 
-        if 'LSCM' in method:
-            # ARAP 최적화 없이 LSCM 결과만 사용
-            flattener = ARAPFlattener(max_iterations=0)
-            uv = flattener._lscm_parameterization(mesh)
-            distortion = flattener._compute_distortion(mesh, uv)
-            return FlattenedMesh(
-                uv=uv,
-                faces=mesh.faces,
-                original_mesh=mesh,
-                distortion_per_face=distortion,
-                scale=1.0
-            )
-
-        if 'ARAP' in method:
-            flattener = ARAPFlattener(max_iterations=iterations)
-            return flattener.flatten(mesh, boundary_type=boundary_type, initial_method=initial)
-
-        raise NotImplementedError(f"Unsupported flatten method: {method}")
-
-    def _get_or_compute_flattened(self, obj, options: dict):
+    def _get_or_compute_flattened(self, obj, options: dict[str, Any]):
         key = self._flatten_cache_key(obj, options)
         cached = self._flattened_cache.get(key)
         if cached is not None:
@@ -2807,36 +3061,84 @@ class MainWindow(QMainWindow):
         self._flattened_cache[key] = flattened
         return flattened
 
-    def on_flatten_requested(self, options: dict):
+    def on_flatten_requested(self, options: dict[str, Any]):
         obj = self.viewport.selected_obj
         if not obj or not obj.mesh:
             QMessageBox.warning(self, "경고", "먼저 메쉬를 선택하세요.")
             return
 
+        key = self._flatten_cache_key(obj, options)
+        cached = self._flattened_cache.get(key)
+        if cached is not None:
+            self._on_flatten_task_done({"key": key, "flattened": cached})
+            return
+
+        base = obj.mesh
+        translation = (
+            np.asarray(obj.translation, dtype=np.float64).copy()
+            if getattr(obj, "translation", None) is not None
+            else None
+        )
+        rotation = (
+            np.asarray(obj.rotation, dtype=np.float64).copy()
+            if getattr(obj, "rotation", None) is not None
+            else None
+        )
+        scale = float(getattr(obj, "scale", 1.0))
+        options_copy = dict(options)
+
+        def task():
+            mesh = MainWindow._build_world_mesh_from_transform(
+                base, translation=translation, rotation=rotation, scale=scale
+            )
+            flattened = MainWindow._compute_flattened_mesh(mesh, options_copy)
+            return {"key": key, "flattened": flattened}
+
         self.status_info.setText("🗺️ 펼침 처리 중...")
-        QApplication.processEvents()
+        self._start_task(
+            title="펼침",
+            label="펼침 처리 중...",
+            thread=TaskThread("flatten", task),
+            on_done=self._on_flatten_task_done,
+            on_failed=self._on_flatten_task_failed,
+        )
 
+    def _on_flatten_task_done(self, result: Any):
+        key = None
+        flattened = None
         try:
-            flattened = self._get_or_compute_flattened(obj, options)
+            if isinstance(result, dict):
+                key = result.get("key")
+                flattened = result.get("flattened")
+        except Exception:
+            key = None
+            flattened = None
 
-            self.status_info.setText(
-                f"✅ 펼침 완료: {flattened.width:.2f} x {flattened.height:.2f} {flattened.original_mesh.unit} "
-                f"(왜곡 평균 {flattened.mean_distortion:.1%})"
-            )
-            QMessageBox.information(
-                self,
-                "펼침 완료",
-                f"펼침이 완료되었습니다.\n\n"
-                f"- 크기: {flattened.width:.2f} x {flattened.height:.2f} {flattened.original_mesh.unit}\n"
-                f"- 왜곡(평균/최대): {flattened.mean_distortion:.1%} / {flattened.max_distortion:.1%}\n\n"
-                f"이제 '펼친 결과 SVG 저장' 또는 '탁본 이미지 내보내기'를 사용할 수 있습니다."
-            )
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
+        if flattened is None:
             self.status_info.setText("❌ 펼침 실패")
-            QMessageBox.critical(self, "오류", f"펼침 처리 중 오류 발생:\n{e}")
-    
+            QMessageBox.critical(self, "오류", self._format_error_message("펼침 처리 실패:", "Flatten result is empty."))
+            return
+
+        if key is not None:
+            self._flattened_cache[key] = flattened
+
+        self.status_info.setText(
+            f"✅ 펼침 완료: {flattened.width:.2f} x {flattened.height:.2f} {flattened.original_mesh.unit} "
+            f"(왜곡 평균 {flattened.mean_distortion:.1%})"
+        )
+        QMessageBox.information(
+            self,
+            "펼침 완료",
+            f"펼침이 완료되었습니다.\n\n"
+            f"- 크기: {flattened.width:.2f} x {flattened.height:.2f} {flattened.original_mesh.unit}\n"
+            f"- 왜곡(평균/최대): {flattened.mean_distortion:.1%} / {flattened.max_distortion:.1%}\n\n"
+            f"이제 '펼친 결과 SVG 저장' 또는 '탁본 이미지 내보내기'를 사용할 수 있습니다."
+        )
+
+    def _on_flatten_task_failed(self, message: str):
+        self.status_info.setText("❌ 펼침 실패")
+        QMessageBox.critical(self, "오류", self._format_error_message("펼침 처리 중 오류 발생:", message))
+
     def on_export_requested(self, data):
         """내보내기 요청 처리"""
         export_type = data.get('type')
@@ -2858,6 +3160,11 @@ class MainWindow(QMainWindow):
         flatten_options = {
             'method': self.flatten_panel.combo_method.currentText(),
             'iterations': self.flatten_panel.spin_iterations.value(),
+            'radius': self.flatten_panel.spin_radius.value(),
+            'direction': self.flatten_panel.combo_direction.currentText(),
+            'distortion': self.flatten_panel.slider_distortion.value() / 100.0,
+            'auto_cut': self.flatten_panel.check_auto_cut.isChecked(),
+            'multiband': self.flatten_panel.check_multiband.isChecked(),
             'boundary': 'free',
             'initial': 'lscm',
         }
@@ -2868,13 +3175,36 @@ class MainWindow(QMainWindow):
             )
             if filepath:
                 self.status_info.setText(f"내보내기: {filepath}")
-                try:
+
+                dpi = int(self.export_panel.spin_dpi.value())
+                include_scale = bool(self.export_panel.check_scale_bar.isChecked())
+
+                key = self._flatten_cache_key(obj, flatten_options)
+                cached_flat = self._flattened_cache.get(key)
+                base = obj.mesh
+                translation = (
+                    np.asarray(obj.translation, dtype=np.float64).copy()
+                    if getattr(obj, "translation", None) is not None
+                    else None
+                )
+                rotation = (
+                    np.asarray(obj.rotation, dtype=np.float64).copy()
+                    if getattr(obj, "rotation", None) is not None
+                    else None
+                )
+                scale = float(getattr(obj, "scale", 1.0))
+                opts = dict(flatten_options)
+
+                def task_export_rubbing():
                     from src.core.surface_visualizer import SurfaceVisualizer
 
-                    flattened = self._get_or_compute_flattened(obj, flatten_options)
-
-                    dpi = int(self.export_panel.spin_dpi.value())
-                    include_scale = bool(self.export_panel.check_scale_bar.isChecked())
+                    if cached_flat is not None:
+                        flattened = cached_flat
+                    else:
+                        mesh = MainWindow._build_world_mesh_from_transform(
+                            base, translation=translation, rotation=rotation, scale=scale
+                        )
+                        flattened = MainWindow._compute_flattened_mesh(mesh, opts)
 
                     # DPI 기준으로 출력 폭 계산 (실측 스케일 유지를 위해)
                     unit = (flattened.original_mesh.unit or "mm").lower()
@@ -2894,47 +3224,107 @@ class MainWindow(QMainWindow):
                     visualizer = SurfaceVisualizer(default_dpi=dpi)
                     rubbing = visualizer.generate_rubbing(flattened, width_pixels=width_pixels, style='traditional')
                     rubbing.save(filepath, include_scale_bar=include_scale)
+                    return {"path": filepath, "key": key, "flattened": flattened if cached_flat is None else None}
+
+                def on_done_export_rubbing(result: Any):
+                    if isinstance(result, dict):
+                        flat = result.get("flattened")
+                        if flat is not None:
+                            self._flattened_cache[key] = flat
 
                     QMessageBox.information(self, "완료", f"탁본 이미지가 저장되었습니다:\n{filepath}")
                     self.status_info.setText(f"✅ 저장 완료: {Path(filepath).name}")
-                except Exception as e:
-                    import traceback
-                    traceback.print_exc()
+
+                def on_failed(message: str):
                     self.status_info.setText("❌ 저장 실패")
-                    QMessageBox.critical(self, "오류", f"탁본 저장 중 오류 발생:\n{e}")
+                    QMessageBox.critical(self, "오류", self._format_error_message("탁본 저장 중 오류 발생:", message))
+
+                self._start_task(
+                    title="내보내기",
+                    label="탁본 이미지 생성/저장 중...",
+                    thread=TaskThread("export_rubbing", task_export_rubbing),
+                    on_done=on_done_export_rubbing,
+                    on_failed=on_failed,
+                )
 
         elif export_type == 'ortho':
             filepath, _ = QFileDialog.getSaveFileName(
                 self, "정사투영 이미지 저장", "", "PNG (*.png);;TIFF (*.tiff)"
             )
             if filepath:
-                try:
+                dpi = int(self.export_panel.spin_dpi.value())
+                base = obj.mesh
+                translation = (
+                    np.asarray(obj.translation, dtype=np.float64).copy()
+                    if getattr(obj, "translation", None) is not None
+                    else None
+                )
+                rotation = (
+                    np.asarray(obj.rotation, dtype=np.float64).copy()
+                    if getattr(obj, "rotation", None) is not None
+                    else None
+                )
+                scale = float(getattr(obj, "scale", 1.0))
+
+                def task_export_ortho():
                     from src.core.orthographic_projector import OrthographicProjector
 
-                    dpi = int(self.export_panel.spin_dpi.value())
+                    mesh = MainWindow._build_world_mesh_from_transform(
+                        base, translation=translation, rotation=rotation, scale=scale
+                    )
                     projector = OrthographicProjector(resolution=2048)
-                    mesh = self._build_world_mesh(obj)
                     aligned = projector.align_mesh(mesh, method='pca')
                     result = projector.project(aligned, direction='top', render_mode='depth')
                     result.save(filepath, dpi=dpi)
+                    return filepath
 
+                def on_done_export_ortho(_result: Any):
                     QMessageBox.information(self, "완료", f"정사투영 이미지가 저장되었습니다:\n{filepath}")
                     self.status_info.setText(f"✅ 저장 완료: {Path(filepath).name}")
-                except Exception as e:
-                    import traceback
-                    traceback.print_exc()
+
+                def on_failed(message: str):
                     self.status_info.setText("❌ 저장 실패")
-                    QMessageBox.critical(self, "오류", f"정사투영 저장 중 오류 발생:\n{e}")
+                    QMessageBox.critical(self, "오류", self._format_error_message("정사투영 저장 중 오류 발생:", message))
+
+                self._start_task(
+                    title="내보내기",
+                    label="정사투영 이미지 생성/저장 중...",
+                    thread=TaskThread("export_ortho", task_export_ortho),
+                    on_done=on_done_export_ortho,
+                    on_failed=on_failed,
+                )
 
         elif export_type == 'flat_svg':
             filepath, _ = QFileDialog.getSaveFileName(
                 self, "펼친 결과 SVG 저장", "flattened.svg", "Scalable Vector Graphics (*.svg)"
             )
             if filepath:
-                try:
+                key = self._flatten_cache_key(obj, flatten_options)
+                cached_flat = self._flattened_cache.get(key)
+                base = obj.mesh
+                translation = (
+                    np.asarray(obj.translation, dtype=np.float64).copy()
+                    if getattr(obj, "translation", None) is not None
+                    else None
+                )
+                rotation = (
+                    np.asarray(obj.rotation, dtype=np.float64).copy()
+                    if getattr(obj, "rotation", None) is not None
+                    else None
+                )
+                scale = float(getattr(obj, "scale", 1.0))
+                opts = dict(flatten_options)
+
+                def task_export_flat_svg():
                     from src.core.flattened_svg_exporter import FlattenedSVGExporter, SVGExportOptions
 
-                    flattened = self._get_or_compute_flattened(obj, flatten_options)
+                    if cached_flat is not None:
+                        flattened = cached_flat
+                    else:
+                        mesh = MainWindow._build_world_mesh_from_transform(
+                            base, translation=translation, rotation=rotation, scale=scale
+                        )
+                        flattened = MainWindow._compute_flattened_mesh(mesh, opts)
                     exporter = FlattenedSVGExporter()
 
                     # 1cm 격자를 기본 제공 (단위가 mm면 10mm)
@@ -2954,14 +3344,27 @@ class MainWindow(QMainWindow):
                             stroke_width=0.05,
                         ),
                     )
+                    return {"path": filepath, "key": key, "flattened": flattened if cached_flat is None else None}
 
+                def on_done_export_flat_svg(result: Any):
+                    if isinstance(result, dict):
+                        flat = result.get("flattened")
+                        if flat is not None:
+                            self._flattened_cache[key] = flat
                     QMessageBox.information(self, "완료", f"펼친 결과 SVG가 저장되었습니다:\n{filepath}")
                     self.status_info.setText(f"✅ 저장 완료: {Path(filepath).name}")
-                except Exception as e:
-                    import traceback
-                    traceback.print_exc()
+
+                def on_failed(message: str):
                     self.status_info.setText("❌ 저장 실패")
-                    QMessageBox.critical(self, "오류", f"SVG 저장 중 오류 발생:\n{e}")
+                    QMessageBox.critical(self, "오류", self._format_error_message("SVG 저장 중 오류 발생:", message))
+
+                self._start_task(
+                    title="내보내기",
+                    label="펼침 계산/ SVG 저장 중...",
+                    thread=TaskThread("export_flat_svg", task_export_flat_svg),
+                    on_done=on_done_export_flat_svg,
+                    on_failed=on_failed,
+                )
 
         elif export_type == 'sheet_svg':
             filepath, _ = QFileDialog.getSaveFileName(
@@ -2971,22 +3374,45 @@ class MainWindow(QMainWindow):
                 "Scalable Vector Graphics (*.svg)",
             )
             if filepath:
-                try:
+                dpi = int(self.export_panel.spin_dpi.value())
+                iterations = int(flatten_options.get("iterations", 30))
+
+                base = obj.mesh
+                translation = (
+                    np.asarray(obj.translation, dtype=np.float64).copy()
+                    if getattr(obj, "translation", None) is not None
+                    else None
+                )
+                rotation = (
+                    np.asarray(obj.rotation, dtype=np.float64).copy()
+                    if getattr(obj, "rotation", None) is not None
+                    else None
+                )
+                scale = float(getattr(obj, "scale", 1.0))
+                cut_lines_world = self.viewport.get_cut_lines_world()
+                cut_profiles_world = self.viewport.get_cut_sections_world()
+                outer_idx = sorted(list(getattr(obj, "outer_face_indices", set()) or []))
+                inner_idx = sorted(list(getattr(obj, "inner_face_indices", set()) or []))
+
+                unit = str(getattr(base, "unit", "cm") or "cm").strip().lower()
+                radius_mm = float(flatten_options.get("radius", 0.0))
+                if unit == "mm":
+                    cylinder_radius = radius_mm
+                elif unit == "m":
+                    cylinder_radius = radius_mm / 1000.0
+                else:
+                    cylinder_radius = radius_mm / 10.0
+
+                def task_export_sheet_svg():
                     from src.core.rubbing_sheet_exporter import (
                         RubbingSheetExporter,
                         SheetExportOptions,
                     )
 
-                    dpi = int(self.export_panel.spin_dpi.value())
-                    iterations = int(flatten_options.get("iterations", 30))
-
+                    mesh = MainWindow._build_world_mesh_from_transform(
+                        base, translation=translation, rotation=rotation, scale=scale
+                    )
                     exporter = RubbingSheetExporter()
-                    mesh = self._build_world_mesh(obj)
-                    cut_lines_world = self.viewport.get_cut_lines_world()
-                    cut_profiles_world = self.viewport.get_cut_sections_world()
-                    outer_idx = sorted(list(getattr(obj, "outer_face_indices", set()) or []))
-                    inner_idx = sorted(list(getattr(obj, "inner_face_indices", set()) or []))
-
                     exporter.export(
                         mesh,
                         filepath,
@@ -2997,73 +3423,157 @@ class MainWindow(QMainWindow):
                         options=SheetExportOptions(
                             dpi=dpi,
                             flatten_iterations=iterations,
+                            flatten_method=str(flatten_options.get("method", "arap")),
+                            flatten_distortion=float(flatten_options.get("distortion", 0.5)),
+                            cylinder_axis=str(flatten_options.get("direction", "auto")),
+                            cylinder_radius=cylinder_radius,
                         ),
                     )
+                    return filepath
 
-                    QMessageBox.information(self, "?꾨즺", f"통합 SVG가 저장되었습니다:\n{filepath}")
-                    self.status_info.setText(f"??????꾨즺: {Path(filepath).name}")
-                except Exception as e:
-                    import traceback
+                def on_done_export_sheet_svg(_result: Any):
+                    QMessageBox.information(self, "완료", f"통합 SVG가 저장되었습니다:\n{filepath}")
+                    self.status_info.setText(f"✅ 저장 완료: {Path(filepath).name}")
 
-                    traceback.print_exc()
-                    self.status_info.setText("??????ㅽ뙣")
-                    QMessageBox.critical(self, "?ㅻ쪟", f"통합 SVG 저장 중 오류 발생:\n{e}")
+                def on_failed(message: str):
+                    self.status_info.setText("❌ 저장 실패")
+                    QMessageBox.critical(self, "오류", self._format_error_message("통합 SVG 저장 중 오류 발생:", message))
+
+                self._start_task(
+                    title="내보내기",
+                    label="통합 SVG 생성/저장 중...",
+                    thread=TaskThread("export_sheet_svg", task_export_sheet_svg),
+                    on_done=on_done_export_sheet_svg,
+                    on_failed=on_failed,
+                )
 
         elif export_type == 'mesh_outer':
             filepath, _ = QFileDialog.getSaveFileName(
                 self, "외면 메쉬 저장", "", "OBJ (*.obj);;STL (*.stl);;PLY (*.ply)"
             )
             if filepath:
-                try:
+                base = obj.mesh
+                translation = (
+                    np.asarray(obj.translation, dtype=np.float64).copy()
+                    if getattr(obj, "translation", None) is not None
+                    else None
+                )
+                rotation = (
+                    np.asarray(obj.rotation, dtype=np.float64).copy()
+                    if getattr(obj, "rotation", None) is not None
+                    else None
+                )
+                scale = float(getattr(obj, "scale", 1.0))
+
+                def task_export_mesh_outer():
                     from src.core.surface_separator import SurfaceSeparator
 
+                    mesh = MainWindow._build_world_mesh_from_transform(
+                        base, translation=translation, rotation=rotation, scale=scale
+                    )
                     separator = SurfaceSeparator()
-                    mesh = self._build_world_mesh(obj)
                     result = separator.auto_detect_surfaces(mesh)
+                    outer = getattr(result, "outer_surface", None)
+                    if outer is None:
+                        return {"status": "no_outer"}
+                    MeshProcessor().save_mesh(outer, filepath)
+                    return {"status": "ok"}
 
-                    if result.outer_surface is None:
+                def on_done_export_mesh_outer(result: Any):
+                    if isinstance(result, dict) and result.get("status") == "no_outer":
                         QMessageBox.warning(self, "경고", "외면을 감지하지 못했습니다.")
                         return
-
-                    processor = MeshProcessor()
-                    processor.save_mesh(result.outer_surface, filepath)
                     QMessageBox.information(self, "완료", f"외면 메쉬가 저장되었습니다:\n{filepath}")
-                except Exception as e:
-                    import traceback
-                    traceback.print_exc()
-                    QMessageBox.critical(self, "오류", f"외면 저장 중 오류 발생:\n{e}")
+
+                def on_failed(message: str):
+                    QMessageBox.critical(self, "오류", self._format_error_message("외면 저장 중 오류 발생:", message))
+
+                self._start_task(
+                    title="내보내기",
+                    label="외면 메쉬 분리/저장 중...",
+                    thread=TaskThread("export_mesh_outer", task_export_mesh_outer),
+                    on_done=on_done_export_mesh_outer,
+                    on_failed=on_failed,
+                )
         elif export_type == 'mesh_inner':
             filepath, _ = QFileDialog.getSaveFileName(
                 self, "내면 메쉬 저장", "", "OBJ (*.obj);;STL (*.stl);;PLY (*.ply)"
             )
             if filepath:
-                try:
+                base = obj.mesh
+                translation = (
+                    np.asarray(obj.translation, dtype=np.float64).copy()
+                    if getattr(obj, "translation", None) is not None
+                    else None
+                )
+                rotation = (
+                    np.asarray(obj.rotation, dtype=np.float64).copy()
+                    if getattr(obj, "rotation", None) is not None
+                    else None
+                )
+                scale = float(getattr(obj, "scale", 1.0))
+
+                def task_export_mesh_inner():
                     from src.core.surface_separator import SurfaceSeparator
 
+                    mesh = MainWindow._build_world_mesh_from_transform(
+                        base, translation=translation, rotation=rotation, scale=scale
+                    )
                     separator = SurfaceSeparator()
-                    mesh = self._build_world_mesh(obj)
                     result = separator.auto_detect_surfaces(mesh)
+                    inner = getattr(result, "inner_surface", None)
+                    if inner is None:
+                        return {"status": "no_inner"}
+                    MeshProcessor().save_mesh(inner, filepath)
+                    return {"status": "ok"}
 
-                    if result.inner_surface is None:
+                def on_done_export_mesh_inner(result: Any):
+                    if isinstance(result, dict) and result.get("status") == "no_inner":
                         QMessageBox.warning(self, "경고", "내면을 감지하지 못했습니다.")
                         return
-
-                    processor = MeshProcessor()
-                    processor.save_mesh(result.inner_surface, filepath)
                     QMessageBox.information(self, "완료", f"내면 메쉬가 저장되었습니다:\n{filepath}")
-                except Exception as e:
-                    import traceback
-                    traceback.print_exc()
-                    QMessageBox.critical(self, "오류", f"내면 저장 중 오류 발생:\n{e}")
+
+                def on_failed(message: str):
+                    QMessageBox.critical(self, "오류", self._format_error_message("내면 저장 중 오류 발생:", message))
+
+                self._start_task(
+                    title="내보내기",
+                    label="내면 메쉬 분리/저장 중...",
+                    thread=TaskThread("export_mesh_inner", task_export_mesh_inner),
+                    on_done=on_done_export_mesh_inner,
+                    on_failed=on_failed,
+                )
         elif export_type == 'mesh_flat':
             filepath, _ = QFileDialog.getSaveFileName(
                 self, "펼쳐진 메쉬 저장", "", "OBJ (*.obj);;STL (*.stl);;PLY (*.ply)"
             )
             if filepath:
-                try:
+                key = self._flatten_cache_key(obj, flatten_options)
+                cached_flat = self._flattened_cache.get(key)
+                base = obj.mesh
+                translation = (
+                    np.asarray(obj.translation, dtype=np.float64).copy()
+                    if getattr(obj, "translation", None) is not None
+                    else None
+                )
+                rotation = (
+                    np.asarray(obj.rotation, dtype=np.float64).copy()
+                    if getattr(obj, "rotation", None) is not None
+                    else None
+                )
+                scale = float(getattr(obj, "scale", 1.0))
+                opts = dict(flatten_options)
+
+                def task_export_mesh_flat():
                     from src.core.mesh_loader import MeshData
 
-                    flattened = self._get_or_compute_flattened(obj, flatten_options)
+                    if cached_flat is not None:
+                        flattened = cached_flat
+                    else:
+                        mesh = MainWindow._build_world_mesh_from_transform(
+                            base, translation=translation, rotation=rotation, scale=scale
+                        )
+                        flattened = MainWindow._compute_flattened_mesh(mesh, opts)
 
                     uv_real = flattened.uv.astype(np.float64) * float(flattened.scale)
                     uv_real -= uv_real.min(axis=0)
@@ -3079,15 +3589,28 @@ class MainWindow(QMainWindow):
                         unit=flattened.original_mesh.unit,
                         filepath=None
                     )
-                    flat_mesh.compute_normals()
+                    flat_mesh.compute_normals(compute_vertex_normals=False)
 
-                    processor = MeshProcessor()
-                    processor.save_mesh(flat_mesh, filepath)
+                    MeshProcessor().save_mesh(flat_mesh, filepath)
+                    return {"status": "ok", "flattened": flattened if cached_flat is None else None}
+
+                def on_done_export_mesh_flat(result: Any):
+                    if isinstance(result, dict):
+                        flat = result.get("flattened")
+                        if flat is not None:
+                            self._flattened_cache[key] = flat
                     QMessageBox.information(self, "완료", f"펼쳐진 메쉬가 저장되었습니다:\n{filepath}")
-                except Exception as e:
-                    import traceback
-                    traceback.print_exc()
-                    QMessageBox.critical(self, "오류", f"펼친 메쉬 저장 중 오류 발생:\n{e}")
+
+                def on_failed(message: str):
+                    QMessageBox.critical(self, "오류", self._format_error_message("펼친 메쉬 저장 중 오류 발생:", message))
+
+                self._start_task(
+                    title="내보내기",
+                    label="펼침/메쉬 생성/저장 중...",
+                    thread=TaskThread("export_mesh_flat", task_export_mesh_flat),
+                    on_done=on_done_export_mesh_flat,
+                    on_failed=on_failed,
+                )
     
     def export_2d_profile(self, view):
         """2D 실측 도면(SVG) 내보내기"""
@@ -3504,7 +4027,11 @@ class MainWindow(QMainWindow):
         try:
             self.viewport.cut_line_active = int(index)
             self.viewport.cut_line_preview = None
-            self.viewport.cut_line_drawing = len(self.viewport.cut_lines[int(index)]) == 1
+            idx = int(index)
+            idx = idx if idx in (0, 1) else 0
+            line = self.viewport.cut_lines[idx]
+            final = getattr(self.viewport, "_cut_line_final", [False, False])
+            self.viewport.cut_line_drawing = bool(line) and not bool(final[idx])
             self.viewport.update()
         except Exception:
             pass
@@ -3737,15 +4264,20 @@ class MainWindow(QMainWindow):
     def show_about(self):
         icon_path = get_icon_path()
         msg = QMessageBox(self)
-        msg.setWindowTitle("ArchMeshRubbing v1.0.0")
+        sha, dirty = _safe_git_info(str(Path(basedir)))
+        sha_s = f"{sha}{'*' if dirty else ''}" if sha else "unknown"
+        msg.setWindowTitle(f"{APP_NAME} v{APP_VERSION} ({sha_s})")
         
         if icon_path:
             msg.setIconPixmap(QPixmap(icon_path).scaled(64, 64, Qt.AspectRatioMode.KeepAspectRatio))
         
-        msg.setText("""
-            <h2>ArchMeshRubbing v1.0.0</h2>
+        debug_info = _collect_debug_info(basedir=str(Path(basedir)))
+        msg.setText(f"""
+            <h2>{APP_NAME} v{APP_VERSION}</h2>
             <p>고고학 메쉬 탁본 도구</p>
             <p style="font-size: 11px; color: #718096;">© 2026 balguljang2 (lzpxilfe) / Licensed under GPLv2</p>
+            <hr>
+            <p style="font-size: 11px; color: #718096; white-space: pre-wrap;">{debug_info}</p>
             <hr>
             <p><b>조작법:</b></p>
             <ul>
@@ -3760,6 +4292,19 @@ class MainWindow(QMainWindow):
 
 def main():
     try:
+        global _log_path
+        try:
+            from src.core.logging_utils import setup_logging
+
+            _log_path = setup_logging()
+        except Exception:
+            _log_path = None
+
+        def _excepthook(exc_type, exc, tb):
+            _LOGGER.critical("Unhandled exception", exc_info=(exc_type, exc, tb))
+
+        sys.excepthook = _excepthook
+
         app = QApplication(sys.argv)
         app.setStyle('Fusion')
         
@@ -3786,8 +4331,19 @@ def main():
         sys.exit(app.exec())
     except Exception as e:
         import traceback
+        _LOGGER.exception("Application crashed on startup")
         err_msg = f"Application crashed on startup:\n\n{e}\n\n{traceback.format_exc()}"
         try:
+            try:
+                from src.core.logging_utils import format_exception_message
+
+                err_msg = format_exception_message(
+                    "Application crashed on startup:",
+                    f"{e}\n\n{traceback.format_exc()}",
+                    log_path=_log_path,
+                )
+            except Exception:
+                pass
             app = QApplication.instance()
             if app is None:
                 app = QApplication(sys.argv)

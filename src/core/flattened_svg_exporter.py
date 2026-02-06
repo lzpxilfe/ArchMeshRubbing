@@ -45,7 +45,7 @@ class FlattenedSVGExporter:
         # UV → 실측 좌표(원본 단위) → SVG 단위로 변환
         uv_real = flattened.uv.astype(np.float64) * float(flattened.scale)
         if uv_real.ndim != 2 or uv_real.shape[0] == 0:
-            svg_parts: list[str] = [
+            empty_svg_parts: list[str] = [
                 '<?xml version="1.0" encoding="UTF-8" standalone="no"?>',
                 '<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" '
                 '"http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">',
@@ -54,7 +54,7 @@ class FlattenedSVGExporter:
                 '<!-- Empty UV: nothing to export -->',
                 '</svg>',
             ]
-            output_path.write_text("\n".join(svg_parts), encoding="utf-8")
+            output_path.write_text("\n".join(empty_svg_parts), encoding="utf-8")
             return str(output_path)
 
         min_uv = uv_real.min(axis=0)

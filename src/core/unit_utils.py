@@ -28,17 +28,35 @@ def resolve_svg_unit(mesh_unit: Optional[str], requested: Optional[str]) -> tupl
         (svg_unit, unit_scale)
 
     `unit_scale` is a multiplier applied to values expressed in mesh units to get SVG units.
+    SVG exports in this project use `mm` or `cm` (meters are exported as `cm`).
     """
-    unit = normalize_unit(requested or mesh_unit or "mm")
+    mesh_u = normalize_unit(mesh_unit)
+    req_u = normalize_unit(requested) if requested is not None else None
 
-    if unit == "mm":
+    # Default: follow mesh units when possible (meters become centimeters).
+    if req_u is None:
+        if mesh_u == "m":
+            return "cm", 100.0
+        return mesh_u, 1.0
+
+    # Requested `mm`
+    if req_u == "mm":
+        if mesh_u == "mm":
+            return "mm", 1.0
+        if mesh_u == "cm":
+            return "mm", 10.0
+        if mesh_u == "m":
+            return "mm", 1000.0
         return "mm", 1.0
-    if unit == "cm":
+
+    # Requested `cm` (or `m`, which is exported as `cm`)
+    if mesh_u == "mm":
+        return "cm", 0.1
+    if mesh_u == "cm":
         return "cm", 1.0
-    if unit == "m":
-        # SVG에서 m는 불편하므로 cm로 변환 (1m = 100cm)
+    if mesh_u == "m":
         return "cm", 100.0
-    return "mm", 1.0
+    return "cm", 0.1
 
 
 def mm_to_svg_units(mm: float, svg_unit: str) -> float:
@@ -48,4 +66,3 @@ def mm_to_svg_units(mm: float, svg_unit: str) -> float:
     if u == "cm":
         return float(mm) / 10.0
     return float(mm)
-

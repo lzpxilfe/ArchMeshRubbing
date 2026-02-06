@@ -8,7 +8,12 @@ Supports: OBJ, PLY, STL, OFF formats
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, List, Union
+import logging
 import numpy as np
+
+from .logging_utils import log_once
+
+_LOGGER = logging.getLogger(__name__)
 
 try:
     import trimesh
@@ -89,7 +94,13 @@ class MeshData:
                 keep = np.all(valid, axis=1)
                 faces = faces[keep]
         except Exception:
-            pass
+            log_once(
+                _LOGGER,
+                "mesh_loader:post_init_face_filter",
+                logging.WARNING,
+                "MeshData.__post_init__ face index filtering failed",
+                exc_info=True,
+            )
         self.faces = faces
         
         if self.normals is not None:
@@ -370,6 +381,22 @@ class MeshData:
             vertex_normals=self.normals,
             process=False
         )
+        try:
+            meta = getattr(mesh, "metadata", None)
+            if not isinstance(meta, dict):
+                meta = {}
+                mesh.metadata = meta
+            meta["unit"] = str(self.unit)
+            if self.filepath is not None:
+                meta["filepath"] = str(self.filepath)
+        except Exception:
+            log_once(
+                _LOGGER,
+                "mesh_loader:to_trimesh_metadata",
+                logging.DEBUG,
+                "Failed to attach metadata to trimesh mesh",
+                exc_info=True,
+            )
         return mesh
     
     @classmethod
@@ -502,7 +529,7 @@ class MeshLoader:
         - GLTF/GLB (GL Transmission Format)
     """
     
-    SUPPORTED_FORMATS = {
+    SUPPORTED_FORMATS: dict[str, str] = {
         '.obj': 'Wavefront OBJ',
         '.ply': 'Polygon File Format',
         '.stl': 'Stereolithography',
@@ -519,7 +546,7 @@ class MeshLoader:
         self.default_unit = default_unit
     
     @classmethod
-    def get_supported_formats(cls) -> dict:
+    def get_supported_formats(cls) -> dict[str, str]:
         """지원 포맷 목록 반환"""
         return cls.SUPPORTED_FORMATS.copy()
     
@@ -604,7 +631,7 @@ class MeshLoader:
         """
         return [self.load(fp, unit) for fp in filepaths]
     
-    def get_file_info(self, filepath: Union[str, Path]) -> dict:
+    def get_file_info(self, filepath: Union[str, Path]) -> dict[str, object]:
         """
         파일 정보 미리보기 (전체 로드 없이)
         
@@ -622,7 +649,7 @@ class MeshLoader:
         ext = filepath.suffix.lower()
         file_size = filepath.stat().st_size
         
-        info = {
+        info: dict[str, object] = {
             'filename': filepath.name,
             'format': self.SUPPORTED_FORMATS.get(ext, 'Unknown'),
             'extension': ext,

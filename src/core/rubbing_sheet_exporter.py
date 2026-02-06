@@ -21,10 +21,10 @@ from typing import Optional
 import numpy as np
 from PIL import Image
 
-from .flattener import ARAPFlattener, FlattenedMesh
+from .flattener import FlattenedMesh, flatten_with_method
 from .mesh_loader import MeshData
 from .profile_exporter import ProfileExporter
-from .surface_visualizer import SurfaceVisualizer
+from .surface_visualizer import RubbingImage, SurfaceVisualizer
 from .unit_utils import resolve_svg_unit as _resolve_unit
 from .unit_utils import mm_to_svg_units as _mm_to_svg_units
 
@@ -49,6 +49,10 @@ class SheetExportOptions:
     normal_split_threshold: float = 0.15  # dot(Z) threshold for outer/inner split
 
     flatten_iterations: int = 30
+    flatten_method: str = "arap"  # 'arap' | 'lscm' | 'area' | 'cylinder' (UI strings also accepted)
+    flatten_distortion: float = 0.5  # 0..1 (area→angle), used when flatten_method='area'
+    cylinder_axis: str = "auto"  # 'auto' | 'x' | 'y' | 'z'
+    cylinder_radius: Optional[float] = None  # mesh/world units; if None, estimated from geometry
     rubbing_style: str = "traditional"
 
     include_labels: bool = True
@@ -93,8 +97,8 @@ class RubbingSheetExporter:
         mesh: MeshData,
         output_path: str | Path,
         *,
-        cut_lines_world: Optional[list] = None,
-        cut_profiles_world: Optional[list] = None,
+        cut_lines_world: Optional[list[list[list[float]]]] = None,
+        cut_profiles_world: Optional[list[list[list[float]]]] = None,
         outer_face_indices: Optional[list[int] | np.ndarray] = None,
         inner_face_indices: Optional[list[int] | np.ndarray] = None,
         options: SheetExportOptions | None = None,
@@ -263,9 +267,17 @@ class RubbingSheetExporter:
         svg_unit: str,
         unit_scale: float,
         options: SheetExportOptions,
-    ) -> tuple[FlattenedMesh, object]:
-        flattener = ARAPFlattener(max_iterations=int(options.flatten_iterations))
-        flattened = flattener.flatten(mesh, boundary_type="free", initial_method="lscm")
+    ) -> tuple[FlattenedMesh, RubbingImage]:
+        flattened = flatten_with_method(
+            mesh,
+            method=str(options.flatten_method),
+            iterations=int(options.flatten_iterations),
+            distortion=float(options.flatten_distortion),
+            boundary_type="free",
+            initial_method="lscm",
+            cylinder_axis=str(options.cylinder_axis),
+            cylinder_radius=options.cylinder_radius,
+        )
 
         dpi = int(options.dpi)
         width_real = float(flattened.width)
@@ -292,8 +304,8 @@ class RubbingSheetExporter:
         self,
         mesh: MeshData,
         *,
-        cut_lines_world: Optional[list],
-        cut_profiles_world: Optional[list],
+        cut_lines_world: Optional[list[list[list[float]]]],
+        cut_profiles_world: Optional[list[list[list[float]]]],
         svg_unit: str,
         unit_scale: float,
         options: SheetExportOptions,
@@ -324,7 +336,7 @@ class RubbingSheetExporter:
             return '<g id="top_view"></g>', w, h
 
         all_pts = np.vstack(pts_xy)
-        finite = np.isfinite(all_pts).all(axis=1)
+        finite = np.all(np.isfinite(all_pts), axis=1)
         all_pts = all_pts[finite]
         if all_pts.size == 0:
             w = 1.0 * unit_scale
