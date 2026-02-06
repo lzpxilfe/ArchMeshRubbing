@@ -683,7 +683,7 @@ class TransformToolbar(QToolBar):
 
 class TransformPanel(QWidget):
     """메쉬 변환 패널 (이동/회전)"""
-    
+
     transformChanged = pyqtSignal()
     
     def __init__(self, viewport: Viewport3D, help_widget: HelpWidget, parent=None):
@@ -696,42 +696,20 @@ class TransformPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(5, 5, 5, 5)
         layout.setSpacing(10)
-        
-        # 바닥면 그리기 도구 (간소화)
-        align_group = QGroupBox("⚡ 바닥면 그리기")
-        align_group.setStyleSheet("QGroupBox { font-weight: bold; }")
-        align_layout = QVBoxLayout(align_group)
 
-        self.btn_draw_floor = QPushButton("✏️ 바닥 면 그리기")
-        self.btn_draw_floor.clicked.connect(self.start_floor_drawing)
-        self.btn_draw_floor.setToolTip(
-            "메쉬 위에 바닥이 될 점들을 찍어 바닥면을 지정하세요\n"
-            "점을 계속 추가할 수 있고, Enter로 확정합니다"
+        hint = QLabel(
+            "정치/바닥 정렬은 상단 툴바를 사용하세요.\n"
+            "✏️ 바닥 면 그리기: 상단 툴바 버튼 → 메쉬 클릭으로 점 추가 → Enter로 확정"
         )
-        self.btn_draw_floor.setStyleSheet("QPushButton { padding: 8px; font-weight: bold; }")
-        align_layout.addWidget(self.btn_draw_floor)
-
-        # 상태 표시
-        self.floor_status = QLabel("점을 찍어 바닥면을 지정한 뒤 Enter로 확정하세요")
-        self.floor_status.setStyleSheet("color: #718096; font-size: 10px;")
-        align_layout.addWidget(self.floor_status)
-        
-        layout.addWidget(align_group)
+        hint.setStyleSheet("color: #718096; font-size: 10px;")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
         layout.addStretch()
     
     def enterEvent(self, event):
         self.help_widget.set_transform_help()
         super().enterEvent(event)
     
-    def start_floor_drawing(self):
-        """바닥 면 그리기 모드 시작 - MainWindow로 위임"""
-        main_window = self.window()
-        start_floor_picking = getattr(main_window, "start_floor_picking", None)
-        if callable(start_floor_picking):
-            start_floor_picking()
-            self.floor_status.setText("📍 점 찍는 중... (Enter로 확정)")
-
-
 class FlattenPanel(QWidget):
     """펼침 설정 패널 (Phase B)"""
     
@@ -1646,7 +1624,7 @@ class SectionPanel(QWidget):
 class MainWindow(QMainWindow):
     """메인 윈도우"""
 
-    UI_STATE_VERSION = 2
+    UI_STATE_VERSION = 3
     
     def __init__(self):
         super().__init__()
@@ -1737,9 +1715,30 @@ class MainWindow(QMainWindow):
         self.help_dock.setObjectName("dock_help")
         self.help_dock.setWidget(self.help_widget)
         try:
-            self.help_dock.setMinimumHeight(140)
+            self.help_dock.setMinimumHeight(100)
         except Exception:
             pass
+        try:
+            self._help_dock_last_floating = True
+            self.help_dock.topLevelChanged.connect(self._on_help_dock_top_level_changed)
+        except Exception:
+            self._help_dock_last_floating = True
+        self.action_toggle_help_panel = self.help_dock.toggleViewAction()
+        if self.action_toggle_help_panel is None:
+            self.action_toggle_help_panel = QAction("❓ 도움말", self)
+            self.action_toggle_help_panel.setCheckable(True)
+            self.action_toggle_help_panel.toggled.connect(self._on_help_panel_toggled)
+            try:
+                self.help_dock.visibilityChanged.connect(self.action_toggle_help_panel.setChecked)
+            except Exception:
+                pass
+        else:
+            self.action_toggle_help_panel.setText("❓ 도움말")
+            self.action_toggle_help_panel.setToolTip("도움말 창 표시/숨김")
+            try:
+                self.action_toggle_help_panel.toggled.connect(self._on_help_panel_toggled)
+            except Exception:
+                pass
 
         # 도킹 위젯 설정
         self.setDockOptions(
@@ -1758,17 +1757,8 @@ class MainWindow(QMainWindow):
         # 2) 정치(변환)
         self.transform_dock = QDockWidget("📐 정치 (변환)", self)
         self.transform_dock.setObjectName("dock_transform")
-        transform_scroll = QScrollArea()
-        transform_scroll.setWidgetResizable(True)
-        transform_content = QWidget()
-        transform_layout = QVBoxLayout(transform_content)
-
         self.transform_panel = TransformPanel(self.viewport, self.help_widget)
-        transform_layout.addWidget(self.transform_panel)
-        transform_layout.addStretch()
-
-        transform_scroll.setWidget(transform_content)
-        self.transform_dock.setWidget(transform_scroll)
+        self.transform_dock.setWidget(self.transform_panel)
 
         # 3) 펼침
         self.flatten_dock = QDockWidget("🗺️ 펼침 (Flatten)", self)
@@ -1880,7 +1870,10 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             dock.setFloating(False)
-            dock.show()
+            if dock is self.help_dock:
+                dock.hide()
+            else:
+                dock.show()
 
         # 상단: 파일/메쉬 정보 + 정치(변환) (가로 배치)
         self.addDockWidget(Qt.DockWidgetArea.TopDockWidgetArea, self.info_dock)
@@ -1901,11 +1894,11 @@ class MainWindow(QMainWindow):
 
         # 하단: 컨텍스트 도움말(선택/툴 사용법)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.help_dock)
+        self.help_dock.hide()
 
         # 크기 비율(대략적인 기본값)
         self.resizeDocks([self.info_dock, self.transform_dock], [650, 750], Qt.Orientation.Horizontal)
         self.resizeDocks([self.flatten_dock, self.scene_dock], [780, 220], Qt.Orientation.Vertical)
-        self.resizeDocks([self.help_dock], [220], Qt.Orientation.Vertical)
 
         self.flatten_dock.raise_()
 
@@ -2276,7 +2269,7 @@ class MainWindow(QMainWindow):
             panels_menu.addAction(self.section_dock.toggleViewAction())
             panels_menu.addAction(self.export_dock.toggleViewAction())
             panels_menu.addAction(self.scene_dock.toggleViewAction())
-            panels_menu.addAction(self.help_dock.toggleViewAction())
+            panels_menu.addAction(self.action_toggle_help_panel)
         
         # 도움말 메뉴
         help_menu = menubar.addMenu("도움말(&H)")
@@ -2289,7 +2282,43 @@ class MainWindow(QMainWindow):
             action_debug.setToolTip("실행 중인 코드/버전/모듈 경로 정보를 클립보드로 복사합니다.")
             action_debug.triggered.connect(self.copy_debug_info)
             help_menu.addAction(action_debug)
-    
+
+    def _on_help_dock_top_level_changed(self, floating: bool) -> None:
+        try:
+            self._help_dock_last_floating = bool(floating)
+        except Exception:
+            pass
+
+    def _on_help_panel_toggled(self, checked: bool) -> None:
+        try:
+            if checked:
+                self.help_dock.show()
+                prefer_floating = bool(getattr(self, "_help_dock_last_floating", True))
+                if prefer_floating:
+                    try:
+                        self.help_dock.setFloating(True)
+                    except Exception:
+                        pass
+                    try:
+                        self.help_dock.resize(560, 260)
+                    except Exception:
+                        pass
+                    try:
+                        g = self.geometry()
+                        x = int(g.x() + g.width() - self.help_dock.width() - 20)
+                        y = int(g.y() + g.height() - self.help_dock.height() - 60)
+                        self.help_dock.move(max(0, x), max(0, y))
+                    except Exception:
+                        pass
+                try:
+                    self.help_dock.raise_()
+                except Exception:
+                    pass
+            else:
+                self.help_dock.hide()
+        except Exception:
+            pass
+
     def init_toolbar(self):
         toolbar = QToolBar("메인 툴바")
         toolbar.setObjectName("toolbar_main")
@@ -2346,6 +2375,9 @@ class MainWindow(QMainWindow):
         action_bottom.setToolTip("하면 뷰 (6)")
         action_bottom.triggered.connect(lambda: self.set_view(0, -89))
         toolbar.addAction(action_bottom)
+
+        toolbar.addSeparator()
+        toolbar.addAction(self.action_toggle_help_panel)
 
     def init_statusbar(self):
         self.statusbar = QStatusBar()
