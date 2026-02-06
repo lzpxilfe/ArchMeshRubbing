@@ -901,6 +901,16 @@ class FlattenPanel(QWidget):
         btn_auto.setToolTip("완전 자동은 메쉬/정렬 상태에 따라 실패할 수 있습니다. 결과가 이상하면 수동 '찍기'로 지정하세요.")
         btn_auto.clicked.connect(lambda: self.selectionRequested.emit("auto_surface", None))
         auto_row.addWidget(btn_auto)
+
+        btn_auto_migu = QPushButton("📏 미구 자동 감지")
+        btn_auto_migu.setToolTip(
+            "미구(계단/경계) 영역을 자동으로 찾아 미구로 지정합니다.\n"
+            "- 클릭: Y축(기본) 강조 감지\n"
+            "- Ctrl+클릭: X축 강조 감지\n"
+            "- Shift+클릭: 둘레 경계(Edge belt) 감지"
+        )
+        btn_auto_migu.clicked.connect(lambda: self.selectionRequested.emit("auto_edge", None))
+        auto_row.addWidget(btn_auto_migu)
         surface_layout.addLayout(auto_row)
 
         layout.addWidget(surface_group)
@@ -2941,8 +2951,120 @@ class MainWindow(QMainWindow):
                 return
 
         elif action == "auto_edge":
-            QMessageBox.information(self, "안내", "미구/경계 자동 선택은 아직 구현되지 않았습니다.")
-            return
+            try:
+                from src.core.surface_separator import SurfaceSeparator
+
+                mesh_local = getattr(obj, "mesh", None)
+                if mesh_local is None:
+                    QMessageBox.warning(self, "경고", "먼저 메쉬를 선택해 주세요.")
+                    return
+
+                modifiers = QApplication.keyboardModifiers()
+                broad_edge = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+                major_axis = "x" if (modifiers & Qt.KeyboardModifier.ControlModifier) else "y"
+
+                # Rotation matrix (local -> world)
+                rot_deg = np.asarray(getattr(obj, "rotation", [0.0, 0.0, 0.0]), dtype=np.float64).reshape(-1)
+                if rot_deg.size < 3:
+                    rot_deg = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+                rx, ry, rz = np.radians(rot_deg[:3])
+                cx, sx = float(np.cos(rx)), float(np.sin(rx))
+                cy, sy = float(np.cos(ry)), float(np.sin(ry))
+                cz, sz = float(np.cos(rz)), float(np.sin(rz))
+                rot_x = np.array([[1.0, 0.0, 0.0], [0.0, cx, -sx], [0.0, sx, cx]], dtype=np.float64)
+                rot_y = np.array([[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]], dtype=np.float64)
+                rot_z = np.array([[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]], dtype=np.float64)
+                rot_mat = rot_x @ rot_y @ rot_z
+
+                # Face normals (world)
+                try:
+                    if getattr(mesh_local, "face_normals", None) is None:
+                        mesh_local.compute_normals(compute_vertex_normals=False)
+                except Exception:
+                    pass
+                fn_local = np.asarray(getattr(mesh_local, "face_normals", None), dtype=np.float64)
+                if fn_local.ndim != 2 or fn_local.shape[0] != int(getattr(mesh_local, "n_faces", 0) or 0) or fn_local.shape[1] < 3:
+                    raise RuntimeError("면 법선(face_normals) 계산에 실패했습니다.")
+                fn_world = fn_local[:, :3] @ rot_mat.T
+
+                # Estimate "thickness" direction and rotate to world
+                separator = SurfaceSeparator()
+                d_local = np.asarray(separator._estimate_reference_direction(mesh_local), dtype=np.float64).reshape(-1)
+                if d_local.size < 3 or not np.isfinite(d_local[:3]).all():
+                    d_local = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+                d_world = rot_mat @ d_local[:3]
+                dn = float(np.linalg.norm(d_world))
+                if dn > 1e-12 and np.isfinite(dn):
+                    d_world = d_world / dn
+                else:
+                    d_world = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+
+                abs_dot = np.abs(fn_world @ d_world.reshape(3,))
+
+                if broad_edge:
+                    # Broad "edge belt": faces whose normals are near-perpendicular to thickness axis.
+                    absdot_max = float(getattr(self, "_migu_edge_absdot_max", 0.35) or 0.35)
+                    absdot_max = float(np.clip(absdot_max, 0.0, 1.0))
+                    mask = abs_dot <= absdot_max
+                    mode_desc = f"경계(둘레) | absdot≤{absdot_max:.2f}"
+                else:
+                    # "미구" heuristic: dominant X/Y-facing faces that are not outer/inner.
+                    major_thr = float(getattr(self, "_migu_major_axis_min", 0.55) or 0.55)
+                    major_thr = float(np.clip(major_thr, 0.0, 1.0))
+                    absdot_max = float(getattr(self, "_migu_absdot_max", 0.90) or 0.90)
+                    absdot_max = float(np.clip(absdot_max, 0.0, 1.0))
+                    ax_i = 0 if major_axis == "x" else 1
+                    major = np.abs(fn_world[:, ax_i])
+                    mask = (major >= major_thr) & (abs_dot <= absdot_max)
+                    mode_desc = f"{major_axis.upper()}축 강조 | major≥{major_thr:.2f}, absdot≤{absdot_max:.2f}"
+
+                idx = np.where(mask)[0].astype(np.int32, copy=False)
+                n_sel = int(idx.size)
+                if n_sel <= 0:
+                    QMessageBox.information(
+                        self,
+                        "결과 없음",
+                        "미구 자동 감지 결과가 없습니다.\n\n"
+                        "팁:\n"
+                        "- 기와를 정치 후(상면/하면이 위/아래) 다시 시도\n"
+                        "- Ctrl을 누르고 다시 클릭(축 전환)\n"
+                        "- Shift를 누르고 클릭(둘레 경계 전체 감지)",
+                    )
+                    return
+
+                try:
+                    obj.migu_face_indices.clear()
+                    obj.migu_face_indices.update(int(x) for x in idx)
+                except Exception:
+                    obj.migu_face_indices = set(int(x) for x in idx)
+
+                # Keep sets exclusive (migu wins).
+                try:
+                    obj.outer_face_indices.difference_update(obj.migu_face_indices)
+                    obj.inner_face_indices.difference_update(obj.migu_face_indices)
+                except Exception:
+                    pass
+
+                self.viewport.status_info = (
+                    f"✅ 미구 자동 감지({mode_desc}): migu {len(obj.migu_face_indices):,} faces "
+                    f"(Shift=경계, Ctrl=축전환)"
+                )
+                try:
+                    self.viewport._emit_surface_assignment_changed(obj)
+                except Exception:
+                    pass
+                QMessageBox.information(
+                    self,
+                    "완료",
+                    "미구 자동 감지 결과를 현재 메쉬에 적용했습니다.\n\n"
+                    f"- migu(미구): {len(obj.migu_face_indices):,} faces\n\n"
+                    "표시: 미구=초록 오버레이\n"
+                    "팁: 필요하면 '찍기/브러시/면적' 도구로 추가 보정하세요.\n"
+                    "단축: Shift=둘레 경계, Ctrl=축 전환(X↔Y)",
+                )
+            except Exception as e:
+                QMessageBox.critical(self, "오류", f"미구 자동 감지 실패:\n{e}")
+                return
 
         else:
             self.status_info.setText(f"선택 작업: {action}")
