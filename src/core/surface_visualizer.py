@@ -153,10 +153,19 @@ class SurfaceVisualizer:
         """
         self.default_dpi = default_dpi
     
-    def generate_rubbing(self, flattened: FlattenedMesh,
-                         width_pixels: int = 2000,
-                         style: str = 'traditional',
-                         light_angle: float = 45.0) -> RubbingImage:
+    def generate_rubbing(
+        self,
+        flattened: FlattenedMesh,
+        width_pixels: int = 2000,
+        style: str = 'traditional',
+        light_angle: float = 45.0,
+        *,
+        height_mode: str = "normal_z",
+        remove_curvature: bool = False,
+        reference_sigma: float | None = None,
+        relief_strength: float = 1.0,
+        invert: bool = False,
+    ) -> RubbingImage:
         """
         탁본 효과 이미지 생성
         
@@ -165,7 +174,12 @@ class SurfaceVisualizer:
             width_pixels: 출력 이미지 너비 (픽셀)
             style: 스타일 ('traditional', 'modern', 'relief')
             light_angle: 조명 각도 (도)
-            
+            height_mode: 높이값 소스 ('normal_z'|'axis').
+            remove_curvature: 곡률(저주파)을 제거하여 디지털 탁본처럼 만듭니다.
+            reference_sigma: 곡률 제거용 가우시안 sigma(px). None이면 해상도에 맞춰 자동.
+            relief_strength: 요철(잔무늬) 강조 배율.
+            invert: 높이 부호 반전(내면/외면 톤 뒤집기 등에 사용).
+             
         Returns:
             RubbingImage: 탁본 이미지
         """
@@ -190,8 +204,34 @@ class SurfaceVisualizer:
             aspect_ratio = 1.0
         height_pixels = max(1, int(width_pixels * aspect_ratio))
         
-        # 깊이맵 생성
-        depth_map = self._create_depth_map(flattened, width_pixels, height_pixels)
+        # Value/height map (image-based pipeline)
+        values = self._compute_height_values(flattened, mode=str(height_mode))
+        depth_map = self._create_value_map(flattened, values, width_pixels, height_pixels)
+
+        if bool(invert):
+            depth_map = -depth_map
+
+        if bool(remove_curvature):
+            sigma_val = reference_sigma
+            if sigma_val is None:
+                sigma_val = max(2.0, 0.02 * float(min(width_pixels, height_pixels)))
+            try:
+                sigma_f = float(sigma_val)
+            except Exception:
+                sigma_f = 0.0
+            if np.isfinite(sigma_f) and sigma_f > 0.0:
+                try:
+                    ref = ndimage.gaussian_filter(depth_map, sigma=float(sigma_f))
+                    depth_map = depth_map - ref
+                except Exception:
+                    pass
+
+        try:
+            strength = float(relief_strength)
+        except Exception:
+            strength = 1.0
+        if np.isfinite(strength) and abs(strength - 1.0) > 1e-12:
+            depth_map = depth_map * strength
         
         # 스타일에 따른 렌더링
         if style == 'traditional':
@@ -210,28 +250,91 @@ class SurfaceVisualizer:
             unit=flattened.original_mesh.unit,
             dpi=self.default_dpi
         )
-    
-    def _create_depth_map(self, flattened: FlattenedMesh,
-                          width: int, height: int) -> np.ndarray:
-        """
-        평면화된 메쉬에서 깊이맵 생성
-        
-        로컬 높이 변화를 깊이로 사용합니다.
-        """
-        # 정규화된 UV 좌표
-        normalized = flattened.normalize()
-        uv = normalized.uv
-        
-        # 원본 메쉬의 법선 벡터에서 높이 추정
-        original = flattened.original_mesh
-        original.compute_normals()
-        
-        # 법선의 Z 성분을 높이 변화로 사용
-        heights = original.normals[:, 2] if original.normals is not None else np.zeros(len(uv))
 
-        # Fast path for very large meshes:
-        # - The old implementation rasterizes every triangle in Python (too slow for millions of faces).
-        # - Here we "splat" per-vertex values into an image grid (bincount) and then fill holes/smooth.
+    def _estimate_thickness_axis(self, vertices: np.ndarray) -> np.ndarray:
+        """PCA 기반 두께(시트 법선) 축 추정. (얇은 쉘/기와에 안정적)"""
+        v = np.asarray(vertices, dtype=np.float64)
+        if v.ndim != 2 or v.shape[0] < 8 or v.shape[1] < 3:
+            return np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        v = v[:, :3]
+        finite = np.isfinite(v).all(axis=1)
+        v = v[finite]
+        if v.shape[0] < 8:
+            return np.array([0.0, 0.0, 1.0], dtype=np.float64)
+
+        c = np.mean(v, axis=0)
+        x = v - c
+        cov = (x.T @ x) / float(max(1, x.shape[0] - 1))
+        try:
+            w, vecs = np.linalg.eigh(cov)
+            axis = vecs[:, int(np.argsort(w)[0])]
+        except Exception:
+            axis = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+
+        n = float(np.linalg.norm(axis))
+        if not np.isfinite(n) or n < 1e-12:
+            axis = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        else:
+            axis = (axis / n).astype(np.float64, copy=False)
+
+        # Prefer +Z to avoid random flips (good default after positioning).
+        if float(axis[2]) < 0.0:
+            axis = -axis
+        return axis
+
+    def _compute_height_values(self, flattened: FlattenedMesh, *, mode: str) -> np.ndarray:
+        """Compute per-vertex scalar values used for rubbing depth (height map)."""
+        original = flattened.original_mesh
+        vertices = np.asarray(getattr(original, "vertices", np.zeros((0, 3))), dtype=np.float64)
+        n = int(vertices.shape[0]) if vertices.ndim == 2 else 0
+        if n <= 0:
+            return np.zeros((0,), dtype=np.float64)
+
+        m = str(mode or "").strip().lower()
+        if m in {"axis", "thickness", "pca"}:
+            axis = self._estimate_thickness_axis(vertices)
+            out = vertices[:, :3] @ axis.reshape(3,)
+            if not np.isfinite(out).all():
+                out = np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
+            return out.astype(np.float64, copy=False)
+
+        # Legacy: normals.z
+        try:
+            original.compute_normals()
+        except Exception:
+            pass
+        normals = getattr(original, "normals", None)
+        if normals is None:
+            return np.zeros((n,), dtype=np.float64)
+        nn = np.asarray(normals, dtype=np.float64)
+        if nn.ndim != 2 or nn.shape[0] != n or nn.shape[1] < 3:
+            return np.zeros((n,), dtype=np.float64)
+        out = nn[:, 2].astype(np.float64, copy=False)
+        if not np.isfinite(out).all():
+            out = np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
+        return out
+
+    def _create_value_map(
+        self,
+        flattened: FlattenedMesh,
+        values: np.ndarray,
+        width: int,
+        height: int,
+    ) -> np.ndarray:
+        """
+        Create an image value map (height/depth/etc.) from per-vertex scalar values.
+
+        - Small meshes: triangle rasterization (accurate).
+        - Large meshes: vertex splat (fast) + hole filling + light smoothing.
+        """
+        normalized = flattened.normalize()
+        uv = np.asarray(normalized.uv, dtype=np.float64)
+        vals = np.asarray(values, dtype=np.float64).reshape(-1)
+        if uv.ndim != 2 or uv.shape[0] == 0 or uv.shape[1] < 2:
+            return np.zeros((int(height), int(width)), dtype=np.float64)
+        if vals.size != int(uv.shape[0]):
+            vals = np.zeros((int(uv.shape[0]),), dtype=np.float64)
+
         try:
             n_faces = int(getattr(flattened, "n_faces", 0) or 0)
         except Exception:
@@ -246,29 +349,40 @@ class SurfaceVisualizer:
         except Exception:
             fast_thr = 250000
         if n_faces >= max(10000, fast_thr):
-            return self._create_depth_map_fast_vertex_splat(uv, heights, width, height)
-        
-        # 깊이 버퍼 초기화
-        depth_buffer = np.zeros((height, width), dtype=np.float64)
-        count_buffer = np.zeros((height, width), dtype=np.int32)
-        
-        # 각 삼각형 래스터화
-        for face in flattened.faces:
+            return self._create_depth_map_fast_vertex_splat(uv, vals, int(width), int(height))
+
+        faces = np.asarray(flattened.faces, dtype=np.int32)
+        if faces.ndim != 2 or faces.shape[0] == 0 or faces.shape[1] < 3:
+            return self._create_depth_map_fast_vertex_splat(uv, vals, int(width), int(height))
+
+        # Depth buffer init
+        w = int(max(1, width))
+        h = int(max(1, height))
+        buffer = np.zeros((h, w), dtype=np.float64)
+        count = np.zeros((h, w), dtype=np.int32)
+
+        for face in faces:
             self._rasterize_triangle_with_values(
-                uv[face], heights[face],
-                width, height,
-                depth_buffer, count_buffer
+                uv[face], vals[face],
+                w, h,
+                buffer, count,
             )
+
+        mask = count > 0
+        buffer[mask] /= count[mask]
+        if not bool(mask.all()):
+            buffer = self._fill_holes(buffer, mask)
+        return buffer
+    
+    def _create_depth_map(self, flattened: FlattenedMesh,
+                          width: int, height: int) -> np.ndarray:
+        """
+        평면화된 메쉬에서 깊이맵 생성
         
-        # 평균 계산
-        mask = count_buffer > 0
-        depth_buffer[mask] /= count_buffer[mask]
-        
-        # 빈 영역 채우기 (주변 값으로 보간)
-        if not mask.all():
-            depth_buffer = self._fill_holes(depth_buffer, mask)
-        
-        return depth_buffer
+        로컬 높이 변화를 깊이로 사용합니다.
+        """
+        values = self._compute_height_values(flattened, mode="normal_z")
+        return self._create_value_map(flattened, values, int(width), int(height))
 
     def _create_depth_map_fast_vertex_splat(
         self,

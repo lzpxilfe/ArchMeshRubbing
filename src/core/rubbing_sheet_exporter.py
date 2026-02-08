@@ -54,6 +54,11 @@ class SheetExportOptions:
     cylinder_axis: str = "auto"  # 'auto' | 'x' | 'y' | 'z'
     cylinder_radius: Optional[float] = None  # mesh/world units; if None, estimated from geometry
     rubbing_style: str = "traditional"
+    # Digital rubbing (image-based) options
+    rubbing_height_mode: str = "normal_z"  # 'normal_z' | 'axis'
+    rubbing_remove_curvature: bool = False
+    rubbing_reference_sigma: float | None = None
+    rubbing_relief_strength: float = 1.0
 
     include_labels: bool = True
     label_font_size_mm: float = 3.5
@@ -296,7 +301,13 @@ class RubbingSheetExporter:
 
         visualizer = SurfaceVisualizer(default_dpi=dpi)
         rubbing = visualizer.generate_rubbing(
-            flattened, width_pixels=width_pixels, style=str(options.rubbing_style)
+            flattened,
+            width_pixels=width_pixels,
+            style=str(options.rubbing_style),
+            height_mode=str(getattr(options, "rubbing_height_mode", "normal_z")),
+            remove_curvature=bool(getattr(options, "rubbing_remove_curvature", False)),
+            reference_sigma=getattr(options, "rubbing_reference_sigma", None),
+            relief_strength=float(getattr(options, "rubbing_relief_strength", 1.0)),
         )
         return flattened, rubbing
 

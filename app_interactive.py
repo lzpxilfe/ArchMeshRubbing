@@ -1403,6 +1403,21 @@ class ExportPanel(QWidget):
         """)
         btn_export_rubbing.clicked.connect(lambda: self.exportRequested.emit({'type': 'rubbing'}))
         layout.addWidget(btn_export_rubbing)
+
+        btn_export_rubbing_digital = QPushButton("📤 디지털 탁본(곡률 제거) 내보내기")
+        btn_export_rubbing_digital.setToolTip("원통 펼침(빠름) + 곡률 제거(참조면 스무딩) 기반 탁본")
+        btn_export_rubbing_digital.setStyleSheet("""
+            QPushButton {
+                background-color: #805ad5;
+                color: white;
+                font-weight: bold;
+                padding: 10px;
+                border-radius: 5px;
+            }
+            QPushButton:hover { background-color: #6b46c1; }
+        """)
+        btn_export_rubbing_digital.clicked.connect(lambda: self.exportRequested.emit({'type': 'rubbing_digital'}))
+        layout.addWidget(btn_export_rubbing_digital)
         
         btn_export_ortho = QPushButton("📤 정사투영 내보내기")
         btn_export_ortho.clicked.connect(lambda: self.exportRequested.emit({'type': 'ortho'}))
@@ -1434,6 +1449,11 @@ class ExportPanel(QWidget):
         btn_export_sheet_svg.setToolTip("Top outline + cut lines/sections + outer/inner rubbing in one SVG")
         btn_export_sheet_svg.clicked.connect(lambda: self.exportRequested.emit({'type': 'sheet_svg'}))
         mesh_layout.addWidget(btn_export_sheet_svg)
+
+        btn_export_sheet_svg_digital = QPushButton("통합 SVG (디지털 탁본/원통)")
+        btn_export_sheet_svg_digital.setToolTip("원통 펼침 + 곡률 제거(디지털 탁본)로 outer/inner 이미지를 생성합니다")
+        btn_export_sheet_svg_digital.clicked.connect(lambda: self.exportRequested.emit({'type': 'sheet_svg_digital'}))
+        mesh_layout.addWidget(btn_export_sheet_svg_digital)
         
         layout.addWidget(mesh_group)
         
@@ -3401,6 +3421,85 @@ class MainWindow(QMainWindow):
                     on_failed=on_failed,
                 )
 
+        elif export_type == 'rubbing_digital':
+            filepath, _ = QFileDialog.getSaveFileName(
+                self, "디지털 탁본 저장 (곡률 제거)", "", "PNG (*.png);;TIFF (*.tiff)"
+            )
+            if filepath:
+                self.status_info.setText(f"내보내기: {filepath}")
+
+                dpi = int(self.export_panel.spin_dpi.value())
+                include_scale = bool(self.export_panel.check_scale_bar.isChecked())
+
+                base = obj.mesh
+                translation = (
+                    np.asarray(obj.translation, dtype=np.float64).copy()
+                    if getattr(obj, "translation", None) is not None
+                    else None
+                )
+                rotation = (
+                    np.asarray(obj.rotation, dtype=np.float64).copy()
+                    if getattr(obj, "rotation", None) is not None
+                    else None
+                )
+                scale = float(getattr(obj, "scale", 1.0))
+
+                # Always use fast cylindrical unwrapping for digital rubbing.
+                opts = dict(flatten_options)
+                opts["method"] = "원통 펼침"
+
+                def task_export_rubbing_digital():
+                    from src.core.surface_visualizer import SurfaceVisualizer
+
+                    mesh = MainWindow._build_world_mesh_from_transform(
+                        base, translation=translation, rotation=rotation, scale=scale
+                    )
+                    flattened = MainWindow._compute_flattened_mesh(mesh, opts)
+
+                    # DPI 기준으로 출력 폭 계산 (실측 스케일 유지를 위해)
+                    unit = (flattened.original_mesh.unit or "mm").lower()
+                    width_real = float(flattened.width)
+                    if unit == 'mm':
+                        width_in = width_real / 25.4
+                    elif unit == 'cm':
+                        width_in = width_real / 2.54
+                    elif unit == 'm':
+                        width_in = (width_real * 100.0) / 2.54
+                    else:
+                        width_in = width_real / 25.4
+
+                    width_pixels = max(800, int(width_in * dpi))
+                    width_pixels = min(width_pixels, 12000)  # 메모리 보호용 상한
+
+                    visualizer = SurfaceVisualizer(default_dpi=dpi)
+                    rubbing = visualizer.generate_rubbing(
+                        flattened,
+                        width_pixels=width_pixels,
+                        style='modern',
+                        height_mode="axis",
+                        remove_curvature=True,
+                        reference_sigma=None,
+                        relief_strength=12.0,
+                    )
+                    rubbing.save(filepath, include_scale_bar=include_scale)
+                    return filepath
+
+                def on_done_export_rubbing_digital(_result: Any):
+                    QMessageBox.information(self, "완료", f"디지털 탁본 이미지가 저장되었습니다:\n{filepath}")
+                    self.status_info.setText(f"✅ 저장 완료: {Path(filepath).name}")
+
+                def on_failed(message: str):
+                    self.status_info.setText("❌ 저장 실패")
+                    QMessageBox.critical(self, "오류", self._format_error_message("디지털 탁본 저장 중 오류 발생:", message))
+
+                self._start_task(
+                    title="내보내기",
+                    label="디지털 탁본 생성/저장 중...",
+                    thread=TaskThread("export_rubbing_digital", task_export_rubbing_digital),
+                    on_done=on_done_export_rubbing_digital,
+                    on_failed=on_failed,
+                )
+
         elif export_type == 'ortho':
             filepath, _ = QFileDialog.getSaveFileName(
                 self, "정사투영 이미지 저장", "", "PNG (*.png);;TIFF (*.tiff)"
@@ -3598,6 +3697,91 @@ class MainWindow(QMainWindow):
                     label="통합 SVG 생성/저장 중...",
                     thread=TaskThread("export_sheet_svg", task_export_sheet_svg),
                     on_done=on_done_export_sheet_svg,
+                    on_failed=on_failed,
+                )
+
+        elif export_type == 'sheet_svg_digital':
+            filepath, _ = QFileDialog.getSaveFileName(
+                self,
+                "통합 SVG 저장 (디지털 탁본/원통)",
+                "rubbing_sheet_digital.svg",
+                "Scalable Vector Graphics (*.svg)",
+            )
+            if filepath:
+                dpi = int(self.export_panel.spin_dpi.value())
+
+                base = obj.mesh
+                translation = (
+                    np.asarray(obj.translation, dtype=np.float64).copy()
+                    if getattr(obj, "translation", None) is not None
+                    else None
+                )
+                rotation = (
+                    np.asarray(obj.rotation, dtype=np.float64).copy()
+                    if getattr(obj, "rotation", None) is not None
+                    else None
+                )
+                scale = float(getattr(obj, "scale", 1.0))
+                cut_lines_world = self.viewport.get_cut_lines_world()
+                cut_profiles_world = self.viewport.get_cut_sections_world()
+                outer_idx = sorted(list(getattr(obj, "outer_face_indices", set()) or []))
+                inner_idx = sorted(list(getattr(obj, "inner_face_indices", set()) or []))
+
+                unit = str(getattr(base, "unit", "cm") or "cm").strip().lower()
+                radius_mm = float(flatten_options.get("radius", 0.0))
+                if unit == "mm":
+                    cylinder_radius = radius_mm
+                elif unit == "m":
+                    cylinder_radius = radius_mm / 1000.0
+                else:
+                    cylinder_radius = radius_mm / 10.0
+
+                def task_export_sheet_svg_digital():
+                    from src.core.rubbing_sheet_exporter import (
+                        RubbingSheetExporter,
+                        SheetExportOptions,
+                    )
+
+                    mesh = MainWindow._build_world_mesh_from_transform(
+                        base, translation=translation, rotation=rotation, scale=scale
+                    )
+                    exporter = RubbingSheetExporter()
+                    exporter.export(
+                        mesh,
+                        filepath,
+                        cut_lines_world=cut_lines_world,
+                        cut_profiles_world=cut_profiles_world,
+                        outer_face_indices=outer_idx if outer_idx else None,
+                        inner_face_indices=inner_idx if inner_idx else None,
+                        options=SheetExportOptions(
+                            dpi=dpi,
+                            flatten_iterations=0,
+                            flatten_method="cylinder",
+                            flatten_distortion=0.0,
+                            cylinder_axis=str(flatten_options.get("direction", "auto")),
+                            cylinder_radius=cylinder_radius,
+                            rubbing_style="modern",
+                            rubbing_height_mode="axis",
+                            rubbing_remove_curvature=True,
+                            rubbing_reference_sigma=None,
+                            rubbing_relief_strength=12.0,
+                        ),
+                    )
+                    return filepath
+
+                def on_done_export_sheet_svg_digital(_result: Any):
+                    QMessageBox.information(self, "완료", f"통합 SVG(디지털 탁본)가 저장되었습니다:\n{filepath}")
+                    self.status_info.setText(f"✅ 저장 완료: {Path(filepath).name}")
+
+                def on_failed(message: str):
+                    self.status_info.setText("❌ 저장 실패")
+                    QMessageBox.critical(self, "오류", self._format_error_message("통합 SVG 저장 중 오류 발생:", message))
+
+                self._start_task(
+                    title="내보내기",
+                    label="통합 SVG(디지털 탁본) 생성/저장 중...",
+                    thread=TaskThread("export_sheet_svg_digital", task_export_sheet_svg_digital),
+                    on_done=on_done_export_sheet_svg_digital,
                     on_failed=on_failed,
                 )
 
