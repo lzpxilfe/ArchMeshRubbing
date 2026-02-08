@@ -3982,7 +3982,7 @@ class Viewport3D(QOpenGLWidget):
             # Draw after the base mesh so the shading stays visible; use indexed draw for performance.
             if is_selected and bool(getattr(self, "show_surface_assignment_overlay", True)):
                 try:
-                    max_faces_vbo = int(getattr(self, "_surface_overlay_max_faces_vbo", 1200000))
+                    max_faces_vbo = int(getattr(self, "_surface_overlay_max_faces_vbo", 3000000))
 
                     outer_set = self._get_surface_target_set(obj, "outer")
                     inner_set = self._get_surface_target_set(obj, "inner")
@@ -3994,15 +3994,17 @@ class Viewport3D(QOpenGLWidget):
                         if paint_target not in {"outer", "inner", "migu"}:
                             paint_target = "outer"
 
-                    outer_c = (0.25, 0.65, 1.0, 0.22)
-                    inner_c = (0.75, 0.35, 1.0, 0.22)
-                    migu_c = (0.25, 0.85, 0.35, 0.22)
+                    # High-contrast colors so users can clearly distinguish auto-separated surfaces.
+                    # outer: blue, inner: orange, migu: green
+                    outer_c = (0.20, 0.55, 1.00, 0.36)
+                    inner_c = (1.00, 0.55, 0.15, 0.36)
+                    migu_c = (0.20, 0.85, 0.35, 0.32)
                     if paint_target == "outer":
-                        outer_c = (outer_c[0], outer_c[1], outer_c[2], 0.32)
+                        outer_c = (outer_c[0], outer_c[1], outer_c[2], 0.50)
                     elif paint_target == "inner":
-                        inner_c = (inner_c[0], inner_c[1], inner_c[2], 0.32)
+                        inner_c = (inner_c[0], inner_c[1], inner_c[2], 0.50)
                     elif paint_target == "migu":
-                        migu_c = (migu_c[0], migu_c[1], migu_c[2], 0.32)
+                        migu_c = (migu_c[0], migu_c[1], migu_c[2], 0.46)
 
                     def get_indices(key: str, face_set: set[int]) -> np.ndarray | None:
                         if not face_set:
@@ -4028,6 +4030,10 @@ class Viewport3D(QOpenGLWidget):
                             except Exception:
                                 _log_ignored_exception()
                         if cache_ver != ver:
+                            try:
+                                cache.clear()
+                            except Exception:
+                                pass
                             try:
                                 obj._surface_overlay_index_cache_version = ver
                             except Exception:
@@ -4061,16 +4067,17 @@ class Viewport3D(QOpenGLWidget):
                         except Exception:
                             pass
 
-                        # Draw order: migu -> inner -> outer
-                        if idx_migu is not None:
-                            glColor4f(*migu_c)
-                            glDrawElements(GL_TRIANGLES, int(idx_migu.size), GL_UNSIGNED_INT, idx_migu)
-                        if idx_inner is not None:
-                            glColor4f(*inner_c)
-                            glDrawElements(GL_TRIANGLES, int(idx_inner.size), GL_UNSIGNED_INT, idx_inner)
+                        # Draw order: outer -> inner -> migu
+                        # (If sets overlap due to user edits, this keeps inner/migu visible on top.)
                         if idx_outer is not None:
                             glColor4f(*outer_c)
                             glDrawElements(GL_TRIANGLES, int(idx_outer.size), GL_UNSIGNED_INT, idx_outer)
+                        if idx_inner is not None:
+                            glColor4f(*inner_c)
+                            glDrawElements(GL_TRIANGLES, int(idx_inner.size), GL_UNSIGNED_INT, idx_inner)
+                        if idx_migu is not None:
+                            glColor4f(*migu_c)
+                            glDrawElements(GL_TRIANGLES, int(idx_migu.size), GL_UNSIGNED_INT, idx_migu)
 
                         glDisable(GL_POLYGON_OFFSET_FILL)
                         glDepthMask(GL_TRUE)

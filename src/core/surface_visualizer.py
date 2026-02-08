@@ -228,6 +228,25 @@ class SurfaceVisualizer:
         
         # 법선의 Z 성분을 높이 변화로 사용
         heights = original.normals[:, 2] if original.normals is not None else np.zeros(len(uv))
+
+        # Fast path for very large meshes:
+        # - The old implementation rasterizes every triangle in Python (too slow for millions of faces).
+        # - Here we "splat" per-vertex values into an image grid (bincount) and then fill holes/smooth.
+        try:
+            n_faces = int(getattr(flattened, "n_faces", 0) or 0)
+        except Exception:
+            n_faces = 0
+        if n_faces <= 0:
+            try:
+                n_faces = int(getattr(flattened.faces, "shape", [0])[0])
+            except Exception:
+                n_faces = 0
+        try:
+            fast_thr = int(getattr(self, "_depthmap_fast_threshold_faces", 250000) or 250000)
+        except Exception:
+            fast_thr = 250000
+        if n_faces >= max(10000, fast_thr):
+            return self._create_depth_map_fast_vertex_splat(uv, heights, width, height)
         
         # 깊이 버퍼 초기화
         depth_buffer = np.zeros((height, width), dtype=np.float64)
@@ -250,6 +269,69 @@ class SurfaceVisualizer:
             depth_buffer = self._fill_holes(depth_buffer, mask)
         
         return depth_buffer
+
+    def _create_depth_map_fast_vertex_splat(
+        self,
+        uv: np.ndarray,
+        heights: np.ndarray,
+        width: int,
+        height: int,
+    ) -> np.ndarray:
+        """Fast depth-map creation by binning per-vertex values into pixels."""
+        uv = np.asarray(uv, dtype=np.float64)
+        h = np.asarray(heights, dtype=np.float64).reshape(-1)
+        if uv.ndim != 2 or uv.shape[0] == 0 or uv.shape[1] < 2:
+            return np.zeros((int(height), int(width)), dtype=np.float64)
+        if h.size != int(uv.shape[0]):
+            h = np.zeros((int(uv.shape[0]),), dtype=np.float64)
+
+        w = int(max(1, width))
+        hh = int(max(1, height))
+
+        u = uv[:, 0].reshape(-1)
+        v = uv[:, 1].reshape(-1)
+        valid = np.isfinite(u) & np.isfinite(v) & np.isfinite(h)
+        if not bool(np.any(valid)):
+            return np.zeros((hh, w), dtype=np.float64)
+
+        u = u[valid]
+        v = v[valid]
+        hv = h[valid]
+
+        # Map to pixel coords (UV is already normalized to [0,1] by FlattenedMesh.normalize()).
+        px = np.rint(u * float(w - 1)).astype(np.int64, copy=False)
+        py = np.rint((1.0 - v) * float(hh - 1)).astype(np.int64, copy=False)
+        px = np.clip(px, 0, w - 1)
+        py = np.clip(py, 0, hh - 1)
+        lin = py * int(w) + px
+
+        # Accumulate sums and counts.
+        size = int(w * hh)
+        sums = np.bincount(lin, weights=hv, minlength=size).astype(np.float64, copy=False)
+        counts = np.bincount(lin, minlength=size).astype(np.int64, copy=False)
+
+        depth_flat = np.zeros((size,), dtype=np.float64)
+        mask_flat = counts > 0
+        depth_flat[mask_flat] = sums[mask_flat] / counts[mask_flat].astype(np.float64, copy=False)
+
+        depth = depth_flat.reshape((hh, w))
+        mask = mask_flat.reshape((hh, w))
+
+        if not bool(mask.all()):
+            depth = self._fill_holes(depth, mask)
+
+        # Light smoothing to reduce splat noise (improves gradient-based shading).
+        try:
+            sigma = float(getattr(self, "_depthmap_fast_sigma", 0.8) or 0.0)
+        except Exception:
+            sigma = 0.8
+        if np.isfinite(sigma) and sigma > 0.0:
+            try:
+                depth = ndimage.gaussian_filter(depth, sigma=float(sigma))
+            except Exception:
+                pass
+
+        return depth
     
     def _rasterize_triangle_with_values(self, uv: np.ndarray, values: np.ndarray,
                                         width: int, height: int,

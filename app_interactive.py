@@ -2943,7 +2943,7 @@ class MainWindow(QMainWindow):
                     f"자동 분리 결과를 현재 메쉬에 적용했습니다. (파일 저장은 아직 하지 않았습니다.)\n\n"
                     f"- outer(외면): {len(obj.outer_face_indices):,} faces\n"
                     f"- inner(내면): {len(obj.inner_face_indices):,} faces\n\n"
-                    f"표시: 외면=파랑, 내면=보라 오버레이\n"
+                    f"표시: 외면=파랑, 내면=주황 오버레이\n"
                     f"저장: 내보내기 탭에서 SVG/이미지로 내보내세요.",
                 )
             except Exception as e:
