@@ -7,14 +7,24 @@ from PIL import Image, ImageDraw
 import io
 import base64
 import importlib.util
+import logging
 import os
 import subprocess
 import sys
 from types import ModuleType
-from typing import cast
+from typing import Any, cast
 
-_CV2_MODULE: ModuleType | None = None
-_CV2_CHECKED = False
+from .logging_utils import log_once
+
+_LOGGER = logging.getLogger(__name__)
+
+OpenGLMatrices = tuple[Any, Any, Any]
+
+Contours = list[np.ndarray]
+Bounds = dict[str, Any]
+
+_cv2_module: ModuleType | None = None
+_cv2_checked = False
 _CV2_DISABLED = os.environ.get("ARCHMESHRUBBING_DISABLE_OPENCV", "").strip().lower() in {"1", "true", "yes", "on"}
 _PROFILE_EXPORT_SAFE = (
     os.environ.get("ARCHMESHRUBBING_PROFILE_EXPORT_SAFE", "").strip().lower()
@@ -22,9 +32,9 @@ _PROFILE_EXPORT_SAFE = (
 )
 
 try:
-    _CV2_IMPORT_TIMEOUT_SECONDS = float(os.environ.get("ARCHMESHRUBBING_CV2_IMPORT_TIMEOUT", "2.0"))
+    _cv2_import_timeout_seconds = float(os.environ.get("ARCHMESHRUBBING_CV2_IMPORT_TIMEOUT", "2.0"))
 except ValueError:
-    _CV2_IMPORT_TIMEOUT_SECONDS = 2.0
+    _cv2_import_timeout_seconds = 2.0
 
 try:
     from scipy import ndimage
@@ -32,14 +42,36 @@ except ImportError:
     ndimage = None  # type: ignore[assignment]
 
 
-def _get_cv2() -> ModuleType | None:
-    global _CV2_CHECKED, _CV2_MODULE
+def _world_units_per_cm_from_unit(unit: str | None) -> float:
+    u = str(unit or "").strip().lower()
+    if u in {"mm", "millimeter", "millimeters"}:
+        return 10.0
+    if u in {"cm", "centimeter", "centimeters"}:
+        return 1.0
+    if u in {"m", "meter", "meters"}:
+        return 0.01
+    return 1.0
 
-    if _CV2_MODULE is not None:
-        return _CV2_MODULE
-    if _CV2_CHECKED:
+
+def _resolve_world_units_per_cm(mesh: Any, override: float | None = None) -> float:
+    if override is not None:
+        try:
+            v = float(override)
+            if v > 0:
+                return v
+        except Exception:
+            _LOGGER.debug("Invalid world_units_per_cm override: %r", override, exc_info=True)
+    return _world_units_per_cm_from_unit(getattr(mesh, "unit", None))
+
+
+def _get_cv2() -> ModuleType | None:
+    global _cv2_checked, _cv2_module
+
+    if _cv2_module is not None:
+        return _cv2_module
+    if _cv2_checked:
         return None
-    _CV2_CHECKED = True
+    _cv2_checked = True
 
     if _CV2_DISABLED:
         return None
@@ -51,8 +83,8 @@ def _get_cv2() -> ModuleType | None:
             import cv2  # type: ignore[import-not-found]
         except Exception:
             return None
-        _CV2_MODULE = cv2
-        return _CV2_MODULE
+        _cv2_module = cv2
+        return _cv2_module
 
     if importlib.util.find_spec("cv2") is None:
         return None
@@ -65,7 +97,7 @@ def _get_cv2() -> ModuleType | None:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=True,
-            timeout=_CV2_IMPORT_TIMEOUT_SECONDS,
+            timeout=_cv2_import_timeout_seconds,
         )
     except Exception:
         return None
@@ -75,8 +107,8 @@ def _get_cv2() -> ModuleType | None:
     except Exception:
         return None
 
-    _CV2_MODULE = cv2
-    return _CV2_MODULE
+    _cv2_module = cv2
+    return _cv2_module
 
 
 def _rdp_simplify(points: np.ndarray, epsilon: float) -> np.ndarray:
@@ -268,6 +300,61 @@ def _extract_main_contour(occupancy: np.ndarray) -> np.ndarray:
     return simplified
 
 
+def _project_world_to_px_segments(
+    pts_world: np.ndarray,
+    *,
+    mvp: np.ndarray,
+    vp: np.ndarray,
+    jump_factor: float = 1.5,
+) -> list[np.ndarray]:
+    pts_world = np.asarray(pts_world, dtype=np.float64)
+    if pts_world.ndim != 2 or pts_world.shape[0] < 2 or pts_world.shape[1] < 2:
+        return []
+
+    if pts_world.shape[1] == 2:
+        pts_world = np.hstack([pts_world, np.zeros((len(pts_world), 1), dtype=np.float64)])
+
+    vp = np.asarray(vp, dtype=np.float64).reshape(-1)
+    if vp.size < 4:
+        return []
+
+    v_homo = np.hstack([pts_world[:, :3], np.ones((len(pts_world), 1), dtype=np.float64)])
+    v_clip = v_homo @ np.asarray(mvp, dtype=np.float64)
+    w = v_clip[:, 3]
+    valid = np.abs(w) > 1e-12
+
+    v_ndc = np.full((len(v_clip), 3), np.nan, dtype=np.float64)
+    v_ndc[valid] = v_clip[valid, :3] / w[valid, None]
+    x = (v_ndc[:, 0] + 1.0) / 2.0 * float(vp[2])
+    y = float(vp[3]) - (v_ndc[:, 1] + 1.0) / 2.0 * float(vp[3])
+    pts = np.stack([x, y], axis=1)
+
+    finite = valid & np.all(np.isfinite(pts), axis=1)
+    max_dim = max(float(vp[2]), float(vp[3]), 1.0)
+    finite &= np.max(np.abs(pts), axis=1) <= max_dim * 10.0
+
+    jump = max_dim * float(jump_factor)
+    segments: list[np.ndarray] = []
+    current: list[np.ndarray] = []
+    for ok, p in zip(finite, pts):
+        if bool(ok):
+            if current and float(np.linalg.norm(p - current[-1])) > jump:
+                if len(current) >= 2:
+                    segments.append(np.asarray(current, dtype=np.float64))
+                current = [p]
+            else:
+                current.append(p)
+        else:
+            if len(current) >= 2:
+                segments.append(np.asarray(current, dtype=np.float64))
+            current = []
+
+    if len(current) >= 2:
+        segments.append(np.asarray(current, dtype=np.float64))
+
+    return segments
+
+
 class ProfileExporter:
     """메쉬의 2D 실루엣을 추출하고 SVG로 내보냅니다."""
     
@@ -292,20 +379,25 @@ class ProfileExporter:
                            translation: np.ndarray | None = None,
                            rotation: np.ndarray | None = None,
                            scale: float = 1.0,
-                           opengl_matrices: tuple | None = None,
-                           viewport_image: Image.Image | None = None) -> tuple:
+                           opengl_matrices: OpenGLMatrices | None = None,
+                           viewport_image: Image.Image | None = None,
+                           world_units_per_cm: float | None = None) -> tuple[Contours, Bounds]:
         """
         메쉬를 투영하여 단일 외곽선(폴리라인)을 추출합니다.
         opengl_matrices: (modelview, projection, viewport) - 제공 시 실제 렌더링 화면과 완벽히 일치시킴
         viewport_image: OpenGL 캡처 이미지(PIL). 제공 시 화면과 100% 일치하는 외곽선을 이미지 기반으로 추출
+        world_units_per_cm: 1cm에 해당하는 world 단위 수. None이면 mesh.unit(mm/cm/m)에서 추정합니다.
         """
+        wupc = _resolve_world_units_per_cm(mesh, world_units_per_cm)
         cv2_mod = _get_cv2()
         if opengl_matrices:
             mv_raw, proj_raw, vp = opengl_matrices
-            # PyOpenGL matrices are column-major; transpose for our row-vector convention (v @ M).
+            # PyOpenGL matrices are column-major. Reshape+transpose yields conventional (column-vector) matrices;
+            # we then build a row-vector MVP to use with (v @ M) throughout this module.
             mv = np.asarray(mv_raw, dtype=np.float64).reshape(4, 4).T
             proj = np.asarray(proj_raw, dtype=np.float64).reshape(4, 4).T
-            mvp = mv @ proj
+            # Row-vector convention: (P*M*v)^T = v^T*M^T*P^T
+            mvp = mv.T @ proj.T
 
             # 1) 월드 bounds 계산 (전체 정점 변환 없이 bounds corner 8개만 변환)
             w_min = None
@@ -328,20 +420,28 @@ class ProfileExporter:
                 corners = corners * float(scale)
                 if rotation is not None:
                     from scipy.spatial.transform import Rotation as R
-                    r = R.from_euler('xyz', rotation, degrees=True)
+                    # Match OpenGL fixed-function order: glRotate(X) -> glRotate(Y) -> glRotate(Z)
+                    # which corresponds to intrinsic "XYZ" in SciPy.
+                    r = R.from_euler('XYZ', rotation, degrees=True)
                     corners = r.apply(corners)
                 if translation is not None:
                     corners = corners + translation
                 w_min = corners.min(axis=0)
                 w_max = corners.max(axis=0)
             except Exception:
-                pass
+                log_once(
+                    _LOGGER,
+                    "profile_exporter:opengl_bounds_from_corners",
+                    logging.DEBUG,
+                    "Failed to compute bounds from mesh.bounds corners; falling back to full-vertex bounds",
+                    exc_info=True,
+                )
 
             if w_min is None or w_max is None:
                 v_all = np.asarray(mesh.vertices, dtype=np.float64) * float(scale)
                 if rotation is not None:
                     from scipy.spatial.transform import Rotation as R
-                    r = R.from_euler('xyz', rotation, degrees=True)
+                    r = R.from_euler('XYZ', rotation, degrees=True)
                     v_all = r.apply(v_all)
                 if translation is not None:
                     v_all = v_all + translation
@@ -352,7 +452,7 @@ class ProfileExporter:
             if vp.size < 4:
                 vp = np.array([0.0, 0.0, 1024.0, 1024.0], dtype=np.float64)
 
-            # 2) px_per_cm 계산 (world 좌표 1.0을 1cm로 가정)
+            # 2) px_per_cm 계산 (world 좌표에서 1cm = wupc world units로 가정)
             # 정사영(glOrtho)인 경우 projection 행렬에서 직접 스케일을 얻는 것이 가장 정확하다.
             def project_pt(p, vp_local):
                 vh = np.append(p, 1.0)
@@ -363,26 +463,30 @@ class ProfileExporter:
                 return np.array([(vn[0] + 1) / 2 * vp_local[2], vp_local[3] - (vn[1] + 1) / 2 * vp_local[3]])
 
             def compute_px_per_cm(vp_local) -> float:
-                px = None
+                px_per_world_unit = None
                 try:
                     if abs(float(proj[3, 3]) - 1.0) < 1e-9 and abs(float(proj[3, 2])) < 1e-9:
                         px_x = abs(float(vp_local[2]) * float(proj[0, 0]) / 2.0)
                         px_y = abs(float(vp_local[3]) * float(proj[1, 1]) / 2.0)
-                        px = float((px_x + px_y) * 0.5)
+                        px_per_world_unit = float((px_x + px_y) * 0.5)
                 except Exception:
-                    px = None
+                    px_per_world_unit = None
 
-                if px is None or px < 1e-6:
+                if px_per_world_unit is None or px_per_world_unit < 1e-6:
                     center_world = (w_min + w_max) / 2.0
                     axis = np.array([1.0, 0.0, 0.0], dtype=np.float64)
                     if view in {"left", "right"}:
                         axis = np.array([0.0, 1.0, 0.0], dtype=np.float64)
                     p1 = center_world + axis
 
-                    px = float(np.linalg.norm(project_pt(center_world, vp_local) - project_pt(p1, vp_local)))
-                    if px < 1e-6:
-                        px = 100.0  # Fallback
-                return float(px)
+                    px_per_world_unit = float(
+                        np.linalg.norm(project_pt(center_world, vp_local) - project_pt(p1, vp_local))
+                    )
+
+                px_per_cm = float(px_per_world_unit or 0.0) * float(wupc)
+                if not np.isfinite(px_per_cm) or px_per_cm < 1e-6:
+                    px_per_cm = 100.0  # Fallback
+                return float(px_per_cm)
 
             px_per_cm = compute_px_per_cm(vp)
 
@@ -451,18 +555,21 @@ class ProfileExporter:
                     faces = []
                 faces = np.asarray(faces, dtype=np.int32)
                 if faces.size == 0:
-                     bounds = {
-                         'min': np.array([0, 0]),
-                         'max': np.array([grid_w / px_per_cm, grid_h / px_per_cm]),
-                         'size': np.array([grid_w / px_per_cm, grid_h / px_per_cm]),
-                         'px_per_cm': px_per_cm,
-                         'is_pixels': True,
-                         'vp_size': (grid_w, grid_h),
-                         'grid_size': (grid_w, grid_h),
+                    bounds = {
+                        'min': np.array([0, 0]),
+                        'max': np.array([grid_w / px_per_cm, grid_h / px_per_cm]),
+                        'size': np.array([grid_w / px_per_cm, grid_h / px_per_cm]),
+                        'px_per_cm': px_per_cm,
+                        'world_units_per_cm': float(wupc),
+                        'mesh_unit': getattr(mesh, "unit", None),
+                        'view': view,
+                        'is_pixels': True,
+                        'vp_size': (grid_w, grid_h),
+                        'grid_size': (grid_w, grid_h),
                         'matrices': (mv_raw, proj_raw, vp),
-                         'world_bounds': np.array([w_min, w_max], dtype=np.float64),
-                     }
-                     return [], bounds
+                        'world_bounds': np.array([w_min, w_max], dtype=np.float64),
+                    }
+                    return [], bounds
 
                 if len(faces) > self.MAX_FACES_FOR_RASTERIZE:
                     step = max(1, int(len(faces) // self.MAX_FACES_FOR_RASTERIZE))
@@ -476,7 +583,7 @@ class ProfileExporter:
                 vertices = np.asarray(mesh.vertices[unique_idx], dtype=np.float64) * float(scale)
                 if rotation is not None:
                     from scipy.spatial.transform import Rotation as R
-                    r = R.from_euler('xyz', rotation, degrees=True)
+                    r = R.from_euler('XYZ', rotation, degrees=True)
                     vertices = r.apply(vertices)
                 if translation is not None:
                     vertices = vertices + translation
@@ -493,7 +600,7 @@ class ProfileExporter:
                 proj_2d[:, 1] = (v_ndc[:, 1] + 1) / 2 * grid_h
                 proj_2d[:, 1] = grid_h - proj_2d[:, 1]
 
-                finite = valid_w & np.isfinite(proj_2d).all(axis=1)
+                finite = valid_w & np.all(np.isfinite(proj_2d), axis=1)
                 max_dim = max(float(grid_w), float(grid_h), 1.0)
                 finite &= np.max(np.abs(proj_2d), axis=1) <= max_dim * 10.0
                 if not bool(np.all(finite)):
@@ -521,6 +628,9 @@ class ProfileExporter:
                 'max': np.array([grid_w / px_per_cm, grid_h / px_per_cm]),
                 'size': np.array([grid_w / px_per_cm, grid_h / px_per_cm]),
                 'px_per_cm': px_per_cm,
+                'world_units_per_cm': float(wupc),
+                'mesh_unit': getattr(mesh, "unit", None),
+                'view': view,
                 'is_pixels': True,
                 'vp_size': (grid_w, grid_h),
                 'grid_size': (grid_w, grid_h),
@@ -540,7 +650,7 @@ class ProfileExporter:
         vertices = mesh.vertices.copy() * scale
         if rotation is not None and np.any(rotation != 0):
             from scipy.spatial.transform import Rotation as R
-            r = R.from_euler('xyz', rotation, degrees=True)
+            r = R.from_euler('XYZ', rotation, degrees=True)
             vertices = r.apply(vertices)
         if translation is not None:
             vertices = vertices + translation
@@ -604,90 +714,144 @@ class ProfileExporter:
             contours.append(real_pts)
         
         bounds = {
-            'min': min_coords, 'max': max_coords, 'size': size,
-            'grid_size': (grid_w, grid_h), 'is_pixels': False
+            'min': min_coords,
+            'max': max_coords,
+            'size': size,
+            'grid_size': (grid_w, grid_h),
+            'is_pixels': False,
+            'world_units_per_cm': float(wupc),
+            'mesh_unit': getattr(mesh, "unit", None),
+            'view': view,
         }
         return contours, bounds
     
-    def generate_composite_image(self, viewport_image: Image.Image, bounds: dict,
-                                 grid_spacing: float = 1.0) -> Image.Image:
+    def generate_composite_image(
+        self,
+        viewport_image: Image.Image,
+        bounds: Bounds,
+        grid_spacing: float = 1.0,
+        *,
+        view: str | None = None,
+    ) -> Image.Image:
         """
         사용자가 실제 본 화면(viewport_image) + 격자 오버레이 이미지 생성 (Multiply)
+
+        grid_spacing은 cm 단위입니다. is_pixels=True인 경우 bounds.world_units_per_cm를 이용해 world spacing으로 변환합니다.
         """
         img_w, img_h = viewport_image.size
         grid_img = Image.new('RGB', (img_w, img_h), (255, 255, 255))
         draw = ImageDraw.Draw(grid_img)
         line_color = (200, 200, 200)
 
+        if not np.isfinite(grid_spacing) or grid_spacing <= 0:
+            return viewport_image
+
         if bounds.get('is_pixels') and 'matrices' in bounds:
             # 1. 행렬 기반 격자 투영
-            mv_raw, proj_raw, vp = bounds['matrices']
-            mv = np.asarray(mv_raw, dtype=np.float64).reshape(4, 4).T
-            proj = np.asarray(proj_raw, dtype=np.float64).reshape(4, 4).T
-            mvp = mv @ proj
-            
-            # 투류용 헬퍼
-            def w_to_i(wx, wy, wz=0):
-                vh = np.array([wx, wy, wz, 1.0])
-                vc = vh @ mvp
-                if abs(vc[3]) < 1e-6:
-                    return None
-                vn = vc[:3] / vc[3]
-                return (vn[0]+1)/2 * img_w, img_h - (vn[1]+1)/2 * img_h
+            try:
+                mv_raw, proj_raw, vp = bounds['matrices']
+                mv = np.asarray(mv_raw, dtype=np.float64).reshape(4, 4).T
+                proj = np.asarray(proj_raw, dtype=np.float64).reshape(4, 4).T
+                # Row-vector convention: (P*M*v)^T = v^T*M^T*P^T
+                mvp = mv.T @ proj.T
 
-            # 가시 범위 계산 (메쉬 주변)
-            if 'world_bounds' in bounds:
-                wb = np.asarray(bounds['world_bounds'], dtype=np.float64)
-                if wb.shape == (2, 3):
-                    w_min, w_max = wb[0], wb[1]
+                wupc = float(bounds.get("world_units_per_cm", 1.0))
+                if not np.isfinite(wupc) or wupc <= 0:
+                    wupc = 1.0
+
+                spacing_world = float(grid_spacing) * wupc
+                if spacing_world <= 0:
+                    return viewport_image
+
+                # 투영용 헬퍼
+                def w_to_i(pt3: np.ndarray) -> tuple[float, float] | None:
+                    vh = np.array([float(pt3[0]), float(pt3[1]), float(pt3[2]), 1.0], dtype=np.float64)
+                    vc = vh @ mvp
+                    if abs(float(vc[3])) < 1e-6:
+                        return None
+                    vn = vc[:3] / vc[3]
+                    return (vn[0] + 1) / 2 * img_w, img_h - (vn[1] + 1) / 2 * img_h
+
+                # 가시 범위 계산 (메쉬 주변)
+                if 'world_bounds' in bounds:
+                    wb = np.asarray(bounds['world_bounds'], dtype=np.float64)
+                    if wb.shape == (2, 3):
+                        w_min, w_max = wb[0], wb[1]
+                    else:
+                        w_min, w_max = wb.min(axis=0), wb.max(axis=0)
                 else:
-                    w_min, w_max = wb.min(axis=0), wb.max(axis=0)
-            else:
-                v_world = bounds['vertices_world']
-                w_min, w_max = v_world.min(axis=0), v_world.max(axis=0)
-            pad = 20.0 # 20cm 여유
-            
-            # 세로선 (X축)
-            x_start = np.floor((w_min[0] - pad) / grid_spacing) * grid_spacing
-            x_end = np.ceil((w_max[0] + pad) / grid_spacing) * grid_spacing
-            y_start, y_end = w_min[1] - pad, w_max[1] + pad
-            
-            x = x_start
-            while x <= x_end:
-                p1 = w_to_i(x, y_start)
-                p2 = w_to_i(x, y_end)
-                if p1 and p2:
-                    draw.line([p1, p2], fill=line_color, width=1)
-                x += grid_spacing
-                
-            # 가로선 (Y축)
-            y_start_grid = np.floor((w_min[1] - pad) / grid_spacing) * grid_spacing
-            y_end_grid = np.ceil((w_max[1] + pad) / grid_spacing) * grid_spacing
-            x_start_f, x_end_f = w_min[0] - pad, w_max[0] + pad
-            
-            y = y_start_grid
-            while y <= y_end_grid:
-                p1 = w_to_i(x_start_f, y)
-                p2 = w_to_i(x_end_f, y)
-                if p1 and p2:
-                    draw.line([p1, p2], fill=line_color, width=1)
-                y += grid_spacing
+                    v_world = np.asarray(bounds.get('vertices_world', []), dtype=np.float64)
+                    if v_world.ndim != 2 or v_world.shape[1] < 3:
+                        return viewport_image
+                    w_min, w_max = v_world.min(axis=0), v_world.max(axis=0)
+
+                center = (w_min + w_max) / 2.0
+                view_key = (view or bounds.get("view") or "top").lower()
+                if view_key in {"front", "back"}:
+                    ax0, ax1, ax_const = 0, 2, 1
+                elif view_key in {"left", "right"}:
+                    ax0, ax1, ax_const = 1, 2, 0
+                else:
+                    ax0, ax1, ax_const = 0, 1, 2
+                const_val = float(center[ax_const])
+
+                pad_cm = 20.0
+                pad_world = pad_cm * wupc
+
+                a0_min = float(w_min[ax0] - pad_world)
+                a0_max = float(w_max[ax0] + pad_world)
+                a1_min = float(w_min[ax1] - pad_world)
+                a1_max = float(w_max[ax1] + pad_world)
+
+                def make_pt(v0: float, v1: float) -> np.ndarray:
+                    p = np.array(center, dtype=np.float64)
+                    p[ax0] = v0
+                    p[ax1] = v1
+                    p[ax_const] = const_val
+                    return p
+
+                # "세로선": ax0를 변화시키고 ax1 범위를 연결
+                v0 = np.floor(a0_min / spacing_world) * spacing_world
+                v0_end = np.ceil(a0_max / spacing_world) * spacing_world
+                while v0 <= v0_end + spacing_world * 0.5:
+                    p1 = w_to_i(make_pt(float(v0), a1_min))
+                    p2 = w_to_i(make_pt(float(v0), a1_max))
+                    if p1 and p2:
+                        draw.line([p1, p2], fill=line_color, width=1)
+                    v0 += spacing_world
+
+                # "가로선": ax1을 변화시키고 ax0 범위를 연결
+                v1 = np.floor(a1_min / spacing_world) * spacing_world
+                v1_end = np.ceil(a1_max / spacing_world) * spacing_world
+                while v1 <= v1_end + spacing_world * 0.5:
+                    p1 = w_to_i(make_pt(a0_min, float(v1)))
+                    p2 = w_to_i(make_pt(a0_max, float(v1)))
+                    if p1 and p2:
+                        draw.line([p1, p2], fill=line_color, width=1)
+                    v1 += spacing_world
+            except Exception as e:
+                _LOGGER.debug("Grid projection failed: %s", e, exc_info=True)
         else:
             # 2. 고전적 평면 투영 (정사영 베이스)
             size = bounds['size']
             min_coords = bounds['min']
             
+            size = np.asarray(size, dtype=np.float64).reshape(-1)
+            min_coords = np.asarray(min_coords, dtype=np.float64).reshape(-1)
+            if size.size < 2 or min_coords.size < 2 or abs(float(size[0])) < 1e-12 or abs(float(size[1])) < 1e-12:
+                return viewport_image
+
             # 세로선 (X)
-            x = np.ceil(min_coords[0] / grid_spacing) * grid_spacing
+            x = np.ceil(float(min_coords[0]) / grid_spacing) * grid_spacing
             while x <= min_coords[0] + size[0]:
-                px = int((x - min_coords[0]) / size[0] * (img_w - 1))
+                px = int((x - float(min_coords[0])) / float(size[0]) * (img_w - 1))
                 if 0 <= px < img_w:
                     draw.line([(px, 0), (px, img_h - 1)], fill=line_color, width=1)
                 x += grid_spacing
             # 가로선 (Y)
-            y = np.ceil(min_coords[1] / grid_spacing) * grid_spacing
+            y = np.ceil(float(min_coords[1]) / grid_spacing) * grid_spacing
             while y <= min_coords[1] + size[1]:
-                py = int((1 - (y - min_coords[1]) / size[1]) * (img_h - 1))
+                py = int((1 - (y - float(min_coords[1])) / float(size[1])) * (img_h - 1))
                 if 0 <= py < img_h:
                     draw.line([(0, py), (img_w - 1, py)], fill=line_color, width=1)
                 y += grid_spacing
@@ -698,11 +862,11 @@ class ProfileExporter:
         result_arr = (mesh_arr * grid_arr * 255.0).astype(np.uint8)
         return Image.fromarray(result_arr)
     
-    def export_svg(self, contours: list, bounds: dict,
+    def export_svg(self, contours: Contours, bounds: Bounds,
                     background_image: Image.Image | None = None,
                     stroke_color: str = "#000000", # 기본 검정색
                     stroke_width: float = 0.05,    # 0.5mm
-                    extra_paths: list | None = None,
+                    extra_paths: list[dict[str, Any]] | None = None,
                     output_path: str | None = None) -> str:
         """
         최종 SVG 생성 (배경 이미지 + 단일 벡터 외곽선)
@@ -775,16 +939,53 @@ class ProfileExporter:
                 '<g id="cut_lines" fill="none" stroke-linejoin="round" stroke-linecap="round">'
             )
             for item in extra_paths:
+                stroke = str(item.get("stroke", "#ff4040"))
+                sw = float(item.get("stroke_width", stroke_width))
+                path_id = item.get("id", None)
+
+                # Efficient multi-segment export (one SVG path with many subpaths).
+                # Used for feature edge layers to avoid generating thousands of <path> nodes.
+                if "segments" in item:
+                    try:
+                        seg = np.asarray(item.get("segments", []), dtype=np.float64)
+                    except Exception:
+                        seg = None
+
+                    if seg is None or seg.ndim != 3 or seg.shape[0] == 0 or seg.shape[1] < 2 or seg.shape[2] < 2:
+                        continue
+
+                    seg_xy = seg[:, :2, :2].copy()
+                    if bounds.get('is_pixels'):
+                        px_per_cm = float(bounds.get('px_per_cm', 100.0))
+                        if px_per_cm <= 0:
+                            px_per_cm = 100.0
+                        seg_xy = seg_xy / px_per_cm
+                    else:
+                        seg_xy[:, :, 0] -= min_coords[0]
+                        seg_xy[:, :, 1] = svg_height - (seg_xy[:, :, 1] - min_coords[1])
+
+                    d_parts = []
+                    for s in seg_xy:
+                        if not np.isfinite(s).all():
+                            continue
+                        d_parts.append(
+                            f'M {s[0,0]:.6f} {s[0,1]:.6f} L {s[1,0]:.6f} {s[1,1]:.6f}'
+                        )
+                    if not d_parts:
+                        continue
+
+                    id_attr = f' id="{path_id}"' if path_id else ""
+                    svg_parts.append(
+                        f'<path{id_attr} d="{" ".join(d_parts)}" fill="none" stroke="{stroke}" stroke-width="{sw}" />'
+                    )
+                    continue
+
                 try:
                     pts = np.asarray(item.get("points", []), dtype=np.float64)
                 except Exception:
                     continue
                 if pts.ndim != 2 or pts.shape[0] < 2 or pts.shape[1] < 2:
                     continue
-
-                stroke = str(item.get("stroke", "#ff4040"))
-                sw = float(item.get("stroke_width", stroke_width))
-                path_id = item.get("id", None)
 
                 svg_pts = pts[:, :2].copy()
                 if bounds.get('is_pixels'):
@@ -824,11 +1025,16 @@ class ProfileExporter:
                        grid_spacing: float = 1.0,
                        include_grid: bool = True,
                        viewport_image: Image.Image | None = None,
-                       opengl_matrices: tuple | None = None,
-                       cut_lines_world: list | None = None,
-                       cut_profiles_world: list | None = None) -> str:
+                       opengl_matrices: OpenGLMatrices | None = None,
+                       cut_lines_world: list[Any] | None = None,
+                       cut_profiles_world: list[Any] | None = None,
+                       feature_edges: Any | None = None,
+                       feature_style: dict[str, Any] | None = None,
+                       world_units_per_cm: float | None = None) -> str:
         """
         메쉬의 2D 프로파일을 SVG로 내보내는 통합 메서드.
+
+        grid_spacing은 cm 단위입니다. world_units_per_cm를 지정하면 메쉬 단위를 cm로 환산하는 기준을 강제할 수 있습니다.
         """
         contours, bounds = self.extract_silhouette(
             mesh,
@@ -838,74 +1044,71 @@ class ProfileExporter:
             scale,
             opengl_matrices,
             viewport_image=viewport_image,
+            world_units_per_cm=world_units_per_cm,
         )
+
+        # export_svg는 cm 단위를 기준으로 동작한다. OpenGL 경로(is_pixels=True)는 px_per_cm로 이미 맞춰져 있고,
+        # 단순 투영 경로(is_pixels=False)는 메쉬 단위를 cm로 환산한다.
+        if not bool(bounds.get("is_pixels", False)):
+            try:
+                wupc = float(bounds.get("world_units_per_cm", _resolve_world_units_per_cm(mesh, world_units_per_cm)))
+            except Exception:
+                wupc = 1.0
+            if not np.isfinite(wupc) or wupc <= 0:
+                wupc = 1.0
+
+            to_cm = 1.0 / wupc
+            bounds = dict(bounds)
+            for k in ("min", "max", "size"):
+                if k in bounds:
+                    bounds[k] = np.asarray(bounds[k], dtype=np.float64) * to_cm
+            bounds["world_units_per_cm"] = 1.0
+            bounds["mesh_unit"] = "cm"
+
+            contours_cm: list[np.ndarray] = []
+            for c in contours or []:
+                arr = np.asarray(c, dtype=np.float64)
+                if arr.ndim == 2 and arr.shape[0] >= 2 and arr.shape[1] >= 2:
+                    contours_cm.append(arr * to_cm)
+            contours = contours_cm
         
         background_image = None
         if include_grid:
             if viewport_image:
                 # 캡처된 실제 이미지와 격자 합성
                 background_image = self.generate_composite_image(
-                    viewport_image, bounds, grid_spacing
+                    viewport_image, bounds, grid_spacing, view=view
                 )
             else:
                 # (Fallback) 실루엣과 격자 합성 - occupancy가 없으므로 빈 이미지 배경
                 dummy_viewport = Image.new('RGB', bounds['grid_size'], (255, 255, 255))
                 background_image = self.generate_composite_image(
-                    dummy_viewport, bounds, grid_spacing
+                    dummy_viewport, bounds, grid_spacing, view=view
                 )
 
         extra_paths = []
-        if cut_lines_world and opengl_matrices and view in {"top", "bottom"}:
+        matrices: OpenGLMatrices | None = None
+        if bool(bounds.get("is_pixels")):
+            m = bounds.get("matrices")
+            if isinstance(m, tuple) and len(m) == 3:
+                matrices = cast(OpenGLMatrices, m)
+
+        matrices_src = matrices if matrices is not None else opengl_matrices
+
+        if cut_lines_world and matrices_src is not None and view in {"top", "bottom"}:
             try:
-                mv_raw, proj_raw, vp = opengl_matrices
+                mv_raw, proj_raw, vp = matrices_src
                 mv = np.asarray(mv_raw, dtype=np.float64).reshape(4, 4).T
                 proj = np.asarray(proj_raw, dtype=np.float64).reshape(4, 4).T
-                mvp = mv @ proj
-
-                def project_world_to_px_segments(pts_world: np.ndarray) -> list[np.ndarray]:
-                    pts_world = np.asarray(pts_world, dtype=np.float64)
-                    if pts_world.ndim != 2 or pts_world.shape[0] < 2 or pts_world.shape[1] < 2:
-                        return []
-                    if pts_world.shape[1] == 2:
-                        pts_world = np.hstack([pts_world, np.zeros((len(pts_world), 1), dtype=np.float64)])
-                    v_homo = np.hstack([pts_world[:, :3], np.ones((len(pts_world), 1), dtype=np.float64)])
-                    v_clip = v_homo @ mvp
-                    w = v_clip[:, 3]
-                    valid = np.abs(w) > 1e-12
-                    v_ndc = np.full((len(v_clip), 3), np.nan, dtype=np.float64)
-                    v_ndc[valid] = v_clip[valid, :3] / w[valid, None]
-                    x = (v_ndc[:, 0] + 1.0) / 2.0 * float(vp[2])
-                    y = float(vp[3]) - (v_ndc[:, 1] + 1.0) / 2.0 * float(vp[3])
-                    pts = np.stack([x, y], axis=1)
-                    finite = valid & np.isfinite(pts).all(axis=1)
-                    max_dim = max(float(vp[2]), float(vp[3]), 1.0)
-                    finite &= np.max(np.abs(pts), axis=1) <= max_dim * 10.0
-
-                    jump = max_dim * 1.5
-                    segments: list[np.ndarray] = []
-                    current: list[np.ndarray] = []
-                    for ok, p in zip(finite, pts):
-                        if bool(ok):
-                            if current and float(np.linalg.norm(p - current[-1])) > jump:
-                                if len(current) >= 2:
-                                    segments.append(np.asarray(current, dtype=np.float64))
-                                current = [p]
-                            else:
-                                current.append(p)
-                        else:
-                            if len(current) >= 2:
-                                segments.append(np.asarray(current, dtype=np.float64))
-                            current = []
-                    if len(current) >= 2:
-                        segments.append(np.asarray(current, dtype=np.float64))
-                    return segments
+                # Row-vector convention: (P*M*v)^T = v^T*M^T*P^T
+                mvp = mv.T @ proj.T
 
                 colors = ["#ff4040", "#2b8cff"]
                 for i, line in enumerate(cut_lines_world):
                     if not line or len(line) < 2:
                         continue
                     pts_w = np.asarray(line, dtype=np.float64)
-                    segments = project_world_to_px_segments(pts_w)
+                    segments = _project_world_to_px_segments(pts_w, mvp=mvp, vp=vp)
                     for seg_i, pts_px in enumerate(segments):
                         if pts_px.shape[0] < 2:
                             continue
@@ -918,59 +1121,23 @@ class ProfileExporter:
                                 "stroke_width": 0.015,  # 0.15mm
                             }
                         )
-            except Exception:
+            except Exception as e:
+                _LOGGER.debug("Failed projecting cut lines to pixels: %s", e, exc_info=True)
                 extra_paths = []
 
-        if cut_profiles_world and opengl_matrices and view in {"top", "bottom"}:
+        if cut_profiles_world and matrices_src is not None and view in {"top", "bottom"}:
             try:
-                mv_raw, proj_raw, vp = opengl_matrices
+                mv_raw, proj_raw, vp = matrices_src
                 mv = np.asarray(mv_raw, dtype=np.float64).reshape(4, 4).T
                 proj = np.asarray(proj_raw, dtype=np.float64).reshape(4, 4).T
-                mvp = mv @ proj
-
-                def project_world_to_px_segments(pts_world: np.ndarray) -> list[np.ndarray]:
-                    pts_world = np.asarray(pts_world, dtype=np.float64)
-                    if pts_world.ndim != 2 or pts_world.shape[0] < 2 or pts_world.shape[1] < 2:
-                        return []
-                    if pts_world.shape[1] == 2:
-                        pts_world = np.hstack([pts_world, np.zeros((len(pts_world), 1), dtype=np.float64)])
-                    v_homo = np.hstack([pts_world[:, :3], np.ones((len(pts_world), 1), dtype=np.float64)])
-                    v_clip = v_homo @ mvp
-                    w = v_clip[:, 3]
-                    valid = np.abs(w) > 1e-12
-                    v_ndc = np.full((len(v_clip), 3), np.nan, dtype=np.float64)
-                    v_ndc[valid] = v_clip[valid, :3] / w[valid, None]
-                    x = (v_ndc[:, 0] + 1.0) / 2.0 * float(vp[2])
-                    y = float(vp[3]) - (v_ndc[:, 1] + 1.0) / 2.0 * float(vp[3])
-                    pts = np.stack([x, y], axis=1)
-                    finite = valid & np.isfinite(pts).all(axis=1)
-                    max_dim = max(float(vp[2]), float(vp[3]), 1.0)
-                    finite &= np.max(np.abs(pts), axis=1) <= max_dim * 10.0
-
-                    jump = max_dim * 1.5
-                    segments: list[np.ndarray] = []
-                    current: list[np.ndarray] = []
-                    for ok, p in zip(finite, pts):
-                        if bool(ok):
-                            if current and float(np.linalg.norm(p - current[-1])) > jump:
-                                if len(current) >= 2:
-                                    segments.append(np.asarray(current, dtype=np.float64))
-                                current = [p]
-                            else:
-                                current.append(p)
-                        else:
-                            if len(current) >= 2:
-                                segments.append(np.asarray(current, dtype=np.float64))
-                            current = []
-                    if len(current) >= 2:
-                        segments.append(np.asarray(current, dtype=np.float64))
-                    return segments
+                # Row-vector convention: (P*M*v)^T = v^T*M^T*P^T
+                mvp = mv.T @ proj.T
 
                 for i, line in enumerate(cut_profiles_world):
                     if not line or len(line) < 2:
                         continue
                     pts_w = np.asarray(line, dtype=np.float64)
-                    segments = project_world_to_px_segments(pts_w)
+                    segments = _project_world_to_px_segments(pts_w, mvp=mvp, vp=vp)
                     for seg_i, pts_px in enumerate(segments):
                         if pts_px.shape[0] < 2:
                             continue
@@ -987,8 +1154,149 @@ class ProfileExporter:
                                 "stroke_width": 0.015,  # 0.15mm
                             }
                         )
+            except Exception as e:
+                _LOGGER.debug("Failed projecting section profiles to pixels: %s", e, exc_info=True)
+
+        if feature_edges is not None:
+            try:
+                edges = np.asarray(getattr(feature_edges, "edges", []), dtype=np.int32)
+                face_pairs = np.asarray(getattr(feature_edges, "face_pairs", []), dtype=np.int32)
             except Exception:
-                pass
+                edges = np.zeros((0, 2), dtype=np.int32)
+                face_pairs = np.zeros((0, 2), dtype=np.int32)
+
+            if edges.ndim == 2 and edges.shape[0] > 0 and edges.shape[1] >= 2:
+                style = dict(feature_style or {})
+                stroke = str(style.get("stroke", "#4a5568"))  # gray-600
+                sw = float(style.get("stroke_width", 0.01))  # 0.1mm
+                max_segments = int(style.get("max_segments", 20000))
+
+                v = np.asarray(getattr(mesh, "vertices", np.zeros((0, 3))), dtype=np.float64)
+                if v.ndim == 2 and v.shape[0] > 0:
+                    keep = np.ones((edges.shape[0],), dtype=bool)
+
+                    # Cheap back-face culling (if face normals are available)
+                    if (
+                        matrices_src is not None
+                        and bool(bounds.get("is_pixels"))
+                        and face_pairs.ndim == 2
+                        and face_pairs.shape[0] == edges.shape[0]
+                        and face_pairs.shape[1] >= 2
+                    ):
+                        try:
+                            mv_raw, _proj_raw, _vp = matrices_src
+                            mv = np.asarray(mv_raw, dtype=np.float64).reshape(4, 4).T
+
+                            fn = getattr(mesh, "face_normals", None)
+                            fn_arr = None
+                            try:
+                                fn_arr = np.asarray(fn, dtype=np.float64) if fn is not None else None
+                            except Exception:
+                                fn_arr = None
+
+                            if fn_arr is not None and fn_arr.ndim == 2 and fn_arr.shape[1] >= 3 and fn_arr.shape[0] > 0:
+                                fn3 = fn_arr[:, :3].copy()
+                                if rotation is not None:
+                                    from scipy.spatial.transform import Rotation as R
+
+                                    r = R.from_euler("XYZ", rotation, degrees=True)
+                                    fn3 = r.apply(fn3)
+
+                                n_eye = fn3 @ mv[:3, :3].T
+                                front = n_eye[:, 2] > 0.0
+
+                                f0 = face_pairs[:, 0].astype(np.int32, copy=False)
+                                f1 = face_pairs[:, 1].astype(np.int32, copy=False)
+                                ok0 = (f0 >= 0) & (f0 < front.shape[0])
+                                ok1 = (f1 >= 0) & (f1 < front.shape[0])
+                                keep = (ok0 & front[f0]) | (ok1 & front[f1])
+                        except Exception:
+                            keep = np.ones((edges.shape[0],), dtype=bool)
+
+                    idx = np.flatnonzero(keep)
+                    if idx.size > 0:
+                        if max_segments > 0 and idx.size > max_segments:
+                            step = int(np.ceil(float(idx.size) / float(max_segments)))
+                            idx = idx[:: max(1, step)]
+
+                        e = edges[idx, :2].astype(np.int32, copy=False)
+                        valid = np.all((e >= 0) & (e < int(v.shape[0])), axis=1)
+                        if not bool(np.all(valid)):
+                            e = e[valid]
+
+                        if e.shape[0] > 0:
+                            p0 = v[e[:, 0]]
+                            p1 = v[e[:, 1]]
+
+                            # Local -> world transform
+                            pts = np.vstack([p0, p1]) * float(scale)
+                            if rotation is not None:
+                                from scipy.spatial.transform import Rotation as R
+
+                                r = R.from_euler("XYZ", rotation, degrees=True)
+                                pts = r.apply(pts)
+                            if translation is not None:
+                                pts = pts + np.asarray(translation, dtype=np.float64).reshape(1, 3)
+
+                            if matrices_src is not None and bool(bounds.get("is_pixels")):
+                                try:
+                                    mv_raw, proj_raw, vp = matrices_src
+                                    mv = np.asarray(mv_raw, dtype=np.float64).reshape(4, 4).T
+                                    proj = np.asarray(proj_raw, dtype=np.float64).reshape(4, 4).T
+                                    mvp = mv.T @ proj.T
+
+                                    vp = np.asarray(vp, dtype=np.float64).reshape(-1)
+                                    if vp.size < 4:
+                                        vp = np.array([0.0, 0.0, 2048.0, 2048.0], dtype=np.float64)
+
+                                    v_h = np.hstack([pts[:, :3], np.ones((pts.shape[0], 1), dtype=np.float64)])
+                                    v_clip = v_h @ mvp
+                                    w = v_clip[:, 3]
+                                    valid_w = np.abs(w) > 1e-12
+                                    xy = np.full((pts.shape[0], 2), np.nan, dtype=np.float64)
+                                    if np.any(valid_w):
+                                        v_ndc = v_clip[valid_w, :3] / w[valid_w, None]
+                                        x = (v_ndc[:, 0] + 1.0) / 2.0 * float(vp[2])
+                                        y = float(vp[3]) - (v_ndc[:, 1] + 1.0) / 2.0 * float(vp[3])
+                                        xy[valid_w] = np.stack([x, y], axis=1)
+
+                                    e_count = int(e.shape[0])
+                                    seg = np.stack([xy[:e_count], xy[e_count:]], axis=1)
+                                    ok = np.isfinite(seg).all(axis=(1, 2))
+                                    if np.any(ok):
+                                        seg = seg[ok]
+                                        extra_paths.append(
+                                            {
+                                                "id": "feature_edges",
+                                                "segments": seg,
+                                                "stroke": stroke,
+                                                "stroke_width": sw,
+                                            }
+                                        )
+                                except Exception:
+                                    _LOGGER.debug("Failed projecting feature edges to pixels", exc_info=True)
+                            else:
+                                # Fallback: project to plane coords (world units)
+                                try:
+                                    if view in self.VIEWS:
+                                        ax0, ax1 = self.VIEWS[view]["axes"]
+                                        seg_world = pts.reshape(2, -1, 3).transpose(1, 0, 2)[:, :, [ax0, ax1]]
+                                        if view == "back":
+                                            seg_world[:, :, 0] *= -1.0
+                                        if view == "left":
+                                            seg_world[:, :, 0] *= -1.0
+                                        if view == "bottom":
+                                            seg_world[:, :, 1] *= -1.0
+                                        extra_paths.append(
+                                            {
+                                                "id": "feature_edges",
+                                                "segments": seg_world[:, :, :2],
+                                                "stroke": stroke,
+                                                "stroke_width": sw,
+                                            }
+                                        )
+                                except Exception:
+                                    _LOGGER.debug("Failed projecting feature edges (fallback)", exc_info=True)
 
         return self.export_svg(
             contours, bounds, background_image,

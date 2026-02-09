@@ -17,6 +17,15 @@ from PyQt6.QtGui import QDragEnterEvent, QDragLeaveEvent, QDropEvent, QFont
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
 
+APP_NAME = "ArchMeshRubbing"
+APP_VERSION = "0.1.0"
+try:
+    import src as _amr_src
+
+    APP_VERSION = str(getattr(_amr_src, "__version__", APP_VERSION))
+except Exception:
+    pass
+
 
 class ProcessingThread(QThread):
     """백그라운드 처리 스레드"""
@@ -163,7 +172,7 @@ class MainWindow(QMainWindow):
     
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("ArchMeshRubbing - 고고학 메쉬 탁본 도구")
+        self.setWindowTitle(f"{APP_NAME} v{APP_VERSION} - 고고학 메쉬 탁본 도구")
         self.setMinimumSize(800, 600)
         self.current_file = None
         self.processing_thread = None
@@ -178,7 +187,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(20, 20, 20, 20)
         
         # 제목
-        title = QLabel("ArchMeshRubbing")
+        title = QLabel(f"{APP_NAME} v{APP_VERSION}")
         title.setFont(QFont("Arial", 24, QFont.Weight.Bold))
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title)

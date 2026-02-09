@@ -8,7 +8,12 @@ Supports: OBJ, PLY, STL, OFF formats
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, List, Union
+import logging
 import numpy as np
+
+from .logging_utils import log_once
+
+_LOGGER = logging.getLogger(__name__)
 
 try:
     import trimesh
@@ -89,7 +94,13 @@ class MeshData:
                 keep = np.all(valid, axis=1)
                 faces = faces[keep]
         except Exception:
-            pass
+            log_once(
+                _LOGGER,
+                "mesh_loader:post_init_face_filter",
+                logging.WARNING,
+                "MeshData.__post_init__ face index filtering failed",
+                exc_info=True,
+            )
         self.faces = faces
         
         if self.normals is not None:
@@ -370,6 +381,22 @@ class MeshData:
             vertex_normals=self.normals,
             process=False
         )
+        try:
+            meta = getattr(mesh, "metadata", None)
+            if not isinstance(meta, dict):
+                meta = {}
+                mesh.metadata = meta
+            meta["unit"] = str(self.unit)
+            if self.filepath is not None:
+                meta["filepath"] = str(self.filepath)
+        except Exception:
+            log_once(
+                _LOGGER,
+                "mesh_loader:to_trimesh_metadata",
+                logging.DEBUG,
+                "Failed to attach metadata to trimesh mesh",
+                exc_info=True,
+            )
         return mesh
     
     @classmethod
@@ -406,28 +433,78 @@ class MeshData:
     
     def extract_submesh(self, face_indices: np.ndarray) -> 'MeshData':
         """선택된 면으로 서브메쉬 추출"""
-        face_indices = np.asarray(face_indices, dtype=np.int32)
-        
-        # 선택된 면들
-        selected_faces = self.faces[face_indices]
-        
-        # 사용된 정점 인덱스
-        unique_verts = np.unique(selected_faces.flatten())
-        
-        # 새 인덱스 매핑
-        vert_map = {old: new for new, old in enumerate(unique_verts)}
-        new_faces = np.array([[vert_map[v] for v in face] for face in selected_faces])
-        
-        # 새 정점
-        new_vertices = self.vertices[unique_verts]
-        
-        # 새 법선 (있는 경우)
-        new_normals = self.normals[unique_verts] if self.normals is not None else None
-        new_face_normals = self.face_normals[face_indices] if self.face_normals is not None else None
-        
-        # 새 UV (있는 경우)
-        new_uv = self.uv_coords[unique_verts] if self.uv_coords is not None else None
-        
+        face_indices = np.asarray(face_indices, dtype=np.int32).reshape(-1)
+
+        faces = np.asarray(self.faces, dtype=np.int32)
+        vertices = np.asarray(self.vertices, dtype=np.float64)
+        n_faces = int(faces.shape[0]) if faces.ndim == 2 else 0
+
+        if face_indices.size == 0 or n_faces == 0:
+            return MeshData(
+                vertices=np.zeros((0, 3), dtype=np.float64),
+                faces=np.zeros((0, 3), dtype=np.int32),
+                normals=None,
+                face_normals=None,
+                uv_coords=None,
+                texture=self.texture,
+                unit=self.unit,
+                filepath=self.filepath,
+            )
+
+        # 크래시 방지: 인덱스 범위 밖 제거
+        valid = (face_indices >= 0) & (face_indices < n_faces)
+        if not bool(np.all(valid)):
+            face_indices = face_indices[valid]
+        if face_indices.size == 0:
+            return MeshData(
+                vertices=np.zeros((0, 3), dtype=np.float64),
+                faces=np.zeros((0, 3), dtype=np.int32),
+                normals=None,
+                face_normals=None,
+                uv_coords=None,
+                texture=self.texture,
+                unit=self.unit,
+                filepath=self.filepath,
+            )
+
+        selected_faces = faces[face_indices]
+
+        # 사용된 정점 인덱스 (sorted)
+        unique_verts = np.unique(selected_faces.reshape(-1)).astype(np.int32, copy=False)
+
+        # 새 정점/속성
+        new_vertices = vertices[unique_verts]
+        new_normals = None
+        if self.normals is not None:
+            try:
+                normals = np.asarray(self.normals, dtype=np.float64)
+                if normals.shape[0] == vertices.shape[0]:
+                    new_normals = normals[unique_verts]
+            except Exception:
+                new_normals = None
+
+        new_face_normals = None
+        if self.face_normals is not None:
+            try:
+                fn = np.asarray(self.face_normals, dtype=np.float32)
+                if fn.shape[0] == faces.shape[0]:
+                    new_face_normals = fn[face_indices]
+            except Exception:
+                new_face_normals = None
+
+        new_uv = None
+        if self.uv_coords is not None:
+            try:
+                uv = np.asarray(self.uv_coords, dtype=np.float64)
+                if uv.shape[0] == vertices.shape[0]:
+                    new_uv = uv[unique_verts]
+            except Exception:
+                new_uv = None
+
+        # 새 인덱스 매핑 (vectorized)
+        # unique_verts는 sorted이므로 searchsorted로 빠르게 remap 가능
+        new_faces = np.searchsorted(unique_verts, selected_faces).astype(np.int32, copy=False)
+
         return MeshData(
             vertices=new_vertices,
             faces=new_faces,
@@ -436,7 +513,7 @@ class MeshData:
             uv_coords=new_uv,
             texture=self.texture,  # 텍스처는 공유
             unit=self.unit,
-            filepath=self.filepath
+            filepath=self.filepath,
         )
 
 
@@ -452,7 +529,7 @@ class MeshLoader:
         - GLTF/GLB (GL Transmission Format)
     """
     
-    SUPPORTED_FORMATS = {
+    SUPPORTED_FORMATS: dict[str, str] = {
         '.obj': 'Wavefront OBJ',
         '.ply': 'Polygon File Format',
         '.stl': 'Stereolithography',
@@ -469,7 +546,7 @@ class MeshLoader:
         self.default_unit = default_unit
     
     @classmethod
-    def get_supported_formats(cls) -> dict:
+    def get_supported_formats(cls) -> dict[str, str]:
         """지원 포맷 목록 반환"""
         return cls.SUPPORTED_FORMATS.copy()
     
@@ -554,7 +631,7 @@ class MeshLoader:
         """
         return [self.load(fp, unit) for fp in filepaths]
     
-    def get_file_info(self, filepath: Union[str, Path]) -> dict:
+    def get_file_info(self, filepath: Union[str, Path]) -> dict[str, object]:
         """
         파일 정보 미리보기 (전체 로드 없이)
         
@@ -572,7 +649,7 @@ class MeshLoader:
         ext = filepath.suffix.lower()
         file_size = filepath.stat().st_size
         
-        info = {
+        info: dict[str, object] = {
             'filename': filepath.name,
             'format': self.SUPPORTED_FORMATS.get(ext, 'Unknown'),
             'extension': ext,

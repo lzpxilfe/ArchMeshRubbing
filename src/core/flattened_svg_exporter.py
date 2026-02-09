@@ -15,6 +15,7 @@ from typing import Optional
 import numpy as np
 
 from .flattener import FlattenedMesh
+from .unit_utils import resolve_svg_unit as _resolve_unit
 
 
 @dataclass(frozen=True)
@@ -39,12 +40,12 @@ class FlattenedSVGExporter:
         options = options or SVGExportOptions()
         output_path = Path(output_path)
 
-        svg_unit, unit_scale = self._resolve_unit(flattened.original_mesh.unit, options.unit)
+        svg_unit, unit_scale = _resolve_unit(flattened.original_mesh.unit, options.unit)
 
         # UV → 실측 좌표(원본 단위) → SVG 단위로 변환
         uv_real = flattened.uv.astype(np.float64) * float(flattened.scale)
         if uv_real.ndim != 2 or uv_real.shape[0] == 0:
-            svg_parts: list[str] = [
+            empty_svg_parts: list[str] = [
                 '<?xml version="1.0" encoding="UTF-8" standalone="no"?>',
                 '<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" '
                 '"http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">',
@@ -53,7 +54,7 @@ class FlattenedSVGExporter:
                 '<!-- Empty UV: nothing to export -->',
                 '</svg>',
             ]
-            output_path.write_text("\n".join(svg_parts), encoding="utf-8")
+            output_path.write_text("\n".join(empty_svg_parts), encoding="utf-8")
             return str(output_path)
 
         min_uv = uv_real.min(axis=0)
@@ -150,20 +151,6 @@ class FlattenedSVGExporter:
 
         output_path.write_text("\n".join(svg_parts), encoding="utf-8")
         return str(output_path)
-
-    def _resolve_unit(self, mesh_unit: str, requested: Optional[str]) -> tuple[str, float]:
-        mesh_unit = (requested or mesh_unit or "mm").lower()
-
-        if mesh_unit in {"mm", "millimeter", "millimeters"}:
-            return "mm", 1.0
-        if mesh_unit in {"cm", "centimeter", "centimeters"}:
-            return "cm", 1.0
-        if mesh_unit in {"m", "meter", "meters"}:
-            # SVG에서 m는 보편적이지 않아 cm로 변환
-            return "cm", 100.0
-
-        # 알 수 없는 단위는 mm로 처리
-        return "mm", 1.0
 
     def _convex_hull_2d(self, points: np.ndarray) -> np.ndarray:
         """

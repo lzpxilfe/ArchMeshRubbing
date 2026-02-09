@@ -52,15 +52,21 @@ class RegionSelector:
         """
         plane_point = np.asarray(plane_point, dtype=np.float64)
         plane_normal = np.asarray(plane_normal, dtype=np.float64)
-        plane_normal /= np.linalg.norm(plane_normal)
+        nrm = float(np.linalg.norm(plane_normal))
+        if np.isfinite(nrm) and nrm > 1e-12:
+            plane_normal /= nrm
         
         # 면 중심 계산
-        face_centers = np.zeros((mesh.n_faces, 3))
-        for i, face in enumerate(mesh.faces):
-            face_centers[i] = mesh.vertices[face].mean(axis=0)
+        faces = np.asarray(getattr(mesh, "faces", np.zeros((0, 3))), dtype=np.int32)
+        vertices = np.asarray(getattr(mesh, "vertices", np.zeros((0, 3))), dtype=np.float64)
+        if faces.ndim != 2 or faces.shape[0] == 0 or faces.shape[1] < 3:
+            face_centers = np.zeros((0, 3), dtype=np.float64)
+        else:
+            faces = faces[:, :3]
+            face_centers = vertices[faces].mean(axis=1)
         
         # 평면에서의 부호 있는 거리
-        distances = np.dot(face_centers - plane_point, plane_normal)
+        distances = (face_centers - plane_point) @ plane_normal
         
         # 선택
         if keep_side == 'positive':
@@ -98,9 +104,13 @@ class RegionSelector:
         box_max = np.asarray(box_max, dtype=np.float64)
         
         # 면 중심 계산
-        face_centers = np.zeros((mesh.n_faces, 3))
-        for i, face in enumerate(mesh.faces):
-            face_centers[i] = mesh.vertices[face].mean(axis=0)
+        faces = np.asarray(getattr(mesh, "faces", np.zeros((0, 3))), dtype=np.int32)
+        vertices = np.asarray(getattr(mesh, "vertices", np.zeros((0, 3))), dtype=np.float64)
+        if faces.ndim != 2 or faces.shape[0] == 0 or faces.shape[1] < 3:
+            face_centers = np.zeros((0, 3), dtype=np.float64)
+        else:
+            faces = faces[:, :3]
+            face_centers = vertices[faces].mean(axis=1)
         
         # 박스 내부 체크
         in_box = np.all((face_centers >= box_min) & (face_centers <= box_max), axis=1)
@@ -134,9 +144,15 @@ class RegionSelector:
             SelectionResult: 선택 결과
         """
         # 면 중심의 높이
-        face_heights = np.zeros(mesh.n_faces)
-        for i, face in enumerate(mesh.faces):
-            face_heights[i] = mesh.vertices[face, axis].mean()
+        faces = np.asarray(getattr(mesh, "faces", np.zeros((0, 3))), dtype=np.int32)
+        vertices = np.asarray(getattr(mesh, "vertices", np.zeros((0, 3))), dtype=np.float64)
+        if faces.ndim != 2 or faces.shape[0] == 0 or faces.shape[1] < 3:
+            face_heights = np.zeros((0,), dtype=np.float64)
+        else:
+            ax = int(axis)
+            if ax not in (0, 1, 2):
+                ax = 2
+            face_heights = vertices[faces[:, :3]][:, :, ax].mean(axis=1)
         
         # 범위 내 선택
         in_range = (face_heights >= min_height) & (face_heights <= max_height)
@@ -188,33 +204,38 @@ class RegionSelector:
                 adjacency[face[i]].add(face[(i+2) % 3])
         
         # BFS로 거리 계산
-        queue = list(boundary_verts)
+        from collections import deque
+
+        queue = deque(int(v) for v in boundary_verts)
         for v in boundary_verts:
             distances[v] = 0
         
         while queue:
-            v = queue.pop(0)
+            v = int(queue.popleft())
             for neighbor in adjacency[v]:
                 edge_dist = np.linalg.norm(mesh.vertices[neighbor] - mesh.vertices[v])
                 new_dist = distances[v] + edge_dist
                 
                 if new_dist < distances[neighbor]:
                     distances[neighbor] = new_dist
-                    queue.append(neighbor)
+                    queue.append(int(neighbor))
         
-        # 면 선택 (모든 정점이 거리 내에 있는 면)
-        selected = []
-        for i, face in enumerate(mesh.faces):
-            face_dist = distances[face].mean()
-            if face_dist <= max_distance:
-                selected.append(i)
-        
-        selected_indices = np.array(selected)
-        all_indices = set(range(mesh.n_faces))
-        remaining_indices = np.array(list(all_indices - set(selected)))
+        # 면 선택 (평균 거리 기준)
+        faces = np.asarray(getattr(mesh, "faces", np.zeros((0, 3))), dtype=np.int32)
+        if faces.ndim != 2 or faces.shape[0] == 0 or faces.shape[1] < 3:
+            selected_indices = np.zeros((0,), dtype=np.int32)
+        else:
+            face_dist = distances[faces[:, :3]].mean(axis=1)
+            selected_indices = np.where(face_dist <= float(max_distance))[0].astype(np.int32, copy=False)
+        n_faces = int(getattr(mesh, "n_faces", 0) or 0)
+        mask = np.ones((n_faces,), dtype=bool)
+        if selected_indices.size:
+            valid = (selected_indices >= 0) & (selected_indices < n_faces)
+            mask[selected_indices[valid]] = False
+        remaining_indices = np.where(mask)[0].astype(np.int32, copy=False)
         
         selected_mesh = mesh.extract_submesh(selected_indices) if len(selected_indices) > 0 else None
-        remaining_mesh = mesh.extract_submesh(remaining_indices) if len(remaining_indices) > 0 else None
+        remaining_mesh = mesh.extract_submesh(remaining_indices) if remaining_indices.size > 0 else None
         
         return SelectionResult(
             selected_mesh=selected_mesh,
@@ -267,9 +288,11 @@ class RegionSelector:
             curvatures[i] = np.mean(angle_diffs)
         
         # 면별 곡률
-        face_curvatures = np.zeros(mesh.n_faces)
-        for i, face in enumerate(mesh.faces):
-            face_curvatures[i] = curvatures[face].mean()
+        faces = np.asarray(getattr(mesh, "faces", np.zeros((0, 3))), dtype=np.int32)
+        if faces.ndim != 2 or faces.shape[0] == 0 or faces.shape[1] < 3:
+            face_curvatures = np.zeros((0,), dtype=np.float64)
+        else:
+            face_curvatures = curvatures[faces[:, :3]].mean(axis=1)
         
         # 범위 내 선택
         in_range = (face_curvatures >= min_curvature) & (face_curvatures <= max_curvature)
@@ -299,18 +322,31 @@ class RegionSelector:
             SelectionResult: 선택 결과
         """
         face_indices = np.asarray(face_indices, dtype=np.int32)
+        n_faces = int(getattr(mesh, "n_faces", 0) or 0)
+        if n_faces <= 0 or face_indices.size == 0:
+            selected = np.zeros((0,), dtype=np.int32)
+            remaining = np.zeros((0,), dtype=np.int32)
+        else:
+            idx = face_indices.reshape(-1)
+            valid = (idx >= 0) & (idx < n_faces)
+            idx = idx[valid]
+            # Deduplicate while preserving order.
+            if idx.size:
+                _, keep = np.unique(idx, return_index=True)
+                idx = idx[np.sort(keep)]
+            selected = idx.astype(np.int32, copy=False)
+            sel_mask = np.zeros((n_faces,), dtype=bool)
+            if selected.size:
+                sel_mask[selected] = True
+            remaining = np.where(~sel_mask)[0].astype(np.int32, copy=False)
         
-        all_indices = set(range(mesh.n_faces))
-        selected_set = set(face_indices)
-        remaining_indices = np.array(list(all_indices - selected_set))
-        
-        selected_mesh = mesh.extract_submesh(face_indices)
-        remaining_mesh = mesh.extract_submesh(remaining_indices) if len(remaining_indices) > 0 else None
+        selected_mesh = mesh.extract_submesh(selected)
+        remaining_mesh = mesh.extract_submesh(remaining) if remaining.size > 0 else None
         
         return SelectionResult(
             selected_mesh=selected_mesh,
             remaining_mesh=remaining_mesh,
-            selected_face_indices=face_indices
+            selected_face_indices=selected
         )
     
     def grow_selection(self, mesh: MeshData,

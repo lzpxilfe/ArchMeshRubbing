@@ -42,7 +42,13 @@ class RubbingImage:
     @property
     def pixels_per_unit(self) -> float:
         """단위당 픽셀 수"""
-        return self.width_pixels / self.width_real
+        try:
+            w = float(self.width_real)
+        except Exception:
+            return 0.0
+        if not np.isfinite(w) or w <= 1e-12:
+            return 0.0
+        return float(self.width_pixels) / w
     
     def to_pil_image(self) -> Image.Image:
         """PIL Image로 변환"""
@@ -76,6 +82,10 @@ class RubbingImage:
     def _add_scale_bar(self, img: Image.Image) -> Image.Image:
         """스케일 바 추가"""
         from PIL import ImageDraw, ImageFont
+
+        ppu = float(self.pixels_per_unit)
+        if not np.isfinite(ppu) or ppu <= 1e-12:
+            return img
         
         # 이미지 복사
         img = img.convert('RGB')
@@ -86,7 +96,7 @@ class RubbingImage:
         target_bar_pixels = int(img.width * target_bar_ratio)
         
         # 실제 크기에 맞는 깔끔한 숫자로 조정
-        bar_real_size = target_bar_pixels / self.pixels_per_unit
+        bar_real_size = float(target_bar_pixels) / ppu
         
         # 깔끔한 숫자로 반올림 (1, 2, 5, 10, 20, 50, 100...)
         nice_values = [1, 2, 5, 10, 20, 50, 100, 200, 500]
@@ -97,7 +107,7 @@ class RubbingImage:
         nice_bar_size = nice_normalized * magnitude
         
         # 실제 픽셀 크기
-        bar_pixels = int(nice_bar_size * self.pixels_per_unit)
+        bar_pixels = int(float(nice_bar_size) * ppu)
         
         # 스케일 바 위치 (오른쪽 하단)
         margin = 20
@@ -143,10 +153,24 @@ class SurfaceVisualizer:
         """
         self.default_dpi = default_dpi
     
-    def generate_rubbing(self, flattened: FlattenedMesh,
-                         width_pixels: int = 2000,
-                         style: str = 'traditional',
-                         light_angle: float = 45.0) -> RubbingImage:
+    def generate_rubbing(
+        self,
+        flattened: FlattenedMesh,
+        width_pixels: int = 2000,
+        style: str = 'traditional',
+        light_angle: float = 45.0,
+        *,
+        height_mode: str = "normal_z",
+        remove_curvature: bool = False,
+        reference_sigma: float | None = None,
+        relief_strength: float = 1.0,
+        invert: bool = False,
+        preset: str | None = None,
+        image_mode: str = "mesh",
+        smooth_sigma: float = 0.0,
+        detail_strength: float = 1.0,
+        detail_sigma: float | None = None,
+    ) -> RubbingImage:
         """
         탁본 효과 이미지 생성
         
@@ -155,13 +179,40 @@ class SurfaceVisualizer:
             width_pixels: 출력 이미지 너비 (픽셀)
             style: 스타일 ('traditional', 'modern', 'relief')
             light_angle: 조명 각도 (도)
-            
+            height_mode: 높이값 소스 ('normal_z'|'axis').
+            remove_curvature: 곡률(저주파)을 제거하여 디지털 탁본처럼 만듭니다.
+            reference_sigma: 곡률 제거용 가우시안 sigma(px). None이면 해상도에 맞춰 자동.
+            relief_strength: 요철(잔무늬) 강조 배율.
+            invert: 높이 부호 반전(내면/외면 톤 뒤집기 등에 사용).
+             
+            preset: 스타일 프리셋 이름.
+            image_mode: 'mesh' | 'image' (이미지 기반 펼침).
+            smooth_sigma: 이미지 기반 렌더링 시 부드럽게 하는 정도(px).
+            detail_strength: 디테일 강조/완화 정도 (1.0=기본).
+            detail_sigma: 디테일 추출용 블러 sigma(px). None이면 자동.
+
         Returns:
             RubbingImage: 탁본 이미지
         """
         width_pixels = int(width_pixels)
         if width_pixels < 1:
             width_pixels = 1
+
+        preset_cfg = self._resolve_rubbing_preset(preset)
+        if preset_cfg:
+            style = preset_cfg.get("style", style)
+            image_mode = preset_cfg.get("image_mode", image_mode)
+            smooth_sigma = preset_cfg.get("smooth_sigma", smooth_sigma)
+            detail_strength = preset_cfg.get("detail_strength", detail_strength)
+            detail_sigma = preset_cfg.get("detail_sigma", detail_sigma)
+            remove_curvature = preset_cfg.get("remove_curvature", remove_curvature)
+            reference_sigma = preset_cfg.get("reference_sigma", reference_sigma)
+            relief_strength = preset_cfg.get("relief_strength", relief_strength)
+            height_mode = preset_cfg.get("height_mode", height_mode)
+            invert = preset_cfg.get("invert", invert)
+            splat_sigma = preset_cfg.get("splat_sigma", None)
+        else:
+            splat_sigma = None
 
         if flattened is None or getattr(flattened, "uv", None) is None or getattr(flattened, "faces", None) is None:
             raise ValueError("Flattened mesh is missing uv/faces.")
@@ -179,9 +230,64 @@ class SurfaceVisualizer:
         if not np.isfinite(aspect_ratio) or aspect_ratio <= 0:
             aspect_ratio = 1.0
         height_pixels = max(1, int(width_pixels * aspect_ratio))
+
+        # Safety: cap total pixels to avoid OOM on huge unwraps.
+        try:
+            max_total = int(getattr(self, "_max_total_pixels", 20000000) or 20000000)
+        except Exception:
+            max_total = 20000000
+        max_total = max(1000000, int(max_total))
+        total = int(width_pixels) * int(height_pixels)
+        if total > max_total:
+            scale = float(np.sqrt(float(max_total) / float(max(1, total))))
+            width_pixels = max(1, int(float(width_pixels) * scale))
+            height_pixels = max(1, int(float(height_pixels) * scale))
         
-        # 깊이맵 생성
-        depth_map = self._create_depth_map(flattened, width_pixels, height_pixels)
+        # Value/height map (image-based pipeline)
+        values = self._compute_height_values(flattened, mode=str(height_mode))
+        mode = str(image_mode or "mesh").strip().lower()
+        if mode in {"image", "baked", "bake", "img"}:
+            depth_map = self._create_value_map_image_based(
+                flattened,
+                values,
+                width_pixels,
+                height_pixels,
+                smooth_sigma=smooth_sigma,
+                splat_sigma=splat_sigma,
+            )
+        else:
+            depth_map = self._create_value_map(flattened, values, width_pixels, height_pixels)
+
+        if bool(invert):
+            depth_map = -depth_map
+
+        if bool(remove_curvature):
+            sigma_val = reference_sigma
+            if sigma_val is None:
+                sigma_val = max(2.0, 0.02 * float(min(width_pixels, height_pixels)))
+            try:
+                sigma_f = float(sigma_val)
+            except Exception:
+                sigma_f = 0.0
+            if np.isfinite(sigma_f) and sigma_f > 0.0:
+                try:
+                    ref = ndimage.gaussian_filter(depth_map, sigma=float(sigma_f))
+                    depth_map = depth_map - ref
+                except Exception:
+                    pass
+
+        depth_map = self._apply_detail_enhancement(
+            depth_map,
+            strength=detail_strength,
+            sigma=detail_sigma,
+        )
+
+        try:
+            strength = float(relief_strength)
+        except Exception:
+            strength = 1.0
+        if np.isfinite(strength) and abs(strength - 1.0) > 1e-12:
+            depth_map = depth_map * strength
         
         # 스타일에 따른 렌더링
         if style == 'traditional':
@@ -200,6 +306,303 @@ class SurfaceVisualizer:
             unit=flattened.original_mesh.unit,
             dpi=self.default_dpi
         )
+
+    def _resolve_rubbing_preset(self, preset: str | None) -> dict | None:
+        if preset is None:
+            return None
+        key = str(preset).strip()
+        if not key:
+            return None
+
+        presets = {
+            "자연(이미지)": dict(
+                style="traditional",
+                image_mode="image",
+                smooth_sigma=1.2,
+                detail_strength=1.2,
+                detail_sigma=None,
+                splat_sigma=0.4,
+            ),
+            "선명(이미지)": dict(
+                style="modern",
+                image_mode="image",
+                smooth_sigma=0.6,
+                detail_strength=1.8,
+                detail_sigma=None,
+                splat_sigma=0.3,
+            ),
+            "부드러움": dict(
+                style="traditional",
+                image_mode="image",
+                smooth_sigma=2.0,
+                detail_strength=0.8,
+                detail_sigma=None,
+                splat_sigma=0.6,
+            ),
+            "디지털(곡률 제거)": dict(
+                style="modern",
+                image_mode="image",
+                smooth_sigma=1.0,
+                detail_strength=1.4,
+                detail_sigma=None,
+                splat_sigma=0.4,
+                remove_curvature=True,
+                reference_sigma=None,
+                height_mode="cyl_radial",
+                relief_strength=6.0,
+            ),
+            "레거시(메쉬)": dict(
+                style="traditional",
+                image_mode="mesh",
+                smooth_sigma=0.0,
+                detail_strength=1.0,
+                detail_sigma=None,
+            ),
+        }
+
+        if key in presets:
+            return dict(presets[key])
+
+        key_low = key.lower()
+        for name, cfg in presets.items():
+            if key_low in name.lower():
+                return dict(cfg)
+        return None
+
+    def _estimate_thickness_axis(self, vertices: np.ndarray) -> np.ndarray:
+        """PCA 기반 두께(시트 법선) 축 추정. (얇은 쉘/기와에 안정적)"""
+        v = np.asarray(vertices, dtype=np.float64)
+        if v.ndim != 2 or v.shape[0] < 8 or v.shape[1] < 3:
+            return np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        v = v[:, :3]
+        finite = np.isfinite(v).all(axis=1)
+        v = v[finite]
+        if v.shape[0] < 8:
+            return np.array([0.0, 0.0, 1.0], dtype=np.float64)
+
+        c = np.mean(v, axis=0)
+        x = v - c
+        cov = (x.T @ x) / float(max(1, x.shape[0] - 1))
+        try:
+            w, vecs = np.linalg.eigh(cov)
+            axis = vecs[:, int(np.argsort(w)[0])]
+        except Exception:
+            axis = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+
+        n = float(np.linalg.norm(axis))
+        if not np.isfinite(n) or n < 1e-12:
+            axis = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        else:
+            axis = (axis / n).astype(np.float64, copy=False)
+
+        # Prefer +Z to avoid random flips (good default after positioning).
+        if float(axis[2]) < 0.0:
+            axis = -axis
+        return axis
+
+    def _estimate_long_axis(self, vertices: np.ndarray) -> np.ndarray:
+        """PCA 기반 길이(주축) 방향 추정. (원통/기와의 축에 가까운 방향)"""
+        v = np.asarray(vertices, dtype=np.float64)
+        if v.ndim != 2 or v.shape[0] < 8 or v.shape[1] < 3:
+            return np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        v = v[:, :3]
+        finite = np.isfinite(v).all(axis=1)
+        v = v[finite]
+        if v.shape[0] < 8:
+            return np.array([0.0, 0.0, 1.0], dtype=np.float64)
+
+        c = np.mean(v, axis=0)
+        x = v - c
+        cov = (x.T @ x) / float(max(1, x.shape[0] - 1))
+        try:
+            w, vecs = np.linalg.eigh(cov)
+            axis = vecs[:, int(np.argsort(w)[-1])]
+        except Exception:
+            axis = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+
+        n = float(np.linalg.norm(axis))
+        if not np.isfinite(n) or n < 1e-12:
+            axis = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        else:
+            axis = (axis / n).astype(np.float64, copy=False)
+
+        if float(axis[2]) < 0.0:
+            axis = -axis
+        return axis
+
+    def _compute_height_values(self, flattened: FlattenedMesh, *, mode: str) -> np.ndarray:
+        """Compute per-vertex scalar values used for rubbing depth (height map)."""
+        original = flattened.original_mesh
+        vertices = np.asarray(getattr(original, "vertices", np.zeros((0, 3))), dtype=np.float64)
+        n = int(vertices.shape[0]) if vertices.ndim == 2 else 0
+        if n <= 0:
+            return np.zeros((0,), dtype=np.float64)
+
+        m = str(mode or "").strip().lower()
+        if m in {"radial", "cyl_radial", "cylinder_radial", "radius"}:
+            meta = getattr(flattened, "meta", None)
+            axis = None
+            center = None
+            radius = None
+            if isinstance(meta, dict):
+                axis = meta.get("cylinder_axis", None)
+                center = meta.get("cylinder_center", None)
+                radius = meta.get("cylinder_radius", None)
+
+            try:
+                a = np.asarray(axis, dtype=np.float64).reshape(3) if axis is not None else None
+            except Exception:
+                a = None
+            if a is None or (not np.isfinite(a).all()) or float(np.linalg.norm(a)) < 1e-12:
+                a = self._estimate_long_axis(vertices)
+            else:
+                a = a / float(np.linalg.norm(a))
+
+            t = vertices[:, :3] @ a.reshape(3,)
+            perp = vertices[:, :3] - t[:, None] * a.reshape(1, 3)
+            try:
+                c = np.asarray(center, dtype=np.float64).reshape(3) if center is not None else None
+            except Exception:
+                c = None
+            if c is None or (not np.isfinite(c).all()):
+                c = perp.mean(axis=0)
+            r_vec = perp - c.reshape(1, 3)
+            r = np.linalg.norm(r_vec, axis=1)
+
+            try:
+                r0 = float(radius) if radius is not None else float("nan")
+            except Exception:
+                r0 = float("nan")
+            if not np.isfinite(r0) or abs(r0) < 1e-12:
+                rf = r[np.isfinite(r)]
+                r0 = float(np.median(rf)) if rf.size else 1.0
+            out = (r - float(r0)).astype(np.float64, copy=False)
+            if not np.isfinite(out).all():
+                out = np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
+            return out
+        if m in {"axis", "thickness", "pca"}:
+            axis = self._estimate_thickness_axis(vertices)
+            out = vertices[:, :3] @ axis.reshape(3,)
+            if not np.isfinite(out).all():
+                out = np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
+            return out.astype(np.float64, copy=False)
+
+        # Legacy: normals.z
+        try:
+            original.compute_normals()
+        except Exception:
+            pass
+        normals = getattr(original, "normals", None)
+        if normals is None:
+            return np.zeros((n,), dtype=np.float64)
+        nn = np.asarray(normals, dtype=np.float64)
+        if nn.ndim != 2 or nn.shape[0] != n or nn.shape[1] < 3:
+            return np.zeros((n,), dtype=np.float64)
+        out = nn[:, 2].astype(np.float64, copy=False)
+        if not np.isfinite(out).all():
+            out = np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
+        return out
+
+    def _create_value_map(
+        self,
+        flattened: FlattenedMesh,
+        values: np.ndarray,
+        width: int,
+        height: int,
+    ) -> np.ndarray:
+        """
+        Create an image value map (height/depth/etc.) from per-vertex scalar values.
+
+        - Small meshes: triangle rasterization (accurate).
+        - Large meshes: vertex splat (fast) + hole filling + light smoothing.
+        """
+        normalized = flattened.normalize()
+        uv = np.asarray(normalized.uv, dtype=np.float64)
+        vals = np.asarray(values, dtype=np.float64).reshape(-1)
+        if uv.ndim != 2 or uv.shape[0] == 0 or uv.shape[1] < 2:
+            return np.zeros((int(height), int(width)), dtype=np.float32)
+        if vals.size != int(uv.shape[0]):
+            vals = np.zeros((int(uv.shape[0]),), dtype=np.float64)
+
+        try:
+            n_faces = int(getattr(flattened, "n_faces", 0) or 0)
+        except Exception:
+            n_faces = 0
+        if n_faces <= 0:
+            try:
+                n_faces = int(getattr(flattened.faces, "shape", [0])[0])
+            except Exception:
+                n_faces = 0
+        try:
+            fast_thr = int(getattr(self, "_depthmap_fast_threshold_faces", 250000) or 250000)
+        except Exception:
+            fast_thr = 250000
+        if n_faces >= max(10000, fast_thr):
+            return self._create_depth_map_fast_vertex_splat(uv, vals, int(width), int(height))
+
+        faces = np.asarray(flattened.faces, dtype=np.int32)
+        if faces.ndim != 2 or faces.shape[0] == 0 or faces.shape[1] < 3:
+            return self._create_depth_map_fast_vertex_splat(uv, vals, int(width), int(height))
+
+        # Depth buffer init
+        w = int(max(1, width))
+        h = int(max(1, height))
+        buffer = np.zeros((h, w), dtype=np.float32)
+        count = np.zeros((h, w), dtype=np.int32)
+
+        for face in faces:
+            self._rasterize_triangle_with_values(
+                uv[face], vals[face],
+                w, h,
+                buffer, count,
+            )
+
+        mask = count > 0
+        buffer[mask] /= count[mask].astype(np.float32, copy=False)
+        if not bool(mask.all()):
+            buffer = self._fill_holes(buffer, mask)
+        return buffer
+
+    def _create_value_map_image_based(
+        self,
+        flattened: FlattenedMesh,
+        values: np.ndarray,
+        width: int,
+        height: int,
+        *,
+        smooth_sigma: float = 0.0,
+        splat_sigma: float | None = None,
+    ) -> np.ndarray:
+        """Image-based value map (vertex splat + optional smoothing)."""
+        normalized = flattened.normalize()
+        uv = np.asarray(normalized.uv, dtype=np.float64)
+        vals = np.asarray(values, dtype=np.float64).reshape(-1)
+        if uv.ndim != 2 or uv.shape[0] == 0 or uv.shape[1] < 2:
+            return np.zeros((int(height), int(width)), dtype=np.float32)
+        if vals.size != int(uv.shape[0]):
+            vals = np.zeros((int(uv.shape[0]),), dtype=np.float64)
+
+        depth = self._create_depth_map_fast_vertex_splat(
+            uv,
+            vals,
+            int(width),
+            int(height),
+            splat_sigma=splat_sigma,
+        )
+
+        try:
+            sigma = float(smooth_sigma)
+        except Exception:
+            sigma = 0.0
+        if np.isfinite(sigma) and sigma > 0.0:
+            try:
+                depth = ndimage.gaussian_filter(depth, sigma=float(sigma))
+            except Exception:
+                pass
+
+        if not np.isfinite(depth).all():
+            depth = np.nan_to_num(depth, nan=0.0, posinf=0.0, neginf=0.0)
+        return depth
     
     def _create_depth_map(self, flattened: FlattenedMesh,
                           width: int, height: int) -> np.ndarray:
@@ -208,38 +611,114 @@ class SurfaceVisualizer:
         
         로컬 높이 변화를 깊이로 사용합니다.
         """
-        # 정규화된 UV 좌표
-        normalized = flattened.normalize()
-        uv = normalized.uv
-        
-        # 원본 메쉬의 법선 벡터에서 높이 추정
-        original = flattened.original_mesh
-        original.compute_normals()
-        
-        # 법선의 Z 성분을 높이 변화로 사용
-        heights = original.normals[:, 2] if original.normals is not None else np.zeros(len(uv))
-        
-        # 깊이 버퍼 초기화
-        depth_buffer = np.zeros((height, width), dtype=np.float64)
-        count_buffer = np.zeros((height, width), dtype=np.int32)
-        
-        # 각 삼각형 래스터화
-        for face in flattened.faces:
-            self._rasterize_triangle_with_values(
-                uv[face], heights[face],
-                width, height,
-                depth_buffer, count_buffer
-            )
-        
-        # 평균 계산
-        mask = count_buffer > 0
-        depth_buffer[mask] /= count_buffer[mask]
-        
-        # 빈 영역 채우기 (주변 값으로 보간)
-        if not mask.all():
-            depth_buffer = self._fill_holes(depth_buffer, mask)
-        
-        return depth_buffer
+        values = self._compute_height_values(flattened, mode="normal_z")
+        return self._create_value_map(flattened, values, int(width), int(height))
+
+    def _create_depth_map_fast_vertex_splat(
+        self,
+        uv: np.ndarray,
+        heights: np.ndarray,
+        width: int,
+        height: int,
+        *,
+        splat_sigma: float | None = None,
+    ) -> np.ndarray:
+        """Fast depth-map creation by binning per-vertex values into pixels."""
+        uv = np.asarray(uv, dtype=np.float64)
+        h = np.asarray(heights, dtype=np.float64).reshape(-1)
+        if uv.ndim != 2 or uv.shape[0] == 0 or uv.shape[1] < 2:
+            return np.zeros((int(height), int(width)), dtype=np.float64)
+        if h.size != int(uv.shape[0]):
+            h = np.zeros((int(uv.shape[0]),), dtype=np.float64)
+
+        w = int(max(1, width))
+        hh = int(max(1, height))
+
+        u = uv[:, 0].reshape(-1)
+        v = uv[:, 1].reshape(-1)
+        valid = np.isfinite(u) & np.isfinite(v) & np.isfinite(h)
+        if not bool(np.any(valid)):
+            return np.zeros((hh, w), dtype=np.float32)
+
+        u = u[valid]
+        v = v[valid]
+        hv = h[valid]
+
+        # Map to pixel coords (UV is already normalized to [0,1] by FlattenedMesh.normalize()).
+        px = np.rint(u * float(w - 1)).astype(np.int64, copy=False)
+        py = np.rint((1.0 - v) * float(hh - 1)).astype(np.int64, copy=False)
+        px = np.clip(px, 0, w - 1)
+        py = np.clip(py, 0, hh - 1)
+        lin = py * int(w) + px
+
+        # Accumulate sums and counts.
+        size = int(w * hh)
+        sums = np.bincount(lin, weights=hv, minlength=size).astype(np.float64, copy=False)
+        counts = np.bincount(lin, minlength=size).astype(np.int64, copy=False)
+
+        depth_flat = np.zeros((size,), dtype=np.float64)
+        mask_flat = counts > 0
+        depth_flat[mask_flat] = sums[mask_flat] / counts[mask_flat].astype(np.float64, copy=False)
+
+        depth = depth_flat.reshape((hh, w))
+        mask = mask_flat.reshape((hh, w))
+
+        if not bool(mask.all()):
+            depth = self._fill_holes(depth, mask)
+
+        # Light smoothing to reduce splat noise (improves gradient-based shading).
+        try:
+            if splat_sigma is not None:
+                sigma = float(splat_sigma)
+            else:
+                sigma = float(getattr(self, "_depthmap_fast_sigma", 0.8) or 0.0)
+        except Exception:
+            sigma = 0.8
+        if np.isfinite(sigma) and sigma > 0.0:
+            try:
+                depth = ndimage.gaussian_filter(depth, sigma=float(sigma))
+            except Exception:
+                pass
+
+        if not np.isfinite(depth).all():
+            depth = np.nan_to_num(depth, nan=0.0, posinf=0.0, neginf=0.0)
+        return np.asarray(depth, dtype=np.float32)
+
+    def _apply_detail_enhancement(
+        self,
+        depth_map: np.ndarray,
+        *,
+        strength: float = 1.0,
+        sigma: float | None = None,
+    ) -> np.ndarray:
+        try:
+            s = float(strength)
+        except Exception:
+            s = 1.0
+        if not np.isfinite(s) or abs(s - 1.0) < 1e-9:
+            return depth_map
+
+        h, w = depth_map.shape[:2]
+        if sigma is None:
+            sigma_val = max(1.0, 0.01 * float(min(w, h)))
+        else:
+            try:
+                sigma_val = float(sigma)
+            except Exception:
+                sigma_val = 0.0
+        if not np.isfinite(sigma_val) or sigma_val <= 0.0:
+            return depth_map
+
+        try:
+            blur = ndimage.gaussian_filter(depth_map, sigma=float(sigma_val))
+            detail = depth_map - blur
+            out = depth_map + s * detail
+        except Exception:
+            return depth_map
+
+        if not np.isfinite(out).all():
+            out = np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
+        return out
     
     def _rasterize_triangle_with_values(self, uv: np.ndarray, values: np.ndarray,
                                         width: int, height: int,
@@ -392,8 +871,26 @@ class SurfaceVisualizer:
         Returns:
             RubbingImage: 깊이맵 이미지
         """
-        aspect_ratio = flattened.height / flattened.width
-        height_pixels = int(width_pixels * aspect_ratio)
+        width_pixels = int(width_pixels)
+        if width_pixels < 1:
+            width_pixels = 1
+
+        if flattened is None or getattr(flattened, "uv", None) is None or getattr(flattened, "faces", None) is None:
+            raise ValueError("Flattened mesh is missing uv/faces.")
+        if flattened.uv.ndim != 2 or flattened.uv.shape[0] == 0:
+            raise ValueError("Flattened mesh has no UV vertices.")
+        if flattened.faces.ndim != 2 or flattened.faces.shape[0] == 0:
+            raise ValueError("Flattened mesh has no faces.")
+
+        w_real = float(flattened.width)
+        h_real = float(flattened.height)
+        if not np.isfinite(w_real) or not np.isfinite(h_real) or w_real <= 1e-12:
+            raise ValueError("Flattened mesh has invalid dimensions.")
+
+        aspect_ratio = h_real / w_real
+        if not np.isfinite(aspect_ratio) or aspect_ratio <= 0:
+            aspect_ratio = 1.0
+        height_pixels = max(1, int(width_pixels * aspect_ratio))
         
         depth_map = self._create_depth_map(flattened, width_pixels, height_pixels)
         
@@ -421,8 +918,26 @@ class SurfaceVisualizer:
         Returns:
             RubbingImage: 곡률맵 이미지
         """
-        aspect_ratio = flattened.height / flattened.width
-        height_pixels = int(width_pixels * aspect_ratio)
+        width_pixels = int(width_pixels)
+        if width_pixels < 1:
+            width_pixels = 1
+
+        if flattened is None or getattr(flattened, "uv", None) is None or getattr(flattened, "faces", None) is None:
+            raise ValueError("Flattened mesh is missing uv/faces.")
+        if flattened.uv.ndim != 2 or flattened.uv.shape[0] == 0:
+            raise ValueError("Flattened mesh has no UV vertices.")
+        if flattened.faces.ndim != 2 or flattened.faces.shape[0] == 0:
+            raise ValueError("Flattened mesh has no faces.")
+
+        w_real = float(flattened.width)
+        h_real = float(flattened.height)
+        if not np.isfinite(w_real) or not np.isfinite(h_real) or w_real <= 1e-12:
+            raise ValueError("Flattened mesh has invalid dimensions.")
+
+        aspect_ratio = h_real / w_real
+        if not np.isfinite(aspect_ratio) or aspect_ratio <= 0:
+            aspect_ratio = 1.0
+        height_pixels = max(1, int(width_pixels * aspect_ratio))
         
         depth_map = self._create_depth_map(flattened, width_pixels, height_pixels)
         

@@ -2,10 +2,16 @@
 단면 프로파일 그래프 위젯
 메쉬 표면의 높이 변화를 그래프로 시각화합니다.
 """
+import logging
+
 from PyQt6.QtWidgets import QWidget, QFileDialog, QMenu
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QPainter, QPen, QColor, QFont
 import numpy as np
+
+from ..core.logging_utils import log_once
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class ProfileGraphWidget(QWidget):
@@ -71,7 +77,14 @@ class ProfileGraphWidget(QWidget):
             if safe_title:
                 default_name = f"{safe_title}.png"
         except Exception:
-            pass
+            log_once(
+                _LOGGER,
+                "profile_graph_widget.safe_title",
+                logging.DEBUG,
+                "Failed to derive safe default filename from title: %r",
+                self.title,
+                exc_info=True,
+            )
 
         path, _ = QFileDialog.getSaveFileName(
             self,
@@ -85,6 +98,7 @@ class ProfileGraphWidget(QWidget):
             pix = self.grab()
             pix.save(path)
         except Exception:
+            _LOGGER.exception("Failed to save profile graph image to %s", path)
             return
 
     def contextMenuEvent(self, a0):
