@@ -1581,6 +1581,16 @@ class ExportPanel(QWidget):
         self.check_scale_bar = QCheckBox("스케일 바 포함")
         self.check_scale_bar.setChecked(True)
         img_layout.addRow("", self.check_scale_bar)
+
+        self.combo_rubbing_target = QComboBox()
+        self.combo_rubbing_target.addItems(["전체", "🌞 외면", "🌙 내면", "🧩 미구"])
+        self.combo_rubbing_target.setToolTip(
+            "탁본/디지털 탁본 내보내기 대상 표면을 선택합니다.\n"
+            "- 전체: 전체 메쉬를 그대로 사용\n"
+            "- 외면/내면/미구: 표면 지정 결과(face set)만 추출해 내보내기\n"
+            "※ 대상 표면이 비어 있으면 먼저 '표면 선택/지정'으로 지정해 주세요."
+        )
+        img_layout.addRow("탁본 대상:", self.combo_rubbing_target)
         
         layout.addWidget(img_group)
         
@@ -1596,7 +1606,11 @@ class ExportPanel(QWidget):
             }
             QPushButton:hover { background-color: #3182ce; }
         """)
-        btn_export_rubbing.clicked.connect(lambda: self.exportRequested.emit({'type': 'rubbing'}))
+        btn_export_rubbing.clicked.connect(
+            lambda: self.exportRequested.emit(
+                {'type': 'rubbing', 'target': self.current_rubbing_target()}
+            )
+        )
         layout.addWidget(btn_export_rubbing)
 
         btn_export_rubbing_digital = QPushButton("📤 디지털 탁본(곡률 제거) 내보내기")
@@ -1611,7 +1625,11 @@ class ExportPanel(QWidget):
             }
             QPushButton:hover { background-color: #6b46c1; }
         """)
-        btn_export_rubbing_digital.clicked.connect(lambda: self.exportRequested.emit({'type': 'rubbing_digital'}))
+        btn_export_rubbing_digital.clicked.connect(
+            lambda: self.exportRequested.emit(
+                {'type': 'rubbing_digital', 'target': self.current_rubbing_target()}
+            )
+        )
         layout.addWidget(btn_export_rubbing_digital)
         
         btn_export_ortho = QPushButton("📤 정사투영 내보내기")
@@ -1721,8 +1739,14 @@ class ExportPanel(QWidget):
         btn_export_pkg.clicked.connect(lambda: self.exportRequested.emit({"type": "profile_2d_package"}))
         profile_layout.addWidget(btn_export_pkg)
         layout.addWidget(profile_group)
-        
-        layout.addStretch()
+        layout.addStretch(1)
+
+    def current_rubbing_target(self) -> str:
+        try:
+            idx = int(getattr(self.combo_rubbing_target, "currentIndex", lambda: 0)())
+        except Exception:
+            idx = 0
+        return {0: "all", 1: "outer", 2: "inner", 3: "migu"}.get(idx, "all")
 
 
 class MeasurePanel(QWidget):
@@ -4585,6 +4609,9 @@ class MainWindow(QMainWindow):
         direction = str(options.get("direction", "auto")).strip()
         auto_cut = bool(options.get("auto_cut", False))
         multiband = bool(options.get("multiband", False))
+        surface_target = str(options.get("surface_target", "all")).strip().lower()
+        if surface_target not in {"all", "outer", "inner", "migu"}:
+            surface_target = "all"
 
         t = tuple(np.round(np.asarray(obj.translation, dtype=np.float64), 6).tolist())
         r = tuple(np.round(np.asarray(obj.rotation, dtype=np.float64), 6).tolist())
@@ -4604,6 +4631,7 @@ class MainWindow(QMainWindow):
             direction,
             auto_cut,
             multiband,
+            surface_target,
         )
 
     def _build_world_mesh(self, obj):
@@ -4792,6 +4820,9 @@ class MainWindow(QMainWindow):
     def on_export_requested(self, data):
         """내보내기 요청 처리"""
         export_type = data.get('type')
+        target = str((data or {}).get("target", "all") or "all").strip().lower()
+        if target not in {"all", "outer", "inner", "migu"}:
+            target = "all"
         
         if export_type == 'profile_2d':
             self.export_2d_profile(data.get('view'))
@@ -4833,7 +4864,23 @@ class MainWindow(QMainWindow):
                 dpi = int(self.export_panel.spin_dpi.value())
                 include_scale = bool(self.export_panel.check_scale_bar.isChecked())
 
-                key = self._flatten_cache_key(obj, flatten_options)
+                face_set = None
+                if target != "all":
+                    attr = f"{target}_face_indices"
+                    face_set = getattr(obj, attr, None) or set()
+                    if not face_set:
+                        QMessageBox.warning(
+                            self,
+                            "경고",
+                            f"'{target}' 표면 지정이 비어 있습니다.\n\n"
+                            "우측 '표면 선택/지정'에서 외면/내면/미구를 먼저 지정하거나,\n"
+                            "탁본 대상=전체로 내보내세요.",
+                        )
+                        return
+
+                flatten_options_target = dict(flatten_options)
+                flatten_options_target["surface_target"] = target
+                key = self._flatten_cache_key(obj, flatten_options_target)
                 cached_flat = self._flattened_cache.get(key)
                 base = obj.mesh
                 translation = (
@@ -4858,6 +4905,9 @@ class MainWindow(QMainWindow):
                         mesh = MainWindow._build_world_mesh_from_transform(
                             base, translation=translation, rotation=rotation, scale=scale
                         )
+                        if target != "all":
+                            ids = np.asarray(sorted(list(face_set or [])), dtype=np.int32).reshape(-1)
+                            mesh = mesh.extract_submesh(ids)
                         flattened = MainWindow._compute_flattened_mesh(mesh, opts)
 
                     # DPI 기준으로 출력 폭 계산 (실측 스케일 유지를 위해)
@@ -4916,6 +4966,20 @@ class MainWindow(QMainWindow):
                 include_scale = bool(self.export_panel.check_scale_bar.isChecked())
 
                 base = obj.mesh
+
+                face_set = None
+                if target != "all":
+                    attr = f"{target}_face_indices"
+                    face_set = getattr(obj, attr, None) or set()
+                    if not face_set:
+                        QMessageBox.warning(
+                            self,
+                            "경고",
+                            f"'{target}' 표면 지정이 비어 있습니다.\n\n"
+                            "우측 '표면 선택/지정'에서 외면/내면/미구를 먼저 지정하거나,\n"
+                            "탁본 대상=전체로 내보내세요.",
+                        )
+                        return
                 translation = (
                     np.asarray(obj.translation, dtype=np.float64).copy()
                     if getattr(obj, "translation", None) is not None
@@ -4938,6 +5002,9 @@ class MainWindow(QMainWindow):
                     mesh = MainWindow._build_world_mesh_from_transform(
                         base, translation=translation, rotation=rotation, scale=scale
                     )
+                    if target != "all":
+                        ids = np.asarray(sorted(list(face_set or [])), dtype=np.int32).reshape(-1)
+                        mesh = mesh.extract_submesh(ids)
                     flattened = MainWindow._compute_flattened_mesh(mesh, opts)
 
                     # DPI 기준으로 출력 폭 계산 (실측 스케일 유지를 위해)

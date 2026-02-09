@@ -1744,6 +1744,86 @@ def _choose_best_axis_xyz(vertices: np.ndarray) -> str:
     return best_axis
 
 
+def _pca_axes_3d(vertices: np.ndarray) -> np.ndarray:
+    """Return 3 PCA axes as unit vectors (columns), ordered by descending variance."""
+    v = np.asarray(vertices, dtype=np.float64)
+    if v.ndim != 2 or v.shape[0] < 8 or v.shape[1] < 3:
+        return np.eye(3, dtype=np.float64)
+
+    v = v[:, :3]
+    finite = np.isfinite(v).all(axis=1)
+    v = v[finite]
+    if v.shape[0] < 8:
+        return np.eye(3, dtype=np.float64)
+
+    c = np.mean(v, axis=0)
+    x = v - c.reshape(1, 3)
+    cov = (x.T @ x) / float(max(1, x.shape[0] - 1))
+
+    try:
+        w, vecs = np.linalg.eigh(cov)  # columns are eigenvectors
+        order = np.argsort(w)[::-1]
+        vecs = vecs[:, order]
+    except Exception:
+        return np.eye(3, dtype=np.float64)
+
+    # Normalize and make deterministic-ish (prefer +Z, then +Y).
+    out = np.zeros((3, 3), dtype=np.float64)
+    for i in range(3):
+        a = vecs[:, i].astype(np.float64, copy=False).reshape(3)
+        n = float(np.linalg.norm(a))
+        if not np.isfinite(n) or n < 1e-12:
+            a = np.zeros((3,), dtype=np.float64)
+            a[i] = 1.0
+            n = 1.0
+        a = a / n
+        # Flip for a stable sign (helps seam stability across runs).
+        if abs(float(a[2])) >= abs(float(a[1])) and abs(float(a[2])) >= abs(float(a[0])):
+            if float(a[2]) < 0.0:
+                a = -a
+        elif abs(float(a[1])) >= abs(float(a[0])):
+            if float(a[1]) < 0.0:
+                a = -a
+        else:
+            if float(a[0]) < 0.0:
+                a = -a
+        out[:, i] = a
+    return out
+
+
+def _cylinder_axis_score(vertices: np.ndarray, axis: np.ndarray) -> float:
+    """Lower is better: how 'cylindrical' the vertex cloud looks around this axis."""
+    v = np.asarray(vertices, dtype=np.float64)
+    if v.ndim != 2 or v.shape[0] < 8 or v.shape[1] < 3:
+        return float("inf")
+
+    try:
+        a = np.asarray(axis, dtype=np.float64).reshape(3)
+    except Exception:
+        return float("inf")
+
+    n = float(np.linalg.norm(a))
+    if not np.isfinite(n) or n < 1e-12:
+        return float("inf")
+    a = a / n
+
+    t = v[:, :3] @ a.reshape(3,)
+    perp = v[:, :3] - t[:, None] * a.reshape(1, 3)
+    center = perp.mean(axis=0)
+    r = np.linalg.norm(perp - center.reshape(1, 3), axis=1)
+    r = r[np.isfinite(r)]
+    if r.size < 8:
+        return float("inf")
+
+    med = float(np.median(r))
+    if not np.isfinite(med) or med < 1e-9:
+        return float("inf")
+    sd = float(np.std(r))
+    if not np.isfinite(sd):
+        return float("inf")
+    return float(sd / med)
+
+
 def _angles_to_min_range(
     angles: np.ndarray, *, seam_hint: float | None = None
 ) -> tuple[np.ndarray, float, float]:
@@ -1876,10 +1956,56 @@ def cylindrical_parameterization(
         return np.zeros((0, 2), dtype=np.float64)
 
     axis_choice = _normalize_cylinder_axis_choice(axis)
+    axis_source = axis_choice
+    axis_score = None
     if axis_choice == "auto":
-        axis_choice = _choose_best_axis_xyz(vertices)
+        # Choose among PCA axes + world axes by "cylindricalness" (radius variation).
+        candidates: list[tuple[str, np.ndarray]] = []
+        try:
+            pca = _pca_axes_3d(vertices)
+            for i in range(3):
+                candidates.append((f"pca{i}", pca[:, i].copy()))
+        except Exception:
+            candidates = []
+        for ax in ("x", "y", "z"):
+            candidates.append((ax, _axis_unit_vector(ax)))
 
-    a = _axis_unit_vector(axis_choice)
+        best_lbl = None
+        best_vec = None
+        best = float("inf")
+        for lbl, vec in candidates:
+            s = _cylinder_axis_score(vertices, vec)
+            if np.isfinite(s) and s < best:
+                best = float(s)
+                best_lbl = str(lbl)
+                best_vec = np.asarray(vec, dtype=np.float64).reshape(3)
+        if best_vec is None:
+            # Fallback: dominant PCA axis (works well for elongated roof tiles).
+            try:
+                pca = _pca_axes_3d(vertices)
+                best_lbl = "pca0"
+                best_vec = np.asarray(pca[:, 0], dtype=np.float64).reshape(3)
+                best = _cylinder_axis_score(vertices, best_vec)
+            except Exception:
+                best_lbl = "z"
+                best_vec = _axis_unit_vector("z")
+                best = _cylinder_axis_score(vertices, best_vec)
+        axis_source = str(best_lbl or "auto")
+        axis_score = None if not np.isfinite(best) else float(best)
+        a = np.asarray(best_vec, dtype=np.float64).reshape(3)
+    else:
+        a = _axis_unit_vector(axis_choice)
+
+    # Normalize axis
+    try:
+        a = np.asarray(a, dtype=np.float64).reshape(3)
+        n_a = float(np.linalg.norm(a))
+        if not np.isfinite(n_a) or n_a < 1e-12:
+            a = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        else:
+            a = a / n_a
+    except Exception:
+        a = np.array([0.0, 0.0, 1.0], dtype=np.float64)
     # Orthonormal basis (b1, b2) spanning plane perpendicular to axis a
     temp = np.array([1.0, 0.0, 0.0], dtype=np.float64) if abs(float(a[0])) < 0.9 else np.array([0.0, 1.0, 0.0], dtype=np.float64)
     b1 = np.cross(a, temp)
@@ -1936,6 +2062,8 @@ def cylindrical_parameterization(
     if bool(return_meta):
         meta: dict[str, Any] = {
             "cylinder_axis_choice": str(axis_choice),
+            "cylinder_axis_source": str(axis_source),
+            "cylinder_axis_score": None if axis_score is None else float(axis_score),
             "cylinder_axis": np.asarray(a, dtype=np.float64).reshape(3),
             "cylinder_center": np.asarray(center, dtype=np.float64).reshape(3),
             "cylinder_radius": float(radius_val),
