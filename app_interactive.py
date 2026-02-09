@@ -927,6 +927,19 @@ class FlattenPanel(QWidget):
             )
         )
         tool_row.addWidget(self.btn_surface_area)
+
+        self.btn_surface_magnetic = QPushButton("🧲 경계(자석)")
+        self.btn_surface_magnetic.setToolTip(
+            "메쉬 경계/윤곽을 따라 '자석'처럼 붙여가며 영역을 지정합니다.\n"
+            "드래그=그리기, 우클릭/Enter=확정, Backspace=되돌리기, [ / ]=자석 반경, ESC=취소"
+        )
+        self.btn_surface_magnetic.clicked.connect(
+            lambda: self.selectionRequested.emit(
+                "surface_tool",
+                {"tool": "magnetic", "target": self.current_surface_target()},
+            )
+        )
+        tool_row.addWidget(self.btn_surface_magnetic)
         surface_layout.addLayout(tool_row)
 
         self.label_surface_assignment = QLabel("외면: 0 / 내면: 0 / 미구: 0")
@@ -4331,6 +4344,18 @@ class MainWindow(QMainWindow):
                     f"📐 면적(Area) [{target}]: 메쉬 위 좌클릭=점 추가(드래그=회전), "
                     f"우클릭/Enter=확정, Backspace=되돌리기, Alt=제거 (ESC로 종료)"
                 )
+            elif tool == "magnetic":
+                self.viewport.picking_mode = "paint_surface_magnetic"
+                try:
+                    self.viewport.start_surface_magnetic_lasso()
+                    self.viewport.setMouseTracking(True)
+                    self.viewport.setFocus()
+                except Exception:
+                    pass
+                self.viewport.status_info = (
+                    f"🧲 경계(자석) [{target}]: 드래그=그리기, 우클릭/Enter=확정, Backspace=되돌리기, "
+                    f"Shift/Ctrl=완드 정제, Alt=제거, [ / ]=반경 (ESC=종료)"
+                )
             else:
                 QMessageBox.information(self, "안내", "선택 도구를 확인할 수 없습니다.")
                 return
@@ -4364,6 +4389,7 @@ class MainWindow(QMainWindow):
             try:
                 self.viewport.clear_surface_paint_points(target)
                 self.viewport.clear_surface_lasso()
+                self.viewport.clear_surface_magnetic_lasso(clear_cache=False)
             except Exception:
                 pass
             self.viewport.status_info = f"표면 지정 비움: {target}"
@@ -4379,6 +4405,7 @@ class MainWindow(QMainWindow):
             try:
                 self.viewport.clear_surface_paint_points(None)
                 self.viewport.clear_surface_lasso()
+                self.viewport.clear_surface_magnetic_lasso(clear_cache=False)
             except Exception:
                 pass
             self.viewport.status_info = "표면 지정 전체 초기화"

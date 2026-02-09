@@ -9,6 +9,7 @@ import sys
 import time
 import numpy as np
 from typing import Any, Optional, cast
+from scipy import ndimage
 
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QThread
@@ -1466,6 +1467,24 @@ class Viewport3D(QOpenGLWidget):
         self._surface_area_wand_time_budget_s = 2.0
         self._surface_lasso_apply_target: str = "outer"
         self._surface_lasso_apply_modifiers: Qt.KeyboardModifier = Qt.KeyboardModifier.NoModifier
+
+        # Surface magnetic lasso (edge-snapped freehand polygon in screen space)
+        self.surface_magnetic_points: list[tuple[int, int]] = []  # GL window coords (x,y)
+        self._surface_magnetic_drawing = False
+        self._surface_magnetic_cursor_qt = None  # QPoint | None
+        self._surface_magnetic_right_press_pos = None
+        self._surface_magnetic_right_dragged = False
+        self._surface_magnetic_snap_radius_px = 14
+        self._surface_magnetic_min_step_px = 1.5
+        self._surface_magnetic_last_add_t = 0.0
+        self._surface_magnetic_dist = None  # np.ndarray(h,w) float32
+        self._surface_magnetic_nn_y = None  # np.ndarray(h,w) int32
+        self._surface_magnetic_nn_x = None  # np.ndarray(h,w) int32
+        self._surface_magnetic_cache_viewport = None  # (vx,vy,w,h) in GL window coords
+        self._surface_magnetic_cache_sig = None
+        self._surface_magnetic_apply_target: str = "outer"
+        self._surface_magnetic_apply_modifiers: Qt.KeyboardModifier = Qt.KeyboardModifier.NoModifier
+        self._surface_magnetic_thread = None
         # Show outer/inner/migu overlays even outside paint mode (helps visualize auto separation).
         self.show_surface_assignment_overlay = True
         # Magic-wand(stepwise) surface grow state for Shift/Ctrl clicks.
@@ -1755,6 +1774,8 @@ class Viewport3D(QOpenGLWidget):
         self.draw_surface_paint_points()
         # 3.3 표면 지정(면적/Area) 올가미 오버레이
         self.draw_surface_lasso_overlay()
+        # 3.4 표면 지정(경계/자석) 올가미 오버레이
+        self.draw_surface_magnetic_lasso_overlay()
 
         # 3.5 바닥 정렬 점 표시
         self.draw_floor_picks()
@@ -5139,6 +5160,24 @@ class Viewport3D(QOpenGLWidget):
                         _log_ignored_exception()
                     return
 
+                elif self.picking_mode == "paint_surface_magnetic":
+                    # Magnetic lasso: freehand stroke in screen space, snapped to depth edges.
+                    try:
+                        self._surface_magnetic_cursor_qt = event.pos()
+                    except Exception:
+                        _log_ignored_exception()
+                    try:
+                        self._ensure_surface_magnetic_cache(force=False)
+                    except Exception:
+                        _log_ignored_exception()
+                    try:
+                        self._surface_magnetic_drawing = True
+                        self._surface_magnetic_try_add_point(event.pos())
+                        self.update()
+                    except Exception:
+                        _log_ignored_exception()
+                    return
+
                 elif self.picking_mode == 'paint_surface_brush':
                     remove = bool(modifiers & Qt.KeyboardModifier.AltModifier)
                     self._pick_surface_brush_face(event.pos(), remove=remove, modifiers=modifiers)
@@ -5216,6 +5255,16 @@ class Viewport3D(QOpenGLWidget):
                 self._surface_area_right_dragged = False
                 try:
                     self.surface_lasso_preview = event.pos()
+                except Exception:
+                    _log_ignored_exception()
+                return
+
+            # 표면 지정(경계/자석): 우클릭은 "확정"(click) 용도로 사용 (드래그 시에는 Pan 유지)
+            if self.picking_mode == "paint_surface_magnetic" and event.button() == Qt.MouseButton.RightButton:
+                self._surface_magnetic_right_press_pos = event.pos()
+                self._surface_magnetic_right_dragged = False
+                try:
+                    self._surface_magnetic_cursor_qt = event.pos()
                 except Exception:
                     _log_ignored_exception()
                 return
@@ -5485,6 +5534,29 @@ class Viewport3D(QOpenGLWidget):
                 self._surface_area_right_press_pos = None
                 self._surface_area_right_dragged = False
 
+        # 표면 지정(경계/자석): 좌클릭=그리기(드래그), 우클릭=확정(클릭일 때만)
+        if self.picking_mode == "paint_surface_magnetic":
+            if event.button() == Qt.MouseButton.LeftButton:
+                try:
+                    self._surface_magnetic_drawing = False
+                    self._surface_magnetic_cursor_qt = event.pos()
+                    self._surface_magnetic_try_add_point(event.pos())
+                    self.update()
+                except Exception:
+                    _log_ignored_exception()
+
+            if event.button() == Qt.MouseButton.RightButton:
+                try:
+                    if (
+                        getattr(self, "_surface_magnetic_right_press_pos", None) is not None
+                        and not bool(getattr(self, "_surface_magnetic_right_dragged", False))
+                    ):
+                        self._finish_surface_magnetic_lasso(event.modifiers(), seed_pos=event.pos())
+                except Exception:
+                    _log_ignored_exception()
+                self._surface_magnetic_right_press_pos = None
+                self._surface_magnetic_right_dragged = False
+
         if self.mouse_button == Qt.MouseButton.LeftButton and self.picking_mode == 'floor_brush':
             if self.brush_selected_faces:
                 self.alignToBrushSelected.emit()
@@ -5609,6 +5681,40 @@ class Viewport3D(QOpenGLWidget):
                         dy0 = float(event.pos().y() - pos0.y())
                         if float(dx0 * dx0 + dy0 * dy0) > thr2:
                             self._surface_area_right_dragged = True
+
+                self.update()
+                if self.mouse_button is None:
+                    return
+
+            # 표면 지정(경계/자석): 커서 프리뷰 + 좌드래그로 자유곡선(스크린) 입력
+            if self.picking_mode == "paint_surface_magnetic":
+                threshold_px = 10
+                thr2 = float(threshold_px * threshold_px)
+                try:
+                    self._surface_magnetic_cursor_qt = event.pos()
+                except Exception:
+                    _log_ignored_exception()
+
+                if (
+                    self.mouse_button == Qt.MouseButton.RightButton
+                    and getattr(self, "_surface_magnetic_right_press_pos", None) is not None
+                    and not bool(getattr(self, "_surface_magnetic_right_dragged", False))
+                ):
+                    pos0 = self._surface_magnetic_right_press_pos
+                    if pos0 is not None:
+                        dx0 = float(event.pos().x() - pos0.x())
+                        dy0 = float(event.pos().y() - pos0.y())
+                        if float(dx0 * dx0 + dy0 * dy0) > thr2:
+                            self._surface_magnetic_right_dragged = True
+
+                if self.mouse_button == Qt.MouseButton.LeftButton:
+                    try:
+                        self._surface_magnetic_drawing = True
+                        self._surface_magnetic_try_add_point(event.pos())
+                    except Exception:
+                        _log_ignored_exception()
+                    self.update()
+                    return
 
                 self.update()
                 if self.mouse_button is None:
@@ -6049,6 +6155,29 @@ class Viewport3D(QOpenGLWidget):
                 self.update()
                 return
 
+        # 0.2 경계(자석) 올가미 도구 단축키
+        if self.picking_mode == "paint_surface_magnetic":
+            key = event.key()
+            if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                self._finish_surface_magnetic_lasso(event.modifiers(), seed_pos=getattr(self, "_surface_magnetic_cursor_qt", None))
+                return
+            if key in (Qt.Key.Key_Backspace, Qt.Key.Key_Delete):
+                try:
+                    if getattr(self, "surface_magnetic_points", None):
+                        self.surface_magnetic_points.pop()
+                    self.update()
+                except Exception:
+                    _log_ignored_exception()
+                return
+            if key == Qt.Key.Key_Escape:
+                self.clear_surface_magnetic_lasso(clear_cache=False)
+                self.picking_mode = "none"
+                if not bool(getattr(self, "cut_lines_enabled", False)):
+                    self.setMouseTracking(False)
+                self.status_info = "⭕ 작업 취소됨"
+                self.update()
+                return
+
         # 1. Enter/Return 키: 바닥 정렬 확정
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             if self.picking_mode in ('floor_3point', 'floor_face', 'floor_brush'):
@@ -6102,6 +6231,23 @@ class Viewport3D(QOpenGLWidget):
                     except Exception:
                         _log_ignored_exception()
                     self.status_info = f"🖌️ 표면 {label} 크기: {new:.0f}px ([ / ] 조절)"
+                    self.update()
+                    return
+
+                # 경계(자석) 도구에서는 [ ] 키로 스냅 반경을 조절합니다.
+                if self.picking_mode == "paint_surface_magnetic":
+                    try:
+                        cur = float(getattr(self, "_surface_magnetic_snap_radius_px", 14.0) or 14.0)
+                    except Exception:
+                        cur = 14.0
+                    factor = 0.9 if key == key_dec else (1.0 / 0.9)
+                    new = float(cur) * float(factor)
+                    new = float(max(2.0, min(new, 200.0)))
+                    try:
+                        self._surface_magnetic_snap_radius_px = int(round(new))
+                    except Exception:
+                        _log_ignored_exception()
+                    self.status_info = f"🧲 자석 반경: {new:.0f}px ([ / ] 조절)"
                     self.update()
                     return
 
@@ -6734,6 +6880,337 @@ class Viewport3D(QOpenGLWidget):
         except Exception:
             pass
 
+    def clear_surface_magnetic_lasso(self, *, clear_cache: bool = False) -> None:
+        """경계(자석) 올가미 상태를 초기화합니다."""
+        try:
+            self._cancel_surface_magnetic_thread()
+        except Exception:
+            _log_ignored_exception()
+        try:
+            self.surface_magnetic_points = []
+            self._surface_magnetic_drawing = False
+            self._surface_magnetic_cursor_qt = None
+            self._surface_magnetic_right_press_pos = None
+            self._surface_magnetic_right_dragged = False
+            self._surface_magnetic_last_add_t = 0.0
+        except Exception:
+            self.surface_magnetic_points = []
+            self._surface_magnetic_drawing = False
+        if clear_cache:
+            try:
+                self._surface_magnetic_dist = None
+                self._surface_magnetic_nn_y = None
+                self._surface_magnetic_nn_x = None
+                self._surface_magnetic_cache_viewport = None
+                self._surface_magnetic_cache_sig = None
+            except Exception:
+                pass
+
+    def _cancel_surface_magnetic_thread(self) -> None:
+        thr = getattr(self, "_surface_magnetic_thread", None)
+        if thr is None:
+            return
+        self._surface_magnetic_thread = None
+        try:
+            if thr.isRunning():
+                thr.requestInterruption()
+        except Exception:
+            _log_ignored_exception()
+
+    def start_surface_magnetic_lasso(self) -> None:
+        """경계(자석) 올가미 도구 시작: 캐시 준비 + 기존 선 초기화."""
+        try:
+            self.clear_surface_magnetic_lasso(clear_cache=False)
+        except Exception:
+            _log_ignored_exception()
+
+        try:
+            target = str(getattr(self, "_surface_paint_target", "outer")).strip().lower()
+            if target not in {"outer", "inner", "migu"}:
+                target = "outer"
+            self._surface_magnetic_apply_target = target
+        except Exception:
+            self._surface_magnetic_apply_target = "outer"
+
+        try:
+            self._ensure_surface_magnetic_cache(force=True)
+        except Exception:
+            _log_ignored_exception()
+
+        self.update()
+
+    def _surface_magnetic_cache_signature(self) -> tuple:
+        """Signature used to decide whether the magnetic edge cache is stale."""
+        try:
+            self.makeCurrent()
+        except Exception:
+            pass
+        try:
+            vp = glGetIntegerv(GL_VIEWPORT)
+            vx, vy, vw, vh = [int(v) for v in vp[:4]]
+        except Exception:
+            vx, vy, vw, vh = 0, 0, int(self.width()), int(self.height())
+
+        obj = getattr(self, "selected_obj", None)
+        obj_id = id(obj) if obj is not None else 0
+        try:
+            cam = getattr(self, "camera", None)
+            az = float(getattr(cam, "azimuth", 0.0) or 0.0)
+            el = float(getattr(cam, "elevation", 0.0) or 0.0)
+            dist = float(getattr(cam, "distance", 0.0) or 0.0)
+        except Exception:
+            az, el, dist = 0.0, 0.0, 0.0
+
+        # Rounded for stability (avoid recompute due to tiny float noise)
+        return (
+            int(obj_id),
+            int(vx),
+            int(vy),
+            int(vw),
+            int(vh),
+            float(round(az, 3)),
+            float(round(el, 3)),
+            float(round(dist, 4)),
+        )
+
+    def _ensure_surface_magnetic_cache(self, *, force: bool = False) -> bool:
+        sig = None
+        try:
+            sig = self._surface_magnetic_cache_signature()
+        except Exception:
+            sig = None
+
+        if (
+            (not force)
+            and sig is not None
+            and sig == getattr(self, "_surface_magnetic_cache_sig", None)
+            and getattr(self, "_surface_magnetic_dist", None) is not None
+            and getattr(self, "_surface_magnetic_nn_x", None) is not None
+            and getattr(self, "_surface_magnetic_nn_y", None) is not None
+            and getattr(self, "_surface_magnetic_cache_viewport", None) is not None
+        ):
+            return True
+
+        ok = self._compute_surface_magnetic_cache()
+        try:
+            self._surface_magnetic_cache_sig = sig
+        except Exception:
+            self._surface_magnetic_cache_sig = None
+        return bool(ok)
+
+    def _compute_surface_magnetic_cache(self) -> bool:
+        """Compute distance-to-edge cache from the current depth buffer."""
+        obj = getattr(self, "selected_obj", None)
+        if obj is None or getattr(obj, "mesh", None) is None:
+            self._surface_magnetic_dist = None
+            self._surface_magnetic_nn_y = None
+            self._surface_magnetic_nn_x = None
+            self._surface_magnetic_cache_viewport = None
+            return False
+
+        try:
+            self.makeCurrent()
+        except Exception:
+            return False
+
+        try:
+            vp = glGetIntegerv(GL_VIEWPORT)
+            vx, vy, vw, vh = [int(v) for v in vp[:4]]
+        except Exception:
+            vx, vy, vw, vh = 0, 0, int(self.width()), int(self.height())
+        vw = max(1, int(vw))
+        vh = max(1, int(vh))
+
+        try:
+            depth_raw = cast(Any, glReadPixels(vx, vy, vw, vh, GL_DEPTH_COMPONENT, GL_FLOAT))
+            depth = np.asarray(depth_raw, dtype=np.float32)
+            depth = np.squeeze(depth)
+            if depth.ndim != 2:
+                depth = depth.reshape((vh, vw))
+        except Exception:
+            self._surface_magnetic_dist = None
+            self._surface_magnetic_nn_y = None
+            self._surface_magnetic_nn_x = None
+            self._surface_magnetic_cache_viewport = None
+            return False
+
+        if depth.size == 0:
+            return False
+
+        depth = np.asarray(depth, dtype=np.float32)
+        mask_obj = np.isfinite(depth) & (depth < 1.0)
+        if not bool(np.any(mask_obj)):
+            self._surface_magnetic_dist = None
+            self._surface_magnetic_nn_y = None
+            self._surface_magnetic_nn_x = None
+            self._surface_magnetic_cache_viewport = None
+            return False
+
+        # Background as far plane for stable gradients.
+        d = depth.copy()
+        d[~mask_obj] = 1.0
+
+        # Smooth a bit to reduce triangle noise, then compute depth edges.
+        try:
+            sigma = float(getattr(self, "_surface_magnetic_depth_smooth_sigma", 1.0) or 1.0)
+        except Exception:
+            sigma = 1.0
+        if np.isfinite(sigma) and sigma > 0.0:
+            try:
+                d = ndimage.gaussian_filter(d, sigma=float(sigma))
+            except Exception:
+                pass
+
+        try:
+            gx = ndimage.sobel(d, axis=1)
+            gy = ndimage.sobel(d, axis=0)
+            g = np.hypot(gx, gy).astype(np.float32, copy=False)
+        except Exception:
+            g = np.zeros((vh, vw), dtype=np.float32)
+
+        g[~mask_obj] = 0.0
+
+        # Silhouette edge (object-vs-background)
+        try:
+            sil = mask_obj & (~ndimage.binary_erosion(mask_obj, structure=np.ones((3, 3), dtype=bool)))
+        except Exception:
+            sil = np.zeros((vh, vw), dtype=bool)
+
+        # Gradient edge (creases / depth discontinuities)
+        thr = 0.0
+        try:
+            vals = g[mask_obj]
+            vals = vals[np.isfinite(vals)]
+            if vals.size:
+                p90 = float(np.percentile(vals, 90.0))
+                p98 = float(np.percentile(vals, 98.0))
+                thr = float(p90 + 0.35 * (p98 - p90))
+        except Exception:
+            thr = 0.0
+        try:
+            thr_abs = float(getattr(self, "_surface_magnetic_edge_thr_abs", 1e-4) or 1e-4)
+        except Exception:
+            thr_abs = 1e-4
+        thr = float(max(thr, thr_abs))
+
+        edges = sil | (g >= thr)
+        if not bool(np.any(edges)):
+            self._surface_magnetic_dist = None
+            self._surface_magnetic_nn_y = None
+            self._surface_magnetic_nn_x = None
+            self._surface_magnetic_cache_viewport = (vx, vy, vw, vh)
+            return False
+
+        try:
+            inv = np.logical_not(edges)
+            dist, (iy, ix) = ndimage.distance_transform_edt(inv, return_indices=True)
+            self._surface_magnetic_dist = np.asarray(dist, dtype=np.float32)
+            self._surface_magnetic_nn_y = np.asarray(iy, dtype=np.int32)
+            self._surface_magnetic_nn_x = np.asarray(ix, dtype=np.int32)
+            self._surface_magnetic_cache_viewport = (vx, vy, vw, vh)
+            return True
+        except Exception:
+            self._surface_magnetic_dist = None
+            self._surface_magnetic_nn_y = None
+            self._surface_magnetic_nn_x = None
+            self._surface_magnetic_cache_viewport = (vx, vy, vw, vh)
+            return False
+
+    def _surface_magnetic_snap_gl(self, gl_x: int, gl_y: int) -> tuple[int, int]:
+        """Snap (gl_x,gl_y) to nearest edge pixel when within snap radius."""
+        dist = getattr(self, "_surface_magnetic_dist", None)
+        nnx = getattr(self, "_surface_magnetic_nn_x", None)
+        nny = getattr(self, "_surface_magnetic_nn_y", None)
+        vp = getattr(self, "_surface_magnetic_cache_viewport", None)
+        if dist is None or nnx is None or nny is None or vp is None:
+            return int(gl_x), int(gl_y)
+
+        try:
+            vx, vy, vw, vh = [int(v) for v in vp[:4]]
+        except Exception:
+            return int(gl_x), int(gl_y)
+
+        x = int(gl_x) - int(vx)
+        y = int(gl_y) - int(vy)
+        if x < 0 or y < 0 or x >= int(vw) or y >= int(vh):
+            return int(gl_x), int(gl_y)
+
+        try:
+            d = float(dist[int(y), int(x)])
+        except Exception:
+            return int(gl_x), int(gl_y)
+
+        try:
+            snap_r = float(getattr(self, "_surface_magnetic_snap_radius_px", 14) or 0.0)
+        except Exception:
+            snap_r = 14.0
+        if not np.isfinite(snap_r) or snap_r <= 0.0:
+            return int(gl_x), int(gl_y)
+
+        if np.isfinite(d) and d <= float(snap_r):
+            try:
+                sx = int(nnx[int(y), int(x)])
+                sy = int(nny[int(y), int(x)])
+                sx = int(np.clip(sx, 0, int(vw) - 1))
+                sy = int(np.clip(sy, 0, int(vh) - 1))
+                return int(vx + sx), int(vy + sy)
+            except Exception:
+                return int(gl_x), int(gl_y)
+        return int(gl_x), int(gl_y)
+
+    def _surface_magnetic_try_add_point(self, qt_pos: object) -> None:
+        """Append a snapped point from a Qt mouse position (best-effort, throttled)."""
+        try:
+            x = int(getattr(qt_pos, "x", lambda: 0)())
+            y = int(getattr(qt_pos, "y", lambda: 0)())
+        except Exception:
+            return
+
+        try:
+            gl_x, gl_y = self._qt_to_gl_window_xy(float(x), float(y), viewport=None)
+        except Exception:
+            gl_x, gl_y = int(x), int(y)
+
+        try:
+            sx, sy = self._surface_magnetic_snap_gl(int(gl_x), int(gl_y))
+        except Exception:
+            sx, sy = int(gl_x), int(gl_y)
+
+        pt = (int(sx), int(sy))
+
+        try:
+            min_step = float(getattr(self, "_surface_magnetic_min_step_px", 1.5) or 0.0)
+        except Exception:
+            min_step = 1.5
+        if not np.isfinite(min_step) or min_step < 0.0:
+            min_step = 0.0
+
+        pts = list(getattr(self, "surface_magnetic_points", None) or [])
+        if pts:
+            try:
+                last = pts[-1]
+                dx = float(pt[0] - int(last[0]))
+                dy = float(pt[1] - int(last[1]))
+                if float(np.hypot(dx, dy)) < float(min_step):
+                    return
+            except Exception:
+                pass
+
+        try:
+            max_pts = int(getattr(self, "_surface_magnetic_max_points", 12000) or 12000)
+        except Exception:
+            max_pts = 12000
+        max_pts = max(2000, min(max_pts, 200000))
+        if int(len(pts)) >= int(max_pts):
+            return
+
+        pts.append(pt)
+        self.surface_magnetic_points = pts
+        try:
+            self._surface_magnetic_last_add_t = float(time.monotonic())
+        except Exception:
+            self._surface_magnetic_last_add_t = 0.0
+
     def _cancel_surface_lasso_thread(self) -> None:
         thr = getattr(self, "_surface_lasso_thread", None)
         if thr is None:
@@ -7057,6 +7534,304 @@ class Viewport3D(QOpenGLWidget):
 
         # Keep tool active, but clear the polygon for the next stroke.
         self.clear_surface_lasso()
+        self.update()
+
+    def _finish_surface_magnetic_lasso(self, modifiers, *, seed_pos=None) -> None:
+        """현재 '경계(자석) 올가미' 폴리곤 영역에 포함되는 '보이는' 면을 한 번에 지정합니다."""
+        obj = self.selected_obj
+        if obj is None or getattr(obj, "mesh", None) is None:
+            self.status_info = "⚠️ 먼저 메쉬를 선택해 주세요."
+            self.clear_surface_magnetic_lasso(clear_cache=False)
+            self.update()
+            return
+
+        pts = list(getattr(self, "surface_magnetic_points", None) or [])
+        if len(pts) < 3:
+            self.status_info = "🧲 경계(자석): 영역을 3점 이상 그려주세요. (우클릭/Enter=확정)"
+            self.update()
+            return
+
+        thr = getattr(self, "_surface_magnetic_thread", None)
+        try:
+            if thr is not None and thr.isRunning():
+                self.status_info = "⏳ 경계(자석) 선택 계산 중…"
+                self.update()
+                return
+        except Exception:
+            _log_ignored_exception()
+
+        # Snapshot state at confirm time
+        target = str(getattr(self, "_surface_paint_target", "outer")).strip().lower()
+        if target not in {"outer", "inner", "migu"}:
+            target = "outer"
+        self._surface_magnetic_apply_target = target
+        self._surface_magnetic_apply_modifiers = modifiers
+
+        # Magic-wand seed: prefer the confirm click position (user intent) if available.
+        seed_face_idx = -1
+        if seed_pos is not None:
+            try:
+                px = int(getattr(seed_pos, "x", lambda: -1)())
+                py = int(getattr(seed_pos, "y", lambda: -1)())
+                if px >= 0 and py >= 0:
+                    p_seed = self.pick_point_on_mesh(px, py)
+                    if p_seed is not None:
+                        res = self.pick_face_at_point(np.asarray(p_seed, dtype=np.float64), return_index=True)
+                        if res:
+                            seed_face_idx = int(res[0])
+            except Exception:
+                seed_face_idx = -1
+
+        if seed_face_idx < 0:
+            try:
+                pts_arr = np.asarray(pts, dtype=np.float64).reshape(-1, 2)
+                if pts_arr.size >= 6:
+                    cx = float(np.mean(pts_arr[:, 0]))
+                    cy = float(np.mean(pts_arr[:, 1]))
+                    self.makeCurrent()
+                    vp0 = glGetIntegerv(GL_VIEWPORT)
+                    qx0, qy0 = self._gl_window_to_qt_xy(cx, cy, viewport=vp0)
+                    p_seed = self.pick_point_on_mesh(int(round(qx0)), int(round(qy0)))
+                    if p_seed is not None:
+                        res = self.pick_face_at_point(np.asarray(p_seed, dtype=np.float64), return_index=True)
+                        if res:
+                            seed_face_idx = int(res[0])
+            except Exception:
+                seed_face_idx = -1
+
+        self.makeCurrent()
+        viewport = glGetIntegerv(GL_VIEWPORT)
+        mv_raw = glGetDoublev(GL_MODELVIEW_MATRIX)
+        proj_raw = glGetDoublev(GL_PROJECTION_MATRIX)
+        try:
+            mv = np.asarray(mv_raw, dtype=np.float64).reshape(4, 4)
+            proj = np.asarray(proj_raw, dtype=np.float64).reshape(4, 4)
+        except Exception:
+            self.status_info = "🧲 경계(자석): 카메라 상태를 읽을 수 없습니다."
+            self.update()
+            return
+
+        try:
+            vx, vy, vw, vh = [int(v) for v in viewport[:4]]
+        except Exception:
+            vx, vy, vw, vh = 0, 0, int(self.width()), int(self.height())
+        vw = max(1, vw)
+        vh = max(1, vh)
+
+        poly_gl = np.asarray(pts, dtype=np.float64).reshape(-1, 2)
+        try:
+            max_poly = int(getattr(self, "_surface_magnetic_max_poly_points", 800) or 800)
+        except Exception:
+            max_poly = 800
+        poly2 = self._sanitize_polygon_2d(poly_gl, max_points=max(50, int(max_poly)), eps=1e-6)
+        if poly2 is None or poly2.shape[0] < 3:
+            self.status_info = "🧲 경계(자석): 폴리곤이 올바르지 않습니다."
+            self.update()
+            return
+        poly_gl = np.asarray(poly2, dtype=np.float64).reshape(-1, 2)
+
+        # Bounding box in GL coords (clamped to viewport)
+        try:
+            gl_x0 = int(np.clip(int(np.floor(float(np.min(poly_gl[:, 0])))), vx, vx + vw - 1))
+            gl_x1 = int(np.clip(int(np.ceil(float(np.max(poly_gl[:, 0])))), vx, vx + vw - 1))
+            gl_y0 = int(np.clip(int(np.floor(float(np.min(poly_gl[:, 1])))), vy, vy + vh - 1))
+            gl_y1 = int(np.clip(int(np.ceil(float(np.max(poly_gl[:, 1])))), vy, vy + vh - 1))
+        except Exception:
+            self.status_info = "🧲 경계(자석): 폴리곤이 올바르지 않습니다."
+            self.update()
+            return
+
+        width = int(max(1, gl_x1 - gl_x0 + 1))
+        height = int(max(1, gl_y1 - gl_y0 + 1))
+
+        # Read depth buffer for occlusion filtering (best-effort).
+        depth_map = None
+        try:
+            depth_raw = cast(Any, glReadPixels(gl_x0, gl_y0, width, height, GL_DEPTH_COMPONENT, GL_FLOAT))
+            depth_map = np.asarray(depth_raw, dtype=np.float32)
+            depth_map = np.squeeze(depth_map)
+            if depth_map.ndim != 2:
+                depth_map = depth_map.reshape((height, width))
+        except Exception:
+            depth_map = None
+
+        try:
+            tol = float(getattr(self, "_surface_area_depth_tol", 0.01))
+        except Exception:
+            tol = 0.01
+        try:
+            max_sel_raw = int(getattr(self, "_surface_area_max_selected_faces", 0))
+        except Exception:
+            max_sel_raw = 0
+
+        n_faces = 0
+        try:
+            n_faces = int(getattr(getattr(obj, "mesh", None), "n_faces", 0) or 0)
+        except Exception:
+            n_faces = 0
+
+        if max_sel_raw <= 0:
+            max_sel = int(max(1, n_faces))
+        else:
+            max_sel = int(max(1, max_sel_raw))
+            if n_faces > 0:
+                max_sel = min(max_sel, int(n_faces))
+
+        self.status_info = "🧲 경계(자석): 보이는 면 계산 중…"
+        self.update()
+
+        wand_enabled = bool(
+            modifiers
+            & (
+                Qt.KeyboardModifier.ShiftModifier
+                | Qt.KeyboardModifier.ControlModifier
+            )
+        )
+        try:
+            thr2 = _SurfaceLassoSelectThread(
+                obj.mesh.vertices,
+                obj.mesh.faces,
+                np.asarray(getattr(obj, "translation", [0.0, 0.0, 0.0]), dtype=np.float64),
+                np.asarray(getattr(obj, "rotation", [0.0, 0.0, 0.0]), dtype=np.float64),
+                float(getattr(obj, "scale", 1.0)),
+                np.asarray(getattr(getattr(self, "camera", None), "position", np.array([0.0, 0.0, 0.0])), dtype=np.float64),
+                mv,
+                proj,
+                np.asarray(viewport, dtype=np.int32),
+                poly_gl,
+                (int(gl_x0), int(gl_y0), int(gl_x1), int(gl_y1)),
+                (int(gl_x0), int(gl_y0)),
+                depth_map,
+                depth_tol=tol,
+                max_selected_faces=max_sel,
+                wand_seed_face_idx=seed_face_idx if seed_face_idx >= 0 else None,
+                wand_enabled=wand_enabled,
+                wand_angle_deg=float(getattr(self, "_surface_area_wand_angle_deg", 30.0) or 30.0),
+                wand_knn_k=int(getattr(self, "_surface_area_wand_knn_k", 12) or 12),
+                wand_time_budget_s=float(getattr(self, "_surface_area_wand_time_budget_s", 2.0) or 2.0),
+            )
+            thr2.computed.connect(self._on_surface_magnetic_computed)
+            thr2.failed.connect(self._on_surface_magnetic_failed)
+            self._surface_magnetic_thread = thr2
+            thr2.start()
+        except Exception as e:
+            self._surface_magnetic_thread = None
+            self.status_info = f"⚠️ 경계(자석) 계산 시작 실패: {e}"
+            self.update()
+
+    def _on_surface_magnetic_failed(self, msg: str) -> None:
+        if self.sender() is not getattr(self, "_surface_magnetic_thread", None):
+            return
+        self._surface_magnetic_thread = None
+        self.status_info = f"⚠️ 경계(자석) 실패: {msg}"
+        self.update()
+
+    def _on_surface_magnetic_computed(self, result: object) -> None:
+        if self.sender() is not getattr(self, "_surface_magnetic_thread", None):
+            return
+        self._surface_magnetic_thread = None
+
+        obj = self.selected_obj
+        if obj is None or getattr(obj, "mesh", None) is None:
+            self.status_info = "⚠️ 경계(자석): 선택 대상이 없습니다."
+            self.clear_surface_magnetic_lasso(clear_cache=False)
+            self.update()
+            return
+
+        indices = None
+        stats = {}
+        try:
+            if isinstance(result, dict):
+                indices = result.get("indices", None)
+                stats = result.get("stats", {}) or {}
+        except Exception:
+            indices = None
+            stats = {}
+
+        if indices is None:
+            self.status_info = "🧲 경계(자석): 선택된 면이 없습니다."
+            self.clear_surface_magnetic_lasso(clear_cache=False)
+            self.update()
+            return
+
+        try:
+            idx_arr = np.asarray(indices, dtype=np.int32).reshape(-1)
+        except Exception:
+            idx_arr = np.zeros((0,), dtype=np.int32)
+
+        target = str(getattr(self, "_surface_magnetic_apply_target", getattr(self, "_surface_paint_target", "outer"))).strip().lower()
+        if target not in {"outer", "inner", "migu"}:
+            target = "outer"
+        target_lbl = {"outer": "외면", "inner": "내면", "migu": "미구"}.get(target, target)
+        modifiers = getattr(self, "_surface_magnetic_apply_modifiers", Qt.KeyboardModifier.NoModifier)
+
+        target_set = self._get_surface_target_set(obj, target)
+        remove = bool(modifiers & Qt.KeyboardModifier.AltModifier)
+
+        if idx_arr.size:
+            try:
+                chunk = int(getattr(self, "_surface_assign_chunk", 200000))
+            except Exception:
+                chunk = 200000
+            chunk = max(20000, min(chunk, 500000))
+
+            other_sets = self._get_other_surface_sets(obj, target) if not remove else []
+            try:
+                idx_arr = np.asarray(idx_arr, dtype=np.int32).reshape(-1)
+            except Exception:
+                idx_arr = np.zeros((0,), dtype=np.int32)
+
+            for start in range(0, int(idx_arr.size), int(chunk)):
+                ids = idx_arr[start : start + int(chunk)].tolist()
+                if remove:
+                    target_set.difference_update(ids)
+                else:
+                    target_set.update(ids)
+                    for s in other_sets:
+                        s.difference_update(ids)
+
+        self._emit_surface_assignment_changed(obj)
+
+        try:
+            selected_n = int(stats.get("selected", int(idx_arr.size)))
+            cand_n = int(stats.get("candidates", 0))
+        except Exception:
+            selected_n = int(idx_arr.size)
+            cand_n = 0
+        wand_info = ""
+        try:
+            wand_n = int(stats.get("wand_selected", 0) or 0)
+            wand_c = int(stats.get("wand_candidates", 0) or 0)
+            if wand_n and wand_c:
+                wand_info = f" / 완드 {wand_n:,}/{wand_c:,}"
+        except Exception:
+            wand_info = ""
+
+        comp_info = ""
+        try:
+            comp_n = int(stats.get("component_selected", 0) or 0)
+            comp_c = int(stats.get("component_candidates", 0) or 0)
+            if comp_n and comp_c and comp_c > comp_n:
+                comp_info = f" / 연결 {comp_n:,}/{comp_c:,}"
+        except Exception:
+            comp_info = ""
+
+        trunc_info = ""
+        try:
+            if bool(stats.get("truncated", False)):
+                ms = int(stats.get("max_selected_faces", 0) or 0)
+                trunc_info = f" / 최대 {ms:,} 제한" if ms > 0 else " / 최대 제한"
+        except Exception:
+            trunc_info = ""
+
+        op = "제거" if remove else "추가"
+        msg = f"🧲 경계(자석) [{target_lbl}]: {op} {selected_n:,} faces{comp_info}{wand_info}{trunc_info}"
+        if cand_n:
+            msg += f" (후보 {cand_n:,})"
+        self.status_info = msg
+
+        # Keep tool active, but clear the polygon for the next stroke.
+        self.clear_surface_magnetic_lasso(clear_cache=False)
         self.update()
 
     def _get_surface_target_set(self, obj: SceneObject, target: str) -> set[int]:
@@ -8394,6 +9169,165 @@ class Viewport3D(QOpenGLWidget):
                         continue
                     glVertex3f(x, y, 0.0)
                 glEnd()
+
+            # Restore matrices
+            glPopMatrix()
+            glMatrixMode(GL_PROJECTION)
+            glPopMatrix()
+            glMatrixMode(GL_MODELVIEW)
+
+        except Exception:
+            try:
+                glEnd()
+            except Exception:
+                _log_ignored_exception()
+        finally:
+            try:
+                glDisable(GL_BLEND)
+                glEnable(GL_DEPTH_TEST)
+                glEnable(GL_LIGHTING)
+            except Exception:
+                _log_ignored_exception()
+
+    def draw_surface_magnetic_lasso_overlay(self) -> None:
+        """경계(자석) 도구의 화면 올가미(폴리곤) 오버레이"""
+        try:
+            if self.picking_mode != "paint_surface_magnetic":
+                return
+
+            pts = getattr(self, "surface_magnetic_points", None) or []
+            cursor = getattr(self, "_surface_magnetic_cursor_qt", None)
+            if not pts and cursor is None:
+                return
+
+            self.makeCurrent()
+            viewport = glGetIntegerv(GL_VIEWPORT)
+            try:
+                vx, vy, w, h = [int(v) for v in viewport[:4]]
+            except Exception:
+                vx, vy, w, h = 0, 0, int(self.width()), int(self.height())
+            if w <= 1 or h <= 1:
+                return
+
+            # Stored points are in GL window coords (bottom-left origin).
+            screen_pts: list[tuple[float, float]] = []
+            for p in pts:
+                try:
+                    gx, gy = int(p[0]), int(p[1])
+                except Exception:
+                    continue
+                sx = float(gx - int(vx))
+                sy = float(int(vy + h - 1) - gy)
+                if np.isfinite(sx) and np.isfinite(sy):
+                    screen_pts.append((sx, sy))
+
+            preview = None
+            preview_snapped = False
+            if cursor is not None:
+                try:
+                    gl_x, gl_y = self._qt_to_gl_window_xy(float(cursor.x()), float(cursor.y()), viewport=viewport)
+                    gl_sx, gl_sy = self._surface_magnetic_snap_gl(int(gl_x), int(gl_y))
+                    preview_snapped = (int(gl_sx) != int(gl_x)) or (int(gl_sy) != int(gl_y))
+                    px = float(int(gl_sx) - int(vx))
+                    py = float(int(vy + h - 1) - int(gl_sy))
+                    if np.isfinite(px) and np.isfinite(py):
+                        preview = (px, py)
+                except Exception:
+                    preview = None
+                    preview_snapped = False
+
+            glDisable(GL_LIGHTING)
+            glDisable(GL_DEPTH_TEST)
+            glEnable(GL_BLEND)
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+
+            # 2D ortho in GL pixel coords (top-left origin)
+            glMatrixMode(GL_PROJECTION)
+            glPushMatrix()
+            glLoadIdentity()
+            glOrtho(0.0, float(w), float(h), 0.0, -1.0, 1.0)
+
+            glMatrixMode(GL_MODELVIEW)
+            glPushMatrix()
+            glLoadIdentity()
+
+            # Polyline
+            if screen_pts:
+                glLineWidth(2.0)
+                glColor4f(0.15, 0.75, 1.0, 0.85)
+                glBegin(GL_LINE_STRIP)
+                for xy in screen_pts:
+                    try:
+                        glVertex3f(float(xy[0]), float(xy[1]), 0.0)
+                    except Exception:
+                        continue
+                if preview is not None:
+                    glVertex3f(float(preview[0]), float(preview[1]), 0.0)
+                glEnd()
+
+                # Vertices
+                glPointSize(6.0)
+                glColor4f(0.95, 0.95, 0.95, 0.95)
+                glBegin(GL_POINTS)
+                for xy in screen_pts:
+                    try:
+                        glVertex3f(float(xy[0]), float(xy[1]), 0.0)
+                    except Exception:
+                        continue
+                glEnd()
+
+                # Start vertex emphasized
+                try:
+                    glPointSize(9.0)
+                    glColor4f(1.0, 1.0, 1.0, 0.95)
+                    glBegin(GL_POINTS)
+                    glVertex3f(float(screen_pts[0][0]), float(screen_pts[0][1]), 0.0)
+                    glEnd()
+                except Exception:
+                    try:
+                        glEnd()
+                    except Exception:
+                        _log_ignored_exception()
+
+            # Cursor preview + snap radius
+            if preview is not None:
+                try:
+                    snap_px = float(getattr(self, "_surface_magnetic_snap_radius_px", 14) or 14.0)
+                except Exception:
+                    snap_px = 14.0
+                snap_px = float(max(0.0, min(snap_px, 400.0)))
+
+                glPointSize(8.0)
+                if preview_snapped:
+                    glColor4f(0.2, 0.95, 0.35, 0.95)
+                else:
+                    glColor4f(0.95, 0.95, 0.95, 0.75)
+                glBegin(GL_POINTS)
+                glVertex3f(float(preview[0]), float(preview[1]), 0.0)
+                glEnd()
+
+                if snap_px > 0.0:
+                    try:
+                        seg = 32
+                        glLineWidth(1.5)
+                        if preview_snapped:
+                            glColor4f(0.2, 0.95, 0.35, 0.6)
+                        else:
+                            glColor4f(0.85, 0.85, 0.85, 0.35)
+                        glBegin(GL_LINE_LOOP)
+                        for j in range(seg):
+                            a = 2.0 * float(np.pi) * float(j) / float(seg)
+                            glVertex3f(
+                                float(preview[0]) + snap_px * float(np.cos(a)),
+                                float(preview[1]) + snap_px * float(np.sin(a)),
+                                0.0,
+                            )
+                        glEnd()
+                    except Exception:
+                        try:
+                            glEnd()
+                        except Exception:
+                            _log_ignored_exception()
 
             # Restore matrices
             glPopMatrix()
