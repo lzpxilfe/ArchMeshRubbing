@@ -4307,7 +4307,7 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
                 self.viewport.status_info = (
-                    f"👆 찍기(자동 확장) [{target}]: 클릭=영역 지정, Shift/Ctrl=추가, Alt=제거 (ESC로 종료)"
+                    f"👆 찍기(자동 확장) [{target}]: 클릭=영역 지정, Shift/Ctrl=추가(단계 확장), Alt=제거, [ / ]=크기 (ESC=종료)"
                 )
             elif tool == "brush":
                 self.viewport.picking_mode = "paint_surface_brush"
@@ -4316,7 +4316,9 @@ class MainWindow(QMainWindow):
                         self.viewport.setMouseTracking(False)
                 except Exception:
                     pass
-                self.viewport.status_info = f"🖌️ 보정(브러시) [{target}]: 드래그=칠하기, Alt=지우기 (ESC로 종료)"
+                self.viewport.status_info = (
+                    f"🖌️ 보정(브러시) [{target}]: 드래그=칠하기, Alt=지우기, Shift=2x, Ctrl=0.5x, [ / ]=크기 (ESC=종료)"
+                )
             elif tool == "area":
                 self.viewport.picking_mode = "paint_surface_area"
                 try:
@@ -4847,7 +4849,11 @@ class MainWindow(QMainWindow):
                     width_pixels = min(width_pixels, 12000)  # 메모리 보호용 상한
 
                     visualizer = SurfaceVisualizer(default_dpi=dpi)
-                    rubbing = visualizer.generate_rubbing(flattened, width_pixels=width_pixels, style='traditional')
+                    rubbing = visualizer.generate_rubbing(
+                        flattened,
+                        width_pixels=width_pixels,
+                        preset="자연(이미지)",
+                    )
                     rubbing.save(filepath, include_scale_bar=include_scale)
                     return {"path": filepath, "key": key, "flattened": flattened if cached_flat is None else None}
 
@@ -5128,6 +5134,7 @@ class MainWindow(QMainWindow):
                             flatten_distortion=float(flatten_options.get("distortion", 0.5)),
                             cylinder_axis=str(flatten_options.get("direction", "auto")),
                             cylinder_radius=cylinder_radius,
+                            rubbing_preset="자연(이미지)",
                         ),
                     )
                     return filepath

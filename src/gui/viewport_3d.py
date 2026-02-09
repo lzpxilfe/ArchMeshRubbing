@@ -1440,8 +1440,13 @@ class Viewport3D(QOpenGLWidget):
         self.brush_selected_faces = set() # 브러시로 선택된 면 인덱스
         self._selection_brush_mode = "replace"  # replace|add|remove
         self._selection_brush_last_pick = 0.0
+        # 큰 메쉬에서 클릭이 조금 빗나가면(배경 depth=1.0) 근처 픽셀을 탐색해서 피킹을 보정합니다.
+        self._pick_search_radius_px = 8
         self._surface_paint_target = "outer"  # outer|inner|migu
         self._surface_brush_last_pick = 0.0
+        # 표면 지정(찍기/브러시) 도구 크기: 화면(px) 기준 기본값(피킹 깊이에서 world로 환산).
+        self._surface_brush_radius_px = 24.0
+        self._surface_click_radius_px = 24.0
         self.surface_paint_points = []  # [(np.ndarray(3,), target), ...] in world coords
         self._surface_paint_points_max = 250
         self._surface_paint_left_press_pos = None
@@ -5357,14 +5362,43 @@ class Viewport3D(QOpenGLWidget):
                     and not bool(getattr(self, "_surface_paint_left_dragged", False))
                 ):
                     modifiers = event.modifiers()
-                    point = self.pick_point_on_mesh(event.pos().x(), event.pos().y())
-                    if point is not None:
+                    info = self.pick_point_on_mesh_info(event.pos().x(), event.pos().y())
+                    if info is not None:
+                        point, depth_value, gl_x, gl_y, viewport, modelview, projection = info
                         res = self.pick_face_at_point(point, return_index=True)
                         if res:
                             idx, _verts = res
                             # Default: pick a small local patch (so it feels like selecting a surface, not a single tri).
                             # Shift/Ctrl: stepwise expand (magic-wand style).
-                            self._apply_surface_seed_pick(int(idx), modifiers, picked_point_world=point)
+                            radius_override = None
+                            try:
+                                r_click = float(getattr(self, "_surface_click_radius_world", 0.0) or 0.0)
+                            except Exception:
+                                r_click = 0.0
+                            if np.isfinite(r_click) and r_click > 0.0:
+                                radius_override = float(r_click)
+                            else:
+                                try:
+                                    px_r = float(getattr(self, "_surface_click_radius_px", 24.0) or 0.0)
+                                except Exception:
+                                    px_r = 0.0
+                                r_px = self._world_radius_from_px_at_depth(
+                                    int(gl_x),
+                                    int(gl_y),
+                                    float(depth_value),
+                                    viewport,
+                                    modelview,
+                                    projection,
+                                    float(px_r),
+                                )
+                                if np.isfinite(r_px) and float(r_px) > 0.0:
+                                    radius_override = float(r_px)
+                            self._apply_surface_seed_pick(
+                                int(idx),
+                                modifiers,
+                                picked_point_world=point,
+                                radius_world_override=radius_override,
+                            )
                         self.update()
             except Exception:
                 _log_ignored_exception()
@@ -6047,17 +6081,42 @@ class Viewport3D(QOpenGLWidget):
         else:
             key_dec = getattr(Qt.Key, "Key_BracketLeft", -1)
             key_inc = getattr(Qt.Key, "Key_BracketRight", -1)
-            if key == key_dec:
-                self.gizmo_radius_factor = max(1.01, float(self.gizmo_radius_factor) * 0.9)
-                self.update_gizmo_size()
-                self.status_info = f"? 기즈모 크기: x{self.gizmo_radius_factor:.2f}"
-                self.update()
-            elif key == key_inc:
-                self.gizmo_radius_factor = min(3.0, float(self.gizmo_radius_factor) / 0.9)
-                self.update_gizmo_size()
-                self.status_info = f"? 기즈모 크기: x{self.gizmo_radius_factor:.2f}"
-                self.update()
-             
+            if key in (key_dec, key_inc):
+                # 표면 지정 도구에서는 [ ] 키로 브러시/찍기 크기를 조절합니다.
+                if self.picking_mode in {"paint_surface_brush", "paint_surface_face"}:
+                    attr = (
+                        "_surface_brush_radius_px"
+                        if self.picking_mode == "paint_surface_brush"
+                        else "_surface_click_radius_px"
+                    )
+                    label = "브러시" if self.picking_mode == "paint_surface_brush" else "찍기"
+                    try:
+                        cur = float(getattr(self, attr, 24.0) or 24.0)
+                    except Exception:
+                        cur = 24.0
+                    factor = 0.9 if key == key_dec else (1.0 / 0.9)
+                    new = float(cur) * float(factor)
+                    new = float(max(2.0, min(new, 600.0)))
+                    try:
+                        setattr(self, attr, new)
+                    except Exception:
+                        _log_ignored_exception()
+                    self.status_info = f"🖌️ 표면 {label} 크기: {new:.0f}px ([ / ] 조절)"
+                    self.update()
+                    return
+
+                # 기본: [ ] 키로 기즈모 크기 조절
+                if key == key_dec:
+                    self.gizmo_radius_factor = max(1.01, float(self.gizmo_radius_factor) * 0.9)
+                    self.update_gizmo_size()
+                    self.status_info = f"? 기즈모 크기: x{self.gizmo_radius_factor:.2f}"
+                    self.update()
+                elif key == key_inc:
+                    self.gizmo_radius_factor = min(3.0, float(self.gizmo_radius_factor) / 0.9)
+                    self.update_gizmo_size()
+                    self.status_info = f"? 기즈모 크기: x{self.gizmo_radius_factor:.2f}"
+                    self.update()
+              
         super().keyPressEvent(event)
 
     def keyReleaseEvent(self, a0: QKeyEvent | None):
@@ -6394,37 +6453,98 @@ class Viewport3D(QOpenGLWidget):
             return None
         return ray_origin + t * ray_dir
         
-    def pick_point_on_mesh(self, screen_x: int, screen_y: int):
-        """화면 좌표를 메쉬 표면의 3D 좌표로 변환"""
+    def pick_point_on_mesh_info(self, screen_x: int, screen_y: int):
+        """
+        화면 좌표를 메쉬 표면의 3D 좌표로 변환합니다.
+
+        Returns:
+            (pt_world, depth_value, gl_x, gl_y, viewport, modelview, projection) 또는 None
+        """
         if not self.objects:
             return None
         obj = self.selected_obj
         if not obj:
             return None
-        
+
         # OpenGL 뷰포트, 투영, 모델뷰 행렬 가져오기
         self.makeCurrent()
-        
+
         viewport = glGetIntegerv(GL_VIEWPORT)
         modelview = glGetDoublev(GL_MODELVIEW_MATRIX)
         projection = glGetDoublev(GL_PROJECTION_MATRIX)
         gl_x, gl_y = self._qt_to_gl_window_xy(float(screen_x), float(screen_y), viewport=viewport)
 
+        def is_bg(depth_val: float) -> bool:
+            try:
+                return (not bool(np.isfinite(depth_val))) or float(depth_val) >= 1.0
+            except Exception:
+                return True
+
         # 깊이 버퍼에서 깊이 값 읽기
-        depth = cast(Any, glReadPixels(gl_x, gl_y, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT))
+        depth = cast(Any, glReadPixels(int(gl_x), int(gl_y), 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT))
         try:
             depth_value = float(depth[0][0])
         except Exception:
+            depth_value = float("nan")
+
+        # 배경을 클릭한 경우: 근처 픽셀 depth를 탐색해서 피킹을 보정
+        if is_bg(depth_value):
+            try:
+                r = int(getattr(self, "_pick_search_radius_px", 0) or 0)
+            except Exception:
+                r = 0
+            if r > 0:
+                try:
+                    vx, vy, vw, vh = [int(v) for v in viewport[:4]]
+                except Exception:
+                    vx, vy, vw, vh = 0, 0, int(self.width()), int(self.height())
+                vw = max(1, vw)
+                vh = max(1, vh)
+
+                cx = int(gl_x)
+                cy = int(gl_y)
+                x0 = int(max(vx, cx - int(r)))
+                y0 = int(max(vy, cy - int(r)))
+                x1 = int(min(vx + vw - 1, cx + int(r)))
+                y1 = int(min(vy + vh - 1, cy + int(r)))
+                w = int(max(1, x1 - x0 + 1))
+                h = int(max(1, y1 - y0 + 1))
+
+                try:
+                    depth_raw = cast(Any, glReadPixels(x0, y0, w, h, GL_DEPTH_COMPONENT, GL_FLOAT))
+                    depth_arr = np.asarray(depth_raw, dtype=np.float32)
+                    depth_arr = np.squeeze(depth_arr)
+                    if depth_arr.ndim != 2:
+                        depth_arr = depth_arr.reshape((h, w))
+                except Exception:
+                    depth_arr = None
+
+                if depth_arr is not None and depth_arr.size:
+                    mask = np.isfinite(depth_arr) & (depth_arr < 1.0)
+                    if bool(np.any(mask)):
+                        ys, xs = np.where(mask)
+                        dx = (xs.astype(np.int32) + int(x0)) - int(cx)
+                        dy = (ys.astype(np.int32) + int(y0)) - int(cy)
+                        dist2 = dx.astype(np.int64) * dx.astype(np.int64) + dy.astype(np.int64) * dy.astype(np.int64)
+                        k = int(np.argmin(dist2))
+                        gl_x = int(x0 + int(xs[k]))
+                        gl_y = int(y0 + int(ys[k]))
+                        try:
+                            depth_value = float(depth_arr[int(ys[k]), int(xs[k])])
+                        except Exception:
+                            depth_value = float("nan")
+
+        if is_bg(depth_value):
             return None
-        
-        # 배경을 클릭한 경우
-        if depth_value >= 1.0:
-            return None
-        
+
         # 화면 좌표를 월드 좌표로 변환
         world_x, world_y, world_z = gluUnProject(
-            gl_x, gl_y, depth_value,
-            modelview, projection, viewport
+            float(gl_x),
+            float(gl_y),
+            float(depth_value),
+            modelview,
+            projection,
+            viewport,
         )
 
         pt = np.array([world_x, world_y, world_z], dtype=np.float64)
@@ -6442,7 +6562,72 @@ class Viewport3D(QOpenGLWidget):
         except Exception:
             _log_ignored_exception()
 
-        return pt
+        return (
+            pt,
+            float(depth_value),
+            int(gl_x),
+            int(gl_y),
+            viewport,
+            modelview,
+            projection,
+        )
+
+    def pick_point_on_mesh(self, screen_x: int, screen_y: int):
+        """화면 좌표를 메쉬 표면의 3D 좌표로 변환"""
+        info = self.pick_point_on_mesh_info(screen_x, screen_y)
+        if info is None:
+            return None
+        return info[0]
+
+    def _world_radius_from_px_at_depth(
+        self,
+        gl_x: int,
+        gl_y: int,
+        depth_value: float,
+        viewport,
+        modelview,
+        projection,
+        px_radius: float,
+    ) -> float:
+        """같은 depth plane에서 px 거리 -> world 거리로 환산(근사)."""
+        try:
+            px = float(px_radius)
+        except Exception:
+            return 0.0
+        if not np.isfinite(px) or px <= 0.0:
+            return 0.0
+        try:
+            d = float(depth_value)
+        except Exception:
+            d = float("nan")
+        if not np.isfinite(d) or d >= 1.0 or d < 0.0:
+            return 0.0
+
+        try:
+            vx, vy, vw, vh = [int(v) for v in viewport[:4]]
+        except Exception:
+            vx, vy, vw, vh = 0, 0, int(self.width()), int(self.height())
+        vw = max(1, vw)
+        vh = max(1, vh)
+
+        x0 = int(np.clip(int(gl_x), vx, vx + vw - 1))
+        y0 = int(np.clip(int(gl_y), vy, vy + vh - 1))
+        x1 = int(np.clip(int(round(float(x0) + px)), vx, vx + vw - 1))
+        if x1 == x0:
+            x1 = int(np.clip(x0 + 1, vx, vx + vw - 1))
+
+        try:
+            w0 = np.asarray(
+                gluUnProject(float(x0), float(y0), float(d), modelview, projection, viewport), dtype=np.float64
+            ).reshape(-1)
+            w1 = np.asarray(
+                gluUnProject(float(x1), float(y0), float(d), modelview, projection, viewport), dtype=np.float64
+            ).reshape(-1)
+            if w0.size < 3 or w1.size < 3 or (not np.isfinite(w0[:3]).all()) or (not np.isfinite(w1[:3]).all()):
+                return 0.0
+            return float(np.linalg.norm(w1[:3] - w0[:3]))
+        except Exception:
+            return 0.0
     
 
     def _pick_brush_face(self, pos):
@@ -7519,9 +7704,10 @@ class Viewport3D(QOpenGLWidget):
         if obj is None or obj.mesh is None:
             return
 
-        point = self.pick_point_on_mesh(pos.x(), pos.y())
-        if point is None:
+        info = self.pick_point_on_mesh_info(pos.x(), pos.y())
+        if info is None:
             return
+        point, depth_value, gl_x, gl_y, viewport, modelview, projection = info
         try:
             self._record_surface_paint_point(point, getattr(self, "_surface_paint_target", "outer"))
         except Exception:
@@ -7541,6 +7727,22 @@ class Viewport3D(QOpenGLWidget):
             base_r = float(getattr(self, "_surface_brush_radius_world", 0.0) or 0.0)
         except Exception:
             base_r = 0.0
+        if base_r <= 0.0:
+            try:
+                px_r = float(getattr(self, "_surface_brush_radius_px", 24.0) or 0.0)
+            except Exception:
+                px_r = 0.0
+            base_r = float(
+                self._world_radius_from_px_at_depth(
+                    int(gl_x),
+                    int(gl_y),
+                    float(depth_value),
+                    viewport,
+                    modelview,
+                    projection,
+                    float(px_r),
+                )
+            )
         if base_r <= 0.0:
             try:
                 base_r = float(getattr(self, "grid_spacing", 1.0) or 1.0) * 0.75
@@ -7638,7 +7840,14 @@ class Viewport3D(QOpenGLWidget):
         except Exception:
             pass
 
-    def _apply_surface_seed_pick(self, seed_face_idx: int, modifiers, *, picked_point_world: np.ndarray | None = None) -> None:
+    def _apply_surface_seed_pick(
+        self,
+        seed_face_idx: int,
+        modifiers,
+        *,
+        picked_point_world: np.ndarray | None = None,
+        radius_world_override: float | None = None,
+    ) -> None:
         obj = self.selected_obj
         if obj is None or obj.mesh is None:
             return
@@ -7653,7 +7862,11 @@ class Viewport3D(QOpenGLWidget):
             patch = self._grow_smooth_patch_stepwise(obj, int(seed_face_idx), max_angle_deg=max_angle)
         else:
             try:
-                r_click = float(getattr(self, "_surface_click_radius_world", 0.0) or 0.0)
+                r_click = (
+                    float(radius_world_override)
+                    if radius_world_override is not None
+                    else float(getattr(self, "_surface_click_radius_world", 0.0) or 0.0)
+                )
             except Exception:
                 r_click = 0.0
             if r_click <= 0.0:
