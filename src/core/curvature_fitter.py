@@ -12,7 +12,7 @@ from dataclasses import dataclass
 class FittedArc:
     """피팅된 원호 결과"""
     center: np.ndarray      # 원의 중심 (3D)
-    radius: float           # 반지름 (cm)
+    radius: float           # 반지름 (입력 포인트와 동일한 단위: mesh/world units)
     normal: np.ndarray      # 원이 놓인 평면의 법선
     points_2d: np.ndarray   # 평면에 투영된 2D 점들
     plane_origin: np.ndarray # 평면 원점
@@ -192,7 +192,7 @@ class CurvatureFitter:
 if __name__ == '__main__':
     fitter = CurvatureFitter()
     
-    # 반지름 10cm 원 위의 점들 생성
+    # 반지름 10 (임의 단위) 원 위의 점들 생성
     theta = np.array([0, np.pi/4, np.pi/2])
     test_points = np.zeros((3, 3))
     test_points[:, 0] = 10 * np.cos(theta)
@@ -204,5 +204,5 @@ if __name__ == '__main__':
     if result:
         print("피팅 결과:")
         print(f"  중심: {result.center}")
-        print(f"  반지름: {result.radius:.2f} cm")
+        print(f"  반지름: {result.radius:.2f} (mesh/world units)")
         print(f"  법선: {result.normal}")

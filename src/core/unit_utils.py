@@ -66,3 +66,27 @@ def mm_to_svg_units(mm: float, svg_unit: str) -> float:
     if u == "cm":
         return float(mm) / 10.0
     return float(mm)
+
+
+def mesh_units_to_mm(value: float, mesh_unit: Optional[str]) -> float:
+    """Convert a value expressed in mesh/world units to millimeters."""
+    u = normalize_unit(mesh_unit)
+    if u == "mm":
+        return float(value)
+    if u == "cm":
+        return float(value) * 10.0
+    if u == "m":
+        return float(value) * 1000.0
+    return float(value)
+
+
+def mm_to_mesh_units(mm: float, mesh_unit: Optional[str]) -> float:
+    """Convert a millimeter value to mesh/world units."""
+    u = normalize_unit(mesh_unit)
+    if u == "mm":
+        return float(mm)
+    if u == "cm":
+        return float(mm) / 10.0
+    if u == "m":
+        return float(mm) / 1000.0
+    return float(mm)

@@ -1824,6 +1824,58 @@ def _cylinder_axis_score(vertices: np.ndarray, axis: np.ndarray) -> float:
     return float(sd / med)
 
 
+def _robust_circle_fit_2d(x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, float] | None:
+    """
+    Robust-ish 2D circle fit (Kasa + one MAD outlier trim).
+
+    Returns:
+        (center_xy, radius) in the same units as (x, y).
+    """
+    xx = np.asarray(x, dtype=np.float64).reshape(-1)
+    yy = np.asarray(y, dtype=np.float64).reshape(-1)
+    m = np.isfinite(xx) & np.isfinite(yy)
+    xx = xx[m]
+    yy = yy[m]
+    if xx.size < 3:
+        return None
+
+    def _fit(x1: np.ndarray, y1: np.ndarray) -> tuple[np.ndarray, float] | None:
+        try:
+            A = np.column_stack([2.0 * x1, 2.0 * y1, np.ones_like(x1)])
+            b = x1 * x1 + y1 * y1
+            sol, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
+            a, b0, c = [float(v) for v in sol]
+            r2 = float(c + a * a + b0 * b0)
+            r = float(np.sqrt(max(r2, 0.0)))
+            if not np.isfinite(r) or r <= 1e-12:
+                return None
+            return np.array([a, b0], dtype=np.float64), r
+        except Exception:
+            return None
+
+    fitted = _fit(xx, yy)
+    if fitted is None:
+        return None
+    center, r = fitted
+
+    # One outlier-trim iteration based on residual MAD.
+    try:
+        res = np.abs(np.hypot(xx - float(center[0]), yy - float(center[1])) - float(r))
+        if res.size >= 8 and np.isfinite(res).any():
+            med = float(np.median(res))
+            mad = float(np.median(np.abs(res - med)))
+            thr = med + 3.5 * float(max(mad, 1e-12))
+            keep = res <= thr
+            if int(np.count_nonzero(keep)) >= 3 and int(np.count_nonzero(keep)) < int(res.size):
+                fitted2 = _fit(xx[keep], yy[keep])
+                if fitted2 is not None:
+                    center, r = fitted2
+    except Exception:
+        pass
+
+    return center, float(r)
+
+
 def _angles_to_min_range(
     angles: np.ndarray, *, seam_hint: float | None = None
 ) -> tuple[np.ndarray, float, float]:
@@ -2018,12 +2070,45 @@ def cylindrical_parameterization(
 
     # Project to axis and perpendicular plane
     t = vertices @ a  # (N,)
-    perp = vertices - t[:, None] * a[None, :]
-    center = perp.mean(axis=0)
-    r_vec = perp - center[None, :]
 
-    x = r_vec @ b1
-    y = r_vec @ b2
+    # Coordinates in the plane perpendicular to the axis (basis b1/b2).
+    x0 = vertices @ b1
+    y0 = vertices @ b2
+
+    # Estimate cylinder axis offset (center) with a circle fit. This is much more stable than mean(perp)
+    # for partial cylinder patches (e.g., roof tiles that cover < 180 degrees).
+    cx = None
+    cy = None
+    try:
+        n = int(x0.size)
+        max_fit = int(getattr(mesh, "_cylinder_fit_max_points", 50000) or 50000)
+        max_fit = max(2000, int(max_fit))
+        if n > max_fit and n > 0:
+            idx = np.linspace(0, n - 1, num=max_fit, dtype=np.int64)
+            fit = _robust_circle_fit_2d(x0[idx], y0[idx])
+        else:
+            fit = _robust_circle_fit_2d(x0, y0)
+        if fit is not None:
+            c2, _r2 = fit
+            cx = float(c2[0])
+            cy = float(c2[1])
+    except Exception:
+        cx = None
+        cy = None
+
+    if cx is None or cy is None or not np.isfinite(cx) or not np.isfinite(cy):
+        # Fallback: mean center (works for full cylinders, less so for partial arcs).
+        try:
+            cx = float(np.nanmean(x0))
+            cy = float(np.nanmean(y0))
+        except Exception:
+            cx = 0.0
+            cy = 0.0
+
+    center = (float(cx) * b1) + (float(cy) * b2)
+
+    x = x0 - float(cx)
+    y = y0 - float(cy)
     theta = np.arctan2(y, x)  # [-pi, pi]
 
     seam_from_lines = _seam_hint_from_cut_lines(
@@ -2036,7 +2121,7 @@ def cylindrical_parameterization(
     seam_pref = seam_hint if seam_hint is not None else seam_from_lines
     theta_wrapped, seam_angle, span = _angles_to_min_range(theta, seam_hint=seam_pref)
 
-    r = np.linalg.norm(r_vec, axis=1)
+    r = np.hypot(x, y)
     if radius is None:
         r_f = r[np.isfinite(r)]
         radius_val = float(np.median(r_f)) if r_f.size else 1.0

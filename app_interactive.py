@@ -547,6 +547,8 @@ class ScenePanel(QWidget):
     
     def update_list(self, objects, selected_index):
         """객체 및 부착된 원호 리스트 갱신"""
+        from src.core.unit_utils import mesh_units_to_mm
+
         self.tree.blockSignals(True)
         self.tree.clear()
         for i, obj in enumerate(objects):
@@ -564,7 +566,8 @@ class ScenePanel(QWidget):
                 arc_item = QTreeWidgetItem(mesh_item)
                 arc_item.setText(0, f"원호 #{j+1}")
                 arc_item.setText(1, "📏")
-                arc_item.setText(2, f"R={arc.radius:.2f}cm") # cm로 표시
+                r_mm = mesh_units_to_mm(float(getattr(arc, "radius", 0.0)), getattr(obj.mesh, "unit", None))
+                arc_item.setText(2, f"R={r_mm:.1f}mm")
                 arc_item.setData(0, Qt.ItemDataRole.UserRole, ("arc", i, j))
 
             # 저장된 단면/가이드 레이어
@@ -900,7 +903,7 @@ class FlattenPanel(QWidget):
         self.btn_surface_click = QPushButton("👆 찍기(자동 확장)")
         self.btn_surface_click.setToolTip(
             "클릭한 면이 속한 '매끈한 연결 영역'을 자동 확장해 지정합니다.\n"
-            "Shift/Ctrl=추가, Alt=제거, ESC=종료"
+            "Shift/Ctrl=추가(단계 확장), Alt=제거, [ / ]=크기, Space+드래그=시점, ESC=종료"
         )
         self.btn_surface_click.clicked.connect(
             lambda: self.selectionRequested.emit("surface_tool", {"tool": "click", "target": self.current_surface_target()})
@@ -908,7 +911,7 @@ class FlattenPanel(QWidget):
         tool_row.addWidget(self.btn_surface_click)
 
         self.btn_surface_brush = QPushButton("🖌️ 보정(브러시)")
-        self.btn_surface_brush.setToolTip("드래그로 칠해서 보정합니다. Alt=지우기, ESC=종료")
+        self.btn_surface_brush.setToolTip("드래그로 칠해서 보정합니다. Alt=지우기, [ / ]=크기, Space+드래그=시점, ESC=종료")
         self.btn_surface_brush.clicked.connect(
             lambda: self.selectionRequested.emit("surface_tool", {"tool": "brush", "target": self.current_surface_target()})
         )
@@ -931,7 +934,7 @@ class FlattenPanel(QWidget):
         self.btn_surface_magnetic = QPushButton("🧲 경계(자석)")
         self.btn_surface_magnetic.setToolTip(
             "메쉬 경계/윤곽을 따라 '자석'처럼 붙여가며 영역을 지정합니다.\n"
-            "드래그=그리기, 우클릭/Enter=확정, Backspace=되돌리기, [ / ]=자석 반경, ESC=취소"
+            "드래그=그리기, Space+드래그=시점, 우클릭/Enter=확정, Backspace=되돌리기, [ / ]=자석 반경, ESC=취소"
         )
         self.btn_surface_magnetic.clicked.connect(
             lambda: self.selectionRequested.emit(
@@ -6173,15 +6176,17 @@ class MainWindow(QMainWindow):
         self.viewport.picked_points = []
         self.viewport.update()
         
-        # 펼침 패널의 곡률 반경에 자동 입력
-        radius_mm = arc.radius * 10  # cm → mm
-        self.flatten_panel.spin_radius.setValue(radius_mm)
+        # 펼침 패널 반경 입력은 mm 기준. arc.radius는 "입력 점(월드/메쉬) 단위" 그대로라서 mesh.unit에 맞춰 mm로 변환.
+        from src.core.unit_utils import mesh_units_to_mm
+
+        radius_mm = mesh_units_to_mm(float(arc.radius), getattr(getattr(obj, "mesh", None), "unit", None))
+        if np.isfinite(radius_mm) and radius_mm > 0:
+            self.flatten_panel.spin_radius.setValue(float(radius_mm))
         
         self.scene_panel.update_list(self.viewport.objects, self.viewport.selected_index)
         arc_count = len(obj.fitted_arcs)
         self.status_info.setText(
-            f"✅ 원호 #{arc_count} 생성됨 (월드 고정): 반지름 = {arc.radius:.2f} cm "
-            f"({radius_mm:.1f} mm)"
+            f"✅ 원호 #{arc_count} 생성됨 (월드 고정): 반지름 = {radius_mm:.1f} mm"
         )
     
     def clear_curvature_points(self):
@@ -6593,9 +6598,12 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "경고", "원 맞추기에 실패했습니다. 포인트를 다시 선택해보세요.")
             return
 
-        diameter_cm = float(arc.radius) * 2.0
-        diameter_mm = diameter_cm * 10.0
-        msg = f"지름: {diameter_cm:.2f} cm ({diameter_mm:.1f} mm)"
+        from src.core.unit_utils import mesh_units_to_mm
+
+        obj = getattr(self.viewport, "selected_obj", None)
+        unit = getattr(getattr(obj, "mesh", None), "unit", None)
+        diameter_mm = mesh_units_to_mm(float(arc.radius) * 2.0, unit)
+        msg = f"지름: {diameter_mm:.1f} mm"
         panel.append_result(msg)
         self.status_info.setText(f"📏 {msg}")
 

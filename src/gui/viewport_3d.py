@@ -1446,8 +1446,9 @@ class Viewport3D(QOpenGLWidget):
         self._surface_paint_target = "outer"  # outer|inner|migu
         self._surface_brush_last_pick = 0.0
         # 표면 지정(찍기/브러시) 도구 크기: 화면(px) 기준 기본값(피킹 깊이에서 world로 환산).
-        self._surface_brush_radius_px = 24.0
-        self._surface_click_radius_px = 24.0
+        # NOTE: 큰 스캔 메쉬에서도 체감 크기가 너무 작지 않도록 기본값을 올려둡니다. ([ / ]로 조절 가능)
+        self._surface_brush_radius_px = 48.0
+        self._surface_click_radius_px = 48.0
         self.surface_paint_points = []  # [(np.ndarray(3,), target), ...] in world coords
         self._surface_paint_points_max = 250
         self._surface_paint_left_press_pos = None
@@ -1477,6 +1478,7 @@ class Viewport3D(QOpenGLWidget):
         self._surface_magnetic_snap_radius_px = 14
         self._surface_magnetic_min_step_px = 1.5
         self._surface_magnetic_last_add_t = 0.0
+        self._surface_magnetic_space_nav = False
         self._surface_magnetic_dist = None  # np.ndarray(h,w) float32
         self._surface_magnetic_nn_y = None  # np.ndarray(h,w) int32
         self._surface_magnetic_nn_x = None  # np.ndarray(h,w) int32
@@ -5146,12 +5148,16 @@ class Viewport3D(QOpenGLWidget):
 
                 elif self.picking_mode == 'paint_surface_face':
                     # Click-to-apply on mouseRelease only (avoid accidental selection while orbiting).
+                    if Qt.Key.Key_Space in getattr(self, "keys_pressed", set()):
+                        return
                     self._surface_paint_left_press_pos = event.pos()
                     self._surface_paint_left_dragged = False
                     return
 
                 elif self.picking_mode == 'paint_surface_area':
                     # Lasso polygon: add vertex on mouseRelease only (avoid accidental points while orbiting).
+                    if Qt.Key.Key_Space in getattr(self, "keys_pressed", set()):
+                        return
                     self._surface_area_left_press_pos = event.pos()
                     self._surface_area_left_dragged = False
                     try:
@@ -5162,6 +5168,9 @@ class Viewport3D(QOpenGLWidget):
 
                 elif self.picking_mode == "paint_surface_magnetic":
                     # Magnetic lasso: freehand stroke in screen space, snapped to depth edges.
+                    if Qt.Key.Key_Space in getattr(self, "keys_pressed", set()):
+                        self._surface_magnetic_space_nav = True
+                        return
                     try:
                         self._surface_magnetic_cursor_qt = event.pos()
                     except Exception:
@@ -5171,6 +5180,7 @@ class Viewport3D(QOpenGLWidget):
                     except Exception:
                         _log_ignored_exception()
                     try:
+                        self._surface_magnetic_space_nav = False
                         self._surface_magnetic_drawing = True
                         self._surface_magnetic_try_add_point(event.pos())
                         self.update()
@@ -5179,6 +5189,8 @@ class Viewport3D(QOpenGLWidget):
                     return
 
                 elif self.picking_mode == 'paint_surface_brush':
+                    if Qt.Key.Key_Space in getattr(self, "keys_pressed", set()):
+                        return
                     remove = bool(modifiers & Qt.KeyboardModifier.AltModifier)
                     self._pick_surface_brush_face(event.pos(), remove=remove, modifiers=modifiers)
                     self.update()
@@ -5428,7 +5440,7 @@ class Viewport3D(QOpenGLWidget):
                                 radius_override = float(r_click)
                             else:
                                 try:
-                                    px_r = float(getattr(self, "_surface_click_radius_px", 24.0) or 0.0)
+                                    px_r = float(getattr(self, "_surface_click_radius_px", 48.0) or 0.0)
                                 except Exception:
                                     px_r = 0.0
                                 r_px = self._world_radius_from_px_at_depth(
@@ -5540,10 +5552,14 @@ class Viewport3D(QOpenGLWidget):
                 try:
                     self._surface_magnetic_drawing = False
                     self._surface_magnetic_cursor_qt = event.pos()
-                    self._surface_magnetic_try_add_point(event.pos())
+                    if not bool(getattr(self, "_surface_magnetic_space_nav", False)) and (
+                        Qt.Key.Key_Space not in getattr(self, "keys_pressed", set())
+                    ):
+                        self._surface_magnetic_try_add_point(event.pos())
                     self.update()
                 except Exception:
                     _log_ignored_exception()
+                self._surface_magnetic_space_nav = False
 
             if event.button() == Qt.MouseButton.RightButton:
                 try:
@@ -5708,13 +5724,16 @@ class Viewport3D(QOpenGLWidget):
                             self._surface_magnetic_right_dragged = True
 
                 if self.mouse_button == Qt.MouseButton.LeftButton:
-                    try:
-                        self._surface_magnetic_drawing = True
-                        self._surface_magnetic_try_add_point(event.pos())
-                    except Exception:
-                        _log_ignored_exception()
-                    self.update()
-                    return
+                    if Qt.Key.Key_Space in getattr(self, "keys_pressed", set()):
+                        self._surface_magnetic_space_nav = True
+                    else:
+                        try:
+                            self._surface_magnetic_drawing = True
+                            self._surface_magnetic_try_add_point(event.pos())
+                        except Exception:
+                            _log_ignored_exception()
+                        self.update()
+                        return
 
                 self.update()
                 if self.mouse_button is None:
@@ -5913,7 +5932,11 @@ class Viewport3D(QOpenGLWidget):
                 return
 
             # 0.2 표면 지정 브러시 처리 (outer/inner/migu)
-            if self.mouse_button == Qt.MouseButton.LeftButton and self.picking_mode == 'paint_surface_brush':
+            if (
+                self.mouse_button == Qt.MouseButton.LeftButton
+                and self.picking_mode == 'paint_surface_brush'
+                and (Qt.Key.Key_Space not in getattr(self, "keys_pressed", set()))
+            ):
                 now = time.monotonic()
                 if now - float(getattr(self, "_surface_brush_last_pick", 0.0)) >= 0.03:
                     self._surface_brush_last_pick = now
@@ -6220,9 +6243,9 @@ class Viewport3D(QOpenGLWidget):
                     )
                     label = "브러시" if self.picking_mode == "paint_surface_brush" else "찍기"
                     try:
-                        cur = float(getattr(self, attr, 24.0) or 24.0)
+                        cur = float(getattr(self, attr, 48.0) or 48.0)
                     except Exception:
-                        cur = 24.0
+                        cur = 48.0
                     factor = 0.9 if key == key_dec else (1.0 / 0.9)
                     new = float(cur) * float(factor)
                     new = float(max(2.0, min(new, 600.0)))
@@ -8504,7 +8527,7 @@ class Viewport3D(QOpenGLWidget):
             base_r = 0.0
         if base_r <= 0.0:
             try:
-                px_r = float(getattr(self, "_surface_brush_radius_px", 24.0) or 0.0)
+                px_r = float(getattr(self, "_surface_brush_radius_px", 48.0) or 0.0)
             except Exception:
                 px_r = 0.0
             base_r = float(
