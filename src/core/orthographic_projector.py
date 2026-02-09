@@ -81,6 +81,11 @@ class OrthographicProjector:
     
     3D 메쉬를 정치(正置)시킨 후 특정 방향에서 수직으로 투영합니다.
     """
+
+    # Safety defaults: the current rasterizer is pure-Python and scales poorly with
+    # (faces * pixels). These caps keep GUI operations from freezing on huge scans.
+    MAX_TOTAL_PIXELS = 8_000_000
+    MAX_FACES_FOR_RASTERIZE = 200_000
     
     def __init__(self, resolution: int = 1024):
         """
@@ -205,6 +210,18 @@ class OrthographicProjector:
             faces = np.zeros((0, 3), dtype=np.int32)
         else:
             faces = faces[:, :3]
+
+        # Safety: downsample faces for rasterization on huge meshes.
+        try:
+            max_faces = int(getattr(self, "MAX_FACES_FOR_RASTERIZE", 200_000))
+        except Exception:
+            max_faces = 200_000
+        max_faces = max(1, int(max_faces))
+        n_faces_full = int(faces.shape[0])
+        if n_faces_full > max_faces:
+            stride = int(np.ceil(float(n_faces_full) / float(max_faces)))
+            stride = max(1, stride)
+            faces = faces[::stride]
         
         # 투영 좌표
         x_coords = vertices[:, x_axis]
@@ -243,6 +260,18 @@ class OrthographicProjector:
         
         img_height = max(img_height, 1)
         img_width = max(img_width, 1)
+
+        # Safety: cap total pixels to avoid OOM / extreme slowness.
+        try:
+            max_total = int(getattr(self, "MAX_TOTAL_PIXELS", 8_000_000))
+        except Exception:
+            max_total = 8_000_000
+        max_total = max(1, int(max_total))
+        total = int(img_width) * int(img_height)
+        if total > max_total:
+            scale_px = float(np.sqrt(float(max_total) / float(max(1, total))))
+            img_width = max(1, int(float(img_width) * scale_px))
+            img_height = max(1, int(float(img_height) * scale_px))
         
         # 스케일 (픽셀당 실제 크기)
         scale = max(width / img_width, height / img_height)

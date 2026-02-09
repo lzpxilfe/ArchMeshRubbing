@@ -1,5 +1,5 @@
 """
-ArchMeshRubbing v1.0.1 - Complete Interactive Application
+ArchMeshRubbing v0.1.0 - Complete Interactive Application
 Copyright (C) 2026 balguljang2 (lzpxilfe)
 Licensed under the GNU General Public License v2.0 (GPL2)
 """
@@ -7,6 +7,7 @@ Licensed under the GNU General Public License v2.0 (GPL2)
 import sys
 import logging
 import subprocess
+import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -30,7 +31,7 @@ import io
 _LOGGER = logging.getLogger(__name__)
 _log_path: Path | None = None
 APP_NAME = "ArchMeshRubbing"
-APP_VERSION = "1.0.1"
+APP_VERSION = "0.1.0"
 
 
 def _safe_git_info(repo_dir: str) -> tuple[str | None, bool]:
@@ -86,9 +87,21 @@ else:
     basedir = str(Path(__file__).parent)
 sys.path.insert(0, basedir)
 
+try:
+    import src as _amr_src  # noqa: E402
+
+    APP_VERSION = str(getattr(_amr_src, "__version__", APP_VERSION))
+except Exception:
+    pass
+
 from src.gui.viewport_3d import Viewport3D  # noqa: E402
 from src.core.mesh_loader import MeshLoader, MeshProcessor  # noqa: E402
 from src.core.profile_exporter import ProfileExporter  # noqa: E402
+from src.core.project_file import (  # noqa: E402
+    ProjectFormatError,
+    load_project as load_amr_project,
+    save_project as save_amr_project,
+)
 from src.gui.profile_graph_widget import ProfileGraphWidget  # noqa: E402
 
 
@@ -112,6 +125,11 @@ class MeshLoadThread(QThread):
                 mesh_data._bounds = None
                 mesh_data._centroid = None
                 mesh_data._surface_area = None
+
+            try:
+                setattr(mesh_data, "_amr_source_scale_factor", float(self._scale_factor))
+            except Exception:
+                pass
 
             self.loaded.emit(mesh_data, self._filepath)
         except Exception as e:
@@ -180,6 +198,8 @@ class ProfileExportThread(QThread):
         resolution: int = 2048,
         grid_spacing: float = 1.0,
         include_grid: bool = True,
+        include_feature_lines: bool = False,
+        feature_angle_deg: float = 60.0,
     ):
         super().__init__()
         self._mesh_data = mesh_data
@@ -195,10 +215,29 @@ class ProfileExportThread(QThread):
         self._resolution = int(resolution)
         self._grid_spacing = float(grid_spacing)
         self._include_grid = bool(include_grid)
+        self._include_feature_lines = bool(include_feature_lines)
+        self._feature_angle_deg = float(feature_angle_deg)
 
     def run(self):
         try:
             exporter = ProfileExporter(resolution=self._resolution)
+            feature_edges = None
+            feature_style = None
+            if self._include_feature_lines:
+                try:
+                    from src.core.feature_line_extractor import extract_sharp_edges
+
+                    feature_edges = extract_sharp_edges(
+                        self._mesh_data,
+                        angle_deg=float(self._feature_angle_deg),
+                        include_boundary=False,
+                        min_edge_length=0.0,
+                    )
+                    feature_style = {"stroke": "#4a5568", "stroke_width": 0.01, "max_segments": 20000}
+                except Exception:
+                    feature_edges = None
+                    feature_style = None
+
             result_path = exporter.export_profile(
                 self._mesh_data,
                 view=self._view,
@@ -212,6 +251,8 @@ class ProfileExportThread(QThread):
                 opengl_matrices=self._opengl_matrices,
                 cut_lines_world=self._cut_lines_world,
                 cut_profiles_world=self._cut_profiles_world,
+                feature_edges=feature_edges,
+                feature_style=feature_style,
             )
             self.done.emit(str(result_path))
         except Exception as e:
@@ -382,7 +423,7 @@ class SplashScreen(QWidget):
         card_layout.addWidget(self.icon_label)
         
         # 타이틀
-        title = QLabel("ArchMeshRubbing v1")
+        title = QLabel(f"{APP_NAME} v{APP_VERSION}")
         title.setStyleSheet("""
             font-size: 24px;
             font-weight: bold;
@@ -393,7 +434,7 @@ class SplashScreen(QWidget):
         card_layout.addWidget(title)
         
         # 버전 정보 추가 (사용자 확인용)
-        version = QLabel("Version: 1.0.1")
+        version = QLabel(f"Version: {APP_VERSION}")
         version.setStyleSheet("color: #a0aec0; font-size: 10px; margin-bottom: 5px;")
         version.setAlignment(Qt.AlignmentFlag.AlignCenter)
         card_layout.addWidget(version)
@@ -622,9 +663,9 @@ class TransformToolbar(QToolBar):
     def init_ui(self):
         # 이동 (cm)
         self.addWidget(QLabel(" 📍 이동: "))
-        self.trans_x = self._create_spin(-10000, 10000, "X")
-        self.trans_y = self._create_spin(-10000, 10000, "Y")
-        self.trans_z = self._create_spin(-10000, 10000, "Z")
+        self.trans_x = self._create_spin(-10000, 10000, "X", step=0.1)
+        self.trans_y = self._create_spin(-10000, 10000, "Y", step=0.1)
+        self.trans_z = self._create_spin(-10000, 10000, "Z", step=0.1)
         self.addWidget(self.trans_x)
         self.addWidget(self.trans_y)
         self.addWidget(self.trans_z)
@@ -633,9 +674,9 @@ class TransformToolbar(QToolBar):
         
         # 회전 (deg)
         self.addWidget(QLabel(" 🔄 회전: "))
-        self.rot_x = self._create_spin(-360, 360, "Rx")
-        self.rot_y = self._create_spin(-360, 360, "Ry")
-        self.rot_z = self._create_spin(-360, 360, "Rz")
+        self.rot_x = self._create_spin(-360, 360, "Rx", step=1.0)
+        self.rot_y = self._create_spin(-360, 360, "Ry", step=1.0)
+        self.rot_z = self._create_spin(-360, 360, "Rz", step=1.0)
         self.addWidget(self.rot_x)
         self.addWidget(self.rot_y)
         self.addWidget(self.rot_z)
@@ -672,12 +713,22 @@ class TransformToolbar(QToolBar):
         self.btn_flat.setToolTip("명암 없이 메쉬를 밝게 봅니다 (회전 시 어두워짐 방지)")
         self.addWidget(self.btn_flat)
 
-    def _create_spin(self, min_v, max_v, prefix=""):
+        self.btn_xray = QPushButton("🩻 X-Ray")
+        self.btn_xray.setCheckable(True)
+        self.btn_xray.setToolTip("선택된 메쉬를 X-Ray(투명)로 표시합니다 (선택 객체만).")
+        self.addWidget(self.btn_xray)
+
+    def _create_spin(self, min_v, max_v, prefix="", step=None):
         spin = QDoubleSpinBox()
         spin.setRange(min_v, max_v)
         spin.setDecimals(2)
         spin.setPrefix(f"{prefix}: ")
         spin.setFixedWidth(90)
+        try:
+            if step is not None:
+                spin.setSingleStep(float(step))
+        except Exception:
+            pass
         return spin
 
 
@@ -1044,7 +1095,7 @@ class SelectionPanel(QWidget):
         auto_layout = QVBoxLayout(auto_group)
         
         btn_auto_surface = QPushButton("📊 내면/외면 자동 감지")
-        btn_auto_surface.setToolTip("클릭=법선 기반, Shift+클릭=상/하면(보이는 면) 기반으로 자동 분류")
+        btn_auto_surface.setToolTip("클릭=법선 기반, Shift+클릭=상/하면(보이는 면 + 보정) 기반 자동 분류 (주름/가림에 더 강함)")
         btn_auto_surface.clicked.connect(lambda: self.selectionChanged.emit('auto_surface', None))
         auto_layout.addWidget(btn_auto_surface)
         
@@ -1266,9 +1317,11 @@ class SlicingPanel(QWidget):
     """단면 슬라이싱 제어 패널"""
     sliceChanged = pyqtSignal(bool, float)  # enabled, height
     exportRequested = pyqtSignal(float)     # height
+    saveLayersRequested = pyqtSignal()      # snapshot to layers (for SVG export)
     
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._presets: list[dict[str, Any]] = []
         self.init_ui()
         
     def init_ui(self):
@@ -1301,6 +1354,31 @@ class SlicingPanel(QWidget):
         slider_layout.addWidget(self.slider)
         slider_layout.addWidget(self.spin)
         group_layout.addLayout(slider_layout)
+
+        # 2.5 Presets
+        preset_layout = QHBoxLayout()
+        preset_layout.addWidget(QLabel("프리셋:"))
+        self.combo_presets = QComboBox()
+        self.combo_presets.setToolTip("저장한 단면(클립) 높이 프리셋을 불러옵니다.")
+        preset_layout.addWidget(self.combo_presets, 1)
+
+        self.btn_preset_add = QPushButton("➕ 저장")
+        self.btn_preset_add.setToolTip("현재 높이(Z)를 프리셋으로 저장합니다.")
+        self.btn_preset_add.clicked.connect(self._on_preset_add_clicked)
+        preset_layout.addWidget(self.btn_preset_add)
+
+        self.btn_preset_apply = QPushButton("적용")
+        self.btn_preset_apply.setToolTip("선택한 프리셋 높이를 적용합니다.")
+        self.btn_preset_apply.clicked.connect(self._on_preset_apply_clicked)
+        preset_layout.addWidget(self.btn_preset_apply)
+
+        self.btn_preset_delete = QPushButton("삭제")
+        self.btn_preset_delete.setToolTip("선택한 프리셋을 삭제합니다.")
+        self.btn_preset_delete.clicked.connect(self._on_preset_delete_clicked)
+        preset_layout.addWidget(self.btn_preset_delete)
+
+        group_layout.addLayout(preset_layout)
+        self._refresh_presets_ui()
         
         # 3. 버튼들
         btn_layout = QHBoxLayout()
@@ -1308,7 +1386,12 @@ class SlicingPanel(QWidget):
         self.btn_export.setStyleSheet("background-color: #ebf8ff; font-weight: bold;")
         self.btn_export.clicked.connect(self.on_export_clicked)
         btn_layout.addWidget(self.btn_export)
-        
+
+        self.btn_save_layers = QPushButton("🗂️ 레이어로 저장")
+        self.btn_save_layers.setToolTip("현재 단면 결과(CT/가이드/ROI)를 레이어로 스냅샷 저장합니다.")
+        self.btn_save_layers.clicked.connect(self.saveLayersRequested.emit)
+        btn_layout.addWidget(self.btn_save_layers)
+
         group_layout.addLayout(btn_layout)
         
         # 도움말
@@ -1352,6 +1435,105 @@ class SlicingPanel(QWidget):
         
         self.slider.blockSignals(False)
         self.spin.blockSignals(False)
+
+    def get_presets(self) -> list[dict[str, Any]]:
+        return [dict(p) for p in (self._presets or [])]
+
+    def set_presets(self, presets: list[dict[str, Any]] | None) -> None:
+        out: list[dict[str, Any]] = []
+        for p in presets or []:
+            if not isinstance(p, dict):
+                continue
+            try:
+                z = float(p.get("z", p.get("height", 0.0)) or 0.0)
+            except Exception:
+                continue
+            name = str(p.get("name", "")).strip() or f"Z={z:.2f}cm"
+            out.append({"name": name, "z": z})
+        self._presets = out
+        self._refresh_presets_ui()
+
+    def _refresh_presets_ui(self) -> None:
+        combo = getattr(self, "combo_presets", None)
+        if combo is None:
+            return
+        combo.blockSignals(True)
+        try:
+            combo.clear()
+            for p in self._presets or []:
+                combo.addItem(str(p.get("name", "")).strip() or "Preset", userData=float(p.get("z", 0.0) or 0.0))
+        finally:
+            combo.blockSignals(False)
+
+        has = bool(self._presets)
+        try:
+            self.btn_preset_apply.setEnabled(has)
+            self.btn_preset_delete.setEnabled(has)
+        except Exception:
+            pass
+
+    def _unique_preset_name(self, base: str) -> str:
+        base = str(base).strip() or "Preset"
+        existing = {str(p.get("name", "")).strip() for p in (self._presets or [])}
+        if base not in existing:
+            return base
+        n = 2
+        while f"{base} ({n})" in existing:
+            n += 1
+        return f"{base} ({n})"
+
+    def _on_preset_add_clicked(self) -> None:
+        try:
+            z = float(self.spin.value())
+        except Exception:
+            z = 0.0
+        name = self._unique_preset_name(f"Z={z:.2f}cm")
+        self._presets.append({"name": name, "z": z})
+        self._refresh_presets_ui()
+        try:
+            self.combo_presets.setCurrentIndex(len(self._presets) - 1)
+        except Exception:
+            pass
+
+    def _on_preset_apply_clicked(self) -> None:
+        if not (self._presets and getattr(self, "combo_presets", None) is not None):
+            return
+        try:
+            idx = int(self.combo_presets.currentIndex())
+        except Exception:
+            idx = -1
+        if not (0 <= idx < len(self._presets)):
+            return
+
+        try:
+            z = float(self._presets[idx].get("z", 0.0) or 0.0)
+        except Exception:
+            z = 0.0
+
+        # Apply and enable slice mode.
+        try:
+            self.group.setChecked(True)
+        except Exception:
+            pass
+        try:
+            self.spin.setValue(z)
+        except Exception:
+            pass
+
+    def _on_preset_delete_clicked(self) -> None:
+        if not (self._presets and getattr(self, "combo_presets", None) is not None):
+            return
+        try:
+            idx = int(self.combo_presets.currentIndex())
+        except Exception:
+            idx = -1
+        if not (0 <= idx < len(self._presets)):
+            return
+        try:
+            del self._presets[idx]
+        except Exception:
+            return
+        self._refresh_presets_ui()
 
 
 class ExportPanel(QWidget):
@@ -1466,6 +1648,40 @@ class ExportPanel(QWidget):
         lbl_info = QLabel("격자는 이미지, 외곽선은 벡터로 저장됩니다.\n(지정된 뷰 방향에서 투영)")
         lbl_info.setStyleSheet("font-size: 11px; color: #718096;")
         profile_layout.addWidget(lbl_info)
+
+        # 옵션: 격자/배경 포함
+        opt_row = QHBoxLayout()
+        self.check_profile_include_grid = QCheckBox("격자/배경 포함 (기본)")
+        self.check_profile_include_grid.setChecked(True)
+        self.check_profile_include_grid.setToolTip(
+            "체크 시 1cm 격자+화면 캡처가 SVG에 배경 이미지로 포함됩니다(파일이 커짐).\n"
+            "해제 시 벡터(외곽선/가이드)만 저장됩니다."
+        )
+        opt_row.addWidget(self.check_profile_include_grid)
+        opt_row.addStretch(1)
+        profile_layout.addLayout(opt_row)
+
+        # 옵션: 샤프 엣지(능선) 라인 포함
+        feature_row = QHBoxLayout()
+        self.check_profile_feature_lines = QCheckBox("✨ 샤프 엣지(능선) 라인 포함")
+        self.check_profile_feature_lines.setChecked(False)
+        self.check_profile_feature_lines.setToolTip(
+            "인접 면의 각도(디하이드럴)로 '날카로운 엣지'를 검출해 SVG에 선 레이어로 추가합니다.\n"
+            "값이 낮을수록 선이 많아지고, 스캔 노이즈가 많으면 파일이 커질 수 있습니다."
+        )
+        feature_row.addWidget(self.check_profile_feature_lines, 1)
+
+        feature_row.addWidget(QLabel("임계각:"))
+        self.spin_profile_feature_angle = QDoubleSpinBox()
+        self.spin_profile_feature_angle.setRange(0.0, 180.0)
+        self.spin_profile_feature_angle.setSingleStep(5.0)
+        self.spin_profile_feature_angle.setValue(60.0)
+        self.spin_profile_feature_angle.setSuffix(" °")
+        self.spin_profile_feature_angle.setToolTip("디하이드럴 각도 임계값(도).")
+        self.spin_profile_feature_angle.setEnabled(False)
+        self.check_profile_feature_lines.toggled.connect(self.spin_profile_feature_angle.setEnabled)
+        feature_row.addWidget(self.spin_profile_feature_angle)
+        profile_layout.addLayout(feature_row)
         
         # 6방향 버튼 그리드
         grid_layout = QGridLayout()
@@ -1486,9 +1702,171 @@ class ExportPanel(QWidget):
             grid_layout.addWidget(btn, i // 2, i % 2)
             
         profile_layout.addLayout(grid_layout)
+
+        btn_export_pkg = QPushButton("📦 6방향 패키지 내보내기")
+        btn_export_pkg.setToolTip("Top/Bottom/Front/Back/Left/Right를 한 폴더에 '뷰별 하위 폴더'로 저장합니다")
+        btn_export_pkg.clicked.connect(lambda: self.exportRequested.emit({"type": "profile_2d_package"}))
+        profile_layout.addWidget(btn_export_pkg)
         layout.addWidget(profile_group)
         
         layout.addStretch()
+
+
+class MeasurePanel(QWidget):
+    """기본 치수(거리/지름) 측정 패널"""
+
+    measureModeToggled = pyqtSignal(bool)
+    fitCircleRequested = pyqtSignal()
+    clearPointsRequested = pyqtSignal()
+    copyResultsRequested = pyqtSignal()
+    clearResultsRequested = pyqtSignal()
+    computeVolumeRequested = pyqtSignal()
+    modeChanged = pyqtSignal(str)  # "distance" | "diameter"
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(5, 5, 5, 5)
+        layout.setSpacing(10)
+
+        hint = QLabel(
+            "Shift+클릭으로 메쉬 위에 점을 찍어 치수를 측정합니다.\n"
+            "거리=2점 선택 즉시 계산, 지름=3점 이상 선택 후 '지름 계산'을 누르세요."
+        )
+        hint.setStyleSheet("color: #718096; font-size: 10px;")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        self.btn_measure_mode = QPushButton("📏 측정 모드 시작")
+        self.btn_measure_mode.setCheckable(True)
+        self.btn_measure_mode.setStyleSheet(
+            "QPushButton:checked { background-color: #38a169; color: white; font-weight: bold; }"
+        )
+        self.btn_measure_mode.toggled.connect(self._on_measure_toggled)
+        layout.addWidget(self.btn_measure_mode)
+
+        mode_group = QGroupBox("측정 방식")
+        mode_group.setStyleSheet("QGroupBox { font-weight: bold; }")
+        mode_layout = QFormLayout(mode_group)
+
+        self.combo_mode = QComboBox()
+        self.combo_mode.addItems(["거리 (2점)", "지름/직경 (원 맞춤, 3점+)"])
+        self.combo_mode.currentIndexChanged.connect(self._on_mode_changed)
+        mode_layout.addRow("모드:", self.combo_mode)
+
+        self.label_point_count = QLabel("선택된 포인트: 0")
+        mode_layout.addRow("", self.label_point_count)
+
+        btn_row = QHBoxLayout()
+        self.btn_fit_circle = QPushButton("⭕ 지름 계산")
+        self.btn_fit_circle.setToolTip("선택된 포인트(3점 이상)로 원을 맞추고 지름을 계산합니다.")
+        self.btn_fit_circle.clicked.connect(self.fitCircleRequested.emit)
+        self.btn_fit_circle.setEnabled(False)
+        btn_row.addWidget(self.btn_fit_circle)
+
+        self.btn_clear_points = QPushButton("🧹 포인트 초기화")
+        self.btn_clear_points.clicked.connect(self.clearPointsRequested.emit)
+        btn_row.addWidget(self.btn_clear_points)
+        btn_row.addStretch(1)
+        mode_layout.addRow(btn_row)
+
+        self.btn_compute_volume = QPushButton("📦 부피/면적 계산")
+        self.btn_compute_volume.setToolTip("선택된 메쉬의 표면적/부피를 계산합니다. (부피는 watertight 메쉬에서만 신뢰)")
+        self.btn_compute_volume.clicked.connect(self.computeVolumeRequested.emit)
+        mode_layout.addRow(self.btn_compute_volume)
+
+        layout.addWidget(mode_group)
+
+        result_group = QGroupBox("결과")
+        result_group.setStyleSheet("QGroupBox { font-weight: bold; }")
+        result_layout = QVBoxLayout(result_group)
+
+        self.text_results = QTextEdit()
+        self.text_results.setReadOnly(True)
+        self.text_results.setPlaceholderText("측정 결과가 여기에 기록됩니다.")
+        self.text_results.setMinimumHeight(120)
+        result_layout.addWidget(self.text_results)
+
+        result_btn_row = QHBoxLayout()
+        self.btn_copy = QPushButton("📋 복사")
+        self.btn_copy.clicked.connect(self.copyResultsRequested.emit)
+        result_btn_row.addWidget(self.btn_copy)
+
+        self.btn_clear_results = QPushButton("🗑️ 지우기")
+        self.btn_clear_results.clicked.connect(self.clearResultsRequested.emit)
+        result_btn_row.addWidget(self.btn_clear_results)
+
+        result_btn_row.addStretch(1)
+        result_layout.addLayout(result_btn_row)
+
+        layout.addWidget(result_group)
+        layout.addStretch(1)
+
+    @property
+    def mode(self) -> str:
+        try:
+            return "diameter" if int(self.combo_mode.currentIndex()) == 1 else "distance"
+        except Exception:
+            return "distance"
+
+    def set_points_count(self, n: int) -> None:
+        try:
+            self.label_point_count.setText(f"선택된 포인트: {int(n)}")
+        except Exception:
+            pass
+
+    def append_result(self, text: str) -> None:
+        try:
+            if text:
+                self.text_results.append(str(text))
+        except Exception:
+            pass
+
+    def clear_results(self) -> None:
+        try:
+            self.text_results.clear()
+        except Exception:
+            pass
+
+    def results_text(self) -> str:
+        try:
+            return str(self.text_results.toPlainText())
+        except Exception:
+            return ""
+
+    def set_measure_checked(self, checked: bool) -> None:
+        try:
+            self.btn_measure_mode.blockSignals(True)
+            self.btn_measure_mode.setChecked(bool(checked))
+        except Exception:
+            pass
+        finally:
+            try:
+                self.btn_measure_mode.blockSignals(False)
+            except Exception:
+                pass
+        try:
+            self.btn_measure_mode.setText("📏 측정 모드 중지" if checked else "📏 측정 모드 시작")
+        except Exception:
+            pass
+
+    def _on_measure_toggled(self, checked: bool):
+        try:
+            self.btn_measure_mode.setText("📏 측정 모드 중지" if checked else "📏 측정 모드 시작")
+        except Exception:
+            pass
+        self.measureModeToggled.emit(bool(checked))
+
+    def _on_mode_changed(self, _index: int):
+        mode = self.mode
+        try:
+            self.btn_fit_circle.setEnabled(mode == "diameter")
+        except Exception:
+            pass
+        self.modeChanged.emit(mode)
 
 
 class SectionPanel(QWidget):
@@ -1575,6 +1953,7 @@ class SectionPanel(QWidget):
 
         line_help = QLabel(
             "상면(Top) 뷰에서 좌클릭으로 점을 추가해 단면선(꺾인 폴리라인)을 그리세요. (자동 수평/수직)\n"
+            "메쉬 위를 클릭해도 자동으로 상면(XY)으로 투영됩니다.\n"
             "Enter/우클릭=현재 선 확정, Backspace/Delete=마지막 점 취소, Tab=선 전환\n"
             "가로/세로는 각각 1개 선만 유지됩니다.\n"
             "Shift/Ctrl/Alt + 드래그: 메쉬 이동/회전 (점 추가 안 됨)"
@@ -1654,7 +2033,7 @@ class SectionPanel(QWidget):
 class MainWindow(QMainWindow):
     """메인 윈도우"""
 
-    UI_STATE_VERSION = 3
+    UI_STATE_VERSION = 4
     
     def __init__(self):
         super().__init__()
@@ -1693,6 +2072,13 @@ class MainWindow(QMainWindow):
         self._slice_debounce_timer.timeout.connect(self._request_slice_compute)
         self._slice_compute_thread = None
         self._slice_pending_height = None
+
+        # Project (.amr)
+        self._current_project_path: str | None = None
+        self._project_load_active: bool = False
+        self._project_load_queue: list[dict[str, Any]] = []
+        self._project_load_state: dict[str, Any] | None = None
+        self._project_load_current: dict[str, Any] | None = None
         
         self.init_ui()
         self.init_menu()
@@ -1714,6 +2100,7 @@ class MainWindow(QMainWindow):
         self.viewport.alignToBrushSelected.connect(self.on_align_to_brush_selected)
         self.viewport.floorAlignmentConfirmed.connect(self.on_floor_alignment_confirmed)
         self.viewport.surfaceAssignmentChanged.connect(self.on_surface_assignment_changed)
+        self.viewport.measurePointPicked.connect(self.on_measure_point_picked)
         
         # 단축키 설정 (Undo: Ctrl+Z)
         self.undo_shortcut = QShortcut(QKeySequence("Ctrl+Z"), self)
@@ -1737,6 +2124,7 @@ class MainWindow(QMainWindow):
         self.trans_toolbar.btn_fixed.clicked.connect(self.restore_fixed_state)
         self.trans_toolbar.btn_reset.clicked.connect(self.reset_transform)
         self.trans_toolbar.btn_flat.toggled.connect(self.toggle_flat_shading)
+        self.trans_toolbar.btn_xray.toggled.connect(self.toggle_xray_mode)
         
         # 도움말 위젯 (오버레이처럼 작동하도록 뷰포트 위에 띄우거나 하단에 배치 가능)
         # 일단은 뷰포트 하단에 고정
@@ -1809,6 +2197,19 @@ class MainWindow(QMainWindow):
         self.export_panel.exportRequested.connect(self.on_export_requested)
         self.export_dock.setWidget(self.export_panel)
 
+        # 4.5) 치수 측정
+        self.measure_dock = QDockWidget("📏 치수 측정", self)
+        self.measure_dock.setObjectName("dock_measure")
+        self.measure_panel = MeasurePanel()
+        self.measure_panel.measureModeToggled.connect(self.toggle_measure_mode)
+        self.measure_panel.fitCircleRequested.connect(self.fit_measure_circle)
+        self.measure_panel.clearPointsRequested.connect(self.clear_measure_points)
+        self.measure_panel.copyResultsRequested.connect(self.copy_measure_results)
+        self.measure_panel.clearResultsRequested.connect(self.clear_measure_results)
+        self.measure_panel.computeVolumeRequested.connect(self.compute_volume_stats)
+        self.measure_panel.modeChanged.connect(self.on_measure_mode_changed)
+        self.measure_dock.setWidget(self.measure_panel)
+
         # 5) 단면 도구 (슬라이싱 + 십자선 + 라인)
         self.section_dock = QDockWidget("📏 단면 도구 (Section)", self)
         self.section_dock.setObjectName("dock_section")
@@ -1820,6 +2221,7 @@ class MainWindow(QMainWindow):
         self.slice_panel = SlicingPanel()
         self.slice_panel.sliceChanged.connect(self.on_slice_changed)
         self.slice_panel.exportRequested.connect(self.on_slice_export_requested)
+        self.slice_panel.saveLayersRequested.connect(self.on_save_section_layers_requested)
         section_layout.addWidget(self.slice_panel)
 
         line = QFrame()
@@ -1867,6 +2269,7 @@ class MainWindow(QMainWindow):
             self.flatten_dock,
             self.section_dock,
             self.export_dock,
+            self.measure_dock,
             self.scene_dock,
             self.help_dock,
         ]:
@@ -1891,6 +2294,7 @@ class MainWindow(QMainWindow):
             self.flatten_dock,
             self.section_dock,
             self.export_dock,
+            self.measure_dock,
             self.scene_dock,
             self.help_dock,
         ]:
@@ -1918,6 +2322,9 @@ class MainWindow(QMainWindow):
 
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.export_dock)
         self.tabifyDockWidget(self.flatten_dock, self.export_dock)
+
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.measure_dock)
+        self.tabifyDockWidget(self.flatten_dock, self.measure_dock)
 
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.scene_dock)
         self.splitDockWidget(self.flatten_dock, self.scene_dock, Qt.Orientation.Vertical)
@@ -1983,6 +2390,10 @@ class MainWindow(QMainWindow):
         """바닥면 그리기(점 찍기) 모드 시작"""
         if self.viewport.selected_obj is None:
             return
+        try:
+            self._disable_measure_mode()
+        except Exception:
+            pass
         self.viewport.picking_mode = 'floor_3point'
         self.viewport.floor_picks = []
         self.viewport.status_info = "📍 바닥면 점 찍기: 메쉬 위를 클릭하여 점을 추가하세요 (Enter로 확정)"
@@ -1992,6 +2403,10 @@ class MainWindow(QMainWindow):
         """면 선택 바닥 정렬 모드 시작"""
         if self.viewport.selected_obj is None:
             return
+        try:
+            self._disable_measure_mode()
+        except Exception:
+            pass
         self.viewport.picking_mode = 'floor_face'
         self.viewport.status_info = "📐 바닥면이 될 삼각형 면(Triangle)을 클릭하세요..."
         self.viewport.update()
@@ -2000,6 +2415,10 @@ class MainWindow(QMainWindow):
         """브러시 바닥 정렬 모드 시작"""
         if self.viewport.selected_obj is None:
             return
+        try:
+            self._disable_measure_mode()
+        except Exception:
+            pass
         self.viewport.picking_mode = 'floor_brush'
         self.viewport.brush_selected_faces.clear()
         self.viewport.status_info = "🖌️ 바닥이 될 영역을 마우스 왼쪽 버튼으로 드래그하듯이 그리세요..."
@@ -2229,6 +2648,23 @@ class MainWindow(QMainWindow):
         action_open.setShortcut(QKeySequence.StandardKey.Open)
         action_open.triggered.connect(self.open_file)
         file_menu.addAction(action_open)
+
+        action_open_project = QAction("📁 프로젝트 열기…", self)
+        action_open_project.setShortcut(QKeySequence("Ctrl+Shift+O"))
+        action_open_project.triggered.connect(self.open_project)
+        file_menu.addAction(action_open_project)
+
+        file_menu.addSeparator()
+
+        action_save_project = QAction("💾 프로젝트 저장", self)
+        action_save_project.setShortcut(QKeySequence.StandardKey.Save)
+        action_save_project.triggered.connect(self.save_project)
+        file_menu.addAction(action_save_project)
+
+        action_save_project_as = QAction("💾 프로젝트 다른 이름 저장…", self)
+        action_save_project_as.setShortcut(QKeySequence.StandardKey.SaveAs)
+        action_save_project_as.triggered.connect(self.save_project_as)
+        file_menu.addAction(action_save_project_as)
         
         file_menu.addSeparator()
         
@@ -2430,6 +2866,24 @@ class MainWindow(QMainWindow):
         self.status_ver.setStyleSheet("color: #a0aec0; font-size: 10px; margin-left: 10px;")
         self.statusbar.addPermanentWidget(self.status_ver)
 
+        # 우측 하단 작업 진행바(작고 비침투적으로)
+        self._status_task_count = 0
+        self._status_task_widget = QWidget()
+        task_layout = QHBoxLayout(self._status_task_widget)
+        task_layout.setContentsMargins(0, 0, 0, 0)
+        task_layout.setSpacing(6)
+        self._status_task_label = QLabel("")
+        self._status_task_label.setStyleSheet("color: #718096; font-size: 10px;")
+        self._status_task_bar = QProgressBar()
+        self._status_task_bar.setTextVisible(False)
+        self._status_task_bar.setFixedWidth(120)
+        self._status_task_bar.setFixedHeight(12)
+        self._status_task_bar.setRange(0, 0)  # indeterminate by default
+        task_layout.addWidget(self._status_task_label)
+        task_layout.addWidget(self._status_task_bar)
+        self._status_task_widget.setVisible(False)
+        self.statusbar.addPermanentWidget(self._status_task_widget)
+
     def copy_debug_info(self) -> None:
         try:
             info = _collect_debug_info(basedir=str(Path(basedir)))
@@ -2454,6 +2908,821 @@ class MainWindow(QMainWindow):
             if dialog.exec() == QDialog.DialogCode.Accepted:
                 scale_factor = dialog.get_scale_factor()
                 self.load_mesh(filepath, scale_factor)
+
+    def open_project(self) -> None:
+        filepath, _ = QFileDialog.getOpenFileName(
+            self,
+            "프로젝트 열기",
+            "",
+            "ArchMeshRubbing Project (*.amr);;All Files (*)",
+        )
+        if not filepath:
+            return
+        self.open_project_path(filepath)
+
+    def open_project_path(self, filepath: str) -> None:
+        """Open a project file (.amr) from a known path (no file dialog)."""
+        if not filepath:
+            return
+
+        try:
+            doc = load_amr_project(filepath)
+            state = doc.get("state", {})
+        except (OSError, ProjectFormatError) as e:
+            QMessageBox.critical(self, "오류", f"프로젝트를 열 수 없습니다:\n{e}")
+            return
+        except Exception as e:
+            QMessageBox.critical(self, "오류", f"프로젝트 열기 중 오류 발생:\n{type(e).__name__}: {e}")
+            return
+
+        objects = state.get("objects", [])
+        if not isinstance(objects, list) or not objects:
+            QMessageBox.warning(self, "경고", "프로젝트에 로드할 객체(objects)가 없습니다.")
+            return
+
+        # Reset scene and start queued mesh loads
+        try:
+            self.viewport.clear_scene()
+        except Exception:
+            try:
+                self.viewport.objects = []
+                self.viewport.selected_index = -1
+                self.viewport.picking_mode = "none"
+                self.viewport.update()
+            except Exception:
+                pass
+
+        self.scene_panel.update_list(self.viewport.objects, self.viewport.selected_index)
+        self.current_mesh = None
+        self.current_filepath = None
+
+        self._current_project_path = str(filepath)
+        self._project_load_active = True
+        self._project_load_state = state if isinstance(state, dict) else {}
+        self._project_load_queue = [o for o in objects if isinstance(o, dict)]
+        self._project_load_current = None
+
+        self.status_info.setText(f"📁 프로젝트 로딩 중: {Path(filepath).name}")
+        self._start_next_project_object_load()
+
+    def save_project(self) -> None:
+        if not getattr(self, "_current_project_path", None):
+            self.save_project_as()
+            return
+        self._write_project(str(self._current_project_path))
+
+    def save_project_as(self) -> None:
+        default_name = "project.amr"
+        try:
+            if self.current_filepath:
+                default_name = str(Path(str(self.current_filepath)).with_suffix(".amr").name)
+        except Exception:
+            default_name = "project.amr"
+
+        filepath, _ = QFileDialog.getSaveFileName(
+            self,
+            "프로젝트 저장",
+            default_name,
+            "ArchMeshRubbing Project (*.amr);;All Files (*)",
+        )
+        if not filepath:
+            return
+
+        if not str(filepath).lower().endswith(".amr"):
+            filepath = str(filepath) + ".amr"
+
+        if self._write_project(filepath):
+            self._current_project_path = str(filepath)
+
+    def _write_project(self, filepath: str) -> bool:
+        try:
+            state = self._collect_project_state()
+
+            sha, dirty = _safe_git_info(str(Path(basedir)))
+            meta = {
+                "app": APP_NAME,
+                "version": APP_VERSION,
+                "git": f"{sha}{'*' if dirty else ''}" if sha else "unknown",
+            }
+            save_amr_project(filepath, state, meta=meta)
+            self.status_info.setText(f"✅ 프로젝트 저장: {Path(filepath).name}")
+            return True
+        except Exception as e:
+            QMessageBox.critical(self, "오류", f"프로젝트 저장 실패:\n{type(e).__name__}: {e}")
+            self.status_info.setText("❌ 프로젝트 저장 실패")
+            return False
+
+    def _collect_project_state(self) -> dict[str, Any]:
+        vp = self.viewport
+
+        def f3(v) -> list[float]:
+            try:
+                arr = np.asarray(v, dtype=np.float64).reshape(-1)
+                if arr.size >= 3:
+                    return [float(arr[0]), float(arr[1]), float(arr[2])]
+            except Exception:
+                pass
+            return [0.0, 0.0, 0.0]
+
+        def f2(v) -> list[float]:
+            try:
+                arr = np.asarray(v, dtype=np.float64).reshape(-1)
+                if arr.size >= 2:
+                    return [float(arr[0]), float(arr[1])]
+            except Exception:
+                pass
+            return [0.0, 0.0]
+
+        def to_int_list(s) -> list[int]:
+            try:
+                return [int(x) for x in sorted(list(s or []))]
+            except Exception:
+                return []
+
+        objects: list[dict[str, Any]] = []
+        for obj in getattr(vp, "objects", []) or []:
+            mesh = getattr(obj, "mesh", None)
+            mesh_path = None
+            try:
+                fp = getattr(mesh, "filepath", None)
+                if fp:
+                    mesh_path = str(fp)
+            except Exception:
+                mesh_path = None
+
+            try:
+                source_scale = float(getattr(mesh, "_amr_source_scale_factor", 1.0))
+            except Exception:
+                source_scale = 1.0
+
+            # Polyline layers (sections/guides)
+            poly_layers: list[dict[str, Any]] = []
+            for layer in getattr(obj, "polyline_layers", []) or []:
+                try:
+                    pts = []
+                    for p in layer.get("points", []) or []:
+                        arr = np.asarray(p, dtype=np.float64).reshape(-1)
+                        if arr.size >= 3:
+                            pts.append([float(arr[0]), float(arr[1]), float(arr[2])])
+                        elif arr.size == 2:
+                            pts.append([float(arr[0]), float(arr[1]), 0.0])
+                    poly_layers.append(
+                        {
+                            "name": str(layer.get("name", "")).strip(),
+                            "kind": str(layer.get("kind", "")).strip(),
+                            "visible": bool(layer.get("visible", True)),
+                            "offset": f2(layer.get("offset", [0.0, 0.0])),
+                            "color": [float(x) for x in (layer.get("color", [0.1, 0.1, 0.1, 0.9]) or [])][:4],
+                            "width": float(layer.get("width", 2.0) or 2.0),
+                            "points": pts,
+                        }
+                    )
+                except Exception:
+                    continue
+
+            # Fitted arcs (curvature)
+            arcs_state: list[dict[str, Any]] = []
+            for arc in getattr(obj, "fitted_arcs", []) or []:
+                try:
+                    arcs_state.append(
+                        {
+                            "center": f3(getattr(arc, "center", [0, 0, 0])),
+                            "radius": float(getattr(arc, "radius", 0.0) or 0.0),
+                            "normal": f3(getattr(arc, "normal", [0, 0, 1])),
+                            "plane_origin": f3(getattr(arc, "plane_origin", [0, 0, 0])),
+                            "plane_u": f3(getattr(arc, "plane_u", [1, 0, 0])),
+                            "plane_v": f3(getattr(arc, "plane_v", [0, 1, 0])),
+                            "points_2d": (
+                                np.asarray(getattr(arc, "points_2d", np.zeros((0, 2))), dtype=np.float64)
+                                .reshape(-1, 2)
+                                .tolist()
+                            ),
+                        }
+                    )
+                except Exception:
+                    continue
+
+            objects.append(
+                {
+                    "name": str(getattr(obj, "name", "")).strip() or "Object",
+                    "visible": bool(getattr(obj, "visible", True)),
+                    "mesh": {"path": mesh_path, "source_scale_factor": source_scale},
+                    "transform": {
+                        "translation": f3(getattr(obj, "translation", [0, 0, 0])),
+                        "rotation_deg": f3(getattr(obj, "rotation", [0, 0, 0])),
+                        "scale": float(getattr(obj, "scale", 1.0) or 1.0),
+                        "fixed_state_valid": bool(getattr(obj, "fixed_state_valid", False)),
+                        "fixed_translation": f3(getattr(obj, "fixed_translation", [0, 0, 0])),
+                        "fixed_rotation_deg": f3(getattr(obj, "fixed_rotation", [0, 0, 0])),
+                        "fixed_scale": float(getattr(obj, "fixed_scale", 1.0) or 1.0),
+                    },
+                    "faces": {
+                        "selected": to_int_list(getattr(obj, "selected_faces", set())),
+                        "outer": to_int_list(getattr(obj, "outer_face_indices", set())),
+                        "inner": to_int_list(getattr(obj, "inner_face_indices", set())),
+                        "migu": to_int_list(getattr(obj, "migu_face_indices", set())),
+                    },
+                    "polylines": poly_layers,
+                    "arcs": arcs_state,
+                }
+            )
+
+        cam = getattr(vp, "camera", None)
+        viewport_state: dict[str, Any] = {
+            "selected_index": int(getattr(vp, "selected_index", -1) or -1),
+            "grid_spacing": float(getattr(vp, "grid_spacing", 1.0) or 1.0),
+            "grid_size": float(getattr(vp, "grid_size", 500.0) or 500.0),
+            "flat_shading": bool(getattr(vp, "flat_shading", False)),
+            "xray_mode": bool(getattr(vp, "xray_mode", False)),
+            "xray_alpha": float(getattr(vp, "xray_alpha", 0.25) or 0.25),
+            "camera": {
+                "distance": float(getattr(cam, "distance", 50.0) or 50.0) if cam is not None else 50.0,
+                "azimuth": float(getattr(cam, "azimuth", 45.0) or 45.0) if cam is not None else 45.0,
+                "elevation": float(getattr(cam, "elevation", 30.0) or 30.0) if cam is not None else 30.0,
+                "center": f3(getattr(cam, "center", [0, 0, 0])) if cam is not None else [0.0, 0.0, 0.0],
+                "pan_offset": f3(getattr(cam, "pan_offset", [0, 0, 0])) if cam is not None else [0.0, 0.0, 0.0],
+            },
+            "slice": {
+                "enabled": bool(getattr(vp, "slice_enabled", False)),
+                "z": float(getattr(vp, "slice_z", 0.0) or 0.0),
+            },
+            "crosshair": {
+                "enabled": bool(getattr(vp, "crosshair_enabled", False)),
+                "pos": f2(getattr(vp, "crosshair_pos", [0.0, 0.0])),
+            },
+            "roi": {
+                "enabled": bool(getattr(vp, "roi_enabled", False)),
+                "bounds": [float(x) for x in (getattr(vp, "roi_bounds", [-10, 10, -10, 10]) or [])][:4],
+                "caps": bool(getattr(vp, "roi_caps_enabled", False)),
+            },
+            "cut_lines": {
+                "enabled": bool(getattr(vp, "cut_lines_enabled", False)),
+                "active": int(getattr(vp, "cut_line_active", 0) or 0),
+                "final": [bool(x) for x in (getattr(vp, "_cut_line_final", [False, False]) or [False, False])][:2],
+                "lines": [
+                    [f3(p) for p in (line or [])]
+                    for line in (getattr(vp, "cut_lines", [[], []]) or [[], []])[:2]
+                ],
+            },
+        }
+
+        ui_state: dict[str, Any] = {
+            "flatten": {
+                "radius_mm": float(getattr(self.flatten_panel, "spin_radius", None).value())
+                if getattr(self, "flatten_panel", None) is not None
+                else 150.0,
+                "direction_index": int(getattr(self.flatten_panel, "combo_direction", None).currentIndex())
+                if getattr(self, "flatten_panel", None) is not None
+                else 0,
+                "method_index": int(getattr(self.flatten_panel, "combo_method", None).currentIndex())
+                if getattr(self, "flatten_panel", None) is not None
+                else 0,
+                "distortion_percent": int(getattr(self.flatten_panel, "slider_distortion", None).value())
+                if getattr(self, "flatten_panel", None) is not None
+                else 50,
+                "auto_cut": bool(getattr(self.flatten_panel, "check_auto_cut", None).isChecked())
+                if getattr(self, "flatten_panel", None) is not None
+                else False,
+                "multiband": bool(getattr(self.flatten_panel, "check_multiband", None).isChecked())
+                if getattr(self, "flatten_panel", None) is not None
+                else False,
+                "iterations": int(getattr(self.flatten_panel, "spin_iterations", None).value())
+                if getattr(self, "flatten_panel", None) is not None
+                else 30,
+            },
+            "export": {
+                "dpi": int(getattr(self.export_panel, "spin_dpi", None).value())
+                if getattr(self, "export_panel", None) is not None
+                else 300,
+                "format_index": int(getattr(self.export_panel, "combo_format", None).currentIndex())
+                if getattr(self, "export_panel", None) is not None
+                else 0,
+                "scale_bar": bool(getattr(self.export_panel, "check_scale_bar", None).isChecked())
+                if getattr(self, "export_panel", None) is not None
+                else True,
+                "profile_include_grid": bool(getattr(self.export_panel, "check_profile_include_grid", None).isChecked())
+                if getattr(self.export_panel, "check_profile_include_grid", None) is not None
+                else True,
+                "profile_feature_lines": bool(getattr(self.export_panel, "check_profile_feature_lines", None).isChecked())
+                if getattr(self.export_panel, "check_profile_feature_lines", None) is not None
+                else False,
+                "profile_feature_angle": float(getattr(self.export_panel, "spin_profile_feature_angle", None).value())
+                if getattr(self.export_panel, "spin_profile_feature_angle", None) is not None
+                else 60.0,
+            },
+            "slice": {
+                "presets": self.slice_panel.get_presets() if getattr(self, "slice_panel", None) is not None else [],
+            },
+        }
+
+        return {
+            "objects": objects,
+            "viewport": viewport_state,
+            "ui": ui_state,
+        }
+
+    def _start_next_project_object_load(self) -> None:
+        if not bool(getattr(self, "_project_load_active", False)):
+            return
+
+        queue = getattr(self, "_project_load_queue", None)
+        if not queue:
+            return
+
+        obj_state = queue.pop(0)
+        self._project_load_current = obj_state
+
+        mesh_info = obj_state.get("mesh", {}) if isinstance(obj_state, dict) else {}
+        if not isinstance(mesh_info, dict):
+            mesh_info = {}
+
+        mesh_path = str(mesh_info.get("path", "") or "").strip()
+        if not mesh_path or not Path(mesh_path).exists():
+            mesh_path, _ = QFileDialog.getOpenFileName(
+                self,
+                "프로젝트 메쉬 파일 찾기",
+                "",
+                "3D Files (*.obj *.ply *.stl *.off);;All Files (*)",
+            )
+            if not mesh_path:
+                # Skip this object
+                self._project_load_current = None
+                self._start_next_project_object_load()
+                return
+            mesh_info["path"] = mesh_path
+            obj_state["mesh"] = mesh_info
+
+        try:
+            scale_factor = float(mesh_info.get("source_scale_factor", 1.0) or 1.0)
+        except Exception:
+            scale_factor = 1.0
+
+        self._start_async_load(mesh_path, scale_factor)
+
+    def _apply_loaded_object_state(self, obj, obj_state: dict[str, Any]) -> None:
+        if obj is None or not isinstance(obj_state, dict):
+            return
+
+        # Visibility/name
+        try:
+            obj.visible = bool(obj_state.get("visible", True))
+        except Exception:
+            pass
+
+        # Transform
+        tr = obj_state.get("transform", {})
+        if not isinstance(tr, dict):
+            tr = {}
+
+        def f3(v, default: tuple[float, float, float] = (0.0, 0.0, 0.0)) -> np.ndarray:
+            try:
+                arr = np.asarray(v, dtype=np.float64).reshape(-1)
+                if arr.size >= 3 and np.isfinite(arr[:3]).all():
+                    return arr[:3].astype(np.float64, copy=True)
+            except Exception:
+                pass
+            return np.asarray(default, dtype=np.float64)
+
+        try:
+            obj.translation = f3(tr.get("translation", obj.translation))
+        except Exception:
+            pass
+        try:
+            obj.rotation = f3(tr.get("rotation_deg", obj.rotation))
+        except Exception:
+            pass
+        try:
+            obj.scale = float(tr.get("scale", getattr(obj, "scale", 1.0)) or 1.0)
+        except Exception:
+            pass
+
+        try:
+            obj.fixed_state_valid = bool(tr.get("fixed_state_valid", getattr(obj, "fixed_state_valid", False)))
+            obj.fixed_translation = f3(tr.get("fixed_translation", getattr(obj, "fixed_translation", [0, 0, 0])))
+            obj.fixed_rotation = f3(tr.get("fixed_rotation_deg", getattr(obj, "fixed_rotation", [0, 0, 0])))
+            obj.fixed_scale = float(tr.get("fixed_scale", getattr(obj, "fixed_scale", 1.0)) or 1.0)
+        except Exception:
+            pass
+
+        # Face selection / outer-inner assignment
+        faces = obj_state.get("faces", {})
+        if not isinstance(faces, dict):
+            faces = {}
+
+        def to_int_set(v) -> set[int]:
+            if not v:
+                return set()
+            out: set[int] = set()
+            try:
+                for x in v:
+                    out.add(int(x))
+            except Exception:
+                return set()
+            return out
+
+        try:
+            obj.selected_faces = to_int_set(faces.get("selected", []))
+        except Exception:
+            pass
+        try:
+            obj.outer_face_indices = to_int_set(faces.get("outer", []))
+            obj.inner_face_indices = to_int_set(faces.get("inner", []))
+            obj.migu_face_indices = to_int_set(faces.get("migu", []))
+        except Exception:
+            pass
+
+        try:
+            obj._surface_assignment_version = int(getattr(obj, "_surface_assignment_version", 0) or 0) + 1
+        except Exception:
+            pass
+        try:
+            obj._surface_overlay_index_cache = {}
+            obj._surface_overlay_index_cache_version = -1
+        except Exception:
+            pass
+
+        try:
+            self.viewport.surfaceAssignmentChanged.emit(
+                len(getattr(obj, "outer_face_indices", set()) or set()),
+                len(getattr(obj, "inner_face_indices", set()) or set()),
+                len(getattr(obj, "migu_face_indices", set()) or set()),
+            )
+        except Exception:
+            pass
+
+        # Polyline layers
+        polylines = obj_state.get("polylines", [])
+        layers: list[dict[str, Any]] = []
+        if isinstance(polylines, list):
+            for layer in polylines:
+                if not isinstance(layer, dict):
+                    continue
+                try:
+                    pts_in = layer.get("points", []) or []
+                    pts: list[list[float]] = []
+                    for p in pts_in:
+                        arr = np.asarray(p, dtype=np.float64).reshape(-1)
+                        if arr.size >= 3 and np.isfinite(arr[:3]).all():
+                            pts.append([float(arr[0]), float(arr[1]), float(arr[2])])
+                        elif arr.size >= 2 and np.isfinite(arr[:2]).all():
+                            pts.append([float(arr[0]), float(arr[1]), 0.0])
+                    layers.append(
+                        {
+                            "name": str(layer.get("name", "")).strip(),
+                            "kind": str(layer.get("kind", "")).strip(),
+                            "visible": bool(layer.get("visible", True)),
+                            "offset": [float(x) for x in (layer.get("offset", [0.0, 0.0]) or [])][:2],
+                            "color": [float(x) for x in (layer.get("color", [0.1, 0.1, 0.1, 0.9]) or [])][:4],
+                            "width": float(layer.get("width", 2.0) or 2.0),
+                            "points": pts,
+                        }
+                    )
+                except Exception:
+                    continue
+        try:
+            obj.polyline_layers = layers
+        except Exception:
+            pass
+
+        # Fitted arcs
+        arcs = obj_state.get("arcs", [])
+        fitted = []
+        if isinstance(arcs, list) and arcs:
+            try:
+                from src.core.curvature_fitter import FittedArc
+
+                for a in arcs:
+                    if not isinstance(a, dict):
+                        continue
+                    try:
+                        center = f3(a.get("center", [0, 0, 0]))
+                        normal = f3(a.get("normal", [0, 0, 1]), default=(0.0, 0.0, 1.0))
+                        plane_origin = f3(a.get("plane_origin", [0, 0, 0]))
+                        plane_u = f3(a.get("plane_u", [1, 0, 0]), default=(1.0, 0.0, 0.0))
+                        plane_v = f3(a.get("plane_v", [0, 1, 0]), default=(0.0, 1.0, 0.0))
+                        pts2 = np.asarray(a.get("points_2d", []), dtype=np.float64).reshape(-1, 2)
+                        fitted.append(
+                            FittedArc(
+                                center=center,
+                                radius=float(a.get("radius", 0.0) or 0.0),
+                                normal=normal,
+                                points_2d=pts2,
+                                plane_origin=plane_origin,
+                                plane_u=plane_u,
+                                plane_v=plane_v,
+                            )
+                        )
+                    except Exception:
+                        continue
+            except Exception:
+                fitted = []
+        try:
+            obj.fitted_arcs = fitted
+        except Exception:
+            pass
+
+    def _finish_project_load(self) -> None:
+        state = getattr(self, "_project_load_state", None)
+        self._project_load_active = False
+        self._project_load_queue = []
+        self._project_load_current = None
+        self._project_load_state = None
+
+        if not isinstance(state, dict):
+            state = {}
+
+        try:
+            self._apply_project_state(state)
+        except Exception:
+            _LOGGER.exception("Failed applying project global state")
+
+        self.scene_panel.update_list(self.viewport.objects, self.viewport.selected_index)
+        try:
+            self.sync_transform_panel()
+        except Exception:
+            pass
+
+        try:
+            self.status_info.setText("✅ 프로젝트 로딩 완료")
+        except Exception:
+            pass
+
+    def _apply_project_state(self, state: dict[str, Any]) -> None:
+        # UI widgets (flatten/export)
+        ui = state.get("ui", {})
+        if isinstance(ui, dict):
+            self._apply_ui_state(ui)
+
+        vp_state = state.get("viewport", {})
+        if not isinstance(vp_state, dict):
+            vp_state = {}
+
+        vp = self.viewport
+
+        # Grid / rendering toggles
+        try:
+            vp.grid_spacing = float(vp_state.get("grid_spacing", vp.grid_spacing) or vp.grid_spacing)
+            vp.grid_size = float(vp_state.get("grid_size", vp.grid_size) or vp.grid_size)
+        except Exception:
+            pass
+        try:
+            vp.flat_shading = bool(vp_state.get("flat_shading", getattr(vp, "flat_shading", False)))
+        except Exception:
+            pass
+        try:
+            vp.xray_mode = bool(vp_state.get("xray_mode", getattr(vp, "xray_mode", False)))
+            vp.xray_alpha = float(vp_state.get("xray_alpha", getattr(vp, "xray_alpha", 0.25)) or 0.25)
+        except Exception:
+            pass
+
+        # Camera
+        cam_s = vp_state.get("camera", {})
+        if isinstance(cam_s, dict) and getattr(vp, "camera", None) is not None:
+            cam = vp.camera
+            try:
+                cam.distance = float(cam_s.get("distance", cam.distance) or cam.distance)
+                cam.azimuth = float(cam_s.get("azimuth", cam.azimuth) or cam.azimuth)
+                cam.elevation = float(cam_s.get("elevation", cam.elevation) or cam.elevation)
+                cam.center = np.asarray(cam_s.get("center", cam.center), dtype=np.float64).reshape(-1)[:3]
+                cam.pan_offset = np.asarray(cam_s.get("pan_offset", cam.pan_offset), dtype=np.float64).reshape(-1)[:3]
+            except Exception:
+                pass
+
+        # Selected object (apply early so derived computations target the right mesh)
+        try:
+            sel = int(vp_state.get("selected_index", getattr(vp, "selected_index", -1)) or -1)
+        except Exception:
+            sel = -1
+        if 0 <= sel < len(getattr(vp, "objects", []) or []):
+            try:
+                vp.select_object(sel)
+            except Exception:
+                vp.selected_index = sel
+
+        # Cut lines data (edit mode restored only if explicitly enabled)
+        cut_s = vp_state.get("cut_lines", {})
+        if isinstance(cut_s, dict):
+            try:
+                vp.cut_line_active = int(cut_s.get("active", getattr(vp, "cut_line_active", 0)) or 0)
+            except Exception:
+                vp.cut_line_active = 0
+            try:
+                vp._cut_line_final = [bool(x) for x in (cut_s.get("final", [False, False]) or [False, False])][:2]
+            except Exception:
+                vp._cut_line_final = [False, False]
+
+            lines = cut_s.get("lines", None)
+            if isinstance(lines, list):
+                out_lines = [[], []]
+                for i in (0, 1):
+                    pts = lines[i] if i < len(lines) else []
+                    line_pts = []
+                    if isinstance(pts, list):
+                        for p in pts:
+                            arr = np.asarray(p, dtype=np.float64).reshape(-1)
+                            if arr.size >= 3 and np.isfinite(arr[:3]).all():
+                                line_pts.append(arr[:3].copy())
+                            elif arr.size >= 2 and np.isfinite(arr[:2]).all():
+                                line_pts.append(np.array([float(arr[0]), float(arr[1]), 0.0], dtype=np.float64))
+                    out_lines[i] = line_pts
+                vp.cut_lines = out_lines
+
+                # Recompute section profiles from restored cut lines.
+                try:
+                    for i in (0, 1):
+                        if i < len(out_lines) and len(out_lines[i]) >= 2:
+                            vp.schedule_cut_section_update(i, delay_ms=0)
+                except Exception:
+                    pass
+
+            try:
+                vp.cut_lines_enabled = bool(cut_s.get("enabled", False))
+            except Exception:
+                vp.cut_lines_enabled = False
+
+            # Restore edit mode state (picking) if enabled.
+            try:
+                if vp.cut_lines_enabled:
+                    vp.picking_mode = "cut_lines"
+                    idx = int(getattr(vp, "cut_line_active", 0) or 0)
+                    idx = idx if idx in (0, 1) else 0
+                    final = getattr(vp, "_cut_line_final", [False, False]) or [False, False]
+                    line = (getattr(vp, "cut_lines", [[], []]) or [[], []])[idx]
+                    vp.cut_line_drawing = bool(line) and not bool(final[idx])
+                    vp.cut_line_preview = None
+                else:
+                    if getattr(vp, "picking_mode", "") == "cut_lines":
+                        vp.picking_mode = "none"
+                    vp.cut_line_drawing = False
+                    vp.cut_line_preview = None
+            except Exception:
+                pass
+
+        # Slice
+        slice_s = vp_state.get("slice", {})
+        if isinstance(slice_s, dict):
+            enabled = bool(slice_s.get("enabled", False))
+            try:
+                z = float(slice_s.get("z", 0.0) or 0.0)
+            except Exception:
+                z = 0.0
+
+            # Sync panel widgets without spamming signals, then apply once.
+            try:
+                self.slice_panel.group.blockSignals(True)
+                self.slice_panel.spin.blockSignals(True)
+                self.slice_panel.slider.blockSignals(True)
+                self.slice_panel.group.setChecked(enabled)
+                self.slice_panel.spin.setValue(z)
+                self.slice_panel.slider.setValue(int(z * 100))
+            finally:
+                try:
+                    self.slice_panel.group.blockSignals(False)
+                    self.slice_panel.spin.blockSignals(False)
+                    self.slice_panel.slider.blockSignals(False)
+                except Exception:
+                    pass
+            self.on_slice_changed(enabled, z)
+
+        # Crosshair
+        cross_s = vp_state.get("crosshair", {})
+        if isinstance(cross_s, dict):
+            try:
+                vp.crosshair_enabled = bool(cross_s.get("enabled", False))
+            except Exception:
+                vp.crosshair_enabled = False
+            try:
+                vp.crosshair_pos = np.asarray(cross_s.get("pos", [0.0, 0.0]), dtype=np.float64).reshape(-1)[:2]
+            except Exception:
+                pass
+            if getattr(vp, "crosshair_enabled", False):
+                try:
+                    vp.picking_mode = "crosshair"
+                    vp.schedule_crosshair_profile_update(0)
+                except Exception:
+                    pass
+            else:
+                if getattr(vp, "picking_mode", "") == "crosshair":
+                    vp.picking_mode = "none"
+
+            try:
+                self.section_panel.btn_toggle.blockSignals(True)
+                self.section_panel.btn_toggle.setChecked(bool(getattr(vp, "crosshair_enabled", False)))
+                self.section_panel.btn_toggle.setText(
+                    "🎯 십자선 단면 모드 중지" if bool(getattr(vp, "crosshair_enabled", False)) else "🎯 십자선 단면 모드 시작"
+                )
+            except Exception:
+                pass
+            finally:
+                try:
+                    self.section_panel.btn_toggle.blockSignals(False)
+                except Exception:
+                    pass
+
+        # ROI
+        roi_s = vp_state.get("roi", {})
+        if isinstance(roi_s, dict):
+            try:
+                vp.roi_enabled = bool(roi_s.get("enabled", False))
+            except Exception:
+                vp.roi_enabled = False
+            try:
+                b = roi_s.get("bounds", None)
+                if isinstance(b, (list, tuple)) and len(b) >= 4:
+                    vp.roi_bounds = [float(b[0]), float(b[1]), float(b[2]), float(b[3])]
+            except Exception:
+                pass
+            try:
+                vp.roi_caps_enabled = bool(roi_s.get("caps", False))
+            except Exception:
+                pass
+            try:
+                if vp.roi_enabled:
+                    vp.schedule_roi_edges_update(0)
+            except Exception:
+                pass
+
+            try:
+                self.section_panel.btn_roi.blockSignals(True)
+                self.section_panel.btn_roi.setChecked(bool(getattr(vp, "roi_enabled", False)))
+                self.section_panel.btn_roi.setText(
+                    "📐 영역 지정 모드 중지" if bool(getattr(vp, "roi_enabled", False)) else "📐 영역 지정 모드 시작"
+                )
+                self.section_panel.btn_silhouette.setEnabled(bool(getattr(vp, "roi_enabled", False)))
+            except Exception:
+                pass
+            finally:
+                try:
+                    self.section_panel.btn_roi.blockSignals(False)
+                except Exception:
+                    pass
+
+        # Cutline edit mode button
+        try:
+            self.section_panel.btn_line.blockSignals(True)
+            self.section_panel.btn_line.setChecked(bool(getattr(vp, "cut_lines_enabled", False)))
+            self.section_panel.btn_line.setText(
+                "✏️ 단면선 그리기 중지" if bool(getattr(vp, "cut_lines_enabled", False)) else "✏️ 단면선 그리기 시작"
+            )
+            try:
+                self.section_panel.combo_cutline.blockSignals(True)
+                self.section_panel.combo_cutline.setCurrentIndex(int(getattr(vp, "cut_line_active", 0) or 0))
+            finally:
+                try:
+                    self.section_panel.combo_cutline.blockSignals(False)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        finally:
+            try:
+                self.section_panel.btn_line.blockSignals(False)
+            except Exception:
+                pass
+
+        vp.update()
+
+    def _apply_ui_state(self, ui: dict[str, Any]) -> None:
+        # Flatten panel
+        flat = ui.get("flatten", {})
+        if isinstance(flat, dict) and getattr(self, "flatten_panel", None) is not None:
+            try:
+                self.flatten_panel.spin_radius.setValue(float(flat.get("radius_mm", self.flatten_panel.spin_radius.value()) or 150.0))
+                self.flatten_panel.combo_direction.setCurrentIndex(int(flat.get("direction_index", self.flatten_panel.combo_direction.currentIndex()) or 0))
+                self.flatten_panel.combo_method.setCurrentIndex(int(flat.get("method_index", self.flatten_panel.combo_method.currentIndex()) or 0))
+                self.flatten_panel.slider_distortion.setValue(int(flat.get("distortion_percent", self.flatten_panel.slider_distortion.value()) or 50))
+                self.flatten_panel.check_auto_cut.setChecked(bool(flat.get("auto_cut", self.flatten_panel.check_auto_cut.isChecked())))
+                self.flatten_panel.check_multiband.setChecked(bool(flat.get("multiband", self.flatten_panel.check_multiband.isChecked())))
+                self.flatten_panel.spin_iterations.setValue(int(flat.get("iterations", self.flatten_panel.spin_iterations.value()) or 30))
+            except Exception:
+                pass
+
+        # Export panel
+        exp = ui.get("export", {})
+        if isinstance(exp, dict) and getattr(self, "export_panel", None) is not None:
+            try:
+                self.export_panel.spin_dpi.setValue(int(exp.get("dpi", self.export_panel.spin_dpi.value()) or 300))
+                self.export_panel.combo_format.setCurrentIndex(int(exp.get("format_index", self.export_panel.combo_format.currentIndex()) or 0))
+                self.export_panel.check_scale_bar.setChecked(bool(exp.get("scale_bar", self.export_panel.check_scale_bar.isChecked())))
+                self.export_panel.check_profile_include_grid.setChecked(
+                    bool(exp.get("profile_include_grid", self.export_panel.check_profile_include_grid.isChecked()))
+                )
+                self.export_panel.check_profile_feature_lines.setChecked(
+                    bool(exp.get("profile_feature_lines", self.export_panel.check_profile_feature_lines.isChecked()))
+                )
+                self.export_panel.spin_profile_feature_angle.setValue(
+                    float(exp.get("profile_feature_angle", self.export_panel.spin_profile_feature_angle.value()) or 60.0)
+                )
+            except Exception:
+                pass
+
+        # Slice presets
+        sl = ui.get("slice", {})
+        if isinstance(sl, dict) and getattr(self, "slice_panel", None) is not None:
+            try:
+                self.slice_panel.set_presets(sl.get("presets", []))
+            except Exception:
+                pass
     
     def dragEnterEvent(self, a0):
         """드래그 진입 이벤트"""
@@ -2513,6 +3782,10 @@ class MainWindow(QMainWindow):
         dlg.setMinimumDuration(0)
         dlg.show()
         self._mesh_load_dialog = dlg
+        try:
+            self._status_task_begin(f"메쉬 로딩: {name}", maximum=None, value=None)
+        except Exception:
+            pass
 
         self._mesh_load_thread = MeshLoadThread(
             filepath=str(filepath),
@@ -2534,11 +3807,25 @@ class MainWindow(QMainWindow):
             self.current_mesh = mesh_data
             self.current_filepath = filepath
 
-            self.viewport.add_mesh_object(mesh_data, name=Path(filepath).name)
+            # Normal file load vs project load(.amr)
+            obj_name = Path(filepath).name
+            project_obj_state = getattr(self, "_project_load_current", None) if getattr(self, "_project_load_active", False) else None
+            if isinstance(project_obj_state, dict):
+                obj_name = str(project_obj_state.get("name", "")).strip() or obj_name
 
-            self.status_info.setText(f"로드됨: {Path(filepath).name}")
-            self.status_mesh.setText(f"V: {mesh_data.n_vertices:,} | F: {mesh_data.n_faces:,}")
-            self.status_grid.setText(f"격자: {self.viewport.grid_spacing}cm")
+            self.viewport.add_mesh_object(mesh_data, name=obj_name)
+
+            if isinstance(project_obj_state, dict):
+                try:
+                    self._apply_loaded_object_state(self.viewport.selected_obj, project_obj_state)
+                except Exception:
+                    _LOGGER.exception("Failed applying object state from project")
+                self.scene_panel.update_list(self.viewport.objects, self.viewport.selected_index)
+                self.status_info.setText(f"로드됨(프로젝트): {obj_name}")
+            else:
+                self.status_info.setText(f"로드됨: {Path(filepath).name}")
+                self.status_mesh.setText(f"V: {mesh_data.n_vertices:,} | F: {mesh_data.n_faces:,}")
+                self.status_grid.setText(f"격자: {self.viewport.grid_spacing}cm")
         finally:
             dlg = getattr(self, "_mesh_load_dialog", None)
             if dlg is not None:
@@ -2550,6 +3837,13 @@ class MainWindow(QMainWindow):
         if dlg is not None:
             dlg.close()
             self._mesh_load_dialog = None
+
+        # Abort project load if a mesh fails to load.
+        if bool(getattr(self, "_project_load_active", False)):
+            self._project_load_active = False
+            self._project_load_queue = []
+            self._project_load_current = None
+            self._project_load_state = None
 
         msg = f"파일 로드 실패:\n{message}"
         try:
@@ -2571,6 +3865,20 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         self._mesh_load_thread = None
+        try:
+            self._status_task_end()
+        except Exception:
+            pass
+
+        # Continue queued project loads after each mesh finishes loading.
+        if bool(getattr(self, "_project_load_active", False)):
+            try:
+                if getattr(self, "_project_load_queue", None):
+                    self._start_next_project_object_load()
+                else:
+                    self._finish_project_load()
+            except Exception:
+                _LOGGER.exception("Project load continuation failed")
 
     def _on_profile_export_done(self, result_path: str):
         dlg = getattr(self, "_profile_export_dialog", None)
@@ -2609,6 +3917,10 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         self._profile_export_thread = None
+        try:
+            self._status_task_end()
+        except Exception:
+            pass
 
     def _format_error_message(self, prefix: str, message: str) -> str:
         try:
@@ -2617,6 +3929,98 @@ class MainWindow(QMainWindow):
             return format_exception_message(prefix, message, log_path=_log_path)
         except Exception:
             return f"{prefix}\n\n{message}"
+
+    def _status_task_begin(self, text: str, *, maximum: int | None = None, value: int | None = None) -> None:
+        try:
+            self._status_task_count = int(getattr(self, "_status_task_count", 0) or 0) + 1
+        except Exception:
+            self._status_task_count = 1
+
+        widget = getattr(self, "_status_task_widget", None)
+        label = getattr(self, "_status_task_label", None)
+        bar = getattr(self, "_status_task_bar", None)
+        if widget is None or label is None or bar is None:
+            return
+
+        try:
+            label.setText(str(text or "").strip())
+        except Exception:
+            pass
+
+        try:
+            if maximum is None:
+                bar.setRange(0, 0)  # indeterminate
+            else:
+                m = int(maximum)
+                m = max(1, m)
+                bar.setRange(0, m)
+                bar.setValue(int(value or 0))
+        except Exception:
+            pass
+
+        try:
+            widget.setVisible(True)
+        except Exception:
+            pass
+
+    def _status_task_update(self, *, text: str | None = None, maximum: int | None = None, value: int | None = None) -> None:
+        widget = getattr(self, "_status_task_widget", None)
+        label = getattr(self, "_status_task_label", None)
+        bar = getattr(self, "_status_task_bar", None)
+        if widget is None or label is None or bar is None:
+            return
+
+        try:
+            if text is not None:
+                label.setText(str(text or "").strip())
+        except Exception:
+            pass
+
+        try:
+            if maximum is not None:
+                m = int(maximum)
+                m = max(1, m)
+                bar.setRange(0, m)
+            if value is not None:
+                bar.setValue(int(value))
+        except Exception:
+            pass
+
+        try:
+            if not widget.isVisible():
+                widget.setVisible(True)
+        except Exception:
+            pass
+
+    def _status_task_end(self) -> None:
+        try:
+            c = int(getattr(self, "_status_task_count", 0) or 0)
+        except Exception:
+            c = 0
+        c = max(0, c - 1)
+        self._status_task_count = c
+
+        if c > 0:
+            return
+
+        widget = getattr(self, "_status_task_widget", None)
+        label = getattr(self, "_status_task_label", None)
+        bar = getattr(self, "_status_task_bar", None)
+        try:
+            if label is not None:
+                label.setText("")
+        except Exception:
+            pass
+        try:
+            if bar is not None:
+                bar.setRange(0, 0)
+        except Exception:
+            pass
+        try:
+            if widget is not None:
+                widget.setVisible(False)
+        except Exception:
+            pass
 
     def _start_task(
         self,
@@ -2639,8 +4043,25 @@ class MainWindow(QMainWindow):
         dlg.setMinimumDuration(0)
         dlg.show()
 
+        try:
+            self._status_task_begin(str(label), maximum=None, value=None)
+        except Exception:
+            pass
+
         self._task_dialog = dlg
         self._task_thread = thread
+
+        progress_ended = False
+
+        def _end_progress():
+            nonlocal progress_ended
+            if progress_ended:
+                return
+            progress_ended = True
+            try:
+                self._status_task_end()
+            except Exception:
+                pass
 
         def _close_dialog():
             d = getattr(self, "_task_dialog", None)
@@ -2650,6 +4071,7 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
                 self._task_dialog = None
+            _end_progress()
 
         def _cleanup_thread():
             t = getattr(self, "_task_thread", None)
@@ -2702,6 +4124,14 @@ class MainWindow(QMainWindow):
                 len(getattr(obj, "inner_face_indices", set()) or set()),
                 len(getattr(obj, "migu_face_indices", set()) or set()),
             )
+        except Exception:
+            pass
+
+        try:
+            self.viewport.clear_measure_picks()
+            panel = getattr(self, "measure_panel", None)
+            if panel is not None:
+                panel.set_points_count(0)
         except Exception:
             pass
 
@@ -2812,6 +4242,18 @@ class MainWindow(QMainWindow):
         self.viewport.flat_shading = enabled
         self.viewport.update()
 
+    def toggle_xray_mode(self, enabled):
+        """X-Ray 모드 토글 (선택된 메쉬만 투명 표시)"""
+        try:
+            self.viewport.xray_mode = bool(enabled)
+        except Exception:
+            return
+        self.viewport.update()
+        try:
+            self.status_info.setText("🩻 X-Ray 모드: 선택된 메쉬를 투명 표시" if enabled else "🩻 X-Ray 모드 종료")
+        except Exception:
+            pass
+
     def reset_transform(self):
         """모든 변환 초기화"""
         obj = self.viewport.selected_obj
@@ -2851,6 +4293,11 @@ class MainWindow(QMainWindow):
             if target not in {"outer", "inner", "migu"}:
                 target = "outer"
             self.viewport._surface_paint_target = target
+
+            try:
+                self._disable_measure_mode()
+            except Exception:
+                pass
 
             if tool == "click":
                 self.viewport.picking_mode = "paint_surface_face"
@@ -3320,6 +4767,10 @@ class MainWindow(QMainWindow):
         if export_type == 'profile_2d':
             self.export_2d_profile(data.get('view'))
             return
+
+        if export_type == "profile_2d_package":
+            self.export_2d_profile_package()
+            return
             
         if not self.viewport.selected_obj:
             QMessageBox.warning(self, "경고", "선택된 메쉬가 없습니다.")
@@ -3472,14 +4923,11 @@ class MainWindow(QMainWindow):
                     width_pixels = min(width_pixels, 12000)  # 메모리 보호용 상한
 
                     visualizer = SurfaceVisualizer(default_dpi=dpi)
+                    # Prefer the image-based preset to reduce aliasing/noise on scanned meshes.
                     rubbing = visualizer.generate_rubbing(
                         flattened,
                         width_pixels=width_pixels,
-                        style='modern',
-                        height_mode="axis",
-                        remove_curvature=True,
-                        reference_sigma=None,
-                        relief_strength=12.0,
+                        preset="디지털(곡률 제거)",
                     )
                     rubbing.save(filepath, include_scale_bar=include_scale)
                     return filepath
@@ -3760,11 +5208,7 @@ class MainWindow(QMainWindow):
                             flatten_distortion=0.0,
                             cylinder_axis=str(flatten_options.get("direction", "auto")),
                             cylinder_radius=cylinder_radius,
-                            rubbing_style="modern",
-                            rubbing_height_mode="axis",
-                            rubbing_remove_curvature=True,
-                            rubbing_reference_sigma=None,
-                            rubbing_relief_strength=12.0,
+                            rubbing_preset="디지털(곡률 제거)",
                         ),
                     )
                     return filepath
@@ -4035,6 +5479,10 @@ class MainWindow(QMainWindow):
             dlg.setMinimumDuration(0)
             dlg.show()
             self._profile_export_dialog = dlg
+            try:
+                self._status_task_begin("2D 도면(SVG) 내보내기", maximum=None, value=None)
+            except Exception:
+                pass
 
             self._profile_export_thread = ProfileExportThread(
                 mesh_data=obj.mesh,
@@ -4049,7 +5497,15 @@ class MainWindow(QMainWindow):
                 cut_profiles_world=self.viewport.get_cut_sections_world(),
                 resolution=2048,
                 grid_spacing=1.0,
-                include_grid=True,
+                include_grid=bool(getattr(self.export_panel, "check_profile_include_grid", None).isChecked())
+                if getattr(self.export_panel, "check_profile_include_grid", None) is not None
+                else True,
+                include_feature_lines=bool(getattr(self.export_panel, "check_profile_feature_lines", None).isChecked())
+                if getattr(self.export_panel, "check_profile_feature_lines", None) is not None
+                else False,
+                feature_angle_deg=float(getattr(self.export_panel, "spin_profile_feature_angle", None).value())
+                if getattr(self.export_panel, "spin_profile_feature_angle", None) is not None
+                else 60.0,
             )
             self._profile_export_thread.done.connect(self._on_profile_export_done)
             self._profile_export_thread.failed.connect(self._on_profile_export_failed)
@@ -4091,6 +5547,389 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
     
+    def export_2d_profile_package(self):
+        """2D 실측 도면(SVG) 6방향 패키지 내보내기"""
+        obj = self.viewport.selected_obj
+        if not obj:
+            QMessageBox.warning(self, "경고", "선택된 메쉬가 없습니다.")
+            return
+
+        mesh_data = getattr(obj, "mesh", None)
+        if mesh_data is None:
+            QMessageBox.warning(self, "경고", "선택된 객체에 메쉬 데이터가 없습니다.")
+            return
+
+        running_single = getattr(self, "_profile_export_thread", None)
+        running_pkg = getattr(self, "_profile_package_export_thread", None)
+        if (
+            (running_single is not None and running_single.isRunning())
+            or (running_pkg is not None and running_pkg.isRunning())
+        ):
+            QMessageBox.information(self, "내보내기", "이미 내보내기 작업이 진행 중입니다.")
+            return
+
+        default_dir = str(Path.home())
+        mesh_fp = None
+        try:
+            mesh_fp = getattr(mesh_data, "filepath", None)
+            if mesh_fp:
+                default_dir = str(Path(str(mesh_fp)).parent)
+        except Exception:
+            mesh_fp = None
+
+        parent_dir = QFileDialog.getExistingDirectory(
+            self,
+            "2D 도면 패키지 저장 폴더 선택",
+            default_dir,
+        )
+        if not parent_dir:
+            return
+
+        base_name = "mesh"
+        try:
+            if mesh_fp:
+                base_name = Path(str(mesh_fp)).stem
+        except Exception:
+            base_name = "mesh"
+
+        # 폴더명 생성 (Windows 금지 문자 치환)
+        invalid = '<>:"/\\\\|?*'
+        safe_name = "".join("_" if c in invalid else c for c in str(base_name)).strip() or "mesh"
+
+        parent = Path(parent_dir)
+        stem = f"{safe_name}_profiles"
+        package_dir = parent / stem
+        if package_dir.exists():
+            for i in range(1, 1000):
+                cand = parent / f"{stem}_{i}"
+                if not cand.exists():
+                    package_dir = cand
+                    break
+            else:
+                QMessageBox.critical(self, "오류", "패키지 폴더 이름을 만들 수 없습니다. 다른 폴더를 선택하세요.")
+                return
+
+        try:
+            package_dir.mkdir(parents=True, exist_ok=False)
+        except Exception as e:
+            QMessageBox.critical(self, "오류", f"폴더 생성 실패:\n{type(e).__name__}: {e}")
+            return
+
+        # 카메라/뷰 상태 저장
+        cam_state = None
+        try:
+            cam = self.viewport.camera
+            cam_state = (
+                float(cam.distance),
+                float(cam.azimuth),
+                float(cam.elevation),
+                cam.center.copy(),
+                cam.pan_offset.copy(),
+            )
+        except Exception:
+            cam_state = None
+
+        translation = np.asarray(getattr(obj, "translation", np.zeros(3)), dtype=np.float64).copy()
+        rotation = np.asarray(getattr(obj, "rotation", np.zeros(3)), dtype=np.float64).copy()
+        scale = float(getattr(obj, "scale", 1.0))
+
+        # 단면/가이드 라인을 포함하도록 bounds 확장
+        try:
+            bounds = np.asarray(obj.get_world_bounds(), dtype=np.float64)
+            extra_pts = []
+            for ln in self.viewport.get_cut_sections_world() or []:
+                for p in ln or []:
+                    extra_pts.append(np.asarray(p, dtype=np.float64))
+            if extra_pts:
+                ep = np.vstack(extra_pts)
+                bounds[0] = np.minimum(bounds[0], ep.min(axis=0))
+                bounds[1] = np.maximum(bounds[1], ep.max(axis=0))
+        except Exception:
+            bounds = np.array([[-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]], dtype=np.float64)
+
+        views = ["top", "bottom", "front", "back", "left", "right"]
+        view_map = {
+            "top": (0.0, 89.0),
+            "bottom": (0.0, -89.0),
+            "front": (-90.0, 0.0),
+            "back": (90.0, 0.0),
+            "left": (180.0, 0.0),
+            "right": (0.0, 0.0),
+        }
+
+        resolution = 2048
+        grid_spacing = 1.0  # cm
+        include_grid = True
+        try:
+            cb = getattr(self.export_panel, "check_profile_include_grid", None)
+            if cb is not None:
+                include_grid = bool(cb.isChecked())
+        except Exception:
+            include_grid = True
+
+        include_feature_lines = False
+        feature_angle_deg = 60.0
+        try:
+            cbf = getattr(self.export_panel, "check_profile_feature_lines", None)
+            if cbf is not None:
+                include_feature_lines = bool(cbf.isChecked())
+            sp = getattr(self.export_panel, "spin_profile_feature_angle", None)
+            if sp is not None:
+                feature_angle_deg = float(sp.value())
+        except Exception:
+            include_feature_lines = False
+            feature_angle_deg = 60.0
+
+        dlg = QProgressDialog("2D 도면(SVG) 패키지 내보내는 중...", None, 0, len(views), self)
+        dlg.setWindowTitle("내보내기")
+        dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
+        dlg.setCancelButton(None)
+        dlg.setMinimumDuration(0)
+        dlg.setValue(0)
+        dlg.show()
+
+        self._profile_package_export_dialog = dlg
+        try:
+            self._status_task_begin("패키지 내보내기", maximum=len(views), value=0)
+        except Exception:
+            pass
+        self._profile_package_export_state = {
+            "started_at": datetime.now().isoformat(timespec="seconds"),
+            "package_dir": str(package_dir),
+            "mesh_filepath": str(mesh_fp) if mesh_fp else None,
+            "mesh_unit": str(getattr(mesh_data, "unit", "mm")),
+            "mesh_data": mesh_data,
+            "translation": translation,
+            "rotation": rotation,
+            "scale": scale,
+            "bounds": bounds,
+            "cam_state": cam_state,
+            "views": views,
+            "view_map": view_map,
+            "index": 0,
+            "results": {},
+            "resolution": resolution,
+            "grid_spacing": grid_spacing,
+            "include_grid": include_grid,
+            "include_feature_lines": include_feature_lines,
+            "feature_angle_deg": feature_angle_deg,
+            "cut_lines_world": self.viewport.get_cut_lines_world(),
+            "cut_profiles_world": self.viewport.get_cut_sections_world(),
+        }
+
+        self.status_info.setText(f"내보내기 시작(패키지): {package_dir.name}")
+        QTimer.singleShot(0, self._start_next_profile_package_view)
+
+    def _start_next_profile_package_view(self):
+        state = getattr(self, "_profile_package_export_state", None)
+        if not isinstance(state, dict):
+            return
+
+        views = list(state.get("views") or [])
+        idx = int(state.get("index", 0))
+        if idx >= len(views):
+            self._finish_profile_package_export()
+            return
+
+        view = str(views[idx])
+        dlg = getattr(self, "_profile_package_export_dialog", None)
+        if dlg is not None:
+            dlg.setLabelText(f"[{idx+1}/{len(views)}] {view} 내보내는 중...")
+            try:
+                dlg.setValue(idx)
+            except Exception:
+                pass
+
+        view_map = state.get("view_map") or {}
+        bounds = np.asarray(state.get("bounds"), dtype=np.float64)
+        resolution = int(state.get("resolution", 2048))
+
+        try:
+            try:
+                cam = self.viewport.camera
+                cam.fit_to_bounds(bounds)
+                if view in view_map:
+                    az, el = view_map[view]
+                    cam.azimuth, cam.elevation = float(az), float(el)
+            except Exception:
+                pass
+
+            qimage, mv, proj, vp = self.viewport.capture_high_res_image(
+                width=resolution,
+                height=resolution,
+                only_selected=True,
+                orthographic=True,
+            )
+
+            ba = QByteArray()
+            qbuf = QBuffer(ba)
+            qbuf.open(QIODevice.OpenModeFlag.WriteOnly)
+            qimage.save(qbuf, "PNG")
+            qbuf.close()
+            pil_img = Image.open(io.BytesIO(ba.data()))
+        except Exception as e:
+            self._abort_profile_package_export(view, f"{type(e).__name__}: {e}")
+            return
+
+        package_dir = Path(str(state.get("package_dir")))
+        view_dir = package_dir / str(view)
+        try:
+            view_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            self._abort_profile_package_export(view, f"{type(e).__name__}: {e}")
+            return
+
+        out_name = f"{view}.svg"
+        out_path = str(view_dir / out_name)
+
+        thread = ProfileExportThread(
+            mesh_data=state.get("mesh_data"),
+            view=view,
+            output_path=out_path,
+            translation=np.asarray(state.get("translation"), dtype=np.float64),
+            rotation=np.asarray(state.get("rotation"), dtype=np.float64),
+            scale=float(state.get("scale", 1.0)),
+            viewport_image=pil_img,
+            opengl_matrices=(mv, proj, vp),
+            cut_lines_world=state.get("cut_lines_world") or [],
+            cut_profiles_world=state.get("cut_profiles_world") or [],
+            resolution=resolution,
+            grid_spacing=float(state.get("grid_spacing", 1.0)),
+            include_grid=bool(state.get("include_grid", True)),
+            include_feature_lines=bool(state.get("include_feature_lines", False)),
+            feature_angle_deg=float(state.get("feature_angle_deg", 60.0)),
+        )
+
+        self._profile_package_export_thread = thread
+        thread.done.connect(lambda p, v=view: self._on_profile_package_view_done(v, p))
+        thread.failed.connect(lambda m, v=view: self._abort_profile_package_export(v, m))
+        thread.finished.connect(self._on_profile_package_view_finished)
+        thread.start()
+
+    def _on_profile_package_view_done(self, view: str, result_path: str):
+        state = getattr(self, "_profile_package_export_state", None)
+        if not isinstance(state, dict):
+            return
+
+        idx = int(state.get("index", 0))
+        try:
+            package_dir = Path(str(state.get("package_dir")))
+            rp = Path(str(result_path))
+            try:
+                rel = rp.relative_to(package_dir)
+                rel_s = rel.as_posix()
+            except Exception:
+                rel_s = rp.name
+        except Exception:
+            rel_s = str(Path(str(result_path)).name)
+
+        state.setdefault("results", {})[str(view)] = rel_s
+        state["index"] = idx + 1
+
+        dlg = getattr(self, "_profile_package_export_dialog", None)
+        if dlg is not None:
+            try:
+                dlg.setValue(int(state["index"]))
+            except Exception:
+                pass
+        try:
+            total = int(len(state.get("views") or []))
+            cur = int(state.get("index", 0))
+            if total > 0:
+                self._status_task_update(text=f"패키지 내보내기 {cur}/{total}", maximum=total, value=cur)
+        except Exception:
+            pass
+
+    def _on_profile_package_view_finished(self):
+        self._profile_package_export_thread = None
+        QTimer.singleShot(0, self._start_next_profile_package_view)
+
+    def _finish_profile_package_export(self):
+        state = getattr(self, "_profile_package_export_state", None)
+        if not isinstance(state, dict):
+            return
+
+        package_dir = Path(str(state.get("package_dir")))
+        views = list(state.get("views") or [])
+        results = dict(state.get("results") or {})
+
+        try:
+            manifest = {
+                "app": {"name": APP_NAME, "version": APP_VERSION},
+                "exported_at": datetime.now().isoformat(timespec="seconds"),
+                "mesh": {"filepath": state.get("mesh_filepath"), "unit": state.get("mesh_unit")},
+                "transform": {
+                    "translation": np.asarray(state.get("translation"), dtype=np.float64).reshape(-1).tolist(),
+                    "rotation": np.asarray(state.get("rotation"), dtype=np.float64).reshape(-1).tolist(),
+                    "scale": float(state.get("scale", 1.0)),
+                },
+                "settings": {
+                    "resolution": int(state.get("resolution", 2048)),
+                    "grid_spacing_cm": float(state.get("grid_spacing", 1.0)),
+                    "include_grid": bool(state.get("include_grid", True)),
+                    "include_feature_lines": bool(state.get("include_feature_lines", False)),
+                    "feature_angle_deg": float(state.get("feature_angle_deg", 60.0)),
+                },
+                "views": [{"view": v, "file": results.get(v)} for v in views],
+            }
+            (package_dir / "manifest.json").write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
+        self._cleanup_profile_package_export()
+        QMessageBox.information(self, "완료", f"2D 도면 패키지가 저장되었습니다:\n{package_dir}")
+        self.status_info.setText(f"✅ 패키지 저장 완료: {package_dir.name}")
+
+    def _abort_profile_package_export(self, view: str, message: str):
+        package_dir = None
+        try:
+            state = getattr(self, "_profile_package_export_state", None)
+            if isinstance(state, dict):
+                package_dir = state.get("package_dir")
+        except Exception:
+            package_dir = None
+
+        self._cleanup_profile_package_export()
+        hint = f"\n\n폴더: {package_dir}" if package_dir else ""
+        QMessageBox.critical(
+            self,
+            "오류",
+            self._format_error_message(f"패키지 내보내기 실패 ({view}):", f"{message}{hint}"),
+        )
+        self.status_info.setText("❌ 패키지 내보내기 실패")
+
+    def _cleanup_profile_package_export(self):
+        dlg = getattr(self, "_profile_package_export_dialog", None)
+        if dlg is not None:
+            try:
+                dlg.close()
+            except Exception:
+                pass
+        self._profile_package_export_dialog = None
+
+        state = getattr(self, "_profile_package_export_state", None)
+        cam_state = None
+        if isinstance(state, dict):
+            cam_state = state.get("cam_state")
+        self._profile_package_export_state = None
+
+        if cam_state is not None:
+            try:
+                cam = self.viewport.camera
+                cam.distance, cam.azimuth, cam.elevation = cam_state[0], cam_state[1], cam_state[2]
+                cam.center = cam_state[3]
+                cam.pan_offset = cam_state[4]
+                self.viewport.update()
+            except Exception:
+                pass
+        try:
+            self._status_task_end()
+        except Exception:
+            pass
+
     def reset_transform_and_center(self):
         """변환 리셋 + 뷰 맞춤"""
         obj = self.viewport.selected_obj
@@ -4185,6 +6024,11 @@ class MainWindow(QMainWindow):
     
     def toggle_curvature_mode(self, enabled: bool):
         """곡률 측정 모드 토글"""
+        if enabled:
+            try:
+                self._disable_measure_mode()
+            except Exception:
+                pass
         self.viewport.curvature_pick_mode = enabled
         self.viewport.picking_mode = 'curvature' if enabled else 'none'
         if enabled:
@@ -4254,8 +6098,594 @@ class MainWindow(QMainWindow):
             self.viewport.update()
             self.status_info.setText(f"🗑️ {count}개 원호 삭제됨")
     
+    def _disable_measure_mode(self) -> None:
+        panel = getattr(self, "measure_panel", None)
+        if panel is not None:
+            try:
+                panel.set_measure_checked(False)
+                panel.set_points_count(0)
+            except Exception:
+                pass
+
+        try:
+            if self.viewport.picking_mode == "measure":
+                self.viewport.picking_mode = "none"
+        except Exception:
+            pass
+
+        try:
+            self.viewport.clear_measure_picks()
+        except Exception:
+            pass
+
+    """
+    NOTE: 아래 블록은 이전 패치 과정에서 깨진 상태로 남은 치수 측정 메서드들입니다.
+    안전하게 보존만 하고(문자열로 처리), 아래에 정상 구현을 다시 정의합니다.
+    (legacy measurement block continues below)
+
+    def toggle_measure_mode(self, enabled: bool) -> None:
+        \"\"\"치수(거리/지름) 측정 모드 토글\"\"\"
+        if enabled and self.viewport.selected_obj is None:
+            QMessageBox.warning(self, \"경고\", \"먼저 메쉬를 선택하세요.\")
+            self._disable_measure_mode()
+            self.viewport.update()
+            return
+
+        if enabled:
+            # 다른 입력 모드와 충돌 방지
+            try:
+                if self.flatten_panel.btn_measure.isChecked():
+                    self.flatten_panel.btn_measure.blockSignals(True)
+                    self.flatten_panel.btn_measure.setChecked(False)
+                    self.flatten_panel.btn_measure.blockSignals(False)
+            except Exception:
+                pass
+            try:
+                self.viewport.curvature_pick_mode = False
+            except Exception:
+                pass
+
+            try:
+                if bool(getattr(self.viewport, \"crosshair_enabled\", False)):
+                    self.viewport.crosshair_enabled = False
+                    self.section_panel.btn_toggle.blockSignals(True)
+                    self.section_panel.btn_toggle.setChecked(False)
+                    self.section_panel.btn_toggle.blockSignals(False)
+            except Exception:
+                pass
+
+            try:
+                if bool(getattr(self.viewport, \"cut_lines_enabled\", False)):
+                    self.viewport.set_cut_lines_enabled(False)
+                    self.section_panel.btn_line.blockSignals(True)
+                    self.section_panel.btn_line.setChecked(False)
+                    self.section_panel.btn_line.blockSignals(False)
+            except Exception:
+                pass
+
+            try:
+                if bool(getattr(self.viewport, \"roi_enabled\", False)):
+                    self.viewport.roi_enabled = False
+                    self.viewport.active_roi_edge = None
+                    self.section_panel.btn_roi.blockSignals(True)
+                    self.section_panel.btn_roi.setChecked(False)
+                    self.section_panel.btn_roi.blockSignals(False)
+                    self.section_panel.btn_silhouette.setEnabled(False)
+            except Exception:
+                pass
+
+            try:
+                self.viewport.clear_measure_picks()
+            except Exception:
+                pass
+            try:
+                self.measure_panel.set_points_count(0)
+            except Exception:
+                pass
+
+            self.viewport.picking_mode = \"measure\"
+            self.status_info.setText(\"📏 치수 측정 모드: Shift+클릭으로 점을 찍으세요.\")
+        else:
+            try:
+                if self.viewport.picking_mode == \"measure\":
+                    self.viewport.picking_mode = \"none\"
+            except Exception:
+                pass
+            try:
+                self.viewport.clear_measure_picks()
+            except Exception:
+                pass
+            try:
+                self.measure_panel.set_points_count(0)
+            except Exception:
+                pass
+            self.status_info.setText(\"📏 치수 측정 모드 종료\")
+
+        self.viewport.update()
+
+    def on_measure_mode_changed(self, mode: str) -> None:
+        try:
+            self.viewport.clear_measure_picks()
+            self.measure_panel.set_points_count(0)
+            self.viewport.update()
+        except Exception:
+            pass
+
+        if str(mode) == \"diameter\":
+            self.status_info.setText(\"📏 지름 모드: 점 3개 이상 선택 후 '지름 계산'.\")
+        else:
+            self.status_info.setText(\"📏 거리 모드: 점 2개 선택하면 자동 계산.\")
+
+    def on_measure_point_picked(self, _point: np.ndarray) -> None:
+        panel = getattr(self, \"measure_panel\", None)
+        if panel is None:
+            return
+
+        try:
+            pts = list(getattr(self.viewport, \"measure_picked_points\", []) or [])
+        except Exception:
+            pts = []
+
+        panel.set_points_count(len(pts))
+
+        if panel.mode != \"distance\":
+            return
+
+        if len(pts) < 2:
+            return
+
+        p0 = np.asarray(pts[-2], dtype=np.float64).reshape(-1)
+        p1 = np.asarray(pts[-1], dtype=np.float64).reshape(-1)
+        if p0.size < 3 or p1.size < 3:
+            return
+        if not np.isfinite(p0[:3]).all() or not np.isfinite(p1[:3]).all():
+            return
+
+        dist_cm = float(np.linalg.norm(p1[:3] - p0[:3]))
+        if not np.isfinite(dist_cm):
+            return
+
+        dist_mm = dist_cm * 10.0
+        msg = f\"거리: {dist_cm:.2f} cm ({dist_mm:.1f} mm)\"
+        panel.append_result(msg)
+        self.status_info.setText(f\"📏 {msg}\")
+
+        try:
+            self.viewport.clear_measure_picks()
+            panel.set_points_count(0)
+            self.viewport.update()
+        except Exception:
+            pass
+
+    def fit_measure_circle(self) -> None:
+        panel = getattr(self, \"measure_panel\", None)
+        if panel is None:
+            return
+
+        if panel.mode != \"diameter\":
+            QMessageBox.information(self, \"안내\", \"지름/직경 모드에서만 사용할 수 있습니다.\")
+            return
+
+        try:
+            pts = np.asarray(getattr(self.viewport, \"measure_picked_points\", []) or [], dtype=np.float64)
+        except Exception:
+            pts = np.zeros((0, 3), dtype=np.float64)
+
+        if pts.ndim != 2 or pts.shape[0] < 3 or pts.shape[1] < 3:
+            QMessageBox.warning(
+                self,
+                \"경고\",
+                \"최소 3개의 포인트가 필요합니다.\\nShift+클릭으로 점을 더 찍어주세요.\",
+            )
+            return
+
+        from src.core.curvature_fitter import CurvatureFitter
+
+        fitter = CurvatureFitter()
+        arc = fitter.fit_arc(pts[:, :3])
+        if arc is None:
+            QMessageBox.warning(self, \"경고\", \"원 맞추기에 실패했습니다. 포인트를 다시 선택해보세요.\")
+            return
+
+        diameter_cm = float(arc.radius) * 2.0
+        diameter_mm = diameter_cm * 10.0
+        msg = f\"지름: {diameter_cm:.2f} cm ({diameter_mm:.1f} mm)\"
+        panel.append_result(msg)
+        self.status_info.setText(f\"📏 {msg}\")
+
+        try:
+            self.viewport.clear_measure_picks()
+            panel.set_points_count(0)
+            self.viewport.update()
+        except Exception:
+            pass
+
+    def clear_measure_points(self) -> None:
+        try:
+            self.viewport.clear_measure_picks()
+            self.measure_panel.set_points_count(0)
+            self.viewport.update()
+            self.status_info.setText(\"🧹 측정 포인트 초기화\")
+        except Exception:
+            pass
+
+    def copy_measure_results(self) -> None:
+        panel = getattr(self, \"measure_panel\", None)
+        if panel is None:
+            return
+
+        text = panel.results_text().strip()
+        if not text:
+            return
+
+        try:
+            QApplication.clipboard().setText(text)
+            self.status_info.setText(\"📋 측정 결과 복사됨\")
+        except Exception:
+            pass
+
+    def clear_measure_results(self) -> None:
+        try:
+            self.measure_panel.clear_results()
+            self.status_info.setText(\"🗑️ 측정 결과 지움\")
+        except Exception:
+            pass
+
+    """
+
+    def toggle_measure_mode(self, enabled: bool) -> None:
+        """치수(거리/지름) 측정 모드 토글"""
+        if enabled and self.viewport.selected_obj is None:
+            QMessageBox.warning(self, "경고", "먼저 메쉬를 선택하세요.")
+            try:
+                self.measure_panel.set_measure_checked(False)
+            except Exception:
+                pass
+            self._disable_measure_mode()
+            self.viewport.update()
+            return
+
+        if enabled:
+            # 다른 입력 모드와 충돌 방지
+            try:
+                if self.flatten_panel.btn_measure.isChecked():
+                    self.flatten_panel.btn_measure.blockSignals(True)
+                    self.flatten_panel.btn_measure.setChecked(False)
+                    self.flatten_panel.btn_measure.blockSignals(False)
+            except Exception:
+                pass
+            try:
+                self.viewport.curvature_pick_mode = False
+            except Exception:
+                pass
+
+            # Crosshair / Cut-lines / ROI 는 입력 충돌이 잦아서 측정 모드에서는 강제 해제
+            try:
+                if bool(getattr(self.viewport, "crosshair_enabled", False)):
+                    self.viewport.crosshair_enabled = False
+                    self.section_panel.btn_toggle.blockSignals(True)
+                    self.section_panel.btn_toggle.setChecked(False)
+                    self.section_panel.btn_toggle.blockSignals(False)
+            except Exception:
+                pass
+
+            try:
+                if bool(getattr(self.viewport, "cut_lines_enabled", False)):
+                    self.viewport.set_cut_lines_enabled(False)
+                    self.section_panel.btn_line.blockSignals(True)
+                    self.section_panel.btn_line.setChecked(False)
+                    self.section_panel.btn_line.blockSignals(False)
+            except Exception:
+                pass
+
+            try:
+                if bool(getattr(self.viewport, "roi_enabled", False)):
+                    self.viewport.roi_enabled = False
+                    self.viewport.active_roi_edge = None
+                    self.section_panel.btn_roi.blockSignals(True)
+                    self.section_panel.btn_roi.setChecked(False)
+                    self.section_panel.btn_roi.blockSignals(False)
+                    self.section_panel.btn_silhouette.setEnabled(False)
+            except Exception:
+                pass
+
+            try:
+                self.viewport.clear_measure_picks()
+                self.measure_panel.set_points_count(0)
+            except Exception:
+                pass
+
+            self.viewport.picking_mode = "measure"
+            self.status_info.setText("📏 치수 측정 모드: Shift+클릭으로 점을 찍으세요.")
+        else:
+            try:
+                if self.viewport.picking_mode == "measure":
+                    self.viewport.picking_mode = "none"
+            except Exception:
+                pass
+            try:
+                self.viewport.clear_measure_picks()
+                self.measure_panel.set_points_count(0)
+            except Exception:
+                pass
+            self.status_info.setText("📏 치수 측정 모드 종료")
+
+        self.viewport.update()
+
+    def on_measure_mode_changed(self, mode: str) -> None:
+        try:
+            self.viewport.clear_measure_picks()
+            self.measure_panel.set_points_count(0)
+            self.viewport.update()
+        except Exception:
+            pass
+
+        if str(mode) == "diameter":
+            self.status_info.setText("📏 지름 모드: 점 3개 이상 선택 후 '지름 계산'.")
+        else:
+            self.status_info.setText("📏 거리 모드: 점 2개 선택하면 자동 계산.")
+
+    def on_measure_point_picked(self, _point: np.ndarray) -> None:
+        panel = getattr(self, "measure_panel", None)
+        if panel is None:
+            return
+
+        try:
+            pts = list(getattr(self.viewport, "measure_picked_points", []) or [])
+        except Exception:
+            pts = []
+
+        panel.set_points_count(len(pts))
+
+        if panel.mode != "distance":
+            return
+
+        if len(pts) < 2:
+            return
+
+        p0 = np.asarray(pts[-2], dtype=np.float64).reshape(-1)
+        p1 = np.asarray(pts[-1], dtype=np.float64).reshape(-1)
+        if p0.size < 3 or p1.size < 3:
+            return
+        if not np.isfinite(p0[:3]).all() or not np.isfinite(p1[:3]).all():
+            return
+
+        dist_cm = float(np.linalg.norm(p1[:3] - p0[:3]))
+        if not np.isfinite(dist_cm):
+            return
+
+        dist_mm = dist_cm * 10.0
+        msg = f"거리: {dist_cm:.2f} cm ({dist_mm:.1f} mm)"
+        panel.append_result(msg)
+        self.status_info.setText(f"📏 {msg}")
+
+        try:
+            self.viewport.clear_measure_picks()
+            panel.set_points_count(0)
+            self.viewport.update()
+        except Exception:
+            pass
+
+    def fit_measure_circle(self) -> None:
+        panel = getattr(self, "measure_panel", None)
+        if panel is None:
+            return
+
+        if panel.mode != "diameter":
+            QMessageBox.information(self, "안내", "지름/직경 모드에서만 사용할 수 있습니다.")
+            return
+
+        try:
+            pts = np.asarray(getattr(self.viewport, "measure_picked_points", []) or [], dtype=np.float64)
+        except Exception:
+            pts = np.zeros((0, 3), dtype=np.float64)
+
+        if pts.ndim != 2 or pts.shape[0] < 3 or pts.shape[1] < 3:
+            QMessageBox.warning(self, "경고", "최소 3개의 포인트가 필요합니다.\nShift+클릭으로 점을 더 찍어주세요.")
+            return
+
+        from src.core.curvature_fitter import CurvatureFitter
+
+        fitter = CurvatureFitter()
+        arc = fitter.fit_arc(pts[:, :3])
+        if arc is None:
+            QMessageBox.warning(self, "경고", "원 맞추기에 실패했습니다. 포인트를 다시 선택해보세요.")
+            return
+
+        diameter_cm = float(arc.radius) * 2.0
+        diameter_mm = diameter_cm * 10.0
+        msg = f"지름: {diameter_cm:.2f} cm ({diameter_mm:.1f} mm)"
+        panel.append_result(msg)
+        self.status_info.setText(f"📏 {msg}")
+
+        try:
+            self.viewport.clear_measure_picks()
+            panel.set_points_count(0)
+            self.viewport.update()
+        except Exception:
+            pass
+
+    def clear_measure_points(self) -> None:
+        try:
+            self.viewport.clear_measure_picks()
+            self.measure_panel.set_points_count(0)
+            self.viewport.update()
+            self.status_info.setText("🧹 측정 포인트 초기화")
+        except Exception:
+            pass
+
+    def copy_measure_results(self) -> None:
+        panel = getattr(self, "measure_panel", None)
+        if panel is None:
+            return
+
+        text = panel.results_text().strip()
+        if not text:
+            return
+
+        try:
+            QApplication.clipboard().setText(text)
+            self.status_info.setText("📋 측정 결과 복사됨")
+        except Exception:
+            pass
+
+    def clear_measure_results(self) -> None:
+        try:
+            self.measure_panel.clear_results()
+            self.status_info.setText("🗑️ 측정 결과 지움")
+        except Exception:
+            pass
+
+    def compute_volume_stats(self) -> None:
+        panel = getattr(self, "measure_panel", None)
+        if panel is None:
+            return
+
+        obj = self.viewport.selected_obj
+        if obj is None:
+            QMessageBox.warning(self, "경고", "선택된 메쉬가 없습니다.")
+            return
+
+        mesh = getattr(obj, "mesh", None)
+        if mesh is None:
+            QMessageBox.warning(self, "경고", "선택된 객체에 메쉬 데이터가 없습니다.")
+            return
+
+        unit = str(getattr(mesh, "unit", "cm") or "cm").strip().lower()
+        scale = float(getattr(obj, "scale", 1.0))
+        name = str(getattr(obj, "name", "mesh"))
+
+        def task():
+            tm = obj.to_trimesh()
+            if tm is None:
+                raise ValueError("trimesh conversion failed")
+
+            watertight = bool(getattr(tm, "is_watertight", False))
+
+            area0 = float(getattr(mesh, "surface_area", 0.0))
+            if not np.isfinite(area0) or area0 < 0.0:
+                area0 = float(getattr(tm, "area", 0.0))
+
+            volume0 = None
+            if watertight:
+                try:
+                    volume0 = abs(float(getattr(tm, "volume", 0.0)))
+                except Exception:
+                    volume0 = None
+
+            hull0 = None
+            if not watertight:
+                try:
+                    vcount = int(getattr(tm, "vertices", np.zeros((0, 3))).shape[0])
+                    fcount = int(getattr(tm, "faces", np.zeros((0, 3))).shape[0])
+                except Exception:
+                    vcount = 0
+                    fcount = 0
+
+                # Convex hull volume is a rough upper bound and can be expensive.
+                if vcount > 0 and fcount > 0 and vcount <= 200000 and fcount <= 400000:
+                    try:
+                        hull0 = abs(float(tm.convex_hull.volume))
+                    except Exception:
+                        hull0 = None
+
+            ext0 = np.asarray(getattr(mesh, "extents", np.zeros(3)), dtype=np.float64)
+            v = int(getattr(mesh, "n_vertices", 0))
+            f = int(getattr(mesh, "n_faces", 0))
+            return {
+                "name": name,
+                "unit": unit,
+                "scale": scale,
+                "watertight": watertight,
+                "area0": area0,
+                "volume0": volume0,
+                "hull0": hull0,
+                "ext0": ext0,
+                "v": v,
+                "f": f,
+            }
+
+        def on_done(result: Any) -> None:
+            if not isinstance(result, dict):
+                return
+
+            unit_s = str(result.get("unit") or "cm").strip().lower()
+            scale_s = float(result.get("scale", 1.0))
+
+            # Convert to cm-based reporting.
+            unit_to_cm = 1.0
+            if unit_s == "mm":
+                unit_to_cm = 0.1
+            elif unit_s == "m":
+                unit_to_cm = 100.0
+
+            ext0 = np.asarray(result.get("ext0") or np.zeros(3), dtype=np.float64).reshape(-1)[:3]
+            ext_cm = ext0 * float(scale_s) * float(unit_to_cm)
+            ext_mm = ext_cm * 10.0
+
+            area0 = float(result.get("area0", 0.0))
+            area_cm2 = area0 * (float(scale_s) ** 2) * (float(unit_to_cm) ** 2)
+            area_mm2 = area_cm2 * 100.0
+
+            vol0 = result.get("volume0")
+            hull0 = result.get("hull0")
+            vol_cm3 = None
+            hull_cm3 = None
+            if vol0 is not None:
+                vol_cm3 = float(vol0) * (float(scale_s) ** 3) * (float(unit_to_cm) ** 3)
+            if hull0 is not None:
+                hull_cm3 = float(hull0) * (float(scale_s) ** 3) * (float(unit_to_cm) ** 3)
+
+            watertight = bool(result.get("watertight", False))
+            v = int(result.get("v", 0))
+            f = int(result.get("f", 0))
+            n = str(result.get("name") or "mesh")
+
+            panel.append_result(f"[Mesh Stats] {n} (V:{v:,}, F:{f:,}, scale:{scale_s:.3f})")
+            panel.append_result(
+                f"- Size: {ext_cm[0]:.2f}×{ext_cm[1]:.2f}×{ext_cm[2]:.2f} cm "
+                f"({ext_mm[0]:.1f}×{ext_mm[1]:.1f}×{ext_mm[2]:.1f} mm)"
+            )
+            panel.append_result(f"- Surface area: {area_cm2:.2f} cm² ({area_mm2:.0f} mm²)")
+
+            if vol_cm3 is not None:
+                panel.append_result(
+                    f"- Volume: {vol_cm3:.2f} cm³ ({vol_cm3 * 1000.0:.0f} mm³) (watertight={watertight})"
+                )
+            else:
+                panel.append_result(f"- Volume: (watertight={watertight}) 계산 불가/참고용")
+                if hull_cm3 is not None:
+                    panel.append_result(
+                        f"  - Convex hull (upper bound): {hull_cm3:.2f} cm³ ({hull_cm3 * 1000.0:.0f} mm³)"
+                    )
+
+            try:
+                self.status_info.setText("📦 부피/면적 계산 완료")
+            except Exception:
+                pass
+
+        def on_failed(message: str) -> None:
+            QMessageBox.critical(self, "오류", self._format_error_message("부피/면적 계산 실패:", message))
+            try:
+                self.status_info.setText("❌ 부피/면적 계산 실패")
+            except Exception:
+                pass
+
+        self._start_task(
+            title="계산",
+            label="부피/면적 계산 중...",
+            thread=TaskThread("mesh_stats", task),
+            on_done=on_done,
+            on_failed=on_failed,
+        )
+
     def on_roi_toggled(self, enabled):
         """2D ROI 모드 토글 핸들러"""
+        if enabled:
+            try:
+                self._disable_measure_mode()
+            except Exception:
+                pass
         self.viewport.roi_enabled = enabled
         if enabled:
             # ROI는 바닥 평면 드래그를 사용 -> 다른 입력 모드 비활성화
@@ -4299,10 +6729,18 @@ class MainWindow(QMainWindow):
         if not points:
             return
         self.status_info.setText(f"✅ {len(points)}개의 점으로 외곽선 추출 완료")
-        print(f"Extracted Silhouette: {len(points)} points")
+        try:
+            _LOGGER.info("Extracted silhouette: %s points", len(points))
+        except Exception:
+            pass
 
     def on_crosshair_toggled(self, enabled):
         """십자선 모드 토글 핸들러 (Viewport3D와 연동)"""
+        if enabled:
+            try:
+                self._disable_measure_mode()
+            except Exception:
+                pass
         # 십자선/선형 단면은 입력(드래그) 충돌 -> 상호 배타로 처리
         if enabled and getattr(self.viewport, "cut_lines_enabled", False):
             self.viewport.set_cut_lines_enabled(False)
@@ -4336,6 +6774,11 @@ class MainWindow(QMainWindow):
 
     def on_line_section_toggled(self, enabled):
         """단면선(2개) 모드 토글 핸들러"""
+        if enabled:
+            try:
+                self._disable_measure_mode()
+            except Exception:
+                pass
         # 십자선/단면선/ROI는 입력 충돌 -> 상호 배타로 처리
         if enabled and self.viewport.crosshair_enabled:
             self.viewport.crosshair_enabled = False
@@ -4661,6 +7104,17 @@ def main():
         # 2. 메인 윈도우 생성
         splash.showMessage("Initializing Main Window...")
         window = MainWindow()
+
+        # Optional: open project passed via CLI (`python main.py --open-project foo.amr`)
+        try:
+            if "--open-project" in sys.argv:
+                i = sys.argv.index("--open-project")
+                if i + 1 < len(sys.argv):
+                    p = str(sys.argv[i + 1])
+                    if p:
+                        window.open_project_path(p)
+        except Exception:
+            _LOGGER.exception("Failed to auto-open project from CLI args")
         
         # 3. 마무리 및 스플래시 닫기
         splash.showMessage("Ready!")

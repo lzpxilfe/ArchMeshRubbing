@@ -420,7 +420,9 @@ class ProfileExporter:
                 corners = corners * float(scale)
                 if rotation is not None:
                     from scipy.spatial.transform import Rotation as R
-                    r = R.from_euler('xyz', rotation, degrees=True)
+                    # Match OpenGL fixed-function order: glRotate(X) -> glRotate(Y) -> glRotate(Z)
+                    # which corresponds to intrinsic "XYZ" in SciPy.
+                    r = R.from_euler('XYZ', rotation, degrees=True)
                     corners = r.apply(corners)
                 if translation is not None:
                     corners = corners + translation
@@ -439,7 +441,7 @@ class ProfileExporter:
                 v_all = np.asarray(mesh.vertices, dtype=np.float64) * float(scale)
                 if rotation is not None:
                     from scipy.spatial.transform import Rotation as R
-                    r = R.from_euler('xyz', rotation, degrees=True)
+                    r = R.from_euler('XYZ', rotation, degrees=True)
                     v_all = r.apply(v_all)
                 if translation is not None:
                     v_all = v_all + translation
@@ -581,7 +583,7 @@ class ProfileExporter:
                 vertices = np.asarray(mesh.vertices[unique_idx], dtype=np.float64) * float(scale)
                 if rotation is not None:
                     from scipy.spatial.transform import Rotation as R
-                    r = R.from_euler('xyz', rotation, degrees=True)
+                    r = R.from_euler('XYZ', rotation, degrees=True)
                     vertices = r.apply(vertices)
                 if translation is not None:
                     vertices = vertices + translation
@@ -648,7 +650,7 @@ class ProfileExporter:
         vertices = mesh.vertices.copy() * scale
         if rotation is not None and np.any(rotation != 0):
             from scipy.spatial.transform import Rotation as R
-            r = R.from_euler('xyz', rotation, degrees=True)
+            r = R.from_euler('XYZ', rotation, degrees=True)
             vertices = r.apply(vertices)
         if translation is not None:
             vertices = vertices + translation
@@ -937,16 +939,53 @@ class ProfileExporter:
                 '<g id="cut_lines" fill="none" stroke-linejoin="round" stroke-linecap="round">'
             )
             for item in extra_paths:
+                stroke = str(item.get("stroke", "#ff4040"))
+                sw = float(item.get("stroke_width", stroke_width))
+                path_id = item.get("id", None)
+
+                # Efficient multi-segment export (one SVG path with many subpaths).
+                # Used for feature edge layers to avoid generating thousands of <path> nodes.
+                if "segments" in item:
+                    try:
+                        seg = np.asarray(item.get("segments", []), dtype=np.float64)
+                    except Exception:
+                        seg = None
+
+                    if seg is None or seg.ndim != 3 or seg.shape[0] == 0 or seg.shape[1] < 2 or seg.shape[2] < 2:
+                        continue
+
+                    seg_xy = seg[:, :2, :2].copy()
+                    if bounds.get('is_pixels'):
+                        px_per_cm = float(bounds.get('px_per_cm', 100.0))
+                        if px_per_cm <= 0:
+                            px_per_cm = 100.0
+                        seg_xy = seg_xy / px_per_cm
+                    else:
+                        seg_xy[:, :, 0] -= min_coords[0]
+                        seg_xy[:, :, 1] = svg_height - (seg_xy[:, :, 1] - min_coords[1])
+
+                    d_parts = []
+                    for s in seg_xy:
+                        if not np.isfinite(s).all():
+                            continue
+                        d_parts.append(
+                            f'M {s[0,0]:.6f} {s[0,1]:.6f} L {s[1,0]:.6f} {s[1,1]:.6f}'
+                        )
+                    if not d_parts:
+                        continue
+
+                    id_attr = f' id="{path_id}"' if path_id else ""
+                    svg_parts.append(
+                        f'<path{id_attr} d="{" ".join(d_parts)}" fill="none" stroke="{stroke}" stroke-width="{sw}" />'
+                    )
+                    continue
+
                 try:
                     pts = np.asarray(item.get("points", []), dtype=np.float64)
                 except Exception:
                     continue
                 if pts.ndim != 2 or pts.shape[0] < 2 or pts.shape[1] < 2:
                     continue
-
-                stroke = str(item.get("stroke", "#ff4040"))
-                sw = float(item.get("stroke_width", stroke_width))
-                path_id = item.get("id", None)
 
                 svg_pts = pts[:, :2].copy()
                 if bounds.get('is_pixels'):
@@ -989,6 +1028,8 @@ class ProfileExporter:
                        opengl_matrices: OpenGLMatrices | None = None,
                        cut_lines_world: list[Any] | None = None,
                        cut_profiles_world: list[Any] | None = None,
+                       feature_edges: Any | None = None,
+                       feature_style: dict[str, Any] | None = None,
                        world_units_per_cm: float | None = None) -> str:
         """
         메쉬의 2D 프로파일을 SVG로 내보내는 통합 메서드.
@@ -1115,6 +1156,147 @@ class ProfileExporter:
                         )
             except Exception as e:
                 _LOGGER.debug("Failed projecting section profiles to pixels: %s", e, exc_info=True)
+
+        if feature_edges is not None:
+            try:
+                edges = np.asarray(getattr(feature_edges, "edges", []), dtype=np.int32)
+                face_pairs = np.asarray(getattr(feature_edges, "face_pairs", []), dtype=np.int32)
+            except Exception:
+                edges = np.zeros((0, 2), dtype=np.int32)
+                face_pairs = np.zeros((0, 2), dtype=np.int32)
+
+            if edges.ndim == 2 and edges.shape[0] > 0 and edges.shape[1] >= 2:
+                style = dict(feature_style or {})
+                stroke = str(style.get("stroke", "#4a5568"))  # gray-600
+                sw = float(style.get("stroke_width", 0.01))  # 0.1mm
+                max_segments = int(style.get("max_segments", 20000))
+
+                v = np.asarray(getattr(mesh, "vertices", np.zeros((0, 3))), dtype=np.float64)
+                if v.ndim == 2 and v.shape[0] > 0:
+                    keep = np.ones((edges.shape[0],), dtype=bool)
+
+                    # Cheap back-face culling (if face normals are available)
+                    if (
+                        matrices_src is not None
+                        and bool(bounds.get("is_pixels"))
+                        and face_pairs.ndim == 2
+                        and face_pairs.shape[0] == edges.shape[0]
+                        and face_pairs.shape[1] >= 2
+                    ):
+                        try:
+                            mv_raw, _proj_raw, _vp = matrices_src
+                            mv = np.asarray(mv_raw, dtype=np.float64).reshape(4, 4).T
+
+                            fn = getattr(mesh, "face_normals", None)
+                            fn_arr = None
+                            try:
+                                fn_arr = np.asarray(fn, dtype=np.float64) if fn is not None else None
+                            except Exception:
+                                fn_arr = None
+
+                            if fn_arr is not None and fn_arr.ndim == 2 and fn_arr.shape[1] >= 3 and fn_arr.shape[0] > 0:
+                                fn3 = fn_arr[:, :3].copy()
+                                if rotation is not None:
+                                    from scipy.spatial.transform import Rotation as R
+
+                                    r = R.from_euler("XYZ", rotation, degrees=True)
+                                    fn3 = r.apply(fn3)
+
+                                n_eye = fn3 @ mv[:3, :3].T
+                                front = n_eye[:, 2] > 0.0
+
+                                f0 = face_pairs[:, 0].astype(np.int32, copy=False)
+                                f1 = face_pairs[:, 1].astype(np.int32, copy=False)
+                                ok0 = (f0 >= 0) & (f0 < front.shape[0])
+                                ok1 = (f1 >= 0) & (f1 < front.shape[0])
+                                keep = (ok0 & front[f0]) | (ok1 & front[f1])
+                        except Exception:
+                            keep = np.ones((edges.shape[0],), dtype=bool)
+
+                    idx = np.flatnonzero(keep)
+                    if idx.size > 0:
+                        if max_segments > 0 and idx.size > max_segments:
+                            step = int(np.ceil(float(idx.size) / float(max_segments)))
+                            idx = idx[:: max(1, step)]
+
+                        e = edges[idx, :2].astype(np.int32, copy=False)
+                        valid = np.all((e >= 0) & (e < int(v.shape[0])), axis=1)
+                        if not bool(np.all(valid)):
+                            e = e[valid]
+
+                        if e.shape[0] > 0:
+                            p0 = v[e[:, 0]]
+                            p1 = v[e[:, 1]]
+
+                            # Local -> world transform
+                            pts = np.vstack([p0, p1]) * float(scale)
+                            if rotation is not None:
+                                from scipy.spatial.transform import Rotation as R
+
+                                r = R.from_euler("XYZ", rotation, degrees=True)
+                                pts = r.apply(pts)
+                            if translation is not None:
+                                pts = pts + np.asarray(translation, dtype=np.float64).reshape(1, 3)
+
+                            if matrices_src is not None and bool(bounds.get("is_pixels")):
+                                try:
+                                    mv_raw, proj_raw, vp = matrices_src
+                                    mv = np.asarray(mv_raw, dtype=np.float64).reshape(4, 4).T
+                                    proj = np.asarray(proj_raw, dtype=np.float64).reshape(4, 4).T
+                                    mvp = mv.T @ proj.T
+
+                                    vp = np.asarray(vp, dtype=np.float64).reshape(-1)
+                                    if vp.size < 4:
+                                        vp = np.array([0.0, 0.0, 2048.0, 2048.0], dtype=np.float64)
+
+                                    v_h = np.hstack([pts[:, :3], np.ones((pts.shape[0], 1), dtype=np.float64)])
+                                    v_clip = v_h @ mvp
+                                    w = v_clip[:, 3]
+                                    valid_w = np.abs(w) > 1e-12
+                                    xy = np.full((pts.shape[0], 2), np.nan, dtype=np.float64)
+                                    if np.any(valid_w):
+                                        v_ndc = v_clip[valid_w, :3] / w[valid_w, None]
+                                        x = (v_ndc[:, 0] + 1.0) / 2.0 * float(vp[2])
+                                        y = float(vp[3]) - (v_ndc[:, 1] + 1.0) / 2.0 * float(vp[3])
+                                        xy[valid_w] = np.stack([x, y], axis=1)
+
+                                    e_count = int(e.shape[0])
+                                    seg = np.stack([xy[:e_count], xy[e_count:]], axis=1)
+                                    ok = np.isfinite(seg).all(axis=(1, 2))
+                                    if np.any(ok):
+                                        seg = seg[ok]
+                                        extra_paths.append(
+                                            {
+                                                "id": "feature_edges",
+                                                "segments": seg,
+                                                "stroke": stroke,
+                                                "stroke_width": sw,
+                                            }
+                                        )
+                                except Exception:
+                                    _LOGGER.debug("Failed projecting feature edges to pixels", exc_info=True)
+                            else:
+                                # Fallback: project to plane coords (world units)
+                                try:
+                                    if view in self.VIEWS:
+                                        ax0, ax1 = self.VIEWS[view]["axes"]
+                                        seg_world = pts.reshape(2, -1, 3).transpose(1, 0, 2)[:, :, [ax0, ax1]]
+                                        if view == "back":
+                                            seg_world[:, :, 0] *= -1.0
+                                        if view == "left":
+                                            seg_world[:, :, 0] *= -1.0
+                                        if view == "bottom":
+                                            seg_world[:, :, 1] *= -1.0
+                                        extra_paths.append(
+                                            {
+                                                "id": "feature_edges",
+                                                "segments": seg_world[:, :, :2],
+                                                "stroke": stroke,
+                                                "stroke_width": sw,
+                                            }
+                                        )
+                                except Exception:
+                                    _LOGGER.debug("Failed projecting feature edges (fallback)", exc_info=True)
 
         return self.export_svg(
             contours, bounds, background_image,

@@ -7,6 +7,7 @@
 - **메쉬 평면화**: ARAP 알고리즘으로 곡면을 왜곡 최소화하며 펼침
 - **정사투영**: 3D 메쉬의 평면도 생성
 - **표면 분리**: 내면/외면 자동 감지 + 사용자 지정(면 선택/할당)
+- **프로젝트(.amr) 저장/불러오기**: 변환/단면/ROI/레이어/내보내기 옵션까지 함께 저장
 - **통합 SVG 출력**: 실측(Top 외곽선) + 단면 + 내/외면 탁본을 1회 SVG로 저장
 - **영역 선택**: 미구 등 특정 부분만 추출
 - **스케일 출력**: 실측 스케일이 맞춰진 이미지 내보내기
@@ -26,6 +27,18 @@ pip install -r requirements-optional.txt  # optional
 python app_interactive.py
 ```
 
+또는:
+
+```bash
+python main.py --gui
+python main.py --open-project my_project.amr
+```
+
+#### 프로젝트 저장/불러오기 (.amr)
+
+- 메뉴 **파일 → 프로젝트 저장 / 프로젝트 열기** (단축키: `Ctrl+S`, `Ctrl+Shift+O`)
+- 단면/가이드(레이어)까지 함께 저장하려면 **단면 도구**에서 **레이어로 저장**을 눌러 스냅샷을 남겨두세요.
+
 ### CLI
 
 ```bash
@@ -34,7 +47,8 @@ python main.py --help
 
 ## 2D 실측 도면(SVG) 내보내기
 
-- GUI에서 `상/하/전/후/좌/우` 뷰를 본 뒤 **2D 실측 도면 내보내기(SVG)** 메뉴로 저장할 수 있습니다.
+- GUI의 **내보내기 → 2D 실측 도면 내보내기(SVG)**에서 뷰별로 저장하거나, **📦 6방향 패키지 내보내기**로 한 폴더에 일괄 저장할 수 있습니다.
+- 기본은 **격자/배경 포함(1cm 격자 + 화면 캡처)**이며, 체크 해제 시 **벡터만(SVG)** 저장합니다.
 
 ## 통합 SVG(실측+단면+내/외면 탁본) 내보내기
 
@@ -65,6 +79,11 @@ python main.py --help
 - `F`: 선택 객체 화면 맞춤
 - `R`: 카메라 리셋
 
+## 단면 슬라이싱 프리셋 (Clip Presets)
+
+- **📏 단면 슬라이싱(CT)** 패널에서 현재 높이(Z)를 **프리셋으로 저장/적용/삭제**할 수 있습니다.
+- 원하는 높이에서 단면을 만든 뒤 **레이어로 저장**을 눌러 스냅샷을 남기면, 이후 **통합 SVG** 또는 **2D 실측 도면(SVG)** 내보내기에 함께 포함됩니다.
+
 ## 환경 변수 (트러블슈팅)
 
 - `ARCHMESHRUBBING_PROFILE_EXPORT_SAFE=1`: SVG 외곽선/가이드 투영을 보수적으로 처리 (Illustrator에서 `격자 + 긴 직선`만 보일 때 권장)
@@ -78,6 +97,10 @@ python main.py --help
 - PLY (Polygon File Format)
 - STL (Stereolithography)
 - OFF (Object File Format)
+
+## References
+
+- 구현에 사용된 주요 알고리즘/기법의 공개 레퍼런스: `docs/REFERENCES.md`
 
 ## 라이선스
 

@@ -59,6 +59,11 @@ class SheetExportOptions:
     rubbing_remove_curvature: bool = False
     rubbing_reference_sigma: float | None = None
     rubbing_relief_strength: float = 1.0
+    rubbing_preset: str | None = None
+    rubbing_image_mode: str = "mesh"
+    rubbing_smooth_sigma: float = 0.0
+    rubbing_detail_strength: float = 1.0
+    rubbing_detail_sigma: float | None = None
 
     include_labels: bool = True
     label_font_size_mm: float = 3.5
@@ -151,8 +156,20 @@ class RubbingSheetExporter:
                 inner_mesh = auto_inner
 
         # 3) Flatten + rubbing images
-        outer_flat, outer_rub = self._flatten_and_rub(outer_mesh, svg_unit=svg_unit, unit_scale=unit_scale, options=options)
-        inner_flat, inner_rub = self._flatten_and_rub(inner_mesh, svg_unit=svg_unit, unit_scale=unit_scale, options=options)
+        outer_flat, outer_rub = self._flatten_and_rub(
+            outer_mesh,
+            svg_unit=svg_unit,
+            unit_scale=unit_scale,
+            options=options,
+            cut_lines_world=cut_lines_world,
+        )
+        inner_flat, inner_rub = self._flatten_and_rub(
+            inner_mesh,
+            svg_unit=svg_unit,
+            unit_scale=unit_scale,
+            options=options,
+            cut_lines_world=cut_lines_world,
+        )
 
         outer_w = float(outer_rub.width_real) * unit_scale
         outer_h = float(outer_rub.height_real) * unit_scale
@@ -272,6 +289,7 @@ class RubbingSheetExporter:
         svg_unit: str,
         unit_scale: float,
         options: SheetExportOptions,
+        cut_lines_world: Optional[list[list[list[float]]]] = None,
     ) -> tuple[FlattenedMesh, RubbingImage]:
         flattened = flatten_with_method(
             mesh,
@@ -282,6 +300,7 @@ class RubbingSheetExporter:
             initial_method="lscm",
             cylinder_axis=str(options.cylinder_axis),
             cylinder_radius=options.cylinder_radius,
+            cut_lines_world=cut_lines_world,
         )
 
         dpi = int(options.dpi)
@@ -308,6 +327,11 @@ class RubbingSheetExporter:
             remove_curvature=bool(getattr(options, "rubbing_remove_curvature", False)),
             reference_sigma=getattr(options, "rubbing_reference_sigma", None),
             relief_strength=float(getattr(options, "rubbing_relief_strength", 1.0)),
+            preset=getattr(options, "rubbing_preset", None),
+            image_mode=str(getattr(options, "rubbing_image_mode", "mesh")),
+            smooth_sigma=float(getattr(options, "rubbing_smooth_sigma", 0.0)),
+            detail_strength=float(getattr(options, "rubbing_detail_strength", 1.0)),
+            detail_sigma=getattr(options, "rubbing_detail_sigma", None),
         )
         return flattened, rubbing
 

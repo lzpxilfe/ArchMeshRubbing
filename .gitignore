@@ -47,7 +47,11 @@ Thumbs.db
 *.obj
 *.ply
 *.off
+*.amr
 
 # Local scratch exports
 __smoke_*.svg
 __test_*.svg
+
+# Local research scratch (do not commit)
+__carrotphant_*

@@ -40,8 +40,11 @@ def run_cli():
         return
     
     if cmd == '--gui':
-        print("GUI mode coming soon...")
-        print("For now, use command line: python main.py <mesh_file>")
+        launch_gui()
+        return
+
+    if cmd == '--open-project' and len(sys.argv) > 2:
+        launch_gui(open_project=sys.argv[2])
         return
     
     if cmd == '--flatten' and len(sys.argv) > 2:
@@ -79,7 +82,8 @@ def print_help():
     print("  python main.py --flatten <mesh_file> [output]    # Flatten only")
     print("  python main.py --project <mesh_file> [output]    # Orthographic projection")
     print("  python main.py --separate <mesh_file>   # Separate inner/outer surfaces")
-    print("  python main.py --gui                    # Launch GUI (coming soon)")
+    print("  python main.py --gui                    # Launch GUI (interactive)")
+    print("  python main.py --open-project <project.amr>  # Launch GUI and open project")
     print()
     print(f"Supported formats: {list(MeshLoader.SUPPORTED_FORMATS.keys())}")
     print()
@@ -275,6 +279,28 @@ def separate_mesh(filepath: str):
         print(f"Error: {e}")
         import traceback
         traceback.print_exc()
+
+
+def launch_gui(*, open_project: str | None = None) -> None:
+    """Launch the interactive GUI (app_interactive.py)."""
+    try:
+        import app_interactive
+    except Exception as e:
+        print("Failed to import GUI.")
+        print("Make sure PyQt6 is installed: pip install -r requirements.txt")
+        print(f"Error: {type(e).__name__}: {e}")
+        return
+
+    if open_project:
+        # Let app_interactive access the argument via sys.argv.
+        sys.argv = [sys.argv[0], "--open-project", str(open_project)]
+    else:
+        sys.argv = [sys.argv[0]]
+
+    try:
+        app_interactive.main()
+    except Exception as e:
+        print(f"GUI failed to start: {type(e).__name__}: {e}")
 
 
 def run_gui():
