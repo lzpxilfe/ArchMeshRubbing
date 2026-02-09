@@ -623,7 +623,18 @@ class SurfaceVisualizer:
         *,
         splat_sigma: float | None = None,
     ) -> np.ndarray:
-        """Fast depth-map creation by binning per-vertex values into pixels."""
+        """Fast depth-map creation by splatting per-vertex values into pixels.
+
+        Notes
+        -----
+        For large meshes we avoid per-triangle rasterization. Instead we splat vertex
+        values into the image using bilinear weights and apply a *normalized* blur:
+
+            depth = G(sums) / (G(weights) + eps)
+
+        This reduces the "pixel-grid" noise that happens with nearest-neighbor binning
+        and fills small holes more naturally than ad-hoc dilation.
+        """
         uv = np.asarray(uv, dtype=np.float64)
         h = np.asarray(heights, dtype=np.float64).reshape(-1)
         if uv.ndim != 2 or uv.shape[0] == 0 or uv.shape[1] < 2:
@@ -645,41 +656,71 @@ class SurfaceVisualizer:
         hv = h[valid]
 
         # Map to pixel coords (UV is already normalized to [0,1] by FlattenedMesh.normalize()).
-        px = np.rint(u * float(w - 1)).astype(np.int64, copy=False)
-        py = np.rint((1.0 - v) * float(hh - 1)).astype(np.int64, copy=False)
-        px = np.clip(px, 0, w - 1)
-        py = np.clip(py, 0, hh - 1)
-        lin = py * int(w) + px
+        fx = (u * float(w - 1)).astype(np.float64, copy=False)
+        fy = ((1.0 - v) * float(hh - 1)).astype(np.float64, copy=False)
 
-        # Accumulate sums and counts.
+        x0 = np.floor(fx).astype(np.int64, copy=False)
+        y0 = np.floor(fy).astype(np.int64, copy=False)
+        dx = (fx - x0.astype(np.float64, copy=False)).astype(np.float64, copy=False)
+        dy = (fy - y0.astype(np.float64, copy=False)).astype(np.float64, copy=False)
+
+        x1 = x0 + 1
+        y1 = y0 + 1
+        x0 = np.clip(x0, 0, w - 1)
+        x1 = np.clip(x1, 0, w - 1)
+        y0 = np.clip(y0, 0, hh - 1)
+        y1 = np.clip(y1, 0, hh - 1)
+
+        w00 = (1.0 - dx) * (1.0 - dy)
+        w10 = dx * (1.0 - dy)
+        w01 = (1.0 - dx) * dy
+        w11 = dx * dy
+
+        lin00 = y0 * int(w) + x0
+        lin10 = y0 * int(w) + x1
+        lin01 = y1 * int(w) + x0
+        lin11 = y1 * int(w) + x1
+
+        lin_all = np.concatenate([lin00, lin10, lin01, lin11], axis=0)
+        w_all = np.concatenate([w00, w10, w01, w11], axis=0)
+        hv_all = np.concatenate([hv * w00, hv * w10, hv * w01, hv * w11], axis=0)
+
         size = int(w * hh)
-        sums = np.bincount(lin, weights=hv, minlength=size).astype(np.float64, copy=False)
-        counts = np.bincount(lin, minlength=size).astype(np.int64, copy=False)
+        sums = np.bincount(lin_all, weights=hv_all, minlength=size).astype(np.float64, copy=False)
+        weights = np.bincount(lin_all, weights=w_all, minlength=size).astype(np.float64, copy=False)
 
-        depth_flat = np.zeros((size,), dtype=np.float64)
-        mask_flat = counts > 0
-        depth_flat[mask_flat] = sums[mask_flat] / counts[mask_flat].astype(np.float64, copy=False)
+        sums_img = sums.reshape((hh, w))
+        weights_img = weights.reshape((hh, w))
 
-        depth = depth_flat.reshape((hh, w))
-        mask = mask_flat.reshape((hh, w))
-
-        if not bool(mask.all()):
-            depth = self._fill_holes(depth, mask)
-
-        # Light smoothing to reduce splat noise (improves gradient-based shading).
+        # Normalized smoothing to reduce splat noise and fill small holes naturally.
         try:
             if splat_sigma is not None:
                 sigma = float(splat_sigma)
             else:
-                sigma = float(getattr(self, "_depthmap_fast_sigma", 0.8) or 0.0)
+                sigma = float(getattr(self, "_depthmap_fast_sigma", 1.0) or 0.0)
         except Exception:
-            sigma = 0.8
+            sigma = 1.0
+
+        # Adapt smoothing when the requested resolution is very high relative to vertex density.
+        try:
+            density = float(hv.size) / float(max(1, w * hh))
+        except Exception:
+            density = 1.0
+        if np.isfinite(density) and density > 0.0 and splat_sigma is None:
+            if density < 0.08:
+                sigma = max(float(sigma), 2.0)
+            elif density < 0.20:
+                sigma = max(float(sigma), 1.4)
+
         if np.isfinite(sigma) and sigma > 0.0:
             try:
-                depth = ndimage.gaussian_filter(depth, sigma=float(sigma))
+                sums_img = ndimage.gaussian_filter(sums_img, sigma=float(sigma))
+                weights_img = ndimage.gaussian_filter(weights_img, sigma=float(sigma))
             except Exception:
                 pass
 
+        eps = 1e-12
+        depth = sums_img / (weights_img + float(eps))
         if not np.isfinite(depth).all():
             depth = np.nan_to_num(depth, nan=0.0, posinf=0.0, neginf=0.0)
         return np.asarray(depth, dtype=np.float32)
@@ -801,7 +842,13 @@ class SurfaceVisualizer:
         검은 바탕에 흰색/회색 음영
         """
         # 그라디언트 계산 (기울기)
-        grad_y, grad_x = np.gradient(depth_map)
+        # NOTE: np.gradient는 depth-map의 미세 노이즈를 그대로 증폭시키는 경향이 있어,
+        #       Sobel(=가벼운 스무딩+미분)로 더 안정적인 음영을 만듭니다.
+        try:
+            grad_x = ndimage.sobel(depth_map, axis=1) / 8.0
+            grad_y = ndimage.sobel(depth_map, axis=0) / 8.0
+        except Exception:
+            grad_y, grad_x = np.gradient(depth_map)
         
         # 조명 방향
         light_rad = np.radians(light_angle)
