@@ -1012,14 +1012,19 @@ class FlattenPanel(QWidget):
 
         auto_row = QHBoxLayout()
         btn_auto = QPushButton("🤖 자동 분리(실험)")
-        btn_auto.setToolTip("완전 자동은 메쉬/정렬 상태에 따라 실패할 수 있습니다. 결과가 이상하면 수동 '찍기'로 지정하세요.")
+        btn_auto.setToolTip(
+            "스마트 자동 분리(auto: 원통→가시성→법선).\n"
+            "결과가 이상하면 수동 '찍기/브러시'로 보정하세요.\n"
+            "- Shift: 가시성(±두께축) 강제\n"
+            "- Ctrl: 원통(반경) 강제"
+        )
         btn_auto.clicked.connect(lambda: self.selectionRequested.emit("auto_surface", None))
         auto_row.addWidget(btn_auto)
 
         btn_auto_migu = QPushButton("📏 미구 자동 감지")
         btn_auto_migu.setToolTip(
             "미구(계단/경계) 영역을 자동으로 찾아 미구로 지정합니다.\n"
-            "- 클릭: Y축(기본) 강조 감지\n"
+            "- 클릭: (가능하면) 원통 기반 미구, 아니면 Y축(기본) 강조 감지\n"
             "- Ctrl+클릭: X축 강조 감지\n"
             "- Shift+클릭: 둘레 경계(Edge belt) 감지"
         )
@@ -1158,12 +1163,19 @@ class SelectionPanel(QWidget):
         auto_layout = QVBoxLayout(auto_group)
         
         btn_auto_surface = QPushButton("📊 내면/외면 자동 감지")
-        btn_auto_surface.setToolTip("클릭=법선 기반, Shift+클릭=상/하면(보이는 면 + 보정) 기반 자동 분류 (주름/가림에 더 강함)")
+        btn_auto_surface.setToolTip(
+            "클릭=스마트(auto: 원통→가시성→법선), Shift+클릭=가시성(±두께축) 강제, Ctrl+클릭=원통(반경) 강제"
+        )
         btn_auto_surface.clicked.connect(lambda: self.selectionChanged.emit('auto_surface', None))
         auto_layout.addWidget(btn_auto_surface)
         
         btn_auto_edge = QPushButton("📏 미구 자동 감지")
-        btn_auto_edge.setToolTip("경계 근처 영역 자동 선택")
+        btn_auto_edge.setToolTip(
+            "미구(계단/경계) 영역을 자동으로 찾아 미구로 지정합니다.\n"
+            "- 클릭: (가능하면) 원통 기반 미구, 아니면 Y축(기본) 강조 감지\n"
+            "- Ctrl+클릭: X축 강조 감지\n"
+            "- Shift+클릭: 둘레 경계(Edge belt) 감지"
+        )
         btn_auto_edge.clicked.connect(lambda: self.selectionChanged.emit('auto_edge', None))
         auto_layout.addWidget(btn_auto_edge)
         
@@ -4545,15 +4557,52 @@ class MainWindow(QMainWindow):
                 from src.core.surface_separator import SurfaceSeparator
 
                 separator = SurfaceSeparator()
-                mesh = self._build_world_mesh(obj)
+                mesh_local = getattr(obj, "mesh", None)
+                if mesh_local is None:
+                    QMessageBox.warning(self, "경고", "먼저 메쉬를 선택해 주세요.")
+                    return
                 modifiers = QApplication.keyboardModifiers()
-                use_views = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
-                result = separator.auto_detect_surfaces(mesh, method="views" if use_views else "normals")
-                obj.outer_face_indices = set(int(x) for x in result.outer_face_indices.tolist())
-                obj.inner_face_indices = set(int(x) for x in result.inner_face_indices.tolist())
+                force_views = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+                force_cyl = bool(modifiers & Qt.KeyboardModifier.ControlModifier)
+                if force_cyl:
+                    method = "cylinder"
+                elif force_views:
+                    method = "views"
+                else:
+                    method = "auto"
+
+                result = separator.auto_detect_surfaces(mesh_local, method=method, return_submeshes=False)
+                obj.outer_face_indices = set(map(int, getattr(result, "outer_face_indices", np.zeros((0,), dtype=np.int32))))
+                obj.inner_face_indices = set(map(int, getattr(result, "inner_face_indices", np.zeros((0,), dtype=np.int32))))
+
+                migu_idx = getattr(result, "migu_face_indices", None)
+                if isinstance(migu_idx, np.ndarray) and migu_idx.size:
+                    obj.migu_face_indices = set(map(int, migu_idx))
+                else:
+                    obj.migu_face_indices.clear()
+
+                # Keep sets exclusive (migu wins).
+                try:
+                    obj.outer_face_indices.difference_update(obj.migu_face_indices)
+                    obj.inner_face_indices.difference_update(obj.migu_face_indices)
+                except Exception:
+                    pass
+
+                # Safety: eliminate any overlap between outer/inner.
+                try:
+                    overlap = obj.outer_face_indices.intersection(obj.inner_face_indices)
+                    if overlap:
+                        obj.outer_face_indices.difference_update(overlap)
+                        obj.inner_face_indices.difference_update(overlap)
+                        obj.migu_face_indices.update(overlap)
+                except Exception:
+                    pass
+
+                meta = getattr(result, "meta", {}) or {}
+                method_used = str(meta.get("method", method))
 
                 self.viewport.status_info = (
-                    f"✅ 자동 분리 적용({('view' if use_views else 'normal')}): outer {len(obj.outer_face_indices):,} / inner {len(obj.inner_face_indices):,} (현재 메쉬에 저장됨)"
+                    f"✅ 자동 분리 적용({method_used}): outer {len(obj.outer_face_indices):,} / inner {len(obj.inner_face_indices):,} / migu {len(obj.migu_face_indices):,} (현재 메쉬에 저장됨)"
                 )
                 try:
                     self.viewport._emit_surface_assignment_changed(obj)
@@ -4564,7 +4613,9 @@ class MainWindow(QMainWindow):
                     "완료",
                     f"자동 분리 결과를 현재 메쉬에 적용했습니다. (파일 저장은 아직 하지 않았습니다.)\n\n"
                     f"- outer(외면): {len(obj.outer_face_indices):,} faces\n"
-                    f"- inner(내면): {len(obj.inner_face_indices):,} faces\n\n"
+                    f"- inner(내면): {len(obj.inner_face_indices):,} faces\n"
+                    f"- migu(미구): {len(obj.migu_face_indices):,} faces\n\n"
+                    f"- method: {method_used}\n\n"
                     f"표시: 외면=파랑, 내면=주황 오버레이\n"
                     f"저장: 내보내기 탭에서 SVG/이미지로 내보내세요.",
                 )
@@ -4583,64 +4634,84 @@ class MainWindow(QMainWindow):
 
                 modifiers = QApplication.keyboardModifiers()
                 broad_edge = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
-                major_axis = "x" if (modifiers & Qt.KeyboardModifier.ControlModifier) else "y"
+                use_x = bool(modifiers & Qt.KeyboardModifier.ControlModifier)
 
-                # Rotation matrix (local -> world)
-                rot_deg = np.asarray(getattr(obj, "rotation", [0.0, 0.0, 0.0]), dtype=np.float64).reshape(-1)
-                if rot_deg.size < 3:
-                    rot_deg = np.array([0.0, 0.0, 0.0], dtype=np.float64)
-                rx, ry, rz = np.radians(rot_deg[:3])
-                cx, sx = float(np.cos(rx)), float(np.sin(rx))
-                cy, sy = float(np.cos(ry)), float(np.sin(ry))
-                cz, sz = float(np.cos(rz)), float(np.sin(rz))
-                rot_x = np.array([[1.0, 0.0, 0.0], [0.0, cx, -sx], [0.0, sx, cx]], dtype=np.float64)
-                rot_y = np.array([[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]], dtype=np.float64)
-                rot_z = np.array([[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]], dtype=np.float64)
-                rot_mat = rot_x @ rot_y @ rot_z
+                idx = None
+                mode_desc = None
 
-                # Face normals (world)
-                try:
-                    if getattr(mesh_local, "face_normals", None) is None:
-                        mesh_local.compute_normals(compute_vertex_normals=False)
-                except Exception:
-                    pass
-                fn_local = np.asarray(getattr(mesh_local, "face_normals", None), dtype=np.float64)
-                if fn_local.ndim != 2 or fn_local.shape[0] != int(getattr(mesh_local, "n_faces", 0) or 0) or fn_local.shape[1] < 3:
-                    raise RuntimeError("면 법선(face_normals) 계산에 실패했습니다.")
-                fn_world = fn_local[:, :3] @ rot_mat.T
+                # Fast path for tiles: reuse the cylinder separator's migu band when it looks valid.
+                if (not broad_edge) and (not use_x):
+                    try:
+                        separator = SurfaceSeparator()
+                        cyl = separator.auto_detect_surfaces(mesh_local, method="cylinder", return_submeshes=False)
+                        meta = getattr(cyl, "meta", {}) or {}
+                        migu_idx = getattr(cyl, "migu_face_indices", None)
+                        if bool(meta.get("cylinder_ok", False)) and isinstance(migu_idx, np.ndarray) and migu_idx.size:
+                            idx = migu_idx.astype(np.int32, copy=False)
+                            mode_desc = "원통(반경) | 자동"
+                    except Exception:
+                        idx = None
+                        mode_desc = None
 
-                # Estimate "thickness" direction and rotate to world
-                separator = SurfaceSeparator()
-                d_local = np.asarray(separator._estimate_reference_direction(mesh_local), dtype=np.float64).reshape(-1)
-                if d_local.size < 3 or not np.isfinite(d_local[:3]).all():
-                    d_local = np.array([0.0, 0.0, 1.0], dtype=np.float64)
-                d_world = rot_mat @ d_local[:3]
-                dn = float(np.linalg.norm(d_world))
-                if dn > 1e-12 and np.isfinite(dn):
-                    d_world = d_world / dn
-                else:
-                    d_world = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+                if idx is None:
+                    major_axis = "x" if use_x else "y"
 
-                abs_dot = np.abs(fn_world @ d_world.reshape(3,))
+                    # Rotation matrix (local -> world)
+                    rot_deg = np.asarray(getattr(obj, "rotation", [0.0, 0.0, 0.0]), dtype=np.float64).reshape(-1)
+                    if rot_deg.size < 3:
+                        rot_deg = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+                    rx, ry, rz = np.radians(rot_deg[:3])
+                    cx, sx = float(np.cos(rx)), float(np.sin(rx))
+                    cy, sy = float(np.cos(ry)), float(np.sin(ry))
+                    cz, sz = float(np.cos(rz)), float(np.sin(rz))
+                    rot_x = np.array([[1.0, 0.0, 0.0], [0.0, cx, -sx], [0.0, sx, cx]], dtype=np.float64)
+                    rot_y = np.array([[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]], dtype=np.float64)
+                    rot_z = np.array([[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]], dtype=np.float64)
+                    rot_mat = rot_x @ rot_y @ rot_z
 
-                if broad_edge:
-                    # Broad "edge belt": faces whose normals are near-perpendicular to thickness axis.
-                    absdot_max = float(getattr(self, "_migu_edge_absdot_max", 0.35) or 0.35)
-                    absdot_max = float(np.clip(absdot_max, 0.0, 1.0))
-                    mask = abs_dot <= absdot_max
-                    mode_desc = f"경계(둘레) | absdot≤{absdot_max:.2f}"
-                else:
-                    # "미구" heuristic: dominant X/Y-facing faces that are not outer/inner.
-                    major_thr = float(getattr(self, "_migu_major_axis_min", 0.55) or 0.55)
-                    major_thr = float(np.clip(major_thr, 0.0, 1.0))
-                    absdot_max = float(getattr(self, "_migu_absdot_max", 0.90) or 0.90)
-                    absdot_max = float(np.clip(absdot_max, 0.0, 1.0))
-                    ax_i = 0 if major_axis == "x" else 1
-                    major = np.abs(fn_world[:, ax_i])
-                    mask = (major >= major_thr) & (abs_dot <= absdot_max)
-                    mode_desc = f"{major_axis.upper()}축 강조 | major≥{major_thr:.2f}, absdot≤{absdot_max:.2f}"
+                    # Face normals (world)
+                    try:
+                        if getattr(mesh_local, "face_normals", None) is None:
+                            mesh_local.compute_normals(compute_vertex_normals=False)
+                    except Exception:
+                        pass
+                    fn_local = np.asarray(getattr(mesh_local, "face_normals", None), dtype=np.float64)
+                    if fn_local.ndim != 2 or fn_local.shape[0] != int(getattr(mesh_local, "n_faces", 0) or 0) or fn_local.shape[1] < 3:
+                        raise RuntimeError("면 법선(face_normals) 계산에 실패했습니다.")
+                    fn_world = fn_local[:, :3] @ rot_mat.T
 
-                idx = np.where(mask)[0].astype(np.int32, copy=False)
+                    # Estimate "thickness" direction and rotate to world
+                    separator = SurfaceSeparator()
+                    d_local = np.asarray(separator._estimate_reference_direction(mesh_local), dtype=np.float64).reshape(-1)
+                    if d_local.size < 3 or not np.isfinite(d_local[:3]).all():
+                        d_local = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+                    d_world = rot_mat @ d_local[:3]
+                    dn = float(np.linalg.norm(d_world))
+                    if dn > 1e-12 and np.isfinite(dn):
+                        d_world = d_world / dn
+                    else:
+                        d_world = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+
+                    abs_dot = np.abs(fn_world @ d_world.reshape(3,))
+
+                    if broad_edge:
+                        # Broad "edge belt": faces whose normals are near-perpendicular to thickness axis.
+                        absdot_max = float(getattr(self, "_migu_edge_absdot_max", 0.35) or 0.35)
+                        absdot_max = float(np.clip(absdot_max, 0.0, 1.0))
+                        mask = abs_dot <= absdot_max
+                        mode_desc = f"경계(둘레) | absdot≤{absdot_max:.2f}"
+                    else:
+                        # "미구" heuristic: dominant X/Y-facing faces that are not outer/inner.
+                        major_thr = float(getattr(self, "_migu_major_axis_min", 0.55) or 0.55)
+                        major_thr = float(np.clip(major_thr, 0.0, 1.0))
+                        absdot_max = float(getattr(self, "_migu_absdot_max", 0.90) or 0.90)
+                        absdot_max = float(np.clip(absdot_max, 0.0, 1.0))
+                        ax_i = 0 if major_axis == "x" else 1
+                        major = np.abs(fn_world[:, ax_i])
+                        mask = (major >= major_thr) & (abs_dot <= absdot_max)
+                        mode_desc = f"{major_axis.upper()}축 강조 | major≥{major_thr:.2f}, absdot≤{absdot_max:.2f}"
+
+                    idx = np.where(mask)[0].astype(np.int32, copy=False)
                 n_sel = int(idx.size)
                 if n_sel <= 0:
                     QMessageBox.information(
@@ -5457,10 +5528,11 @@ class MainWindow(QMainWindow):
                         base, translation=translation, rotation=rotation, scale=scale
                     )
                     separator = SurfaceSeparator()
-                    result = separator.auto_detect_surfaces(mesh)
-                    outer = getattr(result, "outer_surface", None)
-                    if outer is None:
+                    result = separator.auto_detect_surfaces(mesh, return_submeshes=False)
+                    outer_idx = np.asarray(getattr(result, "outer_face_indices", np.zeros((0,), dtype=np.int32)), dtype=np.int32).reshape(-1)
+                    if outer_idx.size <= 0:
                         return {"status": "no_outer"}
+                    outer = mesh.extract_submesh(outer_idx)
                     MeshProcessor().save_mesh(outer, filepath)
                     return {"status": "ok"}
 
@@ -5505,10 +5577,11 @@ class MainWindow(QMainWindow):
                         base, translation=translation, rotation=rotation, scale=scale
                     )
                     separator = SurfaceSeparator()
-                    result = separator.auto_detect_surfaces(mesh)
-                    inner = getattr(result, "inner_surface", None)
-                    if inner is None:
+                    result = separator.auto_detect_surfaces(mesh, return_submeshes=False)
+                    inner_idx = np.asarray(getattr(result, "inner_face_indices", np.zeros((0,), dtype=np.int32)), dtype=np.int32).reshape(-1)
+                    if inner_idx.size <= 0:
                         return {"status": "no_inner"}
+                    inner = mesh.extract_submesh(inner_idx)
                     MeshProcessor().save_mesh(inner, filepath)
                     return {"status": "ok"}
 

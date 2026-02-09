@@ -54,4 +54,4 @@ __smoke_*.svg
 __test_*.svg
 
 # Local research scratch (do not commit)
-__carrotphant_*
+__research_*

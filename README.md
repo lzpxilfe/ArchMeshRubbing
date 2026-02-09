@@ -72,7 +72,7 @@ python main.py --help
 
 참고:
 - “미구 전개/펼침”은 아직 후순위(미구 지정은 저장만 됨)입니다.
-- 내/외면을 지정하지 않으면 자동 분리(법선 기준)로 fallback 됩니다.
+- 내/외면을 지정하지 않으면 자동 분리(auto: 원통→가시성→법선)로 fallback 됩니다.
 
 ## 탁본 이미지(PNG/TIFF) 내보내기
 
@@ -89,7 +89,7 @@ python main.py --help
 
 ## Git / 백업 주의
 
-- 대용량/작업 파일(`*.stl`, `*.amr`, `*.obj`, `*.ply`, `*.off`)과 로컬 연구 자료(`__carrotphant_*` 등)는 **커밋하지 않도록** `.gitignore`로 제외합니다.
+- 대용량/작업 파일(`*.stl`, `*.amr`, `*.obj`, `*.ply`, `*.off`)과 로컬 연구 자료(`__research_*` 등)는 **커밋하지 않도록** `.gitignore`로 제외합니다.
 - Push 전에 항상 `git status`로 스테이징 목록을 확인하세요.
 
 ## 단면 슬라이싱 프리셋 (Clip Presets)
