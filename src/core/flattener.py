@@ -1381,7 +1381,8 @@ class ARAPFlattener:
         cols = np.concatenate([edge_j, edge_i, edge_i, edge_j])
         vals = np.concatenate([-edge_w, -edge_w, edge_w, edge_w])
 
-        return sparse.coo_matrix((vals, (rows, cols)), shape=(n, n)).tocsr()
+        # NOTE: Use csr_matrix ctor directly to avoid SciPy array/matrix return-type ambiguity.
+        return sparse.csr_matrix((vals, (rows, cols)), shape=(n, n), dtype=np.float64)
     
     def _compute_local_rotations(
         self,

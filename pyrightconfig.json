@@ -11,12 +11,10 @@
   ],
   "reportMissingImports": true,
   "reportMissingTypeStubs": false,
-  "reportAny": "none",
   "reportUnknownArgumentType": "none",
   "reportUnknownMemberType": "none",
   "reportUnknownVariableType": "none",
   "reportDeprecated": "none",
   "reportPrivateUsage": "none",
-  "reportUnannotatedClassAttribute": "none",
   "reportUnusedCallResult": "none"
 }

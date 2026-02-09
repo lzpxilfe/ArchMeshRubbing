@@ -131,6 +131,53 @@ class MeshLoadThread(QThread):
             except Exception:
                 pass
 
+            # Precompute heavy caches in the loader thread so the UI stays responsive.
+            # - face_normals: required for display and many tools (compute once, in background)
+            # - face_centroids: speeds up surface tools on huge meshes (lasso/brush)
+            try:
+                if getattr(mesh_data, "face_normals", None) is None:
+                    mesh_data.compute_normals(compute_vertex_normals=False)
+            except Exception:
+                _LOGGER.debug("Mesh normals precompute failed (continuing)", exc_info=True)
+
+            try:
+                n_faces = int(getattr(mesh_data, "n_faces", 0) or 0)
+            except Exception:
+                n_faces = 0
+
+            try:
+                threshold = int(getattr(mesh_data, "_amr_precompute_face_centroids_threshold", 300000) or 300000)
+            except Exception:
+                threshold = 300000
+
+            if n_faces >= threshold:
+                try:
+                    faces = np.asarray(getattr(mesh_data, "faces", None), dtype=np.int32)
+                    verts = np.asarray(getattr(mesh_data, "vertices", None), dtype=np.float64)
+                    if faces.ndim == 2 and faces.shape[1] >= 3 and verts.ndim == 2 and verts.shape[1] >= 3:
+                        centroids = np.empty((int(faces.shape[0]), 3), dtype=np.float32)
+                        try:
+                            chunk = int(getattr(mesh_data, "_amr_precompute_face_centroids_chunk", 250000) or 250000)
+                        except Exception:
+                            chunk = 250000
+                        chunk = max(50000, min(chunk, 500000))
+
+                        for start in range(0, int(faces.shape[0]), int(chunk)):
+                            if self.isInterruptionRequested():
+                                break
+                            end = min(int(faces.shape[0]), start + int(chunk))
+                            f = faces[start:end, :3]
+                            v0 = verts[f[:, 0], :3]
+                            v1 = verts[f[:, 1], :3]
+                            v2 = verts[f[:, 2], :3]
+                            centroids[start:end, :] = ((v0 + v1 + v2) / 3.0).astype(np.float32, copy=False)
+
+                        if not self.isInterruptionRequested():
+                            setattr(mesh_data, "_amr_face_centroids", centroids)
+                            setattr(mesh_data, "_amr_face_centroids_faces_count", int(faces.shape[0]))
+                except Exception:
+                    _LOGGER.debug("Mesh face-centroids precompute failed (continuing)", exc_info=True)
+
             self.loaded.emit(mesh_data, self._filepath)
         except Exception as e:
             _LOGGER.exception("Mesh load failed: %s", self._filepath)
@@ -3206,53 +3253,105 @@ class MainWindow(QMainWindow):
             },
         }
 
-        ui_state: dict[str, Any] = {
-            "flatten": {
-                "radius_mm": float(getattr(self.flatten_panel, "spin_radius", None).value())
-                if getattr(self, "flatten_panel", None) is not None
-                else 150.0,
-                "direction_index": int(getattr(self.flatten_panel, "combo_direction", None).currentIndex())
-                if getattr(self, "flatten_panel", None) is not None
-                else 0,
-                "method_index": int(getattr(self.flatten_panel, "combo_method", None).currentIndex())
-                if getattr(self, "flatten_panel", None) is not None
-                else 0,
-                "distortion_percent": int(getattr(self.flatten_panel, "slider_distortion", None).value())
-                if getattr(self, "flatten_panel", None) is not None
-                else 50,
-                "auto_cut": bool(getattr(self.flatten_panel, "check_auto_cut", None).isChecked())
-                if getattr(self, "flatten_panel", None) is not None
-                else False,
-                "multiband": bool(getattr(self.flatten_panel, "check_multiband", None).isChecked())
-                if getattr(self, "flatten_panel", None) is not None
-                else False,
-                "iterations": int(getattr(self.flatten_panel, "spin_iterations", None).value())
-                if getattr(self, "flatten_panel", None) is not None
-                else 30,
-            },
-            "export": {
-                "dpi": int(getattr(self.export_panel, "spin_dpi", None).value())
-                if getattr(self, "export_panel", None) is not None
-                else 300,
-                "format_index": int(getattr(self.export_panel, "combo_format", None).currentIndex())
-                if getattr(self, "export_panel", None) is not None
-                else 0,
-                "scale_bar": bool(getattr(self.export_panel, "check_scale_bar", None).isChecked())
-                if getattr(self, "export_panel", None) is not None
-                else True,
-                "profile_include_grid": bool(getattr(self.export_panel, "check_profile_include_grid", None).isChecked())
-                if getattr(self.export_panel, "check_profile_include_grid", None) is not None
-                else True,
-                "profile_feature_lines": bool(getattr(self.export_panel, "check_profile_feature_lines", None).isChecked())
-                if getattr(self.export_panel, "check_profile_feature_lines", None) is not None
-                else False,
-                "profile_feature_angle": float(getattr(self.export_panel, "spin_profile_feature_angle", None).value())
-                if getattr(self.export_panel, "spin_profile_feature_angle", None) is not None
-                else 60.0,
-            },
-            "slice": {
-                "presets": self.slice_panel.get_presets() if getattr(self, "slice_panel", None) is not None else [],
-            },
+        ui_state: dict[str, Any] = {}
+
+        # Flatten panel state
+        flatten_panel = getattr(self, "flatten_panel", None)
+        if flatten_panel is not None:
+            try:
+                radius_mm = float(flatten_panel.spin_radius.value())
+            except Exception:
+                radius_mm = 150.0
+            try:
+                direction_index = int(flatten_panel.combo_direction.currentIndex())
+            except Exception:
+                direction_index = 0
+            try:
+                method_index = int(flatten_panel.combo_method.currentIndex())
+            except Exception:
+                method_index = 0
+            try:
+                distortion_percent = int(flatten_panel.slider_distortion.value())
+            except Exception:
+                distortion_percent = 50
+            try:
+                auto_cut = bool(flatten_panel.check_auto_cut.isChecked())
+            except Exception:
+                auto_cut = False
+            try:
+                multiband = bool(flatten_panel.check_multiband.isChecked())
+            except Exception:
+                multiband = False
+            try:
+                iterations = int(flatten_panel.spin_iterations.value())
+            except Exception:
+                iterations = 30
+        else:
+            radius_mm = 150.0
+            direction_index = 0
+            method_index = 0
+            distortion_percent = 50
+            auto_cut = False
+            multiband = False
+            iterations = 30
+
+        ui_state["flatten"] = {
+            "radius_mm": float(radius_mm),
+            "direction_index": int(direction_index),
+            "method_index": int(method_index),
+            "distortion_percent": int(distortion_percent),
+            "auto_cut": bool(auto_cut),
+            "multiband": bool(multiband),
+            "iterations": int(iterations),
+        }
+
+        # Export panel state
+        export_panel = getattr(self, "export_panel", None)
+        if export_panel is not None:
+            try:
+                dpi = int(export_panel.spin_dpi.value())
+            except Exception:
+                dpi = 300
+            try:
+                format_index = int(export_panel.combo_format.currentIndex())
+            except Exception:
+                format_index = 0
+            try:
+                scale_bar = bool(export_panel.check_scale_bar.isChecked())
+            except Exception:
+                scale_bar = True
+            try:
+                profile_include_grid = bool(export_panel.check_profile_include_grid.isChecked())
+            except Exception:
+                profile_include_grid = True
+            try:
+                profile_feature_lines = bool(export_panel.check_profile_feature_lines.isChecked())
+            except Exception:
+                profile_feature_lines = False
+            try:
+                profile_feature_angle = float(export_panel.spin_profile_feature_angle.value())
+            except Exception:
+                profile_feature_angle = 60.0
+        else:
+            dpi = 300
+            format_index = 0
+            scale_bar = True
+            profile_include_grid = True
+            profile_feature_lines = False
+            profile_feature_angle = 60.0
+
+        ui_state["export"] = {
+            "dpi": int(dpi),
+            "format_index": int(format_index),
+            "scale_bar": bool(scale_bar),
+            "profile_include_grid": bool(profile_include_grid),
+            "profile_feature_lines": bool(profile_feature_lines),
+            "profile_feature_angle": float(profile_feature_angle),
+        }
+
+        slice_panel = getattr(self, "slice_panel", None)
+        ui_state["slice"] = {
+            "presets": slice_panel.get_presets() if slice_panel is not None else [],
         }
 
         return {
@@ -5568,9 +5667,6 @@ class MainWindow(QMainWindow):
             qbuf.close()
             pil_img = Image.open(io.BytesIO(ba.data()))
 
-            # 2. 프로파일 추출 및 SVG 내보내기
-            exporter = ProfileExporter(resolution=2048) # 추출 해상도
-
             running = getattr(self, "_profile_export_thread", None)
             if running is not None and running.isRunning():
                 QMessageBox.information(self, "내보내기", "이미 내보내기 작업이 진행 중입니다.")
@@ -5588,6 +5684,22 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
+            include_grid = True
+            include_feature_lines = False
+            feature_angle_deg = 60.0
+            try:
+                include_grid = bool(self.export_panel.check_profile_include_grid.isChecked())
+            except Exception:
+                include_grid = True
+            try:
+                include_feature_lines = bool(self.export_panel.check_profile_feature_lines.isChecked())
+            except Exception:
+                include_feature_lines = False
+            try:
+                feature_angle_deg = float(self.export_panel.spin_profile_feature_angle.value())
+            except Exception:
+                feature_angle_deg = 60.0
+
             self._profile_export_thread = ProfileExportThread(
                 mesh_data=obj.mesh,
                 view=view,
@@ -5601,15 +5713,9 @@ class MainWindow(QMainWindow):
                 cut_profiles_world=self.viewport.get_cut_sections_world(),
                 resolution=2048,
                 grid_spacing=1.0,
-                include_grid=bool(getattr(self.export_panel, "check_profile_include_grid", None).isChecked())
-                if getattr(self.export_panel, "check_profile_include_grid", None) is not None
-                else True,
-                include_feature_lines=bool(getattr(self.export_panel, "check_profile_feature_lines", None).isChecked())
-                if getattr(self.export_panel, "check_profile_feature_lines", None) is not None
-                else False,
-                feature_angle_deg=float(getattr(self.export_panel, "spin_profile_feature_angle", None).value())
-                if getattr(self.export_panel, "spin_profile_feature_angle", None) is not None
-                else 60.0,
+                include_grid=bool(include_grid),
+                include_feature_lines=bool(include_feature_lines),
+                feature_angle_deg=float(feature_angle_deg),
             )
             self._profile_export_thread.done.connect(self._on_profile_export_done)
             self._profile_export_thread.failed.connect(self._on_profile_export_failed)
@@ -5617,22 +5723,6 @@ class MainWindow(QMainWindow):
             self._profile_export_thread.start()
             self.status_info.setText(f"내보내기 시작: {Path(filepath).name}")
             return
-
-            result_path = exporter.export_profile(
-                obj.mesh,
-                view=view,
-                output_path=filepath,
-                translation=obj.translation,
-                rotation=obj.rotation,
-                scale=obj.scale,
-                grid_spacing=1.0, # 1cm 격자
-                include_grid=True,
-                viewport_image=pil_img,
-                opengl_matrices=(mv, proj, vp) # 정밀 정렬을 위한 행렬 전달
-            )
-
-            QMessageBox.information(self, "완료", f"2D 도면이 저장되었습니다:\n{result_path}")
-            self.status_info.setText(f"✅ 저장 완료: {Path(result_path).name}")
 
         except Exception as e:
             import traceback
@@ -6633,8 +6723,12 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            QApplication.clipboard().setText(text)
-            self.status_info.setText("📋 측정 결과 복사됨")
+            cb = QApplication.clipboard()
+            if cb is not None:
+                cb.setText(text)
+            label = getattr(self, "status_info", None)
+            if label is not None:
+                label.setText("📋 측정 결과 복사됨")
         except Exception:
             pass
 

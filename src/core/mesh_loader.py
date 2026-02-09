@@ -217,6 +217,36 @@ class MeshData:
             return
 
         if self.face_normals is None:
+            # For huge meshes, compute in chunks to avoid large temporaries / OOM.
+            try:
+                n_faces = int(faces.shape[0])
+            except Exception:
+                n_faces = int(len(faces))
+
+            try:
+                chunk = int(getattr(self, "_normals_chunk_faces", 250000) or 250000)
+            except Exception:
+                chunk = 250000
+            chunk = max(10000, min(chunk, 500000))
+
+            if n_faces > chunk:
+                out = np.empty((n_faces, 3), dtype=np.float32)
+                for start in range(0, n_faces, chunk):
+                    end = min(n_faces, start + chunk)
+                    f = np.asarray(faces[start:end, :3], dtype=np.int32)
+                    if f.size == 0:
+                        continue
+                    v0 = self.vertices[f[:, 0]]
+                    v1 = self.vertices[f[:, 1]]
+                    v2 = self.vertices[f[:, 2]]
+
+                    cross = np.cross(v1 - v0, v2 - v0)
+                    norms = np.linalg.norm(cross, axis=1, keepdims=True)
+                    norms[norms == 0] = 1  # 0으로 나누기 방지
+                    out[start:end] = (cross / norms).astype(np.float32, copy=False)
+                self.face_normals = out
+
+        if self.face_normals is None:
             v0 = self.vertices[self.faces[:, 0]]
             v1 = self.vertices[self.faces[:, 1]]
             v2 = self.vertices[self.faces[:, 2]]

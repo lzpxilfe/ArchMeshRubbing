@@ -527,6 +527,8 @@ class _SurfaceLassoSelectThread(QThread):
         depth_origin: tuple[int, int],
         depth_map: np.ndarray | None,
         *,
+        face_centroids: np.ndarray | None = None,
+        face_normals: np.ndarray | None = None,
         depth_tol: float = 0.01,
         max_selected_faces: int = 400000,
         wand_seed_face_idx: int | None = None,
@@ -556,6 +558,24 @@ class _SurfaceLassoSelectThread(QThread):
         self._depth = None if depth_map is None else np.asarray(depth_map)
         self._depth_tol = float(depth_tol)
         self._max_selected = int(max_selected_faces)
+
+        self._face_centroids: np.ndarray | None = None
+        try:
+            if face_centroids is not None:
+                fc = np.asarray(face_centroids)
+                if fc.ndim == 2 and int(fc.shape[1]) >= 3:
+                    self._face_centroids = fc[:, :3]
+        except Exception:
+            self._face_centroids = None
+
+        self._face_normals: np.ndarray | None = None
+        try:
+            if face_normals is not None:
+                fn = np.asarray(face_normals)
+                if fn.ndim == 2 and int(fn.shape[1]) >= 3:
+                    self._face_normals = fn[:, :3]
+        except Exception:
+            self._face_normals = None
         try:
             self._wand_seed = int(wand_seed_face_idx) if wand_seed_face_idx is not None else -1
         except Exception:
@@ -675,16 +695,43 @@ class _SurfaceLassoSelectThread(QThread):
                 seed = int(cand[0])
 
             # Centroids and normals for candidate faces (local coords)
-            f = faces[cand, :3].astype(np.int32, copy=False)
-            v0 = vertices[f[:, 0], :3].astype(np.float64, copy=False)
-            v1 = vertices[f[:, 1], :3].astype(np.float64, copy=False)
-            v2 = vertices[f[:, 2], :3].astype(np.float64, copy=False)
-            cent = ((v0 + v1 + v2) / 3.0).astype(np.float32, copy=False)
+            face_centroids_all = getattr(self, "_face_centroids", None)
+            face_normals_all = getattr(self, "_face_normals", None)
 
-            n = np.cross(v1 - v0, v2 - v0)
-            nn = np.linalg.norm(n, axis=1)
-            nn = np.where(nn > 1e-12, nn, 1.0)
-            normals = (n / nn[:, None]).astype(np.float32, copy=False)
+            cent: np.ndarray | None = None
+            normals: np.ndarray | None = None
+
+            if face_centroids_all is not None:
+                try:
+                    fc = np.asarray(face_centroids_all)
+                    if fc.ndim == 2 and int(fc.shape[0]) == int(faces.shape[0]) and int(fc.shape[1]) >= 3:
+                        cent = np.asarray(fc[cand, :3], dtype=np.float32)
+                except Exception:
+                    cent = None
+
+            if face_normals_all is not None:
+                try:
+                    fn = np.asarray(face_normals_all)
+                    if fn.ndim == 2 and int(fn.shape[0]) == int(faces.shape[0]) and int(fn.shape[1]) >= 3:
+                        normals = np.asarray(fn[cand, :3], dtype=np.float32)
+                        nn = np.linalg.norm(normals, axis=1)
+                        nn = np.where(nn > 1e-12, nn, 1.0)
+                        normals = (normals / nn[:, None]).astype(np.float32, copy=False)
+                except Exception:
+                    normals = None
+
+            if cent is None or normals is None:
+                f = faces[cand, :3].astype(np.int32, copy=False)
+                v0 = vertices[f[:, 0], :3].astype(np.float64, copy=False)
+                v1 = vertices[f[:, 1], :3].astype(np.float64, copy=False)
+                v2 = vertices[f[:, 2], :3].astype(np.float64, copy=False)
+                if cent is None:
+                    cent = ((v0 + v1 + v2) / 3.0).astype(np.float32, copy=False)
+                if normals is None:
+                    n = np.cross(v1 - v0, v2 - v0)
+                    nn = np.linalg.norm(n, axis=1)
+                    nn = np.where(nn > 1e-12, nn, 1.0)
+                    normals = (n / nn[:, None]).astype(np.float32, copy=False)
 
             # KNN adjacency on centroids
             k = int(max(2, self._wand_knn_k))
@@ -708,11 +755,20 @@ class _SurfaceLassoSelectThread(QThread):
             else:
                 # Nearest candidate to seed face centroid
                 try:
-                    sf = faces[seed, :3].astype(np.int32, copy=False)
-                    sc = (
-                        (vertices[int(sf[0]), :3] + vertices[int(sf[1]), :3] + vertices[int(sf[2]), :3])
-                        / 3.0
-                    ).astype(np.float32, copy=False)
+                    sc = None
+                    if face_centroids_all is not None:
+                        try:
+                            fc0 = np.asarray(face_centroids_all)
+                            if fc0.ndim == 2 and int(fc0.shape[0]) == int(faces.shape[0]) and int(fc0.shape[1]) >= 3:
+                                sc = np.asarray(fc0[int(seed), :3], dtype=np.float32).reshape(-1)
+                        except Exception:
+                            sc = None
+                    if sc is None:
+                        sf = faces[seed, :3].astype(np.int32, copy=False)
+                        sc = (
+                            (vertices[int(sf[0]), :3] + vertices[int(sf[1]), :3] + vertices[int(sf[2]), :3])
+                            / 3.0
+                        ).astype(np.float32, copy=False)
                     _d2, seed_pos2 = tree.query(np.asarray(sc, dtype=np.float32), k=1)
                     seed_pos = int(np.asarray(seed_pos2).reshape(-1)[0])
                 except Exception:
@@ -864,6 +920,28 @@ class _SurfaceLassoSelectThread(QThread):
             tol = float(max(0.0, self._depth_tol))
             max_sel = max(1, int(self._max_selected))
 
+            face_centroids_all: np.ndarray | None = getattr(self, "_face_centroids", None)
+            if (
+                face_centroids_all is not None
+                and face_centroids_all.ndim == 2
+                and int(face_centroids_all.shape[0]) == n_faces
+                and int(face_centroids_all.shape[1]) >= 3
+            ):
+                face_centroids_all = face_centroids_all[:, :3]
+            else:
+                face_centroids_all = None
+
+            face_normals_all: np.ndarray | None = getattr(self, "_face_normals", None)
+            if (
+                face_normals_all is not None
+                and face_normals_all.ndim == 2
+                and int(face_normals_all.shape[0]) == n_faces
+                and int(face_normals_all.shape[1]) >= 3
+            ):
+                face_normals_all = face_normals_all[:, :3]
+            else:
+                face_normals_all = None
+
             out: list[np.ndarray] = []
             out_count = 0
             out_no_depth: list[np.ndarray] = []
@@ -882,13 +960,17 @@ class _SurfaceLassoSelectThread(QThread):
                     continue
 
                 # Face centroids in local coords
-                try:
-                    v0 = vertices[f[:, 0], :3]
-                    v1 = vertices[f[:, 1], :3]
-                    v2 = vertices[f[:, 2], :3]
-                except Exception:
-                    continue
-                cent = (v0 + v1 + v2) / 3.0
+                v0 = v1 = v2 = None
+                if face_centroids_all is not None:
+                    cent = face_centroids_all[start:end, :3]
+                else:
+                    try:
+                        v0 = vertices[f[:, 0], :3]
+                        v1 = vertices[f[:, 1], :3]
+                        v2 = vertices[f[:, 2], :3]
+                    except Exception:
+                        continue
+                    cent = (v0 + v1 + v2) / 3.0
 
                 # Local -> world
                 cent_w = (rot_mat @ (cent * scale).T).T + trans[:3]
@@ -958,14 +1040,18 @@ class _SurfaceLassoSelectThread(QThread):
                             _log_ignored_exception()
 
                     try:
-                        # Reuse v0/v1/v2 and cent (local coords) for this chunk via the inside mask.
-                        inside_mask = inside
-                        v0_in = v0[valid, :][ok, :][inside_mask, :]
-                        v1_in = v1[valid, :][ok, :][inside_mask, :]
-                        v2_in = v2[valid, :][ok, :][inside_mask, :]
-                        cent_in = cent[valid, :][ok, :][inside_mask, :]
-                        n_local = np.cross(v1_in - v0_in, v2_in - v0_in)
+                        cent_in = cent[valid, :][ok, :][inside, :][:, :3]
                         view_vec = (cam_local[:3].reshape(1, 3) - cent_in[:, :3]).astype(np.float64, copy=False)
+
+                        if face_normals_all is not None:
+                            n_local = np.asarray(face_normals_all[idx_in, :3], dtype=np.float64)
+                        else:
+                            f_in = faces[idx_in, :3]
+                            v0_in = vertices[f_in[:, 0], :3]
+                            v1_in = vertices[f_in[:, 1], :3]
+                            v2_in = vertices[f_in[:, 2], :3]
+                            n_local = np.cross(v1_in - v0_in, v2_in - v0_in)
+
                         dots = np.einsum("ij,ij->i", n_local.astype(np.float64, copy=False), view_vec)
                         keep_front = dots > 1e-12
                         if np.any(keep_front):
@@ -4559,6 +4645,13 @@ class Viewport3D(QOpenGLWidget):
         if name is None:
             name = f"Object_{len(self.objects) + 1}"
             
+        # Optional precomputed caches from the loader thread (performance on huge meshes).
+        pre_centroids = getattr(mesh, "_amr_face_centroids", None)
+        try:
+            pre_centroids_faces = int(getattr(mesh, "_amr_face_centroids_faces_count", 0) or 0)
+        except Exception:
+            pre_centroids_faces = 0
+
         # 메쉬 자체를 원점으로 센터링 (로컬 좌표계 생성)
         center = mesh.centroid
         mesh.vertices -= center
@@ -4570,7 +4663,32 @@ class Viewport3D(QOpenGLWidget):
         except Exception:
             _log_ignored_exception()
         # 로딩 시점에는 face normals만 필요 (vertex normals는 필요할 때 계산)
-        mesh.compute_normals(compute_vertex_normals=False)
+        centroids_cache = None
+        try:
+            if pre_centroids is not None:
+                fc = np.asarray(pre_centroids, dtype=np.float32)
+                n_faces = int(getattr(mesh, "n_faces", int(fc.shape[0])) or int(fc.shape[0]))
+                if (
+                    fc.ndim == 2
+                    and int(fc.shape[1]) >= 3
+                    and int(fc.shape[0]) == n_faces
+                    and (pre_centroids_faces <= 0 or int(fc.shape[0]) == int(pre_centroids_faces))
+                ):
+                    c = np.asarray(center[:3], dtype=np.float32).reshape(1, 3)
+                    fc = fc[:, :3]
+                    try:
+                        fc -= c
+                        centroids_cache = fc
+                    except Exception:
+                        centroids_cache = (fc - c).astype(np.float32, copy=False)
+        except Exception:
+            centroids_cache = None
+
+        try:
+            if getattr(mesh, "face_normals", None) is None:
+                mesh.compute_normals(compute_vertex_normals=False)
+        except Exception:
+            _log_ignored_exception()
         
         new_obj = SceneObject(mesh, name)
         self.objects.append(new_obj)
@@ -4578,6 +4696,17 @@ class Viewport3D(QOpenGLWidget):
         
         # VBO 데이터 생성
         self.update_vbo(new_obj)
+
+        # Attach centroid cache after update_vbo (it invalidates caches defensively).
+        if centroids_cache is not None:
+            try:
+                new_obj._face_centroids = centroids_cache
+                new_obj._face_centroid_faces_count = int(
+                    getattr(mesh, "n_faces", int(centroids_cache.shape[0])) or int(centroids_cache.shape[0])
+                )
+                new_obj._face_centroid_kdtree = None
+            except Exception:
+                _log_ignored_exception()
         
         # 카메라 피팅 (첫 번째 객체인 경우만)
         if len(self.objects) == 1:
@@ -7023,6 +7152,13 @@ class Viewport3D(QOpenGLWidget):
 
     def _compute_surface_magnetic_cache(self) -> bool:
         """Compute distance-to-edge cache from the current depth buffer."""
+        if ndimage is None:
+            self._surface_magnetic_dist = None
+            self._surface_magnetic_nn_y = None
+            self._surface_magnetic_nn_x = None
+            self._surface_magnetic_cache_viewport = None
+            return False
+
         obj = getattr(self, "selected_obj", None)
         if obj is None or getattr(obj, "mesh", None) is None:
             self._surface_magnetic_dist = None
@@ -7095,7 +7231,9 @@ class Viewport3D(QOpenGLWidget):
 
         # Silhouette edge (object-vs-background)
         try:
-            sil = mask_obj & (~ndimage.binary_erosion(mask_obj, structure=np.ones((3, 3), dtype=bool)))
+            sil = mask_obj & np.logical_not(
+                ndimage.binary_erosion(mask_obj, structure=np.ones((3, 3), dtype=bool))
+            )
         except Exception:
             sil = np.zeros((vh, vw), dtype=bool)
 
@@ -7126,7 +7264,10 @@ class Viewport3D(QOpenGLWidget):
 
         try:
             inv = np.logical_not(edges)
-            dist, (iy, ix) = ndimage.distance_transform_edt(inv, return_indices=True)
+            dist, (iy, ix) = cast(
+                tuple[np.ndarray, tuple[np.ndarray, np.ndarray]],
+                ndimage.distance_transform_edt(inv, return_indices=True),
+            )
             self._surface_magnetic_dist = np.asarray(dist, dtype=np.float32)
             self._surface_magnetic_nn_y = np.asarray(iy, dtype=np.int32)
             self._surface_magnetic_nn_x = np.asarray(ix, dtype=np.int32)
@@ -7427,6 +7568,8 @@ class Viewport3D(QOpenGLWidget):
                 (int(gl_x0), int(gl_y0), int(gl_x1), int(gl_y1)),
                 (int(gl_x0), int(gl_y0)),
                 depth_map,
+                face_centroids=getattr(obj, "_face_centroids", None),
+                face_normals=getattr(getattr(obj, "mesh", None), "face_normals", None),
                 depth_tol=tol,
                 max_selected_faces=max_sel,
                 wand_seed_face_idx=seed_face_idx if seed_face_idx >= 0 else None,
@@ -7725,6 +7868,8 @@ class Viewport3D(QOpenGLWidget):
                 (int(gl_x0), int(gl_y0), int(gl_x1), int(gl_y1)),
                 (int(gl_x0), int(gl_y0)),
                 depth_map,
+                face_centroids=getattr(obj, "_face_centroids", None),
+                face_normals=getattr(getattr(obj, "mesh", None), "face_normals", None),
                 depth_tol=tol,
                 max_selected_faces=max_sel,
                 wand_seed_face_idx=seed_face_idx if seed_face_idx >= 0 else None,
@@ -8152,6 +8297,18 @@ class Viewport3D(QOpenGLWidget):
             except Exception:
                 _log_ignored_exception()
 
+        if adjacency is None and tree is None and centroids is not None and centroids.size != 0:
+            try:
+                from scipy import spatial as _spatial
+
+                tree = cast(Any, _spatial).cKDTree(centroids)
+                try:
+                    obj._face_centroid_kdtree = tree
+                except Exception:
+                    _log_ignored_exception()
+            except Exception:
+                tree = None
+
         try:
             fn = np.asarray(normals, dtype=np.float64)
         except Exception:
@@ -8407,6 +8564,18 @@ class Viewport3D(QOpenGLWidget):
                     obj._face_centroid_faces_count = int(n_faces)
                 except Exception:
                     _log_ignored_exception()
+
+        if adjacency is None and tree is None and centroids is not None and centroids.size != 0:
+            try:
+                from scipy import spatial as _spatial
+
+                tree = cast(Any, _spatial).cKDTree(centroids)
+                try:
+                    obj._face_centroid_kdtree = tree
+                except Exception:
+                    _log_ignored_exception()
+            except Exception:
+                tree = None
 
         seed_centroid = None
         if radius_world > 0.0:
@@ -8796,6 +8965,18 @@ class Viewport3D(QOpenGLWidget):
                 obj._face_centroid_faces_count = int(n_faces)
             except Exception:
                 _log_ignored_exception()
+
+        if tree is None and centroids is not None and centroids.size != 0:
+            try:
+                from scipy import spatial as _spatial
+
+                tree = cast(Any, _spatial).cKDTree(centroids)
+                try:
+                    obj._face_centroid_kdtree = tree
+                except Exception:
+                    _log_ignored_exception()
+            except Exception:
+                tree = None
 
         cand = None
         try:
