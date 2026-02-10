@@ -8,6 +8,7 @@ import sys
 import logging
 import subprocess
 import json
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -408,20 +409,16 @@ class HelpWidget(QTextEdit):
             <p style="font-size:11px;">
             내면/외면/미구(경계)를 지정하는 도구입니다.<br><br>
 
-            <b>📊 내면/외면 자동 감지</b><br>
-            - 클릭: <b>법선</b> 기반 자동 분리 (일반 메쉬에 빠름)<br>
-            - <b>Shift + 클릭:</b> <b>상면/하면(보이는 면)</b> 기반 자동 분리 (기와/얇은 쉘에 유리)<br><br>
+            <b>🤖 자동 분리(실험)</b><br>
+            - 클릭: 자동 분리(auto)<br>
+            - <b>Shift + 클릭:</b> 가시성(보이는 면) 기반 강제<br>
+            - <b>Ctrl + 클릭:</b> 원통 기반 강제<br><br>
 
-            <b>🖱️ 찍기(표면 클릭)</b><br>
-            - 클릭: <b>한 면</b>만 토글(추가/해제)<br>
-            - <b>Shift/Ctrl + 클릭:</b> <b>매직완드처럼 조금씩 확장</b> (Shift/Ctrl 클릭을 반복할수록 더 넓게)<br>
-            - <b>Alt:</b> 삭제 모드<br><br>
-
-            <b>🖌️ 브러시</b><br>
-            - 드래그: 칠하는 면을 추가, <b>Alt+드래그</b>: 삭제<br><br>
-
-            <b>⭕ 올가미(면적)</b><br>
-            - 좌클릭으로 점 추가 → 첫 점 근처 클릭 또는 우클릭으로 확정<br>
+            <b>🧲 경계(면적+자석)</b><br>
+            - <b>좌클릭:</b> 점 추가(자석 스냅) / <b>드래그:</b> 카메라 회전<br>
+            - <b>첫 점 근처 클릭</b> 또는 <b>우클릭/Enter</b>: 확정<br>
+            - <b>Backspace</b>: 되돌리기 / <b>Alt</b>: 제거 모드<br>
+            - <b>Shift/Ctrl</b>: 완드 정제 / <b>[ / ]</b>: 자석 반경 / <b>ESC</b>: 종료<br>
             </p>
         """)
 
@@ -947,49 +944,19 @@ class FlattenPanel(QWidget):
         surface_layout.addLayout(target_row)
 
         tool_row = QHBoxLayout()
-        self.btn_surface_click = QPushButton("👆 찍기(자동 확장)")
-        self.btn_surface_click.setToolTip(
-            "클릭한 면이 속한 '매끈한 연결 영역'을 자동 확장해 지정합니다.\n"
-            "Shift/Ctrl=추가(단계 확장), Alt=제거, [ / ]=크기, Space+드래그=시점, ESC=종료"
+        self.btn_surface_boundary = QPushButton("🧲 경계(면적+자석)")
+        self.btn_surface_boundary.setToolTip(
+            "면적(점-올가미) + 자석(경계 스냅)을 하나로 합친 도구입니다.\n"
+            "좌클릭=점 추가(자석 스냅), 드래그=카메라 회전/시점, 우클릭/Enter=확정,\n"
+            "Backspace=되돌리기, Shift/Ctrl=완드 정제, Alt=제거, [ / ]=자석 반경, ESC=종료"
         )
-        self.btn_surface_click.clicked.connect(
-            lambda: self.selectionRequested.emit("surface_tool", {"tool": "click", "target": self.current_surface_target()})
-        )
-        tool_row.addWidget(self.btn_surface_click)
-
-        self.btn_surface_brush = QPushButton("🖌️ 보정(브러시)")
-        self.btn_surface_brush.setToolTip("드래그로 칠해서 보정합니다. Alt=지우기, [ / ]=크기, Space+드래그=시점, ESC=종료")
-        self.btn_surface_brush.clicked.connect(
-            lambda: self.selectionRequested.emit("surface_tool", {"tool": "brush", "target": self.current_surface_target()})
-        )
-        tool_row.addWidget(self.btn_surface_brush)
-
-        self.btn_surface_area = QPushButton("📐 면적(Area)")
-        self.btn_surface_area.setToolTip(
-            "메쉬 위에 점을 찍어 다각형을 만들고, 보이는 면을 한 번에 지정합니다.\n"
-            "시작점 근처 클릭=스냅 닫힘(자동 확정)\n"
-            "좌클릭=점 추가(드래그=회전), 우클릭/Enter=확정(우클릭 위치가 완드 기준), Backspace=되돌리기, ESC=취소"
-        )
-        self.btn_surface_area.clicked.connect(
+        self.btn_surface_boundary.clicked.connect(
             lambda: self.selectionRequested.emit(
                 "surface_tool",
-                {"tool": "area", "target": self.current_surface_target()},
+                {"tool": "boundary", "target": self.current_surface_target()},
             )
         )
-        tool_row.addWidget(self.btn_surface_area)
-
-        self.btn_surface_magnetic = QPushButton("🧲 경계(자석)")
-        self.btn_surface_magnetic.setToolTip(
-            "메쉬 경계/윤곽을 따라 '자석'처럼 붙여가며 영역을 지정합니다.\n"
-            "드래그=그리기, Space+드래그=시점, 우클릭/Enter=확정, Backspace=되돌리기, [ / ]=자석 반경, ESC=취소"
-        )
-        self.btn_surface_magnetic.clicked.connect(
-            lambda: self.selectionRequested.emit(
-                "surface_tool",
-                {"tool": "magnetic", "target": self.current_surface_target()},
-            )
-        )
-        tool_row.addWidget(self.btn_surface_magnetic)
+        tool_row.addWidget(self.btn_surface_boundary)
         surface_layout.addLayout(tool_row)
 
         self.label_surface_assignment = QLabel("외면: 0 / 내면: 0 / 미구: 0")
@@ -1011,10 +978,21 @@ class FlattenPanel(QWidget):
         surface_layout.addLayout(action_row)
 
         auto_row = QHBoxLayout()
+        btn_assist = QPushButton("🤝 수동 보조 분리")
+        btn_assist.setToolTip(
+            "사용자가 지정한 outer/inner 씨드를 기준으로 미분류 면만 보조 분류합니다.\n"
+            "- 기본: views + 보수 모드(모순 배제)\n"
+            "- Shift+클릭: 공격 모드(더 넓게 채움)\n"
+            "- Ctrl+클릭: 원통(반경) 기반 보조\n"
+            "- Alt+클릭: auto(자동) 기반 보조"
+        )
+        btn_assist.clicked.connect(lambda: self.selectionRequested.emit("assist_surface", None))
+        auto_row.addWidget(btn_assist)
+
         btn_auto = QPushButton("🤖 자동 분리(실험)")
         btn_auto.setToolTip(
-            "스마트 자동 분리(auto: 원통→가시성→법선).\n"
-            "결과가 이상하면 수동 '찍기/브러시'로 보정하세요.\n"
+            "스마트 자동 분리(auto: 가시성(위상)→원통→법선).\n"
+            "결과가 이상하면 '경계(면적+자석)'로 보정하세요.\n"
             "- Shift: 가시성(±두께축) 강제\n"
             "- Ctrl: 원통(반경) 강제"
         )
@@ -1031,6 +1009,16 @@ class FlattenPanel(QWidget):
         btn_auto_migu.clicked.connect(lambda: self.selectionRequested.emit("auto_edge", None))
         auto_row.addWidget(btn_auto_migu)
         surface_layout.addLayout(auto_row)
+
+        slice_nav_row = QHBoxLayout()
+        btn_open_section = QPushButton("🧭 단면 도구 열기")
+        btn_open_section.setToolTip(
+            "실시간 단면(3D 절단 관측/촬영)은 '단면 도구' 탭에서 제어합니다.\n"
+            "2D 지정(단면선/ROI)도 같은 탭에서 함께 관리합니다."
+        )
+        btn_open_section.clicked.connect(lambda: self.selectionRequested.emit("open_section_tools", None))
+        slice_nav_row.addWidget(btn_open_section)
+        surface_layout.addLayout(slice_nav_row)
 
         layout.addWidget(surface_group)
         
@@ -1164,7 +1152,7 @@ class SelectionPanel(QWidget):
         
         btn_auto_surface = QPushButton("📊 내면/외면 자동 감지")
         btn_auto_surface.setToolTip(
-            "클릭=스마트(auto: 원통→가시성→법선), Shift+클릭=가시성(±두께축) 강제, Ctrl+클릭=원통(반경) 강제"
+            "클릭=스마트(auto: 가시성(위상)→원통→법선), Shift+클릭=가시성(±두께축) 강제, Ctrl+클릭=원통(반경) 강제"
         )
         btn_auto_surface.clicked.connect(lambda: self.selectionChanged.emit('auto_surface', None))
         auto_layout.addWidget(btn_auto_surface)
@@ -1392,6 +1380,7 @@ class SlicingPanel(QWidget):
     """단면 슬라이싱 제어 패널"""
     sliceChanged = pyqtSignal(bool, float)  # enabled, height
     exportRequested = pyqtSignal(float)     # height
+    captureRequested = pyqtSignal(float)    # height (capture current mesh slice)
     saveLayersRequested = pyqtSignal()      # snapshot to layers (for SVG export)
     
     def __init__(self, parent=None):
@@ -1403,7 +1392,7 @@ class SlicingPanel(QWidget):
         layout = QVBoxLayout(self)
         
         # 1. 활성화 스위치
-        self.group = QGroupBox("📏 단면 슬라이싱 (CT)")
+        self.group = QGroupBox("📏 메쉬 단면 슬라이싱")
         self.group.setCheckable(True)
         self.group.setChecked(False)
         self.group.toggled.connect(self.on_toggled)
@@ -1462,15 +1451,25 @@ class SlicingPanel(QWidget):
         self.btn_export.clicked.connect(self.on_export_clicked)
         btn_layout.addWidget(self.btn_export)
 
+        self.btn_capture = QPushButton("📸 현재 단면 촬영")
+        self.btn_capture.setStyleSheet("background-color: #fff7ed; font-weight: bold;")
+        self.btn_capture.setToolTip("현재 보이는 메쉬 단면을 레이어로 바로 저장합니다.")
+        self.btn_capture.clicked.connect(self.on_capture_clicked)
+        btn_layout.addWidget(self.btn_capture)
+
         self.btn_save_layers = QPushButton("🗂️ 레이어로 저장")
-        self.btn_save_layers.setToolTip("현재 단면 결과(CT/가이드/ROI)를 레이어로 스냅샷 저장합니다.")
+        self.btn_save_layers.setToolTip("현재 단면 결과(슬라이스/가이드/ROI)를 레이어로 스냅샷 저장합니다.")
         self.btn_save_layers.clicked.connect(self.saveLayersRequested.emit)
         btn_layout.addWidget(self.btn_save_layers)
 
         group_layout.addLayout(btn_layout)
         
         # 도움말
-        help_label = QLabel("상면(Top) 뷰에서 보면서 높이를 조절하세요.")
+        help_label = QLabel(
+            "상면(Top) 뷰에서 보면서 높이를 조절하세요. "
+            "Ctrl+휠=실시간 단면 이동, Shift+Ctrl=미세, Alt+Ctrl=고속\n"
+            "실시간 단면=3D 절단 관측/촬영, 2D 지정(단면선/ROI)=아래 도구에서 설정"
+        )
         help_label.setStyleSheet("color: #718096; font-size: 10px;")
         help_label.setWordWrap(True)
         group_layout.addWidget(help_label)
@@ -1495,6 +1494,9 @@ class SlicingPanel(QWidget):
         
     def on_export_clicked(self):
         self.exportRequested.emit(self.spin.value())
+
+    def on_capture_clicked(self):
+        self.captureRequested.emit(self.spin.value())
 
     def update_range(self, z_min, z_max):
         """메쉬 범위에 맞춰 슬라이더 범위 업데이트"""
@@ -2019,8 +2021,8 @@ class SectionPanel(QWidget):
         line.setFrameShadow(QFrame.Shadow.Sunken)
         layout.addWidget(line)
 
-        # 4. 단면선(2개) - 상면에서 가로/세로(꺾임 가능) 가이드 라인
-        line_group = QGroupBox("✏️ 단면선 (2개)")
+        # 4. 2D 단면선(2개) - 상면에서 가로/세로(꺾임 가능) 가이드 라인
+        line_group = QGroupBox("✏️ 2D 단면선 지정 (상면, 2개)")
         line_layout = QVBoxLayout(line_group)
 
         self.btn_line = QPushButton("✏️ 단면선 그리기 시작")
@@ -2073,8 +2075,8 @@ class SectionPanel(QWidget):
         line2.setFrameShadow(QFrame.Shadow.Sunken)
         layout.addWidget(line2)
         
-        # 5. 2D ROI 영역 지정 (NEW)
-        roi_group = QGroupBox("✂️ 2D 영역 지정 (Cropping)")
+        # 5. 2D ROI 영역 지정 (상면 투영)
+        roi_group = QGroupBox("✂️ 2D 영역 지정 (상면 Cropping)")
         roi_layout = QVBoxLayout(roi_group)
         
         self.btn_roi = QPushButton("📐 영역 지정 모드 시작")
@@ -2088,7 +2090,10 @@ class SectionPanel(QWidget):
         self.btn_silhouette.clicked.connect(self.silhouetteRequested.emit)
         roi_layout.addWidget(self.btn_silhouette)
         
-        roi_help = QLabel("상면(Top) 뷰에서 4개 화살표를 드래그하여 영역을 지정하세요.")
+        roi_help = QLabel(
+            "상면(Top) 뷰에서 4개 화살표 드래그=크기 조절, 가운데 마름모 드래그=이동.\n"
+            "Shift+드래그=새 영역 지정 (드래그=카메라 회전 / 우클릭 드래그=이동)"
+        )
         roi_help.setStyleSheet("color: #718096; font-size: 10px;")
         roi_help.setWordWrap(True)
         roi_layout.addWidget(roi_help)
@@ -2165,12 +2170,13 @@ class MainWindow(QMainWindow):
         # 평면화(Flatten) 결과 캐시: (obj id + transform + options) -> FlattenedMesh
         self._flattened_cache = {}
 
-        # Slice(CT) 계산은 디바운스 + 백그라운드 스레드로 처리 (UI 끊김 방지)
+        # Slice 계산은 디바운스 + 백그라운드 스레드로 처리 (UI 끊김 방지)
         self._slice_debounce_timer = QTimer(self)
         self._slice_debounce_timer.setSingleShot(True)
         self._slice_debounce_timer.timeout.connect(self._request_slice_compute)
         self._slice_compute_thread = None
         self._slice_pending_height = None
+        self._slice_capture_pending = False
 
         # Project (.amr)
         self._current_project_path: str | None = None
@@ -2288,6 +2294,10 @@ class MainWindow(QMainWindow):
         self.flatten_panel.btn_clear_points.clicked.connect(self.clear_curvature_points)
         self.flatten_panel.btn_clear_arcs.clicked.connect(self.clear_all_arcs)
         self.flatten_dock.setWidget(self.flatten_panel)
+        try:
+            self.flatten_dock.visibilityChanged.connect(self._on_flatten_dock_visibility_changed)
+        except Exception:
+            pass
 
         # 4) 내보내기
         self.export_dock = QDockWidget("📤 내보내기", self)
@@ -2309,8 +2319,8 @@ class MainWindow(QMainWindow):
         self.measure_panel.modeChanged.connect(self.on_measure_mode_changed)
         self.measure_dock.setWidget(self.measure_panel)
 
-        # 5) 단면 도구 (슬라이싱 + 십자선 + 라인)
-        self.section_dock = QDockWidget("📏 단면 도구 (Section)", self)
+        # 5) 단면/2D 지정 도구 (슬라이싱 + 십자선 + 라인 + ROI)
+        self.section_dock = QDockWidget("📏 단면/2D 지정 도구 (Section)", self)
         self.section_dock.setObjectName("dock_section")
         section_scroll = QScrollArea()
         section_scroll.setWidgetResizable(True)
@@ -2320,8 +2330,14 @@ class MainWindow(QMainWindow):
         self.slice_panel = SlicingPanel()
         self.slice_panel.sliceChanged.connect(self.on_slice_changed)
         self.slice_panel.exportRequested.connect(self.on_slice_export_requested)
+        self.slice_panel.captureRequested.connect(self.on_slice_capture_requested)
         self.slice_panel.saveLayersRequested.connect(self.on_save_section_layers_requested)
         section_layout.addWidget(self.slice_panel)
+
+        mode_hint = QLabel("구분: 실시간 단면 = 3D 절단 관측/촬영 | 2D 지정 = 상면에서 단면선/ROI 가이드 지정")
+        mode_hint.setStyleSheet("color: #4a5568; font-size: 10px;")
+        mode_hint.setWordWrap(True)
+        section_layout.addWidget(mode_hint)
 
         line = QFrame()
         line.setFrameShape(QFrame.Shape.HLine)
@@ -2342,6 +2358,8 @@ class MainWindow(QMainWindow):
         self.viewport.lineProfileUpdated.connect(self.section_panel.update_line_profile)
         self.viewport.roiSilhouetteExtracted.connect(self.on_silhouette_extracted)
         self.viewport.cutLinesAutoEnded.connect(self._on_cut_lines_auto_ended)
+        self.viewport.sliceScanRequested.connect(self.on_slice_scan_requested)
+        self.viewport.sliceCaptureRequested.connect(self.on_slice_capture_requested)
         section_layout.addWidget(self.section_panel)
 
         section_layout.addStretch()
@@ -2437,6 +2455,37 @@ class MainWindow(QMainWindow):
         self.resizeDocks([self.flatten_dock, self.scene_dock], [780, 220], Qt.Orientation.Vertical)
 
         self.flatten_dock.raise_()
+
+    def _on_flatten_dock_visibility_changed(self, visible: bool) -> None:
+        """펼침 탭이 활성화되면(보이면) 기본 도구를 '경계(면적+자석)'로 맞춥니다.
+
+        다른 피킹 모드가 이미 켜져 있으면(예: 단면/ROI 등) 덮어쓰지 않습니다.
+        """
+        try:
+            if not bool(visible):
+                return
+        except Exception:
+            return
+
+        try:
+            if str(getattr(self.viewport, "picking_mode", "none")) != "none":
+                return
+        except Exception:
+            return
+
+        obj = getattr(self.viewport, "selected_obj", None)
+        if obj is None or getattr(obj, "mesh", None) is None:
+            return
+
+        try:
+            target = self.flatten_panel.current_surface_target()
+        except Exception:
+            target = "outer"
+
+        try:
+            self.on_selection_action("surface_tool", {"tool": "boundary", "target": target})
+        except Exception:
+            pass
 
     def _restore_ui_state(self):
         settings = self._settings()
@@ -2998,7 +3047,7 @@ class MainWindow(QMainWindow):
             self,
             "3D 메쉬 파일 열기",
             "",
-            "3D Files (*.obj *.ply *.stl *.off);;All Files (*)"
+            "3D Files (*.obj *.ply *.stl *.off *.gltf *.glb);;All Files (*)"
         )
         
         if filepath:
@@ -3138,6 +3187,44 @@ class MainWindow(QMainWindow):
             except Exception:
                 return []
 
+        def to_safe_assist_meta(meta_src: Any) -> dict[str, Any]:
+            if not isinstance(meta_src, dict):
+                return {}
+            keep_keys = (
+                "status",
+                "method",
+                "auto_method",
+                "auto_mapping",
+                "assist_mode",
+                "conservative",
+                "seed_outer_count",
+                "seed_inner_count",
+                "added_outer_count",
+                "added_inner_count",
+                "unknown_count",
+                "unresolved_count",
+                "unresolved_truncated",
+                "migu_count",
+                "direct_hits",
+                "swapped_hits",
+                "rule_used",
+                "rule_sep_ratio",
+            )
+            out: dict[str, Any] = {}
+            for k in keep_keys:
+                if k not in meta_src:
+                    continue
+                v = meta_src.get(k)
+                if isinstance(v, (str, bool, int)):
+                    out[str(k)] = v
+                elif isinstance(v, (np.integer,)):
+                    out[str(k)] = int(v)
+                elif isinstance(v, (float, np.floating)):
+                    fv = float(v)
+                    if np.isfinite(fv):
+                        out[str(k)] = fv
+            return out
+
         objects: list[dict[str, Any]] = []
         for obj in getattr(vp, "objects", []) or []:
             mesh = getattr(obj, "mesh", None)
@@ -3220,6 +3307,10 @@ class MainWindow(QMainWindow):
                         "outer": to_int_list(getattr(obj, "outer_face_indices", set())),
                         "inner": to_int_list(getattr(obj, "inner_face_indices", set())),
                         "migu": to_int_list(getattr(obj, "migu_face_indices", set())),
+                        "assist_unresolved": to_int_list(
+                            getattr(obj, "surface_assist_unresolved_face_indices", set())
+                        ),
+                        "assist_meta": to_safe_assist_meta(getattr(obj, "surface_assist_meta", {})),
                     },
                     "polylines": poly_layers,
                     "arcs": arcs_state,
@@ -3393,7 +3484,7 @@ class MainWindow(QMainWindow):
                 self,
                 "프로젝트 메쉬 파일 찾기",
                 "",
-                "3D Files (*.obj *.ply *.stl *.off);;All Files (*)",
+                "3D Files (*.obj *.ply *.stl *.off *.gltf *.glb);;All Files (*)",
             )
             if not mesh_path:
                 # Skip this object
@@ -3460,13 +3551,25 @@ class MainWindow(QMainWindow):
         if not isinstance(faces, dict):
             faces = {}
 
-        def to_int_set(v) -> set[int]:
+        try:
+            n_faces_local = int(getattr(getattr(obj, "mesh", None), "n_faces", 0) or 0)
+        except Exception:
+            n_faces_local = 0
+        n_faces_limit: int | None = n_faces_local if n_faces_local > 0 else None
+
+        def to_int_set(v, *, max_face_count: int | None = n_faces_limit) -> set[int]:
             if not v:
                 return set()
             out: set[int] = set()
             try:
                 for x in v:
-                    out.add(int(x))
+                    try:
+                        i = int(x)
+                    except Exception:
+                        continue
+                    if max_face_count is not None and (i < 0 or i >= max_face_count):
+                        continue
+                    out.add(i)
             except Exception:
                 return set()
             return out
@@ -3481,25 +3584,52 @@ class MainWindow(QMainWindow):
             obj.migu_face_indices = to_int_set(faces.get("migu", []))
         except Exception:
             pass
-
         try:
-            obj._surface_assignment_version = int(getattr(obj, "_surface_assignment_version", 0) or 0) + 1
+            obj.outer_face_indices.difference_update(obj.migu_face_indices)
+            obj.inner_face_indices.difference_update(obj.migu_face_indices)
+            overlap = obj.outer_face_indices.intersection(obj.inner_face_indices)
+            if overlap:
+                obj.inner_face_indices.difference_update(overlap)
         except Exception:
             pass
+        try:
+            unresolved = to_int_set(faces.get("assist_unresolved", []))
+            unresolved.difference_update(obj.outer_face_indices)
+            unresolved.difference_update(obj.inner_face_indices)
+            unresolved.difference_update(obj.migu_face_indices)
+            obj.surface_assist_unresolved_face_indices = unresolved
+        except Exception:
+            obj.surface_assist_unresolved_face_indices = set()
+        try:
+            raw_assist_meta = faces.get("assist_meta", {})
+            obj.surface_assist_meta = dict(raw_assist_meta) if isinstance(raw_assist_meta, dict) else {}
+        except Exception:
+            obj.surface_assist_meta = {}
+        try:
+            obj.surface_assist_runtime = {}
+        except Exception:
+            pass
+
         try:
             obj._surface_overlay_index_cache = {}
             obj._surface_overlay_index_cache_version = -1
         except Exception:
             pass
-
         try:
-            self.viewport.surfaceAssignmentChanged.emit(
-                len(getattr(obj, "outer_face_indices", set()) or set()),
-                len(getattr(obj, "inner_face_indices", set()) or set()),
-                len(getattr(obj, "migu_face_indices", set()) or set()),
-            )
+            self.viewport._emit_surface_assignment_changed(obj)
         except Exception:
-            pass
+            try:
+                obj._surface_assignment_version = int(getattr(obj, "_surface_assignment_version", 0) or 0) + 1
+            except Exception:
+                pass
+            try:
+                self.viewport.surfaceAssignmentChanged.emit(
+                    len(getattr(obj, "outer_face_indices", set()) or set()),
+                    len(getattr(obj, "inner_face_indices", set()) or set()),
+                    len(getattr(obj, "migu_face_indices", set()) or set()),
+                )
+            except Exception:
+                pass
 
         # Polyline layers
         polylines = obj_state.get("polylines", [])
@@ -3974,6 +4104,15 @@ class MainWindow(QMainWindow):
                 self.scene_panel.update_list(self.viewport.objects, self.viewport.selected_index)
                 self.status_info.setText(f"로드됨(프로젝트): {obj_name}")
             else:
+                # 일반 메쉬 로드 시에는 X-Ray를 기본 해제해 내부 비침 혼란을 줄입니다.
+                try:
+                    self.viewport.xray_mode = False
+                    if getattr(self, "trans_toolbar", None) is not None:
+                        self.trans_toolbar.btn_xray.blockSignals(True)
+                        self.trans_toolbar.btn_xray.setChecked(False)
+                        self.trans_toolbar.btn_xray.blockSignals(False)
+                except Exception:
+                    pass
                 self.status_info.setText(f"로드됨: {Path(filepath).name}")
                 self.status_mesh.setText(f"V: {mesh_data.n_vertices:,} | F: {mesh_data.n_faces:,}")
                 self.status_grid.setText(f"격자: {self.viewport.grid_spacing}cm")
@@ -4417,6 +4556,89 @@ class MainWindow(QMainWindow):
         self.sync_transform_panel()
         self.viewport.update()
         self.viewport.meshTransformChanged.emit()
+
+    def _infer_migu_from_outer_inner(
+        self,
+        *,
+        obj,
+        mesh_local,
+        outer_ids: set[int] | list[int] | np.ndarray,
+        inner_ids: set[int] | list[int] | np.ndarray,
+    ) -> tuple[np.ndarray, str]:
+        """
+        현재 outer/inner 라벨 경계로부터 미구(두께/측벽) face를 추론합니다.
+
+        Returns:
+            (indices, description)
+        """
+        try:
+            from src.core.surface_separator import SurfaceSeparator
+
+            separator = SurfaceSeparator()
+            hops = int(getattr(self, "_migu_boundary_hops", 1) or 1)
+            dom_ratio = float(getattr(self, "_migu_vertex_dom_ratio", 1.20) or 1.20)
+            side_thr = float(getattr(self, "_migu_side_absdot_max", 0.45) or 0.45)
+            max_ratio = float(getattr(self, "_migu_boundary_max_ratio", 0.35) or 0.35)
+
+            idx, meta = separator.infer_migu_from_outer_inner(
+                mesh_local,
+                outer_face_indices=outer_ids,
+                inner_face_indices=inner_ids,
+                hops=hops,
+                vertex_dom_ratio=dom_ratio,
+                side_absdot_max=side_thr,
+                max_ratio=max_ratio,
+            )
+            mode = str((meta or {}).get("mode", "")).strip()
+            mode_tag = f",{mode}" if mode else ""
+            desc = f"경계-보조(hops={max(0, min(hops, 3))}{mode_tag})"
+            return np.asarray(idx, dtype=np.int32).reshape(-1), desc
+        except Exception:
+            return np.zeros((0,), dtype=np.int32), "경계-보조"
+
+    def _apply_surface_stability_presets(self, mesh_local) -> str | None:
+        """
+        대형 메쉬(수백만 face)에서 내/외면 분리 안정성을 높이기 위한 기본 프리셋을 적용합니다.
+        사용자/고급 설정이 이미 존재하면 덮어쓰지 않습니다.
+        """
+        try:
+            n_faces = int(getattr(mesh_local, "n_faces", 0) or 0)
+        except Exception:
+            n_faces = 0
+        if n_faces < 1_000_000:
+            return None
+
+        applied: list[str] = []
+        try:
+            if not hasattr(mesh_local, "_views_fallback_use_normals"):
+                mesh_local._views_fallback_use_normals = False
+                applied.append("fallback_t_only")
+        except Exception:
+            pass
+        try:
+            if not hasattr(mesh_local, "_views_migu_absdot_max"):
+                # Disable normal-only migu carving for very large meshes; use boundary-based supplement instead.
+                mesh_local._views_migu_absdot_max = 1.0
+                applied.append("migu_disable_normals")
+        except Exception:
+            pass
+        try:
+            if not hasattr(mesh_local, "_views_migu_max_frac"):
+                mesh_local._views_migu_max_frac = 0.05
+                applied.append("migu_frac_guard")
+        except Exception:
+            pass
+        try:
+            if not hasattr(mesh_local, "_views_visibility_neighborhood"):
+                # Reduce view-bin jitter on very large meshes.
+                mesh_local._views_visibility_neighborhood = 2
+                applied.append("vis_nbhd2")
+        except Exception:
+            pass
+
+        if applied:
+            return "large-mesh-stable"
+        return "large-mesh-stable(user-set)"
     
     def on_selection_action(self, action: str, data):
         action = str(action or "").strip()
@@ -4427,7 +4649,7 @@ class MainWindow(QMainWindow):
             if target not in {"outer", "inner", "migu"}:
                 target = "outer"
             self.viewport._surface_paint_target = target
-            self.viewport.status_info = f"✋ 표면 지정 대상: {target} (찍기/브러시 버튼으로 시작)"
+            self.viewport.status_info = f"✋ 표면 지정 대상: {target} (경계(면적+자석)로 시작)"
             self.viewport.update()
             return
 
@@ -4450,40 +4672,20 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
-            if tool == "click":
-                self.viewport.picking_mode = "paint_surface_face"
-                try:
-                    if not bool(getattr(self.viewport, "cut_lines_enabled", False)):
-                        self.viewport.setMouseTracking(False)
-                except Exception:
-                    pass
-                self.viewport.status_info = (
-                    f"👆 찍기(자동 확장) [{target}]: 클릭=영역 지정, Shift/Ctrl=추가(단계 확장), Alt=제거, [ / ]=크기 (ESC=종료)"
-                )
-            elif tool == "brush":
-                self.viewport.picking_mode = "paint_surface_brush"
-                try:
-                    if not bool(getattr(self.viewport, "cut_lines_enabled", False)):
-                        self.viewport.setMouseTracking(False)
-                except Exception:
-                    pass
-                self.viewport.status_info = (
-                    f"🖌️ 보정(브러시) [{target}]: 드래그=칠하기, Alt=지우기, Shift=2x, Ctrl=0.5x, [ / ]=크기 (ESC=종료)"
-                )
-            elif tool == "area":
-                self.viewport.picking_mode = "paint_surface_area"
+            # Tool unification: click/brush removed, area+magnetic merged into one boundary tool.
+            tool = {
+                "click": "boundary",
+                "brush": "boundary",
+                "area": "boundary",
+                "magnetic": "boundary",
+            }.get(tool, tool)
+
+            if tool == "boundary":
+                self.viewport.picking_mode = "paint_surface_magnetic"
                 try:
                     self.viewport.clear_surface_lasso()
-                    self.viewport.setMouseTracking(True)
-                    self.viewport.setFocus()
                 except Exception:
                     pass
-                self.viewport.status_info = (
-                    f"📐 면적(Area) [{target}]: 메쉬 위 좌클릭=점 추가(드래그=회전), "
-                    f"우클릭/Enter=확정, Backspace=되돌리기, Alt=제거 (ESC로 종료)"
-                )
-            elif tool == "magnetic":
-                self.viewport.picking_mode = "paint_surface_magnetic"
                 try:
                     self.viewport.start_surface_magnetic_lasso()
                     self.viewport.setMouseTracking(True)
@@ -4491,14 +4693,29 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
                 self.viewport.status_info = (
-                    f"🧲 경계(자석) [{target}]: 드래그=그리기, 우클릭/Enter=확정, Backspace=되돌리기, "
-                    f"Shift/Ctrl=완드 정제, Alt=제거, [ / ]=반경 (ESC=종료)"
+                    f"🧲 경계(면적+자석) [{target}]: 좌클릭=점 추가(자석 스냅), 드래그=회전/시점, "
+                    f"우클릭/Enter=확정, Backspace=되돌리기, Shift/Ctrl=완드 정제, Alt=제거, [ / ]=반경, "
+                    f"실시간 단면은 '단면/2D 지정 도구' 탭에서 ON 후 Ctrl+휠/[, .]/C 사용 (ESC=종료)"
                 )
             else:
                 QMessageBox.information(self, "안내", "선택 도구를 확인할 수 없습니다.")
                 return
 
             self.viewport.update()
+            return
+
+        if action == "open_section_tools":
+            try:
+                self.section_dock.show()
+                self.section_dock.raise_()
+            except Exception:
+                pass
+            try:
+                self.status_info.setText(
+                    "단면/2D 지정 도구로 이동: 실시간 단면(3D)과 2D 단면선/ROI를 여기서 함께 제어합니다."
+                )
+            except Exception:
+                pass
             return
 
         # 2) Actions that need a selected mesh
@@ -4513,6 +4730,65 @@ class MainWindow(QMainWindow):
             obj.inner_face_indices = set()
         if not hasattr(obj, "migu_face_indices") or obj.migu_face_indices is None:
             obj.migu_face_indices = set()
+        if not hasattr(obj, "surface_assist_unresolved_face_indices") or obj.surface_assist_unresolved_face_indices is None:
+            obj.surface_assist_unresolved_face_indices = set()
+        if not hasattr(obj, "surface_assist_meta") or obj.surface_assist_meta is None:
+            obj.surface_assist_meta = {}
+        if not hasattr(obj, "surface_assist_runtime") or obj.surface_assist_runtime is None:
+            obj.surface_assist_runtime = {}
+
+        if action == "surface_slice_toggle":
+            panel = getattr(self, "slice_panel", None)
+            if panel is None:
+                QMessageBox.warning(self, "경고", "단면 패널을 찾을 수 없습니다.")
+                return
+            try:
+                self.update_slice_range()
+            except Exception:
+                pass
+            current_enabled = bool(getattr(self.viewport, "slice_enabled", False))
+            requested = data if isinstance(data, bool) else None
+            enabled = (not current_enabled) if requested is None else bool(requested)
+            try:
+                lo = float(panel.spin.minimum())
+                hi = float(panel.spin.maximum())
+                z_cur = float(getattr(self.viewport, "slice_z", 0.0) or 0.0)
+                z_next = float(np.clip(z_cur, lo, hi))
+            except Exception:
+                z_next = float(getattr(self.viewport, "slice_z", 0.0) or 0.0)
+            try:
+                panel.spin.setValue(z_next)
+            except Exception:
+                pass
+            try:
+                panel.group.setChecked(bool(enabled))
+            except Exception:
+                pass
+            if enabled:
+                self.viewport.status_info = (
+                    f"🧭 실시간 단면 모드 ON (Z={z_next:.2f}cm): "
+                    "Ctrl+휠/[, .]=스캔, C=촬영"
+                )
+            else:
+                self.viewport.status_info = "🧭 실시간 단면 모드 OFF"
+            try:
+                self.viewport.setFocus()
+            except Exception:
+                pass
+            self.viewport.update()
+            return
+
+        if action == "surface_slice_capture":
+            try:
+                z_now = float(getattr(self.viewport, "slice_z", 0.0) or 0.0)
+            except Exception:
+                z_now = 0.0
+            self.on_slice_capture_requested(z_now)
+            try:
+                self.viewport.setFocus()
+            except Exception:
+                pass
+            return
 
         if action == "surface_clear_target":
             target = str(data or "").strip().lower()
@@ -4532,6 +4808,12 @@ class MainWindow(QMainWindow):
                 pass
             self.viewport.status_info = f"표면 지정 비움: {target}"
             try:
+                obj.surface_assist_unresolved_face_indices = set()
+                obj.surface_assist_meta = {}
+                obj.surface_assist_runtime = {}
+            except Exception:
+                pass
+            try:
                 self.viewport._emit_surface_assignment_changed(obj)
             except Exception:
                 pass
@@ -4540,6 +4822,12 @@ class MainWindow(QMainWindow):
             obj.outer_face_indices.clear()
             obj.inner_face_indices.clear()
             obj.migu_face_indices.clear()
+            try:
+                obj.surface_assist_unresolved_face_indices = set()
+                obj.surface_assist_meta = {}
+                obj.surface_assist_runtime = {}
+            except Exception:
+                pass
             try:
                 self.viewport.clear_surface_paint_points(None)
                 self.viewport.clear_surface_lasso()
@@ -4552,6 +4840,157 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
+        elif action == "assist_surface":
+            try:
+                from src.core.surface_separator import SurfaceSeparator
+
+                mesh_local = getattr(obj, "mesh", None)
+                if mesh_local is None:
+                    QMessageBox.warning(self, "경고", "먼저 메쉬를 선택해 주세요.")
+                    return
+
+                try:
+                    n_faces = int(getattr(mesh_local, "n_faces", 0) or 0)
+                except Exception:
+                    n_faces = 0
+                min_seed = int(max(24, min(300, int(0.00005 * max(1, n_faces)))))
+
+                modifiers = QApplication.keyboardModifiers()
+                conservative = not bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+                force_cyl = bool(modifiers & Qt.KeyboardModifier.ControlModifier)
+                force_auto = bool(modifiers & Qt.KeyboardModifier.AltModifier)
+                if force_cyl:
+                    method = "cylinder"
+                elif force_auto:
+                    method = "auto"
+                else:
+                    method = "views"
+
+                old_outer = set(int(x) for x in (getattr(obj, "outer_face_indices", set()) or set()))
+                old_inner = set(int(x) for x in (getattr(obj, "inner_face_indices", set()) or set()))
+                old_migu = set(int(x) for x in (getattr(obj, "migu_face_indices", set()) or set()))
+                assist_total_t0 = time.perf_counter()
+
+                try:
+                    self._apply_surface_stability_presets(mesh_local)
+                except Exception:
+                    pass
+
+                separator = SurfaceSeparator()
+                assist_core_t0 = time.perf_counter()
+                outer_idx, inner_idx, meta = separator.assist_outer_inner_from_seeds(
+                    mesh_local,
+                    outer_face_indices=old_outer,
+                    inner_face_indices=old_inner,
+                    migu_face_indices=old_migu,
+                    method=method,
+                    conservative=bool(conservative),
+                    min_seed=min_seed,
+                )
+                assist_core_ms = (time.perf_counter() - assist_core_t0) * 1000.0
+
+                status = str((meta or {}).get("status", "")).strip().lower()
+                if status == "missing_seeds":
+                    so = int((meta or {}).get("seed_outer_count", len(old_outer)) or 0)
+                    si = int((meta or {}).get("seed_inner_count", len(old_inner)) or 0)
+                    req = int((meta or {}).get("min_seed_required", min_seed) or min_seed)
+                    QMessageBox.information(
+                        self,
+                        "씨드 부족",
+                        "수동 보조 분리를 위해 outer/inner 씨드가 더 필요합니다.\n\n"
+                        f"- 현재 outer seed: {so:,}\n"
+                        f"- 현재 inner seed: {si:,}\n"
+                        f"- 권장 최소 seed: {req:,}\n\n"
+                        "경계(면적+자석)로 양쪽에 조금씩 먼저 지정한 뒤 다시 실행하세요.",
+                    )
+                    return
+                if status and status != "ok":
+                    err = str((meta or {}).get("error", "")).strip()
+                    msg = (
+                        "수동 보조 분리 중 자동 분류를 완료하지 못했습니다.\n\n"
+                        f"- 상태: {status}\n"
+                    )
+                    if err:
+                        msg += f"- 상세: {err}\n"
+                    msg += "\n씨드를 더 지정하거나 보조 방식(Shift/Ctrl/Alt)을 바꿔 다시 시도하세요."
+                    QMessageBox.warning(self, "수동 보조 분리 실패", msg)
+                    return
+
+                assist_apply_t0 = time.perf_counter()
+                new_outer = set(map(int, np.asarray(outer_idx, dtype=np.int32).reshape(-1)))
+                new_inner = set(map(int, np.asarray(inner_idx, dtype=np.int32).reshape(-1)))
+                # Keep migu exclusive.
+                new_outer.difference_update(old_migu)
+                new_inner.difference_update(old_migu)
+                overlap = new_outer.intersection(new_inner)
+                if overlap:
+                    new_inner.difference_update(overlap)
+
+                obj.outer_face_indices = new_outer
+                obj.inner_face_indices = new_inner
+                unresolved_truncated = bool((meta or {}).get("unresolved_truncated", False))
+                try:
+                    unresolved_raw = (meta or {}).get("unresolved_indices", None)
+                    if unresolved_raw is None:
+                        unresolved_idx = np.zeros((0,), dtype=np.int32)
+                    else:
+                        unresolved_idx = np.asarray(unresolved_raw, dtype=np.int32).reshape(-1)
+                except Exception:
+                    unresolved_idx = np.zeros((0,), dtype=np.int32)
+                if unresolved_idx.size > 0:
+                    unresolved_set = set(int(x) for x in unresolved_idx.tolist())
+                else:
+                    unresolved_set = set()
+                if unresolved_set:
+                    unresolved_set.difference_update(new_outer)
+                    unresolved_set.difference_update(new_inner)
+                    unresolved_set.difference_update(old_migu)
+                obj.surface_assist_unresolved_face_indices = unresolved_set
+                obj.surface_assist_meta = dict(meta or {})
+                assist_apply_ms = (time.perf_counter() - assist_apply_t0) * 1000.0
+                assist_total_ms = (time.perf_counter() - assist_total_t0) * 1000.0
+
+                add_o = len(new_outer.difference(old_outer))
+                add_i = len(new_inner.difference(old_inner))
+                unresolved = int((meta or {}).get("unresolved_count", 0) or 0)
+                mode = str((meta or {}).get("assist_mode", "seeded")).strip()
+                mapping = str((meta or {}).get("auto_mapping", "direct")).strip()
+                mode_txt = "보수" if conservative else "공격"
+                unresolved_suffix = (
+                    " (표시 일부 생략)"
+                    if unresolved > 0 and unresolved_truncated and len(unresolved_set) <= 0
+                    else ""
+                )
+                try:
+                    obj.surface_assist_runtime = {
+                        "total_ms": float(assist_total_ms),
+                        "core_ms": float(assist_core_ms),
+                        "apply_ms": float(assist_apply_ms),
+                        "method": str(method),
+                        "mode_txt": str(mode_txt),
+                        "assist_mode": str(mode),
+                        "mapping": str(mapping),
+                        "added_outer_count": int(add_o),
+                        "added_inner_count": int(add_i),
+                        "unresolved_count": int(unresolved),
+                        "unresolved_drawn_count": int(len(unresolved_set)),
+                    }
+                except Exception:
+                    pass
+
+                self.viewport.status_info = (
+                    f"🤝 수동 보조 분리({mode_txt}/{method}, {mode}, {mapping}): "
+                    f"outer +{add_o:,}, inner +{add_i:,}, 미확정 {unresolved:,}{unresolved_suffix} "
+                    f"({assist_total_ms:.1f}ms)"
+                )
+                try:
+                    self.viewport._emit_surface_assignment_changed(obj)
+                except Exception:
+                    pass
+            except Exception as e:
+                QMessageBox.critical(self, "오류", f"수동 보조 분리 실패:\n{e}")
+                return
+
         elif action == "auto_surface":
             try:
                 from src.core.surface_separator import SurfaceSeparator
@@ -4561,6 +5000,11 @@ class MainWindow(QMainWindow):
                 if mesh_local is None:
                     QMessageBox.warning(self, "경고", "먼저 메쉬를 선택해 주세요.")
                     return
+                preset_desc = None
+                try:
+                    preset_desc = self._apply_surface_stability_presets(mesh_local)
+                except Exception:
+                    preset_desc = None
                 modifiers = QApplication.keyboardModifiers()
                 force_views = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
                 force_cyl = bool(modifiers & Qt.KeyboardModifier.ControlModifier)
@@ -4574,6 +5018,12 @@ class MainWindow(QMainWindow):
                 result = separator.auto_detect_surfaces(mesh_local, method=method, return_submeshes=False)
                 obj.outer_face_indices = set(map(int, getattr(result, "outer_face_indices", np.zeros((0,), dtype=np.int32))))
                 obj.inner_face_indices = set(map(int, getattr(result, "inner_face_indices", np.zeros((0,), dtype=np.int32))))
+                try:
+                    obj.surface_assist_unresolved_face_indices = set()
+                    obj.surface_assist_meta = {}
+                    obj.surface_assist_runtime = {}
+                except Exception:
+                    pass
 
                 migu_idx = getattr(result, "migu_face_indices", None)
                 if isinstance(migu_idx, np.ndarray) and migu_idx.size:
@@ -4598,8 +5048,33 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
 
+                # Supplemental migu inference from current outer/inner boundary
+                # (so users can get usable inner/migu split in one click).
+                supplemental_desc = None
+                try:
+                    n_faces = int(getattr(mesh_local, "n_faces", 0) or 0)
+                    min_migu = max(8, int(0.003 * max(1, n_faces)))
+                    if len(obj.migu_face_indices) < min_migu:
+                        sup_idx, sup_desc = self._infer_migu_from_outer_inner(
+                            obj=obj,
+                            mesh_local=mesh_local,
+                            outer_ids=obj.outer_face_indices,
+                            inner_ids=obj.inner_face_indices,
+                        )
+                        if isinstance(sup_idx, np.ndarray) and sup_idx.size > 0:
+                            obj.migu_face_indices.update(int(x) for x in sup_idx)
+                            obj.outer_face_indices.difference_update(obj.migu_face_indices)
+                            obj.inner_face_indices.difference_update(obj.migu_face_indices)
+                            supplemental_desc = str(sup_desc or "경계-보조")
+                except Exception:
+                    supplemental_desc = None
+
                 meta = getattr(result, "meta", {}) or {}
                 method_used = str(meta.get("method", method))
+                if preset_desc:
+                    method_used = f"{method_used} + {preset_desc}"
+                if supplemental_desc:
+                    method_used = f"{method_used} + {supplemental_desc}"
 
                 self.viewport.status_info = (
                     f"✅ 자동 분리 적용({method_used}): outer {len(obj.outer_face_indices):,} / inner {len(obj.inner_face_indices):,} / migu {len(obj.migu_face_indices):,} (현재 메쉬에 저장됨)"
@@ -4635,12 +5110,64 @@ class MainWindow(QMainWindow):
                 modifiers = QApplication.keyboardModifiers()
                 broad_edge = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
                 use_x = bool(modifiers & Qt.KeyboardModifier.ControlModifier)
+                allow_bootstrap = bool(modifiers & Qt.KeyboardModifier.AltModifier)
 
                 idx = None
                 mode_desc = None
+                bootstrap_used = False
+
+                # Optional: if outer/inner labels are weak or missing, bootstrap once first.
+                # Keep this opt-in (Alt) instead of implicit auto behavior.
+                if (not broad_edge) and (not use_x) and allow_bootstrap:
+                    try:
+                        n_faces = int(getattr(mesh_local, "n_faces", 0) or 0)
+                        min_seed = max(12, int(0.005 * max(1, n_faces)))
+                        cur_outer = set(int(x) for x in (getattr(obj, "outer_face_indices", set()) or set()))
+                        cur_inner = set(int(x) for x in (getattr(obj, "inner_face_indices", set()) or set()))
+                        if len(cur_outer) < min_seed or len(cur_inner) < min_seed:
+                            try:
+                                self._apply_surface_stability_presets(mesh_local)
+                            except Exception:
+                                pass
+                            separator = SurfaceSeparator()
+                            boot = separator.auto_detect_surfaces(mesh_local, method="auto", return_submeshes=False)
+                            boot_outer = set(map(int, getattr(boot, "outer_face_indices", np.zeros((0,), dtype=np.int32))))
+                            boot_inner = set(map(int, getattr(boot, "inner_face_indices", np.zeros((0,), dtype=np.int32))))
+                            if boot_outer and boot_inner:
+                                try:
+                                    boot_outer.difference_update(getattr(obj, "migu_face_indices", set()) or set())
+                                    boot_inner.difference_update(getattr(obj, "migu_face_indices", set()) or set())
+                                except Exception:
+                                    pass
+                                overlap = boot_outer.intersection(boot_inner)
+                                if overlap:
+                                    boot_outer.difference_update(overlap)
+                                    boot_inner.difference_update(overlap)
+                                if boot_outer and boot_inner:
+                                    obj.outer_face_indices = boot_outer
+                                    obj.inner_face_indices = boot_inner
+                                    bootstrap_used = True
+                    except Exception:
+                        bootstrap_used = False
+
+                # Preferred path: if outer/inner already exist, infer migu directly from their boundary.
+                if (not broad_edge) and (not use_x):
+                    try:
+                        idx_b, desc_b = self._infer_migu_from_outer_inner(
+                            obj=obj,
+                            mesh_local=mesh_local,
+                            outer_ids=getattr(obj, "outer_face_indices", set()) or set(),
+                            inner_ids=getattr(obj, "inner_face_indices", set()) or set(),
+                        )
+                        if isinstance(idx_b, np.ndarray) and idx_b.size > 0:
+                            idx = idx_b.astype(np.int32, copy=False)
+                            mode_desc = str(desc_b or "경계-보조")
+                    except Exception:
+                        idx = None
+                        mode_desc = None
 
                 # Fast path for tiles: reuse the cylinder separator's migu band when it looks valid.
-                if (not broad_edge) and (not use_x):
+                if idx is None and (not broad_edge) and (not use_x):
                     try:
                         separator = SurfaceSeparator()
                         cyl = separator.auto_detect_surfaces(mesh_local, method="cylinder", return_submeshes=False)
@@ -4712,6 +5239,8 @@ class MainWindow(QMainWindow):
                         mode_desc = f"{major_axis.upper()}축 강조 | major≥{major_thr:.2f}, absdot≤{absdot_max:.2f}"
 
                     idx = np.where(mask)[0].astype(np.int32, copy=False)
+                if bootstrap_used:
+                    mode_desc = f"{mode_desc} + outer/inner 자동보강" if mode_desc else "outer/inner 자동보강"
                 n_sel = int(idx.size)
                 if n_sel <= 0:
                     QMessageBox.information(
@@ -4721,7 +5250,8 @@ class MainWindow(QMainWindow):
                         "팁:\n"
                         "- 기와를 정치 후(상면/하면이 위/아래) 다시 시도\n"
                         "- Ctrl을 누르고 다시 클릭(축 전환)\n"
-                        "- Shift를 누르고 클릭(둘레 경계 전체 감지)",
+                        "- Shift를 누르고 클릭(둘레 경계 전체 감지)\n"
+                        "- Alt를 누르고 클릭(내/외면 자동보강 후 미구 감지)",
                     )
                     return
 
@@ -4730,6 +5260,12 @@ class MainWindow(QMainWindow):
                     obj.migu_face_indices.update(int(x) for x in idx)
                 except Exception:
                     obj.migu_face_indices = set(int(x) for x in idx)
+                try:
+                    obj.surface_assist_unresolved_face_indices = set()
+                    obj.surface_assist_meta = {}
+                    obj.surface_assist_runtime = {}
+                except Exception:
+                    pass
 
                 # Keep sets exclusive (migu wins).
                 try:
@@ -4740,7 +5276,7 @@ class MainWindow(QMainWindow):
 
                 self.viewport.status_info = (
                     f"✅ 미구 자동 감지({mode_desc}): migu {len(obj.migu_face_indices):,} faces "
-                    f"(Shift=경계, Ctrl=축전환)"
+                    f"(Shift=경계, Ctrl=축전환, Alt=내/외면 자동보강)"
                 )
                 try:
                     self.viewport._emit_surface_assignment_changed(obj)
@@ -4752,8 +5288,8 @@ class MainWindow(QMainWindow):
                     "미구 자동 감지 결과를 현재 메쉬에 적용했습니다.\n\n"
                     f"- migu(미구): {len(obj.migu_face_indices):,} faces\n\n"
                     "표시: 미구=초록 오버레이\n"
-                    "팁: 필요하면 '찍기/브러시/면적' 도구로 추가 보정하세요.\n"
-                    "단축: Shift=둘레 경계, Ctrl=축 전환(X↔Y)",
+                    "팁: 필요하면 '경계(면적+자석)'로 추가 보정하세요.\n"
+                    "단축: Shift=둘레 경계, Ctrl=축 전환(X↔Y), Alt=내/외면 자동보강",
                 )
             except Exception as e:
                 QMessageBox.critical(self, "오류", f"미구 자동 감지 실패:\n{e}")
@@ -4973,16 +5509,46 @@ class MainWindow(QMainWindow):
         if key is not None:
             self._flattened_cache[key] = flattened
 
+        meta = dict(getattr(flattened, "meta", {}) or {})
+        size_warning = bool(meta.get("flatten_size_warning", False))
+        size_guard_applied = bool(meta.get("flatten_size_guard_applied", False))
+        dim_ratio_before = meta.get("flatten_size_dim_ratio_before", None)
+        dim_ratio_after = meta.get("flatten_size_dim_ratio_after", None)
+        guard_scale = meta.get("flatten_size_guard_scale", None)
+
+        status_prefix = "⚠️ 펼침 완료" if size_warning else "✅ 펼침 완료"
         self.status_info.setText(
-            f"✅ 펼침 완료: {flattened.width:.2f} x {flattened.height:.2f} {flattened.original_mesh.unit} "
+            f"{status_prefix}: {flattened.width:.2f} x {flattened.height:.2f} {flattened.original_mesh.unit} "
             f"(왜곡 평균 {flattened.mean_distortion:.1%})"
         )
+
+        size_note = ""
+        if size_warning:
+            if size_guard_applied:
+                try:
+                    size_note = (
+                        f"\n- 크기 안정화 보정: 적용됨"
+                        f"\n  (비율 {float(dim_ratio_before):.2f}x → {float(dim_ratio_after):.2f}x,"
+                        f" 스케일 {float(guard_scale):.4f})"
+                    )
+                except Exception:
+                    size_note = "\n- 크기 안정화 보정: 적용됨"
+            else:
+                try:
+                    size_note = (
+                        f"\n- 크기 경고: 원본 대비 펼침 최대 길이 비율이 큽니다"
+                        f"\n  (현재 약 {float(dim_ratio_before):.2f}x)"
+                    )
+                except Exception:
+                    size_note = "\n- 크기 경고: 원본 대비 펼침 크기가 큰 편입니다."
+
         QMessageBox.information(
             self,
             "펼침 완료",
             f"펼침이 완료되었습니다.\n\n"
             f"- 크기: {flattened.width:.2f} x {flattened.height:.2f} {flattened.original_mesh.unit}\n"
-            f"- 왜곡(평균/최대): {flattened.mean_distortion:.1%} / {flattened.max_distortion:.1%}\n\n"
+            f"- 왜곡(평균/최대): {flattened.mean_distortion:.1%} / {flattened.max_distortion:.1%}"
+            f"{size_note}\n\n"
             f"이제 '펼친 결과 SVG 저장' 또는 '탁본 이미지 내보내기'를 사용할 수 있습니다."
         )
 
@@ -5508,6 +6074,10 @@ class MainWindow(QMainWindow):
                 self, "외면 메쉬 저장", "", "OBJ (*.obj);;STL (*.stl);;PLY (*.ply)"
             )
             if filepath:
+                manual_outer_idx = np.asarray(
+                    sorted(list(getattr(obj, "outer_face_indices", set()) or [])),
+                    dtype=np.int32,
+                ).reshape(-1)
                 base = obj.mesh
                 translation = (
                     np.asarray(obj.translation, dtype=np.float64).copy()
@@ -5527,20 +6097,38 @@ class MainWindow(QMainWindow):
                     mesh = MainWindow._build_world_mesh_from_transform(
                         base, translation=translation, rotation=rotation, scale=scale
                     )
-                    separator = SurfaceSeparator()
-                    result = separator.auto_detect_surfaces(mesh, return_submeshes=False)
-                    outer_idx = np.asarray(getattr(result, "outer_face_indices", np.zeros((0,), dtype=np.int32)), dtype=np.int32).reshape(-1)
+                    source = "manual"
+                    if manual_outer_idx.size > 0:
+                        outer_idx = manual_outer_idx.astype(np.int32, copy=True)
+                    else:
+                        source = "auto"
+                        try:
+                            self._apply_surface_stability_presets(mesh)
+                        except Exception:
+                            pass
+                        separator = SurfaceSeparator()
+                        result = separator.auto_detect_surfaces(mesh, return_submeshes=False)
+                        outer_idx = np.asarray(
+                            getattr(result, "outer_face_indices", np.zeros((0,), dtype=np.int32)),
+                            dtype=np.int32,
+                        ).reshape(-1)
+
+                    n_faces = int(getattr(mesh, "n_faces", 0) or 0)
+                    if n_faces > 0 and outer_idx.size > 0:
+                        valid = (outer_idx >= 0) & (outer_idx < n_faces)
+                        outer_idx = np.unique(outer_idx[valid]).astype(np.int32, copy=False)
                     if outer_idx.size <= 0:
                         return {"status": "no_outer"}
                     outer = mesh.extract_submesh(outer_idx)
                     MeshProcessor().save_mesh(outer, filepath)
-                    return {"status": "ok"}
+                    return {"status": "ok", "source": source}
 
                 def on_done_export_mesh_outer(result: Any):
                     if isinstance(result, dict) and result.get("status") == "no_outer":
                         QMessageBox.warning(self, "경고", "외면을 감지하지 못했습니다.")
                         return
-                    QMessageBox.information(self, "완료", f"외면 메쉬가 저장되었습니다:\n{filepath}")
+                    src = "수동 지정" if isinstance(result, dict) and result.get("source") == "manual" else "자동 감지"
+                    QMessageBox.information(self, "완료", f"외면 메쉬가 저장되었습니다 ({src}):\n{filepath}")
 
                 def on_failed(message: str):
                     QMessageBox.critical(self, "오류", self._format_error_message("외면 저장 중 오류 발생:", message))
@@ -5557,6 +6145,10 @@ class MainWindow(QMainWindow):
                 self, "내면 메쉬 저장", "", "OBJ (*.obj);;STL (*.stl);;PLY (*.ply)"
             )
             if filepath:
+                manual_inner_idx = np.asarray(
+                    sorted(list(getattr(obj, "inner_face_indices", set()) or [])),
+                    dtype=np.int32,
+                ).reshape(-1)
                 base = obj.mesh
                 translation = (
                     np.asarray(obj.translation, dtype=np.float64).copy()
@@ -5576,20 +6168,38 @@ class MainWindow(QMainWindow):
                     mesh = MainWindow._build_world_mesh_from_transform(
                         base, translation=translation, rotation=rotation, scale=scale
                     )
-                    separator = SurfaceSeparator()
-                    result = separator.auto_detect_surfaces(mesh, return_submeshes=False)
-                    inner_idx = np.asarray(getattr(result, "inner_face_indices", np.zeros((0,), dtype=np.int32)), dtype=np.int32).reshape(-1)
+                    source = "manual"
+                    if manual_inner_idx.size > 0:
+                        inner_idx = manual_inner_idx.astype(np.int32, copy=True)
+                    else:
+                        source = "auto"
+                        try:
+                            self._apply_surface_stability_presets(mesh)
+                        except Exception:
+                            pass
+                        separator = SurfaceSeparator()
+                        result = separator.auto_detect_surfaces(mesh, return_submeshes=False)
+                        inner_idx = np.asarray(
+                            getattr(result, "inner_face_indices", np.zeros((0,), dtype=np.int32)),
+                            dtype=np.int32,
+                        ).reshape(-1)
+
+                    n_faces = int(getattr(mesh, "n_faces", 0) or 0)
+                    if n_faces > 0 and inner_idx.size > 0:
+                        valid = (inner_idx >= 0) & (inner_idx < n_faces)
+                        inner_idx = np.unique(inner_idx[valid]).astype(np.int32, copy=False)
                     if inner_idx.size <= 0:
                         return {"status": "no_inner"}
                     inner = mesh.extract_submesh(inner_idx)
                     MeshProcessor().save_mesh(inner, filepath)
-                    return {"status": "ok"}
+                    return {"status": "ok", "source": source}
 
                 def on_done_export_mesh_inner(result: Any):
                     if isinstance(result, dict) and result.get("status") == "no_inner":
                         QMessageBox.warning(self, "경고", "내면을 감지하지 못했습니다.")
                         return
-                    QMessageBox.information(self, "완료", f"내면 메쉬가 저장되었습니다:\n{filepath}")
+                    src = "수동 지정" if isinstance(result, dict) and result.get("source") == "manual" else "자동 감지"
+                    QMessageBox.information(self, "완료", f"내면 메쉬가 저장되었습니다 ({src}):\n{filepath}")
 
                 def on_failed(message: str):
                     QMessageBox.critical(self, "오류", self._format_error_message("내면 저장 중 오류 발생:", message))
@@ -6987,12 +7597,56 @@ class MainWindow(QMainWindow):
             if self.viewport.selected_obj and self.viewport.selected_obj.mesh:
                 b = self.viewport.selected_obj.get_world_bounds()
                 # [min_x, max_x, min_y, max_y]
-                self.viewport.roi_bounds = [float(b[0][0]), float(b[1][0]), float(b[0][1]), float(b[1][1])]
+                fit = [float(b[0][0]), float(b[1][0]), float(b[0][1]), float(b[1][1])]
+
+                cur = None
+                try:
+                    cur = [float(x) for x in (getattr(self.viewport, "roi_bounds", None) or [])][:4]
+                except Exception:
+                    cur = None
+
+                need_fit = True
+                if cur is not None and len(cur) >= 4 and np.isfinite(np.asarray(cur[:4], dtype=np.float64)).all():
+                    try:
+                        x1, x2 = float(cur[0]), float(cur[1])
+                        y1, y2 = float(cur[2]), float(cur[3])
+                        if x1 > x2:
+                            x1, x2 = x2, x1
+                        if y1 > y2:
+                            y1, y2 = y2, y1
+                        cur0 = [x1, x2, y1, y2]
+                    except Exception:
+                        cur0 = None
+
+                    default0 = [-10.0, 10.0, -10.0, 10.0]
+                    if cur0 is not None and all(abs(float(cur0[i]) - float(default0[i])) < 1e-8 for i in range(4)):
+                        need_fit = True
+                    else:
+                        # If the current ROI overlaps the mesh bounds, keep it (prevents "reset every time").
+                        try:
+                            bx1, bx2, by1, by2 = [float(v) for v in fit]
+                            overlap_x = not (float(x2) < float(bx1) or float(x1) > float(bx2))
+                            overlap_y = not (float(y2) < float(by1) or float(y1) > float(by2))
+                            need_fit = not (overlap_x and overlap_y)
+                        except Exception:
+                            need_fit = True
+
+                if need_fit:
+                    self.viewport.roi_bounds = fit
             try:
                 self.viewport.schedule_roi_edges_update(0)
             except Exception:
                 pass
         else:
+            try:
+                self.viewport.active_roi_edge = None
+                self.viewport.roi_rect_dragging = False
+                self.viewport.roi_rect_start = None
+                self.viewport._roi_move_dragging = False
+                self.viewport._roi_move_last_xy = None
+                self.viewport._roi_bounds_changed = False
+            except Exception:
+                pass
             try:
                 self.viewport.roi_cut_edges = {"x1": [], "x2": [], "y1": [], "y2": []}
             except Exception:
@@ -7131,6 +7785,40 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def _slice_debounce_delay_ms(self) -> int:
+        """메쉬 크기에 따라 단면 계산 디바운스 시간을 동적으로 조정."""
+        try:
+            obj = self.viewport.selected_obj
+            n_faces = int(getattr(getattr(obj, "mesh", None), "n_faces", 0) or 0)
+        except Exception:
+            n_faces = 0
+
+        if n_faces >= 3_000_000:
+            return 120
+        if n_faces >= 1_000_000:
+            return 90
+        if n_faces >= 300_000:
+            return 60
+        return 35
+
+    def _capture_current_slice_to_layer(self) -> int:
+        """현재 슬라이스를 레이어로 저장하고 UI를 갱신."""
+        try:
+            added = int(self.viewport.save_current_slice_to_layer())
+        except Exception:
+            added = 0
+
+        if added <= 0:
+            self.status_info.setText("촬영할 단면이 없습니다.")
+            return 0
+
+        try:
+            self.scene_panel.update_list(self.viewport.objects, self.viewport.selected_index)
+        except Exception:
+            pass
+        self.status_info.setText(f"단면 촬영 완료: 레이어 {added}개 저장")
+        return int(added)
+
     def _request_slice_compute(self):
         if not getattr(self.viewport, "slice_enabled", False):
             return
@@ -7167,6 +7855,86 @@ class MainWindow(QMainWindow):
         self._slice_compute_thread.finished.connect(self._on_slice_compute_finished)
         self._slice_compute_thread.start()
 
+    def on_slice_scan_requested(self, delta_cm: float):
+        """Ctrl+휠 스캔 입력으로 슬라이스 높이를 연속 조절."""
+        try:
+            delta = float(delta_cm)
+        except Exception:
+            return
+        if abs(delta) <= 1e-9:
+            return
+
+        panel = getattr(self, "slice_panel", None)
+        if panel is None:
+            return
+
+        try:
+            if not panel.group.isChecked():
+                panel.group.setChecked(True)
+        except Exception:
+            pass
+
+        try:
+            cur = float(panel.spin.value())
+            lo = float(panel.spin.minimum())
+            hi = float(panel.spin.maximum())
+        except Exception:
+            return
+
+        nxt = float(np.clip(cur + delta, lo, hi))
+        if np.isclose(nxt, cur, atol=1e-9):
+            return
+        try:
+            panel.spin.setValue(nxt)
+        except Exception:
+            return
+        try:
+            self.status_info.setText(f"단면 스캔 Z={nxt:.2f}cm (Ctrl+휠)")
+        except Exception:
+            pass
+
+    def on_slice_capture_requested(self, height: float):
+        """현재 단면 촬영(레이어 저장) 요청."""
+        obj = self.viewport.selected_obj
+        if obj is None or getattr(obj, "mesh", None) is None:
+            QMessageBox.warning(self, "경고", "촬영할 대상 메쉬가 없습니다.")
+            return
+
+        try:
+            target_z = float(height)
+        except Exception:
+            target_z = float(getattr(self.viewport, "slice_z", 0.0) or 0.0)
+
+        try:
+            if not self.slice_panel.group.isChecked():
+                self.slice_panel.group.setChecked(True)
+        except Exception:
+            pass
+
+        try:
+            cur_z = float(getattr(self.viewport, "slice_z", 0.0) or 0.0)
+            if not np.isclose(cur_z, target_z, atol=1e-9):
+                self.slice_panel.spin.setValue(target_z)
+        except Exception:
+            pass
+
+        # 즉시 저장 가능하면 바로 촬영
+        thread = getattr(self, "_slice_compute_thread", None)
+        has_live_contours = bool(getattr(self.viewport, "slice_contours", None))
+        if has_live_contours and (thread is None or not thread.isRunning()) and self._slice_pending_height is None:
+            self._slice_capture_pending = False
+            self._capture_current_slice_to_layer()
+            return
+
+        # 계산 후 자동 촬영 큐
+        self._slice_capture_pending = True
+        self._slice_pending_height = float(getattr(self.viewport, "slice_z", target_z) or target_z)
+        self._slice_debounce_timer.start(1)
+        try:
+            self.status_info.setText("단면 계산 완료 후 자동 촬영합니다...")
+        except Exception:
+            pass
+
     def _on_slice_computed(self, z_height: float, contours):
         if not getattr(self.viewport, "slice_enabled", False):
             return
@@ -7179,12 +7947,16 @@ class MainWindow(QMainWindow):
 
         self.viewport.slice_contours = contours or []
         self.viewport.update()
+        if self._slice_capture_pending:
+            self._slice_capture_pending = False
+            self._capture_current_slice_to_layer()
 
     def _on_slice_compute_failed(self, z_height: float, message: str):
         if not getattr(self.viewport, "slice_enabled", False):
             return
         self.viewport.slice_contours = []
         self.viewport.update()
+        self._slice_capture_pending = False
         # 너무 잦은 팝업 방지: 상태바에만 표시
         try:
             self.status_info.setText(f"단면 계산 실패 (Z={float(z_height):.2f}cm): {message}")
@@ -7215,10 +7987,11 @@ class MainWindow(QMainWindow):
             self.viewport.update()
 
             self._slice_pending_height = float(height)
-            self._slice_debounce_timer.start(150)
+            self._slice_debounce_timer.start(self._slice_debounce_delay_ms())
             return
 
         self._slice_pending_height = None
+        self._slice_capture_pending = False
         try:
             self._slice_debounce_timer.stop()
         except Exception:
@@ -7240,83 +8013,59 @@ class MainWindow(QMainWindow):
         if file_path:
             try:
                 from src.core.mesh_slicer import MeshSlicer
-                slicer = MeshSlicer(obj.mesh)
-                
-                # 로컬 좌표계로 평면 변환
                 from scipy.spatial.transform import Rotation as R
+                slicer = MeshSlicer(obj.mesh)
+
                 inv_rot = R.from_euler('xyz', obj.rotation, degrees=True).inv().as_matrix()
                 inv_scale = 1.0 / obj.scale if obj.scale != 0 else 1.0
-                
-                world_origin = np.array([0, 0, height])
-                local_origin = inv_scale * inv_rot @ (world_origin - obj.translation)
-                
-                world_normal = np.array([0, 0, 1])
+
+                world_origin = np.array([0.0, 0.0, float(height)], dtype=np.float64)
+                world_normal = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+                translation = np.asarray(obj.translation, dtype=np.float64).reshape(3,)
+
+                local_origin = inv_scale * (inv_rot @ (world_origin - translation))
                 local_normal = inv_rot @ world_normal
-                
-                # Slicer를 통해 SVG 직접 내보내기는 slice_at_z 대신 slice_with_plane 기반 SVG 구현 필요
-                # 일단 slice_multiple_z 형태를 응용하거나 수동 SVG 생성
-                
-                # MeshSlicer 클래스에 slice_with_plane_svg 추가하거나, 
-                # 여기서 contours 추출 후 slicer.export_slice_svg_from_contours(file_path, contours) 같은 식
-                
-                # 우선 slicer.py를 수정하여 slice_with_plane_svg를 추가하는 것이 깔끔함.
-                # 임시로 contours 추출 후 slicer의 일반 SVG 메서드 활용 시뮬레이션
-                
-                contours = slicer.slice_with_plane(local_origin, local_normal)
-                if not contours:
+
+                contours_local = slicer.slice_with_plane(local_origin, local_normal)
+                if not contours_local:
                     QMessageBox.warning(self, "경고", f"Z={height:.2f} 높이에서 단면을 찾을 수 없습니다.")
                     return
-                
-                # slicer.export_slice_svg는 slice_at_z(수평)만 지원하므로,
-                # contours를 직접 전달하는 방식이 필요함. 
-                # (slicer.py 수정을 예약하고 일단 구현 유보 혹은 slicer.py 즉시 수정)
-                
-                # TODO: slicer.py에 export_contours_svg 추가
-                # 일단 slicer.export_slice_svg(height, file_path) 호출 (단, local transform 고려 안됨)
-                # 정답: slicer.py에 contours를 인자로 받는 메서드 추가 필요
-                
-                self._save_contours_as_svg(file_path, contours, height)
-                
+
+                rot = R.from_euler('xyz', obj.rotation, degrees=True).as_matrix()
+                scale = float(obj.scale)
+                t = translation.reshape(1, 3)
+
+                contours_world: list[np.ndarray] = []
+                for contour in contours_local:
+                    arr = np.asarray(contour, dtype=np.float64)
+                    if arr.ndim != 2 or arr.shape[0] < 2 or arr.shape[1] < 3:
+                        continue
+                    world_pts = (rot @ (arr[:, :3] * scale).T).T + t
+                    contours_world.append(world_pts)
+
+                if not contours_world:
+                    QMessageBox.warning(self, "경고", "유효한 단면 폴리라인이 없습니다.")
+                    return
+
+                saved = slicer.export_contours_svg(
+                    contours_world,
+                    file_path,
+                    unit=getattr(obj.mesh, "unit", None),
+                    stroke_color="#FF0000",
+                    stroke_width=0.1,
+                    grid_spacing_cm=1.0,
+                    mesh_unit=getattr(obj.mesh, "unit", None),
+                    title=f"Cross Section at Z={float(height):.2f}",
+                    desc=f"Scale: 1:1 (mesh unit: {getattr(obj.mesh, 'unit', 'mm')})",
+                )
+                if not saved:
+                    QMessageBox.warning(self, "경고", "SVG 저장에 실패했습니다.")
+                    return
+
                 QMessageBox.information(self, "성공", f"단면 SVG가 저장되었습니다:\n{file_path}")
-                
+
             except Exception as e:
                 QMessageBox.critical(self, "오류", f"SVG 저장 중 오류 발생: {e}")
-
-    def _save_contours_as_svg(self, path, contours, z_val):
-        """임시 SVG 저장 (로컬 contours를 월드 비율로)"""
-        # 바운딩 박스 (로컬 XY)
-        # 하지만 스케일이 곱해져야 하므로...
-        obj = self.viewport.selected_obj
-        if obj is None:
-            return
-        scale = float(obj.scale)
-        all_pts = np.vstack(contours) * scale
-        
-        min_x, min_y = all_pts[:, 0].min(), all_pts[:, 1].min()
-        max_x, max_y = all_pts[:, 0].max(), all_pts[:, 1].max()
-        
-        width = (max_x - min_x) * 1.1
-        height = (max_y - min_y) * 1.1
-        
-        svg = [
-            (
-                f'<svg xmlns="http://www.w3.org/2000/svg" width="{width:.2f}cm" '
-                f'height="{height:.2f}cm" viewBox="0 0 {width:.4f} {height:.4f}">'
-            ),
-            '<g stroke="red" fill="none" stroke-width="0.1">',
-        ]
-        
-        for cnt in contours:
-            pts = cnt[:, :2] * scale
-            pts[:, 0] -= min_x
-            pts[:, 1] = height - (pts[:, 1] - min_y)
-            pts_str = " ".join([f"{p[0]:.3f},{p[1]:.3f}" for p in pts])
-            svg.append(f'<polyline points="{pts_str}" fill="none" />')
-             
-        svg.append('</g></svg>')
-        
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write("\n".join(svg))
 
     def show_about(self):
         icon_path = get_icon_path()

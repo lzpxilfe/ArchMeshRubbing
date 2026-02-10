@@ -154,3 +154,126 @@ class TestSurfaceSeparatorCylinder(unittest.TestCase):
         self.assertGreaterEqual(outer_recall, 0.90)
         self.assertGreaterEqual(inner_recall, 0.90)
 
+    def test_infer_migu_from_outer_inner_prefers_unknown_bridge(self):
+        mesh, true_outer, true_inner, true_migu = _make_thin_cylinder_patch()
+
+        sep = SurfaceSeparator()
+        idx, meta = sep.infer_migu_from_outer_inner(
+            mesh,
+            outer_face_indices=np.asarray(sorted(true_outer), dtype=np.int32),
+            inner_face_indices=np.asarray(sorted(true_inner), dtype=np.int32),
+            hops=1,
+        )
+
+        pred_migu = set(map(int, np.asarray(idx, dtype=np.int32).reshape(-1)))
+        recall = len(pred_migu & true_migu) / max(1, len(true_migu))
+        precision = len(pred_migu & true_migu) / max(1, len(pred_migu))
+
+        self.assertEqual(str((meta or {}).get("mode", "")), "unknown_bridge")
+        self.assertGreaterEqual(recall, 0.80)
+        self.assertGreaterEqual(precision, 0.80)
+
+    def test_infer_migu_from_outer_inner_can_carve_boundary_strip(self):
+        mesh, true_outer, true_inner, true_migu = _make_thin_cylinder_patch()
+
+        # Simulate a fully-labeled case where migu is currently mixed into outer.
+        merged_outer = set(true_outer) | set(true_migu)
+        sep = SurfaceSeparator()
+        idx, meta = sep.infer_migu_from_outer_inner(
+            mesh,
+            outer_face_indices=np.asarray(sorted(merged_outer), dtype=np.int32),
+            inner_face_indices=np.asarray(sorted(true_inner), dtype=np.int32),
+            hops=1,
+        )
+
+        pred_migu = set(map(int, np.asarray(idx, dtype=np.int32).reshape(-1)))
+        self.assertEqual(str((meta or {}).get("mode", "")), "boundary_strip")
+        self.assertGreater(len(pred_migu), 0)
+        self.assertLessEqual(len(pred_migu), int(0.40 * max(1, mesh.n_faces)))
+
+        hit = len(pred_migu & true_migu) / max(1, len(true_migu))
+        self.assertGreaterEqual(hit, 0.30)
+
+    def test_views_keeps_visibility_seeds_even_with_biased_normals(self):
+        mesh, true_outer, true_inner, _true_migu = _make_thin_cylinder_patch()
+
+        sep = SurfaceSeparator()
+        axis = np.asarray(sep._estimate_reference_direction(mesh), dtype=np.float64).reshape(3)
+        # Deliberately bias all normals to one direction.
+        # If visibility seeds are overridden by normal sign, this collapses one side.
+        mesh.face_normals = np.tile(axis.reshape(1, 3), (mesh.n_faces, 1))
+
+        res = sep.auto_detect_surfaces(mesh, method="views", return_submeshes=False)
+
+        pred_outer = set(map(int, res.outer_face_indices))
+        pred_inner = set(map(int, res.inner_face_indices))
+
+        self.assertGreater(len(pred_outer), 0)
+        self.assertGreater(len(pred_inner), 0)
+        self.assertTrue(pred_outer.isdisjoint(pred_inner))
+
+        outer_recall = len(pred_outer & true_outer) / max(1, len(true_outer))
+        inner_recall = len(pred_inner & true_inner) / max(1, len(true_inner))
+        self.assertGreaterEqual(outer_recall, 0.90)
+        self.assertGreaterEqual(inner_recall, 0.90)
+
+        meta = getattr(res, "meta", {}) or {}
+        self.assertTrue(bool(meta.get("topology_assignment", False)))
+
+    def test_views_fallback_without_normals_keeps_two_sides(self):
+        mesh, true_outer, true_inner, _true_migu = _make_thin_cylinder_patch()
+
+        # Force fallback path
+        mesh._views_use_topology_assignment = False
+        mesh._views_fallback_use_normals = False
+        # Disable migu masking so we isolate outer/inner fallback behavior.
+        mesh._views_migu_absdot_max = 1.0
+        mesh._views_migu_max_frac = 0.05
+
+        sep = SurfaceSeparator()
+        # Baseline fallback result with original normals.
+        res_base = sep.auto_detect_surfaces(mesh, method="views", return_submeshes=False)
+
+        axis = np.asarray(sep._estimate_reference_direction(mesh), dtype=np.float64).reshape(3)
+        mesh.face_normals = np.tile(axis.reshape(1, 3), (mesh.n_faces, 1))
+
+        res = sep.auto_detect_surfaces(mesh, method="views", return_submeshes=False)
+
+        base_outer = set(map(int, res_base.outer_face_indices))
+        base_inner = set(map(int, res_base.inner_face_indices))
+        pred_outer = set(map(int, res.outer_face_indices))
+        pred_inner = set(map(int, res.inner_face_indices))
+        self.assertGreater(len(pred_outer), 0)
+        self.assertGreater(len(pred_inner), 0)
+        self.assertTrue(pred_outer.isdisjoint(pred_inner))
+
+        # With fallback normals disabled, classification should not drift when normals are biased.
+        self.assertEqual(pred_outer, base_outer)
+        self.assertEqual(pred_inner, base_inner)
+
+        meta = getattr(res, "meta", {}) or {}
+        self.assertEqual(str(meta.get("topology_mode")), "fallback")
+        self.assertFalse(bool(meta.get("fallback_use_normals", True)))
+
+    def test_views_migu_threshold_accepts_zero(self):
+        mesh, _true_outer, _true_inner, _true_migu = _make_thin_cylinder_patch()
+        mesh._views_migu_absdot_max = 0.0
+        mesh._views_use_topology_assignment = False
+
+        sep = SurfaceSeparator()
+        res = sep.auto_detect_surfaces(mesh, method="views", return_submeshes=False)
+        meta = getattr(res, "meta", {}) or {}
+        self.assertEqual(float(meta.get("migu_absdot_max", -1.0)), 0.0)
+
+    def test_views_visibility_neighborhood_meta_and_override(self):
+        mesh, _true_outer, _true_inner, _true_migu = _make_thin_cylinder_patch()
+        sep = SurfaceSeparator()
+
+        res_default = sep.auto_detect_surfaces(mesh, method="views", return_submeshes=False)
+        meta_default = getattr(res_default, "meta", {}) or {}
+        self.assertEqual(int(meta_default.get("visibility_neighborhood", -1)), 1)
+
+        mesh._views_visibility_neighborhood = 0
+        res0 = sep.auto_detect_surfaces(mesh, method="views", return_submeshes=False)
+        meta0 = getattr(res0, "meta", {}) or {}
+        self.assertEqual(int(meta0.get("visibility_neighborhood", -1)), 0)

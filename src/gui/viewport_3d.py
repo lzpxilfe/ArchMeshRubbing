@@ -13,11 +13,12 @@ from scipy import ndimage
 
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QThread
-from PyQt6.QtGui import QKeyEvent, QMouseEvent, QWheelEvent
+from PyQt6.QtGui import QColor, QFont, QKeyEvent, QMouseEvent, QPainter, QWheelEvent
 from PyQt6.QtOpenGLWidgets import QOpenGLWidget
 from PyQt6.QtOpenGL import QOpenGLFramebufferObject
 
 from OpenGL.GL import (
+    GL_BACK,
     GL_ALL_ATTRIB_BITS,
     GL_AMBIENT,
     GL_AMBIENT_AND_DIFFUSE,
@@ -83,6 +84,7 @@ from OpenGL.GL import (
     glColor4f,
     glColor4fv,
     glColorMaterial,
+    glCullFace,
     glDeleteBuffers,
     glDepthMask,
     glDisable,
@@ -1395,6 +1397,10 @@ class SceneObject:
         self.outer_face_indices = set()
         self.inner_face_indices = set()
         self.migu_face_indices = set()
+        # Optional assist output: faces still unresolved after seeded assist.
+        self.surface_assist_unresolved_face_indices = set()
+        self.surface_assist_meta: dict[str, Any] = {}
+        self.surface_assist_runtime: dict[str, Any] = {}
         self._surface_assignment_version: int = 0
         self._surface_overlay_index_cache: dict[str, np.ndarray] = {}
         self._surface_overlay_index_cache_version: int = -1
@@ -1479,6 +1485,8 @@ class Viewport3D(QOpenGLWidget):
     faceSelectionChanged = pyqtSignal(int)   # 선택된 face 개수 변경
     surfaceAssignmentChanged = pyqtSignal(int, int, int)  # outer/inner/migu faces count
     measurePointPicked = pyqtSignal(np.ndarray)  # 치수 측정 점 선택됨 (월드 좌표)
+    sliceScanRequested = pyqtSignal(float)   # 슬라이스 스캔 이동량(cm): Ctrl+휠
+    sliceCaptureRequested = pyqtSignal(float)  # 현재 슬라이스 촬영 요청(Z cm): C
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1517,7 +1525,12 @@ class Viewport3D(QOpenGLWidget):
         
         # 상태 표시용 텍스트
         self.status_info = ""
+        self.surface_runtime_hud_enabled = True
+        # Last assist/overlay performance snapshots for runtime HUD.
+        self._surface_overlay_last_stats: dict[str, Any] = {}
         self.flat_shading = False # Flat shading 모드 (명암 없이 밝게 보기)
+        # 기본 렌더는 "속이 꽉 찬" 느낌을 우선: 불투명 메쉬에서 back-face를 컬링.
+        self.solid_shell_render = True
         # X-Ray 렌더링(선택된 객체만): 내부/후면도 함께 보이도록 투명 렌더링
         self.xray_mode = False
         self.xray_alpha = 0.25
@@ -1554,13 +1567,17 @@ class Viewport3D(QOpenGLWidget):
         self._surface_area_wand_time_budget_s = 2.0
         self._surface_lasso_apply_target: str = "outer"
         self._surface_lasso_apply_modifiers: Qt.KeyboardModifier = Qt.KeyboardModifier.NoModifier
+        self._surface_lasso_apply_tool: str = "area"  # area|boundary
 
-        # Surface magnetic lasso (edge-snapped freehand polygon in screen space)
+        # Surface boundary tool (magnetic edge snapping; vertices stored in surface_lasso_points)
         self.surface_magnetic_points: list[tuple[int, int]] = []  # GL window coords (x,y)
         self._surface_magnetic_drawing = False
         self._surface_magnetic_cursor_qt = None  # QPoint | None
+        self._surface_magnetic_left_press_pos = None
+        self._surface_magnetic_left_dragged = False
         self._surface_magnetic_right_press_pos = None
         self._surface_magnetic_right_dragged = False
+        self._surface_magnetic_close_snap_px = 12
         self._surface_magnetic_snap_radius_px = 14
         self._surface_magnetic_min_step_px = 1.5
         self._surface_magnetic_last_add_t = 0.0
@@ -1609,6 +1626,10 @@ class Viewport3D(QOpenGLWidget):
         self.active_roi_edge = None # 현재 드래그 중인 모서리 ('left', 'right', 'top', 'bottom')
         self.roi_rect_dragging = False  # 캡쳐 뜨듯이 드래그로 ROI 박스 지정
         self.roi_rect_start = None      # np.array([x,y])
+        self._roi_bounds_changed = False
+        self._roi_move_dragging = False
+        self._roi_move_last_xy = None  # np.ndarray(2,) | None
+        self._roi_handle_hit_px = 24
         self.roi_cut_edges: dict[str, list[np.ndarray]] = {"x1": [], "x2": [], "y1": [], "y2": []}  # ROI 잘림 경계선(월드 좌표)
         self.roi_cap_verts: dict[str, np.ndarray | None] = {"x1": None, "x2": None, "y1": None, "y2": None}  # ROI 캡(삼각형) 버텍스
         self.roi_section_world = {"x": [], "y": []}  # ROI로 얻은 단면(바닥 배치)
@@ -1663,6 +1684,7 @@ class Viewport3D(QOpenGLWidget):
         self._cached_viewport = None
         self._cached_modelview = None
         self._cached_projection = None
+        self._ctrl_drag_active = False
         self._hover_axis = None
         
         # 키보드 조작 타이머 (WASD 연속 이동용)
@@ -1904,6 +1926,7 @@ class Viewport3D(QOpenGLWidget):
             
         # 5. UI 오버레이 (HUD)
         self.draw_orientation_hud()
+        self.draw_surface_runtime_hud()
 
     def _update_floor_penetration_clip_plane(self):
         """월드 바닥(Z=0) 기준으로 '아래쪽'만 남기는 클리핑 평면 정의"""
@@ -2218,6 +2241,56 @@ class Viewport3D(QOpenGLWidget):
             n += 1
         return f"{base} {n}"
 
+    def save_current_slice_to_layer(self) -> int:
+        """현재 슬라이스만 레이어로 스냅샷 저장."""
+        obj = self.selected_obj
+        if obj is None:
+            return 0
+        contours = getattr(self, "slice_contours", None) or []
+        if not bool(getattr(self, "slice_enabled", False)) or not contours:
+            return 0
+
+        if not hasattr(obj, "polyline_layers") or obj.polyline_layers is None:
+            obj.polyline_layers = []
+
+        def to_points_list(points) -> list[list[float]]:
+            out_pts: list[list[float]] = []
+            for p in points or []:
+                try:
+                    arr = np.asarray(p, dtype=np.float64).reshape(-1)
+                except Exception:
+                    continue
+                if arr.size >= 3:
+                    out_pts.append([float(arr[0]), float(arr[1]), float(arr[2])])
+                elif arr.size == 2:
+                    out_pts.append([float(arr[0]), float(arr[1]), 0.0])
+            return out_pts
+
+        added = 0
+        z_val = float(getattr(self, "slice_z", 0.0) or 0.0)
+        for i, cnt in enumerate(contours):
+            pts = to_points_list(cnt)
+            if len(pts) < 2:
+                continue
+            suffix = f" #{i+1}" if len(contours) > 1 else ""
+            name = self._unique_polyline_layer_name(obj, f"Slice-Z {z_val:.2f}cm{suffix}")
+            obj.polyline_layers.append(
+                {
+                    "name": name,
+                    "kind": "section_profile",
+                    "points": pts,
+                    "visible": True,
+                    "offset": [0.0, 0.0],
+                    "color": [0.75, 0.15, 0.75, 0.9],
+                    "width": 2.0,
+                }
+            )
+            added += 1
+
+        if added:
+            self.update()
+        return int(added)
+
     def save_current_sections_to_layers(self) -> int:
         """현재 단면/가이드 결과를 스냅샷 레이어로 저장."""
         obj = self.selected_obj
@@ -2311,7 +2384,7 @@ class Viewport3D(QOpenGLWidget):
         except Exception:
             _log_ignored_exception()
 
-        # 4) CT slice contours (if enabled)
+        # 4) Slice contours (if enabled)
         try:
             contours = getattr(self, "slice_contours", None) or []
             if bool(getattr(self, "slice_enabled", False)) and contours:
@@ -2321,7 +2394,7 @@ class Viewport3D(QOpenGLWidget):
                     if len(pts) < 2:
                         continue
                     suffix = f" #{i+1}" if len(contours) > 1 else ""
-                    name = self._unique_polyline_layer_name(obj, f"CT-Z {z_val:.2f}cm{suffix}")
+                    name = self._unique_polyline_layer_name(obj, f"Slice-Z {z_val:.2f}cm{suffix}")
                     obj.polyline_layers.append(
                         {
                             "name": name,
@@ -3388,6 +3461,42 @@ class Viewport3D(QOpenGLWidget):
         x1, x2, y1, y2 = self.roi_bounds
         z = 0.08 # 바닥에서 살짝 띄움 (Z-fight 방지)
 
+        # Ensure min/max ordering (defensive)
+        try:
+            x1, x2 = (float(x1), float(x2)) if float(x1) <= float(x2) else (float(x2), float(x1))
+            y1, y2 = (float(y1), float(y2)) if float(y1) <= float(y2) else (float(y2), float(y1))
+        except Exception:
+            pass
+
+        mid_x = (x1 + x2) / 2
+        mid_y = (y1 + y2) / 2
+
+        # ROI rectangle (fill + outline) so the area feels "fixed"
+        try:
+            glColor4f(0.0, 0.95, 1.0, 0.08)
+            glBegin(GL_QUADS)
+            glVertex3f(float(x1), float(y1), float(z))
+            glVertex3f(float(x2), float(y1), float(z))
+            glVertex3f(float(x2), float(y2), float(z))
+            glVertex3f(float(x1), float(y2), float(z))
+            glEnd()
+
+            glLineWidth(2.0)
+            glColor4f(0.0, 0.95, 1.0, 0.6)
+            glBegin(GL_LINE_LOOP)
+            glVertex3f(float(x1), float(y1), float(z))
+            glVertex3f(float(x2), float(y1), float(z))
+            glVertex3f(float(x2), float(y2), float(z))
+            glVertex3f(float(x1), float(y2), float(z))
+            glEnd()
+        except Exception:
+            try:
+                glEnd()
+            except Exception:
+                _log_ignored_exception()
+        finally:
+            glLineWidth(1.0)
+
         # 4방향 화살표 핸들 (간이 삼각형) - 화살표만 보이게
         def draw_arrow(cx, cy, direction):
             size = max(3.0, self.camera.distance * 0.03)
@@ -3416,9 +3525,27 @@ class Viewport3D(QOpenGLWidget):
             glEnd()
             glLineWidth(1.0)
 
-        # 각 모서리 중앙에 화살표 표시
-        mid_x = (x1 + x2) / 2
-        mid_y = (y1 + y2) / 2
+        # Center move handle (click/drag to translate the ROI)
+        try:
+            csize = max(2.0, self.camera.distance * 0.02)
+            if str(getattr(self, "active_roi_edge", "")).strip().lower() == "move":
+                glColor4f(1.0, 0.75, 0.2, 1.0)
+            else:
+                glColor4f(1.0, 1.0, 1.0, 0.95)
+            glLineWidth(2.0)
+            glBegin(GL_LINE_LOOP)
+            glVertex3f(float(mid_x - csize), float(mid_y), float(z))
+            glVertex3f(float(mid_x), float(mid_y + csize), float(z))
+            glVertex3f(float(mid_x + csize), float(mid_y), float(z))
+            glVertex3f(float(mid_x), float(mid_y - csize), float(z))
+            glEnd()
+        except Exception:
+            try:
+                glEnd()
+            except Exception:
+                _log_ignored_exception()
+        finally:
+            glLineWidth(1.0)
         
         # 활성 상태에 따라 색상 변경
         def get_color(edge):
@@ -4186,6 +4313,138 @@ class Viewport3D(QOpenGLWidget):
         glEnable(GL_DEPTH_TEST)
         glEnable(GL_LIGHTING)
 
+    def draw_surface_runtime_hud(self):
+        """표면 분리(assist/overlay) 런타임 계측값을 화면 좌측 상단에 표시."""
+        if not bool(getattr(self, "surface_runtime_hud_enabled", True)):
+            return
+        obj = self.selected_obj
+        if obj is None:
+            return
+
+        assist = getattr(obj, "surface_assist_runtime", None)
+        if not isinstance(assist, dict):
+            assist = {}
+        overlay = getattr(self, "_surface_overlay_last_stats", None)
+        if not isinstance(overlay, dict):
+            overlay = {}
+
+        has_assist = bool(assist)
+        has_overlay = bool(overlay)
+        if not has_assist and not has_overlay:
+            return
+
+        try:
+            outer_n = int(len(getattr(obj, "outer_face_indices", set()) or set()))
+            inner_n = int(len(getattr(obj, "inner_face_indices", set()) or set()))
+            migu_n = int(len(getattr(obj, "migu_face_indices", set()) or set()))
+            unresolved_n = int(len(getattr(obj, "surface_assist_unresolved_face_indices", set()) or set()))
+        except Exception:
+            outer_n = inner_n = migu_n = unresolved_n = 0
+
+        def _fms(v: Any) -> str:
+            try:
+                fv = float(v)
+            except Exception:
+                return "n/a"
+            if not np.isfinite(fv):
+                return "n/a"
+            return f"{fv:.1f}ms"
+
+        def _fnum(v: Any) -> float:
+            try:
+                fv = float(v)
+            except Exception:
+                return float("nan")
+            if not np.isfinite(fv):
+                return float("nan")
+            return fv
+
+        def _latency_color(ms: float, *, warn_ms: float, crit_ms: float) -> QColor:
+            if not np.isfinite(ms):
+                return QColor(236, 240, 245)
+            if ms >= float(crit_ms):
+                return QColor(255, 132, 132)  # critical
+            if ms >= float(warn_ms):
+                return QColor(255, 196, 120)  # warning
+            return QColor(140, 232, 170)      # good
+
+        assist_total_ms = _fnum(assist.get("total_ms")) if has_assist else float("nan")
+        overlay_total_ms = _fnum(overlay.get("total_ms")) if has_overlay else float("nan")
+
+        lines: list[tuple[str, QColor]] = []
+        lines.append(("Surface Runtime", QColor(132, 211, 255)))
+        if has_assist:
+            lines.append((
+                "assist total/core/apply: "
+                f"{_fms(assist.get('total_ms'))} / {_fms(assist.get('core_ms'))} / {_fms(assist.get('apply_ms'))}"
+                ,
+                _latency_color(assist_total_ms, warn_ms=7000.0, crit_ms=9000.0),
+            ))
+            lines.append((
+                f"assist mode: {assist.get('mode_txt', '?')} / {assist.get('method', '?')} / {assist.get('assist_mode', '?')} / {assist.get('mapping', '?')}"
+                ,
+                QColor(236, 240, 245),
+            ))
+        if has_overlay:
+            overlay_age_ms = float("nan")
+            try:
+                ts = float(overlay.get("perf_ts", 0.0) or 0.0)
+                if ts > 0.0:
+                    overlay_age_ms = max(0.0, (time.perf_counter() - ts) * 1000.0)
+            except Exception:
+                overlay_age_ms = float("nan")
+            lines.append((
+                "overlay total/index/draw: "
+                f"{_fms(overlay.get('total_ms'))} / {_fms(overlay.get('index_ms'))} / {_fms(overlay.get('draw_ms'))}"
+                ,
+                _latency_color(overlay_total_ms, warn_ms=180.0, crit_ms=300.0),
+            ))
+            cache_build = int(overlay.get("cache_build", 0) or 0)
+            cache_hit = int(overlay.get("cache_hit", 0) or 0)
+            cache_color = QColor(236, 240, 245)
+            if cache_build > 0 and cache_hit == 0:
+                cache_color = QColor(255, 196, 120)
+            elif cache_hit > 0 and cache_build == 0:
+                cache_color = QColor(140, 232, 170)
+            lines.append((
+                f"overlay cache build/hit: {int(overlay.get('cache_build', 0) or 0)} / {int(overlay.get('cache_hit', 0) or 0)}"
+                ,
+                cache_color,
+            ))
+            lines.append((
+                f"overlay age: {_fms(overlay_age_ms)}"
+                ,
+                QColor(195, 200, 208),
+            ))
+        lines.append((
+            f"faces O/I/M/U: {outer_n:,} / {inner_n:,} / {migu_n:,} / {unresolved_n:,}",
+            QColor(236, 240, 245),
+        ))
+
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+            font = QFont("Consolas")
+            font.setPointSize(9)
+            painter.setFont(font)
+            fm = painter.fontMetrics()
+            line_h = int(max(14, fm.height()))
+            text_w = int(max((fm.horizontalAdvance(s) for (s, _c) in lines), default=120))
+            pad_x = 8
+            pad_y = 6
+            box_w = int(text_w + pad_x * 2)
+            box_h = int(line_h * len(lines) + pad_y * 2)
+            x = 12
+            y = 12
+            painter.fillRect(x, y, box_w, box_h, QColor(8, 14, 22, 176))
+            yy = y + pad_y + line_h - 2
+            for s, color in lines:
+                painter.setPen(color)
+                painter.drawText(x + pad_x, yy, s)
+                yy += line_h
+        finally:
+            painter.end()
+
     
     def draw_scene_object(
         self,
@@ -4209,9 +4468,17 @@ class Viewport3D(QOpenGLWidget):
         if not np.isfinite(alpha_f):
             alpha_f = 1.0
         alpha_f = max(0.0, min(alpha_f, 1.0))
+        solid_shell = bool(getattr(self, "solid_shell_render", True)) and alpha_f >= 0.999
 
         if not depth_write:
             glDepthMask(GL_FALSE)
+
+        if solid_shell:
+            # 기본 표시에서는 back-face를 숨겨 "속이 꽉 찬" 형태로 보이게 합니다.
+            glEnable(GL_CULL_FACE)
+            glCullFace(GL_BACK)
+        else:
+            glDisable(GL_CULL_FACE)
         
         # 메쉬 재질 및 밝기 최적화 (광택 추가로 굴곡 강조)
         if not self.flat_shading:
@@ -4233,7 +4500,9 @@ class Viewport3D(QOpenGLWidget):
         if alpha_f < 1.0:
             glColor4f(float(col[0]), float(col[1]), float(col[2]), float(alpha_f))
         else:
-            glColor3f(float(col[0]), float(col[1]), float(col[2]))
+            # glColor3f는 alpha를 건드리지 않으므로 이전 draw의 alpha가 남을 수 있습니다.
+            # 불투명 메쉬는 alpha=1.0을 명시해 의도치 않은 내부 비침을 막습니다.
+            glColor4f(float(col[0]), float(col[1]), float(col[2]), 1.0)
             
         # 브러시로 선택된 면 하이라이트 (임시 오버레이)
         if is_selected and self.picking_mode == 'floor_brush' and self.brush_selected_faces:
@@ -4299,18 +4568,28 @@ class Viewport3D(QOpenGLWidget):
                 except Exception:
                     _log_ignored_exception()
 
-            # Surface assignment overlays (outer/inner/migu).
+            # Surface assignment overlays (outer/inner/migu + assist-unresolved).
             # Draw after the base mesh so the shading stays visible; use indexed draw for performance.
             if is_selected and bool(getattr(self, "show_surface_assignment_overlay", True)):
                 try:
+                    overlay_t0 = time.perf_counter()
                     max_faces_vbo = int(getattr(self, "_surface_overlay_max_faces_vbo", 3000000))
 
                     outer_set = self._get_surface_target_set(obj, "outer")
                     inner_set = self._get_surface_target_set(obj, "inner")
                     migu_set = self._get_surface_target_set(obj, "migu")
+                    unresolved_set = set(
+                        int(x)
+                        for x in (getattr(obj, "surface_assist_unresolved_face_indices", set()) or set())
+                    )
+                    if unresolved_set:
+                        # Safety: unresolved should not overlap with labeled sets.
+                        unresolved_set.difference_update(outer_set)
+                        unresolved_set.difference_update(inner_set)
+                        unresolved_set.difference_update(migu_set)
 
                     paint_target = None
-                    if self.picking_mode in {"paint_surface_face", "paint_surface_brush", "paint_surface_area"}:
+                    if self.picking_mode in {"paint_surface_face", "paint_surface_brush", "paint_surface_area", "paint_surface_magnetic"}:
                         paint_target = str(getattr(self, "_surface_paint_target", "outer")).strip().lower()
                         if paint_target not in {"outer", "inner", "migu"}:
                             paint_target = "outer"
@@ -4320,6 +4599,7 @@ class Viewport3D(QOpenGLWidget):
                     outer_c = (0.20, 0.55, 1.00, 0.36)
                     inner_c = (1.00, 0.55, 0.15, 0.36)
                     migu_c = (0.20, 0.85, 0.35, 0.32)
+                    unresolved_c = (1.00, 0.92, 0.22, 0.30)
                     if paint_target == "outer":
                         outer_c = (outer_c[0], outer_c[1], outer_c[2], 0.50)
                     elif paint_target == "inner":
@@ -4327,7 +4607,11 @@ class Viewport3D(QOpenGLWidget):
                     elif paint_target == "migu":
                         migu_c = (migu_c[0], migu_c[1], migu_c[2], 0.46)
 
+                    cache_hit = 0
+                    cache_build = 0
+
                     def get_indices(key: str, face_set: set[int]) -> np.ndarray | None:
+                        nonlocal cache_hit, cache_build
                         if not face_set:
                             return None
                         n = int(len(face_set))
@@ -4362,6 +4646,7 @@ class Viewport3D(QOpenGLWidget):
 
                         arr = cache.get(key)
                         if isinstance(arr, np.ndarray) and arr.dtype == np.uint32 and arr.ndim == 1 and arr.size == n * 3:
+                            cache_hit += 1
                             return arr
 
                         face_idx = np.fromiter(face_set, dtype=np.int32, count=n)
@@ -4371,12 +4656,18 @@ class Viewport3D(QOpenGLWidget):
                         idx_arr[1::3] = base + np.uint32(1)
                         idx_arr[2::3] = base + np.uint32(2)
                         cache[key] = idx_arr
+                        cache_build += 1
                         return idx_arr
 
+                    idx_t0 = time.perf_counter()
                     idx_migu = get_indices("migu", migu_set)
                     idx_inner = get_indices("inner", inner_set)
                     idx_outer = get_indices("outer", outer_set)
-                    if idx_migu is not None or idx_inner is not None or idx_outer is not None:
+                    idx_unresolved = get_indices("unresolved", unresolved_set)
+                    index_ms = (time.perf_counter() - idx_t0) * 1000.0
+                    draw_ms = 0.0
+                    if idx_migu is not None or idx_inner is not None or idx_outer is not None or idx_unresolved is not None:
+                        draw_t0 = time.perf_counter()
                         glDisable(GL_LIGHTING)
                         glEnable(GL_BLEND)
                         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
@@ -4388,8 +4679,8 @@ class Viewport3D(QOpenGLWidget):
                         except Exception:
                             pass
 
-                        # Draw order: outer -> inner -> migu
-                        # (If sets overlap due to user edits, this keeps inner/migu visible on top.)
+                        # Draw order: outer -> inner -> migu -> unresolved
+                        # (If sets overlap due to user edits, this keeps focused overlays on top.)
                         if idx_outer is not None:
                             glColor4f(*outer_c)
                             glDrawElements(GL_TRIANGLES, int(idx_outer.size), GL_UNSIGNED_INT, idx_outer)
@@ -4399,11 +4690,31 @@ class Viewport3D(QOpenGLWidget):
                         if idx_migu is not None:
                             glColor4f(*migu_c)
                             glDrawElements(GL_TRIANGLES, int(idx_migu.size), GL_UNSIGNED_INT, idx_migu)
+                        if idx_unresolved is not None:
+                            glColor4f(*unresolved_c)
+                            glDrawElements(GL_TRIANGLES, int(idx_unresolved.size), GL_UNSIGNED_INT, idx_unresolved)
 
                         glDisable(GL_POLYGON_OFFSET_FILL)
                         glDepthMask(GL_TRUE if depth_write else GL_FALSE)
                         glDisable(GL_BLEND)
                         glEnable(GL_LIGHTING)
+                        draw_ms = (time.perf_counter() - draw_t0) * 1000.0
+                    total_ms = (time.perf_counter() - overlay_t0) * 1000.0
+                    try:
+                        self._surface_overlay_last_stats = {
+                            "total_ms": float(total_ms),
+                            "index_ms": float(index_ms),
+                            "draw_ms": float(draw_ms),
+                            "cache_hit": int(cache_hit),
+                            "cache_build": int(cache_build),
+                            "outer_count": int(len(outer_set)),
+                            "inner_count": int(len(inner_set)),
+                            "migu_count": int(len(migu_set)),
+                            "unresolved_count": int(len(unresolved_set)),
+                            "perf_ts": float(time.perf_counter()),
+                        }
+                    except Exception:
+                        _log_ignored_exception()
                 except Exception:
                     _log_ignored_exception()
 
@@ -4415,6 +4726,7 @@ class Viewport3D(QOpenGLWidget):
         if is_selected and self.picking_mode in {'floor_3point', 'floor_face', 'floor_brush'}:
             self._draw_floor_contact_faces(obj)
 
+        glDisable(GL_CULL_FACE)
         glPopMatrix()
 
         if not depth_write:
@@ -4759,6 +5071,9 @@ class Viewport3D(QOpenGLWidget):
         self.active_roi_edge = None
         self.roi_rect_dragging = False
         self.roi_rect_start = None
+        self._roi_bounds_changed = False
+        self._roi_move_dragging = False
+        self._roi_move_last_xy = None
         self.roi_bounds = [-10.0, 10.0, -10.0, 10.0]
         self.roi_cut_edges = {"x1": [], "x2": [], "y1": [], "y2": []}
         self.roi_cap_verts = {"x1": None, "x2": None, "y1": None, "y2": None}
@@ -5140,6 +5455,46 @@ class Viewport3D(QOpenGLWidget):
         self.update()
         self.meshTransformChanged.emit()
         self.status_info = "↩️ 변환 취소됨"
+
+    def _begin_ctrl_drag(self, event: QMouseEvent, obj: SceneObject) -> bool:
+        """Ctrl+드래그용 깊이/행렬 캐시를 준비합니다."""
+        if event is None or obj is None:
+            return False
+        try:
+            self.makeCurrent()
+            self._cached_viewport = glGetIntegerv(GL_VIEWPORT)
+            self._cached_modelview = glGetDoublev(GL_MODELVIEW_MATRIX)
+            self._cached_projection = glGetDoublev(GL_PROJECTION_MATRIX)
+
+            gl_x, gl_y = self._qt_to_gl_window_xy(
+                float(event.pos().x()),
+                float(event.pos().y()),
+                viewport=self._cached_viewport,
+            )
+            depth = cast(Any, glReadPixels(gl_x, gl_y, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT))
+            try:
+                self._drag_depth = float(depth[0][0])
+            except Exception:
+                self._drag_depth = 1.0
+
+            # 배경을 클릭한 경우 객체 중심 깊이로 대체
+            if self._drag_depth >= 1.0:
+                obj_win_pos = gluProject(
+                    *obj.translation,
+                    self._cached_modelview,
+                    self._cached_projection,
+                    self._cached_viewport,
+                )
+                if obj_win_pos:
+                    self._drag_depth = float(obj_win_pos[2])
+            return True
+        except Exception:
+            _log_ignored_exception("Failed to initialize ctrl-drag cache", level=logging.WARNING)
+            self._cached_viewport = None
+            self._cached_modelview = None
+            self._cached_projection = None
+            self._drag_depth = 1.0
+            return False
     
     def mousePressEvent(self, a0: QMouseEvent | None):
         if a0 is None:
@@ -5150,6 +5505,21 @@ class Viewport3D(QOpenGLWidget):
             self.last_mouse_pos = event.pos()
             self.mouse_button = event.button()
             modifiers = event.modifiers()
+            obj_for_ctrl_drag = self.selected_obj
+            self._ctrl_drag_active = False
+
+            # Ctrl+우클릭 드래그는 모든 모드에서 "메쉬 이동" 우선.
+            # (표면/단면 도구의 우클릭 확정과 충돌하지 않도록 press 시점에서 선점)
+            if (
+                event.button() == Qt.MouseButton.RightButton
+                and bool(modifiers & Qt.KeyboardModifier.ControlModifier)
+                and obj_for_ctrl_drag is not None
+                and (not getattr(self, "roi_enabled", False))
+            ):
+                self.save_undo_state()
+                self._ctrl_drag_active = bool(self._begin_ctrl_drag(event, obj_for_ctrl_drag))
+                if self._ctrl_drag_active:
+                    return
 
             # 1. 일반 클릭 (객체 선택 또는 피킹 모드 처리) - 좌클릭만 처리
             if event.button() == Qt.MouseButton.LeftButton:
@@ -5296,25 +5666,26 @@ class Viewport3D(QOpenGLWidget):
                     return
 
                 elif self.picking_mode == "paint_surface_magnetic":
-                    # Magnetic lasso: freehand stroke in screen space, snapped to depth edges.
+                    # Boundary tool: click-to-add snapped vertices; drag to orbit camera.
                     if Qt.Key.Key_Space in getattr(self, "keys_pressed", set()):
                         self._surface_magnetic_space_nav = True
                         return
+                    self._surface_magnetic_left_press_pos = event.pos()
+                    self._surface_magnetic_left_dragged = False
                     try:
                         self._surface_magnetic_cursor_qt = event.pos()
+                    except Exception:
+                        _log_ignored_exception()
+                    try:
+                        self.surface_lasso_preview = event.pos()
                     except Exception:
                         _log_ignored_exception()
                     try:
                         self._ensure_surface_magnetic_cache(force=False)
                     except Exception:
                         _log_ignored_exception()
-                    try:
-                        self._surface_magnetic_space_nav = False
-                        self._surface_magnetic_drawing = True
-                        self._surface_magnetic_try_add_point(event.pos())
-                        self.update()
-                    except Exception:
-                        _log_ignored_exception()
+                    self._surface_magnetic_space_nav = False
+                    self.update()
                     return
 
                 elif self.picking_mode == 'paint_surface_brush':
@@ -5367,22 +5738,44 @@ class Viewport3D(QOpenGLWidget):
                     return
 
                 elif self.roi_enabled:
-                    # ROI 핸들 클릭 검사
-                    self.active_roi_edge = self._hit_test_roi(event.pos())
-                    if self.active_roi_edge:
-                        self.update()
-                        return
+                    # ROI handle click test (arrows + center-move handle)
+                    handle = self._hit_test_roi(event.pos())
+                    if handle:
+                        self._roi_bounds_changed = False
+                        if str(handle).strip().lower() == "move":
+                            # Start moving the whole ROI rectangle
+                            pt = self.pick_point_on_plane_z(event.pos().x(), event.pos().y(), z=0.0)
+                            if pt is not None:
+                                self.active_roi_edge = "move"
+                                self.roi_rect_dragging = False
+                                self.roi_rect_start = None
+                                self._roi_move_dragging = True
+                                self._roi_move_last_xy = np.array([float(pt[0]), float(pt[1])], dtype=np.float64)
+                                self.update()
+                                return
+                        else:
+                            self.active_roi_edge = str(handle)
+                            self._roi_move_dragging = False
+                            self._roi_move_last_xy = None
+                            self.update()
+                            return
 
-                    # 핸들이 아니면: 캡쳐 뜨듯이 드래그로 ROI 박스 새로 지정
-                    pt = self.pick_point_on_plane_z(event.pos().x(), event.pos().y(), z=0.0)
-                    if pt is not None:
-                        self.roi_rect_dragging = True
-                        self.roi_rect_start = np.array([float(pt[0]), float(pt[1])], dtype=np.float64)
-                        # 초기에는 최소 크기를 확보해(0.1cm) 이후 드래그로 확장
-                        self.roi_bounds = [float(pt[0]), float(pt[0]) + 0.1, float(pt[1]), float(pt[1]) + 0.1]
-                        self.schedule_roi_edges_update(0)
-                        self.update()
-                        return
+                    # New ROI capture by drag: Shift+drag only (prevents accidental resets while orbiting camera).
+                    if modifiers & Qt.KeyboardModifier.ShiftModifier:
+                        pt = self.pick_point_on_plane_z(event.pos().x(), event.pos().y(), z=0.0)
+                        if pt is not None:
+                            self._roi_bounds_changed = True
+                            self._roi_move_dragging = False
+                            self._roi_move_last_xy = None
+                            self.active_roi_edge = None
+                            self.roi_rect_dragging = True
+                            self.roi_rect_start = np.array([float(pt[0]), float(pt[1])], dtype=np.float64)
+                            # 초기에는 최소 크기를 확보해(0.1cm) 이후 드래그로 확장
+                            self.roi_bounds = [float(pt[0]), float(pt[0]) + 0.1, float(pt[1]), float(pt[1]) + 0.1]
+                            self.schedule_roi_edges_update(0)
+                            self.update()
+                            return
+                    # Otherwise: allow normal camera drag (left=rotate, right=pan)
 
             # 단면선 모드: 우클릭은 "확정"(click) 용도로 사용 (드래그 시에는 Pan 유지)
             if self.picking_mode == "cut_lines" and event.button() == Qt.MouseButton.RightButton:
@@ -5408,36 +5801,24 @@ class Viewport3D(QOpenGLWidget):
                     self._surface_magnetic_cursor_qt = event.pos()
                 except Exception:
                     _log_ignored_exception()
+                try:
+                    self.surface_lasso_preview = event.pos()
+                except Exception:
+                    _log_ignored_exception()
                 return
 
             # 3. 객체 조작 (Shift/Ctrl + 드래그)
             obj = self.selected_obj
-            if obj and (modifiers & Qt.KeyboardModifier.ShiftModifier or modifiers & Qt.KeyboardModifier.ControlModifier):
+            if (
+                obj
+                and (not getattr(self, "roi_enabled", False))
+                and (modifiers & Qt.KeyboardModifier.ShiftModifier or modifiers & Qt.KeyboardModifier.ControlModifier)
+            ):
                  self.save_undo_state() # 변환 시작 전 상태 저장
                  
                  # Ctrl+드래그(이동)를 위한 초기 깊이값 저장 (마우스가 가리키는 지점의 깊이)
                  if modifiers & Qt.KeyboardModifier.ControlModifier:
-                     self.makeCurrent()
-                     self._cached_viewport = glGetIntegerv(GL_VIEWPORT)
-                     self._cached_modelview = glGetDoublev(GL_MODELVIEW_MATRIX)
-                     self._cached_projection = glGetDoublev(GL_PROJECTION_MATRIX)
-
-                     gl_x, gl_y = self._qt_to_gl_window_xy(
-                         float(event.pos().x()),
-                         float(event.pos().y()),
-                         viewport=self._cached_viewport,
-                     )
-                     depth = cast(Any, glReadPixels(gl_x, gl_y, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT))
-                     try:
-                         self._drag_depth = float(depth[0][0])
-                     except Exception:
-                         self._drag_depth = 1.0
-                     
-                     # 배경을 클릭한 경우 객체 중심의 깊이 사용
-                     if self._drag_depth >= 1.0:
-                         obj_win_pos = gluProject(*obj.translation, self._cached_modelview, self._cached_projection, self._cached_viewport)
-                         if obj_win_pos:
-                             self._drag_depth = obj_win_pos[2]
+                     self._ctrl_drag_active = bool(self._begin_ctrl_drag(event, obj))
                  return
             
             # 4. 휠 클릭: 포커스 이동 (Focus move)
@@ -5675,20 +6056,71 @@ class Viewport3D(QOpenGLWidget):
                 self._surface_area_right_press_pos = None
                 self._surface_area_right_dragged = False
 
-        # 표면 지정(경계/자석): 좌클릭=그리기(드래그), 우클릭=확정(클릭일 때만)
+        # 표면 지정(경계/자석): 좌클릭=점 추가(클릭일 때만), 우클릭=확정(클릭일 때만)
         if self.picking_mode == "paint_surface_magnetic":
             if event.button() == Qt.MouseButton.LeftButton:
                 try:
-                    self._surface_magnetic_drawing = False
                     self._surface_magnetic_cursor_qt = event.pos()
-                    if not bool(getattr(self, "_surface_magnetic_space_nav", False)) and (
-                        Qt.Key.Key_Space not in getattr(self, "keys_pressed", set())
+                except Exception:
+                    _log_ignored_exception()
+                try:
+                    self.surface_lasso_preview = event.pos()
+                except Exception:
+                    _log_ignored_exception()
+
+                try:
+                    if (
+                        getattr(self, "_surface_magnetic_left_press_pos", None) is not None
+                        and not bool(getattr(self, "_surface_magnetic_left_dragged", False))
+                        and not bool(getattr(self, "_surface_magnetic_space_nav", False))
+                        and (Qt.Key.Key_Space not in getattr(self, "keys_pressed", set()))
                     ):
-                        self._surface_magnetic_try_add_point(event.pos())
-                    self.update()
+                        thr = getattr(self, "_surface_lasso_thread", None)
+                        try:
+                            if thr is not None and bool(getattr(thr, "isRunning", lambda: False)()):
+                                self.status_info = "⏳ 경계 선택 계산 중…"
+                                self.update()
+                                self._surface_magnetic_left_press_pos = None
+                                self._surface_magnetic_left_dragged = False
+                                self._surface_magnetic_space_nav = False
+                                return
+                        except Exception:
+                            _log_ignored_exception()
+
+                        # Snap-close: click near the first point to close & confirm.
+                        try:
+                            snap_px = int(getattr(self, "_surface_magnetic_close_snap_px", 12))
+                        except Exception:
+                            snap_px = 12
+                        if snap_px > 0 and len(getattr(self, "surface_lasso_points", []) or []) >= 3:
+                            try:
+                                p0 = np.asarray(self.surface_lasso_points[0], dtype=np.float64).reshape(-1)
+                                if p0.size >= 3:
+                                    self.makeCurrent()
+                                    vp0 = glGetIntegerv(GL_VIEWPORT)
+                                    mv0 = glGetDoublev(GL_MODELVIEW_MATRIX)
+                                    pr0 = glGetDoublev(GL_PROJECTION_MATRIX)
+                                    win = gluProject(float(p0[0]), float(p0[1]), float(p0[2]), mv0, pr0, vp0)
+                                    if win:
+                                        qx0, qy0 = self._gl_window_to_qt_xy(float(win[0]), float(win[1]), viewport=vp0)
+                                        dx0 = float(event.pos().x()) - float(qx0)
+                                        dy0 = float(event.pos().y()) - float(qy0)
+                                        if float(np.hypot(dx0, dy0)) <= float(snap_px):
+                                            self._finish_surface_lasso(event.modifiers(), seed_pos=event.pos())
+                                            self._surface_magnetic_left_press_pos = None
+                                            self._surface_magnetic_left_dragged = False
+                                            self._surface_magnetic_space_nav = False
+                                            return
+                            except Exception:
+                                _log_ignored_exception()
+
+                        self._surface_boundary_try_add_world_point(event.pos())
+                        self.update()
                 except Exception:
                     _log_ignored_exception()
                 self._surface_magnetic_space_nav = False
+                self._surface_magnetic_left_press_pos = None
+                self._surface_magnetic_left_dragged = False
 
             if event.button() == Qt.MouseButton.RightButton:
                 try:
@@ -5696,7 +6128,7 @@ class Viewport3D(QOpenGLWidget):
                         getattr(self, "_surface_magnetic_right_press_pos", None) is not None
                         and not bool(getattr(self, "_surface_magnetic_right_dragged", False))
                     ):
-                        self._finish_surface_magnetic_lasso(event.modifiers(), seed_pos=event.pos())
+                        self._finish_surface_lasso(event.modifiers(), seed_pos=event.pos())
                 except Exception:
                     _log_ignored_exception()
                 self._surface_magnetic_right_press_pos = None
@@ -5726,12 +6158,18 @@ class Viewport3D(QOpenGLWidget):
 
         if self.mouse_button == Qt.MouseButton.LeftButton and getattr(self, "roi_enabled", False):
             # ROI 드래그(핸들/사각형) 종료 시 최종 상태로 1회 확정 계산
+            roi_changed = bool(getattr(self, "_roi_bounds_changed", False))
             if getattr(self, "roi_rect_dragging", False):
                 self.roi_rect_dragging = False
                 self.roi_rect_start = None
+            if bool(getattr(self, "_roi_move_dragging", False)):
+                self._roi_move_dragging = False
+                self._roi_move_last_xy = None
             if getattr(self, "active_roi_edge", None):
                 self.active_roi_edge = None
-            self.schedule_roi_edges_update(0)
+            if roi_changed:
+                self.schedule_roi_edges_update(0)
+            self._roi_bounds_changed = False
 
         self.mouse_button = None
         self.active_gizmo_axis = None
@@ -5742,6 +6180,7 @@ class Viewport3D(QOpenGLWidget):
         self._cached_viewport = None
         self._cached_modelview = None
         self._cached_projection = None
+        self._ctrl_drag_active = False
         
         self.update()
     
@@ -5831,7 +6270,7 @@ class Viewport3D(QOpenGLWidget):
                 if self.mouse_button is None:
                     return
 
-            # 표면 지정(경계/자석): 커서 프리뷰 + 좌드래그로 자유곡선(스크린) 입력
+            # 표면 지정(경계/자석): 커서 프리뷰 + 클릭으로 점 추가(스냅)
             if self.picking_mode == "paint_surface_magnetic":
                 threshold_px = 10
                 thr2 = float(threshold_px * threshold_px)
@@ -5839,6 +6278,22 @@ class Viewport3D(QOpenGLWidget):
                     self._surface_magnetic_cursor_qt = event.pos()
                 except Exception:
                     _log_ignored_exception()
+                try:
+                    self.surface_lasso_preview = event.pos()
+                except Exception:
+                    _log_ignored_exception()
+
+                if (
+                    self.mouse_button == Qt.MouseButton.LeftButton
+                    and getattr(self, "_surface_magnetic_left_press_pos", None) is not None
+                    and not bool(getattr(self, "_surface_magnetic_left_dragged", False))
+                ):
+                    pos0 = self._surface_magnetic_left_press_pos
+                    if pos0 is not None:
+                        dx0 = float(event.pos().x() - pos0.x())
+                        dy0 = float(event.pos().y() - pos0.y())
+                        if float(dx0 * dx0 + dy0 * dy0) > thr2:
+                            self._surface_magnetic_left_dragged = True
 
                 if (
                     self.mouse_button == Qt.MouseButton.RightButton
@@ -5852,17 +6307,8 @@ class Viewport3D(QOpenGLWidget):
                         if float(dx0 * dx0 + dy0 * dy0) > thr2:
                             self._surface_magnetic_right_dragged = True
 
-                if self.mouse_button == Qt.MouseButton.LeftButton:
-                    if Qt.Key.Key_Space in getattr(self, "keys_pressed", set()):
-                        self._surface_magnetic_space_nav = True
-                    else:
-                        try:
-                            self._surface_magnetic_drawing = True
-                            self._surface_magnetic_try_add_point(event.pos())
-                        except Exception:
-                            _log_ignored_exception()
-                        self.update()
-                        return
+                if self.mouse_button == Qt.MouseButton.LeftButton and Qt.Key.Key_Space in getattr(self, "keys_pressed", set()):
+                    self._surface_magnetic_space_nav = True
 
                 self.update()
                 if self.mouse_button is None:
@@ -5953,7 +6399,15 @@ class Viewport3D(QOpenGLWidget):
                 return
             
             # 3. 객체 직접 조작 (Ctrl+드래그 = 메쉬 이동, 마우스 커서를 정확히 따라감)
-            if (modifiers & Qt.KeyboardModifier.ControlModifier) and obj and self._cached_viewport is not None:
+            if (
+                (not getattr(self, "roi_enabled", False))
+                and (
+                    bool(modifiers & Qt.KeyboardModifier.ControlModifier)
+                    or bool(getattr(self, "_ctrl_drag_active", False))
+                )
+                and obj
+                and self._cached_viewport is not None
+            ):
                 # 마우스 프레스 시 캡처된 깊이와 매트릭스 재사용 (성능 향상)
                 curr_x, curr_y = self._qt_to_gl_window_xy(
                     float(event.pos().x()),
@@ -6006,7 +6460,7 @@ class Viewport3D(QOpenGLWidget):
                 self.update()
                 return
             
-            elif (modifiers & Qt.KeyboardModifier.AltModifier) and obj:
+            elif (not getattr(self, "roi_enabled", False)) and (modifiers & Qt.KeyboardModifier.AltModifier) and obj:
                 # 트랙볼 스타일 회전 - 방향 반전
                 rot_speed = 0.5
                 
@@ -6022,7 +6476,13 @@ class Viewport3D(QOpenGLWidget):
                 self.update()
                 return
             
-            elif (modifiers & Qt.KeyboardModifier.ShiftModifier) and obj and self.mouse_button == Qt.MouseButton.LeftButton and self.picking_mode != 'line_section':
+            elif (
+                (not getattr(self, "roi_enabled", False))
+                and (modifiers & Qt.KeyboardModifier.ShiftModifier)
+                and obj
+                and self.mouse_button == Qt.MouseButton.LeftButton
+                and self.picking_mode != 'line_section'
+            ):
                 # 직관적 회전: 드래그 방향 = 회전 방향 (카메라 기준)
                 rot_speed = 0.5
                 
@@ -6115,6 +6575,35 @@ class Viewport3D(QOpenGLWidget):
                     self.update()
                 return
 
+            # 0.54 ROI 이동 드래그 (중앙 핸들)
+            if (
+                getattr(self, "roi_enabled", False)
+                and bool(getattr(self, "_roi_move_dragging", False))
+                and self.mouse_button == Qt.MouseButton.LeftButton
+            ):
+                pt = self.pick_point_on_plane_z(event.pos().x(), event.pos().y(), z=0.0)
+                last_xy = getattr(self, "_roi_move_last_xy", None)
+                if pt is not None and last_xy is not None:
+                    try:
+                        dxw = float(pt[0]) - float(last_xy[0])
+                        dyw = float(pt[1]) - float(last_xy[1])
+                    except Exception:
+                        dxw, dyw = 0.0, 0.0
+                    if np.isfinite(dxw) and np.isfinite(dyw) and (abs(dxw) > 1e-12 or abs(dyw) > 1e-12):
+                        try:
+                            x1, x2, y1, y2 = [float(v) for v in self.roi_bounds]
+                            self.roi_bounds = [x1 + dxw, x2 + dxw, y1 + dyw, y2 + dyw]
+                        except Exception:
+                            _log_ignored_exception()
+                        try:
+                            self._roi_move_last_xy = np.array([float(pt[0]), float(pt[1])], dtype=np.float64)
+                        except Exception:
+                            self._roi_move_last_xy = None
+                        self._roi_bounds_changed = True
+                        self.schedule_roi_edges_update(120)
+                        self.update()
+                return
+
             # 0.55 ROI 사각형 드래그(캡쳐처럼 지정)
             if getattr(self, "roi_enabled", False) and getattr(self, "roi_rect_dragging", False) and self.mouse_button == Qt.MouseButton.LeftButton:
                 pt = self.pick_point_on_plane_z(event.pos().x(), event.pos().y(), z=0.0)
@@ -6131,12 +6620,13 @@ class Viewport3D(QOpenGLWidget):
                     if max_y - min_y < 0.1:
                         max_y = min_y + 0.1
                     self.roi_bounds = [min_x, max_x, min_y, max_y]
+                    self._roi_bounds_changed = True
                     self.schedule_roi_edges_update(120)
                     self.update()
                 return
              
             # 0.6 ROI 핸들 드래그 처리
-            if self.roi_enabled and self.active_roi_edge and self.mouse_button == Qt.MouseButton.LeftButton:
+            if self.roi_enabled and self.active_roi_edge and self.active_roi_edge != "move" and self.mouse_button == Qt.MouseButton.LeftButton:
                 # XY 평면으로 투영하여 마우스 월드 좌표 획득 (z=0으로 가정)
                 # pick_point_on_mesh는 메쉬 표면을 찍으므로, 여기서는 단순히 레이-평면 교차 사용
                 # 도움을 위해 pick_point_on_mesh 활용 가능하나 바닥일 때 고려
@@ -6158,7 +6648,8 @@ class Viewport3D(QOpenGLWidget):
                         self.roi_bounds[2] = min(wy, self.roi_bounds[3] - 0.1)
                     elif self.active_roi_edge == 'top':
                         self.roi_bounds[3] = max(wy, self.roi_bounds[2] + 0.1)
-                    
+                     
+                    self._roi_bounds_changed = True
                     self.schedule_roi_edges_update(120)
                     self.update()
                 return
@@ -6220,7 +6711,26 @@ class Viewport3D(QOpenGLWidget):
         if a0 is None:
             return
         event = a0
-        """마우스 휠 (줌)"""
+        """마우스 휠: 기본 줌, Ctrl+휠은 슬라이스 스캔."""
+        try:
+            mods = event.modifiers()
+            if bool(getattr(self, "slice_enabled", False)) and bool(mods & Qt.KeyboardModifier.ControlModifier):
+                steps = float(event.angleDelta().y()) / 120.0
+                if abs(steps) > 1e-9:
+                    # Default 0.1cm, Shift=fine(0.02cm), Alt=coarse(0.5cm)
+                    if bool(mods & Qt.KeyboardModifier.ShiftModifier):
+                        step_cm = 0.02
+                    elif bool(mods & Qt.KeyboardModifier.AltModifier):
+                        step_cm = 0.5
+                    else:
+                        step_cm = 0.1
+                    self.sliceScanRequested.emit(float(steps * step_cm))
+                    event.accept()
+                    return
+        except Exception:
+            _log_ignored_exception()
+
+        # fallback: camera zoom
         delta = event.angleDelta().y()
         self.camera.zoom(delta)
         self.update()
@@ -6234,6 +6744,38 @@ class Viewport3D(QOpenGLWidget):
         if event.key() in (Qt.Key.Key_W, Qt.Key.Key_A, Qt.Key.Key_S, Qt.Key.Key_D, Qt.Key.Key_Q, Qt.Key.Key_E):
             if not self.move_timer.isActive():
                 self.move_timer.start()
+
+        # 0. 슬라이스 단축키 (표면 분리 작업 중 빠른 단면 스캔/촬영)
+        if bool(getattr(self, "slice_enabled", False)):
+            key = event.key()
+            mods = event.modifiers()
+            if key in (Qt.Key.Key_Comma, Qt.Key.Key_Period):
+                if bool(mods & Qt.KeyboardModifier.ShiftModifier):
+                    step_cm = 0.02
+                elif bool(mods & Qt.KeyboardModifier.AltModifier):
+                    step_cm = 0.5
+                else:
+                    step_cm = 0.1
+                sign = -1.0 if key == Qt.Key.Key_Comma else 1.0
+                try:
+                    self.sliceScanRequested.emit(float(sign * step_cm))
+                    self.status_info = f"단면 스캔 스텝 {sign * step_cm:+.2f}cm (, / .)"
+                    self.update()
+                except Exception:
+                    _log_ignored_exception()
+                return
+            if key == Qt.Key.Key_C and not bool(mods & Qt.KeyboardModifier.ControlModifier):
+                try:
+                    z_now = float(getattr(self, "slice_z", 0.0) or 0.0)
+                except Exception:
+                    z_now = 0.0
+                try:
+                    self.sliceCaptureRequested.emit(float(z_now))
+                    self.status_info = f"📸 단면 촬영 요청 (Z={z_now:.2f}cm, C)"
+                    self.update()
+                except Exception:
+                    _log_ignored_exception()
+                return
 
         # 0. 단면선(2개) 도구 단축키
         if self.picking_mode == 'cut_lines':
@@ -6307,26 +6849,29 @@ class Viewport3D(QOpenGLWidget):
                 self.update()
                 return
 
-        # 0.2 경계(자석) 올가미 도구 단축키
+        # 0.2 경계(면적+자석) 올가미 도구 단축키
         if self.picking_mode == "paint_surface_magnetic":
             key = event.key()
             if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-                self._finish_surface_magnetic_lasso(event.modifiers(), seed_pos=getattr(self, "_surface_magnetic_cursor_qt", None))
+                self._finish_surface_lasso(event.modifiers(), seed_pos=getattr(self, "surface_lasso_preview", None))
                 return
             if key in (Qt.Key.Key_Backspace, Qt.Key.Key_Delete):
                 try:
-                    if getattr(self, "surface_magnetic_points", None):
-                        self.surface_magnetic_points.pop()
+                    if getattr(self, "surface_lasso_points", None):
+                        self.surface_lasso_points.pop()
+                    if getattr(self, "surface_lasso_face_indices", None):
+                        self.surface_lasso_face_indices.pop()
                     self.update()
                 except Exception:
                     _log_ignored_exception()
                 return
             if key == Qt.Key.Key_Escape:
+                self.clear_surface_lasso()
                 self.clear_surface_magnetic_lasso(clear_cache=False)
                 self.picking_mode = "none"
                 if not bool(getattr(self, "cut_lines_enabled", False)):
                     self.setMouseTracking(False)
-                self.status_info = "⭕ 작업 취소됨"
+                self.status_info = "🧲 작업 취소됨"
                 self.update()
                 return
 
@@ -6386,7 +6931,7 @@ class Viewport3D(QOpenGLWidget):
                     self.update()
                     return
 
-                # 경계(자석) 도구에서는 [ ] 키로 스냅 반경을 조절합니다.
+                # 경계(면적+자석) 도구에서는 [ ] 키로 스냅 반경을 조절합니다.
                 if self.picking_mode == "paint_surface_magnetic":
                     try:
                         cur = float(getattr(self, "_surface_magnetic_snap_radius_px", 14.0) or 14.0)
@@ -6453,34 +6998,96 @@ class Viewport3D(QOpenGLWidget):
             self.update()
     
     def _hit_test_roi(self, pos):
-        """ROI 핸들(화살표) 클릭 검사"""
-        ray_origin, ray_dir = self.get_ray(pos.x(), pos.y())
-        if ray_origin is None or ray_dir is None:
+        """ROI 핸들(화살표/중앙) 클릭 검사 (screen-space 우선)."""
+        # 1) Screen-space hit test (stable regardless of mesh scale / zoom).
+        try:
+            self.makeCurrent()
+            viewport = glGetIntegerv(GL_VIEWPORT)
+            modelview = glGetDoublev(GL_MODELVIEW_MATRIX)
+            projection = glGetDoublev(GL_PROJECTION_MATRIX)
+
+            x1, x2, y1, y2 = self.roi_bounds
+            try:
+                x1, x2 = (float(x1), float(x2)) if float(x1) <= float(x2) else (float(x2), float(x1))
+                y1, y2 = (float(y1), float(y2)) if float(y1) <= float(y2) else (float(y2), float(y1))
+            except Exception:
+                pass
+
+            mid_x = (float(x1) + float(x2)) / 2.0
+            mid_y = (float(y1) + float(y2)) / 2.0
+            z = 0.08
+
+            handles = {
+                "bottom": (mid_x, float(y1), z),
+                "top": (mid_x, float(y2), z),
+                "left": (float(x1), mid_y, z),
+                "right": (float(x2), mid_y, z),
+                "move": (mid_x, mid_y, z),
+            }
+
+            try:
+                thr = int(getattr(self, "_roi_handle_hit_px", 24) or 24)
+            except Exception:
+                thr = 24
+            thr = max(8, min(thr, 120))
+            thr2 = float(thr * thr)
+
+            best = None
+            best_d2 = float("inf")
+            for edge, (wx, wy, wz) in handles.items():
+                try:
+                    win = gluProject(float(wx), float(wy), float(wz), modelview, projection, viewport)
+                    if not win:
+                        continue
+                    qx, qy = self._gl_window_to_qt_xy(float(win[0]), float(win[1]), viewport=viewport)
+                    dx = float(pos.x()) - float(qx)
+                    dy = float(pos.y()) - float(qy)
+                    d2 = float(dx * dx + dy * dy)
+                    if d2 <= thr2 and d2 < best_d2:
+                        best = str(edge)
+                        best_d2 = d2
+                except Exception:
+                    continue
+
+            if best is not None:
+                return best
+        except Exception:
+            _log_ignored_exception()
+
+        # 2) Fallback: world-space hit test on Z=0 plane (previous behavior)
+        try:
+            ray_origin, ray_dir = self.get_ray(pos.x(), pos.y())
+            if ray_origin is None or ray_dir is None:
+                return None
+            if abs(float(ray_dir[2])) < 1e-6:
+                return None
+            t = -float(ray_origin[2]) / float(ray_dir[2])
+            hit_pt = ray_origin + t * ray_dir
+            wx, wy = float(hit_pt[0]), float(hit_pt[1])
+
+            x1, x2, y1, y2 = self.roi_bounds
+            try:
+                x1, x2 = (float(x1), float(x2)) if float(x1) <= float(x2) else (float(x2), float(x1))
+                y1, y2 = (float(y1), float(y2)) if float(y1) <= float(y2) else (float(y2), float(y1))
+            except Exception:
+                pass
+            mid_x = (float(x1) + float(x2)) / 2.0
+            mid_y = (float(y1) + float(y2)) / 2.0
+
+            threshold = float(getattr(self.camera, "distance", 50.0) or 50.0) * 0.05
+            if np.hypot(wx - mid_x, wy - float(y1)) < threshold:
+                return "bottom"
+            if np.hypot(wx - mid_x, wy - float(y2)) < threshold:
+                return "top"
+            if np.hypot(wx - float(x1), wy - mid_y) < threshold:
+                return "left"
+            if np.hypot(wx - float(x2), wy - mid_y) < threshold:
+                return "right"
+            if np.hypot(wx - mid_x, wy - mid_y) < threshold:
+                return "move"
+        except Exception:
             return None
-        # Z=0 평면상의 좌표 계산
-        if abs(ray_dir[2]) < 1e-6:
-            return None
-        t = -ray_origin[2] / ray_dir[2]
-        hit_pt = ray_origin + t * ray_dir
-        wx, wy = hit_pt[0], hit_pt[1]
-        
-        x1, x2, y1, y2 = self.roi_bounds
-        mid_x = (x1 + x2) / 2
-        mid_y = (y1 + y2) / 2
-        
-        # 카메라 거리 기반 동적 히트 테스트 반경
-        threshold = self.camera.distance * 0.05
-        
-        # 각 핸들 위치와 거리 체크
-        if np.hypot(wx - mid_x, wy - y1) < threshold:
-            return 'bottom'
-        if np.hypot(wx - mid_x, wy - y2) < threshold:
-            return 'top'
-        if np.hypot(wx - x1, wy - mid_y) < threshold:
-            return 'left'
-        if np.hypot(wx - x2, wy - mid_y) < threshold:
-            return 'right'
-        
+
         return None
 
     def capture_high_res_image(
@@ -6962,6 +7569,16 @@ class Viewport3D(QOpenGLWidget):
     def _emit_surface_assignment_changed(self, obj: SceneObject | None) -> None:
         if obj is None:
             return
+        # Keep assist-unresolved set consistent with current labels.
+        try:
+            unresolved = set(int(x) for x in (getattr(obj, "surface_assist_unresolved_face_indices", set()) or set()))
+            if unresolved:
+                unresolved.difference_update(getattr(obj, "outer_face_indices", set()) or set())
+                unresolved.difference_update(getattr(obj, "inner_face_indices", set()) or set())
+                unresolved.difference_update(getattr(obj, "migu_face_indices", set()) or set())
+            obj.surface_assist_unresolved_face_indices = unresolved
+        except Exception:
+            _log_ignored_exception()
         try:
             obj._surface_assignment_version = int(getattr(obj, "_surface_assignment_version", 0) or 0) + 1
         except Exception:
@@ -7033,7 +7650,7 @@ class Viewport3D(QOpenGLWidget):
             pass
 
     def clear_surface_magnetic_lasso(self, *, clear_cache: bool = False) -> None:
-        """경계(자석) 올가미 상태를 초기화합니다."""
+        """경계(면적+자석) 올가미 상태를 초기화합니다."""
         try:
             self._cancel_surface_magnetic_thread()
         except Exception:
@@ -7042,9 +7659,12 @@ class Viewport3D(QOpenGLWidget):
             self.surface_magnetic_points = []
             self._surface_magnetic_drawing = False
             self._surface_magnetic_cursor_qt = None
+            self._surface_magnetic_left_press_pos = None
+            self._surface_magnetic_left_dragged = False
             self._surface_magnetic_right_press_pos = None
             self._surface_magnetic_right_dragged = False
             self._surface_magnetic_last_add_t = 0.0
+            self._surface_magnetic_space_nav = False
         except Exception:
             self.surface_magnetic_points = []
             self._surface_magnetic_drawing = False
@@ -7070,7 +7690,7 @@ class Viewport3D(QOpenGLWidget):
             _log_ignored_exception()
 
     def start_surface_magnetic_lasso(self) -> None:
-        """경계(자석) 올가미 도구 시작: 캐시 준비 + 기존 선 초기화."""
+        """경계(면적+자석) 올가미 도구 시작: 캐시 준비 + 기존 선 초기화."""
         try:
             self.clear_surface_magnetic_lasso(clear_cache=False)
         except Exception:
@@ -7106,16 +7726,48 @@ class Viewport3D(QOpenGLWidget):
         obj = getattr(self, "selected_obj", None)
         obj_id = id(obj) if obj is not None else 0
         try:
+            mesh_id = id(getattr(obj, "mesh", None)) if obj is not None else 0
+        except Exception:
+            mesh_id = 0
+        try:
+            tr = np.asarray(getattr(obj, "translation", [0.0, 0.0, 0.0]), dtype=np.float64).reshape(-1)
+            if tr.size >= 3:
+                obj_t = (float(round(float(tr[0]), 6)), float(round(float(tr[1]), 6)), float(round(float(tr[2]), 6)))
+            else:
+                obj_t = (0.0, 0.0, 0.0)
+        except Exception:
+            obj_t = (0.0, 0.0, 0.0)
+        try:
+            rr = np.asarray(getattr(obj, "rotation", [0.0, 0.0, 0.0]), dtype=np.float64).reshape(-1)
+            if rr.size >= 3:
+                obj_r = (float(round(float(rr[0]), 4)), float(round(float(rr[1]), 4)), float(round(float(rr[2]), 4)))
+            else:
+                obj_r = (0.0, 0.0, 0.0)
+        except Exception:
+            obj_r = (0.0, 0.0, 0.0)
+        try:
+            sc = float(getattr(obj, "scale", 1.0) or 1.0)
+            obj_s = float(round(sc, 6)) if np.isfinite(sc) else 1.0
+        except Exception:
+            obj_s = 1.0
+        try:
             cam = getattr(self, "camera", None)
             az = float(getattr(cam, "azimuth", 0.0) or 0.0)
             el = float(getattr(cam, "elevation", 0.0) or 0.0)
             dist = float(getattr(cam, "distance", 0.0) or 0.0)
+            la = np.asarray(getattr(cam, "look_at", [0.0, 0.0, 0.0]), dtype=np.float64).reshape(-1)
+            if la.size >= 3:
+                look_at = (float(round(float(la[0]), 5)), float(round(float(la[1]), 5)), float(round(float(la[2]), 5)))
+            else:
+                look_at = (0.0, 0.0, 0.0)
         except Exception:
             az, el, dist = 0.0, 0.0, 0.0
+            look_at = (0.0, 0.0, 0.0)
 
         # Rounded for stability (avoid recompute due to tiny float noise)
         return (
             int(obj_id),
+            int(mesh_id),
             int(vx),
             int(vy),
             int(vw),
@@ -7123,6 +7775,10 @@ class Viewport3D(QOpenGLWidget):
             float(round(az, 3)),
             float(round(el, 3)),
             float(round(dist, 4)),
+            look_at,
+            obj_t,
+            obj_r,
+            float(obj_s),
         )
 
     def _ensure_surface_magnetic_cache(self, *, force: bool = False) -> bool:
@@ -7342,6 +7998,20 @@ class Viewport3D(QOpenGLWidget):
 
         pt = (int(sx), int(sy))
 
+        # Guard: ignore clicks fully outside the mesh (background depth).
+        try:
+            self.makeCurrent()
+            d = cast(Any, glReadPixels(int(pt[0]), int(pt[1]), 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT))
+            try:
+                depth_val = float(d[0][0])
+            except Exception:
+                depth_val = float("nan")
+            if (not bool(np.isfinite(depth_val))) or float(depth_val) >= 1.0:
+                return
+        except Exception:
+            # If the guard fails, fall back to the previous permissive behavior.
+            pass
+
         try:
             min_step = float(getattr(self, "_surface_magnetic_min_step_px", 1.5) or 0.0)
         except Exception:
@@ -7375,6 +8045,80 @@ class Viewport3D(QOpenGLWidget):
         except Exception:
             self._surface_magnetic_last_add_t = 0.0
 
+    def _surface_boundary_try_add_world_point(self, qt_pos: object) -> bool:
+        """Add a boundary vertex snapped to magnetic edges, stored as a world-space point.
+
+        This keeps the polygon attached to the mesh even when the camera moves.
+        Points are appended to `surface_lasso_points` / `surface_lasso_face_indices`.
+        """
+        try:
+            qx = int(getattr(qt_pos, "x", lambda: 0)())
+            qy = int(getattr(qt_pos, "y", lambda: 0)())
+        except Exception:
+            return False
+
+        info = self.pick_point_on_mesh_info(int(qx), int(qy))
+        if info is None:
+            self.status_info = "⚠️ 메쉬 위를 클릭해 점을 찍어 주세요."
+            return False
+
+        try:
+            picked_world, _picked_depth, gl_x, gl_y, viewport, _modelview, _projection = info
+        except Exception:
+            return False
+
+        try:
+            self._ensure_surface_magnetic_cache(force=False)
+        except Exception:
+            pass
+
+        try:
+            sx, sy = self._surface_magnetic_snap_gl(int(gl_x), int(gl_y))
+        except Exception:
+            sx, sy = int(gl_x), int(gl_y)
+
+        # Convert the snapped screen location back to a mesh point. This intentionally reuses
+        # the same robust picking logic (including background depth search + bounds guards).
+        pt = None
+        try:
+            qx2, qy2 = self._gl_window_to_qt_xy(float(sx), float(sy), viewport=viewport)
+            info2 = self.pick_point_on_mesh_info(int(round(qx2)), int(round(qy2)))
+            if info2 is not None:
+                pt = np.asarray(info2[0], dtype=np.float64).reshape(3)
+        except Exception:
+            pt = None
+
+        if pt is None:
+            pt = np.asarray(picked_world, dtype=np.float64).reshape(3)
+
+        try:
+            self.surface_lasso_points.append(np.asarray(pt[:3], dtype=np.float64))
+        except Exception:
+            try:
+                self.surface_lasso_points.append(pt)
+            except Exception:
+                return False
+
+        try:
+            res = self.pick_face_at_point(np.asarray(pt, dtype=np.float64), return_index=True)
+            if res:
+                fi, _v = res
+                self.surface_lasso_face_indices.append(int(fi))
+            else:
+                self.surface_lasso_face_indices.append(-1)
+        except Exception:
+            try:
+                self.surface_lasso_face_indices.append(-1)
+            except Exception:
+                _log_ignored_exception()
+
+        try:
+            self.surface_lasso_preview = qt_pos
+        except Exception:
+            pass
+
+        return True
+
     def _cancel_surface_lasso_thread(self) -> None:
         thr = getattr(self, "_surface_lasso_thread", None)
         if thr is None:
@@ -7387,6 +8131,16 @@ class Viewport3D(QOpenGLWidget):
         except Exception:
             _log_ignored_exception()
 
+    def _surface_lasso_tool_strings(self, tool: object | None = None) -> tuple[str, str]:
+        """Return (icon, label) for the lasso selection tool."""
+        try:
+            t = str(tool if tool is not None else getattr(self, "_surface_lasso_apply_tool", "area")).strip().lower()
+        except Exception:
+            t = "area"
+        if t in {"boundary", "magnetic", "paint_surface_magnetic"}:
+            return "🧲", "경계(면적+자석)"
+        return "⭕", "둘러서 지정"
+
     def _finish_surface_lasso(self, modifiers, *, seed_pos=None) -> None:
         """현재 올가미(다각형) 영역에 포함되는 '보이는' 면을 한 번에 지정합니다."""
         obj = self.selected_obj
@@ -7398,14 +8152,18 @@ class Viewport3D(QOpenGLWidget):
 
         pts_world = list(getattr(self, "surface_lasso_points", None) or [])
         if len(pts_world) < 3:
-            self.status_info = "⭕ 둘러서 지정: 점을 3개 이상 찍어주세요. (우클릭/Enter=확정)"
+            icon, lbl = self._surface_lasso_tool_strings(
+                "boundary" if str(getattr(self, "picking_mode", "none")) == "paint_surface_magnetic" else "area"
+            )
+            self.status_info = f"{icon} {lbl}: 점을 3개 이상 찍어주세요. (우클릭/Enter=확정)"
             self.update()
             return
 
         thr = getattr(self, "_surface_lasso_thread", None)
         try:
             if thr is not None and thr.isRunning():
-                self.status_info = "⏳ 둘러서 선택 계산 중…"
+                _icon, lbl = self._surface_lasso_tool_strings()
+                self.status_info = f"⏳ {lbl} 선택 계산 중…"
                 self.update()
                 return
         except Exception:
@@ -7417,6 +8175,10 @@ class Viewport3D(QOpenGLWidget):
             target = "outer"
         self._surface_lasso_apply_target = target
         self._surface_lasso_apply_modifiers = modifiers
+        self._surface_lasso_apply_tool = (
+            "boundary" if str(getattr(self, "picking_mode", "none")) == "paint_surface_magnetic" else "area"
+        )
+        icon, lbl = self._surface_lasso_tool_strings()
 
         # Magic-wand seed: prefer the confirm click position (user intent) if available,
         # then try polygon centroid, then fall back to last picked vertex face.
@@ -7489,7 +8251,7 @@ class Viewport3D(QOpenGLWidget):
                 continue
 
         if len(proj_xy) < 3:
-            self.status_info = "⭕ 둘러서 지정: 점 입력이 올바르지 않습니다."
+            self.status_info = f"{icon} {lbl}: 점 입력이 올바르지 않습니다."
             self.update()
             return
 
@@ -7502,7 +8264,7 @@ class Viewport3D(QOpenGLWidget):
             gl_y0 = int(np.clip(int(np.floor(float(np.min(poly_gl[:, 1])))), vy, vy + vh - 1))
             gl_y1 = int(np.clip(int(np.ceil(float(np.max(poly_gl[:, 1])))), vy, vy + vh - 1))
         except Exception:
-            self.status_info = "⭕ 둘러서 지정: 점 입력이 올바르지 않습니다."
+            self.status_info = f"{icon} {lbl}: 점 입력이 올바르지 않습니다."
             self.update()
             return
 
@@ -7543,7 +8305,7 @@ class Viewport3D(QOpenGLWidget):
             if n_faces > 0:
                 max_sel = min(max_sel, int(n_faces))
 
-        self.status_info = "⭕ 둘러서 지정: 보이는 면 계산 중…"
+        self.status_info = f"{icon} {lbl}: 보이는 면 계산 중…"
         self.update()
 
         wand_enabled = bool(
@@ -7584,14 +8346,16 @@ class Viewport3D(QOpenGLWidget):
             thr2.start()
         except Exception as e:
             self._surface_lasso_thread = None
-            self.status_info = f"⚠️ 둘러서 지정 계산 시작 실패: {e}"
+            _icon, lbl = self._surface_lasso_tool_strings()
+            self.status_info = f"⚠️ {lbl} 계산 시작 실패: {e}"
             self.update()
 
     def _on_surface_lasso_failed(self, msg: str) -> None:
         if self.sender() is not getattr(self, "_surface_lasso_thread", None):
             return
         self._surface_lasso_thread = None
-        self.status_info = f"⚠️ 둘러서 지정 실패: {msg}"
+        _icon, lbl = self._surface_lasso_tool_strings()
+        self.status_info = f"⚠️ {lbl} 실패: {msg}"
         self.update()
 
     def _on_surface_lasso_computed(self, result: object) -> None:
@@ -7601,7 +8365,8 @@ class Viewport3D(QOpenGLWidget):
 
         obj = self.selected_obj
         if obj is None or getattr(obj, "mesh", None) is None:
-            self.status_info = "⚠️ 둘러서 지정: 선택 대상이 없습니다."
+            _icon, lbl = self._surface_lasso_tool_strings()
+            self.status_info = f"⚠️ {lbl}: 선택 대상이 없습니다."
             self.clear_surface_lasso()
             self.update()
             return
@@ -7617,7 +8382,8 @@ class Viewport3D(QOpenGLWidget):
             stats = {}
 
         if indices is None:
-            self.status_info = "⭕ 둘러서 지정: 선택된 면이 없습니다."
+            icon, lbl = self._surface_lasso_tool_strings()
+            self.status_info = f"{icon} {lbl}: 선택된 면이 없습니다."
             self.clear_surface_lasso()
             self.update()
             return
@@ -7693,7 +8459,8 @@ class Viewport3D(QOpenGLWidget):
             trunc_info = ""
 
         op = "제거" if remove else "추가"
-        msg = f"⭕ 둘러서 지정 [{target_lbl}]: {op} {selected_n:,} faces{comp_info}{wand_info}{trunc_info}"
+        icon, lbl = self._surface_lasso_tool_strings()
+        msg = f"{icon} {lbl} [{target_lbl}]: {op} {selected_n:,} faces{comp_info}{wand_info}{trunc_info}"
         if cand_n:
             msg += f" (후보 {cand_n:,})"
         self.status_info = msg
@@ -7703,7 +8470,7 @@ class Viewport3D(QOpenGLWidget):
         self.update()
 
     def _finish_surface_magnetic_lasso(self, modifiers, *, seed_pos=None) -> None:
-        """현재 '경계(자석) 올가미' 폴리곤 영역에 포함되는 '보이는' 면을 한 번에 지정합니다."""
+        """현재 '경계(면적+자석) 올가미' 폴리곤 영역에 포함되는 '보이는' 면을 한 번에 지정합니다."""
         obj = self.selected_obj
         if obj is None or getattr(obj, "mesh", None) is None:
             self.status_info = "⚠️ 먼저 메쉬를 선택해 주세요."
@@ -7713,14 +8480,14 @@ class Viewport3D(QOpenGLWidget):
 
         pts = list(getattr(self, "surface_magnetic_points", None) or [])
         if len(pts) < 3:
-            self.status_info = "🧲 경계(자석): 영역을 3점 이상 그려주세요. (우클릭/Enter=확정)"
+            self.status_info = "🧲 경계(면적+자석): 영역을 3점 이상 찍어주세요. (우클릭/Enter=확정)"
             self.update()
             return
 
         thr = getattr(self, "_surface_magnetic_thread", None)
         try:
             if thr is not None and thr.isRunning():
-                self.status_info = "⏳ 경계(자석) 선택 계산 중…"
+                self.status_info = "⏳ 경계(면적+자석) 선택 계산 중…"
                 self.update()
                 return
         except Exception:
@@ -7773,7 +8540,7 @@ class Viewport3D(QOpenGLWidget):
             mv = np.asarray(mv_raw, dtype=np.float64).reshape(4, 4)
             proj = np.asarray(proj_raw, dtype=np.float64).reshape(4, 4)
         except Exception:
-            self.status_info = "🧲 경계(자석): 카메라 상태를 읽을 수 없습니다."
+            self.status_info = "🧲 경계(면적+자석): 카메라 상태를 읽을 수 없습니다."
             self.update()
             return
 
@@ -7791,7 +8558,7 @@ class Viewport3D(QOpenGLWidget):
             max_poly = 800
         poly2 = self._sanitize_polygon_2d(poly_gl, max_points=max(50, int(max_poly)), eps=1e-6)
         if poly2 is None or poly2.shape[0] < 3:
-            self.status_info = "🧲 경계(자석): 폴리곤이 올바르지 않습니다."
+            self.status_info = "🧲 경계(면적+자석): 폴리곤이 올바르지 않습니다."
             self.update()
             return
         poly_gl = np.asarray(poly2, dtype=np.float64).reshape(-1, 2)
@@ -7803,7 +8570,7 @@ class Viewport3D(QOpenGLWidget):
             gl_y0 = int(np.clip(int(np.floor(float(np.min(poly_gl[:, 1])))), vy, vy + vh - 1))
             gl_y1 = int(np.clip(int(np.ceil(float(np.max(poly_gl[:, 1])))), vy, vy + vh - 1))
         except Exception:
-            self.status_info = "🧲 경계(자석): 폴리곤이 올바르지 않습니다."
+            self.status_info = "🧲 경계(면적+자석): 폴리곤이 올바르지 않습니다."
             self.update()
             return
 
@@ -7843,7 +8610,7 @@ class Viewport3D(QOpenGLWidget):
             if n_faces > 0:
                 max_sel = min(max_sel, int(n_faces))
 
-        self.status_info = "🧲 경계(자석): 보이는 면 계산 중…"
+        self.status_info = "🧲 경계(면적+자석): 보이는 면 계산 중…"
         self.update()
 
         wand_enabled = bool(
@@ -7884,14 +8651,14 @@ class Viewport3D(QOpenGLWidget):
             thr2.start()
         except Exception as e:
             self._surface_magnetic_thread = None
-            self.status_info = f"⚠️ 경계(자석) 계산 시작 실패: {e}"
+            self.status_info = f"⚠️ 경계(면적+자석) 계산 시작 실패: {e}"
             self.update()
 
     def _on_surface_magnetic_failed(self, msg: str) -> None:
         if self.sender() is not getattr(self, "_surface_magnetic_thread", None):
             return
         self._surface_magnetic_thread = None
-        self.status_info = f"⚠️ 경계(자석) 실패: {msg}"
+        self.status_info = f"⚠️ 경계(면적+자석) 실패: {msg}"
         self.update()
 
     def _on_surface_magnetic_computed(self, result: object) -> None:
@@ -7901,7 +8668,7 @@ class Viewport3D(QOpenGLWidget):
 
         obj = self.selected_obj
         if obj is None or getattr(obj, "mesh", None) is None:
-            self.status_info = "⚠️ 경계(자석): 선택 대상이 없습니다."
+            self.status_info = "⚠️ 경계(면적+자석): 선택 대상이 없습니다."
             self.clear_surface_magnetic_lasso(clear_cache=False)
             self.update()
             return
@@ -7917,7 +8684,7 @@ class Viewport3D(QOpenGLWidget):
             stats = {}
 
         if indices is None:
-            self.status_info = "🧲 경계(자석): 선택된 면이 없습니다."
+            self.status_info = "🧲 경계(면적+자석): 선택된 면이 없습니다."
             self.clear_surface_magnetic_lasso(clear_cache=False)
             self.update()
             return
@@ -7993,7 +8760,7 @@ class Viewport3D(QOpenGLWidget):
             trunc_info = ""
 
         op = "제거" if remove else "추가"
-        msg = f"🧲 경계(자석) [{target_lbl}]: {op} {selected_n:,} faces{comp_info}{wand_info}{trunc_info}"
+        msg = f"🧲 경계(면적+자석) [{target_lbl}]: {op} {selected_n:,} faces{comp_info}{wand_info}{trunc_info}"
         if cand_n:
             msg += f" (후보 {cand_n:,})"
         self.status_info = msg
@@ -9240,7 +10007,7 @@ class Viewport3D(QOpenGLWidget):
             if w <= 1 or h <= 1:
                 return
 
-            # Project world points -> widget coords (top-left origin)
+            # Project world points -> viewport-relative pixels (top-left origin)
             modelview = glGetDoublev(GL_MODELVIEW_MATRIX)
             projection = glGetDoublev(GL_PROJECTION_MATRIX)
             screen_pts: list[tuple[float, float]] = []
@@ -9252,11 +10019,22 @@ class Viewport3D(QOpenGLWidget):
                     xw, yw = float(win[0]), float(win[1])
                     # viewport origin may not be (0,0)
                     sx = xw - float(vx)
-                    sy = float(vy + h) - yw
+                    sy = float(int(vy + h - 1)) - yw
                     if np.isfinite(sx) and np.isfinite(sy):
-                        screen_pts.append((sx, sy))
+                        screen_pts.append((float(sx), float(sy)))
                 except Exception:
                     continue
+
+            preview_xy = None
+            if preview is not None:
+                try:
+                    gl_px, gl_py = self._qt_to_gl_window_xy(float(preview.x()), float(preview.y()), viewport=viewport)
+                    px = float(int(gl_px) - int(vx))
+                    py = float(int(vy + h - 1) - int(gl_py))
+                    if np.isfinite(px) and np.isfinite(py):
+                        preview_xy = (px, py)
+                except Exception:
+                    preview_xy = None
 
             glDisable(GL_LIGHTING)
             glDisable(GL_DEPTH_TEST)
@@ -9282,14 +10060,14 @@ class Viewport3D(QOpenGLWidget):
             snap_ready = False
             if (
                 snap_px > 0
-                and preview is not None
+                and preview_xy is not None
                 and len(screen_pts) >= 3
                 and np.isfinite(screen_pts[0][0])
                 and np.isfinite(screen_pts[0][1])
             ):
                 try:
-                    dx = float(preview.x()) - float(screen_pts[0][0])
-                    dy = float(preview.y()) - float(screen_pts[0][1])
+                    dx = float(preview_xy[0]) - float(screen_pts[0][0])
+                    dy = float(preview_xy[1]) - float(screen_pts[0][1])
                     snap_ready = float(np.hypot(dx, dy)) <= float(snap_px)
                 except Exception:
                     snap_ready = False
@@ -9307,9 +10085,9 @@ class Viewport3D(QOpenGLWidget):
                 except Exception:
                     continue
                 glVertex3f(x, y, 0.0)
-            if preview is not None:
+            if preview_xy is not None:
                 try:
-                    glVertex3f(float(preview.x()), float(preview.y()), 0.0)
+                    glVertex3f(float(preview_xy[0]), float(preview_xy[1]), 0.0)
                 except Exception:
                     _log_ignored_exception()
             glEnd()
@@ -9331,11 +10109,11 @@ class Viewport3D(QOpenGLWidget):
                     glEnd()
 
                     # Optional closure hint line
-                    if snap_ready and preview is not None:
+                    if snap_ready and preview_xy is not None:
                         glLineWidth(2.0)
                         glColor4f(0.2, 0.95, 0.35, 0.75)
                         glBegin(GL_LINES)
-                        glVertex3f(float(preview.x()), float(preview.y()), 0.0)
+                        glVertex3f(float(preview_xy[0]), float(preview_xy[1]), 0.0)
                         glVertex3f(cx0, cy0, 0.0)
                         glEnd()
                 except Exception:
@@ -9394,14 +10172,16 @@ class Viewport3D(QOpenGLWidget):
                 _log_ignored_exception()
 
     def draw_surface_magnetic_lasso_overlay(self) -> None:
-        """경계(자석) 도구의 화면 올가미(폴리곤) 오버레이"""
+        """경계(면적+자석) 도구의 화면 올가미(폴리곤) 오버레이 (월드 포인트 기반)."""
         try:
             if self.picking_mode != "paint_surface_magnetic":
                 return
 
-            pts = getattr(self, "surface_magnetic_points", None) or []
-            cursor = getattr(self, "_surface_magnetic_cursor_qt", None)
-            if not pts and cursor is None:
+            pts_world = getattr(self, "surface_lasso_points", None) or []
+            cursor = getattr(self, "surface_lasso_preview", None)
+            if cursor is None:
+                cursor = getattr(self, "_surface_magnetic_cursor_qt", None)
+            if not pts_world and cursor is None:
                 return
 
             self.makeCurrent()
@@ -9413,17 +10193,22 @@ class Viewport3D(QOpenGLWidget):
             if w <= 1 or h <= 1:
                 return
 
-            # Stored points are in GL window coords (bottom-left origin).
+            # Project world points -> viewport-relative pixels (top-left origin)
+            modelview = glGetDoublev(GL_MODELVIEW_MATRIX)
+            projection = glGetDoublev(GL_PROJECTION_MATRIX)
             screen_pts: list[tuple[float, float]] = []
-            for p in pts:
+            for p in pts_world:
                 try:
-                    gx, gy = int(p[0]), int(p[1])
+                    win = gluProject(float(p[0]), float(p[1]), float(p[2]), modelview, projection, viewport)
+                    if not win:
+                        continue
+                    xw, yw = float(win[0]), float(win[1])
+                    sx = xw - float(vx)
+                    sy = float(int(vy + h - 1)) - yw
+                    if np.isfinite(sx) and np.isfinite(sy):
+                        screen_pts.append((float(sx), float(sy)))
                 except Exception:
                     continue
-                sx = float(gx - int(vx))
-                sy = float(int(vy + h - 1) - gy)
-                if np.isfinite(sx) and np.isfinite(sy):
-                    screen_pts.append((sx, sy))
 
             preview = None
             preview_snapped = False
@@ -9439,6 +10224,21 @@ class Viewport3D(QOpenGLWidget):
                 except Exception:
                     preview = None
                     preview_snapped = False
+
+            # Snap-ready state (mouse near the start vertex)
+            close_px = 0
+            try:
+                close_px = int(getattr(self, "_surface_magnetic_close_snap_px", 12))
+            except Exception:
+                close_px = 12
+            snap_ready = False
+            if close_px > 0 and preview is not None and len(screen_pts) >= 3:
+                try:
+                    dx = float(preview[0]) - float(screen_pts[0][0])
+                    dy = float(preview[1]) - float(screen_pts[0][1])
+                    snap_ready = float(np.hypot(dx, dy)) <= float(close_px)
+                except Exception:
+                    snap_ready = False
 
             glDisable(GL_LIGHTING)
             glDisable(GL_DEPTH_TEST)
@@ -9458,7 +10258,10 @@ class Viewport3D(QOpenGLWidget):
             # Polyline
             if screen_pts:
                 glLineWidth(2.0)
-                glColor4f(0.15, 0.75, 1.0, 0.85)
+                if snap_ready:
+                    glColor4f(0.2, 0.95, 0.35, 0.9)
+                else:
+                    glColor4f(0.15, 0.75, 1.0, 0.85)
                 glBegin(GL_LINE_STRIP)
                 for xy in screen_pts:
                     try:
@@ -9469,21 +10272,42 @@ class Viewport3D(QOpenGLWidget):
                     glVertex3f(float(preview[0]), float(preview[1]), 0.0)
                 glEnd()
 
-                # Vertices
-                glPointSize(6.0)
-                glColor4f(0.95, 0.95, 0.95, 0.95)
-                glBegin(GL_POINTS)
-                for xy in screen_pts:
+                # Snap ring around the first vertex (close-to-confirm)
+                if close_px > 0:
                     try:
-                        glVertex3f(float(xy[0]), float(xy[1]), 0.0)
-                    except Exception:
-                        continue
-                glEnd()
+                        cx0, cy0 = float(screen_pts[0][0]), float(screen_pts[0][1])
+                        seg = 28
+                        glLineWidth(1.5)
+                        if snap_ready:
+                            glColor4f(0.2, 0.95, 0.35, 0.85)
+                        else:
+                            glColor4f(0.75, 0.75, 0.75, 0.55)
+                        glBegin(GL_LINE_LOOP)
+                        for j in range(seg):
+                            a = 2.0 * float(np.pi) * float(j) / float(seg)
+                            glVertex3f(cx0 + float(close_px) * float(np.cos(a)), cy0 + float(close_px) * float(np.sin(a)), 0.0)
+                        glEnd()
 
-                # Start vertex emphasized
+                        if snap_ready and preview is not None:
+                            glLineWidth(2.0)
+                            glColor4f(0.2, 0.95, 0.35, 0.75)
+                            glBegin(GL_LINES)
+                            glVertex3f(float(preview[0]), float(preview[1]), 0.0)
+                            glVertex3f(cx0, cy0, 0.0)
+                            glEnd()
+                    except Exception:
+                        try:
+                            glEnd()
+                        except Exception:
+                            _log_ignored_exception()
+
+                # Vertices (start emphasized)
                 try:
                     glPointSize(9.0)
-                    glColor4f(1.0, 1.0, 1.0, 0.95)
+                    if snap_ready:
+                        glColor4f(0.2, 0.95, 0.35, 0.95)
+                    else:
+                        glColor4f(1.0, 1.0, 1.0, 0.95)
                     glBegin(GL_POINTS)
                     glVertex3f(float(screen_pts[0][0]), float(screen_pts[0][1]), 0.0)
                     glEnd()
@@ -9492,6 +10316,17 @@ class Viewport3D(QOpenGLWidget):
                         glEnd()
                     except Exception:
                         _log_ignored_exception()
+
+                if len(screen_pts) > 1:
+                    glPointSize(6.0)
+                    glColor4f(0.95, 0.95, 0.95, 0.95)
+                    glBegin(GL_POINTS)
+                    for xy in screen_pts[1:]:
+                        try:
+                            glVertex3f(float(xy[0]), float(xy[1]), 0.0)
+                        except Exception:
+                            continue
+                    glEnd()
 
             # Cursor preview + snap radius
             if preview is not None:

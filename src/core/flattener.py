@@ -1696,6 +1696,149 @@ def _mesh_total_area_2d(mesh: MeshData, uv: np.ndarray) -> float:
     return float(a.sum()) if a.size else 0.0
 
 
+def _positive_float(value: Any, default: float, *, min_value: float = 0.0) -> float:
+    try:
+        out = float(value)
+    except Exception:
+        return float(default)
+    if not np.isfinite(out) or out <= float(min_value):
+        return float(default)
+    return float(out)
+
+
+def _uv_extents_2d(uv: np.ndarray) -> np.ndarray:
+    arr = np.asarray(uv, dtype=np.float64)
+    if arr.ndim != 2 or arr.shape[0] == 0:
+        return np.zeros((2,), dtype=np.float64)
+    if arr.shape[1] < 2:
+        return np.zeros((2,), dtype=np.float64)
+    arr2 = arr[:, :2]
+    finite = np.all(np.isfinite(arr2), axis=1)
+    if not np.any(finite):
+        return np.zeros((2,), dtype=np.float64)
+    vv = arr2[finite]
+    ext = vv.max(axis=0) - vv.min(axis=0)
+    ext = np.asarray(ext, dtype=np.float64).reshape(2)
+    ext = np.where(np.isfinite(ext), ext, 0.0)
+    ext[ext < 0.0] = 0.0
+    return ext
+
+
+def _apply_flatten_size_guard(
+    mesh: MeshData,
+    uv: np.ndarray,
+    *,
+    meta: dict[str, Any] | None = None,
+) -> tuple[np.ndarray, dict[str, Any], bool]:
+    """
+    Guard against pathological flatten size explosions.
+
+    The guard is conservative:
+    - moderate outliers: mark warning in meta
+    - severe outliers: apply uniform down-scale and mark correction in meta
+    """
+    uv_in = np.asarray(uv, dtype=np.float64)
+    uv_out = uv_in.copy()
+    out_meta = dict(meta or {})
+
+    try:
+        uv_ext = _uv_extents_2d(uv_out)
+        flat_w = float(uv_ext[0])
+        flat_h = float(uv_ext[1])
+        flat_max = float(max(flat_w, flat_h))
+        flat_area_bbox = float(flat_w * flat_h)
+
+        mesh_ext = np.asarray(getattr(mesh, "extents", np.zeros((3,), dtype=np.float64)), dtype=np.float64).reshape(-1)
+        mesh_ext = mesh_ext[np.isfinite(mesh_ext) & (mesh_ext > 1e-9)]
+        ref_span = float(np.max(mesh_ext)) if mesh_ext.size else 0.0
+
+        dim_ratio_before = float(flat_max / ref_span) if ref_span > 1e-12 else 1.0
+
+        area_3d = float(_mesh_total_area_3d(mesh))
+        area_2d = float(_mesh_total_area_2d(mesh, uv_out))
+        area_ratio_before: float | None
+        if area_3d > 1e-12 and np.isfinite(area_2d) and area_2d >= 0.0:
+            area_ratio_before = float(area_2d / area_3d)
+        else:
+            area_ratio_before = None
+
+        warn_dim_ratio = _positive_float(getattr(mesh, "_flatten_size_warn_dim_ratio", 6.0), 6.0, min_value=1.0)
+        hard_dim_ratio = _positive_float(getattr(mesh, "_flatten_size_hard_dim_ratio", 30.0), 30.0, min_value=1.0)
+        target_dim_ratio = _positive_float(getattr(mesh, "_flatten_size_target_dim_ratio", 12.0), 12.0, min_value=1.0)
+        if hard_dim_ratio < warn_dim_ratio:
+            hard_dim_ratio = warn_dim_ratio
+        if target_dim_ratio > hard_dim_ratio:
+            target_dim_ratio = hard_dim_ratio
+
+        warn_area_ratio = _positive_float(getattr(mesh, "_flatten_size_warn_area_ratio", 8.0), 8.0, min_value=1.0)
+        hard_area_ratio = _positive_float(getattr(mesh, "_flatten_size_hard_area_ratio", 60.0), 60.0, min_value=1.0)
+        target_area_ratio = _positive_float(getattr(mesh, "_flatten_size_target_area_ratio", 24.0), 24.0, min_value=1.0)
+        if hard_area_ratio < warn_area_ratio:
+            hard_area_ratio = warn_area_ratio
+        if target_area_ratio > hard_area_ratio:
+            target_area_ratio = hard_area_ratio
+
+        warn_dim = bool(dim_ratio_before > warn_dim_ratio)
+        hard_dim = bool(dim_ratio_before > hard_dim_ratio)
+
+        warn_area = False
+        hard_area = False
+        if area_ratio_before is not None and np.isfinite(area_ratio_before):
+            warn_area = bool(area_ratio_before > warn_area_ratio)
+            hard_area = bool(area_ratio_before > hard_area_ratio)
+
+        warning = bool(warn_dim or warn_area)
+        severe = bool(hard_dim or hard_area)
+
+        applied = False
+        guard_scale = 1.0
+        dim_ratio_after = dim_ratio_before
+        area_ratio_after = area_ratio_before
+
+        if severe:
+            scale_candidates: list[float] = [1.0]
+            if hard_dim and ref_span > 1e-12 and flat_max > 1e-12:
+                scale_candidates.append(float((target_dim_ratio * ref_span) / flat_max))
+            if hard_area and area_ratio_before is not None and area_ratio_before > 1e-12:
+                scale_candidates.append(float(np.sqrt(target_area_ratio / area_ratio_before)))
+            scale_fix = float(min(scale_candidates))
+
+            if np.isfinite(scale_fix) and 1e-9 < scale_fix < 1.0:
+                uv_out *= scale_fix
+                applied = True
+                guard_scale = scale_fix
+
+                uv_ext_after = _uv_extents_2d(uv_out)
+                flat_max_after = float(max(float(uv_ext_after[0]), float(uv_ext_after[1])))
+                dim_ratio_after = float(flat_max_after / ref_span) if ref_span > 1e-12 else dim_ratio_before
+
+                area_2d_after = float(_mesh_total_area_2d(mesh, uv_out))
+                if area_ratio_before is not None and area_3d > 1e-12 and np.isfinite(area_2d_after):
+                    area_ratio_after = float(area_2d_after / area_3d)
+                warning = True
+
+        out_meta["flatten_size_warning"] = bool(warning)
+        out_meta["flatten_size_guard_applied"] = bool(applied)
+        out_meta["flatten_size_guard_scale"] = float(guard_scale)
+        out_meta["flatten_size_dim_ratio_before"] = float(dim_ratio_before)
+        out_meta["flatten_size_dim_ratio_after"] = float(dim_ratio_after)
+        out_meta["flatten_size_area_ratio_before"] = None if area_ratio_before is None else float(area_ratio_before)
+        out_meta["flatten_size_area_ratio_after"] = None if area_ratio_after is None else float(area_ratio_after)
+        out_meta["flatten_size_bbox_area"] = float(flat_area_bbox)
+        out_meta["flatten_size_ref_span"] = float(ref_span)
+        out_meta["flatten_size_warn_dim_ratio"] = float(warn_dim_ratio)
+        out_meta["flatten_size_hard_dim_ratio"] = float(hard_dim_ratio)
+        out_meta["flatten_size_warn_area_ratio"] = float(warn_area_ratio)
+        out_meta["flatten_size_hard_area_ratio"] = float(hard_area_ratio)
+        return uv_out, out_meta, applied
+    except Exception:
+        _log_ignored_exception("flatten size guard failed")
+        out_meta["flatten_size_warning"] = False
+        out_meta["flatten_size_guard_applied"] = False
+        out_meta["flatten_size_guard_scale"] = 1.0
+        return uv_out, out_meta, False
+
+
 def _normalize_cylinder_axis_choice(choice: str) -> str:
     c = str(choice or "").strip().lower()
     if c in {"x", "x축", "x축 기준", "x axis"}:
@@ -2258,6 +2401,33 @@ def flatten_with_method(
             _log_ignored_exception()
             return uv_in
 
+    def _build_result(
+        uv: np.ndarray,
+        *,
+        faces: np.ndarray | None = None,
+        distortion_arr: np.ndarray | None = None,
+        scale: float = 1.0,
+        meta: dict[str, Any] | None = None,
+    ) -> FlattenedMesh:
+        uv_arr = np.asarray(uv, dtype=np.float64)
+        face_arr = mesh_s.faces if faces is None else np.asarray(faces, dtype=np.int32)
+        out_meta = dict(meta or {})
+        uv_guarded, out_meta, guard_applied = _apply_flatten_size_guard(mesh_s, uv_arr, meta=out_meta)
+
+        if distortion_arr is None or bool(guard_applied):
+            dist = flattener._compute_distortion(mesh_s, uv_guarded)
+        else:
+            dist = np.asarray(distortion_arr, dtype=np.float64)
+
+        return FlattenedMesh(
+            uv=uv_guarded,
+            faces=face_arr,
+            original_mesh=mesh_s,
+            distortion_per_face=dist,
+            scale=float(scale),
+            meta=out_meta,
+        )
+
     if m == "arap":
         init_text = str(initial_method or "lscm")
         init_t = init_text.lower().strip()
@@ -2295,7 +2465,13 @@ def flatten_with_method(
                 out.meta.update(cyl_meta)
         except Exception:
             _log_ignored_exception()
-        return out
+        return _build_result(
+            out.uv,
+            faces=out.faces,
+            distortion_arr=out.distortion_per_face,
+            scale=float(getattr(out, "scale", 1.0)),
+            meta=dict(getattr(out, "meta", {}) or {}),
+        )
 
     if m == "lscm":
         uv = flattener._safe_initial_parameterization(mesh_s, "lscm")
@@ -2307,11 +2483,9 @@ def flatten_with_method(
         uv = flattener._orient_uv_pca(uv)
         uv = _maybe_smooth_uv(uv)
         distortion_arr = flattener._compute_distortion(mesh_s, uv)
-        return FlattenedMesh(
-            uv=uv,
-            faces=mesh_s.faces,
-            original_mesh=mesh_s,
-            distortion_per_face=distortion_arr,
+        return _build_result(
+            uv,
+            distortion_arr=distortion_arr,
             scale=1.0,
             meta={"flatten_method": "lscm"},
         )
@@ -2350,11 +2524,9 @@ def flatten_with_method(
                 uv *= s
 
         distortion_arr = flattener._compute_distortion(mesh_s, uv)
-        return FlattenedMesh(
-            uv=uv,
-            faces=mesh_s.faces,
-            original_mesh=mesh_s,
-            distortion_per_face=distortion_arr,
+        return _build_result(
+            uv,
+            distortion_arr=distortion_arr,
             scale=1.0,
             meta={"flatten_method": "area", "distortion_weight": float(w)},
         )
@@ -2386,11 +2558,9 @@ def flatten_with_method(
             "cylinder_radius_input": None if cylinder_radius is None else float(cylinder_radius),
             **(cyl_meta or {}),
         }
-        return FlattenedMesh(
-            uv=uv,
-            faces=mesh_s.faces,
-            original_mesh=mesh_s,
-            distortion_per_face=distortion_arr,
+        return _build_result(
+            uv,
+            distortion_arr=distortion_arr,
             scale=1.0,
             meta=meta,
         )

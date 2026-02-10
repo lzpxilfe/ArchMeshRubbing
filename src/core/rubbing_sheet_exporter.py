@@ -275,10 +275,35 @@ class RubbingSheetExporter:
             outer_idx = np.where(dots >= 0.0)[0].astype(np.int32)
             inner_idx = np.where(dots < 0.0)[0].astype(np.int32)
 
+        # Fallback 2: robust surface separator (topology + cylindrical cues).
+        if outer_idx.size == 0 or inner_idx.size == 0:
+            try:
+                from .surface_separator import SurfaceSeparator
+
+                sep = SurfaceSeparator()
+                res = sep.auto_detect_surfaces(mesh, method="auto", return_submeshes=True)
+                if (
+                    res is not None
+                    and res.outer_surface is not None
+                    and res.inner_surface is not None
+                    and res.outer_surface.n_faces > 0
+                    and res.inner_surface.n_faces > 0
+                ):
+                    return res.outer_surface, res.inner_surface
+            except Exception:
+                pass
+
+        # Final fallback: keep sets disjoint so we never duplicate the whole mesh twice.
+        all_idx = np.arange(mesh.n_faces, dtype=np.int32)
+        if outer_idx.size == 0 and inner_idx.size > 0:
+            outer_idx = np.setdiff1d(all_idx, inner_idx, assume_unique=False).astype(np.int32, copy=False)
+        if inner_idx.size == 0 and outer_idx.size > 0:
+            inner_idx = np.setdiff1d(all_idx, outer_idx, assume_unique=False).astype(np.int32, copy=False)
+
         if outer_idx.size == 0:
-            outer_idx = np.arange(mesh.n_faces, dtype=np.int32)
+            outer_idx = all_idx
         if inner_idx.size == 0:
-            inner_idx = np.arange(mesh.n_faces, dtype=np.int32)
+            inner_idx = np.zeros((0,), dtype=np.int32)
 
         return mesh.extract_submesh(outer_idx), mesh.extract_submesh(inner_idx)
 

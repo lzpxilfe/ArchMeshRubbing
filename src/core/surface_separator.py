@@ -78,21 +78,11 @@ class SurfaceSeparator:
         """
         m = str(method or "auto").strip().lower()
         if m in {"auto", "best", "smart"}:
-            # 1) Cylindrical thickness split (roof tiles): robust and fast.
-            try:
-                r0 = self._auto_detect_surfaces_by_cylinder_radius(mesh, return_submeshes=bool(return_submeshes))
-                if bool(r0.meta.get("cylinder_ok", False)):
-                    return r0
-            except Exception:
-                log_once(
-                    _LOGGER,
-                    "surface_separator:auto:cylinder_failed",
-                    logging.DEBUG,
-                    "Auto surface separation: cylinder path failed; falling back",
-                    exc_info=True,
-                )
-
-            # 2) View-based split along estimated thickness axis (works even if normals are flipped).
+            r1 = None
+            # 1) View-first split:
+            # treat the shell as two opposite sides and propagate labels over topology.
+            # This is more stable on folded/occluded surfaces where simple camera visibility
+            # (or a single global cylinder fit) can be misleading.
             try:
                 r1 = self._auto_detect_surfaces_by_views(
                     mesh,
@@ -106,7 +96,19 @@ class SurfaceSeparator:
 
                 outer_n = int(getattr(r1.outer_face_indices, "size", 0) or 0)
                 inner_n = int(getattr(r1.inner_face_indices, "size", 0) or 0)
-                if outer_n > max(10, int(0.01 * n_faces)) and inner_n > max(10, int(0.01 * n_faces)):
+                migu_n = int(getattr(getattr(r1, "migu_face_indices", None), "size", 0) or 0)
+                meta1 = getattr(r1, "meta", {}) or {}
+                seed_outer_n = int(meta1.get("seed_outer_count", 0) or 0)
+                seed_inner_n = int(meta1.get("seed_inner_count", 0) or 0)
+                seed_frac = float(seed_outer_n + seed_inner_n) / float(max(1, n_faces))
+                migu_frac = float(migu_n) / float(max(1, n_faces))
+                views_confident = bool(
+                    outer_n > max(10, int(0.01 * n_faces))
+                    and inner_n > max(10, int(0.01 * n_faces))
+                    and seed_frac >= 0.10
+                    and migu_frac <= 0.20
+                )
+                if views_confident:
                     return r1
             except Exception:
                 log_once(
@@ -117,7 +119,26 @@ class SurfaceSeparator:
                     exc_info=True,
                 )
 
-            # 3) Fallback: global-normal split.
+            # 2) Fallback for tile-like meshes: cylindrical thickness split.
+            try:
+                r0 = self._auto_detect_surfaces_by_cylinder_radius(mesh, return_submeshes=bool(return_submeshes))
+                if bool(r0.meta.get("cylinder_ok", False)):
+                    return r0
+            except Exception:
+                log_once(
+                    _LOGGER,
+                    "surface_separator:auto:cylinder_failed",
+                    logging.DEBUG,
+                    "Auto surface separation: cylinder path failed; falling back",
+                    exc_info=True,
+                )
+
+            # If views succeeded but did not pass confidence gates, still prefer it over normals.
+            # (Normals-only split can be unstable when winding/curvature is noisy.)
+            if r1 is not None:
+                return r1
+
+            # 3) Final fallback: global-normal split.
             return self._auto_detect_surfaces_by_normals(
                 mesh,
                 reference_direction=reference_direction,
@@ -140,6 +161,507 @@ class SurfaceSeparator:
             reference_direction=reference_direction,
             return_submeshes=bool(return_submeshes),
         )
+
+    def infer_migu_from_outer_inner(
+        self,
+        mesh: MeshData,
+        *,
+        outer_face_indices: set[int] | list[int] | np.ndarray,
+        inner_face_indices: set[int] | list[int] | np.ndarray,
+        hops: int = 1,
+        vertex_dom_ratio: float = 1.20,
+        side_absdot_max: float = 0.45,
+        max_ratio: float = 0.35,
+        reference_direction: Optional[np.ndarray] = None,
+    ) -> tuple[np.ndarray, dict[str, Any]]:
+        """
+        현재 outer/inner 라벨 경계로부터 migu(측벽/두께 면) 후보를 추론합니다.
+
+        Notes:
+        - outer/inner 사이에 "미분류(unknown) 면"이 남아 있는 경우 unknown 우선으로 추론합니다.
+        - unknown이 없으면 outer/inner 경계 띠를 얇게 절삭하는 방식으로 후보를 만듭니다.
+        """
+
+        faces = np.asarray(getattr(mesh, "faces", np.zeros((0, 3))), dtype=np.int32)
+        if faces.ndim != 2 or faces.shape[0] <= 0 or faces.shape[1] < 3:
+            return np.zeros((0,), dtype=np.int32), {"method": "boundary_bridge", "reason": "invalid_faces"}
+        faces = faces[:, :3]
+        n_faces = int(faces.shape[0])
+        if n_faces <= 0:
+            return np.zeros((0,), dtype=np.int32), {"method": "boundary_bridge", "reason": "empty_faces"}
+
+        # Memory guard for very large meshes.
+        if n_faces > 2_000_000:
+            return np.zeros((0,), dtype=np.int32), {"method": "boundary_bridge", "reason": "too_large"}
+
+        def _to_face_index_array(ids: set[int] | list[int] | np.ndarray) -> np.ndarray:
+            if ids is None:
+                return np.zeros((0,), dtype=np.int32)
+            try:
+                arr = np.asarray(ids, dtype=np.int64).reshape(-1)
+            except Exception:
+                try:
+                    arr = np.asarray(list(ids), dtype=np.int64).reshape(-1)
+                except Exception:
+                    arr = np.zeros((0,), dtype=np.int64)
+            if arr.size <= 0:
+                return np.zeros((0,), dtype=np.int32)
+            valid = np.isfinite(arr)
+            if not bool(np.any(valid)):
+                return np.zeros((0,), dtype=np.int32)
+            arr = arr[valid]
+            arr = arr[(arr >= 0) & (arr < n_faces)]
+            if arr.size <= 0:
+                return np.zeros((0,), dtype=np.int32)
+            return np.unique(arr.astype(np.int32, copy=False))
+
+        outer_idx = _to_face_index_array(outer_face_indices)
+        inner_idx = _to_face_index_array(inner_face_indices)
+        if outer_idx.size <= 0 or inner_idx.size <= 0:
+            return np.zeros((0,), dtype=np.int32), {"method": "boundary_bridge", "reason": "missing_labels"}
+
+        outer_mask = np.zeros((n_faces,), dtype=bool)
+        inner_mask = np.zeros((n_faces,), dtype=bool)
+        outer_mask[outer_idx] = True
+        inner_mask[inner_idx] = True
+
+        # Resolve overlap: outer wins for stability.
+        overlap = outer_mask & inner_mask
+        if bool(np.any(overlap)):
+            inner_mask[overlap] = False
+        unknown_mask = ~(outer_mask | inner_mask)
+        has_unknown = bool(np.any(unknown_mask))
+
+        # Build adjacent face pairs from shared edges.
+        e01 = faces[:, [0, 1]]
+        e12 = faces[:, [1, 2]]
+        e20 = faces[:, [2, 0]]
+        edges = np.vstack([e01, e12, e20]).astype(np.int32, copy=False)
+        edges.sort(axis=1)
+        # Edge rows are stacked as [all e01, all e12, all e20], so face ids must be tiled (not repeated).
+        face_ids = np.tile(np.arange(n_faces, dtype=np.int32), 3)
+
+        order = np.lexsort((edges[:, 1], edges[:, 0]))
+        edges_s = edges[order]
+        face_s = face_ids[order]
+
+        is_new = np.empty((edges_s.shape[0],), dtype=bool)
+        is_new[0] = True
+        is_new[1:] = np.any(edges_s[1:] != edges_s[:-1], axis=1)
+        starts = np.flatnonzero(is_new).astype(np.int32, copy=False)
+        counts = np.diff(np.append(starts, edges_s.shape[0])).astype(np.int32, copy=False)
+
+        pair_mask = counts == 2
+        if not bool(np.any(pair_mask)):
+            return np.zeros((0,), dtype=np.int32), {"method": "boundary_bridge", "reason": "no_adjacency_pairs"}
+
+        a = face_s[starts[pair_mask]]
+        b = face_s[starts[pair_mask] + 1]
+        hops_i = int(max(0, min(int(hops), 3)))
+
+        # Direct outer<->inner touching faces (strip carving fallback).
+        cross = (outer_mask[a] & inner_mask[b]) | (inner_mask[a] & outer_mask[b])
+        seed_cross = np.zeros((n_faces,), dtype=bool)
+        if bool(np.any(cross)):
+            seed_cross[a[cross]] = True
+            seed_cross[b[cross]] = True
+
+        # Bridge faces: adjacent to both outer and inner.
+        # This catches true migu faces when they sit between outer and inner.
+        adj_outer = np.zeros((n_faces,), dtype=bool)
+        adj_inner = np.zeros((n_faces,), dtype=bool)
+        adj_outer[a] |= outer_mask[b]
+        adj_outer[b] |= outer_mask[a]
+        adj_inner[a] |= inner_mask[b]
+        adj_inner[b] |= inner_mask[a]
+        seed_bridge = adj_outer & adj_inner
+
+        # Unknown-bridge propagation:
+        # expand unknown faces connected to outer and inner from both sides, then intersect.
+        seed_unknown = np.zeros((n_faces,), dtype=bool)
+        touch_outer = np.zeros((n_faces,), dtype=bool)
+        touch_inner = np.zeros((n_faces,), dtype=bool)
+        ao = unknown_mask[a] & outer_mask[b]
+        bo = unknown_mask[b] & outer_mask[a]
+        ai = unknown_mask[a] & inner_mask[b]
+        bi = unknown_mask[b] & inner_mask[a]
+        if bool(np.any(ao)):
+            touch_outer[a[ao]] = True
+        if bool(np.any(bo)):
+            touch_outer[b[bo]] = True
+        if bool(np.any(ai)):
+            touch_inner[a[ai]] = True
+        if bool(np.any(bi)):
+            touch_inner[b[bi]] = True
+
+        uu = unknown_mask[a] & unknown_mask[b]
+        ua = a[uu]
+        ub = b[uu]
+        if ua.size > 0:
+            reach_outer = touch_outer.copy()
+            reach_inner = touch_inner.copy()
+            bridge_steps = int(max(1, min(hops_i + 1, 4)))
+            for _ in range(bridge_steps):
+                near_o = reach_outer[ua] | reach_outer[ub]
+                if bool(np.any(near_o)):
+                    reach_outer[ua[near_o]] = True
+                    reach_outer[ub[near_o]] = True
+                near_i = reach_inner[ua] | reach_inner[ub]
+                if bool(np.any(near_i)):
+                    reach_inner[ua[near_i]] = True
+                    reach_inner[ub[near_i]] = True
+            seed_unknown = unknown_mask & reach_outer & reach_inner
+
+        if bool(np.any(seed_unknown)):
+            seed = seed_unknown | (seed_cross & unknown_mask)
+            mode = "unknown_bridge"
+        else:
+            seed = seed_bridge | seed_cross
+            mode = "boundary_strip"
+
+        if not bool(np.any(seed)):
+            return np.zeros((0,), dtype=np.int32), {"method": "boundary_bridge", "reason": "no_boundary_seed", "mode": mode}
+
+        belt = seed.copy()
+        for _ in range(hops_i):
+            near = belt[a] | belt[b]
+            if not bool(np.any(near)):
+                break
+            belt[a[near]] = True
+            belt[b[near]] = True
+
+        # Vertex-dominance bridge prior.
+        bridge_dom = np.zeros((n_faces,), dtype=bool)
+        try:
+            n_vertices = int(np.max(faces) + 1) if faces.size > 0 else 0
+            if n_vertices > 0:
+                v_outer = np.bincount(faces[outer_mask].ravel(), minlength=n_vertices).astype(np.float64, copy=False)
+                v_inner = np.bincount(faces[inner_mask].ravel(), minlength=n_vertices).astype(np.float64, copy=False)
+                dom_ratio = float(max(1.0, float(vertex_dom_ratio)))
+                dom_outer = (v_outer > (dom_ratio * v_inner)) & (v_outer > 0.0)
+                dom_inner = (v_inner > (dom_ratio * v_outer)) & (v_inner > 0.0)
+                bridge_dom = np.any(dom_outer[faces], axis=1) & np.any(dom_inner[faces], axis=1)
+        except Exception:
+            bridge_dom = np.zeros((n_faces,), dtype=bool)
+        if has_unknown:
+            bridge_dom = bridge_dom & unknown_mask
+        else:
+            # In fully-labeled meshes this prior can over-capture; rely on boundary strip instead.
+            bridge_dom = np.zeros((n_faces,), dtype=bool)
+
+        # Side-wall prior: faces near-perpendicular to thickness axis.
+        side = np.ones((n_faces,), dtype=bool)
+        try:
+            d = np.asarray(reference_direction, dtype=np.float64).reshape(-1) if reference_direction is not None else self._estimate_reference_direction(mesh)
+            d = np.asarray(d, dtype=np.float64).reshape(-1)
+            if d.size < 3 or not np.isfinite(d[:3]).all():
+                d = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+            d = d[:3]
+            d = d / (float(np.linalg.norm(d)) + 1e-12)
+
+            if getattr(mesh, "face_normals", None) is None:
+                mesh.compute_normals(compute_vertex_normals=False)
+            fn = np.asarray(getattr(mesh, "face_normals", None), dtype=np.float64)
+            if fn.ndim == 2 and fn.shape[0] == n_faces and fn.shape[1] >= 3:
+                dotn = np.abs(fn[:, :3] @ d.reshape(3,))
+                thr = float(np.clip(float(side_absdot_max), 0.0, 1.0))
+                side = np.isfinite(dotn) & (dotn <= thr)
+        except Exception:
+            side = np.ones((n_faces,), dtype=bool)
+
+        if has_unknown:
+            keep = ((seed | bridge_dom | (belt & side)) & unknown_mask)
+            if not bool(np.any(keep)):
+                # Fallback for fully-labeled or noisy cases.
+                keep = seed | (belt & side)
+        else:
+            keep = seed | (belt & side)
+
+        # Prevent over-capture on noisy meshes.
+        ratio_max = float(np.clip(float(max_ratio), 0.05, 0.80))
+        frac = float(np.mean(keep)) if keep.size else 0.0
+        clamped = False
+        if frac > ratio_max:
+            clamped = True
+            keep = seed.copy()
+            if has_unknown:
+                keep = keep & unknown_mask
+                if not bool(np.any(keep)):
+                    keep = seed.copy()
+
+        idx = np.where(keep)[0].astype(np.int32, copy=False)
+        meta = {
+            "method": "boundary_bridge",
+            "mode": mode,
+            "hops": int(hops_i),
+            "seed_count": int(np.count_nonzero(seed)),
+            "unknown_count": int(np.count_nonzero(unknown_mask)),
+            "ratio": float(frac),
+            "max_ratio": float(ratio_max),
+            "clamped": bool(clamped),
+        }
+        return idx, meta
+
+    def assist_outer_inner_from_seeds(
+        self,
+        mesh: MeshData,
+        *,
+        outer_face_indices: set[int] | list[int] | np.ndarray,
+        inner_face_indices: set[int] | list[int] | np.ndarray,
+        migu_face_indices: set[int] | list[int] | np.ndarray | None = None,
+        method: str = "views",
+        conservative: bool = True,
+        min_seed: int = 24,
+    ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+        """
+        사용자 수동 라벨(outer/inner)을 씨드로 사용해 미분류 면만 보조 분류합니다.
+
+        원칙:
+        - 기존 수동 라벨은 유지(덮어쓰기 없음)
+        - migu 라벨은 제외
+        - auto 결과는 씨드와 일치하도록 orientation 정렬 후, unknown에만 적용
+        - conservative=True면 auto + 두께축(t) 규칙이 동시에 동의하는 면만 채움
+        """
+        faces = np.asarray(getattr(mesh, "faces", np.zeros((0, 3))), dtype=np.int32)
+        vertices = np.asarray(getattr(mesh, "vertices", np.zeros((0, 3))), dtype=np.float64)
+        if (
+            vertices.ndim != 2
+            or vertices.shape[0] <= 0
+            or faces.ndim != 2
+            or faces.shape[0] <= 0
+            or faces.shape[1] < 3
+        ):
+            empty = np.zeros((0,), dtype=np.int32)
+            return empty, empty, {"status": "invalid_mesh", "reason": "empty_or_invalid"}
+
+        faces = faces[:, :3]
+        n_faces = int(faces.shape[0])
+        min_seed_i = int(max(1, int(min_seed)))
+
+        def _to_face_index_array(ids: set[int] | list[int] | np.ndarray | None) -> np.ndarray:
+            if ids is None:
+                return np.zeros((0,), dtype=np.int32)
+            try:
+                arr = np.asarray(ids, dtype=np.int64).reshape(-1)
+            except Exception:
+                try:
+                    arr = np.asarray(list(ids), dtype=np.int64).reshape(-1)
+                except Exception:
+                    arr = np.zeros((0,), dtype=np.int64)
+            if arr.size <= 0:
+                return np.zeros((0,), dtype=np.int32)
+            valid = np.isfinite(arr)
+            if not bool(np.any(valid)):
+                return np.zeros((0,), dtype=np.int32)
+            arr = arr[valid]
+            arr = arr[(arr >= 0) & (arr < n_faces)]
+            if arr.size <= 0:
+                return np.zeros((0,), dtype=np.int32)
+            return np.unique(arr.astype(np.int32, copy=False))
+
+        outer_seed_idx = _to_face_index_array(outer_face_indices)
+        inner_seed_idx = _to_face_index_array(inner_face_indices)
+        migu_idx = _to_face_index_array(migu_face_indices)
+
+        migu_mask = np.zeros((n_faces,), dtype=bool)
+        if migu_idx.size > 0:
+            migu_mask[migu_idx] = True
+
+        outer_seed_mask = np.zeros((n_faces,), dtype=bool)
+        inner_seed_mask = np.zeros((n_faces,), dtype=bool)
+        if outer_seed_idx.size > 0:
+            outer_seed_mask[outer_seed_idx] = True
+        if inner_seed_idx.size > 0:
+            inner_seed_mask[inner_seed_idx] = True
+
+        # Keep labels exclusive and migu-safe (outer wins in overlap).
+        outer_seed_mask = outer_seed_mask & ~migu_mask
+        inner_seed_mask = inner_seed_mask & ~migu_mask
+        overlap_seed = outer_seed_mask & inner_seed_mask
+        if bool(np.any(overlap_seed)):
+            inner_seed_mask[overlap_seed] = False
+
+        seed_outer_n = int(np.count_nonzero(outer_seed_mask))
+        seed_inner_n = int(np.count_nonzero(inner_seed_mask))
+        if seed_outer_n < min_seed_i or seed_inner_n < min_seed_i:
+            return (
+                np.where(outer_seed_mask)[0].astype(np.int32, copy=False),
+                np.where(inner_seed_mask)[0].astype(np.int32, copy=False),
+                {
+                    "status": "missing_seeds",
+                    "seed_outer_count": seed_outer_n,
+                    "seed_inner_count": seed_inner_n,
+                    "min_seed_required": min_seed_i,
+                },
+            )
+
+        # 1) Auto prediction (views/cylinder/auto) for global shape prior.
+        auto_method = str(method or "views").strip().lower()
+        if auto_method not in {"views", "view", "visible", "auto", "best", "smart", "cylinder", "cyl", "tile"}:
+            auto_method = "views"
+        try:
+            pred = self.auto_detect_surfaces(mesh, method=auto_method, return_submeshes=False)
+        except Exception as e:
+            return (
+                np.where(outer_seed_mask)[0].astype(np.int32, copy=False),
+                np.where(inner_seed_mask)[0].astype(np.int32, copy=False),
+                {
+                    "status": "auto_failed",
+                    "method": auto_method,
+                    "error": f"{type(e).__name__}: {e}",
+                },
+            )
+
+        pred_outer = np.zeros((n_faces,), dtype=bool)
+        pred_inner = np.zeros((n_faces,), dtype=bool)
+        try:
+            po = np.asarray(getattr(pred, "outer_face_indices", np.zeros((0,), dtype=np.int32)), dtype=np.int32).reshape(-1)
+        except Exception:
+            po = np.zeros((0,), dtype=np.int32)
+        try:
+            pi = np.asarray(getattr(pred, "inner_face_indices", np.zeros((0,), dtype=np.int32)), dtype=np.int32).reshape(-1)
+        except Exception:
+            pi = np.zeros((0,), dtype=np.int32)
+        if po.size > 0:
+            valid = (po >= 0) & (po < n_faces)
+            pred_outer[po[valid]] = True
+        if pi.size > 0:
+            valid = (pi >= 0) & (pi < n_faces)
+            pred_inner[pi[valid]] = True
+
+        pred_outer = pred_outer & ~migu_mask
+        pred_inner = pred_inner & ~migu_mask
+
+        # 2) Align orientation to user seeds (direct vs swapped).
+        direct_hits = int(np.count_nonzero(pred_outer & outer_seed_mask) + np.count_nonzero(pred_inner & inner_seed_mask))
+        swapped_hits = int(np.count_nonzero(pred_outer & inner_seed_mask) + np.count_nonzero(pred_inner & outer_seed_mask))
+        swapped = bool(swapped_hits > direct_hits)
+        mapped_outer = pred_inner if swapped else pred_outer
+        mapped_inner = pred_outer if swapped else pred_inner
+        mapping = "swapped" if swapped else "direct"
+
+        unknown_mask = ~(outer_seed_mask | inner_seed_mask | migu_mask)
+
+        # 3) Conservative consensus: auto result AND thickness-axis rule.
+        rule_outer = np.ones((n_faces,), dtype=bool)
+        rule_inner = np.ones((n_faces,), dtype=bool)
+        rule_ok = False
+        rule_sep_ratio = 0.0
+        try:
+            if bool(conservative):
+                d = np.asarray(self._estimate_reference_direction(mesh), dtype=np.float64).reshape(-1)
+                if d.size >= 3 and np.isfinite(d[:3]).all():
+                    d = d[:3]
+                    d = d / (float(np.linalg.norm(d)) + 1e-12)
+                    t = np.empty((n_faces,), dtype=np.float32)
+                    try:
+                        chunk = int(getattr(mesh, "_assist_axis_chunk_faces", 250000) or 250000)
+                    except Exception:
+                        chunk = 250000
+                    chunk = max(20000, min(chunk, 500000))
+                    for start in range(0, n_faces, chunk):
+                        end = min(n_faces, start + chunk)
+                        f = np.asarray(faces[start:end, :3], dtype=np.int32)
+                        if f.size == 0:
+                            continue
+                        cent = (vertices[f[:, 0]] + vertices[f[:, 1]] + vertices[f[:, 2]]) / 3.0
+                        t[start:end] = (cent @ d.reshape(3,)).astype(np.float32, copy=False)
+
+                    t64 = t.astype(np.float64, copy=False)
+                    to = t64[outer_seed_mask]
+                    ti = t64[inner_seed_mask]
+                    if to.size > 0 and ti.size > 0:
+                        mo = float(np.nanmedian(to))
+                        mi = float(np.nanmedian(ti))
+                        mid = 0.5 * (mo + mi)
+                        gap = float(abs(mo - mi))
+                        mad_o = float(np.nanmedian(np.abs(to - mo))) if to.size > 0 else 0.0
+                        mad_i = float(np.nanmedian(np.abs(ti - mi))) if ti.size > 0 else 0.0
+                        spread = float(max(mad_o, mad_i, 1e-12))
+                        rule_sep_ratio = float(gap / spread) if spread > 0.0 else 0.0
+                        try:
+                            raw = getattr(mesh, "_assist_rule_min_sep_ratio", None)
+                            min_sep_ratio = 1.5 if raw is None else float(raw)
+                        except Exception:
+                            min_sep_ratio = 1.5
+                        if np.isfinite(rule_sep_ratio) and rule_sep_ratio >= float(max(0.0, min_sep_ratio)):
+                            dead = float(max(0.0, 0.05 * gap))
+                            if mo >= mi:
+                                rule_outer = np.isfinite(t64) & (t64 >= (mid + dead))
+                                rule_inner = np.isfinite(t64) & (t64 <= (mid - dead))
+                            else:
+                                rule_outer = np.isfinite(t64) & (t64 <= (mid - dead))
+                                rule_inner = np.isfinite(t64) & (t64 >= (mid + dead))
+                            rule_ok = True
+        except Exception:
+            rule_ok = False
+
+        if bool(conservative) and rule_ok:
+            # Conservative-but-usable:
+            # keep mapped prediction unless thickness rule strongly contradicts it.
+            # (strict consensus was too sparse for practical manual assist.)
+            veto_outer = unknown_mask & mapped_outer & rule_inner
+            veto_inner = unknown_mask & mapped_inner & rule_outer
+            add_outer = unknown_mask & mapped_outer & ~veto_outer
+            add_inner = unknown_mask & mapped_inner & ~veto_inner
+            assist_mode = "mapped_with_veto"
+        else:
+            add_outer = unknown_mask & mapped_outer
+            add_inner = unknown_mask & mapped_inner
+            assist_mode = "mapped_only"
+
+        conflict = add_outer & add_inner
+        if bool(np.any(conflict)):
+            add_outer[conflict] = False
+            add_inner[conflict] = False
+
+        outer_final = (outer_seed_mask | add_outer) & ~migu_mask
+        inner_final = (inner_seed_mask | add_inner) & ~migu_mask
+        # Keep final labels exclusive.
+        overlap_final = outer_final & inner_final
+        if bool(np.any(overlap_final)):
+            inner_final[overlap_final] = False
+
+        unresolved = unknown_mask & ~(add_outer | add_inner)
+
+        outer_idx = np.where(outer_final)[0].astype(np.int32, copy=False)
+        inner_idx = np.where(inner_final)[0].astype(np.int32, copy=False)
+        unresolved_count = int(np.count_nonzero(unresolved))
+        try:
+            raw_keep = getattr(mesh, "_assist_unresolved_keep_max", None)
+            unresolved_keep_max = 800_000 if raw_keep is None else int(raw_keep)
+        except Exception:
+            unresolved_keep_max = 800_000
+        unresolved_keep_max = max(0, int(unresolved_keep_max))
+        unresolved_idx = None
+        unresolved_truncated = False
+        if unresolved_count > 0 and unresolved_keep_max > 0:
+            if unresolved_count <= unresolved_keep_max:
+                unresolved_idx = np.where(unresolved)[0].astype(np.int32, copy=False)
+            else:
+                unresolved_truncated = True
+
+        return outer_idx, inner_idx, {
+            "status": "ok",
+            "method": "assist_seeded",
+            "auto_method": auto_method,
+            "auto_mapping": mapping,
+            "assist_mode": assist_mode,
+            "conservative": bool(conservative),
+            "seed_outer_count": seed_outer_n,
+            "seed_inner_count": seed_inner_n,
+            "added_outer_count": int(np.count_nonzero(add_outer)),
+            "added_inner_count": int(np.count_nonzero(add_inner)),
+            "unknown_count": int(np.count_nonzero(unknown_mask)),
+            "unresolved_count": int(unresolved_count),
+            "unresolved_indices": unresolved_idx,
+            "unresolved_truncated": bool(unresolved_truncated),
+            "migu_count": int(np.count_nonzero(migu_mask)),
+            "direct_hits": int(direct_hits),
+            "swapped_hits": int(swapped_hits),
+            "rule_used": bool(rule_ok),
+            "rule_sep_ratio": float(rule_sep_ratio),
+        }
 
     def _auto_detect_surfaces_by_normals(
         self,
@@ -623,6 +1145,19 @@ class SurfaceSeparator:
             tol_val = float(scale) * 0.75
         tol_f = float(max(0.0, float(tol_val)))
 
+        # Visibility robustness:
+        # sample front depth from a local neighborhood (default: 3x3) to reduce
+        # pixel-quantization jitter when model orientation changes.
+        try:
+            raw_vis_nbhd = getattr(mesh, "_views_visibility_neighborhood", None)
+            if raw_vis_nbhd is None:
+                vis_nbhd = 2 if n_faces >= 1_000_000 else 1
+            else:
+                vis_nbhd = int(raw_vis_nbhd)
+        except Exception:
+            vis_nbhd = 1
+        vis_nbhd = max(0, min(vis_nbhd, 2))
+
         try:
             chunk = int(getattr(mesh, "_views_classify_chunk_faces", 250000) or 250000)
         except Exception:
@@ -690,6 +1225,17 @@ class SurfaceSeparator:
             try:
                 front_p = depth_plus[py, px].astype(np.float32, copy=False)
                 front_m = depth_minus[py, px].astype(np.float32, copy=False)
+                if vis_nbhd > 0:
+                    h_max = int(img_h - 1)
+                    w_max = int(img_w - 1)
+                    for oy in range(-vis_nbhd, vis_nbhd + 1):
+                        yy = np.clip(py + oy, 0, h_max).astype(np.int32, copy=False)
+                        for ox in range(-vis_nbhd, vis_nbhd + 1):
+                            if ox == 0 and oy == 0:
+                                continue
+                            xx = np.clip(px + ox, 0, w_max).astype(np.int32, copy=False)
+                            front_p = np.maximum(front_p, depth_plus[yy, xx].astype(np.float32, copy=False))
+                            front_m = np.maximum(front_m, depth_minus[yy, xx].astype(np.float32, copy=False))
             except Exception:
                 front_p = np.full((end - start,), -np.inf, dtype=np.float32)
                 front_m = np.full((end - start,), -np.inf, dtype=np.float32)
@@ -708,7 +1254,7 @@ class SurfaceSeparator:
         except Exception:
             med = 0.0
 
-        # Normal prior for occluded folds + migu detection (side walls)
+        # Normal prior for migu detection (side walls)
         dotn = None
         try:
             if getattr(mesh, "face_normals", None) is None:
@@ -722,46 +1268,244 @@ class SurfaceSeparator:
         except Exception:
             dotn = None
 
-        if isinstance(dotn, np.ndarray) and dotn.shape == (n_faces,):
-            seed_fix_thr = 0.35  # require a strong normal agreement to override view seeds
-            finite_n = np.isfinite(dotn)
-            fix_to_outer = seed_inner & finite_n & (dotn >= float(seed_fix_thr))
-            fix_to_inner = seed_outer & finite_n & (dotn <= -float(seed_fix_thr))
-            if bool(fix_to_outer.any()):
-                seed_outer = seed_outer | fix_to_outer
-                seed_inner = seed_inner & ~fix_to_outer
-            if bool(fix_to_inner.any()):
-                seed_inner = seed_inner | fix_to_inner
-                seed_outer = seed_outer & ~fix_to_inner
-
-        ambiguous = ~(seed_outer | seed_inner)
-        if isinstance(dotn, np.ndarray) and dotn.shape == (n_faces,):
-            thr = 0.12  # small but non-zero: ignore near-perpendicular faces (side walls)
-            confident = ambiguous & np.isfinite(dotn) & (np.abs(dotn) >= float(thr))
-            assign_outer = (ambiguous & ~confident & (t >= float(med))) | (confident & (dotn >= 0.0))
-        else:
-            assign_outer = ambiguous & (t >= float(med))
-        assign_inner = ambiguous & ~assign_outer
-
-        outer_mask = seed_outer | assign_outer
-        inner_mask = seed_inner | assign_inner
-
         migu_mask = None
         if isinstance(dotn, np.ndarray) and dotn.shape == (n_faces,):
             # Side walls are near-perpendicular to the thickness axis.
-            migu_absdot_max = 0.35
+            try:
+                raw = getattr(mesh, "_views_migu_absdot_max", None)
+                migu_absdot_max = 0.35 if raw is None else float(raw)
+            except Exception:
+                migu_absdot_max = 0.35
+            migu_absdot_max = float(np.clip(migu_absdot_max, 0.0, 1.0))
             mm = np.isfinite(dotn) & (np.abs(dotn) <= float(migu_absdot_max))
             # Guard: if axis guess is bad, this can swallow too much; disable in that case.
             try:
                 frac = float(np.mean(mm)) if mm.size else 0.0
             except Exception:
                 frac = 0.0
-            if frac > 0.40:
+            try:
+                raw = getattr(mesh, "_views_migu_max_frac", None)
+                migu_max_frac = 0.40 if raw is None else float(raw)
+            except Exception:
+                migu_max_frac = 0.40
+            migu_max_frac = float(np.clip(migu_max_frac, 0.05, 0.95))
+            if frac > float(migu_max_frac):
                 mm = np.zeros((n_faces,), dtype=bool)
-            if bool(mm.any()):
-                outer_mask = outer_mask & ~mm
-                inner_mask = inner_mask & ~mm
-                migu_mask = mm
+            migu_mask = mm
+
+        non_migu = ~migu_mask if isinstance(migu_mask, np.ndarray) else np.ones((n_faces,), dtype=bool)
+        outer_seed = seed_outer & non_migu
+        inner_seed = seed_inner & non_migu
+
+        outer_mask = None
+        inner_mask = None
+        topology_used = False
+        topology_mode = "fallback"
+
+        # Topology assignment:
+        # treat outer/inner as two opposite shell sides, then assign unlabeled faces by
+        # connectivity components on the non-migu graph. This avoids mislabeling occluded
+        # folds by normal sign alone.
+        try:
+            use_topology = bool(getattr(mesh, "_views_use_topology_assignment", True))
+        except Exception:
+            use_topology = True
+        try:
+            topo_max_faces = int(getattr(mesh, "_views_topology_max_faces", 1_200_000) or 1_200_000)
+        except Exception:
+            topo_max_faces = 1_200_000
+
+        if (
+            use_topology
+            and n_faces <= max(10_000, int(topo_max_faces))
+            and bool(np.any(outer_seed))
+            and bool(np.any(inner_seed))
+        ):
+            try:
+                from scipy import sparse as _sparse
+                from scipy.sparse import csgraph as _csgraph
+
+                e01 = faces[:, [0, 1]]
+                e12 = faces[:, [1, 2]]
+                e20 = faces[:, [2, 0]]
+                edges = np.vstack([e01, e12, e20]).astype(np.int32, copy=False)
+                edges.sort(axis=1)
+                face_ids = np.tile(np.arange(n_faces, dtype=np.int32), 3)
+
+                order = np.lexsort((edges[:, 1], edges[:, 0]))
+                edges_s = edges[order]
+                face_s = face_ids[order]
+
+                is_new = np.empty((edges_s.shape[0],), dtype=bool)
+                is_new[0] = True
+                is_new[1:] = np.any(edges_s[1:] != edges_s[:-1], axis=1)
+                starts = np.flatnonzero(is_new).astype(np.int32, copy=False)
+                counts = np.diff(np.append(starts, edges_s.shape[0])).astype(np.int32, copy=False)
+                pair_mask = counts == 2
+
+                a = face_s[starts[pair_mask]]
+                b = face_s[starts[pair_mask] + 1]
+                keep_pair = non_migu[a] & non_migu[b]
+                a = a[keep_pair]
+                b = b[keep_pair]
+
+                if a.size > 0:
+                    rows = np.concatenate([a, b]).astype(np.int32, copy=False)
+                    cols = np.concatenate([b, a]).astype(np.int32, copy=False)
+                    data = np.ones((rows.size,), dtype=np.uint8)
+                    graph = _sparse.csr_matrix((data, (rows, cols)), shape=(n_faces, n_faces))
+                    use_geodesic = False
+                    try:
+                        topo_geo_max_faces = int(getattr(mesh, "_views_topology_geodesic_max_faces", 400_000) or 400_000)
+                    except Exception:
+                        topo_geo_max_faces = 400_000
+
+                    # Preferred: shortest-path assignment from outer/inner seed sets.
+                    # This preserves local "two-sided shell" structure even when both sides
+                    # are connected in one component (e.g. noisy normals or folds).
+                    if n_faces <= max(20_000, int(topo_geo_max_faces)):
+                        try:
+                            src_outer = np.flatnonzero(outer_seed).astype(np.int32, copy=False)
+                            src_inner = np.flatnonzero(inner_seed).astype(np.int32, copy=False)
+
+                            # Guard: too many sources can make multi-source dijkstra expensive.
+                            # Keep deterministic coverage via stride downsampling.
+                            try:
+                                max_src = int(getattr(mesh, "_views_topology_geodesic_max_sources", 4096) or 4096)
+                            except Exception:
+                                max_src = 4096
+                            max_src = max(256, int(max_src))
+                            if src_outer.size > max_src:
+                                step = max(1, int(np.ceil(float(src_outer.size) / float(max_src))))
+                                src_outer = src_outer[::step][:max_src]
+                            if src_inner.size > max_src:
+                                step = max(1, int(np.ceil(float(src_inner.size) / float(max_src))))
+                                src_inner = src_inner[::step][:max_src]
+
+                            if src_outer.size > 0 and src_inner.size > 0:
+                                d_out = _csgraph.dijkstra(
+                                    graph,
+                                    directed=False,
+                                    indices=src_outer,
+                                    unweighted=True,
+                                    min_only=True,
+                                )
+                                d_in = _csgraph.dijkstra(
+                                    graph,
+                                    directed=False,
+                                    indices=src_inner,
+                                    unweighted=True,
+                                    min_only=True,
+                                )
+
+                                d_out = np.asarray(d_out, dtype=np.float64).reshape(-1)
+                                d_in = np.asarray(d_in, dtype=np.float64).reshape(-1)
+                                f_out = np.isfinite(d_out)
+                                f_in = np.isfinite(d_in)
+
+                                face_cls = np.zeros((n_faces,), dtype=np.int8)
+                                only_o = non_migu & f_out & ~f_in
+                                only_i = non_migu & f_in & ~f_out
+                                face_cls[only_o] = 1
+                                face_cls[only_i] = -1
+
+                                both = non_migu & f_out & f_in
+                                if bool(np.any(both)):
+                                    both_idx = np.flatnonzero(both).astype(np.int32, copy=False)
+                                    do = d_out[both_idx]
+                                    di = d_in[both_idx]
+                                    o_win = do < di
+                                    i_win = di < do
+                                    if bool(np.any(o_win)):
+                                        face_cls[both_idx[o_win]] = 1
+                                    if bool(np.any(i_win)):
+                                        face_cls[both_idx[i_win]] = -1
+                                    tie = ~(o_win | i_win)
+                                    if bool(np.any(tie)):
+                                        tie_idx = both_idx[tie]
+                                        face_cls[tie_idx] = np.where(t[tie_idx] >= float(med), 1, -1).astype(np.int8, copy=False)
+
+                                unresolved = non_migu & (face_cls == 0)
+                                if bool(np.any(unresolved)):
+                                    face_cls[unresolved] = np.where(t[unresolved] >= float(med), 1, -1).astype(np.int8, copy=False)
+
+                                outer_mask = non_migu & (face_cls > 0)
+                                inner_mask = non_migu & (face_cls <= 0)
+                                topology_used = True
+                                topology_mode = "geodesic"
+                                use_geodesic = True
+                        except Exception:
+                            use_geodesic = False
+
+                    if not use_geodesic:
+                        comp_n, comp = _csgraph.connected_components(graph, directed=False, return_labels=True)
+
+                        comp_outer = np.bincount(comp[outer_seed], minlength=comp_n).astype(np.int32, copy=False)
+                        comp_inner = np.bincount(comp[inner_seed], minlength=comp_n).astype(np.int32, copy=False)
+
+                        t64 = t.astype(np.float64, copy=False)
+                        comp_cnt = np.bincount(comp[non_migu], minlength=comp_n).astype(np.int32, copy=False)
+                        comp_sum_t = np.bincount(comp[non_migu], weights=t64[non_migu], minlength=comp_n).astype(np.float64, copy=False)
+                        comp_mean_t = np.zeros((comp_n,), dtype=np.float64)
+                        valid_comp = comp_cnt > 0
+                        comp_mean_t[valid_comp] = comp_sum_t[valid_comp] / np.maximum(comp_cnt[valid_comp], 1)
+
+                        comp_cls = np.zeros((comp_n,), dtype=np.int8)  # +1 outer, -1 inner
+                        only_outer = (comp_outer > 0) & (comp_inner == 0)
+                        only_inner = (comp_inner > 0) & (comp_outer == 0)
+                        comp_cls[only_outer] = 1
+                        comp_cls[only_inner] = -1
+
+                        both = (comp_outer > 0) & (comp_inner > 0)
+                        if bool(np.any(both)):
+                            both_idx = np.flatnonzero(both).astype(np.int32, copy=False)
+                            oc = comp_outer[both_idx]
+                            ic = comp_inner[both_idx]
+                            o_win = oc > ic
+                            i_win = ic > oc
+                            if bool(np.any(o_win)):
+                                comp_cls[both_idx[o_win]] = 1
+                            if bool(np.any(i_win)):
+                                comp_cls[both_idx[i_win]] = -1
+                            tie = ~(o_win | i_win)
+                            if bool(np.any(tie)):
+                                tie_idx = both_idx[tie]
+                                comp_cls[tie_idx] = np.where(comp_mean_t[tie_idx] >= float(med), 1, -1).astype(np.int8, copy=False)
+
+                        unassigned = comp_cls == 0
+                        if bool(np.any(unassigned)):
+                            comp_cls[unassigned] = np.where(comp_mean_t[unassigned] >= float(med), 1, -1).astype(np.int8, copy=False)
+
+                        face_cls = comp_cls[comp]
+                        outer_mask = non_migu & (face_cls > 0)
+                        inner_mask = non_migu & (face_cls <= 0)
+                        topology_used = True
+                        topology_mode = "component"
+            except Exception:
+                topology_used = False
+                topology_mode = "fallback"
+
+        if outer_mask is None or inner_mask is None:
+            ambiguous = non_migu & ~(outer_seed | inner_seed)
+            try:
+                fallback_use_normals = bool(getattr(mesh, "_views_fallback_use_normals", False))
+            except Exception:
+                fallback_use_normals = False
+            if fallback_use_normals and isinstance(dotn, np.ndarray) and dotn.shape == (n_faces,):
+                try:
+                    raw = getattr(mesh, "_views_fallback_normal_conf_thr", None)
+                    thr = 0.12 if raw is None else float(raw)
+                except Exception:
+                    thr = 0.12
+                thr = float(np.clip(thr, 0.0, 1.0))
+                confident = ambiguous & np.isfinite(dotn) & (np.abs(dotn) >= float(thr))
+                assign_outer = (ambiguous & ~confident & (t >= float(med))) | (confident & (dotn >= 0.0))
+            else:
+                assign_outer = ambiguous & (t >= float(med))
+            assign_inner = ambiguous & ~assign_outer
+            outer_mask = outer_seed | assign_outer
+            inner_mask = inner_seed | assign_inner
+            topology_mode = "fallback"
 
         outer_indices = np.where(outer_mask)[0].astype(np.int32, copy=False)
         inner_indices = np.where(inner_mask)[0].astype(np.int32, copy=False)
@@ -783,7 +1527,13 @@ class SurfaceSeparator:
                 "img_size": (int(img_w), int(img_h)),
                 "depth_tol": None if depth_tol is None else float(depth_tol),
                 "depth_tol_effective": float(tol_f),
-                "migu_absdot_max": 0.35,
+                "visibility_neighborhood": int(vis_nbhd),
+                "migu_absdot_max": float(migu_absdot_max) if "migu_absdot_max" in locals() else 0.35,
+                "topology_assignment": bool(topology_used),
+                "topology_mode": str(topology_mode),
+                "seed_outer_count": int(np.count_nonzero(outer_seed)),
+                "seed_inner_count": int(np.count_nonzero(inner_seed)),
+                "fallback_use_normals": bool(locals().get("fallback_use_normals", False)),
             },
         )
     
@@ -792,7 +1542,8 @@ class SurfaceSeparator:
         기준 방향 자동 추정
 
         기와처럼 얇은 쉘/대칭 형상에서는 면적 가중 법선 합이 0에 가까워지기 쉬워서,
-        먼저 PCA로 "두께 방향"(최소 분산 축)을 추정하고 실패 시 기존 방식으로 fallback 합니다.
+        먼저 PCA 축 후보를 만들고, 가능하면 면 법선 정렬 점수로 두께축 후보를 재선정합니다.
+        실패 시 기존 방식으로 fallback 합니다.
         """
         try:
             vertices = np.asarray(mesh.vertices, dtype=np.float64)
@@ -802,7 +1553,9 @@ class SurfaceSeparator:
             if faces.ndim != 2 or faces.shape[0] == 0 or faces.shape[1] < 3:
                 return np.array([0.0, 0.0, 1.0], dtype=np.float64)
 
-            # 1) PCA: smallest-variance axis ~= sheet/thickness normal (robust for tiles).
+            # 1) PCA 축 후보 구성
+            pca_axes: list[np.ndarray] = []
+            pca_ref = None
             try:
                 v = np.asarray(vertices[:, :3], dtype=np.float64)
                 v = v[np.isfinite(v).all(axis=1)]
@@ -811,18 +1564,71 @@ class SurfaceSeparator:
                     x = v - c
                     cov = (x.T @ x) / float(max(1, x.shape[0] - 1))
                     w, vecs = np.linalg.eigh(cov)
-                    ref = vecs[:, int(np.argsort(w)[0])]
-                    ref_norm = float(np.linalg.norm(ref))
-                    if ref_norm > 1e-12:
-                        ref = (ref / ref_norm).astype(np.float64, copy=False)
-                        # Prefer +Z-ish direction to avoid random flips.
-                        if float(ref[2]) < 0.0:
-                            ref = -ref
-                        return ref
+                    order = np.argsort(w)
+                    for i in [int(order[0]), int(order[1]), int(order[2])]:
+                        a = np.asarray(vecs[:, i], dtype=np.float64).reshape(3)
+                        n = float(np.linalg.norm(a))
+                        if np.isfinite(n) and n > 1e-12:
+                            pca_axes.append((a / n).astype(np.float64, copy=False))
+                    if pca_axes:
+                        pca_ref = np.asarray(pca_axes[0], dtype=np.float64).reshape(3)
             except Exception:
-                pass
+                pca_axes = []
+                pca_ref = None
 
-            # 2) Area-weighted normal sum fallback.
+            # 2) Face normal 정렬 점수로 후보 축 재선정.
+            # 얇은 쉘인데 축별 분산이 비슷한 경우(주름/굽힘), 최소분산 축이 두께축이 아닐 수 있음.
+            ref = None
+            try:
+                use_normal_score = bool(getattr(mesh, "_refdir_use_normal_score", True))
+            except Exception:
+                use_normal_score = True
+            if use_normal_score:
+                try:
+                    if getattr(mesh, "face_normals", None) is None:
+                        mesh.compute_normals(compute_vertex_normals=False)
+                    fn = np.asarray(getattr(mesh, "face_normals", None), dtype=np.float64)
+                    if fn.ndim == 2 and fn.shape[0] == int(faces.shape[0]) and fn.shape[1] >= 3:
+                        fn = fn[:, :3]
+                        nrm = np.linalg.norm(fn, axis=1, keepdims=True)
+                        fn = fn / (nrm + 1e-12)
+                        candidates = list(pca_axes) if pca_axes else [
+                            np.array([1.0, 0.0, 0.0], dtype=np.float64),
+                            np.array([0.0, 1.0, 0.0], dtype=np.float64),
+                            np.array([0.0, 0.0, 1.0], dtype=np.float64),
+                        ]
+                        best_axis = None
+                        best_score = -np.inf
+                        for cand in candidates:
+                            a = np.asarray(cand, dtype=np.float64).reshape(3)
+                            n = float(np.linalg.norm(a))
+                            if not np.isfinite(n) or n <= 1e-12:
+                                continue
+                            a = a / n
+                            dots = np.abs(fn @ a.reshape(3,))
+                            dots = dots[np.isfinite(dots)]
+                            if dots.size < 16:
+                                continue
+                            q75 = float(np.quantile(dots, 0.75))
+                            med = float(np.median(dots))
+                            score = q75 + 0.15 * med
+                            if score > best_score:
+                                best_score = score
+                                best_axis = a.astype(np.float64, copy=False)
+                        if best_axis is not None:
+                            ref = best_axis
+                except Exception:
+                    ref = None
+
+            if ref is None and pca_ref is not None:
+                ref = pca_ref
+            if isinstance(ref, np.ndarray) and ref.shape == (3,):
+                # Prefer +Z-ish direction to avoid random flips.
+                if float(ref[2]) < 0.0:
+                    ref = -ref
+                return ref.astype(np.float64, copy=False)
+
+            # 3) Area-weighted normal sum fallback.
             v0 = vertices[faces[:, 0]]
             v1 = vertices[faces[:, 1]]
             v2 = vertices[faces[:, 2]]

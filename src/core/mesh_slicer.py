@@ -57,8 +57,12 @@ class MeshSlicer:
             if section is None:
                 return []
             
-            # Path3D를 2D로 변환
-            section_2d, to_3d_transform = section.to_planar()
+            # Path3D -> Path2D 변환
+            # trimesh 신버전은 to_2D(), 구버전은 to_planar()를 사용합니다.
+            try:
+                section_2d, to_3d_transform = section.to_2D()
+            except Exception:
+                section_2d, to_3d_transform = section.to_planar()
             
             # 폴리라인 추출
             contours = []
@@ -122,10 +126,9 @@ class MeshSlicer:
             저장된 파일 경로 또는 None
         """
         contours = self.slice_at_z(z_height)
-        
         if not contours:
             return None
-        
+
         mesh_unit = None
         try:
             meta = getattr(self.mesh, "metadata", None)
@@ -136,25 +139,100 @@ class MeshSlicer:
 
         svg_unit, unit_scale = _resolve_svg_unit(mesh_unit, unit)
         mesh_u = _normalize_unit(mesh_unit)
+        z_out = float(z_height) * float(unit_scale)
+        title = f"Cross Section at Z={z_out:.2f}{svg_unit}"
+        desc = f"Scale: 1:1 (units: {svg_unit}, mesh unit: {mesh_u})"
 
-        # 바운딩 박스 계산 (XY 평면)
+        return self.export_contours_svg(
+            contours,
+            output_path,
+            stroke_color=stroke_color,
+            stroke_width=stroke_width,
+            unit=unit,
+            grid_spacing_cm=grid_spacing_cm,
+            mesh_unit=mesh_unit,
+            title=title,
+            desc=desc,
+        )
+
+    def export_contours_svg(
+        self,
+        contours: List[np.ndarray],
+        output_path: str,
+        *,
+        stroke_color: str = "#FF0000",
+        stroke_width: float = 0.1,
+        unit: Optional[str] = None,
+        grid_spacing_cm: float = 1.0,
+        mesh_unit: Optional[str] = None,
+        title: Optional[str] = None,
+        desc: Optional[str] = None,
+    ) -> Optional[str]:
+        """
+        이미 계산된 3D contour 목록을 SVG로 저장합니다.
+
+        Args:
+            contours: 단면 폴리라인 리스트 (각 폴리라인은 Nx3 또는 Nx2)
+            output_path: 저장 경로
+            stroke_color: 선 색상
+            stroke_width: 선 두께 (cm 기준)
+            unit: SVG 출력 단위 ('mm' | 'cm' | 'm'). None이면 mesh 단위를 따름
+            grid_spacing_cm: 격자 간격 (cm)
+            mesh_unit: contour 좌표의 월드 단위 (None이면 self.mesh.metadata.unit 사용)
+            title: SVG title
+            desc: SVG desc
+        """
+        if not contours:
+            return None
+
+        if mesh_unit is None:
+            try:
+                meta = getattr(self.mesh, "metadata", None)
+                if isinstance(meta, dict):
+                    mesh_unit = meta.get("unit")
+            except Exception:
+                mesh_unit = None
+
+        prepared: List[np.ndarray] = []
+        for contour in contours:
+            try:
+                arr = np.asarray(contour, dtype=np.float64)
+            except Exception:
+                continue
+            if arr.ndim != 2 or arr.shape[0] < 2 or arr.shape[1] < 2:
+                continue
+            if arr.shape[1] == 2:
+                arr = np.column_stack([arr, np.zeros((arr.shape[0], 1), dtype=np.float64)])
+            else:
+                arr = arr[:, :3]
+            finite = np.all(np.isfinite(arr[:, :2]), axis=1)
+            arr = arr[finite]
+            if arr.shape[0] >= 2:
+                prepared.append(arr)
+
+        if not prepared:
+            return None
+
+        svg_unit, unit_scale = _resolve_svg_unit(mesh_unit, unit)
+        mesh_u = _normalize_unit(mesh_unit)
+
         try:
-            all_points = np.vstack([c for c in contours if len(c) >= 2])
+            all_points = np.vstack([c[:, :2] for c in prepared])
         except Exception:
             return None
         if all_points.size == 0:
             return None
+
         min_x, min_y = all_points[:, 0].min(), all_points[:, 1].min()
         max_x, max_y = all_points[:, 0].max(), all_points[:, 1].max()
-        
-        # 여백 5%
+
         margin_x = (max_x - min_x) * 0.05
         margin_y = (max_y - min_y) * 0.05
         min_x -= margin_x
         min_y -= margin_y
         max_x += margin_x
         max_y += margin_y
-        
+
         width = float(max_x - min_x)
         height = float(max_y - min_y)
         if not np.isfinite(width) or not np.isfinite(height):
@@ -164,24 +242,26 @@ class MeshSlicer:
 
         width_svg = width * float(unit_scale)
         height_svg = height * float(unit_scale)
-        z_out = float(z_height) * float(unit_scale)
 
         def _cm_to_svg_units(value_cm: float) -> float:
             if svg_unit == "mm":
                 return float(value_cm) * 10.0
+            if svg_unit == "m":
+                return float(value_cm) / 100.0
             return float(value_cm)
 
-        # SVG 생성
+        title_text = str(title or "Cross Section")
+        desc_text = str(desc or f"Scale: 1:1 (units: {svg_unit}, mesh unit: {mesh_u})")
+
         svg_parts = [
             '<?xml version="1.0" encoding="UTF-8"?>',
             '<svg xmlns="http://www.w3.org/2000/svg" ',
             f'width="{width_svg:.2f}{svg_unit}" height="{height_svg:.2f}{svg_unit}" ',
             f'viewBox="0 0 {width_svg:.4f} {height_svg:.4f}">',
-            f'<title>Cross Section at Z={z_out:.2f}{svg_unit}</title>',
-            f'<desc>Scale: 1:1 (units: {svg_unit}, mesh unit: {mesh_u})</desc>',
+            f'<title>{title_text}</title>',
+            f'<desc>{desc_text}</desc>',
         ]
 
-        # 격자 추가 (1cm 간격)
         units_per_cm = 10.0
         if mesh_u == "cm":
             units_per_cm = 1.0
@@ -206,28 +286,20 @@ class MeshSlicer:
                 )
             svg_parts.append('</g>')
 
-        # 단면 폴리라인
         section_sw = _cm_to_svg_units(float(stroke_width))
         svg_parts.append(
             f'<g id="section" stroke="{stroke_color}" fill="none" stroke-width="{section_sw:.4f}">'
         )
-        for contour in contours:
-            if len(contour) < 2:
-                continue
-            # SVG 좌표로 변환
+        for contour in prepared:
             svg_pts = contour[:, :2].copy()
             svg_pts[:, 0] = (svg_pts[:, 0] - float(min_x)) * float(unit_scale)
             svg_pts[:, 1] = (float(max_y) - svg_pts[:, 1]) * float(unit_scale)
-
             points_str = " ".join([f"{p[0]:.3f},{p[1]:.3f}" for p in svg_pts])
             svg_parts.append(f'<polyline points="{points_str}" fill="none" />')
         svg_parts.append('</g>')
-        
         svg_parts.append('</svg>')
-        
-        svg_content = '\n'.join(svg_parts)
-        
+
         with open(output_path, 'w', encoding='utf-8') as f:
-            f.write(svg_content)
-        
+            f.write('\n'.join(svg_parts))
+
         return output_path

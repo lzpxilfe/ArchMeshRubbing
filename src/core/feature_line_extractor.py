@@ -117,7 +117,8 @@ def extract_sharp_edges(
     e20 = faces[:, [2, 0]]
     edges = np.vstack([e01, e12, e20]).astype(np.int32, copy=False)
     edges.sort(axis=1)
-    face_ids = np.repeat(np.arange(n_faces, dtype=np.int32), 3)
+    # Edge rows are stacked as [all e01, all e12, all e20], so face ids must be tiled (not repeated).
+    face_ids = np.tile(np.arange(n_faces, dtype=np.int32), 3)
 
     # Sort edges to group identical ones.
     order = np.lexsort((edges[:, 1], edges[:, 0]))
