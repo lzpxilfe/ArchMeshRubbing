@@ -122,7 +122,8 @@ python main.py --help
 
 ## References
 
-- 구현에 사용된 주요 알고리즘/기법의 공개 레퍼런스: `docs/REFERENCES.md`
+- 논문/문헌/공식 문서 레퍼런스 목록: `docs/REFERENCES.md`
+- 기능별 구현 근거 매핑(어떤 기능이 어떤 레퍼런스를 따르는지): `docs/FEATURE_REFERENCES.md`
 
 ## 라이선스
 

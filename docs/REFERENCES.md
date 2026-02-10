@@ -1,33 +1,55 @@
 # References
 
-ArchMeshRubbing is an open-source tool for producing measurement-friendly 2D outputs (SVG/images) from archaeological 3D scan meshes.
-Below are public references for the main algorithms and techniques used in the project.
+ArchMeshRubbing implements production-oriented variants of known methods.
+This document lists the bibliographic/official references.
 
-## Mesh Parameterization / Flattening
+For the feature-by-feature mapping, see:
+- `docs/FEATURE_REFERENCES.md`
 
-- **ARAP (As-Rigid-As-Possible) surface modeling / parameterization**
-  - Olga Sorkine, Marc Alexa, “As-Rigid-As-Possible Surface Modeling”, *Symposium on Geometry Processing (SGP)*, 2007.
-- **LSCM (Least Squares Conformal Maps)**
-  - Bruno Lévy, Sylvain Petitjean, Nicolas Ray, Jérome Maillot, “Least Squares Conformal Maps for Automatic Texture Atlas Generation”, *SIGGRAPH*, 2002.
+## Papers / Algorithms
 
-## Polyline Simplification
+- `[R1]` ARAP (As-Rigid-As-Possible)
+  - Olga Sorkine, Marc Alexa, “As-Rigid-As-Possible Surface Modeling”, *SGP*, 2007.
 
-- **Ramer–Douglas–Peucker (RDP) algorithm**
+- `[R2]` LSCM (Least Squares Conformal Maps)
+  - Bruno Levy, Sylvain Petitjean, Nicolas Ray, Jérome Maillot, “Least Squares Conformal Maps for Automatic Texture Atlas Generation”, *SIGGRAPH*, 2002.
+
+- `[R3]` Tutte embedding
+  - W. T. Tutte, “How to Draw a Graph”, *Proceedings of the London Mathematical Society*, 1963.
+
+- `[R4]` Cotangent/discrete differential operators (practical background)
+  - Mark Meyer, Mathieu Desbrun, Peter Schroder, Alan H. Barr, “Discrete Differential-Geometry Operators for Triangulated 2-Manifolds”, 2002.
+
+- `[R5]` Dijkstra shortest path
+  - E. W. Dijkstra, “A Note on Two Problems in Connexion with Graphs”, 1959.
+
+- `[R6]` Ramer-Douglas-Peucker polyline simplification
   - Urs Ramer, “An iterative procedure for the polygonal approximation of plane curves”, 1972.
   - David Douglas, Thomas Peucker, “Algorithms for the reduction of the number of points required to represent a digitized line or its caricature”, 1973.
 
-## Rendering / Projection
+- `[R7]` Z-buffer visibility concept
+  - Edwin Catmull, “A Subdivision Algorithm for Computer Display of Curved Surfaces”, 1974. (classical depth-buffer visibility context)
 
-- **Z-buffer / depth buffer visibility**
-  - Conceptually equivalent to classic Z-buffer visibility in rasterization; used for “which faces are visible from top/bottom” heuristics in `src/core/surface_separator.py`.
+- `[R8]` Circle fit (algebraic least-squares baseline)
+  - I. Kasa, “A curve fitting procedure and its error analysis”, *IEEE Transactions on Instrumentation and Measurement*, 1976.
 
-## Geometry Features
+- `[R9]` Dihedral-angle sharp edge criterion
+  - Standard mesh-processing practice: classify feature edges by dihedral angle between adjacent face normals.
 
-- **Sharp edge / feature line detection**
-  - Common practice: classify edges using dihedral angles between adjacent face normals (no single canonical paper; the implementation here follows the standard definition).
+## Libraries / Official Docs
+
+- `[L1]` NumPy - https://numpy.org/
+- `[L2]` SciPy - https://scipy.org/
+- `[L3]` trimesh - https://trimsh.org/
+- `[L4]` Pillow - https://python-pillow.org/
+- `[L5]` OpenCV - https://docs.opencv.org/
+- `[L6]` PyQt6 - https://doc.qt.io/qtforpython-6/
+- `[L7]` PyOpenGL - https://pyopengl.sourceforge.net/
 
 ## Notes
 
-- This document is for attribution and learning; it is *not* a dependency list.
-- If you contribute a new algorithm, please add a short reference here (paper/book/blog) when possible.
+- Not every behavior is a direct paper reproduction; some parts are engineering heuristics for stability/performance.
+- When adding a new major algorithm, include both:
+  - a bibliography entry here (`[R*]` or `[L*]`)
+  - a feature mapping entry in `docs/FEATURE_REFERENCES.md`
 
