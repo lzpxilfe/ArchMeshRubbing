@@ -2689,6 +2689,22 @@ class MainWindow(QMainWindow):
 
         selected_rot = (R @ (selected_pts - centroid).T).T + centroid
 
+        # Final parallel pass: make selected floor support truly parallel to XY.
+        try:
+            plane_after = fit_plane_normal(selected_rot, robust=False)
+            if plane_after is not None:
+                normal_after, centroid_after = plane_after
+                target_up = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+                if float(np.dot(normal_after, target_up)) < 0.0:
+                    normal_after = -normal_after
+                R2 = rotation_matrix_align_vectors(normal_after, target_up)
+                verts2 = np.asarray(obj.mesh.vertices, dtype=np.float64)
+                pivot2 = np.asarray(centroid_after, dtype=np.float64).reshape(3)
+                obj.mesh.vertices = ((R2 @ (verts2 - pivot2).T).T + pivot2).astype(np.float32)
+                selected_rot = (R2 @ (selected_rot - pivot2).T).T + pivot2
+        except Exception:
+            pass
+
         try:
             floor_z = float(np.nanmin(np.asarray(selected_rot, dtype=np.float64)[:, 2]))
         except Exception:
@@ -2722,6 +2738,10 @@ class MainWindow(QMainWindow):
             obj.mesh._bounds = None
             obj.mesh._centroid = None
             obj.mesh._surface_area = None
+        except Exception:
+            pass
+        try:
+            obj.mesh.compute_normals(compute_vertex_normals=False, force=True)
         except Exception:
             pass
         obj._trimesh = None
@@ -2773,6 +2793,67 @@ class MainWindow(QMainWindow):
         self.viewport.update_vbo(obj)
         self.sync_transform_panel()
         return R
+
+    def _optimize_points_xy_contact(self, points: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Minimize picked-point |z| in XY frame via small X/Y tilt search."""
+        pts = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+        if len(pts) < 3:
+            return np.eye(3, dtype=np.float64), np.array([0.0, 0.0, 0.0], dtype=np.float64), pts
+
+        pivot = np.mean(pts, axis=0)
+        centered = pts - pivot
+
+        def _rot_x(rad: float) -> np.ndarray:
+            c = float(np.cos(rad))
+            s = float(np.sin(rad))
+            return np.array(
+                [[1.0, 0.0, 0.0], [0.0, c, -s], [0.0, s, c]],
+                dtype=np.float64,
+            )
+
+        def _rot_y(rad: float) -> np.ndarray:
+            c = float(np.cos(rad))
+            s = float(np.sin(rad))
+            return np.array(
+                [[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]],
+                dtype=np.float64,
+            )
+
+        def _eval(ax: float, ay: float) -> tuple[tuple[float, float], np.ndarray, np.ndarray]:
+            R = _rot_y(ay) @ _rot_x(ax)
+            pts_r = (R @ centered.T).T + pivot
+            z = np.asarray(pts_r[:, 2], dtype=np.float64)
+            if z.size == 0 or not np.isfinite(z).all():
+                return (float("inf"), float("inf")), pts_r, R
+            return (float(np.max(np.abs(z))), float(np.mean(np.abs(z)))), pts_r, R
+
+        ax = 0.0
+        ay = 0.0
+        best_metric, best_pts, best_R = _eval(ax, ay)
+
+        for step_deg in (1.2, 0.4, 0.15, 0.05):
+            step = float(np.deg2rad(step_deg))
+            improved = True
+            while improved:
+                improved = False
+                for dax, day in (
+                    (step, 0.0), (-step, 0.0), (0.0, step), (0.0, -step),
+                    (step, step), (step, -step), (-step, step), (-step, -step),
+                ):
+                    metric, pts_try, R_try = _eval(ax + dax, ay + day)
+                    better = (
+                        (metric[0] + 1e-12 < best_metric[0])
+                        or (abs(metric[0] - best_metric[0]) <= 1e-12 and metric[1] + 1e-12 < best_metric[1])
+                    )
+                    if better:
+                        ax += dax
+                        ay += day
+                        best_metric = metric
+                        best_pts = pts_try
+                        best_R = R_try
+                        improved = True
+
+        return best_R, pivot, best_pts
 
     def on_floor_face_picked(self, vertices):
         """바닥면(면 선택) - Enter를 눌러야 정렬됨"""
@@ -2844,27 +2925,22 @@ class MainWindow(QMainWindow):
             return
         points_rotated = (R @ (points - centroid).T).T + centroid
 
+        # Final parallel pass: enforce selected floor points parallel to XY.
+        try:
+            R2, pivot2, points_opt = self._optimize_points_xy_contact(points_rotated)
+            if R2 is not None:
+                verts2 = np.asarray(obj.mesh.vertices, dtype=np.float64)
+                pivot2 = np.asarray(pivot2, dtype=np.float64).reshape(3)
+                obj.mesh.vertices = ((R2 @ (verts2 - pivot2).T).T + pivot2).astype(np.float32)
+                points_rotated = np.asarray(points_opt, dtype=np.float64)
+        except Exception:
+            pass
+
         # 4) 선택 바닥 평면을 Z=0으로 이동
-        # Picked points can be on triangle interiors; include nearest vertices as support.
         try:
             floor_z = float(np.nanmin(np.asarray(points_rotated, dtype=np.float64)[:, 2]))
         except Exception:
             floor_z = 0.0
-        try:
-            verts_rot = np.asarray(obj.mesh.vertices, dtype=np.float64).reshape(-1, 3)
-            pts_rot = np.asarray(points_rotated, dtype=np.float64).reshape(-1, 3)
-            if len(verts_rot) > 0 and len(pts_rot) > 0:
-                support_min = None
-                for p in pts_rot:
-                    d2 = np.sum((verts_rot - p) ** 2, axis=1)
-                    j = int(np.nanargmin(d2))
-                    z_j = float(verts_rot[j, 2])
-                    if np.isfinite(z_j):
-                        support_min = z_j if support_min is None else min(support_min, z_j)
-                if support_min is not None and np.isfinite(support_min):
-                    floor_z = float(min(float(floor_z), float(support_min)))
-        except Exception:
-            pass
         if np.isfinite(floor_z):
             obj.mesh.vertices[:, 2] -= floor_z
             points_rotated[:, 2] -= floor_z
@@ -2895,6 +2971,10 @@ class MainWindow(QMainWindow):
             obj.mesh._bounds = None
             obj.mesh._centroid = None
             obj.mesh._surface_area = None
+        except Exception:
+            pass
+        try:
+            obj.mesh.compute_normals(compute_vertex_normals=False, force=True)
         except Exception:
             pass
         obj._trimesh = None

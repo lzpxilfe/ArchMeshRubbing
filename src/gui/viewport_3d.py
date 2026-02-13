@@ -1425,9 +1425,10 @@ class TrackballCamera:
         """Camera look-at point."""
         return self.center + self.pan_offset
 
-    def rotate(self, delta_x: float, delta_y: float, sensitivity: float = 0.5):
+    def rotate(self, delta_x: float, delta_y: float, sensitivity: float = 0.35):
         """Rotate camera around look-at."""
         self.azimuth -= delta_x * sensitivity
+        self.azimuth = ((self.azimuth + 180.0) % 360.0) - 180.0
         self.elevation += delta_y * sensitivity
         self.elevation = max(-89.0, min(89.0, self.elevation))
 
@@ -1671,8 +1672,8 @@ class Viewport3D(QOpenGLWidget):
         self.gizmo_radius_factor = 0.90
         self._gizmo_pick_width_ratio = 0.12
         self._gizmo_rotate_sensitivity = 0.85
-        # Visual "steering-wheel" feel: drag direction should match perceived spin.
-        self._gizmo_drag_sign = -1.0
+        # Steering-wheel feel: clockwise drag should rotate clockwise on screen.
+        self._gizmo_drag_sign = 1.0
         self.gizmo_drag_start = None
         
         # 怨〓쪧 痢≪젙 紐⑤뱶
@@ -8314,6 +8315,9 @@ class Viewport3D(QOpenGLWidget):
                 curr_yf = float(event.pos().y())
             dx = curr_xf - prev_xf
             dy = curr_yf - prev_yf
+            # Suppress occasional event spikes that feel like camera hitching.
+            dx = float(np.clip(dx, -120.0, 120.0))
+            dy = float(np.clip(dy, -120.0, 120.0))
             self.last_mouse_posf = (curr_xf, curr_yf)
             self.last_mouse_pos = event.pos()
             
@@ -8331,7 +8335,7 @@ class Viewport3D(QOpenGLWidget):
                     delta_angle = float(np.clip(delta_angle, -25.0, 25.0))
                     rot_sensitivity = float(getattr(self, "_gizmo_rotate_sensitivity", 0.85) or 0.85)
                     delta_angle *= float(max(0.1, min(rot_sensitivity, 2.0)))
-                    delta_angle *= float(getattr(self, "_gizmo_drag_sign", -1.0) or -1.0)
+                    delta_angle *= float(getattr(self, "_gizmo_drag_sign", 1.0) or 1.0)
                     
                     # "?먮룞李??몃뱾" 吏곴??? 留덉슦?ㅼ쓽 ?뚯쟾 諛⑺뼢??硫붿돩 ?뚯쟾??1:1 留ㅼ묶
                     # 移대찓???쒖꽑怨??뚯쟾異뺤쓽 諛⑺뼢???꾪듃怨????듯빐 visual CW/CCW瑜?寃곗젙
@@ -8636,26 +8640,23 @@ class Viewport3D(QOpenGLWidget):
 
             # 4. ?쇰컲 移대찓??議곗옉 (?쒕옒洹?
             ortho_locked = bool(getattr(self, "_front_back_ortho_enabled", False))
-            # In canonical 6-axis orthographic views:
-            # - right-drag keeps 2D pan
-            # - left/middle-drag exits ortho lock and starts orbit
-            if ortho_locked:
-                if self.mouse_button == Qt.MouseButton.RightButton:
-                    self.camera.pan(dx, dy)
-                    self.update()
-                    return
-                if self.mouse_button in (Qt.MouseButton.LeftButton, Qt.MouseButton.MiddleButton):
-                    self._front_back_ortho_enabled = False
-                    self._ortho_frame_override = None
+            # In canonical 6-axis views, any drag immediately returns to free camera.
+            if ortho_locked and self.mouse_button in (
+                Qt.MouseButton.LeftButton,
+                Qt.MouseButton.RightButton,
+                Qt.MouseButton.MiddleButton,
+            ):
+                self._front_back_ortho_enabled = False
+                self._ortho_frame_override = None
 
             if self.mouse_button == Qt.MouseButton.LeftButton:
-                self.camera.rotate(dx, dy)
+                self.camera.rotate(dx, dy, sensitivity=0.35)
                 self.update()
             elif self.mouse_button == Qt.MouseButton.RightButton:
-                self.camera.pan(dx, dy)
+                self.camera.pan(dx, dy, sensitivity=0.22)
                 self.update()
             elif self.mouse_button == Qt.MouseButton.MiddleButton:
-                self.camera.rotate(dx, dy)
+                self.camera.rotate(dx, dy, sensitivity=0.35)
                 self.update()
             
         except Exception:
