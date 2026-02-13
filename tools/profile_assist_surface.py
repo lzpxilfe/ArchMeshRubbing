@@ -4,6 +4,7 @@ import argparse
 import ctypes
 import gc
 import json
+import os
 import sys
 import time
 import tracemalloc
@@ -16,8 +17,8 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from src.core.mesh_loader import MeshLoader
-from src.core.surface_separator import SurfaceSeparator
+from src.core.mesh_loader import MeshLoader  # noqa: E402
+from src.core.surface_separator import SurfaceSeparator  # noqa: E402
 
 try:
     import psutil  # type: ignore
@@ -97,13 +98,13 @@ def _apply_large_mesh_stability_presets(mesh) -> None:
         n_faces = 0
     if n_faces < 1_000_000:
         return
-    if not hasattr(mesh, "_views_fallback_use_normals"):
+    if getattr(mesh, "_views_fallback_use_normals", None) is None:
         mesh._views_fallback_use_normals = False
-    if not hasattr(mesh, "_views_migu_absdot_max"):
+    if getattr(mesh, "_views_migu_absdot_max", None) is None:
         mesh._views_migu_absdot_max = 1.0
-    if not hasattr(mesh, "_views_migu_max_frac"):
+    if getattr(mesh, "_views_migu_max_frac", None) is None:
         mesh._views_migu_max_frac = 0.05
-    if not hasattr(mesh, "_views_visibility_neighborhood"):
+    if getattr(mesh, "_views_visibility_neighborhood", None) is None:
         mesh._views_visibility_neighborhood = 2
 
 
@@ -340,16 +341,33 @@ def run_profile(args: argparse.Namespace) -> dict[str, Any]:
     return summary
 
 
+def _discover_default_mesh_arg() -> str | None:
+    env_mesh = str(os.environ.get("ARCHMESHRUBBING_PROFILE_MESH", "")).strip()
+    if env_mesh:
+        return env_mesh
+
+    patterns = ("*.stl", "*.obj", "*.ply", "*.off", "*.glb", "*.gltf")
+    for pattern in patterns:
+        try:
+            candidates = sorted(Path.cwd().glob(pattern))
+        except Exception:
+            candidates = []
+        if candidates:
+            return str(candidates[0])
+    return None
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Profile manual seeded assist-surface pipeline (assist + unresolved overlay build)."
     )
-    default_mesh = Path("수키와편.stl")
+    default_mesh = _discover_default_mesh_arg()
     parser.add_argument(
         "mesh",
         nargs="?",
-        default=str(default_mesh) if default_mesh.exists() else None,
-        help="Path to mesh file (stl/obj/ply/off/glb/gltf).",
+        default=default_mesh,
+        help="Path to mesh file (stl/obj/ply/off/glb/gltf). "
+        "If omitted, uses ARCHMESHRUBBING_PROFILE_MESH or the first mesh file in CWD.",
     )
     parser.add_argument("--unit", default="cm", help="Default unit for mesh loader.")
     parser.add_argument("--iterations", type=int, default=3, help="Assist repeat count.")
@@ -374,7 +392,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--json-out", default="", help="Optional JSON output path.")
     args = parser.parse_args()
     if not args.mesh:
-        parser.error("mesh path is required (or place '수키와편.stl' in current directory).")
+        parser.error(
+            "mesh path is required. Set ARCHMESHRUBBING_PROFILE_MESH, pass a positional path, "
+            "or run in a folder containing a mesh file."
+        )
     return args
 
 

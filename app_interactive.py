@@ -33,6 +33,16 @@ _LOGGER = logging.getLogger(__name__)
 _log_path: Path | None = None
 APP_NAME = "ArchMeshRubbing"
 APP_VERSION = "0.1.0"
+ORTHO_VIEW_SCALE_DEFAULT = 1.15
+DEFAULT_MESH_UNIT = "cm"
+DEFAULT_PROJECT_FILENAME = "project.amr"
+MIN_EXPORT_WIDTH_PX = 800
+MAX_EXPORT_WIDTH_PX = 12000
+_UNIT_TO_INCHES: dict[str, float] = {
+    "mm": 1.0 / 25.4,
+    "cm": 1.0 / 2.54,
+    "m": 100.0 / 2.54,
+}
 
 
 def _safe_git_info(repo_dir: str) -> tuple[str | None, bool]:
@@ -80,6 +90,21 @@ def _collect_debug_info(*, basedir: str) -> str:
     ]
     return "\n".join(parts)
 
+
+def _safe_float_or_none(value: Any) -> float | None:
+    try:
+        out = float(value)
+    except Exception:
+        return None
+    if not np.isfinite(out):
+        return None
+    return out
+
+
+def _width_in_inches(width_real: float, unit: str) -> float:
+    factor = _UNIT_TO_INCHES.get(str(unit).strip().lower(), _UNIT_TO_INCHES["mm"])
+    return float(width_real) * float(factor)
+
 # Add src to path
 # Add basedir to path so 'src' package can be found
 if getattr(sys, 'frozen', False):
@@ -104,6 +129,12 @@ from src.core.project_file import (  # noqa: E402
     save_project as save_amr_project,
 )
 from src.gui.profile_graph_widget import ProfileGraphWidget  # noqa: E402
+from src.core.alignment_utils import (  # noqa: E402
+    compute_floor_contact_shift,
+    fit_plane_normal,
+    orient_plane_normal_toward,
+    rotation_matrix_align_vectors,
+)
 
 
 class MeshLoadThread(QThread):
@@ -394,7 +425,7 @@ class HelpWidget(QTextEdit):
     
     def set_scene_help(self):
         self.setHtml("""
-            <h3 style="margin:0; color:#2c5282;">🌲 씬 트리 (Scene)</h3>
+            <h3 style="margin:0; color:#2c5282;">🌲 레이어 트리 (Layer)</h3>
             <p style="font-size:11px;">
             현재 작업 중인 객체 목록입니다.<br>
             <b>클릭:</b> 객체 선택 및 기즈모 활성화<br>
@@ -484,7 +515,7 @@ class SplashScreen(QWidget):
         card_layout.addWidget(version)
         
         # 서브타이틀
-        subtitle = QLabel("고고학용 3D 메쉬 탁본 도구")
+        subtitle = QLabel("고고학용 3d 메쉬 도구")
         subtitle.setStyleSheet("color: #718096; font-size: 14px;")
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         card_layout.addWidget(subtitle)
@@ -565,7 +596,7 @@ class UnitSelectionDialog(QDialog):
 
 
 class ScenePanel(QWidget):
-    """씬 내의 객체 목록과 부착된 요소를 보여주는 트리 패널"""
+    """레이어 기준으로 객체 목록과 부착된 요소를 보여주는 트리 패널"""
     selectionChanged = pyqtSignal(int)
     visibilityChanged = pyqtSignal(int, bool)
     arcDeleted = pyqtSignal(int, int) # object_idx, arc_idx
@@ -754,6 +785,10 @@ class TransformToolbar(QToolBar):
         
         self.btn_reset = QPushButton("🔄 초기화")
         self.addWidget(self.btn_reset)
+
+        self.btn_fit_ground = QPushButton("⬆ 바닥면 맞춤")
+        self.btn_fit_ground.setToolTip("현재 자세를 유지한 채 메쉬 최저점을 XY 바닥(Z=0)에 맞춥니다.")
+        self.addWidget(self.btn_fit_ground)
         
         self.btn_flat = QPushButton("🌓 Flat Shading")
         self.btn_flat.setCheckable(True)
@@ -977,48 +1012,6 @@ class FlattenPanel(QWidget):
         action_row.addWidget(btn_clear_all)
         surface_layout.addLayout(action_row)
 
-        auto_row = QHBoxLayout()
-        btn_assist = QPushButton("🤝 수동 보조 분리")
-        btn_assist.setToolTip(
-            "사용자가 지정한 outer/inner 씨드를 기준으로 미분류 면만 보조 분류합니다.\n"
-            "- 기본: views + 보수 모드(모순 배제)\n"
-            "- Shift+클릭: 공격 모드(더 넓게 채움)\n"
-            "- Ctrl+클릭: 원통(반경) 기반 보조\n"
-            "- Alt+클릭: auto(자동) 기반 보조"
-        )
-        btn_assist.clicked.connect(lambda: self.selectionRequested.emit("assist_surface", None))
-        auto_row.addWidget(btn_assist)
-
-        btn_auto = QPushButton("🤖 자동 분리(실험)")
-        btn_auto.setToolTip(
-            "스마트 자동 분리(auto: 가시성(위상)→원통→법선).\n"
-            "결과가 이상하면 '경계(면적+자석)'로 보정하세요.\n"
-            "- Shift: 가시성(±두께축) 강제\n"
-            "- Ctrl: 원통(반경) 강제"
-        )
-        btn_auto.clicked.connect(lambda: self.selectionRequested.emit("auto_surface", None))
-        auto_row.addWidget(btn_auto)
-
-        btn_auto_migu = QPushButton("📏 미구 자동 감지")
-        btn_auto_migu.setToolTip(
-            "미구(계단/경계) 영역을 자동으로 찾아 미구로 지정합니다.\n"
-            "- 클릭: (가능하면) 원통 기반 미구, 아니면 Y축(기본) 강조 감지\n"
-            "- Ctrl+클릭: X축 강조 감지\n"
-            "- Shift+클릭: 둘레 경계(Edge belt) 감지"
-        )
-        btn_auto_migu.clicked.connect(lambda: self.selectionRequested.emit("auto_edge", None))
-        auto_row.addWidget(btn_auto_migu)
-        surface_layout.addLayout(auto_row)
-
-        slice_nav_row = QHBoxLayout()
-        btn_open_section = QPushButton("🧭 단면 도구 열기")
-        btn_open_section.setToolTip(
-            "실시간 단면(3D 절단 관측/촬영)은 '단면 도구' 탭에서 제어합니다.\n"
-            "2D 지정(단면선/ROI)도 같은 탭에서 함께 관리합니다."
-        )
-        btn_open_section.clicked.connect(lambda: self.selectionRequested.emit("open_section_tools", None))
-        slice_nav_row.addWidget(btn_open_section)
-        surface_layout.addLayout(slice_nav_row)
 
         layout.addWidget(surface_group)
         
@@ -1997,29 +1990,30 @@ class SectionPanel(QWidget):
             }
         """)
         self.btn_toggle.toggled.connect(self.on_btn_toggled)
-        layout.addWidget(self.btn_toggle)
         
         # 2. 도움말
         help_label = QLabel("모드 활성 후 메쉬를 클릭/드래그하여 단면을 확인하세요.")
         help_label.setStyleSheet("color: #718096; font-size: 10px;")
         help_label.setWordWrap(True)
-        layout.addWidget(help_label)
         
         # 3. 그래프 공간
         self.label_x = QLabel("X-Profile (Yellow Line)")
-        layout.addWidget(self.label_x)
         self.graph_x = ProfileGraphWidget("가로 단면 (X-Profile)")
-        layout.addWidget(self.graph_x)
         
         self.label_y = QLabel("Y-Profile (Cyan Line)")
-        layout.addWidget(self.label_y)
         self.graph_y = ProfileGraphWidget("세로 단면 (Y-Profile)")
-        layout.addWidget(self.graph_y)
         
         line = QFrame()
         line.setFrameShape(QFrame.Shape.HLine)
         line.setFrameShadow(QFrame.Shadow.Sunken)
-        layout.addWidget(line)
+        # XY 십자선/프로파일 UI는 단면 도구 단순화 요청으로 숨김 처리
+        self.btn_toggle.setVisible(False)
+        help_label.setVisible(False)
+        self.label_x.setVisible(False)
+        self.graph_x.setVisible(False)
+        self.label_y.setVisible(False)
+        self.graph_y.setVisible(False)
+        line.setVisible(False)
 
         # 4. 2D 단면선(2개) - 상면에서 가로/세로(꺾임 가능) 가이드 라인
         line_group = QGroupBox("✏️ 2D 단면선 지정 (상면, 2개)")
@@ -2137,7 +2131,7 @@ class SectionPanel(QWidget):
 class MainWindow(QMainWindow):
     """메인 윈도우"""
 
-    UI_STATE_VERSION = 4
+    UI_STATE_VERSION = 6
     
     def __init__(self):
         super().__init__()
@@ -2156,7 +2150,7 @@ class MainWindow(QMainWindow):
         if icon_path:
             self.setWindowIcon(QIcon(icon_path))
         
-        self.mesh_loader = MeshLoader(default_unit='cm')
+        self.mesh_loader = MeshLoader(default_unit=DEFAULT_MESH_UNIT)
         self.current_mesh = None
         self.current_filepath = None
 
@@ -2190,13 +2184,14 @@ class MainWindow(QMainWindow):
         self.init_toolbar()
         self.init_statusbar()
         self._restore_ui_state()
+        self._hide_unused_docks()
     
     def init_ui(self):
         # 중앙 위젯 (3D 뷰포트)
         self.viewport = Viewport3D()
         self.setCentralWidget(self.viewport)
         
-        # 씬 매니저 연결
+        # 레이어 매니저 연결
         self.viewport.selectionChanged.connect(self.on_selection_changed)
         self.viewport.meshLoaded.connect(self.on_mesh_loaded)
         self.viewport.meshTransformChanged.connect(self.sync_transform_panel)
@@ -2228,6 +2223,7 @@ class MainWindow(QMainWindow):
         self.trans_toolbar.btn_bake.clicked.connect(self.on_bake_all_clicked)
         self.trans_toolbar.btn_fixed.clicked.connect(self.restore_fixed_state)
         self.trans_toolbar.btn_reset.clicked.connect(self.reset_transform)
+        self.trans_toolbar.btn_fit_ground.clicked.connect(self.fit_ground_plane)
         self.trans_toolbar.btn_flat.toggled.connect(self.toggle_flat_shading)
         self.trans_toolbar.btn_xray.toggled.connect(self.toggle_xray_mode)
         
@@ -2327,14 +2323,10 @@ class MainWindow(QMainWindow):
         section_content = QWidget()
         section_layout = QVBoxLayout(section_content)
 
-        self.slice_panel = SlicingPanel()
-        self.slice_panel.sliceChanged.connect(self.on_slice_changed)
-        self.slice_panel.exportRequested.connect(self.on_slice_export_requested)
-        self.slice_panel.captureRequested.connect(self.on_slice_capture_requested)
-        self.slice_panel.saveLayersRequested.connect(self.on_save_section_layers_requested)
-        section_layout.addWidget(self.slice_panel)
+        # Section dock is simplified to line/ROI only.
+        self.slice_panel = None
 
-        mode_hint = QLabel("구분: 실시간 단면 = 3D 절단 관측/촬영 | 2D 지정 = 상면에서 단면선/ROI 가이드 지정")
+        mode_hint = QLabel("구분: 2D 지정 = 상면에서 단면선/ROI 가이드 지정")
         mode_hint.setStyleSheet("color: #4a5568; font-size: 10px;")
         mode_hint.setWordWrap(True)
         section_layout.addWidget(mode_hint)
@@ -2345,7 +2337,6 @@ class MainWindow(QMainWindow):
         section_layout.addWidget(line)
 
         self.section_panel = SectionPanel()
-        self.section_panel.crosshairToggled.connect(self.on_crosshair_toggled)
         self.section_panel.lineSectionToggled.connect(self.on_line_section_toggled)
         self.section_panel.cutLineActiveChanged.connect(self.on_cut_line_active_changed)
         self.section_panel.cutLineClearRequested.connect(self.on_cut_line_clear_requested)
@@ -2354,20 +2345,19 @@ class MainWindow(QMainWindow):
         self.section_panel.silhouetteRequested.connect(self.viewport.extract_roi_silhouette)
         self.section_panel.saveSectionLayersRequested.connect(self.on_save_section_layers_requested)
 
-        self.viewport.profileUpdated.connect(self.section_panel.update_profiles)
         self.viewport.lineProfileUpdated.connect(self.section_panel.update_line_profile)
         self.viewport.roiSilhouetteExtracted.connect(self.on_silhouette_extracted)
         self.viewport.cutLinesAutoEnded.connect(self._on_cut_lines_auto_ended)
-        self.viewport.sliceScanRequested.connect(self.on_slice_scan_requested)
-        self.viewport.sliceCaptureRequested.connect(self.on_slice_capture_requested)
+        self.viewport.cutLinesEnabledChanged.connect(self._sync_cutline_button_state)
+        self.viewport.roiSectionCommitRequested.connect(self.on_roi_section_commit_requested)
         section_layout.addWidget(self.section_panel)
 
         section_layout.addStretch()
         section_scroll.setWidget(section_content)
         self.section_dock.setWidget(section_scroll)
 
-        # 7) 씬(레이어)
-        self.scene_dock = QDockWidget("🌲 씬 (레이어)", self)
+        # 7) 레이어
+        self.scene_dock = QDockWidget("🌲 레이어", self)
         self.scene_dock.setObjectName("dock_scene")
         self.scene_panel = ScenePanel()
         self.scene_panel.selectionChanged.connect(self.viewport.select_object)
@@ -2382,13 +2372,11 @@ class MainWindow(QMainWindow):
         # 공통 도킹/플로팅 옵션
         for dock in [
             self.info_dock,
-            self.transform_dock,
             self.flatten_dock,
             self.section_dock,
             self.export_dock,
             self.measure_dock,
             self.scene_dock,
-            self.help_dock,
         ]:
             dock.setAllowedAreas(Qt.DockWidgetArea.AllDockWidgetAreas)
             dock.setFeatures(
@@ -2397,7 +2385,7 @@ class MainWindow(QMainWindow):
                 | QDockWidget.DockWidgetFeature.DockWidgetClosable
             )
 
-        # 기본 레이아웃(일러스트레이터 스타일: 상단 정보/정치, 우측 분리, 씬은 우측 하단)
+        # 기본 레이아웃(일러스트레이터 스타일: 상단 정보/정치, 우측 분리, 레이어는 우측 하단)
         self._apply_default_dock_layout()
 
     def _settings(self) -> QSettings:
@@ -2407,13 +2395,11 @@ class MainWindow(QMainWindow):
         """기본 도킹 레이아웃 적용 (저장된 레이아웃이 없을 때의 초기 배치)"""
         for dock in [
             self.info_dock,
-            self.transform_dock,
             self.flatten_dock,
             self.section_dock,
             self.export_dock,
             self.measure_dock,
             self.scene_dock,
-            self.help_dock,
         ]:
             # 기존 배치가 남아있으면(중복 split/tabify 등) 레이아웃이 꼬일 수 있어 초기화
             try:
@@ -2421,40 +2407,31 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             dock.setFloating(False)
-            if dock is self.help_dock:
-                dock.hide()
-            else:
-                dock.show()
+            dock.show()
 
-        # 상단: 파일/메쉬 정보 + 정치(변환) (가로 배치)
+        # 상단: 파일/메쉬 정보
         self.addDockWidget(Qt.DockWidgetArea.TopDockWidgetArea, self.info_dock)
-        self.addDockWidget(Qt.DockWidgetArea.TopDockWidgetArea, self.transform_dock)
-        self.splitDockWidget(self.info_dock, self.transform_dock, Qt.Orientation.Horizontal)
 
-        # 우측: 펼침 + 단면(도구) + 내보내기는 탭, 씬은 우측 하단
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.flatten_dock)
-
+        # 우측: 단면 + 펼침 + 내보내기(+치수)는 탭, 레이어는 우측 하단
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.section_dock)
-        self.tabifyDockWidget(self.flatten_dock, self.section_dock)
+
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.flatten_dock)
+        self.tabifyDockWidget(self.section_dock, self.flatten_dock)
 
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.export_dock)
-        self.tabifyDockWidget(self.flatten_dock, self.export_dock)
+        self.tabifyDockWidget(self.section_dock, self.export_dock)
 
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.measure_dock)
-        self.tabifyDockWidget(self.flatten_dock, self.measure_dock)
+        self.tabifyDockWidget(self.section_dock, self.measure_dock)
 
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.scene_dock)
-        self.splitDockWidget(self.flatten_dock, self.scene_dock, Qt.Orientation.Vertical)
-
-        # 하단: 컨텍스트 도움말(선택/툴 사용법)
-        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.help_dock)
-        self.help_dock.hide()
+        self.splitDockWidget(self.section_dock, self.scene_dock, Qt.Orientation.Vertical)
 
         # 크기 비율(대략적인 기본값)
-        self.resizeDocks([self.info_dock, self.transform_dock], [650, 750], Qt.Orientation.Horizontal)
-        self.resizeDocks([self.flatten_dock, self.scene_dock], [780, 220], Qt.Orientation.Vertical)
+        self.resizeDocks([self.section_dock, self.scene_dock], [780, 220], Qt.Orientation.Vertical)
 
-        self.flatten_dock.raise_()
+        self.section_dock.raise_()
+        self._hide_unused_docks()
 
     def _on_flatten_dock_visibility_changed(self, visible: bool) -> None:
         """펼침 탭이 활성화되면(보이면) 기본 도구를 '경계(면적+자석)'로 맞춥니다.
@@ -2514,6 +2491,23 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
+    def _hide_unused_docks(self):
+        for dock in (getattr(self, "transform_dock", None), getattr(self, "help_dock", None)):
+            if dock is None:
+                continue
+            try:
+                self.removeDockWidget(dock)
+            except Exception:
+                pass
+            try:
+                dock.setFloating(False)
+            except Exception:
+                pass
+            try:
+                dock.hide()
+            except Exception:
+                pass
+
     def _save_ui_state(self):
         settings = self._settings()
         settings.setValue("ui/state_version", self.UI_STATE_VERSION)
@@ -2529,15 +2523,36 @@ class MainWindow(QMainWindow):
         self._apply_default_dock_layout()
 
     def closeEvent(self, a0):
-        self._save_ui_state()
         if a0 is None:
             return
+        reply = QMessageBox.question(
+            self,
+            "종료 확인",
+            "정말 종료하시겠습니까?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            a0.ignore()
+            return
+        self._save_ui_state()
         super().closeEvent(a0)
 
     def start_floor_picking(self):
         """바닥면 그리기(점 찍기) 모드 시작"""
         if self.viewport.selected_obj is None:
             return
+        # X-Ray는 바닥면 판독을 방해하고 "방충망"처럼 보여 정렬 오판을 유발할 수 있어 자동 해제.
+        try:
+            if bool(getattr(self.viewport, "xray_mode", False)):
+                self.viewport.xray_mode = False
+                btn_xray = getattr(getattr(self, "trans_toolbar", None), "btn_xray", None)
+                if btn_xray is not None:
+                    btn_xray.blockSignals(True)
+                    btn_xray.setChecked(False)
+                    btn_xray.blockSignals(False)
+        except Exception:
+            pass
         try:
             self._disable_measure_mode()
         except Exception:
@@ -2552,6 +2567,16 @@ class MainWindow(QMainWindow):
         if self.viewport.selected_obj is None:
             return
         try:
+            if bool(getattr(self.viewport, "xray_mode", False)):
+                self.viewport.xray_mode = False
+                btn_xray = getattr(getattr(self, "trans_toolbar", None), "btn_xray", None)
+                if btn_xray is not None:
+                    btn_xray.blockSignals(True)
+                    btn_xray.setChecked(False)
+                    btn_xray.blockSignals(False)
+        except Exception:
+            pass
+        try:
             self._disable_measure_mode()
         except Exception:
             pass
@@ -2563,6 +2588,16 @@ class MainWindow(QMainWindow):
         """브러시 바닥 정렬 모드 시작"""
         if self.viewport.selected_obj is None:
             return
+        try:
+            if bool(getattr(self.viewport, "xray_mode", False)):
+                self.viewport.xray_mode = False
+                btn_xray = getattr(getattr(self, "trans_toolbar", None), "btn_xray", None)
+                if btn_xray is not None:
+                    btn_xray.blockSignals(True)
+                    btn_xray.setChecked(False)
+                    btn_xray.blockSignals(False)
+        except Exception:
+            pass
         try:
             self._disable_measure_mode()
         except Exception:
@@ -2609,36 +2644,38 @@ class MainWindow(QMainWindow):
         self.viewport.status_info = f"✅ 브러시 영역({count}개 면) 기준 바닥 정렬 완료"
         self.viewport.update()
 
-    def align_mesh_to_normal(self, normal):
-        """주어진 법선 벡터를 월드 Z축(0,0,1)으로 정렬 (Bake)"""
+    def align_mesh_to_normal(self, normal, *, pivot=None) -> np.ndarray | None:
+        """주어진 법선을 월드 +Z로 정렬 (메쉬에 직접 반영/Bake)."""
         obj = self.viewport.selected_obj
         if not obj:
             return
-        
-        target = np.array([0.0, 0.0, 1.0])
-        axis = np.cross(normal, target)
-        axis_norm = np.linalg.norm(axis)
-        
-        if axis_norm > 1e-6:
-            axis = axis / axis_norm
-            angle = np.arccos(np.clip(np.dot(normal, target), -1.0, 1.0))
-            K = np.array([[0, -axis[2], axis[1]], [axis[2], 0, -axis[0]], [-axis[1], axis[0], 0]])
-            R = np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * (K @ K)
 
-            obj.mesh.vertices = (R @ obj.mesh.vertices.T).T
-            try:
-                obj.mesh._bounds = None
-                obj.mesh._centroid = None
-                obj.mesh._surface_area = None
-            except Exception:
-                pass
-            obj.mesh.compute_normals(compute_vertex_normals=False, force=True)
-            obj._trimesh = None
-            obj.rotation = np.array([0.0, 0.0, 0.0])
-            self.viewport.update_vbo(obj)
-            self.sync_transform_panel()
-            return R
-        return np.eye(3)
+        target = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        R = rotation_matrix_align_vectors(normal, target)
+
+        try:
+            pivot_v = (
+                np.asarray(pivot, dtype=np.float64).reshape(3)
+                if pivot is not None
+                else np.array([0.0, 0.0, 0.0], dtype=np.float64)
+            )
+        except Exception:
+            pivot_v = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+
+        vertices = np.asarray(obj.mesh.vertices, dtype=np.float64)
+        obj.mesh.vertices = ((R @ (vertices - pivot_v).T).T + pivot_v).astype(np.float32)
+        try:
+            obj.mesh._bounds = None
+            obj.mesh._centroid = None
+            obj.mesh._surface_area = None
+        except Exception:
+            pass
+        obj.mesh.compute_normals(compute_vertex_normals=False, force=True)
+        obj._trimesh = None
+        obj.rotation = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+        self.viewport.update_vbo(obj)
+        self.sync_transform_panel()
+        return R
 
     def on_floor_face_picked(self, vertices):
         """바닥면(면 선택) - Enter를 눌러야 정렬됨"""
@@ -2676,66 +2713,76 @@ class MainWindow(QMainWindow):
         if not obj or not self.viewport.floor_picks:
             return
 
-        points = np.array(self.viewport.floor_picks)
+        points = np.asarray(self.viewport.floor_picks, dtype=np.float64).reshape(-1, 3)
+        points = points[np.all(np.isfinite(points), axis=1)]
         if len(points) < 3:
             self.viewport.status_info = "❌ 점이 부족합니다. 더 찍어주세요."
             self.viewport.update()
             return
             
-        # 1. 메쉬 정치 확정 (Bake)
-        # 선택된 점들이 로컬 좌표계이므로, 현재 메쉬의 모든 변환을 정점에 미리 적용해둠
+        # 1) floor_picks는 월드 좌표이므로 메쉬도 월드 기준 정점으로 맞춘다.
         self.viewport.bake_object_transform(obj)
-        
-        # 2. 평면 피팅
-        centroid = np.mean(points, axis=0)
-        centered_points = points - centroid
-        _, _, vh = np.linalg.svd(centered_points)
-        normal = vh[2, :] # 초기 법선 (방향은 아직 불확실)
-        
-        # 3. 정렬 수행
-        self.viewport.save_undo_state()
-        R = self.align_mesh_to_normal(normal)
-        
-        # 4. 상하 반전 체크 (Bulk-Height Comparison)
-        if R is not None:
-            # 회전 후 찍은 점들의 평균 Z
-            points_rotated = (R @ points.T).T
-            avg_pick_z = np.mean(points_rotated[:, 2])
-            
-            # 회전 후 전체 메쉬의 평균 Z
-            avg_mesh_z = np.mean(obj.mesh.vertices[:, 2])
-            
-            # 메쉬 몸통(평균)이 찍은 점들보다 낮으면 upside-down 상태
-            if avg_mesh_z < avg_pick_z:
-                # 180도 추가 회전 (X축 기준)
-                R_flip = np.array([[1, 0, 0], [0, -1, 0], [0, 0, -1]])
-                obj.mesh.vertices = (R_flip @ obj.mesh.vertices.T).T
-                try:
-                    obj.mesh._bounds = None
-                    obj.mesh._centroid = None
-                    obj.mesh._surface_area = None
-                except Exception:
-                    pass
-                obj.mesh.compute_normals(compute_vertex_normals=False, force=True)
-                obj._trimesh = None
-                self.viewport.update_vbo(obj)
-        
-        # 5. 바닥 높이 맞춤 (가라앉지 않도록 Z >= 0 보장)
-        if R is not None:
-            min_z = obj.mesh.vertices[:, 2].min()
-            obj.mesh.vertices[:, 2] -= min_z
-            try:
-                obj.mesh._bounds = None
-                obj.mesh._centroid = None
-            except Exception:
-                pass
-            obj._trimesh = None
-            obj.translation[2] = 0
 
-            self.viewport.update_vbo(obj)
-            self.sync_transform_panel()
-            self.viewport.status_info = f"✅ 바닥 정렬 완료 (점 {len(points)}개 기반 평면 보정)"
+        # 2) 점 기반 평면을 robust하게 추정한다.
+        plane = fit_plane_normal(points, robust=True)
+        if plane is None:
+            self.viewport.status_info = "❌ 선택 점이 거의 일직선입니다. 점을 다시 찍어주세요."
             self.viewport.update()
+            return
+        normal, centroid = plane
+
+        # 법선 방향을 메쉬 중심 쪽으로 맞춰 뒤집힘을 줄인다.
+        try:
+            mesh_centroid = np.asarray(obj.mesh.centroid, dtype=np.float64).reshape(3)
+        except Exception:
+            mesh_centroid = np.mean(np.asarray(obj.mesh.vertices, dtype=np.float64), axis=0)
+        normal = orient_plane_normal_toward(normal, centroid, mesh_centroid)
+
+        # 3) 법선 정렬
+        self.viewport.save_undo_state()
+        R = self.align_mesh_to_normal(normal, pivot=centroid)
+        if R is None:
+            self.viewport.status_info = "바닥 정렬 중 회전 계산에 실패했습니다."
+            self.viewport.update()
+            return
+        points_rotated = (R @ (points - centroid).T).T + centroid
+
+        # 4) 선택 바닥 평면을 Z=0으로 이동
+        try:
+            plane_z = float(np.nanmedian(np.asarray(points_rotated, dtype=np.float64)[:, 2]))
+        except Exception:
+            plane_z = 0.0
+        if np.isfinite(plane_z):
+            obj.mesh.vertices[:, 2] -= plane_z
+
+        # 5) 경미한 침투만 자동 보정한다(큰 보정은 사용자 의도와 다를 수 있어 보정 안 함).
+        auto_shift = 0.0
+        try:
+            z_vals = np.asarray(obj.mesh.vertices[:, 2], dtype=np.float64)
+            auto_shift = compute_floor_contact_shift(z_vals, tolerance=0.02, max_auto_shift=0.2)
+            if auto_shift > 0.0:
+                obj.mesh.vertices[:, 2] += float(auto_shift)
+        except Exception:
+            auto_shift = 0.0
+
+        try:
+            obj.mesh._bounds = None
+            obj.mesh._centroid = None
+            obj.mesh._surface_area = None
+        except Exception:
+            pass
+        obj._trimesh = None
+        obj.translation = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+
+        self.viewport.update_vbo(obj)
+        self.sync_transform_panel()
+        if auto_shift > 0.0:
+            self.viewport.status_info = (
+                f"✅ 바닥 정렬 완료 (점 {len(points)}개 / 경미한 침투 보정 +{auto_shift:.3f})"
+            )
+        else:
+            self.viewport.status_info = f"✅ 바닥 정렬 완료 (점 {len(points)}개 기반 평면 보정)"
+        self.viewport.update()
         
         self.viewport.floor_picks = []
         self.viewport.picking_mode = 'none'
@@ -2861,12 +2908,12 @@ class MainWindow(QMainWindow):
         
         action_top = QAction("5️⃣ 상면 뷰", self)
         action_top.setShortcut("5")
-        action_top.triggered.connect(lambda: self.set_view(0, 89))
+        action_top.triggered.connect(lambda: self.set_view(0, 90))
         view_menu.addAction(action_top)
         
         action_bottom = QAction("6️⃣ 하면 뷰", self)
         action_bottom.setShortcut("6")
-        action_bottom.triggered.connect(lambda: self.set_view(0, -89))
+        action_bottom.triggered.connect(lambda: self.set_view(0, -90))
         view_menu.addAction(action_bottom)
 
         view_menu.addSeparator()
@@ -2878,12 +2925,10 @@ class MainWindow(QMainWindow):
         panels_menu = view_menu.addMenu("패널 표시/숨김")
         if panels_menu is not None:
             panels_menu.addAction(self.info_dock.toggleViewAction())
-            panels_menu.addAction(self.transform_dock.toggleViewAction())
             panels_menu.addAction(self.flatten_dock.toggleViewAction())
             panels_menu.addAction(self.section_dock.toggleViewAction())
             panels_menu.addAction(self.export_dock.toggleViewAction())
             panels_menu.addAction(self.scene_dock.toggleViewAction())
-            panels_menu.addAction(self.action_toggle_help_panel)
         
         # 도움말 메뉴
         help_menu = menubar.addMenu("도움말(&H)")
@@ -2982,16 +3027,15 @@ class MainWindow(QMainWindow):
         
         action_top = QAction("상면", self)
         action_top.setToolTip("상면 뷰 (5)")
-        action_top.triggered.connect(lambda: self.set_view(0, 89))
+        action_top.triggered.connect(lambda: self.set_view(0, 90))
         toolbar.addAction(action_top)
         
         action_bottom = QAction("하면", self)
         action_bottom.setToolTip("하면 뷰 (6)")
-        action_bottom.triggered.connect(lambda: self.set_view(0, -89))
+        action_bottom.triggered.connect(lambda: self.set_view(0, -90))
         toolbar.addAction(action_bottom)
 
         toolbar.addSeparator()
-        toolbar.addAction(self.action_toggle_help_panel)
 
     def init_statusbar(self):
         self.statusbar = QStatusBar()
@@ -3120,12 +3164,12 @@ class MainWindow(QMainWindow):
         self._write_project(str(self._current_project_path))
 
     def save_project_as(self) -> None:
-        default_name = "project.amr"
+        default_name = DEFAULT_PROJECT_FILENAME
         try:
             if self.current_filepath:
                 default_name = str(Path(str(self.current_filepath)).with_suffix(".amr").name)
         except Exception:
-            default_name = "project.amr"
+            default_name = DEFAULT_PROJECT_FILENAME
 
         filepath, _ = QFileDialog.getSaveFileName(
             self,
@@ -3759,13 +3803,8 @@ class MainWindow(QMainWindow):
         # Camera
         cam_s = vp_state.get("camera", {})
         if isinstance(cam_s, dict) and getattr(vp, "camera", None) is not None:
-            cam = vp.camera
             try:
-                cam.distance = float(cam_s.get("distance", cam.distance) or cam.distance)
-                cam.azimuth = float(cam_s.get("azimuth", cam.azimuth) or cam.azimuth)
-                cam.elevation = float(cam_s.get("elevation", cam.elevation) or cam.elevation)
-                cam.center = np.asarray(cam_s.get("center", cam.center), dtype=np.float64).reshape(-1)[:3]
-                cam.pan_offset = np.asarray(cam_s.get("pan_offset", cam.pan_offset), dtype=np.float64).reshape(-1)[:3]
+                self._restore_camera_state_from_project(cam_s)
             except Exception:
                 pass
 
@@ -3817,88 +3856,47 @@ class MainWindow(QMainWindow):
                     pass
 
             try:
-                vp.cut_lines_enabled = bool(cut_s.get("enabled", False))
+                vp.set_cut_lines_enabled(bool(cut_s.get("enabled", False)))
             except Exception:
-                vp.cut_lines_enabled = False
+                vp.set_cut_lines_enabled(False)
 
-            # Restore edit mode state (picking) if enabled.
+        # Slice/Crosshair are intentionally disabled in section mode (line/ROI only).
+        try:
+            vp.slice_enabled = False
+            vp.slice_contours = []
+        except Exception:
+            pass
+        try:
+            if getattr(vp, "picking_mode", "") == "slice":
+                vp.picking_mode = "none"
+        except Exception:
+            pass
+        try:
+            self._slice_pending_height = None
+            self._slice_capture_pending = False
+            self._slice_debounce_timer.stop()
+        except Exception:
+            pass
+
+        try:
+            vp.crosshair_enabled = False
+        except Exception:
+            pass
+        try:
+            if getattr(vp, "picking_mode", "") == "crosshair":
+                vp.picking_mode = "none"
+        except Exception:
+            pass
+        try:
+            self.section_panel.btn_toggle.blockSignals(True)
+            self.section_panel.btn_toggle.setChecked(False)
+        except Exception:
+            pass
+        finally:
             try:
-                if vp.cut_lines_enabled:
-                    vp.picking_mode = "cut_lines"
-                    idx = int(getattr(vp, "cut_line_active", 0) or 0)
-                    idx = idx if idx in (0, 1) else 0
-                    final = getattr(vp, "_cut_line_final", [False, False]) or [False, False]
-                    line = (getattr(vp, "cut_lines", [[], []]) or [[], []])[idx]
-                    vp.cut_line_drawing = bool(line) and not bool(final[idx])
-                    vp.cut_line_preview = None
-                else:
-                    if getattr(vp, "picking_mode", "") == "cut_lines":
-                        vp.picking_mode = "none"
-                    vp.cut_line_drawing = False
-                    vp.cut_line_preview = None
+                self.section_panel.btn_toggle.blockSignals(False)
             except Exception:
                 pass
-
-        # Slice
-        slice_s = vp_state.get("slice", {})
-        if isinstance(slice_s, dict):
-            enabled = bool(slice_s.get("enabled", False))
-            try:
-                z = float(slice_s.get("z", 0.0) or 0.0)
-            except Exception:
-                z = 0.0
-
-            # Sync panel widgets without spamming signals, then apply once.
-            try:
-                self.slice_panel.group.blockSignals(True)
-                self.slice_panel.spin.blockSignals(True)
-                self.slice_panel.slider.blockSignals(True)
-                self.slice_panel.group.setChecked(enabled)
-                self.slice_panel.spin.setValue(z)
-                self.slice_panel.slider.setValue(int(z * 100))
-            finally:
-                try:
-                    self.slice_panel.group.blockSignals(False)
-                    self.slice_panel.spin.blockSignals(False)
-                    self.slice_panel.slider.blockSignals(False)
-                except Exception:
-                    pass
-            self.on_slice_changed(enabled, z)
-
-        # Crosshair
-        cross_s = vp_state.get("crosshair", {})
-        if isinstance(cross_s, dict):
-            try:
-                vp.crosshair_enabled = bool(cross_s.get("enabled", False))
-            except Exception:
-                vp.crosshair_enabled = False
-            try:
-                vp.crosshair_pos = np.asarray(cross_s.get("pos", [0.0, 0.0]), dtype=np.float64).reshape(-1)[:2]
-            except Exception:
-                pass
-            if getattr(vp, "crosshair_enabled", False):
-                try:
-                    vp.picking_mode = "crosshair"
-                    vp.schedule_crosshair_profile_update(0)
-                except Exception:
-                    pass
-            else:
-                if getattr(vp, "picking_mode", "") == "crosshair":
-                    vp.picking_mode = "none"
-
-            try:
-                self.section_panel.btn_toggle.blockSignals(True)
-                self.section_panel.btn_toggle.setChecked(bool(getattr(vp, "crosshair_enabled", False)))
-                self.section_panel.btn_toggle.setText(
-                    "🎯 십자선 단면 모드 중지" if bool(getattr(vp, "crosshair_enabled", False)) else "🎯 십자선 단면 모드 시작"
-                )
-            except Exception:
-                pass
-            finally:
-                try:
-                    self.section_panel.btn_toggle.blockSignals(False)
-                except Exception:
-                    pass
 
         # ROI
         roi_s = vp_state.get("roi", {})
@@ -3940,11 +3938,7 @@ class MainWindow(QMainWindow):
 
         # Cutline edit mode button
         try:
-            self.section_panel.btn_line.blockSignals(True)
-            self.section_panel.btn_line.setChecked(bool(getattr(vp, "cut_lines_enabled", False)))
-            self.section_panel.btn_line.setText(
-                "✏️ 단면선 그리기 중지" if bool(getattr(vp, "cut_lines_enabled", False)) else "✏️ 단면선 그리기 시작"
-            )
+            self._sync_cutline_button_state(bool(getattr(vp, "cut_lines_enabled", False)))
             try:
                 self.section_panel.combo_cutline.blockSignals(True)
                 self.section_panel.combo_cutline.setCurrentIndex(int(getattr(vp, "cut_line_active", 0) or 0))
@@ -3955,13 +3949,154 @@ class MainWindow(QMainWindow):
                     pass
         except Exception:
             pass
+
+        # Normalize mutually-exclusive section input modes restored from project files.
+        try:
+            self._normalize_section_modes_after_restore()
+        except Exception:
+            _LOGGER.exception("Failed normalizing section modes after restore")
+
+        # Final UI sync after normalization so button state always matches actual mode.
+        try:
+            self._sync_section_mode_buttons()
+        except Exception:
+            pass
+
+        vp.update()
+
+    def _restore_camera_state_from_project(self, cam_s: dict[str, Any]) -> None:
+        vp = self.viewport
+        cam = vp.camera
+
+        def _vec3(value: object, fallback: np.ndarray) -> np.ndarray:
+            try:
+                arr = np.asarray(value, dtype=np.float64).reshape(-1)
+                if arr.size >= 3 and np.isfinite(arr[:3]).all():
+                    return arr[:3].copy()
+            except Exception:
+                pass
+            return np.asarray(fallback, dtype=np.float64).reshape(3)
+
+        try:
+            dist_raw = float(cam_s.get("distance", cam.distance) or cam.distance)
+        except Exception:
+            dist_raw = float(getattr(cam, "distance", 50.0) or 50.0)
+        try:
+            az_raw = float(cam_s.get("azimuth", cam.azimuth) or cam.azimuth)
+        except Exception:
+            az_raw = float(getattr(cam, "azimuth", 45.0) or 45.0)
+        try:
+            el_raw = float(cam_s.get("elevation", cam.elevation) or cam.elevation)
+        except Exception:
+            el_raw = float(getattr(cam, "elevation", 30.0) or 30.0)
+
+        min_d = float(getattr(cam, "min_distance", 0.01) or 0.01)
+        max_d = float(getattr(cam, "max_distance", 1_000_000.0) or 1_000_000.0)
+        if not np.isfinite(dist_raw):
+            dist_raw = float(getattr(cam, "distance", 50.0) or 50.0)
+        dist = float(max(min_d, min(max_d, dist_raw)))
+
+        if not np.isfinite(az_raw):
+            az_raw = float(getattr(cam, "azimuth", 45.0) or 45.0)
+        az = ((float(az_raw) + 180.0) % 360.0) - 180.0
+
+        if not np.isfinite(el_raw):
+            el_raw = float(getattr(cam, "elevation", 30.0) or 30.0)
+        el = float(el_raw)
+        el = float(max(-90.0, min(90.0, el)))
+
+        cam.distance = dist
+        cam.azimuth = az
+        cam.elevation = el
+        cam.center = _vec3(cam_s.get("center", cam.center), np.asarray(getattr(cam, "center", [0.0, 0.0, 0.0]), dtype=np.float64))
+        cam.pan_offset = _vec3(
+            cam_s.get("pan_offset", cam.pan_offset),
+            np.asarray(getattr(cam, "pan_offset", [0.0, 0.0, 0.0]), dtype=np.float64),
+        )
+
+        # Restore should not force camera back into orthographic lock.
+        vp._front_back_ortho_enabled = False
+
+    def _normalize_section_modes_after_restore(self) -> None:
+        vp = self.viewport
+
+        cut_enabled = bool(getattr(vp, "cut_lines_enabled", False))
+        roi_enabled = bool(getattr(vp, "roi_enabled", False))
+        cross_enabled = bool(getattr(vp, "crosshair_enabled", False))
+
+        # Priority: cut-lines > ROI > crosshair (matches active input intent).
+        if cut_enabled:
+            vp.crosshair_enabled = False
+            vp.roi_enabled = False
+            vp.active_roi_edge = None
+            vp.set_cut_lines_enabled(True)
+            return
+
+        vp.set_cut_lines_enabled(False)
+        vp.active_roi_edge = None
+
+        if roi_enabled:
+            vp.crosshair_enabled = False
+            vp.roi_enabled = True
+            if str(getattr(vp, "picking_mode", "")).strip().lower() in {"crosshair", "cut_lines"}:
+                vp.picking_mode = "none"
+            try:
+                vp.schedule_roi_edges_update(0)
+            except Exception:
+                pass
+            return
+
+        if cross_enabled:
+            vp.roi_enabled = False
+            vp.crosshair_enabled = True
+            vp.picking_mode = "crosshair"
+            try:
+                vp.schedule_crosshair_profile_update(0)
+            except Exception:
+                pass
+            return
+
+        vp.crosshair_enabled = False
+        vp.roi_enabled = False
+        if str(getattr(vp, "picking_mode", "")).strip().lower() in {"crosshair", "cut_lines"}:
+            vp.picking_mode = "none"
+
+    def _sync_section_mode_buttons(self) -> None:
+        vp = self.viewport
+        cross_enabled = bool(getattr(vp, "crosshair_enabled", False))
+        roi_enabled = bool(getattr(vp, "roi_enabled", False))
+        cut_enabled = bool(getattr(vp, "cut_lines_enabled", False))
+
+        try:
+            self.section_panel.btn_toggle.blockSignals(True)
+            self.section_panel.btn_toggle.setChecked(cross_enabled)
+            self.section_panel.btn_toggle.setText(
+                "🎯 십자선 단면 모드 중지" if cross_enabled else "🎯 십자선 단면 모드 시작"
+            )
+        except Exception:
+            pass
         finally:
             try:
-                self.section_panel.btn_line.blockSignals(False)
+                self.section_panel.btn_toggle.blockSignals(False)
             except Exception:
                 pass
 
-        vp.update()
+        try:
+            self.section_panel.btn_roi.blockSignals(True)
+            self.section_panel.btn_roi.setChecked(roi_enabled)
+            self.section_panel.btn_roi.setText(
+                "🗺 영역 지정 모드 중지" if roi_enabled else "🗺 영역 지정 모드 시작"
+            )
+            self.section_panel.btn_silhouette.setEnabled(roi_enabled)
+        except Exception:
+            pass
+        finally:
+            try:
+                self.section_panel.btn_roi.blockSignals(False)
+            except Exception:
+                pass
+
+        self._sync_cutline_button_state(cut_enabled)
 
     def _apply_ui_state(self, ui: dict[str, Any]) -> None:
         # Flatten panel
@@ -4071,7 +4206,7 @@ class MainWindow(QMainWindow):
         self._mesh_load_thread = MeshLoadThread(
             filepath=str(filepath),
             scale_factor=float(scale_factor),
-            default_unit=str(getattr(self.mesh_loader, "default_unit", "cm")),
+            default_unit=str(getattr(self.mesh_loader, "default_unit", DEFAULT_MESH_UNIT)),
         )
         self._mesh_load_thread.loaded.connect(self._on_mesh_load_thread_loaded)
         self._mesh_load_thread.failed.connect(self._on_mesh_load_thread_failed)
@@ -4095,6 +4230,13 @@ class MainWindow(QMainWindow):
                 obj_name = str(project_obj_state.get("name", "")).strip() or obj_name
 
             self.viewport.add_mesh_object(mesh_data, name=obj_name)
+            try:
+                obj_loaded = self.viewport.selected_obj
+                if obj_loaded is not None and int(getattr(obj_loaded, "vertex_count", 0) or 0) <= 0:
+                    # Defensive: if VBO was not prepared, rebuild once.
+                    self.viewport.update_vbo(obj_loaded)
+            except Exception:
+                pass
 
             if isinstance(project_obj_state, dict):
                 try:
@@ -4111,6 +4253,11 @@ class MainWindow(QMainWindow):
                         self.trans_toolbar.btn_xray.blockSignals(True)
                         self.trans_toolbar.btn_xray.setChecked(False)
                         self.trans_toolbar.btn_xray.blockSignals(False)
+                except Exception:
+                    pass
+                try:
+                    # Keep newly loaded meshes immediately visible.
+                    self.fit_view()
                 except Exception:
                     pass
                 self.status_info.setText(f"로드됨: {Path(filepath).name}")
@@ -4434,7 +4581,8 @@ class MainWindow(QMainWindow):
     def update_slice_range(self):
         """현재 선택된 객체의 Z 범위로 슬라이더 업데이트"""
         obj = self.viewport.selected_obj
-        if obj and obj.mesh:
+        panel = getattr(self, "slice_panel", None)
+        if obj and obj.mesh and panel is not None:
             # 대용량 메쉬에서 전체 버텍스 스캔은 느림 -> 월드 바운드로 근사
             try:
                 wb = obj.get_world_bounds()
@@ -4443,7 +4591,7 @@ class MainWindow(QMainWindow):
             except Exception:
                 z_min = float(obj.mesh.bounds[0][2])
                 z_max = float(obj.mesh.bounds[1][2])
-            self.slice_panel.update_range(z_min, z_max)
+            panel.update_range(z_min, z_max)
             
     def on_visibility_changed(self, index, visible):
         if 0 <= index < len(self.viewport.objects):
@@ -4557,6 +4705,49 @@ class MainWindow(QMainWindow):
         self.viewport.update()
         self.viewport.meshTransformChanged.emit()
 
+    def fit_ground_plane(self):
+        """현재 자세를 유지하고 메쉬를 XY 바닥(Z=0)에 안착."""
+        obj = self.viewport.selected_obj
+        if not obj:
+            return
+
+        try:
+            self.viewport.save_undo_state()
+        except Exception:
+            pass
+
+        # 월드 기준 안착을 위해 현재 T/R/S를 먼저 bake.
+        self.viewport.bake_object_transform(obj)
+
+        try:
+            z_vals = np.asarray(obj.mesh.vertices[:, 2], dtype=np.float64)
+            z_vals = z_vals[np.isfinite(z_vals)]
+            if z_vals.size == 0:
+                return
+            min_z = float(np.min(z_vals))
+        except Exception:
+            return
+
+        if not np.isfinite(min_z):
+            return
+
+        if abs(min_z) > 1e-9:
+            obj.mesh.vertices[:, 2] -= min_z
+            try:
+                obj.mesh._bounds = None
+                obj.mesh._centroid = None
+                obj.mesh._surface_area = None
+            except Exception:
+                pass
+            obj._trimesh = None
+
+        obj.translation = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+        self.viewport.update_vbo(obj)
+        self.sync_transform_panel()
+        self.viewport.status_info = "✅ 기준평면 맞추기 완료 (최저점 Z=0)"
+        self.viewport.update()
+        self.viewport.meshTransformChanged.emit()
+
     def _infer_migu_from_outer_inner(
         self,
         *,
@@ -4610,26 +4801,26 @@ class MainWindow(QMainWindow):
 
         applied: list[str] = []
         try:
-            if not hasattr(mesh_local, "_views_fallback_use_normals"):
+            if getattr(mesh_local, "_views_fallback_use_normals", None) is None:
                 mesh_local._views_fallback_use_normals = False
                 applied.append("fallback_t_only")
         except Exception:
             pass
         try:
-            if not hasattr(mesh_local, "_views_migu_absdot_max"):
+            if getattr(mesh_local, "_views_migu_absdot_max", None) is None:
                 # Disable normal-only migu carving for very large meshes; use boundary-based supplement instead.
                 mesh_local._views_migu_absdot_max = 1.0
                 applied.append("migu_disable_normals")
         except Exception:
             pass
         try:
-            if not hasattr(mesh_local, "_views_migu_max_frac"):
+            if getattr(mesh_local, "_views_migu_max_frac", None) is None:
                 mesh_local._views_migu_max_frac = 0.05
                 applied.append("migu_frac_guard")
         except Exception:
             pass
         try:
-            if not hasattr(mesh_local, "_views_visibility_neighborhood"):
+            if getattr(mesh_local, "_views_visibility_neighborhood", None) is None:
                 # Reduce view-bin jitter on very large meshes.
                 mesh_local._views_visibility_neighborhood = 2
                 applied.append("vis_nbhd2")
@@ -5515,6 +5706,9 @@ class MainWindow(QMainWindow):
         dim_ratio_before = meta.get("flatten_size_dim_ratio_before", None)
         dim_ratio_after = meta.get("flatten_size_dim_ratio_after", None)
         guard_scale = meta.get("flatten_size_guard_scale", None)
+        dim_ratio_before_f = _safe_float_or_none(dim_ratio_before)
+        dim_ratio_after_f = _safe_float_or_none(dim_ratio_after)
+        guard_scale_f = _safe_float_or_none(guard_scale)
 
         status_prefix = "⚠️ 펼침 완료" if size_warning else "✅ 펼침 완료"
         self.status_info.setText(
@@ -5528,8 +5722,8 @@ class MainWindow(QMainWindow):
                 try:
                     size_note = (
                         f"\n- 크기 안정화 보정: 적용됨"
-                        f"\n  (비율 {float(dim_ratio_before):.2f}x → {float(dim_ratio_after):.2f}x,"
-                        f" 스케일 {float(guard_scale):.4f})"
+                        f"\n  (비율 {float(dim_ratio_before_f or 0.0):.2f}x → {float(dim_ratio_after_f or 0.0):.2f}x,"
+                        f" 스케일 {float(guard_scale_f or 0.0):.4f})"
                     )
                 except Exception:
                     size_note = "\n- 크기 안정화 보정: 적용됨"
@@ -5537,7 +5731,7 @@ class MainWindow(QMainWindow):
                 try:
                     size_note = (
                         f"\n- 크기 경고: 원본 대비 펼침 최대 길이 비율이 큽니다"
-                        f"\n  (현재 약 {float(dim_ratio_before):.2f}x)"
+                        f"\n  (현재 약 {float(dim_ratio_before_f or 0.0):.2f}x)"
                     )
                 except Exception:
                     size_note = "\n- 크기 경고: 원본 대비 펼침 크기가 큰 편입니다."
@@ -5651,18 +5845,9 @@ class MainWindow(QMainWindow):
 
                     # DPI 기준으로 출력 폭 계산 (실측 스케일 유지를 위해)
                     unit = (flattened.original_mesh.unit or "mm").lower()
-                    width_real = float(flattened.width)
-                    if unit == 'mm':
-                        width_in = width_real / 25.4
-                    elif unit == 'cm':
-                        width_in = width_real / 2.54
-                    elif unit == 'm':
-                        width_in = (width_real * 100.0) / 2.54
-                    else:
-                        width_in = width_real / 25.4
-
-                    width_pixels = max(800, int(width_in * dpi))
-                    width_pixels = min(width_pixels, 12000)  # 메모리 보호용 상한
+                    width_in = _width_in_inches(float(flattened.width), unit)
+                    width_pixels = max(MIN_EXPORT_WIDTH_PX, int(width_in * dpi))
+                    width_pixels = min(width_pixels, MAX_EXPORT_WIDTH_PX)  # output width guard
 
                     visualizer = SurfaceVisualizer(default_dpi=dpi)
                     rubbing = visualizer.generate_rubbing(
@@ -5748,18 +5933,9 @@ class MainWindow(QMainWindow):
 
                     # DPI 기준으로 출력 폭 계산 (실측 스케일 유지를 위해)
                     unit = (flattened.original_mesh.unit or "mm").lower()
-                    width_real = float(flattened.width)
-                    if unit == 'mm':
-                        width_in = width_real / 25.4
-                    elif unit == 'cm':
-                        width_in = width_real / 2.54
-                    elif unit == 'm':
-                        width_in = (width_real * 100.0) / 2.54
-                    else:
-                        width_in = width_real / 25.4
-
-                    width_pixels = max(800, int(width_in * dpi))
-                    width_pixels = min(width_pixels, 12000)  # 메모리 보호용 상한
+                    width_in = _width_in_inches(float(flattened.width), unit)
+                    width_pixels = max(MIN_EXPORT_WIDTH_PX, int(width_in * dpi))
+                    width_pixels = min(width_pixels, MAX_EXPORT_WIDTH_PX)  # output width guard
 
                     visualizer = SurfaceVisualizer(default_dpi=dpi)
                     # Prefer the image-based preset to reduce aliasing/noise on scanned meshes.
@@ -5868,8 +6044,8 @@ class MainWindow(QMainWindow):
                     exporter = FlattenedSVGExporter()
 
                     # 1cm 격자를 기본 제공 (단위가 mm면 10mm)
-                    unit = (flattened.original_mesh.unit or "cm").lower()
-                    svg_unit = unit if unit in ('mm', 'cm') else 'cm'
+                    unit = (flattened.original_mesh.unit or DEFAULT_MESH_UNIT).lower()
+                    svg_unit = unit if unit in ("mm", "cm") else DEFAULT_MESH_UNIT
                     grid = 10.0 if svg_unit == 'mm' else 1.0
 
                     exporter.export(
@@ -6309,8 +6485,8 @@ class MainWindow(QMainWindow):
                 cam.pan_offset.copy(),
             )
             view_map = {
-                'top': (0.0, 89.0),
-                'bottom': (0.0, -89.0),
+                'top': (0.0, 90.0),
+                'bottom': (0.0, -90.0),
                 'front': (-90.0, 0.0),
                 'back': (90.0, 0.0),
                 'left': (180.0, 0.0),
@@ -6526,8 +6702,8 @@ class MainWindow(QMainWindow):
 
         views = ["top", "bottom", "front", "back", "left", "right"]
         view_map = {
-            "top": (0.0, 89.0),
-            "bottom": (0.0, -89.0),
+            "top": (0.0, 90.0),
+            "bottom": (0.0, -90.0),
             "front": (-90.0, 0.0),
             "back": (90.0, 0.0),
             "left": (180.0, 0.0),
@@ -6880,25 +7056,98 @@ class MainWindow(QMainWindow):
         self.status_info.setText("🏠 카메라 원점 복귀")
             
     def reset_view(self):
+        self.viewport._front_back_ortho_enabled = False
         self.viewport.camera.reset()
         self.viewport.update()
-    
+
     def fit_view(self):
+        self.viewport._front_back_ortho_enabled = False
         obj = self.viewport.selected_obj
         if obj:
-            # 월드 좌표계 바운드로 획득
-            self.viewport.camera.fit_to_bounds(obj.get_world_bounds())
-            self.viewport.update()
+            try:
+                wb = np.asarray(obj.get_world_bounds(), dtype=np.float64)
+                if wb.shape == (2, 3) and np.isfinite(wb).all():
+                    self.viewport.camera.fit_to_bounds(wb)
+                    self.viewport.camera.pan_offset = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+                    self.viewport.update()
+                    return
+            except Exception:
+                pass
+            try:
+                self.viewport.fit_view_to_selected_object()
+            except Exception:
+                pass
         elif self.current_mesh is not None:
-            self.viewport.camera.fit_to_bounds(self.current_mesh.bounds)
-            self.viewport.update()
+            try:
+                b = np.asarray(self.current_mesh.bounds, dtype=np.float64)
+                if b.shape == (2, 3) and np.isfinite(b).all():
+                    self.viewport.camera.fit_to_bounds(b)
+                    self.viewport.camera.pan_offset = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+                    self.viewport.update()
+            except Exception:
+                pass
 
-    
     def set_view(self, azimuth: float, elevation: float):
-        self.viewport.camera.azimuth = azimuth
-        self.viewport.camera.elevation = elevation
+        try:
+            az = float(azimuth)
+            el = float(elevation)
+        except Exception:
+            return
+
+        az = ((az + 180.0) % 360.0) - 180.0
+        for tgt in (-180.0, -90.0, 0.0, 90.0, 180.0):
+            if abs(az - tgt) <= 1e-6:
+                az = tgt
+                break
+        if abs(el) <= 1e-6:
+            el = 0.0
+        if abs(el - 90.0) <= 1e-6:
+            el = 90.0
+        elif abs(el + 90.0) <= 1e-6:
+            el = -90.0
+
+        cam = self.viewport.camera
+        cam.azimuth = az
+        cam.elevation = max(-90.0, min(90.0, el))
+
+        # Keep 6-face views tightly framed around visible geometry.
+        try:
+            bounds = None
+            obj = self.viewport.selected_obj
+            if obj is not None:
+                b = np.asarray(obj.get_world_bounds(), dtype=np.float64)
+                if b.shape == (2, 3) and np.isfinite(b).all():
+                    bounds = b
+            else:
+                boxes = []
+                for o in list(getattr(self.viewport, "objects", []) or []):
+                    if not bool(getattr(o, "visible", True)):
+                        continue
+                    b = np.asarray(o.get_world_bounds(), dtype=np.float64)
+                    if b.shape == (2, 3) and np.isfinite(b).all():
+                        boxes.append(b)
+                if boxes:
+                    wb = np.vstack(boxes)
+                    bounds = np.array([wb.min(axis=0), wb.max(axis=0)], dtype=np.float64)
+            if bounds is not None:
+                center = (bounds[0] + bounds[1]) * 0.5
+                ext = bounds[1] - bounds[0]
+                max_dim = float(np.max(ext))
+                if not np.isfinite(max_dim) or max_dim <= 1e-6:
+                    max_dim = 10.0
+                cam.center = np.asarray(center, dtype=np.float64)
+                cam.distance = float(max(cam.min_distance, min(cam.max_distance, max_dim * 1.35)))
+        except Exception:
+            pass
+
+        try:
+            cam.pan_offset = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+        except Exception:
+            pass
+        # Keep directional view buttons free-orbit friendly (no sticky ortho lock).
+        self.viewport._front_back_ortho_enabled = False
         self.viewport.update()
-    
+
     def toggle_curvature_mode(self, enabled: bool):
         """곡률 측정 모드 토글"""
         if enabled:
@@ -7732,6 +7981,22 @@ class MainWindow(QMainWindow):
                 pass
 
         self.viewport.set_cut_lines_enabled(enabled)
+        self._sync_cutline_button_state(bool(getattr(self.viewport, "cut_lines_enabled", False)))
+
+    def _sync_cutline_button_state(self, enabled: bool):
+        try:
+            self.section_panel.btn_line.blockSignals(True)
+            self.section_panel.btn_line.setChecked(bool(enabled))
+            self.section_panel.btn_line.setText(
+                "✏️ 단면선 그리기 중지" if bool(enabled) else "✏️ 단면선 그리기 시작"
+            )
+        except Exception:
+            pass
+        finally:
+            try:
+                self.section_panel.btn_line.blockSignals(False)
+            except Exception:
+                pass
 
     def on_cut_line_active_changed(self, index: int):
         """단면선(2개) 중 활성 선 변경"""
@@ -7777,13 +8042,22 @@ class MainWindow(QMainWindow):
         self.scene_panel.update_list(self.viewport.objects, self.viewport.selected_index)
         self.status_info.setText(f"단면 레이어 {added}개 저장됨")
 
-    def _on_cut_lines_auto_ended(self):
-        """Viewport에서 단면선(2개) 입력이 자동 종료되면 버튼 상태도 맞춰줌"""
+    def on_roi_section_commit_requested(self):
+        """ROI Enter 커밋 요청을 현재 조정 축 기준 ROI 단면 레이어 저장으로 처리."""
         try:
-            if self.section_panel.btn_line.isChecked():
-                self.section_panel.btn_line.setChecked(False)
+            added = int(self.viewport.save_roi_sections_to_layers())
         except Exception:
-            pass
+            added = 0
+
+        if added <= 0:
+            self.status_info.setText("저장할 ROI 단면 레이어가 없습니다.")
+            return
+
+        self.scene_panel.update_list(self.viewport.objects, self.viewport.selected_index)
+        self.status_info.setText(f"ROI 단면 레이어 {added}개 저장됨")
+
+    def _on_cut_lines_auto_ended(self):
+        self._sync_cutline_button_state(False)
 
     def _slice_debounce_delay_ms(self) -> int:
         """메쉬 크기에 따라 단면 계산 디바운스 시간을 동적으로 조정."""
@@ -7899,6 +8173,9 @@ class MainWindow(QMainWindow):
         if obj is None or getattr(obj, "mesh", None) is None:
             QMessageBox.warning(self, "경고", "촬영할 대상 메쉬가 없습니다.")
             return
+        panel = getattr(self, "slice_panel", None)
+        if panel is None:
+            return
 
         try:
             target_z = float(height)
@@ -7906,15 +8183,15 @@ class MainWindow(QMainWindow):
             target_z = float(getattr(self.viewport, "slice_z", 0.0) or 0.0)
 
         try:
-            if not self.slice_panel.group.isChecked():
-                self.slice_panel.group.setChecked(True)
+            if not panel.group.isChecked():
+                panel.group.setChecked(True)
         except Exception:
             pass
 
         try:
             cur_z = float(getattr(self.viewport, "slice_z", 0.0) or 0.0)
             if not np.isclose(cur_z, target_z, atol=1e-9):
-                self.slice_panel.spin.setValue(target_z)
+                panel.spin.setValue(target_z)
         except Exception:
             pass
 
