@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).parent / 'src'))
 
 APP_NAME = "ArchMeshRubbing"
 APP_VERSION = "0.1.0"
+DEFAULT_EXPORT_DPI = 300
 try:
     import src as _amr_src
 
@@ -62,7 +63,7 @@ class ProcessingThread(QThread):
                 flattened = flattener.flatten(mesh)
                 
                 self.progress.emit(60, "탁본 이미지 생성 중...")
-                visualizer = SurfaceVisualizer(default_dpi=300)
+                visualizer = SurfaceVisualizer(default_dpi=DEFAULT_EXPORT_DPI)
                 rubbing = visualizer.generate_rubbing(
                     flattened, 
                     width_pixels=self.options.get('resolution', 2000),
@@ -85,7 +86,7 @@ class ProcessingThread(QThread):
                 
                 self.progress.emit(90, "저장 중...")
                 save_path = output_path.with_suffix('.projection.png')
-                result.save(str(save_path), dpi=300)
+                result.save(str(save_path), dpi=DEFAULT_EXPORT_DPI)
                 
                 self.progress.emit(100, "완료!")
                 self.finished.emit(True, str(save_path))

@@ -14,6 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
 
 _LOGGER = logging.getLogger(__name__)
+DEFAULT_EXPORT_DPI = 300
 
 
 def run_cli():
@@ -142,7 +143,7 @@ def process_mesh(filepath: str):
         
         # 3. 탁본 이미지 생성
         print("\n[3/4] Generating rubbing image...")
-        visualizer = SurfaceVisualizer(default_dpi=300)
+        visualizer = SurfaceVisualizer(default_dpi=DEFAULT_EXPORT_DPI)
         rubbing = visualizer.generate_rubbing(flattened, width_pixels=2000)
         
         print(f"      Image size: {rubbing.width_pixels} x {rubbing.height_pixels} pixels")
@@ -228,7 +229,7 @@ def project_mesh(filepath: str, output_path: str | None = None):
         print(f"  Real size: {result.width_real:.2f} x {result.height_real:.2f} {result.unit}")
         
         output_path = output_path or str(Path(filepath).with_suffix('.projection.png'))
-        result.save(output_path, dpi=300)
+        result.save(output_path, dpi=DEFAULT_EXPORT_DPI)
         
         print(f"  Saved: {output_path}")
         

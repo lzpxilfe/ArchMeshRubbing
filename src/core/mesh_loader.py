@@ -49,6 +49,15 @@ class MeshData:
     _bounds: Optional[np.ndarray] = field(default=None, repr=False)
     _centroid: Optional[np.ndarray] = field(default=None, repr=False)
     _surface_area: Optional[float] = field(default=None, repr=False)
+    _normals_chunk_faces: Optional[int] = field(default=None, repr=False)
+
+    # Optional runtime tuning knobs used by surface separation / assist.
+    _assist_unresolved_keep_max: Optional[int] = field(default=None, repr=False)
+    _views_use_topology_assignment: bool = field(default=True, repr=False)
+    _views_fallback_use_normals: bool = field(default=False, repr=False)
+    _views_migu_absdot_max: Optional[float] = field(default=None, repr=False)
+    _views_migu_max_frac: Optional[float] = field(default=None, repr=False)
+    _views_visibility_neighborhood: Optional[int] = field(default=None, repr=False)
     
     def __post_init__(self):
         """데이터 검증 및 타입 변환"""

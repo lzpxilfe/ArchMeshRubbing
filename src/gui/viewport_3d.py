@@ -48,12 +48,10 @@ from OpenGL.GL import (
     GL_LINE,
     GL_LINE_LOOP,
     GL_LINE_SMOOTH,
-    GL_LINE_SMOOTH_HINT,
     GL_LINE_STRIP,
     GL_LINES,
     GL_MODELVIEW,
     GL_MODELVIEW_MATRIX,
-    GL_NICEST,
     GL_NORMAL_ARRAY,
     GL_NORMALIZE,
     GL_ONE_MINUS_SRC_ALPHA,
@@ -97,7 +95,6 @@ from OpenGL.GL import (
     glGenBuffers,
     glGetDoublev,
     glGetIntegerv,
-    glHint,
     glLightfv,
     glLightModelfv,
     glLineWidth,
@@ -1546,14 +1543,14 @@ class SceneObject:
         self.polyline_layers = []
         
         # ?뚮뜑留?由ъ냼??
-        self.vbo_id = None
-        self.vertex_count = 0
-        self.selected_faces = set()
-        self.outer_face_indices = set()
-        self.inner_face_indices = set()
-        self.migu_face_indices = set()
+        self.vbo_id: int | None = None
+        self.vertex_count: int = 0
+        self.selected_faces: set[int] = set()
+        self.outer_face_indices: set[int] = set()
+        self.inner_face_indices: set[int] = set()
+        self.migu_face_indices: set[int] = set()
         # Optional assist output: faces still unresolved after seeded assist.
-        self.surface_assist_unresolved_face_indices = set()
+        self.surface_assist_unresolved_face_indices: set[int] = set()
         self.surface_assist_meta: dict[str, Any] = {}
         self.surface_assist_runtime: dict[str, Any] = {}
         self._surface_assignment_version: int = 0
@@ -1650,6 +1647,7 @@ class Viewport3D(QOpenGLWidget):
         
         # 留덉슦???곹깭
         self.last_mouse_pos = None
+        self.last_mouse_posf: tuple[float, float] | None = None
         self.mouse_button = None
         
         # ???곹깭 ?곹뼢 ?됱???(硫??硫붿돩)
@@ -1691,6 +1689,7 @@ class Viewport3D(QOpenGLWidget):
         # ?뺣㈃/?꾨㈃ ?꾨━?뗭뿉??X-Z 吏곴탳 ?ъ쁺??媛뺤젣?????ъ슜
         self._front_back_ortho_enabled = False
         self._ortho_view_scale = ORTHO_VIEW_SCALE_DEFAULT
+        self._ortho_frame_override: tuple[float, float] | None = None
         
         # ?쇳궧 紐⑤뱶 ('none', 'curvature', 'floor_3point', 'floor_face', 'floor_brush')
         self.picking_mode = 'none'
@@ -1843,7 +1842,7 @@ class Viewport3D(QOpenGLWidget):
         self._line_profile_timer.timeout.connect(self._request_line_profile_compute)
 
         # Floor penetration highlight (z < 0)
-        self.floor_penetration_highlight = False
+        self.floor_penetration_highlight = True
         
         # ?쒕옒洹?議곗옉??理쒖쟻??蹂??
         self._drag_depth = 0.0
@@ -2174,23 +2173,38 @@ class Viewport3D(QOpenGLWidget):
 
         # 6諛⑺뼢 異??뺣젹 ?꾨━?? ?뚯쟾 以묒뿉???ㅼ???援щ룄媛 ?붾뱾由ъ? ?딅룄濡??덉젙 吏곴탳 ?꾨젅?대컢
         try:
-            _center_w, radius = self._collect_projection_sphere()
+            half_w = None
+            half_h = None
+            override = getattr(self, "_ortho_frame_override", None)
             try:
-                ortho_scale = float(getattr(self, "_ortho_view_scale", ORTHO_VIEW_SCALE_DEFAULT) or ORTHO_VIEW_SCALE_DEFAULT)
-                # 異??뺣젹 ?꾨━?뗭뿉?쒕뒗 ???꾩쟻 ?ㅽ봽?뗭쑝濡??명븳 援щ룄 ??댁쭚??李⑤떒.
+                if isinstance(override, (tuple, list, np.ndarray)) and len(override) >= 2:
+                    hw = float(override[0])
+                    hh = float(override[1])
+                    if np.isfinite(hw) and np.isfinite(hh) and hw > 1e-6 and hh > 1e-6:
+                        half_w = hw
+                        half_h = hh
             except Exception:
-                ortho_scale = ORTHO_VIEW_SCALE_DEFAULT
-            if not np.isfinite(ortho_scale):
-                ortho_scale = ORTHO_VIEW_SCALE_DEFAULT
-            ortho_scale = float(max(0.2, min(ortho_scale, 40.0)))
+                half_w = None
+                half_h = None
 
-            base = max(1e-3, float(radius) * ortho_scale)
-            if aspect >= 1.0:
-                half_h = base
-                half_w = base * aspect
-            else:
-                half_w = base
-                half_h = base / max(1e-9, aspect)
+            if half_w is None or half_h is None:
+                _center_w, radius = self._collect_projection_sphere()
+                try:
+                    ortho_scale = float(getattr(self, "_ortho_view_scale", ORTHO_VIEW_SCALE_DEFAULT) or ORTHO_VIEW_SCALE_DEFAULT)
+                    # 異??뺣젹 ?꾨━?뗭뿉?쒕뒗 ???꾩쟻 ?ㅽ봽?뗭쑝濡??명븳 援щ룄 ??댁쭚??李⑤떒.
+                except Exception:
+                    ortho_scale = ORTHO_VIEW_SCALE_DEFAULT
+                if not np.isfinite(ortho_scale):
+                    ortho_scale = ORTHO_VIEW_SCALE_DEFAULT
+                ortho_scale = float(max(0.2, min(ortho_scale, 40.0)))
+
+                base = max(1e-3, float(radius) * ortho_scale)
+                if aspect >= 1.0:
+                    half_h = base
+                    half_w = base * aspect
+                else:
+                    half_w = base
+                    half_h = base / max(1e-9, aspect)
 
             near = float(clip_near)
             far = float(clip_far)
@@ -6147,15 +6161,22 @@ class Viewport3D(QOpenGLWidget):
                 try:
                     wb = obj.get_world_bounds()
                     if float(wb[0][2]) < 0.0:
-                        glEnable(GL_CLIP_PLANE0)
-                        glDepthMask(GL_FALSE)
-                        glEnable(GL_POLYGON_OFFSET_FILL)
-                        glPolygonOffset(-1.0, -1.0)
-                        glColor3f(0.0, 1.0, 0.2)
-                        glDrawArrays(GL_TRIANGLES, 0, obj.vertex_count)
-                        glDisable(GL_POLYGON_OFFSET_FILL)
-                        glDepthMask(GL_TRUE if depth_write else GL_FALSE)
-                        glDisable(GL_CLIP_PLANE0)
+                        pushed = False
+                        try:
+                            glPushAttrib(GL_ALL_ATTRIB_BITS)
+                            pushed = True
+                            glDisable(GL_LIGHTING)
+                            glEnable(GL_BLEND)
+                            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+                            glDepthMask(GL_FALSE)
+                            glEnable(GL_POLYGON_OFFSET_FILL)
+                            glPolygonOffset(-2.0, -2.0)
+                            glEnable(GL_CLIP_PLANE0)
+                            glColor4f(0.0, 1.0, 0.2, 0.55)
+                            glDrawArrays(GL_TRIANGLES, 0, obj.vertex_count)
+                        finally:
+                            if pushed:
+                                glPopAttrib()
                 except Exception:
                     _log_ignored_exception()
 
@@ -6362,22 +6383,30 @@ class Viewport3D(QOpenGLWidget):
             return
 
         try:
-            glEnable(GL_CLIP_PLANE0)
-            glDepthMask(GL_FALSE)
-            glEnable(GL_POLYGON_OFFSET_FILL)
-            glPolygonOffset(-1.0, -1.0)
-            glColor3f(0.0, 1.0, 0.2)
-            glBegin(GL_TRIANGLES)
-            for f in faces:
-                glVertex3fv(vertices[int(f[0])])
-                glVertex3fv(vertices[int(f[1])])
-                glVertex3fv(vertices[int(f[2])])
-            glEnd()
+            pushed = False
+            try:
+                glPushAttrib(GL_ALL_ATTRIB_BITS)
+                pushed = True
+                glDisable(GL_LIGHTING)
+                glEnable(GL_BLEND)
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+                glDepthMask(GL_FALSE)
+                glEnable(GL_POLYGON_OFFSET_FILL)
+                glPolygonOffset(-2.0, -2.0)
+                glEnable(GL_CLIP_PLANE0)
+                glColor4f(0.0, 1.0, 0.2, 0.55)
+                glBegin(GL_TRIANGLES)
+                for f in faces:
+                    glVertex3fv(vertices[int(f[0])])
+                    glVertex3fv(vertices[int(f[1])])
+                    glVertex3fv(vertices[int(f[2])])
+                glEnd()
+            finally:
+                if pushed:
+                    glPopAttrib()
         finally:
             try:
-                glDisable(GL_POLYGON_OFFSET_FILL)
                 glDepthMask(GL_TRUE if depth_write else GL_FALSE)
-                glDisable(GL_CLIP_PLANE0)
             except Exception:
                 _log_ignored_exception()
 
@@ -6743,6 +6772,7 @@ class Viewport3D(QOpenGLWidget):
             try:
                 # Ensure first loaded mesh is immediately visible.
                 self._front_back_ortho_enabled = False
+                self._ortho_frame_override = None
                 self.camera.fit_to_bounds(new_obj.get_world_bounds())
                 self.camera.pan_offset = np.array([0.0, 0.0, 0.0], dtype=np.float64)
             except Exception:
@@ -6984,7 +7014,10 @@ class Viewport3D(QOpenGLWidget):
         """媛앹껜??VBO ?앹꽦 諛??곗씠???꾩넚"""
         made_current = False
         created_vbo = False
-        prev_vbo_id = getattr(obj, "vbo_id", None) if obj is not None else None
+        try:
+            prev_vbo_id = int(getattr(obj, "vbo_id", 0) or 0) if obj is not None else 0
+        except Exception:
+            prev_vbo_id = 0
         try:
             prev_vertex_count = int(getattr(obj, "vertex_count", 0) or 0) if obj is not None else 0
         except Exception:
@@ -7087,11 +7120,12 @@ class Viewport3D(QOpenGLWidget):
             except Exception:
                 pass
             try:
-                if created_vbo and int(getattr(obj, "vbo_id", 0) or 0) > 0:
-                    glDeleteBuffers(1, [int(obj.vbo_id)])
+                current_vbo_id = int(getattr(obj, "vbo_id", 0) or 0)
+                if created_vbo and current_vbo_id > 0:
+                    glDeleteBuffers(1, [current_vbo_id])
                     obj.vbo_id = None
                 else:
-                    prev_vbo = int(prev_vbo_id or 0) if prev_vbo_id is not None else 0
+                    prev_vbo = int(prev_vbo_id or 0)
                     obj.vbo_id = prev_vbo if prev_vbo > 0 else None
                 obj.vertex_count = prev_vertex_count
             except Exception:
@@ -7240,7 +7274,7 @@ class Viewport3D(QOpenGLWidget):
         self.update()
         self.meshTransformChanged.emit()
 
-    def save_undo_state(self):
+    def save_undo_state(self, include_mesh: bool = False):
         """?꾩옱 ?좏깮??媛앹껜??蹂???곹깭瑜??ㅽ깮?????"""
         obj = self.selected_obj
         if not obj:
@@ -7252,6 +7286,13 @@ class Viewport3D(QOpenGLWidget):
             'rotation': obj.rotation.copy(),
             'scale': obj.scale if isinstance(obj.scale, (int, float)) else obj.scale.copy() if hasattr(obj.scale, 'copy') else obj.scale
         }
+        if bool(include_mesh):
+            try:
+                verts = np.asarray(getattr(getattr(obj, "mesh", None), "vertices", None), dtype=np.float64)
+                if verts.ndim == 2 and verts.shape[0] > 0 and verts.shape[1] >= 3:
+                    state["mesh_vertices"] = verts[:, :3].copy()
+            except Exception:
+                _log_ignored_exception()
         self.undo_stack.append(state)
         if len(self.undo_stack) > self.max_undo:
             self.undo_stack.pop(0)
@@ -7266,6 +7307,30 @@ class Viewport3D(QOpenGLWidget):
         obj.translation = state['translation']
         obj.rotation = state['rotation']
         obj.scale = state['scale']
+
+        mesh_vertices = state.get("mesh_vertices")
+        if mesh_vertices is not None and getattr(obj, "mesh", None) is not None:
+            try:
+                verts_arr = np.asarray(mesh_vertices, dtype=np.float64)
+                if verts_arr.ndim == 2 and verts_arr.shape[0] > 0 and verts_arr.shape[1] >= 3:
+                    obj.mesh.vertices = verts_arr[:, :3].astype(np.float32, copy=True)
+                    try:
+                        obj.mesh._bounds = None
+                        obj.mesh._centroid = None
+                        obj.mesh._surface_area = None
+                    except Exception:
+                        pass
+                    try:
+                        obj.mesh.compute_normals(compute_vertex_normals=False, force=True)
+                    except Exception:
+                        _log_ignored_exception()
+                    obj._trimesh = None
+                    try:
+                        self.update_vbo(obj)
+                    except Exception:
+                        _log_ignored_exception()
+            except Exception:
+                _log_ignored_exception()
         
         self.update()
         self.meshTransformChanged.emit()
@@ -7318,6 +7383,11 @@ class Viewport3D(QOpenGLWidget):
         """留덉슦??踰꾪듉 ?뚮┝"""
         try:
             self.last_mouse_pos = event.pos()
+            try:
+                posf = event.position()
+                self.last_mouse_posf = (float(posf.x()), float(posf.y()))
+            except Exception:
+                self.last_mouse_posf = (float(event.pos().x()), float(event.pos().y()))
             self.mouse_button = event.button()
             modifiers = event.modifiers()
             obj_for_ctrl_drag = self.selected_obj
@@ -8022,6 +8092,7 @@ class Viewport3D(QOpenGLWidget):
         self.active_gizmo_axis = None
         self.gizmo_drag_start = None
         self.last_mouse_pos = None
+        self.last_mouse_posf = None
         
         # 罹먯떆 珥덇린??
         self._cached_viewport = None
@@ -8031,7 +8102,7 @@ class Viewport3D(QOpenGLWidget):
         
         self.update()
     
-    def mouseMoveEvent(self, a0: QMouseEvent | None):
+    def mouseMoveEvent(self, a0: QMouseEvent | None):  # pyright: ignore[reportGeneralTypeIssues]
         if a0 is None:
             return
         event = a0
@@ -8211,12 +8282,26 @@ class Viewport3D(QOpenGLWidget):
 
             if self.last_mouse_pos is None:
                 self.last_mouse_pos = event.pos()
+            if self.last_mouse_posf is None:
+                try:
+                    posf = event.position()
+                    self.last_mouse_posf = (float(posf.x()), float(posf.y()))
+                except Exception:
+                    self.last_mouse_posf = (float(event.pos().x()), float(event.pos().y()))
                 return
 
-            # ?댁쟾 ?꾩튂 ???諛??꾩옱 ?꾩튂 媛깆떊 (?쒕옒洹?怨꾩궛??
             prev_pos = self.last_mouse_pos
-            dx = event.pos().x() - prev_pos.x()
-            dy = event.pos().y() - prev_pos.y()
+            prev_xf, prev_yf = self.last_mouse_posf
+            try:
+                posf = event.position()
+                curr_xf = float(posf.x())
+                curr_yf = float(posf.y())
+            except Exception:
+                curr_xf = float(event.pos().x())
+                curr_yf = float(event.pos().y())
+            dx = curr_xf - prev_xf
+            dy = curr_yf - prev_yf
+            self.last_mouse_posf = (curr_xf, curr_yf)
             self.last_mouse_pos = event.pos()
             
             obj = self.selected_obj
@@ -8532,21 +8617,36 @@ class Viewport3D(QOpenGLWidget):
 
             # 4. ?쇰컲 移대찓??議곗옉 (?쒕옒洹?
             ortho_locked = bool(getattr(self, "_front_back_ortho_enabled", False))
+            # In canonical 6-axis orthographic views, keep camera interaction strictly 2D
+            # (pan on screen plane) unless Alt is held to intentionally leave lock.
+            if ortho_locked and not bool(modifiers & Qt.KeyboardModifier.AltModifier):
+                if self.mouse_button in (
+                    Qt.MouseButton.LeftButton,
+                    Qt.MouseButton.RightButton,
+                    Qt.MouseButton.MiddleButton,
+                ):
+                    self.camera.pan(dx, dy)
+                    self.update()
+                    return
+
             if self.mouse_button == Qt.MouseButton.LeftButton:
                 # 6-face view starts axis-aligned, but dragging should immediately return to free orbit.
                 if ortho_locked:
                     self._front_back_ortho_enabled = False
+                    self._ortho_frame_override = None
                 self.camera.rotate(dx, dy)
                 self.update()
             elif self.mouse_button == Qt.MouseButton.RightButton:
                 # Right-drag should also return to free camera mode.
                 if ortho_locked:
                     self._front_back_ortho_enabled = False
+                    self._ortho_frame_override = None
                 self.camera.pan(dx, dy)
                 self.update()
             elif self.mouse_button == Qt.MouseButton.MiddleButton:
                 if ortho_locked:
                     self._front_back_ortho_enabled = False
+                    self._ortho_frame_override = None
                 self.camera.rotate(dx, dy)
                 self.update()
             
@@ -8617,16 +8717,32 @@ class Viewport3D(QOpenGLWidget):
         if bool(getattr(self, "_front_back_ortho_enabled", False)):
             steps = float(delta) / 120.0
             if abs(steps) > 1e-9:
+                factor = float(1.10 ** (-steps))
+                override = getattr(self, "_ortho_frame_override", None)
+                updated_override = False
                 try:
-                    scale = float(getattr(self, "_ortho_view_scale", ORTHO_VIEW_SCALE_DEFAULT) or ORTHO_VIEW_SCALE_DEFAULT)
+                    if isinstance(override, (tuple, list, np.ndarray)) and len(override) >= 2:
+                        hw = float(override[0]) * factor
+                        hh = float(override[1]) * factor
+                        if np.isfinite(hw) and np.isfinite(hh):
+                            hw = float(max(1e-4, min(hw, 1e8)))
+                            hh = float(max(1e-4, min(hh, 1e8)))
+                            self._ortho_frame_override = (hw, hh)
+                            updated_override = True
                 except Exception:
-                    scale = ORTHO_VIEW_SCALE_DEFAULT
-                scale = float(scale * (1.10 ** (-steps)))
-                self._ortho_view_scale = float(max(0.2, min(scale, 40.0)))
+                    _log_ignored_exception()
+                if not updated_override:
+                    try:
+                        scale = float(getattr(self, "_ortho_view_scale", ORTHO_VIEW_SCALE_DEFAULT) or ORTHO_VIEW_SCALE_DEFAULT)
+                    except Exception:
+                        scale = ORTHO_VIEW_SCALE_DEFAULT
+                    scale = float(scale * factor)
+                    self._ortho_view_scale = float(max(0.2, min(scale, 40.0)))
             self.update()
             return
 
         self._front_back_ortho_enabled = False
+        self._ortho_frame_override = None
         self.camera.zoom(delta)
         self.update()
 
@@ -8866,10 +8982,12 @@ class Viewport3D(QOpenGLWidget):
         key = event.key()
         if key == Qt.Key.Key_R:
             self._front_back_ortho_enabled = False
+            self._ortho_frame_override = None
             self.camera.reset()
             self.update()
         elif key == Qt.Key.Key_F:
             self._front_back_ortho_enabled = False
+            self._ortho_frame_override = None
             self.fit_view_to_selected_object()
         else:
             key_dec = getattr(Qt.Key, "Key_BracketLeft", -1)

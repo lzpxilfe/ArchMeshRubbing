@@ -34,6 +34,15 @@ _log_path: Path | None = None
 APP_NAME = "ArchMeshRubbing"
 APP_VERSION = "0.1.0"
 ORTHO_VIEW_SCALE_DEFAULT = 1.15
+DEFAULT_MESH_UNIT = "cm"
+DEFAULT_PROJECT_FILENAME = "project.amr"
+MIN_EXPORT_WIDTH_PX = 800
+MAX_EXPORT_WIDTH_PX = 12000
+_UNIT_TO_INCHES: dict[str, float] = {
+    "mm": 1.0 / 25.4,
+    "cm": 1.0 / 2.54,
+    "m": 100.0 / 2.54,
+}
 
 
 def _safe_git_info(repo_dir: str) -> tuple[str | None, bool]:
@@ -80,6 +89,21 @@ def _collect_debug_info(*, basedir: str) -> str:
         f"  src.core.flattener: {mod_path('src.core.flattener')}",
     ]
     return "\n".join(parts)
+
+
+def _safe_float_or_none(value: Any) -> float | None:
+    try:
+        out = float(value)
+    except Exception:
+        return None
+    if not np.isfinite(out):
+        return None
+    return out
+
+
+def _width_in_inches(width_real: float, unit: str) -> float:
+    factor = _UNIT_TO_INCHES.get(str(unit).strip().lower(), _UNIT_TO_INCHES["mm"])
+    return float(width_real) * float(factor)
 
 # Add src to path
 # Add basedir to path so 'src' package can be found
@@ -491,7 +515,7 @@ class SplashScreen(QWidget):
         card_layout.addWidget(version)
         
         # 서브타이틀
-        subtitle = QLabel("고고학용 3D 메쉬 탁본 도구")
+        subtitle = QLabel("고고학용 3d 메쉬 도구")
         subtitle.setStyleSheet("color: #718096; font-size: 14px;")
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         card_layout.addWidget(subtitle)
@@ -988,48 +1012,6 @@ class FlattenPanel(QWidget):
         action_row.addWidget(btn_clear_all)
         surface_layout.addLayout(action_row)
 
-        auto_row = QHBoxLayout()
-        btn_assist = QPushButton("🤝 수동 보조 분리")
-        btn_assist.setToolTip(
-            "사용자가 지정한 outer/inner 씨드를 기준으로 미분류 면만 보조 분류합니다.\n"
-            "- 기본: views + 보수 모드(모순 배제)\n"
-            "- Shift+클릭: 공격 모드(더 넓게 채움)\n"
-            "- Ctrl+클릭: 원통(반경) 기반 보조\n"
-            "- Alt+클릭: auto(자동) 기반 보조"
-        )
-        btn_assist.clicked.connect(lambda: self.selectionRequested.emit("assist_surface", None))
-        auto_row.addWidget(btn_assist)
-
-        btn_auto = QPushButton("🤖 자동 분리(실험)")
-        btn_auto.setToolTip(
-            "스마트 자동 분리(auto: 가시성(위상)→원통→법선).\n"
-            "결과가 이상하면 '경계(면적+자석)'로 보정하세요.\n"
-            "- Shift: 가시성(±두께축) 강제\n"
-            "- Ctrl: 원통(반경) 강제"
-        )
-        btn_auto.clicked.connect(lambda: self.selectionRequested.emit("auto_surface", None))
-        auto_row.addWidget(btn_auto)
-
-        btn_auto_migu = QPushButton("📏 미구 자동 감지")
-        btn_auto_migu.setToolTip(
-            "미구(계단/경계) 영역을 자동으로 찾아 미구로 지정합니다.\n"
-            "- 클릭: (가능하면) 원통 기반 미구, 아니면 Y축(기본) 강조 감지\n"
-            "- Ctrl+클릭: X축 강조 감지\n"
-            "- Shift+클릭: 둘레 경계(Edge belt) 감지"
-        )
-        btn_auto_migu.clicked.connect(lambda: self.selectionRequested.emit("auto_edge", None))
-        auto_row.addWidget(btn_auto_migu)
-        surface_layout.addLayout(auto_row)
-
-        slice_nav_row = QHBoxLayout()
-        btn_open_section = QPushButton("🧭 단면 도구 열기")
-        btn_open_section.setToolTip(
-            "실시간 단면(3D 절단 관측/촬영)은 '단면 도구' 탭에서 제어합니다.\n"
-            "2D 지정(단면선/ROI)도 같은 탭에서 함께 관리합니다."
-        )
-        btn_open_section.clicked.connect(lambda: self.selectionRequested.emit("open_section_tools", None))
-        slice_nav_row.addWidget(btn_open_section)
-        surface_layout.addLayout(slice_nav_row)
 
         layout.addWidget(surface_group)
         
@@ -2167,7 +2149,7 @@ class MainWindow(QMainWindow):
         if icon_path:
             self.setWindowIcon(QIcon(icon_path))
         
-        self.mesh_loader = MeshLoader(default_unit='cm')
+        self.mesh_loader = MeshLoader(default_unit=DEFAULT_MESH_UNIT)
         self.current_mesh = None
         self.current_filepath = None
 
@@ -2543,9 +2525,19 @@ class MainWindow(QMainWindow):
         self._apply_default_dock_layout()
 
     def closeEvent(self, a0):
-        self._save_ui_state()
         if a0 is None:
             return
+        reply = QMessageBox.question(
+            self,
+            "종료 확인",
+            "정말 종료하시겠습니까?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            a0.ignore()
+            return
+        self._save_ui_state()
         super().closeEvent(a0)
 
     def start_floor_picking(self):
@@ -2654,7 +2646,7 @@ class MainWindow(QMainWindow):
         self.viewport.status_info = f"✅ 브러시 영역({count}개 면) 기준 바닥 정렬 완료"
         self.viewport.update()
 
-    def align_mesh_to_normal(self, normal, *, pivot=None):
+    def align_mesh_to_normal(self, normal, *, pivot=None) -> np.ndarray | None:
         """주어진 법선을 월드 +Z로 정렬 (메쉬에 직접 반영/Bake)."""
         obj = self.viewport.selected_obj
         if not obj:
@@ -2751,6 +2743,10 @@ class MainWindow(QMainWindow):
         # 3) 법선 정렬
         self.viewport.save_undo_state()
         R = self.align_mesh_to_normal(normal, pivot=centroid)
+        if R is None:
+            self.viewport.status_info = "바닥 정렬 중 회전 계산에 실패했습니다."
+            self.viewport.update()
+            return
         points_rotated = (R @ (points - centroid).T).T + centroid
 
         # 4) 선택 바닥 평면을 Z=0으로 이동
@@ -3173,12 +3169,12 @@ class MainWindow(QMainWindow):
         self._write_project(str(self._current_project_path))
 
     def save_project_as(self) -> None:
-        default_name = "project.amr"
+        default_name = DEFAULT_PROJECT_FILENAME
         try:
             if self.current_filepath:
                 default_name = str(Path(str(self.current_filepath)).with_suffix(".amr").name)
         except Exception:
-            default_name = "project.amr"
+            default_name = DEFAULT_PROJECT_FILENAME
 
         filepath, _ = QFileDialog.getSaveFileName(
             self,
@@ -4238,7 +4234,7 @@ class MainWindow(QMainWindow):
         self._mesh_load_thread = MeshLoadThread(
             filepath=str(filepath),
             scale_factor=float(scale_factor),
-            default_unit=str(getattr(self.mesh_loader, "default_unit", "cm")),
+            default_unit=str(getattr(self.mesh_loader, "default_unit", DEFAULT_MESH_UNIT)),
         )
         self._mesh_load_thread.loaded.connect(self._on_mesh_load_thread_loaded)
         self._mesh_load_thread.failed.connect(self._on_mesh_load_thread_failed)
@@ -4832,26 +4828,26 @@ class MainWindow(QMainWindow):
 
         applied: list[str] = []
         try:
-            if not hasattr(mesh_local, "_views_fallback_use_normals"):
+            if getattr(mesh_local, "_views_fallback_use_normals", None) is None:
                 mesh_local._views_fallback_use_normals = False
                 applied.append("fallback_t_only")
         except Exception:
             pass
         try:
-            if not hasattr(mesh_local, "_views_migu_absdot_max"):
+            if getattr(mesh_local, "_views_migu_absdot_max", None) is None:
                 # Disable normal-only migu carving for very large meshes; use boundary-based supplement instead.
                 mesh_local._views_migu_absdot_max = 1.0
                 applied.append("migu_disable_normals")
         except Exception:
             pass
         try:
-            if not hasattr(mesh_local, "_views_migu_max_frac"):
+            if getattr(mesh_local, "_views_migu_max_frac", None) is None:
                 mesh_local._views_migu_max_frac = 0.05
                 applied.append("migu_frac_guard")
         except Exception:
             pass
         try:
-            if not hasattr(mesh_local, "_views_visibility_neighborhood"):
+            if getattr(mesh_local, "_views_visibility_neighborhood", None) is None:
                 # Reduce view-bin jitter on very large meshes.
                 mesh_local._views_visibility_neighborhood = 2
                 applied.append("vis_nbhd2")
@@ -5737,6 +5733,9 @@ class MainWindow(QMainWindow):
         dim_ratio_before = meta.get("flatten_size_dim_ratio_before", None)
         dim_ratio_after = meta.get("flatten_size_dim_ratio_after", None)
         guard_scale = meta.get("flatten_size_guard_scale", None)
+        dim_ratio_before_f = _safe_float_or_none(dim_ratio_before)
+        dim_ratio_after_f = _safe_float_or_none(dim_ratio_after)
+        guard_scale_f = _safe_float_or_none(guard_scale)
 
         status_prefix = "⚠️ 펼침 완료" if size_warning else "✅ 펼침 완료"
         self.status_info.setText(
@@ -5750,8 +5749,8 @@ class MainWindow(QMainWindow):
                 try:
                     size_note = (
                         f"\n- 크기 안정화 보정: 적용됨"
-                        f"\n  (비율 {float(dim_ratio_before):.2f}x → {float(dim_ratio_after):.2f}x,"
-                        f" 스케일 {float(guard_scale):.4f})"
+                        f"\n  (비율 {float(dim_ratio_before_f or 0.0):.2f}x → {float(dim_ratio_after_f or 0.0):.2f}x,"
+                        f" 스케일 {float(guard_scale_f or 0.0):.4f})"
                     )
                 except Exception:
                     size_note = "\n- 크기 안정화 보정: 적용됨"
@@ -5759,7 +5758,7 @@ class MainWindow(QMainWindow):
                 try:
                     size_note = (
                         f"\n- 크기 경고: 원본 대비 펼침 최대 길이 비율이 큽니다"
-                        f"\n  (현재 약 {float(dim_ratio_before):.2f}x)"
+                        f"\n  (현재 약 {float(dim_ratio_before_f or 0.0):.2f}x)"
                     )
                 except Exception:
                     size_note = "\n- 크기 경고: 원본 대비 펼침 크기가 큰 편입니다."
@@ -5873,18 +5872,9 @@ class MainWindow(QMainWindow):
 
                     # DPI 기준으로 출력 폭 계산 (실측 스케일 유지를 위해)
                     unit = (flattened.original_mesh.unit or "mm").lower()
-                    width_real = float(flattened.width)
-                    if unit == 'mm':
-                        width_in = width_real / 25.4
-                    elif unit == 'cm':
-                        width_in = width_real / 2.54
-                    elif unit == 'm':
-                        width_in = (width_real * 100.0) / 2.54
-                    else:
-                        width_in = width_real / 25.4
-
-                    width_pixels = max(800, int(width_in * dpi))
-                    width_pixels = min(width_pixels, 12000)  # 메모리 보호용 상한
+                    width_in = _width_in_inches(float(flattened.width), unit)
+                    width_pixels = max(MIN_EXPORT_WIDTH_PX, int(width_in * dpi))
+                    width_pixels = min(width_pixels, MAX_EXPORT_WIDTH_PX)  # output width guard
 
                     visualizer = SurfaceVisualizer(default_dpi=dpi)
                     rubbing = visualizer.generate_rubbing(
@@ -5970,18 +5960,9 @@ class MainWindow(QMainWindow):
 
                     # DPI 기준으로 출력 폭 계산 (실측 스케일 유지를 위해)
                     unit = (flattened.original_mesh.unit or "mm").lower()
-                    width_real = float(flattened.width)
-                    if unit == 'mm':
-                        width_in = width_real / 25.4
-                    elif unit == 'cm':
-                        width_in = width_real / 2.54
-                    elif unit == 'm':
-                        width_in = (width_real * 100.0) / 2.54
-                    else:
-                        width_in = width_real / 25.4
-
-                    width_pixels = max(800, int(width_in * dpi))
-                    width_pixels = min(width_pixels, 12000)  # 메모리 보호용 상한
+                    width_in = _width_in_inches(float(flattened.width), unit)
+                    width_pixels = max(MIN_EXPORT_WIDTH_PX, int(width_in * dpi))
+                    width_pixels = min(width_pixels, MAX_EXPORT_WIDTH_PX)  # output width guard
 
                     visualizer = SurfaceVisualizer(default_dpi=dpi)
                     # Prefer the image-based preset to reduce aliasing/noise on scanned meshes.
@@ -6090,8 +6071,8 @@ class MainWindow(QMainWindow):
                     exporter = FlattenedSVGExporter()
 
                     # 1cm 격자를 기본 제공 (단위가 mm면 10mm)
-                    unit = (flattened.original_mesh.unit or "cm").lower()
-                    svg_unit = unit if unit in ('mm', 'cm') else 'cm'
+                    unit = (flattened.original_mesh.unit or DEFAULT_MESH_UNIT).lower()
+                    svg_unit = unit if unit in ("mm", "cm") else DEFAULT_MESH_UNIT
                     grid = 10.0 if svg_unit == 'mm' else 1.0
 
                     exporter.export(
