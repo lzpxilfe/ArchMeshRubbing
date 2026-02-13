@@ -1753,6 +1753,8 @@ class Viewport3D(QOpenGLWidget):
         # This lets the user expand a patch gradually (Photoshop-like).
         self._surface_grow_state: dict[str, Any] = {}
         self.floor_picks = []  # 諛붾떏硫?吏?뺤슜 ??由ъ뒪??        
+        self._floor_3point_right_press_pos = None
+        self._floor_3point_right_dragged = False
         # Undo/Redo ?쒖뒪??
         self.undo_stack = []
         self.max_undo = 50
@@ -2130,6 +2132,19 @@ class Viewport3D(QOpenGLWidget):
 
             clip_near = float(max(1e-5, dist - (r * 4.0)))
             clip_far = float(max(clip_near + 1.0, dist + (r * 6.0)))
+            # Keep far clip sufficiently large so floor/grid/axes do not get visibly cut at low elevation.
+            cam_dist = float(max(1e-3, float(getattr(self.camera, "distance", dist) or dist)))
+            elev_abs = abs(float(getattr(self.camera, "elevation", 30.0) or 30.0))
+            if elev_abs < 5.0:
+                horizon_factor = 42.0
+            elif elev_abs < 10.0:
+                horizon_factor = 30.0
+            elif elev_abs < 20.0:
+                horizon_factor = 18.0
+            else:
+                horizon_factor = 10.0
+            clip_far = max(clip_far, dist + cam_dist * horizon_factor)
+            clip_near = min(clip_near, max(1e-4, cam_dist * 1e-3))
             if (not np.isfinite(clip_near)) or clip_near <= 0.0:
                 clip_near = 0.001
             if (not np.isfinite(clip_far)) or clip_far <= clip_near:
@@ -2206,6 +2221,16 @@ class Viewport3D(QOpenGLWidget):
         # 移대찓???곸슜
         self.camera.apply()
 
+        # Reset clip planes every frame so stale ROI/floor clipping never leaks into global overlays.
+        try:
+            glDisable(GL_CLIP_PLANE0)
+            glDisable(GL_CLIP_PLANE1)
+            glDisable(GL_CLIP_PLANE2)
+            glDisable(GL_CLIP_PLANE3)
+            glDisable(GL_CLIP_PLANE4)
+        except Exception:
+            _log_ignored_exception()
+
         # 諛붾떏 愿??z<0) ?섏씠?쇱씠?몄슜 ?대━???됰㈃ 媛깆떊 (移대찓???대룞/?뚯쟾???곕씪 留??꾨젅???꾩슂)
         if self.floor_penetration_highlight:
             self._update_floor_penetration_clip_plane()
@@ -2238,7 +2263,6 @@ class Viewport3D(QOpenGLWidget):
         glDepthMask(GL_FALSE)
         self.draw_ground_plane()  # 諛섑닾紐?諛붾떏
         self.draw_grid()
-        self.draw_axes()
         glDepthMask(GL_TRUE)
         
         # 2. 紐⑤뱺 硫붿돩 媛앹껜 ?뚮뜑留?
@@ -2318,6 +2342,8 @@ class Viewport3D(QOpenGLWidget):
                         _log_ignored_exception("Failed to disable ROI clip planes", level=logging.WARNING)
             
         # 3. ?ㅻ쾭?덉씠 ?붿냼 (Depth write off: depth buffer??硫붿돩留??좎?)
+        # Draw world axes after solids so they remain visible after mesh load.
+        self.draw_axes()
         glDepthMask(GL_FALSE)
 
         # 3.1 怨〓쪧 ?쇳똿 ?붿냼
@@ -2406,8 +2432,17 @@ class Viewport3D(QOpenGLWidget):
         glDisable(GL_CULL_FACE)
         
         # 諛붾떏硫??ш린 (移대찓??嫄곕━??鍮꾨?)
-        size = max(self.camera.distance * 3, 200.0)
-        size = min(size, 60000.0)
+        elev = abs(float(getattr(self.camera, "elevation", 30.0) or 30.0))
+        if elev < 5.0:
+            horizon_factor = 22.0
+        elif elev < 10.0:
+            horizon_factor = 14.0
+        elif elev < 20.0:
+            horizon_factor = 9.0
+        else:
+            horizon_factor = 5.0
+        size = max(float(self.camera.distance) * horizon_factor, 200.0)
+        size = min(size, 2_000_000.0)
         
         # Keep floor tone neutral to reduce visual noise and preserve depth cues.
         glColor4f(0.82, 0.84, 0.86, 0.16)
@@ -2423,71 +2458,96 @@ class Viewport3D(QOpenGLWidget):
         glEnable(GL_LIGHTING)
     
     def draw_grid(self):
-        """臾댄븳 寃⑹옄 諛붾떏硫?洹몃━湲?(Z=0, XY ?됰㈃) - Z-up 醫뚰몴怨?"""
+        """Draw an infinite-feeling world grid on Z=0."""
         glDisable(GL_LIGHTING)
         glEnable(GL_BLEND)
         glDisable(GL_LINE_SMOOTH)
-        
-        # 移대찓??嫄곕━???곕씪 湲곕낯 媛꾧꺽 寃곗젙 (理쒖냼 1cm, 理쒕? 10km)
-        base_spacing = self.grid_spacing
-        levels = [1, 10, 100]
-        if float(getattr(self.camera, "distance", 0.0) or 0.0) >= 2000.0:
-            levels.append(1000)
-        
-        cam_center = self.camera.look_at
-        
+
+        try:
+            base_spacing = float(getattr(self, "grid_spacing", 1.0) or 1.0)
+        except Exception:
+            base_spacing = 1.0
+        if (not np.isfinite(base_spacing)) or base_spacing <= 1e-9:
+            base_spacing = 1.0
+
+        try:
+            cam_dist = float(getattr(self.camera, "distance", 500.0) or 500.0)
+        except Exception:
+            cam_dist = 500.0
+        cam_dist = max(1.0, cam_dist)
+
+        try:
+            elev = abs(float(getattr(self.camera, "elevation", 30.0) or 30.0))
+        except Exception:
+            elev = 30.0
+        if elev < 5.0:
+            horizon_factor = 24.0
+        elif elev < 10.0:
+            horizon_factor = 16.0
+        elif elev < 20.0:
+            horizon_factor = 9.0
+        else:
+            horizon_factor = 5.0
+        min_spacing_factor = 0.02 if elev < 10.0 else 0.015
+
+        target_half_range = max(200.0, cam_dist * horizon_factor)
+        target_half_range = min(target_half_range, 2_000_000.0)
+
+        cam_center = np.asarray(getattr(self.camera, "look_at", [0.0, 0.0, 0.0]), dtype=np.float64)
+        levels = [1, 10, 100, 1000, 10000]
         for level in levels:
-            spacing = base_spacing * level
-            
-            # 移대찓??嫄곕━??鍮꾪빐 ?덈Т 議곕???寃⑹옄???앸왂?섏뿬 ?깅뒫/媛?쒖꽦 ?뺣낫
-            if spacing < self.camera.distance * 0.02:
+            spacing = base_spacing * float(level)
+            if (not np.isfinite(spacing)) or spacing <= 1e-9:
                 continue
-                
-            # 移대찓??嫄곕━??鍮꾪빐 ?덈Т ?쒕Ц 寃⑹옄???쒕줈??踰붿쐞 議곗젅
-            # Keep an "infinite floor" feel while reducing overdraw and driver stalls.
-            steps = 64 if level == 1 else (48 if level == 10 else 32)
-            view_range = spacing * steps
-            if view_range < self.camera.distance * 0.6 and level < 1000:
+            if spacing < cam_dist * min_spacing_factor:
                 continue
-                
-            view_range = min(max(view_range, self.camera.distance * 2.2), 60000.0)
-            half_range = view_range / 2
-            
-            # ?щ챸??議곗젅 - ??吏꾪븯寃?
+            if spacing > target_half_range * 1.2 and level > 1:
+                continue
+
+            half_steps = int(np.ceil(target_half_range / spacing))
+            if level <= 10:
+                max_half_steps = 1200
+            elif level <= 100:
+                max_half_steps = 900
+            else:
+                max_half_steps = 700
+            half_steps = max(24, min(max_half_steps, half_steps))
+            half_range = spacing * float(half_steps)
+
             if level == 1:
-                alpha = 0.22
+                alpha = 0.20
                 line_width = 1.0
             elif level == 10:
-                alpha = 0.34
+                alpha = 0.30
                 line_width = 1.0
             elif level == 100:
-                alpha = 0.44
+                alpha = 0.40
                 line_width = 1.2
-            else:  # 1000 (10m)
-                alpha = 0.52
+            elif level == 1000:
+                alpha = 0.50
                 line_width = 1.2
-            
+            else:
+                alpha = 0.58
+                line_width = 1.3
+
             glColor4f(0.5, 0.5, 0.5, alpha)
             glLineWidth(line_width)
-            
-            snap_x = round(cam_center[0] / spacing) * spacing
-            snap_y = round(cam_center[1] / spacing) * spacing
-            
+
+            snap_x = round(float(cam_center[0]) / spacing) * spacing
+            snap_y = round(float(cam_center[1]) / spacing) * spacing
+
             glBegin(GL_LINES)
-            half_steps = max(12, min(80, int(steps // 2)))
             for i in range(-half_steps, half_steps + 1):
                 offset = i * spacing
-                # X 諛⑺뼢 ?쇱씤 (Y???됲뻾)
                 x_val = snap_x + offset
-                glVertex3f(x_val, snap_y - half_range, 0)
-                glVertex3f(x_val, snap_y + half_range, 0)
-                
-                # Y 諛⑺뼢 ?쇱씤 (X???됲뻾)
+                glVertex3f(float(x_val), float(snap_y - half_range), 0.0)
+                glVertex3f(float(x_val), float(snap_y + half_range), 0.0)
+
                 y_val = snap_y + offset
-                glVertex3f(snap_x - half_range, y_val, 0)
-                glVertex3f(snap_x + half_range, y_val, 0)
+                glVertex3f(float(snap_x - half_range), float(y_val), 0.0)
+                glVertex3f(float(snap_x + half_range), float(y_val), 0.0)
             glEnd()
-            
+
         glLineWidth(1.0)
         glDisable(GL_BLEND)
         glEnable(GL_LIGHTING)
@@ -5543,42 +5603,56 @@ class Viewport3D(QOpenGLWidget):
 
     
     def draw_axes(self):
-        """XYZ 異?洹몃━湲?(Z-up 醫뚰몴怨?"""
+        """Draw world XYZ axes (Z-up)."""
         glDisable(GL_LIGHTING)
         glDisable(GL_DEPTH_TEST)
-        
+
+        try:
+            cam_dist = float(getattr(self.camera, "distance", 500.0) or 500.0)
+        except Exception:
+            cam_dist = 500.0
+        cam_dist = max(1.0, cam_dist)
+
+        try:
+            elev = abs(float(getattr(self.camera, "elevation", 30.0) or 30.0))
+        except Exception:
+            elev = 30.0
+        if elev < 5.0:
+            horizon_factor = 22.0
+        elif elev < 10.0:
+            horizon_factor = 14.0
+        elif elev < 20.0:
+            horizon_factor = 9.0
+        else:
+            horizon_factor = 5.0
+
+        world_extent = max(200.0, cam_dist * horizon_factor)
+        axis_length = max(120.0, world_extent * 0.35)
+        axis_length = min(axis_length, 200_000.0)
+
         glPushMatrix()
-        
-        axis_length = max(self.camera.distance * 100, 1000000.0)
-        
-        # 異???洹몃━湲?
-        glLineWidth(3.5)
+        glLineWidth(2.8)
         glBegin(GL_LINES)
-        
-        # X異?(鍮④컯) - 醫뚯슦
+
         glColor3f(0.95, 0.2, 0.2)
-        glVertex3f(-axis_length, 0, 0)
-        glVertex3f(axis_length, 0, 0)
-        
-        # Y異?(珥덈줉) - ?욌뮘 (源딆씠)
+        glVertex3f(float(-axis_length), 0.0, 0.0)
+        glVertex3f(float(axis_length), 0.0, 0.0)
+
         glColor3f(0.2, 0.85, 0.2)
-        glVertex3f(0, -axis_length, 0)
-        glVertex3f(0, axis_length, 0)
-        
-        # Z異?(?뚮옉) - ?곹븯 (?섏쭅)
+        glVertex3f(0.0, float(-axis_length), 0.0)
+        glVertex3f(0.0, float(axis_length), 0.0)
+
         glColor3f(0.2, 0.2, 0.95)
-        glVertex3f(0, 0, -axis_length)
-        glVertex3f(0, 0, axis_length)
-        
+        glVertex3f(0.0, 0.0, float(-axis_length))
+        glVertex3f(0.0, 0.0, float(axis_length))
+
         glEnd()
         glPopMatrix()
-        
+
         glLineWidth(1.0)
         glEnable(GL_DEPTH_TEST)
         glEnable(GL_LIGHTING)
 
-
-    
     def _draw_axis_label_marker(self, x, y, z, size, axis):
         """X/Y 異??쇰꺼??媛꾨떒??湲고븯?숈쟻 ?뺥깭濡?洹몃━湲?(XY ?됰㈃???쒖떆)"""
         glLineWidth(2.5)
@@ -7525,11 +7599,10 @@ class Viewport3D(QOpenGLWidget):
 
             # ?⑤㈃??紐⑤뱶: ?고겢由?? "?뺤젙"(click) ?⑸룄濡??ъ슜 (?쒕옒洹??쒖뿉??Pan ?좎?)
             if self.picking_mode == "floor_3point" and event.button() == Qt.MouseButton.RightButton:
-                if len(getattr(self, "floor_picks", []) or []) >= 3:
-                    self.floorAlignmentConfirmed.emit()
-                else:
-                    self.status_info = "諛붾떏吏???먯쓣 3媛??댁긽 李띿? ???고겢由?Enter濡??뺤젙?섏꽭??"
-                    self.update()
+                # Right-click confirms only when released without dragging.
+                # Right-drag remains available for camera pan in floor mode.
+                self._floor_3point_right_press_pos = event.pos()
+                self._floor_3point_right_dragged = False
                 return
 
             if self.picking_mode == "cut_lines" and event.button() == Qt.MouseButton.RightButton:
@@ -7682,6 +7755,22 @@ class Viewport3D(QOpenGLWidget):
                     _log_ignored_exception()
                 self._cut_line_left_press_pos = None
                 self._cut_line_left_dragged = False
+
+        if self.picking_mode == "floor_3point" and event.button() == Qt.MouseButton.RightButton:
+            try:
+                if (
+                    getattr(self, "_floor_3point_right_press_pos", None) is not None
+                    and not bool(getattr(self, "_floor_3point_right_dragged", False))
+                ):
+                    if len(getattr(self, "floor_picks", []) or []) >= 3:
+                        self.floorAlignmentConfirmed.emit()
+                    else:
+                        self.status_info = "Pick at least 3 floor points, then right-click (or press Enter) to confirm."
+                        self.update()
+            except Exception:
+                _log_ignored_exception()
+            self._floor_3point_right_press_pos = None
+            self._floor_3point_right_dragged = False
 
         # ?쒕㈃ 吏??李띻린): ?쒕옒洹멸? ?꾨땲硫?由대━利덉뿉??1???곸슜
         if self.picking_mode == "paint_surface_face" and event.button() == Qt.MouseButton.LeftButton:
@@ -7974,6 +8063,21 @@ class Viewport3D(QOpenGLWidget):
                         dy0 = float(event.pos().y() - pos0.y())
                         if float(dx0 * dx0 + dy0 * dy0) > thr2:
                             self._cut_line_right_dragged = True
+
+            if self.picking_mode == "floor_3point":
+                threshold_px = 10
+                thr2 = float(threshold_px * threshold_px)
+                if (
+                    self.mouse_button == Qt.MouseButton.RightButton
+                    and getattr(self, "_floor_3point_right_press_pos", None) is not None
+                    and not bool(getattr(self, "_floor_3point_right_dragged", False))
+                ):
+                    pos0 = self._floor_3point_right_press_pos
+                    if pos0 is not None:
+                        dx0 = float(event.pos().x() - pos0.x())
+                        dy0 = float(event.pos().y() - pos0.y())
+                        if float(dx0 * dx0 + dy0 * dy0) > thr2:
+                            self._floor_3point_right_dragged = True
 
             # ?쒕㈃ 吏??李띻린): ?쒕옒洹몃뒗 移대찓???뚯쟾?쇰줈 媛꾩＜?섍퀬, 由대━利덉뿉?쒕쭔 "?대┃" 泥섎━
             if self.picking_mode == "paint_surface_face":
@@ -8435,8 +8539,8 @@ class Viewport3D(QOpenGLWidget):
                 self.camera.rotate(dx, dy)
                 self.update()
             elif self.mouse_button == Qt.MouseButton.RightButton:
-                # Pan in both modes; do not break ortho lock when already in 6-face orthographic mode.
-                if not ortho_locked:
+                # Right-drag should also return to free camera mode.
+                if ortho_locked:
                     self._front_back_ortho_enabled = False
                 self.camera.pan(dx, dy)
                 self.update()

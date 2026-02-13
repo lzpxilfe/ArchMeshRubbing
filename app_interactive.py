@@ -105,6 +105,12 @@ from src.core.project_file import (  # noqa: E402
     save_project as save_amr_project,
 )
 from src.gui.profile_graph_widget import ProfileGraphWidget  # noqa: E402
+from src.core.alignment_utils import (  # noqa: E402
+    compute_floor_contact_shift,
+    fit_plane_normal,
+    orient_plane_normal_toward,
+    rotation_matrix_align_vectors,
+)
 
 
 class MeshLoadThread(QThread):
@@ -755,6 +761,10 @@ class TransformToolbar(QToolBar):
         
         self.btn_reset = QPushButton("🔄 초기화")
         self.addWidget(self.btn_reset)
+
+        self.btn_fit_ground = QPushButton("⬆ 바닥면 맞춤")
+        self.btn_fit_ground.setToolTip("현재 자세를 유지한 채 메쉬 최저점을 XY 바닥(Z=0)에 맞춥니다.")
+        self.addWidget(self.btn_fit_ground)
         
         self.btn_flat = QPushButton("🌓 Flat Shading")
         self.btn_flat.setCheckable(True)
@@ -2229,6 +2239,7 @@ class MainWindow(QMainWindow):
         self.trans_toolbar.btn_bake.clicked.connect(self.on_bake_all_clicked)
         self.trans_toolbar.btn_fixed.clicked.connect(self.restore_fixed_state)
         self.trans_toolbar.btn_reset.clicked.connect(self.reset_transform)
+        self.trans_toolbar.btn_fit_ground.clicked.connect(self.fit_ground_plane)
         self.trans_toolbar.btn_flat.toggled.connect(self.toggle_flat_shading)
         self.trans_toolbar.btn_xray.toggled.connect(self.toggle_xray_mode)
         
@@ -2644,40 +2655,37 @@ class MainWindow(QMainWindow):
         self.viewport.update()
 
     def align_mesh_to_normal(self, normal, *, pivot=None):
-        """주어진 법선 벡터를 월드 Z축(0,0,1)으로 정렬 (Bake)"""
+        """주어진 법선을 월드 +Z로 정렬 (메쉬에 직접 반영/Bake)."""
         obj = self.viewport.selected_obj
         if not obj:
             return
-        
-        target = np.array([0.0, 0.0, 1.0])
-        axis = np.cross(normal, target)
-        axis_norm = np.linalg.norm(axis)
-        
-        if axis_norm > 1e-6:
-            axis = axis / axis_norm
-            angle = np.arccos(np.clip(np.dot(normal, target), -1.0, 1.0))
-            K = np.array([[0, -axis[2], axis[1]], [axis[2], 0, -axis[0]], [-axis[1], axis[0], 0]])
-            R = np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * (K @ K)
 
-            try:
-                pivot_v = np.asarray(pivot, dtype=np.float64).reshape(3) if pivot is not None else np.array([0.0, 0.0, 0.0], dtype=np.float64)
-            except Exception:
-                pivot_v = np.array([0.0, 0.0, 0.0], dtype=np.float64)
-            vertices = np.asarray(obj.mesh.vertices, dtype=np.float64)
-            obj.mesh.vertices = ((R @ (vertices - pivot_v).T).T + pivot_v).astype(np.float32)
-            try:
-                obj.mesh._bounds = None
-                obj.mesh._centroid = None
-                obj.mesh._surface_area = None
-            except Exception:
-                pass
-            obj.mesh.compute_normals(compute_vertex_normals=False, force=True)
-            obj._trimesh = None
-            obj.rotation = np.array([0.0, 0.0, 0.0])
-            self.viewport.update_vbo(obj)
-            self.sync_transform_panel()
-            return R
-        return np.eye(3)
+        target = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        R = rotation_matrix_align_vectors(normal, target)
+
+        try:
+            pivot_v = (
+                np.asarray(pivot, dtype=np.float64).reshape(3)
+                if pivot is not None
+                else np.array([0.0, 0.0, 0.0], dtype=np.float64)
+            )
+        except Exception:
+            pivot_v = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+
+        vertices = np.asarray(obj.mesh.vertices, dtype=np.float64)
+        obj.mesh.vertices = ((R @ (vertices - pivot_v).T).T + pivot_v).astype(np.float32)
+        try:
+            obj.mesh._bounds = None
+            obj.mesh._centroid = None
+            obj.mesh._surface_area = None
+        except Exception:
+            pass
+        obj.mesh.compute_normals(compute_vertex_normals=False, force=True)
+        obj._trimesh = None
+        obj.rotation = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+        self.viewport.update_vbo(obj)
+        self.sync_transform_panel()
+        return R
 
     def on_floor_face_picked(self, vertices):
         """바닥면(면 선택) - Enter를 눌러야 정렬됨"""
@@ -2722,80 +2730,65 @@ class MainWindow(QMainWindow):
             self.viewport.update()
             return
             
-        # 1. 메쉬 정치 확정 (Bake)
-        # floor_picks는 월드 좌표이므로, 메쉬도 월드 기준 정점 상태로 맞춰 계산을 일관화.
+        # 1) floor_picks는 월드 좌표이므로 메쉬도 월드 기준 정점으로 맞춘다.
         self.viewport.bake_object_transform(obj)
-        
-        # 2. 평면 피팅
-        centroid = np.mean(points, axis=0)
-        centered_points = points - centroid
-        _, _, vh = np.linalg.svd(centered_points)
-        normal = vh[2, :] # 초기 법선 (방향은 아직 불확실)
-        
-        # 3. 정렬 수행
+
+        # 2) 점 기반 평면을 robust하게 추정한다.
+        plane = fit_plane_normal(points, robust=True)
+        if plane is None:
+            self.viewport.status_info = "❌ 선택 점이 거의 일직선입니다. 점을 다시 찍어주세요."
+            self.viewport.update()
+            return
+        normal, centroid = plane
+
+        # 법선 방향을 메쉬 중심 쪽으로 맞춰 뒤집힘을 줄인다.
+        try:
+            mesh_centroid = np.asarray(obj.mesh.centroid, dtype=np.float64).reshape(3)
+        except Exception:
+            mesh_centroid = np.mean(np.asarray(obj.mesh.vertices, dtype=np.float64), axis=0)
+        normal = orient_plane_normal_toward(normal, centroid, mesh_centroid)
+
+        # 3) 법선 정렬
         self.viewport.save_undo_state()
         R = self.align_mesh_to_normal(normal, pivot=centroid)
         points_rotated = (R @ (points - centroid).T).T + centroid
-        
-        # 4. 상하 반전 체크 (Bulk-Height Comparison)
-        if R is not None:
-            # 회전 후 찍은 점들의 평균 Z
-            avg_pick_z = np.mean(points_rotated[:, 2])
-            
-            # 회전 후 전체 메쉬의 평균 Z
-            avg_mesh_z = np.mean(obj.mesh.vertices[:, 2])
-            
-            # 메쉬 몸통(평균)이 찍은 점들보다 낮으면 upside-down 상태
-            if avg_mesh_z < avg_pick_z:
-                # 180도 추가 회전 (X축 기준)
-                R_flip = np.array([[1, 0, 0], [0, -1, 0], [0, 0, -1]])
-                vertices = np.asarray(obj.mesh.vertices, dtype=np.float64)
-                obj.mesh.vertices = ((R_flip @ (vertices - centroid).T).T + centroid).astype(np.float32)
-                try:
-                    obj.mesh._bounds = None
-                    obj.mesh._centroid = None
-                    obj.mesh._surface_area = None
-                except Exception:
-                    pass
-                obj.mesh.compute_normals(compute_vertex_normals=False, force=True)
-                obj._trimesh = None
-                self.viewport.update_vbo(obj)
-                points_rotated = (R_flip @ (points_rotated - centroid).T).T + centroid
-        
-        # 5. 바닥 높이 맞춤
-        #    - 먼저 사용자가 찍은 바닥면(점들)의 Z 중앙값을 0으로 맞춘다.
-        #    - 이후 하위 0.5% 분위수만 보정해 노이즈/돌기(outlier) 때문에 모델이 과도하게 뜨는 현상을 줄인다.
-        if R is not None:
-            try:
-                plane_z = float(np.nanmedian(np.asarray(points_rotated, dtype=np.float64)[:, 2]))
-            except Exception:
-                plane_z = 0.0
-            if np.isfinite(plane_z):
-                obj.mesh.vertices[:, 2] -= plane_z
 
-            try:
-                z_vals = np.asarray(obj.mesh.vertices[:, 2], dtype=np.float64)
-                z_vals = z_vals[np.isfinite(z_vals)]
-                if z_vals.size > 0:
-                    low_q = float(np.percentile(z_vals, 0.5))
-                    if low_q < 0.0:
-                        obj.mesh.vertices[:, 2] -= low_q
-            except Exception:
-                pass
+        # 4) 선택 바닥 평면을 Z=0으로 이동
+        try:
+            plane_z = float(np.nanmedian(np.asarray(points_rotated, dtype=np.float64)[:, 2]))
+        except Exception:
+            plane_z = 0.0
+        if np.isfinite(plane_z):
+            obj.mesh.vertices[:, 2] -= plane_z
 
-            try:
-                obj.mesh._bounds = None
-                obj.mesh._centroid = None
-                obj.mesh._surface_area = None
-            except Exception:
-                pass
-            obj._trimesh = None
-            obj.translation = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+        # 5) 경미한 침투만 자동 보정한다(큰 보정은 사용자 의도와 다를 수 있어 보정 안 함).
+        auto_shift = 0.0
+        try:
+            z_vals = np.asarray(obj.mesh.vertices[:, 2], dtype=np.float64)
+            auto_shift = compute_floor_contact_shift(z_vals, tolerance=0.02, max_auto_shift=0.2)
+            if auto_shift > 0.0:
+                obj.mesh.vertices[:, 2] += float(auto_shift)
+        except Exception:
+            auto_shift = 0.0
 
-            self.viewport.update_vbo(obj)
-            self.sync_transform_panel()
+        try:
+            obj.mesh._bounds = None
+            obj.mesh._centroid = None
+            obj.mesh._surface_area = None
+        except Exception:
+            pass
+        obj._trimesh = None
+        obj.translation = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+
+        self.viewport.update_vbo(obj)
+        self.sync_transform_panel()
+        if auto_shift > 0.0:
+            self.viewport.status_info = (
+                f"✅ 바닥 정렬 완료 (점 {len(points)}개 / 경미한 침투 보정 +{auto_shift:.3f})"
+            )
+        else:
             self.viewport.status_info = f"✅ 바닥 정렬 완료 (점 {len(points)}개 기반 평면 보정)"
-            self.viewport.update()
+        self.viewport.update()
         
         self.viewport.floor_picks = []
         self.viewport.picking_mode = 'none'
@@ -4038,21 +4031,10 @@ class MainWindow(QMainWindow):
         if not np.isfinite(az_raw):
             az_raw = float(getattr(cam, "azimuth", 45.0) or 45.0)
         az = ((float(az_raw) + 180.0) % 360.0) - 180.0
-        # Snap near-cardinal angles so legacy saved states (e.g., 89 deg) align to exact orthographic axes.
-        for tgt in (-180.0, -90.0, 0.0, 90.0, 180.0):
-            if abs(az - tgt) <= 1.5:
-                az = tgt
-                break
 
         if not np.isfinite(el_raw):
             el_raw = float(getattr(cam, "elevation", 30.0) or 30.0)
         el = float(el_raw)
-        if abs(el) <= 1.5:
-            el = 0.0
-        elif abs(el - 90.0) <= 1.5:
-            el = 90.0
-        elif abs(el + 90.0) <= 1.5:
-            el = -90.0
         el = float(max(-90.0, min(90.0, el)))
 
         cam.distance = dist
@@ -4064,17 +4046,8 @@ class MainWindow(QMainWindow):
             np.asarray(getattr(cam, "pan_offset", [0.0, 0.0, 0.0]), dtype=np.float64),
         )
 
-        is_top_bottom = abs(abs(el) - 90.0) <= 1e-6
-        is_side = abs(el) <= 1e-6 and any(abs(az - tgt) <= 1e-6 for tgt in (-180.0, -90.0, 0.0, 90.0, 180.0))
-        vp._front_back_ortho_enabled = bool(is_top_bottom or is_side)
-        if vp._front_back_ortho_enabled:
-            try:
-                scale = float(getattr(vp, "_ortho_view_scale", ORTHO_VIEW_SCALE_DEFAULT) or ORTHO_VIEW_SCALE_DEFAULT)
-            except Exception:
-                scale = ORTHO_VIEW_SCALE_DEFAULT
-            if not np.isfinite(scale):
-                scale = ORTHO_VIEW_SCALE_DEFAULT
-            vp._ortho_view_scale = float(max(0.2, min(scale, 40.0)))
+        # Restore should not force camera back into orthographic lock.
+        vp._front_back_ortho_enabled = False
 
     def _normalize_section_modes_after_restore(self) -> None:
         vp = self.viewport
@@ -4760,6 +4733,49 @@ class MainWindow(QMainWindow):
         obj.rotation = np.array([0.0, 0.0, 0.0])
         obj.scale = 1.0
         self.sync_transform_panel()
+        self.viewport.update()
+        self.viewport.meshTransformChanged.emit()
+
+    def fit_ground_plane(self):
+        """현재 자세를 유지하고 메쉬를 XY 바닥(Z=0)에 안착."""
+        obj = self.viewport.selected_obj
+        if not obj:
+            return
+
+        try:
+            self.viewport.save_undo_state()
+        except Exception:
+            pass
+
+        # 월드 기준 안착을 위해 현재 T/R/S를 먼저 bake.
+        self.viewport.bake_object_transform(obj)
+
+        try:
+            z_vals = np.asarray(obj.mesh.vertices[:, 2], dtype=np.float64)
+            z_vals = z_vals[np.isfinite(z_vals)]
+            if z_vals.size == 0:
+                return
+            min_z = float(np.min(z_vals))
+        except Exception:
+            return
+
+        if not np.isfinite(min_z):
+            return
+
+        if abs(min_z) > 1e-9:
+            obj.mesh.vertices[:, 2] -= min_z
+            try:
+                obj.mesh._bounds = None
+                obj.mesh._centroid = None
+                obj.mesh._surface_area = None
+            except Exception:
+                pass
+            obj._trimesh = None
+
+        obj.translation = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+        self.viewport.update_vbo(obj)
+        self.sync_transform_panel()
+        self.viewport.status_info = "✅ 기준평면 맞추기 완료 (최저점 Z=0)"
         self.viewport.update()
         self.viewport.meshTransformChanged.emit()
 
@@ -7174,14 +7190,8 @@ class MainWindow(QMainWindow):
             cam.pan_offset = np.array([0.0, 0.0, 0.0], dtype=np.float64)
         except Exception:
             pass
-        is_top_bottom = abs(abs(el) - 90.0) <= 1e-6
-        is_side = abs(el) <= 1e-6 and any(abs(az - tgt) <= 1e-6 for tgt in (-180.0, -90.0, 0.0, 90.0, 180.0))
-        self.viewport._front_back_ortho_enabled = bool(is_top_bottom or is_side)
-        if self.viewport._front_back_ortho_enabled:
-            try:
-                self.viewport._ortho_view_scale = ORTHO_VIEW_SCALE_DEFAULT
-            except Exception:
-                pass
+        # Keep directional view buttons free-orbit friendly (no sticky ortho lock).
+        self.viewport._front_back_ortho_enabled = False
         self.viewport.update()
 
     def toggle_curvature_mode(self, enabled: bool):
