@@ -425,7 +425,7 @@ class HelpWidget(QTextEdit):
     
     def set_scene_help(self):
         self.setHtml("""
-            <h3 style="margin:0; color:#2c5282;">🌲 씬 트리 (Scene)</h3>
+            <h3 style="margin:0; color:#2c5282;">🌲 레이어 트리 (Layer)</h3>
             <p style="font-size:11px;">
             현재 작업 중인 객체 목록입니다.<br>
             <b>클릭:</b> 객체 선택 및 기즈모 활성화<br>
@@ -596,7 +596,7 @@ class UnitSelectionDialog(QDialog):
 
 
 class ScenePanel(QWidget):
-    """씬 내의 객체 목록과 부착된 요소를 보여주는 트리 패널"""
+    """레이어 기준으로 객체 목록과 부착된 요소를 보여주는 트리 패널"""
     selectionChanged = pyqtSignal(int)
     visibilityChanged = pyqtSignal(int, bool)
     arcDeleted = pyqtSignal(int, int) # object_idx, arc_idx
@@ -1990,29 +1990,30 @@ class SectionPanel(QWidget):
             }
         """)
         self.btn_toggle.toggled.connect(self.on_btn_toggled)
-        layout.addWidget(self.btn_toggle)
         
         # 2. 도움말
         help_label = QLabel("모드 활성 후 메쉬를 클릭/드래그하여 단면을 확인하세요.")
         help_label.setStyleSheet("color: #718096; font-size: 10px;")
         help_label.setWordWrap(True)
-        layout.addWidget(help_label)
         
         # 3. 그래프 공간
         self.label_x = QLabel("X-Profile (Yellow Line)")
-        layout.addWidget(self.label_x)
         self.graph_x = ProfileGraphWidget("가로 단면 (X-Profile)")
-        layout.addWidget(self.graph_x)
         
         self.label_y = QLabel("Y-Profile (Cyan Line)")
-        layout.addWidget(self.label_y)
         self.graph_y = ProfileGraphWidget("세로 단면 (Y-Profile)")
-        layout.addWidget(self.graph_y)
         
         line = QFrame()
         line.setFrameShape(QFrame.Shape.HLine)
         line.setFrameShadow(QFrame.Shadow.Sunken)
-        layout.addWidget(line)
+        # XY 십자선/프로파일 UI는 단면 도구 단순화 요청으로 숨김 처리
+        self.btn_toggle.setVisible(False)
+        help_label.setVisible(False)
+        self.label_x.setVisible(False)
+        self.graph_x.setVisible(False)
+        self.label_y.setVisible(False)
+        self.graph_y.setVisible(False)
+        line.setVisible(False)
 
         # 4. 2D 단면선(2개) - 상면에서 가로/세로(꺾임 가능) 가이드 라인
         line_group = QGroupBox("✏️ 2D 단면선 지정 (상면, 2개)")
@@ -2130,7 +2131,7 @@ class SectionPanel(QWidget):
 class MainWindow(QMainWindow):
     """메인 윈도우"""
 
-    UI_STATE_VERSION = 4
+    UI_STATE_VERSION = 6
     
     def __init__(self):
         super().__init__()
@@ -2183,13 +2184,14 @@ class MainWindow(QMainWindow):
         self.init_toolbar()
         self.init_statusbar()
         self._restore_ui_state()
+        self._hide_unused_docks()
     
     def init_ui(self):
         # 중앙 위젯 (3D 뷰포트)
         self.viewport = Viewport3D()
         self.setCentralWidget(self.viewport)
         
-        # 씬 매니저 연결
+        # 레이어 매니저 연결
         self.viewport.selectionChanged.connect(self.on_selection_changed)
         self.viewport.meshLoaded.connect(self.on_mesh_loaded)
         self.viewport.meshTransformChanged.connect(self.sync_transform_panel)
@@ -2321,14 +2323,10 @@ class MainWindow(QMainWindow):
         section_content = QWidget()
         section_layout = QVBoxLayout(section_content)
 
-        self.slice_panel = SlicingPanel()
-        self.slice_panel.sliceChanged.connect(self.on_slice_changed)
-        self.slice_panel.exportRequested.connect(self.on_slice_export_requested)
-        self.slice_panel.captureRequested.connect(self.on_slice_capture_requested)
-        self.slice_panel.saveLayersRequested.connect(self.on_save_section_layers_requested)
-        section_layout.addWidget(self.slice_panel)
+        # Section dock is simplified to line/ROI only.
+        self.slice_panel = None
 
-        mode_hint = QLabel("구분: 실시간 단면 = 3D 절단 관측/촬영 | 2D 지정 = 상면에서 단면선/ROI 가이드 지정")
+        mode_hint = QLabel("구분: 2D 지정 = 상면에서 단면선/ROI 가이드 지정")
         mode_hint.setStyleSheet("color: #4a5568; font-size: 10px;")
         mode_hint.setWordWrap(True)
         section_layout.addWidget(mode_hint)
@@ -2339,7 +2337,6 @@ class MainWindow(QMainWindow):
         section_layout.addWidget(line)
 
         self.section_panel = SectionPanel()
-        self.section_panel.crosshairToggled.connect(self.on_crosshair_toggled)
         self.section_panel.lineSectionToggled.connect(self.on_line_section_toggled)
         self.section_panel.cutLineActiveChanged.connect(self.on_cut_line_active_changed)
         self.section_panel.cutLineClearRequested.connect(self.on_cut_line_clear_requested)
@@ -2348,22 +2345,19 @@ class MainWindow(QMainWindow):
         self.section_panel.silhouetteRequested.connect(self.viewport.extract_roi_silhouette)
         self.section_panel.saveSectionLayersRequested.connect(self.on_save_section_layers_requested)
 
-        self.viewport.profileUpdated.connect(self.section_panel.update_profiles)
         self.viewport.lineProfileUpdated.connect(self.section_panel.update_line_profile)
         self.viewport.roiSilhouetteExtracted.connect(self.on_silhouette_extracted)
         self.viewport.cutLinesAutoEnded.connect(self._on_cut_lines_auto_ended)
         self.viewport.cutLinesEnabledChanged.connect(self._sync_cutline_button_state)
         self.viewport.roiSectionCommitRequested.connect(self.on_roi_section_commit_requested)
-        self.viewport.sliceScanRequested.connect(self.on_slice_scan_requested)
-        self.viewport.sliceCaptureRequested.connect(self.on_slice_capture_requested)
         section_layout.addWidget(self.section_panel)
 
         section_layout.addStretch()
         section_scroll.setWidget(section_content)
         self.section_dock.setWidget(section_scroll)
 
-        # 7) 씬(레이어)
-        self.scene_dock = QDockWidget("🌲 씬 (레이어)", self)
+        # 7) 레이어
+        self.scene_dock = QDockWidget("🌲 레이어", self)
         self.scene_dock.setObjectName("dock_scene")
         self.scene_panel = ScenePanel()
         self.scene_panel.selectionChanged.connect(self.viewport.select_object)
@@ -2378,13 +2372,11 @@ class MainWindow(QMainWindow):
         # 공통 도킹/플로팅 옵션
         for dock in [
             self.info_dock,
-            self.transform_dock,
             self.flatten_dock,
             self.section_dock,
             self.export_dock,
             self.measure_dock,
             self.scene_dock,
-            self.help_dock,
         ]:
             dock.setAllowedAreas(Qt.DockWidgetArea.AllDockWidgetAreas)
             dock.setFeatures(
@@ -2393,7 +2385,7 @@ class MainWindow(QMainWindow):
                 | QDockWidget.DockWidgetFeature.DockWidgetClosable
             )
 
-        # 기본 레이아웃(일러스트레이터 스타일: 상단 정보/정치, 우측 분리, 씬은 우측 하단)
+        # 기본 레이아웃(일러스트레이터 스타일: 상단 정보/정치, 우측 분리, 레이어는 우측 하단)
         self._apply_default_dock_layout()
 
     def _settings(self) -> QSettings:
@@ -2403,13 +2395,11 @@ class MainWindow(QMainWindow):
         """기본 도킹 레이아웃 적용 (저장된 레이아웃이 없을 때의 초기 배치)"""
         for dock in [
             self.info_dock,
-            self.transform_dock,
             self.flatten_dock,
             self.section_dock,
             self.export_dock,
             self.measure_dock,
             self.scene_dock,
-            self.help_dock,
         ]:
             # 기존 배치가 남아있으면(중복 split/tabify 등) 레이아웃이 꼬일 수 있어 초기화
             try:
@@ -2417,40 +2407,31 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             dock.setFloating(False)
-            if dock is self.help_dock:
-                dock.hide()
-            else:
-                dock.show()
+            dock.show()
 
-        # 상단: 파일/메쉬 정보 + 정치(변환) (가로 배치)
+        # 상단: 파일/메쉬 정보
         self.addDockWidget(Qt.DockWidgetArea.TopDockWidgetArea, self.info_dock)
-        self.addDockWidget(Qt.DockWidgetArea.TopDockWidgetArea, self.transform_dock)
-        self.splitDockWidget(self.info_dock, self.transform_dock, Qt.Orientation.Horizontal)
 
-        # 우측: 펼침 + 단면(도구) + 내보내기는 탭, 씬은 우측 하단
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.flatten_dock)
-
+        # 우측: 단면 + 펼침 + 내보내기(+치수)는 탭, 레이어는 우측 하단
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.section_dock)
-        self.tabifyDockWidget(self.flatten_dock, self.section_dock)
+
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.flatten_dock)
+        self.tabifyDockWidget(self.section_dock, self.flatten_dock)
 
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.export_dock)
-        self.tabifyDockWidget(self.flatten_dock, self.export_dock)
+        self.tabifyDockWidget(self.section_dock, self.export_dock)
 
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.measure_dock)
-        self.tabifyDockWidget(self.flatten_dock, self.measure_dock)
+        self.tabifyDockWidget(self.section_dock, self.measure_dock)
 
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.scene_dock)
-        self.splitDockWidget(self.flatten_dock, self.scene_dock, Qt.Orientation.Vertical)
-
-        # 하단: 컨텍스트 도움말(선택/툴 사용법)
-        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.help_dock)
-        self.help_dock.hide()
+        self.splitDockWidget(self.section_dock, self.scene_dock, Qt.Orientation.Vertical)
 
         # 크기 비율(대략적인 기본값)
-        self.resizeDocks([self.info_dock, self.transform_dock], [650, 750], Qt.Orientation.Horizontal)
-        self.resizeDocks([self.flatten_dock, self.scene_dock], [780, 220], Qt.Orientation.Vertical)
+        self.resizeDocks([self.section_dock, self.scene_dock], [780, 220], Qt.Orientation.Vertical)
 
-        self.flatten_dock.raise_()
+        self.section_dock.raise_()
+        self._hide_unused_docks()
 
     def _on_flatten_dock_visibility_changed(self, visible: bool) -> None:
         """펼침 탭이 활성화되면(보이면) 기본 도구를 '경계(면적+자석)'로 맞춥니다.
@@ -2507,6 +2488,23 @@ class MainWindow(QMainWindow):
         if state is not None:
             try:
                 self.restoreState(state, self.UI_STATE_VERSION)
+            except Exception:
+                pass
+
+    def _hide_unused_docks(self):
+        for dock in (getattr(self, "transform_dock", None), getattr(self, "help_dock", None)):
+            if dock is None:
+                continue
+            try:
+                self.removeDockWidget(dock)
+            except Exception:
+                pass
+            try:
+                dock.setFloating(False)
+            except Exception:
+                pass
+            try:
+                dock.hide()
             except Exception:
                 pass
 
@@ -2927,12 +2925,10 @@ class MainWindow(QMainWindow):
         panels_menu = view_menu.addMenu("패널 표시/숨김")
         if panels_menu is not None:
             panels_menu.addAction(self.info_dock.toggleViewAction())
-            panels_menu.addAction(self.transform_dock.toggleViewAction())
             panels_menu.addAction(self.flatten_dock.toggleViewAction())
             panels_menu.addAction(self.section_dock.toggleViewAction())
             panels_menu.addAction(self.export_dock.toggleViewAction())
             panels_menu.addAction(self.scene_dock.toggleViewAction())
-            panels_menu.addAction(self.action_toggle_help_panel)
         
         # 도움말 메뉴
         help_menu = menubar.addMenu("도움말(&H)")
@@ -3040,7 +3036,6 @@ class MainWindow(QMainWindow):
         toolbar.addAction(action_bottom)
 
         toolbar.addSeparator()
-        toolbar.addAction(self.action_toggle_help_panel)
 
     def init_statusbar(self):
         self.statusbar = QStatusBar()
@@ -3865,66 +3860,43 @@ class MainWindow(QMainWindow):
             except Exception:
                 vp.set_cut_lines_enabled(False)
 
-        # Slice
-        slice_s = vp_state.get("slice", {})
-        if isinstance(slice_s, dict):
-            enabled = bool(slice_s.get("enabled", False))
-            try:
-                z = float(slice_s.get("z", 0.0) or 0.0)
-            except Exception:
-                z = 0.0
+        # Slice/Crosshair are intentionally disabled in section mode (line/ROI only).
+        try:
+            vp.slice_enabled = False
+            vp.slice_contours = []
+        except Exception:
+            pass
+        try:
+            if getattr(vp, "picking_mode", "") == "slice":
+                vp.picking_mode = "none"
+        except Exception:
+            pass
+        try:
+            self._slice_pending_height = None
+            self._slice_capture_pending = False
+            self._slice_debounce_timer.stop()
+        except Exception:
+            pass
 
-            # Sync panel widgets without spamming signals, then apply once.
+        try:
+            vp.crosshair_enabled = False
+        except Exception:
+            pass
+        try:
+            if getattr(vp, "picking_mode", "") == "crosshair":
+                vp.picking_mode = "none"
+        except Exception:
+            pass
+        try:
+            self.section_panel.btn_toggle.blockSignals(True)
+            self.section_panel.btn_toggle.setChecked(False)
+        except Exception:
+            pass
+        finally:
             try:
-                self.slice_panel.group.blockSignals(True)
-                self.slice_panel.spin.blockSignals(True)
-                self.slice_panel.slider.blockSignals(True)
-                self.slice_panel.group.setChecked(enabled)
-                self.slice_panel.spin.setValue(z)
-                self.slice_panel.slider.setValue(int(z * 100))
-            finally:
-                try:
-                    self.slice_panel.group.blockSignals(False)
-                    self.slice_panel.spin.blockSignals(False)
-                    self.slice_panel.slider.blockSignals(False)
-                except Exception:
-                    pass
-            self.on_slice_changed(enabled, z)
-
-        # Crosshair
-        cross_s = vp_state.get("crosshair", {})
-        if isinstance(cross_s, dict):
-            try:
-                vp.crosshair_enabled = bool(cross_s.get("enabled", False))
-            except Exception:
-                vp.crosshair_enabled = False
-            try:
-                vp.crosshair_pos = np.asarray(cross_s.get("pos", [0.0, 0.0]), dtype=np.float64).reshape(-1)[:2]
+                self.section_panel.btn_toggle.blockSignals(False)
             except Exception:
                 pass
-            if getattr(vp, "crosshair_enabled", False):
-                try:
-                    vp.picking_mode = "crosshair"
-                    vp.schedule_crosshair_profile_update(0)
-                except Exception:
-                    pass
-            else:
-                if getattr(vp, "picking_mode", "") == "crosshair":
-                    vp.picking_mode = "none"
-
-            try:
-                self.section_panel.btn_toggle.blockSignals(True)
-                self.section_panel.btn_toggle.setChecked(bool(getattr(vp, "crosshair_enabled", False)))
-                self.section_panel.btn_toggle.setText(
-                    "🎯 십자선 단면 모드 중지" if bool(getattr(vp, "crosshair_enabled", False)) else "🎯 십자선 단면 모드 시작"
-                )
-            except Exception:
-                pass
-            finally:
-                try:
-                    self.section_panel.btn_toggle.blockSignals(False)
-                except Exception:
-                    pass
 
         # ROI
         roi_s = vp_state.get("roi", {})
@@ -4609,7 +4581,8 @@ class MainWindow(QMainWindow):
     def update_slice_range(self):
         """현재 선택된 객체의 Z 범위로 슬라이더 업데이트"""
         obj = self.viewport.selected_obj
-        if obj and obj.mesh:
+        panel = getattr(self, "slice_panel", None)
+        if obj and obj.mesh and panel is not None:
             # 대용량 메쉬에서 전체 버텍스 스캔은 느림 -> 월드 바운드로 근사
             try:
                 wb = obj.get_world_bounds()
@@ -4618,7 +4591,7 @@ class MainWindow(QMainWindow):
             except Exception:
                 z_min = float(obj.mesh.bounds[0][2])
                 z_max = float(obj.mesh.bounds[1][2])
-            self.slice_panel.update_range(z_min, z_max)
+            panel.update_range(z_min, z_max)
             
     def on_visibility_changed(self, index, visible):
         if 0 <= index < len(self.viewport.objects):
@@ -8200,6 +8173,9 @@ class MainWindow(QMainWindow):
         if obj is None or getattr(obj, "mesh", None) is None:
             QMessageBox.warning(self, "경고", "촬영할 대상 메쉬가 없습니다.")
             return
+        panel = getattr(self, "slice_panel", None)
+        if panel is None:
+            return
 
         try:
             target_z = float(height)
@@ -8207,15 +8183,15 @@ class MainWindow(QMainWindow):
             target_z = float(getattr(self.viewport, "slice_z", 0.0) or 0.0)
 
         try:
-            if not self.slice_panel.group.isChecked():
-                self.slice_panel.group.setChecked(True)
+            if not panel.group.isChecked():
+                panel.group.setChecked(True)
         except Exception:
             pass
 
         try:
             cur_z = float(getattr(self.viewport, "slice_z", 0.0) or 0.0)
             if not np.isclose(cur_z, target_z, atol=1e-9):
-                self.slice_panel.spin.setValue(target_z)
+                panel.spin.setValue(target_z)
         except Exception:
             pass
 
