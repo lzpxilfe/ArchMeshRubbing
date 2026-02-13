@@ -38,6 +38,20 @@ DEFAULT_MESH_UNIT = "cm"
 DEFAULT_PROJECT_FILENAME = "project.amr"
 MIN_EXPORT_WIDTH_PX = 800
 MAX_EXPORT_WIDTH_PX = 12000
+VIEW_ANGLE_EPS = 1e-6
+VIEW_CANONICAL_AZIMUTHS = (-180.0, -90.0, 0.0, 90.0, 180.0)
+VIEW_DISTANCE_SCALE = 1.35
+VIEW_MIN_DIM = 10.0
+VIEW_ORTHO_SCALE_TOP_BOTTOM = 0.95
+VIEW_ORTHO_SCALE_SIDE = 1.35
+CANONICAL_VIEW_PRESETS: dict[str, tuple[float, float]] = {
+    "front": (-90.0, 0.0),
+    "back": (90.0, 0.0),
+    "right": (0.0, 0.0),
+    "left": (180.0, 0.0),
+    "top": (0.0, 90.0),
+    "bottom": (0.0, -90.0),
+}
 _UNIT_TO_INCHES: dict[str, float] = {
     "mm": 1.0 / 25.4,
     "cm": 1.0 / 2.54,
@@ -2689,6 +2703,22 @@ class MainWindow(QMainWindow):
 
         selected_rot = (R @ (selected_pts - centroid).T).T + centroid
 
+        # Final parallel pass: make selected floor support truly parallel to XY.
+        try:
+            plane_after = fit_plane_normal(selected_rot, robust=False)
+            if plane_after is not None:
+                normal_after, centroid_after = plane_after
+                target_up = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+                if float(np.dot(normal_after, target_up)) < 0.0:
+                    normal_after = -normal_after
+                R2 = rotation_matrix_align_vectors(normal_after, target_up)
+                verts2 = np.asarray(obj.mesh.vertices, dtype=np.float64)
+                pivot2 = np.asarray(centroid_after, dtype=np.float64).reshape(3)
+                obj.mesh.vertices = ((R2 @ (verts2 - pivot2).T).T + pivot2).astype(np.float32)
+                selected_rot = (R2 @ (selected_rot - pivot2).T).T + pivot2
+        except Exception:
+            pass
+
         try:
             floor_z = float(np.nanmin(np.asarray(selected_rot, dtype=np.float64)[:, 2]))
         except Exception:
@@ -2722,6 +2752,10 @@ class MainWindow(QMainWindow):
             obj.mesh._bounds = None
             obj.mesh._centroid = None
             obj.mesh._surface_area = None
+        except Exception:
+            pass
+        try:
+            obj.mesh.compute_normals(compute_vertex_normals=False, force=True)
         except Exception:
             pass
         obj._trimesh = None
@@ -2773,6 +2807,67 @@ class MainWindow(QMainWindow):
         self.viewport.update_vbo(obj)
         self.sync_transform_panel()
         return R
+
+    def _optimize_points_xy_contact(self, points: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Minimize picked-point |z| in XY frame via small X/Y tilt search."""
+        pts = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+        if len(pts) < 3:
+            return np.eye(3, dtype=np.float64), np.array([0.0, 0.0, 0.0], dtype=np.float64), pts
+
+        pivot = np.mean(pts, axis=0)
+        centered = pts - pivot
+
+        def _rot_x(rad: float) -> np.ndarray:
+            c = float(np.cos(rad))
+            s = float(np.sin(rad))
+            return np.array(
+                [[1.0, 0.0, 0.0], [0.0, c, -s], [0.0, s, c]],
+                dtype=np.float64,
+            )
+
+        def _rot_y(rad: float) -> np.ndarray:
+            c = float(np.cos(rad))
+            s = float(np.sin(rad))
+            return np.array(
+                [[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]],
+                dtype=np.float64,
+            )
+
+        def _eval(ax: float, ay: float) -> tuple[tuple[float, float], np.ndarray, np.ndarray]:
+            R = _rot_y(ay) @ _rot_x(ax)
+            pts_r = (R @ centered.T).T + pivot
+            z = np.asarray(pts_r[:, 2], dtype=np.float64)
+            if z.size == 0 or not np.isfinite(z).all():
+                return (float("inf"), float("inf")), pts_r, R
+            return (float(np.max(np.abs(z))), float(np.mean(np.abs(z)))), pts_r, R
+
+        ax = 0.0
+        ay = 0.0
+        best_metric, best_pts, best_R = _eval(ax, ay)
+
+        for step_deg in (1.2, 0.4, 0.15, 0.05):
+            step = float(np.deg2rad(step_deg))
+            improved = True
+            while improved:
+                improved = False
+                for dax, day in (
+                    (step, 0.0), (-step, 0.0), (0.0, step), (0.0, -step),
+                    (step, step), (step, -step), (-step, step), (-step, -step),
+                ):
+                    metric, pts_try, R_try = _eval(ax + dax, ay + day)
+                    better = (
+                        (metric[0] + 1e-12 < best_metric[0])
+                        or (abs(metric[0] - best_metric[0]) <= 1e-12 and metric[1] + 1e-12 < best_metric[1])
+                    )
+                    if better:
+                        ax += dax
+                        ay += day
+                        best_metric = metric
+                        best_pts = pts_try
+                        best_R = R_try
+                        improved = True
+
+        return best_R, pivot, best_pts
 
     def on_floor_face_picked(self, vertices):
         """바닥면(면 선택) - Enter를 눌러야 정렬됨"""
@@ -2844,27 +2939,22 @@ class MainWindow(QMainWindow):
             return
         points_rotated = (R @ (points - centroid).T).T + centroid
 
+        # Final parallel pass: enforce selected floor points parallel to XY.
+        try:
+            R2, pivot2, points_opt = self._optimize_points_xy_contact(points_rotated)
+            if R2 is not None:
+                verts2 = np.asarray(obj.mesh.vertices, dtype=np.float64)
+                pivot2 = np.asarray(pivot2, dtype=np.float64).reshape(3)
+                obj.mesh.vertices = ((R2 @ (verts2 - pivot2).T).T + pivot2).astype(np.float32)
+                points_rotated = np.asarray(points_opt, dtype=np.float64)
+        except Exception:
+            pass
+
         # 4) 선택 바닥 평면을 Z=0으로 이동
-        # Picked points can be on triangle interiors; include nearest vertices as support.
         try:
             floor_z = float(np.nanmin(np.asarray(points_rotated, dtype=np.float64)[:, 2]))
         except Exception:
             floor_z = 0.0
-        try:
-            verts_rot = np.asarray(obj.mesh.vertices, dtype=np.float64).reshape(-1, 3)
-            pts_rot = np.asarray(points_rotated, dtype=np.float64).reshape(-1, 3)
-            if len(verts_rot) > 0 and len(pts_rot) > 0:
-                support_min = None
-                for p in pts_rot:
-                    d2 = np.sum((verts_rot - p) ** 2, axis=1)
-                    j = int(np.nanargmin(d2))
-                    z_j = float(verts_rot[j, 2])
-                    if np.isfinite(z_j):
-                        support_min = z_j if support_min is None else min(support_min, z_j)
-                if support_min is not None and np.isfinite(support_min):
-                    floor_z = float(min(float(floor_z), float(support_min)))
-        except Exception:
-            pass
         if np.isfinite(floor_z):
             obj.mesh.vertices[:, 2] -= floor_z
             points_rotated[:, 2] -= floor_z
@@ -2895,6 +2985,10 @@ class MainWindow(QMainWindow):
             obj.mesh._bounds = None
             obj.mesh._centroid = None
             obj.mesh._surface_area = None
+        except Exception:
+            pass
+        try:
+            obj.mesh.compute_normals(compute_vertex_normals=False, force=True)
         except Exception:
             pass
         obj._trimesh = None
@@ -3015,36 +3109,32 @@ class MainWindow(QMainWindow):
         # 6방향 뷰
         action_front = QAction("1️⃣ 정면 뷰", self)
         action_front.setShortcut("1")
-        # Absolute-axis canonical view: +Y -> origin
-        action_front.triggered.connect(lambda: self.set_view(-90, 0))
+        action_front.triggered.connect(lambda: self._set_canonical_view("front"))
         view_menu.addAction(action_front)
         
         action_back = QAction("2️⃣ 후면 뷰", self)
         action_back.setShortcut("2")
-        # Absolute-axis canonical view: -Y -> origin
-        action_back.triggered.connect(lambda: self.set_view(90, 0))
+        action_back.triggered.connect(lambda: self._set_canonical_view("back"))
         view_menu.addAction(action_back)
         
         action_right = QAction("3️⃣ 우측면 뷰", self)
         action_right.setShortcut("3")
-        # Absolute-axis canonical view: +X -> origin
-        action_right.triggered.connect(lambda: self.set_view(0, 0))
+        action_right.triggered.connect(lambda: self._set_canonical_view("right"))
         view_menu.addAction(action_right)
         
         action_left = QAction("4️⃣ 좌측면 뷰", self)
         action_left.setShortcut("4")
-        # Absolute-axis canonical view: -X -> origin
-        action_left.triggered.connect(lambda: self.set_view(180, 0))
+        action_left.triggered.connect(lambda: self._set_canonical_view("left"))
         view_menu.addAction(action_left)
         
         action_top = QAction("5️⃣ 상면 뷰", self)
         action_top.setShortcut("5")
-        action_top.triggered.connect(lambda: self.set_view(0, 90))
+        action_top.triggered.connect(lambda: self._set_canonical_view("top"))
         view_menu.addAction(action_top)
         
         action_bottom = QAction("6️⃣ 하면 뷰", self)
         action_bottom.setShortcut("6")
-        action_bottom.triggered.connect(lambda: self.set_view(0, -90))
+        action_bottom.triggered.connect(lambda: self._set_canonical_view("bottom"))
         view_menu.addAction(action_bottom)
 
         view_menu.addSeparator()
@@ -3138,32 +3228,32 @@ class MainWindow(QMainWindow):
         # 6방향 뷰 버튼
         action_front = QAction("정면", self)
         action_front.setToolTip("정면 뷰 (1)")
-        action_front.triggered.connect(lambda: self.set_view(-90, 0))
+        action_front.triggered.connect(lambda: self._set_canonical_view("front"))
         toolbar.addAction(action_front)
         
         action_back = QAction("후면", self)
         action_back.setToolTip("후면 뷰 (2)")
-        action_back.triggered.connect(lambda: self.set_view(90, 0))
+        action_back.triggered.connect(lambda: self._set_canonical_view("back"))
         toolbar.addAction(action_back)
         
         action_right = QAction("우측", self)
         action_right.setToolTip("우측면 뷰 (3)")
-        action_right.triggered.connect(lambda: self.set_view(0, 0))
+        action_right.triggered.connect(lambda: self._set_canonical_view("right"))
         toolbar.addAction(action_right)
         
         action_left = QAction("좌측", self)
         action_left.setToolTip("좌측면 뷰 (4)")
-        action_left.triggered.connect(lambda: self.set_view(180, 0))
+        action_left.triggered.connect(lambda: self._set_canonical_view("left"))
         toolbar.addAction(action_left)
         
         action_top = QAction("상면", self)
         action_top.setToolTip("상면 뷰 (5)")
-        action_top.triggered.connect(lambda: self.set_view(0, 90))
+        action_top.triggered.connect(lambda: self._set_canonical_view("top"))
         toolbar.addAction(action_top)
         
         action_bottom = QAction("하면", self)
         action_bottom.setToolTip("하면 뷰 (6)")
-        action_bottom.triggered.connect(lambda: self.set_view(0, -90))
+        action_bottom.triggered.connect(lambda: self._set_canonical_view("bottom"))
         toolbar.addAction(action_bottom)
 
         toolbar.addSeparator()
@@ -4265,9 +4355,10 @@ class MainWindow(QMainWindow):
 
         # Slice presets
         sl = ui.get("slice", {})
-        if isinstance(sl, dict) and getattr(self, "slice_panel", None) is not None:
+        slice_panel = getattr(self, "slice_panel", None)
+        if isinstance(sl, dict) and slice_panel is not None:
             try:
-                self.slice_panel.set_presets(sl.get("presets", []))
+                slice_panel.set_presets(sl.get("presets", []))
             except Exception:
                 pass
     
@@ -7218,6 +7309,12 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
+    def _set_canonical_view(self, key: str) -> None:
+        preset = CANONICAL_VIEW_PRESETS.get(str(key).strip().lower())
+        if preset is None:
+            return
+        self.set_view(float(preset[0]), float(preset[1]))
+
     def set_view(self, azimuth: float, elevation: float):
         try:
             az = float(azimuth)
@@ -7226,15 +7323,15 @@ class MainWindow(QMainWindow):
             return
 
         az = ((az + 180.0) % 360.0) - 180.0
-        for tgt in (-180.0, -90.0, 0.0, 90.0, 180.0):
-            if abs(az - tgt) <= 1e-6:
+        for tgt in VIEW_CANONICAL_AZIMUTHS:
+            if abs(az - tgt) <= VIEW_ANGLE_EPS:
                 az = tgt
                 break
-        if abs(el) <= 1e-6:
+        if abs(el) <= VIEW_ANGLE_EPS:
             el = 0.0
-        if abs(el - 90.0) <= 1e-6:
+        if abs(el - 90.0) <= VIEW_ANGLE_EPS:
             el = 90.0
-        elif abs(el + 90.0) <= 1e-6:
+        elif abs(el + 90.0) <= VIEW_ANGLE_EPS:
             el = -90.0
 
         cam = self.viewport.camera
@@ -7316,18 +7413,22 @@ class MainWindow(QMainWindow):
                     pass
             if center is None or max_dim is None:
                 try:
-                    cm = np.asarray(getattr(self, "current_mesh", None).bounds, dtype=np.float64)
-                    if cm.shape == (2, 3) and np.isfinite(cm).all():
-                        center = (cm[0] + cm[1]) * 0.5
-                        max_dim = float(np.max(np.abs(cm[1] - cm[0])))
+                    mesh_current = getattr(self, "current_mesh", None)
+                    if mesh_current is not None:
+                        cm = np.asarray(mesh_current.bounds, dtype=np.float64)
+                        if cm.shape == (2, 3) and np.isfinite(cm).all():
+                            center = (cm[0] + cm[1]) * 0.5
+                            max_dim = float(np.max(np.abs(cm[1] - cm[0])))
                 except Exception:
                     pass
 
             if center is not None and max_dim is not None:
                 if not np.isfinite(max_dim) or max_dim <= 1e-6:
-                    max_dim = 10.0
+                    max_dim = VIEW_MIN_DIM
                 cam.center = np.asarray(center, dtype=np.float64)
-                cam.distance = float(max(cam.min_distance, min(cam.max_distance, max_dim * 1.35)))
+                cam.distance = float(
+                    max(cam.min_distance, min(cam.max_distance, max_dim * VIEW_DISTANCE_SCALE))
+                )
         except Exception:
             pass
 
@@ -7338,15 +7439,13 @@ class MainWindow(QMainWindow):
         # 6-face view should stay orthographic and axis-aligned.
         enable_ortho_lock = True
         try:
-            is_top_bottom = abs(abs(float(cam.elevation)) - 90.0) <= 1e-6
-            is_side = abs(float(cam.elevation)) <= 1e-6 and any(
-                abs(float(cam.azimuth) - t) <= 1e-6 for t in (-180.0, -90.0, 0.0, 90.0, 180.0)
+            is_top_bottom = abs(abs(float(cam.elevation)) - 90.0) <= VIEW_ANGLE_EPS
+            # Keep top/bottom as strict ortho. Side views use perspective for intuitive navigation.
+            self.viewport._ortho_view_scale = (
+                VIEW_ORTHO_SCALE_TOP_BOTTOM if is_top_bottom else VIEW_ORTHO_SCALE_SIDE
             )
-            # Side/front/back: modest zoom-out.
-            # Top/bottom: 2x bigger than current request => half scale.
-            self.viewport._ortho_view_scale = 0.95 if is_top_bottom else 1.35
             self.viewport._ortho_frame_override = None
-            enable_ortho_lock = bool(is_top_bottom or is_side)
+            enable_ortho_lock = bool(is_top_bottom)
         except Exception:
             pass
         self.viewport._front_back_ortho_enabled = enable_ortho_lock
