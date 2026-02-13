@@ -7440,16 +7440,12 @@ class MainWindow(QMainWindow):
         enable_ortho_lock = True
         try:
             is_top_bottom = abs(abs(float(cam.elevation)) - 90.0) <= VIEW_ANGLE_EPS
-            is_side = abs(float(cam.elevation)) <= VIEW_ANGLE_EPS and any(
-                abs(float(cam.azimuth) - t) <= VIEW_ANGLE_EPS for t in VIEW_CANONICAL_AZIMUTHS
-            )
-            # Side/front/back: modest zoom-out.
-            # Top/bottom: 2x bigger than current request => half scale.
+            # Keep top/bottom as strict ortho. Side views use perspective for intuitive navigation.
             self.viewport._ortho_view_scale = (
                 VIEW_ORTHO_SCALE_TOP_BOTTOM if is_top_bottom else VIEW_ORTHO_SCALE_SIDE
             )
             self.viewport._ortho_frame_override = None
-            enable_ortho_lock = bool(is_top_bottom or is_side)
+            enable_ortho_lock = bool(is_top_bottom)
         except Exception:
             pass
         self.viewport._front_back_ortho_enabled = enable_ortho_lock

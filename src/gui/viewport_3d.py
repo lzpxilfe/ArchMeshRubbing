@@ -8643,14 +8643,17 @@ class Viewport3D(QOpenGLWidget):
 
             # 4. ?쇰컲 移대찓??議곗옉 (?쒕옒洹?
             ortho_locked = bool(getattr(self, "_front_back_ortho_enabled", False))
-            # In canonical 6-axis views, any drag immediately returns to free camera.
-            if ortho_locked and self.mouse_button in (
-                Qt.MouseButton.LeftButton,
-                Qt.MouseButton.RightButton,
-                Qt.MouseButton.MiddleButton,
-            ):
-                self._front_back_ortho_enabled = False
-                self._ortho_frame_override = None
+            # In canonical 6-axis views:
+            # - right-drag keeps orthographic 2D pan
+            # - left/middle-drag switches to free camera (orbit)
+            if ortho_locked:
+                if self.mouse_button == Qt.MouseButton.RightButton:
+                    self.camera.pan(dx, dy, sensitivity=0.16)
+                    self.update()
+                    return
+                if self.mouse_button in (Qt.MouseButton.LeftButton, Qt.MouseButton.MiddleButton):
+                    self._front_back_ortho_enabled = False
+                    self._ortho_frame_override = None
 
             if self.mouse_button == Qt.MouseButton.LeftButton:
                 self.camera.rotate(dx, dy, sensitivity=CAMERA_ROTATE_SENSITIVITY_DEFAULT)
