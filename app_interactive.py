@@ -130,7 +130,6 @@ from src.core.project_file import (  # noqa: E402
 )
 from src.gui.profile_graph_widget import ProfileGraphWidget  # noqa: E402
 from src.core.alignment_utils import (  # noqa: E402
-    compute_floor_contact_shift,
     fit_plane_normal,
     orient_plane_normal_toward,
     rotation_matrix_align_vectors,
@@ -2608,41 +2607,139 @@ class MainWindow(QMainWindow):
         self.viewport.update()
 
     def on_align_to_brush_selected(self):
-        """브러시로 선택된 영역의 평균 법선으로 정렬"""
+        """Align by brushed-face normal and keep brushed region touching XY plane."""
         obj = self.viewport.selected_obj
         if not obj or not self.viewport.brush_selected_faces:
             return
-            
-        faces = obj.mesh.faces
-        vertices = obj.mesh.vertices
-        
-        total_normal = np.array([0.0, 0.0, 0.0])
-        total_area = 0.0
-        
-        for face_idx in self.viewport.brush_selected_faces:
-            f = faces[face_idx]
-            v0 = vertices[f[0]]
-            v1 = vertices[f[1]]
-            v2 = vertices[f[2]]
-            
-            n = np.cross(v1 - v0, v2 - v0)
-            area = np.linalg.norm(n) / 2.0
-            if area > 1e-9:
-                total_normal += n # n의 길이가 area*2이므로 가중 합산됨
-                total_area += area
-        
-        if total_area < 1e-9:
-            self.viewport.status_info = "❌ 유효한 면이 선택되지 않았습니다."
+
+        # Brushed faces are picked in world view. Bake first so mesh-space == world-space.
+        self.viewport.bake_object_transform(obj)
+
+        try:
+            faces = np.asarray(obj.mesh.faces, dtype=np.int64)
+            vertices = np.asarray(obj.mesh.vertices, dtype=np.float64)
+        except Exception:
+            return
+
+        selected = []
+        for idx in list(self.viewport.brush_selected_faces):
+            try:
+                fi = int(idx)
+            except Exception:
+                continue
+            if 0 <= fi < int(len(faces)):
+                selected.append(fi)
+
+        if not selected:
+            self.viewport.status_info = "선택된 브러시 면이 없습니다."
             self.viewport.update()
             return
-            
-        avg_normal = total_normal / np.linalg.norm(total_normal)
-        self.align_mesh_to_normal(avg_normal)
-        
-        count = len(self.viewport.brush_selected_faces)
+
+        total_normal = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+        total_area = 0.0
+        selected_vidx: set[int] = set()
+
+        for face_idx in selected:
+            f = faces[int(face_idx)]
+            i0, i1, i2 = int(f[0]), int(f[1]), int(f[2])
+            selected_vidx.add(i0)
+            selected_vidx.add(i1)
+            selected_vidx.add(i2)
+
+            v0 = vertices[i0]
+            v1 = vertices[i1]
+            v2 = vertices[i2]
+            n = np.cross(v1 - v0, v2 - v0)
+            n_len = float(np.linalg.norm(n))
+            if n_len > 1e-12:
+                total_normal += n
+                total_area += (n_len * 0.5)
+
+        if total_area < 1e-9 or float(np.linalg.norm(total_normal)) <= 1e-12:
+            self.viewport.status_info = "유효한 바닥 브러시 면을 찾지 못했습니다."
+            self.viewport.update()
+            return
+
+        if selected_vidx:
+            sel_idx = np.asarray(sorted(selected_vidx), dtype=np.int64)
+            selected_pts = np.asarray(vertices[sel_idx], dtype=np.float64)
+        else:
+            selected_pts = np.asarray(vertices, dtype=np.float64)
+
+        if selected_pts.size == 0:
+            self.viewport.status_info = "브러시 영역 정점을 찾지 못했습니다."
+            self.viewport.update()
+            return
+
+        centroid = np.mean(selected_pts, axis=0)
+        avg_normal = total_normal / float(np.linalg.norm(total_normal))
+
+        try:
+            mesh_centroid = np.asarray(obj.mesh.centroid, dtype=np.float64).reshape(3)
+        except Exception:
+            mesh_centroid = np.mean(np.asarray(vertices, dtype=np.float64), axis=0)
+        avg_normal = orient_plane_normal_toward(avg_normal, centroid, mesh_centroid)
+
+        self.viewport.save_undo_state()
+        R = self.align_mesh_to_normal(avg_normal, pivot=centroid)
+        if R is None:
+            self.viewport.status_info = "브러시 바닥 정렬 회전 계산에 실패했습니다."
+            self.viewport.update()
+            return
+
+        selected_rot = (R @ (selected_pts - centroid).T).T + centroid
+
+        try:
+            floor_z = float(np.nanmin(np.asarray(selected_rot, dtype=np.float64)[:, 2]))
+        except Exception:
+            floor_z = 0.0
+        if np.isfinite(floor_z):
+            obj.mesh.vertices[:, 2] -= floor_z
+            selected_rot[:, 2] -= floor_z
+
+        contact_fix = 0.0
+        try:
+            floor_min = float(np.nanmin(np.asarray(selected_rot, dtype=np.float64)[:, 2]))
+            if np.isfinite(floor_min) and floor_min < 0.0:
+                contact_fix = -floor_min
+                obj.mesh.vertices[:, 2] += float(contact_fix)
+                selected_rot[:, 2] += float(contact_fix)
+        except Exception:
+            contact_fix = 0.0
+
+        # Final guard: never leave mesh below XY after floor alignment.
+        global_fix = 0.0
+        try:
+            mesh_min_z = float(np.nanmin(np.asarray(obj.mesh.vertices, dtype=np.float64)[:, 2]))
+            if np.isfinite(mesh_min_z) and mesh_min_z < 0.0:
+                global_fix = -mesh_min_z
+                obj.mesh.vertices[:, 2] += float(global_fix)
+                selected_rot[:, 2] += float(global_fix)
+        except Exception:
+            global_fix = 0.0
+
+        try:
+            obj.mesh._bounds = None
+            obj.mesh._centroid = None
+            obj.mesh._surface_area = None
+        except Exception:
+            pass
+        obj._trimesh = None
+        obj.translation = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+
+        self.viewport.update_vbo(obj)
+        self.sync_transform_panel()
+
+        count = int(len(selected))
         self.viewport.brush_selected_faces.clear()
-        self.viewport.status_info = f"✅ 브러시 영역({count}개 면) 기준 바닥 정렬 완료"
+        self.viewport.picking_mode = 'none'
+        total_fix = float(contact_fix + global_fix)
+        if total_fix > 0.0:
+            self.viewport.status_info = f"✅ 브러시 바닥 정렬 완료 ({count}개 면 / XY 접점 보정 +{total_fix:.4f})"
+        else:
+            self.viewport.status_info = f"✅ 브러시 바닥 정렬 완료 ({count}개 면 / XY 접점)"
         self.viewport.update()
+        self.viewport.meshTransformChanged.emit()
 
     def align_mesh_to_normal(self, normal, *, pivot=None) -> np.ndarray | None:
         """주어진 법선을 월드 +Z로 정렬 (메쉬에 직접 반영/Bake)."""
@@ -2748,22 +2845,51 @@ class MainWindow(QMainWindow):
         points_rotated = (R @ (points - centroid).T).T + centroid
 
         # 4) 선택 바닥 평면을 Z=0으로 이동
+        # Picked points can be on triangle interiors; include nearest vertices as support.
         try:
-            plane_z = float(np.nanmedian(np.asarray(points_rotated, dtype=np.float64)[:, 2]))
+            floor_z = float(np.nanmin(np.asarray(points_rotated, dtype=np.float64)[:, 2]))
         except Exception:
-            plane_z = 0.0
-        if np.isfinite(plane_z):
-            obj.mesh.vertices[:, 2] -= plane_z
+            floor_z = 0.0
+        try:
+            verts_rot = np.asarray(obj.mesh.vertices, dtype=np.float64).reshape(-1, 3)
+            pts_rot = np.asarray(points_rotated, dtype=np.float64).reshape(-1, 3)
+            if len(verts_rot) > 0 and len(pts_rot) > 0:
+                support_min = None
+                for p in pts_rot:
+                    d2 = np.sum((verts_rot - p) ** 2, axis=1)
+                    j = int(np.nanargmin(d2))
+                    z_j = float(verts_rot[j, 2])
+                    if np.isfinite(z_j):
+                        support_min = z_j if support_min is None else min(support_min, z_j)
+                if support_min is not None and np.isfinite(support_min):
+                    floor_z = float(min(float(floor_z), float(support_min)))
+        except Exception:
+            pass
+        if np.isfinite(floor_z):
+            obj.mesh.vertices[:, 2] -= floor_z
+            points_rotated[:, 2] -= floor_z
 
-        # 5) 경미한 침투만 자동 보정한다(큰 보정은 사용자 의도와 다를 수 있어 보정 안 함).
-        auto_shift = 0.0
+        # 5) Numeric guard: selected floor points must stay on/above XY plane.
+        contact_fix = 0.0
         try:
-            z_vals = np.asarray(obj.mesh.vertices[:, 2], dtype=np.float64)
-            auto_shift = compute_floor_contact_shift(z_vals, tolerance=0.02, max_auto_shift=0.2)
-            if auto_shift > 0.0:
-                obj.mesh.vertices[:, 2] += float(auto_shift)
+            floor_min = float(np.nanmin(np.asarray(points_rotated, dtype=np.float64)[:, 2]))
+            if np.isfinite(floor_min) and floor_min < 0.0:
+                contact_fix = -floor_min
+                obj.mesh.vertices[:, 2] += float(contact_fix)
+                points_rotated[:, 2] += float(contact_fix)
         except Exception:
-            auto_shift = 0.0
+            contact_fix = 0.0
+
+        # Final guard: never leave mesh below XY after floor alignment.
+        global_fix = 0.0
+        try:
+            mesh_min_z = float(np.nanmin(np.asarray(obj.mesh.vertices, dtype=np.float64)[:, 2]))
+            if np.isfinite(mesh_min_z) and mesh_min_z < 0.0:
+                global_fix = -mesh_min_z
+                obj.mesh.vertices[:, 2] += float(global_fix)
+                points_rotated[:, 2] += float(global_fix)
+        except Exception:
+            global_fix = 0.0
 
         try:
             obj.mesh._bounds = None
@@ -2776,12 +2902,13 @@ class MainWindow(QMainWindow):
 
         self.viewport.update_vbo(obj)
         self.sync_transform_panel()
-        if auto_shift > 0.0:
+        total_fix = float(contact_fix + global_fix)
+        if total_fix > 0.0:
             self.viewport.status_info = (
-                f"✅ 바닥 정렬 완료 (점 {len(points)}개 / 경미한 침투 보정 +{auto_shift:.3f})"
+                f"✅ 바닥 정렬 완료 (점 {len(points)}개 / XY 접점 보정 +{total_fix:.4f})"
             )
         else:
-            self.viewport.status_info = f"✅ 바닥 정렬 완료 (점 {len(points)}개 기반 평면 보정)"
+            self.viewport.status_info = f"✅ 바닥 정렬 완료 (점 {len(points)}개 기반 / XY 접점)"
         self.viewport.update()
         
         self.viewport.floor_picks = []
@@ -2888,21 +3015,25 @@ class MainWindow(QMainWindow):
         # 6방향 뷰
         action_front = QAction("1️⃣ 정면 뷰", self)
         action_front.setShortcut("1")
+        # Absolute-axis canonical view: +Y -> origin
         action_front.triggered.connect(lambda: self.set_view(-90, 0))
         view_menu.addAction(action_front)
         
         action_back = QAction("2️⃣ 후면 뷰", self)
         action_back.setShortcut("2")
+        # Absolute-axis canonical view: -Y -> origin
         action_back.triggered.connect(lambda: self.set_view(90, 0))
         view_menu.addAction(action_back)
         
         action_right = QAction("3️⃣ 우측면 뷰", self)
         action_right.setShortcut("3")
+        # Absolute-axis canonical view: +X -> origin
         action_right.triggered.connect(lambda: self.set_view(0, 0))
         view_menu.addAction(action_right)
         
         action_left = QAction("4️⃣ 좌측면 뷰", self)
         action_left.setShortcut("4")
+        # Absolute-axis canonical view: -X -> origin
         action_left.triggered.connect(lambda: self.set_view(180, 0))
         view_menu.addAction(action_left)
         
@@ -7110,29 +7241,89 @@ class MainWindow(QMainWindow):
         cam.azimuth = az
         cam.elevation = max(-90.0, min(90.0, el))
 
-        # Keep 6-face views tightly framed around visible geometry.
+        # Keep 6-face views framed using absolute-axis-stable sizing
+        # (independent from mesh rotation/orientation).
         try:
-            bounds = None
-            obj = self.viewport.selected_obj
-            if obj is not None:
-                b = np.asarray(obj.get_world_bounds(), dtype=np.float64)
-                if b.shape == (2, 3) and np.isfinite(b).all():
-                    bounds = b
-            else:
-                boxes = []
-                for o in list(getattr(self.viewport, "objects", []) or []):
-                    if not bool(getattr(o, "visible", True)):
-                        continue
+            center = None
+            max_dim = None
+
+            def _stable_center_dim(o):
+                world_center = None
+                try:
+                    wb = np.asarray(o.get_world_bounds(), dtype=np.float64)
+                    if wb.shape == (2, 3) and np.isfinite(wb).all():
+                        world_center = (wb[0] + wb[1]) * 0.5
+                except Exception:
+                    world_center = None
+
+                try:
+                    mesh = getattr(o, "mesh", None)
+                    if mesh is not None and hasattr(mesh, "bounds"):
+                        lb = np.asarray(mesh.bounds, dtype=np.float64)
+                        if lb.shape == (2, 3) and np.isfinite(lb).all():
+                            sc = float(getattr(o, "scale", 1.0) or 1.0)
+                            if abs(sc) < 1e-12:
+                                sc = 1.0
+                            d = float(np.max(np.abs(lb[1] - lb[0])) * abs(sc))
+                            if (
+                                world_center is not None
+                                and np.isfinite(world_center).all()
+                                and np.isfinite(d)
+                                and d > 1e-9
+                            ):
+                                return np.asarray(world_center, dtype=np.float64), float(d)
+                except Exception:
+                    pass
+
+                try:
                     b = np.asarray(o.get_world_bounds(), dtype=np.float64)
                     if b.shape == (2, 3) and np.isfinite(b).all():
-                        boxes.append(b)
-                if boxes:
-                    wb = np.vstack(boxes)
-                    bounds = np.array([wb.min(axis=0), wb.max(axis=0)], dtype=np.float64)
-            if bounds is not None:
-                center = (bounds[0] + bounds[1]) * 0.5
-                ext = bounds[1] - bounds[0]
-                max_dim = float(np.max(ext))
+                        c = (b[0] + b[1]) * 0.5
+                        d = float(np.max(np.abs(b[1] - b[0])))
+                        if np.isfinite(c).all() and np.isfinite(d) and d > 1e-9:
+                            return np.asarray(c, dtype=np.float64), float(d)
+                except Exception:
+                    pass
+                return None
+
+            obj = self.viewport.selected_obj
+            if obj is not None and bool(getattr(obj, "visible", True)):
+                stable = _stable_center_dim(obj)
+                if stable is not None:
+                    center, max_dim = stable
+            else:
+                try:
+                    bmin, bmax = self.viewport._collect_projection_bounds()
+                    bmin = np.asarray(bmin, dtype=np.float64).reshape(3)
+                    bmax = np.asarray(bmax, dtype=np.float64).reshape(3)
+                    if np.isfinite(bmin).all() and np.isfinite(bmax).all():
+                        center = (bmin + bmax) * 0.5
+                        max_dim = float(np.max(np.abs(bmax - bmin)))
+                except Exception:
+                    center = None
+                    max_dim = None
+
+            # Fallback: selected object bounds even when hidden, then current mesh bounds.
+            if center is None or max_dim is None:
+                try:
+                    obj_any = self.viewport.selected_obj
+                    if obj_any is not None:
+                        b = np.asarray(obj_any.get_world_bounds(), dtype=np.float64)
+                        if b.shape == (2, 3) and np.isfinite(b).all():
+                            center = (b[0] + b[1]) * 0.5
+                            max_dim = float(np.max(np.abs(b[1] - b[0])))
+                except Exception:
+                    pass
+            if center is None or max_dim is None:
+                try:
+                    cm = np.asarray(getattr(self, "current_mesh", None).bounds, dtype=np.float64)
+                    if cm.shape == (2, 3) and np.isfinite(cm).all():
+                        center = (cm[0] + cm[1]) * 0.5
+                        max_dim = float(np.max(np.abs(cm[1] - cm[0])))
+                except Exception:
+                    pass
+
+            if center is not None and max_dim is not None:
                 if not np.isfinite(max_dim) or max_dim <= 1e-6:
                     max_dim = 10.0
                 cam.center = np.asarray(center, dtype=np.float64)
@@ -7144,8 +7335,21 @@ class MainWindow(QMainWindow):
             cam.pan_offset = np.array([0.0, 0.0, 0.0], dtype=np.float64)
         except Exception:
             pass
-        # Keep directional view buttons free-orbit friendly (no sticky ortho lock).
-        self.viewport._front_back_ortho_enabled = False
+        # 6-face view should stay orthographic and axis-aligned.
+        enable_ortho_lock = True
+        try:
+            is_top_bottom = abs(abs(float(cam.elevation)) - 90.0) <= 1e-6
+            is_side = abs(float(cam.elevation)) <= 1e-6 and any(
+                abs(float(cam.azimuth) - t) <= 1e-6 for t in (-180.0, -90.0, 0.0, 90.0, 180.0)
+            )
+            # Side/front/back: modest zoom-out.
+            # Top/bottom: 2x bigger than current request => half scale.
+            self.viewport._ortho_view_scale = 0.95 if is_top_bottom else 1.35
+            self.viewport._ortho_frame_override = None
+            enable_ortho_lock = bool(is_top_bottom or is_side)
+        except Exception:
+            pass
+        self.viewport._front_back_ortho_enabled = enable_ortho_lock
         self.viewport.update()
 
     def toggle_curvature_mode(self, enabled: bool):

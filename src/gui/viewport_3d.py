@@ -1445,6 +1445,10 @@ class TrackballCamera:
             up_ref = np.array([0.0, 0.0, 1.0], dtype=np.float64)
         else:
             up_ref = up_ref / u_norm
+        # In near top/bottom views, world-Z up becomes parallel to forward.
+        # Switch reference up so screen-plane panning remains stable.
+        if abs(float(np.dot(forward, up_ref))) > 0.98:
+            up_ref = np.array([0.0, 1.0, 0.0], dtype=np.float64)
 
         right = np.cross(forward, up_ref)
         r_norm = float(np.linalg.norm(right))
@@ -1664,7 +1668,11 @@ class Viewport3D(QOpenGLWidget):
         self.show_gizmo = True
         self.active_gizmo_axis = None
         self.gizmo_size = 6.0
-        self.gizmo_radius_factor = 0.72
+        self.gizmo_radius_factor = 0.90
+        self._gizmo_pick_width_ratio = 0.12
+        self._gizmo_rotate_sensitivity = 0.85
+        # Visual "steering-wheel" feel: drag direction should match perceived spin.
+        self._gizmo_drag_sign = -1.0
         self.gizmo_drag_start = None
         
         # 怨〓쪧 痢≪젙 紐⑤뱶
@@ -6925,8 +6933,8 @@ class Viewport3D(QOpenGLWidget):
         except Exception:
             return
 
-        factor = float(getattr(self, "gizmo_radius_factor", 0.72))
-        factor = max(0.60, min(2.5, factor))
+        factor = float(getattr(self, "gizmo_radius_factor", 0.90))
+        factor = max(0.75, min(2.8, factor))
         self.gizmo_radius_factor = factor
         self.gizmo_size = max_dim * 0.5 * factor
     
@@ -6956,7 +6964,10 @@ class Viewport3D(QOpenGLWidget):
             
             ray_origin = np.array(near_pt)
             ray_dir = np.array(far_pt) - ray_origin
-            ray_dir /= np.linalg.norm(ray_dir)
+            ray_norm = float(np.linalg.norm(ray_dir))
+            if ray_norm <= 1e-12:
+                return None
+            ray_dir /= ray_norm
             
             best_axis = None
             min_ray_t = float('inf')
@@ -6972,10 +6983,11 @@ class Viewport3D(QOpenGLWidget):
             # rendering the gizmo to a small off-screen buffer with unique colors for picking.
             
             # Let's try to estimate a world-space threshold based on screen pixel size
-            pixel_world_size = 0.005 * self.camera.distance # Heuristic value
-            threshold = pixel_world_size * 5 # Allow for a few pixels tolerance
-            
             scaled_gizmo_radius = self.gizmo_size * obj.scale
+            pixel_world_size = 0.005 * float(getattr(self.camera, "distance", 50.0) or 50.0)
+            tol_ratio = float(getattr(self, "_gizmo_pick_width_ratio", 0.12) or 0.12)
+            tol_ratio = float(max(0.06, min(tol_ratio, 0.30)))
+            threshold = max(pixel_world_size * 8.0, float(scaled_gizmo_radius) * tol_ratio)
             center = obj.translation
             
             # Define the planes for each axis's circle
@@ -7426,6 +7438,7 @@ class Viewport3D(QOpenGLWidget):
                             self.gizmo_drag_start = angle
                             self.update()
                             return
+                        self.active_gizmo_axis = None
 
                 # ?쇳궧 紐⑤뱶 泥섎━
                 if self.picking_mode == 'curvature' and (modifiers & Qt.KeyboardModifier.ShiftModifier):
@@ -8312,7 +8325,13 @@ class Viewport3D(QOpenGLWidget):
                 angle_info = self._calculate_gizmo_angle(event.pos().x(), event.pos().y())
                 if angle_info is not None:
                     current_angle = angle_info
-                    delta_angle = np.degrees(current_angle - self.gizmo_drag_start)
+                    raw_delta = float(current_angle - self.gizmo_drag_start)
+                    # Wrap to shortest signed arc to avoid sudden +/-360 jumps.
+                    delta_angle = float(np.degrees(np.arctan2(np.sin(raw_delta), np.cos(raw_delta))))
+                    delta_angle = float(np.clip(delta_angle, -25.0, 25.0))
+                    rot_sensitivity = float(getattr(self, "_gizmo_rotate_sensitivity", 0.85) or 0.85)
+                    delta_angle *= float(max(0.1, min(rot_sensitivity, 2.0)))
+                    delta_angle *= float(getattr(self, "_gizmo_drag_sign", -1.0) or -1.0)
                     
                     # "?먮룞李??몃뱾" 吏곴??? 留덉슦?ㅼ쓽 ?뚯쟾 諛⑺뼢??硫붿돩 ?뚯쟾??1:1 留ㅼ묶
                     # 移대찓???쒖꽑怨??뚯쟾異뺤쓽 諛⑺뼢???꾪듃怨????듯빐 visual CW/CCW瑜?寃곗젙
@@ -8617,36 +8636,25 @@ class Viewport3D(QOpenGLWidget):
 
             # 4. ?쇰컲 移대찓??議곗옉 (?쒕옒洹?
             ortho_locked = bool(getattr(self, "_front_back_ortho_enabled", False))
-            # In canonical 6-axis orthographic views, keep camera interaction strictly 2D
-            # (pan on screen plane) unless Alt is held to intentionally leave lock.
-            if ortho_locked and not bool(modifiers & Qt.KeyboardModifier.AltModifier):
-                if self.mouse_button in (
-                    Qt.MouseButton.LeftButton,
-                    Qt.MouseButton.RightButton,
-                    Qt.MouseButton.MiddleButton,
-                ):
+            # In canonical 6-axis orthographic views:
+            # - right-drag keeps 2D pan
+            # - left/middle-drag exits ortho lock and starts orbit
+            if ortho_locked:
+                if self.mouse_button == Qt.MouseButton.RightButton:
                     self.camera.pan(dx, dy)
                     self.update()
                     return
-
-            if self.mouse_button == Qt.MouseButton.LeftButton:
-                # 6-face view starts axis-aligned, but dragging should immediately return to free orbit.
-                if ortho_locked:
+                if self.mouse_button in (Qt.MouseButton.LeftButton, Qt.MouseButton.MiddleButton):
                     self._front_back_ortho_enabled = False
                     self._ortho_frame_override = None
+
+            if self.mouse_button == Qt.MouseButton.LeftButton:
                 self.camera.rotate(dx, dy)
                 self.update()
             elif self.mouse_button == Qt.MouseButton.RightButton:
-                # Right-drag should also return to free camera mode.
-                if ortho_locked:
-                    self._front_back_ortho_enabled = False
-                    self._ortho_frame_override = None
                 self.camera.pan(dx, dy)
                 self.update()
             elif self.mouse_button == Qt.MouseButton.MiddleButton:
-                if ortho_locked:
-                    self._front_back_ortho_enabled = False
-                    self._ortho_frame_override = None
                 self.camera.rotate(dx, dy)
                 self.update()
             
@@ -8654,13 +8662,12 @@ class Viewport3D(QOpenGLWidget):
             _log_ignored_exception("Mouse move error", level=logging.WARNING)
     
     def _calculate_gizmo_angle(self, screen_x, screen_y):
-        """湲곗쫰紐?以묒떖 湲곗? 2D ?붾㈃ 怨듦컙?먯꽌??媛곷룄 怨꾩궛 (媛??吏곴??곸씤 ?먰삎 ?쒕옒洹?諛⑹떇)"""
+        """Return signed angle for active gizmo axis from the current cursor position."""
         obj = self.selected_obj
         if not obj or not self.active_gizmo_axis:
             return None
-        
+
         try:
-            # 罹먯떆??留ㅽ듃由?뒪媛 ?덉쑝硫??ъ슜 (?깅뒫 理쒖쟻??
             if self._cached_viewport is not None:
                 viewport = self._cached_viewport
                 modelview = self._cached_modelview
@@ -8670,25 +8677,54 @@ class Viewport3D(QOpenGLWidget):
                 viewport = glGetIntegerv(GL_VIEWPORT)
                 modelview = glGetDoublev(GL_MODELVIEW_MATRIX)
                 projection = glGetDoublev(GL_PROJECTION_MATRIX)
-            
-            # 湲곗쫰紐?以묒떖(?ㅻ툕?앺듃 ?꾩튂)???붾㈃?쇰줈 ?ъ쁺
-            obj_pos = obj.translation
-            win_pos = gluProject(obj_pos[0], obj_pos[1], obj_pos[2], modelview, projection, viewport)
+
+            gl_x, gl_y = self._qt_to_gl_window_xy(float(screen_x), float(screen_y), viewport=viewport)
+            near_pt = gluUnProject(gl_x, gl_y, 0.0, modelview, projection, viewport)
+            far_pt = gluUnProject(gl_x, gl_y, 1.0, modelview, projection, viewport)
+
+            if near_pt and far_pt:
+                ray_origin = np.asarray(near_pt, dtype=np.float64).reshape(3)
+                ray_dir = np.asarray(far_pt, dtype=np.float64).reshape(3) - ray_origin
+                ray_norm = float(np.linalg.norm(ray_dir))
+                if ray_norm > 1e-12:
+                    ray_dir = ray_dir / ray_norm
+                    center = np.asarray(obj.translation, dtype=np.float64).reshape(3)
+
+                    if self.active_gizmo_axis == "X":
+                        normal = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+                        basis_u = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+                        basis_v = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+                    elif self.active_gizmo_axis == "Y":
+                        normal = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+                        basis_u = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+                        basis_v = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+                    else:
+                        normal = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+                        basis_u = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+                        basis_v = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+
+                    denom = float(np.dot(ray_dir, normal))
+                    if abs(denom) > 1e-8:
+                        t = float(np.dot(center - ray_origin, normal) / denom)
+                        if t > 0.0 and np.isfinite(t):
+                            hit_pt = ray_origin + ray_dir * t
+                            local = hit_pt - center
+                            u = float(np.dot(local, basis_u))
+                            v = float(np.dot(local, basis_v))
+                            return float(np.arctan2(v, u))
+
+            # Fallback: 2D center-angle in screen space.
+            center = np.asarray(obj.translation, dtype=np.float64).reshape(3)
+            win_pos = gluProject(center[0], center[1], center[2], modelview, projection, viewport)
             if not win_pos:
                 return None
-
             center_x, center_y = self._gl_window_to_qt_xy(float(win_pos[0]), float(win_pos[1]), viewport=viewport)
-
-            # 以묒떖?먯뿉??留덉슦???ъ씤?곌퉴吏??2D 媛곷룄 (atan2)
-            # ?붾㈃ 醫뚰몴怨꾨뒗 Y媛 ?꾨옒濡?利앷??섎?濡?遺??二쇱쓽
             dx = float(screen_x) - float(center_x)
             dy = float(screen_y) - float(center_y)
-
-            angle = np.arctan2(dy, dx)
-            return angle
+            return float(np.arctan2(dy, dx))
         except Exception:
             return None
-    
+
     def wheelEvent(self, a0: QWheelEvent | None):
         if a0 is None:
             return
@@ -9035,12 +9071,12 @@ class Viewport3D(QOpenGLWidget):
 
                 # 湲곕낯: [ ] ?ㅻ줈 湲곗쫰紐??ш린 議곗젅
                 if key == key_dec:
-                    self.gizmo_radius_factor = max(0.60, float(self.gizmo_radius_factor) * 0.9)
+                    self.gizmo_radius_factor = max(0.75, float(self.gizmo_radius_factor) * 0.9)
                     self.update_gizmo_size()
                     self.status_info = f"? 湲곗쫰紐??ш린: x{self.gizmo_radius_factor:.2f}"
                     self.update()
                 elif key == key_inc:
-                    self.gizmo_radius_factor = min(2.5, float(self.gizmo_radius_factor) / 0.9)
+                    self.gizmo_radius_factor = min(2.8, float(self.gizmo_radius_factor) / 0.9)
                     self.update_gizmo_size()
                     self.status_info = f"? 湲곗쫰紐??ш린: x{self.gizmo_radius_factor:.2f}"
                     self.update()
