@@ -131,6 +131,9 @@ from ..core.logging_utils import log_once
 
 _LOGGER = logging.getLogger(__name__)
 ORTHO_VIEW_SCALE_DEFAULT = 1.15
+MOUSE_DELTA_SPIKE_CLAMP_PX = 120.0
+CAMERA_ROTATE_SENSITIVITY_DEFAULT = 0.35
+CAMERA_PAN_SENSITIVITY_DEFAULT = 0.22
 
 
 def _log_ignored_exception(context: str = "Ignored exception", *, level: int = logging.DEBUG) -> None:
@@ -1425,7 +1428,7 @@ class TrackballCamera:
         """Camera look-at point."""
         return self.center + self.pan_offset
 
-    def rotate(self, delta_x: float, delta_y: float, sensitivity: float = 0.35):
+    def rotate(self, delta_x: float, delta_y: float, sensitivity: float = CAMERA_ROTATE_SENSITIVITY_DEFAULT):
         """Rotate camera around look-at."""
         self.azimuth -= delta_x * sensitivity
         self.azimuth = ((self.azimuth + 180.0) % 360.0) - 180.0
@@ -8316,8 +8319,8 @@ class Viewport3D(QOpenGLWidget):
             dx = curr_xf - prev_xf
             dy = curr_yf - prev_yf
             # Suppress occasional event spikes that feel like camera hitching.
-            dx = float(np.clip(dx, -120.0, 120.0))
-            dy = float(np.clip(dy, -120.0, 120.0))
+            dx = float(np.clip(dx, -MOUSE_DELTA_SPIKE_CLAMP_PX, MOUSE_DELTA_SPIKE_CLAMP_PX))
+            dy = float(np.clip(dy, -MOUSE_DELTA_SPIKE_CLAMP_PX, MOUSE_DELTA_SPIKE_CLAMP_PX))
             self.last_mouse_posf = (curr_xf, curr_yf)
             self.last_mouse_pos = event.pos()
             
@@ -8650,13 +8653,13 @@ class Viewport3D(QOpenGLWidget):
                 self._ortho_frame_override = None
 
             if self.mouse_button == Qt.MouseButton.LeftButton:
-                self.camera.rotate(dx, dy, sensitivity=0.35)
+                self.camera.rotate(dx, dy, sensitivity=CAMERA_ROTATE_SENSITIVITY_DEFAULT)
                 self.update()
             elif self.mouse_button == Qt.MouseButton.RightButton:
-                self.camera.pan(dx, dy, sensitivity=0.22)
+                self.camera.pan(dx, dy, sensitivity=CAMERA_PAN_SENSITIVITY_DEFAULT)
                 self.update()
             elif self.mouse_button == Qt.MouseButton.MiddleButton:
-                self.camera.rotate(dx, dy, sensitivity=0.35)
+                self.camera.rotate(dx, dy, sensitivity=CAMERA_ROTATE_SENSITIVITY_DEFAULT)
                 self.update()
             
         except Exception:
