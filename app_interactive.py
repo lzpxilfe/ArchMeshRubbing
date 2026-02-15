@@ -44,6 +44,8 @@ VIEW_DISTANCE_SCALE = 1.35
 VIEW_MIN_DIM = 10.0
 VIEW_ORTHO_SCALE_TOP_BOTTOM = 0.95
 VIEW_ORTHO_SCALE_SIDE = 1.35
+FLOOR_ALIGN_AXIS_Z = 2
+FLOOR_OPTIMIZE_STEP_DEGREES = (1.2, 0.4, 0.15, 0.05)
 CANONICAL_VIEW_PRESETS: dict[str, tuple[float, float]] = {
     "front": (-90.0, 0.0),
     "back": (90.0, 0.0),
@@ -144,6 +146,8 @@ from src.core.project_file import (  # noqa: E402
 )
 from src.gui.profile_graph_widget import ProfileGraphWidget  # noqa: E402
 from src.core.alignment_utils import (  # noqa: E402
+    compute_minimax_center_shift,
+    compute_nonpenetration_lift,
     fit_plane_normal,
     orient_plane_normal_toward,
     rotation_matrix_align_vectors,
@@ -2721,26 +2725,24 @@ class MainWindow(QMainWindow):
 
         z_residual = float("nan")
         try:
-            z_vals = np.asarray(selected_rot, dtype=np.float64)[:, 2]
-            z_min = float(np.nanmin(z_vals))
-            z_max = float(np.nanmax(z_vals))
-            floor_z = 0.5 * (z_min + z_max)
+            z_vals = np.asarray(selected_rot, dtype=np.float64)[:, FLOOR_ALIGN_AXIS_Z]
+            floor_z = compute_minimax_center_shift(z_vals)
         except Exception:
             floor_z = 0.0
         if np.isfinite(floor_z):
-            obj.mesh.vertices[:, 2] -= float(floor_z)
-            selected_rot[:, 2] -= float(floor_z)
+            obj.mesh.vertices[:, FLOOR_ALIGN_AXIS_Z] -= float(floor_z)
+            selected_rot[:, FLOOR_ALIGN_AXIS_Z] -= float(floor_z)
         # Keep the entire mesh above XY after floor alignment.
         try:
-            mesh_min_z = float(np.nanmin(np.asarray(obj.mesh.vertices, dtype=np.float64)[:, 2]))
+            mesh_z = np.asarray(obj.mesh.vertices, dtype=np.float64)[:, FLOOR_ALIGN_AXIS_Z]
+            lift_z = compute_nonpenetration_lift(mesh_z, floor_z=0.0)
         except Exception:
-            mesh_min_z = float("nan")
-        if np.isfinite(mesh_min_z) and mesh_min_z < 0.0:
-            lift_z = float(-mesh_min_z)
-            obj.mesh.vertices[:, 2] += lift_z
-            selected_rot[:, 2] += lift_z
+            lift_z = 0.0
+        if np.isfinite(lift_z) and lift_z > 0.0:
+            obj.mesh.vertices[:, FLOOR_ALIGN_AXIS_Z] += float(lift_z)
+            selected_rot[:, FLOOR_ALIGN_AXIS_Z] += float(lift_z)
         try:
-            z_after = np.asarray(selected_rot, dtype=np.float64)[:, 2]
+            z_after = np.asarray(selected_rot, dtype=np.float64)[:, FLOOR_ALIGN_AXIS_Z]
             z_residual = float(np.nanmax(np.abs(z_after)))
         except Exception:
             z_residual = float("nan")
@@ -2834,7 +2836,7 @@ class MainWindow(QMainWindow):
         def _eval(ax: float, ay: float) -> tuple[tuple[float, float], np.ndarray, np.ndarray]:
             R = _rot_y(ay) @ _rot_x(ax)
             pts_r = (R @ centered.T).T + pivot
-            z = np.asarray(pts_r[:, 2], dtype=np.float64)
+            z = np.asarray(pts_r[:, FLOOR_ALIGN_AXIS_Z], dtype=np.float64)
             if z.size == 0 or not np.isfinite(z).all():
                 return (float("inf"), float("inf")), pts_r, R
             # Height offset is irrelevant (we translate to Z=0 later).
@@ -2846,7 +2848,7 @@ class MainWindow(QMainWindow):
         ay = 0.0
         best_metric, best_pts, best_R = _eval(ax, ay)
 
-        for step_deg in (1.2, 0.4, 0.15, 0.05):
+        for step_deg in FLOOR_OPTIMIZE_STEP_DEGREES:
             step = float(np.deg2rad(step_deg))
             improved = True
             while improved:
@@ -2955,27 +2957,25 @@ class MainWindow(QMainWindow):
         #    (기존 min(z)=0 방식은 한두 점만 닿고 나머지가 뜨기 쉬움)
         z_residual = float("nan")
         try:
-            z_vals = np.asarray(points_rotated, dtype=np.float64)[:, 2]
-            z_min = float(np.nanmin(z_vals))
-            z_max = float(np.nanmax(z_vals))
+            z_vals = np.asarray(points_rotated, dtype=np.float64)[:, FLOOR_ALIGN_AXIS_Z]
             # Minimax center: minimize max_i |z_i - t|
-            floor_z = 0.5 * (z_min + z_max)
+            floor_z = compute_minimax_center_shift(z_vals)
         except Exception:
             floor_z = 0.0
         if np.isfinite(floor_z):
-            obj.mesh.vertices[:, 2] -= float(floor_z)
-            points_rotated[:, 2] -= float(floor_z)
+            obj.mesh.vertices[:, FLOOR_ALIGN_AXIS_Z] -= float(floor_z)
+            points_rotated[:, FLOOR_ALIGN_AXIS_Z] -= float(floor_z)
         # Keep the entire mesh above XY after floor alignment.
         try:
-            mesh_min_z = float(np.nanmin(np.asarray(obj.mesh.vertices, dtype=np.float64)[:, 2]))
+            mesh_z = np.asarray(obj.mesh.vertices, dtype=np.float64)[:, FLOOR_ALIGN_AXIS_Z]
+            lift_z = compute_nonpenetration_lift(mesh_z, floor_z=0.0)
         except Exception:
-            mesh_min_z = float("nan")
-        if np.isfinite(mesh_min_z) and mesh_min_z < 0.0:
-            lift_z = float(-mesh_min_z)
-            obj.mesh.vertices[:, 2] += lift_z
-            points_rotated[:, 2] += lift_z
+            lift_z = 0.0
+        if np.isfinite(lift_z) and lift_z > 0.0:
+            obj.mesh.vertices[:, FLOOR_ALIGN_AXIS_Z] += float(lift_z)
+            points_rotated[:, FLOOR_ALIGN_AXIS_Z] += float(lift_z)
         try:
-            z_after = np.asarray(points_rotated, dtype=np.float64)[:, 2]
+            z_after = np.asarray(points_rotated, dtype=np.float64)[:, FLOOR_ALIGN_AXIS_Z]
             z_residual = float(np.nanmax(np.abs(z_after)))
         except Exception:
             z_residual = float("nan")
