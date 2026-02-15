@@ -1,11 +1,31 @@
 import os
 import subprocess
 import shutil
+import ctypes
 from pathlib import Path
+
+
+def get_desktop_dir() -> Path:
+    """Return Desktop path without assuming a literal 'Desktop' folder name."""
+    if os.name == "nt":
+        csidl_desktopdirectory = 0x0010
+        shgfp_type_current = 0
+        buf = ctypes.create_unicode_buffer(260)
+        result = ctypes.windll.shell32.SHGetFolderPathW(
+            None,
+            csidl_desktopdirectory,
+            None,
+            shgfp_type_current,
+            buf,
+        )
+        if result == 0 and buf.value:
+            return Path(buf.value)
+    return Path.home() / "Desktop"
+
 
 def delete_old_shortcuts(shortcut_name):
     """Delete existing shortcuts matching the name pattern on Desktop."""
-    desktop = Path(os.path.expanduser("~")) / "Desktop"
+    desktop = get_desktop_dir()
     
     # Find all shortcuts that start with the app name
     deleted_count = 0
@@ -24,7 +44,7 @@ def delete_old_shortcuts(shortcut_name):
 
 def create_shortcut(target_exe, shortcut_name):
     """Windows Desktop shortcut creator."""
-    desktop = Path(os.path.expanduser("~")) / "Desktop"
+    desktop = get_desktop_dir()
     shortcut_path = desktop / f"{shortcut_name}.lnk"
     
     # Delete old shortcuts first

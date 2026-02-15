@@ -44,6 +44,8 @@ VIEW_DISTANCE_SCALE = 1.35
 VIEW_MIN_DIM = 10.0
 VIEW_ORTHO_SCALE_TOP_BOTTOM = 0.95
 VIEW_ORTHO_SCALE_SIDE = 1.35
+FLOOR_ALIGN_AXIS_Z = 2
+FLOOR_OPTIMIZE_STEP_DEGREES = (1.2, 0.4, 0.15, 0.05)
 CANONICAL_VIEW_PRESETS: dict[str, tuple[float, float]] = {
     "front": (-90.0, 0.0),
     "back": (90.0, 0.0),
@@ -52,11 +54,40 @@ CANONICAL_VIEW_PRESETS: dict[str, tuple[float, float]] = {
     "top": (0.0, 90.0),
     "bottom": (0.0, -90.0),
 }
+# 6-view planes must always be one of XY / YZ / ZX.
+CANONICAL_VIEW_AXES: dict[str, tuple[int, int]] = {
+    "top": (0, 1),     # XY
+    "bottom": (0, 1),  # XY
+    "left": (1, 2),    # YZ
+    "right": (1, 2),   # YZ
+    "front": (2, 0),   # ZX
+    "back": (2, 0),    # ZX
+}
 _UNIT_TO_INCHES: dict[str, float] = {
     "mm": 1.0 / 25.4,
     "cm": 1.0 / 2.54,
     "m": 100.0 / 2.54,
 }
+
+
+def _canonical_view_key_from_angles(azimuth: float, elevation: float) -> str | None:
+    az = ((float(azimuth) + 180.0) % 360.0) - 180.0
+    el = float(elevation)
+    if abs(el - 90.0) <= VIEW_ANGLE_EPS:
+        return "top"
+    if abs(el + 90.0) <= VIEW_ANGLE_EPS:
+        return "bottom"
+    if abs(el) > VIEW_ANGLE_EPS:
+        return None
+    if abs(az - 0.0) <= VIEW_ANGLE_EPS:
+        return "right"
+    if abs(abs(az) - 180.0) <= VIEW_ANGLE_EPS:
+        return "left"
+    if abs(az + 90.0) <= VIEW_ANGLE_EPS:
+        return "front"
+    if abs(az - 90.0) <= VIEW_ANGLE_EPS:
+        return "back"
+    return None
 
 
 def _safe_git_info(repo_dir: str) -> tuple[str | None, bool]:
@@ -142,12 +173,17 @@ from src.core.project_file import (  # noqa: E402
     load_project as load_amr_project,
     save_project as save_amr_project,
 )
+from src.core.runtime_defaults import DEFAULTS as RUNTIME_DEFAULTS  # noqa: E402
 from src.gui.profile_graph_widget import ProfileGraphWidget  # noqa: E402
 from src.core.alignment_utils import (  # noqa: E402
+    compute_minimax_center_shift,
+    compute_nonpenetration_lift,
     fit_plane_normal,
     orient_plane_normal_toward,
     rotation_matrix_align_vectors,
 )
+
+DEFAULT_EXPORT_DPI = RUNTIME_DEFAULTS.export_dpi
 
 
 class MeshLoadThread(QThread):
@@ -1640,7 +1676,7 @@ class ExportPanel(QWidget):
         
         self.spin_dpi = QSpinBox()
         self.spin_dpi.setRange(72, 600)
-        self.spin_dpi.setValue(300)
+        self.spin_dpi.setValue(DEFAULT_EXPORT_DPI)
         self.spin_dpi.setSuffix(" DPI")
         img_layout.addRow("해상도:", self.spin_dpi)
         
@@ -2721,26 +2757,24 @@ class MainWindow(QMainWindow):
 
         z_residual = float("nan")
         try:
-            z_vals = np.asarray(selected_rot, dtype=np.float64)[:, 2]
-            z_min = float(np.nanmin(z_vals))
-            z_max = float(np.nanmax(z_vals))
-            floor_z = 0.5 * (z_min + z_max)
+            z_vals = np.asarray(selected_rot, dtype=np.float64)[:, FLOOR_ALIGN_AXIS_Z]
+            floor_z = compute_minimax_center_shift(z_vals)
         except Exception:
             floor_z = 0.0
         if np.isfinite(floor_z):
-            obj.mesh.vertices[:, 2] -= float(floor_z)
-            selected_rot[:, 2] -= float(floor_z)
+            obj.mesh.vertices[:, FLOOR_ALIGN_AXIS_Z] -= float(floor_z)
+            selected_rot[:, FLOOR_ALIGN_AXIS_Z] -= float(floor_z)
         # Keep the entire mesh above XY after floor alignment.
         try:
-            mesh_min_z = float(np.nanmin(np.asarray(obj.mesh.vertices, dtype=np.float64)[:, 2]))
+            mesh_z = np.asarray(obj.mesh.vertices, dtype=np.float64)[:, FLOOR_ALIGN_AXIS_Z]
+            lift_z = compute_nonpenetration_lift(mesh_z, floor_z=0.0)
         except Exception:
-            mesh_min_z = float("nan")
-        if np.isfinite(mesh_min_z) and mesh_min_z < 0.0:
-            lift_z = float(-mesh_min_z)
-            obj.mesh.vertices[:, 2] += lift_z
-            selected_rot[:, 2] += lift_z
+            lift_z = 0.0
+        if np.isfinite(lift_z) and lift_z > 0.0:
+            obj.mesh.vertices[:, FLOOR_ALIGN_AXIS_Z] += float(lift_z)
+            selected_rot[:, FLOOR_ALIGN_AXIS_Z] += float(lift_z)
         try:
-            z_after = np.asarray(selected_rot, dtype=np.float64)[:, 2]
+            z_after = np.asarray(selected_rot, dtype=np.float64)[:, FLOOR_ALIGN_AXIS_Z]
             z_residual = float(np.nanmax(np.abs(z_after)))
         except Exception:
             z_residual = float("nan")
@@ -2834,7 +2868,7 @@ class MainWindow(QMainWindow):
         def _eval(ax: float, ay: float) -> tuple[tuple[float, float], np.ndarray, np.ndarray]:
             R = _rot_y(ay) @ _rot_x(ax)
             pts_r = (R @ centered.T).T + pivot
-            z = np.asarray(pts_r[:, 2], dtype=np.float64)
+            z = np.asarray(pts_r[:, FLOOR_ALIGN_AXIS_Z], dtype=np.float64)
             if z.size == 0 or not np.isfinite(z).all():
                 return (float("inf"), float("inf")), pts_r, R
             # Height offset is irrelevant (we translate to Z=0 later).
@@ -2846,7 +2880,7 @@ class MainWindow(QMainWindow):
         ay = 0.0
         best_metric, best_pts, best_R = _eval(ax, ay)
 
-        for step_deg in (1.2, 0.4, 0.15, 0.05):
+        for step_deg in FLOOR_OPTIMIZE_STEP_DEGREES:
             step = float(np.deg2rad(step_deg))
             improved = True
             while improved:
@@ -2955,27 +2989,25 @@ class MainWindow(QMainWindow):
         #    (기존 min(z)=0 방식은 한두 점만 닿고 나머지가 뜨기 쉬움)
         z_residual = float("nan")
         try:
-            z_vals = np.asarray(points_rotated, dtype=np.float64)[:, 2]
-            z_min = float(np.nanmin(z_vals))
-            z_max = float(np.nanmax(z_vals))
+            z_vals = np.asarray(points_rotated, dtype=np.float64)[:, FLOOR_ALIGN_AXIS_Z]
             # Minimax center: minimize max_i |z_i - t|
-            floor_z = 0.5 * (z_min + z_max)
+            floor_z = compute_minimax_center_shift(z_vals)
         except Exception:
             floor_z = 0.0
         if np.isfinite(floor_z):
-            obj.mesh.vertices[:, 2] -= float(floor_z)
-            points_rotated[:, 2] -= float(floor_z)
+            obj.mesh.vertices[:, FLOOR_ALIGN_AXIS_Z] -= float(floor_z)
+            points_rotated[:, FLOOR_ALIGN_AXIS_Z] -= float(floor_z)
         # Keep the entire mesh above XY after floor alignment.
         try:
-            mesh_min_z = float(np.nanmin(np.asarray(obj.mesh.vertices, dtype=np.float64)[:, 2]))
+            mesh_z = np.asarray(obj.mesh.vertices, dtype=np.float64)[:, FLOOR_ALIGN_AXIS_Z]
+            lift_z = compute_nonpenetration_lift(mesh_z, floor_z=0.0)
         except Exception:
-            mesh_min_z = float("nan")
-        if np.isfinite(mesh_min_z) and mesh_min_z < 0.0:
-            lift_z = float(-mesh_min_z)
-            obj.mesh.vertices[:, 2] += lift_z
-            points_rotated[:, 2] += lift_z
+            lift_z = 0.0
+        if np.isfinite(lift_z) and lift_z > 0.0:
+            obj.mesh.vertices[:, FLOOR_ALIGN_AXIS_Z] += float(lift_z)
+            points_rotated[:, FLOOR_ALIGN_AXIS_Z] += float(lift_z)
         try:
-            z_after = np.asarray(points_rotated, dtype=np.float64)[:, 2]
+            z_after = np.asarray(points_rotated, dtype=np.float64)[:, FLOOR_ALIGN_AXIS_Z]
             z_residual = float(np.nanmax(np.abs(z_after)))
         except Exception:
             z_residual = float("nan")
@@ -3677,7 +3709,7 @@ class MainWindow(QMainWindow):
             try:
                 dpi = int(export_panel.spin_dpi.value())
             except Exception:
-                dpi = 300
+                dpi = DEFAULT_EXPORT_DPI
             try:
                 format_index = int(export_panel.combo_format.currentIndex())
             except Exception:
@@ -3699,7 +3731,7 @@ class MainWindow(QMainWindow):
             except Exception:
                 profile_feature_angle = 60.0
         else:
-            dpi = 300
+            dpi = DEFAULT_EXPORT_DPI
             format_index = 0
             scale_bar = True
             profile_include_grid = True
@@ -4336,7 +4368,9 @@ class MainWindow(QMainWindow):
         exp = ui.get("export", {})
         if isinstance(exp, dict) and getattr(self, "export_panel", None) is not None:
             try:
-                self.export_panel.spin_dpi.setValue(int(exp.get("dpi", self.export_panel.spin_dpi.value()) or 300))
+                self.export_panel.spin_dpi.setValue(
+                    int(exp.get("dpi", self.export_panel.spin_dpi.value()) or DEFAULT_EXPORT_DPI)
+                )
                 self.export_panel.combo_format.setCurrentIndex(int(exp.get("format_index", self.export_panel.combo_format.currentIndex()) or 0))
                 self.export_panel.check_scale_bar.setChecked(bool(exp.get("scale_bar", self.export_panel.check_scale_bar.isChecked())))
                 self.export_panel.check_profile_include_grid.setChecked(
@@ -6921,14 +6955,7 @@ class MainWindow(QMainWindow):
             bounds = np.array([[-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]], dtype=np.float64)
 
         views = ["top", "bottom", "front", "back", "left", "right"]
-        view_map = {
-            "top": (0.0, 90.0),
-            "bottom": (0.0, -90.0),
-            "front": (-90.0, 0.0),
-            "back": (90.0, 0.0),
-            "left": (180.0, 0.0),
-            "right": (0.0, 0.0),
-        }
+        view_map = {k: CANONICAL_VIEW_PRESETS[k] for k in views}
 
         resolution = 2048
         grid_spacing = 1.0  # cm
@@ -7335,12 +7362,24 @@ class MainWindow(QMainWindow):
         cam = self.viewport.camera
         cam.azimuth = az
         cam.elevation = max(-90.0, min(90.0, el))
+        view_key = _canonical_view_key_from_angles(cam.azimuth, cam.elevation)
+        view_axes = CANONICAL_VIEW_AXES.get(view_key)
 
         # Keep 6-face views framed using absolute-axis-stable sizing
         # (independent from mesh rotation/orientation).
         try:
             center = None
             max_dim = None
+
+            def _span_from_bounds(bounds_min: np.ndarray, bounds_max: np.ndarray) -> float:
+                span = np.abs(np.asarray(bounds_max, dtype=np.float64) - np.asarray(bounds_min, dtype=np.float64))
+                if span.shape != (3,):
+                    return float(np.max(np.abs(span)))
+                if view_axes is not None:
+                    a0 = int(view_axes[0])
+                    a1 = int(view_axes[1])
+                    return float(max(float(span[a0]), float(span[a1])))
+                return float(np.max(span))
 
             def _stable_center_dim(o):
                 world_center = None
@@ -7359,7 +7398,7 @@ class MainWindow(QMainWindow):
                             sc = float(getattr(o, "scale", 1.0) or 1.0)
                             if abs(sc) < 1e-12:
                                 sc = 1.0
-                            d = float(np.max(np.abs(lb[1] - lb[0])) * abs(sc))
+                            d = float(_span_from_bounds(lb[0], lb[1]) * abs(sc))
                             if (
                                 world_center is not None
                                 and np.isfinite(world_center).all()
@@ -7374,7 +7413,7 @@ class MainWindow(QMainWindow):
                     b = np.asarray(o.get_world_bounds(), dtype=np.float64)
                     if b.shape == (2, 3) and np.isfinite(b).all():
                         c = (b[0] + b[1]) * 0.5
-                        d = float(np.max(np.abs(b[1] - b[0])))
+                        d = float(_span_from_bounds(b[0], b[1]))
                         if np.isfinite(c).all() and np.isfinite(d) and d > 1e-9:
                             return np.asarray(c, dtype=np.float64), float(d)
                 except Exception:
@@ -7393,7 +7432,7 @@ class MainWindow(QMainWindow):
                     bmax = np.asarray(bmax, dtype=np.float64).reshape(3)
                     if np.isfinite(bmin).all() and np.isfinite(bmax).all():
                         center = (bmin + bmax) * 0.5
-                        max_dim = float(np.max(np.abs(bmax - bmin)))
+                        max_dim = float(_span_from_bounds(bmin, bmax))
                 except Exception:
                     center = None
                     max_dim = None
@@ -7406,7 +7445,7 @@ class MainWindow(QMainWindow):
                         b = np.asarray(obj_any.get_world_bounds(), dtype=np.float64)
                         if b.shape == (2, 3) and np.isfinite(b).all():
                             center = (b[0] + b[1]) * 0.5
-                            max_dim = float(np.max(np.abs(b[1] - b[0])))
+                            max_dim = float(_span_from_bounds(b[0], b[1]))
                 except Exception:
                     pass
             if center is None or max_dim is None:
@@ -7416,7 +7455,7 @@ class MainWindow(QMainWindow):
                         cm = np.asarray(mesh_current.bounds, dtype=np.float64)
                         if cm.shape == (2, 3) and np.isfinite(cm).all():
                             center = (cm[0] + cm[1]) * 0.5
-                            max_dim = float(np.max(np.abs(cm[1] - cm[0])))
+                            max_dim = float(_span_from_bounds(cm[0], cm[1]))
                 except Exception:
                     pass
 

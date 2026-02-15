@@ -110,6 +110,11 @@ python main.py --help
 - `ARCHMESHRUBBING_DISABLE_OPENCV=1`: OpenCV 비활성화 (SciPy 기반 경로 사용)
 - `ARCHMESHRUBBING_CV2_IMPORT_TIMEOUT=2.0`: OpenCV import smoke-test 타임아웃(초)
 - `ARCHMESHRUBBING_LOG_LEVEL=DEBUG`: 디버그 로그 활성화 (Windows 기본 로그 경로: `%LOCALAPPDATA%\\ArchMeshRubbing\\logs\\archmeshrubbing.log`)
+- `ARCHMESHRUBBING_EXPORT_DPI=300`: CLI/GUI 기본 내보내기 DPI
+- `ARCHMESHRUBBING_RENDER_RESOLUTION=2000`: CLI/GUI 기본 렌더 해상도(px)
+- `ARCHMESHRUBBING_ARAP_MAX_ITERATIONS=30`: 평면화(ARAP) 기본 반복 횟수
+- `ARCHMESHRUBBING_GUI_MIN_RESOLUTION=500`: GUI 해상도 스핀박스 최소값
+- `ARCHMESHRUBBING_GUI_MAX_RESOLUTION=8000`: GUI 해상도 스핀박스 최대값
 
 ## 지원 포맷
 

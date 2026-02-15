@@ -1,4 +1,4 @@
-"""
+﻿"""
 3D Viewport Widget with OpenGL
 Copyright (C) 2026 balguljang2 (lzpxilfe)
 Licensed under the GNU General Public License v2.0 (GPL2)
@@ -134,6 +134,16 @@ ORTHO_VIEW_SCALE_DEFAULT = 1.15
 MOUSE_DELTA_SPIKE_CLAMP_PX = 120.0
 CAMERA_ROTATE_SENSITIVITY_DEFAULT = 0.35
 CAMERA_PAN_SENSITIVITY_DEFAULT = 0.22
+GIZMO_PICK_WIDTH_RATIO_DEFAULT = 0.18
+GIZMO_ROTATE_SENSITIVITY_DEFAULT = 0.85
+GIZMO_DRAG_SIGN_DEFAULT = -1.0
+GIZMO_DELTA_ANGLE_CLAMP_DEG = 25.0
+GIZMO_ROTATE_SENSITIVITY_MIN = 0.1
+GIZMO_ROTATE_SENSITIVITY_MAX = 2.0
+FLOOR_PICK_SEARCH_RADIUS_PX_DEFAULT = 14
+FLOOR_PICK_CLOSE_LOOP_DISTANCE_WORLD = 0.15
+ORTHO_PAN_SENSITIVITY_RIGHT = 0.16
+ORTHO_PAN_SENSITIVITY_MAIN = 0.13
 
 
 def _log_ignored_exception(context: str = "Ignored exception", *, level: int = logging.DEBUG) -> None:
@@ -435,7 +445,7 @@ class _CutPolylineSectionProfileThread(QThread):
                         merged_profile.append((s_offset + float(s_val), float(z_val)))
                 s_offset += max(0.0, float(seg_len))
 
-            # Fallback: segment 湲곕컲 異붿텧???ㅽ뙣?섎㈃ 泥???吏곸꽑 湲곗??쇰줈 1???ъ떆??
+            # Fallback: segment ??れ삀??뫢???⑤베毓???????됰꽡??嚥???癲???癲ル슣???????れ삀?????⑥??1???????
             if len(merged_profile) < 2:
                 seg_profile, _seg_len = _extract_segment_profile(pts[0], pts[-1])
                 if seg_profile is not None:
@@ -510,7 +520,7 @@ class _RoiCutEdgesThread(QThread):
         hi: float,
         eps: float = 1e-6,
     ) -> list[np.ndarray]:
-        """3D polyline瑜???異?axis)??[lo, hi] 援ш컙?쇰줈 ?대━?묓빐 議곌컖?ㅻ줈 諛섑솚."""
+        """3D polyline??????axis)??[lo, hi] ????쐠????⑥????????쒕굜???釉뚰??㉱????겾??袁⑸즵???"""
         try:
             pts = np.asarray(points, dtype=np.float64).reshape(-1, 3)
         except Exception:
@@ -522,7 +532,7 @@ class _RoiCutEdgesThread(QThread):
         hi_v = float(max(lo, hi))
         eps_v = float(max(1e-12, eps))
 
-        # closed contour??留덉?留?以묐났???쒓굅 ??留덉?留?泥섏쓬 ?멸렇癒쇳듃源뚯? 泥섎━
+        # closed contour??癲ル슢???癲?濚욌꼬?댄꺇?????癰귙끋源???癲ル슢???癲?癲ル슪?ｇ몭???嶺뚮∥梨??沃섅굥???용굟??? 癲ル슪?ｇ몭??
         closed = False
         try:
             if float(np.linalg.norm(pts[0] - pts[-1])) <= eps_v:
@@ -561,7 +571,7 @@ class _RoiCutEdgesThread(QThread):
                 cur = []
                 return
             arr = np.asarray(cur, dtype=np.float64).reshape(-1, 3)
-            # ?곗냽 以묐났 ?쒓굅
+            # ???Β?ろ떗 濚욌꼬?댄꺇????癰귙끋源?
             if arr.shape[0] >= 2:
                 d = np.linalg.norm(np.diff(arr, axis=0), axis=1)
                 keep = np.ones((arr.shape[0],), dtype=bool)
@@ -584,7 +594,7 @@ class _RoiCutEdgesThread(QThread):
                 continue
 
             if in0 and not in1:
-                # inside -> outside: 寃쎄퀎?먯뿉??醫낅즺
+                # inside -> outside: ?濡ろ뜑???????????ろ꼤嶺?
                 hit = interp(p0, p1, hi_v if v1 > hi_v else lo_v)
                 if not cur:
                     cur.append(np.asarray(p0, dtype=np.float64))
@@ -593,13 +603,13 @@ class _RoiCutEdgesThread(QThread):
                 continue
 
             if (not in0) and in1:
-                # outside -> inside: 寃쎄퀎?먯뿉???쒖옉
+                # outside -> inside: ?濡ろ뜑??????????筌믨퀣援?
                 hit = interp(p0, p1, hi_v if v0 > hi_v else lo_v)
                 cur.append(np.asarray(hit, dtype=np.float64))
                 cur.append(np.asarray(p1, dtype=np.float64))
                 continue
 
-            # outside -> outside: 援ш컙??愿?듯븯硫???援먯감?먯쑝濡?1媛?議곌컖 ?앹꽦
+            # outside -> outside: ????쐠??????????異????????뤆???筌뤿뱶??1???釉뚰??㉱???獄쏅똻??
             if (v0 < lo_v and v1 > hi_v) or (v0 > hi_v and v1 < lo_v):
                 h0 = interp(p0, p1, lo_v)
                 h1 = interp(p0, p1, hi_v)
@@ -624,10 +634,10 @@ class _RoiCutEdgesThread(QThread):
         y1: float,
         y2: float,
     ) -> dict[str, list[np.ndarray]]:
-        """媛?ROI 寃쎄퀎 ?⑤㈃???ㅻⅨ 異??덈떒 寃곌낵? ?곹샇 諛섏쁺?섎룄濡??대━??"""
+        """??ROI ?濡ろ뜑???????몃뱠??????렺???????덊렭 ?濡ろ뜏???? ????繹??袁⑸즵????嚥▲꺃????????"""
         out: dict[str, list[np.ndarray]] = {"x1": [], "x2": [], "y1": [], "y2": []}
 
-        # x-plane ?⑤㈃? y 援ш컙?쇰줈, y-plane ?⑤㈃? x 援ш컙?쇰줈 ?섎씪??        # ??諛⑺뼢 ?덈떒???곹샇?묒슜???ㅼ젣 ?⑤㈃ 紐⑥뼇???⑸땲??
+        # x-plane ????몃뱠?? y ????쐠????⑥?? y-plane ????몃뱠?? x ????쐠????⑥????嚥????        # ???袁⑸젻泳?떑??????덊렭??????繹??????????源놁졆 ????몃뱠 癲ル슢?꾤땟怨⑹젂????筌뤾퍓???
         for key in ("x1", "x2"):
             for cnt in edges.get(key, []) or []:
                 out[key].extend(
@@ -690,14 +700,14 @@ class _RoiCutEdgesThread(QThread):
                     out.append((rot_mat @ (cnt * self._scale).T).T + self._translation)
                 return out
 
-            # 4媛쒖쓽 寃쎄퀎 ?됰㈃?먯꽌 ?⑤㈃??寃쎄퀎?? 異붿텧
+            # 4??좊즵獒???濡ろ뜑?????野껊갭??????????몃뱠???濡ろ뜑???? ??⑤베毓??
             edges = {
                 "x1": slice_world_plane(np.array([x1, 0.0, 0.0]), np.array([1.0, 0.0, 0.0])),
                 "x2": slice_world_plane(np.array([x2, 0.0, 0.0]), np.array([1.0, 0.0, 0.0])),
                 "y1": slice_world_plane(np.array([0.0, y1, 0.0]), np.array([0.0, 1.0, 0.0])),
                 "y2": slice_world_plane(np.array([0.0, y2, 0.0]), np.array([0.0, 1.0, 0.0])),
             }
-            # ?듭떖: 媛?諛⑺뼢 ?⑤㈃??"?ㅻⅨ 諛⑺뼢 ?덈떒"怨??곹샇 諛섏쁺?섍쾶 ?꾪꽣留?
+            # ????? ???袁⑸젻泳?떑??????몃뱠??"????렺??袁⑸젻泳?떑??????덊렭"??????繹??袁⑸즵??????곕쿊 ??ш낄援?轅곗땡?
             clipped = self._apply_roi_interaction_filters(
                 edges,
                 x1=float(x1),
@@ -1525,32 +1535,32 @@ class TrackballCamera:
 
 
 class SceneObject:
-    """???댁쓽 媛쒕퀎 硫붿돩 媛앹껜 愿由?"""
+    """?????⑤챶爰???좊즵獒??癲ル슢??????좊즵??꼯??????"""
     def __init__(self, mesh, name="Object"):
         self.mesh = mesh
         self.name = name
         self.visible = True
         self.color = [0.72, 0.72, 0.78]
         
-        # 媛쒕퀎 蹂???곹깭
+        # ??좊즵獒???怨뚮뼚?????ㅺ컼??
         self.translation = np.array([0.0, 0.0, 0.0])
         self.rotation = np.array([0.0, 0.0, 0.0])
         self.scale = 1.0
 
-        # ?뺤튂 怨좎젙 ?곹깭 (Bake ?댄썑 蹂듦???
+        # ?嶺뚮Ĳ?????關履?????ㅺ컼??(Bake ??熬곣뫖???怨뚮옖甕걔???
         self.fixed_state_valid = False
         self.fixed_translation = np.array([0.0, 0.0, 0.0], dtype=np.float64)
         self.fixed_rotation = np.array([0.0, 0.0, 0.0], dtype=np.float64)
         self.fixed_scale = 1.0
         
-        # ?쇳똿???먰샇??(硫붿돩? ?④퍡 ?대룞)
+        # ???紐꾧튅????誘⑦ｆ틦??(癲ル슢????? ??影?얠맽 ????
         self.fitted_arcs = []
 
         # Saved overlay polylines (e.g., section/cut results) attached to this object.
         # Each item is a dict: {name, kind, points([[x,y,z],...]), visible, color([r,g,b,a]), width}
         self.polyline_layers = []
         
-        # ?뚮뜑留?由ъ냼??
+        # ?????異??域밸Ŧ遊양댆??
         self.vbo_id: int | None = None
         self.vertex_count: int = 0
         self.selected_faces: set[int] = set()
@@ -1572,20 +1582,20 @@ class SceneObject:
         self._face_adjacency_faces_count: int = 0
         
     def to_trimesh(self):
-        """trimesh 媛앹껜 諛섑솚 (罹먯떛)"""
+        """trimesh ??좊즵??꼯???袁⑸즵???(癲????"""
         if self._trimesh is None and self.mesh:
             self._trimesh = self.mesh.to_trimesh()
         return self._trimesh
 
     def get_world_bounds(self):
-        """?붾뱶 醫뚰몴怨꾩뿉?쒖쓽 寃쎄퀎 諛뺤뒪 諛섑솚"""
+        """??釉먮폇?????щ뮡嶺뚮ㅏ??節뚮쳮???筌믨퀡爰??濡ろ뜑????袁⑸즴甕???袁⑸즵???"""
         if not self.mesh:
             return np.array([[0,0,0],[0,0,0]])
             
-        # 濡쒖뺄 諛붿슫??
+        # ?棺??짆?쏆춾??袁⑸즴????
         lb = self.mesh.bounds
         
-        # 8媛쒖쓽 瑗?쭞???앹꽦
+        # 8??좊즵獒????鶯????獄쏅똻??
         v = np.array([
             [lb[0,0], lb[0,1], lb[0,2]], [lb[1,0], lb[0,1], lb[0,2]],
             [lb[0,0], lb[1,1], lb[0,2]], [lb[1,0], lb[1,1], lb[0,2]],
@@ -1593,7 +1603,7 @@ class SceneObject:
             [lb[0,0], lb[1,1], lb[1,2]], [lb[1,0], lb[1,1], lb[1,2]]
         ])
 
-        # ?붾뱶 蹂???곸슜 (R * (S * V) + T)
+        # ??釉먮폇???怨뚮뼚?????ㅼ굣??(R * (S * V) + T)
         rx, ry, rz = np.radians(self.rotation)
         cx, sx = float(np.cos(rx)), float(np.sin(rx))
         cy, sy = float(np.cos(ry)), float(np.sin(ry))
@@ -1603,7 +1613,7 @@ class SceneObject:
         rot_y = np.array([[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]], dtype=np.float64)
         rot_z = np.array([[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]], dtype=np.float64)
 
-        # OpenGL ?곸슜 ?쒖꽌(glRotatef X->Y->Z)? ?숈씪??intrinsic 'xyz' (Rx @ Ry @ Rz)
+        # OpenGL ???ㅼ굣????筌?留?glRotatef X->Y->Z)?? ????곕럡??intrinsic 'xyz' (Rx @ Ry @ Rz)
         rot_mat = rot_x @ rot_y @ rot_z
 
         world_v = (rot_mat @ (v * float(self.scale)).T).T + self.translation
@@ -1612,7 +1622,7 @@ class SceneObject:
         
     def cleanup(self):
         if self.vbo_id is not None:
-            # OpenGL 而⑦뀓?ㅽ듃媛 ?쒖꽦?붾맂 ?곹깭?먯꽌 ?몄텧?섏뼱????
+            # OpenGL ???爾?????덉쉐??좊읈 ??筌????釉먮폇壤????ㅺ컼???????嶺뚮ㅎ????筌뚯슦苑????
             try:
                 vbo_id = int(self.vbo_id or 0)
             except Exception:
@@ -1653,38 +1663,39 @@ class Viewport3D(QOpenGLWidget):
         # Camera
         self.camera = TrackballCamera()
         
-        # 留덉슦???곹깭
+        # 癲ル슢????????ㅺ컼??
         self.last_mouse_pos = None
         self.last_mouse_posf: tuple[float, float] | None = None
         self.mouse_button = None
         
-        # ???곹깭 ?곹뼢 ?됱???(硫??硫붿돩)
+        # ?????ㅺ컼?????ㅺ강???????(癲ル슢議??癲ル슢????
         self.objects = []
         self.selected_index = -1
         self._mesh_center: np.ndarray = np.array([0.0, 0.0, 0.0], dtype=np.float64)
         
-        # ?뚮뜑留??ㅼ젙
-        self.grid_size = 500.0  # cm (???ш쾶 ?뺤옣)
+        # ?????異????源놁젳
+        self.grid_size = 500.0  # cm (???????嶺뚮Ĳ???
         self.grid_spacing = 1.0  # cm (1.0 = 1cm)
         self.bg_color = [0.96, 0.96, 0.94, 1.0] # #F5F5F0 (Cream/Beige)
         
-        # 湲곗쫰紐??ㅼ젙
+        # ??れ삀?節낅윺?ⓦ끉異????源놁젳
         self.show_gizmo = True
         self.active_gizmo_axis = None
         self.gizmo_size = 6.0
         self.gizmo_radius_factor = 0.90
-        self._gizmo_pick_width_ratio = 0.18
-        self._gizmo_rotate_sensitivity = 0.85
+        self._gizmo_pick_width_ratio = GIZMO_PICK_WIDTH_RATIO_DEFAULT
+        self._gizmo_rotate_sensitivity = GIZMO_ROTATE_SENSITIVITY_DEFAULT
         # Steering-wheel feel: clockwise drag should rotate clockwise on screen.
-        self._gizmo_drag_sign = -1.0
+        self._gizmo_drag_sign = GIZMO_DRAG_SIGN_DEFAULT
         self.gizmo_drag_start = None
         
-        # 怨〓쪧 痢≪젙 紐⑤뱶
+        # ??????癲ル쉵?猷??癲ル슢?꾤땟???
         self.curvature_pick_mode = False
         self.picked_points = []
         self.fitted_arc = None
+        self.curvature_pick_markers_enabled = False
 
-        # 移섏닔 痢≪젙 紐⑤뱶 (嫄곕━/吏곴꼍 ??
+        # ?怨멸땀???癲ル쉵?猷??癲ル슢?꾤땟???(癲꾧퀗????癲ル슣???㏓き???
         self.measure_picked_points: list[np.ndarray] = []
         
         # Status text shown on viewport HUD
@@ -1692,32 +1703,34 @@ class Viewport3D(QOpenGLWidget):
         self.surface_runtime_hud_enabled = True
         # Last assist/overlay performance snapshots for runtime HUD.
         self._surface_overlay_last_stats: dict[str, Any] = {}
-        self.flat_shading = False # Flat shading 紐⑤뱶 (紐낆븫 ?놁씠 諛앷쾶 蹂닿린)
-        # ?쇳빀 winding 硫붿돩?먯꽌 ?대?媛 鍮꾩퀜 蹂댁씠??臾몄젣瑜??쇳븯湲??꾪빐 湲곕낯媛믪? ?묐㈃ ?뚮뜑留?
+        self.flat_shading = False # Flat shading 癲ル슢?꾤땟???(癲ル슢?뤸뤃?뉖눀????⑤챶???袁⑸즵??끼???怨뚮옖??逾?
+        # ???? winding 癲ル슢?????????????좊읈 ??????怨뚮옖???????뽮덫?影?뽧걫????紐꺿봼????ш낄援????れ삀???筌ｋ〃泥? ???쑧???????異?
         self.solid_shell_render = True
         # X-Ray render mode for selected object
         self.xray_mode = False
         self.xray_alpha = 0.25
-        # ?뺣㈃/?꾨㈃ ?꾨━?뗭뿉??X-Z 吏곴탳 ?ъ쁺??媛뺤젣?????ъ슜
-        self._front_back_ortho_enabled = False
+        # ?嶺뚮㉡?????ш끽踰????ш끽諭욥걡??????X-Z 癲ル슣???????????좊즴甕?????????        self._front_back_ortho_enabled = False
         self._ortho_view_scale = ORTHO_VIEW_SCALE_DEFAULT
         self._ortho_frame_override: tuple[float, float] | None = None
         
-        # ?쇳궧 紐⑤뱶 ('none', 'curvature', 'floor_3point', 'floor_face', 'floor_brush')
+        # ???醫딅르 癲ル슢?꾤땟???('none', 'curvature', 'floor_3point', 'floor_face', 'floor_brush')
         self.picking_mode = 'none'
         self.brush_selected_faces = set()  # Brush-selected face indices
         self._selection_brush_mode = "replace"  # replace|add|remove
         self._selection_brush_last_pick = 0.0
-        # ??硫붿돩?먯꽌 ?대┃??議곌툑 鍮쀫굹媛硫?諛곌꼍 depth=1.0) 洹쇱쿂 ?쎌????먯깋?댁꽌 ?쇳궧??蹂댁젙?⑸땲??
+        self._floor_pick_search_radius_px = FLOOR_PICK_SEARCH_RADIUS_PX_DEFAULT
+        self._floor_pick_close_loop_distance = FLOOR_PICK_CLOSE_LOOP_DISTANCE_WORLD
+        # ??癲ル슢??????????????釉뚰???????뗫즼??좊읈癲??袁⑸즲??㏓き?depth=1.0) ?????뗫쐩?????????????⑤똾留????醫딅르???怨뚮옖????筌뤾퍓???
         self._pick_search_radius_px = 8
         self._surface_paint_target = "outer"  # outer|inner|migu
         self._surface_brush_last_pick = 0.0
-        # ?쒕㈃ 吏??李띻린/釉뚮윭?? ?꾧뎄 ?ш린: ?붾㈃(px) 湲곗? 湲곕낯媛??쇳궧 源딆씠?먯꽌 world濡??섏궛).
-        # NOTE: ???ㅼ틪 硫붿돩?먯꽌??泥닿컧 ?ш린媛 ?덈Т ?묒? ?딅룄濡?湲곕낯媛믪쓣 ?щ젮?〓땲?? ([ / ]濡?議곗젅 媛??
+        # ??筌먯룆??癲ル슣???癲ル슔?蹂?뎀????怨쀫뮛??? ??ш낄猷?????? ??釉먮뻤??px) ??れ삀?? ??れ삀???筌????醫딅르 嚥싲갭큔???????world????筌뚯뼦??.
+        # NOTE: ??????몃펽 癲ル슢?????????癲ル슪????????源껉펷筌? ??????? ????녳뵣????れ삀???筌ｋ〃泥???도 ?????癰궽삵돲?? ([ / ]???釉뚰?????좊읈??
         self._surface_brush_radius_px = 48.0
         self._surface_click_radius_px = 48.0
         self.surface_paint_points = []  # [(np.ndarray(3,), target), ...] in world coords
         self._surface_paint_points_max = 250
+        self.surface_paint_markers_enabled = False
         self._surface_paint_left_press_pos = None
         self._surface_paint_left_dragged = False
         # Surface area(lasso) selection via mesh-snapped world points
@@ -1763,23 +1776,23 @@ class Viewport3D(QOpenGLWidget):
         # Magic-wand(stepwise) surface grow state for Shift/Ctrl clicks.
         # This lets the user expand a patch gradually (Photoshop-like).
         self._surface_grow_state: dict[str, Any] = {}
-        self.floor_picks = []  # 諛붾떏硫?吏?뺤슜 ??由ъ뒪??        
+        self.floor_picks = []  # ?袁⑸즴????쒕굞異?癲ル슣??嶺뚮Ĳ??????域밸Ŧ遊얕짆??        
         self._floor_3point_right_press_pos = None
         self._floor_3point_right_dragged = False
-        # Undo/Redo ?쒖뒪??
+        # Undo/Redo ??筌?痢??
         self.undo_stack = []
         self.max_undo = 50
         
-        # ?⑤㈃ ?щ씪?댁떛
+        # ????몃뱠 ??????⑤８??
         self.slice_enabled = False
         self.slice_z = 0.0
-        self.slice_contours = []  # ?꾩옱 ?щ씪?댁뒪 ?⑤㈃ ?대━?쇱씤
+        self.slice_contours = []  # ??ш끽維????????⑤８痢?????몃뱠 ?????繹먮끏??
         
-        # ??옄???⑤㈃ (Crosshair)
+        # ?????????몃뱠 (Crosshair)
         self.crosshair_enabled = False
-        self.crosshair_pos = np.array([0.0, 0.0]) # XY ?꾩튂
-        self.x_profile = [] # X異??⑤㈃ ?곗씠??[(dist, z), ...]
-        self.y_profile = [] # Y異??⑤㈃ ?곗씠??[(dist, z), ...]
+        self.crosshair_pos = np.array([0.0, 0.0]) # XY ??ш끽維??
+        self.x_profile = [] # X??????몃뱠 ???Β????[(dist, z), ...]
+        self.y_profile = [] # Y??????몃뱠 ???Β????[(dist, z), ...]
         self._world_x_profile: np.ndarray | list[list[float]] = []
         self._world_y_profile: np.ndarray | list[list[float]] = []
         self._crosshair_last_update = 0.0
@@ -1792,46 +1805,46 @@ class Viewport3D(QOpenGLWidget):
         # 2D ROI (Region of Interest)
         self.roi_enabled = False
         self.roi_bounds = [-10.0, 10.0, -10.0, 10.0] # [min_x, max_x, min_y, max_y]
-        self.active_roi_edge = None # ?꾩옱 ?쒕옒洹?以묒씤 紐⑥꽌由?('left', 'right', 'top', 'bottom')
-        self.roi_rect_dragging = False  # 罹≪퀜 ?⑤벏???쒕옒洹몃줈 ROI 諛뺤뒪 吏??
+        self.active_roi_edge = None # ??ш끽維????筌먦끉援??濚욌꼬?댄꺍??癲ル슢?꾤땟怨?빝??ㅻ렓?('left', 'right', 'top', 'bottom')
+        self.roi_rect_dragging = False  # 癲ル슓釉???????댁봺????筌먦끉援??숆강筌?쑙鍮?ROI ?袁⑸즴甕??癲ル슣???
         self.roi_rect_start = None      # np.array([x,y])
         self._roi_bounds_changed = False
         self._roi_move_dragging = False
         self._roi_move_last_xy = None  # np.ndarray(2,) | None
         self._roi_last_adjust_axis: str | None = None  # "x" | "y"
-        self._roi_commit_axis_hint: str | None = None  # Enter 諛곗튂 ???곗꽑 異?
+        self._roi_commit_axis_hint: str | None = None  # Enter ?袁⑸즲????????Β?띾쭡 ??
         self._roi_last_adjust_plane: str | None = None  # "x1" | "x2" | "y1" | "y2"
-        self._roi_commit_plane_hint: str | None = None  # Enter 諛곗튂 ???곗꽑 ?됰㈃
+        self._roi_commit_plane_hint: str | None = None  # Enter ?袁⑸즲????????Β?띾쭡 ??野껊갭??
         self._roi_handle_hit_px = 52
-        self.roi_cut_edges: dict[str, list[np.ndarray]] = {"x1": [], "x2": [], "y1": [], "y2": []}  # ROI ?섎┝ 寃쎄퀎???붾뱶 醫뚰몴)
-        self.roi_cap_verts: dict[str, np.ndarray | None] = {"x1": None, "x2": None, "y1": None, "y2": None}  # ROI 罹??쇨컖?? 踰꾪뀓??
-        self.roi_section_world = {"x": [], "y": []}  # ROI濡??살? ?⑤㈃(諛붾떏 諛곗튂)
-        # ROI ?⑤㈃ "梨꾩?"(罹? ?쒖떆. 湲곕낯? ?멸낸?좊쭔 蹂댁씠?꾨줉 OFF.
+        self.roi_cut_edges: dict[str, list[np.ndarray]] = {"x1": [], "x2": [], "y1": [], "y2": []}  # ROI ??嚥▲볧꼤 ?濡ろ뜑??????釉먮폇?????щ뮡嶺?
+        self.roi_cap_verts: dict[str, np.ndarray | None] = {"x1": None, "x2": None, "y1": None, "y2": None}  # ROI 癲????館??? ?類?????
+        self.roi_section_world = {"x": [], "y": []}  # ROI????? ????몃뱠(?袁⑸즴?????袁⑸즲???
+        # ROI ????몃뱠 "癲???"(癲? ??筌?六? ??れ삀???? ?嶺뚮∥梨뜻쾮???ル늉???怨뚮옖????ш끽維곩ㅇ?OFF.
         self.roi_caps_enabled = False
         self._roi_edges_pending_bounds = None
         self._roi_edges_thread = None
         self._roi_edges_timer = QTimer(self)
         self._roi_edges_timer.setSingleShot(True)
         self._roi_edges_timer.timeout.connect(self._request_roi_edges_compute)
-        # ROI ?쒕옒洹?以??⑤㈃ ?ш퀎?곗? 臾닿쾪湲??뚮Ц???꾨━酉??낅뜲?댄듃 媛꾧꺽???섎┰?덈떎.
+        # ROI ??筌먦끉援??濚?????몃뱠 ?????? ???뺣섕??꿸턂?????????ш끽諭욥걡??????녿ぅ??熬곣뫀肄???좊즲??좊뙀????嚥▲볥렊????덊렡.
         self._roi_live_update_delay_ms = 220
 
         # Cut guide lines (2 polylines on top view, SVG export??
         self.cut_lines_enabled = False
-        self.cut_lines = [[], []]  # 媛??붿냼??world 醫뚰몴 ??由ъ뒪??[np.array([x,y,z]), ...]
+        self.cut_lines = [[], []]  # ????釉먯뒠???world ???щ뮡嶺????域밸Ŧ遊얕짆??[np.array([x,y,z]), ...]
         # Per-line axis lock: line0=Length(X), line1=Width(Y).
         self.cut_line_axis_lock: list[str | None] = ["x", "y"]
         self.cut_line_active = 0   # 0 or 1
         self.cut_line_drawing = False
-        self.cut_line_preview = None  # np.array([x,y,z]) - 留덉?留??먯뿉???댁뼱吏???꾨━酉?        # 媛??대━?쇱씤??"?뺤젙/?꾨즺" ?곹깭. Enter/?고겢由?쑝濡?True媛 ?섎ŉ, Backspace/Delete濡??몄쭛 ??False濡??뚯븘媛?
+        self.cut_line_preview = None  # np.array([x,y,z]) - 癲ル슢???癲??????????⑤９苑묕┼??넊????ш끽諭욥걡??        # ???????繹먮끏???"?嶺뚮Ĳ?????ш끽維?? ???ㅺ컼?? Enter/???μ쪙繹?????肉?True??좊읈 ???? Backspace/Delete???嶺뚮ㅎ?당빊???False???????믩쨬?
         self._cut_line_final = [False, False]
-        # ?⑤㈃???낅젰: '?대┃' vs '?쒕옒洹? 援щ텇(?대룞/?뚯쟾 以??먯씠 李랁엳??臾몄젣 諛⑹?)
+        # ????몃뱠??????곸죷: '???? vs '??筌먦끉援?? ????㎦???????????濚??????癲ル슔?蹂?엥??????뽮덫???袁⑸젻泳?)
         self._cut_line_left_press_pos = None
         self._cut_line_left_dragged = False
         self._cut_line_right_press_pos = None
         self._cut_line_right_dragged = False
-        self.cut_section_profiles = [[], []]  # 媛??좎쓽 (s,z) ?꾨줈?뚯씪 [(dist, z), ...]
-        self.cut_section_world = [[], []]     # 諛붾떏??諛곗튂???⑤㈃ ?대━?쇱씤(?붾뱶 醫뚰몴)
+        self.cut_section_profiles = [[], []]  # ?????モ섋린?(s,z) ??ш끽維곩ㅇ?????[(dist, z), ...]
+        self.cut_section_world = [[], []]     # ?袁⑸즴??????袁⑸즲????????몃뱠 ?????繹먮끏????釉먮폇?????щ뮡嶺?
         self._cutline_tape_cache: dict[tuple[Any, ...], list[list[np.ndarray]]] = {}
         self._cut_section_pending_indices: set[int] = set()
         self._cut_section_thread = None
@@ -1856,28 +1869,30 @@ class Viewport3D(QOpenGLWidget):
         # Floor penetration highlight (z < 0)
         self.floor_penetration_highlight = True
         
-        # ?쒕옒洹?議곗옉??理쒖쟻??蹂??
+        # ??筌먦끉援???釉뚰????癲ル슔?됭짆????怨뚮뼚??
         self._drag_depth = 0.0
         self._cached_viewport = None
         self._cached_modelview = None
         self._cached_projection = None
         self._ctrl_drag_active = False
+        self._ctrl_drag_attempted = False
+        self._ctrl_drag_press_pos = None
         self._hover_axis = None
         
-        # ?ㅻ낫??議곗옉 ??대㉧ (WASD ?곗냽 ?대룞??
+        # ????좏뀪???釉뚰?????????(WASD ???Β?ろ떗 ?????
         self.keys_pressed = set()
         self.move_timer = QTimer(self)
         self.move_timer.timeout.connect(self.process_keyboard_navigation)
-        self.move_timer.setInterval(16) # ~60fps (?꾩슂 ?쒕쭔 start/stop)
+        self.move_timer.setInterval(16) # ~60fps (??ш끽維????筌먦끉??start/stop)
         
-        # UI ?ㅼ젙
+        # UI ???源놁젳
         self.setMinimumSize(400, 300)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
-        # 蹂???대룞/?뚯쟾/?ㅼ??? ???⑤㈃/ROI ???뚯깮 ?곗씠?곕? ?붾컮?댁뒪 媛깆떊
+        # ?怨뚮뼚???????????????? ??????몃뱠/ROI ??????????Β????? ??釉먮폏筌???⑤８痢???좊즲???
         self.meshTransformChanged.connect(self._on_mesh_transform_changed)
 
-        # ?뚮뜑留곸? ?낅젰/?곹깭 蹂寃??쒖뿉留?update()?섎룄濡??좎? (?곸떆 60FPS ?뚮뜑留곸? ??⑸웾 硫붿돩?먯꽌 踰꾨쾮???좊컻)
+        # ?????異??녠텥? ????곸죷/???ㅺ컼???怨뚮뼚????筌?諭븝┼?update()??嚥▲꺃?????? (???ㅼ굡筌?60FPS ?????異??녠텥? ????筌뤾쑴??癲ル슢?????????類?????????ル늉筌?
     
     @property
     def selected_obj(self) -> Optional[SceneObject]:
@@ -1886,9 +1901,9 @@ class Viewport3D(QOpenGLWidget):
         return None
     
     def initializeGL(self):
-        """OpenGL 珥덇린??"""
-        glClearColor(0.95, 0.95, 0.95, 1.0) # 諛앹? 諛곌꼍 (CloudCompare ?ㅽ???
-        # 湲곕낯 ?ㅼ젙
+        """OpenGL ?縕?猿녿뎨??"""
+        glClearColor(0.95, 0.95, 0.95, 1.0) # ?袁⑸즵?? ?袁⑸즲??㏓き?(CloudCompare ?????
+        # ??れ삀??????源놁젳
         glEnable(GL_DEPTH_TEST)
         glEnable(GL_LIGHTING)
         glEnable(GL_LIGHT0)
@@ -1900,26 +1915,26 @@ class Viewport3D(QOpenGLWidget):
         glEnable(GL_BLEND)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
         
-        # 愿묒썝 紐⑤뜽 ?ㅼ젙 (?꾩뿭 ?섍꼍愿???땄)
+        # ???뱁꺍??癲ル슢?꾤땟??????源놁젳 (??ш끽維??????듬젿??????
         glLightModelfv(GL_LIGHT_MODEL_AMBIENT, [0.1, 0.1, 0.1, 1.0])
         
-        # 愿묒썝 ?ㅼ젙 (湲곕낯媛?
-        glLightfv(GL_LIGHT0, GL_AMBIENT, [0.0, 0.0, 0.0, 1.0]) # 媛쒕퀎 愿묒썝 ambient??0?쇰줈
+        # ???뱁꺍?????源놁젳 (??れ삀???筌?
+        glLightfv(GL_LIGHT0, GL_AMBIENT, [0.0, 0.0, 0.0, 1.0]) # ??좊즵獒?????뱁꺍??ambient??0???⑥??
         glLightfv(GL_LIGHT0, GL_DIFFUSE, [0.8, 0.8, 0.8, 1.0])
         glLightfv(GL_LIGHT0, GL_SPECULAR, [0.5, 0.5, 0.5, 1.0])
         
-        # ?몃? ?뺢퇋???쒖꽦??
+        # ?嶺? ?嶺??????筌????
         glEnable(GL_NORMALIZE)
         
-        # ?대━怨?紐⑤뱶
+        # ?????癲ル슢?꾤땟???
         glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
         
-        # ?덊떚?⑤━?댁떛 (?쇰? ?쒕씪?대쾭?먯꽌 遺덉븞?뺥븷 ???덉뼱 鍮꾪솢?깊솕)
+        # ????낇룂????????⑤８??(??? ??筌먦끇???????????됰씭???嶺뚮쮳?녹춵 ?????怨쀪퐨 ?????濚밸Ŧ遊??
         # glEnable(GL_LINE_SMOOTH)
         # glHint(GL_LINE_SMOOTH_HINT, GL_NICEST)
     
     def resizeGL(self, w: int, h: int):
-        """酉고룷???ш린 蹂寃?"""
+        """?????????????怨뚮뼚??"""
         glViewport(0, 0, w, h)
 
         self._apply_main_projection(w, h)
@@ -1985,7 +2000,7 @@ class Viewport3D(QOpenGLWidget):
         return np.array([-1.0, -1.0, -1.0], dtype=np.float64), np.array([1.0, 1.0, 1.0], dtype=np.float64)
 
     def _collect_projection_sphere(self) -> tuple[np.ndarray, float]:
-        """酉??꾨젅?대컢 ?덉젙?붾? ?꾪븳 ?붾뱶 援?bound sphere) ?섏쭛."""
+        """????ш끽維????????源놁젳??? ??ш낄援η뵳???釉먮폇????bound sphere) ???쒓낯??"""
         sphere_center = None
         sphere_radius = None
 
@@ -2178,12 +2193,12 @@ class Viewport3D(QOpenGLWidget):
             except Exception:
                 use_front_back_ortho = False
         if not use_front_back_ortho:
-            # 湲곕낯 ?먭렐 ?ъ쁺
+            # ??れ삀????????????
             gluPerspective(45.0, aspect, float(clip_near), float(clip_far))
             glMatrixMode(GL_MODELVIEW)
             return
 
-        # 6諛⑺뼢 異??뺣젹 ?꾨━?? ?뚯쟾 以묒뿉???ㅼ???援щ룄媛 ?붾뱾由ъ? ?딅룄濡??덉젙 吏곴탳 ?꾨젅?대컢
+        # Keep orthographic frame stable in canonical 6-way views.
         try:
             half_w = None
             half_h = None
@@ -2203,7 +2218,7 @@ class Viewport3D(QOpenGLWidget):
                 _center_w, radius = self._collect_projection_sphere()
                 try:
                     ortho_scale = float(getattr(self, "_ortho_view_scale", ORTHO_VIEW_SCALE_DEFAULT) or ORTHO_VIEW_SCALE_DEFAULT)
-                    # 異??뺣젹 ?꾨━?뗭뿉?쒕뒗 ???꾩쟻 ?ㅽ봽?뗭쑝濡??명븳 援щ룄 ??댁쭚??李⑤떒.
+                    # ???嶺뚮㉡?ｈ????ш끽諭욥걡??????筌먲퐢痢?????ш끽維??????덈뭷???筌뤿뱶???嶺뚮ㅏ援앯뵳?????㎣筌??????⑤챷???癲ル슓堉곁땟???
                 except Exception:
                     ortho_scale = ORTHO_VIEW_SCALE_DEFAULT
                 if not np.isfinite(ortho_scale):
@@ -2227,12 +2242,12 @@ class Viewport3D(QOpenGLWidget):
         glMatrixMode(GL_MODELVIEW)
     
     def paintGL(self):
-        """洹몃━湲?"""
+        """??숆강筌??ⓦ꺂糾?"""
         try:
             self._apply_main_projection(self.width(), self.height())
         except Exception:
             _log_ignored_exception()
-        # ?댁쟾 ?꾨젅???덉쇅?먯꽌 ?꾩닔???곹깭瑜?留??꾨젅???뺢퇋?뷀빐 源딆씠 ?덉젙?깆쓣 ?뺣낫?⑸땲??
+        # ???⑤챷????ш끽維??????源낅눞???????ш끽維??????ㅺ컼???癲???ш끽維????嶺??????쑏?嚥싲갭큔??????源놁젳?濚밸Ŧ?김キ??嶺뚮㉡?€쾮??筌뤾퍓???
         glMatrixMode(GL_MODELVIEW)
         glDepthMask(GL_TRUE)
         glEnable(GL_DEPTH_TEST)
@@ -2244,7 +2259,7 @@ class Viewport3D(QOpenGLWidget):
         glClear(int(GL_COLOR_BUFFER_BIT) | int(GL_DEPTH_BUFFER_BIT))
         glLoadIdentity()
         
-        # 移대찓???곸슜
+        # ?怨멸텭?嶺?????ㅼ굣??
         self.camera.apply()
 
         # Reset clip planes every frame so stale ROI/floor clipping never leaks into global overlays.
@@ -2257,52 +2272,52 @@ class Viewport3D(QOpenGLWidget):
         except Exception:
             _log_ignored_exception()
 
-        # 諛붾떏 愿??z<0) ?섏씠?쇱씠?몄슜 ?대━???됰㈃ 媛깆떊 (移대찓???대룞/?뚯쟾???곕씪 留??꾨젅???꾩슂)
+        # ?袁⑸즴????????z<0) ???쒓낮???繹먮끏??嶺뚮ㅎ??????????野껊갭????좊즲???(?怨멸텭?嶺???????????????ㅻ깹??癲???ш끽維?????ш끽維??
         if self.floor_penetration_highlight:
             self._update_floor_penetration_clip_plane()
         if self.roi_enabled:
             self._update_roi_clip_planes()
         
-        # 0. 愿묒썝 ?꾩튂 ?낅뜲?댄듃 (諛앷퀬 洹좎씪??議곕챸)
+        # 0. ???뱁꺍????ш끽維??????녿ぅ??熬곣뫀肄?(?袁⑸즵??????鴉????釉뚰??썬럷?
         if not self.flat_shading:
             glEnable(GL_LIGHTING)
             
-            # ?섍꼍愿??믪엫 (?꾩껜?곸쑝濡?諛앷쾶)
+            # ????듬젿???亦껋꼨援?굢?(??ш끽維????ㅼ굣筌뤿뱶???袁⑸즵??끼??
             glLightModelfv(GL_LIGHT_MODEL_AMBIENT, [0.4, 0.4, 0.4, 1.0])
             
-            # GL_LIGHT0: ?뺣㈃ 二?議곕챸 (Headlight - 移대찓??諛⑺뼢)
+            # GL_LIGHT0: ?嶺뚮㉡??????釉뚰??썬럷?(Headlight - ?怨멸텭?嶺???袁⑸젻泳?떑??
             glLightfv(GL_LIGHT0, GL_POSITION, [0.0, 0.0, 1.0, 0.0])
             glLightfv(GL_LIGHT0, GL_DIFFUSE, [0.6, 0.6, 0.6, 1.0])
             glLightfv(GL_LIGHT0, GL_SPECULAR, [0.2, 0.2, 0.2, 1.0])
             
-            # GL_LIGHT1: 蹂댁“ 議곕챸 (?ㅼそ?먯꽌 - 洹몃┝???꾪솕)
+            # GL_LIGHT1: ?怨뚮옖????釉뚰??썬럷?(????뉕뎅?????- ??숆강筌?????ш낄援??
             glEnable(GL_LIGHT1)
             glLightfv(GL_LIGHT1, GL_POSITION, [0.0, 0.0, -1.0, 0.0])
             glLightfv(GL_LIGHT1, GL_DIFFUSE, [0.3, 0.3, 0.3, 1.0])
             glLightfv(GL_LIGHT1, GL_SPECULAR, [0.0, 0.0, 0.0, 1.0])
         else:
             glDisable(GL_LIGHTING)
-            # Flat shading ?쒖뿉??紐⑤뱺 硫댁씠 ?쇱젙 諛앷린濡?蹂댁씠寃?
+            # Flat shading ??筌?諭??癲ル슢?꾤땟???癲ル슢??????繹먮냱???袁⑸즵??끝逾녑칰?뚮퓠??怨뚮옖??鈺곗뼚臾?
             glColor3f(0.8, 0.8, 0.8)
         
-        # 1. 寃⑹옄 諛?異?(Depth buffer?먮뒗 湲곕줉?섏? ?딆쓬: 硫붿돩 ?쇳궧/源딆씠 ?덉젙??
+        # 1. ?濡る큸泳??????(Depth buffer???獒???れ삀??쎈뭄??? ???怨룹쓱: 癲ル슢???????醫딅르/嚥싲갭큔??????源놁젳??
         glDepthMask(GL_FALSE)
-        self.draw_ground_plane()  # 諛섑닾紐?諛붾떏
+        self.draw_ground_plane()  # ?袁⑸즵?????떻??袁⑸즴????
         self.draw_grid()
         glDepthMask(GL_TRUE)
         
-        # 2. 紐⑤뱺 硫붿돩 媛앹껜 ?뚮뜑留?
+        # 2. 癲ル슢?꾤땟???癲ル슢??????좊즵??꼯???????異?
         sel = int(self.selected_index) if self.selected_index is not None else -1
         xray_enabled = bool(getattr(self, "xray_mode", False))
         for i, obj in enumerate(self.objects):
             if not obj.visible:
                 continue
 
-            # X-Ray???좏깮??媛앹껜瑜?猷⑦봽 ?ㅼ뿉??蹂꾨룄 ?뚮뜑留?源딆씠踰꾪띁 ?곹뼢 理쒖냼??
+            # X-Ray?????ャ뀕?????좊즵??꼯??癒?걫???룸Ŧ爾?????怨좊군???怨뚮옓?????????異?嚥싲갭큔???リ쑬?쏁넭怨κ데?????ㅺ강??癲ル슔?됭짆???
             if xray_enabled and i == sel:
                 continue
 
-            # ROI ?대┰? ?좏깮??媛앹껜?먮쭔 ?곸슜
+            # ROI ????? ???ャ뀕?????좊즵??꼯?????????ㅼ굣??
             if self.roi_enabled and i == sel:
                 try:
                     glEnable(GL_CLIP_PLANE1)
@@ -2313,7 +2328,7 @@ class Viewport3D(QOpenGLWidget):
                     _log_ignored_exception("Failed to enable ROI clip planes", level=logging.WARNING)
 
                 self.draw_scene_object(obj, is_selected=True)
-                # ROI濡??섎┛ 硫댁쓣 梨꾩썙 ?⑤㈃ ?뺤씤???쎄쾶 蹂댁씠?꾨줉 罹??쒓퍚) ?뚮뜑留?
+                # ROI????嚥▲볧꺙 癲ル슢????癲????????몃뱠 ?嶺뚮Ĳ?됮????熬곣뫗踰??怨뚮옖????ш끽維곩ㅇ?癲???癰귙룗?? ?????異?
                 if bool(getattr(self, "roi_caps_enabled", False)):
                     self.draw_roi_caps()
 
@@ -2328,7 +2343,7 @@ class Viewport3D(QOpenGLWidget):
 
             self.draw_scene_object(obj, is_selected=(i == sel))
 
-        # X-Ray (?좏깮??媛앹껜留? 留덉?留됱뿉 ?뚮뜑留?
+        # X-Ray (???ャ뀕?????좊즵??꼯???덉떴? 癲ル슢???癲ル슢??쭕?듦덩??????異?
         if xray_enabled and 0 <= sel < len(self.objects):
             try:
                 obj = self.objects[sel]
@@ -2367,40 +2382,40 @@ class Viewport3D(QOpenGLWidget):
                     except Exception:
                         _log_ignored_exception("Failed to disable ROI clip planes", level=logging.WARNING)
             
-        # 3. ?ㅻ쾭?덉씠 ?붿냼 (Depth write off: depth buffer??硫붿돩留??좎?)
+        # 3. ????곷츉???源낇꼧 ??釉먯뒠??(Depth write off: depth buffer??癲ル슢?????깆떴????)
         # Draw world axes after solids so they remain visible after mesh load.
         self.draw_axes()
         glDepthMask(GL_FALSE)
 
-        # 3.1 怨〓쪧 ?쇳똿 ?붿냼
+        # 3.1 ?????????紐꾧튅 ??釉먯뒠??
         self.draw_picked_points()
         self.draw_fitted_arc()
 
-        # 3.2 ?쒕㈃ 吏??李띿? ?? ?쒖떆
+        # 3.2 ??筌먯룆??癲ル슣???癲ル슔?蹂?뎔? ?? ??筌?六?
         self.draw_surface_paint_points()
-        # 3.3 ?쒕㈃ 吏??硫댁쟻/Area) ?ш?誘??ㅻ쾭?덉씠
+        # 3.3 ??筌먯룆??癲ル슣???癲ル슢????Area) ???雅?????곷츉???源낇꼧
         self.draw_surface_lasso_overlay()
-        # 3.4 ?쒕㈃ 吏??寃쎄퀎/?먯꽍) ?ш?誘??ㅻ쾭?덉씠
+        # 3.4 ??筌먯룆??癲ル슣????濡ろ뜑???????? ???雅?????곷츉???源낇꼧
         self.draw_surface_magnetic_lasso_overlay()
 
-        # 3.5 諛붾떏 ?뺣젹 ???쒖떆
+        # 3.5 ?袁⑸즴?????嶺뚮㉡?ｈ??????筌?六?
         self.draw_floor_picks()
 
         # 3.6 Mesh slicing plane/contours disabled (ROI + line-section workflow only).
 
-        # 3.7 ??옄???⑤㈃
+        # 3.7 ?????????몃뱠
         if self.crosshair_enabled:
             self.draw_crosshair()
 
-        # 3.7.25 ?⑤㈃??2媛? 媛?대뱶
+        # 3.7.25 ????몃뱠??2?? ??좊읈????
         if self.cut_lines_enabled or any(len(line) > 0 for line in getattr(self, "cut_lines", [])) or self._has_visible_polyline_layers():
             self.draw_cut_lines()
 
-        # 3.7.5 ?좏삎 ?⑤㈃ (Top-view cut line)
+        # 3.7.5 ???レ챺??????몃뱠 (Top-view cut line)
         if self.line_section_enabled:
             self.draw_line_section()
              
-        # 3.8 2D ROI ?щ줈???곸뿭
+        # 3.8 2D ROI ??繞?????ㅼ굡??
         if self.roi_enabled:
             self.draw_roi_cut_edges()
             self.draw_roi_box()
@@ -2409,28 +2424,28 @@ class Viewport3D(QOpenGLWidget):
 
         # 3.9 ROI section floor-plots disabled (ROI-only workflow).
         
-        # 4. ?뚯쟾 湲곗쫰紐?(?좏깮??媛앹껜?먮쭔, ?쇳궧 紐⑤뱶 ?꾨땺 ?뚮쭔)
+        # 4. ???????れ삀?節낅윺?ⓦ끉異?(???ャ뀕?????좊즵??꼯?????? ???醫딅르 癲ル슢?꾤땟?????ш끽維???????
         if self.selected_obj and self.picking_mode == 'none':
             if not self.roi_enabled:
                 self.draw_rotation_gizmo(self.selected_obj)
-            # 硫붿돩 移섏닔/以묒떖???ㅻ쾭?덉씠
+            # 癲ル슢?????怨멸땀???濚욌꼬?댄꺍???????곷츉???源낇꼧
             self.draw_mesh_dimensions(self.selected_obj)
             
-        # 5. UI ?ㅻ쾭?덉씠 (HUD)
+        # 5. UI ????곷츉???源낇꼧 (HUD)
         self.draw_orientation_hud()
         self.draw_surface_runtime_hud()
 
     def _update_floor_penetration_clip_plane(self):
-        """?붾뱶 諛붾떏(Z=0) 湲곗??쇰줈 '?꾨옒履?留??④린???대━???됰㈃ ?뺤쓽"""
+        """Update clip plane used for floor-penetration visualization (Z=0)."""
         try:
             # Plane: z = 0, keep z <= 0  => -z >= 0
             glClipPlane(GL_CLIP_PLANE0, (0.0, 0.0, -1.0, 0.0))
         except Exception:
-            # OpenGL 而⑦뀓?ㅽ듃/?꾨줈?뚯씪???곕씪 吏?먯씠 ???????덉쓬
+            # OpenGL ???爾?????덉쉐/??ш끽維곩ㅇ?????????ㅻ깹??癲ル슣???????????????源낆쓱
             pass
 
     def _update_roi_clip_planes(self):
-        """ROI bounds(x/y)濡??좏깮 硫붿돩瑜??щ줈?묓븯??4媛??대━???됰㈃ ?뺤쓽"""
+        """ROI bounds(x/y)?????ャ뀕??癲ル슢?????????繞???쒕굜???4?????????野껊갭???嶺뚮Ĳ?됭린?"""
         try:
             x1, x2, y1, y2 = self.roi_bounds
             # Keep: x >= x1
@@ -2445,8 +2460,8 @@ class Viewport3D(QOpenGLWidget):
             _log_ignored_exception()
     
     def draw_ground_plane(self):
-        """諛섑닾紐?諛붾떏硫?洹몃━湲?(Z=0, XY ?됰㈃) - Z-up 醫뚰몴怨?"""
-        # ?섑룊 酉??뺣㈃/痢〓㈃ ???먯꽌??諛붾떏硫댁씠 ?좎쑝濡?蹂댁뿬 ?쒖빞瑜?諛⑺빐?섎?濡??④?
+        """?袁⑸즵?????떻??袁⑸즴????쒕굞異???숆강筌??ⓦ꺂糾?(Z=0, XY ??野껊갭?? - Z-up ???щ뮡嶺뚮ㅏ??"""
+        # ???얜Ŋ?????嶺뚮㉡???癲ル쉵?명???????????袁⑸즴????쒕굞異??⑤챶?????モ섓쭗?쒖뒙??怨뚮옖???덩???筌?????袁⑸젻泳?떘?????????
         if abs(self.camera.elevation) < 10:
             return
             
@@ -2454,10 +2469,10 @@ class Viewport3D(QOpenGLWidget):
         glEnable(GL_BLEND)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
         
-        # ?묐㈃ ?뚮뜑留?(?꾨옒?먯꽌 遊먮룄 蹂댁씠寃?
+        # ???쑧???????異?(??ш끽維?????????????怨뚮옖??鈺곗뼚臾?
         glDisable(GL_CULL_FACE)
         
-        # 諛붾떏硫??ш린 (移대찓??嫄곕━??鍮꾨?)
+        # ?袁⑸즴????쒕굞異?????(?怨멸텭?嶺??癲꾧퀗?????????)
         elev = abs(float(getattr(self.camera, "elevation", 30.0) or 30.0))
         if elev < 5.0:
             horizon_factor = 22.0
@@ -2472,7 +2487,7 @@ class Viewport3D(QOpenGLWidget):
         
         # Keep floor tone neutral to reduce visual noise and preserve depth cues.
         glColor4f(0.82, 0.84, 0.86, 0.16)
-        # ?뺤젏 ?쒖꽌: 諛섏떆怨?諛⑺뼢 = ?꾩そ???욌㈃ (Z-up)
+        # ?嶺뚮Ĳ?????筌?留? ?袁⑸즵?????袁⑸젻泳?떑??= ??ш끽裕㎩쳞?????節뗫뱠 (Z-up)
         glBegin(GL_QUADS)
         glVertex3f(-size, -size, 0)
         glVertex3f(size, -size, 0)
@@ -2579,16 +2594,16 @@ class Viewport3D(QOpenGLWidget):
         glEnable(GL_LIGHTING)
 
     def draw_slice_plane(self):
-        """?꾩옱 ?щ씪?댁뒪 ?믪씠??諛섑닾紐??됰㈃ 洹몃━湲?"""
+        """??ш끽維????????⑤８痢??亦껋꼨援????袁⑸즵?????떻???野껊갭????숆강筌??ⓦ꺂糾?"""
         glDisable(GL_LIGHTING)
         glEnable(GL_BLEND)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
         
-        # ?됰㈃ ?ш린 (洹몃━???ш린? 留욎땄)
+        # ??野껊갭??????(??숆강筌???????? 癲ル슢????
         s = self.grid_size / 2
         z = self.slice_z
         
-        # 諛섑닾紐?鍮④컙???됰㈃
+        # ?袁⑸즵?????떻???筌륁슕?????野껊갭??
         glColor4f(1.0, 0.0, 0.0, 0.15)
         glBegin(GL_QUADS)
         glVertex3f(-s, -s, z)
@@ -2597,7 +2612,7 @@ class Viewport3D(QOpenGLWidget):
         glVertex3f(-s, s, z)
         glEnd()
         
-        # 寃쎄퀎??
+        # ?濡ろ뜑????
         glLineWidth(2.0)
         glColor4f(1.0, 0.0, 0.0, 0.5)
         glBegin(GL_LINE_LOOP)
@@ -2612,13 +2627,13 @@ class Viewport3D(QOpenGLWidget):
         glEnable(GL_LIGHTING)
 
     def draw_slice_contours(self):
-        """異붿텧???⑤㈃??洹몃━湲?"""
+        """??⑤베毓???????몃뱠????숆강筌??ⓦ꺂糾?"""
         if not self.slice_contours:
             return
             
         glDisable(GL_LIGHTING)
         glLineWidth(3.0)
-        glColor3f(1.0, 0.0, 1.0)  # 留덉젨? ?됱긽 (?덉뿉 ?꾧쾶)
+        glColor3f(1.0, 0.0, 1.0)  # 癲ル슢????? ??繹먭퍓彛?(???怨좊군 ??ш낄猷??
         
         for contour in self.slice_contours:
             if len(contour) < 2:
@@ -2632,7 +2647,7 @@ class Viewport3D(QOpenGLWidget):
         glEnable(GL_LIGHTING)
 
     def update_slice(self):
-        """?꾩옱 Z ?믪씠?먯꽌 ?⑤㈃ ?ъ텛異?"""
+        """??ш끽維??Z ?亦껋꼨援??????????몃뱠 ????怨룻돯?"""
         obj = self.selected_obj
         if obj is None or obj.mesh is None:
             self.slice_contours = []
@@ -2645,29 +2660,29 @@ class Viewport3D(QOpenGLWidget):
 
         slicer = MeshSlicer(cast(Any, tm))
         
-        # 媛앹껜??濡쒖뺄 Z 醫뚰몴濡?蹂???꾩슂 (?꾩옱???붾뱶 Z 湲곗? ?щ씪?댁뒪 援ы쁽)
-        # TODO: 媛앹껜 蹂???뚯쟾, ?대룞) 諛섏쁺 泥섎━
-        # ?곗꽑 媛???⑥닚?섍쾶 ?붾뱶 Z 湲곗? (?됰㈃ origin??媛앹껜 濡쒖뺄 醫뚰몴濡?????섑븯???щ씪?댁뒪)
+        # ??좊즵??꼯????棺??짆?쏆춾?Z ???щ뮡嶺뚮ㅏ????怨뚮뼚????ш끽維??(??ш끽維?????釉먮폇??Z ??れ삀?? ??????⑤８痢?????열野?
+        # TODO: ??좊즵??꼯???怨뚮뼚??????? ???? ?袁⑸즵???癲ル슪?ｇ몭??
+        # ???Β?띾쭡 ??좊읈????縕?????곕쿊 ??釉먮폇??Z ??れ삀?? (??野껊갭??origin????좊즵??꼯???棺??짆?쏆춾????щ뮡嶺뚮ㅏ?????????얜Ŧ?????????⑤８痢?
         
-        # (?붾뱶 Z) -> (濡쒖뺄 醫뚰몴)
-        # 濡쒖쭅: P_world = R * (S * P_local) + T
+        # (??釉먮폇??Z) -> (?棺??짆?쏆춾????щ뮡嶺?
+        # ?棺??짆?먰맪? P_world = R * (S * P_local) + T
         # P_local = (1/S) * R^T * (P_world - T)
 
         from scipy.spatial.transform import Rotation as R
         inv_rot = R.from_euler('XYZ', obj.rotation, degrees=True).inv().as_matrix()
         inv_scale = 1.0 / obj.scale if obj.scale != 0 else 1.0
         
-        # ?붾뱶 ?됰㈃ [0, 0, 1] dot (P - [0, 0, Z_slice]) = 0
-        # 濡쒗봽 醫뚰몴?먯꽌???됰㈃ origin怨?normal 怨꾩궛
+        # ??釉먮폇????野껊갭??[0, 0, 1] dot (P - [0, 0, Z_slice]) = 0
+        # ?棺??짆??괌????щ뮡嶺????????野껊갭??origin??normal ??節뚮쳮雅?
         world_origin = np.array([0.0, 0.0, float(self.slice_z)], dtype=np.float64)
         local_origin = inv_scale * inv_rot @ (world_origin - obj.translation)
 
         world_normal = np.array([0.0, 0.0, 1.0], dtype=np.float64)
-        local_normal = inv_rot @ world_normal # ?뚯쟾留??곸슜 (踰뺤꽑踰≫꽣?대?濡?
+        local_normal = inv_rot @ world_normal # ?????꾩땡????ㅼ굣??(?類?↑린?묐빝?얜뿫????뚮뙃?????
 
         self.slice_contours = slicer.slice_with_plane(local_origin.tolist(), local_normal.tolist())
         
-        # 異붿텧??濡쒖뺄 醫뚰몴 ?⑤㈃???붾뱶 醫뚰몴濡?蹂?섑븯?????(?뚮뜑留곸슜)
+        # ??⑤베毓????棺??짆?쏆춾????щ뮡嶺?????몃뱠????釉먮폇?????щ뮡嶺뚮ㅏ????怨뚮뼚???얜Ŧ???????(?????異??녠텥??
         rot_mat = R.from_euler('XYZ', obj.rotation, degrees=True).as_matrix()
         scale = obj.scale
         trans = obj.translation
@@ -2682,13 +2697,13 @@ class Viewport3D(QOpenGLWidget):
         self.update()
 
     def draw_crosshair(self):
-        """??옄??諛?硫붿돩 ?ъ쁺 ?⑤㈃ ?쒓컖??"""
+        """???????癲ル슢????????????몃뱠 ??癰????"""
         glDisable(GL_LIGHTING)
         
         cx, cy = self.crosshair_pos
         s = self.grid_size / 2
         
-        # 1. 諛붾떏 ??옄??(?고븳 ?뚯깋)
+        # 1. ?袁⑸즴?????????(???μ쪚???????
         glLineWidth(1.0)
         glColor4f(0.5, 0.5, 0.5, 0.5)
         glBegin(GL_LINES)
@@ -2698,16 +2713,16 @@ class Viewport3D(QOpenGLWidget):
         glVertex3f(cx, s, 0)
         glEnd()
         
-        # 2. 硫붿돩 ?ъ쁺 ?⑤㈃ (媛뺥븳 ?몃???
+        # 2. 癲ル슢????????????몃뱠 (??좊즴甕겹끃???嶺???
         glLineWidth(3.0)
         glColor3f(1.0, 1.0, 0.0)
         
-        # X異??꾨줈?뚯씪 (Y 怨좎젙)
+        # X????ш끽維곩ㅇ?????(Y ??關履??
         if self.x_profile:
             pass
             
-        # 3. ?ㅼ젣 異붿텧???ъ씤?몃뱾 ?뚮뜑留?(?붾뱶 醫뚰몴怨?
-        # X ?꾨줈?뚯씪: X異?諛⑺뼢?쇰줈 媛濡쒖?瑜대뒗 ??(Y = cy)
+        # 3. ???源놁졆 ??⑤베毓???????嶺뚮ㅎ?볠뤃??????異?(??釉먮폇?????щ뮡嶺뚮ㅏ??
+        # X ??ш끽維곩ㅇ????? X???袁⑸젻泳?떑????⑥????좊읈?棺??짆????????(Y = cy)
         world_x_profile = getattr(self, '_world_x_profile', None)
         if world_x_profile is not None and len(world_x_profile) > 0:
             glColor3f(1.0, 1.0, 0.0) # Yellow
@@ -2716,7 +2731,7 @@ class Viewport3D(QOpenGLWidget):
                 glVertex3fv(pt)
             glEnd()
             
-        # Y ?꾨줈?뚯씪: Y異?諛⑺뼢?쇰줈 媛濡쒖?瑜대뒗 ??(X = cx)
+        # Y ??ш끽維곩ㅇ????? Y???袁⑸젻泳?떑????⑥????좊읈?棺??짆????????(X = cx)
         world_y_profile = getattr(self, '_world_y_profile', None)
         if world_y_profile is not None and len(world_y_profile) > 0:
             glColor3f(0.0, 1.0, 1.0) # Cyan
@@ -2729,7 +2744,7 @@ class Viewport3D(QOpenGLWidget):
         glEnable(GL_LIGHTING)
 
     def clear_line_section(self):
-        """?좏삎 ?⑤㈃(?쇱씤) ?곗씠??珥덇린??"""
+        """???レ챺??????몃뱠(??繹먮끏?? ???Β?????縕?猿녿뎨??"""
         self.line_section_start = None
         self.line_section_end = None
         self.line_profile = []
@@ -2802,7 +2817,7 @@ class Viewport3D(QOpenGLWidget):
         )
 
     def _suggest_section_profile_offset(self, obj: SceneObject, points: list[list[float]]) -> list[float]:
-        """湲곕낯 諛곗튂 ?꾩튂???⑤㈃ ?덉씠?닿? ?대? ?덉쑝硫?寃뱀튂吏 ?딅룄濡??ㅽ봽?뗭쓣 ?쒖븞."""
+        """??れ삀????袁⑸즲?????ш끽維???????몃뱠 ???源낇꼧??? ??? ???源끹걬癲??濡ろ뜐??域밟뫁?? ????녳뵣??????덈뭷???獄???筌???"""
         bbox_new = self._polyline_bbox_xy(points)
         if bbox_new is None:
             return [0.0, 0.0]
@@ -2905,7 +2920,7 @@ class Viewport3D(QOpenGLWidget):
         return True
 
     def save_current_slice_to_layer(self) -> int:
-        """?꾩옱 ?щ씪?댁뒪留??덉씠?대줈 ?ㅻ깄?????"""
+        """??ш끽維????????⑤８痢⑼┼????源낇꼧??繞????怨좊룴??????"""
         obj = self.selected_obj
         if obj is None:
             return 0
@@ -2945,7 +2960,7 @@ class Viewport3D(QOpenGLWidget):
         separate_section_profiles: bool = False,
         roi_axes: set[str] | list[str] | tuple[str, ...] | None = None,
     ) -> int:
-        """?꾩옱 ?⑤㈃/媛?대뱶 寃곌낵瑜??ㅻ깄???덉씠?대줈 ???"""
+        """??ш끽維??????몃뱠/??좊읈?????濡ろ뜏???醫듽걫????怨좊룴?????源낇꼧??繞?????"""
         obj = self.selected_obj
         if obj is None:
             return 0
@@ -2965,7 +2980,7 @@ class Viewport3D(QOpenGLWidget):
             for i, line in enumerate(getattr(self, "cut_lines", [[], []]) or []):
                 if self._append_polyline_layer(
                     obj,
-                    name=(names[i] if i < len(names) else f"?⑤㈃??{i+1}"),
+                    name=(names[i] if i < len(names) else f"????몃뱠??{i+1}"),
                     kind="cut_line",
                     points=line,
                     color=list(colors[i % len(colors)]),
@@ -2980,7 +2995,7 @@ class Viewport3D(QOpenGLWidget):
             for i, line in enumerate(getattr(self, "cut_section_world", [[], []]) or []):
                 if self._append_polyline_layer(
                     obj,
-                    name=(sec_names[i] if i < len(sec_names) else f"?⑤㈃-{i+1}"),
+                    name=(sec_names[i] if i < len(sec_names) else f"????몃뱠-{i+1}"),
                     kind="section_profile",
                     points=line,
                     color=[0.1, 0.1, 0.1, 0.9],
@@ -3010,7 +3025,7 @@ class Viewport3D(QOpenGLWidget):
                     axis = "X" if key == "x" else "Y"
                     if self._append_polyline_layer(
                         obj,
-                        name=f"ROI-?⑤㈃-{axis}",
+                        name=f"ROI-????몃뱠-{axis}",
                         kind="section_profile",
                         points=line,
                         color=[0.1, 0.35, 0.1, 0.9],
@@ -3047,12 +3062,12 @@ class Viewport3D(QOpenGLWidget):
         return int(added)
 
     def save_roi_sections_to_layers(self) -> int:
-        """?꾩옱 ROI ?⑤㈃ 誘몃━蹂닿린瑜??덉씠?대줈 ?뺤젙 諛곗튂."""
+        """??ш끽維??ROI ????몃뱠 雅?퍔瑗띰㎖???????깅탿?????源낇꼧??繞??嶺뚮Ĳ????袁⑸즲???"""
         plane_hint = str(getattr(self, "_roi_commit_plane_hint", "") or "").strip().lower()
         axis_hint = str(getattr(self, "_roi_commit_axis_hint", "") or "").strip().lower()
         try:
-            # Enter 吏곸쟾??ROI媛 諛⑷툑 蹂寃쎈맂 寃쎌슦, ?ㅻ젅??寃곌낵瑜?湲곕떎由ъ? ?딄퀬 ?꾩옱 bounds 湲곗??쇰줈 利됱떆 怨꾩궛
-            # ?댁꽌 "?ъ슜?먭? 留덉?留됱쑝濡?以꾩씤 ?⑤㈃"??洹몃?濡?諛곗튂?⑸땲??
+            # Enter 癲ル슣?????ROI??좊읈 ?袁⑸젻泳???怨뚮뼚?濡ろ뜑?恝彛??濡ろ뜑??? ????곸쓨???濡ろ뜏???醫듽걫???れ삀??嚥▲룗??? ??熬???ш끽維??bounds ??れ삀?????⑥??癲ル슣鍮뽳쭕????節뚮쳮雅?
+            # ???⑤똾留?"?????? 癲ル슢???癲ル슢??쭕???肉?濚욌꼬釉먮쳮??????몃뱠"????숆강筌????袁⑸즲????筌뤾퍓???
             need_fresh_edges = bool(getattr(self, "_roi_bounds_changed", False)) or (
                 getattr(self, "_roi_edges_pending_bounds", None) is not None
             )
@@ -3261,7 +3276,7 @@ class Viewport3D(QOpenGLWidget):
             self.cut_line_axis_lock = ["x", "y"]
         if enabled:
             self.picking_mode = 'cut_lines'
-            # ?꾨━酉곕? ?꾪빐 留덉슦???몃옒???쒖꽦??
+            # ??ш끽諭욥걡????? ??ш낄援??癲ル슢??????嶺뚮ㅎ??????筌????
             self.setMouseTracking(True)
             try:
                 self.setFocus()
@@ -3338,7 +3353,7 @@ class Viewport3D(QOpenGLWidget):
         self.update()
 
     def get_cut_lines_world(self):
-        """?대낫?닿린?? ?⑤㈃??2媛? ?붾뱶 醫뚰몴 諛섑솚 (?쒖닔 python list)"""
+        """???????깅탿?? ????몃뱠??2?? ??釉먮폇?????щ뮡嶺??袁⑸즵???(??筌?鍮?python list)"""
         out = []
         for line in getattr(self, "cut_lines", [[], []]):
             pts = []
@@ -3384,7 +3399,7 @@ class Viewport3D(QOpenGLWidget):
         return out
 
     def get_cut_sections_world(self):
-        """?대낫?닿린?? 諛붾떏??諛곗튂???⑤㈃(?꾨줈?뚯씪) ?대━?쇱씤???⑤㈃??ROI) ?붾뱶 醫뚰몴 諛섑솚"""
+        """???????깅탿?? ?袁⑸즴??????袁⑸즲????????몃뱠(??ш끽維곩ㅇ????? ?????繹먮끏???????몃뱠??ROI) ??釉먮폇?????щ뮡嶺??袁⑸즵???"""
         out = []
         for line in getattr(self, "cut_section_world", [[], []]):
             pts = []
@@ -3399,7 +3414,7 @@ class Viewport3D(QOpenGLWidget):
                     continue
             out.append(pts)
 
-        # ROI濡??앹꽦???⑤㈃(?덈뒗 寃쎌슦)???④퍡 ?대낫?닿린
+        # ROI????獄쏅똻???????몃뱠(????덉툗 ?濡ろ뜑???????影?얠맽 ???????깅탿
         try:
             roi_sec = getattr(self, "roi_section_world", {}) or {}
             for key in ("x", "y"):
@@ -3462,7 +3477,7 @@ class Viewport3D(QOpenGLWidget):
         self._cut_section_timer.start(max(0, int(delay_ms)))
 
     def _on_mesh_transform_changed(self):
-        """硫붿돩 蹂???? ?⑤㈃/ROI ???섏〈 ?곗씠?곕? ?붾컮?댁뒪 媛깆떊."""
+        """癲ル슢?????怨뚮뼚???? ????몃뱠/ROI ????筌????Β????? ??釉먮폏筌???⑤８痢???좊즲???"""
         self._clear_cutline_tape_cache()
         try:
             if getattr(self, "crosshair_enabled", False):
@@ -3537,20 +3552,20 @@ class Viewport3D(QOpenGLWidget):
             axis = self._cut_line_axis_for_index(idx)
             extent_along_axis = extent_x if axis == "x" else extent_y
             if axis == "x":
-                # X異?諛⑺뼢 ?⑤㈃: 硫붿돩 ?곷떒(+Y)??諛곗튂 (s -> X, z -> Y)
+                # X???袁⑸젻泳?떑??????몃뱠: 癲ル슢???????ㅿ폍??+Y)???袁⑸즲???(s -> X, z -> Y)
                 base_x = min_x
                 base_y = max_y + margin
             else:
-                # Y異?諛⑺뼢 ?⑤㈃: 硫붿돩 ?곗륫(+X)??諛곗튂 (z -> X, s -> Y)
+                # Y???袁⑸젻泳?떑??????몃뱠: 癲ル슢???????Β?(+X)???袁⑸즲???(z -> X, s -> Y)
                 base_x = max_x + margin
                 base_y = min_y
             scale_s = max(1e-6, extent_along_axis) / s_span
 
             flip_s = False
             if axis == "y":
-                # ?ъ슜?먭? ?⑤㈃?좎쓣 ??>?꾨옒(?먮뒗 ?ㅻⅨ履?>?쇱そ)濡?洹몃━硫?
-                # s 異?諛⑺뼢???ㅼ쭛? 寃곌낵媛 ???섍? ?ㅼ쭛? 蹂댁씪 ???덉쓬.
-                # ?⑤㈃?좎쓽 吏꾪뻾 諛⑺뼢??+Y(?몃줈) / +X(媛濡?媛 ?섎룄濡?s 異뺤쓣 嫄곗슱?곸쑝濡??ㅼ쭛?붾떎.
+                # ?????? ????몃뱠???モ섋キ???>??ш끽維?????獒?????렺轅곗땡?>??疫꿸퉫援?????숆강筌??⑥궡異?
+                # s ???袁⑸젻泳?떑??????源녿뾼?? ?濡ろ뜏????뽰씀? ????? ???源녿뾼?? ?怨뚮옖????????源낆쓱.
+                # ????몃뱠???モ섋린?癲ル슣???몄춿??袁⑸젻泳?떑???+Y(?嶺뚮ㅎ?붷ㅇ? / +X(??좊읈????좊읈 ??嚥▲꺃???s ??⑤베源??癲꾧퀗??????ㅼ굣筌뤿뱶?????源녿뾼??釉먮폇??
                 try:
                     lines = getattr(self, "cut_lines", [[], []]) or [[], []]
                     if idx < len(lines) and lines[idx] and len(lines[idx]) >= 2:
@@ -3630,7 +3645,7 @@ class Viewport3D(QOpenGLWidget):
                 _log_ignored_exception()
         self._cut_section_thread = None
 
-        # ?湲?以묒씤 理쒖떊 ?붿껌???덉쑝硫?利됱떆 ?ㅼ떆 ?쒕룄
+        # ????濚욌꼬?댄꺍??癲ル슔?됭짆????釉먯뒜??????源끹걬癲?癲ル슣鍮뽳쭕?????怨뺣빰 ??筌먲퐣??
         if getattr(self, "_cut_section_pending_indices", None):
             self._cut_section_timer.start(1)
 
@@ -3651,11 +3666,11 @@ class Viewport3D(QOpenGLWidget):
         self.update()
 
     def _on_cut_section_failed(self, message: str):
-        # ?ㅽ뙣?대룄 UI??怨꾩냽 ?숈옉?댁빞 ??        # print(f"Cut section compute failed: {message}")
+        # ????됰꽡????UI????節뚮쳮??????깃탾???⑤；????        # print(f"Cut section compute failed: {message}")
         pass
 
     def draw_line_section(self):
-        """?곷㈃(Top)?먯꽌 洹몄? 吏곸꽑 ?⑤㈃ ?쒓컖??"""
+        """???ㅼ쭋??Top)???????숆강筌? 癲ル슣?????????몃뱠 ??癰????"""
         if self.line_section_start is None or self.line_section_end is None:
             return
 
@@ -3664,7 +3679,7 @@ class Viewport3D(QOpenGLWidget):
         p0 = self.line_section_start
         p1 = self.line_section_end
 
-        # 1) 諛붾떏 ?됰㈃ ??而ㅽ똿 ?쇱씤 (?ㅻ젋吏)
+        # 1) ?袁⑸즴??????野껊갭??????節뗪괍????繹먮끏??(????곸젂癲ル슣??
         z = 0.05
         glLineWidth(2.5)
         glColor4f(1.0, 0.55, 0.0, 0.85)
@@ -3673,8 +3688,8 @@ class Viewport3D(QOpenGLWidget):
         glVertex3f(float(p1[0]), float(p1[1]), z)
         glEnd()
 
-        # 2) ?붾뱶?ъ씤??留덉빱
-        # 3) 硫붿돩 ?⑤㈃??(?쇱엫)
+        # 2) ??釉먮폇??????癲ル슢???쎈쑏?
+        # 3) 癲ル슢????????몃뱠??(??繹먮끏??
         if self.line_section_contours:
             glLineWidth(3.0)
             glColor3f(0.2, 1.0, 0.2)
@@ -3696,7 +3711,7 @@ class Viewport3D(QOpenGLWidget):
         *,
         force_lock_axis: bool = True,
     ) -> np.ndarray:
-        """CAD Ortho: 留덉?留???湲곗??쇰줈 X/Y 以??섎굹留?蹂??"""
+        """CAD Ortho: 癲ル슢???癲?????れ삀?????⑥??X/Y 濚???嚥▲굥猷롳┼??怨뚮뼚??"""
         last_pt = np.asarray(last_pt, dtype=np.float64)
         candidate = np.asarray(candidate, dtype=np.float64).copy()
         try:
@@ -3728,7 +3743,7 @@ class Viewport3D(QOpenGLWidget):
 
     @staticmethod
     def _closest_point_on_triangle(point: np.ndarray, a: np.ndarray, b: np.ndarray, c: np.ndarray) -> np.ndarray:
-        """Christer Ericson ?뚭퀬由ъ쬁 湲곕컲 ?쇨컖??理쒓렐?묒젏."""
+        """Christer Ericson ??????畑???れ삀??뫢????館???癲ル슔?됭짆???????"""
         p = np.asarray(point, dtype=np.float64).reshape(-1)[:3]
         a = np.asarray(a, dtype=np.float64).reshape(-1)[:3]
         b = np.asarray(b, dtype=np.float64).reshape(-1)[:3]
@@ -3781,7 +3796,7 @@ class Viewport3D(QOpenGLWidget):
         z_hint: float | None = None,
         max_xy_distance: float | None = None,
     ) -> np.ndarray | None:
-        """源딆씠 ???ㅽ뙣/?쒖빟 ??XY ?먯쓣 ?좏깮 硫붿돩 ?쒕㈃ 理쒓렐?묒젏?쇰줈 ?ы닾??"""
+        """嚥싲갭큔?????????됰꽡/??筌?????XY ???獄????ャ뀕??癲ル슢??????筌먯룆??癲ル슔?됭짆?????????⑥???????"""
         obj = self.selected_obj
         if obj is None or getattr(obj, "mesh", None) is None:
             return None
@@ -3845,7 +3860,7 @@ class Viewport3D(QOpenGLWidget):
         return None
 
     def _finish_cut_lines_current(self):
-        """Enter/?고겢由?쑝濡??꾩옱 ?쒖꽦 ?⑤㈃???낅젰??留덈Т由?"""
+        """Enter/???μ쪙繹?????肉???ш끽維????筌???????몃뱠??????곸죷??癲ル슢??袁ъÞ??"""
         try:
             idx_done = int(getattr(self, "cut_line_active", 0))
         except Exception:
@@ -3864,14 +3879,14 @@ class Viewport3D(QOpenGLWidget):
         except Exception:
             _log_ignored_exception()
 
-        # ?⑤㈃(?꾨줈?뚯씪) 怨꾩궛 ?붿껌
+        # ????몃뱠(??ш끽維곩ㅇ????? ??節뚮쳮雅???釉먯뒜??
         try:
             if idx_done in (0, 1) and len(self.cut_lines[idx_done]) >= 2:
                 self.schedule_cut_section_update(idx_done, delay_ms=0)
         except Exception:
             _log_ignored_exception()
 
-        # ?ㅻⅨ ?좎씠 "誘명솗???대㈃ ?먮룞 ?꾪솚 (鍮????ы븿)
+        # ????렺????モ섌?"雅?퍔瑗띰㎖??????????筌???ш낄援??(????????
         try:
             other = 1 - int(idx_done)
             final = getattr(self, "_cut_line_final", [False, False])
@@ -3888,18 +3903,18 @@ class Viewport3D(QOpenGLWidget):
                     locks = getattr(self, "cut_line_axis_lock", [None, None]) or [None, None]
                     lk = locks[other] if other < len(locks) else None
                     axis_txt = "X" if str(lk).lower().startswith("x") else ("Y" if str(lk).lower().startswith("y") else "X/Y")
-                    self.status_info = f"?㎛ ?ㅼ쓬 ?⑤㈃?? {role} ({axis_txt}異??ㅻ깄)"
+                    self.status_info = f"??????源낆쓱 ????몃뱠?? {role} ({axis_txt}?????怨좊룴)"
                 except Exception:
                     _log_ignored_exception()
         except Exception:
             _log_ignored_exception()
 
-        # ?????뺤젙?섎㈃ 紐⑤뱶 ?먮룞 醫낅즺
+        # ?????嶺뚮Ĳ????嚥???癲ル슢?꾤땟??????筌????ろ꼤嶺?
         try:
             final = getattr(self, "_cut_line_final", [False, False])
             if bool(final[0]) and bool(final[1]):
                 self.set_cut_lines_enabled(False)
-                self.status_info = "??Length/Width ?⑤㈃???낅젰 ?꾨즺"
+                self.status_info = "Length/Width 단면선 입력 완료"
                 try:
                     self.cutLinesAutoEnded.emit()
                 except Exception:
@@ -3910,7 +3925,7 @@ class Viewport3D(QOpenGLWidget):
         self.update()
 
     def _densify_cut_polyline(self, line: list[np.ndarray] | list[list[float]], step_world: float = 0.6) -> list[np.ndarray]:
-        """?쒓컖?붿슜 ?대━?쇱씤 蹂닿컙(?뚯씠??怨좊Т諛대뱶 ?쒗쁽 ?덉쭏 ?μ긽)."""
+        """??癰????釉먯뒭???????繹먮끏???怨뚮옖????????????關履싩뵺?믩쎗????????猿????源녿뼥 ???뤿Ь?."""
         try:
             step = float(step_world)
         except Exception:
@@ -4071,7 +4086,7 @@ class Viewport3D(QOpenGLWidget):
         return strips
 
     def draw_cut_lines(self):
-        """?⑤㈃??2媛? 媛?대뱶 ?쇱씤 ?쒓컖??(??긽 ?붾㈃ ?꾨줈)"""
+        """????몃뱠??2?? ??좊읈??????繹먮끏????癰????(??????釉먮뻤????ш끽維곩ㅇ?"""
         lines = getattr(self, "cut_lines", [[], []])
         if not lines:
             return
@@ -4079,7 +4094,7 @@ class Viewport3D(QOpenGLWidget):
         glDisable(GL_LIGHTING)
         glDisable(GL_DEPTH_TEST)
 
-        z = 0.08  # 諛붾떏?먯꽌 ?댁쭩 ?꾩?
+        z = 0.08  # ?袁⑸즴???????????? ???
         colors = [
             (1.0, 0.45, 0.15, 0.95),  # length: orange-ish
             (0.10, 0.72, 0.45, 0.95),  # width: green-ish
@@ -4152,7 +4167,7 @@ class Viewport3D(QOpenGLWidget):
                 glEnd()
         glDisable(GL_DEPTH_TEST)
 
-        # ?꾨━酉??멸렇癒쇳듃
+        # ??ш끽諭욥걡???嶺뚮∥梨??沃섅굥???
         if self.cut_line_drawing and self.cut_line_preview is not None:
             try:
                 idx = int(self.cut_line_active)
@@ -4169,7 +4184,7 @@ class Viewport3D(QOpenGLWidget):
             except Exception:
                 _log_ignored_exception()
 
-        # ?⑤㈃ ?꾨줈?뚯씪(諛붾떏 諛곗튂) ?뚮뜑留?
+        # ????몃뱠 ??ш끽維곩ㅇ??????袁⑸즴?????袁⑸즲??? ?????異?
         profiles = getattr(self, "cut_section_world", [[], []])
         z_profile = 0.12
         if profiles:
@@ -4414,7 +4429,7 @@ class Viewport3D(QOpenGLWidget):
             self._line_profile_timer.start(1)
 
     def update_line_section_profile(self):
-        """?꾩옱 ?좏삎 ?⑤㈃(?쇱씤)?쇰줈遺???꾨줈?뚯씪 異붿텧"""
+        """??ш끽維?????レ챺??????몃뱠(??繹먮끏?????⑥???????ш끽維곩ㅇ???????⑤베毓??"""
         if not self.selected_obj or self.selected_obj.mesh is None:
             self.clear_line_section()
             return
@@ -4440,7 +4455,7 @@ class Viewport3D(QOpenGLWidget):
             return
 
         d_unit = d / length
-        # ?섏쭅 ?⑤㈃ ?됰㈃??踰뺤꽑 (XY?먯꽌 ?쇱씤???섏쭅)
+        # ???쒓낯??????몃뱠 ??野껊갭????類?↑린?묐빝?(XY???????繹먮끏??????쒓낯??
         world_normal = np.array([d_unit[1], -d_unit[0], 0.0], dtype=float)
         world_origin = p0
 
@@ -4458,7 +4473,7 @@ class Viewport3D(QOpenGLWidget):
         slicer = MeshSlicer(cast(Any, tm))
         contours_local = slicer.slice_with_plane(local_origin.tolist(), local_normal.tolist())
 
-        # ?붾뱶 醫뚰몴濡?蹂???뚮뜑留??꾨줈?뚯씪??
+        # ??釉먮폇?????щ뮡嶺뚮ㅏ????怨뚮뼚???????異???ш끽維곩ㅇ??????
         rot_mat = R.from_euler('XYZ', obj.rotation, degrees=True).as_matrix()
         trans = obj.translation
         scale = obj.scale
@@ -4469,11 +4484,11 @@ class Viewport3D(QOpenGLWidget):
             world_contours.append(w_cnt)
         self.line_section_contours = world_contours
 
-        # ?꾨줈?뚯씪: (嫄곕━, ?믪씠) - ?쇱씤 諛⑺뼢?쇰줈 ?ъ쁺
+        # ??ш끽維곩ㅇ????? (癲꾧퀗???? ?亦껋꼨援?? - ??繹먮끏???袁⑸젻泳?떑????⑥??????
         best_profile = []
         best_span = 0.0
 
-        # ?쇱씤 ?멸렇癒쇳듃 踰붿쐞濡??꾪꽣留?(?쎄컙 ?ъ쑀)
+        # ??繹먮끏???嶺뚮∥梨??沃섅굥????類????袁⑸퓠???ш낄援?轅곗땡?(??熬곣뫚?????)
         margin = max(length * 0.02, 0.2)
         t_min = -margin
         t_max = length + margin
@@ -4496,7 +4511,7 @@ class Viewport3D(QOpenGLWidget):
             t_sorted = t_f[order]
             z_sorted = z_f[order]
 
-            # 洹몃옒?꾨뒗 0遺???쒖옉?섎룄濡?shift
+            # ??숆강筌???ш끽維獒?0??????筌믨퀣援??嚥▲꺃???shift
             t_sorted = t_sorted - float(t_sorted.min())
 
             best_profile = list(zip(t_sorted.tolist(), z_sorted.tolist()))
@@ -4507,7 +4522,7 @@ class Viewport3D(QOpenGLWidget):
         self.update()
 
     def update_crosshair_profile(self):
-        """?꾩옱 ??옄???꾩튂?먯꽌 ?⑤㈃ ?꾨줈?뚯씪 異붿텧"""
+        """??ш끽維?????????ш끽維??????????몃뱠 ??ш끽維곩ㅇ???????⑤베毓??"""
         if not self.selected_obj or self.selected_obj.mesh is None:
             self.x_profile = []
             self.y_profile = []
@@ -4529,13 +4544,13 @@ class Viewport3D(QOpenGLWidget):
             rot_mat = R.from_euler('XYZ', obj.rotation, degrees=True).as_matrix()
             return (rot_mat @ (pts_local * obj.scale).T).T + obj.translation
 
-        # 2. X異?諛⑺뼢 ?⑤㈃ (?됰㈃: Y = cy)
-        # ?붾뱶 ?곸쓽 ?됰㈃: Origin=[0, cy, 0], Normal=[0, 1, 0]
+        # 2. X???袁⑸젻泳?떑??????몃뱠 (??野껊갭?? Y = cy)
+        # ??釉먮폇?????ㅼ굣甕???野껊갭?? Origin=[0, cy, 0], Normal=[0, 1, 0]
         w_orig_x = np.array([0, cy, 0])
         w_norm_x = np.array([0, 1, 0])
         l_orig_x = get_world_to_local(w_orig_x.reshape(1,3))[0]
-        l_norm_x = inv_rot @ w_norm_x # 踰뺤꽑? ?뚯쟾留?        
-        # MeshData.section ?먮윭 ?섏젙???꾪빐 to_trimesh() ?ъ슜
+        l_norm_x = inv_rot @ w_norm_x # ?類?↑린?묐빝?? ?????꾩땡?        
+        # MeshData.section ????????쒓낯?????ш낄援??to_trimesh() ????
         tm = obj.to_trimesh()
         if tm is None:
             self.x_profile = []
@@ -4545,52 +4560,52 @@ class Viewport3D(QOpenGLWidget):
         slicer = MeshSlicer(cast(Any, tm))
         contours_x = slicer.slice_with_plane(l_orig_x.tolist(), l_norm_x.tolist())
         
-        # 3. Y異?諛⑺뼢 ?⑤㈃ (?됰㈃: X = cx)
+        # 3. Y???袁⑸젻泳?떑??????몃뱠 (??野껊갭?? X = cx)
         w_orig_y = np.array([cx, 0, 0])
-        w_norm_y = np.array([1, 0, 0]) # X異뺤뿉 ?섏쭅???됰㈃
+        w_norm_y = np.array([1, 0, 0]) # X??⑤베源?????쒓낯?????野껊갭??
         l_orig_y = get_world_to_local(w_orig_y.reshape(1,3))[0]
         l_norm_y = inv_rot @ w_norm_y
         contours_y = slicer.slice_with_plane(l_orig_y.tolist(), l_norm_y.tolist())
         
-        # 4. 寃곌낵 泥섎━ (洹몃옒?꾩슜 媛怨?
-        # X ?꾨줈?뚯씪 (X異??곕씪 ?대룞 ?쒖쓽 Z媛?
+        # 4. ?濡ろ뜏???癲ル슪?ｇ몭??(??숆강筌???ш끽維????좊읈??
+        # X ??ш끽維곩ㅇ?????(X?????ㅻ깹????????筌믨퀡爰?Z??
         self.x_profile = []
         self._world_x_profile = []
         if contours_x:
             pts_local = np.vstack(contours_x)
             pts_world = get_local_to_world(pts_local)
-            # X媛?湲곗??쇰줈 ?뺣젹
+            # X????れ삀?????⑥???嶺뚮㉡?ｈ??
             idx = np.argsort(pts_world[:, 0])
             sorted_pts = pts_world[idx]
             self._world_x_profile = sorted_pts
-            # 洹몃옒???곗씠?? (X醫뚰몴, Z醫뚰몴)
+            # ??숆강筌??????Β???? (X???щ뮡嶺? Z???щ뮡嶺?
             self.x_profile = sorted_pts[:, [0, 2]].tolist()
             
-        # Y ?꾨줈?뚯씪 (Y異??곕씪 ?대룞 ?쒖쓽 Z媛?
+        # Y ??ш끽維곩ㅇ?????(Y?????ㅻ깹????????筌믨퀡爰?Z??
         self.y_profile = []
         self._world_y_profile = []
         if contours_y:
             pts_local = np.vstack(contours_y)
             pts_world = get_local_to_world(pts_local)
-            # Y媛?湲곗??쇰줈 ?뺣젹
+            # Y????れ삀?????⑥???嶺뚮㉡?ｈ??
             idx = np.argsort(pts_world[:, 1])
             sorted_pts = pts_world[idx]
             self._world_y_profile = sorted_pts
-            # 洹몃옒???곗씠?? (Y醫뚰몴, Z醫뚰몴)
+            # ??숆강筌??????Β???? (Y???щ뮡嶺? Z???щ뮡嶺?
             self.y_profile = sorted_pts[:, [1, 2]].tolist()
             
         self.profileUpdated.emit(self.x_profile, self.y_profile)
         self.update()
 
     def draw_roi_box(self):
-        """2D ROI (?щ줈???곸뿭) 諛??몃뱾 ?쒓컖??"""
+        """2D ROI (??繞?????ㅼ굡?? ???嶺뚮ㅎ?볠뤃???癰????"""
         glDisable(GL_LIGHTING)
         glDisable(GL_DEPTH_TEST)
         glEnable(GL_BLEND)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
         
         x1, x2, y1, y2 = self.roi_bounds
-        z = 0.08 # 諛붾떏?먯꽌 ?댁쭩 ?꾩? (Z-fight 諛⑹?)
+        z = 0.08 # ?袁⑸즴???????????? ??? (Z-fight ?袁⑸젻泳?)
 
         # Ensure min/max ordering (defensive)
         try:
@@ -4770,7 +4785,7 @@ class Viewport3D(QOpenGLWidget):
         glEnable(GL_LIGHTING)
 
     def draw_roi_cut_edges(self):
-        """ROI ?대━?묒쑝濡??앷린???섎┝ 寃쎄퀎???⑤㈃?? ?ㅻ쾭?덉씠"""
+        """ROI ???????筌뤿뱶?????룸ħ逾????嚥▲볧꼤 ?濡ろ뜑????????몃뱠?? ????곷츉???源낇꼧"""
         edges = getattr(self, "roi_cut_edges", None)
         if not edges:
             return
@@ -4823,10 +4838,10 @@ class Viewport3D(QOpenGLWidget):
         glEnable(GL_LIGHTING)
 
     def draw_roi_caps(self):
-        """ROI濡??섎┛ ?⑤㈃??'罹??쒓퍚) 硫??쇰줈 梨꾩썙 ?뚮뜑留?
+        """Draw ROI cap faces for clipped cross-sections."""
 
-        NOTE: ROI ?대┰ ?뚮젅??GL_CLIP_PLANE1~4)??enable ???곹깭?먯꽌 ?몄텧?섎뒗 寃껋쓣 沅뚯옣.
-        """
+        # NOTE: clip planes for ROI caps are managed by caller.
+
         caps = getattr(self, "roi_cap_verts", None)
         if not caps:
             return
@@ -4842,7 +4857,7 @@ class Viewport3D(QOpenGLWidget):
             if verts is None:
                 continue
 
-            # ?덈떒 ?대?媛 鍮꾩뼱 蹂댁씠吏 ?딅룄濡??뚯깋 ?ㅻ㈃?쇰줈 罹≪쓣 梨꾩썎?덈떎.
+            # ????덊렭 ?????좊읈 ????룹젂??怨뚮옖???ル쵐?? ????녳뵣??????????醫딅뱠???⑥??癲ル슓釉???癲???????덊렡.
             if str(key).startswith("x"):
                 glColor4f(0.60, 0.60, 0.60, 1.0)
             else:
@@ -4861,7 +4876,7 @@ class Viewport3D(QOpenGLWidget):
 
     @staticmethod
     def _polygon_area2(points_2d: np.ndarray) -> float:
-        """2D ?대━怨?signed area*2 (shoelace)."""
+        """2D ?????signed area*2 (shoelace)."""
         pts = np.asarray(points_2d, dtype=np.float64).reshape(-1, 2)
         if pts.shape[0] < 3:
             return 0.0
@@ -4871,7 +4886,7 @@ class Viewport3D(QOpenGLWidget):
 
     @staticmethod
     def _sanitize_polygon_2d(points_2d: np.ndarray, max_points: int = 800, eps: float = 1e-6) -> Optional[np.ndarray]:
-        """triangulation??2D ?대━?쇱씤 ?뺣━(以묐났 ?쒓굅/?ロ옒 ?쒓굅/?ㅼ슫?섑뵆)."""
+        """triangulation??2D ?????繹먮끏???嶺뚮㉡?섌걡?濚욌꼬?댄꺇????癰귙끋源????????癰귙끋源????源낅????얜?源?."""
         try:
             pts = np.asarray(points_2d, dtype=np.float64).reshape(-1, 2)
         except Exception:
@@ -4885,7 +4900,7 @@ class Viewport3D(QOpenGLWidget):
         if pts.shape[0] < 3:
             return None
 
-        # ?ロ엺 猷⑦봽硫?留덉?留????쒓굅
+        # ???????룸Ŧ爾??녿짗壤?癲ル슢???癲?????癰귙끋源?
         try:
             if float(np.linalg.norm(pts[0] - pts[-1])) <= eps:
                 pts = pts[:-1]
@@ -4895,7 +4910,7 @@ class Viewport3D(QOpenGLWidget):
         if pts.shape[0] < 3:
             return None
 
-        # ?곗냽 以묐났 ?쒓굅
+        # ???Β?ろ떗 濚욌꼬?댄꺇????癰귙끋源?
         if pts.shape[0] >= 2:
             d = np.linalg.norm(np.diff(pts, axis=0), axis=1)
             keep = np.ones((pts.shape[0],), dtype=bool)
@@ -4905,7 +4920,7 @@ class Viewport3D(QOpenGLWidget):
         if pts.shape[0] < 3:
             return None
 
-        # ?덈Т 議곕??섎㈃ ?ㅼ슫?섑뵆
+        # ?????釉뚰????嚥??????源낅????얜?源?
         if int(pts.shape[0]) > int(max_points):
             step = int(np.ceil(float(pts.shape[0]) / float(max_points)))
             step = max(1, step)
@@ -4914,7 +4929,7 @@ class Viewport3D(QOpenGLWidget):
         if pts.shape[0] < 3:
             return None
 
-        # ?ㅼ슫?섑뵆 ???ㅼ떆 ?뺣━
+        # ???源낅????얜?源??????怨뺣빰 ?嶺뚮㉡?섌걡?
         try:
             if float(np.linalg.norm(pts[0] - pts[-1])) <= eps:
                 pts = pts[:-1]
@@ -4952,14 +4967,14 @@ class Viewport3D(QOpenGLWidget):
     def _triangulate_ear_clip(
         cls, polygon_2d: np.ndarray, eps: float = 1e-12
     ) -> Optional[list[tuple[int, int, int]]]:
-        """?⑥씪 猷⑦봽(? ?놁쓬)??ear-clipping ?쇨컖遺꾪븷. ?ㅽ뙣 ??None."""
+        """???쒒???룸Ŧ爾???? ???⑤챶苡???ear-clipping ???館???됰슣維?? ????됰꽡 ??None."""
         pts = np.asarray(polygon_2d, dtype=np.float64).reshape(-1, 2)
         n = int(pts.shape[0])
         if n < 3:
             return None
 
-        # CCW濡??뺣젹
-        idx_map = list(range(n))  # pts ?몃뜳??-> ?낅젰 polygon_2d ?몃뜳??
+        # CCW???嶺뚮㉡?ｈ??
+        idx_map = list(range(n))  # pts ?嶺뚮ㅎ????-> ????곸죷 polygon_2d ?嶺뚮ㅎ????
         if cls._polygon_area2(pts) < 0.0:
             pts = pts[::-1].copy()
             idx_map = idx_map[::-1]
@@ -5037,7 +5052,7 @@ class Viewport3D(QOpenGLWidget):
         return tris if tris else None
 
     def _rebuild_roi_caps(self):
-        """?꾩옱 ROI ?섎┝ 寃쎄퀎??roi_cut_edges)濡?罹??쇨컖?? 踰꾪뀓?ㅻ? 媛깆떊."""
+        """??ш끽維??ROI ??嚥▲볧꼤 ?濡ろ뜑????roi_cut_edges)??癲????館??? ?類?????? ??좊즲???"""
         self.roi_cap_verts = {"x1": None, "x2": None, "y1": None, "y2": None}
         if not getattr(self, "roi_enabled", False):
             return
@@ -5058,7 +5073,7 @@ class Viewport3D(QOpenGLWidget):
             if not contours:
                 continue
 
-            # 媛????硫댁쟻 湲곗?) 猷⑦봽 1媛쒕쭔 罹≪쑝濡??ъ슜
+            # ??좊읈????癲ル슢??????れ삀??) ??룸Ŧ爾??1??좊즵獒뺣끀??癲ル슓釉????肉?????
             best_pts2d = None
             best_area = 0.0
             cloud_pts2d = []
@@ -5087,7 +5102,7 @@ class Viewport3D(QOpenGLWidget):
                     best_area = area
                     best_pts2d = pts2
 
-            # 猷⑦봽瑜?紐?留뚮뱾硫??? ?좊텇 議곌컖留?議댁옱) ?꾩껜 ?먯쑝濡?convex hull 罹?
+            # ??룸Ŧ爾??녿쑟筌?癲?癲ル슢???????떵??? ???ル탛???釉뚰??㉱??뒃壤??釉뚰??? ??ш끽維?????筌뤿뱶??convex hull 癲?
             if best_pts2d is None or best_pts2d.shape[0] < 3:
                 if not cloud_pts2d:
                     continue
@@ -5134,7 +5149,7 @@ class Viewport3D(QOpenGLWidget):
                 self.roi_cap_verts[key] = np.asarray(verts, dtype=np.float32)
 
     def draw_roi_section_plots(self):
-        """ROI ?⑤㈃ 諛붾떏 諛곗튂 誘몃━蹂닿린 (x異??⑤㈃=+X 諛⑺뼢, y異??⑤㈃=+Y 諛⑺뼢)."""
+        """Draw ROI section plots on the floor plane."""
         roi_sec = getattr(self, "roi_section_world", None)
         if not roi_sec:
             return
@@ -5241,8 +5256,8 @@ class Viewport3D(QOpenGLWidget):
             z_min = float(np.min(pts[:, 2]))
             y_span = max(1e-6, y_max - y_min)
             scale_y = max(1e-6, (max_y - min_y)) / y_span
-            # X異?ROI ?⑤㈃? ?쇱씤 ?⑤㈃ '?몃줈(?곗륫 諛곗튂)'? 媛숈? 洹쒖튃?쇰줈 諛곗튂
-            # (z -> X, y-湲몄씠 -> Y[硫붿돩 湲몄씠??留욎떠 ?ㅼ???).
+            # X??ROI ????몃뱠?? ??繹먮끏??????몃뱠 '?嶺뚮ㅎ?붷ㅇ????Β? ?袁⑸즲???'?? ??좊즵?? ???獒????⑥???袁⑸즲???
+            # (z -> X, y-??ヂ?筌??-> Y[癲ル슢??????ヂ?筌???癲ル슢?????????).
             base_x = max_x + float(margin)
             base_y = min_y
             for pt in pts:
@@ -5259,7 +5274,7 @@ class Viewport3D(QOpenGLWidget):
             x_min = float(np.min(pts[:, 0]))
             z_min = float(np.min(pts[:, 2]))
             base_x = min_x
-            base_y = max_y + float(margin)  # Y 諛⑺뼢 ?⑤㈃: +Y 諛⑺뼢
+            base_y = max_y + float(margin)  # Y ?袁⑸젻泳?떑??????몃뱠: +Y ?袁⑸젻泳?떑??
             for pt in pts:
                 out.append(
                     [
@@ -5273,7 +5288,7 @@ class Viewport3D(QOpenGLWidget):
         return []
 
     def _compute_roi_cut_edges_sync(self, bounds: list[float] | None = None) -> dict[str, list[np.ndarray]]:
-        """Enter ?뺤젙 吏곸쟾???꾩옱 ROI 寃쎄퀎 ?⑤㈃???숆린 怨꾩궛."""
+        """Enter ?嶺뚮Ĳ???癲ル슣???????ш끽維??ROI ?濡ろ뜑???????몃뱠??????뗫탿 ??節뚮쳮雅?"""
         out: dict[str, list[np.ndarray]] = {"x1": [], "x2": [], "y1": [], "y2": []}
 
         obj = self.selected_obj
@@ -5412,7 +5427,7 @@ class Viewport3D(QOpenGLWidget):
         return out
 
     def _roi_live_delay_ms(self) -> int:
-        """硫붿돩 ?ш린??留욎떠 ROI ?ㅼ떆媛??낅뜲?댄듃 吏?곗쓣 ?꾪솕."""
+        """癲ル슢?????????癲ル슢????ROI ???怨뺣빰??????녿ぅ??熬곣뫀肄?癲ル슣????Β?援???ш낄援??"""
         try:
             base = int(getattr(self, "_roi_live_update_delay_ms", 220) or 220)
         except Exception:
@@ -5486,7 +5501,7 @@ class Viewport3D(QOpenGLWidget):
                 _log_ignored_exception()
         self._roi_edges_thread = None
 
-        # ?쒕옒洹?以?理쒖떊 bounds媛 ?湲?以묒씠硫??ㅼ떆 怨꾩궛
+        # ??筌먦끉援??濚?癲ル슔?됭짆??bounds??좊읈 ????濚욌꼬?댄꺍??ル쵐異????怨뺣빰 ??節뚮쳮雅?
         if getattr(self, "roi_enabled", False) and self._roi_edges_pending_bounds is not None:
             self._roi_edges_timer.start(1)
 
@@ -5502,7 +5517,7 @@ class Viewport3D(QOpenGLWidget):
 
         self.roi_cut_edges = cleaned
 
-        # ROI 罹??섎┛ 硫?梨꾩슦湲? 媛깆떊
+        # ROI 癲???嚥▲볧꺙 癲?癲?????? ??좊즲???
         try:
             dragging_roi = bool(getattr(self, "_roi_move_dragging", False) or getattr(self, "roi_rect_dragging", False))
             active_edge = str(getattr(self, "active_roi_edge", "") or "").strip().lower()
@@ -5516,7 +5531,7 @@ class Viewport3D(QOpenGLWidget):
         except Exception:
             _log_ignored_exception()
 
-        # ROI媛 '?뉗븘議뚯쓣 ?? ?⑤㈃??諛붾떏??諛곗튂 (?뚯쟾?댁꽌 遊먮룄 ?⑤㈃ ?뺤씤 媛??
+        # ROI??좊읈 '?????떋?釉뚰????? ????몃뱠???袁⑸즴??????袁⑸즲???(???????⑤똾留???????????몃뱠 ?嶺뚮Ĳ?됮???좊읈??
         self.roi_section_world = {"x": [], "y": []}
         try:
             obj = self.selected_obj
@@ -5526,7 +5541,7 @@ class Viewport3D(QOpenGLWidget):
                 margin = 5.0
 
                 x1, x2, y1, y2 = [float(v) for v in self.roi_bounds]
-                thin_th = 1.0  # cm: ?대낫???뉗쑝硫?"?⑤㈃"?쇰줈 媛꾩＜
+                thin_th = 1.0  # cm: ??????????뺧┼?"????몃뱠"???⑥????좊즲??뱀낄?
 
                 def pick_main(contours):
                     if not contours:
@@ -5543,7 +5558,7 @@ class Viewport3D(QOpenGLWidget):
                             best = c
                     return best
 
-                # X 諛⑺뼢 ?⑤㈃ (醫뚯슦 ??씠 留ㅼ슦 ?뉗쓣 ?? -> +X 諛⑺뼢??諛곗튂 (Y-Z)
+                # X ?袁⑸젻泳?떑??????몃뱠 (???щ뮝??????癲ル슢????????援??? -> +X ?袁⑸젻泳?떑????袁⑸즲???(Y-Z)
                 if abs(x2 - x1) <= thin_th:
                     main = pick_main(self.roi_cut_edges.get("x1", []) or self.roi_cut_edges.get("x2", []))
                     if main is not None and len(main) >= 2:
@@ -5557,7 +5572,7 @@ class Viewport3D(QOpenGLWidget):
                         base_y = float(b[0][1])
                         pts = []
                         for pt in main:
-                            # ?쇱씤 ?⑤㈃ ?몃줈 諛곗튂? ?숈씪: z -> X, y-湲몄씠 -> Y(硫붿돩 湲몄씠 ?ㅼ???
+                            # ??繹먮끏??????몃뱠 ?嶺뚮ㅎ?붷ㅇ??袁⑸즲???? ????곕럡: z -> X, y-??ヂ?筌??-> Y(癲ル슢??????ヂ?筌???????
                             pts.append(
                                 [
                                     base_x + (float(pt[2]) - z_min),
@@ -5567,7 +5582,7 @@ class Viewport3D(QOpenGLWidget):
                             )
                         self.roi_section_world["x"] = pts
 
-                # Y 諛⑺뼢 ?⑤㈃ (?곹븯 ??씠 留ㅼ슦 ?뉗쓣 ?? -> +Y 諛⑺뼢??諛곗튂 (X-Z)
+                # Y ?袁⑸젻泳?떑??????몃뱠 (???ㅺ강??????癲ル슢????????援??? -> +Y ?袁⑸젻泳?떑????袁⑸즲???(X-Z)
                 if abs(y2 - y1) <= thin_th:
                     main = pick_main(self.roi_cut_edges.get("y1", []) or self.roi_cut_edges.get("y2", []))
                     if main is not None and len(main) >= 2:
@@ -5578,7 +5593,7 @@ class Viewport3D(QOpenGLWidget):
                         base_y = max_y + margin
                         pts = []
                         for pt in main:
-                            # XZ ?⑤㈃??"媛濡?X, ?몃줈=Z"濡?諛곗튂 (?믪씠媛 ?꾨줈 ?ν븯?꾨줉)
+                            # XZ ????몃뱠??"??좊읈??X, ?嶺뚮ㅎ?붷ㅇ?Z"???袁⑸즲???(?亦껋꼨援?얠×琉????ш끽維곩ㅇ??濚왿몾???ш끽維곩ㅇ?
                             pts.append(
                                 [
                                     base_x + (float(pt[0]) - x_min),
@@ -5596,7 +5611,7 @@ class Viewport3D(QOpenGLWidget):
         pass
 
     def extract_roi_silhouette(self):
-        """吏?뺣맂 ROI ?곸뿭??硫붿돩 ?멸낸(?ㅻ（?? 異붿텧"""
+        """癲ル슣??嶺뚮㉡?℡퐲?ROI ???ㅼ굡???癲ル슢?????嶺뚮∥梨뜻쾮?????노젵?? ??⑤베毓??"""
         if not self.selected_obj or self.selected_obj.mesh is None:
             return
             
@@ -5607,7 +5622,7 @@ class Viewport3D(QOpenGLWidget):
         rot_mat = R.from_euler('XYZ', obj.rotation, degrees=True).as_matrix()
         world_v = (rot_mat @ (obj.mesh.vertices * obj.scale).T).T + obj.translation
         
-        # 2. ROI ?곸뿭 ?댁쓽 ?먮뱾 ?꾪꽣留?
+        # 2. ROI ???ㅼ굡?????⑤챶爰????????ш낄援?轅곗땡?
         mask = (world_v[:, 0] >= x1) & (world_v[:, 0] <= x2) & \
                (world_v[:, 1] >= y1) & (world_v[:, 1] <= y2)
         
@@ -5615,14 +5630,14 @@ class Viewport3D(QOpenGLWidget):
         if len(inside_v) < 3:
             return
             
-        # 3. 2D ?ъ쁺 (XY ?됰㈃) 諛?Convex Hull ?먮뒗 Alpha Shape濡??멸낸 異붿텧
-        # ?ш린?쒕뒗 媛꾨떒??Convex Hull ?ъ슜 (異뷀썑 蹂듭옟???뺤긽? Alpha Shape ?꾩슂)
+        # 3. 2D ????(XY ??野껊갭?? ??Convex Hull ???獒?Alpha Shape???嶺뚮∥梨뜻쾮???⑤베毓??
+        # ?????筌먲퐢痢???좊즲????Convex Hull ????(??????怨뚮옖甕????嶺뚮Ĳ?놅쭕?? Alpha Shape ??ш끽維??
         from scipy.spatial import ConvexHull
         points_2d = inside_v[:, :2]
         try:
             hull = ConvexHull(points_2d)
             silhouette = points_2d[hull.vertices]
-            # ?ㅼ떆 2D 由ъ뒪???뺥깭濡?諛섑솚
+            # ???怨뺣빰 2D ?域밸Ŧ遊얕짆???嶺뚮쮳釉띚???袁⑸즵???
             self.roiSilhouetteExtracted.emit(silhouette.tolist())
         except Exception:
             _log_ignored_exception()
@@ -5680,18 +5695,18 @@ class Viewport3D(QOpenGLWidget):
         glEnable(GL_LIGHTING)
 
     def _draw_axis_label_marker(self, x, y, z, size, axis):
-        """X/Y 異??쇰꺼??媛꾨떒??湲고븯?숈쟻 ?뺥깭濡?洹몃━湲?(XY ?됰㈃???쒖떆)"""
+        """X/Y ?????⑤슢?????좊즲??????れ삀???????깆뱾 ?嶺뚮쮳釉띚????숆강筌??ⓦ꺂糾?(XY ??野껊갭?????筌?六?"""
         glLineWidth(2.5)
         glBegin(GL_LINES)
         
         if axis == 'X':
-            # X 紐⑥뼇 (YZ ?됰㈃???쒖떆, X異??앹뿉??
+            # X 癲ル슢?꾤땟怨⑹젂?(YZ ??野껊갭?????筌?六? X????獄쏅챸諭??
             glVertex3f(x, -size, z + size)
             glVertex3f(x, size, z - size)
             glVertex3f(x, -size, z - size)
             glVertex3f(x, size, z + size)
         elif axis == 'Y':
-            # Y 紐⑥뼇 (XZ ?됰㈃???쒖떆, Y異??앹뿉??
+            # Y 癲ル슢?꾤땟怨⑹젂?(XZ ??野껊갭?????筌?六? Y????獄쏅챸諭??
             glVertex3f(-size, y, z + size)
             glVertex3f(0, y, z)
             glVertex3f(size, y, z + size)
@@ -5702,11 +5717,11 @@ class Viewport3D(QOpenGLWidget):
         glEnd()
     
     def _draw_axis_label_marker_z(self, x, y, z, size, axis):
-        """Z 異??쇰꺼??媛꾨떒??湲고븯?숈쟻 ?뺥깭濡?洹몃━湲?(XY ?됰㈃???쒖떆, Z異??앹뿉??"""
+        """Z ?????⑤슢?????좊즲??????れ삀???????깆뱾 ?嶺뚮쮳釉띚????숆강筌??ⓦ꺂糾?(XY ??野껊갭?????筌?六? Z????獄쏅챸諭??"""
         glLineWidth(2.5)
         glBegin(GL_LINES)
         
-        # Z 紐⑥뼇 (XY ?됰㈃???쒖떆)
+        # Z 癲ル슢?꾤땟怨⑹젂?(XY ??野껊갭?????筌?六?
         glVertex3f(x - size, y + size, z)
         glVertex3f(x + size, y + size, z)
         glVertex3f(x + size, y + size, z)
@@ -5718,18 +5733,40 @@ class Viewport3D(QOpenGLWidget):
 
         
     def draw_orientation_hud(self):
-        """?곗륫 ?섎떒???묒? 諛⑺뼢 媛?대뱶(HUD) 洹몃━湲?"""
+        """???Β? ??嚥▲꺂?????? ?袁⑸젻泳?떑????좊읈????HUD) ??숆강筌??ⓦ꺂糾?"""
         glDisable(GL_DEPTH_TEST)
         glDisable(GL_LIGHTING)
         
-        # 1. 酉고룷???뺣낫 ???
+        # 1. ?????????嶺뚮㉡?€쾮?????
         viewport = glGetIntegerv(GL_VIEWPORT)
         w, h = viewport[2], viewport[3]
         
-        # 2. ?꾩옱 酉??됰젹 媛?몄삤湲?(?뚯쟾 ?뺣낫 異붿텧??
-        view_matrix = glGetDoublev(GL_MODELVIEW_MATRIX)
+        # 2. ??ш끽維???????⑥ъ／ ??좊읈?嶺뚮ㅎ?닸쾮濡㏓섀?(??????嶺뚮㉡?€쾮???⑤베毓???
+        # Build HUD orientation from camera-only view transform so the
+        # indicator stays stable in canonical 6-way views.
+        view_matrix = None
+        pushed_mv = False
+        try:
+            glMatrixMode(GL_MODELVIEW)
+            glPushMatrix()
+            pushed_mv = True
+            glLoadIdentity()
+            self.camera.apply()
+            view_matrix = glGetDoublev(GL_MODELVIEW_MATRIX)
+        except Exception:
+            _log_ignored_exception("Orientation HUD camera matrix build failed")
+            try:
+                view_matrix = glGetDoublev(GL_MODELVIEW_MATRIX)
+            except Exception:
+                view_matrix = None
+        finally:
+            if pushed_mv:
+                try:
+                    glPopMatrix()
+                except Exception:
+                    _log_ignored_exception()
         
-        # 3. HUD???꾩슜 酉고룷???ㅼ젙 (?곗륫 ?섎떒 80x80)
+        # 3. HUD????ш끽維?????????????源놁젳 (???Β? ??嚥▲꺂??80x80)
         hud_size = 100
         margin = 10
         glViewport(w - hud_size - margin, margin, hud_size, hud_size)
@@ -5743,20 +5780,26 @@ class Viewport3D(QOpenGLWidget):
         glPushMatrix()
         glLoadIdentity()
         
-        # 4. 酉??됰젹?먯꽌 ?뚯쟾留??곸슜 (?대룞 ?쒓굅)
+        # 4. ?????⑥ъ／??????????꾩땡????ㅼ굣??(??????癰귙끋源?
         try:
+            if view_matrix is None:
+                raise ValueError("HUD view matrix unavailable")
             rot_matrix = np.array(view_matrix, dtype=np.float64).reshape(4, 4)
-            # ?대룞 ?깅텇 ?쒓굅 (Column-major 湲곗? 12, 13, 14踰덉㎏ ?붿냼媛 4??1,2,3??
-            # numpy array??寃쎌슦 r, c ?몃뜳???ъ슜
+            # ?????濚밸Ŧ援????癰귙끋源?(Column-major ??れ삀?? 12, 13, 14?類??????釉먯뒠?곕쉠琉??4??1,2,3??
+            # numpy array???濡ろ뜑???r, c ?嶺뚮ㅎ????????
             rot_matrix[3, 0] = 0.0
             rot_matrix[3, 1] = 0.0
             rot_matrix[3, 2] = 0.0
+            rot_matrix[0, 3] = 0.0
+            rot_matrix[1, 3] = 0.0
+            rot_matrix[2, 3] = 0.0
+            rot_matrix[3, 3] = 1.0
             glLoadMatrixd(rot_matrix)
         except Exception:
-            # ?됰젹 泥섎━???ㅽ뙣??寃쎌슦 HUD ?뚯쟾 ?곸슜 ?앸왂 (理쒖냼???щ옒?쒕뒗 諛⑹?)
+            # ???⑥ъ／ 癲ル슪?ｇ몭???????됰꽡???濡ろ뜑???HUD ????????ㅼ굣????筌뤾쑴??(癲ル슔?됭짆????????筌먲퐢痢??袁⑸젻泳?)
             pass
         
-        # 5. 異?洹몃━湲?(X:Red, Y:Green, Z:Blue)
+        # 5. ????숆강筌??ⓦ꺂糾?(X:Red, Y:Green, Z:Blue)
         glLineWidth(3.0)
         glBegin(GL_LINES)
         # X: Red
@@ -5773,10 +5816,10 @@ class Viewport3D(QOpenGLWidget):
         glVertex3f(0, 0, 1)
         glEnd()
         
-        # 5.5 異??쇰꺼 (X, Y, Z) - 媛?異??앹뿉 ?쒖떆
+        # 5.5 ?????⑤슢??(X, Y, Z) - ??????獄쏅챸諭???筌?六?
         label_size = 0.12
         
-        # X ?쇰꺼
+        # X ???⑤슢??
         glColor3f(1.0, 0.2, 0.2)
         glBegin(GL_LINES)
         glVertex3f(1.1 - label_size, label_size, 0)
@@ -5785,7 +5828,7 @@ class Viewport3D(QOpenGLWidget):
         glVertex3f(1.1 + label_size, label_size, 0)
         glEnd()
         
-        # Y ?쇰꺼
+        # Y ???⑤슢??
         glColor3f(0.2, 1.0, 0.2)
         glBegin(GL_LINES)
         glVertex3f(-label_size, 1.1 + label_size, 0)
@@ -5796,7 +5839,7 @@ class Viewport3D(QOpenGLWidget):
         glVertex3f(0, 1.1 - label_size, 0)
         glEnd()
         
-        # Z ?쇰꺼
+        # Z ???⑤슢??
         glColor3f(0.2, 0.2, 1.0)
         glBegin(GL_LINES)
         glVertex3f(-label_size, label_size, 1.1)
@@ -5807,7 +5850,7 @@ class Viewport3D(QOpenGLWidget):
         glVertex3f(label_size, -label_size, 1.1)
         glEnd()
         
-        # 6. 蹂듦뎄
+        # 6. ?怨뚮옖甕걔??
         glPopMatrix()
         glMatrixMode(GL_PROJECTION)
         glPopMatrix()
@@ -5817,7 +5860,7 @@ class Viewport3D(QOpenGLWidget):
         glEnable(GL_LIGHTING)
 
     def draw_surface_runtime_hud(self):
-        """?쒕㈃ 遺꾨━(assist/overlay) ?고???怨꾩륫媛믪쓣 ?붾㈃ 醫뚯륫 ?곷떒???쒖떆."""
+        """??筌먯룆????됰슣維??assist/overlay) ???????節뚮쳮??뚭뭍筌ｋ〃泥???도 ??釉먮뻤?????щ뮝?????ㅿ폍?????筌?六?"""
         if not bool(getattr(self, "surface_runtime_hud_enabled", True)):
             return
         obj = self.selected_obj
@@ -5957,7 +6000,7 @@ class Viewport3D(QOpenGLWidget):
         alpha: float = 1.0,
         depth_write: bool = True,
     ):
-        """媛쒕퀎 硫붿돩 媛앹껜 ?뚮뜑留?(?곹깭 ?꾩닔 諛⑹? ?섑띁)."""
+        """??좊즵獒??癲ル슢??????좊즵??꼯???????異?(???ㅺ컼????ш끽維???袁⑸젻泳? ???얜Ŋ諭?."""
         glPushMatrix()
         try:
             self._draw_scene_object_impl(
@@ -5969,7 +6012,7 @@ class Viewport3D(QOpenGLWidget):
         except Exception:
             _log_ignored_exception("Failed to draw scene object", level=logging.WARNING)
         finally:
-            # ??媛앹껜 ?뚮뜑 ?ㅽ뙣媛 ?ㅼ쓬 ?꾨젅??媛앹껜 源딆씠 ?곹깭瑜??ㅼ뿼?쒗궎吏 ?딅룄濡?媛뺤젣 蹂듦뎄.
+            # ????좊즵??꼯???????????됰꽡??좊읈 ???源낆쓱 ??ш끽維?????좊즵??꼯??嚥싲갭큔??????ㅺ컼??????怨쀬굯????띾욑┼??넊 ????녳뵣????좊즴甕???怨뚮옖甕걔??
             try:
                 glBindBuffer(GL_ARRAY_BUFFER, 0)
             except Exception:
@@ -6035,9 +6078,9 @@ class Viewport3D(QOpenGLWidget):
         alpha: float = 1.0,
         depth_write: bool = True,
     ):
-        """媛쒕퀎 硫붿돩 媛앹껜 ?뚮뜑留?"""
+        """??좊즵獒??癲ル슢??????좊즵??꼯???????異?"""
 
-        # 蹂???곸슜
+        # ?怨뚮뼚?????ㅼ굣??
         try:
             tr = np.asarray(getattr(obj, "translation", [0.0, 0.0, 0.0]), dtype=np.float64).reshape(-1)
             if tr.size < 3 or (not np.isfinite(tr[:3]).all()):
@@ -6086,13 +6129,13 @@ class Viewport3D(QOpenGLWidget):
             glDepthMask(GL_FALSE)
 
         if solid_shell:
-            # 湲곕낯 ?쒖떆?먯꽌??back-face瑜??④꺼 "?띿씠 苑?李? ?뺥깭濡?蹂댁씠寃??⑸땲??
+            # ??れ삀?????筌?六??????back-face????影?낅궢 "???怨뺥꼧 ??癲? ?嶺뚮쮳釉띚???怨뚮옖??鈺곗뼚臾???筌뤾퍓???
             glEnable(GL_CULL_FACE)
             glCullFace(GL_BACK)
         else:
             glDisable(GL_CULL_FACE)
         
-        # 硫붿돩 ?ъ쭏 諛?諛앷린 理쒖쟻??(愿묓깮 異붽?濡?援닿끝 媛뺤“)
+        # 癲ル슢??????鶯????袁⑸즵??끝逾?癲ル슔?됭짆???(???뱁꺎濚???⑤베堉???????????좊즴甕??
         if not self.flat_shading:
             glEnable(GL_LIGHTING)
             glEnable(GL_COLOR_MATERIAL)
@@ -6103,24 +6146,24 @@ class Viewport3D(QOpenGLWidget):
             glDisable(GL_LIGHTING)
             glDisable(GL_COLOR_MATERIAL)
         
-        # 硫붿돩 ?됱긽
+        # 癲ル슢??????繹먭퍓彛?
         if is_selected:
-            col = (0.85, 0.85, 0.95)  # ?덈Т ?섏뼏吏 ?딄쾶 ?쎄컙 ?ㅻ떎??
+            col = (0.85, 0.85, 0.95)  # ??????筌뚯슧?癲ル슣????熬곣뫗踰???熬곣뫚??????명렡??
         else:
             col = tuple(float(c) for c in (obj.color or [0.72, 0.72, 0.78])[:3])
 
         if alpha_f < 1.0:
             glColor4f(float(col[0]), float(col[1]), float(col[2]), float(alpha_f))
         else:
-            # glColor3f??alpha瑜?嫄대뱶由ъ? ?딆쑝誘濡??댁쟾 draw??alpha媛 ?⑥쓣 ???덉뒿?덈떎.
-            # 遺덊닾紐?硫붿돩??alpha=1.0??紐낆떆???섎룄移??딆? ?대? 鍮꾩묠??留됱뒿?덈떎.
+            # glColor3f??alpha??癲꾧퀗?????ｉ?? ???怨룔걬雅?퍔源?????⑤챷??draw??alpha??좊읈 ???쒑キ??????怨?????덊렡.
+            # ??됰씭?????떻?癲ル슢?????alpha=1.0??癲ル슢?뤸뤃?????嚥▲꺃?????? ??? ????븍닱??癲ル슢??쭕?????덊렡.
             glColor4f(float(col[0]), float(col[1]), float(col[2]), 1.0)
             
-        # 釉뚮윭?쒕줈 ?좏깮??硫??섏씠?쇱씠??(?꾩떆 ?ㅻ쾭?덉씠)
+        # ??怨쀫뮛???筌먦끉큔 ???ャ뀕???癲????쒓낮???繹먮끏???(??ш끽維뽳쭛?????곷츉???源낇꼧)
         if is_selected and self.picking_mode == 'floor_brush' and self.brush_selected_faces:
             glPushMatrix()
             glDisable(GL_LIGHTING)
-            # 硫붿돩蹂대떎 ?꾩＜ ?쎄컙 ?욎뿉 洹몃━湲?(Z-fight 諛⑹?)
+            # 癲ル슢??????룱?????ш끽維????熬곣뫚????嚥▲꺆諭???숆강筌??ⓦ꺂糾?(Z-fight ?袁⑸젻泳?)
             glPolygonOffset(-1.0, -1.0)
             glEnable(GL_POLYGON_OFFSET_FILL)
             glColor3f(1.0, 0.2, 0.2)
@@ -6134,7 +6177,7 @@ class Viewport3D(QOpenGLWidget):
             glEnable(GL_LIGHTING)
             glPopMatrix()
 
-        # ?좏깮??硫??섏씠?쇱씠??(SelectionPanel)
+        # ???ャ뀕???癲????쒓낮???繹먮끏???(SelectionPanel)
         if is_selected and self.picking_mode in {'select_face', 'select_brush'} and obj.selected_faces:
             glPushMatrix()
             glDisable(GL_LIGHTING)
@@ -6157,7 +6200,7 @@ class Viewport3D(QOpenGLWidget):
             vbo_id = 0
         can_draw_vbo = vbo_id > 0 and int(getattr(obj, "vertex_count", 0) or 0) > 0
         if can_draw_vbo:
-            # VBO 諛⑹떇 ?뚮뜑留?
+            # VBO ?袁⑸젻泳???????異?
             glEnableClientState(GL_VERTEX_ARRAY)
             glEnableClientState(GL_NORMAL_ARRAY)
 
@@ -6165,10 +6208,10 @@ class Viewport3D(QOpenGLWidget):
             glVertexPointer(3, GL_FLOAT, 24, ctypes.c_void_p(0))
             glNormalPointer(GL_FLOAT, 24, ctypes.c_void_p(12))
 
-            # 1) 湲곕낯 ?됱긽 ?뚮뜑留?
+            # 1) ??れ삀?????繹먭퍓彛??????異?
             glDrawArrays(GL_TRIANGLES, 0, obj.vertex_count)
 
-            # 2) 諛붾떏 愿??z<0) ?곸뿭??珥덈줉?됱쑝濡???뼱?곌린(?대━???됰㈃ ?댁슜, CPU ?ㅼ틪 ?놁쓬)
+            # 2) ?袁⑸즴????????z<0) ???ㅼ굡????縕?袁〓뭄??繹먮끏?????????ㅼ뒧?????????野껊갭?????⑤챶裕? CPU ????몃펽 ???⑤챶苡?
             if self.floor_penetration_highlight:
                 try:
                     wb = obj.get_world_bounds()
@@ -6373,7 +6416,7 @@ class Viewport3D(QOpenGLWidget):
             except Exception:
                 _log_ignored_exception("Immediate-mode mesh fallback failed", level=logging.WARNING)
         
-        # 諛붾떏 ?묒큺 硫??섏씠?쇱씠?몃뒗 ?뺤튂(諛붾떏 ?뺣젹) 愿??紐⑤뱶?먯꽌留??쒖떆 (??⑸웾 硫붿돩 ?깅뒫)
+        # ?袁⑸즴????????野?癲????쒓낮???繹먮끏??嶺뚮ㅎ?볢짆??嶺뚮Ĳ????袁⑸즴?????嶺뚮㉡?ｈ?? ????癲ル슢?꾤땟??????節뉗땡???筌?六?(????筌뤾쑴??癲ル슢?????濚밸Ŧ援앲짆?
         if is_selected and self.picking_mode in {'floor_3point', 'floor_face', 'floor_brush'}:
             self._draw_floor_contact_faces(obj)
 
@@ -6496,20 +6539,20 @@ class Viewport3D(QOpenGLWidget):
                 _log_ignored_exception()
     
     def _draw_floor_contact_faces(self, obj: SceneObject):
-        """諛붾떏(Z=0) 洹쇱쿂 硫댁쓣 珥덈줉?됱쑝濡??섏씠?쇱씠??(?뺤튂 怨쇱젙 以??쒖떆)"""
+        """?袁⑸즴????Z=0) ?????뗫쐩?癲ル슢?????縕?袁〓뭄??繹먮끏??????쒓낮???繹먮끏???(?嶺뚮Ĳ?????貫???濚???筌?六?"""
         if obj.mesh is None or obj.mesh.faces is None:
             return
         
         faces = obj.mesh.faces
         vertices = obj.mesh.vertices
         
-        # ?뚯쟾 ?됰젹 怨꾩궛
+        # ????????⑥ъ／ ??節뚮쳮雅?
         from scipy.spatial.transform import Rotation as R
         r = R.from_euler('XYZ', obj.rotation, degrees=True).as_matrix()
         
         total_faces = len(faces)
         
-        # ?섑뵆留?(???硫붿돩)
+        # ???얜?源듸┼?(????癲ル슢????
         sample_size = min(80000, total_faces)
         if total_faces > sample_size:
             # Deterministic stride sampling avoids per-frame flicker and random CPU spikes.
@@ -6522,13 +6565,13 @@ class Viewport3D(QOpenGLWidget):
         v_indices = sample_faces[:, 0]
         v_points = vertices[v_indices] * obj.scale
         
-        # ?붾뱶 Z 醫뚰몴 怨꾩궛
+        # ??釉먮폇??Z ???щ뮡嶺???節뚮쳮雅?
         world_z = (r[2, 0] * v_points[:, 0] + 
                    r[2, 1] * v_points[:, 1] + 
                    r[2, 2] * v_points[:, 2]) + obj.translation[2]
         
-        # 諛붾떏 洹쇱쿂 媛먯? (Z < 0.5cm ?먮뒗 Z < 0)
-        # ?뺤튂 紐⑤뱶?먯꽌??諛붾떏 洹쇱쿂(0.5cm ?대궡)源뚯? ?쒖떆
+        # ?袁⑸즴?????????뗫쐩???좊즴?? (Z < 0.5cm ???獒?Z < 0)
+        # ?嶺뚮Ĳ???癲ル슢?꾤땟?????????袁⑸즴?????????뗫쐩?0.5cm ??雅?嚥싲갭큔?? ??筌?六?
         threshold = 0.5 if self.picking_mode == 'floor_3point' else 0.0
         near_floor_mask = world_z < threshold
         near_pos = np.where(near_floor_mask)[0]
@@ -6538,7 +6581,7 @@ class Viewport3D(QOpenGLWidget):
         if len(near_floor_indices) == 0:
             return
         
-        # 珥덈줉??梨꾩슦湲?
+        # ?縕?袁〓뭄??癲??????
         glPushAttrib(GL_ALL_ATTRIB_BITS)
         glDisable(GL_LIGHTING)
         glDisable(GL_CULL_FACE)
@@ -6548,22 +6591,22 @@ class Viewport3D(QOpenGLWidget):
         glEnable(GL_POLYGON_OFFSET_FILL)
         glPolygonOffset(-4.0, -4.0)
         
-        # ?됱긽: 諛붾떏 ?꾨옒(Z<0)??吏꾪븳 珥덈줉, 洹쇱쿂(0<Z<0.5)???고븳 珥덈줉
+        # ??繹먭퍓彛? ?袁⑸즴??????ш끽維??Z<0)??癲ル슣???ㅻ눀??縕?袁〓뭄? ?????뗫쐩?0<Z<0.5)?????μ쪚???縕?袁〓뭄?
         glBegin(GL_TRIANGLES)
         max_fill_faces = min(10000, int(len(near_floor_indices)))
         for k in range(max_fill_faces):
             face_idx = int(near_floor_indices[k])
             f = faces[face_idx]
             v0_z = float(near_floor_z[k])
-            # ?섑룊 ?쒖젏?대굹 ?섎㈃ ?쒖젏(Elevation < 0)?먯꽌?????щ챸?섍쾶 泥섎━?섏뿬 硫붿돩瑜?媛由ъ? ?딄쾶 ??
+            # ???얜Ŋ????筌믨퀣???????嚥?????筌믨퀣??Elevation < 0)??????????嶺????곕쿊 癲ル슪?ｇ몭???筌뚯슦肉?癲ル슢?????????좊읈?域? ??熬곣뫗踰???
             is_bottom_view = self.camera.elevation < -45
             alpha_penetrate = 0.1 if is_bottom_view else 0.4
             alpha_near = 0.05 if is_bottom_view else 0.2
             
             if v0_z < 0:
-                glColor4f(0.0, 1.0, 0.2, alpha_penetrate)  # 吏꾪븳 珥덈줉 (愿??
+                glColor4f(0.0, 1.0, 0.2, alpha_penetrate)  # 癲ル슣???ㅻ눀??縕?袁〓뭄?(????
             else:
-                glColor4f(0.5, 1.0, 0.5, alpha_near)  # ?고븳 珥덈줉 (洹쇱쿂)
+                glColor4f(0.5, 1.0, 0.5, alpha_near)  # ???μ쪚???縕?袁〓뭄?(?????뗫쐩?
             for v_idx in f:
                 glVertex3fv(vertices[v_idx])
         glEnd()
@@ -6573,28 +6616,28 @@ class Viewport3D(QOpenGLWidget):
         glPopAttrib()
     
     def draw_mesh_dimensions(self, obj: SceneObject):
-        """硫붿돩 以묒떖????옄???쒖떆 (?쒕옒洹몃줈 ?대룞 媛??"""
+        """癲ル슢????濚욌꼬?댄꺍??????????筌?六?(??筌먦끉援??숆강筌?쑙鍮???????좊읈??"""
         if obj.mesh is None:
             return
 
-        # ?붾뱶 醫뚰몴?먯꽌 諛붿슫??諛뺤뒪 怨꾩궛 (??⑸웾 硫붿돩?먯꽌??O(1))
+        # ??釉먮폇?????щ뮡嶺??????袁⑸즴?????袁⑸즴甕????節뚮쳮雅?(????筌뤾쑴??癲ル슢?????????O(1))
         wb = obj.get_world_bounds()
         min_pt = wb[0]
         max_pt = wb[1]
         
         center_x = (min_pt[0] + max_pt[0]) / 2
         center_y = (min_pt[1] + max_pt[1]) / 2
-        z = min_pt[2] + 0.1  # 諛붾떏 ?댁쭩 ??        
-        # 以묒떖?????(?쒕옒洹몄슜)
+        z = min_pt[2] + 0.1  # ?袁⑸즴???????? ??        
+        # 濚욌꼬?댄꺍???????(??筌먦끉援??숆강筌??
         self._mesh_center = np.array([center_x, center_y, z])
         
         glDisable(GL_LIGHTING)
         glDisable(GL_DEPTH_TEST)
         
-        # ?묒? ??옄??(鍮④컙??
+        # ??? ?????(??筌륁슕???
         glColor3f(1.0, 0.3, 0.3)
         glLineWidth(2.0)
-        marker_size = 1.5  # 怨좎젙 ?ш린 1.5cm
+        marker_size = 1.5  # ??關履??????1.5cm
         glBegin(GL_LINES)
         glVertex3f(center_x - marker_size, center_y, z)
         glVertex3f(center_x + marker_size, center_y, z)
@@ -6602,7 +6645,7 @@ class Viewport3D(QOpenGLWidget):
         glVertex3f(center_x, center_y + marker_size, z)
         glEnd()
         
-        # ?먯젏 ?쒖떆 (?뱀깋 ?묒? ??
+        # ???????筌?六?(???????? ??
         glColor3f(0.3, 0.9, 0.3)
         glBegin(GL_LINE_LOOP)
         for i in range(16):
@@ -6615,7 +6658,7 @@ class Viewport3D(QOpenGLWidget):
         glEnable(GL_LIGHTING)
 
     def draw_rotation_gizmo(self, obj: SceneObject):
-        """?뚯쟾 湲곗쫰紐?洹몃━湲?"""
+        """???????れ삀?節낅윺?ⓦ끉異???숆강筌??ⓦ꺂糾?"""
         if not self.show_gizmo:
             return
         
@@ -6623,16 +6666,16 @@ class Viewport3D(QOpenGLWidget):
         glDisable(GL_DEPTH_TEST)
         
         glPushMatrix()
-        # ?좏깮??媛앹껜???꾩튂濡??대룞
+        # ???ャ뀕?????좊즵??꼯?????ш끽維?袁?뒙?????
         glTranslatef(*obj.translation)
         
-        # 湲곗쫰紐??ш린 ?ㅼ젙 (媛앹껜 ?ㅼ???諛섏쁺)
+        # ??れ삀?節낅윺?ⓦ끉異????????源놁젳 (??좊즵??꼯????????袁⑸즵???
         size = self.gizmo_size * obj.scale
         
-        # ?섏씠?쇱씠?몄슜 異?(hover ?먮뒗 active)
+        # ???쒓낮???繹먮끏??嶺뚮ㅎ?????(hover ???獒?active)
         highlight_axis = self.active_gizmo_axis or getattr(self, '_hover_axis', None)
         
-        # X異?
+        # X??
         glColor3f(1.0, 0.2, 0.2)
         if highlight_axis == 'X':
             glLineWidth(5.0)
@@ -6644,7 +6687,7 @@ class Viewport3D(QOpenGLWidget):
         self._draw_gizmo_circle(size)
         glPopMatrix()
         
-        # Y異?
+        # Y??
         glColor3f(0.2, 1.0, 0.2)
         if highlight_axis == 'Y':
             glLineWidth(5.0)
@@ -6656,7 +6699,7 @@ class Viewport3D(QOpenGLWidget):
         self._draw_gizmo_circle(size)
         glPopMatrix()
         
-        # Z異?
+        # Z??
         glColor3f(0.2, 0.2, 1.0)
         if highlight_axis == 'Z':
             glLineWidth(5.0)
@@ -6671,7 +6714,7 @@ class Viewport3D(QOpenGLWidget):
         glEnable(GL_LIGHTING)
 
     def _draw_gizmo_circle(self, radius, segments=64):
-        """湲곗쫰紐⑥슜 ??洹몃━湲?"""
+        """??れ삀?節낅윺?ⓦ끉異????????숆강筌??ⓦ꺂糾?"""
         glBegin(GL_LINE_LOOP)
         for i in range(segments):
             angle = 2.0 * np.pi * i / segments
@@ -6681,7 +6724,7 @@ class Viewport3D(QOpenGLWidget):
         glEnd()
 
     def draw_wireframe(self, obj: SceneObject):
-        """??댁뼱?꾨젅???ㅻ쾭?덉씠"""
+        """?????⑤９苑??ш끽維???????곷츉???源낇꼧"""
         if obj is None or obj.mesh is None:
             return
         
@@ -6711,7 +6754,7 @@ class Viewport3D(QOpenGLWidget):
         glEnable(GL_LIGHTING)
     
     def add_mesh_object(self, mesh, name=None):
-        """??硫붿돩瑜??ъ뿉 異붽?"""
+        """??癲ル슢?????????????⑤베堉?"""
         if name is None:
             name = f"Object_{len(self.objects) + 1}"
             
@@ -6722,17 +6765,17 @@ class Viewport3D(QOpenGLWidget):
         except Exception:
             pre_centroids_faces = 0
 
-        # 硫붿돩 ?먯껜瑜??먯젏?쇰줈 ?쇳꽣留?(濡쒖뺄 醫뚰몴怨??앹꽦)
+        # 癲ル슢?????????????????⑥?????醫롫뙃癲?(?棺??짆?쏆춾????щ뮡嶺뚮ㅏ????獄쏅똻??
         center = mesh.centroid
         mesh.vertices -= center
-        # 罹먯떆 臾댄슚??(vertices 蹂寃?
+        # 癲???????뺤깙???(vertices ?怨뚮뼚??
         try:
             mesh._bounds = None
             mesh._centroid = None
             mesh._surface_area = None
         except Exception:
             _log_ignored_exception()
-        # 濡쒕뵫 ?쒖젏?먮뒗 face normals留??꾩슂 (vertex normals???꾩슂????怨꾩궛)
+        # ?棺??짆?승???筌믨퀣????獒?face normals癲???ш끽維??(vertex normals????ш끽維???????節뚮쳮雅?
         centroids_cache = None
         try:
             if pre_centroids is not None:
@@ -6764,7 +6807,7 @@ class Viewport3D(QOpenGLWidget):
         self.objects.append(new_obj)
         self.selected_index = len(self.objects) - 1
         
-        # VBO ?곗씠???앹꽦
+        # VBO ???Β??????獄쏅똻??
         self.update_vbo(new_obj)
 
         # Attach centroid cache after update_vbo (it invalidates caches defensively).
@@ -6778,7 +6821,7 @@ class Viewport3D(QOpenGLWidget):
             except Exception:
                 _log_ignored_exception()
         
-        # 移대찓???쇳똿 (泥?踰덉㎏ 媛앹껜??寃쎌슦留?
+        # ?怨멸텭?嶺?????紐꾧튅 (癲??類??????좊즵??꼯????濡ろ뜑???壤?
         if len(self.objects) == 1:
             self.update_grid_scale()
             try:
@@ -6795,7 +6838,7 @@ class Viewport3D(QOpenGLWidget):
         self.update()
 
     def clear_scene(self) -> None:
-        """?ъ쓽 紐⑤뱺 媛앹껜/?ㅻ쾭?덉씠瑜??쒓굅?섍퀬 湲곕낯 ?곹깭濡?由ъ뀑?⑸땲??"""
+        """????癲ル슢?꾤땟?????좊즵??꼯??????곷츉???源낇꼧????癰귙끋源??????れ삀??????ㅺ컼?얜쑚???域밸Ŧ遊??筌뤾퍓???"""
         try:
             self.makeCurrent()
         except Exception:
@@ -6897,7 +6940,7 @@ class Viewport3D(QOpenGLWidget):
         self.update()
 
     def update_grid_scale(self):
-        """?좏깮??硫붿돩 ?ш린??留욎떠 寃⑹옄 ?ㅼ???議곗젙"""
+        """???ャ뀕???癲ル슢?????????癲ル슢?????濡る큸泳????????釉뚰???"""
         obj = self.selected_obj
         if not obj:
             return
@@ -6925,7 +6968,7 @@ class Viewport3D(QOpenGLWidget):
         self.update_gizmo_size()
 
     def update_gizmo_size(self):
-        """?좏깮??硫붿돩 ?ш린??留욎떠 ?뚯쟾 湲곗쫰紐?諛섍꼍 議곗젙"""
+        """???ャ뀕???癲ル슢?????????癲ル슢???????????れ삀?節낅윺?ⓦ끉異??袁⑸즵?쀫뱺紐??釉뚰???"""
         obj = self.selected_obj
         if not obj or getattr(obj, "mesh", None) is None:
             return
@@ -6962,7 +7005,7 @@ class Viewport3D(QOpenGLWidget):
             return np.eye(3, dtype=np.float64)
     
     def hit_test_gizmo(self, screen_x, screen_y):
-        """湲곗쫰紐?怨좊━ ?대┃ 寃??"""
+        """??れ삀?節낅윺?ⓦ끉異???關履???????濡ろ떟??"""
         obj = self.selected_obj
         if not obj:
             return None
@@ -7008,7 +7051,10 @@ class Viewport3D(QOpenGLWidget):
             # Let's try to estimate a world-space threshold based on screen pixel size
             scaled_gizmo_radius = self.gizmo_size * obj.scale
             pixel_world_size = 0.005 * float(getattr(self.camera, "distance", 50.0) or 50.0)
-            tol_ratio = float(getattr(self, "_gizmo_pick_width_ratio", 0.12) or 0.12)
+            tol_ratio = float(
+                getattr(self, "_gizmo_pick_width_ratio", GIZMO_PICK_WIDTH_RATIO_DEFAULT)
+                or GIZMO_PICK_WIDTH_RATIO_DEFAULT
+            )
             tol_ratio = float(max(0.06, min(tol_ratio, 0.30)))
             threshold = max(pixel_world_size * 8.0, float(scaled_gizmo_radius) * tol_ratio)
             center = obj.translation
@@ -7051,7 +7097,7 @@ class Viewport3D(QOpenGLWidget):
             return None
 
     def update_vbo(self, obj: SceneObject):
-        """媛앹껜??VBO ?앹꽦 諛??곗씠???꾩넚"""
+        """??좊즵??꼯???VBO ??獄쏅똻???????Β??????ш끽維뽬땻?"""
         made_current = False
         created_vbo = False
         try:
@@ -7182,7 +7228,7 @@ class Viewport3D(QOpenGLWidget):
                     _log_ignored_exception()
     
     def fit_view_to_selected_object(self):
-        """?좏깮??媛앹껜??移대찓??珥덉젏 留욎땄"""
+        """???ャ뀕?????좊즵??꼯????怨멸텭?嶺???縕???癲ル슢????"""
         obj = self.selected_obj
         if obj:
             self.camera.fit_to_bounds(obj.mesh.bounds)
@@ -7213,22 +7259,22 @@ class Viewport3D(QOpenGLWidget):
 
     def bake_object_transform(self, obj: SceneObject):
         """
-        ?뺤튂 ?뺤젙: ?꾩옱 蹂댁씠??洹몃?濡?硫붿돩瑜?怨좎젙?섍퀬 紐⑤뱺 蹂?섍컪??0?쇰줈 由ъ뀑
+        ?嶺뚮Ĳ????嶺뚮Ĳ??? ??ш끽維???怨뚮옖??????숆강筌???癲ル슢?????????關履?????癲ル슢?꾤땟????怨뚮뼚????⑸???0???⑥???域밸Ŧ遊?
         
-        - ?꾩옱 ?붾㈃??蹂댁씠???꾩튂 洹몃?濡??좎?
-        - ?대룞/?뚯쟾/諛곗쑉 媛믪씠 紐⑤몢 0?쇰줈 由ъ뀑
-        - ?댄썑 0?먯꽌遺???몃? 議곗젙 媛??        """
+        - ??ш끽維????釉먮뻤????怨뚮옖??????ш끽維????숆강筌??????
+        - ??????????袁⑸즲?????좊즴???癲ル슢?꾤땟?嶺?0???⑥???域밸Ŧ遊?
+        - ??熬곣뫖??0?????????嶺? ?釉뚰?????좊읈??        """
         if not obj:
             return
         
-        # 蹂?섏씠 ?놁쑝硫??ㅽ궢
+        # ?怨뚮뼚???쒓낮?????⑤챶?뺧┼????袁⑤툞
         has_transform = (
             not np.allclose(obj.translation, [0, 0, 0]) or 
             not np.allclose(obj.rotation, [0, 0, 0]) or 
             obj.scale != 1.0
         )
         if not has_transform:
-            # 蹂?섏씠 ?놁뼱??"?꾩옱 ?곹깭"瑜?怨좎젙 ?곹깭濡?湲곕줉
+            # ?怨뚮뼚???쒓낮?????⑤９苑??"??ш끽維?????ㅺ컼??????關履?????ㅺ컼?얜쑚????れ삀??쎈뭄?
             try:
                 obj.fixed_translation = np.asarray(obj.translation, dtype=np.float64).copy()
                 obj.fixed_rotation = np.asarray(obj.rotation, dtype=np.float64).copy()
@@ -7238,7 +7284,7 @@ class Viewport3D(QOpenGLWidget):
                 _log_ignored_exception()
             return
         
-        # 1. ?뚯쟾 ?됰젹 怨꾩궛
+        # 1. ????????⑥ъ／ ??節뚮쳮雅?
         rx, ry, rz = np.radians(obj.rotation)
         
         cos_x, sin_x = np.cos(rx), np.sin(rx)
@@ -7250,22 +7296,22 @@ class Viewport3D(QOpenGLWidget):
         cos_z, sin_z = np.cos(rz), np.sin(rz)
         rot_z = np.array([[cos_z, -sin_z, 0], [sin_z, cos_z, 0], [0, 0, 1]])
         
-        # OpenGL ?뚮뜑留?glRotate X->Y->Z)怨??숈씪???⑹꽦 ?뚯쟾
+        # OpenGL ?????異?glRotate X->Y->Z)??????곕럡????獄쏅똻???????
         rotation_matrix = rot_x @ rot_y @ rot_z
         
-        # 2. ?뺤젏 蹂??(S -> R -> T ?쒖꽌, ?뚮뜑留곴낵 ?숈씪)
-        # ?ㅼ???
+        # 2. ?嶺뚮Ĳ????怨뚮뼚??(S -> R -> T ??筌?留? ?????異??녠텠??????곕럡)
+        # ?????
         vertices = obj.mesh.vertices * obj.scale
         
-        # ?뚯쟾
+        # ?????
         vertices = (rotation_matrix @ vertices.T).T
         
-        # ?대룞 (?붾뱶 醫뚰몴???곸슜)
+        # ????(??釉먮폇?????щ뮡嶺?????ㅼ굣??
         vertices = vertices + obj.translation
         
-        # 3. ?곗씠???낅뜲?댄듃
+        # 3. ???Β????????녿ぅ??熬곣뫀肄?
         obj.mesh.vertices = vertices.astype(np.float32)
-        # 罹먯떆 臾댄슚??(vertices 蹂寃?
+        # 癲???????뺤깙???(vertices ?怨뚮뼚??
         try:
             obj.mesh._bounds = None
             obj.mesh._centroid = None
@@ -7278,12 +7324,12 @@ class Viewport3D(QOpenGLWidget):
         obj.mesh.compute_normals(compute_vertex_normals=False, force=True)
         obj._trimesh = None
         
-        # 4. 紐⑤뱺 蹂?섍컪 0?쇰줈 由ъ뀑 (?댁젣 硫붿돩 ?뺤젏 ?먯껜媛 ?붾뱶 醫뚰몴)
+        # 4. 癲ル슢?꾤땟????怨뚮뼚????⑸? 0???⑥???域밸Ŧ遊?(???⑤챷??癲ル슢?????嶺뚮Ĳ???????瓘琉????釉먮폇?????щ뮡嶺?
         obj.translation = np.array([0.0, 0.0, 0.0])
         obj.rotation = np.array([0.0, 0.0, 0.0])
         obj.scale = 1.0
 
-        # 4.5 怨좎젙 ?곹깭 媛깆떊 (?ㅼ닔濡??吏곸뿬??蹂듦? 媛??
+        # 4.5 ??關履?????ㅺ컼????좊즲???(???怨뺣묄????癲ル슣???援???怨뚮옖甕걔? ??좊읈??
         try:
             obj.fixed_translation = obj.translation.copy()
             obj.fixed_rotation = obj.rotation.copy()
@@ -7292,13 +7338,13 @@ class Viewport3D(QOpenGLWidget):
         except Exception:
             _log_ignored_exception()
         
-        # 5. VBO ?낅뜲?댄듃
+        # 5. VBO ????녿ぅ??熬곣뫀肄?
         self.update_vbo(obj)
         self.update()
         self.meshTransformChanged.emit()
 
     def restore_fixed_state(self, obj: SceneObject):
-        """?뺤튂 ?뺤젙 ?댄썑??'怨좎젙 ?곹깭'濡?蹂?섍컪 蹂듦?"""
+        """?嶺뚮Ĳ????嶺뚮Ĳ?????熬곣뫖???'??關履?????ㅺ컼?????怨뚮뼚????⑸? ?怨뚮옖甕걔?"""
         if not obj:
             return
         if not getattr(obj, "fixed_state_valid", False):
@@ -7315,7 +7361,7 @@ class Viewport3D(QOpenGLWidget):
         self.meshTransformChanged.emit()
 
     def save_undo_state(self, include_mesh: bool = False):
-        """?꾩옱 ?좏깮??媛앹껜??蹂???곹깭瑜??ㅽ깮?????"""
+        """??ш끽維?????ャ뀕?????좊즵??꼯????怨뚮뼚?????ㅺ컼??????袁ⓓ??????"""
         obj = self.selected_obj
         if not obj:
             return
@@ -7338,7 +7384,7 @@ class Viewport3D(QOpenGLWidget):
             self.undo_stack.pop(0)
 
     def undo(self):
-        """留덉?留?蹂??痍⑥냼 (Ctrl+Z)"""
+        """癲ル슢???癲??怨뚮뼚?????爾??(Ctrl+Z)"""
         if not self.undo_stack:
             return
             
@@ -7377,7 +7423,7 @@ class Viewport3D(QOpenGLWidget):
         self.status_info = "Undo transform"
 
     def _begin_ctrl_drag(self, event: QMouseEvent, obj: SceneObject) -> bool:
-        """Ctrl+?쒕옒洹몄슜 源딆씠/?됰젹 罹먯떆瑜?以鍮꾪빀?덈떎."""
+        """Ctrl+??筌먦끉援??숆강筌??嚥싲갭큔??????⑥ъ／ 癲????釉띲걫?濚욌꼬????ㅻ쑏????덊렡."""
         if event is None or obj is None:
             return False
         try:
@@ -7397,7 +7443,7 @@ class Viewport3D(QOpenGLWidget):
             except Exception:
                 self._drag_depth = 1.0
 
-            # 諛곌꼍???대┃??寃쎌슦 媛앹껜 以묒떖 源딆씠濡??泥?
+            # ?袁⑸즲??㏓き????????濡ろ뜑?????좊즵??꼯??濚욌꼬?댄꺍??嚥싲갭큔??鈺곗슦肉???癲?
             if self._drag_depth >= 1.0:
                 obj_win_pos = gluProject(
                     *obj.translation,
@@ -7420,7 +7466,7 @@ class Viewport3D(QOpenGLWidget):
         if a0 is None:
             return
         event = a0
-        """留덉슦??踰꾪듉 ?뚮┝"""
+        """癲ル슢??????類?????????"""
         try:
             self.last_mouse_pos = event.pos()
             try:
@@ -7432,9 +7478,19 @@ class Viewport3D(QOpenGLWidget):
             modifiers = event.modifiers()
             obj_for_ctrl_drag = self.selected_obj
             self._ctrl_drag_active = False
+            self._ctrl_drag_attempted = False
+            self._ctrl_drag_press_pos = None
 
-            # Ctrl+?고겢由??쒕옒洹몃뒗 紐⑤뱺 紐⑤뱶?먯꽌 "硫붿돩 ?대룞" ?곗꽑.
-            # (?쒕㈃/?⑤㈃ ?꾧뎄???고겢由??뺤젙怨?異⑸룎?섏? ?딅룄濡?press ?쒖젏?먯꽌 ?좎젏)
+            if (
+                event.button() == Qt.MouseButton.LeftButton
+                and bool(modifiers & Qt.KeyboardModifier.ControlModifier)
+                and obj_for_ctrl_drag is not None
+                and (not getattr(self, "roi_enabled", False))
+            ):
+                self._ctrl_drag_press_pos = event.pos()
+
+            # Ctrl+???μ쪙繹????筌먦끉援??숆강筌??癲ル슢?꾤땟???癲ル슢?꾤땟???????"癲ル슢???????? ???Β?띾쭡.
+            # (??筌먯룆??????몃뱠 ??ш낄猷??????μ쪙繹???嶺뚮Ĳ?????野껊챶爾???? ????녳뵣??press ??筌믨퀣?????????モ??
             if (
                 event.button() == Qt.MouseButton.RightButton
                 and bool(modifiers & Qt.KeyboardModifier.ControlModifier)
@@ -7446,16 +7502,16 @@ class Viewport3D(QOpenGLWidget):
                 if self._ctrl_drag_active:
                     return
 
-            # 1. ?쇰컲 ?대┃ (媛앹껜 ?좏깮 ?먮뒗 ?쇳궧 紐⑤뱶 泥섎━) - 醫뚰겢由?쭔 泥섎━
+            # 1. ???⑥ロ떘 ????(??좊즵??꼯?????ャ뀕?????獒????醫딅르 癲ル슢?꾤땟???癲ル슪?ｇ몭?? - ???щ뮡?롪틵???鶯?癲ル슪?ｇ몭??
             if event.button() == Qt.MouseButton.LeftButton:
-                # 湲곗쫰紐??좏깮 寃??(媛???곗꽑?쒖쐞) - ROI 紐⑤뱶?먯꽌???④?/鍮꾪솢??
+                # ??れ삀?節낅윺?ⓦ끉異????ャ뀕???濡ろ떟??(??좊읈?????Β?띾쭡??筌믨퀡彛? - ROI 癲ル슢?꾤땟???????????/??????
                 if self.picking_mode == 'none' and not getattr(self, "roi_enabled", False):
                     axis = self.hit_test_gizmo(event.pos().x(), event.pos().y())
                     if axis:
-                        self.save_undo_state() # 蹂???쒖옉 ???곹깭 ???
+                        self.save_undo_state() # ?怨뚮뼚????筌믨퀣援??????ㅺ컼??????
                         self.active_gizmo_axis = axis
 
-                        # 罹먯떆 留ㅽ듃由?뒪 ???(?깅뒫 理쒖쟻??
+                        # 癲????癲ル슢????용끏????????(?濚밸Ŧ援앲짆?癲ル슔?됭짆???
                         self.makeCurrent()
                         self._cached_viewport = glGetIntegerv(GL_VIEWPORT)
                         self._cached_modelview = glGetDoublev(GL_MODELVIEW_MATRIX)
@@ -7468,9 +7524,8 @@ class Viewport3D(QOpenGLWidget):
                             return
                         self.active_gizmo_axis = None
 
-                # ?쇳궧 紐⑤뱶 泥섎━
-                if self.picking_mode == 'curvature' and (modifiers & Qt.KeyboardModifier.ShiftModifier):
-                    # Shift+?대┃?쇰줈留???李띻린
+                # ???醫딅르 癲ル슢?꾤땟???癲ル슪?ｇ몭??                if self.picking_mode == 'curvature' and (modifiers & Qt.KeyboardModifier.ShiftModifier):
+                    # Shift+??????⑥??┼???癲ル슔?蹂?뎀??
                     point = self.pick_point_on_mesh(event.pos().x(), event.pos().y())
                     if point is not None:
                         self.picked_points.append(point)
@@ -7478,7 +7533,7 @@ class Viewport3D(QOpenGLWidget):
                     return
 
                 if self.picking_mode == "measure" and (modifiers & Qt.KeyboardModifier.ShiftModifier):
-                    # Shift+?대┃?쇰줈留???李띻린
+                    # Shift+??????⑥??┼???癲ル슔?蹂?뎀??
                     point = self.pick_point_on_mesh(event.pos().x(), event.pos().y())
                     if point is not None:
                         self.measure_picked_points.append(point)
@@ -7490,58 +7545,76 @@ class Viewport3D(QOpenGLWidget):
                     return
                         
                 elif self.picking_mode == 'floor_3point':
-                    point = self.pick_point_on_mesh(
-                        event.pos().x(),
-                        event.pos().y(),
-                        allow_depth_search=True,
-                        search_radius_px=14,
+                    world_pt, _fi = self._pick_visible_surface_hit(
+                        int(event.pos().x()),
+                        int(event.pos().y()),
                     )
-                    if point is not None:
-                        try:
-                            snapped = self._snap_floor_point_on_picked_face(point)
-                            if snapped is not None:
-                                point = snapped
-                        except Exception:
-                            _log_ignored_exception()
-                        # CAD AREA ?ㅽ??? ?쇳궧 ?먯? ?붾뱶 醫뚰몴 洹몃?濡??꾩쟻.
-                        # (濡쒖뺄/?붾뱶 ?쇱슜 ???뚯쟾/?ㅼ??쇰맂 硫붿돩?먯꽌 ?됰㈃ 怨꾩궛??遺덉븞?뺥빐吏?
-                        world_pt = np.asarray(point[:3], dtype=np.float64)
+                    if world_pt is None:
+                        # Tiny fallback only for anti-aliased edge misses.
+                        info = self.pick_point_on_mesh_info(
+                            int(event.pos().x()),
+                            int(event.pos().y()),
+                            allow_depth_search=True,
+                            search_radius_px=2,
+                        )
+                        if info is not None:
+                            world_pt = np.asarray(info[0][:3], dtype=np.float64).reshape(3)
+                    if world_pt is not None:
+                        world_pt = np.asarray(world_pt[:3], dtype=np.float64).reshape(3)
 
-                        # 1. ?ㅻ깄 寃??(泥?踰덉㎏ ?먭낵 媛源뚯슦硫??뺤젙)
+                        # 1. ???怨좊룴 ?濡ろ떟??(癲??類???????亦???좊읈嚥싲갭큔???壤??嶺뚮Ĳ???
                         if len(self.floor_picks) >= 3:
                             first_pt = self.floor_picks[0]
                             dist = np.linalg.norm(world_pt - first_pt)
-                            if dist < 0.15: # ?ㅻ깄 嫄곕━ ?뺣? (15cm)
+                            if dist < float(
+                                getattr(self, "_floor_pick_close_loop_distance", FLOOR_PICK_CLOSE_LOOP_DISTANCE_WORLD)
+                            ): # ???怨좊룴 癲꾧퀗?????嶺? (15cm)
                                 self.floorAlignmentConfirmed.emit()
                                 return
                                 
                         self.floorPointPicked.emit(world_pt)
                         self.update()
+                    else:
+                        self.status_info = "보이는 메쉬 표면을 직접 클릭해 바닥점을 선택하세요."
+                        self.update()
                     return
                         
                 elif self.picking_mode == 'floor_face':
-                    point = self.pick_point_on_mesh(
-                        event.pos().x(),
-                        event.pos().y(),
-                        allow_depth_search=True,
-                        search_radius_px=14,
+                    surface_pt, face_idx = self._pick_visible_surface_hit(
+                        int(event.pos().x()),
+                        int(event.pos().y()),
                     )
-                    if point is not None:
+                    if surface_pt is None:
+                        info = self.pick_point_on_mesh_info(
+                            int(event.pos().x()),
+                            int(event.pos().y()),
+                            allow_depth_search=True,
+                            search_radius_px=2,
+                        )
+                        if info is not None:
+                            surface_pt = np.asarray(info[0][:3], dtype=np.float64).reshape(3)
+                            face_idx = -1
+                    if surface_pt is not None:
+                        surface_pt = np.asarray(surface_pt[:3], dtype=np.float64).reshape(3)
+                        vertices = None
                         try:
-                            snapped = self._snap_floor_point_on_picked_face(point)
-                            if snapped is not None:
-                                point = snapped
+                            if int(face_idx) >= 0:
+                                vertices = self._face_world_vertices(int(face_idx))
+                            if not vertices:
+                                vertices = self.pick_face_at_point(np.asarray(surface_pt[:3], dtype=np.float64))
                         except Exception:
-                            _log_ignored_exception()
-                        vertices = self.pick_face_at_point(point)
+                            vertices = None
                         if vertices:
                             self.floorFacePicked.emit(vertices)
                         else:
-                            self.floorPointPicked.emit(point)
+                            self.floorPointPicked.emit(np.asarray(surface_pt[:3], dtype=np.float64))
                         self.picking_mode = 'none'
                         self.update()
+                    else:
+                        self.status_info = "보이는 메쉬 표면을 직접 클릭해 바닥면을 선택하세요."
+                        self.update()
                     return
-                
+
                 elif self.picking_mode == 'floor_brush':
                     self.brush_selected_faces.clear()
                     self._pick_brush_face(event.pos())
@@ -7666,7 +7739,7 @@ class Viewport3D(QOpenGLWidget):
                 ):
                     if event.button() != Qt.MouseButton.LeftButton:
                         return
-                    # ?ㅼ젣 ??異붽???mouseRelease?먯꽌 "?대┃"?쇰줈 ?먯젙?먯쓣 ?뚮쭔 ?섑뻾
+                    # ???源놁졆 ????⑤베堉???mouseRelease?????"???????⑥?????????獄?????????얜Ŧ類?
                     self._cut_line_left_press_pos = event.pos()
                     self._cut_line_left_dragged = False
                     return
@@ -7674,7 +7747,7 @@ class Viewport3D(QOpenGLWidget):
                 elif self.picking_mode == 'crosshair':
                     point = self.pick_point_on_mesh(event.pos().x(), event.pos().y())
                     if point is None:
-                        # 硫붿돩 ?쎌씠 ?ㅽ뙣?대룄(?붿〈 ?뚯넀 ?? 諛붾떏 ?됰㈃?먯꽌 ??옄???대룞 媛??
+                        # 癲ル슢??????????????됰꽡??????釉먯돴????? ?? ?袁⑸즴??????野껊갭?????????????????좊읈??
                         point = self.pick_point_on_plane_z(event.pos().x(), event.pos().y(), z=0.0)
                     if point is not None:
                         self.crosshair_pos = point[:2]
@@ -7723,14 +7796,14 @@ class Viewport3D(QOpenGLWidget):
                             self.roi_rect_start = np.array([float(pt[0]), float(pt[1])], dtype=np.float64)
                             self._roi_commit_axis_hint = None
                             self._roi_commit_plane_hint = None
-                            # 珥덇린?먮뒗 理쒖냼 ?ш린瑜??뺣낫??0.1cm) ?댄썑 ?쒕옒洹몃줈 ?뺤옣
+                            # ?縕?猿녿뎨???獒?癲ル슔?됭짆?????源껎뗰쭗??嶺뚮㉡?€쾮??0.1cm) ??熬곣뫖????筌먦끉援??숆강筌?쑙鍮??嶺뚮Ĳ???
                             self.roi_bounds = [float(pt[0]), float(pt[0]) + 0.1, float(pt[1]), float(pt[1]) + 0.1]
                             self.schedule_roi_edges_update(0)
                             self.update()
                             return
                     # Otherwise: allow normal camera drag (left=rotate, right=pan)
 
-            # ?⑤㈃??紐⑤뱶: ?고겢由?? "?뺤젙"(click) ?⑸룄濡??ъ슜 (?쒕옒洹??쒖뿉??Pan ?좎?)
+            # ????몃뱠??癲ル슢?꾤땟??? ???μ쪙繹??? "?嶺뚮Ĳ???(click) ??筌뤾퍔???????(??筌먦끉援????筌?諭??Pan ???)
             if self.picking_mode == "floor_3point" and event.button() == Qt.MouseButton.RightButton:
                 # Right-click confirms only when released without dragging.
                 # Right-drag remains available for camera pan in floor mode.
@@ -7743,7 +7816,7 @@ class Viewport3D(QOpenGLWidget):
                 self._cut_line_right_dragged = False
                 return
 
-            # ?쒕㈃ 吏??硫댁쟻/Area): ?고겢由?? "?뺤젙"(click) ?⑸룄濡??ъ슜 (?쒕옒洹??쒖뿉??Pan ?좎?)
+            # ??筌먯룆??癲ル슣???癲ル슢????Area): ???μ쪙繹??? "?嶺뚮Ĳ???(click) ??筌뤾퍔???????(??筌먦끉援????筌?諭??Pan ???)
             if self.picking_mode == "paint_surface_area" and event.button() == Qt.MouseButton.RightButton:
                 self._surface_area_right_press_pos = event.pos()
                 self._surface_area_right_dragged = False
@@ -7753,7 +7826,7 @@ class Viewport3D(QOpenGLWidget):
                     _log_ignored_exception()
                 return
 
-            # ?쒕㈃ 吏??寃쎄퀎/?먯꽍): ?고겢由?? "?뺤젙"(click) ?⑸룄濡??ъ슜 (?쒕옒洹??쒖뿉??Pan ?좎?)
+            # ??筌먯룆??癲ル슣????濡ろ뜑????????: ???μ쪙繹??? "?嶺뚮Ĳ???(click) ??筌뤾퍔???????(??筌먦끉援????筌?諭??Pan ???)
             if self.picking_mode == "paint_surface_magnetic" and event.button() == Qt.MouseButton.RightButton:
                 self._surface_magnetic_right_press_pos = event.pos()
                 self._surface_magnetic_right_dragged = False
@@ -7767,20 +7840,20 @@ class Viewport3D(QOpenGLWidget):
                     _log_ignored_exception()
                 return
 
-            # 3. 媛앹껜 議곗옉 (Shift/Ctrl + ?쒕옒洹?
+            # 3. ??좊즵??꼯???釉뚰???(Shift/Ctrl + ??筌먦끉援??
             obj = self.selected_obj
             if (
                 obj
                 and (not getattr(self, "roi_enabled", False))
                 and (modifiers & Qt.KeyboardModifier.ShiftModifier or modifiers & Qt.KeyboardModifier.ControlModifier)
             ):
-                 self.save_undo_state() # 蹂???쒖옉 ???곹깭 ???                 
-                 # Ctrl+?쒕옒洹??대룞)瑜??꾪븳 珥덇린 源딆씠媛????(留덉슦?ㅺ? 媛由ы궎??吏?먯쓽 源딆씠)
+                 self.save_undo_state() # ?怨뚮뼚????筌믨퀣援??????ㅺ컼??????                 
+                 # Ctrl+??筌먦끉援??????????ш낄援η뵳??縕?猿녿뎨?嚥싲갭큔??鈺곗뼚苡?????(癲ル슢?????? ??좊읈?域밸Ŧ肉???癲ル슣????甕?嚥싲갭큔???
                  if modifiers & Qt.KeyboardModifier.ControlModifier:
                      self._ctrl_drag_active = bool(self._begin_ctrl_drag(event, obj))
                  return
             
-            # 4. ???대┃: ?ъ빱???대룞 (Focus move)
+            # 4. ?????? ?????????(Focus move)
             if event.button() == Qt.MouseButton.MiddleButton and modifiers == Qt.KeyboardModifier.NoModifier:
                 point = self.pick_point_on_mesh(event.pos().x(), event.pos().y())
                 if point is not None:
@@ -7796,9 +7869,9 @@ class Viewport3D(QOpenGLWidget):
         if a0 is None:
             return
         event = a0
-        """留덉슦??踰꾪듉 ?볦쓬"""
+        """癲ル슢??????類???????甕?"""
 
-        # ?⑤㈃??2媛?: 醫뚰겢由???異붽?(?대┃?쇰줈留?, ?고겢由??꾩옱 ???뺤젙
+        # ????몃뱠??2??: ???щ뮡?롪틵???????⑤베堉?(??????⑥??┼?, ???μ쪙繹????ш끽維?????嶺뚮Ĳ???
         if self.picking_mode == "cut_lines":
             modifiers = event.modifiers()
 
@@ -7841,7 +7914,7 @@ class Viewport3D(QOpenGLWidget):
                                 idx = 0
                             line = self.cut_lines[idx]
 
-                            # 湲곗〈 ?⑤㈃ 寃곌낵???몄쭛 ??臾댄슚??
+                            # ??れ삀???????몃뱠 ?濡ろ뜏?????嶺뚮ㅎ?당빊??????뺤깙???
                             self.cut_section_profiles[idx] = []
                             self.cut_section_world[idx] = []
 
@@ -7850,12 +7923,12 @@ class Viewport3D(QOpenGLWidget):
                                 pz = 0.0
                             p = np.array([float(picked[0]), float(picked[1]), pz], dtype=np.float64)
 
-                            # Polyline input (?긱꽩 紐⑥뼇 ??: 醫뚰겢由?쑝濡??먯쓣 怨꾩냽 異붽??섍퀬,
-                            # Enter/?고겢由?쑝濡?"?뺤젙"?⑸땲?? (媛??멸렇癒쇳듃??Ortho濡??섑룊/?섏쭅 ?쒖빟)
+                            # Polyline input (??リ옇???癲ル슢?꾤땟怨⑹젂???: ???щ뮡?롪틵??????肉????獄???節뚮쳮????⑤베堉?????
+                            # Enter/???μ쪙繹?????肉?"?嶺뚮Ĳ?????筌뤾퍓??? (???嶺뚮∥梨??沃섅굥????Ortho?????얜Ŋ?????쒓낯????筌???
                             try:
                                 final = getattr(self, "_cut_line_final", [False, False])
                                 if bool(final[idx]) and len(line) >= 2:
-                                    # ?대? ?뺤젙???쇱씤? Backspace/Delete濡??몄쭛?섍굅??吏?곌퀬 ?ㅼ떆 ?쒖옉.
+                                    # ??? ?嶺뚮Ĳ??????繹먮끏??? Backspace/Delete???嶺뚮ㅎ?당빊????듦뭅??癲ル슣????ㅼ뒭????怨뺣빰 ??筌믨퀣援?
                                     self.cut_line_drawing = False
                                     self.cut_line_preview = None
                                     self.update()
@@ -7864,7 +7937,7 @@ class Viewport3D(QOpenGLWidget):
                             except Exception:
                                 _log_ignored_exception()
 
-                            # Polyline input: keep adding orthogonal segments (????議고빀).
+                            # Polyline input: keep adding orthogonal segments (?????釉뚰????.
                             if len(line) == 0:
                                 line.append(p)
                             else:
@@ -7905,7 +7978,7 @@ class Viewport3D(QOpenGLWidget):
             self._floor_3point_right_press_pos = None
             self._floor_3point_right_dragged = False
 
-        # ?쒕㈃ 吏??李띻린): ?쒕옒洹멸? ?꾨땲硫?由대━利덉뿉??1???곸슜
+        # ??筌먯룆??癲ル슣???癲ル슔?蹂?뎀??: ??筌먦끉援??숆강?? ??ш끽維??씤異??繹???⑥궡???怨좊군??1?????ㅼ굣??
         if self.picking_mode == "paint_surface_face" and event.button() == Qt.MouseButton.LeftButton:
             try:
                 if (
@@ -7956,7 +8029,7 @@ class Viewport3D(QOpenGLWidget):
             self._surface_paint_left_press_pos = None
             self._surface_paint_left_dragged = False
 
-        # ?쒕㈃ 吏??硫댁쟻/Area): 醫뚰겢由???異붽?(?대┃???뚮쭔), ?고겢由??뺤젙(?대┃???뚮쭔)
+        # ??筌먯룆??癲ル슣???癲ル슢????Area): ???щ뮡?롪틵???????⑤베堉?(??????????, ???μ쪙繹???嶺뚮Ĳ?????????????
         if self.picking_mode == "paint_surface_area":
             if event.button() == Qt.MouseButton.LeftButton:
                 try:
@@ -7996,7 +8069,7 @@ class Viewport3D(QOpenGLWidget):
 
                             p = self.pick_point_on_mesh(event.pos().x(), event.pos().y())
                             if p is None:
-                                self.status_info = "?좑툘 硫붿돩 ?꾨? ?대┃???먯쓣 李띿뼱 二쇱꽭??"
+                                self.status_info = "???レ탴??癲ル슢??????? ????????獄?癲ル슔?蹂?뎔????낆뒩??뗫빝??"
                             else:
                                 try:
                                     self.surface_lasso_points.append(np.asarray(p[:3], dtype=np.float64))
@@ -8036,7 +8109,7 @@ class Viewport3D(QOpenGLWidget):
                 self._surface_area_right_press_pos = None
                 self._surface_area_right_dragged = False
 
-        # ?쒕㈃ 吏??寃쎄퀎/?먯꽍): 醫뚰겢由???異붽?(?대┃???뚮쭔), ?고겢由??뺤젙(?대┃???뚮쭔)
+        # ??筌먯룆??癲ル슣????濡ろ뜑????????: ???щ뮡?롪틵???????⑤베堉?(??????????, ???μ쪙繹???嶺뚮Ĳ?????????????
         if self.picking_mode == "paint_surface_magnetic":
             if event.button() == Qt.MouseButton.LeftButton:
                 try:
@@ -8132,12 +8205,12 @@ class Viewport3D(QOpenGLWidget):
                 self.schedule_line_profile_update(0)
 
         if self.mouse_button == Qt.MouseButton.LeftButton and self.picking_mode == 'crosshair':
-            # ?쒕옒洹??ㅻ줈?濡??명빐 留덉?留??꾩튂媛 諛섏쁺?섏? ?딆쓣 ???덉뼱, 由대━利???1???뺤젙 ?낅뜲?댄듃
+            # ??筌먦끉援??????겾?????嶺뚮ㅏ援??癲ル슢???癲???ш끽維?袁ｋ쨬???袁⑸즵????? ???怨룰도 ?????怨쀪퐨, ?繹???⑥궡????1???嶺뚮Ĳ???????녿ぅ??熬곣뫀肄?
             self._crosshair_last_update = 0.0
             self.schedule_crosshair_profile_update(0)
 
         if self.mouse_button == Qt.MouseButton.LeftButton and getattr(self, "roi_enabled", False):
-            # ROI ?쒕옒洹??몃뱾/?ш컖?? 醫낅즺 ??理쒖쥌 ?곹깭濡?1???뺤젙 怨꾩궛
+            # ROI ??筌먦끉援???嶺뚮ㅎ?볠뤃?????? ???ろ꼤嶺???癲ル슔?됭짆?륂렭????ㅺ컼?얜쑚??1???嶺뚮Ĳ?????節뚮쳮雅?
             roi_changed = bool(getattr(self, "_roi_bounds_changed", False))
             if getattr(self, "roi_rect_dragging", False):
                 self.roi_rect_dragging = False
@@ -8157,11 +8230,13 @@ class Viewport3D(QOpenGLWidget):
         self.last_mouse_pos = None
         self.last_mouse_posf = None
         
-        # 罹먯떆 珥덇린??
+        # 癲?????縕?猿녿뎨??
         self._cached_viewport = None
         self._cached_modelview = None
         self._cached_projection = None
         self._ctrl_drag_active = False
+        self._ctrl_drag_attempted = False
+        self._ctrl_drag_press_pos = None
         
         self.update()
     
@@ -8169,9 +8244,9 @@ class Viewport3D(QOpenGLWidget):
         if a0 is None:
             return
         event = a0
-        """留덉슦???대룞 (?쒕옒洹?"""
+        """癲ル슢?????????(??筌먦끉援??"""
         try:
-            # ?⑤㈃??紐⑤뱶: ?쒕옒洹?以묒뿉??"?대┃"?쇰줈 ?ㅼ씤?섏? ?딅룄濡??뚮옒洹?泥섎━
+            # ????몃뱠??癲ル슢?꾤땟??? ??筌먦끉援??濚욌꼬?댄꺍???"???????⑥?????源낅뜲??? ????녳뵣???????μ쐺?癲ル슪?ｇ몭??
             if self.picking_mode == "cut_lines":
                 threshold_px = 10
                 thr2 = float(threshold_px * threshold_px)
@@ -8213,7 +8288,7 @@ class Viewport3D(QOpenGLWidget):
                         if float(dx0 * dx0 + dy0 * dy0) > thr2:
                             self._floor_3point_right_dragged = True
 
-            # ?쒕㈃ 吏??李띻린): ?쒕옒洹몃뒗 移대찓???뚯쟾?쇰줈 媛꾩＜?섍퀬, 由대━利덉뿉?쒕쭔 "?대┃" 泥섎━
+            # ??筌먯룆??癲ル슣???癲ル슔?蹂?뎀??: ??筌먦끉援??숆강筌???怨멸텭?嶺?????????⑥????좊즲??뱀낄???? ?繹???⑥궡???怨좊군??筌먦끉??"???? 癲ル슪?ｇ몭??
             if self.picking_mode == "paint_surface_face":
                 threshold_px = 10
                 thr2 = float(threshold_px * threshold_px)
@@ -8229,7 +8304,7 @@ class Viewport3D(QOpenGLWidget):
                         if float(dx0 * dx0 + dy0 * dy0) > thr2:
                             self._surface_paint_left_dragged = True
 
-            # ?쒕㈃ 吏??硫댁쟻/Area): 誘몃━蹂닿린 + ?쒕옒洹??먯젙
+            # ??筌먯룆??癲ル슣???癲ル슢????Area): 雅?퍔瑗띰㎖???????깅탿 + ??筌먦끉援???????
             if self.picking_mode == "paint_surface_area":
                 threshold_px = 10
                 thr2 = float(threshold_px * threshold_px)
@@ -8266,7 +8341,7 @@ class Viewport3D(QOpenGLWidget):
                 if self.mouse_button is None:
                     return
 
-            # ?쒕㈃ 吏??寃쎄퀎/?먯꽍): 而ㅼ꽌 ?꾨━酉?+ ?대┃?쇰줈 ??異붽?(?ㅻ깄)
+            # ??筌먯룆??癲ル슣????濡ろ뜑????????: ??節뗪콬????ш끽諭욥걡??+ ??????⑥??????⑤베堉?(???怨좊룴)
             if self.picking_mode == "paint_surface_magnetic":
                 threshold_px = 10
                 thr2 = float(threshold_px * threshold_px)
@@ -8310,7 +8385,7 @@ class Viewport3D(QOpenGLWidget):
                 if self.mouse_button is None:
                     return
 
-            # ?⑤㈃??2媛? ?꾨━酉? 留덉슦???몃옒??踰꾪듉 ?놁씠 ?대룞)?먯꽌???숈옉
+            # ????몃뱠??2?? ??ш끽諭욥걡?? 癲ル슢??????嶺뚮ㅎ?????類???????⑤챶????????????????깃탾
             if self.picking_mode == 'cut_lines' and getattr(self, "cut_line_drawing", False):
                 if self.mouse_button is None or self.mouse_button == Qt.MouseButton.LeftButton:
                     pt = self.pick_point_on_plane_z(event.pos().x(), event.pos().y(), z=0.0)
@@ -8339,7 +8414,7 @@ class Viewport3D(QOpenGLWidget):
                         except Exception:
                             self.cut_line_preview = p
                         self.update()
-                # 踰꾪듉 ?놁씠 ?대룞 以묒씠硫?移대찓???쒕옒洹?濡쒖쭅???吏 ?딅룄濡?議곌린 醫낅즺
+                # ?類???????⑤챶??????濚욌꼬?댄꺍??ル쵐異??怨멸텭?嶺????筌먦끉援???棺??짆?먰맪????癲ル슣??????녳뵣???釉뚰??㏓뎨????ろ꼤嶺?
                 if self.mouse_button is None:
                     return
 
@@ -8372,8 +8447,47 @@ class Viewport3D(QOpenGLWidget):
             
             obj = self.selected_obj
             modifiers = event.modifiers()
+
+            # In paint tools, Ctrl+click is used by the tool itself.
+            # Start mesh-translate only after a real drag is detected so
+            # Ctrl+click keeps its original pick behavior.
+            if (
+                (not getattr(self, "roi_enabled", False))
+                and bool(modifiers & Qt.KeyboardModifier.ControlModifier)
+                and obj is not None
+                and self.mouse_button == Qt.MouseButton.LeftButton
+                and self._cached_viewport is None
+                and (not bool(getattr(self, "_ctrl_drag_attempted", False)))
+            ):
+                drag_start_ok = False
+                press_pos = getattr(self, "_ctrl_drag_press_pos", None)
+                if press_pos is not None:
+                    try:
+                        ddx = float(event.pos().x() - press_pos.x())
+                        ddy = float(event.pos().y() - press_pos.y())
+                        drag_start_ok = float(ddx * ddx + ddy * ddy) >= 9.0  # >= 3px
+                    except Exception:
+                        drag_start_ok = False
+                else:
+                    drag_start_ok = (abs(float(dx)) + abs(float(dy))) > 0.5
+
+                if drag_start_ok:
+                    started = bool(self._begin_ctrl_drag(event, obj))
+                    if started:
+                        self._ctrl_drag_attempted = True
+                        self._ctrl_drag_active = True
+                        self.save_undo_state()
+
+                        # Prevent tool click handlers from adding points on release.
+                        mode_now = str(getattr(self, "picking_mode", "none") or "none")
+                        if mode_now == "paint_surface_face":
+                            self._surface_paint_left_dragged = True
+                        elif mode_now == "paint_surface_area":
+                            self._surface_area_left_dragged = True
+                        elif mode_now == "paint_surface_magnetic":
+                            self._surface_magnetic_left_dragged = True
             
-            # 1. 湲곗쫰紐??쒕옒洹?(醫뚰겢由?+ 湲곗쫰紐??쒕옒洹??쒖옉??
+            # 1. ??れ삀?節낅윺?ⓦ끉異???筌먦끉援??(???щ뮡?롪틵???+ ??れ삀?節낅윺?ⓦ끉異???筌먦끉援????筌믨퀣援??
             if self.gizmo_drag_start is not None and self.active_gizmo_axis and obj and self.mouse_button == Qt.MouseButton.LeftButton:
                 angle_info = self._calculate_gizmo_angle(event.pos().x(), event.pos().y())
                 if angle_info is not None:
@@ -8381,13 +8495,18 @@ class Viewport3D(QOpenGLWidget):
                     raw_delta = float(current_angle - self.gizmo_drag_start)
                     # Wrap to shortest signed arc to avoid sudden +/-360 jumps.
                     delta_angle = float(np.degrees(np.arctan2(np.sin(raw_delta), np.cos(raw_delta))))
-                    delta_angle = float(np.clip(delta_angle, -25.0, 25.0))
-                    rot_sensitivity = float(getattr(self, "_gizmo_rotate_sensitivity", 0.85) or 0.85)
-                    delta_angle *= float(max(0.1, min(rot_sensitivity, 2.0)))
-                    delta_angle *= float(getattr(self, "_gizmo_drag_sign", -1.0) or -1.0)
+                    delta_angle = float(np.clip(delta_angle, -GIZMO_DELTA_ANGLE_CLAMP_DEG, GIZMO_DELTA_ANGLE_CLAMP_DEG))
+                    rot_sensitivity = float(
+                        getattr(self, "_gizmo_rotate_sensitivity", GIZMO_ROTATE_SENSITIVITY_DEFAULT)
+                        or GIZMO_ROTATE_SENSITIVITY_DEFAULT
+                    )
+                    delta_angle *= float(
+                        max(GIZMO_ROTATE_SENSITIVITY_MIN, min(rot_sensitivity, GIZMO_ROTATE_SENSITIVITY_MAX))
+                    )
+                    delta_angle *= float(getattr(self, "_gizmo_drag_sign", GIZMO_DRAG_SIGN_DEFAULT) or GIZMO_DRAG_SIGN_DEFAULT)
                     
-                    # "?먮룞李??몃뱾" 吏곴??? 留덉슦?ㅼ쓽 ?뚯쟾 諛⑺뼢??硫붿돩 ?뚯쟾??1:1 留ㅼ묶
-                    # 移대찓???쒖꽑怨??뚯쟾異뺤쓽 諛⑺뼢???꾪듃怨????듯빐 visual CW/CCW瑜?寃곗젙
+                    # "???筌욎㏃땡??嶺뚮ㅎ?볠뤃? 癲ル슣????? 癲ル슢??????源낃틖 ??????袁⑸젻泳?떑???癲ル슢??????????1:1 癲ル슢????닱?
+                    # ?怨멸텭?嶺????筌?留????????⑤베源???袁⑸젻泳?떑?????ш낄援θキ?????????visual CW/CCW???濡ろ뜏???
                     view_dir = self.camera.look_at - self.camera.position
                     view_dir /= np.linalg.norm(view_dir)
                     
@@ -8404,7 +8523,7 @@ class Viewport3D(QOpenGLWidget):
                     if axis_norm > 1e-12:
                         axis_vec = axis_vec / axis_norm
                     
-                    # ?쒓컖??諛섏쟾 ?щ? 寃곗젙 (?몃뱾???뚮━??諛⑺뼢怨?硫붿돩媛 ?꾨뒗 諛⑺뼢 ?쇱튂)
+                    # ??癰?????袁⑸즵?????? ?濡ろ뜏???(?嶺뚮ㅎ?볠뤃?????????袁⑸젻泳?떑???癲ル슢?????곸씀? ??ш끽維獒??袁⑸젻泳?떑????繹먮봾萸?
                     dot = float(np.dot(view_dir, axis_vec))
                     flip = 1.0 if dot > 0 else -1.0
                     
@@ -8420,16 +8539,16 @@ class Viewport3D(QOpenGLWidget):
                     self.update()
                     return
                 
-            # 2. 湲곗쫰紐??몃쾭 ?섏씠?쇱씠??(踰꾪듉 ???뚮졇???뚮쭔)
+            # 2. ??れ삀?節낅윺?ⓦ끉異??嶺뚮ㅎ??????쒓낮???繹먮끏???(?類?????????雅???????
             if event.buttons() == Qt.MouseButton.NoButton:
                 axis = self.hit_test_gizmo(event.pos().x(), event.pos().y())
-                # ?몃쾭 ???섏씠?쇱씠?몃쭔 蹂寃? active_gizmo_axis???대┃ ?쒖뿉留??ㅼ젙
+                # ?嶺뚮ㅎ????????쒓낮???繹먮끏??嶺뚮ㅎ?붺빊??怨뚮뼚?? active_gizmo_axis????????筌?諭븝┼????源놁젳
                 if axis != getattr(self, '_hover_axis', None):
                     self._hover_axis = axis
                     self.update()
                 return
             
-            # 3. 媛앹껜 吏곸젒 議곗옉 (Ctrl+?쒕옒洹?= 硫붿돩 ?대룞, 留덉슦??而ㅼ꽌瑜??뺥솗???곕씪媛?
+            # 3. ??좊즵??꼯??癲ル슣?????釉뚰???(Ctrl+??筌먦끉援??= 癲ル슢???????? 癲ル슢???????節뗪콬?臾먯뒞筌??嶺뚮쮳?곌섈?????ㅻ깹?앗꾨쨬?
             if (
                 (not getattr(self, "roi_enabled", False))
                 and (
@@ -8439,7 +8558,7 @@ class Viewport3D(QOpenGLWidget):
                 and obj
                 and self._cached_viewport is not None
             ):
-                # 留덉슦???꾨젅????罹≪쿂??源딆씠? 留ㅽ듃由?뒪 ?ъ궗??(?깅뒫 ?μ긽)
+                # 癲ル슢???????ш끽維?????癲ル슓釉?????嚥싲갭큔???? 癲ル슢????용끏??????雅??(?濚밸Ŧ援앲짆????뤿Ь?
                 curr_x, curr_y = self._qt_to_gl_window_xy(
                     float(event.pos().x()),
                     float(event.pos().y()),
@@ -8479,13 +8598,13 @@ class Viewport3D(QOpenGLWidget):
                 return
             
             elif (not getattr(self, "roi_enabled", False)) and (modifiers & Qt.KeyboardModifier.AltModifier) and obj:
-                # ?몃옓蹂??ㅽ????뚯쟾 - 諛⑺뼢 諛섏쟾
+                # ?嶺뚮ㅎ???⑥녃???????????- ?袁⑸젻泳?떑???袁⑸즵???
                 rot_speed = 0.5
                 
-                # ?붾㈃ ?섑룊 ?쒕옒洹?-> Z異??뚯쟾 (諛⑺뼢 諛섏쟾)
+                # ??釉먮뻤?????얜Ŋ????筌먦끉援??-> Z???????(?袁⑸젻泳?떑???袁⑸즵???
                 obj.rotation[2] += dx * rot_speed
                 
-                # ?붾㈃ ?섏쭅 ?쒕옒洹?-> 移대찓??諛⑺뼢 湲곗? ?쇱묶 (諛⑺뼢 諛섏쟾)
+                # ??釉먮뻤?????쒓낯????筌먦끉援??-> ?怨멸텭?嶺???袁⑸젻泳?떑????れ삀?? ??繹먮겍?(?袁⑸젻泳?떑???袁⑸즵???
                 az_rad = np.radians(self.camera.azimuth)
                 obj.rotation[0] -= dy * rot_speed * np.sin(az_rad)
                 obj.rotation[1] -= dy * rot_speed * np.cos(az_rad)
@@ -8501,13 +8620,13 @@ class Viewport3D(QOpenGLWidget):
                 and self.mouse_button == Qt.MouseButton.LeftButton
                 and self.picking_mode != 'line_section'
             ):
-                # 吏곴????뚯쟾: ?쒕옒洹?諛⑺뼢 = ?뚯쟾 諛⑺뼢 (移대찓??湲곗?)
+                # 癲ル슣?????????? ??筌먦끉援???袁⑸젻泳?떑??= ??????袁⑸젻泳?떑??(?怨멸텭?嶺????れ삀??)
                 rot_speed = 0.5
                 
-                # 醫뚯슦 ?쒕옒洹?-> ?붾㈃ Y異?湲곗? ?뚯쟾 (Z異??뚯쟾)
+                # ???щ뮝????筌먦끉援??-> ??釉먮뻤??Y????れ삀?? ?????(Z???????
                 obj.rotation[2] -= dx * rot_speed
                 
-                # ?곹븯 ?쒕옒洹?-> ?붾㈃?먯꽌 ?욌뮘濡?援대┝ (移대찓??諛⑺뼢 怨좊젮)
+                # ???ㅺ강????筌먦끉援??-> ??釉먮뻤???????????????????(?怨멸텭?嶺???袁⑸젻泳?떑????關履??
                 az_rad = np.radians(self.camera.azimuth)
                 obj.rotation[0] += dy * rot_speed * np.cos(az_rad)
                 obj.rotation[1] += dy * rot_speed * np.sin(az_rad)
@@ -8518,13 +8637,13 @@ class Viewport3D(QOpenGLWidget):
 
 
                 
-            # 0. 釉뚮윭???쇳궧 泥섎━
+            # 0. ??怨쀫뮛??????醫딅르 癲ル슪?ｇ몭??
             if self.mouse_button == Qt.MouseButton.LeftButton and self.picking_mode == 'floor_brush':
                 self._pick_brush_face(event.pos())
                 self.update()
                 return
 
-            # 0.1 ?좏깮 釉뚮윭??泥섎━ (SelectionPanel)
+            # 0.1 ???ャ뀕????怨쀫뮛???癲ル슪?ｇ몭??(SelectionPanel)
             if self.mouse_button == Qt.MouseButton.LeftButton and self.picking_mode == 'select_brush':
                 now = time.monotonic()
                 if now - float(getattr(self, "_selection_brush_last_pick", 0.0)) >= 0.03:
@@ -8538,7 +8657,7 @@ class Viewport3D(QOpenGLWidget):
                 self.update()
                 return
 
-            # 0.2 ?쒕㈃ 吏??釉뚮윭??泥섎━ (outer/inner/migu)
+            # 0.2 ??筌먯룆??癲ル슣?????怨쀫뮛???癲ル슪?ｇ몭??(outer/inner/migu)
             if (
                 self.mouse_button == Qt.MouseButton.LeftButton
                 and self.picking_mode == 'paint_surface_brush'
@@ -8552,13 +8671,13 @@ class Viewport3D(QOpenGLWidget):
                 self.update()
                 return
 
-            # 0.4 ?좏삎 ?⑤㈃(?쇱씤) ?쒕옒洹?泥섎━
+            # 0.4 ???レ챺??????몃뱠(??繹먮끏?? ??筌먦끉援??癲ル슪?ｇ몭??
             if self.picking_mode == 'line_section' and self.line_section_dragging and self.mouse_button == Qt.MouseButton.LeftButton:
                 pt = self.pick_point_on_plane_z(event.pos().x(), event.pos().y(), z=0.0)
                 if pt is not None and self.line_section_start is not None:
                     end = np.array([pt[0], pt[1], 0.0], dtype=float)
 
-                    # Shift: CAD Ortho (?섑룊/?섏쭅 怨좎젙)
+                    # Shift: CAD Ortho (???얜Ŋ?????쒓낯????關履??
                     if modifiers & Qt.KeyboardModifier.ShiftModifier:
                         start = np.array(self.line_section_start, dtype=float)
                         dx_l = float(end[0] - start[0])
@@ -8570,7 +8689,7 @@ class Viewport3D(QOpenGLWidget):
 
                     self.line_section_end = end
 
-                    # ?곗궛 鍮꾩슜(?щ씪?댁떛) ?덉빟???꾪빐 ?쎄컙 ?ㅻ줈?留?
+                    # ???Β?띾????????????⑤８?? ???怨좊뭿????ш낄援????熬곣뫚??????겾??癲?
                     now = time.monotonic()
                     if now - self._line_section_last_update > 0.08:
                         self._line_section_last_update = now
@@ -8579,7 +8698,7 @@ class Viewport3D(QOpenGLWidget):
                         self.update()
                 return
             
-            # 0.5 ??옄???쒕옒洹?泥섎━
+            # 0.5 ???????筌먦끉援??癲ル슪?ｇ몭??
             if self.picking_mode == 'crosshair' and self.mouse_button == Qt.MouseButton.LeftButton:
                 point = self.pick_point_on_mesh(event.pos().x(), event.pos().y())
                 if point is None:
@@ -8593,7 +8712,7 @@ class Viewport3D(QOpenGLWidget):
                     self.update()
                 return
 
-            # 0.54 ROI ?대룞 ?쒕옒洹?(以묒븰 ?몃뱾)
+            # 0.54 ROI ??????筌먦끉援??(濚욌꼬?댄꺍???嶺뚮ㅎ?볠뤃?
             if (
                 getattr(self, "roi_enabled", False)
                 and bool(getattr(self, "_roi_move_dragging", False))
@@ -8622,7 +8741,7 @@ class Viewport3D(QOpenGLWidget):
                         self.update()
                 return
 
-            # 0.55 ROI ?ш컖???쒕옒洹?罹≪퀜泥섎읆 吏??
+            # 0.55 ROI ???????筌먦끉援??癲ル슓釉????삳읁?嚥?諭?癲ル슣???
             if getattr(self, "roi_enabled", False) and getattr(self, "roi_rect_dragging", False) and self.mouse_button == Qt.MouseButton.LeftButton:
                 pt = self.pick_point_on_plane_z(event.pos().x(), event.pos().y(), z=0.0)
                 if pt is not None and self.roi_rect_start is not None:
@@ -8632,7 +8751,7 @@ class Viewport3D(QOpenGLWidget):
                     max_x = max(x0, x1)
                     min_y = min(y0, y1)
                     max_y = max(y0, y1)
-                    # 理쒖냼 ?ш린 ?뺣낫 (0.1cm)
+                    # 癲ル슔?됭짆???????嶺뚮㉡?€쾮?(0.1cm)
                     if max_x - min_x < 0.1:
                         max_x = min_x + 0.1
                     if max_y - min_y < 0.1:
@@ -8643,11 +8762,11 @@ class Viewport3D(QOpenGLWidget):
                     self.update()
                 return
              
-            # 0.6 ROI ?몃뱾 ?쒕옒洹?泥섎━
+            # 0.6 ROI ?嶺뚮ㅎ?볠뤃???筌먦끉援??癲ル슪?ｇ몭??
             if self.roi_enabled and self.active_roi_edge and self.active_roi_edge != "move" and self.mouse_button == Qt.MouseButton.LeftButton:
-                # XY ?됰㈃?쇰줈 ?ъ쁺?섏뿬 留덉슦???붾뱶 醫뚰몴 ?띾뱷 (z=0?쇰줈 媛??
-                # pick_point_on_mesh??硫붿돩 ?쒕㈃??李띿쑝誘濡? ?ш린?쒕뒗 ?⑥닚???덉씠-?됰㈃ 援먯감 ?ъ슜
-                # ?꾩????꾪빐 pick_point_on_mesh ?쒖슜 媛?ν븯??諛붾떏????怨좊젮
+                # XY ??野껊갭????⑥???????筌뚯슦肉?癲ル슢???????釉먮폇?????щ뮡嶺?????볥뜪 (z=0???⑥????좊읈??
+                # pick_point_on_mesh??癲ル슢??????筌먯룆???癲ル슔?蹂?뎔???곸쓸??? ?????筌먲퐢痢???縕??????源낇꼧-??野껊갭???????뤆?????
+                # ???????ш낄援??pick_point_on_mesh ??筌믨퀡裕???좊읈?濚왿몾????袁⑸즴?????????關履??
                 ray_origin, ray_dir = self.get_ray(event.pos().x(), event.pos().y())
                 if ray_origin is None or ray_dir is None:
                     return
@@ -8680,26 +8799,22 @@ class Viewport3D(QOpenGLWidget):
                     self.update()
                 return
 
-            # 4. ?쇰컲 移대찓??議곗옉 (?쒕옒洹?
+            # 4. ???⑥ロ떘 ?怨멸텭?嶺???釉뚰???(??筌먦끉援??
             ortho_locked = bool(getattr(self, "_front_back_ortho_enabled", False))
-            # In canonical 6-axis views (CloudCompare-like):
-            # - drag pans while keeping orthographic lock
-            # - Alt+left/middle exits lock and starts free orbit
+            # In canonical 6-axis views:
+            # - Left/Middle drag: immediately unlock and orbit (no modifier key).
+            # - Right drag: pan while keeping orthographic lock.
             if ortho_locked:
-                if self.mouse_button in (
-                    Qt.MouseButton.LeftButton,
-                    Qt.MouseButton.RightButton,
-                    Qt.MouseButton.MiddleButton,
-                ):
-                    allow_orbit = bool(event.modifiers() & Qt.KeyboardModifier.AltModifier)
-                    if allow_orbit and self.mouse_button in (Qt.MouseButton.LeftButton, Qt.MouseButton.MiddleButton):
-                        self._front_back_ortho_enabled = False
-                        self._ortho_frame_override = None
-                    else:
-                        pan_sens = 0.16 if self.mouse_button == Qt.MouseButton.RightButton else 0.13
-                        self.camera.pan(dx, dy, sensitivity=pan_sens)
-                        self.update()
-                        return
+                if self.mouse_button == Qt.MouseButton.RightButton:
+                    pan_sens = (
+                        ORTHO_PAN_SENSITIVITY_RIGHT
+                    )
+                    self.camera.pan(dx, dy, sensitivity=pan_sens)
+                    self.update()
+                    return
+                if self.mouse_button in (Qt.MouseButton.LeftButton, Qt.MouseButton.MiddleButton):
+                    self._front_back_ortho_enabled = False
+                    self._ortho_frame_override = None
 
             if self.mouse_button == Qt.MouseButton.LeftButton:
                 self.camera.rotate(dx, dy, sensitivity=CAMERA_ROTATE_SENSITIVITY_DEFAULT)
@@ -8794,7 +8909,7 @@ class Viewport3D(QOpenGLWidget):
         if a0 is None:
             return
         event = a0
-        """留덉슦???? 湲곕낯 以? Ctrl+?좎? ?щ씪?댁뒪 ?ㅼ틪."""
+        """癲ル슢??????? ??れ삀???濚? Ctrl+??? ??????⑤８痢?????몃펽."""
         try:
             mods = event.modifiers()
             if bool(getattr(self, "slice_enabled", False)) and bool(mods & Qt.KeyboardModifier.ControlModifier):
@@ -8851,13 +8966,13 @@ class Viewport3D(QOpenGLWidget):
         if a0 is None:
             return
         event = a0
-        """?ㅻ낫???낅젰"""
+        """????좏뀪??????곸죷"""
         self.keys_pressed.add(event.key())
         if event.key() in (Qt.Key.Key_W, Qt.Key.Key_A, Qt.Key.Key_S, Qt.Key.Key_D, Qt.Key.Key_Q, Qt.Key.Key_E):
             if not self.move_timer.isActive():
                 self.move_timer.start()
 
-        # 0. ?щ씪?댁뒪 ?⑥텞??(?쒕㈃ 遺꾨━ ?묒뾽 以?鍮좊Ⅸ ?⑤㈃ ?ㅼ틪/珥ъ쁺)
+        # 0. ??????⑤８痢???繞???(??筌먯룆????됰슣維????????濚???鴉??????몃뱠 ????몃펽/?燁??얘?)
         if bool(getattr(self, "slice_enabled", False)):
             key = event.key()
             mods = event.modifiers()
@@ -8871,7 +8986,7 @@ class Viewport3D(QOpenGLWidget):
                 sign = -1.0 if key == Qt.Key.Key_Comma else 1.0
                 try:
                     self.sliceScanRequested.emit(float(sign * step_cm))
-                    self.status_info = f"?⑤㈃ ?ㅼ틪 ?ㅽ뀦 {sign * step_cm:+.2f}cm (, / .)"
+                    self.status_info = f"????몃뱠 ????몃펽 ????{sign * step_cm:+.2f}cm (, / .)"
                     self.update()
                 except Exception:
                     _log_ignored_exception()
@@ -8883,13 +8998,13 @@ class Viewport3D(QOpenGLWidget):
                     z_now = 0.0
                 try:
                     self.sliceCaptureRequested.emit(float(z_now))
-                    self.status_info = f"?벝 ?⑤㈃ 珥ъ쁺 ?붿껌 (Z={z_now:.2f}cm, C)"
+                    self.status_info = f"???????몃뱠 ?燁??얘? ??釉먯뒜??(Z={z_now:.2f}cm, C)"
                     self.update()
                 except Exception:
                     _log_ignored_exception()
                 return
 
-        # 0. ?⑤㈃??2媛? ?꾧뎄 ?⑥텞??
+        # 0. ????몃뱠??2?? ??ш낄猷????繞???
         if self.picking_mode == 'cut_lines':
             key = event.key()
             if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
@@ -8934,7 +9049,7 @@ class Viewport3D(QOpenGLWidget):
                         locks = getattr(self, "cut_line_axis_lock", [None, None]) or [None, None]
                         lk = locks[idx] if idx < len(locks) else None
                         axis_txt = "X" if str(lk).lower().startswith("x") else ("Y" if str(lk).lower().startswith("y") else "X/Y")
-                        self.status_info = f"?㎛ ?쒖꽦 ?⑤㈃?? {role} ({axis_txt}異??ㅻ깄)"
+                        self.status_info = f"?????筌???????몃뱠?? {role} ({axis_txt}?????怨좊룴)"
                     except Exception:
                         _log_ignored_exception()
                     self.update()
@@ -8945,11 +9060,11 @@ class Viewport3D(QOpenGLWidget):
                 # Cancel the entire section-line process.
                 self.clear_cut_lines()
                 self.set_cut_lines_enabled(False)
-                self.status_info = "?썞 ?⑤㈃???낅젰??痍⑥냼?섏뿀?듬땲??"
+                self.status_info = "???????몃뱠??????곸죷?????爾???筌???????"
                 self.update()
                 return
 
-        # 0.05 ROI ?⑤㈃ 誘몃━蹂닿린 ?뺤젙(Enter): ?꾩옱 蹂댁씠??ROI ?⑤㈃???덉씠?대줈 諛곗튂
+        # 0.05 ROI ????몃뱠 雅?퍔瑗띰㎖???????깅탿 ?嶺뚮Ĳ???Enter): ??ш끽維???怨뚮옖????ROI ????몃뱠?????源낇꼧??繞??袁⑸즲???
         if bool(getattr(self, "roi_enabled", False)) and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             try:
                 axis_hint = self._roi_edge_to_axis(getattr(self, "active_roi_edge", None))
@@ -8965,13 +9080,13 @@ class Viewport3D(QOpenGLWidget):
                         plane_hint = last_plane
                 self._roi_commit_plane_hint = plane_hint if plane_hint in ("x1", "x2", "y1", "y2") else None
                 self.roiSectionCommitRequested.emit()
-                self.status_info = "?뱦 ROI ?⑤㈃ 諛곗튂 ?붿껌"
+                self.status_info = "ROI ?⑤㈃ 而ㅻ컠 ?붿껌"
                 self.update()
             except Exception:
                 _log_ignored_exception()
             return
 
-        # 0.1 ?섎윭??吏???곸뿭) ?꾧뎄 ?⑥텞??
+        # 0.1 ??嚥?紐??癲ル슣??????ㅼ굡?? ??ш낄猷????繞???
         if self.picking_mode == "paint_surface_area":
             key = event.key()
             if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
@@ -8996,7 +9111,7 @@ class Viewport3D(QOpenGLWidget):
                 self.update()
                 return
 
-        # 0.2 寃쎄퀎(硫댁쟻+?먯꽍) ?ш?誘??꾧뎄 ?⑥텞??
+        # 0.2 ?濡ろ뜑???癲ル슢????????? ???雅???ш낄猷????繞???
         if self.picking_mode == "paint_surface_magnetic":
             key = event.key()
             if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
@@ -9022,7 +9137,7 @@ class Viewport3D(QOpenGLWidget):
                 self.update()
                 return
 
-        # 0.9 ESC: ROI ?뱀뀡 紐⑤뱶 痍⑥냼
+        # 0.9 ESC: ROI ????癲ル슢?꾤땟??????爾??
         if event.key() == Qt.Key.Key_Escape and bool(getattr(self, "roi_enabled", False)):
             try:
                 self.roi_enabled = False
@@ -9036,34 +9151,34 @@ class Viewport3D(QOpenGLWidget):
                 self._roi_last_adjust_axis = None
                 self._roi_commit_plane_hint = None
                 self._roi_last_adjust_plane = None
-                self.status_info = "?썞 ROI ?뱀뀡??痍⑥냼?섏뿀?듬땲??"
+                self.status_info = "???ROI ????????爾???筌???????"
                 self.update()
             except Exception:
                 _log_ignored_exception()
             return
 
-        # 1. Backspace/Delete: 諛붾떏吏?????섎굹 ?섎룎由ш린
+        # 1. Backspace/Delete: ?袁⑸즴????쒕굞????????嚥▲굥猷???嚥▲꺃??域밸Ŧ???
         if event.key() in (Qt.Key.Key_Backspace, Qt.Key.Key_Delete):
             if self.picking_mode == 'floor_3point':
                 if self.floor_picks:
                     self.floor_picks.pop()
                     n = int(len(self.floor_picks))
                     if n <= 0:
-                        self.status_info = "諛붾떏吏???먯씠 紐⑤몢 吏?뚯죱?듬땲??"
+                        self.status_info = "?袁⑸즴????쒕굞?????????癲ル슢?꾤땟?嶺?癲ル슣????塋??????"
                     elif n < 3:
-                        self.status_info = f"諛붾떏吏????{n}媛? 3媛??댁긽 ?꾩슂?⑸땲??"
+                        self.status_info = f"?袁⑸즴????쒕굞??????{n}?? 3?????⑤?彛???ш끽維???筌뤾퍓???"
                     else:
-                        self.status_info = f"諛붾떏吏????{n}媛? Enter/?고겢由?쑝濡??뺤젙?섏꽭??"
+                        self.status_info = f"?袁⑸즴????쒕굞??????{n}?? Enter/???μ쪙繹?????肉??嶺뚮Ĳ????筌뚯뼚???"
                     self.update()
                 return
 
-        # 2. Enter/Return ?? 諛붾떏 ?뺣젹 ?뺤젙
+        # 2. Enter/Return ?? ?袁⑸즴?????嶺뚮㉡?ｈ???嶺뚮Ĳ???
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             if self.picking_mode in ('floor_3point', 'floor_face', 'floor_brush'):
                 self.floorAlignmentConfirmed.emit()
                 return
 
-        # 3. ESC: ?묒뾽 痍⑥냼
+        # 3. ESC: ?????????爾??
         if event.key() == Qt.Key.Key_Escape:
             if self.picking_mode != 'none':
                 self.picking_mode = 'none'
@@ -9079,7 +9194,7 @@ class Viewport3D(QOpenGLWidget):
             self.undo()
             return
 
-        # 湲곗쫰紐⑤굹 移대찓??酉?愿????
+        # ??れ삀?節낅윺?ⓦ끉異??釉띾즼 ?怨멸텭?嶺??????????
         key = event.key()
         if key == Qt.Key.Key_R:
             self._front_back_ortho_enabled = False
@@ -9094,7 +9209,7 @@ class Viewport3D(QOpenGLWidget):
             key_dec = getattr(Qt.Key, "Key_BracketLeft", -1)
             key_inc = getattr(Qt.Key, "Key_BracketRight", -1)
             if key in (key_dec, key_inc):
-                # ?쒕㈃ 吏???꾧뎄?먯꽌??[ ] ?ㅻ줈 釉뚮윭??李띻린 ?ш린瑜?議곗젅?⑸땲??
+                # ??筌먯룆??癲ル슣?????ш낄猷???????[ ] ????겾???怨쀫뮛???癲ル슔?蹂?뎀?????源껎뗰쭗??釉뚰????筌뤾퍓???
                 if self.picking_mode in {"paint_surface_brush", "paint_surface_face"}:
                     attr = (
                         "_surface_brush_radius_px"
@@ -9113,11 +9228,11 @@ class Viewport3D(QOpenGLWidget):
                         setattr(self, attr, new)
                     except Exception:
                         _log_ignored_exception()
-                    self.status_info = f"?뼂截??쒕㈃ {label} ?ш린: {new:.0f}px ([ / ] 議곗젅)"
+                    self.status_info = f"????뇤????筌먯룆??{label} ???? {new:.0f}px ([ / ] ?釉뚰???"
                     self.update()
                     return
 
-                # 寃쎄퀎(硫댁쟻+?먯꽍) ?꾧뎄?먯꽌??[ ] ?ㅻ줈 ?ㅻ깄 諛섍꼍??議곗젅?⑸땲??
+                # ?濡ろ뜑???癲ル슢????????? ??ш낄猷???????[ ] ????겾????怨좊룴 ?袁⑸즵?쀫뱺紐???釉뚰????筌뤾퍓???
                 if self.picking_mode == "paint_surface_magnetic":
                     try:
                         cur = float(getattr(self, "_surface_magnetic_snap_radius_px", 14.0) or 14.0)
@@ -9130,20 +9245,20 @@ class Viewport3D(QOpenGLWidget):
                         self._surface_magnetic_snap_radius_px = int(round(new))
                     except Exception:
                         _log_ignored_exception()
-                    self.status_info = f"?㎠ ?먯꽍 諛섍꼍: {new:.0f}px ([ / ] 議곗젅)"
+                    self.status_info = f"?????????袁⑸즵?쀫뱺紐? {new:.0f}px ([ / ] ?釉뚰???"
                     self.update()
                     return
 
-                # 湲곕낯: [ ] ?ㅻ줈 湲곗쫰紐??ш린 議곗젅
+                # ??れ삀??? [ ] ????겾???れ삀?節낅윺?ⓦ끉異??????釉뚰???
                 if key == key_dec:
                     self.gizmo_radius_factor = max(0.75, float(self.gizmo_radius_factor) * 0.9)
                     self.update_gizmo_size()
-                    self.status_info = f"? 湲곗쫰紐??ш린: x{self.gizmo_radius_factor:.2f}"
+                    self.status_info = f"? ??れ삀?節낅윺?ⓦ끉異????? x{self.gizmo_radius_factor:.2f}"
                     self.update()
                 elif key == key_inc:
                     self.gizmo_radius_factor = min(2.8, float(self.gizmo_radius_factor) / 0.9)
                     self.update_gizmo_size()
-                    self.status_info = f"? 湲곗쫰紐??ш린: x{self.gizmo_radius_factor:.2f}"
+                    self.status_info = f"? ??れ삀?節낅윺?ⓦ끉異????? x{self.gizmo_radius_factor:.2f}"
                     self.update()
               
         super().keyPressEvent(event)
@@ -9152,7 +9267,7 @@ class Viewport3D(QOpenGLWidget):
         if a0 is None:
             return
         event = a0
-        """????泥섎━"""
+        """????癲ル슪?ｇ몭??"""
         if event.key() in self.keys_pressed:
             self.keys_pressed.remove(event.key())
         if not (self.keys_pressed & {Qt.Key.Key_W, Qt.Key.Key_A, Qt.Key.Key_S, Qt.Key.Key_D, Qt.Key.Key_Q, Qt.Key.Key_E}):
@@ -9161,7 +9276,7 @@ class Viewport3D(QOpenGLWidget):
         super().keyReleaseEvent(event)
 
     def process_keyboard_navigation(self):
-        """WASD ?곗냽 ?대룞 泥섎━"""
+        """WASD ???Β?ろ떗 ????癲ル슪?ｇ몭??"""
         if not self.keys_pressed:
             return
             
@@ -9184,7 +9299,7 @@ class Viewport3D(QOpenGLWidget):
             self.update()
     
     def _hit_test_roi(self, pos):
-        """ROI ?몃뱾(?붿궡??以묒븰) ?대┃ 寃??(screen-space ?곗꽑)."""
+        """ROI ?嶺뚮ㅎ?볠뤃???釉먯뒜????濚욌꼬?댄꺍?? ?????濡ろ떟??(screen-space ???Β?띾쭡)."""
         # 1) Screen-space hit test (stable regardless of mesh scale / zoom).
         try:
             self.makeCurrent()
@@ -9241,7 +9356,7 @@ class Viewport3D(QOpenGLWidget):
                         continue
                 return best_key
 
-            # Edge handles first: "move" ?몃뱾???붿궡???좏깮??媛濡쒖콈吏 ?딅룄濡??곗꽑?쒖쐞 遺??
+            # Edge handles first: "move" ?嶺뚮ㅎ?볠뤃????釉먯뒜???????ャ뀕?????좊읈?棺??짆?볤턀???? ????녳뵣?????Β?띾쭡??筌믨퀡彛?????
             picked_edge = _pick_one(("bottom", "top", "left", "right"), edge_radius)
             if picked_edge is not None:
                 return picked_edge
@@ -9296,8 +9411,8 @@ class Viewport3D(QOpenGLWidget):
         only_selected: bool = False,
         orthographic: bool = False,
     ):
-        """怨좏빐?곷룄 ?ㅽ봽?ㅽ겕由??뚮뜑留?
-        `orthographic=True`瑜??ъ슜?섎㈃ ?뺤궗??glOrtho)?쇰줈 罹≪쿂?섏뿬 1:1 ?ㅼ????꾨㈃???좊━?⑸땲??
+        """??關履????ㅿ폍筌?????덈뭷???袁⑹뵫???????異?
+        `orthographic=True`???????嚥????嶺뚮Ĳ????glOrtho)???⑥??癲ル슓釉?????筌뚯슦肉?1:1 ???????ш끽踰??????ル깼???筌뤾퍓???
         """
         self.makeCurrent()
         prev_viewport = None
@@ -9306,11 +9421,11 @@ class Viewport3D(QOpenGLWidget):
         except Exception:
             prev_viewport = None
 
-        # 1. FBO ?앹꽦
+        # 1. FBO ??獄쏅똻??
         fbo = QOpenGLFramebufferObject(width, height, QOpenGLFramebufferObject.Attachment.Depth)
         fbo.bind()
         
-        # 2. ?뚮뜑留??ㅼ젙 (?ㅽ봽?ㅽ겕由곗슜)
+        # 2. ?????異????源놁젳 (????덈뭷???袁⑹뵫?繹먭퍗???
         glViewport(0, 0, width, height)
         
         glMatrixMode(GL_PROJECTION)
@@ -9323,8 +9438,8 @@ class Viewport3D(QOpenGLWidget):
         glMatrixMode(GL_MODELVIEW)
         glPushMatrix()
         
-        # 3. 洹몃━湲?(UI ?쒖쇅?섍퀬 源⑤걮?섍쾶)
-        glClearColor(1.0, 1.0, 1.0, 1.0) # ?붿씠??諛곌꼍
+        # 3. ??숆강筌??ⓦ꺂糾?(UI ??筌믨퀡?????嚥싲갭?泳?濾????곕쿊)
+        glClearColor(1.0, 1.0, 1.0, 1.0) # ??釉먯뒭????袁⑸즲??㏓き?
         glDepthMask(GL_TRUE)
         glClear(int(GL_COLOR_BUFFER_BIT) | int(GL_DEPTH_BUFFER_BIT))
         glLoadIdentity()
@@ -9414,13 +9529,13 @@ class Viewport3D(QOpenGLWidget):
                 gluPerspective(45.0, aspect, 0.1, 1000000.0)
                 glMatrixMode(GL_MODELVIEW)
         
-        # 愿묒썝
+        # ???뱁꺍??
         glEnable(GL_LIGHTING)
         glLightModelfv(GL_LIGHT_MODEL_AMBIENT, [0.4, 0.4, 0.4, 1.0])
         glLightfv(GL_LIGHT0, GL_POSITION, [0.0, 0.0, 1.0, 0.0])
         glLightfv(GL_LIGHT0, GL_DIFFUSE, [0.6, 0.6, 0.6, 1.0])
         
-        # 硫붿돩留??뚮뜑留?(洹몃━?쒕굹 HUD ?쒖쇅)
+        # 癲ル슢?????깆떴??????異?(??숆강筌???筌?猷?HUD ??筌믨퀡??
         sel = int(self.selected_index) if self.selected_index is not None else -1
         for i, obj in enumerate(self.objects):
             if not obj.visible:
@@ -9429,7 +9544,7 @@ class Viewport3D(QOpenGLWidget):
                 continue
             self.draw_scene_object(obj, is_selected=(i == sel))
         
-        # 4. ?됰젹 罹≪쿂 (SVG ?ъ쁺 ?뺣젹??
+        # 4. ???⑥ъ／ 癲ル슓釉????(SVG ?????嶺뚮㉡?ｈ???
         mv = glGetDoublev(GL_MODELVIEW_MATRIX)
         proj = glGetDoublev(GL_PROJECTION_MATRIX)
         vp = glGetIntegerv(GL_VIEWPORT)
@@ -9437,7 +9552,7 @@ class Viewport3D(QOpenGLWidget):
         glFlush()
         qimage = fbo.toImage()
         
-        # 5. 蹂듦뎄
+        # 5. ?怨뚮옖甕걔??
         glMatrixMode(GL_PROJECTION)
         glPopMatrix()
         glMatrixMode(GL_MODELVIEW)
@@ -9445,7 +9560,7 @@ class Viewport3D(QOpenGLWidget):
         
         fbo.release()
 
-        # ?먮옒 酉고룷??蹂듦뎄
+        # ??????????????怨뚮옖甕걔??
         try:
             if prev_viewport is not None:
                 vx0, vy0, vw0, vh0 = [int(v) for v in prev_viewport[:4]]
@@ -9518,7 +9633,7 @@ class Viewport3D(QOpenGLWidget):
             return float(gl_x), float(gl_y)
 
     def get_ray(self, screen_x: int, screen_y: int):
-        """?붾㈃ 醫뚰몴?먯꽌 ?붾뱶 ?덉씠(origin, dir) 怨꾩궛"""
+        """??釉먮뻤?????щ뮡嶺???????釉먮폇?????源낇꼧(origin, dir) ??節뚮쳮雅?"""
         try:
             self.makeCurrent()
 
@@ -9544,7 +9659,7 @@ class Viewport3D(QOpenGLWidget):
             return None, None
 
     def pick_point_on_plane_z(self, screen_x: int, screen_y: int, z: float = 0.0):
-        """?붾㈃ 醫뚰몴?먯꽌 Z=z ?됰㈃怨쇱쓽 援먯젏(?붾뱶 醫뚰몴) 怨꾩궛"""
+        """??釉먮뻤?????щ뮡嶺?????Z=z ??野껊갭???貫???????????釉먮폇?????щ뮡嶺? ??節뚮쳮雅?"""
         ray_origin, ray_dir = self.get_ray(screen_x, screen_y)
         if ray_origin is None or ray_dir is None:
             return None
@@ -9565,10 +9680,10 @@ class Viewport3D(QOpenGLWidget):
         search_radius_px: int | None = None,
     ):
         """
-        ?붾㈃ 醫뚰몴瑜?硫붿돩 ?쒕㈃??3D 醫뚰몴濡?蹂?섑빀?덈떎.
+        ??釉먮뻤?????щ뮡嶺뚮ㅏ??쭗?癲ル슢??????筌먯룆???3D ???щ뮡嶺뚮ㅏ????怨뚮뼚????????덊렡.
 
         Returns:
-            (pt_world, depth_value, gl_x, gl_y, viewport, modelview, projection) ?먮뒗 None
+            (pt_world, depth_value, gl_x, gl_y, viewport, modelview, projection) ???獒?None
         """
         if not self.objects:
             return None
@@ -9576,7 +9691,7 @@ class Viewport3D(QOpenGLWidget):
         if not obj:
             return None
 
-        # OpenGL 酉고룷?? ?ъ쁺, 紐⑤뜽酉??됰젹 媛?몄삤湲?
+        # OpenGL ???????? ???? 癲ル슢?꾤땟????댟????⑥ъ／ ??좊읈?嶺뚮ㅎ?닸쾮濡㏓섀?
         self.makeCurrent()
 
         viewport = glGetIntegerv(GL_VIEWPORT)
@@ -9590,14 +9705,14 @@ class Viewport3D(QOpenGLWidget):
             except Exception:
                 return True
 
-        # 源딆씠 踰꾪띁?먯꽌 源딆씠 媛??쎄린
+        # 嚥싲갭큔????類????????嚥싲갭큔???????熬곣뱿逾?
         depth = cast(Any, glReadPixels(int(gl_x), int(gl_y), 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT))
         try:
             depth_value = float(depth[0][0])
         except Exception:
             depth_value = float("nan")
 
-        # 諛곌꼍 ???대┃ ???쒖쟻??쎌뿉????洹쇱쿂 depth濡??쇳궧 蹂댁젙 (?쇳궧 紐⑤뱶?먯꽌?쒕쭔 ?덉슜)
+        # ?袁⑸즲??㏓き???????????筌믨퀣??????諭?????????뗫쐩?depth?????醫딅르 ?怨뚮옖???(???醫딅르 癲ル슢?꾤땟????????筌먦끉?????源낅츛)
         if bool(allow_depth_search) and is_bg(depth_value):
             try:
                 if search_radius_px is not None:
@@ -9693,7 +9808,7 @@ class Viewport3D(QOpenGLWidget):
         allow_depth_search: bool = True,
         search_radius_px: int | None = None,
     ):
-        """?붾㈃ 醫뚰몴瑜?硫붿돩 ?쒕㈃??3D 醫뚰몴濡?蹂??"""
+        """??釉먮뻤?????щ뮡嶺뚮ㅏ??쭗?癲ル슢??????筌먯룆???3D ???щ뮡嶺뚮ㅏ????怨뚮뼚??"""
         info = self.pick_point_on_mesh_info(
             screen_x,
             screen_y,
@@ -9714,7 +9829,7 @@ class Viewport3D(QOpenGLWidget):
         projection,
         px_radius: float,
     ) -> float:
-        """媛숈? depth plane?먯꽌 px 嫄곕━ -> world 嫄곕━濡??섏궛(洹쇱궗)."""
+        """??좊즵?? depth plane?????px 癲꾧퀗????-> world 癲꾧퀗????ⓦ꺃肉???筌뚯뼦???????됱쒜?."""
         try:
             px = float(px_radius)
         except Exception:
@@ -9756,12 +9871,14 @@ class Viewport3D(QOpenGLWidget):
     
 
     def _pick_brush_face(self, pos):
-        """釉뚮윭?쒕줈 硫??좏깮"""
+        """??怨쀫뮛???筌먦끉큔 癲????ャ뀕??"""
         point = self.pick_point_on_mesh(
             pos.x(),
             pos.y(),
             allow_depth_search=True,
-            search_radius_px=14,
+            search_radius_px=int(
+                getattr(self, "_floor_pick_search_radius_px", FLOOR_PICK_SEARCH_RADIUS_PX_DEFAULT)
+            ),
         )
         if point is not None:
             res = self.pick_face_at_point(point, return_index=True)
@@ -9769,23 +9886,311 @@ class Viewport3D(QOpenGLWidget):
                 idx, v = res
                 self.brush_selected_faces.add(idx)
 
+    def _pick_visible_surface_hit(
+        self,
+        screen_x: int,
+        screen_y: int,
+        *,
+        approx_point_world: np.ndarray | None = None,
+    ) -> tuple[np.ndarray | None, int]:
+        """Return nearest positive ray-hit on selected mesh.
+
+        If `outer_face_indices` exists and is non-empty, search is restricted to that set.
+        """
+        _ = approx_point_world  # kept for call compatibility
+        obj = self.selected_obj
+        if obj is None or getattr(obj, "mesh", None) is None:
+            return None, -1
+
+        ray_origin_w, ray_dir_w = self.get_ray(int(screen_x), int(screen_y))
+        if ray_origin_w is None or ray_dir_w is None:
+            return None, -1
+
+        try:
+            trans = np.asarray(getattr(obj, "translation", [0.0, 0.0, 0.0]), dtype=np.float64).reshape(-1)
+            if trans.size < 3:
+                trans = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+            rot_deg = np.asarray(getattr(obj, "rotation", [0.0, 0.0, 0.0]), dtype=np.float64).reshape(-1)
+            if rot_deg.size < 3:
+                rot_deg = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+            scale = float(getattr(obj, "scale", 1.0))
+            if abs(scale) < 1e-12:
+                scale = 1.0
+
+            rx, ry, rz = np.radians(rot_deg[:3])
+            cx, sx = float(np.cos(rx)), float(np.sin(rx))
+            cy, sy = float(np.cos(ry)), float(np.sin(ry))
+            cz, sz = float(np.cos(rz)), float(np.sin(rz))
+            rot_x = np.array([[1.0, 0.0, 0.0], [0.0, cx, -sx], [0.0, sx, cx]], dtype=np.float64)
+            rot_y = np.array([[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]], dtype=np.float64)
+            rot_z = np.array([[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]], dtype=np.float64)
+            rot_mat = rot_x @ rot_y @ rot_z
+        except Exception:
+            return None, -1
+
+        try:
+            ray_origin_l = (rot_mat.T @ (np.asarray(ray_origin_w, dtype=np.float64).reshape(3) - trans[:3])) / float(scale)
+            ray_dir_l = rot_mat.T @ np.asarray(ray_dir_w, dtype=np.float64).reshape(3)
+            dn = float(np.linalg.norm(ray_dir_l))
+            if dn <= 1e-12 or (not np.isfinite(dn)):
+                return None, -1
+            ray_dir_l = ray_dir_l / dn
+        except Exception:
+            return None, -1
+
+        faces = np.asarray(getattr(obj.mesh, "faces", None), dtype=np.int32)
+        vertices = np.asarray(getattr(obj.mesh, "vertices", None), dtype=np.float64)
+        if faces.ndim != 2 or faces.shape[1] < 3 or vertices.ndim != 2 or vertices.shape[1] < 3:
+            return None, -1
+        n_faces = int(getattr(obj.mesh, "n_faces", 0) or 0)
+        if n_faces <= 0:
+            return None, -1
+
+        subset: np.ndarray | None = None
+        try:
+            outer = getattr(obj, "outer_face_indices", None)
+            if outer:
+                tmp = np.fromiter((int(i) for i in outer), dtype=np.int64, count=len(outer))
+                tmp = tmp[(tmp >= 0) & (tmp < n_faces)]
+                if tmp.size > 0:
+                    subset = np.asarray(tmp, dtype=np.int32)
+        except Exception:
+            subset = None
+
+        try:
+            chunk = int(getattr(self, "_floor_pick_ray_chunk_faces", 120000) or 120000)
+        except Exception:
+            chunk = 120000
+        chunk = int(max(20000, min(chunk, 300000)))
+
+        best_t = float("inf")
+        best_face = -1
+        ray_o = np.asarray(ray_origin_l, dtype=np.float64).reshape(3)
+        ray_d = np.asarray(ray_dir_l, dtype=np.float64).reshape(3)
+        eps = 1e-12
+
+        def _scan_ids(ids: np.ndarray) -> None:
+            nonlocal best_t, best_face
+            if ids.size <= 0:
+                return
+            try:
+                f = np.asarray(faces[ids, :3], dtype=np.int32)
+                v0 = np.asarray(vertices[f[:, 0], :3], dtype=np.float64)
+                v1 = np.asarray(vertices[f[:, 1], :3], dtype=np.float64)
+                v2 = np.asarray(vertices[f[:, 2], :3], dtype=np.float64)
+            except Exception:
+                return
+
+            e1 = v1 - v0
+            e2 = v2 - v0
+            pvec = np.cross(ray_d, e2)
+            det = np.einsum("ij,ij->i", e1, pvec)
+            mask = np.abs(det) > eps
+            if not bool(np.any(mask)):
+                return
+
+            inv_det = np.zeros_like(det, dtype=np.float64)
+            inv_det[mask] = 1.0 / det[mask]
+
+            tvec = ray_o.reshape(1, 3) - v0
+            u = np.einsum("ij,ij->i", tvec, pvec) * inv_det
+            mask &= (u >= -1e-9) & (u <= 1.0 + 1e-9)
+            if not bool(np.any(mask)):
+                return
+
+            qvec = np.cross(tvec, e1)
+            v = np.einsum("j,ij->i", ray_d, qvec) * inv_det
+            mask &= (v >= -1e-9) & ((u + v) <= 1.0 + 1e-9)
+            if not bool(np.any(mask)):
+                return
+
+            t = np.einsum("ij,ij->i", e2, qvec) * inv_det
+            mask &= t > 1e-8
+            mask &= np.isfinite(t)
+            if np.isfinite(best_t):
+                mask &= t < float(best_t)
+            if not bool(np.any(mask)):
+                return
+
+            valid = np.where(mask)[0]
+            try:
+                loc = int(valid[int(np.argmin(t[valid]))])
+                tt = float(t[loc])
+                if np.isfinite(tt) and tt < best_t:
+                    best_t = tt
+                    best_face = int(ids[loc])
+            except Exception:
+                return
+
+        if subset is None:
+            for start in range(0, int(n_faces), int(chunk)):
+                end = min(int(n_faces), start + int(chunk))
+                ids = np.arange(start, end, dtype=np.int32)
+                _scan_ids(ids)
+        else:
+            total = int(subset.size)
+            for start in range(0, total, int(chunk)):
+                end = min(total, start + int(chunk))
+                ids = np.asarray(subset[start:end], dtype=np.int32)
+                _scan_ids(ids)
+
+        if best_face < 0 or (not np.isfinite(best_t)):
+            return None, -1
+
+        hit_l = ray_o + ray_d * float(best_t)
+        hit_w = (rot_mat @ (hit_l * float(scale))) + trans[:3]
+        if not np.isfinite(hit_w).all():
+            return None, -1
+        return np.asarray(hit_w, dtype=np.float64).reshape(3), int(best_face)
+
+    def _face_world_vertices(self, face_idx: int) -> list[np.ndarray] | None:
+        """Return selected face vertices in world coordinates."""
+        obj = self.selected_obj
+        if obj is None or getattr(obj, "mesh", None) is None:
+            return None
+        try:
+            fi = int(face_idx)
+        except Exception:
+            return None
+
+        try:
+            faces = np.asarray(obj.mesh.faces, dtype=np.int32)
+            verts = np.asarray(obj.mesh.vertices, dtype=np.float64)
+            if fi < 0 or fi >= int(faces.shape[0]):
+                return None
+            f = np.asarray(faces[fi], dtype=np.int32).reshape(-1)
+            if f.size < 3:
+                return None
+        except Exception:
+            return None
+
+        try:
+            trans = np.asarray(getattr(obj, "translation", [0.0, 0.0, 0.0]), dtype=np.float64).reshape(-1)
+            if trans.size < 3:
+                trans = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+            rot_deg = np.asarray(getattr(obj, "rotation", [0.0, 0.0, 0.0]), dtype=np.float64).reshape(-1)
+            if rot_deg.size < 3:
+                rot_deg = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+            scale = float(getattr(obj, "scale", 1.0))
+            if abs(scale) < 1e-12:
+                scale = 1.0
+            rx, ry, rz = np.radians(rot_deg[:3])
+            cx, sx = float(np.cos(rx)), float(np.sin(rx))
+            cy, sy = float(np.cos(ry)), float(np.sin(ry))
+            cz, sz = float(np.cos(rz)), float(np.sin(rz))
+            rot_x = np.array([[1.0, 0.0, 0.0], [0.0, cx, -sx], [0.0, sx, cx]], dtype=np.float64)
+            rot_y = np.array([[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]], dtype=np.float64)
+            rot_z = np.array([[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]], dtype=np.float64)
+            rot_mat = rot_x @ rot_y @ rot_z
+        except Exception:
+            return None
+
+        out: list[np.ndarray] = []
+        for vi in f[:3]:
+            try:
+                v = np.asarray(verts[int(vi)], dtype=np.float64).reshape(-1)
+                if v.size < 3 or (not np.isfinite(v[:3]).all()):
+                    return None
+                w = (rot_mat @ (v[:3] * float(scale))) + trans[:3]
+                out.append(np.asarray(w, dtype=np.float64).reshape(3))
+            except Exception:
+                return None
+        return out if len(out) == 3 else None
+
     def _snap_floor_point_on_picked_face(self, point: np.ndarray) -> np.ndarray | None:
-        """Snap a floor pick to a likely support point (lowest vertex on the picked face)."""
+        """Project a floor pick onto the picked mesh triangle (world coordinates)."""
         try:
             res = self.pick_face_at_point(np.asarray(point, dtype=np.float64), return_index=True)
             if not res:
-                return np.asarray(point, dtype=np.float64).reshape(-1)[:3]
+                return None
             _idx, verts_w = res
             arr = np.asarray(verts_w, dtype=np.float64).reshape(-1, 3)
             if arr.size == 0 or not np.isfinite(arr).all():
-                return np.asarray(point, dtype=np.float64).reshape(-1)[:3]
-            k = int(np.argmin(arr[:, 2]))
-            return np.asarray(arr[k], dtype=np.float64).reshape(3)
+                return None
+            if arr.shape[0] < 3:
+                return None
+
+            p = np.asarray(point, dtype=np.float64).reshape(-1)
+            if p.size < 3 or not np.isfinite(p[:3]).all():
+                return None
+            p = p[:3]
+            a, b, c = arr[0], arr[1], arr[2]
+
+            # Reject far snaps (e.g., accidental non-mesh depth hits).
+            max_snap = 4.0  # cm
+            try:
+                obj = self.selected_obj
+                if obj is not None:
+                    wb = np.asarray(obj.get_world_bounds(), dtype=np.float64)
+                    if wb.shape == (2, 3) and np.isfinite(wb).all():
+                        span = np.asarray(wb[1] - wb[0], dtype=np.float64).reshape(3)
+                        max_dim = float(np.max(np.abs(span)))
+                        if np.isfinite(max_dim) and max_dim > 0.0:
+                            max_snap = float(max(0.2, min(max_dim * 0.04, 12.0)))
+            except Exception:
+                _log_ignored_exception()
+
+            def _accept(q: np.ndarray) -> np.ndarray | None:
+                qq = np.asarray(q, dtype=np.float64).reshape(-1)
+                if qq.size < 3 or not np.isfinite(qq[:3]).all():
+                    return None
+                q3 = qq[:3]
+                try:
+                    d = float(np.linalg.norm(q3 - p))
+                except Exception:
+                    return None
+                if (not np.isfinite(d)) or d > float(max_snap):
+                    return None
+                return np.asarray(q3, dtype=np.float64).reshape(3)
+
+            # Closest-point on triangle (Ericson, Real-Time Collision Detection).
+            ab = b - a
+            ac = c - a
+            ap = p - a
+            d1 = float(np.dot(ab, ap))
+            d2 = float(np.dot(ac, ap))
+            if d1 <= 0.0 and d2 <= 0.0:
+                return _accept(np.asarray(a, dtype=np.float64).reshape(3))
+
+            bp = p - b
+            d3 = float(np.dot(ab, bp))
+            d4 = float(np.dot(ac, bp))
+            if d3 >= 0.0 and d4 <= d3:
+                return _accept(np.asarray(b, dtype=np.float64).reshape(3))
+
+            vc = d1 * d4 - d3 * d2
+            if vc <= 0.0 and d1 >= 0.0 and d3 <= 0.0:
+                v = d1 / (d1 - d3)
+                return _accept(np.asarray(a + v * ab, dtype=np.float64).reshape(3))
+
+            cp = p - c
+            d5 = float(np.dot(ab, cp))
+            d6 = float(np.dot(ac, cp))
+            if d6 >= 0.0 and d5 <= d6:
+                return _accept(np.asarray(c, dtype=np.float64).reshape(3))
+
+            vb = d5 * d2 - d1 * d6
+            if vb <= 0.0 and d2 >= 0.0 and d6 <= 0.0:
+                w = d2 / (d2 - d6)
+                return _accept(np.asarray(a + w * ac, dtype=np.float64).reshape(3))
+
+            va = d3 * d6 - d5 * d4
+            if va <= 0.0 and (d4 - d3) >= 0.0 and (d5 - d6) >= 0.0:
+                w = (d4 - d3) / ((d4 - d3) + (d5 - d6))
+                return _accept(np.asarray(b + w * (c - b), dtype=np.float64).reshape(3))
+
+            denom = (va + vb + vc)
+            if abs(float(denom)) <= 1e-18:
+                return None
+            inv = 1.0 / float(denom)
+            v = vb * inv
+            w = vc * inv
+            return _accept(np.asarray(a + ab * v + ac * w, dtype=np.float64).reshape(3))
         except Exception:
             return None
 
     def _pick_selection_brush_face(self, pos):
-        """SelectionPanel??釉뚮윭???좏깮 (obj.selected_faces??諛섏쁺)"""
+        """Pick a face for selection-brush mode."""
         obj = self.selected_obj
         if not obj or obj.mesh is None:
             return
@@ -9834,6 +10239,8 @@ class Viewport3D(QOpenGLWidget):
 
     def _record_surface_paint_point(self, point: np.ndarray, target: str) -> None:
         try:
+            if not bool(getattr(self, "surface_paint_markers_enabled", False)):
+                return
             p = np.asarray(point, dtype=np.float64).reshape(-1)
             if p.size < 3 or not np.isfinite(p[:3]).all():
                 return
@@ -9848,7 +10255,7 @@ class Viewport3D(QOpenGLWidget):
             _log_ignored_exception()
 
     def clear_surface_paint_points(self, target: str | None = None) -> None:
-        """?쒕㈃ 吏??李띿? ?? ?쒖떆瑜?吏?곷땲??"""
+        """??筌먯룆??癲ル슣???癲ル슔?蹂?뎔? ?? ??筌?六??癲ル슣????ㅿ폍???"""
         try:
             if target is None:
                 self.surface_paint_points = []
@@ -9867,7 +10274,7 @@ class Viewport3D(QOpenGLWidget):
             pass
 
     def clear_surface_lasso(self) -> None:
-        """?섎윭??吏???곸뿭) ?ш?誘??ㅺ컖?? ?ㅻ쾭?덉씠瑜?珥덇린?뷀빀?덈떎."""
+        """??嚥?紐??癲ル슣??????ㅼ굡?? ???雅????됰???? ????곷츉???源낇꼧???縕?猿녿뎨????쑏????덊렡."""
         try:
             self._cancel_surface_lasso_thread()
         except Exception:
@@ -9890,7 +10297,7 @@ class Viewport3D(QOpenGLWidget):
             pass
 
     def clear_surface_magnetic_lasso(self, *, clear_cache: bool = False) -> None:
-        """寃쎄퀎(硫댁쟻+?먯꽍) ?ш?誘??곹깭瑜?珥덇린?뷀빀?덈떎."""
+        """?濡ろ뜑???癲ル슢????????? ???雅????ㅺ컼????縕?猿녿뎨????쑏????덊렡."""
         try:
             self._cancel_surface_magnetic_thread()
         except Exception:
@@ -9930,7 +10337,7 @@ class Viewport3D(QOpenGLWidget):
             _log_ignored_exception()
 
     def start_surface_magnetic_lasso(self) -> None:
-        """寃쎄퀎(硫댁쟻+?먯꽍) ?ш?誘??꾧뎄 ?쒖옉: 罹먯떆 以鍮?+ 湲곗〈 ??珥덇린??"""
+        """?濡ろ뜑???癲ル슢????????? ???雅???ш낄猷????筌믨퀣援? 癲????濚욌꼬??+ ??れ삀??????縕?猿녿뎨??"""
         try:
             self.clear_surface_magnetic_lasso(clear_cache=False)
         except Exception:
@@ -10299,7 +10706,7 @@ class Viewport3D(QOpenGLWidget):
 
         info = self.pick_point_on_mesh_info(int(qx), int(qy))
         if info is None:
-            self.status_info = "?좑툘 硫붿돩 ?꾨? ?대┃???먯쓣 李띿뼱 二쇱꽭??"
+            self.status_info = "???レ탴??癲ル슢??????? ????????獄?癲ル슔?蹂?뎔????낆뒩??뗫빝??"
             return False
 
         try:
@@ -10378,14 +10785,14 @@ class Viewport3D(QOpenGLWidget):
         except Exception:
             t = "area"
         if t in {"boundary", "magnetic", "paint_surface_magnetic"}:
-            return "?㎠", "寃쎄퀎(硫댁쟻+?먯꽍)"
+            return "Boundary", "Lasso(boundary)"
         return "Area", "Lasso(area)"
 
     def _finish_surface_lasso(self, modifiers, *, seed_pos=None) -> None:
         """Finalize current lasso and compute visible-face selection."""
         obj = self.selected_obj
         if obj is None or getattr(obj, "mesh", None) is None:
-            self.status_info = "?좑툘 癒쇱? 硫붿돩瑜??좏깮??二쇱꽭??"
+            self.status_info = "???レ탴???沃섅굥?? 癲ル슢??????????ャ뀕?????낆뒩??뗫빝??"
             self.clear_surface_lasso()
             self.update()
             return
@@ -10395,7 +10802,7 @@ class Viewport3D(QOpenGLWidget):
             icon, lbl = self._surface_lasso_tool_strings(
                 "boundary" if str(getattr(self, "picking_mode", "none")) == "paint_surface_magnetic" else "area"
             )
-            self.status_info = f"{icon} {lbl}: ?먯쓣 3媛??댁긽 李띿뼱二쇱꽭?? (?고겢由?Enter=?뺤젙)"
+            self.status_info = f"{icon} {lbl}: ???獄?3?????⑤?彛?癲ル슔?蹂?뎔???┸??繹먭퍔??? (???μ쪙繹??Enter=?嶺뚮Ĳ???"
             self.update()
             return
 
@@ -10491,7 +10898,7 @@ class Viewport3D(QOpenGLWidget):
                 continue
 
         if len(proj_xy) < 3:
-            self.status_info = f"{icon} {lbl}: ???낅젰???щ컮瑜댁? ?딆뒿?덈떎."
+            self.status_info = f"{icon} {lbl}: ??????곸죷??????筌?? ?????????덊렡."
             self.update()
             return
 
@@ -10504,7 +10911,7 @@ class Viewport3D(QOpenGLWidget):
             gl_y0 = int(np.clip(int(np.floor(float(np.min(poly_gl[:, 1])))), vy, vy + vh - 1))
             gl_y1 = int(np.clip(int(np.ceil(float(np.max(poly_gl[:, 1])))), vy, vy + vh - 1))
         except Exception:
-            self.status_info = f"{icon} {lbl}: ???낅젰???щ컮瑜댁? ?딆뒿?덈떎."
+            self.status_info = f"{icon} {lbl}: ??????곸죷??????筌?? ?????????덊렡."
             self.update()
             return
 
@@ -10587,7 +10994,7 @@ class Viewport3D(QOpenGLWidget):
         except Exception as e:
             self._surface_lasso_thread = None
             _icon, lbl = self._surface_lasso_tool_strings()
-            self.status_info = f"?좑툘 {lbl} 怨꾩궛 ?쒖옉 ?ㅽ뙣: {e}"
+            self.status_info = f"???レ탴??{lbl} ??節뚮쳮雅???筌믨퀣援?????됰꽡: {e}"
             self.update()
 
     def _on_surface_lasso_failed(self, msg: str) -> None:
@@ -10595,7 +11002,7 @@ class Viewport3D(QOpenGLWidget):
             return
         self._surface_lasso_thread = None
         _icon, lbl = self._surface_lasso_tool_strings()
-        self.status_info = f"?좑툘 {lbl} ?ㅽ뙣: {msg}"
+        self.status_info = f"???レ탴??{lbl} ????됰꽡: {msg}"
         self.update()
 
     def _on_surface_lasso_computed(self, result: object) -> None:
@@ -10606,7 +11013,7 @@ class Viewport3D(QOpenGLWidget):
         obj = self.selected_obj
         if obj is None or getattr(obj, "mesh", None) is None:
             _icon, lbl = self._surface_lasso_tool_strings()
-            self.status_info = f"?좑툘 {lbl}: ?좏깮 ??곸씠 ?놁뒿?덈떎."
+            self.status_info = f"???レ탴??{lbl}: ???ャ뀕???????ㅼ굣?????⑤８?????덊렡."
             self.clear_surface_lasso()
             self.update()
             return
@@ -10623,7 +11030,7 @@ class Viewport3D(QOpenGLWidget):
 
         if indices is None:
             icon, lbl = self._surface_lasso_tool_strings()
-            self.status_info = f"{icon} {lbl}: ?좏깮??硫댁씠 ?놁뒿?덈떎."
+            self.status_info = f"{icon} {lbl}: ???ャ뀕???癲ル슢???????⑤８?????덊렡."
             self.clear_surface_lasso()
             self.update()
             return
@@ -10636,7 +11043,7 @@ class Viewport3D(QOpenGLWidget):
         target = str(getattr(self, "_surface_lasso_apply_target", getattr(self, "_surface_paint_target", "outer"))).strip().lower()
         if target not in {"outer", "inner", "migu"}:
             target = "outer"
-        target_lbl = {"outer": "?몃㈃", "inner": "?대㈃", "migu": "誘멸뎄"}.get(target, target)
+        target_lbl = {"outer": "Outer", "inner": "Inner", "migu": "Migu"}.get(target, target)
         modifiers = getattr(self, "_surface_lasso_apply_modifiers", Qt.KeyboardModifier.NoModifier)
 
         target_set = self._get_surface_target_set(obj, target)
@@ -10677,7 +11084,7 @@ class Viewport3D(QOpenGLWidget):
             wand_n = int(stats.get("wand_selected", 0) or 0)
             wand_c = int(stats.get("wand_candidates", 0) or 0)
             if wand_n and wand_c:
-                wand_info = f" / ?꾨뱶 {wand_n:,}/{wand_c:,}"
+                wand_info = f" / ??ш끽維??{wand_n:,}/{wand_c:,}"
         except Exception:
             wand_info = ""
 
@@ -10686,7 +11093,7 @@ class Viewport3D(QOpenGLWidget):
             comp_n = int(stats.get("component_selected", 0) or 0)
             comp_c = int(stats.get("component_candidates", 0) or 0)
             if comp_n and comp_c and comp_c > comp_n:
-                comp_info = f" / ?곌껐 {comp_n:,}/{comp_c:,}"
+                comp_info = f" / ???ㅼ뒦??{comp_n:,}/{comp_c:,}"
         except Exception:
             comp_info = ""
 
@@ -10694,15 +11101,15 @@ class Viewport3D(QOpenGLWidget):
         try:
             if bool(stats.get("truncated", False)):
                 ms = int(stats.get("max_selected_faces", 0) or 0)
-                trunc_info = f" / 理쒕? {ms:,} ?쒗븳" if ms > 0 else " / 理쒕? ?쒗븳"
+                trunc_info = f" / 癲ル슔?됭짆? {ms:,} ????モ뵲" if ms > 0 else " / 癲ル슔?됭짆? ????モ뵲"
         except Exception:
             trunc_info = ""
 
-        op = "?쒓굅" if remove else "異붽?"
+        op = "Remove" if remove else "Add"
         icon, lbl = self._surface_lasso_tool_strings()
         msg = f"{icon} {lbl} [{target_lbl}]: {op} {selected_n:,} faces{comp_info}{wand_info}{trunc_info}"
         if cand_n:
-            msg += f" (?꾨낫 {cand_n:,})"
+            msg += f" (??ш끽維亦?{cand_n:,})"
         self.status_info = msg
 
         # Keep tool active, but clear the polygon for the next stroke.
@@ -10710,17 +11117,17 @@ class Viewport3D(QOpenGLWidget):
         self.update()
 
     def _finish_surface_magnetic_lasso(self, modifiers, *, seed_pos=None) -> None:
-        """?꾩옱 '寃쎄퀎(硫댁쟻+?먯꽍) ?ш?誘? ?대━怨??곸뿭???ы븿?섎뒗 '蹂댁씠?? 硫댁쓣 ??踰덉뿉 吏?뺥빀?덈떎."""
+        """??ш끽維??'?濡ろ뜑???癲ル슢????????? ???雅? ????????ㅼ굡????????嚥▲꺂痢?'?怨뚮옖???? 癲ル슢???????類???산덩?癲ル슣??嶺뚮쮳?????덊렡."""
         obj = self.selected_obj
         if obj is None or getattr(obj, "mesh", None) is None:
-            self.status_info = "?좑툘 癒쇱? 硫붿돩瑜??좏깮??二쇱꽭??"
+            self.status_info = "???レ탴???沃섅굥?? 癲ル슢??????????ャ뀕?????낆뒩??뗫빝??"
             self.clear_surface_magnetic_lasso(clear_cache=False)
             self.update()
             return
 
         pts = list(getattr(self, "surface_magnetic_points", None) or [])
         if len(pts) < 3:
-            self.status_info = "?㎠ 寃쎄퀎(硫댁쟻+?먯꽍): ?곸뿭??3???댁긽 李띿뼱二쇱꽭?? (?고겢由?Enter=?뺤젙)"
+            self.status_info = "????濡ろ뜑???癲ル슢?????????: ???ㅼ굡???3?????⑤?彛?癲ル슔?蹂?뎔???┸??繹먭퍔??? (???μ쪙繹??Enter=?嶺뚮Ĳ???"
             self.update()
             return
 
@@ -10780,7 +11187,7 @@ class Viewport3D(QOpenGLWidget):
             mv = np.asarray(mv_raw, dtype=np.float64).reshape(4, 4)
             proj = np.asarray(proj_raw, dtype=np.float64).reshape(4, 4)
         except Exception:
-            self.status_info = "?㎠ 寃쎄퀎(硫댁쟻+?먯꽍): 移대찓???곹깭瑜??쎌쓣 ???놁뒿?덈떎."
+            self.status_info = "????濡ろ뜑???癲ル슢?????????: ?怨멸텭?嶺?????ㅺ컼???????援??????⑤８?????덊렡."
             self.update()
             return
 
@@ -10798,7 +11205,7 @@ class Viewport3D(QOpenGLWidget):
             max_poly = 800
         poly2 = self._sanitize_polygon_2d(poly_gl, max_points=max(50, int(max_poly)), eps=1e-6)
         if poly2 is None or poly2.shape[0] < 3:
-            self.status_info = "?㎠ 寃쎄퀎(硫댁쟻+?먯꽍): ?대━怨ㅼ씠 ?щ컮瑜댁? ?딆뒿?덈떎."
+            self.status_info = "????濡ろ뜑???癲ル슢?????????: ????ⓦ깴踰???????筌?? ?????????덊렡."
             self.update()
             return
         poly_gl = np.asarray(poly2, dtype=np.float64).reshape(-1, 2)
@@ -10810,7 +11217,7 @@ class Viewport3D(QOpenGLWidget):
             gl_y0 = int(np.clip(int(np.floor(float(np.min(poly_gl[:, 1])))), vy, vy + vh - 1))
             gl_y1 = int(np.clip(int(np.ceil(float(np.max(poly_gl[:, 1])))), vy, vy + vh - 1))
         except Exception:
-            self.status_info = "?㎠ 寃쎄퀎(硫댁쟻+?먯꽍): ?대━怨ㅼ씠 ?щ컮瑜댁? ?딆뒿?덈떎."
+            self.status_info = "????濡ろ뜑???癲ル슢?????????: ????ⓦ깴踰???????筌?? ?????????덊렡."
             self.update()
             return
 
@@ -10891,14 +11298,14 @@ class Viewport3D(QOpenGLWidget):
             thr2.start()
         except Exception as e:
             self._surface_magnetic_thread = None
-            self.status_info = f"?좑툘 寃쎄퀎(硫댁쟻+?먯꽍) 怨꾩궛 ?쒖옉 ?ㅽ뙣: {e}"
+            self.status_info = f"???レ탴???濡ろ뜑???癲ル슢????????? ??節뚮쳮雅???筌믨퀣援?????됰꽡: {e}"
             self.update()
 
     def _on_surface_magnetic_failed(self, msg: str) -> None:
         if self.sender() is not getattr(self, "_surface_magnetic_thread", None):
             return
         self._surface_magnetic_thread = None
-        self.status_info = f"?좑툘 寃쎄퀎(硫댁쟻+?먯꽍) ?ㅽ뙣: {msg}"
+        self.status_info = f"???レ탴???濡ろ뜑???癲ル슢????????? ????됰꽡: {msg}"
         self.update()
 
     def _on_surface_magnetic_computed(self, result: object) -> None:
@@ -10908,7 +11315,7 @@ class Viewport3D(QOpenGLWidget):
 
         obj = self.selected_obj
         if obj is None or getattr(obj, "mesh", None) is None:
-            self.status_info = "?좑툘 寃쎄퀎(硫댁쟻+?먯꽍): ?좏깮 ??곸씠 ?놁뒿?덈떎."
+            self.status_info = "???レ탴???濡ろ뜑???癲ル슢?????????: ???ャ뀕???????ㅼ굣?????⑤８?????덊렡."
             self.clear_surface_magnetic_lasso(clear_cache=False)
             self.update()
             return
@@ -10924,7 +11331,7 @@ class Viewport3D(QOpenGLWidget):
             stats = {}
 
         if indices is None:
-            self.status_info = "?㎠ 寃쎄퀎(硫댁쟻+?먯꽍): ?좏깮??硫댁씠 ?놁뒿?덈떎."
+            self.status_info = "????濡ろ뜑???癲ル슢?????????: ???ャ뀕???癲ル슢???????⑤８?????덊렡."
             self.clear_surface_magnetic_lasso(clear_cache=False)
             self.update()
             return
@@ -10937,7 +11344,7 @@ class Viewport3D(QOpenGLWidget):
         target = str(getattr(self, "_surface_magnetic_apply_target", getattr(self, "_surface_paint_target", "outer"))).strip().lower()
         if target not in {"outer", "inner", "migu"}:
             target = "outer"
-        target_lbl = {"outer": "?몃㈃", "inner": "?대㈃", "migu": "誘멸뎄"}.get(target, target)
+        target_lbl = {"outer": "Outer", "inner": "Inner", "migu": "Migu"}.get(target, target)
         modifiers = getattr(self, "_surface_magnetic_apply_modifiers", Qt.KeyboardModifier.NoModifier)
 
         target_set = self._get_surface_target_set(obj, target)
@@ -10978,7 +11385,7 @@ class Viewport3D(QOpenGLWidget):
             wand_n = int(stats.get("wand_selected", 0) or 0)
             wand_c = int(stats.get("wand_candidates", 0) or 0)
             if wand_n and wand_c:
-                wand_info = f" / ?꾨뱶 {wand_n:,}/{wand_c:,}"
+                wand_info = f" / ??ш끽維??{wand_n:,}/{wand_c:,}"
         except Exception:
             wand_info = ""
 
@@ -10987,7 +11394,7 @@ class Viewport3D(QOpenGLWidget):
             comp_n = int(stats.get("component_selected", 0) or 0)
             comp_c = int(stats.get("component_candidates", 0) or 0)
             if comp_n and comp_c and comp_c > comp_n:
-                comp_info = f" / ?곌껐 {comp_n:,}/{comp_c:,}"
+                comp_info = f" / ???ㅼ뒦??{comp_n:,}/{comp_c:,}"
         except Exception:
             comp_info = ""
 
@@ -10995,14 +11402,14 @@ class Viewport3D(QOpenGLWidget):
         try:
             if bool(stats.get("truncated", False)):
                 ms = int(stats.get("max_selected_faces", 0) or 0)
-                trunc_info = f" / 理쒕? {ms:,} ?쒗븳" if ms > 0 else " / 理쒕? ?쒗븳"
+                trunc_info = f" / 癲ル슔?됭짆? {ms:,} ????モ뵲" if ms > 0 else " / 癲ル슔?됭짆? ????モ뵲"
         except Exception:
             trunc_info = ""
 
-        op = "?쒓굅" if remove else "異붽?"
-        msg = f"?㎠ 寃쎄퀎(硫댁쟻+?먯꽍) [{target_lbl}]: {op} {selected_n:,} faces{comp_info}{wand_info}{trunc_info}"
+        op = "Remove" if remove else "Add"
+        msg = f"????濡ろ뜑???癲ル슢????????? [{target_lbl}]: {op} {selected_n:,} faces{comp_info}{wand_info}{trunc_info}"
         if cand_n:
-            msg += f" (?꾨낫 {cand_n:,})"
+            msg += f" (??ш끽維亦?{cand_n:,})"
         self.status_info = msg
 
         # Keep tool active, but clear the polygon for the next stroke.
@@ -11897,12 +12304,12 @@ class Viewport3D(QOpenGLWidget):
         self._emit_surface_assignment_changed(obj)
 
     def pick_face_at_point(self, point: np.ndarray, return_index=False):
-        """?뱀젙 3D 醫뚰몴媛 ?ы븿???쇨컖??硫댁쓽 ?뺤젏 3媛쒕? 諛섑솚"""
+        """????3D ???щ뮡嶺뚮ㅏ?ｏ㎗? ????????館???癲ル슢?????嶺뚮Ĳ???3??좊즵獒? ?袁⑸즵???"""
         obj = self.selected_obj
         if not obj or obj.mesh is None:
             return None
         
-        # 硫붿돩 濡쒖뺄 醫뚰몴濡?蹂??(T/R/S ?????
+        # 癲ル슢?????棺??짆?쏆춾????щ뮡嶺뚮ㅏ????怨뚮뼚??(T/R/S ?????
         try:
             trans = np.asarray(getattr(obj, "translation", [0.0, 0.0, 0.0]), dtype=np.float64).reshape(-1)
             if trans.size < 3:
@@ -12116,12 +12523,14 @@ class Viewport3D(QOpenGLWidget):
         return None
 
     def draw_picked_points(self):
-        """李띿? ?먮뱾???묒? 援щ줈 ?쒓컖??(怨〓쪧/移섏닔 痢≪젙)"""
-        if not self.picked_points and not getattr(self, "measure_picked_points", None):
+        """癲ル슔?蹂?뎔? ????????? ????㎥鸚???癰????(???????怨멸땀???癲ル쉵?猷??"""
+        cp = self.picked_points if bool(getattr(self, "curvature_pick_markers_enabled", False)) else []
+        mp = getattr(self, "measure_picked_points", None) or []
+        if not cp and not mp:
             return
         
         glDisable(GL_LIGHTING)
-        glDisable(GL_DEPTH_TEST)  # ??긽 ?욎뿉 蹂댁씠寃?
+        glDisable(GL_DEPTH_TEST)  # ??????嚥▲꺆諭??怨뚮옖??鈺곗뼚臾?
         glEnable(GL_BLEND)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
         
@@ -12137,17 +12546,17 @@ class Viewport3D(QOpenGLWidget):
                 glPushMatrix()
                 glTranslatef(x, y, z)
 
-                # ?묒? 援?(?몃쭖泥대줈 洹쇱궗) - ?ш린 0.08cm
+                # ??? ??(?嶺뚮ㅎ?붺빊釉異???繞??????됱쒜? - ????0.08cm
                 size = 0.08
                 glBegin(GL_TRIANGLE_FAN)
-                glVertex3f(0, 0, size)  # ?곷떒
+                glVertex3f(0, 0, size)  # ???ㅿ폍??
                 for j in range(9):
                     angle = 2.0 * np.pi * j / 8
                     glVertex3f(size * np.cos(angle), size * np.sin(angle), 0)
                 glEnd()
 
                 glBegin(GL_TRIANGLE_FAN)
-                glVertex3f(0, 0, -size)  # ?섎떒
+                glVertex3f(0, 0, -size)  # ??嚥▲꺂??
                 for j in range(9):
                     angle = 2.0 * np.pi * j / 8
                     glVertex3f(size * np.cos(angle), size * np.sin(angle), 0)
@@ -12156,10 +12565,9 @@ class Viewport3D(QOpenGLWidget):
                 glPopMatrix()
 
         # Curvature picks (magenta)
-        draw_points(self.picked_points, (0.9, 0.2, 0.9, 0.9))
+        draw_points(cp, (0.9, 0.2, 0.9, 0.9))
 
         # Measure picks (cyan)
-        mp = getattr(self, "measure_picked_points", None) or []
         draw_points(mp, (0.1, 0.85, 0.95, 0.9))
 
         # If exactly 2 measure points exist, draw a line between them for clarity.
@@ -12182,14 +12590,16 @@ class Viewport3D(QOpenGLWidget):
         glEnable(GL_LIGHTING)
 
     def draw_surface_paint_points(self):
-        """?쒕㈃ 吏??????誘멸뎄) 以?李띿? ???쒖떆"""
+        """Draw paint-point markers used by surface assignment tools."""
+        if not bool(getattr(self, "surface_paint_markers_enabled", False)):
+            return
         pts = getattr(self, "surface_paint_points", None)
         if not pts:
             return
 
         try:
             glDisable(GL_LIGHTING)
-            glDisable(GL_DEPTH_TEST)  # ??긽 蹂댁씠寃?
+            glDisable(GL_DEPTH_TEST)  # ?????怨뚮옖??鈺곗뼚臾?
             glEnable(GL_BLEND)
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
@@ -12228,7 +12638,7 @@ class Viewport3D(QOpenGLWidget):
                 _log_ignored_exception()
 
     def draw_surface_lasso_overlay(self) -> None:
-        """?섎윭??吏???곸뿭) ?꾧뎄???붾㈃ ?ш?誘??ㅺ컖?? ?ㅻ쾭?덉씠"""
+        """??嚥?紐??癲ル슣??????ㅼ굡?? ??ш낄猷?????釉먮뻤?????雅????됰???? ????곷츉???源낇꼧"""
         try:
             if self.picking_mode != "paint_surface_area":
                 return
@@ -12412,7 +12822,7 @@ class Viewport3D(QOpenGLWidget):
                 _log_ignored_exception()
 
     def draw_surface_magnetic_lasso_overlay(self) -> None:
-        """寃쎄퀎(硫댁쟻+?먯꽍) ?꾧뎄???붾㈃ ?ш?誘??대━怨? ?ㅻ쾭?덉씠 (?붾뱶 ?ъ씤??湲곕컲)."""
+        """?濡ろ뜑???癲ル슢????????? ??ш낄猷?????釉먮뻤?????雅?????? ????곷츉???源낇꼧 (??釉먮폇?????????れ삀??뫢?."""
         try:
             if self.picking_mode != "paint_surface_magnetic":
                 return
@@ -12628,38 +13038,38 @@ class Viewport3D(QOpenGLWidget):
                 _log_ignored_exception()
     
     def draw_fitted_arc(self):
-        """?쇳똿???먰샇 ?쒓컖??(?좏깮??媛앹껜??遺李⑸맖)"""
+        """???紐꾧튅????誘⑦ｆ틦???癰????(???ャ뀕?????좊즵??꼯?????딅떵異??몄납嶺?"""
         obj = self.selected_obj
         if not obj or not obj.fitted_arcs:
-            # ?꾩떆 ?먰샇??洹몃━湲?(?꾩쭅 媛앹껜??遺李?????寃쎌슦)
+            # ??ш끽維뽳쭛???誘⑦ｆ틦????숆강筌??ⓦ꺂糾?(??ш끽維쀧빊???좊즵??꼯?????딅떵異??????濡ろ뜑???
             if self.fitted_arc is not None:
                 self._draw_single_arc(self.fitted_arc, None)
             return
         
-        # 媛앹껜??遺李⑸맂 紐⑤뱺 ?먰샇 洹몃━湲?
+        # ??좊즵??꼯?????딅떵異??몄납嶺?癲ル슢?꾤땟?????誘⑦ｆ틦???숆강筌??ⓦ꺂糾?
         for arc in obj.fitted_arcs:
             self._draw_single_arc(arc, obj)
     
     def _draw_single_arc(self, arc, obj):
-        """?⑥씪 ?먰샇 洹몃━湲?(?댁젣 ??긽 ?붾뱶 醫뚰몴 湲곗?)"""
+        """???쒒???誘⑦ｆ틦???숆강筌??ⓦ꺂糾?(???⑤챷????????釉먮폇?????щ뮡嶺???れ삀??)"""
         from src.core.curvature_fitter import CurvatureFitter
         
         glDisable(GL_LIGHTING)
-        glColor3f(0.9, 0.2, 0.9)  # 留덉젨?
+        glColor3f(0.9, 0.2, 0.9)  # 癲ル슢?????
         glLineWidth(3.0)
         
-        # ?먰샇 ?먮뱾 ?앹꽦
+        # ??誘⑦ｆ틦????????獄쏅똻??
         fitter = CurvatureFitter()
         arc_points = fitter.generate_arc_points(arc, 64)
         
-        # ??洹몃━湲?
+        # ????숆강筌??ⓦ꺂糾?
         glBegin(GL_LINE_LOOP)
         for point in arc_points:
             glVertex3fv(point)
         glEnd()
         
-        # 以묒떖?먯꽌 ?먯＜源뚯? ??(諛섏?由??쒖떆)
-        glColor3f(1.0, 1.0, 0.0)  # ?몃???
+        # 濚욌꼬?댄꺍??????????誘λ춴???? ??(?袁⑸즵??????筌?六?
+        glColor3f(1.0, 1.0, 0.0)  # ?嶺???
         glBegin(GL_LINES)
         glVertex3fv(arc.center)
         glVertex3fv(arc_points[0])
@@ -12669,31 +13079,31 @@ class Viewport3D(QOpenGLWidget):
         glEnable(GL_LIGHTING)
     
     def draw_floor_picks(self):
-        """諛붾떏硫?吏?????쒓컖??(??+ ?곌껐??"""
+        """?袁⑸즴????쒕굞異?癲ル슣???????癰????(??+ ???ㅼ뒦???"""
         if not self.floor_picks:
             return
         
         glDisable(GL_LIGHTING)
-        glDisable(GL_DEPTH_TEST)  # 硫붿돩 ?욎뿉 ?쒖떆
+        glEnable(GL_DEPTH_TEST)  # Keep picks visually attached to mesh surfaces.
         
-        # ??洹몃━湲?(?뚮????먰삎 留덉빱)
-        glColor3f(0.2, 0.4, 1.0)  # ?뚮???
+        # ????숆강筌??ⓦ꺂糾?(???????誘⑦ｆ뤃?癲ル슢???쎈쑏?
+        glColor3f(0.2, 0.4, 1.0)  # ?????
         glPointSize(12.0)
         glBegin(GL_POINTS)
         for point in self.floor_picks:
             glVertex3fv(point)
         glEnd()
         
-        # ???ъ씠 ?곌껐??(?몃???
+        # ?????????ㅼ뒦???(?嶺???
         if len(self.floor_picks) >= 2:
-            glColor3f(1.0, 0.9, 0.2)  # ?몃???
+            glColor3f(1.0, 0.9, 0.2)  # ?嶺???
             glLineWidth(3.0)
             glBegin(GL_LINE_STRIP)
             for point in self.floor_picks:
                 glVertex3fv(point)
             glEnd()
             
-            # ??긽 ?쒖옉???앹젏 ?곌껐?섏뿬 ?곸뿭 ?쒖떆
+            # ??????筌믨퀣援????獄??????ㅼ뒦???筌뚯슦肉????ㅼ굡????筌?六?
             glBegin(GL_LINES)
             glVertex3fv(self.floor_picks[-1])
             glVertex3fv(self.floor_picks[0])
@@ -12704,23 +13114,23 @@ class Viewport3D(QOpenGLWidget):
                 glVertex3fv(point)
             glEnd()
             
-            # 諛섑닾紐??곸뿭 硫??쒖떆 (異⑸텇???먯씠 紐⑥씠硫?
+            # ?袁⑸즵?????떻????ㅼ굡??癲???筌?六?(?野껊챶爾????????癲ル슢?꾤땟??ル쵐異?
             if len(self.floor_picks) >= 3:
                 glEnable(GL_BLEND)
                 glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-                glColor4f(0.2, 0.8, 0.2, 0.3)  # 珥덈줉??諛섑닾紐?                # ?ㅺ컖??硫?(Triangle Fan)
+                glColor4f(0.2, 0.8, 0.2, 0.3)  # ?縕?袁〓뭄???袁⑸즵?????떻?                # ???됰????癲?(Triangle Fan)
                 glBegin(GL_TRIANGLE_FAN)
                 for point in self.floor_picks:
                     glVertex3fv(point)
                 glEnd()
         
-        # ??踰덊샇 ?쒖떆???묒? 留덉빱 (1, 2, 3)
+        # ???類??????筌?六????? 癲ル슢???쎈쑏?(1, 2, 3)
         glColor3f(1.0, 1.0, 1.0)
-        marker_size = 0.3
+        marker_size = 0.12
         for i, point in enumerate(self.floor_picks):
             glPushMatrix()
-            glTranslatef(point[0], point[1], point[2] + 0.5)
-            # ?レ옄 ????ш린濡?援щ텇 (1=?묒??? 2=以묎컙?? 3=?곗썝)
+            glTranslatef(point[0], point[1], point[2] + 0.06)
+            # ????????????源껉펾??????㎦??(1=????? 2=濚욌꼬?댄꺁??? 3=???Β???
             size = marker_size * (i + 1)
             glBegin(GL_LINE_LOOP)
             for j in range(16):
@@ -12749,7 +13159,7 @@ class Viewport3D(QOpenGLWidget):
         self.update()
 
 
-# ?뚯뒪?몄슜 ?ㅽ깲?쒖뼹濡??ㅽ뻾
+# ???獒?嶺뚮ㅎ??????袁ⓓ??筌?苑??????덈틖
 if __name__ == '__main__':
     import sys
     

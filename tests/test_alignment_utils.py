@@ -4,6 +4,8 @@ import numpy as np
 
 from src.core.alignment_utils import (
     compute_floor_contact_shift,
+    compute_minimax_center_shift,
+    compute_nonpenetration_lift,
     fit_plane_normal,
     orient_plane_normal_toward,
     rotation_matrix_align_vectors,
@@ -72,7 +74,20 @@ class TestAlignmentUtils(unittest.TestCase):
         z_large = np.array([-3.0, -2.5, 0.1], dtype=np.float64)
         self.assertAlmostEqual(compute_floor_contact_shift(z_large, tolerance=0.02, max_auto_shift=0.2), 0.0)
 
+    def test_compute_minimax_center_shift(self):
+        z = np.array([-1.0, 2.0, 3.0], dtype=np.float64)
+        self.assertAlmostEqual(compute_minimax_center_shift(z), 1.0)
+
+        z_empty = np.array([], dtype=np.float64)
+        self.assertAlmostEqual(compute_minimax_center_shift(z_empty), 0.0)
+
+    def test_compute_nonpenetration_lift(self):
+        z = np.array([-0.25, 0.1, 0.4], dtype=np.float64)
+        self.assertAlmostEqual(compute_nonpenetration_lift(z, floor_z=0.0), 0.25)
+
+        z_ok = np.array([0.0, 0.2, 1.5], dtype=np.float64)
+        self.assertAlmostEqual(compute_nonpenetration_lift(z_ok, floor_z=0.0), 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()
-
