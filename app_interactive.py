@@ -2719,34 +2719,31 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+        z_residual = float("nan")
         try:
-            floor_z = float(np.nanmin(np.asarray(selected_rot, dtype=np.float64)[:, 2]))
+            z_vals = np.asarray(selected_rot, dtype=np.float64)[:, 2]
+            z_min = float(np.nanmin(z_vals))
+            z_max = float(np.nanmax(z_vals))
+            floor_z = 0.5 * (z_min + z_max)
         except Exception:
             floor_z = 0.0
         if np.isfinite(floor_z):
-            obj.mesh.vertices[:, 2] -= floor_z
-            selected_rot[:, 2] -= floor_z
-
-        contact_fix = 0.0
-        try:
-            floor_min = float(np.nanmin(np.asarray(selected_rot, dtype=np.float64)[:, 2]))
-            if np.isfinite(floor_min) and floor_min < 0.0:
-                contact_fix = -floor_min
-                obj.mesh.vertices[:, 2] += float(contact_fix)
-                selected_rot[:, 2] += float(contact_fix)
-        except Exception:
-            contact_fix = 0.0
-
-        # Final guard: never leave mesh below XY after floor alignment.
-        global_fix = 0.0
+            obj.mesh.vertices[:, 2] -= float(floor_z)
+            selected_rot[:, 2] -= float(floor_z)
+        # Keep the entire mesh above XY after floor alignment.
         try:
             mesh_min_z = float(np.nanmin(np.asarray(obj.mesh.vertices, dtype=np.float64)[:, 2]))
-            if np.isfinite(mesh_min_z) and mesh_min_z < 0.0:
-                global_fix = -mesh_min_z
-                obj.mesh.vertices[:, 2] += float(global_fix)
-                selected_rot[:, 2] += float(global_fix)
         except Exception:
-            global_fix = 0.0
+            mesh_min_z = float("nan")
+        if np.isfinite(mesh_min_z) and mesh_min_z < 0.0:
+            lift_z = float(-mesh_min_z)
+            obj.mesh.vertices[:, 2] += lift_z
+            selected_rot[:, 2] += lift_z
+        try:
+            z_after = np.asarray(selected_rot, dtype=np.float64)[:, 2]
+            z_residual = float(np.nanmax(np.abs(z_after)))
+        except Exception:
+            z_residual = float("nan")
 
         try:
             obj.mesh._bounds = None
@@ -2767,11 +2764,12 @@ class MainWindow(QMainWindow):
         count = int(len(selected))
         self.viewport.brush_selected_faces.clear()
         self.viewport.picking_mode = 'none'
-        total_fix = float(contact_fix + global_fix)
-        if total_fix > 0.0:
-            self.viewport.status_info = f"✅ 브러시 바닥 정렬 완료 ({count}개 면 / XY 접점 보정 +{total_fix:.4f})"
+        if np.isfinite(z_residual):
+            self.viewport.status_info = (
+                f"✅ 브러시 바닥 정렬 완료 ({count}개 면 / 선택점 Z잔차 ±{z_residual:.4f})"
+            )
         else:
-            self.viewport.status_info = f"✅ 브러시 바닥 정렬 완료 ({count}개 면 / XY 접점)"
+            self.viewport.status_info = f"✅ 브러시 바닥 정렬 완료 ({count}개 면)"
         self.viewport.update()
         self.viewport.meshTransformChanged.emit()
 
@@ -2809,7 +2807,7 @@ class MainWindow(QMainWindow):
         return R
 
     def _optimize_points_xy_contact(self, points: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Minimize picked-point |z| in XY frame via small X/Y tilt search."""
+        """Minimize picked-point Z spread (plane flatness) via small X/Y tilt search."""
         pts = np.asarray(points, dtype=np.float64).reshape(-1, 3)
         if len(pts) < 3:
             return np.eye(3, dtype=np.float64), np.array([0.0, 0.0, 0.0], dtype=np.float64), pts
@@ -2839,7 +2837,10 @@ class MainWindow(QMainWindow):
             z = np.asarray(pts_r[:, 2], dtype=np.float64)
             if z.size == 0 or not np.isfinite(z).all():
                 return (float("inf"), float("inf")), pts_r, R
-            return (float(np.max(np.abs(z))), float(np.mean(np.abs(z)))), pts_r, R
+            # Height offset is irrelevant (we translate to Z=0 later).
+            # Optimize flatness of picked points around their own center level.
+            z_rel = z - float(np.median(z))
+            return (float(np.max(np.abs(z_rel))), float(np.mean(np.abs(z_rel)))), pts_r, R
 
         ax = 0.0
         ay = 0.0
@@ -2915,8 +2916,8 @@ class MainWindow(QMainWindow):
         # 1) floor_picks는 월드 좌표이므로 메쉬도 월드 기준 정점으로 맞춘다.
         self.viewport.bake_object_transform(obj)
 
-        # 2) 점 기반 평면을 robust하게 추정한다.
-        plane = fit_plane_normal(points, robust=True)
+        # 2) 선택한 점 전체를 반영한 least-squares 평면을 추정한다.
+        plane = fit_plane_normal(points, robust=False)
         if plane is None:
             self.viewport.status_info = "❌ 선택 점이 거의 일직선입니다. 점을 다시 찍어주세요."
             self.viewport.update()
@@ -2950,36 +2951,34 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        # 4) 선택 바닥 평면을 Z=0으로 이동
+        # 4) 선택 점들의 Z 잔차를 XY 기준으로 최소화하도록 중심 정렬한다.
+        #    (기존 min(z)=0 방식은 한두 점만 닿고 나머지가 뜨기 쉬움)
+        z_residual = float("nan")
         try:
-            floor_z = float(np.nanmin(np.asarray(points_rotated, dtype=np.float64)[:, 2]))
+            z_vals = np.asarray(points_rotated, dtype=np.float64)[:, 2]
+            z_min = float(np.nanmin(z_vals))
+            z_max = float(np.nanmax(z_vals))
+            # Minimax center: minimize max_i |z_i - t|
+            floor_z = 0.5 * (z_min + z_max)
         except Exception:
             floor_z = 0.0
         if np.isfinite(floor_z):
-            obj.mesh.vertices[:, 2] -= floor_z
-            points_rotated[:, 2] -= floor_z
-
-        # 5) Numeric guard: selected floor points must stay on/above XY plane.
-        contact_fix = 0.0
-        try:
-            floor_min = float(np.nanmin(np.asarray(points_rotated, dtype=np.float64)[:, 2]))
-            if np.isfinite(floor_min) and floor_min < 0.0:
-                contact_fix = -floor_min
-                obj.mesh.vertices[:, 2] += float(contact_fix)
-                points_rotated[:, 2] += float(contact_fix)
-        except Exception:
-            contact_fix = 0.0
-
-        # Final guard: never leave mesh below XY after floor alignment.
-        global_fix = 0.0
+            obj.mesh.vertices[:, 2] -= float(floor_z)
+            points_rotated[:, 2] -= float(floor_z)
+        # Keep the entire mesh above XY after floor alignment.
         try:
             mesh_min_z = float(np.nanmin(np.asarray(obj.mesh.vertices, dtype=np.float64)[:, 2]))
-            if np.isfinite(mesh_min_z) and mesh_min_z < 0.0:
-                global_fix = -mesh_min_z
-                obj.mesh.vertices[:, 2] += float(global_fix)
-                points_rotated[:, 2] += float(global_fix)
         except Exception:
-            global_fix = 0.0
+            mesh_min_z = float("nan")
+        if np.isfinite(mesh_min_z) and mesh_min_z < 0.0:
+            lift_z = float(-mesh_min_z)
+            obj.mesh.vertices[:, 2] += lift_z
+            points_rotated[:, 2] += lift_z
+        try:
+            z_after = np.asarray(points_rotated, dtype=np.float64)[:, 2]
+            z_residual = float(np.nanmax(np.abs(z_after)))
+        except Exception:
+            z_residual = float("nan")
 
         try:
             obj.mesh._bounds = None
@@ -2996,13 +2995,12 @@ class MainWindow(QMainWindow):
 
         self.viewport.update_vbo(obj)
         self.sync_transform_panel()
-        total_fix = float(contact_fix + global_fix)
-        if total_fix > 0.0:
+        if np.isfinite(z_residual):
             self.viewport.status_info = (
-                f"✅ 바닥 정렬 완료 (점 {len(points)}개 / XY 접점 보정 +{total_fix:.4f})"
+                f"✅ 바닥 정렬 완료 (점 {len(points)}개 / 선택점 Z잔차 ±{z_residual:.4f})"
             )
         else:
-            self.viewport.status_info = f"✅ 바닥 정렬 완료 (점 {len(points)}개 기반 / XY 접점)"
+            self.viewport.status_info = f"✅ 바닥 정렬 완료 (점 {len(points)}개 기반)"
         self.viewport.update()
         
         self.viewport.floor_picks = []
@@ -7440,12 +7438,15 @@ class MainWindow(QMainWindow):
         enable_ortho_lock = True
         try:
             is_top_bottom = abs(abs(float(cam.elevation)) - 90.0) <= VIEW_ANGLE_EPS
-            # Keep top/bottom as strict ortho. Side views use perspective for intuitive navigation.
+            az_norm = ((float(cam.azimuth) + 180.0) % 360.0) - 180.0
+            is_side = abs(float(cam.elevation)) <= VIEW_ANGLE_EPS and any(
+                abs(az_norm - tgt) <= VIEW_ANGLE_EPS for tgt in VIEW_CANONICAL_AZIMUTHS
+            )
             self.viewport._ortho_view_scale = (
                 VIEW_ORTHO_SCALE_TOP_BOTTOM if is_top_bottom else VIEW_ORTHO_SCALE_SIDE
             )
             self.viewport._ortho_frame_override = None
-            enable_ortho_lock = bool(is_top_bottom)
+            enable_ortho_lock = bool(is_top_bottom or is_side)
         except Exception:
             pass
         self.viewport._front_back_ortho_enabled = enable_ortho_lock
