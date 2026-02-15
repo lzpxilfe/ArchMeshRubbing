@@ -207,3 +207,44 @@ def compute_floor_contact_shift(
     if shift > float(max_auto_shift):
         return 0.0
     return float(shift)
+
+
+def compute_minimax_center_shift(z_values: np.ndarray) -> float:
+    """
+    Return minimax center shift for 1D values.
+
+    This is the translation `t` that minimizes `max_i |z_i - t|`.
+    """
+    z = np.asarray(z_values, dtype=np.float64).reshape(-1)
+    z = z[np.isfinite(z)]
+    if z.size == 0:
+        return 0.0
+    z_min = float(np.min(z))
+    z_max = float(np.max(z))
+    if (not np.isfinite(z_min)) or (not np.isfinite(z_max)):
+        return 0.0
+    return float(0.5 * (z_min + z_max))
+
+
+def compute_nonpenetration_lift(
+    z_values: np.ndarray,
+    *,
+    floor_z: float = 0.0,
+    eps: float = 1e-12,
+) -> float:
+    """
+    Return additional +Z lift required to keep all values on/above `floor_z`.
+    """
+    z = np.asarray(z_values, dtype=np.float64).reshape(-1)
+    z = z[np.isfinite(z)]
+    if z.size == 0:
+        return 0.0
+
+    min_z = float(np.min(z))
+    if (not np.isfinite(min_z)):
+        return 0.0
+
+    needed = float(floor_z) - min_z
+    if needed <= float(eps):
+        return 0.0
+    return float(needed)
