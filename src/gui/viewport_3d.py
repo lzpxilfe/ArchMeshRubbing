@@ -1673,10 +1673,10 @@ class Viewport3D(QOpenGLWidget):
         self.active_gizmo_axis = None
         self.gizmo_size = 6.0
         self.gizmo_radius_factor = 0.90
-        self._gizmo_pick_width_ratio = 0.12
+        self._gizmo_pick_width_ratio = 0.18
         self._gizmo_rotate_sensitivity = 0.85
         # Steering-wheel feel: clockwise drag should rotate clockwise on screen.
-        self._gizmo_drag_sign = 1.0
+        self._gizmo_drag_sign = -1.0
         self.gizmo_drag_start = None
         
         # 怨〓쪧 痢≪젙 紐⑤뱶
@@ -6941,6 +6941,25 @@ class Viewport3D(QOpenGLWidget):
         factor = max(0.75, min(2.8, factor))
         self.gizmo_radius_factor = factor
         self.gizmo_size = max_dim * 0.5 * factor
+
+    def _object_rotation_matrix_world(self, obj: SceneObject | None) -> np.ndarray:
+        """Return object local->world rotation matrix in X->Y->Z order."""
+        if obj is None:
+            return np.eye(3, dtype=np.float64)
+        try:
+            rot_deg = np.asarray(getattr(obj, "rotation", [0.0, 0.0, 0.0]), dtype=np.float64).reshape(-1)
+            if rot_deg.size < 3:
+                return np.eye(3, dtype=np.float64)
+            rx, ry, rz = np.radians(rot_deg[:3])
+            cx, sx = float(np.cos(rx)), float(np.sin(rx))
+            cy, sy = float(np.cos(ry)), float(np.sin(ry))
+            cz, sz = float(np.cos(rz)), float(np.sin(rz))
+            rot_x = np.array([[1.0, 0.0, 0.0], [0.0, cx, -sx], [0.0, sx, cx]], dtype=np.float64)
+            rot_y = np.array([[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]], dtype=np.float64)
+            rot_z = np.array([[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]], dtype=np.float64)
+            return rot_x @ rot_y @ rot_z
+        except Exception:
+            return np.eye(3, dtype=np.float64)
     
     def hit_test_gizmo(self, screen_x, screen_y):
         """湲곗쫰紐?怨좊━ ?대┃ 寃??"""
@@ -6993,6 +7012,7 @@ class Viewport3D(QOpenGLWidget):
             tol_ratio = float(max(0.06, min(tol_ratio, 0.30)))
             threshold = max(pixel_world_size * 8.0, float(scaled_gizmo_radius) * tol_ratio)
             center = obj.translation
+            rot_mat = self._object_rotation_matrix_world(obj)
             
             # Define the planes for each axis's circle
             # X-axis circle is in YZ plane, normal is X-axis
@@ -7000,13 +7020,17 @@ class Viewport3D(QOpenGLWidget):
             # Z-axis circle is in XY plane, normal is Z-axis
             
             planes = {
-                'X': {'normal': np.array([1.0, 0.0, 0.0]), 'axis_vec': np.array([0.0, 1.0, 0.0])}, # Y-axis for rotation
-                'Y': {'normal': np.array([0.0, 1.0, 0.0]), 'axis_vec': np.array([1.0, 0.0, 0.0])}, # X-axis for rotation
-                'Z': {'normal': np.array([0.0, 0.0, 1.0]), 'axis_vec': np.array([1.0, 0.0, 0.0])}  # X-axis for rotation
+                "X": {"normal": rot_mat @ np.array([1.0, 0.0, 0.0], dtype=np.float64)},
+                "Y": {"normal": rot_mat @ np.array([0.0, 1.0, 0.0], dtype=np.float64)},
+                "Z": {"normal": rot_mat @ np.array([0.0, 0.0, 1.0], dtype=np.float64)},
             }
             
             for axis, plane_info in planes.items():
-                normal = plane_info['normal']
+                normal = np.asarray(plane_info["normal"], dtype=np.float64).reshape(3)
+                nrm = float(np.linalg.norm(normal))
+                if nrm <= 1e-12:
+                    continue
+                normal = normal / nrm
                 
                 # Intersection of ray with the plane containing the circle
                 denom = np.dot(ray_dir, normal)
@@ -7466,8 +7490,19 @@ class Viewport3D(QOpenGLWidget):
                     return
                         
                 elif self.picking_mode == 'floor_3point':
-                    point = self.pick_point_on_mesh(event.pos().x(), event.pos().y())
+                    point = self.pick_point_on_mesh(
+                        event.pos().x(),
+                        event.pos().y(),
+                        allow_depth_search=True,
+                        search_radius_px=14,
+                    )
                     if point is not None:
+                        try:
+                            snapped = self._snap_floor_point_on_picked_face(point)
+                            if snapped is not None:
+                                point = snapped
+                        except Exception:
+                            _log_ignored_exception()
                         # CAD AREA ?ㅽ??? ?쇳궧 ?먯? ?붾뱶 醫뚰몴 洹몃?濡??꾩쟻.
                         # (濡쒖뺄/?붾뱶 ?쇱슜 ???뚯쟾/?ㅼ??쇰맂 硫붿돩?먯꽌 ?됰㈃ 怨꾩궛??遺덉븞?뺥빐吏?
                         world_pt = np.asarray(point[:3], dtype=np.float64)
@@ -7485,8 +7520,19 @@ class Viewport3D(QOpenGLWidget):
                     return
                         
                 elif self.picking_mode == 'floor_face':
-                    point = self.pick_point_on_mesh(event.pos().x(), event.pos().y())
+                    point = self.pick_point_on_mesh(
+                        event.pos().x(),
+                        event.pos().y(),
+                        allow_depth_search=True,
+                        search_radius_px=14,
+                    )
                     if point is not None:
+                        try:
+                            snapped = self._snap_floor_point_on_picked_face(point)
+                            if snapped is not None:
+                                point = snapped
+                        except Exception:
+                            _log_ignored_exception()
                         vertices = self.pick_face_at_point(point)
                         if vertices:
                             self.floorFacePicked.emit(vertices)
@@ -8338,23 +8384,28 @@ class Viewport3D(QOpenGLWidget):
                     delta_angle = float(np.clip(delta_angle, -25.0, 25.0))
                     rot_sensitivity = float(getattr(self, "_gizmo_rotate_sensitivity", 0.85) or 0.85)
                     delta_angle *= float(max(0.1, min(rot_sensitivity, 2.0)))
-                    delta_angle *= float(getattr(self, "_gizmo_drag_sign", 1.0) or 1.0)
+                    delta_angle *= float(getattr(self, "_gizmo_drag_sign", -1.0) or -1.0)
                     
                     # "?먮룞李??몃뱾" 吏곴??? 留덉슦?ㅼ쓽 ?뚯쟾 諛⑺뼢??硫붿돩 ?뚯쟾??1:1 留ㅼ묶
                     # 移대찓???쒖꽑怨??뚯쟾異뺤쓽 諛⑺뼢???꾪듃怨????듯빐 visual CW/CCW瑜?寃곗젙
                     view_dir = self.camera.look_at - self.camera.position
                     view_dir /= np.linalg.norm(view_dir)
                     
-                    axis_vec = np.zeros(3)
+                    rot_mat = self._object_rotation_matrix_world(obj)
+                    axis_vec = np.zeros(3, dtype=np.float64)
                     if self.active_gizmo_axis == 'X':
                         axis_vec[0] = 1.0
                     elif self.active_gizmo_axis == 'Y':
                         axis_vec[1] = 1.0
                     elif self.active_gizmo_axis == 'Z':
                         axis_vec[2] = 1.0
+                    axis_vec = rot_mat @ axis_vec
+                    axis_norm = float(np.linalg.norm(axis_vec))
+                    if axis_norm > 1e-12:
+                        axis_vec = axis_vec / axis_norm
                     
                     # ?쒓컖??諛섏쟾 ?щ? 寃곗젙 (?몃뱾???뚮━??諛⑺뼢怨?硫붿돩媛 ?꾨뒗 諛⑺뼢 ?쇱튂)
-                    dot = np.dot(view_dir, axis_vec)
+                    dot = float(np.dot(view_dir, axis_vec))
                     flip = 1.0 if dot > 0 else -1.0
                     
                     if self.active_gizmo_axis == 'X':
@@ -8418,22 +8469,10 @@ class Viewport3D(QOpenGLWidget):
                 )
                 
                 if curr_world and prev_world:
-                    delta_world = np.array(curr_world) - np.array(prev_world)
-                    
-                    # 6媛?醫뚰몴怨??뺣젹 酉곗뿉?쒕뒗 2李⑥썝 ?대룞 媛뺤젣 (吏곴????μ긽)
-                    el = self.camera.elevation
-                    az = self.camera.azimuth % 360
-                    
-                    if abs(el) > 85: # ?곷㈃(90) / ?섎㈃(-90)
-                        delta_world[2] = 0
-                    elif abs(el) < 5: # ?뺣㈃, ?꾨㈃, 醫? ??                        # ?뺣㈃(-90/270), ?꾨㈃(90) -> Y異?怨좎젙
-                        if abs(az - 90) < 5 or abs(az - 270) < 5:
-                            delta_world[1] = 0
-                        # ?곗륫(0/360), 醫뚯륫(180) -> X異?怨좎젙
-                        elif abs(az) < 5 or abs(az - 360) < 5 or abs(az - 180) < 5:
-                            delta_world[0] = 0
-                            
-                    obj.translation += delta_world
+                    delta_world = np.array(curr_world, dtype=np.float64) - np.array(prev_world, dtype=np.float64)
+                    # Preserve full 3-axis movement even in canonical 6-way views.
+                    if np.isfinite(delta_world).all():
+                        obj.translation += delta_world
                 
                 self.meshTransformChanged.emit()
                 self.update()
@@ -8643,17 +8682,24 @@ class Viewport3D(QOpenGLWidget):
 
             # 4. ?쇰컲 移대찓??議곗옉 (?쒕옒洹?
             ortho_locked = bool(getattr(self, "_front_back_ortho_enabled", False))
-            # In canonical 6-axis views:
-            # - right-drag keeps orthographic 2D pan
-            # - left/middle-drag switches to free camera (orbit)
+            # In canonical 6-axis views (CloudCompare-like):
+            # - drag pans while keeping orthographic lock
+            # - Alt+left/middle exits lock and starts free orbit
             if ortho_locked:
-                if self.mouse_button == Qt.MouseButton.RightButton:
-                    self.camera.pan(dx, dy, sensitivity=0.16)
-                    self.update()
-                    return
-                if self.mouse_button in (Qt.MouseButton.LeftButton, Qt.MouseButton.MiddleButton):
-                    self._front_back_ortho_enabled = False
-                    self._ortho_frame_override = None
+                if self.mouse_button in (
+                    Qt.MouseButton.LeftButton,
+                    Qt.MouseButton.RightButton,
+                    Qt.MouseButton.MiddleButton,
+                ):
+                    allow_orbit = bool(event.modifiers() & Qt.KeyboardModifier.AltModifier)
+                    if allow_orbit and self.mouse_button in (Qt.MouseButton.LeftButton, Qt.MouseButton.MiddleButton):
+                        self._front_back_ortho_enabled = False
+                        self._ortho_frame_override = None
+                    else:
+                        pan_sens = 0.16 if self.mouse_button == Qt.MouseButton.RightButton else 0.13
+                        self.camera.pan(dx, dy, sensitivity=pan_sens)
+                        self.update()
+                        return
 
             if self.mouse_button == Qt.MouseButton.LeftButton:
                 self.camera.rotate(dx, dy, sensitivity=CAMERA_ROTATE_SENSITIVITY_DEFAULT)
@@ -8697,18 +8743,30 @@ class Viewport3D(QOpenGLWidget):
                     ray_dir = ray_dir / ray_norm
                     center = np.asarray(obj.translation, dtype=np.float64).reshape(3)
 
+                    rot_mat = self._object_rotation_matrix_world(obj)
                     if self.active_gizmo_axis == "X":
-                        normal = np.array([1.0, 0.0, 0.0], dtype=np.float64)
-                        basis_u = np.array([0.0, 1.0, 0.0], dtype=np.float64)
-                        basis_v = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+                        normal_local = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+                        basis_u_local = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+                        basis_v_local = np.array([0.0, 0.0, 1.0], dtype=np.float64)
                     elif self.active_gizmo_axis == "Y":
-                        normal = np.array([0.0, 1.0, 0.0], dtype=np.float64)
-                        basis_u = np.array([1.0, 0.0, 0.0], dtype=np.float64)
-                        basis_v = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+                        normal_local = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+                        basis_u_local = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+                        basis_v_local = np.array([0.0, 0.0, 1.0], dtype=np.float64)
                     else:
-                        normal = np.array([0.0, 0.0, 1.0], dtype=np.float64)
-                        basis_u = np.array([1.0, 0.0, 0.0], dtype=np.float64)
-                        basis_v = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+                        normal_local = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+                        basis_u_local = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+                        basis_v_local = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+                    normal = rot_mat @ normal_local
+                    basis_u = rot_mat @ basis_u_local
+                    basis_v = rot_mat @ basis_v_local
+                    n_norm = float(np.linalg.norm(normal))
+                    u_norm = float(np.linalg.norm(basis_u))
+                    v_norm = float(np.linalg.norm(basis_v))
+                    if n_norm <= 1e-12 or u_norm <= 1e-12 or v_norm <= 1e-12:
+                        return None
+                    normal = normal / n_norm
+                    basis_u = basis_u / u_norm
+                    basis_v = basis_v / v_norm
 
                     denom = float(np.dot(ray_dir, normal))
                     if abs(denom) > 1e-8:
@@ -9498,7 +9556,14 @@ class Viewport3D(QOpenGLWidget):
             return None
         return ray_origin + t * ray_dir
         
-    def pick_point_on_mesh_info(self, screen_x: int, screen_y: int):
+    def pick_point_on_mesh_info(
+        self,
+        screen_x: int,
+        screen_y: int,
+        *,
+        allow_depth_search: bool = True,
+        search_radius_px: int | None = None,
+    ):
         """
         ?붾㈃ 醫뚰몴瑜?硫붿돩 ?쒕㈃??3D 醫뚰몴濡?蹂?섑빀?덈떎.
 
@@ -9532,10 +9597,13 @@ class Viewport3D(QOpenGLWidget):
         except Exception:
             depth_value = float("nan")
 
-        # 諛곌꼍???대┃??寃쎌슦: 洹쇱쿂 ?쎌? depth瑜??먯깋?댁꽌 ?쇳궧??蹂댁젙
-        if is_bg(depth_value):
+        # 諛곌꼍 ???대┃ ???쒖쟻??쎌뿉????洹쇱쿂 depth濡??쇳궧 蹂댁젙 (?쇳궧 紐⑤뱶?먯꽌?쒕쭔 ?덉슜)
+        if bool(allow_depth_search) and is_bg(depth_value):
             try:
-                r = int(getattr(self, "_pick_search_radius_px", 0) or 0)
+                if search_radius_px is not None:
+                    r = int(search_radius_px)
+                else:
+                    r = int(getattr(self, "_pick_search_radius_px", 0) or 0)
             except Exception:
                 r = 0
             if r > 0:
@@ -9617,9 +9685,21 @@ class Viewport3D(QOpenGLWidget):
             projection,
         )
 
-    def pick_point_on_mesh(self, screen_x: int, screen_y: int):
+    def pick_point_on_mesh(
+        self,
+        screen_x: int,
+        screen_y: int,
+        *,
+        allow_depth_search: bool = True,
+        search_radius_px: int | None = None,
+    ):
         """?붾㈃ 醫뚰몴瑜?硫붿돩 ?쒕㈃??3D 醫뚰몴濡?蹂??"""
-        info = self.pick_point_on_mesh_info(screen_x, screen_y)
+        info = self.pick_point_on_mesh_info(
+            screen_x,
+            screen_y,
+            allow_depth_search=bool(allow_depth_search),
+            search_radius_px=search_radius_px,
+        )
         if info is None:
             return None
         return info[0]
@@ -9677,12 +9757,32 @@ class Viewport3D(QOpenGLWidget):
 
     def _pick_brush_face(self, pos):
         """釉뚮윭?쒕줈 硫??좏깮"""
-        point = self.pick_point_on_mesh(pos.x(), pos.y())
+        point = self.pick_point_on_mesh(
+            pos.x(),
+            pos.y(),
+            allow_depth_search=True,
+            search_radius_px=14,
+        )
         if point is not None:
             res = self.pick_face_at_point(point, return_index=True)
             if res:
                 idx, v = res
                 self.brush_selected_faces.add(idx)
+
+    def _snap_floor_point_on_picked_face(self, point: np.ndarray) -> np.ndarray | None:
+        """Snap a floor pick to a likely support point (lowest vertex on the picked face)."""
+        try:
+            res = self.pick_face_at_point(np.asarray(point, dtype=np.float64), return_index=True)
+            if not res:
+                return np.asarray(point, dtype=np.float64).reshape(-1)[:3]
+            _idx, verts_w = res
+            arr = np.asarray(verts_w, dtype=np.float64).reshape(-1, 3)
+            if arr.size == 0 or not np.isfinite(arr).all():
+                return np.asarray(point, dtype=np.float64).reshape(-1)[:3]
+            k = int(np.argmin(arr[:, 2]))
+            return np.asarray(arr[k], dtype=np.float64).reshape(3)
+        except Exception:
+            return None
 
     def _pick_selection_brush_face(self, pos):
         """SelectionPanel??釉뚮윭???좏깮 (obj.selected_faces??諛섏쁺)"""
