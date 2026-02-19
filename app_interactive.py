@@ -182,6 +182,7 @@ from src.core.alignment_utils import (  # noqa: E402
     orient_plane_normal_toward,
     rotation_matrix_align_vectors,
 )
+from src.core.unit_utils import mm_to_mesh_units  # noqa: E402
 
 DEFAULT_EXPORT_DPI = RUNTIME_DEFAULTS.export_dpi
 
@@ -3295,7 +3296,7 @@ class MainWindow(QMainWindow):
         self.status_info = QLabel("📂 파일을 열거나 드래그하세요")
         self.status_mesh = QLabel("") # 메쉬 정보 (정점, 면)
         self.status_grid = QLabel("격자: -")
-        self.status_unit = QLabel("단위: cm")
+        self.status_unit = QLabel("단위: -")
         
         self.statusbar.addWidget(self.status_info, 1)
         self.statusbar.addPermanentWidget(self.status_mesh)
@@ -4476,6 +4477,10 @@ class MainWindow(QMainWindow):
 
             self.current_mesh = mesh_data
             self.current_filepath = filepath
+            unit_s = str(getattr(mesh_data, "unit", "") or "").strip().lower()
+            if unit_s not in ("mm", "cm", "m"):
+                unit_s = str(getattr(self.mesh_loader, "default_unit", DEFAULT_MESH_UNIT) or DEFAULT_MESH_UNIT).strip().lower()
+            self.status_unit.setText(f"단위: {unit_s}")
 
             # Normal file load vs project load(.amr)
             obj_name = Path(filepath).name
@@ -5853,14 +5858,7 @@ class MainWindow(QMainWindow):
             return "arap"
 
         # FlattenPanel의 radius는 mm 입력이므로, mesh.unit 기준으로 world 단위로 환산
-        unit = str(getattr(mesh, "unit", "cm") or "cm").strip().lower()
-        if unit == "mm":
-            radius_world = radius_mm
-        elif unit == "m":
-            radius_world = radius_mm / 1000.0
-        else:
-            # default: cm
-            radius_world = radius_mm / 10.0
+        radius_world = mm_to_mesh_units(radius_mm, getattr(mesh, "unit", None))
 
         return flatten_with_method(
             mesh,
@@ -6364,14 +6362,8 @@ class MainWindow(QMainWindow):
                 outer_idx = sorted(list(getattr(obj, "outer_face_indices", set()) or []))
                 inner_idx = sorted(list(getattr(obj, "inner_face_indices", set()) or []))
 
-                unit = str(getattr(base, "unit", "cm") or "cm").strip().lower()
                 radius_mm = float(flatten_options.get("radius", 0.0))
-                if unit == "mm":
-                    cylinder_radius = radius_mm
-                elif unit == "m":
-                    cylinder_radius = radius_mm / 1000.0
-                else:
-                    cylinder_radius = radius_mm / 10.0
+                cylinder_radius = mm_to_mesh_units(radius_mm, getattr(base, "unit", None))
 
                 def task_export_sheet_svg():
                     from src.core.rubbing_sheet_exporter import (
@@ -6445,14 +6437,8 @@ class MainWindow(QMainWindow):
                 outer_idx = sorted(list(getattr(obj, "outer_face_indices", set()) or []))
                 inner_idx = sorted(list(getattr(obj, "inner_face_indices", set()) or []))
 
-                unit = str(getattr(base, "unit", "cm") or "cm").strip().lower()
                 radius_mm = float(flatten_options.get("radius", 0.0))
-                if unit == "mm":
-                    cylinder_radius = radius_mm
-                elif unit == "m":
-                    cylinder_radius = radius_mm / 1000.0
-                else:
-                    cylinder_radius = radius_mm / 10.0
+                cylinder_radius = mm_to_mesh_units(radius_mm, getattr(base, "unit", None))
 
                 def task_export_sheet_svg_digital():
                     from src.core.rubbing_sheet_exporter import (
@@ -7363,7 +7349,7 @@ class MainWindow(QMainWindow):
         cam.azimuth = az
         cam.elevation = max(-90.0, min(90.0, el))
         view_key = _canonical_view_key_from_angles(cam.azimuth, cam.elevation)
-        view_axes = CANONICAL_VIEW_AXES.get(view_key)
+        view_axes = CANONICAL_VIEW_AXES.get(view_key) if view_key is not None else None
 
         # Keep 6-face views framed using absolute-axis-stable sizing
         # (independent from mesh rotation/orientation).
@@ -8029,7 +8015,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "경고", "선택된 객체에 메쉬 데이터가 없습니다.")
             return
 
-        unit = str(getattr(mesh, "unit", "cm") or "cm").strip().lower()
+        unit = str(getattr(mesh, "unit", DEFAULT_MESH_UNIT) or DEFAULT_MESH_UNIT).strip().lower()
         scale = float(getattr(obj, "scale", 1.0))
         name = str(getattr(obj, "name", "mesh"))
 
@@ -8087,7 +8073,7 @@ class MainWindow(QMainWindow):
             if not isinstance(result, dict):
                 return
 
-            unit_s = str(result.get("unit") or "cm").strip().lower()
+            unit_s = str(result.get("unit") or DEFAULT_MESH_UNIT).strip().lower()
             scale_s = float(result.get("scale", 1.0))
 
             # Convert to cm-based reporting.

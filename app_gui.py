@@ -19,8 +19,8 @@ ROOT_DIR = Path(__file__).resolve().parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from src.core.runtime_defaults import DEFAULTS
-from src.core.output_paths import (
+from src.core.runtime_defaults import DEFAULTS  # noqa: E402
+from src.core.output_paths import (  # noqa: E402
     rubbing_output_path,
     projection_output_path,
     inner_surface_path,

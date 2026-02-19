@@ -2166,17 +2166,21 @@ class Viewport3D(QOpenGLWidget):
             clip_near = 0.1
             clip_far = 1000000.0
 
-        use_front_back_ortho = bool(getattr(self, "_front_back_ortho_enabled", False))
-        if use_front_back_ortho:
-            try:
-                az = float(getattr(self.camera, "azimuth", 0.0))
-                el = float(getattr(self.camera, "elevation", 0.0))
-                az = ((az + 180.0) % 360.0) - 180.0
-                is_top_bottom = abs(abs(el) - 90.0) <= 1e-3
-                is_side = abs(el) <= 1e-3 and any(abs(az - t) <= 1e-3 for t in (-180.0, -90.0, 0.0, 90.0, 180.0))
-                use_front_back_ortho = bool(is_top_bottom or is_side)
-            except Exception:
-                use_front_back_ortho = False
+        # Canonical 6-way angles should always render orthographically.
+        # This prevents accidental fallback to perspective when lock state was
+        # reset by unrelated actions (fit/project-restore/etc.).
+        is_canonical_6way = False
+        try:
+            az = float(getattr(self.camera, "azimuth", 0.0))
+            el = float(getattr(self.camera, "elevation", 0.0))
+            az = ((az + 180.0) % 360.0) - 180.0
+            is_top_bottom = abs(abs(el) - 90.0) <= 1e-3
+            is_side = abs(el) <= 1e-3 and any(abs(az - t) <= 1e-3 for t in (-180.0, -90.0, 0.0, 90.0, 180.0))
+            is_canonical_6way = bool(is_top_bottom or is_side)
+        except Exception:
+            is_canonical_6way = False
+
+        use_front_back_ortho = bool(getattr(self, "_front_back_ortho_enabled", False) or is_canonical_6way)
         if not use_front_back_ortho:
             # 湲곕낯 ?먭렐 ?ъ쁺
             gluPerspective(45.0, aspect, float(clip_near), float(clip_far))
