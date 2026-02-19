@@ -1700,6 +1700,7 @@ class Viewport3D(QOpenGLWidget):
         self.xray_alpha = 0.25
         # ?뺣㈃/?꾨㈃ ?꾨━?뗭뿉??X-Z 吏곴탳 ?ъ쁺??媛뺤젣?????ъ슜
         self._front_back_ortho_enabled = False
+        self._canonical_view_key: str | None = None
         self._ortho_view_scale = ORTHO_VIEW_SCALE_DEFAULT
         self._ortho_frame_override: tuple[float, float] | None = None
         
@@ -2118,6 +2119,33 @@ class Viewport3D(QOpenGLWidget):
         cam.center = _vec3(getattr(cam, "center", [0.0, 0.0, 0.0]), np.zeros(3, dtype=np.float64))
         cam.pan_offset = _vec3(getattr(cam, "pan_offset", [0.0, 0.0, 0.0]), np.zeros(3, dtype=np.float64))
 
+    def _camera_canonical_view_key(self) -> str | None:
+        """Return canonical view key for exact 6-way camera angles."""
+        try:
+            locked = str(getattr(self, "_canonical_view_key", "") or "").strip().lower()
+            if locked in {"front", "back", "left", "right", "top", "bottom"}:
+                return locked
+        except Exception:
+            _log_ignored_exception()
+        try:
+            az = float(getattr(self.camera, "azimuth", 0.0))
+            el = float(getattr(self.camera, "elevation", 0.0))
+            az = ((az + 180.0) % 360.0) - 180.0
+            if abs(abs(el) - 90.0) <= 1e-3:
+                return "top" if el >= 0.0 else "bottom"
+            if abs(el) <= 1e-3:
+                if abs(az - 0.0) <= 1e-3:
+                    return "right"
+                if abs(abs(az) - 180.0) <= 1e-3:
+                    return "left"
+                if abs(az + 90.0) <= 1e-3:
+                    return "front"
+                if abs(az - 90.0) <= 1e-3:
+                    return "back"
+        except Exception:
+            _log_ignored_exception()
+        return None
+
     def _apply_main_projection(self, w: int, h: int) -> None:
         self._sanitize_camera_state()
         ww = max(1, int(w))
@@ -2166,19 +2194,32 @@ class Viewport3D(QOpenGLWidget):
             clip_near = 0.1
             clip_far = 1000000.0
 
-        # Canonical 6-way angles should always render orthographically.
-        # This prevents accidental fallback to perspective when lock state was
-        # reset by unrelated actions (fit/project-restore/etc.).
-        is_canonical_6way = False
-        try:
-            az = float(getattr(self.camera, "azimuth", 0.0))
-            el = float(getattr(self.camera, "elevation", 0.0))
-            az = ((az + 180.0) % 360.0) - 180.0
-            is_top_bottom = abs(abs(el) - 90.0) <= 1e-3
-            is_side = abs(el) <= 1e-3 and any(abs(az - t) <= 1e-3 for t in (-180.0, -90.0, 0.0, 90.0, 180.0))
-            is_canonical_6way = bool(is_top_bottom or is_side)
-        except Exception:
-            is_canonical_6way = False
+        # Canonical 6-way views are hard-locked to exact angles so they remain
+        # true 2D planes (XY / YZ / XZ) without drifting into oblique view.
+        view_key = self._camera_canonical_view_key()
+        is_canonical_6way = view_key is not None
+        if view_key is not None:
+            presets: dict[str, tuple[float, float]] = {
+                "front": (-90.0, 0.0),
+                "back": (90.0, 0.0),
+                "right": (0.0, 0.0),
+                "left": (180.0, 0.0),
+                "top": (0.0, 90.0),
+                "bottom": (0.0, -90.0),
+            }
+            target = presets.get(view_key)
+            if target is not None:
+                try:
+                    az_t, el_t = float(target[0]), float(target[1])
+                    az_cur = float(getattr(self.camera, "azimuth", az_t))
+                    el_cur = float(getattr(self.camera, "elevation", el_t))
+                    az_cur = ((az_cur + 180.0) % 360.0) - 180.0
+                    if abs(az_cur - az_t) > 1e-6:
+                        self.camera.azimuth = az_t
+                    if abs(el_cur - el_t) > 1e-6:
+                        self.camera.elevation = el_t
+                except Exception:
+                    _log_ignored_exception()
 
         use_front_back_ortho = bool(getattr(self, "_front_back_ortho_enabled", False) or is_canonical_6way)
         if not use_front_back_ortho:
@@ -2415,7 +2456,8 @@ class Viewport3D(QOpenGLWidget):
         
         # 4. ?뚯쟾 湲곗쫰紐?(?좏깮??媛앹껜?먮쭔, ?쇳궧 紐⑤뱶 ?꾨땺 ?뚮쭔)
         if self.selected_obj and self.picking_mode == 'none':
-            if not self.roi_enabled:
+            is_canonical_6way = self._camera_canonical_view_key() is not None
+            if not self.roi_enabled and not is_canonical_6way:
                 self.draw_rotation_gizmo(self.selected_obj)
             # 硫붿돩 移섏닔/以묒떖???ㅻ쾭?덉씠
             self.draw_mesh_dimensions(self.selected_obj)
@@ -2493,6 +2535,13 @@ class Viewport3D(QOpenGLWidget):
         glEnable(GL_BLEND)
         glDisable(GL_LINE_SMOOTH)
 
+        # Canonical 6-way views should read as true 2D planes:
+        # - top/bottom: XY plane
+        # - front/back: XZ plane
+        # - left/right: YZ plane
+        # For side views we therefore render a plane-aligned grid, not the XY floor.
+        view_key = self._camera_canonical_view_key()
+
         try:
             base_spacing = float(getattr(self, "grid_spacing", 1.0) or 1.0)
         except Exception:
@@ -2524,6 +2573,22 @@ class Viewport3D(QOpenGLWidget):
         target_half_range = min(target_half_range, 2_000_000.0)
 
         cam_center = np.asarray(getattr(self.camera, "look_at", [0.0, 0.0, 0.0]), dtype=np.float64)
+        plane_axes = (0, 1)
+        fixed_axis = 2
+        if view_key in ("front", "back"):
+            plane_axes = (0, 2)  # XZ
+            fixed_axis = 1       # Y fixed
+        elif view_key in ("left", "right"):
+            plane_axes = (1, 2)  # YZ
+            fixed_axis = 0       # X fixed
+        elif view_key in ("top", "bottom"):
+            plane_axes = (0, 1)  # XY
+            fixed_axis = 2       # Z fixed
+        try:
+            plane_coord = float(cam_center[fixed_axis])
+        except Exception:
+            plane_coord = 0.0
+
         levels = [1, 10, 100, 1000, 10000]
         for level in levels:
             spacing = base_spacing * float(level)
@@ -2563,19 +2628,39 @@ class Viewport3D(QOpenGLWidget):
             glColor4f(0.5, 0.5, 0.5, alpha)
             glLineWidth(line_width)
 
-            snap_x = round(float(cam_center[0]) / spacing) * spacing
-            snap_y = round(float(cam_center[1]) / spacing) * spacing
+            ax0 = int(plane_axes[0])
+            ax1 = int(plane_axes[1])
+            snap_0 = round(float(cam_center[ax0]) / spacing) * spacing
+            snap_1 = round(float(cam_center[ax1]) / spacing) * spacing
 
             glBegin(GL_LINES)
             for i in range(-half_steps, half_steps + 1):
                 offset = i * spacing
-                x_val = snap_x + offset
-                glVertex3f(float(x_val), float(snap_y - half_range), 0.0)
-                glVertex3f(float(x_val), float(snap_y + half_range), 0.0)
+                v0 = np.zeros(3, dtype=np.float64)
+                v1 = np.zeros(3, dtype=np.float64)
+                v2 = np.zeros(3, dtype=np.float64)
+                v3 = np.zeros(3, dtype=np.float64)
 
-                y_val = snap_y + offset
-                glVertex3f(float(snap_x - half_range), float(y_val), 0.0)
-                glVertex3f(float(snap_x + half_range), float(y_val), 0.0)
+                # axis-0 fixed, axis-1 varying
+                v0[fixed_axis] = plane_coord
+                v1[fixed_axis] = plane_coord
+                v0[ax0] = snap_0 + offset
+                v1[ax0] = snap_0 + offset
+                v0[ax1] = snap_1 - half_range
+                v1[ax1] = snap_1 + half_range
+
+                # axis-1 fixed, axis-0 varying
+                v2[fixed_axis] = plane_coord
+                v3[fixed_axis] = plane_coord
+                v2[ax1] = snap_1 + offset
+                v3[ax1] = snap_1 + offset
+                v2[ax0] = snap_0 - half_range
+                v3[ax0] = snap_0 + half_range
+
+                glVertex3f(float(v0[0]), float(v0[1]), float(v0[2]))
+                glVertex3f(float(v1[0]), float(v1[1]), float(v1[2]))
+                glVertex3f(float(v2[0]), float(v2[1]), float(v2[2]))
+                glVertex3f(float(v3[0]), float(v3[1]), float(v3[2]))
             glEnd()
 
         glLineWidth(1.0)
@@ -5660,21 +5745,34 @@ class Viewport3D(QOpenGLWidget):
         axis_length = max(120.0, world_extent * 0.35)
         axis_length = min(axis_length, 200_000.0)
 
+        view_key = self._camera_canonical_view_key()
+
+        visible_axes = {0, 1, 2}
+        if view_key in ("top", "bottom"):
+            visible_axes = {0, 1}  # XY only
+        elif view_key in ("front", "back"):
+            visible_axes = {0, 2}  # XZ only
+        elif view_key in ("left", "right"):
+            visible_axes = {1, 2}  # YZ only
+
         glPushMatrix()
         glLineWidth(2.8)
         glBegin(GL_LINES)
 
-        glColor3f(0.95, 0.2, 0.2)
-        glVertex3f(float(-axis_length), 0.0, 0.0)
-        glVertex3f(float(axis_length), 0.0, 0.0)
+        if 0 in visible_axes:
+            glColor3f(0.95, 0.2, 0.2)
+            glVertex3f(float(-axis_length), 0.0, 0.0)
+            glVertex3f(float(axis_length), 0.0, 0.0)
 
-        glColor3f(0.2, 0.85, 0.2)
-        glVertex3f(0.0, float(-axis_length), 0.0)
-        glVertex3f(0.0, float(axis_length), 0.0)
+        if 1 in visible_axes:
+            glColor3f(0.2, 0.85, 0.2)
+            glVertex3f(0.0, float(-axis_length), 0.0)
+            glVertex3f(0.0, float(axis_length), 0.0)
 
-        glColor3f(0.2, 0.2, 0.95)
-        glVertex3f(0.0, 0.0, float(-axis_length))
-        glVertex3f(0.0, 0.0, float(axis_length))
+        if 2 in visible_axes:
+            glColor3f(0.2, 0.2, 0.95)
+            glVertex3f(0.0, 0.0, float(-axis_length))
+            glVertex3f(0.0, 0.0, float(axis_length))
 
         glEnd()
         glPopMatrix()
@@ -6622,6 +6720,8 @@ class Viewport3D(QOpenGLWidget):
         """?뚯쟾 湲곗쫰紐?洹몃━湲?"""
         if not self.show_gizmo:
             return
+        if self._camera_canonical_view_key() is not None:
+            return
         
         glDisable(GL_LIGHTING)
         glDisable(GL_DEPTH_TEST)
@@ -6788,6 +6888,7 @@ class Viewport3D(QOpenGLWidget):
             try:
                 # Ensure first loaded mesh is immediately visible.
                 self._front_back_ortho_enabled = False
+                self._canonical_view_key = None
                 self._ortho_frame_override = None
                 self.camera.fit_to_bounds(new_obj.get_world_bounds())
                 self.camera.pan_offset = np.array([0.0, 0.0, 0.0], dtype=np.float64)
@@ -7454,7 +7555,9 @@ class Viewport3D(QOpenGLWidget):
             if event.button() == Qt.MouseButton.LeftButton:
                 # 湲곗쫰紐??좏깮 寃??(媛???곗꽑?쒖쐞) - ROI 紐⑤뱶?먯꽌???④?/鍮꾪솢??
                 if self.picking_mode == 'none' and not getattr(self, "roi_enabled", False):
-                    axis = self.hit_test_gizmo(event.pos().x(), event.pos().y())
+                    axis = None
+                    if self._camera_canonical_view_key() is None:
+                        axis = self.hit_test_gizmo(event.pos().x(), event.pos().y())
                     if axis:
                         self.save_undo_state() # 蹂???쒖옉 ???곹깭 ???
                         self.active_gizmo_axis = axis
@@ -8686,7 +8789,7 @@ class Viewport3D(QOpenGLWidget):
 
             # 4. ?쇰컲 移대찓??議곗옉 (?쒕옒洹?
             ortho_locked = bool(getattr(self, "_front_back_ortho_enabled", False))
-            # In canonical 6-axis views (CloudCompare-like):
+            # In canonical 6-axis views:
             # - drag pans while keeping orthographic lock
             # - Alt+left/middle exits lock and starts free orbit
             if ortho_locked:
@@ -8698,6 +8801,7 @@ class Viewport3D(QOpenGLWidget):
                     allow_orbit = bool(event.modifiers() & Qt.KeyboardModifier.AltModifier)
                     if allow_orbit and self.mouse_button in (Qt.MouseButton.LeftButton, Qt.MouseButton.MiddleButton):
                         self._front_back_ortho_enabled = False
+                        self._canonical_view_key = None
                         self._ortho_frame_override = None
                     else:
                         pan_sens = 0.16 if self.mouse_button == Qt.MouseButton.RightButton else 0.13
@@ -8847,6 +8951,7 @@ class Viewport3D(QOpenGLWidget):
             return
 
         self._front_back_ortho_enabled = False
+        self._canonical_view_key = None
         self._ortho_frame_override = None
         self.camera.zoom(delta)
         self.update()
@@ -9087,11 +9192,13 @@ class Viewport3D(QOpenGLWidget):
         key = event.key()
         if key == Qt.Key.Key_R:
             self._front_back_ortho_enabled = False
+            self._canonical_view_key = None
             self._ortho_frame_override = None
             self.camera.reset()
             self.update()
         elif key == Qt.Key.Key_F:
             self._front_back_ortho_enabled = False
+            self._canonical_view_key = None
             self._ortho_frame_override = None
             self.fit_view_to_selected_object()
         else:

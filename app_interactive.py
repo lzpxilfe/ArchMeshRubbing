@@ -4268,6 +4268,7 @@ class MainWindow(QMainWindow):
 
         # Restore should not force camera back into orthographic lock.
         vp._front_back_ortho_enabled = False
+        vp._canonical_view_key = None
 
     def _normalize_section_modes_after_restore(self) -> None:
         vp = self.viewport
@@ -7290,11 +7291,13 @@ class MainWindow(QMainWindow):
             
     def reset_view(self):
         self.viewport._front_back_ortho_enabled = False
+        self.viewport._canonical_view_key = None
         self.viewport.camera.reset()
         self.viewport.update()
 
     def fit_view(self):
         self.viewport._front_back_ortho_enabled = False
+        self.viewport._canonical_view_key = None
         obj = self.viewport.selected_obj
         if obj:
             try:
@@ -7475,6 +7478,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self.viewport._front_back_ortho_enabled = enable_ortho_lock
+        self.viewport._canonical_view_key = view_key if (enable_ortho_lock and view_key is not None) else None
         self.viewport.update()
 
     def toggle_curvature_mode(self, enabled: bool):
