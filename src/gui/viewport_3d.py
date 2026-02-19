@@ -8790,16 +8790,15 @@ class Viewport3D(QOpenGLWidget):
             # 4. ?쇰컲 移대찓??議곗옉 (?쒕옒洹?
             ortho_locked = bool(getattr(self, "_front_back_ortho_enabled", False))
             # In canonical 6-axis views:
-            # - drag pans while keeping orthographic lock
-            # - Alt+left/middle exits lock and starts free orbit
+            # - left/middle drag exits lock and starts free orbit immediately
+            # - right drag keeps panning in locked view
             if ortho_locked:
                 if self.mouse_button in (
                     Qt.MouseButton.LeftButton,
                     Qt.MouseButton.RightButton,
                     Qt.MouseButton.MiddleButton,
                 ):
-                    allow_orbit = bool(event.modifiers() & Qt.KeyboardModifier.AltModifier)
-                    if allow_orbit and self.mouse_button in (Qt.MouseButton.LeftButton, Qt.MouseButton.MiddleButton):
+                    if self.mouse_button in (Qt.MouseButton.LeftButton, Qt.MouseButton.MiddleButton):
                         self._front_back_ortho_enabled = False
                         self._canonical_view_key = None
                         self._ortho_frame_override = None
