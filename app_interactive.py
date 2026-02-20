@@ -182,6 +182,9 @@ from src.core.alignment_utils import (  # noqa: E402
     orient_plane_normal_toward,
     rotation_matrix_align_vectors,
 )
+from src.core.cylindrical_image_unwrapper import (  # noqa: E402
+    unwrap_cylindrical_view_image,
+)
 from src.core.unit_utils import mm_to_mesh_units  # noqa: E402
 
 DEFAULT_EXPORT_DPI = RUNTIME_DEFAULTS.export_dpi
@@ -1680,9 +1683,10 @@ class ExportPanel(QWidget):
         img_layout = QFormLayout(img_group)
         
         self.spin_dpi = QSpinBox()
-        self.spin_dpi.setRange(72, 600)
+        self.spin_dpi.setRange(72, 1200)
         self.spin_dpi.setValue(DEFAULT_EXPORT_DPI)
         self.spin_dpi.setSuffix(" DPI")
+        self.spin_dpi.setToolTip("권장: 300 / 600 / 1200 PPI")
         img_layout.addRow("해상도:", self.spin_dpi)
         
         self.combo_format = QComboBox()
@@ -1742,6 +1746,27 @@ class ExportPanel(QWidget):
             )
         )
         layout.addWidget(btn_export_rubbing_digital)
+
+        btn_export_rubbing_view_cyl = QPushButton("📤 현재뷰 원통 이미지 내보내기(초고속)")
+        btn_export_rubbing_view_cyl.setToolTip(
+            "메쉬 평면화 없이, 현재 보이는 뷰 이미지를 바로 원통 디워프해서 저장합니다."
+        )
+        btn_export_rubbing_view_cyl.setStyleSheet("""
+            QPushButton {
+                background-color: #2f855a;
+                color: white;
+                font-weight: bold;
+                padding: 10px;
+                border-radius: 5px;
+            }
+            QPushButton:hover { background-color: #276749; }
+        """)
+        btn_export_rubbing_view_cyl.clicked.connect(
+            lambda: self.exportRequested.emit(
+                {'type': 'rubbing_view_cyl', 'target': self.current_rubbing_target()}
+            )
+        )
+        layout.addWidget(btn_export_rubbing_view_cyl)
         
         btn_export_ortho = QPushButton("📤 정사투영 내보내기")
         btn_export_ortho.clicked.connect(lambda: self.exportRequested.emit({'type': 'ortho'}))
@@ -6268,6 +6293,91 @@ class MainWindow(QMainWindow):
                     label="디지털 탁본 생성/저장 중...",
                     thread=TaskThread("export_rubbing_digital", task_export_rubbing_digital),
                     on_done=on_done_export_rubbing_digital,
+                    on_failed=on_failed,
+                )
+
+        elif export_type == "rubbing_view_cyl":
+            filepath, _ = QFileDialog.getSaveFileName(
+                self, "현재뷰 원통 이미지 저장", "", "PNG (*.png);;TIFF (*.tiff)"
+            )
+            if filepath:
+                self.status_info.setText(f"내보내기: {filepath}")
+
+                if target != "all":
+                    QMessageBox.information(
+                        self,
+                        "알림",
+                        "현재뷰 원통 이미지는 뷰 캡처 기반이므로 대상(외/내/미구) 분리를 사용하지 않습니다.",
+                    )
+
+                dpi = int(self.export_panel.spin_dpi.value())
+                try:
+                    wb = np.asarray(obj.get_world_bounds(), dtype=np.float64)
+                    if wb.shape == (2, 3) and np.isfinite(wb).all():
+                        ext = np.abs(wb[1] - wb[0])
+                        width_real = float(max(ext[0], ext[1], 1e-6))
+                    else:
+                        width_real = 120.0
+                except Exception:
+                    width_real = 120.0
+                unit = str(getattr(obj.mesh, "unit", "mm") or "mm").lower()
+                width_in = _width_in_inches(float(width_real), unit)
+                width_pixels = max(MIN_EXPORT_WIDTH_PX, int(max(1.0, width_in) * float(dpi)))
+                width_pixels = min(width_pixels, MAX_EXPORT_WIDTH_PX)
+
+                try:
+                    vw = max(1, int(self.viewport.width()))
+                    vh = max(1, int(self.viewport.height()))
+                    aspect = float(vh) / float(vw)
+                except Exception:
+                    aspect = 1.0
+                if not np.isfinite(aspect) or aspect <= 0.0:
+                    aspect = 1.0
+                height_pixels = max(512, int(float(width_pixels) * float(aspect)))
+                height_pixels = min(height_pixels, MAX_EXPORT_WIDTH_PX)
+
+                try:
+                    qimage, _mv, _proj, _vp = self.viewport.capture_high_res_image(
+                        width=int(width_pixels),
+                        height=int(height_pixels),
+                        only_selected=True,
+                        orthographic=False,
+                    )
+                    ba = QByteArray()
+                    qbuf = QBuffer(ba)
+                    qbuf.open(QIODevice.OpenModeFlag.WriteOnly)
+                    qimage.save(qbuf, "PNG")
+                    pil_img = Image.open(io.BytesIO(ba.data())).convert("RGB")
+                except Exception as e:
+                    QMessageBox.critical(
+                        self,
+                        "오류",
+                        self._format_error_message("현재뷰 캡처 중 오류 발생:", f"{type(e).__name__}: {e}"),
+                    )
+                    return
+
+                def task_export_rubbing_view_cyl():
+                    out = unwrap_cylindrical_view_image(
+                        pil_img,
+                        visible_angle_deg=170.0,
+                        strength=1.0,
+                    )
+                    out.save(filepath, dpi=(int(dpi), int(dpi)))
+                    return filepath
+
+                def on_done_export_rubbing_view_cyl(_result: Any):
+                    QMessageBox.information(self, "완료", f"현재뷰 원통 이미지가 저장되었습니다:\n{filepath}")
+                    self.status_info.setText(f"✅ 저장 완료: {Path(filepath).name}")
+
+                def on_failed(message: str):
+                    self.status_info.setText("❌ 저장 실패")
+                    QMessageBox.critical(self, "오류", self._format_error_message("현재뷰 원통 저장 중 오류 발생:", message))
+
+                self._start_task(
+                    title="내보내기",
+                    label="현재뷰 원통 이미지 생성/저장 중...",
+                    thread=TaskThread("export_rubbing_view_cyl", task_export_rubbing_view_cyl),
+                    on_done=on_done_export_rubbing_view_cyl,
                     on_failed=on_failed,
                 )
 

@@ -21,6 +21,17 @@ It is the current safe restore point before the next feature cycle.
 - Keep this commit as a named backup tag
 - Keep a git bundle backup file outside the repository working tree
 
+## Fast Cylindrical View Unwrap (Image-only)
+
+For cylindrical tiles, use the new export path that unwraps the **current viewport image** directly.
+This avoids heavy mesh-face flattening and is intended for fast production capture.
+
+- UI path: `Export` -> `현재뷰 원통 이미지 내보내기(초고속)`
+- Input: current selected object in current camera view
+- Output: dewarped PNG/TIFF with DPI metadata
+- Recommended DPI presets: `300`, `600`, `1200`
+- Note: this mode is image-based, so outer/inner/migu face-target split is not applied
+
 怨좉퀬???좊Ъ???ㅼ틪 ?꾨즺 3D 硫붿돩瑜?遺꾩꽍/遺꾨━/?⑤㈃/?꾧컻/?곷낯?뷀븯???꾩쿂由??꾧뎄?낅땲??
 ?ㅼ틦???λ퉬 ?곕룞 ?놁씠 硫붿돩 ?뚯씪(OBJ/PLY/STL/OFF/glTF/GLB) ?먯껜瑜??ㅻ９?덈떎.
 
