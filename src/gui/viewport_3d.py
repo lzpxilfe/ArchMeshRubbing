@@ -316,7 +316,7 @@ class _LineSectionProfileThread(QThread):
 
 
 class _CutPolylineSectionProfileThread(QThread):
-    computed = pyqtSignal(object)  # {"index","profile","contours_world"} profile=[(s,z),...]
+    computed = pyqtSignal(object)  # {"index","profile","contours_world","translation","rotation_deg","scale"}
     failed = pyqtSignal(str)
 
     def __init__(
@@ -339,10 +339,24 @@ class _CutPolylineSectionProfileThread(QThread):
     def run(self):
         try:
             from scipy.spatial.transform import Rotation as R
+            payload_base = {
+                "index": self._index,
+                "translation": [
+                    float(self._translation[0]) if self._translation.size >= 1 else 0.0,
+                    float(self._translation[1]) if self._translation.size >= 2 else 0.0,
+                    float(self._translation[2]) if self._translation.size >= 3 else 0.0,
+                ],
+                "rotation_deg": [
+                    float(self._rotation[0]) if self._rotation.size >= 1 else 0.0,
+                    float(self._rotation[1]) if self._rotation.size >= 2 else 0.0,
+                    float(self._rotation[2]) if self._rotation.size >= 3 else 0.0,
+                ],
+                "scale": float(self._scale),
+            }
 
             pts = np.asarray(self._polyline_world, dtype=np.float64)
             if pts.ndim != 2 or pts.shape[0] < 2:
-                self.computed.emit({"index": self._index, "profile": [], "contours_world": []})
+                self.computed.emit({**payload_base, "profile": [], "contours_world": []})
                 return
             if pts.shape[1] == 2:
                 pts = np.hstack([pts, np.zeros((len(pts), 1), dtype=np.float64)])
@@ -356,14 +370,107 @@ class _CutPolylineSectionProfileThread(QThread):
                     keep.append(i)
             pts = pts[keep]
             if len(pts) < 2:
-                self.computed.emit({"index": self._index, "profile": [], "contours_world": []})
+                self.computed.emit({**payload_base, "profile": [], "contours_world": []})
                 return
+
+            # Polyline section is physically a single plane.
+            # For bent guides, collapse to a dominant straight direction for stability/speed.
+            if pts.shape[0] > 2:
+                try:
+                    dxy = np.diff(pts[:, :2], axis=0)
+                    seg_len = np.linalg.norm(dxy, axis=1)
+                    valid = seg_len > 1e-5
+                    if bool(np.any(valid)):
+                        dirs = dxy[valid] / seg_len[valid][:, None]
+                        w = seg_len[valid]
+                        w_sum = float(np.sum(w))
+                        if w_sum > 1e-9:
+                            d_main = np.sum(dirs * (w / w_sum)[:, None], axis=0)
+                        else:
+                            d_main = pts[-1, :2] - pts[0, :2]
+                        n_main = float(np.linalg.norm(d_main))
+                        if n_main <= 1e-6:
+                            d_main = pts[-1, :2] - pts[0, :2]
+                            n_main = float(np.linalg.norm(d_main))
+                        if n_main > 1e-6:
+                            d_main = d_main / n_main
+                            rel = pts[:, :2] - pts[0, :2]
+                            proj = rel @ d_main
+                            p0_xy = pts[0, :2] + d_main * float(np.min(proj))
+                            p1_xy = pts[0, :2] + d_main * float(np.max(proj))
+                            if float(np.linalg.norm(p1_xy - p0_xy)) > 1e-5:
+                                pts = np.array(
+                                    [
+                                        [float(p0_xy[0]), float(p0_xy[1]), 0.0],
+                                        [float(p1_xy[0]), float(p1_xy[1]), 0.0],
+                                    ],
+                                    dtype=np.float64,
+                                )
+                except Exception:
+                    _log_ignored_exception()
 
             inv_rot = R.from_euler('XYZ', self._rotation, degrees=True).inv().as_matrix()
             inv_scale = 1.0 / self._scale if self._scale != 0 else 1.0
             rot_mat = R.from_euler('XYZ', self._rotation, degrees=True).as_matrix()
 
             slicer = MeshSlicer(self._mesh.to_trimesh())
+
+            def _regularize_profile_pairs(
+                pairs: list[tuple[float, float]] | list[list[float]],
+            ) -> list[tuple[float, float]]:
+                try:
+                    arr = np.asarray(pairs, dtype=np.float64).reshape(-1, 2)
+                except Exception:
+                    return []
+                if arr.shape[0] < 2:
+                    return []
+                finite = np.isfinite(arr).all(axis=1)
+                arr = arr[finite]
+                if arr.shape[0] < 2:
+                    return []
+                order = np.argsort(arr[:, 0])
+                arr = arr[order]
+
+                # Collapse near-identical s samples (keep upper z to avoid noisy flip-flop).
+                uniq: list[np.ndarray] = [arr[0].copy()]
+                for row in arr[1:]:
+                    ds = float(row[0] - uniq[-1][0])
+                    if abs(ds) <= 1e-6:
+                        if row[1] > uniq[-1][1]:
+                            uniq[-1] = row.copy()
+                        continue
+                    if float(np.hypot(ds, float(row[1] - uniq[-1][1]))) > 1e-5:
+                        uniq.append(row.copy())
+                arr = np.asarray(uniq, dtype=np.float64).reshape(-1, 2)
+                if arr.shape[0] < 2:
+                    return []
+
+                s0 = arr[:, 0]
+                z0 = arr[:, 1]
+                span = float(s0[-1] - s0[0])
+                if (not np.isfinite(span)) or span <= 1e-6:
+                    return []
+
+                # Uniform resampling makes the curve less jagged and more stable frame-to-frame.
+                n_target = int(np.clip(arr.shape[0], 96, 260))
+                s_u = np.linspace(float(s0[0]), float(s0[-1]), num=n_target, dtype=np.float64)
+                z_u = np.interp(s_u, s0, z0)
+
+                if n_target >= 9:
+                    try:
+                        k = 7 if n_target >= 160 else 5
+                        z_u = ndimage.median_filter(z_u, size=k, mode="nearest")
+                    except Exception:
+                        _log_ignored_exception()
+                    try:
+                        sigma = 1.35 if n_target >= 180 else 1.05
+                        z_u = ndimage.gaussian_filter1d(z_u, sigma=sigma, mode="nearest")
+                    except Exception:
+                        _log_ignored_exception()
+                    z_u[0] = z0[0]
+                    z_u[-1] = z0[-1]
+
+                return [(float(s_u[i]), float(z_u[i])) for i in range(int(s_u.size))]
 
             def _extract_segment_profile(
                 seg_p0: np.ndarray,
@@ -387,6 +494,9 @@ class _CutPolylineSectionProfileThread(QThread):
                 best_profile = None
                 best_world = None
                 best_score = -1.0
+                seg_margin = max(seg_len * 0.03, 0.25)
+                t_min = -seg_margin
+                t_max = seg_len + seg_margin
 
                 for cnt in contours_local:
                     if cnt is None or len(cnt) < 2:
@@ -395,38 +505,77 @@ class _CutPolylineSectionProfileThread(QThread):
                     if arr.shape[0] < 2:
                         continue
 
-                    s = (arr - np.asarray(seg_p0, dtype=np.float64)) @ d_unit
+                    t = (arr - np.asarray(seg_p0, dtype=np.float64)) @ d_unit
                     z = arr[:, 2]
-                    finite = np.isfinite(s) & np.isfinite(z)
-                    s = s[finite]
+                    finite = np.isfinite(t) & np.isfinite(z)
+                    if int(np.count_nonzero(finite)) < 2:
+                        continue
+
+                    t = t[finite]
                     z = z[finite]
-                    if s.size < 2:
+                    arr_valid = arr[finite]
+                    mask = (t >= t_min) & (t <= t_max)
+                    if int(np.count_nonzero(mask)) < 2:
                         continue
 
-                    ds = np.hypot(np.diff(s), np.diff(z))
-                    keep_seg = np.ones((s.size,), dtype=bool)
-                    keep_seg[1:] = ds > 1e-6
-                    s = s[keep_seg]
-                    z = z[keep_seg]
-                    if s.size < 2:
+                    t_sel = t[mask]
+                    z_sel = z[mask]
+                    arr_sel = arr_valid[mask]
+                    if t_sel.size < 2:
                         continue
 
-                    span_s = float(np.nanmax(s) - np.nanmin(s))
-                    span_z = float(np.nanmax(z) - np.nanmin(z))
-                    score = max(span_s, span_s * max(1e-6, span_z))
-                    if s.size >= 3:
+                    t_min_local = float(np.nanmin(t_sel))
+                    t_max_local = float(np.nanmax(t_sel))
+                    t_span_raw = float(t_max_local - t_min_local)
+                    if (not np.isfinite(t_span_raw)) or t_span_raw <= 1e-4:
+                        continue
+
+                    t_rel = t_sel - t_min_local
+                    prof_arr = np.column_stack([t_rel, z_sel]).astype(np.float64, copy=False)
+                    if prof_arr.shape[0] < 2:
+                        continue
+
+                    # Keep contour order (actual section path), only remove near-duplicate jitter.
+                    compact_prof: list[np.ndarray] = [prof_arr[0].copy()]
+                    compact_world: list[np.ndarray] = [np.asarray(arr_sel[0], dtype=np.float64).copy()]
+                    for jj in range(1, prof_arr.shape[0]):
+                        ds = float(prof_arr[jj, 0] - compact_prof[-1][0])
+                        dz = float(prof_arr[jj, 1] - compact_prof[-1][1])
+                        if float(np.hypot(ds, dz)) <= 1e-5:
+                            continue
+                        compact_prof.append(prof_arr[jj].copy())
+                        compact_world.append(np.asarray(arr_sel[jj], dtype=np.float64).copy())
+
+                    prof_arr = np.asarray(compact_prof, dtype=np.float64).reshape(-1, 2)
+                    world_arr = np.asarray(compact_world, dtype=np.float64).reshape(-1, 3)
+                    if prof_arr.shape[0] < 2:
+                        continue
+
+                    if prof_arr.shape[0] > 420:
+                        idx_keep = np.linspace(0, prof_arr.shape[0] - 1, num=420, dtype=np.int64)
+                        prof_arr = prof_arr[idx_keep]
+                        world_arr = world_arr[idx_keep]
+
+                    # Mild local denoise only; avoid heavy trend fitting.
+                    if prof_arr.shape[0] >= 9:
                         try:
-                            s2 = np.append(s, s[0])
-                            z2 = np.append(z, z[0])
-                            area2 = float(np.dot(s2[:-1], z2[1:]) - np.dot(z2[:-1], s2[1:]))
-                            score = max(score, abs(area2))
+                            z_med = ndimage.median_filter(prof_arr[:, 1], size=3, mode="nearest")
+                            prof_arr[:, 1] = 0.75 * prof_arr[:, 1] + 0.25 * z_med
                         except Exception:
                             _log_ignored_exception()
 
+                    span_s = float(np.nanmax(prof_arr[:, 0]) - np.nanmin(prof_arr[:, 0]))
+                    coverage = span_s / max(seg_len, 1e-6)
+                    try:
+                        path_len = float(np.sum(np.linalg.norm(np.diff(prof_arr, axis=0), axis=1)))
+                    except Exception:
+                        path_len = 0.0
+                    score = span_s * (0.75 + 0.25 * min(1.0, max(0.0, coverage))) + 0.02 * path_len
+
                     if score > best_score:
                         best_score = score
-                        best_profile = list(zip(s.tolist(), z.tolist()))
-                        best_world = arr.copy()
+                        best_profile = [(float(v[0]), float(v[1])) for v in prof_arr]
+                        best_world = world_arr.copy()
 
                 return best_profile, seg_len, best_world
 
@@ -470,13 +619,13 @@ class _CutPolylineSectionProfileThread(QThread):
                     cleaned.append((float(s_val), float(z_val)))
                     continue
                 ps, pz = cleaned[-1]
-                if float(np.hypot(float(s_val) - ps, float(z_val) - pz)) > 1e-6:
+                if float(np.hypot(float(s_val) - ps, float(z_val) - pz)) > 1e-5:
                     cleaned.append((float(s_val), float(z_val)))
 
             try:
                 if len(cleaned) >= 2:
                     s_arr = np.asarray([p[0] for p in cleaned], dtype=np.float64)
-                    if not np.isfinite(s_arr).all() or float(np.nanmax(s_arr) - np.nanmin(s_arr)) <= 1e-6:
+                    if (not np.isfinite(s_arr).all()) or float(np.nanmax(s_arr) - np.nanmin(s_arr)) <= 1e-6:
                         cleaned = []
             except Exception:
                 _log_ignored_exception()
@@ -493,6 +642,13 @@ class _CutPolylineSectionProfileThread(QThread):
                                 ps, pz = cleaned[-1]
                                 if float(np.hypot(float(s_val) - ps, float(z_val) - pz)) > 1e-6:
                                     cleaned.append((float(s_val), float(z_val)))
+                if len(cleaned) >= 2:
+                    try:
+                        s_arr = np.asarray([p[0] for p in cleaned], dtype=np.float64)
+                        if (not np.isfinite(s_arr).all()) or float(np.nanmax(s_arr) - np.nanmin(s_arr)) <= 1e-6:
+                            cleaned = []
+                    except Exception:
+                        _log_ignored_exception()
                 merged_contours = []
                 if seg_contour is not None:
                     try:
@@ -503,7 +659,7 @@ class _CutPolylineSectionProfileThread(QThread):
                         _log_ignored_exception()
 
             if len(cleaned) < 2:
-                self.computed.emit({"index": self._index, "profile": [], "contours_world": []})
+                self.computed.emit({**payload_base, "profile": [], "contours_world": []})
                 return
 
             contours_out: list[list[list[float]]] = []
@@ -524,9 +680,30 @@ class _CutPolylineSectionProfileThread(QThread):
                         compact.append(arr[j])
                 if len(compact) < 2:
                     continue
-                contours_out.append([np.asarray(p, dtype=np.float64).reshape(-1)[:3].tolist() for p in compact])
+                arr_c = np.asarray(compact, dtype=np.float64).reshape(-1, 3)
+                if arr_c.shape[0] > 480:
+                    idx_keep = np.linspace(0, arr_c.shape[0] - 1, num=480, dtype=np.int64)
+                    arr_c = arr_c[idx_keep]
+                if arr_c.shape[0] >= 7:
+                    try:
+                        closed = float(np.linalg.norm(arr_c[0] - arr_c[-1])) <= 1e-4
+                        if closed:
+                            prev = np.roll(arr_c, 1, axis=0)
+                            nxt = np.roll(arr_c, -1, axis=0)
+                            sm = 0.20 * prev + 0.60 * arr_c + 0.20 * nxt
+                            sm[-1] = sm[0]
+                            arr_c = sm
+                        else:
+                            pad = np.pad(arr_c, ((1, 1), (0, 0)), mode="edge")
+                            sm = 0.20 * pad[:-2, :] + 0.60 * pad[1:-1, :] + 0.20 * pad[2:, :]
+                            sm[0, :] = arr_c[0, :]
+                            sm[-1, :] = arr_c[-1, :]
+                            arr_c = sm
+                    except Exception:
+                        _log_ignored_exception()
+                contours_out.append([arr_c[j, :3].tolist() for j in range(arr_c.shape[0])])
 
-            self.computed.emit({"index": self._index, "profile": cleaned, "contours_world": contours_out})
+            self.computed.emit({**payload_base, "profile": cleaned, "contours_world": contours_out})
         except Exception as e:
             self.failed.emit(str(e))
 
@@ -542,6 +719,7 @@ class _RoiCutEdgesThread(QThread):
         rotation_deg: np.ndarray,
         scale: float,
         roi_bounds: list[float],
+        plane_keys: tuple[str, ...] | list[str] | None = None,
     ):
         super().__init__()
         self._mesh_or_tm = mesh_or_tm
@@ -549,6 +727,11 @@ class _RoiCutEdgesThread(QThread):
         self._rotation = np.asarray(rotation_deg, dtype=np.float64)
         self._scale = float(scale)
         self._roi_bounds = np.asarray(roi_bounds, dtype=np.float64).reshape(-1)
+        try:
+            vals = tuple(str(v).strip().lower() for v in (plane_keys or ()))
+            self._plane_keys = tuple(v for v in vals if v in ("x1", "x2", "y1", "y2"))
+        except Exception:
+            self._plane_keys = ()
 
     @staticmethod
     def _clip_polyline_axis_interval(
@@ -739,13 +922,16 @@ class _RoiCutEdgesThread(QThread):
                     out.append((rot_mat @ (cnt * self._scale).T).T + self._translation)
                 return out
 
-            # 4媛쒖쓽 寃쎄퀎 ?됰㈃?먯꽌 ?⑤㈃??寃쎄퀎?? 異붿텧
-            edges = {
-                "x1": slice_world_plane(np.array([x1, 0.0, 0.0]), np.array([1.0, 0.0, 0.0])),
-                "x2": slice_world_plane(np.array([x2, 0.0, 0.0]), np.array([1.0, 0.0, 0.0])),
-                "y1": slice_world_plane(np.array([0.0, y1, 0.0]), np.array([0.0, 1.0, 0.0])),
-                "y2": slice_world_plane(np.array([0.0, y2, 0.0]), np.array([0.0, 1.0, 0.0])),
-            }
+            keys = self._plane_keys if self._plane_keys else ("x1", "x2", "y1", "y2")
+            edges = {"x1": [], "x2": [], "y1": [], "y2": []}
+            if "x1" in keys:
+                edges["x1"] = slice_world_plane(np.array([x1, 0.0, 0.0]), np.array([1.0, 0.0, 0.0]))
+            if "x2" in keys:
+                edges["x2"] = slice_world_plane(np.array([x2, 0.0, 0.0]), np.array([1.0, 0.0, 0.0]))
+            if "y1" in keys:
+                edges["y1"] = slice_world_plane(np.array([0.0, y1, 0.0]), np.array([0.0, 1.0, 0.0]))
+            if "y2" in keys:
+                edges["y2"] = slice_world_plane(np.array([0.0, y2, 0.0]), np.array([0.0, 1.0, 0.0]))
             # ?듭떖: 媛?諛⑺뼢 ?⑤㈃??"?ㅻⅨ 諛⑺뼢 ?덈떒"怨??곹샇 諛섏쁺?섍쾶 ?꾪꽣留?
             clipped = self._apply_roi_interaction_filters(
                 edges,
@@ -1725,8 +1911,9 @@ class Viewport3D(QOpenGLWidget):
         self._gizmo_pick_width_ratio = 0.18
         self._gizmo_rotate_sensitivity = 0.85
         # Steering-wheel feel: clockwise drag should rotate clockwise on screen.
-        self._gizmo_drag_sign = -1.0
+        self._gizmo_drag_sign = 1.0
         self.gizmo_drag_start = None
+        self._gizmo_drag_screen_angle = None
         
         # 怨〓쪧 痢≪젙 紐⑤뱶
         self.curvature_pick_mode = False
@@ -1816,6 +2003,8 @@ class Viewport3D(QOpenGLWidget):
         self.floor_picks = []  # 諛붾떏硫?吏?뺤슜 ??由ъ뒪??        
         self._floor_3point_right_press_pos = None
         self._floor_3point_right_dragged = False
+        self._floor_pick_ready = True
+        self._floor_pick_ready_at = 0.0
         # Undo/Redo ?쒖뒪??
         self.undo_stack = []
         self.max_undo = 50
@@ -1883,6 +2072,7 @@ class Viewport3D(QOpenGLWidget):
         self.cut_section_profiles = [[], []]  # 媛??좎쓽 (s,z) ?꾨줈?뚯씪 [(dist, z), ...]
         self.cut_section_world = [[], []]     # 諛붾떏??諛곗튂???⑤㈃ ?대━?쇱씤(?붾뱶 醫뚰몴)
         self.cut_section_contours_world = [[], []]  # 3D mesh-attached section contours
+        self.cut_section_contours_local = [[], []]  # Mesh-local section contours (stable across transforms)
         self._cutline_tape_cache: dict[tuple[Any, ...], list[list[np.ndarray]]] = {}
         self._cutline_tape_suspend_until = 0.0
         self._cut_section_pending_indices: set[int] = set()
@@ -2489,7 +2679,12 @@ class Viewport3D(QOpenGLWidget):
             self.draw_crosshair()
 
         # 3.7.25 ?⑤㈃??2媛? 媛?대뱶
-        if self.cut_lines_enabled or any(len(line) > 0 for line in getattr(self, "cut_lines", [])) or self._has_visible_polyline_layers():
+        if (
+            self.cut_lines_enabled
+            or self.picking_mode == 'cut_lines'
+            or self._has_visible_polyline_layers()
+            or any(bool(x) for x in (getattr(self, "_cut_line_final", [False, False]) or [False, False]))
+        ):
             self.draw_cut_lines()
 
         # 3.7.5 ?좏삎 ?⑤㈃ (Top-view cut line)
@@ -2976,6 +3171,14 @@ class Viewport3D(QOpenGLWidget):
         span_y = max(1e-6, float(bbox_new[3] - bbox_new[2]))
         span = max(span_x, span_y)
         gap = max(2.0, 0.16 * span)
+        try:
+            wb = np.asarray(obj.get_world_bounds(), dtype=np.float64)
+            if wb.shape == (2, 3) and np.isfinite(wb).all():
+                mesh_span = float(max(float(wb[1, 0] - wb[0, 0]), float(wb[1, 1] - wb[0, 1])))
+                if np.isfinite(mesh_span):
+                    gap = max(float(gap), float(mesh_span) * 0.10)
+        except Exception:
+            _log_ignored_exception()
         overlap_pad = max(0.2, 0.04 * span)
 
         def collides(dx: float, dy: float) -> bool:
@@ -2991,11 +3194,11 @@ class Viewport3D(QOpenGLWidget):
         for step in range(1, 32):
             d = float(step) * float(gap)
             for cand_x, cand_y in (
-                (d, 0.0),
                 (0.0, d),
-                (d, d),
-                (-d, 0.0),
                 (0.0, -d),
+                (d, 0.0),
+                (-d, 0.0),
+                (d, d),
             ):
                 if not collides(cand_x, cand_y):
                     return [float(cand_x), float(cand_y)]
@@ -3098,8 +3301,8 @@ class Viewport3D(QOpenGLWidget):
         if bool(include_cut_lines):
             names = ["CutLine-Length", "CutLine-Width"]
             colors = [
-                (1.0, 0.25, 0.25, 0.95),
-                (0.15, 0.55, 1.0, 0.95),
+                (1.0, 0.45, 0.15, 0.95),  # orange
+                (0.10, 0.72, 0.45, 0.95),  # green
             ]
             for i, line in enumerate(getattr(self, "cut_lines", [[], []]) or []):
                 if self._append_polyline_layer(
@@ -3116,13 +3319,17 @@ class Viewport3D(QOpenGLWidget):
         # 2) Section profiles laid on the floor
         if bool(include_cut_profiles):
             sec_names = ["Section-Length", "Section-Width"]
+            sec_colors = [
+                [1.0, 0.45, 0.15, 0.92],  # orange
+                [0.10, 0.72, 0.45, 0.92],  # green
+            ]
             for i, line in enumerate(getattr(self, "cut_section_world", [[], []]) or []):
                 if self._append_polyline_layer(
                     obj,
                     name=(sec_names[i] if i < len(sec_names) else f"?⑤㈃-{i+1}"),
                     kind="section_profile",
                     points=line,
-                    color=[0.1, 0.1, 0.1, 0.9],
+                    color=list(sec_colors[i % len(sec_colors)]),
                     width=2.0,
                     auto_separate_section=bool(separate_section_profiles),
                 ):
@@ -3152,7 +3359,7 @@ class Viewport3D(QOpenGLWidget):
                         name=f"ROI-?⑤㈃-{axis}",
                         kind="section_profile",
                         points=line,
-                        color=[0.1, 0.35, 0.1, 0.9],
+                        color=[1.0, 0.86, 0.28, 0.92] if key == "x" else [0.38, 0.76, 1.0, 0.92],
                         width=2.0,
                         auto_separate_section=bool(separate_section_profiles),
                     ):
@@ -3451,6 +3658,10 @@ class Viewport3D(QOpenGLWidget):
                 self.cut_section_contours_world[idx] = []
             except Exception:
                 _log_ignored_exception()
+            try:
+                self.cut_section_contours_local[idx] = []
+            except Exception:
+                _log_ignored_exception()
             self._clear_cutline_tape_cache()
             try:
                 self._cut_section_pending_indices.discard(idx)
@@ -3474,6 +3685,7 @@ class Viewport3D(QOpenGLWidget):
         self.cut_section_profiles = [[], []]
         self.cut_section_world = [[], []]
         self.cut_section_contours_world = [[], []]
+        self.cut_section_contours_local = [[], []]
         self._clear_cutline_tape_cache()
         try:
             self._cut_section_pending_indices.clear()
@@ -3628,7 +3840,10 @@ class Viewport3D(QOpenGLWidget):
 
         try:
             lines = getattr(self, "cut_lines", [[], []]) or [[], []]
+            final = getattr(self, "_cut_line_final", [False, False]) or [False, False]
             for idx in (0, 1):
+                if idx < len(final) and bool(final[idx]):
+                    continue
                 if idx < len(lines) and lines[idx] and len(lines[idx]) >= 2:
                     self.schedule_cut_section_update(idx, delay_ms=150)
         except Exception:
@@ -3649,6 +3864,101 @@ class Viewport3D(QOpenGLWidget):
         except Exception:
             pass
         return "x" if idx == 0 else "y"
+
+    def _rotation_matrix_from_euler_xyz_deg(self, rotation_deg: Any) -> np.ndarray:
+        """Return XYZ-order local->world rotation matrix from degree euler."""
+        try:
+            rot_deg = np.asarray(rotation_deg, dtype=np.float64).reshape(-1)
+            if rot_deg.size < 3:
+                return np.eye(3, dtype=np.float64)
+            rx, ry, rz = np.radians(rot_deg[:3])
+            cx, sx = float(np.cos(rx)), float(np.sin(rx))
+            cy, sy = float(np.cos(ry)), float(np.sin(ry))
+            cz, sz = float(np.cos(rz)), float(np.sin(rz))
+            rot_x = np.array([[1.0, 0.0, 0.0], [0.0, cx, -sx], [0.0, sx, cx]], dtype=np.float64)
+            rot_y = np.array([[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]], dtype=np.float64)
+            rot_z = np.array([[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]], dtype=np.float64)
+            return rot_x @ rot_y @ rot_z
+        except Exception:
+            return np.eye(3, dtype=np.float64)
+
+    def _cutline_contours_world_to_local(
+        self,
+        contours_world: list[list[np.ndarray]],
+        *,
+        translation: np.ndarray,
+        rotation_deg: np.ndarray,
+        scale: float,
+    ) -> list[list[np.ndarray]]:
+        out: list[list[np.ndarray]] = []
+        try:
+            tr = np.asarray(translation, dtype=np.float64).reshape(-1)
+        except Exception:
+            tr = np.zeros(3, dtype=np.float64)
+        if tr.size < 3:
+            tr = np.pad(tr, (0, max(0, 3 - tr.size)), mode="constant")
+        tr = tr[:3]
+
+        try:
+            sc = float(scale)
+        except Exception:
+            sc = 1.0
+        if (not np.isfinite(sc)) or abs(sc) < 1e-12:
+            sc = 1.0
+        inv_scale = 1.0 / sc
+
+        rot_mat = self._rotation_matrix_from_euler_xyz_deg(rotation_deg)
+        inv_rot = rot_mat.T
+
+        for cnt in contours_world or []:
+            pts: list[np.ndarray] = []
+            for p in cnt or []:
+                arr = np.asarray(p, dtype=np.float64).reshape(-1)
+                if arr.size < 3 or not np.isfinite(arr[:3]).all():
+                    continue
+                lp = inv_scale * (inv_rot @ (arr[:3] - tr))
+                if lp.size >= 3 and np.isfinite(lp[:3]).all():
+                    pts.append(lp[:3].copy())
+            if len(pts) >= 2:
+                out.append(pts)
+        return out
+
+    def _cutline_contours_local_to_world(
+        self,
+        contours_local: list[list[np.ndarray]],
+        obj: SceneObject | None,
+    ) -> list[list[np.ndarray]]:
+        if obj is None:
+            return []
+        try:
+            tr = np.asarray(getattr(obj, "translation", [0.0, 0.0, 0.0]), dtype=np.float64).reshape(-1)
+        except Exception:
+            tr = np.zeros(3, dtype=np.float64)
+        if tr.size < 3:
+            tr = np.pad(tr, (0, max(0, 3 - tr.size)), mode="constant")
+        tr = tr[:3]
+
+        try:
+            sc = float(getattr(obj, "scale", 1.0) or 1.0)
+        except Exception:
+            sc = 1.0
+        if (not np.isfinite(sc)) or abs(sc) < 1e-12:
+            sc = 1.0
+
+        rot_mat = self._rotation_matrix_from_euler_xyz_deg(getattr(obj, "rotation", [0.0, 0.0, 0.0]))
+        out: list[list[np.ndarray]] = []
+        for cnt in contours_local or []:
+            pts: list[np.ndarray] = []
+            for p in cnt or []:
+                arr = np.asarray(p, dtype=np.float64).reshape(-1)
+                if arr.size < 3 or not np.isfinite(arr[:3]).all():
+                    continue
+                wp = (rot_mat @ (arr[:3] * sc)) + tr
+                if wp.size >= 3 and np.isfinite(wp[:3]).all():
+                    pts.append(wp[:3].copy())
+            if len(pts) >= 2:
+                out.append(pts)
+        return out
 
     def _layout_cut_section_world(self, profile: list[tuple[float, float]], index: int):
         obj = self.selected_obj
@@ -3753,6 +4063,10 @@ class Viewport3D(QOpenGLWidget):
                 self.cut_section_contours_world[idx] = []
             except Exception:
                 _log_ignored_exception()
+            try:
+                self.cut_section_contours_local[idx] = []
+            except Exception:
+                _log_ignored_exception()
             self.update()
             return
 
@@ -3795,8 +4109,58 @@ class Viewport3D(QOpenGLWidget):
         if idx not in (0, 1):
             return
 
+        obj = self.selected_obj
+        if obj is not None:
+            try:
+                tr_used = np.asarray(getattr(obj, "translation", [0.0, 0.0, 0.0]), dtype=np.float64).reshape(-1)
+            except Exception:
+                tr_used = np.zeros(3, dtype=np.float64)
+            try:
+                rot_used = np.asarray(getattr(obj, "rotation", [0.0, 0.0, 0.0]), dtype=np.float64).reshape(-1)
+            except Exception:
+                rot_used = np.zeros(3, dtype=np.float64)
+            try:
+                scale_used = float(getattr(obj, "scale", 1.0) or 1.0)
+            except Exception:
+                scale_used = 1.0
+        else:
+            tr_used = np.zeros(3, dtype=np.float64)
+            rot_used = np.zeros(3, dtype=np.float64)
+            scale_used = 1.0
+
+        try:
+            tr_res = np.asarray(result.get("translation", tr_used), dtype=np.float64).reshape(-1)
+            if tr_res.size >= 3 and np.isfinite(tr_res[:3]).all():
+                tr_used = tr_res[:3].copy()
+        except Exception:
+            _log_ignored_exception()
+        try:
+            rot_res = np.asarray(result.get("rotation_deg", rot_used), dtype=np.float64).reshape(-1)
+            if rot_res.size >= 3 and np.isfinite(rot_res[:3]).all():
+                rot_used = rot_res[:3].copy()
+        except Exception:
+            _log_ignored_exception()
+        try:
+            scale_res = float(result.get("scale", scale_used))
+            if np.isfinite(scale_res) and abs(scale_res) > 1e-12:
+                scale_used = float(scale_res)
+        except Exception:
+            _log_ignored_exception()
+
         self.cut_section_profiles[idx] = profile
-        self.cut_section_world[idx] = self._layout_cut_section_world(profile, idx)
+        layout_world = self._layout_cut_section_world(profile, idx)
+        try:
+            pts_world = [np.asarray(p, dtype=np.float64).reshape(-1)[:3].copy() for p in (layout_world or [])]
+            if len(pts_world) > 260:
+                idx_keep = np.linspace(0, len(pts_world) - 1, num=260, dtype=np.int64)
+                pts_world = [pts_world[int(ii)] for ii in idx_keep.tolist()]
+            pts_world = self._smooth_cutline_tape_strip(pts_world, passes=1)
+            self.cut_section_world[idx] = [
+                [float(p[0]), float(p[1]), float(p[2])] for p in (pts_world or [])
+            ]
+        except Exception:
+            _log_ignored_exception()
+            self.cut_section_world[idx] = layout_world
         parsed_contours: list[list[np.ndarray]] = []
         try:
             src = contours_world if isinstance(contours_world, list) else []
@@ -3817,6 +4181,19 @@ class Viewport3D(QOpenGLWidget):
             self.cut_section_contours_world[idx] = parsed_contours
         except Exception:
             _log_ignored_exception()
+        try:
+            self.cut_section_contours_local[idx] = self._cutline_contours_world_to_local(
+                parsed_contours,
+                translation=tr_used,
+                rotation_deg=rot_used,
+                scale=float(scale_used),
+            )
+        except Exception:
+            _log_ignored_exception()
+            try:
+                self.cut_section_contours_local[idx] = []
+            except Exception:
+                _log_ignored_exception()
         self.update()
 
     def _on_cut_section_failed(self, message: str):
@@ -4435,7 +4812,7 @@ class Viewport3D(QOpenGLWidget):
         if len(cur) >= 2:
             strips.append(cur)
 
-        strips = [self._smooth_cutline_tape_strip(s, passes=2) for s in strips if s is not None and len(s) >= 2]
+        strips = [self._smooth_cutline_tape_strip(s, passes=3) for s in strips if s is not None and len(s) >= 2]
 
         cache[cache_key] = strips
         if len(cache) > 48:
@@ -4455,6 +4832,13 @@ class Viewport3D(QOpenGLWidget):
         lines = getattr(self, "cut_lines", [[], []])
         if not lines:
             return
+        live_cut_active = bool(getattr(self, "cut_lines_enabled", False) or self.picking_mode == 'cut_lines')
+        try:
+            final_flags = [bool(x) for x in (getattr(self, "_cut_line_final", [False, False]) or [False, False])][:2]
+            if len(final_flags) < 2:
+                final_flags = (final_flags + [False, False])[:2]
+        except Exception:
+            final_flags = [False, False]
 
         glDisable(GL_LIGHTING)
         glDisable(GL_DEPTH_TEST)
@@ -4464,7 +4848,9 @@ class Viewport3D(QOpenGLWidget):
                 (1.0, 0.45, 0.15, 0.72),  # length guide
                 (0.10, 0.72, 0.45, 0.72),  # width guide
             ]
-            tape_enabled = True
+            show_final = bool(any(bool(v) for v in final_flags))
+            # Show mesh-attached indicator for finalized lines (created on Enter).
+            tape_enabled = bool(show_final)
             try:
                 now_t = float(time.monotonic())
                 if self._is_mesh_transform_interacting():
@@ -4474,46 +4860,47 @@ class Viewport3D(QOpenGLWidget):
                 if np.isfinite(suspend_until) and now_t < suspend_until:
                     tape_enabled = False
             except Exception:
-                tape_enabled = True
+                tape_enabled = bool(show_final)
 
-            for i, line in enumerate(lines):
-                if not line:
-                    continue
-                col = colors[i % 2]
-                glColor4f(*col)
-                glLineWidth(2.0 if int(self.cut_line_active) == i else 1.5)
+            if live_cut_active:
+                for i, line in enumerate(lines):
+                    if not line:
+                        continue
+                    col = colors[i % 2]
+                    glColor4f(*col)
+                    glLineWidth(2.0 if int(self.cut_line_active) == i else 1.5)
 
-                if len(line) == 1:
-                    p0 = np.asarray(line[0], dtype=np.float64)
-                    glPointSize(7.0)
-                    glBegin(GL_POINTS)
-                    glVertex3f(float(p0[0]), float(p0[1]), z)
+                    if len(line) == 1:
+                        p0 = np.asarray(line[0], dtype=np.float64)
+                        glPointSize(7.0)
+                        glBegin(GL_POINTS)
+                        glVertex3f(float(p0[0]), float(p0[1]), z)
+                        glEnd()
+                        glPointSize(1.0)
+                        continue
+
+                    glBegin(GL_LINE_STRIP)
+                    for p in line:
+                        p0 = np.asarray(p, dtype=np.float64)
+                        glVertex3f(float(p0[0]), float(p0[1]), z)
                     glEnd()
-                    glPointSize(1.0)
-                    continue
-
-                glBegin(GL_LINE_STRIP)
-                for p in line:
-                    p0 = np.asarray(p, dtype=np.float64)
-                    glVertex3f(float(p0[0]), float(p0[1]), z)
-                glEnd()
 
             # Mesh-attached "sticker / rubber-band" overlay.
             tape_lift = 0.02
-            tape_band_width = 0.48
+            tape_band_width = 0.38
+            obj_tape = self.selected_obj
             try:
-                obj_tape = self.selected_obj
                 if obj_tape is not None:
                     wb_t = np.asarray(obj_tape.get_world_bounds(), dtype=np.float64)
                     if wb_t.shape == (2, 3) and np.isfinite(wb_t).all():
                         span = float(max(np.abs(wb_t[1] - wb_t[0])))
                         tape_lift = float(max(0.018, span * 0.0011))
                         tape_lift = float(min(tape_lift, max(0.12, span * 0.02)))
-                        tape_band_width = float(max(0.34, span * 0.016))
+                        tape_band_width = float(max(0.28, span * 0.013))
                         tape_band_width = float(min(tape_band_width, max(4.0, span * 0.11)))
             except Exception:
                 tape_lift = 0.02
-                tape_band_width = 0.48
+                tape_band_width = 0.38
 
             strips_by_idx: dict[int, list[list[np.ndarray]]] = {}
             if tape_enabled:
@@ -4521,11 +4908,22 @@ class Viewport3D(QOpenGLWidget):
                 for i, line in enumerate(lines):
                     if line is None or len(line) < 2:
                         continue
+                    if not bool(final_flags[i % 2]):
+                        continue
                     col = colors[i % 2]
                     strips: list[list[np.ndarray]] = []
                     try:
-                        contour_store = getattr(self, "cut_section_contours_world", [[], []]) or [[], []]
-                        contour_candidates = contour_store[i] if i < len(contour_store) else []
+                        contour_candidates: list[list[np.ndarray]] = []
+                        contour_store_local = getattr(self, "cut_section_contours_local", [[], []]) or [[], []]
+                        contour_local = contour_store_local[i] if i < len(contour_store_local) else []
+                        if contour_local and obj_tape is not None:
+                            contour_candidates = self._cutline_contours_local_to_world(contour_local, obj_tape)
+                        if not contour_candidates:
+                            contour_store = getattr(self, "cut_section_contours_world", [[], []]) or [[], []]
+                            contour_candidates = contour_store[i] if i < len(contour_store) else []
+                        # Bent polyline => contours from mixed planes look chaotic; prefer surface-projected tape.
+                        if isinstance(line, list) and len(line) > 2:
+                            contour_candidates = []
                         for cnt in contour_candidates:
                             pts_raw: list[np.ndarray] = []
                             for p in cnt or []:
@@ -4534,9 +4932,15 @@ class Viewport3D(QOpenGLWidget):
                                     pts_raw.append(p0[:3].copy())
                             if len(pts_raw) < 2:
                                 continue
+                            if len(pts_raw) > 480:
+                                try:
+                                    idx_keep = np.linspace(0, len(pts_raw) - 1, num=480, dtype=np.int64)
+                                    pts_raw = [pts_raw[int(ii)] for ii in idx_keep.tolist()]
+                                except Exception:
+                                    pts_raw = pts_raw[:480]
                             dense_step = float(max(0.12, tape_band_width * 0.40))
                             dense = self._densify_cut_polyline(pts_raw, step_world=dense_step)
-                            pts = self._smooth_cutline_tape_strip(dense if len(dense) >= 2 else pts_raw, passes=2)
+                            pts = self._smooth_cutline_tape_strip(dense if len(dense) >= 2 else pts_raw, passes=3)
                             if len(pts) < 2:
                                 continue
                             try:
@@ -4566,7 +4970,7 @@ class Viewport3D(QOpenGLWidget):
                             pts,
                             color=col,
                             lift=float(tape_lift),
-                            width_world=float(tape_band_width * (1.16 if is_active else 1.0)),
+                            width_world=float(tape_band_width * (1.08 if is_active else 1.0)),
                             active=bool(is_active),
                         )
 
@@ -4574,8 +4978,8 @@ class Viewport3D(QOpenGLWidget):
             glDisable(GL_DEPTH_TEST)
             for i, strips in strips_by_idx.items():
                 col = colors[i % 2]
-                glColor4f(float(col[0]), float(col[1]), float(col[2]), 0.66 if int(self.cut_line_active) == i else 0.52)
-                glLineWidth(1.8 if int(self.cut_line_active) == i else 1.4)
+                glColor4f(float(col[0]), float(col[1]), float(col[2]), 0.74 if int(self.cut_line_active) == i else 0.60)
+                glLineWidth(1.55 if int(self.cut_line_active) == i else 1.25)
                 for dense in strips:
                     pts: list[np.ndarray] = []
                     for p in dense:
@@ -4590,7 +4994,7 @@ class Viewport3D(QOpenGLWidget):
                     glEnd()
 
             # ?꾨━酉??멸렇癒쇳듃
-            if self.cut_line_drawing and self.cut_line_preview is not None:
+            if live_cut_active and self.cut_line_drawing and self.cut_line_preview is not None:
                 try:
                     idx = int(self.cut_line_active)
                     active = lines[idx]
@@ -4610,17 +5014,24 @@ class Viewport3D(QOpenGLWidget):
             # ?⑤㈃ ?꾨줈?뚯씪(諛붾떏 諛곗튂) ?뚮뜑留?
             profiles = getattr(self, "cut_section_world", [[], []])
             z_profile = 0.12
-            if profiles and self.picking_mode != 'cut_lines':
-                glColor4f(0.1, 0.1, 0.1, 0.55)
-                glLineWidth(1.4)
-                for pts in profiles:
+            if profiles and (live_cut_active or show_final):
+                glEnable(GL_BLEND)
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+                glEnable(GL_LINE_SMOOTH)
+                glLineWidth(1.6)
+                for i, pts in enumerate(profiles):
                     if pts is None or len(pts) < 2:
                         continue
+                    if not bool(final_flags[i % 2]):
+                        continue
+                    c = colors[i % len(colors)]
+                    glColor4f(float(c[0]), float(c[1]), float(c[2]), 0.82)
                     glBegin(GL_LINE_STRIP)
                     for p in pts:
                         p0 = np.asarray(p, dtype=np.float64)
                         glVertex3f(float(p0[0]), float(p0[1]), z_profile)
                     glEnd()
+                glDisable(GL_LINE_SMOOTH)
 
             # Saved polyline layers
             obj = self.selected_obj
@@ -5577,30 +5988,47 @@ class Viewport3D(QOpenGLWidget):
         if not roi_sec:
             return
 
-        lines = []
+        lines: list[tuple[str, list[Any]]] = []
         try:
             lx = roi_sec.get("x", [])
             ly = roi_sec.get("y", [])
             if lx and len(lx) >= 2:
-                lines.append(lx)
+                lines.append(("x", lx))
             if ly and len(ly) >= 2:
-                lines.append(ly)
+                lines.append(("y", ly))
         except Exception:
             return
 
         if not lines:
             return
 
+        roi_shift_y = 0.0
+        try:
+            cut_profiles = getattr(self, "cut_section_world", [[], []]) or [[], []]
+            has_cut = any(isinstance(pp, list) and len(pp) >= 2 for pp in cut_profiles)
+            if has_cut:
+                obj = self.selected_obj
+                if obj is not None:
+                    wb = np.asarray(obj.get_world_bounds(), dtype=np.float64)
+                    if wb.shape == (2, 3) and np.isfinite(wb).all():
+                        span_xy = float(max(float(wb[1, 0] - wb[0, 0]), float(wb[1, 1] - wb[0, 1])))
+                        roi_shift_y = float(max(2.0, span_xy * 0.08))
+        except Exception:
+            roi_shift_y = 0.0
+
         glDisable(GL_LIGHTING)
         glDisable(GL_DEPTH_TEST)
-        glColor4f(0.05, 0.05, 0.05, 0.9)
-        glLineWidth(2.0)
+        glLineWidth(1.8)
         z_plot = 0.12
-        for pts in lines:
+        for key, pts in lines:
+            if str(key).lower() == "x":
+                glColor4f(1.0, 0.86, 0.28, 0.90)  # yellow
+            else:
+                glColor4f(0.38, 0.76, 1.0, 0.90)  # sky
             glBegin(GL_LINE_STRIP)
             for p in pts:
                 p0 = np.asarray(p, dtype=np.float64)
-                glVertex3f(float(p0[0]), float(p0[1]), z_plot)
+                glVertex3f(float(p0[0]), float(p0[1]) + float(roi_shift_y), z_plot)
             glEnd()
         glLineWidth(1.0)
         glEnable(GL_DEPTH_TEST)
@@ -5903,12 +6331,26 @@ class Viewport3D(QOpenGLWidget):
         if roi_mesh_source is None:
             roi_mesh_source = obj.mesh
 
+        plane_keys: tuple[str, ...] | None = None
+        try:
+            dragging_roi = bool(getattr(self, "_roi_move_dragging", False) or getattr(self, "roi_rect_dragging", False))
+            active_edge = str(getattr(self, "active_roi_edge", "") or "").strip().lower()
+            if active_edge in ("left", "right"):
+                plane_keys = ("x1", "x2")
+            elif active_edge in ("top", "bottom"):
+                plane_keys = ("y1", "y2")
+            elif dragging_roi:
+                plane_keys = None
+        except Exception:
+            plane_keys = None
+
         self._roi_edges_thread = _RoiCutEdgesThread(
             roi_mesh_source,
             translation=obj.translation.copy(),
             rotation_deg=obj.rotation.copy(),
             scale=float(obj.scale),
             roi_bounds=bounds,
+            plane_keys=plane_keys,
         )
         self._roi_edges_thread.computed.connect(self._on_roi_edges_computed)
         self._roi_edges_thread.failed.connect(self._on_roi_edges_failed)
@@ -6957,6 +7399,9 @@ class Viewport3D(QOpenGLWidget):
         """諛붾떏(Z=0) 洹쇱쿂 硫댁쓣 珥덈줉?됱쑝濡??섏씠?쇱씠??(?뺤튂 怨쇱젙 以??쒖떆)"""
         if obj.mesh is None or obj.mesh.faces is None:
             return
+        # While orbit/pan dragging, skip heavy preview pass to keep interaction smooth.
+        if self.mouse_button in (Qt.MouseButton.RightButton, Qt.MouseButton.MiddleButton):
+            return
         
         faces = obj.mesh.faces
         vertices = obj.mesh.vertices
@@ -6968,7 +7413,13 @@ class Viewport3D(QOpenGLWidget):
         total_faces = len(faces)
         
         # ?섑뵆留?(???硫붿돩)
-        sample_size = min(80000, total_faces)
+        if self.picking_mode == 'floor_brush':
+            sample_cap = 70000
+        elif self.picking_mode == 'floor_3point':
+            sample_cap = 30000
+        else:
+            sample_cap = 42000
+        sample_size = min(sample_cap, total_faces)
         if total_faces > sample_size:
             # Deterministic stride sampling avoids per-frame flicker and random CPU spikes.
             step = int(max(1, total_faces // sample_size))
@@ -7008,7 +7459,12 @@ class Viewport3D(QOpenGLWidget):
         
         # ?됱긽: 諛붾떏 ?꾨옒(Z<0)??吏꾪븳 珥덈줉, 洹쇱쿂(0<Z<0.5)???고븳 珥덈줉
         glBegin(GL_TRIANGLES)
-        max_fill_faces = min(10000, int(len(near_floor_indices)))
+        if self.picking_mode == 'floor_brush':
+            max_fill_faces = min(7000, int(len(near_floor_indices)))
+        elif self.picking_mode == 'floor_3point':
+            max_fill_faces = min(2600, int(len(near_floor_indices)))
+        else:
+            max_fill_faces = min(3600, int(len(near_floor_indices)))
         for k in range(max_fill_faces):
             face_idx = int(near_floor_indices[k])
             f = faces[face_idx]
@@ -7319,6 +7775,7 @@ class Viewport3D(QOpenGLWidget):
         self.cut_section_profiles = [[], []]
         self.cut_section_world = [[], []]
         self.cut_section_contours_world = [[], []]
+        self.cut_section_contours_local = [[], []]
         try:
             self._cut_section_pending_indices.clear()
         except Exception:
@@ -7340,6 +7797,8 @@ class Viewport3D(QOpenGLWidget):
             self.floor_picks = []
         except Exception:
             pass
+        self._floor_pick_ready = True
+        self._floor_pick_ready_at = 0.0
 
         # Surface paint overlays
         try:
@@ -7465,20 +7924,7 @@ class Viewport3D(QOpenGLWidget):
         """Return object local->world rotation matrix in X->Y->Z order."""
         if obj is None:
             return np.eye(3, dtype=np.float64)
-        try:
-            rot_deg = np.asarray(getattr(obj, "rotation", [0.0, 0.0, 0.0]), dtype=np.float64).reshape(-1)
-            if rot_deg.size < 3:
-                return np.eye(3, dtype=np.float64)
-            rx, ry, rz = np.radians(rot_deg[:3])
-            cx, sx = float(np.cos(rx)), float(np.sin(rx))
-            cy, sy = float(np.cos(ry)), float(np.sin(ry))
-            cz, sz = float(np.cos(rz)), float(np.sin(rz))
-            rot_x = np.array([[1.0, 0.0, 0.0], [0.0, cx, -sx], [0.0, sx, cx]], dtype=np.float64)
-            rot_y = np.array([[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]], dtype=np.float64)
-            rot_z = np.array([[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]], dtype=np.float64)
-            return rot_x @ rot_y @ rot_z
-        except Exception:
-            return np.eye(3, dtype=np.float64)
+        return self._rotation_matrix_from_euler_xyz_deg(getattr(obj, "rotation", [0.0, 0.0, 0.0]))
     
     def hit_test_gizmo(self, screen_x, screen_y):
         """湲곗쫰紐?怨좊━ ?대┃ 寃??"""
@@ -7986,9 +8432,13 @@ class Viewport3D(QOpenGLWidget):
                         angle = self._calculate_gizmo_angle(event.pos().x(), event.pos().y())
                         if angle is not None:
                             self.gizmo_drag_start = angle
+                            self._gizmo_drag_screen_angle = self._calculate_gizmo_screen_angle(
+                                event.pos().x(), event.pos().y()
+                            )
                             self.update()
                             return
                         self.active_gizmo_axis = None
+                        self._gizmo_drag_screen_angle = None
 
                 # ?쇳궧 紐⑤뱶 泥섎━
                 if self.picking_mode == 'curvature' and (modifiers & Qt.KeyboardModifier.ShiftModifier):
@@ -8012,6 +8462,10 @@ class Viewport3D(QOpenGLWidget):
                     return
                         
                 elif self.picking_mode == 'floor_3point':
+                    if not self._is_floor_pick_ready():
+                        self.status_info = "Floor pick is preparing... please wait a moment, then click."
+                        self.update()
+                        return
                     point = self.pick_point_on_mesh(
                         event.pos().x(),
                         event.pos().y(),
@@ -8042,6 +8496,10 @@ class Viewport3D(QOpenGLWidget):
                     return
                         
                 elif self.picking_mode == 'floor_face':
+                    if not self._is_floor_pick_ready():
+                        self.status_info = "Floor face pick is preparing... please wait a moment, then click."
+                        self.update()
+                        return
                     point = self.pick_point_on_mesh(
                         event.pos().x(),
                         event.pos().y(),
@@ -8366,6 +8824,11 @@ class Viewport3D(QOpenGLWidget):
                             # 湲곗〈 ?⑤㈃ 寃곌낵???몄쭛 ??臾댄슚??
                             self.cut_section_profiles[idx] = []
                             self.cut_section_world[idx] = []
+                            try:
+                                self.cut_section_contours_world[idx] = []
+                                self.cut_section_contours_local[idx] = []
+                            except Exception:
+                                _log_ignored_exception()
 
                             pz = float(picked[2]) if (np.asarray(picked).reshape(-1).size >= 3) else 0.0
                             if not np.isfinite(pz):
@@ -8676,6 +9139,7 @@ class Viewport3D(QOpenGLWidget):
         self.mouse_button = None
         self.active_gizmo_axis = None
         self.gizmo_drag_start = None
+        self._gizmo_drag_screen_angle = None
         self.last_mouse_pos = None
         self.last_mouse_posf = None
         
@@ -8906,36 +9370,30 @@ class Viewport3D(QOpenGLWidget):
                     delta_angle = float(np.clip(delta_angle, -25.0, 25.0))
                     rot_sensitivity = float(getattr(self, "_gizmo_rotate_sensitivity", 0.85) or 0.85)
                     delta_angle *= float(max(0.1, min(rot_sensitivity, 2.0)))
-                    delta_angle *= float(getattr(self, "_gizmo_drag_sign", -1.0) or -1.0)
-                    
-                    # "?먮룞李??몃뱾" 吏곴??? 留덉슦?ㅼ쓽 ?뚯쟾 諛⑺뼢??硫붿돩 ?뚯쟾??1:1 留ㅼ묶
-                    # 移대찓???쒖꽑怨??뚯쟾異뺤쓽 諛⑺뼢???꾪듃怨????듯빐 visual CW/CCW瑜?寃곗젙
-                    view_dir = self.camera.look_at - self.camera.position
-                    view_dir /= np.linalg.norm(view_dir)
-                    
-                    rot_mat = self._object_rotation_matrix_world(obj)
-                    axis_vec = np.zeros(3, dtype=np.float64)
+
+                    # Use screen-space CW/CCW around the gizmo center so behavior follows current view.
+                    screen_curr = self._calculate_gizmo_screen_angle(event.pos().x(), event.pos().y())
+                    screen_prev = getattr(self, "_gizmo_drag_screen_angle", None)
+                    if screen_curr is not None:
+                        self._gizmo_drag_screen_angle = screen_curr
+                    if screen_curr is not None and screen_prev is not None:
+                        try:
+                            raw_screen = float(screen_curr - screen_prev)
+                            raw_screen = float(np.arctan2(np.sin(raw_screen), np.cos(raw_screen)))
+                            screen_deg = float(np.degrees(raw_screen))
+                            if abs(screen_deg) > 0.03:
+                                delta_angle = abs(float(delta_angle)) * (1.0 if screen_deg > 0.0 else -1.0)
+                        except Exception:
+                            _log_ignored_exception()
+
+                    delta_angle *= float(getattr(self, "_gizmo_drag_sign", 1.0) or 1.0)
+
                     if self.active_gizmo_axis == 'X':
-                        axis_vec[0] = 1.0
+                        obj.rotation[0] += delta_angle
                     elif self.active_gizmo_axis == 'Y':
-                        axis_vec[1] = 1.0
+                        obj.rotation[1] += delta_angle
                     elif self.active_gizmo_axis == 'Z':
-                        axis_vec[2] = 1.0
-                    axis_vec = rot_mat @ axis_vec
-                    axis_norm = float(np.linalg.norm(axis_vec))
-                    if axis_norm > 1e-12:
-                        axis_vec = axis_vec / axis_norm
-                    
-                    # ?쒓컖??諛섏쟾 ?щ? 寃곗젙 (?몃뱾???뚮━??諛⑺뼢怨?硫붿돩媛 ?꾨뒗 諛⑺뼢 ?쇱튂)
-                    dot = float(np.dot(view_dir, axis_vec))
-                    flip = 1.0 if dot > 0 else -1.0
-                    
-                    if self.active_gizmo_axis == 'X':
-                        obj.rotation[0] += delta_angle * flip
-                    elif self.active_gizmo_axis == 'Y':
-                        obj.rotation[1] += delta_angle * flip
-                    elif self.active_gizmo_axis == 'Z':
-                        obj.rotation[2] += delta_angle * flip
+                        obj.rotation[2] += delta_angle
                         
                     self.gizmo_drag_start = current_angle
                     self._emit_mesh_transform_changed(suspend_tape_sec=0.28)
@@ -9321,6 +9779,33 @@ class Viewport3D(QOpenGLWidget):
         except Exception:
             return None
 
+    def _calculate_gizmo_screen_angle(self, screen_x, screen_y):
+        """Return cursor angle around gizmo center in screen space (view-relative)."""
+        obj = self.selected_obj
+        if not obj:
+            return None
+        try:
+            if self._cached_viewport is not None:
+                viewport = self._cached_viewport
+                modelview = self._cached_modelview
+                projection = self._cached_projection
+            else:
+                self.makeCurrent()
+                viewport = glGetIntegerv(GL_VIEWPORT)
+                modelview = glGetDoublev(GL_MODELVIEW_MATRIX)
+                projection = glGetDoublev(GL_PROJECTION_MATRIX)
+
+            center = np.asarray(obj.translation, dtype=np.float64).reshape(3)
+            win_pos = gluProject(center[0], center[1], center[2], modelview, projection, viewport)
+            if not win_pos:
+                return None
+            center_x, center_y = self._gl_window_to_qt_xy(float(win_pos[0]), float(win_pos[1]), viewport=viewport)
+            dx = float(screen_x) - float(center_x)
+            dy = float(screen_y) - float(center_y)
+            return float(np.arctan2(dy, dx))
+        except Exception:
+            return None
+
     def wheelEvent(self, a0: QWheelEvent | None):
         if a0 is None:
             return
@@ -9437,6 +9922,11 @@ class Viewport3D(QOpenGLWidget):
                         self.cut_section_profiles[idx] = []
                         self.cut_section_world[idx] = []
                         try:
+                            self.cut_section_contours_world[idx] = []
+                            self.cut_section_contours_local[idx] = []
+                        except Exception:
+                            _log_ignored_exception()
+                        try:
                             self._cut_line_final[idx] = False
                         except Exception:
                             _log_ignored_exception()
@@ -9497,7 +9987,22 @@ class Viewport3D(QOpenGLWidget):
                         plane_hint = last_plane
                 self._roi_commit_plane_hint = plane_hint if plane_hint in ("x1", "x2", "y1", "y2") else None
                 self.roiSectionCommitRequested.emit()
-                self.status_info = "?뱦 ROI ?⑤㈃ 諛곗튂 ?붿껌"
+                try:
+                    x1, x2, y1, y2 = [float(v) for v in (getattr(self, "roi_bounds", [-10, 10, -10, 10]) or [])[:4]]
+                except Exception:
+                    x1, x2, y1, y2 = (-10.0, 10.0, -10.0, 10.0)
+                plane_txt = str(self._roi_commit_plane_hint or "-")
+                if plane_txt == "x1":
+                    cut_txt = f"x={x1:.2f}"
+                elif plane_txt == "x2":
+                    cut_txt = f"x={x2:.2f}"
+                elif plane_txt == "y1":
+                    cut_txt = f"y={y1:.2f}"
+                elif plane_txt == "y2":
+                    cut_txt = f"y={y2:.2f}"
+                else:
+                    cut_txt = f"x=[{x1:.2f},{x2:.2f}], y=[{y1:.2f},{y2:.2f}]"
+                self.status_info = f"ROI cut committed ({plane_txt}, {cut_txt})"
                 self.update()
             except Exception:
                 _log_ignored_exception()
@@ -10317,6 +10822,31 @@ class Viewport3D(QOpenGLWidget):
             return np.asarray(arr[k], dtype=np.float64).reshape(3)
         except Exception:
             return None
+
+    def mark_floor_pick_pending(self, wait_sec: float = 0.18) -> None:
+        """Set a short warmup window so first click doesn't race stale depth/render state."""
+        try:
+            sec = float(wait_sec)
+        except Exception:
+            sec = 0.18
+        if (not np.isfinite(sec)) or sec < 0.0:
+            sec = 0.18
+        self._floor_pick_ready = False
+        self._floor_pick_ready_at = float(time.monotonic()) + float(max(0.0, sec))
+        self.update()
+
+    def _is_floor_pick_ready(self) -> bool:
+        try:
+            if bool(getattr(self, "_floor_pick_ready", True)):
+                return True
+            at = float(getattr(self, "_floor_pick_ready_at", 0.0) or 0.0)
+            if np.isfinite(at) and float(time.monotonic()) >= at:
+                self._floor_pick_ready = True
+                return True
+        except Exception:
+            self._floor_pick_ready = True
+            return True
+        return False
 
     def _pick_selection_brush_face(self, pos):
         """SelectionPanel??釉뚮윭???좏깮 (obj.selected_faces??諛섏쁺)"""

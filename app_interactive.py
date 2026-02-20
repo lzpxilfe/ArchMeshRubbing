@@ -2609,7 +2609,24 @@ class MainWindow(QMainWindow):
             pass
         self.viewport.picking_mode = 'floor_3point'
         self.viewport.floor_picks = []
-        self.viewport.status_info = "📍 바닥면 점 찍기: 메쉬 위를 클릭하여 점을 추가하세요 (Enter로 확정)"
+        try:
+            self.viewport.mark_floor_pick_pending(0.20)
+        except Exception:
+            pass
+        self.viewport.status_info = "Preparing floor pick... please wait, then click on mesh."
+        QTimer.singleShot(
+            220,
+            lambda: (
+                setattr(
+                    self.viewport,
+                    "status_info",
+                    "Floor pick ready: click 3 points on mesh (Enter to confirm).",
+                ),
+                self.viewport.update(),
+            )
+            if getattr(self.viewport, "picking_mode", "") == "floor_3point"
+            else None,
+        )
         self.viewport.update()
 
     def start_floor_picking_face(self):
@@ -2631,7 +2648,24 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self.viewport.picking_mode = 'floor_face'
-        self.viewport.status_info = "📐 바닥면이 될 삼각형 면(Triangle)을 클릭하세요..."
+        try:
+            self.viewport.mark_floor_pick_pending(0.22)
+        except Exception:
+            pass
+        self.viewport.status_info = "Preparing floor face pick... please wait, then click a face."
+        QTimer.singleShot(
+            240,
+            lambda: (
+                setattr(
+                    self.viewport,
+                    "status_info",
+                    "Floor face pick ready: click a support face.",
+                ),
+                self.viewport.update(),
+            )
+            if getattr(self.viewport, "picking_mode", "") == "floor_face"
+            else None,
+        )
         self.viewport.update()
 
     def start_floor_picking_brush(self):
@@ -8320,6 +8354,18 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
+        if enabled:
+            # Start cutline mode as a fresh session so stale profiles do not appear.
+            try:
+                self.viewport.clear_cut_lines()
+            except Exception:
+                pass
+            try:
+                self.viewport.cut_line_active = 0
+                self.viewport.cutLineActiveChanged.emit(0)
+            except Exception:
+                pass
+
         self.viewport.set_cut_lines_enabled(enabled)
         self._sync_cutline_button_state(bool(getattr(self.viewport, "cut_lines_enabled", False)))
 
@@ -8371,33 +8417,90 @@ class MainWindow(QMainWindow):
     def on_save_section_layers_requested(self):
         """현재 단면/가이드 결과를 레이어로 저장(스냅샷)."""
         try:
-            added = int(self.viewport.save_current_sections_to_layers())
+            added = int(
+                self.viewport.save_current_sections_to_layers(
+                    separate_section_profiles=True,
+                )
+            )
         except Exception:
             added = 0
 
         if added <= 0:
-            self.status_info.setText("저장할 단면 레이어가 없습니다.")
+            self.status_info.setText("No section layer to save.")
             return
 
         self.scene_panel.update_list(self.viewport.objects, self.viewport.selected_index)
-        self.status_info.setText(f"단면 레이어 {added}개 저장됨")
+        self.status_info.setText(f"Saved {added} section layer(s). You can move each layer in Scene panel.")
 
     def on_roi_section_commit_requested(self):
         """ROI Enter 커밋 요청을 현재 조정 축 기준 ROI 단면 레이어 저장으로 처리."""
+        # Capture cut location hint before save_roi_sections_to_layers() clears commit markers.
+        try:
+            plane_hint = str(getattr(self.viewport, "_roi_commit_plane_hint", "") or "").strip().lower()
+        except Exception:
+            plane_hint = ""
+        if plane_hint not in ("x1", "x2", "y1", "y2"):
+            try:
+                plane_hint = str(getattr(self.viewport, "_roi_last_adjust_plane", "") or "").strip().lower()
+            except Exception:
+                plane_hint = ""
+        try:
+            roi_bounds = [float(v) for v in (getattr(self.viewport, "roi_bounds", None) or [])][:4]
+        except Exception:
+            roi_bounds = []
+
         try:
             added = int(self.viewport.save_roi_sections_to_layers())
         except Exception:
             added = 0
 
         if added <= 0:
-            self.status_info.setText("저장할 ROI 단면 레이어가 없습니다.")
+            self.status_info.setText("No ROI section layer to save.")
             return
 
         self.scene_panel.update_list(self.viewport.objects, self.viewport.selected_index)
-        self.status_info.setText(f"ROI 단면 레이어 {added}개 저장됨")
+        loc_text = ""
+        try:
+            if len(roi_bounds) >= 4:
+                x1, x2, y1, y2 = float(roi_bounds[0]), float(roi_bounds[1]), float(roi_bounds[2]), float(roi_bounds[3])
+                if plane_hint == "x1":
+                    loc_text = f" x1={x1:.2f}"
+                elif plane_hint == "x2":
+                    loc_text = f" x2={x2:.2f}"
+                elif plane_hint == "y1":
+                    loc_text = f" y1={y1:.2f}"
+                elif plane_hint == "y2":
+                    loc_text = f" y2={y2:.2f}"
+                else:
+                    loc_text = f" x[{x1:.2f},{x2:.2f}] y[{y1:.2f},{y2:.2f}]"
+        except Exception:
+            loc_text = ""
+        self.status_info.setText(
+            f"Saved ROI section layer(s): {added}.{loc_text}  Move/offset in Scene panel."
+        )
 
     def _on_cut_lines_auto_ended(self):
         self._sync_cutline_button_state(False)
+        try:
+            added = int(
+                self.viewport.save_current_sections_to_layers(
+                    include_cut_lines=False,
+                    include_cut_profiles=True,
+                    include_roi_profiles=False,
+                    include_slices=False,
+                    separate_section_profiles=True,
+                )
+            )
+        except Exception:
+            added = 0
+        if added > 0:
+            try:
+                self.scene_panel.update_list(self.viewport.objects, self.viewport.selected_index)
+            except Exception:
+                pass
+            self.status_info.setText(
+                f"Cut section committed: {added} layer(s). Move them in Scene panel."
+            )
 
     def _slice_debounce_delay_ms(self) -> int:
         """메쉬 크기에 따라 단면 계산 디바운스 시간을 동적으로 조정."""
