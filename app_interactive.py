@@ -654,6 +654,7 @@ class ScenePanel(QWidget):
     layerDeleted = pyqtSignal(int, int)  # object_idx, layer_idx
     layerMoveRequested = pyqtSignal(int, int, float, float)  # object_idx, layer_idx, dx, dy
     layerOffsetResetRequested = pyqtSignal(int, int)  # object_idx, layer_idx
+    layerSelected = pyqtSignal(int, int)  # object_idx, layer_idx
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -740,6 +741,9 @@ class ScenePanel(QWidget):
                 visible = item.text(1) == "👓"
                 item.setText(1, "👁️" if visible else "👓")
                 self.layerVisibilityChanged.emit(obj_idx, layer_idx, visible)
+            else:
+                self.selectionChanged.emit(obj_idx)
+                self.layerSelected.emit(obj_idx, layer_idx)
 
     def show_context_menu(self, pos):
         item = self.tree.itemAt(pos)
@@ -2417,6 +2421,7 @@ class MainWindow(QMainWindow):
         self.scene_panel.layerDeleted.connect(self.on_layer_deleted)
         self.scene_panel.layerMoveRequested.connect(self.on_layer_move_requested)
         self.scene_panel.layerOffsetResetRequested.connect(self.on_layer_offset_reset_requested)
+        self.scene_panel.layerSelected.connect(self.on_layer_selected)
         self.scene_dock.setWidget(self.scene_panel)
 
         # 공통 도킹/플로팅 옵션
@@ -2610,12 +2615,12 @@ class MainWindow(QMainWindow):
         self.viewport.picking_mode = 'floor_3point'
         self.viewport.floor_picks = []
         try:
-            self.viewport.mark_floor_pick_pending(0.20)
+            self.viewport.mark_floor_pick_pending(0.08)
         except Exception:
             pass
         self.viewport.status_info = "Preparing floor pick... please wait, then click on mesh."
         QTimer.singleShot(
-            220,
+            90,
             lambda: (
                 setattr(
                     self.viewport,
@@ -2649,12 +2654,12 @@ class MainWindow(QMainWindow):
             pass
         self.viewport.picking_mode = 'floor_face'
         try:
-            self.viewport.mark_floor_pick_pending(0.22)
+            self.viewport.mark_floor_pick_pending(0.10)
         except Exception:
             pass
         self.viewport.status_info = "Preparing floor face pick... please wait, then click a face."
         QTimer.singleShot(
-            240,
+            110,
             lambda: (
                 setattr(
                     self.viewport,
@@ -3112,6 +3117,17 @@ class MainWindow(QMainWindow):
         try:
             self.viewport.reset_polyline_layer_offset(int(obj_idx), int(layer_idx))
             self.viewport.update()
+        except Exception:
+            pass
+
+    def on_layer_selected(self, obj_idx: int, layer_idx: int):
+        try:
+            oi = int(obj_idx)
+            li = int(layer_idx)
+            self.viewport.select_object(oi)
+            self.viewport.set_active_polyline_layer(oi, li)
+            self.viewport.update()
+            self.status_info.setText("Section layer selected: drag in viewport (Shift = axis lock)")
         except Exception:
             pass
 
@@ -8419,6 +8435,10 @@ class MainWindow(QMainWindow):
         try:
             added = int(
                 self.viewport.save_current_sections_to_layers(
+                    include_cut_lines=False,
+                    include_cut_profiles=True,
+                    include_roi_profiles=False,
+                    include_slices=False,
                     separate_section_profiles=True,
                 )
             )

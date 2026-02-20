@@ -1,45 +1,63 @@
-# ArchMeshRubbing
+﻿# ArchMeshRubbing
 
-고고학 유물의 스캔 완료 3D 메쉬를 분석/분리/단면/전개/탁본화하는 후처리 도구입니다.
-스캐너 장비 연동 없이 메쉬 파일(OBJ/PLY/STL/OFF/glTF/GLB) 자체를 다룹니다.
+## Pallet Town Baseline
 
-## 주요 기능
+Date: 2026-02-20
+Branch: pallet-town-origin
 
-- **메쉬 평면화**: ARAP/LSCM/면적 보존/원통 전개 지원 + 비정상 크기 감지/안정화
-- **정사투영**: 3D 메쉬의 평면도 생성
-- **표면 분리**: 사용자 수동 지정(내면/외면/미구) + 수동 보조 분리 + 자동 분리(보조)
-- **프로젝트(.amr) 저장/불러오기**: 변환/단면/ROI/레이어/내보내기 옵션까지 함께 저장
-- **통합 SVG 출력**: 실측(Top 외곽선) + 단면 + 내/외면 탁본을 1회 SVG로 저장
-- **영역 선택**: 미구 등 특정 부분만 추출 (경계(면적+자석) 올가미)
-- **실시간 단면 관측/촬영**: 스캔 방식으로 단면을 이동 관측하고 즉시 레이어 촬영
-- **스케일 출력**: 실측 스케일이 맞춰진 이미지 내보내기
+This snapshot is designated as the Pallet Town baseline for ongoing development.
+It is the current safe restore point before the next feature cycle.
 
-## 설치
+### Included in this baseline
+
+- Floor-pick readiness latency reduced, with explicit "ready in X.XXs" feedback
+- Canonical-view gizmo rotation direction corrected for top/right/back views
+- Section display uses closed contour loops when available (clean ring-first display)
+- Section layer select/visibility workflow and viewport drag behavior stabilized
+- Section extraction path tuned for fidelity-first behavior (reduced smoothing/downsampling)
+
+### Backup policy for this baseline
+
+- Keep this commit as a named backup tag
+- Keep a git bundle backup file outside the repository working tree
+
+怨좉퀬???좊Ъ???ㅼ틪 ?꾨즺 3D 硫붿돩瑜?遺꾩꽍/遺꾨━/?⑤㈃/?꾧컻/?곷낯?뷀븯???꾩쿂由??꾧뎄?낅땲??
+?ㅼ틦???λ퉬 ?곕룞 ?놁씠 硫붿돩 ?뚯씪(OBJ/PLY/STL/OFF/glTF/GLB) ?먯껜瑜??ㅻ９?덈떎.
+
+## 二쇱슂 湲곕뒫
+
+- **硫붿돩 ?됰㈃??*: ARAP/LSCM/硫댁쟻 蹂댁〈/?먰넻 ?꾧컻 吏??+ 鍮꾩젙???ш린 媛먯?/?덉젙??- **?뺤궗?ъ쁺**: 3D 硫붿돩???됰㈃???앹꽦
+- **?쒕㈃ 遺꾨━**: ?ъ슜???섎룞 吏???대㈃/?몃㈃/誘멸뎄) + ?섎룞 蹂댁“ 遺꾨━ + ?먮룞 遺꾨━(蹂댁“)
+- **?꾨줈?앺듃(.amr) ???遺덈윭?ㅺ린**: 蹂???⑤㈃/ROI/?덉씠???대낫?닿린 ?듭뀡源뚯? ?④퍡 ???- **?듯빀 SVG 異쒕젰**: ?ㅼ륫(Top ?멸낸?? + ?⑤㈃ + ???몃㈃ ?곷낯??1??SVG濡????- **?곸뿭 ?좏깮**: 誘멸뎄 ???뱀젙 遺遺꾨쭔 異붿텧 (寃쎄퀎(硫댁쟻+?먯꽍) ?ш?誘?
+- **?ㅼ떆媛??⑤㈃ 愿痢?珥ъ쁺**: ?ㅼ틪 諛⑹떇?쇰줈 ?⑤㈃???대룞 愿痢≫븯怨?利됱떆 ?덉씠??珥ъ쁺
+- **?ㅼ???異쒕젰**: ?ㅼ륫 ?ㅼ??쇱씠 留욎떠吏??대?吏 ?대낫?닿린
+
+## ?ㅼ튂
 
 ```bash
 pip install -r requirements.txt
 pip install -r requirements-optional.txt  # optional
 ```
 
-## 실행
+## ?ㅽ뻾
 
-### GUI (추천)
+### GUI (異붿쿇)
 
 ```bash
 python app_interactive.py
 ```
 
-또는:
+?먮뒗:
 
 ```bash
 python main.py --gui
 python main.py --open-project my_project.amr
 ```
 
-#### 프로젝트 저장/불러오기 (.amr)
+#### ?꾨줈?앺듃 ???遺덈윭?ㅺ린 (.amr)
 
-- 메뉴 **파일 → 프로젝트 저장 / 프로젝트 열기** (단축키: `Ctrl+S`, `Ctrl+Shift+O`)
-- 단면/가이드(레이어)까지 함께 저장하려면 **단면 도구**에서 **레이어로 저장**을 눌러 스냅샷을 남겨두세요.
+- 硫붾돱 **?뚯씪 ???꾨줈?앺듃 ???/ ?꾨줈?앺듃 ?닿린** (?⑥텞?? `Ctrl+S`, `Ctrl+Shift+O`)
+- ?⑤㈃/媛?대뱶(?덉씠??源뚯? ?④퍡 ??ν븯?ㅻ㈃ **?⑤㈃ ?꾧뎄**?먯꽌 **?덉씠?대줈 ???*???뚮윭 ?ㅻ깄?룹쓣 ?④꺼?먯꽭??
 
 ### CLI
 
@@ -47,76 +65,72 @@ python main.py --open-project my_project.amr
 python main.py --help
 ```
 
-## 2D 실측 도면(SVG) 내보내기
+## 2D ?ㅼ륫 ?꾨㈃(SVG) ?대낫?닿린
 
-- GUI의 **내보내기 → 2D 실측 도면 내보내기(SVG)**에서 뷰별로 저장하거나, **📦 6방향 패키지 내보내기**로 한 폴더에 일괄 저장할 수 있습니다.
-- 기본은 **격자/배경 포함(1cm 격자 + 화면 캡처)**이며, 체크 해제 시 **벡터만(SVG)** 저장합니다.
+- GUI??**?대낫?닿린 ??2D ?ㅼ륫 ?꾨㈃ ?대낫?닿린(SVG)**?먯꽌 酉곕퀎濡???ν븯嫄곕굹, **?벀 6諛⑺뼢 ?⑦궎吏 ?대낫?닿린**濡????대뜑???쇨큵 ??ν븷 ???덉뒿?덈떎.
+- 湲곕낯? **寃⑹옄/諛곌꼍 ?ы븿(1cm 寃⑹옄 + ?붾㈃ 罹≪쿂)**?대ŉ, 泥댄겕 ?댁젣 ??**踰≫꽣留?SVG)** ??ν빀?덈떎.
 
-## 통합 SVG(실측+단면+내/외면 탁본) 내보내기
+## ?듯빀 SVG(?ㅼ륫+?⑤㈃+???몃㈃ ?곷낯) ?대낫?닿린
 
-한 번의 SVG 내보내기로 아래를 한 시트에 함께 저장합니다.
+??踰덉쓽 SVG ?대낫?닿린濡??꾨옒瑜????쒗듃???④퍡 ??ν빀?덈떎.
 
-- **Top 외곽선 실측(벡터)** + (선택) **단면선/단면 폴리라인(벡터)**
-- **외면 탁본(이미지)** / **내면 탁본(이미지)** *(SVG 안에 PNG로 포함)*
+- **Top ?멸낸???ㅼ륫(踰≫꽣)** + (?좏깮) **?⑤㈃???⑤㈃ ?대━?쇱씤(踰≫꽣)**
+- **?몃㈃ ?곷낯(?대?吏)** / **?대㈃ ?곷낯(?대?吏)** *(SVG ?덉뿉 PNG濡??ы븿)*
 
-권장 워크플로우:
+沅뚯옣 ?뚰겕?뚮줈??
 
-1) (권장) **메쉬 정렬**: 바닥면 정렬(3점/면/브러시) 기능으로 “위/아래(Z-up)”가 맞게 정렬  
-2) **내/외면 지정** (자동이 이상하면 꼭 필요)  
-   - 우측 **펼침** 패널 → “표면 선택/지정”에서 **대상(외면/내면/미구)** 선택  
-   - “경계(면적+자석)”으로 **메쉬 위에 점을 찍어**(자석 스냅) 다각형을 만들고 보이는 면을 한 번에 지정 *(시작점 근처 클릭=스냅 닫힘(자동 확정), 좌클릭=점 추가(드래그=회전), 우클릭/Enter=확정(우클릭 위치가 완드 기준), Backspace=되돌리기, Shift/Ctrl=완드 정제, Alt=제거, `[ / ]`=자석 반경)*  
-   - “수동 보조 분리”로 사용자가 지정한 seed(내/외면)를 기준으로 미분류 면만 채웁니다  
-   - (옵션) “자동 분리(실험)”은 메쉬/정렬 상태에 따라 실패할 수 있어 보조용입니다  
-3) (옵션) **단면선 입력**: 우측 단면 패널에서 단면선/ROI를 잡아두면 통합 SVG에 함께 포함됩니다  
-4) **내보내기**: 우측 내보내기 패널 → “통합 SVG (실측+단면+내/외면 탁본)”
+1) (沅뚯옣) **硫붿돩 ?뺣젹**: 諛붾떏硫??뺣젹(3??硫?釉뚮윭?? 湲곕뒫?쇰줈 ?쒖쐞/?꾨옒(Z-up)?앷? 留욊쾶 ?뺣젹  
+2) **???몃㈃ 吏??* (?먮룞???댁긽?섎㈃ 瑗??꾩슂)  
+   - ?곗륫 **?쇱묠** ?⑤꼸 ???쒗몴硫??좏깮/吏?뺚앹뿉??**????몃㈃/?대㈃/誘멸뎄)** ?좏깮  
+   - ?쒓꼍怨?硫댁쟻+?먯꽍)?앹쑝濡?**硫붿돩 ?꾩뿉 ?먯쓣 李띿뼱**(?먯꽍 ?ㅻ깄) ?ㅺ컖?뺤쓣 留뚮뱾怨?蹂댁씠??硫댁쓣 ??踰덉뿉 吏??*(?쒖옉??洹쇱쿂 ?대┃=?ㅻ깄 ?ロ옒(?먮룞 ?뺤젙), 醫뚰겢由???異붽?(?쒕옒洹??뚯쟾), ?고겢由?Enter=?뺤젙(?고겢由??꾩튂媛 ?꾨뱶 湲곗?), Backspace=?섎룎由ш린, Shift/Ctrl=?꾨뱶 ?뺤젣, Alt=?쒓굅, `[ / ]`=?먯꽍 諛섍꼍)*  
+   - ?쒖닔??蹂댁“ 遺꾨━?앸줈 ?ъ슜?먭? 吏?뺥븳 seed(???몃㈃)瑜?湲곗??쇰줈 誘몃텇瑜?硫대쭔 梨꾩썎?덈떎  
+   - (?듭뀡) ?쒖옄??遺꾨━(?ㅽ뿕)?앹? 硫붿돩/?뺣젹 ?곹깭???곕씪 ?ㅽ뙣?????덉뼱 蹂댁“?⑹엯?덈떎  
+3) (?듭뀡) **?⑤㈃???낅젰**: ?곗륫 ?⑤㈃ ?⑤꼸?먯꽌 ?⑤㈃??ROI瑜??≪븘?먮㈃ ?듯빀 SVG???④퍡 ?ы븿?⑸땲?? 
+4) **?대낫?닿린**: ?곗륫 ?대낫?닿린 ?⑤꼸 ???쒗넻??SVG (?ㅼ륫+?⑤㈃+???몃㈃ ?곷낯)??
+李멸퀬:
+- ?쒕?援??꾧컻/?쇱묠?앹? ?꾩쭅 ?꾩닚??誘멸뎄 吏?뺤? ??λ쭔 ???낅땲??
+- ???몃㈃??吏?뺥븯吏 ?딆쑝硫??먮룞 遺꾨━(auto: 媛?쒖꽦(?꾩긽)?믪썝?듈넂踰뺤꽑)濡?fallback ?⑸땲??
 
-참고:
-- “미구 전개/펼침”은 아직 후순위(미구 지정은 저장만 됨)입니다.
-- 내/외면을 지정하지 않으면 자동 분리(auto: 가시성(위상)→원통→법선)로 fallback 됩니다.
+## ?곷낯 ?대?吏(PNG/TIFF) ?대낫?닿린
 
-## 탁본 이미지(PNG/TIFF) 내보내기
+- ?곗륫 **?대낫?닿린** ?⑤꼸?먯꽌 **?곷낯 ????꾩껜/?몃㈃/?대㈃/誘멸뎄)** ???좏깮?????덉뒿?덈떎.
+- ?몃㈃/?대㈃/誘멸뎄???쒗몴硫??좏깮/吏?뺚?寃곌낵(face set)瑜??ъ슜?⑸땲?? 鍮꾩뼱 ?덉쑝硫?癒쇱? 吏?뺥빐 二쇱꽭??
+- 湲곗?泥섎읆 ?먰넻(??? 怨〓쪧???쒕졆?섎㈃ **?붿????곷낯(怨〓쪧 ?쒓굅)** ??沅뚯옣?⑸땲?? (?먰넻 ?쇱묠 + 怨〓쪧 ?쒓굅 ?꾨━??
 
-- 우측 **내보내기** 패널에서 **탁본 대상(전체/외면/내면/미구)** 을 선택할 수 있습니다.
-- 외면/내면/미구는 “표면 선택/지정” 결과(face set)를 사용합니다. 비어 있으면 먼저 지정해 주세요.
-- 기와처럼 원통(와통) 곡률이 뚜렷하면 **디지털 탁본(곡률 제거)** 을 권장합니다. (원통 펼침 + 곡률 제거 프리셋)
+## ?⑥텞??
+- `[` / `]`: (?곹솴蹂? ?쒕㈃ ?꾧뎄 ?ш린/?먯꽍 諛섍꼍/?뚯쟾 湲곗쫰紐??ш린 議곗젅
+- `Space` + ?쒕옒洹? ?쒕㈃ ?꾧뎄 ?ъ슜 以??쒖젏 ?대룞(?뚯쟾)
+- `F`: ?좏깮 媛앹껜 ?붾㈃ 留욎땄
+- `R`: 移대찓??由ъ뀑
 
-## 단축키
+## Git / 諛깆뾽 二쇱쓽
 
-- `[` / `]`: (상황별) 표면 도구 크기/자석 반경/회전 기즈모 크기 조절
-- `Space` + 드래그: 표면 도구 사용 중 시점 이동(회전)
-- `F`: 선택 객체 화면 맞춤
-- `R`: 카메라 리셋
+- ??⑸웾/?묒뾽 ?뚯씪(`*.stl`, `*.amr`, `*.obj`, `*.ply`, `*.off`)怨?濡쒖뺄 ?곌뎄 ?먮즺(`__research_*` ????**而ㅻ컠?섏? ?딅룄濡?* `.gitignore`濡??쒖쇅?⑸땲??
+- Push ?꾩뿉 ??긽 `git status`濡??ㅽ뀒?댁쭠 紐⑸줉???뺤씤?섏꽭??
 
-## Git / 백업 주의
+## ?⑤㈃ ?щ씪?댁떛 ?꾨━??(Clip Presets)
 
-- 대용량/작업 파일(`*.stl`, `*.amr`, `*.obj`, `*.ply`, `*.off`)과 로컬 연구 자료(`__research_*` 등)는 **커밋하지 않도록** `.gitignore`로 제외합니다.
-- Push 전에 항상 `git status`로 스테이징 목록을 확인하세요.
+- **?뱩 硫붿돩 ?⑤㈃ ?щ씪?댁떛** ?⑤꼸?먯꽌 ?꾩옱 ?믪씠(Z)瑜?**?꾨━?뗭쑝濡?????곸슜/??젣**?????덉뒿?덈떎.
+- ?먰븯???믪씠?먯꽌 ?⑤㈃??留뚮뱺 ??**?덉씠?대줈 ???*???뚮윭 ?ㅻ깄?룹쓣 ?④린硫? ?댄썑 **?듯빀 SVG** ?먮뒗 **2D ?ㅼ륫 ?꾨㈃(SVG)** ?대낫?닿린???④퍡 ?ы븿?⑸땲??
 
-## 단면 슬라이싱 프리셋 (Clip Presets)
+## ?ㅼ떆媛??⑤㈃ (?ㅼ틪 ?ㅽ???
 
-- **📏 메쉬 단면 슬라이싱** 패널에서 현재 높이(Z)를 **프리셋으로 저장/적용/삭제**할 수 있습니다.
-- 원하는 높이에서 단면을 만든 뒤 **레이어로 저장**을 눌러 스냅샷을 남기면, 이후 **통합 SVG** 또는 **2D 실측 도면(SVG)** 내보내기에 함께 포함됩니다.
+- ?ㅼ떆媛??⑤㈃? **?⑤㈃/2D 吏???꾧뎄** ??뿉??耳쒓퀬, 3D ?덈떒 ?⑤㈃???곗냽 愿痢≫빀?덈떎.
+- `Ctrl+留덉슦?ㅽ쑀`濡??⑤㈃ ?믪씠瑜??대룞?섍퀬, `Shift+Ctrl`? 誘몄꽭 ?대룞, `Alt+Ctrl`? 怨좎냽 ?대룞?낅땲??
+- **?벝 ?꾩옱 ?⑤㈃ 珥ъ쁺** 踰꾪듉?쇰줈 ?꾩옱 ?⑤㈃??利됱떆 ?덉씠?댁뿉 ??ν븷 ???덉뒿?덈떎.
+- 援щ텇: ?ㅼ떆媛??⑤㈃? 3D ?덈떒 愿痢?珥ъ쁺?닿퀬, 2D 吏???⑤㈃??ROI)? ?곷㈃ 媛?대뱶 吏?뺤엯?덈떎.
 
-## 실시간 단면 (스캔 스타일)
+## ?섍꼍 蹂??(?몃윭釉붿뒋??
 
-- 실시간 단면은 **단면/2D 지정 도구** 탭에서 켜고, 3D 절단 단면을 연속 관측합니다.
-- `Ctrl+마우스휠`로 단면 높이를 이동하고, `Shift+Ctrl`은 미세 이동, `Alt+Ctrl`은 고속 이동입니다.
-- **📸 현재 단면 촬영** 버튼으로 현재 단면을 즉시 레이어에 저장할 수 있습니다.
-- 구분: 실시간 단면은 3D 절단 관측/촬영이고, 2D 지정(단면선/ROI)은 상면 가이드 지정입니다.
-
-## 환경 변수 (트러블슈팅)
-
-- `ARCHMESHRUBBING_PROFILE_EXPORT_SAFE=1`: SVG 외곽선/가이드 투영을 보수적으로 처리 (Illustrator에서 `격자 + 긴 직선`만 보일 때 권장)
-- `ARCHMESHRUBBING_DISABLE_OPENCV=1`: OpenCV 비활성화 (SciPy 기반 경로 사용)
-- `ARCHMESHRUBBING_CV2_IMPORT_TIMEOUT=2.0`: OpenCV import smoke-test 타임아웃(초)
-- `ARCHMESHRUBBING_LOG_LEVEL=DEBUG`: 디버그 로그 활성화 (Windows 기본 로그 경로: `%LOCALAPPDATA%\\ArchMeshRubbing\\logs\\archmeshrubbing.log`)
-- `ARCHMESHRUBBING_EXPORT_DPI=300`: CLI/GUI 기본 내보내기 DPI
-- `ARCHMESHRUBBING_RENDER_RESOLUTION=2000`: CLI/GUI 기본 렌더 해상도(px)
-- `ARCHMESHRUBBING_ARAP_MAX_ITERATIONS=30`: 평면화(ARAP) 기본 반복 횟수
-- `ARCHMESHRUBBING_GUI_MIN_RESOLUTION=500`: GUI 해상도 스핀박스 최소값
-- `ARCHMESHRUBBING_GUI_MAX_RESOLUTION=8000`: GUI 해상도 스핀박스 최대값
-
-## 지원 포맷
+- `ARCHMESHRUBBING_PROFILE_EXPORT_SAFE=1`: SVG ?멸낸??媛?대뱶 ?ъ쁺??蹂댁닔?곸쑝濡?泥섎━ (Illustrator?먯꽌 `寃⑹옄 + 湲?吏곸꽑`留?蹂댁씪 ??沅뚯옣)
+- `ARCHMESHRUBBING_DISABLE_OPENCV=1`: OpenCV 鍮꾪솢?깊솕 (SciPy 湲곕컲 寃쎈줈 ?ъ슜)
+- `ARCHMESHRUBBING_CV2_IMPORT_TIMEOUT=2.0`: OpenCV import smoke-test ??꾩븘??珥?
+- `ARCHMESHRUBBING_LOG_LEVEL=DEBUG`: ?붾쾭洹?濡쒓렇 ?쒖꽦??(Windows 湲곕낯 濡쒓렇 寃쎈줈: `%LOCALAPPDATA%\\ArchMeshRubbing\\logs\\archmeshrubbing.log`)
+- `ARCHMESHRUBBING_EXPORT_DPI=300`: CLI/GUI 湲곕낯 ?대낫?닿린 DPI
+- `ARCHMESHRUBBING_RENDER_RESOLUTION=2000`: CLI/GUI 湲곕낯 ?뚮뜑 ?댁긽??px)
+- `ARCHMESHRUBBING_ARAP_MAX_ITERATIONS=30`: ?됰㈃??ARAP) 湲곕낯 諛섎났 ?잛닔
+- `ARCHMESHRUBBING_GUI_MIN_RESOLUTION=500`: GUI ?댁긽???ㅽ?諛뺤뒪 理쒖냼媛?- `ARCHMESHRUBBING_GUI_MAX_RESOLUTION=8000`: GUI ?댁긽???ㅽ?諛뺤뒪 理쒕?媛?
+## 吏???щ㎎
 
 - OBJ (Wavefront)
 - PLY (Polygon File Format)
@@ -127,9 +141,12 @@ python main.py --help
 
 ## References
 
-- 논문/문헌/공식 문서 레퍼런스 목록: `docs/REFERENCES.md`
-- 기능별 구현 근거 매핑(어떤 기능이 어떤 레퍼런스를 따르는지): `docs/FEATURE_REFERENCES.md`
+- ?쇰Ц/臾명뿄/怨듭떇 臾몄꽌 ?덊띁?곗뒪 紐⑸줉: `docs/REFERENCES.md`
+- 湲곕뒫蹂?援ы쁽 洹쇨굅 留ㅽ븨(?대뼡 湲곕뒫???대뼡 ?덊띁?곗뒪瑜??곕Ⅴ?붿?): `docs/FEATURE_REFERENCES.md`
 
-## 라이선스
+## ?쇱씠?좎뒪
 
-GNU General Public License v2.0 (GPLv2) — 자세한 내용은 `LICENSE` 파일을 참고하세요.
+GNU General Public License v2.0 (GPLv2) ???먯꽭???댁슜? `LICENSE` ?뚯씪??李멸퀬?섏꽭??
+
+
+

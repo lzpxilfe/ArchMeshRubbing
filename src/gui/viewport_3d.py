@@ -374,26 +374,29 @@ class _CutPolylineSectionProfileThread(QThread):
                 return
 
             # Polyline section is physically a single plane.
-            # For bent guides, collapse to a dominant straight direction for stability/speed.
+            # For bent guides, keep a single plane but derive direction from the longest segment
+            # (more predictable than weighted average that can drift diagonally).
             if pts.shape[0] > 2:
                 try:
                     dxy = np.diff(pts[:, :2], axis=0)
                     seg_len = np.linalg.norm(dxy, axis=1)
                     valid = seg_len > 1e-5
                     if bool(np.any(valid)):
-                        dirs = dxy[valid] / seg_len[valid][:, None]
-                        w = seg_len[valid]
-                        w_sum = float(np.sum(w))
-                        if w_sum > 1e-9:
-                            d_main = np.sum(dirs * (w / w_sum)[:, None], axis=0)
-                        else:
-                            d_main = pts[-1, :2] - pts[0, :2]
+                        valid_idx = np.where(valid)[0]
+                        i_long = int(valid_idx[int(np.argmax(seg_len[valid_idx]))])
+                        d_main = np.asarray(dxy[i_long], dtype=np.float64).reshape(2)
                         n_main = float(np.linalg.norm(d_main))
                         if n_main <= 1e-6:
                             d_main = pts[-1, :2] - pts[0, :2]
                             n_main = float(np.linalg.norm(d_main))
                         if n_main > 1e-6:
                             d_main = d_main / n_main
+                            try:
+                                d_ref = np.asarray(pts[-1, :2] - pts[0, :2], dtype=np.float64).reshape(2)
+                                if float(np.linalg.norm(d_ref)) > 1e-6 and float(np.dot(d_main, d_ref)) < 0.0:
+                                    d_main = -d_main
+                            except Exception:
+                                _log_ignored_exception()
                             rel = pts[:, :2] - pts[0, :2]
                             proj = rel @ d_main
                             p0_xy = pts[0, :2] + d_main * float(np.min(proj))
@@ -551,18 +554,10 @@ class _CutPolylineSectionProfileThread(QThread):
                     if prof_arr.shape[0] < 2:
                         continue
 
-                    if prof_arr.shape[0] > 420:
-                        idx_keep = np.linspace(0, prof_arr.shape[0] - 1, num=420, dtype=np.int64)
+                    if prof_arr.shape[0] > 1200:
+                        idx_keep = np.linspace(0, prof_arr.shape[0] - 1, num=1200, dtype=np.int64)
                         prof_arr = prof_arr[idx_keep]
                         world_arr = world_arr[idx_keep]
-
-                    # Mild local denoise only; avoid heavy trend fitting.
-                    if prof_arr.shape[0] >= 9:
-                        try:
-                            z_med = ndimage.median_filter(prof_arr[:, 1], size=3, mode="nearest")
-                            prof_arr[:, 1] = 0.75 * prof_arr[:, 1] + 0.25 * z_med
-                        except Exception:
-                            _log_ignored_exception()
 
                     span_s = float(np.nanmax(prof_arr[:, 0]) - np.nanmin(prof_arr[:, 0]))
                     coverage = span_s / max(seg_len, 1e-6)
@@ -681,26 +676,9 @@ class _CutPolylineSectionProfileThread(QThread):
                 if len(compact) < 2:
                     continue
                 arr_c = np.asarray(compact, dtype=np.float64).reshape(-1, 3)
-                if arr_c.shape[0] > 480:
-                    idx_keep = np.linspace(0, arr_c.shape[0] - 1, num=480, dtype=np.int64)
+                if arr_c.shape[0] > 1600:
+                    idx_keep = np.linspace(0, arr_c.shape[0] - 1, num=1600, dtype=np.int64)
                     arr_c = arr_c[idx_keep]
-                if arr_c.shape[0] >= 7:
-                    try:
-                        closed = float(np.linalg.norm(arr_c[0] - arr_c[-1])) <= 1e-4
-                        if closed:
-                            prev = np.roll(arr_c, 1, axis=0)
-                            nxt = np.roll(arr_c, -1, axis=0)
-                            sm = 0.20 * prev + 0.60 * arr_c + 0.20 * nxt
-                            sm[-1] = sm[0]
-                            arr_c = sm
-                        else:
-                            pad = np.pad(arr_c, ((1, 1), (0, 0)), mode="edge")
-                            sm = 0.20 * pad[:-2, :] + 0.60 * pad[1:-1, :] + 0.20 * pad[2:, :]
-                            sm[0, :] = arr_c[0, :]
-                            sm[-1, :] = arr_c[-1, :]
-                            arr_c = sm
-                    except Exception:
-                        _log_ignored_exception()
                 contours_out.append([arr_c[j, :3].tolist() for j in range(arr_c.shape[0])])
 
             self.computed.emit({**payload_base, "profile": cleaned, "contours_world": contours_out})
@@ -2080,6 +2058,15 @@ class Viewport3D(QOpenGLWidget):
         self._cut_section_timer = QTimer(self)
         self._cut_section_timer.setSingleShot(True)
         self._cut_section_timer.timeout.connect(self._request_cut_section_compute)
+
+        # Section-profile layer drag (XY only on z=0 plane)
+        self._active_polyline_layer_obj_index = -1
+        self._active_polyline_layer_index = -1
+        self._polyline_layer_dragging = False
+        self._polyline_layer_drag_world_start = None   # np.ndarray([x, y], float64)
+        self._polyline_layer_drag_offset_start = None  # np.ndarray([ox, oy], float64)
+        self._polyline_layer_drag_axis_lock = None     # "x" | "y" | None
+        self._polyline_layer_drag_moved = False
 
         # Line section (top-view cut line)
         self.line_section_enabled = False
@@ -3516,6 +3503,16 @@ class Viewport3D(QOpenGLWidget):
             layers.pop(li)
         except Exception:
             return
+        try:
+            ai_obj = int(getattr(self, "_active_polyline_layer_obj_index", -1))
+            ai_layer = int(getattr(self, "_active_polyline_layer_index", -1))
+            if ai_obj == oi:
+                if ai_layer == li:
+                    self._active_polyline_layer_index = -1
+                elif ai_layer > li:
+                    self._active_polyline_layer_index = int(ai_layer - 1)
+        except Exception:
+            _log_ignored_exception()
         self.update()
 
     def move_polyline_layer(self, object_index: int, layer_index: int, dx: float, dy: float):
@@ -3565,6 +3562,304 @@ class Viewport3D(QOpenGLWidget):
         except Exception:
             return
         self.update()
+
+    def set_active_polyline_layer(self, object_index: int, layer_index: int):
+        try:
+            oi = int(object_index)
+            li = int(layer_index)
+        except Exception:
+            self._active_polyline_layer_obj_index = -1
+            self._active_polyline_layer_index = -1
+            self.update()
+            return
+        if not (0 <= oi < len(self.objects)):
+            self._active_polyline_layer_obj_index = -1
+            self._active_polyline_layer_index = -1
+            self.update()
+            return
+        layers = getattr(self.objects[oi], "polyline_layers", None) or []
+        if not (0 <= li < len(layers)):
+            self._active_polyline_layer_obj_index = -1
+            self._active_polyline_layer_index = -1
+            self.update()
+            return
+        self._active_polyline_layer_obj_index = oi
+        self._active_polyline_layer_index = li
+        self.update()
+
+    def clear_active_polyline_layer(self):
+        self._active_polyline_layer_obj_index = -1
+        self._active_polyline_layer_index = -1
+        self.update()
+
+    @staticmethod
+    def _distance_sq_point_to_segment_2d(
+        px: float,
+        py: float,
+        ax: float,
+        ay: float,
+        bx: float,
+        by: float,
+    ) -> float:
+        abx = float(bx - ax)
+        aby = float(by - ay)
+        apx = float(px - ax)
+        apy = float(py - ay)
+        denom = float(abx * abx + aby * aby)
+        if denom <= 1e-12:
+            dx = float(px - ax)
+            dy = float(py - ay)
+            return float(dx * dx + dy * dy)
+        t = float((apx * abx + apy * aby) / denom)
+        t = float(max(0.0, min(1.0, t)))
+        qx = float(ax + t * abx)
+        qy = float(ay + t * aby)
+        dx = float(px - qx)
+        dy = float(py - qy)
+        return float(dx * dx + dy * dy)
+
+    def _get_polyline_layer_ref(self, object_index: int, layer_index: int):
+        try:
+            oi = int(object_index)
+            li = int(layer_index)
+        except Exception:
+            return None
+        if not (0 <= oi < len(self.objects)):
+            return None
+        obj = self.objects[oi]
+        layers = getattr(obj, "polyline_layers", None) or []
+        if not (0 <= li < len(layers)):
+            return None
+        return obj, layers[li]
+
+    def _hit_test_section_profile_layer(self, screen_x: float, screen_y: float, max_dist_px: float = 12.0):
+        """Return (object_index, layer_index) for nearest visible section_profile near cursor."""
+        try:
+            oi_sel = int(getattr(self, "selected_index", -1))
+        except Exception:
+            oi_sel = -1
+        if not (0 <= oi_sel < len(self.objects)):
+            return None
+
+        obj = self.objects[oi_sel]
+        layers = getattr(obj, "polyline_layers", None) or []
+        if not layers:
+            return None
+
+        try:
+            self.makeCurrent()
+            viewport = glGetIntegerv(GL_VIEWPORT)
+            modelview = glGetDoublev(GL_MODELVIEW_MATRIX)
+            projection = glGetDoublev(GL_PROJECTION_MATRIX)
+        except Exception:
+            return None
+
+        try:
+            px = float(screen_x)
+            py = float(screen_y)
+            max_d2 = float(max_dist_px) * float(max_dist_px)
+        except Exception:
+            return None
+
+        try:
+            ai_obj = int(getattr(self, "_active_polyline_layer_obj_index", -1))
+            ai_layer = int(getattr(self, "_active_polyline_layer_index", -1))
+        except Exception:
+            ai_obj, ai_layer = -1, -1
+
+        candidate_indices: list[int] = []
+        if ai_obj == oi_sel and 0 <= ai_layer < len(layers):
+            try:
+                lyr = layers[ai_layer]
+                if bool(lyr.get("visible", True)) and str(lyr.get("kind", "")).strip() == "section_profile":
+                    # If a section layer is explicitly selected in Scene panel, move only that layer.
+                    candidate_indices = [int(ai_layer)]
+            except Exception:
+                candidate_indices = []
+        if not candidate_indices:
+            for li in range(len(layers)):
+                candidate_indices.append(li)
+
+        best_li = -1
+        best_d2 = float("inf")
+        for li in candidate_indices:
+            layer = layers[li]
+            try:
+                if not bool(layer.get("visible", True)):
+                    continue
+                if str(layer.get("kind", "")).strip() != "section_profile":
+                    continue
+            except Exception:
+                continue
+
+            pts_src = layer.get("points", None) or []
+            if len(pts_src) < 2:
+                continue
+
+            off = layer.get("offset", None)
+            if not (isinstance(off, (list, tuple)) and len(off) >= 2):
+                off = [0.0, 0.0]
+            try:
+                off_x = float(off[0])
+                off_y = float(off[1])
+            except Exception:
+                off_x, off_y = 0.0, 0.0
+
+            pts_2d: list[tuple[float, float]] = []
+            for p in pts_src:
+                arr = np.asarray(p, dtype=np.float64).reshape(-1)
+                if arr.size < 2 or not np.isfinite(arr[:2]).all():
+                    continue
+                wx = float(arr[0]) + off_x
+                wy = float(arr[1]) + off_y
+                wz = 0.0
+                try:
+                    win = gluProject(wx, wy, wz, modelview, projection, viewport)
+                except Exception:
+                    win = None
+                if not win:
+                    continue
+                qx, qy = self._gl_window_to_qt_xy(float(win[0]), float(win[1]), viewport=viewport)
+                if np.isfinite([qx, qy]).all():
+                    pts_2d.append((float(qx), float(qy)))
+
+            if len(pts_2d) < 2:
+                continue
+
+            local_best = float("inf")
+            for i in range(1, len(pts_2d)):
+                ax, ay = pts_2d[i - 1]
+                bx, by = pts_2d[i]
+                d2 = self._distance_sq_point_to_segment_2d(px, py, ax, ay, bx, by)
+                if d2 < local_best:
+                    local_best = d2
+
+            if local_best <= max_d2 and local_best < best_d2:
+                best_d2 = local_best
+                best_li = int(li)
+
+        if best_li < 0:
+            return None
+        return oi_sel, best_li
+
+    def _begin_polyline_layer_drag(self, event: QMouseEvent, object_index: int, layer_index: int) -> bool:
+        ref = self._get_polyline_layer_ref(object_index, layer_index)
+        if ref is None:
+            return False
+        _obj, layer = ref
+        try:
+            if str(layer.get("kind", "")).strip() != "section_profile":
+                return False
+        except Exception:
+            return False
+
+        pt = self.pick_point_on_plane_z(event.pos().x(), event.pos().y(), z=0.0)
+        if pt is None:
+            return False
+        try:
+            off = layer.get("offset", [0.0, 0.0]) or [0.0, 0.0]
+            ox = float(off[0]) if isinstance(off, (list, tuple)) and len(off) >= 1 else 0.0
+            oy = float(off[1]) if isinstance(off, (list, tuple)) and len(off) >= 2 else 0.0
+        except Exception:
+            ox, oy = 0.0, 0.0
+
+        self._active_polyline_layer_obj_index = int(object_index)
+        self._active_polyline_layer_index = int(layer_index)
+        self._polyline_layer_dragging = True
+        self._polyline_layer_drag_world_start = np.array([float(pt[0]), float(pt[1])], dtype=np.float64)
+        self._polyline_layer_drag_offset_start = np.array([float(ox), float(oy)], dtype=np.float64)
+        self._polyline_layer_drag_axis_lock = None
+        self._polyline_layer_drag_moved = False
+        self.save_undo_state()
+        self.status_info = "Section layer drag started (Shift: axis lock)"
+        self.update()
+        return True
+
+    def _update_polyline_layer_drag(self, event: QMouseEvent, modifiers: Qt.KeyboardModifier) -> bool:
+        if not bool(getattr(self, "_polyline_layer_dragging", False)):
+            return False
+
+        oi = int(getattr(self, "_active_polyline_layer_obj_index", -1))
+        li = int(getattr(self, "_active_polyline_layer_index", -1))
+        ref = self._get_polyline_layer_ref(oi, li)
+        if ref is None:
+            return False
+        _obj, layer = ref
+        pt = self.pick_point_on_plane_z(event.pos().x(), event.pos().y(), z=0.0)
+        start_xy = getattr(self, "_polyline_layer_drag_world_start", None)
+        off_start = getattr(self, "_polyline_layer_drag_offset_start", None)
+        if pt is None or start_xy is None or off_start is None:
+            return False
+
+        try:
+            dx = float(pt[0]) - float(start_xy[0])
+            dy = float(pt[1]) - float(start_xy[1])
+        except Exception:
+            return False
+        if not np.isfinite([dx, dy]).all():
+            return False
+
+        shift_on = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+        if shift_on:
+            axis = getattr(self, "_polyline_layer_drag_axis_lock", None)
+            if axis not in ("x", "y"):
+                if abs(dx) >= abs(dy):
+                    axis = "x"
+                else:
+                    axis = "y"
+                self._polyline_layer_drag_axis_lock = axis
+            if axis == "x":
+                dy = 0.0
+            else:
+                dx = 0.0
+        else:
+            self._polyline_layer_drag_axis_lock = None
+
+        try:
+            new_off_x = float(off_start[0]) + float(dx)
+            new_off_y = float(off_start[1]) + float(dy)
+            layer["offset"] = [new_off_x, new_off_y]
+        except Exception:
+            return False
+
+        if abs(dx) > 1e-9 or abs(dy) > 1e-9:
+            self._polyline_layer_drag_moved = True
+        axis_txt = str(getattr(self, "_polyline_layer_drag_axis_lock", "") or "").upper()
+        if axis_txt not in ("X", "Y"):
+            axis_txt = "XY"
+        self.status_info = f"Section layer offset: ({new_off_x:.2f}, {new_off_y:.2f}) [{axis_txt}]"
+        self.update()
+        return True
+
+    def _end_polyline_layer_drag(self):
+        if not bool(getattr(self, "_polyline_layer_dragging", False)):
+            return
+        moved = bool(getattr(self, "_polyline_layer_drag_moved", False))
+        self._polyline_layer_dragging = False
+        self._polyline_layer_drag_world_start = None
+        self._polyline_layer_drag_offset_start = None
+        self._polyline_layer_drag_axis_lock = None
+        self._polyline_layer_drag_moved = False
+        if moved:
+            self.status_info = "Section layer moved"
+        self.update()
+
+    def _count_visible_section_profile_layers(self, obj: SceneObject | None) -> int:
+        if obj is None:
+            return 0
+        cnt = 0
+        for layer in getattr(obj, "polyline_layers", None) or []:
+            try:
+                if not bool(layer.get("visible", True)):
+                    continue
+                if str(layer.get("kind", "")).strip() != "section_profile":
+                    continue
+                pts = layer.get("points", None) or []
+                if len(pts) >= 2:
+                    cnt += 1
+            except Exception:
+                continue
+        return int(cnt)
 
     def _has_visible_polyline_layers(self) -> bool:
         obj = self.selected_obj
@@ -4151,10 +4446,6 @@ class Viewport3D(QOpenGLWidget):
         layout_world = self._layout_cut_section_world(profile, idx)
         try:
             pts_world = [np.asarray(p, dtype=np.float64).reshape(-1)[:3].copy() for p in (layout_world or [])]
-            if len(pts_world) > 260:
-                idx_keep = np.linspace(0, len(pts_world) - 1, num=260, dtype=np.int64)
-                pts_world = [pts_world[int(ii)] for ii in idx_keep.tolist()]
-            pts_world = self._smooth_cutline_tape_strip(pts_world, passes=1)
             self.cut_section_world[idx] = [
                 [float(p[0]), float(p[1]), float(p[2])] for p in (pts_world or [])
             ]
@@ -4702,11 +4993,12 @@ class Viewport3D(QOpenGLWidget):
         max_world_step = float(max(step_eff * 3.6, span_xy * 0.035, 1.2))
         max_world_step = float(min(max_world_step, max(8.0, span_xy * 0.35)))
         try:
-            xy_blend = float(getattr(self, "_cutline_tape_surface_xy_blend", 0.65) or 0.65)
+            # Keep tape shape stable: favor guide XY over noisy per-face XY snaps.
+            xy_blend = float(getattr(self, "_cutline_tape_surface_xy_blend", 0.30) or 0.30)
         except Exception:
-            xy_blend = 0.65
+            xy_blend = 0.30
         if (not np.isfinite(xy_blend)) or xy_blend < 0.0:
-            xy_blend = 0.65
+            xy_blend = 0.30
         xy_blend = float(max(0.15, min(xy_blend, 1.0)))
 
         line_sig: list[tuple[float, float, float]] = []
@@ -4812,7 +5104,7 @@ class Viewport3D(QOpenGLWidget):
         if len(cur) >= 2:
             strips.append(cur)
 
-        strips = [self._smooth_cutline_tape_strip(s, passes=3) for s in strips if s is not None and len(s) >= 2]
+        strips = [self._smooth_cutline_tape_strip(s, passes=4) for s in strips if s is not None and len(s) >= 2]
 
         cache[cache_key] = strips
         if len(cache) > 48:
@@ -4826,6 +5118,212 @@ class Viewport3D(QOpenGLWidget):
                 pass
 
         return strips
+
+    def _prepare_cutline_closed_contour_loop(
+        self,
+        contour_points: list[np.ndarray] | list[list[float]],
+        *,
+        close_tol_world: float = 0.45,
+    ) -> list[np.ndarray]:
+        """Regularize a contour into a smooth closed loop for on-mesh cut indication."""
+        try:
+            arr = np.asarray(contour_points, dtype=np.float64).reshape(-1, 3)
+        except Exception:
+            return []
+        if arr.shape[0] < 3:
+            return []
+        try:
+            finite = np.isfinite(arr).all(axis=1)
+            arr = arr[finite]
+        except Exception:
+            pass
+        if arr.shape[0] < 3:
+            return []
+
+        compact: list[np.ndarray] = [arr[0].copy()]
+        for j in range(1, arr.shape[0]):
+            try:
+                if float(np.linalg.norm(arr[j] - compact[-1])) <= 1e-6:
+                    continue
+            except Exception:
+                pass
+            compact.append(arr[j].copy())
+        arr = np.asarray(compact, dtype=np.float64).reshape(-1, 3)
+        if arr.shape[0] < 3:
+            return []
+
+        try:
+            span = float(max(np.ptp(arr[:, 0]), np.ptp(arr[:, 1]), np.ptp(arr[:, 2])))
+        except Exception:
+            span = 0.0
+        tol = float(max(float(close_tol_world), span * 0.035, 0.08))
+        tol = float(min(tol, max(2.0, span * 0.10)))
+        try:
+            d_close = float(np.linalg.norm(arr[0] - arr[-1]))
+        except Exception:
+            d_close = float("inf")
+        if not np.isfinite(d_close):
+            return []
+        if d_close > tol:
+            force_tol = float(max(tol * 1.9, span * 0.07))
+            if d_close > force_tol:
+                return []
+
+        if d_close > 1e-8:
+            arr = np.vstack([arr, arr[0]])
+        else:
+            arr[-1] = arr[0]
+        if arr.shape[0] < 4:
+            return []
+
+        if arr.shape[0] > 1400:
+            try:
+                idx_keep = np.linspace(0, arr.shape[0] - 1, num=1400, dtype=np.int64)
+                arr = arr[idx_keep]
+            except Exception:
+                arr = arr[:1400]
+        if arr.shape[0] < 4:
+            return []
+
+        base = arr[:-1].copy()
+        if base.shape[0] < 3:
+            return []
+        # Keep geometry fidelity: do not aggressively smooth/resample extracted contour.
+        # If too sparse, only densify lightly for stable rendering.
+        out = base
+        if out.shape[0] < 24:
+            try:
+                closed_chain = np.vstack([out, out[0]])
+                seg = np.linalg.norm(np.diff(closed_chain, axis=0), axis=1)
+                seg = np.asarray(seg, dtype=np.float64).reshape(-1)
+                if seg.size >= 2 and np.isfinite(seg).all():
+                    total = float(np.sum(seg))
+                    if np.isfinite(total) and total > 1e-6:
+                        n_target = int(np.clip(max(24, out.shape[0] * 3), 24, 180))
+                        s = np.concatenate([[0.0], np.cumsum(seg)])
+                        su = np.linspace(0.0, total, num=n_target, endpoint=False, dtype=np.float64)
+                        x = np.concatenate([out[:, 0], [out[0, 0]]])
+                        y = np.concatenate([out[:, 1], [out[0, 1]]])
+                        z = np.concatenate([out[:, 2], [out[0, 2]]])
+                        out = np.column_stack([
+                            np.interp(su, s, x),
+                            np.interp(su, s, y),
+                            np.interp(su, s, z),
+                        ]).astype(np.float64, copy=False)
+            except Exception:
+                _log_ignored_exception()
+        out = np.vstack([out, out[0]])
+        return [out[i, :3].copy() for i in range(out.shape[0])]
+
+    def _get_cutline_display_loops(
+        self,
+        index: int,
+        line: list[np.ndarray] | list[list[float]],
+        obj: SceneObject | None,
+    ) -> list[list[np.ndarray]]:
+        """Return a preferred closed loop for a finalized cut line, if available."""
+        try:
+            idx = int(index)
+        except Exception:
+            return []
+        if idx not in (0, 1):
+            return []
+
+        close_tol = 0.45
+        try:
+            if obj is not None:
+                wb = np.asarray(obj.get_world_bounds(), dtype=np.float64)
+                if wb.shape == (2, 3) and np.isfinite(wb).all():
+                    span = float(max(np.abs(wb[1] - wb[0])))
+                    close_tol = float(max(0.10, span * 0.016))
+                    close_tol = float(min(close_tol, max(2.0, span * 0.08)))
+        except Exception:
+            close_tol = 0.45
+
+        contour_candidates: list[list[np.ndarray]] = []
+        try:
+            local_store = getattr(self, "cut_section_contours_local", [[], []]) or [[], []]
+            local = local_store[idx] if idx < len(local_store) else []
+            if local and obj is not None:
+                contour_candidates = self._cutline_contours_local_to_world(local, obj)
+        except Exception:
+            contour_candidates = []
+        if not contour_candidates:
+            try:
+                world_store = getattr(self, "cut_section_contours_world", [[], []]) or [[], []]
+                contour_candidates = world_store[idx] if idx < len(world_store) else []
+            except Exception:
+                contour_candidates = []
+        if not contour_candidates:
+            return []
+
+        line_xy: list[np.ndarray] = []
+        for p in line or []:
+            arr = np.asarray(p, dtype=np.float64).reshape(-1)
+            if arr.size >= 2 and np.isfinite(arr[:2]).all():
+                line_xy.append(arr[:2].copy())
+
+        best_loop: list[np.ndarray] | None = None
+        best_score = -float("inf")
+        for cnt in contour_candidates:
+            loop = self._prepare_cutline_closed_contour_loop(cnt, close_tol_world=close_tol)
+            if len(loop) < 4:
+                continue
+            try:
+                arr = np.asarray(loop, dtype=np.float64).reshape(-1, 3)
+            except Exception:
+                continue
+            if arr.shape[0] < 4 or (not np.isfinite(arr).all()):
+                continue
+
+            try:
+                perim = float(np.sum(np.linalg.norm(np.diff(arr, axis=0), axis=1)))
+            except Exception:
+                perim = 0.0
+            if perim <= 1e-5:
+                continue
+
+            dist_penalty = 0.0
+            if len(line_xy) >= 2:
+                try:
+                    n_sample = int(min(28, max(8, arr.shape[0] - 1)))
+                    sample_idx = np.linspace(0, arr.shape[0] - 2, num=n_sample, dtype=np.int64)
+                    d_acc = 0.0
+                    d_cnt = 0
+                    for ii in sample_idx.tolist():
+                        pxy = arr[int(ii), :2]
+                        d2_best = float("inf")
+                        for j in range(1, len(line_xy)):
+                            a = line_xy[j - 1]
+                            b = line_xy[j]
+                            d2 = self._distance_sq_point_to_segment_2d(
+                                float(pxy[0]),
+                                float(pxy[1]),
+                                float(a[0]),
+                                float(a[1]),
+                                float(b[0]),
+                                float(b[1]),
+                            )
+                            if d2 < d2_best:
+                                d2_best = d2
+                        if np.isfinite(d2_best):
+                            d_acc += float(np.sqrt(max(0.0, d2_best)))
+                            d_cnt += 1
+                    if d_cnt > 0:
+                        dist_penalty = float(d_acc / float(d_cnt))
+                except Exception:
+                    dist_penalty = 0.0
+
+            if dist_penalty > float(close_tol * 3.0):
+                continue
+            score = float(perim - 6.0 * dist_penalty)
+            if score > best_score:
+                best_score = score
+                best_loop = loop
+
+        if best_loop is None:
+            return []
+        return [best_loop]
 
     def draw_cut_lines(self):
         """?⑤㈃??2媛? 媛?대뱶 ?쇱씤 ?쒓컖??(??긽 ?붾㈃ ?꾨줈)"""
@@ -4903,6 +5401,7 @@ class Viewport3D(QOpenGLWidget):
                 tape_band_width = 0.38
 
             strips_by_idx: dict[int, list[list[np.ndarray]]] = {}
+            closed_loop_by_idx: dict[int, bool] = {}
             if tape_enabled:
                 glEnable(GL_DEPTH_TEST)
                 for i, line in enumerate(lines):
@@ -4912,74 +5411,81 @@ class Viewport3D(QOpenGLWidget):
                         continue
                     col = colors[i % 2]
                     strips: list[list[np.ndarray]] = []
+                    used_closed_loop = False
                     try:
-                        contour_candidates: list[list[np.ndarray]] = []
-                        contour_store_local = getattr(self, "cut_section_contours_local", [[], []]) or [[], []]
-                        contour_local = contour_store_local[i] if i < len(contour_store_local) else []
-                        if contour_local and obj_tape is not None:
-                            contour_candidates = self._cutline_contours_local_to_world(contour_local, obj_tape)
-                        if not contour_candidates:
-                            contour_store = getattr(self, "cut_section_contours_world", [[], []]) or [[], []]
-                            contour_candidates = contour_store[i] if i < len(contour_store) else []
-                        # Bent polyline => contours from mixed planes look chaotic; prefer surface-projected tape.
-                        if isinstance(line, list) and len(line) > 2:
-                            contour_candidates = []
-                        for cnt in contour_candidates:
-                            pts_raw: list[np.ndarray] = []
-                            for p in cnt or []:
-                                p0 = np.asarray(p, dtype=np.float64).reshape(-1)
-                                if p0.size >= 3 and np.isfinite(p0[:3]).all():
-                                    pts_raw.append(p0[:3].copy())
-                            if len(pts_raw) < 2:
-                                continue
-                            if len(pts_raw) > 480:
-                                try:
-                                    idx_keep = np.linspace(0, len(pts_raw) - 1, num=480, dtype=np.int64)
-                                    pts_raw = [pts_raw[int(ii)] for ii in idx_keep.tolist()]
-                                except Exception:
-                                    pts_raw = pts_raw[:480]
-                            dense_step = float(max(0.12, tape_band_width * 0.40))
-                            dense = self._densify_cut_polyline(pts_raw, step_world=dense_step)
-                            pts = self._smooth_cutline_tape_strip(dense if len(dense) >= 2 else pts_raw, passes=3)
-                            if len(pts) < 2:
-                                continue
-                            try:
-                                close_eps = float(max(0.03, tape_band_width * 0.35))
-                                if float(np.linalg.norm(np.asarray(pts[0], dtype=np.float64) - np.asarray(pts[-1], dtype=np.float64))) <= close_eps:
-                                    pts[-1] = np.asarray(pts[0], dtype=np.float64).copy()
-                            except Exception:
-                                _log_ignored_exception()
-                            strips.append(pts)
+                        # Prefer actual section contour loop when available.
+                        strips = self._get_cutline_display_loops(i, line, obj_tape)
+                        used_closed_loop = bool(strips)
                     except Exception:
-                        _log_ignored_exception("Cutline contour->tape conversion failed", level=logging.WARNING)
+                        _log_ignored_exception("Cutline contour loop build failed", level=logging.WARNING)
                         strips = []
+                        used_closed_loop = False
                     if not strips:
                         try:
-                            strips = self._build_cutline_surface_tape_strips(line, step_world=0.5)
+                            # Fallback: guide-projected on-surface strips.
+                            strips = self._build_cutline_surface_tape_strips(line, step_world=0.42)
                         except Exception:
                             _log_ignored_exception("Cutline tape build failed", level=logging.WARNING)
                             strips = []
+                        used_closed_loop = False
                     if not strips:
                         continue
+                    # Keep one primary loop for readability when contour loops exist.
+                    if used_closed_loop and len(strips) > 1:
+                        try:
+                            strips = [max(strips, key=lambda s: len(s or []))]
+                        except Exception:
+                            strips = [strips[0]]
+                    if not strips:
+                        continue
+                    closed_loop_by_idx[int(i)] = bool(used_closed_loop)
                     strips_by_idx[int(i)] = strips
                     for pts in strips:
                         if pts is None or len(pts) < 2:
                             continue
                         is_active = int(self.cut_line_active) == i
+                        if used_closed_loop:
+                            # Closed section contour is rendered as a clean ring line (no filled ribbon)
+                            # to avoid speckle/z-fighting noise on rough meshes.
+                            continue
                         self._draw_cutline_rubber_ribbon(
                             pts,
                             color=col,
                             lift=float(tape_lift),
-                            width_world=float(tape_band_width * (1.08 if is_active else 1.0)),
+                            width_world=float(tape_band_width * (1.15 if used_closed_loop else 1.08 if is_active else 1.0)),
                             active=bool(is_active),
                         )
-
-            # Always-visible thin guide on top of the tape for readability while orbiting.
+ 
+            # Always-visible guide on top of tape for readability while orbiting.
             glDisable(GL_DEPTH_TEST)
             for i, strips in strips_by_idx.items():
                 col = colors[i % 2]
-                glColor4f(float(col[0]), float(col[1]), float(col[2]), 0.74 if int(self.cut_line_active) == i else 0.60)
-                glLineWidth(1.55 if int(self.cut_line_active) == i else 1.25)
+                is_active = int(self.cut_line_active) == i
+                is_closed = bool(closed_loop_by_idx.get(int(i), False))
+                # Dark halo pass makes colored ring readable against bright mesh.
+                if is_closed:
+                    glColor4f(0.03, 0.03, 0.03, 0.74 if is_active else 0.64)
+                    glLineWidth(3.10 if is_active else 2.60)
+                    for dense in strips:
+                        pts_h: list[np.ndarray] = []
+                        for p in dense:
+                            p0 = np.asarray(p, dtype=np.float64).reshape(-1)
+                            if p0.size >= 3 and np.isfinite(p0[:3]).all():
+                                pts_h.append(p0[:3].copy())
+                        if len(pts_h) < 2:
+                            continue
+                        glBegin(GL_LINE_STRIP)
+                        for p0 in pts_h:
+                            glVertex3f(float(p0[0]), float(p0[1]), float(p0[2] + tape_lift * 1.85))
+                        glEnd()
+
+                glColor4f(
+                    float(col[0]),
+                    float(col[1]),
+                    float(col[2]),
+                    0.96 if (is_closed and is_active) else 0.88 if is_closed else 0.74 if is_active else 0.60,
+                )
+                glLineWidth(2.45 if is_closed and is_active else 2.05 if is_closed else 1.55 if is_active else 1.25)
                 for dense in strips:
                     pts: list[np.ndarray] = []
                     for p in dense:
@@ -5037,7 +5543,13 @@ class Viewport3D(QOpenGLWidget):
             obj = self.selected_obj
             if obj is not None:
                 layers = getattr(obj, "polyline_layers", None) or []
-                for layer in layers:
+                try:
+                    active_obj_idx = int(getattr(self, "_active_polyline_layer_obj_index", -1))
+                    active_layer_idx = int(getattr(self, "_active_polyline_layer_index", -1))
+                except Exception:
+                    active_obj_idx, active_layer_idx = -1, -1
+                selected_obj_idx = int(getattr(self, "selected_index", -1))
+                for k, layer in enumerate(layers):
                     try:
                         if not bool(layer.get("visible", True)):
                             continue
@@ -5062,6 +5574,14 @@ class Viewport3D(QOpenGLWidget):
                             r, g, b, a = (0.2, 0.2, 0.2, 0.7)
 
                         w = float(layer.get("width", 1.6))
+                        is_active_layer = (
+                            selected_obj_idx == active_obj_idx
+                            and int(k) == active_layer_idx
+                            and str(kind).strip() == "section_profile"
+                        )
+                        if is_active_layer:
+                            a = float(max(0.82, min(1.0, a + 0.20)))
+                            w = float(max(2.0, w + 0.8))
                         glColor4f(r, g, b, a)
                         glLineWidth(max(1.0, w))
                         z_use = z if kind == "cut_line" else z_profile
@@ -7776,6 +8296,13 @@ class Viewport3D(QOpenGLWidget):
         self.cut_section_world = [[], []]
         self.cut_section_contours_world = [[], []]
         self.cut_section_contours_local = [[], []]
+        self._active_polyline_layer_obj_index = -1
+        self._active_polyline_layer_index = -1
+        self._polyline_layer_dragging = False
+        self._polyline_layer_drag_world_start = None
+        self._polyline_layer_drag_offset_start = None
+        self._polyline_layer_drag_axis_lock = None
+        self._polyline_layer_drag_moved = False
         try:
             self._cut_section_pending_indices.clear()
         except Exception:
@@ -8176,6 +8703,13 @@ class Viewport3D(QOpenGLWidget):
     def select_object(self, index):
         if 0 <= index < len(self.objects):
             self.selected_index = index
+            try:
+                if int(getattr(self, "_active_polyline_layer_obj_index", -1)) != int(index):
+                    self._active_polyline_layer_obj_index = int(index)
+                    self._active_polyline_layer_index = -1
+            except Exception:
+                self._active_polyline_layer_obj_index = int(index)
+                self._active_polyline_layer_index = -1
             self.update()
             self.selectionChanged.emit(index)
 
@@ -8416,6 +8950,50 @@ class Viewport3D(QOpenGLWidget):
 
             # 1. ?쇰컲 ?대┃ (媛앹껜 ?좏깮 ?먮뒗 ?쇳궧 紐⑤뱶 泥섎━) - 醫뚰겢由?쭔 泥섎━
             if event.button() == Qt.MouseButton.LeftButton:
+                # Section-profile layer drag (z=0 plane): click near a visible extracted layer.
+                if (
+                    self.picking_mode == 'none'
+                    and not getattr(self, "roi_enabled", False)
+                    and not bool(modifiers & Qt.KeyboardModifier.ControlModifier)
+                    and not bool(modifiers & Qt.KeyboardModifier.AltModifier)
+                ):
+                    try:
+                        sec_count = self._count_visible_section_profile_layers(self.selected_obj)
+                    except Exception:
+                        sec_count = 0
+                    active_ok = False
+                    try:
+                        ai_obj = int(getattr(self, "_active_polyline_layer_obj_index", -1))
+                        ai_layer = int(getattr(self, "_active_polyline_layer_index", -1))
+                        if ai_obj == int(getattr(self, "selected_index", -1)):
+                            ref = self._get_polyline_layer_ref(ai_obj, ai_layer)
+                            if ref is not None:
+                                _ao, _al = ref
+                                active_ok = bool(_al.get("visible", True)) and str(_al.get("kind", "")).strip() == "section_profile"
+                    except Exception:
+                        active_ok = False
+                    if sec_count > 1 and not active_ok:
+                        self.status_info = "Select one section layer in Scene panel, then drag."
+                        self.update()
+                        return
+                    try:
+                        hit = self._hit_test_section_profile_layer(
+                            float(event.pos().x()),
+                            float(event.pos().y()),
+                            max_dist_px=12.0,
+                        )
+                    except Exception:
+                        hit = None
+                    if hit is not None:
+                        try:
+                            oi, li = int(hit[0]), int(hit[1])
+                            if self.selected_index != oi:
+                                self.select_object(oi)
+                            if self._begin_polyline_layer_drag(event, oi, li):
+                                return
+                        except Exception:
+                            _log_ignored_exception()
+
                 # 湲곗쫰紐??좏깮 寃??(媛???곗꽑?쒖쐞) - ROI 紐⑤뱶?먯꽌???④?/鍮꾪솢??
                 if self.picking_mode == 'none' and not getattr(self, "roi_enabled", False):
                     axis = self.hit_test_gizmo(event.pos().x(), event.pos().y())
@@ -8463,7 +9041,11 @@ class Viewport3D(QOpenGLWidget):
                         
                 elif self.picking_mode == 'floor_3point':
                     if not self._is_floor_pick_ready():
-                        self.status_info = "Floor pick is preparing... please wait a moment, then click."
+                        remain = float(self._floor_pick_remaining_sec())
+                        if remain > 0.0:
+                            self.status_info = f"Floor pick is preparing... ready in {remain:.2f}s."
+                        else:
+                            self.status_info = "Floor pick is preparing... please wait a moment, then click."
                         self.update()
                         return
                     point = self.pick_point_on_mesh(
@@ -8497,7 +9079,11 @@ class Viewport3D(QOpenGLWidget):
                         
                 elif self.picking_mode == 'floor_face':
                     if not self._is_floor_pick_ready():
-                        self.status_info = "Floor face pick is preparing... please wait a moment, then click."
+                        remain = float(self._floor_pick_remaining_sec())
+                        if remain > 0.0:
+                            self.status_info = f"Floor face pick is preparing... ready in {remain:.2f}s."
+                        else:
+                            self.status_info = "Floor face pick is preparing... please wait a moment, then click."
                         self.update()
                         return
                     point = self.pick_point_on_mesh(
@@ -8777,6 +9363,12 @@ class Viewport3D(QOpenGLWidget):
             return
         event = a0
         """留덉슦??踰꾪듉 ?볦쓬"""
+
+        if event.button() == Qt.MouseButton.LeftButton and bool(getattr(self, "_polyline_layer_dragging", False)):
+            try:
+                self._end_polyline_layer_drag()
+            except Exception:
+                _log_ignored_exception()
 
         # ?⑤㈃??2媛?: 醫뚰겢由???異붽?(?대┃?쇰줈留?, ?고겢由??꾩옱 ???뺤젙
         if self.picking_mode == "cut_lines":
@@ -9157,6 +9749,13 @@ class Viewport3D(QOpenGLWidget):
         event = a0
         """留덉슦???대룞 (?쒕옒洹?"""
         try:
+            if (
+                self.mouse_button == Qt.MouseButton.LeftButton
+                and bool(getattr(self, "_polyline_layer_dragging", False))
+            ):
+                if self._update_polyline_layer_drag(event, event.modifiers()):
+                    return
+
             # ?⑤㈃??紐⑤뱶: ?쒕옒洹?以묒뿉??"?대┃"?쇰줈 ?ㅼ씤?섏? ?딅룄濡??뚮옒洹?泥섎━
             if self.picking_mode == "cut_lines":
                 threshold_px = 10
@@ -9385,6 +9984,12 @@ class Viewport3D(QOpenGLWidget):
                                 delta_angle = abs(float(delta_angle)) * (1.0 if screen_deg > 0.0 else -1.0)
                         except Exception:
                             _log_ignored_exception()
+
+                    # Canonical views with mirrored screen orientation need sign flip
+                    # so CW/CCW feels consistent to the user.
+                    view_key = self._camera_canonical_view_key()
+                    if view_key in ("top", "right", "back"):
+                        delta_angle = -float(delta_angle)
 
                     delta_angle *= float(getattr(self, "_gizmo_drag_sign", 1.0) or 1.0)
 
@@ -10823,30 +11428,37 @@ class Viewport3D(QOpenGLWidget):
         except Exception:
             return None
 
-    def mark_floor_pick_pending(self, wait_sec: float = 0.18) -> None:
+    def mark_floor_pick_pending(self, wait_sec: float = 0.10) -> None:
         """Set a short warmup window so first click doesn't race stale depth/render state."""
         try:
             sec = float(wait_sec)
         except Exception:
-            sec = 0.18
+            sec = 0.10
         if (not np.isfinite(sec)) or sec < 0.0:
-            sec = 0.18
+            sec = 0.10
         self._floor_pick_ready = False
         self._floor_pick_ready_at = float(time.monotonic()) + float(max(0.0, sec))
         self.update()
 
-    def _is_floor_pick_ready(self) -> bool:
+    def _floor_pick_remaining_sec(self) -> float:
         try:
             if bool(getattr(self, "_floor_pick_ready", True)):
-                return True
+                return 0.0
             at = float(getattr(self, "_floor_pick_ready_at", 0.0) or 0.0)
-            if np.isfinite(at) and float(time.monotonic()) >= at:
+            if not np.isfinite(at):
                 self._floor_pick_ready = True
-                return True
+                return 0.0
+            remain = float(at - float(time.monotonic()))
+            if remain <= 0.0:
+                self._floor_pick_ready = True
+                return 0.0
+            return float(remain)
         except Exception:
             self._floor_pick_ready = True
-            return True
-        return False
+            return 0.0
+
+    def _is_floor_pick_ready(self) -> bool:
+        return self._floor_pick_remaining_sec() <= 0.0
 
     def _pick_selection_brush_face(self, pos):
         """SelectionPanel??釉뚮윭???좏깮 (obj.selected_faces??諛섏쁺)"""
