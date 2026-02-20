@@ -43,7 +43,7 @@ VIEW_CANONICAL_AZIMUTHS = (-180.0, -90.0, 0.0, 90.0, 180.0)
 VIEW_DISTANCE_SCALE = 1.35
 VIEW_MIN_DIM = 10.0
 VIEW_ORTHO_SCALE_TOP_BOTTOM = 0.95
-VIEW_ORTHO_SCALE_SIDE = 1.35
+VIEW_ORTHO_SCALE_SIDE = 1.05
 FLOOR_ALIGN_AXIS_Z = 2
 FLOOR_OPTIMIZE_STEP_DEGREES = (1.2, 0.4, 0.15, 0.05)
 CANONICAL_VIEW_PRESETS: dict[str, tuple[float, float]] = {
@@ -4164,9 +4164,14 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             try:
-                vp.roi_caps_enabled = bool(roi_s.get("caps", False))
+                vp.roi_caps_enabled = bool(roi_s.get("caps", True))
             except Exception:
-                pass
+                vp.roi_caps_enabled = True
+            try:
+                if bool(vp.roi_enabled) and not bool(vp.roi_caps_enabled):
+                    vp.roi_caps_enabled = True
+            except Exception:
+                vp.roi_caps_enabled = True
             try:
                 if vp.roi_enabled:
                     vp.schedule_roi_edges_update(0)
@@ -8155,6 +8160,8 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         self.viewport.roi_enabled = enabled
+        if enabled:
+            self.viewport.roi_caps_enabled = True
         if enabled:
             # ROI는 바닥 평면 드래그를 사용 -> 다른 입력 모드 비활성화
             if self.viewport.crosshair_enabled:
