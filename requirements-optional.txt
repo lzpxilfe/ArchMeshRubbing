@@ -1,0 +1,9 @@
+# Optional dependencies for extra features/performance.
+#
+# Install with:
+#   pip install -r requirements-optional.txt
+#
+# OpenCV improves contour extraction in `src/core/profile_exporter.py` but is
+# intentionally optional to keep installs lightweight/stable.
+opencv-python>=4.8.0
+PyOpenGL_accelerate>=3.1.7

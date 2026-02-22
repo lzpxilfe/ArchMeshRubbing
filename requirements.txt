@@ -1,0 +1,9 @@
+# Core dependencies
+numpy>=1.24.0
+scipy>=1.11.0
+trimesh>=4.0.0
+Pillow>=10.0.0
+
+# GUI
+PyQt6>=6.5.0
+PyOpenGL>=3.1.7

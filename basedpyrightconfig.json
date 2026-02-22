@@ -1,0 +1,22 @@
+{
+  "typeCheckingMode": "basic",
+  "venvPath": ".",
+  "venv": ".venv",
+  "exclude": [
+    "**/__pycache__",
+    ".venv",
+    ".ruff_cache",
+    "build",
+    "dist"
+  ],
+  "reportMissingImports": true,
+  "reportMissingTypeStubs": false,
+  "reportAny": "none",
+  "reportUnknownArgumentType": "none",
+  "reportUnknownMemberType": "none",
+  "reportUnknownVariableType": "none",
+  "reportDeprecated": "none",
+  "reportPrivateUsage": "none",
+  "reportUnannotatedClassAttribute": "none",
+  "reportUnusedCallResult": "none"
+}
