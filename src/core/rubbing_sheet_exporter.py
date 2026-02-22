@@ -102,6 +102,10 @@ def _is_closed(points: np.ndarray, tol: float = 1e-6) -> bool:
 
 
 class RubbingSheetExporter:
+    def split_outer_inner(self, mesh: MeshData, *, threshold: float = 0.15) -> tuple[MeshData, MeshData]:
+        """Public helper for auto split without manual face selection."""
+        return self._split_outer_inner(mesh, threshold=float(threshold))
+
     def export(
         self,
         mesh: MeshData,

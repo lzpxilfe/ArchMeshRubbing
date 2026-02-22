@@ -1071,6 +1071,13 @@ class FlattenPanel(QWidget):
 
 
         layout.addWidget(surface_group)
+        # Surface painting remains available for advanced/manual correction,
+        # but the default rubbing workflow uses automatic split.
+        surface_group.setVisible(False)
+        auto_hint = QLabel("내/외면 선택 없이 자동 분리 후 상/하면 이미지를 생성합니다.")
+        auto_hint.setStyleSheet("color: #4a5568; font-size: 11px;")
+        auto_hint.setWordWrap(True)
+        layout.addWidget(auto_hint)
         
         # 실행 버튼
         self.btn_flatten = QPushButton("🚀 펼침 실행")
@@ -1698,12 +1705,13 @@ class ExportPanel(QWidget):
         img_layout.addRow("", self.check_scale_bar)
 
         self.combo_rubbing_target = QComboBox()
+        # Default export flow uses full-surface unwrap; keep target fixed to all.
         self.combo_rubbing_target.addItems(["전체", "🌞 외면", "🌙 내면", "🧩 미구"])
+        self.combo_rubbing_target.clear()
+        self.combo_rubbing_target.addItem("전체(자동)")
+        self.combo_rubbing_target.setEnabled(False)
         self.combo_rubbing_target.setToolTip(
-            "탁본/디지털 탁본 내보내기 대상 표면을 선택합니다.\n"
-            "- 전체: 전체 메쉬를 그대로 사용\n"
-            "- 외면/내면/미구: 표면 지정 결과(face set)만 추출해 내보내기\n"
-            "※ 대상 표면이 비어 있으면 먼저 '표면 선택/지정'으로 지정해 주세요."
+            "기본 탁본 워크플로우는 표면 수동 선택 없이 전체 메쉬를 자동 처리합니다."
         )
         img_layout.addRow("탁본 대상:", self.combo_rubbing_target)
         
@@ -1728,8 +1736,10 @@ class ExportPanel(QWidget):
         )
         layout.addWidget(btn_export_rubbing)
 
-        btn_export_rubbing_digital = QPushButton("📤 디지털 탁본(곡률 제거) 내보내기")
-        btn_export_rubbing_digital.setToolTip("원통 펼침(빠름) + 곡률 제거(참조면 스무딩) 기반 탁본")
+        btn_export_rubbing_digital = QPushButton("📤 디지털 탁본(상/하면 2장) 내보내기")
+        btn_export_rubbing_digital.setToolTip(
+            "수동 표면선택 없이 자동 분리한 뒤, 원통 펼침 + 곡률 제거로 상면/하면 2장을 저장합니다."
+        )
         btn_export_rubbing_digital.setStyleSheet("""
             QPushButton {
                 background-color: #805ad5;
@@ -1878,11 +1888,7 @@ class ExportPanel(QWidget):
         layout.addStretch(1)
 
     def current_rubbing_target(self) -> str:
-        try:
-            idx = int(getattr(self.combo_rubbing_target, "currentIndex", lambda: 0)())
-        except Exception:
-            idx = 0
-        return {0: "all", 1: "outer", 2: "inner", 3: "migu"}.get(idx, "all")
+        return "all"
 
 
 class MeasurePanel(QWidget):
@@ -3361,8 +3367,6 @@ class MainWindow(QMainWindow):
         action_bottom.setToolTip("하면 뷰 (6)")
         action_bottom.triggered.connect(lambda: self._set_canonical_view("bottom"))
         toolbar.addAction(action_bottom)
-
-        toolbar.addSeparator()
 
     def init_statusbar(self):
         self.statusbar = QStatusBar()
@@ -6089,6 +6093,8 @@ class MainWindow(QMainWindow):
         target = str((data or {}).get("target", "all") or "all").strip().lower()
         if target not in {"all", "outer", "inner", "migu"}:
             target = "all"
+        if export_type in {"rubbing", "rubbing_digital", "rubbing_view_cyl"}:
+            target = "all"
         
         if export_type == 'profile_2d':
             self.export_2d_profile(data.get('view'))
@@ -6214,7 +6220,7 @@ class MainWindow(QMainWindow):
 
         elif export_type == 'rubbing_digital':
             filepath, _ = QFileDialog.getSaveFileName(
-                self, "디지털 탁본 저장 (곡률 제거)", "", "PNG (*.png);;TIFF (*.tiff)"
+                self, "디지털 탁본 저장 (상/하면 2장)", "", "PNG (*.png);;TIFF (*.tiff)"
             )
             if filepath:
                 self.status_info.setText(f"내보내기: {filepath}")
@@ -6223,20 +6229,6 @@ class MainWindow(QMainWindow):
                 include_scale = bool(self.export_panel.check_scale_bar.isChecked())
 
                 base = obj.mesh
-
-                face_set = None
-                if target != "all":
-                    attr = f"{target}_face_indices"
-                    face_set = getattr(obj, attr, None) or set()
-                    if not face_set:
-                        QMessageBox.warning(
-                            self,
-                            "경고",
-                            f"'{target}' 표면 지정이 비어 있습니다.\n\n"
-                            "우측 '표면 선택/지정'에서 외면/내면/미구를 먼저 지정하거나,\n"
-                            "탁본 대상=전체로 내보내세요.",
-                        )
-                        return
                 translation = (
                     np.asarray(obj.translation, dtype=np.float64).copy()
                     if getattr(obj, "translation", None) is not None
@@ -6249,40 +6241,84 @@ class MainWindow(QMainWindow):
                 )
                 scale = float(getattr(obj, "scale", 1.0))
 
-                # Always use fast cylindrical unwrapping for digital rubbing.
+                out_path = Path(filepath)
+                out_suffix = out_path.suffix if out_path.suffix else ".png"
+                out_dir = out_path.parent
+                out_stem = out_path.stem
+                top_path = str(out_dir / f"{out_stem}_top{out_suffix}")
+                bottom_path = str(out_dir / f"{out_stem}_bottom{out_suffix}")
+
+                # Digital rubbing workflow:
+                # 1) auto split outer/inner (no manual face selection),
+                # 2) cylinder flatten each side,
+                # 3) export top/bottom images.
                 opts = dict(flatten_options)
                 opts["method"] = "원통 펼침"
+                opts["iterations"] = 0
 
                 def task_export_rubbing_digital():
                     from src.core.surface_visualizer import SurfaceVisualizer
+                    from src.core.rubbing_sheet_exporter import RubbingSheetExporter
 
                     mesh = MainWindow._build_world_mesh_from_transform(
                         base, translation=translation, rotation=rotation, scale=scale
                     )
-                    if target != "all":
-                        ids = np.asarray(sorted(list(face_set or [])), dtype=np.int32).reshape(-1)
-                        mesh = mesh.extract_submesh(ids)
-                    flattened = MainWindow._compute_flattened_mesh(mesh, opts)
-
-                    # DPI 기준으로 출력 폭 계산 (실측 스케일 유지를 위해)
-                    unit = (flattened.original_mesh.unit or "mm").lower()
-                    width_in = _width_in_inches(float(flattened.width), unit)
-                    width_pixels = max(MIN_EXPORT_WIDTH_PX, int(width_in * dpi))
-                    width_pixels = min(width_pixels, MAX_EXPORT_WIDTH_PX)  # output width guard
+                    splitter = RubbingSheetExporter()
+                    outer_mesh, inner_mesh = splitter.split_outer_inner(mesh, threshold=0.15)
 
                     visualizer = SurfaceVisualizer(default_dpi=dpi)
-                    # Prefer the image-based preset to reduce aliasing/noise on scanned meshes.
-                    rubbing = visualizer.generate_rubbing(
-                        flattened,
-                        width_pixels=width_pixels,
-                        preset="디지털(곡률 제거)",
-                    )
-                    rubbing.save(filepath, include_scale_bar=include_scale)
-                    return filepath
+                    saved_paths: dict[str, str] = {}
 
-                def on_done_export_rubbing_digital(_result: Any):
-                    QMessageBox.information(self, "완료", f"디지털 탁본 이미지가 저장되었습니다:\n{filepath}")
-                    self.status_info.setText(f"✅ 저장 완료: {Path(filepath).name}")
+                    def _render_and_save(side_mesh, side_path: str) -> bool:
+                        try:
+                            n_faces = int(getattr(side_mesh, "n_faces", 0) or 0)
+                        except Exception:
+                            n_faces = 0
+                        if n_faces <= 0:
+                            return False
+
+                        flattened = MainWindow._compute_flattened_mesh(side_mesh, opts)
+                        unit = (flattened.original_mesh.unit or "mm").lower()
+                        width_in = _width_in_inches(float(flattened.width), unit)
+                        width_pixels = max(MIN_EXPORT_WIDTH_PX, int(width_in * dpi))
+                        width_pixels = min(width_pixels, MAX_EXPORT_WIDTH_PX)
+
+                        rubbing = visualizer.generate_rubbing(
+                            flattened,
+                            width_pixels=width_pixels,
+                            preset="디지털(곡률 제거)",
+                        )
+                        rubbing.save(side_path, include_scale_bar=include_scale)
+                        return True
+
+                    if _render_and_save(outer_mesh, top_path):
+                        saved_paths["top"] = top_path
+                    if _render_and_save(inner_mesh, bottom_path):
+                        saved_paths["bottom"] = bottom_path
+
+                    if not saved_paths:
+                        raise RuntimeError("내/외면 자동 분리 결과가 비어 상/하면 이미지를 생성하지 못했습니다.")
+                    return saved_paths
+
+                def on_done_export_rubbing_digital(result: Any):
+                    top_done = ""
+                    bottom_done = ""
+                    if isinstance(result, dict):
+                        top_done = str(result.get("top", "") or "")
+                        bottom_done = str(result.get("bottom", "") or "")
+
+                    lines = []
+                    if top_done:
+                        lines.append(f"- 상면: {top_done}")
+                    if bottom_done:
+                        lines.append(f"- 하면: {bottom_done}")
+
+                    QMessageBox.information(
+                        self,
+                        "완료",
+                        "디지털 탁본(상/하면)이 저장되었습니다:\n" + "\n".join(lines),
+                    )
+                    self.status_info.setText(f"✅ 저장 완료: {Path(filepath).name} (상/하면)")
 
                 def on_failed(message: str):
                     self.status_info.setText("❌ 저장 실패")
@@ -6290,7 +6326,7 @@ class MainWindow(QMainWindow):
 
                 self._start_task(
                     title="내보내기",
-                    label="디지털 탁본 생성/저장 중...",
+                    label="디지털 탁본(상/하면) 생성/저장 중...",
                     thread=TaskThread("export_rubbing_digital", task_export_rubbing_digital),
                     on_done=on_done_export_rubbing_digital,
                     on_failed=on_failed,

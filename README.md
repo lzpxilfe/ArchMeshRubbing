@@ -1,163 +1,132 @@
 ﻿# ArchMeshRubbing
 
-## Pallet Town Baseline
+ArchMeshRubbing은 고고학/건축 유물 메쉬를 정렬, 단면화, 전개(Flatten), 탁본 이미지화, 실측 SVG 출력까지 한 번에 처리하는 도구입니다.
 
-Date: 2026-02-20
-Branch: pallet-town-origin
+## 현재 핵심 워크플로우
 
-This snapshot is designated as the Pallet Town baseline for ongoing development.
-It is the current safe restore point before the next feature cycle.
+1. 메쉬 파일(`.obj`, `.ply`, `.stl`, `.off`, `.gltf`, `.glb`)을 연다.
+2. 바닥면 지정/맞춤으로 자세(정치)를 잡는다.
+3. 필요하면 단면선/ROI를 지정한다.
+4. 목적에 맞는 출력 경로를 선택한다.
+   - 탁본 이미지
+   - 디지털 탁본(상/하면 2장)
+   - 현재뷰 원통 이미지(초고속)
+   - 2D 실측 도면(SVG)
+   - 통합 SVG(실측+단면+탁본)
 
-### Included in this baseline
+## 주요 기능
 
-- Floor-pick readiness latency reduced, with explicit "ready in X.XXs" feedback
-- Canonical-view gizmo rotation direction corrected for top/right/back views
-- Section display uses closed contour loops when available (clean ring-first display)
-- Section layer select/visibility workflow and viewport drag behavior stabilized
-- Section extraction path tuned for fidelity-first behavior (reduced smoothing/downsampling)
+- 메쉬 정렬/표시
+  - 바닥면 피킹 및 바닥면 맞춤
+  - 6방향 정규 뷰(정면/후면/좌/우/상/하)
+  - X-Ray, Flat Shading 등 시각화 보조
 
-### Backup policy for this baseline
+- 단면/2D 지정
+  - 실시간 단면 슬라이싱
+  - 2D 단면선 지정(상면)
+  - ROI 지정 후 외곽 추출
+  - 단면/레이어 저장
 
-- Keep this commit as a named backup tag
-- Keep a git bundle backup file outside the repository working tree
+- 펼침(Flatten)
+  - ARAP, LSCM, 면적 보존, 원통 펼침
+  - 곡률 반경/방향/반복 횟수 설정
 
-## Fast Cylindrical View Unwrap (Image-only)
+- 이미지/도면 내보내기
+  - 탁본 이미지(PNG/TIFF)
+  - 디지털 탁본(상/하면 2장): 자동 내/외면 분리 + 원통 펼침 + 곡률 제거
+    - 저장 파일: `<이름>_top.<확장자>`, `<이름>_bottom.<확장자>`
+  - 현재뷰 원통 이미지 내보내기(초고속)
+  - 정사투영 이미지 내보내기
+  - 2D 실측 도면(SVG) 및 6방향 패키지 내보내기
+  - 통합 SVG
+    - 실측+단면+내/외면 탁본
+    - 디지털 탁본/원통 버전
 
-For cylindrical tiles, use the new export path that unwraps the **current viewport image** directly.
-This avoids heavy mesh-face flattening and is intended for fast production capture.
+- 프로젝트 파일
+  - `.amr` 프로젝트 저장/불러오기
+  - 객체 상태/카메라/레이어/옵션 복원
 
-- UI path: `Export` -> `현재뷰 원통 이미지 내보내기(초고속)`
-- Input: current selected object in current camera view
-- Output: dewarped PNG/TIFF with DPI metadata
-- Recommended DPI presets: `300`, `600`, `1200`
-- Note: this mode is image-based, so outer/inner/migu face-target split is not applied
-
-怨좉퀬???좊Ъ???ㅼ틪 ?꾨즺 3D 硫붿돩瑜?遺꾩꽍/遺꾨━/?⑤㈃/?꾧컻/?곷낯?뷀븯???꾩쿂由??꾧뎄?낅땲??
-?ㅼ틦???λ퉬 ?곕룞 ?놁씠 硫붿돩 ?뚯씪(OBJ/PLY/STL/OFF/glTF/GLB) ?먯껜瑜??ㅻ９?덈떎.
-
-## 二쇱슂 湲곕뒫
-
-- **硫붿돩 ?됰㈃??*: ARAP/LSCM/硫댁쟻 蹂댁〈/?먰넻 ?꾧컻 吏??+ 鍮꾩젙???ш린 媛먯?/?덉젙??- **?뺤궗?ъ쁺**: 3D 硫붿돩???됰㈃???앹꽦
-- **?쒕㈃ 遺꾨━**: ?ъ슜???섎룞 吏???대㈃/?몃㈃/誘멸뎄) + ?섎룞 蹂댁“ 遺꾨━ + ?먮룞 遺꾨━(蹂댁“)
-- **?꾨줈?앺듃(.amr) ???遺덈윭?ㅺ린**: 蹂???⑤㈃/ROI/?덉씠???대낫?닿린 ?듭뀡源뚯? ?④퍡 ???- **?듯빀 SVG 異쒕젰**: ?ㅼ륫(Top ?멸낸?? + ?⑤㈃ + ???몃㈃ ?곷낯??1??SVG濡????- **?곸뿭 ?좏깮**: 誘멸뎄 ???뱀젙 遺遺꾨쭔 異붿텧 (寃쎄퀎(硫댁쟻+?먯꽍) ?ш?誘?
-- **?ㅼ떆媛??⑤㈃ 愿痢?珥ъ쁺**: ?ㅼ틪 諛⑹떇?쇰줈 ?⑤㈃???대룞 愿痢≫븯怨?利됱떆 ?덉씠??珥ъ쁺
-- **?ㅼ???異쒕젰**: ?ㅼ륫 ?ㅼ??쇱씠 留욎떠吏??대?吏 ?대낫?닿린
-
-## ?ㅼ튂
+## 설치
 
 ```bash
 pip install -r requirements.txt
-pip install -r requirements-optional.txt  # optional
+pip install -r requirements-optional.txt  # 선택
 ```
 
-## ?ㅽ뻾
+## 실행
 
-### GUI (異붿쿇)
+GUI 실행:
 
 ```bash
 python app_interactive.py
 ```
 
-?먮뒗:
+또는:
 
 ```bash
 python main.py --gui
-python main.py --open-project my_project.amr
+python main.py --open-project <project.amr>
 ```
 
-#### ?꾨줈?앺듃 ???遺덈윭?ㅺ린 (.amr)
-
-- 硫붾돱 **?뚯씪 ???꾨줈?앺듃 ???/ ?꾨줈?앺듃 ?닿린** (?⑥텞?? `Ctrl+S`, `Ctrl+Shift+O`)
-- ?⑤㈃/媛?대뱶(?덉씠??源뚯? ?④퍡 ??ν븯?ㅻ㈃ **?⑤㈃ ?꾧뎄**?먯꽌 **?덉씠?대줈 ???*???뚮윭 ?ㅻ깄?룹쓣 ?④꺼?먯꽭??
-
-### CLI
+CLI 도움말:
 
 ```bash
 python main.py --help
 ```
 
-## 2D ?ㅼ륫 ?꾨㈃(SVG) ?대낫?닿린
+## CLI 예시
 
-- GUI??**?대낫?닿린 ??2D ?ㅼ륫 ?꾨㈃ ?대낫?닿린(SVG)**?먯꽌 酉곕퀎濡???ν븯嫄곕굹, **?벀 6諛⑺뼢 ?⑦궎吏 ?대낫?닿린**濡????대뜑???쇨큵 ??ν븷 ???덉뒿?덈떎.
-- 湲곕낯? **寃⑹옄/諛곌꼍 ?ы븿(1cm 寃⑹옄 + ?붾㈃ 罹≪쿂)**?대ŉ, 泥댄겕 ?댁젣 ??**踰≫꽣留?SVG)** ??ν빀?덈떎.
+```bash
+python main.py <mesh_file>
+python main.py --info <mesh_file>
+python main.py --flatten <mesh_file> [output]
+python main.py --project <mesh_file> [output]
+python main.py --separate <mesh_file>
+```
 
-## ?듯빀 SVG(?ㅼ륫+?⑤㈃+???몃㈃ ?곷낯) ?대낫?닿린
+## 지원 포맷
 
-??踰덉쓽 SVG ?대낫?닿린濡??꾨옒瑜????쒗듃???④퍡 ??ν빀?덈떎.
+- OBJ (`.obj`)
+- PLY (`.ply`)
+- STL (`.stl`)
+- OFF (`.off`)
+- glTF (`.gltf`)
+- glTF Binary (`.glb`)
 
-- **Top ?멸낸???ㅼ륫(踰≫꽣)** + (?좏깮) **?⑤㈃???⑤㈃ ?대━?쇱씤(踰≫꽣)**
-- **?몃㈃ ?곷낯(?대?吏)** / **?대㈃ ?곷낯(?대?吏)** *(SVG ?덉뿉 PNG濡??ы븿)*
+## 주요 단축키
 
-沅뚯옣 ?뚰겕?뚮줈??
+- `1`~`6`: 6방향 뷰
+- `F`: 선택 객체 화면 맞춤
+- `Ctrl+S`: 프로젝트 저장
+- `Ctrl+Shift+O`: 프로젝트 열기
 
-1) (沅뚯옣) **硫붿돩 ?뺣젹**: 諛붾떏硫??뺣젹(3??硫?釉뚮윭?? 湲곕뒫?쇰줈 ?쒖쐞/?꾨옒(Z-up)?앷? 留욊쾶 ?뺣젹  
-2) **???몃㈃ 吏??* (?먮룞???댁긽?섎㈃ 瑗??꾩슂)  
-   - ?곗륫 **?쇱묠** ?⑤꼸 ???쒗몴硫??좏깮/吏?뺚앹뿉??**????몃㈃/?대㈃/誘멸뎄)** ?좏깮  
-   - ?쒓꼍怨?硫댁쟻+?먯꽍)?앹쑝濡?**硫붿돩 ?꾩뿉 ?먯쓣 李띿뼱**(?먯꽍 ?ㅻ깄) ?ㅺ컖?뺤쓣 留뚮뱾怨?蹂댁씠??硫댁쓣 ??踰덉뿉 吏??*(?쒖옉??洹쇱쿂 ?대┃=?ㅻ깄 ?ロ옒(?먮룞 ?뺤젙), 醫뚰겢由???異붽?(?쒕옒洹??뚯쟾), ?고겢由?Enter=?뺤젙(?고겢由??꾩튂媛 ?꾨뱶 湲곗?), Backspace=?섎룎由ш린, Shift/Ctrl=?꾨뱶 ?뺤젣, Alt=?쒓굅, `[ / ]`=?먯꽍 諛섍꼍)*  
-   - ?쒖닔??蹂댁“ 遺꾨━?앸줈 ?ъ슜?먭? 吏?뺥븳 seed(???몃㈃)瑜?湲곗??쇰줈 誘몃텇瑜?硫대쭔 梨꾩썎?덈떎  
-   - (?듭뀡) ?쒖옄??遺꾨━(?ㅽ뿕)?앹? 硫붿돩/?뺣젹 ?곹깭???곕씪 ?ㅽ뙣?????덉뼱 蹂댁“?⑹엯?덈떎  
-3) (?듭뀡) **?⑤㈃???낅젰**: ?곗륫 ?⑤㈃ ?⑤꼸?먯꽌 ?⑤㈃??ROI瑜??≪븘?먮㈃ ?듯빀 SVG???④퍡 ?ы븿?⑸땲?? 
-4) **?대낫?닿린**: ?곗륫 ?대낫?닿린 ?⑤꼸 ???쒗넻??SVG (?ㅼ륫+?⑤㈃+???몃㈃ ?곷낯)??
-李멸퀬:
-- ?쒕?援??꾧컻/?쇱묠?앹? ?꾩쭅 ?꾩닚??誘멸뎄 吏?뺤? ??λ쭔 ???낅땲??
-- ???몃㈃??吏?뺥븯吏 ?딆쑝硫??먮룞 遺꾨━(auto: 媛?쒖꽦(?꾩긽)?믪썝?듈넂踰뺤꽑)濡?fallback ?⑸땲??
+## 환경 변수
 
-## ?곷낯 ?대?吏(PNG/TIFF) ?대낫?닿린
+- `ARCHMESHRUBBING_EXPORT_DPI`
+- `ARCHMESHRUBBING_RENDER_RESOLUTION`
+- `ARCHMESHRUBBING_ARAP_MAX_ITERATIONS`
+- `ARCHMESHRUBBING_GUI_MIN_RESOLUTION`
+- `ARCHMESHRUBBING_GUI_MAX_RESOLUTION`
+- `ARCHMESHRUBBING_PROFILE_EXPORT_SAFE`
+- `ARCHMESHRUBBING_DISABLE_OPENCV`
+- `ARCHMESHRUBBING_CV2_IMPORT_TIMEOUT`
+- `ARCHMESHRUBBING_LOG_LEVEL`
 
-- ?곗륫 **?대낫?닿린** ?⑤꼸?먯꽌 **?곷낯 ????꾩껜/?몃㈃/?대㈃/誘멸뎄)** ???좏깮?????덉뒿?덈떎.
-- ?몃㈃/?대㈃/誘멸뎄???쒗몴硫??좏깮/吏?뺚?寃곌낵(face set)瑜??ъ슜?⑸땲?? 鍮꾩뼱 ?덉쑝硫?癒쇱? 吏?뺥빐 二쇱꽭??
-- 湲곗?泥섎읆 ?먰넻(??? 怨〓쪧???쒕졆?섎㈃ **?붿????곷낯(怨〓쪧 ?쒓굅)** ??沅뚯옣?⑸땲?? (?먰넻 ?쇱묠 + 怨〓쪧 ?쒓굅 ?꾨━??
+## 백업/커밋 금지 정책
 
-## ?⑥텞??
-- `[` / `]`: (?곹솴蹂? ?쒕㈃ ?꾧뎄 ?ш린/?먯꽍 諛섍꼍/?뚯쟾 湲곗쫰紐??ш린 議곗젅
-- `Space` + ?쒕옒洹? ?쒕㈃ ?꾧뎄 ?ъ슜 以??쒖젏 ?대룞(?뚯쟾)
-- `F`: ?좏깮 媛앹껜 ?붾㈃ 留욎땄
-- `R`: 移대찓??由ъ뀑
+아래 항목은 **절대로 백업 대상에 포함하지 않습니다.**
 
-## Git / 諛깆뾽 二쇱쓽
+- 개발철학 문서: `DEVELOPMENT_PHILOSOPHY.md`, `DEVELOPMENT_PHILOSOPHY.txt`
+- 캐럿 폰트 자산(파일명/경로에 `caret` 또는 `캐럿`이 포함된 폰트 파일)
+- STL 샘플 파일(예: `수키와편.stl`, 기타 샘플 `*.stl`)
 
-- ??⑸웾/?묒뾽 ?뚯씪(`*.stl`, `*.amr`, `*.obj`, `*.ply`, `*.off`)怨?濡쒖뺄 ?곌뎄 ?먮즺(`__research_*` ????**而ㅻ컠?섏? ?딅룄濡?* `.gitignore`濡??쒖쇅?⑸땲??
-- Push ?꾩뿉 ??긽 `git status`濡??ㅽ뀒?댁쭠 紐⑸줉???뺤씤?섏꽭??
+또한 로컬 실험 산출물(`__smoke_*`, `__test_*`, `__research_*`)은 커밋/백업 대상에서 제외합니다.
 
-## ?⑤㈃ ?щ씪?댁떛 ?꾨━??(Clip Presets)
+## 참고 문서
 
-- **?뱩 硫붿돩 ?⑤㈃ ?щ씪?댁떛** ?⑤꼸?먯꽌 ?꾩옱 ?믪씠(Z)瑜?**?꾨━?뗭쑝濡?????곸슜/??젣**?????덉뒿?덈떎.
-- ?먰븯???믪씠?먯꽌 ?⑤㈃??留뚮뱺 ??**?덉씠?대줈 ???*???뚮윭 ?ㅻ깄?룹쓣 ?④린硫? ?댄썑 **?듯빀 SVG** ?먮뒗 **2D ?ㅼ륫 ?꾨㈃(SVG)** ?대낫?닿린???④퍡 ?ы븿?⑸땲??
+- 레퍼런스 목록: `docs/REFERENCES.md`
+- 기능-레퍼런스 매핑: `docs/FEATURE_REFERENCES.md`
 
-## ?ㅼ떆媛??⑤㈃ (?ㅼ틪 ?ㅽ???
+## 라이선스
 
-- ?ㅼ떆媛??⑤㈃? **?⑤㈃/2D 吏???꾧뎄** ??뿉??耳쒓퀬, 3D ?덈떒 ?⑤㈃???곗냽 愿痢≫빀?덈떎.
-- `Ctrl+留덉슦?ㅽ쑀`濡??⑤㈃ ?믪씠瑜??대룞?섍퀬, `Shift+Ctrl`? 誘몄꽭 ?대룞, `Alt+Ctrl`? 怨좎냽 ?대룞?낅땲??
-- **?벝 ?꾩옱 ?⑤㈃ 珥ъ쁺** 踰꾪듉?쇰줈 ?꾩옱 ?⑤㈃??利됱떆 ?덉씠?댁뿉 ??ν븷 ???덉뒿?덈떎.
-- 援щ텇: ?ㅼ떆媛??⑤㈃? 3D ?덈떒 愿痢?珥ъ쁺?닿퀬, 2D 吏???⑤㈃??ROI)? ?곷㈃ 媛?대뱶 吏?뺤엯?덈떎.
-
-## ?섍꼍 蹂??(?몃윭釉붿뒋??
-
-- `ARCHMESHRUBBING_PROFILE_EXPORT_SAFE=1`: SVG ?멸낸??媛?대뱶 ?ъ쁺??蹂댁닔?곸쑝濡?泥섎━ (Illustrator?먯꽌 `寃⑹옄 + 湲?吏곸꽑`留?蹂댁씪 ??沅뚯옣)
-- `ARCHMESHRUBBING_DISABLE_OPENCV=1`: OpenCV 鍮꾪솢?깊솕 (SciPy 湲곕컲 寃쎈줈 ?ъ슜)
-- `ARCHMESHRUBBING_CV2_IMPORT_TIMEOUT=2.0`: OpenCV import smoke-test ??꾩븘??珥?
-- `ARCHMESHRUBBING_LOG_LEVEL=DEBUG`: ?붾쾭洹?濡쒓렇 ?쒖꽦??(Windows 湲곕낯 濡쒓렇 寃쎈줈: `%LOCALAPPDATA%\\ArchMeshRubbing\\logs\\archmeshrubbing.log`)
-- `ARCHMESHRUBBING_EXPORT_DPI=300`: CLI/GUI 湲곕낯 ?대낫?닿린 DPI
-- `ARCHMESHRUBBING_RENDER_RESOLUTION=2000`: CLI/GUI 湲곕낯 ?뚮뜑 ?댁긽??px)
-- `ARCHMESHRUBBING_ARAP_MAX_ITERATIONS=30`: ?됰㈃??ARAP) 湲곕낯 諛섎났 ?잛닔
-- `ARCHMESHRUBBING_GUI_MIN_RESOLUTION=500`: GUI ?댁긽???ㅽ?諛뺤뒪 理쒖냼媛?- `ARCHMESHRUBBING_GUI_MAX_RESOLUTION=8000`: GUI ?댁긽???ㅽ?諛뺤뒪 理쒕?媛?
-## 吏???щ㎎
-
-- OBJ (Wavefront)
-- PLY (Polygon File Format)
-- STL (Stereolithography)
-- OFF (Object File Format)
-- glTF (.gltf)
-- glTF Binary (.glb)
-
-## References
-
-- ?쇰Ц/臾명뿄/怨듭떇 臾몄꽌 ?덊띁?곗뒪 紐⑸줉: `docs/REFERENCES.md`
-- 湲곕뒫蹂?援ы쁽 洹쇨굅 留ㅽ븨(?대뼡 湲곕뒫???대뼡 ?덊띁?곗뒪瑜??곕Ⅴ?붿?): `docs/FEATURE_REFERENCES.md`
-
-## ?쇱씠?좎뒪
-
-GNU General Public License v2.0 (GPLv2) ???먯꽭???댁슜? `LICENSE` ?뚯씪??李멸퀬?섏꽭??
-
-
-
+GNU General Public License v2.0 (GPLv2)
