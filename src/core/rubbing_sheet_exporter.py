@@ -6,6 +6,8 @@ Rubbing Sheet (Composite) SVG Exporter
 - 단면(컷) 프로파일(벡터)
 - 내/외면 탁본 이미지(전개 후 탁본 스타일 렌더)
 
+기본 철학은 삼각형 조각을 보여주는 것이 아니라,
+기록면을 연속 탁본 이미지와 실측 벡터 레이어로 내보내는 것입니다.
 미구(ㄴ자 꺾임 등) 전개/출력은 후순위로 두고, 현재 버전은 Z-방향(face normal) 기준으로
 내/외면을 자동 분리하여 전개합니다.
 """
@@ -16,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import base64
 import io
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 from PIL import Image
@@ -51,8 +53,11 @@ class SheetExportOptions:
     flatten_iterations: int = 30
     flatten_method: str = "arap"  # 'arap' | 'lscm' | 'area' | 'cylinder' | 'section' (UI strings also accepted)
     flatten_distortion: float = 0.5  # 0..1 (area→angle), used when flatten_method='area'
-    cylinder_axis: str = "auto"  # 'auto' | 'x' | 'y' | 'z'
+    flatten_initial_method: str = "lscm"  # 'lscm' | 'section'
+    cylinder_axis: Any = "auto"  # 'auto' | 'x' | 'y' | 'z' | explicit 3D axis vector
     cylinder_radius: Optional[float] = None  # mesh/world units; if None, estimated from geometry
+    section_guides: list[dict[str, Any]] | None = None
+    section_record_view: str | None = None
     rubbing_style: str = "traditional"
     # Digital rubbing (image-based) options
     rubbing_height_mode: str = "normal_z"  # 'normal_z' | 'axis'
@@ -68,6 +73,14 @@ class SheetExportOptions:
     include_labels: bool = True
     label_font_size_mm: float = 3.5
     label_gap_mm: float = 1.5
+    single_surface_label: str | None = None
+
+
+@dataclass(frozen=True)
+class _RenderedSide:
+    group_id: str
+    label: str
+    rubbing: RubbingImage
 
 
 def _encode_png_data_uri(img: Image.Image) -> str:
@@ -132,75 +145,101 @@ class RubbingSheetExporter:
             options=options,
         )
 
-        # 2) Split mesh into outer/inner (prefer user-assigned face indices if provided)
-        outer_mesh = None
-        inner_mesh = None
-        if outer_face_indices is not None:
-            try:
-                idx = np.asarray(outer_face_indices, dtype=np.int32).reshape(-1)
-                if idx.size > 0:
-                    outer_mesh = mesh.extract_submesh(idx)
-            except Exception:
-                outer_mesh = None
-        if inner_face_indices is not None:
-            try:
-                idx = np.asarray(inner_face_indices, dtype=np.int32).reshape(-1)
-                if idx.size > 0:
-                    inner_mesh = mesh.extract_submesh(idx)
-            except Exception:
-                inner_mesh = None
-
-        if outer_mesh is None or inner_mesh is None:
-            auto_outer, auto_inner = self._split_outer_inner(
-                mesh, threshold=float(options.normal_split_threshold)
+        rendered_sides: list[_RenderedSide] = []
+        single_surface_label = str(options.single_surface_label or "").strip()
+        if single_surface_label:
+            single_side = self._render_side(
+                mesh,
+                group_id="surface_rubbing",
+                label=single_surface_label,
+                svg_unit=svg_unit,
+                unit_scale=unit_scale,
+                options=options,
+                cut_lines_world=cut_lines_world,
             )
-            if outer_mesh is None:
-                outer_mesh = auto_outer
-            if inner_mesh is None:
-                inner_mesh = auto_inner
+            if single_side is not None:
+                rendered_sides.append(single_side)
+        else:
+            # 2) Split mesh into outer/inner (prefer user-assigned face indices if provided)
+            outer_mesh = None
+            inner_mesh = None
+            if outer_face_indices is not None:
+                try:
+                    idx = np.asarray(outer_face_indices, dtype=np.int32).reshape(-1)
+                    if idx.size > 0:
+                        outer_mesh = mesh.extract_submesh(idx)
+                except Exception:
+                    outer_mesh = None
+            if inner_face_indices is not None:
+                try:
+                    idx = np.asarray(inner_face_indices, dtype=np.int32).reshape(-1)
+                    if idx.size > 0:
+                        inner_mesh = mesh.extract_submesh(idx)
+                except Exception:
+                    inner_mesh = None
 
-        # 3) Flatten + rubbing images
-        outer_flat, outer_rub = self._flatten_and_rub(
-            outer_mesh,
-            svg_unit=svg_unit,
-            unit_scale=unit_scale,
-            options=options,
-            cut_lines_world=cut_lines_world,
-        )
-        inner_flat, inner_rub = self._flatten_and_rub(
-            inner_mesh,
-            svg_unit=svg_unit,
-            unit_scale=unit_scale,
-            options=options,
-            cut_lines_world=cut_lines_world,
-        )
+            if outer_mesh is None or inner_mesh is None:
+                auto_outer, auto_inner = self._split_outer_inner(
+                    mesh, threshold=float(options.normal_split_threshold)
+                )
+                if outer_mesh is None:
+                    outer_mesh = auto_outer
+                if inner_mesh is None:
+                    inner_mesh = auto_inner
 
-        outer_w = float(outer_rub.width_real) * unit_scale
-        outer_h = float(outer_rub.height_real) * unit_scale
-        inner_w = float(inner_rub.width_real) * unit_scale
-        inner_h = float(inner_rub.height_real) * unit_scale
+            # 3) Flatten + rubbing images (skip empty sides gracefully)
+            outer_side = self._render_side(
+                outer_mesh,
+                group_id="outer_rubbing",
+                label="외면 탁본",
+                svg_unit=svg_unit,
+                unit_scale=unit_scale,
+                options=options,
+                cut_lines_world=cut_lines_world,
+            )
+            if outer_side is not None:
+                rendered_sides.append(outer_side)
+            inner_side = self._render_side(
+                inner_mesh,
+                group_id="inner_rubbing",
+                label="내면 탁본",
+                svg_unit=svg_unit,
+                unit_scale=unit_scale,
+                options=options,
+                cut_lines_world=cut_lines_world,
+            )
+            if inner_side is not None:
+                rendered_sides.append(inner_side)
+
+        if not rendered_sides:
+            raise ValueError("No non-empty surface is available for rubbing sheet export.")
 
         margin = _mm_to_svg_units(float(options.margin_mm), svg_unit)
         gap = _mm_to_svg_units(float(options.gap_mm), svg_unit)
-        top_row_h = max(outer_h, inner_h, 1e-6)
+        side_sizes = [
+            (
+                float(side.rubbing.width_real) * unit_scale,
+                float(side.rubbing.height_real) * unit_scale,
+            )
+            for side in rendered_sides
+        ]
+        row_w = float(sum(w for w, _h in side_sizes))
+        if len(side_sizes) > 1:
+            row_w += gap * float(len(side_sizes) - 1)
+        top_row_h = max((h for _w, h in side_sizes), default=1e-6)
 
-        sheet_w = max(margin * 2 + outer_w + gap + inner_w, margin * 2 + top_w)
+        sheet_w = max(margin * 2 + row_w, margin * 2 + top_w)
         sheet_h = margin * 3 + top_row_h + top_h
 
         # Coordinates
-        outer_x = margin
-        outer_y = margin
-        inner_x = margin + outer_w + gap
-        inner_y = margin
+        row_x = margin + max(0.0, (sheet_w - margin * 2 - row_w) * 0.5)
+        row_y = margin
 
         top_x = margin + max(0.0, (sheet_w - margin * 2 - top_w) * 0.5)
         top_y = margin * 2 + top_row_h
 
         label_font = _mm_to_svg_units(float(options.label_font_size_mm), svg_unit)
         stroke_width = _mm_to_svg_units(float(options.stroke_width_mm), svg_unit)
-
-        outer_img_uri = _encode_png_data_uri(outer_rub.to_pil_image())
-        inner_img_uri = _encode_png_data_uri(inner_rub.to_pil_image())
 
         svg_parts: list[str] = [
             '<?xml version="1.0" encoding="UTF-8" standalone="no"?>',
@@ -211,31 +250,22 @@ class RubbingSheetExporter:
             "<!-- Produced by ArchMeshRubbing (Composite Sheet SVG) -->",
         ]
 
-        # Outer rubbing
-        svg_parts.append(f'<g id="outer_rubbing" transform="translate({outer_x:.6f},{outer_y:.6f})">')
-        svg_parts.append(
-            f'<image x="0" y="0" width="{outer_w:.6f}" height="{outer_h:.6f}" '
-            f'preserveAspectRatio="none" href="{outer_img_uri}" xlink:href="{outer_img_uri}" />'
-        )
-        if options.include_labels:
+        # Rubbing groups
+        cursor_x = row_x
+        for side, (side_w, side_h) in zip(rendered_sides, side_sizes):
+            img_uri = _encode_png_data_uri(side.rubbing.to_pil_image())
+            svg_parts.append(f'<g id="{side.group_id}" transform="translate({cursor_x:.6f},{row_y:.6f})">')
             svg_parts.append(
-                f'<text x="0" y="{-0.5 * margin:.6f}" font-size="{label_font:.6f}" '
-                f'fill="{options.stroke_color}">외면 탁본</text>'
+                f'<image x="0" y="0" width="{side_w:.6f}" height="{side_h:.6f}" '
+                f'preserveAspectRatio="none" href="{img_uri}" xlink:href="{img_uri}" />'
             )
-        svg_parts.append("</g>")
-
-        # Inner rubbing
-        svg_parts.append(f'<g id="inner_rubbing" transform="translate({inner_x:.6f},{inner_y:.6f})">')
-        svg_parts.append(
-            f'<image x="0" y="0" width="{inner_w:.6f}" height="{inner_h:.6f}" '
-            f'preserveAspectRatio="none" href="{inner_img_uri}" xlink:href="{inner_img_uri}" />'
-        )
-        if options.include_labels:
-            svg_parts.append(
-                f'<text x="0" y="{-0.5 * margin:.6f}" font-size="{label_font:.6f}" '
-                f'fill="{options.stroke_color}">내면 탁본</text>'
-            )
-        svg_parts.append("</g>")
+            if options.include_labels:
+                svg_parts.append(
+                    f'<text x="0" y="{-0.5 * margin:.6f}" font-size="{label_font:.6f}" '
+                    f'fill="{options.stroke_color}">{side.label}</text>'
+                )
+            svg_parts.append("</g>")
+            cursor_x += side_w + gap
 
         # Top-view measurement
         svg_parts.append(f'<g id="top_measurement" transform="translate({top_x:.6f},{top_y:.6f})">')
@@ -311,6 +341,36 @@ class RubbingSheetExporter:
 
         return mesh.extract_submesh(outer_idx), mesh.extract_submesh(inner_idx)
 
+    def _mesh_has_faces(self, mesh: MeshData | None) -> bool:
+        if mesh is None:
+            return False
+        try:
+            return int(getattr(mesh, "n_faces", 0) or 0) > 0 and int(getattr(mesh, "n_vertices", 0) or 0) > 0
+        except Exception:
+            return False
+
+    def _render_side(
+        self,
+        mesh: MeshData | None,
+        *,
+        group_id: str,
+        label: str,
+        svg_unit: str,
+        unit_scale: float,
+        options: SheetExportOptions,
+        cut_lines_world: Optional[list[list[list[float]]]] = None,
+    ) -> _RenderedSide | None:
+        if not self._mesh_has_faces(mesh):
+            return None
+        _flattened, rubbing = self._flatten_and_rub(
+            mesh,
+            svg_unit=svg_unit,
+            unit_scale=unit_scale,
+            options=options,
+            cut_lines_world=cut_lines_world,
+        )
+        return _RenderedSide(group_id=group_id, label=label, rubbing=rubbing)
+
     def _flatten_and_rub(
         self,
         mesh: MeshData,
@@ -326,10 +386,12 @@ class RubbingSheetExporter:
             iterations=int(options.flatten_iterations),
             distortion=float(options.flatten_distortion),
             boundary_type="free",
-            initial_method="lscm",
-            cylinder_axis=str(options.cylinder_axis),
+            initial_method=str(getattr(options, "flatten_initial_method", "lscm")),
+            cylinder_axis=getattr(options, "cylinder_axis", "auto"),
             cylinder_radius=options.cylinder_radius,
             cut_lines_world=cut_lines_world,
+            section_guides=getattr(options, "section_guides", None),
+            section_record_view=getattr(options, "section_record_view", None),
         )
 
         dpi = int(options.dpi)

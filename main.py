@@ -1,6 +1,6 @@
 ﻿"""
-ArchMeshRubbing - 3D Mesh Flattening Tool for Archaeological Documentation
-怨좉퀬???좊Ъ 3D 硫붿돩 ?됰㈃???꾧뎄
+ArchMeshRubbing - Archaeological Recording-Surface Unwrap Tool
+고고학 기록용 3D 메쉬 기록면 전개 도구
 
 Main entry point
 """
@@ -19,6 +19,7 @@ from src.core.runtime_defaults import DEFAULTS  # noqa: E402
 from src.core.output_paths import (  # noqa: E402
     rubbing_output_path,
     projection_output_path,
+    review_sheet_output_path,
     inner_surface_path,
     outer_surface_path,
 )
@@ -28,10 +29,11 @@ DEFAULT_EXPORT_DPI = DEFAULTS.export_dpi
 DEFAULT_RENDER_RESOLUTION = DEFAULTS.render_resolution
 DEFAULT_ARAP_MAX_ITERATIONS = DEFAULTS.arap_max_iterations
 DEFAULT_MESH_UNIT = "mm"
+SUPPORTED_FORMATS = ["OBJ", "PLY", "STL", "OFF", "glTF (.gltf)", "glTF Binary (.glb)"]
 
 
 def run_cli():
-    """而ㅻ㎤?쒕씪???명꽣?섏씠???ㅽ뻾"""
+    """명령줄 인터페이스 실행."""
     try:
         from src.core.logging_utils import setup_logging
 
@@ -64,6 +66,10 @@ def run_cli():
     if cmd == '--flatten' and len(sys.argv) > 2:
         flatten_mesh(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None)
         return
+
+    if cmd == '--review' and len(sys.argv) > 2:
+        review_mesh(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None)
+        return
     
     if cmd == '--project' and len(sys.argv) > 2:
         project_mesh(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None)
@@ -73,7 +79,7 @@ def run_cli():
         separate_mesh(sys.argv[2])
         return
     
-    # 湲곕낯: ?뚯씪 泥섎━
+    # 기본: 파일 경로가 들어오면 전체 처리
     if os.path.exists(cmd):
         process_mesh(cmd)
     else:
@@ -82,33 +88,33 @@ def run_cli():
 
 
 def print_help():
-    """?꾩?留?異쒕젰"""
-    from src.core.mesh_loader import MeshLoader
-    
+    """도움말 출력."""
     print("=" * 60)
-    print("ArchMeshRubbing - 3D Mesh Flattening Tool")
-    print("怨좉퀬???좊Ъ 3D 硫붿돩 ?됰㈃???꾧뎄")
+    print("ArchMeshRubbing - Archaeological Recording-Surface Unwrap Tool")
+    print("고고학 기록용 3D 메쉬 기록면 전개 도구")
     print("=" * 60)
     print()
     print("Usage:")
     print("  python main.py <mesh_file>              # Full processing")
     print("  python main.py --info <mesh_file>       # Show file info")
-    print("  python main.py --flatten <mesh_file> [output]    # Flatten only")
+    print("  python main.py --flatten <mesh_file> [output]    # Recording-surface unwrap only")
+    print("  python main.py --review <mesh_file> [output]     # Recording-surface review sheet")
     print("  python main.py --project <mesh_file> [output]    # Orthographic projection")
     print("  python main.py --separate <mesh_file>   # Separate inner/outer surfaces")
     print("  python main.py --gui                    # Launch GUI (interactive)")
     print("  python main.py --open-project <project.amr>  # Launch GUI and open project")
     print()
-    print(f"Supported formats: {list(MeshLoader.SUPPORTED_FORMATS.keys())}")
+    print(f"Supported formats: {SUPPORTED_FORMATS}")
     print()
     print("Examples:")
     print("  python main.py roof_tile.obj")
     print("  python main.py --flatten roof_tile.ply rubbing.tiff")
+    print("  python main.py --review roof_tile.ply review.png")
     print("  python main.py --project roof_tile.stl planview.png")
 
 
 def show_file_info(filepath: str):
-    """?뚯씪 ?뺣낫 ?쒖떆"""
+    """파일 정보 표시."""
     from src.core.mesh_loader import MeshLoader
     
     print(f"\nFile Info: {filepath}")
@@ -124,7 +130,7 @@ def show_file_info(filepath: str):
 
 
 def process_mesh(filepath: str):
-    """硫붿돩 ?꾩껜 泥섎━ (濡쒕뱶 ???됰㈃?????대?吏 ?앹꽦)"""
+    """메쉬 전체 처리 (로드 -> 기록면 전개 -> 탁본 이미지 생성)."""
     from src.core.mesh_loader import MeshLoader
     from src.core.flattener import ARAPFlattener
     from src.core.surface_visualizer import SurfaceVisualizer
@@ -134,7 +140,7 @@ def process_mesh(filepath: str):
     print(f"{'='*60}")
     
     try:
-        # 1. 濡쒕뱶
+        # 1. Load
         print("\n[1/4] Loading mesh...")
         loader = MeshLoader(default_unit=DEFAULT_MESH_UNIT)
         mesh = loader.load(filepath)
@@ -145,16 +151,16 @@ def process_mesh(filepath: str):
         print(f"      Size: {mesh.extents[0]:.1f} x {mesh.extents[1]:.1f} x {mesh.extents[2]:.1f} {mesh.unit}")
         print(f"      Has Texture: {mesh.has_texture}")
         
-        # 2. Flatten
-        print("\n[2/4] Flattening mesh (ARAP algorithm)...")
+        # 2. Recording-surface unwrap
+        print("\n[2/4] Unwrapping recording surface (ARAP algorithm)...")
         flattener = ARAPFlattener(max_iterations=DEFAULT_ARAP_MAX_ITERATIONS)
         flattened = flattener.flatten(mesh)
         
-        print(f"      Flattened size: {flattened.width:.2f} x {flattened.height:.2f} {mesh.unit}")
+        print(f"      Unwrapped size: {flattened.width:.2f} x {flattened.height:.2f} {mesh.unit}")
         print(f"      Mean distortion: {flattened.mean_distortion:.1%}")
         print(f"      Max distortion: {flattened.max_distortion:.1%}")
         
-        # 3. ?곷낯 ?대?吏 ?앹꽦
+        # 3. Generate rubbing image
         print("\n[3/4] Generating rubbing image...")
         visualizer = SurfaceVisualizer(default_dpi=DEFAULT_EXPORT_DPI)
         rubbing = visualizer.generate_rubbing(flattened, width_pixels=DEFAULT_RENDER_RESOLUTION)
@@ -162,7 +168,7 @@ def process_mesh(filepath: str):
         print(f"      Image size: {rubbing.width_pixels} x {rubbing.height_pixels} pixels")
         print(f"      Real size: {rubbing.width_real:.1f} x {rubbing.height_real:.1f} {rubbing.unit}")
         
-        # 4. ???
+        # 4. Save output
         print("\n[4/4] Saving output...")
         output_path = rubbing_output_path(filepath)
         rubbing.save(str(output_path), include_scale_bar=True)
@@ -180,12 +186,12 @@ def process_mesh(filepath: str):
 
 
 def flatten_mesh(filepath: str, output_path: str | None = None):
-    """硫붿돩 ?됰㈃?붾쭔 ?섑뻾"""
+    """기록면 전개만 수행."""
     from src.core.mesh_loader import MeshLoader
     from src.core.flattener import ARAPFlattener
     from src.core.surface_visualizer import SurfaceVisualizer
     
-    print(f"\nFlattening: {filepath}")
+    print(f"\nUnwrapping recording surface: {filepath}")
     print("-" * 40)
     
     try:
@@ -197,10 +203,10 @@ def flatten_mesh(filepath: str, output_path: str | None = None):
         flattener = ARAPFlattener(max_iterations=DEFAULT_ARAP_MAX_ITERATIONS)
         flattened = flattener.flatten(mesh)
         
-        print(f"  Flattened: {flattened.width:.2f} x {flattened.height:.2f} {mesh.unit}")
+        print(f"  Unwrapped: {flattened.width:.2f} x {flattened.height:.2f} {mesh.unit}")
         print(f"  Distortion: {flattened.mean_distortion:.1%} (mean), {flattened.max_distortion:.1%} (max)")
         
-        # ?대?吏 ?앹꽦
+        # 이미지 생성
         visualizer = SurfaceVisualizer()
         rubbing = visualizer.generate_rubbing(flattened, width_pixels=DEFAULT_RENDER_RESOLUTION)
         
@@ -215,8 +221,63 @@ def flatten_mesh(filepath: str, output_path: str | None = None):
         traceback.print_exc()
 
 
+def review_mesh(filepath: str, output_path: str | None = None):
+    """기록면 검토 시트 생성."""
+    from src.core.flattener import ARAPFlattener
+    from src.core.mesh_loader import MeshLoader
+    from src.core.recording_surface_review import (
+        build_recording_surface_summary_lines,
+        RecordingSurfaceReviewOptions,
+        render_recording_surface_review,
+    )
+    from src.core.surface_visualizer import SurfaceVisualizer
+
+    print(f"\nBuilding recording-surface review sheet: {filepath}")
+    print("-" * 40)
+
+    try:
+        loader = MeshLoader(default_unit=DEFAULT_MESH_UNIT)
+        mesh = loader.load(filepath)
+
+        print(f"  Loaded: {mesh.n_vertices:,} vertices, {mesh.n_faces:,} faces")
+
+        flattener = ARAPFlattener(max_iterations=DEFAULT_ARAP_MAX_ITERATIONS)
+        flattened = flattener.flatten(mesh)
+
+        print(f"  Unwrapped: {flattened.width:.2f} x {flattened.height:.2f} {mesh.unit}")
+        print(f"  Distortion: {flattened.mean_distortion:.1%} (mean), {flattened.max_distortion:.1%} (max)")
+
+        visualizer = SurfaceVisualizer(default_dpi=DEFAULT_EXPORT_DPI)
+        rubbing = visualizer.generate_rubbing(flattened, width_pixels=DEFAULT_RENDER_RESOLUTION)
+
+        review = render_recording_surface_review(
+            flattened,
+            options=RecordingSurfaceReviewOptions(
+                dpi=DEFAULT_EXPORT_DPI,
+                width_pixels=DEFAULT_RENDER_RESOLUTION,
+                summary_lines=build_recording_surface_summary_lines(
+                    flattened,
+                    record_label="전체 기록면",
+                    target_label="전체 메쉬",
+                    mode_label="일반 전개",
+                ),
+            ),
+            rubbing_image=rubbing.to_pil_image(),
+        )
+
+        save_path = review_sheet_output_path(filepath, output_path)
+        review.combined_image.save(str(save_path))
+
+        print(f"  Saved: {save_path}")
+
+    except Exception as e:
+        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
+
+
 def project_mesh(filepath: str, output_path: str | None = None):
-    """?뺤궗?ъ쁺 ?대?吏 ?앹꽦"""
+    """정사영 이미지 생성."""
     from src.core.mesh_loader import MeshLoader
     from src.core.orthographic_projector import OrthographicProjector
     
@@ -231,11 +292,11 @@ def project_mesh(filepath: str, output_path: str | None = None):
         
         projector = OrthographicProjector(resolution=DEFAULT_RENDER_RESOLUTION)
         
-        # ?뺣젹
+        # 정렬
         aligned = projector.align_mesh(mesh, method='pca')
         print("  Aligned mesh using PCA")
         
-        # ?ъ쁺
+        # 투영
         result = projector.project(aligned, direction='top', render_mode='depth')
         
         print(f"  Projected: {result.image.shape[1]} x {result.image.shape[0]} pixels")
@@ -253,7 +314,7 @@ def project_mesh(filepath: str, output_path: str | None = None):
 
 
 def separate_mesh(filepath: str):
-    """?대㈃/?몃㈃ 遺꾨━"""
+    """내면/외면 분리."""
     from src.core.mesh_loader import MeshLoader
     from src.core.surface_separator import SurfaceSeparator
     
@@ -274,7 +335,7 @@ def separate_mesh(filepath: str):
         if result.outer_surface:
             print(f"  Outer surface: {result.outer_surface.n_faces:,} faces")
         
-        # ???(trimesh ?ъ슜)
+        # 저장 (trimesh 사용)
         if result.inner_surface:
             inner_path = inner_surface_path(filepath)
             inner_mesh = result.inner_surface.to_trimesh()
@@ -316,7 +377,7 @@ def launch_gui(*, open_project: str | None = None) -> None:
 
 
 def run_gui():
-    """GUI ?좏뵆由ъ??댁뀡 ?ㅽ뻾"""
+    """GUI 애플리케이션 실행."""
     import importlib.util
 
     if importlib.util.find_spec("PyQt6") is None:

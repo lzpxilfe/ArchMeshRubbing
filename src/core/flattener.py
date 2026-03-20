@@ -1839,7 +1839,27 @@ def _apply_flatten_size_guard(
         return uv_out, out_meta, False
 
 
-def _normalize_cylinder_axis_choice(choice: str) -> str:
+def _coerce_explicit_axis_vector(choice: Any) -> np.ndarray | None:
+    try:
+        arr = np.asarray(choice, dtype=np.float64).reshape(-1)
+    except Exception:
+        return None
+    if arr.size < 3 or not np.isfinite(arr[:3]).all():
+        return None
+    vec = arr[:3].astype(np.float64, copy=True)
+    nrm = float(np.linalg.norm(vec))
+    if not np.isfinite(nrm) or nrm <= 1e-12:
+        return None
+    vec = vec / nrm
+    pivot = int(np.argmax(np.abs(vec)))
+    if float(vec[pivot]) < 0.0:
+        vec = -vec
+    return vec
+
+
+def _normalize_cylinder_axis_choice(choice: Any) -> str:
+    if _coerce_explicit_axis_vector(choice) is not None:
+        return "vector"
     c = str(choice or "").strip().lower()
     if c in {"x", "x축", "x축 기준", "x axis"}:
         return "x"
@@ -1852,7 +1872,10 @@ def _normalize_cylinder_axis_choice(choice: str) -> str:
     return "auto"
 
 
-def _axis_unit_vector(axis: str) -> np.ndarray:
+def _axis_unit_vector(axis: Any) -> np.ndarray:
+    explicit = _coerce_explicit_axis_vector(axis)
+    if explicit is not None:
+        return explicit
     a = _normalize_cylinder_axis_choice(axis)
     if a == "x":
         return np.array([1.0, 0.0, 0.0], dtype=np.float64)
@@ -2201,11 +2224,11 @@ def _unwrap_angle_series(values: np.ndarray, *, hint: float | None = None) -> np
 def _estimate_section_longitudinal_axis(
     vertices: np.ndarray,
     *,
-    axis: str = "auto",
+    axis: Any = "auto",
 ) -> tuple[np.ndarray, str]:
     axis_choice = _normalize_cylinder_axis_choice(axis)
     if axis_choice != "auto":
-        return _axis_unit_vector(axis_choice), axis_choice
+        return _axis_unit_vector(axis), axis_choice
 
     try:
         pca_axes = _pca_axes_3d(vertices)
@@ -2230,12 +2253,75 @@ def _estimate_section_longitudinal_axis(
     return _axis_unit_vector("z"), "z"
 
 
+def _coerce_section_guides(
+    section_guides: Any,
+) -> list[dict[str, float | None]]:
+    if not isinstance(section_guides, (list, tuple)):
+        return []
+
+    parsed: list[dict[str, float | None]] = []
+    for item in section_guides:
+        source = item if isinstance(item, dict) else None
+        if source is None:
+            continue
+        try:
+            station = float(source.get("station", None))
+        except Exception:
+            continue
+        if not np.isfinite(station):
+            continue
+
+        try:
+            confidence = float(source.get("confidence", 0.0) or 0.0)
+        except Exception:
+            confidence = 0.0
+        confidence = float(np.clip(confidence, 0.0, 1.0))
+
+        try:
+            radius_val = source.get("radius_world", None)
+            radius = float(radius_val) if radius_val is not None else None
+        except Exception:
+            radius = None
+        if radius is not None and (not np.isfinite(radius) or radius <= 0.0):
+            radius = None
+
+        parsed.append(
+            {
+                "station": float(station),
+                "confidence": float(confidence),
+                "radius_world": None if radius is None else float(radius),
+            }
+        )
+
+    if not parsed:
+        return []
+
+    parsed.sort(key=lambda item: float(item["station"] or 0.0))
+    merged: list[dict[str, float | None]] = []
+    for item in parsed:
+        if merged and abs(float(merged[-1]["station"] or 0.0) - float(item["station"] or 0.0)) <= 1e-6:
+            prev = merged[-1]
+            prev_conf = float(prev.get("confidence", 0.0) or 0.0)
+            item_conf = float(item.get("confidence", 0.0) or 0.0)
+            prev_radius = prev.get("radius_world", None)
+            item_radius = item.get("radius_world", None)
+            if item_radius is not None and (prev_radius is None or item_conf >= prev_conf):
+                merged[-1] = item
+            elif item_conf > prev_conf:
+                prev["confidence"] = item_conf
+        else:
+            merged.append(dict(item))
+    return merged
+
+
 def sectionwise_cylindrical_parameterization(
     mesh: MeshData,
     *,
-    axis: str = "auto",
+    axis: Any = "auto",
     n_sections: int | None = None,
     cut_lines_world: list[list[list[float]]] | None = None,
+    section_guides: list[dict[str, Any]] | None = None,
+    record_view: str | None = None,
     return_meta: bool = False,
 ) -> np.ndarray | tuple[np.ndarray, dict[str, Any]]:
     """
@@ -2316,6 +2402,16 @@ def sectionwise_cylindrical_parameterization(
     if not np.isfinite(span) or span < 1e-9:
         return _fallback("degenerate_span")
 
+    guides = _coerce_section_guides(section_guides)
+    guide_station_values = np.asarray(
+        [float(item["station"]) for item in guides if item.get("station", None) is not None],
+        dtype=np.float64,
+    ).reshape(-1)
+    if guide_station_values.size > 0:
+        guide_station_values = np.clip(guide_station_values, s_min, s_max)
+        guide_station_values = guide_station_values[np.isfinite(guide_station_values)]
+        guide_station_values = np.unique(guide_station_values)
+
     try:
         n_sections_val = int(n_sections) if n_sections is not None else int(np.sqrt(float(vertices.shape[0])))
     except Exception:
@@ -2323,9 +2419,18 @@ def sectionwise_cylindrical_parameterization(
     n_sections_val = max(12, min(n_sections_val, 96))
 
     try:
-        s_sections = np.quantile(s_valid, np.linspace(0.0, 1.0, n_sections_val, dtype=np.float64))
+        auto_sections = np.quantile(s_valid, np.linspace(0.0, 1.0, n_sections_val, dtype=np.float64))
     except Exception:
-        s_sections = np.linspace(s_min, s_max, n_sections_val, dtype=np.float64)
+        auto_sections = np.linspace(s_min, s_max, n_sections_val, dtype=np.float64)
+
+    if guide_station_values.size >= 4:
+        s_sections = guide_station_values
+        if guide_station_values.size < min(12, n_sections_val):
+            s_sections = np.concatenate([s_sections, auto_sections])
+    elif guide_station_values.size > 0:
+        s_sections = np.concatenate([auto_sections, guide_station_values])
+    else:
+        s_sections = auto_sections
     s_sections = np.unique(np.asarray(s_sections, dtype=np.float64).reshape(-1))
     if s_sections.size < 4:
         return _fallback("too_few_sections")
@@ -2345,6 +2450,56 @@ def sectionwise_cylindrical_parameterization(
     r_sec = np.full((s_sections.size,), np.nan, dtype=np.float64)
     fit_counts = np.zeros((s_sections.size,), dtype=np.int32)
     fit_ok = np.zeros((s_sections.size,), dtype=bool)
+    guide_radius_used = np.zeros((s_sections.size,), dtype=bool)
+
+    guide_radius_at_sections = np.full((s_sections.size,), np.nan, dtype=np.float64)
+    guide_conf_at_sections = np.zeros((s_sections.size,), dtype=np.float64)
+    guided_radius_source_count = 0
+    if guides:
+        guide_stations = np.asarray([float(item["station"]) for item in guides], dtype=np.float64).reshape(-1)
+        guide_conf = np.asarray(
+            [float(item.get("confidence", 0.0) or 0.0) for item in guides],
+            dtype=np.float64,
+        ).reshape(-1)
+        if guide_conf.size > 0:
+            guide_conf = np.clip(guide_conf, 0.0, 1.0)
+            if guide_conf.size == 1:
+                guide_conf_at_sections[:] = float(guide_conf[0])
+            else:
+                guide_conf_at_sections[:] = np.interp(
+                    s_sections,
+                    guide_stations,
+                    guide_conf,
+                    left=float(guide_conf[0]),
+                    right=float(guide_conf[-1]),
+                )
+
+        guide_radii_raw = [
+            float(item["radius_world"])
+            for item in guides
+            if item.get("radius_world", None) is not None and np.isfinite(float(item["radius_world"]))
+        ]
+        if guide_radii_raw:
+            guide_radius_stations = np.asarray(
+                [
+                    float(item["station"])
+                    for item in guides
+                    if item.get("radius_world", None) is not None and np.isfinite(float(item["radius_world"]))
+                ],
+                dtype=np.float64,
+            ).reshape(-1)
+            guide_radius_values = np.asarray(guide_radii_raw, dtype=np.float64).reshape(-1)
+            guided_radius_source_count = int(guide_radius_values.size)
+            if guide_radius_values.size == 1:
+                guide_radius_at_sections[:] = float(guide_radius_values[0])
+            else:
+                guide_radius_at_sections[:] = np.interp(
+                    s_sections,
+                    guide_radius_stations,
+                    guide_radius_values,
+                    left=float(guide_radius_values[0]),
+                    right=float(guide_radius_values[-1]),
+                )
 
     for i, s0 in enumerate(s_sections):
         dist = np.abs(s_valid - float(s0))
@@ -2364,12 +2519,29 @@ def sectionwise_cylindrical_parameterization(
         x_sel = np.asarray(x_valid[local_idx], dtype=np.float64)
         y_sel = np.asarray(y_valid[local_idx], dtype=np.float64)
 
+        guide_radius = (
+            float(guide_radius_at_sections[i])
+            if i < guide_radius_at_sections.size and np.isfinite(guide_radius_at_sections[i]) and guide_radius_at_sections[i] > 1e-9
+            else None
+        )
+        guide_conf = (
+            float(guide_conf_at_sections[i])
+            if i < guide_conf_at_sections.size and np.isfinite(guide_conf_at_sections[i])
+            else 0.0
+        )
+
         fit = _robust_circle_fit_2d(x_sel, y_sel)
         if fit is not None:
             center_xy, radius = fit
             cx[i] = float(center_xy[0])
             cy[i] = float(center_xy[1])
-            r_sec[i] = float(radius)
+            radius_fit = float(radius)
+            if guide_radius is not None:
+                guide_blend = float(np.clip(0.35 + (0.40 * guide_conf), 0.35, 0.80))
+                r_sec[i] = (1.0 - guide_blend) * radius_fit + guide_blend * float(guide_radius)
+                guide_radius_used[i] = True
+            else:
+                r_sec[i] = radius_fit
             fit_ok[i] = True
             continue
 
@@ -2377,7 +2549,16 @@ def sectionwise_cylindrical_parameterization(
         cy[i] = float(np.median(y_sel))
         rr = np.hypot(x_sel - float(cx[i]), y_sel - float(cy[i]))
         rr = rr[np.isfinite(rr)]
-        r_sec[i] = float(np.median(rr)) if rr.size else np.nan
+        radius_guess = float(np.median(rr)) if rr.size else np.nan
+        if guide_radius is not None:
+            if np.isfinite(radius_guess) and radius_guess > 1e-9:
+                guide_blend = float(np.clip(0.45 + (0.35 * guide_conf), 0.45, 0.85))
+                r_sec[i] = (1.0 - guide_blend) * radius_guess + guide_blend * float(guide_radius)
+            else:
+                r_sec[i] = float(guide_radius)
+            guide_radius_used[i] = True
+        else:
+            r_sec[i] = radius_guess
 
     if int(np.count_nonzero(np.isfinite(cx) & np.isfinite(cy))) < max(4, int(0.25 * s_sections.size)):
         return _fallback("section_fit_failed")
@@ -2448,6 +2629,11 @@ def sectionwise_cylindrical_parameterization(
     u[finite] = theta_wrapped * r_local
     v_out[finite] = v[finite]
 
+    record_view_key = str(record_view or "").strip().lower()
+    flip_u = record_view_key == "bottom"
+    if flip_u:
+        u[finite] = -u[finite]
+
     uv = np.stack([u, v_out], axis=1)
     if np.any(finite):
         uv_f = uv[finite].copy()
@@ -2467,12 +2653,18 @@ def sectionwise_cylindrical_parameterization(
             "section_basis_v": np.asarray(b2, dtype=np.float64).reshape(3),
             "section_count": int(s_sections.size),
             "section_fit_valid_count": int(np.count_nonzero(fit_ok)),
+            "section_guided_count": int(guide_station_values.size),
+            "section_guided_radius_count": int(guided_radius_source_count),
+            "section_guided_radius_interp_count": int(np.count_nonzero(np.isfinite(guide_radius_at_sections))),
+            "section_guided_radius_applied_count": int(np.count_nonzero(guide_radius_used)),
             "section_window": float(section_window),
             "section_spacing": float(spacing),
             "section_centerline_length": float(centerline_arc[-1]) if centerline_arc.size else 0.0,
             "section_mean_radius": float(np.mean(r_sec[np.isfinite(r_sec)])) if np.isfinite(r_sec).any() else 0.0,
             "section_mean_span": float(np.mean(spans[np.isfinite(spans)])) if np.isfinite(spans).any() else 0.0,
             "section_seam_hint": None if seam_hint is None else float(seam_hint),
+            "section_record_view": record_view_key,
+            "section_u_flipped": bool(flip_u),
         }
         return uv, meta
     return uv
@@ -2541,7 +2733,7 @@ def cylindrical_parameterization(
         axis_score = None if not np.isfinite(best) else float(best)
         a = np.asarray(best_vec, dtype=np.float64).reshape(3)
     else:
-        a = _axis_unit_vector(axis_choice)
+        a = _axis_unit_vector(axis)
 
     # Normalize axis
     try:
@@ -2662,9 +2854,11 @@ def flatten_with_method(
     distortion: float = 0.5,
     boundary_type: str = "free",
     initial_method: str = "lscm",
-    cylinder_axis: str = "auto",
+    cylinder_axis: Any = "auto",
     cylinder_radius: float | None = None,
     cut_lines_world: list[list[list[float]]] | None = None,
+    section_guides: list[dict[str, Any]] | None = None,
+    section_record_view: str | None = None,
     smooth_iters: int | None = None,
     smooth_strength: float = 0.15,
     pack_compact: bool = True,
@@ -2681,8 +2875,11 @@ def flatten_with_method(
 
     Notes:
       - `distortion` in [0..1]: 0=area priority, 1=angle priority (for method='area').
+      - `cylinder_axis` may be 'auto'/'x'/'y'/'z' or an explicit 3D axis vector.
       - `cylinder_radius` is in mesh/world units; if None, it is estimated.
       - `cut_lines_world` can align cylindrical seams to user cut lines.
+      - `section_guides` can inject accepted representative section stations/radii.
+      - `section_record_view='bottom'` mirrors the unwrap so top/bottom recordings stay consistent.
       - `smooth_iters`/`smooth_strength` apply lightweight UV smoothing.
       - `pack_compact` selects compact packing for multi-component ARAP.
     """
@@ -2805,6 +3002,8 @@ def flatten_with_method(
                 mesh_s,
                 axis=cylinder_axis,
                 cut_lines_world=cut_lines_world,
+                section_guides=section_guides,
+                record_view=section_record_view,
                 return_meta=True,
             )
             if isinstance(initial_uv_res, tuple):
@@ -2936,6 +3135,8 @@ def flatten_with_method(
             mesh_s,
             axis=cylinder_axis,
             cut_lines_world=cut_lines_world,
+            section_guides=section_guides,
+            record_view=section_record_view,
             return_meta=True,
         )
         if isinstance(uv_res, tuple):

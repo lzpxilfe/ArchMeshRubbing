@@ -1,6 +1,6 @@
 ﻿"""
 ArchMeshRubbing GUI - Main Window
-媛꾨떒???쒕옒洹????쒕∼ ?명꽣?섏씠??
+간단한 드래그 앤 드롭 인터페이스
 """
 
 import sys
@@ -77,8 +77,8 @@ class ProcessingThread(QThread):
             from src.core.surface_visualizer import SurfaceVisualizer
             from src.core.surface_separator import SurfaceSeparator
             
-            # 1. 濡쒕뱶
-            self.progress.emit(10, "硫붿돩 濡쒕뵫 以?..")
+            # 1. Load mesh
+            self.progress.emit(10, "메쉬 로딩 중...")
             loader = MeshLoader(default_unit=DEFAULT_MESH_UNIT)
             mesh = loader.load(self.filepath)
             
@@ -87,12 +87,12 @@ class ProcessingThread(QThread):
             output_path = Path(self.filepath)
             
             if self.mode == 'flatten':
-                # Flatten
-                self.progress.emit(30, "Flattening mesh (ARAP)...")
+                # Recording-surface unwrap
+                self.progress.emit(30, "기록면 전개 중 (ARAP)...")
                 flattener = ARAPFlattener(max_iterations=DEFAULT_ARAP_MAX_ITERATIONS)
                 flattened = flattener.flatten(mesh)
                 
-                self.progress.emit(60, "?곷낯 ?대?吏 ?앹꽦 以?..")
+                self.progress.emit(60, "탁본 이미지 생성 중...")
                 visualizer = SurfaceVisualizer(default_dpi=DEFAULT_EXPORT_DPI)
                 rubbing = visualizer.generate_rubbing(
                     flattened, 
@@ -100,36 +100,36 @@ class ProcessingThread(QThread):
                     style=self.options.get('style', 'traditional')
                 )
                 
-                self.progress.emit(90, "???以?..")
+                self.progress.emit(90, "저장 중...")
                 save_path = rubbing_output_path(output_path)
                 rubbing.save(str(save_path), include_scale_bar=True)
                 
-                self.progress.emit(100, "?꾨즺!")
+                self.progress.emit(100, "완료!")
                 self.finished.emit(True, str(save_path))
                 
             elif self.mode == 'project':
-                # ?뺤궗?ъ쁺
-                self.progress.emit(40, "?뺤궗?ъ쁺 ?앹꽦 以?..")
+                # Orthographic projection
+                self.progress.emit(40, "정사영 이미지 생성 중...")
                 projector = OrthographicProjector(
                     resolution=self.options.get('resolution', DEFAULT_RENDER_RESOLUTION)
                 )
                 aligned = projector.align_mesh(mesh, method='pca')
                 result = projector.project(aligned, direction='top', render_mode='depth')
                 
-                self.progress.emit(90, "???以?..")
+                self.progress.emit(90, "저장 중...")
                 save_path = projection_output_path(output_path)
                 result.save(str(save_path), dpi=DEFAULT_EXPORT_DPI)
                 
-                self.progress.emit(100, "?꾨즺!")
+                self.progress.emit(100, "완료!")
                 self.finished.emit(True, str(save_path))
                 
             elif self.mode == 'separate':
-                # ?쒕㈃ 遺꾨━
-                self.progress.emit(50, "?쒕㈃ 遺꾨━ 以?..")
+                # Surface separation
+                self.progress.emit(50, "표면 분리 중...")
                 separator = SurfaceSeparator()
                 result = separator.auto_detect_surfaces(mesh)
                 
-                self.progress.emit(80, "???以?..")
+                self.progress.emit(80, "저장 중...")
                 
                 saved_files = []
                 if result.inner_surface:
@@ -142,7 +142,7 @@ class ProcessingThread(QThread):
                     result.outer_surface.to_trimesh().export(str(outer_path))
                     saved_files.append(str(outer_path))
                 
-                self.progress.emit(100, "?꾨즺!")
+                self.progress.emit(100, "완료!")
                 self.finished.emit(True, ", ".join(saved_files))
             
         except Exception as e:
@@ -150,13 +150,13 @@ class ProcessingThread(QThread):
 
 
 class DropArea(QLabel):
-    """?쒕옒洹????쒕∼ ?곸뿭"""
+    """드래그 앤 드롭 영역."""
     fileDropped = pyqtSignal(str)
     
     def __init__(self):
         super().__init__()
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setText("3D ?뚯씪???ш린???뚯뼱???볦쑝?몄슂\n\n(.obj, .ply, .stl, .off)")
+        self.setText("3D 파일을 여기에 끌어다 놓으세요\n\n(.obj, .ply, .stl, .off)")
         self.setStyleSheet("""
             QLabel {
                 border: 3px dashed #aaa;
@@ -205,7 +205,7 @@ class MainWindow(QMainWindow):
     
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(f"{APP_NAME} v{APP_VERSION} - 怨좉퀬??硫붿돩 ?곷낯 ?꾧뎄")
+        self.setWindowTitle(f"{APP_NAME} v{APP_VERSION} - 고고학 3D 메쉬 기록 도구")
         self.setMinimumSize(800, 600)
         self.current_file = None
         self.processing_thread = None
@@ -219,25 +219,25 @@ class MainWindow(QMainWindow):
         layout.setSpacing(15)
         layout.setContentsMargins(20, 20, 20, 20)
         
-        # ?쒕ぉ
+        # 제목
         title = QLabel(f"{APP_NAME} v{APP_VERSION}")
         title.setFont(QFont("Arial", 24, QFont.Weight.Bold))
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title)
         
-        subtitle = QLabel("3D 硫붿돩瑜??곷낯泥섎읆 ?쇱퀜二쇰뒗 ?꾧뎄")
+        subtitle = QLabel("3D 메쉬를 탁본처럼 기록하는 도구")
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         subtitle.setStyleSheet("color: #666; font-size: 14px;")
         layout.addWidget(subtitle)
         
-        # ?쒕옒洹????쒕∼ ?곸뿭
+        # 드래그 앤 드롭 영역
         self.drop_area = DropArea()
         self.drop_area.fileDropped.connect(self.on_file_dropped)
         layout.addWidget(self.drop_area)
         
-        # ?뚯씪 ?좏깮 踰꾪듉
+        # 파일 선택 버튼
         btn_layout = QHBoxLayout()
-        self.btn_open = QPushButton("?뱛 ?뚯씪 ?좏깮")
+        self.btn_open = QPushButton("파일 선택")
         self.btn_open.setStyleSheet("""
             QPushButton {
                 background-color: #4a90d9;
@@ -257,24 +257,24 @@ class MainWindow(QMainWindow):
         btn_layout.addStretch()
         layout.addLayout(btn_layout)
         
-        # ?뚯씪 ?뺣낫
+        # 파일 정보
         self.file_info = QLabel("")
         self.file_info.setStyleSheet("font-size: 12px; color: #333;")
         self.file_info.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.file_info)
         
-        # 泥섎━ ?듭뀡
-        options_group = QGroupBox("泥섎━ ?듭뀡")
+        # 처리 옵션
+        options_group = QGroupBox("처리 옵션")
         options_layout = QVBoxLayout(options_group)
         
-        # 紐⑤뱶 ?좏깮
+        # 모드 선택
         mode_layout = QHBoxLayout()
-        mode_layout.addWidget(QLabel("泥섎━ 紐⑤뱶:"))
+        mode_layout.addWidget(QLabel("처리 모드:"))
         
-        self.radio_flatten = QRadioButton("?곷낯 (?쇱튂湲?")
+        self.radio_flatten = QRadioButton("탁본 생성")
         self.radio_flatten.setChecked(True)
-        self.radio_project = QRadioButton("?뺤궗?ъ쁺 (?됰㈃??")
-        self.radio_separate = QRadioButton("?쒕㈃ 遺꾨━ (?대㈃/?몃㈃)")
+        self.radio_project = QRadioButton("정사영 이미지")
+        self.radio_separate = QRadioButton("표면 분리 (내면/외면)")
         
         mode_layout.addWidget(self.radio_flatten)
         mode_layout.addWidget(self.radio_project)
@@ -282,16 +282,16 @@ class MainWindow(QMainWindow):
         mode_layout.addStretch()
         options_layout.addLayout(mode_layout)
         
-        # ?댁긽??
+        # 해상도
         res_layout = QHBoxLayout()
-        res_layout.addWidget(QLabel("異쒕젰 ?댁긽??"))
+        res_layout.addWidget(QLabel("출력 해상도:"))
         self.spin_resolution = QSpinBox()
         self.spin_resolution.setRange(GUI_MIN_RESOLUTION, GUI_MAX_RESOLUTION)
         self.spin_resolution.setValue(DEFAULT_RENDER_RESOLUTION)
         self.spin_resolution.setSuffix(" px")
         res_layout.addWidget(self.spin_resolution)
         
-        res_layout.addWidget(QLabel("  ?ㅽ???"))
+        res_layout.addWidget(QLabel("  스타일:"))
         self.combo_style = QComboBox()
         self.combo_style.addItems(["traditional", "modern", "relief"])
         res_layout.addWidget(self.combo_style)
@@ -300,22 +300,22 @@ class MainWindow(QMainWindow):
         
         layout.addWidget(options_group)
         
-        # 吏꾪뻾 ?곹깭
-        progress_group = QGroupBox("吏꾪뻾 ?곹깭")
+        # 진행 상태
+        progress_group = QGroupBox("진행 상태")
         progress_layout = QVBoxLayout(progress_group)
         
         self.progress_bar = QProgressBar()
         self.progress_bar.setValue(0)
         progress_layout.addWidget(self.progress_bar)
         
-        self.status_label = QLabel("?湲?以?..")
+        self.status_label = QLabel("대기 중...")
         self.status_label.setStyleSheet("color: #666;")
         progress_layout.addWidget(self.status_label)
         
         layout.addWidget(progress_group)
         
-        # 泥섎━ 踰꾪듉
-        self.btn_process = QPushButton("?? 泥섎━ ?쒖옉")
+        # 처리 버튼
+        self.btn_process = QPushButton("처리 시작")
         self.btn_process.setEnabled(False)
         self.btn_process.setStyleSheet("""
             QPushButton {
@@ -337,7 +337,7 @@ class MainWindow(QMainWindow):
         self.btn_process.clicked.connect(self.start_processing)
         layout.addWidget(self.btn_process)
         
-        # 寃곌낵 濡쒓렇
+        # 결과 로그
         self.log_text = QTextEdit()
         self.log_text.setMaximumHeight(100)
         self.log_text.setReadOnly(True)
@@ -347,7 +347,7 @@ class MainWindow(QMainWindow):
     def open_file(self):
         filepath, _ = QFileDialog.getOpenFileName(
             self,
-            "3D 硫붿돩 ?뚯씪 ?좏깮",
+            "3D 메쉬 파일 선택",
             "",
             "3D Files (*.obj *.ply *.stl *.off *.gltf *.glb);;All Files (*)"
         )
@@ -356,9 +356,9 @@ class MainWindow(QMainWindow):
     
     def on_file_dropped(self, filepath):
         self.current_file = filepath
-        self.drop_area.setText(f"?좏깮???뚯씪:\n{Path(filepath).name}")
+        self.drop_area.setText(f"선택한 파일:\n{Path(filepath).name}")
         
-        # ?뚯씪 ?뺣낫 ?쒖떆
+        # 파일 정보 표시
         try:
             from src.core.mesh_loader import MeshLoader
             loader = MeshLoader(default_unit=DEFAULT_MESH_UNIT)
@@ -369,17 +369,17 @@ class MainWindow(QMainWindow):
             file_size = info.get("file_size_mb")
             size_text = f"{file_size}" if isinstance(file_size, (int, float)) else "?"
 
-            info_text = f"?뺤젏: {n_vertices_text}媛? |  "
-            info_text += f"硫? {n_faces_text}媛? |  "
-            info_text += f"?ш린: {size_text} MB"
+            info_text = f"정점: {n_vertices_text}개 |  "
+            info_text += f"면: {n_faces_text}개 |  "
+            info_text += f"크기: {size_text} MB"
             self.file_info.setText(info_text)
 
-            self.log(f"?뚯씪 濡쒕뱶: {filepath}")
+            self.log(f"파일 로드: {filepath}")
             self.log(f"  - Vertices: {n_vertices_text}")
             self.log(f"  - Faces: {n_faces_text}")
             
         except Exception as e:
-            self.file_info.setText(f"?ㅻ쪟: {e}")
+            self.file_info.setText(f"오류: {e}")
         
         self.btn_process.setEnabled(True)
     
@@ -387,7 +387,7 @@ class MainWindow(QMainWindow):
         if not self.current_file:
             return
         
-        # 紐⑤뱶 寃곗젙
+        # 모드 결정
         if self.radio_flatten.isChecked():
             mode = 'flatten'
         elif self.radio_project.isChecked():
@@ -402,7 +402,7 @@ class MainWindow(QMainWindow):
         
         self.btn_process.setEnabled(False)
         self.progress_bar.setValue(0)
-        self.status_label.setText("泥섎━ ?쒖옉...")
+        self.status_label.setText("처리 시작...")
         
         self.processing_thread = ProcessingThread(self.current_file, mode, options)
         self.processing_thread.progress.connect(self.on_progress)
@@ -418,13 +418,13 @@ class MainWindow(QMainWindow):
         self.btn_process.setEnabled(True)
         
         if success:
-            self.status_label.setText("???꾨즺!")
-            self.log(f"????λ맖: {result}")
-            QMessageBox.information(self, "?꾨즺", f"泥섎━媛 ?꾨즺?섏뿀?듬땲??\n\n????꾩튂:\n{result}")
+            self.status_label.setText("처리 완료!")
+            self.log(f"저장 완료: {result}")
+            QMessageBox.information(self, "완료", f"처리가 완료되었습니다.\n\n저장 위치:\n{result}")
         else:
-            self.status_label.setText("???ㅻ쪟 諛쒖깮")
-            self.log(f"???ㅻ쪟: {result}")
-            QMessageBox.critical(self, "?ㅻ쪟", f"泥섎━ 以??ㅻ쪟媛 諛쒖깮?덉뒿?덈떎:\n\n{result}")
+            self.status_label.setText("오류 발생")
+            self.log(f"오류: {result}")
+            QMessageBox.critical(self, "오류", f"처리 중 오류가 발생했습니다:\n\n{result}")
 
         if self.processing_thread is not None:
             self.processing_thread.deleteLater()

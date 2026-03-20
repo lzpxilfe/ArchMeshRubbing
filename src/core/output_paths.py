@@ -13,6 +13,7 @@ PathLike = Union[str, Path]
 
 RUBBING_SUFFIX = ".rubbing.png"
 PROJECTION_SUFFIX = ".projection.png"
+REVIEW_SUFFIX = ".review.png"
 INNER_SUFFIX = ".inner.ply"
 OUTER_SUFFIX = ".outer.ply"
 
@@ -33,6 +34,10 @@ def rubbing_output_path(input_path: PathLike, output_path: Optional[PathLike] = 
 
 def projection_output_path(input_path: PathLike, output_path: Optional[PathLike] = None) -> Path:
     return _resolve_output_path(input_path, output_path, PROJECTION_SUFFIX)
+
+
+def review_sheet_output_path(input_path: PathLike, output_path: Optional[PathLike] = None) -> Path:
+    return _resolve_output_path(input_path, output_path, REVIEW_SUFFIX)
 
 
 def inner_surface_path(input_path: PathLike, output_path: Optional[PathLike] = None) -> Path:

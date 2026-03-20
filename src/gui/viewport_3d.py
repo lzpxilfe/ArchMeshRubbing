@@ -1973,6 +1973,8 @@ class Viewport3D(QOpenGLWidget):
         self._surface_magnetic_apply_target: str = "outer"
         self._surface_magnetic_apply_modifiers: Qt.KeyboardModifier = Qt.KeyboardModifier.NoModifier
         self._surface_magnetic_thread = None
+        self._visible_face_select_thread = None
+        self._visible_face_select_modifiers: Qt.KeyboardModifier = Qt.KeyboardModifier.NoModifier
         # Show outer/inner/migu overlays even outside paint mode (helps visualize auto separation).
         self.show_surface_assignment_overlay = True
         # Magic-wand(stepwise) surface grow state for Shift/Ctrl clicks.
@@ -11605,6 +11607,142 @@ class Viewport3D(QOpenGLWidget):
         except Exception:
             _log_ignored_exception()
 
+    def _cancel_visible_face_select_thread(self) -> None:
+        thr = getattr(self, "_visible_face_select_thread", None)
+        if thr is None:
+            return
+        self._visible_face_select_thread = None
+        try:
+            if thr.isRunning():
+                thr.requestInterruption()
+        except Exception:
+            _log_ignored_exception()
+
+    def select_visible_faces_in_view(
+        self,
+        *,
+        modifiers: Qt.KeyboardModifier = Qt.KeyboardModifier.NoModifier,
+    ) -> None:
+        """Select faces that are visible in the current camera view."""
+        obj = self.selected_obj
+        if obj is None or getattr(obj, "mesh", None) is None:
+            self.status_info = "👁️ 현재 시점 가시면: 먼저 메쉬를 선택해 주세요."
+            self.update()
+            return
+
+        thr = getattr(self, "_visible_face_select_thread", None)
+        try:
+            if thr is not None and thr.isRunning():
+                self.status_info = "👁️ 현재 시점 가시면 선택 계산 중..."
+                self.update()
+                return
+        except Exception:
+            _log_ignored_exception()
+
+        try:
+            self.makeCurrent()
+            viewport = glGetIntegerv(GL_VIEWPORT)
+            mv_raw = glGetDoublev(GL_MODELVIEW_MATRIX)
+            proj_raw = glGetDoublev(GL_PROJECTION_MATRIX)
+            mv = np.asarray(mv_raw, dtype=np.float64).reshape(4, 4).T
+            proj = np.asarray(proj_raw, dtype=np.float64).reshape(4, 4).T
+        except Exception as e:
+            self.status_info = f"👁️ 현재 시점 가시면 계산 준비 실패: {e}"
+            self.update()
+            return
+
+        try:
+            vx, vy, vw, vh = [int(v) for v in viewport[:4]]
+        except Exception:
+            vx, vy, vw, vh = 0, 0, int(self.width()), int(self.height())
+        vw = max(1, vw)
+        vh = max(1, vh)
+
+        gl_x0 = int(vx)
+        gl_y0 = int(vy)
+        gl_x1 = int(vx + vw - 1)
+        gl_y1 = int(vy + vh - 1)
+        width = int(max(1, gl_x1 - gl_x0 + 1))
+        height = int(max(1, gl_y1 - gl_y0 + 1))
+
+        depth_map = None
+        try:
+            depth_raw = cast(Any, glReadPixels(gl_x0, gl_y0, width, height, GL_DEPTH_COMPONENT, GL_FLOAT))
+            depth_map = np.asarray(depth_raw, dtype=np.float32)
+            depth_map = np.squeeze(depth_map)
+            if depth_map.ndim != 2:
+                depth_map = depth_map.reshape((height, width))
+        except Exception:
+            depth_map = None
+
+        try:
+            tol = float(getattr(self, "_surface_area_depth_tol", 0.01))
+        except Exception:
+            tol = 0.01
+        try:
+            max_sel_raw = int(getattr(self, "_surface_area_max_selected_faces", 0))
+        except Exception:
+            max_sel_raw = 0
+        try:
+            n_faces = int(getattr(getattr(obj, "mesh", None), "n_faces", 0) or 0)
+        except Exception:
+            n_faces = 0
+
+        if max_sel_raw <= 0:
+            max_sel = int(max(1, n_faces))
+        else:
+            max_sel = int(max(1, max_sel_raw))
+            if n_faces > 0:
+                max_sel = min(max_sel, int(n_faces))
+
+        poly_gl = np.asarray(
+            [
+                [float(gl_x0), float(gl_y0)],
+                [float(gl_x1), float(gl_y0)],
+                [float(gl_x1), float(gl_y1)],
+                [float(gl_x0), float(gl_y1)],
+            ],
+            dtype=np.float64,
+        )
+
+        self._visible_face_select_modifiers = modifiers
+        self.status_info = "👁️ 현재 시점 가시면 계산 중..."
+        self.update()
+
+        try:
+            thr2 = _SurfaceLassoSelectThread(
+                obj.mesh.vertices,
+                obj.mesh.faces,
+                np.asarray(getattr(obj, "translation", [0.0, 0.0, 0.0]), dtype=np.float64),
+                np.asarray(getattr(obj, "rotation", [0.0, 0.0, 0.0]), dtype=np.float64),
+                float(getattr(obj, "scale", 1.0)),
+                np.asarray(
+                    getattr(getattr(self, "camera", None), "position", np.array([0.0, 0.0, 0.0])),
+                    dtype=np.float64,
+                ),
+                mv,
+                proj,
+                np.asarray(viewport, dtype=np.int32),
+                poly_gl,
+                (gl_x0, gl_y0, gl_x1, gl_y1),
+                (gl_x0, gl_y0),
+                depth_map,
+                face_centroids=getattr(obj, "_face_centroids", None),
+                face_normals=getattr(getattr(obj, "mesh", None), "face_normals", None),
+                depth_tol=tol,
+                max_selected_faces=max_sel,
+                wand_seed_face_idx=None,
+                wand_enabled=False,
+            )
+            thr2.computed.connect(self._on_visible_face_select_computed)
+            thr2.failed.connect(self._on_visible_face_select_failed)
+            self._visible_face_select_thread = thr2
+            thr2.start()
+        except Exception as e:
+            self._visible_face_select_thread = None
+            self.status_info = f"👁️ 현재 시점 가시면 계산 시작 실패: {e}"
+            self.update()
+
     def start_surface_magnetic_lasso(self) -> None:
         """寃쎄퀎(硫댁쟻+?먯꽍) ?ш?誘??꾧뎄 ?쒖옉: 罹먯떆 以鍮?+ 湲곗〈 ??珥덇린??"""
         try:
@@ -12683,6 +12821,90 @@ class Viewport3D(QOpenGLWidget):
 
         # Keep tool active, but clear the polygon for the next stroke.
         self.clear_surface_magnetic_lasso(clear_cache=False)
+        self.update()
+
+    def _on_visible_face_select_failed(self, msg: str) -> None:
+        if self.sender() is not getattr(self, "_visible_face_select_thread", None):
+            return
+        self._visible_face_select_thread = None
+        self.status_info = f"👁️ 현재 시점 가시면 선택 실패: {msg}"
+        self.update()
+
+    def _on_visible_face_select_computed(self, result: object) -> None:
+        if self.sender() is not getattr(self, "_visible_face_select_thread", None):
+            return
+        self._visible_face_select_thread = None
+
+        obj = self.selected_obj
+        if obj is None or getattr(obj, "mesh", None) is None:
+            self.status_info = "👁️ 현재 시점 가시면: 선택 대상이 없습니다."
+            self.update()
+            return
+
+        if not hasattr(obj, "selected_faces") or obj.selected_faces is None:
+            obj.selected_faces = set()
+
+        indices = None
+        stats = {}
+        try:
+            if isinstance(result, dict):
+                indices = result.get("indices", None)
+                stats = result.get("stats", {}) or {}
+        except Exception:
+            indices = None
+            stats = {}
+
+        try:
+            idx_arr = np.asarray(indices, dtype=np.int32).reshape(-1) if indices is not None else np.zeros((0,), dtype=np.int32)
+        except Exception:
+            idx_arr = np.zeros((0,), dtype=np.int32)
+
+        modifiers = getattr(self, "_visible_face_select_modifiers", Qt.KeyboardModifier.NoModifier)
+        remove = bool(modifiers & Qt.KeyboardModifier.AltModifier)
+        add = bool(modifiers & (Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.ControlModifier))
+
+        if not add and not remove:
+            obj.selected_faces.clear()
+
+        if idx_arr.size:
+            try:
+                chunk = int(getattr(self, "_surface_assign_chunk", 200000))
+            except Exception:
+                chunk = 200000
+            chunk = max(20000, min(chunk, 500000))
+
+            for start in range(0, int(idx_arr.size), int(chunk)):
+                ids = idx_arr[start : start + int(chunk)].tolist()
+                if remove:
+                    obj.selected_faces.difference_update(ids)
+                else:
+                    obj.selected_faces.update(ids)
+
+        try:
+            self.faceSelectionChanged.emit(len(obj.selected_faces))
+        except Exception:
+            _log_ignored_exception()
+
+        try:
+            selected_n = int(stats.get("selected", int(idx_arr.size)))
+            cand_n = int(stats.get("candidates", 0))
+        except Exception:
+            selected_n = int(idx_arr.size)
+            cand_n = 0
+
+        trunc_info = ""
+        try:
+            if bool(stats.get("truncated", False)):
+                ms = int(stats.get("max_selected_faces", 0) or 0)
+                trunc_info = f" / 최대 {ms:,} 제한" if ms > 0 else " / 최대치 제한"
+        except Exception:
+            trunc_info = ""
+
+        op = "제거" if remove else ("추가" if add else "교체")
+        msg = f"👁️ 현재 시점 가시면: {op} {selected_n:,} faces{trunc_info}"
+        if cand_n:
+            msg += f" (후보 {cand_n:,})"
+        self.status_info = msg
         self.update()
 
     def _get_surface_target_set(self, obj: SceneObject, target: str) -> set[int]:

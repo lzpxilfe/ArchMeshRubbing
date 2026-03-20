@@ -48,6 +48,11 @@ Thumbs.db
 *.ply
 *.off
 *.amr
+!tests/fixtures/
+!tests/fixtures/*.obj
+!tests/fixtures/*.ply
+!tests/fixtures/*.off
+!tests/fixtures/*.stl
 
 # Local scratch exports
 __smoke_*.svg

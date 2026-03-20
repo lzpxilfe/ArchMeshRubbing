@@ -1,9 +1,10 @@
 """
-Flattened Mesh → SVG exporter
+Recording-surface unwrap → SVG exporter
 
-평면화(Flatten)된 UV 결과를 실측 단위로 SVG로 내보냅니다.
+전개된 기록면 UV 결과를 실측 단위 SVG로 내보냅니다.
 
-기본은 경계(Outline)만 출력하며, 필요 시 메쉬 와이어프레임 출력도 지원합니다.
+기본은 연속 표면의 경계(Outline)만 출력하며,
+메쉬 와이어프레임은 디버그/고급 용도로만 선택적으로 지원합니다.
 """
 
 from __future__ import annotations
@@ -33,7 +34,7 @@ class SVGExportOptions:
 
 
 class FlattenedSVGExporter:
-    """FlattenedMesh를 실측 SVG로 내보내는 유틸리티."""
+    """전개된 기록면(FlattenedMesh)을 실측 SVG로 내보내는 유틸리티."""
 
     def export(self, flattened: FlattenedMesh, output_path: str | Path,
                options: SVGExportOptions | None = None) -> str:

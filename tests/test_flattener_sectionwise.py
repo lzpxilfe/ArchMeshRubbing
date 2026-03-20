@@ -109,6 +109,56 @@ class TestFlattenerSectionwise(unittest.TestCase):
         self.assertEqual(str(meta.get("initial_method")), "section")
         self.assertTrue(bool(meta.get("sectionwise", False)))
 
+    def test_sectionwise_uses_section_guides_and_bottom_record_flip(self):
+        mesh, row_radii, _theta_span = _make_variable_radius_u_patch(n_theta=18, n_len=12)
+        ys = np.linspace(0.0, 120.0, int(row_radii.size), dtype=np.float64)
+
+        guide_rows = [1, 3, 6, 9, 11]
+        guides = [
+            {
+                "station": float(ys[idx]),
+                "radius_world": float(row_radii[idx]),
+                "confidence": 0.9,
+            }
+            for idx in guide_rows
+        ]
+
+        out_top = flatten_with_method(
+            mesh,
+            method="section",
+            cylinder_axis="y",
+            section_guides=guides,
+            section_record_view="top",
+        )
+        out_bottom = flatten_with_method(
+            mesh,
+            method="section",
+            cylinder_axis="y",
+            section_guides=guides,
+            section_record_view="bottom",
+        )
+
+        uv_top = np.asarray(out_top.uv, dtype=np.float64)
+        uv_bottom = np.asarray(out_bottom.uv, dtype=np.float64)
+        self.assertEqual(uv_top.shape, uv_bottom.shape)
+        self.assertTrue(np.isfinite(uv_top).all())
+        self.assertTrue(np.isfinite(uv_bottom).all())
+
+        meta_top = dict(getattr(out_top, "meta", {}) or {})
+        meta_bottom = dict(getattr(out_bottom, "meta", {}) or {})
+
+        self.assertEqual(int(meta_top.get("section_guided_count", 0)), len(guides))
+        self.assertEqual(int(meta_top.get("section_guided_radius_count", 0)), len(guides))
+        self.assertEqual(str(meta_top.get("section_record_view", "")), "top")
+        self.assertFalse(bool(meta_top.get("section_u_flipped", False)))
+
+        self.assertEqual(int(meta_bottom.get("section_guided_count", 0)), len(guides))
+        self.assertEqual(str(meta_bottom.get("section_record_view", "")), "bottom")
+        self.assertTrue(bool(meta_bottom.get("section_u_flipped", False)))
+
+        mirror_sum = uv_top[:, 0] + uv_bottom[:, 0]
+        self.assertLess(float(np.std(mirror_sum)), 1e-5)
+
 
 if __name__ == "__main__":
     unittest.main()
