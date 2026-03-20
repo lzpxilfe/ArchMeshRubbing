@@ -974,7 +974,8 @@ class FlattenPanel(QWidget):
             "ARAP (형태 보존)",
             "LSCM (각도 보존)",
             "면적 보존",
-            "원통 펼침"
+            "원통 펼침",
+            "단면 기반 펼침 (기와)"
         ])
         self.combo_method.setToolTip("펼침 알고리즘 선택")
         method_layout.addWidget(self.combo_method)
@@ -5938,6 +5939,8 @@ class MainWindow(QMainWindow):
                 return "lscm"
             if ("면적" in text) or ("area" in t):
                 return "area"
+            if ("단면" in text) or ("기와" in text) or ("section" in t) or ("tile" in t):
+                return "section"
             if ("원통" in text) or ("cyl" in t):
                 return "cylinder"
             return "arap"

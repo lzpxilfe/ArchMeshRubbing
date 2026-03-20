@@ -2127,6 +2127,357 @@ def _seam_hint_from_cut_lines(
     return float(np.arctan2(s_sum, c_sum))
 
 
+def _smooth_finite_series(values: np.ndarray, *, passes: int = 2) -> np.ndarray:
+    arr = np.asarray(values, dtype=np.float64).reshape(-1)
+    if arr.size == 0:
+        return np.zeros((0,), dtype=np.float64)
+
+    out = arr.copy()
+    finite = np.isfinite(out)
+    if not bool(np.any(finite)):
+        return np.zeros_like(out)
+
+    idx = np.arange(out.size, dtype=np.float64)
+    if int(np.count_nonzero(finite)) == 1:
+        out[~finite] = float(out[finite][0])
+    else:
+        out[~finite] = np.interp(
+            idx[~finite],
+            idx[finite],
+            out[finite],
+            left=float(out[finite][0]),
+            right=float(out[finite][-1]),
+        )
+
+    for _ in range(max(0, int(passes))):
+        if out.size < 3:
+            break
+        tmp = out.copy()
+        tmp[1:-1] = 0.25 * out[:-2] + 0.50 * out[1:-1] + 0.25 * out[2:]
+        out = tmp
+    return out
+
+
+def _unwrap_angle_series(values: np.ndarray, *, hint: float | None = None) -> np.ndarray:
+    arr = np.asarray(values, dtype=np.float64).reshape(-1)
+    if arr.size == 0:
+        return np.zeros((0,), dtype=np.float64)
+
+    finite = np.isfinite(arr)
+    if not bool(np.any(finite)):
+        base = 0.0
+        if hint is not None:
+            try:
+                if np.isfinite(float(hint)):
+                    base = float(hint)
+            except Exception:
+                base = 0.0
+        return np.full_like(arr, base)
+
+    out = arr.copy()
+    first = int(np.flatnonzero(finite)[0])
+    prev = float(out[first])
+    if hint is not None:
+        try:
+            hint_f = float(hint)
+            if np.isfinite(hint_f):
+                prev = hint_f + float(np.angle(np.exp(1j * (prev - hint_f))))
+        except Exception:
+            pass
+    out[first] = prev
+
+    for i in range(first + 1, out.size):
+        if not np.isfinite(out[i]):
+            out[i] = prev
+            continue
+        delta = float(np.angle(np.exp(1j * (float(out[i]) - prev))))
+        prev = prev + delta
+        out[i] = prev
+
+    out[:first] = out[first]
+    return out
+
+
+def _estimate_section_longitudinal_axis(
+    vertices: np.ndarray,
+    *,
+    axis: str = "auto",
+) -> tuple[np.ndarray, str]:
+    axis_choice = _normalize_cylinder_axis_choice(axis)
+    if axis_choice != "auto":
+        return _axis_unit_vector(axis_choice), axis_choice
+
+    try:
+        pca_axes = _pca_axes_3d(vertices)
+        vec = np.asarray(pca_axes[:, 0], dtype=np.float64).reshape(3)
+        nrm = float(np.linalg.norm(vec))
+        if np.isfinite(nrm) and nrm > 1e-12:
+            return vec / nrm, "pca0"
+    except Exception:
+        _log_ignored_exception("section longitudinal axis PCA failed")
+
+    v = np.asarray(vertices, dtype=np.float64)
+    if v.ndim == 2 and v.shape[0] > 0 and v.shape[1] >= 3:
+        spans = np.ptp(v[:, :3], axis=0)
+        try:
+            best = int(np.nanargmax(spans))
+        except Exception:
+            best = 1
+        if best == 0:
+            return _axis_unit_vector("x"), "x"
+        if best == 1:
+            return _axis_unit_vector("y"), "y"
+    return _axis_unit_vector("z"), "z"
+
+
+def sectionwise_cylindrical_parameterization(
+    mesh: MeshData,
+    *,
+    axis: str = "auto",
+    n_sections: int | None = None,
+    cut_lines_world: list[list[list[float]]] | None = None,
+    return_meta: bool = False,
+) -> np.ndarray | tuple[np.ndarray, dict[str, Any]]:
+    """
+    Section-wise cylindrical unwrap for roof-tile like shapes.
+
+    Unlike the plain cylindrical model, this estimates a local cross-section
+    center along the longitudinal axis and uses per-vertex local radius. This
+    handles U-shaped tiles whose curvature changes along their length.
+    """
+    vertices = np.asarray(mesh.vertices, dtype=np.float64)
+    if vertices.ndim != 2 or vertices.shape[0] == 0 or vertices.shape[1] < 3:
+        return np.zeros((0, 2), dtype=np.float64)
+
+    def _fallback(reason: str) -> np.ndarray | tuple[np.ndarray, dict[str, Any]]:
+        uv_res = cylindrical_parameterization(
+            mesh,
+            axis=axis,
+            radius=None,
+            cut_lines_world=cut_lines_world,
+            return_meta=True,
+        )
+        if isinstance(uv_res, tuple):
+            uv0, meta0 = uv_res
+        else:
+            uv0, meta0 = uv_res, {}
+        meta_out = dict(meta0 or {})
+        meta_out["sectionwise_fallback"] = True
+        meta_out["sectionwise_reason"] = str(reason)
+        if bool(return_meta):
+            return uv0, meta_out
+        return uv0
+
+    a, axis_source = _estimate_section_longitudinal_axis(vertices, axis=axis)
+    try:
+        a = np.asarray(a, dtype=np.float64).reshape(3)
+        nrm = float(np.linalg.norm(a))
+        if not np.isfinite(nrm) or nrm < 1e-12:
+            return _fallback("invalid_axis")
+        a = a / nrm
+    except Exception:
+        return _fallback("axis_exception")
+
+    temp = (
+        np.array([1.0, 0.0, 0.0], dtype=np.float64)
+        if abs(float(a[0])) < 0.9
+        else np.array([0.0, 1.0, 0.0], dtype=np.float64)
+    )
+    b1 = np.cross(a, temp)
+    b1_n = float(np.linalg.norm(b1))
+    if not np.isfinite(b1_n) or b1_n < 1e-12:
+        b1 = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        b1 = np.cross(a, b1)
+        b1_n = float(np.linalg.norm(b1))
+    if not np.isfinite(b1_n) or b1_n < 1e-12:
+        return _fallback("basis_failed")
+    b1 = b1 / b1_n
+    b2 = np.cross(a, b1)
+    b2_n = float(np.linalg.norm(b2))
+    if not np.isfinite(b2_n) or b2_n < 1e-12:
+        return _fallback("basis_failed")
+    b2 = b2 / b2_n
+
+    s_raw = vertices[:, :3] @ a.reshape(3,)
+    x0 = vertices[:, :3] @ b1.reshape(3,)
+    y0 = vertices[:, :3] @ b2.reshape(3,)
+
+    finite = np.isfinite(s_raw) & np.isfinite(x0) & np.isfinite(y0)
+    if int(np.count_nonzero(finite)) < 16:
+        return _fallback("too_few_points")
+
+    s_valid = s_raw[finite]
+    x_valid = x0[finite]
+    y_valid = y0[finite]
+
+    s_min = float(np.min(s_valid))
+    s_max = float(np.max(s_valid))
+    span = float(s_max - s_min)
+    if not np.isfinite(span) or span < 1e-9:
+        return _fallback("degenerate_span")
+
+    try:
+        n_sections_val = int(n_sections) if n_sections is not None else int(np.sqrt(float(vertices.shape[0])))
+    except Exception:
+        n_sections_val = 24
+    n_sections_val = max(12, min(n_sections_val, 96))
+
+    try:
+        s_sections = np.quantile(s_valid, np.linspace(0.0, 1.0, n_sections_val, dtype=np.float64))
+    except Exception:
+        s_sections = np.linspace(s_min, s_max, n_sections_val, dtype=np.float64)
+    s_sections = np.unique(np.asarray(s_sections, dtype=np.float64).reshape(-1))
+    if s_sections.size < 4:
+        return _fallback("too_few_sections")
+
+    diffs = np.diff(s_sections)
+    diffs = diffs[np.isfinite(diffs) & (diffs > 1e-9)]
+    spacing = float(np.median(diffs)) if diffs.size else float(span / max(1, s_sections.size - 1))
+    if not np.isfinite(spacing) or spacing <= 0.0:
+        spacing = float(span / max(1, s_sections.size - 1))
+    section_window = float(max(spacing * 1.5, span / max(12.0, float(s_sections.size))))
+
+    min_fit_points = int(max(16, min(96, int(vertices.shape[0] // max(4, s_sections.size)))))
+    nearest_k = int(max(min_fit_points, min(192, max(24, int(vertices.shape[0] // max(2, s_sections.size))))))
+
+    cx = np.full((s_sections.size,), np.nan, dtype=np.float64)
+    cy = np.full((s_sections.size,), np.nan, dtype=np.float64)
+    r_sec = np.full((s_sections.size,), np.nan, dtype=np.float64)
+    fit_counts = np.zeros((s_sections.size,), dtype=np.int32)
+    fit_ok = np.zeros((s_sections.size,), dtype=bool)
+
+    for i, s0 in enumerate(s_sections):
+        dist = np.abs(s_valid - float(s0))
+        local_idx = np.flatnonzero(dist <= section_window).astype(np.int32, copy=False)
+        if local_idx.size < min_fit_points:
+            k = int(min(max(min_fit_points, nearest_k), s_valid.size))
+            if k <= 0:
+                continue
+            if k >= s_valid.size:
+                local_idx = np.arange(s_valid.size, dtype=np.int32)
+            else:
+                local_idx = np.argpartition(dist, k - 1)[:k].astype(np.int32, copy=False)
+        if local_idx.size < 3:
+            continue
+
+        fit_counts[i] = int(local_idx.size)
+        x_sel = np.asarray(x_valid[local_idx], dtype=np.float64)
+        y_sel = np.asarray(y_valid[local_idx], dtype=np.float64)
+
+        fit = _robust_circle_fit_2d(x_sel, y_sel)
+        if fit is not None:
+            center_xy, radius = fit
+            cx[i] = float(center_xy[0])
+            cy[i] = float(center_xy[1])
+            r_sec[i] = float(radius)
+            fit_ok[i] = True
+            continue
+
+        cx[i] = float(np.median(x_sel))
+        cy[i] = float(np.median(y_sel))
+        rr = np.hypot(x_sel - float(cx[i]), y_sel - float(cy[i]))
+        rr = rr[np.isfinite(rr)]
+        r_sec[i] = float(np.median(rr)) if rr.size else np.nan
+
+    if int(np.count_nonzero(np.isfinite(cx) & np.isfinite(cy))) < max(4, int(0.25 * s_sections.size)):
+        return _fallback("section_fit_failed")
+
+    cx = _smooth_finite_series(cx, passes=2)
+    cy = _smooth_finite_series(cy, passes=2)
+    r_sec = _smooth_finite_series(r_sec, passes=2)
+
+    mean_center = (float(np.mean(cx)) * b1) + (float(np.mean(cy)) * b2)
+    seam_hint = _seam_hint_from_cut_lines(
+        cut_lines_world,
+        axis=a,
+        b1=b1,
+        b2=b2,
+        center=mean_center,
+    )
+
+    seams = np.full((s_sections.size,), np.nan, dtype=np.float64)
+    spans = np.full((s_sections.size,), np.nan, dtype=np.float64)
+    for i, s0 in enumerate(s_sections):
+        dist = np.abs(s_valid - float(s0))
+        local_idx = np.flatnonzero(dist <= section_window).astype(np.int32, copy=False)
+        if local_idx.size < max(8, min_fit_points // 2):
+            k = int(min(max(8, min_fit_points // 2), s_valid.size))
+            if k <= 0:
+                continue
+            if k >= s_valid.size:
+                local_idx = np.arange(s_valid.size, dtype=np.int32)
+            else:
+                local_idx = np.argpartition(dist, k - 1)[:k].astype(np.int32, copy=False)
+        if local_idx.size < 2:
+            continue
+        theta_loc = np.arctan2(y_valid[local_idx] - float(cy[i]), x_valid[local_idx] - float(cx[i]))
+        _wrapped, seam_i, span_i = _angles_to_min_range(theta_loc, seam_hint=None)
+        seams[i] = float(seam_i)
+        spans[i] = float(span_i)
+
+    seams = _unwrap_angle_series(seams, hint=seam_hint)
+    seams = _smooth_finite_series(seams, passes=1)
+
+    centerline = (
+        s_sections.reshape(-1, 1) * a.reshape(1, 3)
+        + cx.reshape(-1, 1) * b1.reshape(1, 3)
+        + cy.reshape(-1, 1) * b2.reshape(1, 3)
+    )
+    centerline_arc = np.zeros((s_sections.size,), dtype=np.float64)
+    if centerline.shape[0] >= 2:
+        centerline_arc[1:] = np.cumsum(np.linalg.norm(np.diff(centerline, axis=0), axis=1))
+
+    cx_v = np.interp(s_raw, s_sections, cx)
+    cy_v = np.interp(s_raw, s_sections, cy)
+    seam_v = np.interp(s_raw, s_sections, seams)
+    v = np.interp(s_raw, s_sections, centerline_arc)
+
+    u = np.zeros_like(s_raw, dtype=np.float64)
+    v_out = np.zeros_like(s_raw, dtype=np.float64)
+
+    x = x0[finite] - cx_v[finite]
+    y = y0[finite] - cy_v[finite]
+    theta = np.arctan2(y, x)
+    theta_wrapped = np.mod(theta - seam_v[finite], 2.0 * np.pi)
+    r_local = np.hypot(x, y)
+    finite_radius = np.isfinite(r_local) & (r_local > 1e-9)
+    if not bool(np.all(finite_radius)):
+        fallback_radius = r_sec[np.isfinite(r_sec) & (r_sec > 1e-9)]
+        radius_fill = float(np.median(fallback_radius)) if fallback_radius.size else 1.0
+        r_local = np.where(finite_radius, r_local, radius_fill)
+    u[finite] = theta_wrapped * r_local
+    v_out[finite] = v[finite]
+
+    uv = np.stack([u, v_out], axis=1)
+    if np.any(finite):
+        uv_f = uv[finite].copy()
+        uv_f[:, 0] -= float(np.min(uv_f[:, 0]))
+        uv_f[:, 1] -= float(np.min(uv_f[:, 1]))
+        uv[finite] = uv_f
+    if not np.isfinite(uv).all():
+        uv = np.nan_to_num(uv, nan=0.0, posinf=0.0, neginf=0.0)
+
+    if bool(return_meta):
+        meta = {
+            "sectionwise": True,
+            "section_axis_input": str(axis),
+            "section_axis_source": str(axis_source),
+            "section_axis": np.asarray(a, dtype=np.float64).reshape(3),
+            "section_basis_u": np.asarray(b1, dtype=np.float64).reshape(3),
+            "section_basis_v": np.asarray(b2, dtype=np.float64).reshape(3),
+            "section_count": int(s_sections.size),
+            "section_fit_valid_count": int(np.count_nonzero(fit_ok)),
+            "section_window": float(section_window),
+            "section_spacing": float(spacing),
+            "section_centerline_length": float(centerline_arc[-1]) if centerline_arc.size else 0.0,
+            "section_mean_radius": float(np.mean(r_sec[np.isfinite(r_sec)])) if np.isfinite(r_sec).any() else 0.0,
+            "section_mean_span": float(np.mean(spans[np.isfinite(spans)])) if np.isfinite(spans).any() else 0.0,
+            "section_seam_hint": None if seam_hint is None else float(seam_hint),
+        }
+        return uv, meta
+    return uv
+
+
 def cylindrical_parameterization(
     mesh: MeshData,
     *,
@@ -2326,6 +2677,7 @@ def flatten_with_method(
       - 'lscm': conformal (angle-preserving) init only
       - 'area': area-prioritized blend (Tutte ↔ LSCM), controlled by `distortion`
       - 'cylinder': cylindrical unwrapping
+      - 'section': section-wise unwrap for roof-tile/U-shaped artifacts
 
     Notes:
       - `distortion` in [0..1]: 0=area priority, 1=angle priority (for method='area').
@@ -2342,6 +2694,8 @@ def flatten_with_method(
         m = "lscm"
     elif ("area" in m_text) or ("면적" in raw_method):
         m = "area"
+    elif ("section" in m_text) or ("tile" in m_text) or ("단면" in raw_method) or ("기와" in raw_method):
+        m = "section"
     elif ("cyl" in m_text) or ("원통" in raw_method):
         m = "cylinder"
     else:
@@ -2432,7 +2786,7 @@ def flatten_with_method(
         init_text = str(initial_method or "lscm")
         init_t = init_text.lower().strip()
         initial_uv = None
-        cyl_meta: dict[str, Any] = {}
+        init_meta: dict[str, Any] = {}
         if ("cyl" in init_t) or ("원통" in init_text):
             initial_uv_res = cylindrical_parameterization(
                 mesh_s,
@@ -2442,10 +2796,22 @@ def flatten_with_method(
                 return_meta=True,
             )
             if isinstance(initial_uv_res, tuple):
-                initial_uv, cyl_meta = initial_uv_res
+                initial_uv, init_meta = initial_uv_res
             else:
                 initial_uv = initial_uv_res
-                cyl_meta = {}
+                init_meta = {}
+        elif ("section" in init_t) or ("tile" in init_t) or ("단면" in init_text) or ("기와" in init_text):
+            initial_uv_res = sectionwise_cylindrical_parameterization(
+                mesh_s,
+                axis=cylinder_axis,
+                cut_lines_world=cut_lines_world,
+                return_meta=True,
+            )
+            if isinstance(initial_uv_res, tuple):
+                initial_uv, init_meta = initial_uv_res
+            else:
+                initial_uv = initial_uv_res
+                init_meta = {}
         out = flattener.flatten(
             mesh_s,
             boundary_type=str(boundary_type or "free"),
@@ -2461,8 +2827,8 @@ def flatten_with_method(
             out.meta["iterations"] = int(iters)
             out.meta["smooth_iters"] = int(smooth_iters_val)
             out.meta["smooth_strength"] = float(smooth_strength_val)
-            if cyl_meta:
-                out.meta.update(cyl_meta)
+            if init_meta:
+                out.meta.update(init_meta)
         except Exception:
             _log_ignored_exception()
         return _build_result(
@@ -2557,6 +2923,37 @@ def flatten_with_method(
             "cylinder_axis_input": str(cylinder_axis),
             "cylinder_radius_input": None if cylinder_radius is None else float(cylinder_radius),
             **(cyl_meta or {}),
+        }
+        return _build_result(
+            uv,
+            distortion_arr=distortion_arr,
+            scale=1.0,
+            meta=meta,
+        )
+
+    if m in {"section", "tile", "sectionwise", "section-wise", "roof_tile"}:
+        uv_res = sectionwise_cylindrical_parameterization(
+            mesh_s,
+            axis=cylinder_axis,
+            cut_lines_world=cut_lines_world,
+            return_meta=True,
+        )
+        if isinstance(uv_res, tuple):
+            uv, section_meta = uv_res
+        else:
+            uv = uv_res
+            section_meta = {}
+        uv = np.asarray(uv, dtype=np.float64)
+        if uv.ndim != 2 or uv.shape[0] != mesh_s.n_vertices or uv.shape[1] < 2:
+            uv = np.zeros((mesh_s.n_vertices, 2), dtype=np.float64)
+        else:
+            uv = uv[:, :2].copy()
+        uv = _maybe_smooth_uv(uv)
+        distortion_arr = flattener._compute_distortion(mesh_s, uv)
+        meta = {
+            "flatten_method": "section",
+            "section_axis_input": str(cylinder_axis),
+            **(section_meta or {}),
         }
         return _build_result(
             uv,

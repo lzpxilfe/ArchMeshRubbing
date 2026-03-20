@@ -49,7 +49,7 @@ class SheetExportOptions:
     normal_split_threshold: float = 0.15  # dot(Z) threshold for outer/inner split
 
     flatten_iterations: int = 30
-    flatten_method: str = "arap"  # 'arap' | 'lscm' | 'area' | 'cylinder' (UI strings also accepted)
+    flatten_method: str = "arap"  # 'arap' | 'lscm' | 'area' | 'cylinder' | 'section' (UI strings also accepted)
     flatten_distortion: float = 0.5  # 0..1 (area→angle), used when flatten_method='area'
     cylinder_axis: str = "auto"  # 'auto' | 'x' | 'y' | 'z'
     cylinder_radius: Optional[float] = None  # mesh/world units; if None, estimated from geometry
