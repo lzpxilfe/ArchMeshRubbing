@@ -39,6 +39,19 @@ _LAZY_IMPORTS = {
     "MandrelFitResult": ".tile_form_model",
     "TileInterpretationSlot": ".tile_form_model",
     "TileInterpretationState": ".tile_form_model",
+    "SyntheticTileSpec": ".tile_synthetic",
+    "SyntheticTileGroundTruth": ".tile_synthetic",
+    "SyntheticTileArtifact": ".tile_synthetic",
+    "TileEvaluationReport": ".tile_synthetic",
+    "SyntheticBenchmarkCaseResult": ".tile_synthetic",
+    "SyntheticBenchmarkSuiteReport": ".tile_synthetic",
+    "default_synthetic_tile_spec": ".tile_synthetic",
+    "synthetic_tile_spec_from_preset": ".tile_synthetic",
+    "generate_synthetic_tile": ".tile_synthetic",
+    "evaluate_tile_interpretation": ".tile_synthetic",
+    "render_synthetic_tile_review_sheet": ".tile_synthetic",
+    "save_synthetic_tile_bundle": ".tile_synthetic",
+    "save_synthetic_benchmark_suite": ".tile_synthetic",
 }
 
 __all__ = list(_LAZY_IMPORTS.keys())

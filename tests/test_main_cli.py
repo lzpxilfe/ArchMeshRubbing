@@ -22,6 +22,22 @@ class TestMainCLI(unittest.TestCase):
         text = buffer.getvalue()
         self.assertIn("--review <mesh_file>", text)
         self.assertIn("Recording-surface review sheet", text)
+        self.assertIn("--generate-synthetic <preset>", text)
+        self.assertIn("Synthetic benchmark suite + review sheets", text)
+
+    def test_run_cli_routes_generate_synthetic_command(self):
+        with patch("main.generate_synthetic_bundle") as mock_generate:
+            with patch("sys.argv", ["main.py", "--generate-synthetic", "sugkiwa_quarter", "7", "synthetic.obj"]):
+                main.run_cli()
+
+        mock_generate.assert_called_once_with("sugkiwa_quarter", seed=7, output_path="synthetic.obj")
+
+    def test_run_cli_routes_benchmark_synthetic_command(self):
+        with patch("main.benchmark_synthetic_tiles") as mock_benchmark:
+            with patch("sys.argv", ["main.py", "--benchmark-synthetic", "benchmarks", "1,2,3"]):
+                main.run_cli()
+
+        mock_benchmark.assert_called_once_with("benchmarks", seeds_arg="1,2,3")
 
 
 if __name__ == "__main__":

@@ -70,6 +70,25 @@ def run_cli():
     if cmd == '--review' and len(sys.argv) > 2:
         review_mesh(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None)
         return
+
+    if cmd == '--generate-synthetic' and len(sys.argv) > 2:
+        try:
+            seed = int(sys.argv[3]) if len(sys.argv) > 3 else 1
+        except Exception:
+            seed = 1
+        generate_synthetic_bundle(
+            sys.argv[2],
+            seed=seed,
+            output_path=sys.argv[4] if len(sys.argv) > 4 else None,
+        )
+        return
+
+    if cmd == '--benchmark-synthetic' and len(sys.argv) > 2:
+        benchmark_synthetic_tiles(
+            sys.argv[2],
+            seeds_arg=(sys.argv[3] if len(sys.argv) > 3 else "1"),
+        )
+        return
     
     if cmd == '--project' and len(sys.argv) > 2:
         project_mesh(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None)
@@ -99,6 +118,8 @@ def print_help():
     print("  python main.py --info <mesh_file>       # Show file info")
     print("  python main.py --flatten <mesh_file> [output]    # Recording-surface unwrap only")
     print("  python main.py --review <mesh_file> [output]     # Recording-surface review sheet")
+    print("  python main.py --generate-synthetic <preset> [seed] [output]  # Synthetic tile benchmark bundle + review")
+    print("  python main.py --benchmark-synthetic <output_dir> [seeds]     # Synthetic benchmark suite + review sheets")
     print("  python main.py --project <mesh_file> [output]    # Orthographic projection")
     print("  python main.py --separate <mesh_file>   # Separate inner/outer surfaces")
     print("  python main.py --gui                    # Launch GUI (interactive)")
@@ -110,6 +131,8 @@ def print_help():
     print("  python main.py roof_tile.obj")
     print("  python main.py --flatten roof_tile.ply rubbing.tiff")
     print("  python main.py --review roof_tile.ply review.png")
+    print("  python main.py --generate-synthetic sugkiwa_quarter 7 synthetic_tile.obj")
+    print("  python main.py --benchmark-synthetic ./benchmarks 1,2,3")
     print("  python main.py --project roof_tile.stl planview.png")
 
 
@@ -270,6 +293,81 @@ def review_mesh(filepath: str, output_path: str | None = None):
 
         print(f"  Saved: {save_path}")
 
+    except Exception as e:
+        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+def generate_synthetic_bundle(preset: str, *, seed: int = 1, output_path: str | None = None):
+    """합성 기와 벤치마크 묶음 생성."""
+    from src.core.tile_synthetic import (
+        evaluate_tile_interpretation,
+        generate_synthetic_tile,
+        save_synthetic_tile_bundle,
+        synthetic_tile_spec_from_preset,
+    )
+
+    print(f"\nGenerating synthetic tile benchmark: {preset} (seed {int(seed)})")
+    print("-" * 40)
+
+    try:
+        spec = synthetic_tile_spec_from_preset(preset, seed=int(seed))
+        artifact = generate_synthetic_tile(spec)
+        report = evaluate_tile_interpretation(artifact.truth.ground_truth_state, artifact.truth)
+
+        if not output_path:
+            output_path = str(Path.cwd() / f"{artifact.name}.obj")
+
+        bundle_paths = save_synthetic_tile_bundle(
+            artifact,
+            output_path,
+            interpretation_state=artifact.truth.ground_truth_state,
+            evaluation_report=report,
+        )
+
+        print(f"  Mesh: {bundle_paths.get('mesh', '')}")
+        print(f"  Truth: {bundle_paths.get('truth', '')}")
+        print(f"  Interpretation: {bundle_paths.get('interpretation', '')}")
+        print(f"  Evaluation: {bundle_paths.get('evaluation', '')}")
+        print(f"  Review: {bundle_paths.get('review', '')}")
+        print(f"  Bundle: {bundle_paths.get('bundle', '')}")
+        print(f"  Baseline score: {report.overall_score * 100.0:.0f} / 100")
+
+    except Exception as e:
+        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+def benchmark_synthetic_tiles(output_dir: str, *, seeds_arg: str = "1"):
+    """합성 기와 벤치마크 suite 생성."""
+    from src.core.tile_synthetic import save_synthetic_benchmark_suite
+
+    print(f"\nBuilding synthetic benchmark suite: {output_dir}")
+    print("-" * 40)
+
+    try:
+        seeds: list[int] = []
+        for token in str(seeds_arg or "1").split(","):
+            token = str(token or "").strip()
+            if not token:
+                continue
+            seeds.append(int(token))
+        if not seeds:
+            seeds = [1]
+
+        report = save_synthetic_benchmark_suite(output_dir, seeds=tuple(seeds))
+        print(f"  Cases: {report.case_count}")
+        print(f"  Average score: {report.average_score * 100.0:.1f} / 100")
+        print(f"  Pass threshold: {report.pass_threshold * 100.0:.0f} / 100")
+        print(f"  Passed / Failed: {report.pass_count} / {report.fail_count}")
+        print(f"  Summary JSON: {Path(output_dir) / 'synthetic_benchmark_summary.json'}")
+        print(f"  Summary CSV: {Path(output_dir) / 'synthetic_benchmark_summary.csv'}")
+        if report.cases:
+            first_review = str(report.cases[0].review_path or "").strip()
+            if first_review:
+                print(f"  Review sheets: {Path(first_review).parent}")
     except Exception as e:
         print(f"Error: {e}")
         import traceback

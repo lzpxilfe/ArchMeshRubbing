@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import (
     QTreeWidgetItem, QGroupBox, QDoubleSpinBox, QFormLayout,
     QSlider, QSpinBox, QStatusBar, QToolBar, QFrame,
     QMessageBox, QTextEdit, QProgressBar, QComboBox,
-    QCheckBox, QScrollArea, QSizePolicy, QButtonGroup, QDialog,
+    QCheckBox, QScrollArea, QSizePolicy, QButtonGroup, QDialog, QLineEdit,
     QGridLayout, QProgressDialog, QMenu
 )
 from PyQt6.QtCore import Qt, QTimer, QSize, pyqtSignal, QThread, QBuffer, QByteArray, QIODevice
@@ -236,6 +236,18 @@ from src.core.tile_form_model import (  # noqa: E402
     SplitScheme,
     TileClass,
     TileInterpretationState,
+)
+from src.core.tile_synthetic import (  # noqa: E402
+    SyntheticTileArtifact,
+    SyntheticBenchmarkSuiteReport,
+    SyntheticTileGroundTruth,
+    SyntheticTileSpec,
+    TileEvaluationReport,
+    evaluate_tile_interpretation,
+    generate_synthetic_tile,
+    save_synthetic_benchmark_suite,
+    save_synthetic_tile_bundle,
+    synthetic_tile_spec_from_preset,
 )
 
 DEFAULT_EXPORT_DPI = RUNTIME_DEFAULTS.export_dpi
@@ -1685,6 +1697,134 @@ class TileInterpretationPanel(QWidget):
 
         layout.addWidget(slot_group)
 
+        wizard_group = QGroupBox("🪄 기와 모드 위저드")
+        wizard_group.setStyleSheet("QGroupBox { font-weight: bold; }")
+        wizard_layout = QVBoxLayout(wizard_group)
+
+        self.label_wizard_summary = QLabel("위저드가 아직 시작되지 않았습니다.")
+        self.label_wizard_summary.setWordWrap(True)
+        self.label_wizard_summary.setStyleSheet("color: #2c5282; font-weight: bold;")
+        wizard_layout.addWidget(self.label_wizard_summary)
+
+        self.progress_wizard = QProgressBar()
+        self.progress_wizard.setRange(0, 100)
+        self.progress_wizard.setValue(0)
+        wizard_layout.addWidget(self.progress_wizard)
+
+        self.btn_wizard_next = QPushButton("다음 단계 실행")
+        self.btn_wizard_next.clicked.connect(lambda: self.interpretationChanged.emit("run_wizard_next", None))
+        wizard_layout.addWidget(self.btn_wizard_next)
+
+        self.btn_wizard_run_all = QPushButton("남은 단계 자동 실행")
+        self.btn_wizard_run_all.clicked.connect(lambda: self.interpretationChanged.emit("run_wizard_all", None))
+        wizard_layout.addWidget(self.btn_wizard_run_all)
+
+        layout.addWidget(wizard_group)
+
+        synth_group = QGroupBox("🧪 합성 데이터 / 정답 평가")
+        synth_group.setStyleSheet("QGroupBox { font-weight: bold; }")
+        synth_layout = QVBoxLayout(synth_group)
+
+        preset_row = QHBoxLayout()
+        self.combo_synthetic_preset = QComboBox()
+        self.combo_synthetic_preset.addItem("수키와 · 4분할", "sugkiwa_quarter")
+        self.combo_synthetic_preset.addItem("수키와 · 2분할", "sugkiwa_half")
+        self.combo_synthetic_preset.addItem("암키와 · 4분할", "amkiwa_quarter")
+        self.combo_synthetic_preset.addItem("암키와 · 2분할", "amkiwa_half")
+        preset_row.addWidget(self.combo_synthetic_preset, 1)
+
+        self.spin_synthetic_seed = QSpinBox()
+        self.spin_synthetic_seed.setRange(0, 999999)
+        self.spin_synthetic_seed.setValue(1)
+        self.spin_synthetic_seed.setPrefix("seed ")
+        preset_row.addWidget(self.spin_synthetic_seed)
+        synth_layout.addLayout(preset_row)
+
+        btn_generate_synthetic = QPushButton("합성 기와 생성")
+        btn_generate_synthetic.clicked.connect(
+            lambda: self.interpretationChanged.emit(
+                "generate_synthetic_tile",
+                {
+                    "preset": self.combo_synthetic_preset.currentData(),
+                    "seed": int(self.spin_synthetic_seed.value()),
+                },
+            )
+        )
+        synth_layout.addWidget(btn_generate_synthetic)
+
+        btn_evaluate_truth = QPushButton("정답 평가 실행")
+        btn_evaluate_truth.clicked.connect(lambda: self.interpretationChanged.emit("evaluate_against_truth", None))
+        synth_layout.addWidget(btn_evaluate_truth)
+        self.btn_evaluate_truth = btn_evaluate_truth
+
+        btn_apply_truth = QPushButton("정답 가설 적용")
+        btn_apply_truth.setToolTip("합성 정답이 연결된 경우, 정답 상태를 현재 해석 상태로 복원합니다.")
+        btn_apply_truth.clicked.connect(lambda: self.interpretationChanged.emit("apply_synthetic_truth_hypothesis", None))
+        synth_layout.addWidget(btn_apply_truth)
+        self.btn_apply_truth = btn_apply_truth
+
+        btn_export_bundle = QPushButton("합성 벤치마크 묶음 저장")
+        btn_export_bundle.setToolTip("메쉬, 정답, 현재 해석, 평가 결과를 한 묶음으로 저장합니다.")
+        btn_export_bundle.clicked.connect(lambda: self.interpretationChanged.emit("export_synthetic_bundle", None))
+        synth_layout.addWidget(btn_export_bundle)
+        self.btn_export_synthetic_bundle = btn_export_bundle
+
+        suite_row = QHBoxLayout()
+        self.edit_synthetic_suite_seeds = QLineEdit("1,2,3")
+        self.edit_synthetic_suite_seeds.setPlaceholderText("seed 목록 / Seeds, e.g. 1,2,3")
+        self.edit_synthetic_suite_seeds.setToolTip(
+            "모든 preset에 대해 생성할 synthetic benchmark seed 목록 / Seeds for every preset in the benchmark suite"
+        )
+        suite_row.addWidget(self.edit_synthetic_suite_seeds, 1)
+
+        self.spin_synthetic_pass_threshold = QDoubleSpinBox()
+        self.spin_synthetic_pass_threshold.setRange(0.0, 1.0)
+        self.spin_synthetic_pass_threshold.setDecimals(2)
+        self.spin_synthetic_pass_threshold.setSingleStep(0.05)
+        self.spin_synthetic_pass_threshold.setValue(0.90)
+        self.spin_synthetic_pass_threshold.setPrefix("pass ")
+        self.spin_synthetic_pass_threshold.setToolTip(
+            "합격 기준 점수 / Pass threshold for synthetic benchmark suite"
+        )
+        suite_row.addWidget(self.spin_synthetic_pass_threshold)
+
+        btn_export_suite = QPushButton("합성 benchmark suite 저장")
+        btn_export_suite.setToolTip(
+            "모든 기와 preset × seed 목록을 한 번에 생성하고 review 시트까지 저장합니다. / "
+            "Generate every preset × seed case and save review sheets together."
+        )
+        btn_export_suite.clicked.connect(
+            lambda: self.interpretationChanged.emit(
+                "export_synthetic_benchmark_suite",
+                {
+                    "seeds": str(self.edit_synthetic_suite_seeds.text() or "1"),
+                    "pass_threshold": float(self.spin_synthetic_pass_threshold.value()),
+                },
+            )
+        )
+        suite_row.addWidget(btn_export_suite)
+        synth_layout.addLayout(suite_row)
+        self.btn_export_synthetic_suite = btn_export_suite
+
+        self.label_synthetic_truth = QLabel("선택된 메쉬에 연결된 합성 정답이 없습니다.")
+        self.label_synthetic_truth.setWordWrap(True)
+        self.label_synthetic_truth.setStyleSheet("font-size: 11px; color: #4a5568;")
+        synth_layout.addWidget(self.label_synthetic_truth)
+
+        self.label_evaluation_summary = QLabel("아직 실행된 정답 평가가 없습니다.")
+        self.label_evaluation_summary.setWordWrap(True)
+        self.label_evaluation_summary.setStyleSheet("font-size: 11px; color: #4a5568;")
+        synth_layout.addWidget(self.label_evaluation_summary)
+
+        self.label_synthetic_suite_summary = QLabel(
+            "Synthetic benchmark suite: 모든 preset × seed 조합을 생성하고 review 시트까지 함께 저장합니다."
+        )
+        self.label_synthetic_suite_summary.setWordWrap(True)
+        self.label_synthetic_suite_summary.setStyleSheet("font-size: 11px; color: #4a5568;")
+        synth_layout.addWidget(self.label_synthetic_suite_summary)
+
+        layout.addWidget(synth_group)
+
         self.label_context = QLabel("선택된 메쉬가 없습니다.")
         self.label_context.setWordWrap(True)
         self.label_context.setStyleSheet("font-size: 11px; color: #4a5568;")
@@ -1707,6 +1847,12 @@ class TileInterpretationPanel(QWidget):
         object_unit: str,
         selected_faces: int,
         total_faces: int,
+        wizard_summary: str = "",
+        wizard_progress: int = 0,
+        wizard_next_label: str = "",
+        wizard_next_enabled: bool = False,
+        synthetic_truth_summary: str = "",
+        evaluation_summary: str = "",
     ) -> None:
         enabled = state is not None
 
@@ -1738,6 +1884,19 @@ class TileInterpretationPanel(QWidget):
                 self._slot_info_labels[slot_index].setText(f"슬롯 {slot_index}: 비어 있음")
             self.btn_clear_slots.setEnabled(False)
             self.btn_export_slots.setEnabled(False)
+            self.label_wizard_summary.setText("위저드가 아직 시작되지 않았습니다.")
+            self.progress_wizard.setValue(0)
+            self.btn_wizard_next.setText("다음 단계 실행")
+            self.btn_wizard_next.setEnabled(False)
+            self.btn_wizard_run_all.setEnabled(False)
+            self.label_synthetic_truth.setText("선택된 메쉬에 연결된 합성 정답이 없습니다.")
+            self.label_evaluation_summary.setText("아직 실행된 정답 평가가 없습니다.")
+            self.label_synthetic_suite_summary.setText(
+                "Synthetic benchmark suite: 모든 preset × seed 조합을 생성하고 review 시트까지 함께 저장합니다."
+            )
+            self.btn_evaluate_truth.setEnabled(False)
+            self.btn_apply_truth.setEnabled(False)
+            self.btn_export_synthetic_bundle.setEnabled(False)
             self.label_context.setText("선택된 메쉬가 없습니다.")
             self.label_workflow.setText(
                 "다음 단계: 길이축이 잡히면 대표 단면을 골라 와통 기반 제작형 추정을 시작합니다."
@@ -1747,6 +1906,21 @@ class TileInterpretationPanel(QWidget):
         for slot_index in range(1, 4):
             self._slot_save_buttons[slot_index].setEnabled(True)
         self.btn_clear_slots.setEnabled(True)
+        self.btn_wizard_next.setEnabled(bool(wizard_next_enabled))
+        self.btn_wizard_next.setText(str(wizard_next_label or "다음 단계 실행"))
+        self.btn_wizard_run_all.setEnabled(bool(wizard_next_enabled))
+        self.progress_wizard.setValue(max(0, min(100, int(wizard_progress))))
+        self.label_wizard_summary.setText(str(wizard_summary or "위저드 단계를 계산하지 못했습니다."))
+        has_truth = bool(str(synthetic_truth_summary or "").strip())
+        self.label_synthetic_truth.setText(
+            str(synthetic_truth_summary or "선택된 메쉬에 연결된 합성 정답이 없습니다.")
+        )
+        self.label_evaluation_summary.setText(
+            str(evaluation_summary or "아직 실행된 정답 평가가 없습니다.")
+        )
+        self.btn_evaluate_truth.setEnabled(has_truth)
+        self.btn_apply_truth.setEnabled(has_truth)
+        self.btn_export_synthetic_bundle.setEnabled(has_truth)
 
         axis_hint = state.axis_hint
         if axis_hint.is_defined():
@@ -4225,6 +4399,8 @@ class MainWindow(QMainWindow):
         objects: list[dict[str, Any]] = []
         for obj in getattr(vp, "objects", []) or []:
             mesh = getattr(obj, "mesh", None)
+            synthetic_truth = self._coerce_synthetic_truth(getattr(obj, "tile_synthetic_truth", None))
+            evaluation_report = self._coerce_tile_evaluation_report(getattr(obj, "tile_evaluation_report", None))
             mesh_path = None
             try:
                 fp = getattr(mesh, "filepath", None)
@@ -4312,6 +4488,8 @@ class MainWindow(QMainWindow):
                     "polylines": poly_layers,
                     "arcs": arcs_state,
                     "tile_interpretation": self._ensure_tile_interpretation_state(obj).to_dict(),
+                    "tile_synthetic_truth": synthetic_truth.to_dict() if synthetic_truth is not None else None,
+                    "tile_evaluation_report": evaluation_report.to_dict() if evaluation_report is not None else None,
                 }
             )
 
@@ -4704,6 +4882,20 @@ class MainWindow(QMainWindow):
             obj.tile_interpretation_state = TileInterpretationState.from_dict(obj_state.get("tile_interpretation"))
         except Exception:
             obj.tile_interpretation_state = TileInterpretationState()
+        try:
+            raw_truth = obj_state.get("tile_synthetic_truth")
+            obj.tile_synthetic_truth = (
+                SyntheticTileGroundTruth.from_dict(raw_truth) if isinstance(raw_truth, dict) else None
+            )
+        except Exception:
+            obj.tile_synthetic_truth = None
+        try:
+            raw_report = obj_state.get("tile_evaluation_report")
+            obj.tile_evaluation_report = (
+                TileEvaluationReport.from_dict(raw_report) if isinstance(raw_report, dict) else None
+            )
+        except Exception:
+            obj.tile_evaluation_report = None
 
     def _finish_project_load(self) -> None:
         state = getattr(self, "_project_load_state", None)
@@ -5582,6 +5774,167 @@ class MainWindow(QMainWindow):
         return state
 
     @staticmethod
+    def _coerce_synthetic_truth(raw: object) -> SyntheticTileGroundTruth | None:
+        if isinstance(raw, SyntheticTileGroundTruth):
+            return raw
+        if isinstance(raw, dict):
+            try:
+                return SyntheticTileGroundTruth.from_dict(raw)
+            except Exception:
+                return None
+        return None
+
+    @staticmethod
+    def _coerce_tile_evaluation_report(raw: object) -> TileEvaluationReport | None:
+        if isinstance(raw, TileEvaluationReport):
+            return raw
+        if isinstance(raw, dict):
+            try:
+                return TileEvaluationReport.from_dict(raw)
+            except Exception:
+                return None
+        return None
+
+    @staticmethod
+    def _synthetic_tile_spec_from_preset(preset: object, *, seed: int) -> SyntheticTileSpec:
+        return synthetic_tile_spec_from_preset(preset, seed=int(seed))
+
+    def _tile_wizard_status(
+        self,
+        obj,
+        state: TileInterpretationState,
+    ) -> dict[str, Any]:
+        selected_faces = len(getattr(obj, "selected_faces", set()) or set()) if obj is not None else 0
+        tile_ready = state.tile_class != TileClass.UNKNOWN and state.split_scheme != SplitScheme.UNKNOWN
+        analyzed_sections = sum(
+            1 for item in list(getattr(state, "section_observations", []) or [])
+            if int(getattr(item, "profile_point_count", 0) or 0) > 0
+        )
+        accepted_sections = sum(
+            1 for item in list(getattr(state, "section_observations", []) or [])
+            if bool(getattr(item, "accepted", False))
+        )
+
+        if not tile_ready:
+            return {
+                "summary": "1/6 유형과 2분할/4분할 가설을 먼저 정하세요.",
+                "progress": 8,
+                "next_label": "유형/분할 먼저 지정",
+                "next_enabled": False,
+                "next_action": None,
+                "next_data": None,
+            }
+        if not state.axis_hint.is_defined():
+            mode = "selected" if selected_faces > 0 else "mesh"
+            return {
+                "summary": "2/6 길이축 힌트를 추정해야 합니다.",
+                "progress": 20,
+                "next_label": f"다음 단계: 길이축 추정 ({'현재 선택' if mode == 'selected' else '전체 메쉬'})",
+                "next_enabled": True,
+                "next_action": "estimate_axis",
+                "next_data": {"mode": mode},
+            }
+        if accepted_sections <= 0:
+            mode = "selected" if selected_faces > 0 else "mesh"
+            return {
+                "summary": "3/6 대표 단면 후보를 자동 제안하고 채택할 단계입니다.",
+                "progress": 35,
+                "next_label": "다음 단계: 대표 단면 5개 자동 제안",
+                "next_enabled": True,
+                "next_action": "auto_section_candidates",
+                "next_data": {"mode": mode, "count": 5},
+            }
+        if analyzed_sections <= 0:
+            return {
+                "summary": f"4/6 채택된 단면 {accepted_sections}개가 있습니다. 프로파일 분석이 필요합니다.",
+                "progress": 52,
+                "next_label": "다음 단계: 단면 프로파일 분석",
+                "next_enabled": True,
+                "next_action": "analyze_section_profiles",
+                "next_data": {"mode": "selected_preferred"},
+            }
+        if not state.mandrel_fit.is_defined():
+            return {
+                "summary": f"5/6 분석된 단면 {analyzed_sections}개를 기준으로 와통 반경을 피팅합니다.",
+                "progress": 72,
+                "next_label": "다음 단계: 와통 초벌 피팅",
+                "next_enabled": True,
+                "next_action": "fit_mandrel",
+                "next_data": {"mode": "selected_preferred"},
+            }
+        if str(state.record_view or "").strip().lower() not in {"top", "bottom"}:
+            return {
+                "summary": "6/6 상면 또는 하면 기록면을 준비하면 위저드가 완료됩니다.",
+                "progress": 88,
+                "next_label": "다음 단계: 상면 기록 준비",
+                "next_enabled": True,
+                "next_action": "prepare_record_surface",
+                "next_data": {"view": "top"},
+            }
+        record_label = "상면" if str(state.record_view).strip().lower() == "top" else "하면"
+        return {
+            "summary": f"완료: {record_label} 기록면이 준비되었습니다. 검토 시트 저장이나 평가를 실행할 수 있습니다.",
+            "progress": 100,
+            "next_label": "위저드 완료",
+            "next_enabled": False,
+            "next_action": None,
+            "next_data": None,
+        }
+
+    @staticmethod
+    def _synthetic_truth_summary(truth: SyntheticTileGroundTruth | None) -> str:
+        if truth is None:
+            return ""
+        return " | ".join(truth.summary_lines())
+
+    @staticmethod
+    def _tile_evaluation_summary(report: TileEvaluationReport | None, *, unit: str) -> str:
+        if report is None:
+            return ""
+        return " | ".join(report.summary_lines(unit=unit))
+
+    @staticmethod
+    def _synthetic_suite_summary(report: SyntheticBenchmarkSuiteReport | None) -> str:
+        if report is None:
+            return ""
+        lines = list(report.summary_lines())
+        lines.extend(report.failing_case_lines(limit=3))
+        return "\n".join(str(line) for line in lines if str(line or "").strip())
+
+    def _add_synthetic_tile_artifact(self, artifact) -> None:
+        self.viewport.add_mesh_object(artifact.mesh, artifact.name)
+        obj = getattr(self.viewport, "selected_obj", None)
+        if obj is None:
+            raise RuntimeError("합성 기와 객체를 장면에 추가하지 못했습니다.")
+
+        state = TileInterpretationState(
+            tile_class=TileClass.UNKNOWN,
+            split_scheme=SplitScheme.UNKNOWN,
+            workflow_stage="hypothesis",
+            note="synthetic_tile_benchmark",
+        )
+        state.touch()
+        setattr(obj, "tile_interpretation_state", state)
+        setattr(obj, "tile_synthetic_truth", artifact.truth)
+        setattr(obj, "tile_evaluation_report", TileEvaluationReport())
+        try:
+            obj.selected_faces = set()
+        except Exception:
+            pass
+
+        self.current_mesh = artifact.mesh
+        self.current_filepath = None
+        try:
+            self.selection_panel.update_selection_count(0)
+        except Exception:
+            pass
+        try:
+            self.viewport.faceSelectionChanged.emit(0)
+        except Exception:
+            pass
+        self._sync_tile_panel()
+
+    @staticmethod
     def _tile_slot_key(slot_index: object) -> str:
         try:
             index = int(slot_index)
@@ -5695,6 +6048,9 @@ class MainWindow(QMainWindow):
             total_faces = int(getattr(getattr(obj, "mesh", None), "n_faces", 0) or 0)
         except Exception:
             total_faces = 0
+        truth = self._coerce_synthetic_truth(getattr(obj, "tile_synthetic_truth", None))
+        report = self._coerce_tile_evaluation_report(getattr(obj, "tile_evaluation_report", None))
+        wizard = self._tile_wizard_status(obj, state)
 
         panel.update_state(
             state,
@@ -5702,6 +6058,15 @@ class MainWindow(QMainWindow):
             object_unit=str(getattr(getattr(obj, "mesh", None), "unit", "") or ""),
             selected_faces=int(selected_faces),
             total_faces=int(total_faces),
+            wizard_summary=str(wizard.get("summary", "") or ""),
+            wizard_progress=int(wizard.get("progress", 0) or 0),
+            wizard_next_label=str(wizard.get("next_label", "") or ""),
+            wizard_next_enabled=bool(wizard.get("next_enabled", False)),
+            synthetic_truth_summary=self._synthetic_truth_summary(truth),
+            evaluation_summary=self._tile_evaluation_summary(
+                report,
+                unit=str(getattr(getattr(obj, "mesh", None), "unit", "") or "mm"),
+            ),
         )
 
     def _build_tile_scope_mesh(self, obj, *, mode: str):
@@ -6478,6 +6843,118 @@ class MainWindow(QMainWindow):
         )
 
     def on_tile_interpretation_action(self, action: str, data: object) -> None:
+        if action == "generate_synthetic_tile":
+            try:
+                preset = str((data or {}).get("preset", "sugkiwa_quarter") or "sugkiwa_quarter")
+            except Exception:
+                preset = "sugkiwa_quarter"
+            try:
+                seed = int((data or {}).get("seed", 1) or 1)
+            except Exception:
+                seed = 1
+            try:
+                spec = self._synthetic_tile_spec_from_preset(preset, seed=seed)
+                artifact = generate_synthetic_tile(spec)
+                self._add_synthetic_tile_artifact(artifact)
+                self.status_info.setText(
+                    f"합성 기와 생성: {artifact.name} "
+                    f"({spec.tile_class.label_ko}, {spec.split_scheme.label_ko}, seed {int(spec.seed)})"
+                )
+            except Exception as e:
+                QMessageBox.warning(
+                    self,
+                    "기와 해석",
+                    self._format_error_message("합성 기와를 생성하지 못했습니다:", f"{type(e).__name__}: {e}"),
+                )
+            return
+        if action == "export_synthetic_benchmark_suite":
+            seeds_arg = "1"
+            pass_threshold = 0.9
+            try:
+                seeds_arg = str((data or {}).get("seeds", "1") or "1").strip() or "1"
+            except Exception:
+                seeds_arg = "1"
+            try:
+                pass_threshold = float((data or {}).get("pass_threshold", 0.9) or 0.9)
+            except Exception:
+                pass_threshold = 0.9
+            output_dir = QFileDialog.getExistingDirectory(
+                self,
+                "합성 benchmark suite 저장 폴더 선택",
+                "",
+            )
+            if not output_dir:
+                return
+
+            def task_export_synthetic_suite():
+                seeds: list[int] = []
+                for token in str(seeds_arg or "1").split(","):
+                    token = str(token or "").strip()
+                    if not token:
+                        continue
+                    seeds.append(int(token))
+                if not seeds:
+                    seeds = [1]
+                report = save_synthetic_benchmark_suite(
+                    output_dir,
+                    seeds=tuple(seeds),
+                    include_review_sheets=True,
+                    review_dpi=int(self.export_panel.spin_dpi.value()) if hasattr(self, "export_panel") else DEFAULT_EXPORT_DPI,
+                    pass_threshold=pass_threshold,
+                )
+                return report.to_dict()
+
+            def on_done_export_synthetic_suite(result: Any):
+                report = (
+                    SyntheticBenchmarkSuiteReport.from_dict(result)
+                    if isinstance(result, dict)
+                    else SyntheticBenchmarkSuiteReport()
+                )
+                summary = (
+                    self._synthetic_suite_summary(report)
+                    if report.case_count > 0
+                    else "Synthetic benchmark suite를 생성하지 않았습니다."
+                )
+                self.label_synthetic_suite_summary.setText(summary)
+                self.status_info.setText(
+                    f"✅ synthetic benchmark suite {report.case_count}건 저장 완료"
+                )
+                fail_text = (
+                    "\n실패 케이스는 label 또는 summary 파일을 확인하세요."
+                    if int(report.fail_count or 0) > 0
+                    else "\n모든 케이스가 기준 점수를 통과했습니다."
+                )
+                QMessageBox.information(
+                    self,
+                    "합성 benchmark suite 저장",
+                    (
+                        f"synthetic benchmark suite 저장 완료\n\n"
+                        f"케이스 수: {report.case_count}\n"
+                        f"평균 점수: {report.average_score * 100.0:.1f} / 100\n"
+                        f"기준 점수: {report.pass_threshold * 100.0:.0f} / 100\n"
+                        f"통과/실패: {report.pass_count}/{report.fail_count}\n"
+                        f"폴더: {output_dir}"
+                        f"{fail_text}"
+                    ),
+                )
+
+            def on_failed_export_synthetic_suite(message: str):
+                self.status_info.setText("❌ synthetic benchmark suite 저장 실패")
+                QMessageBox.critical(
+                    self,
+                    "오류",
+                    self._format_error_message("synthetic benchmark suite 저장 중 오류 발생:", message),
+                )
+
+            self._start_task(
+                title="합성 benchmark",
+                label=f"synthetic benchmark suite 생성/저장 중... ({seeds_arg})",
+                thread=TaskThread("export_synthetic_benchmark_suite", task_export_synthetic_suite),
+                on_done=on_done_export_synthetic_suite,
+                on_failed=on_failed_export_synthetic_suite,
+            )
+            return
+
         obj = getattr(self.viewport, "selected_obj", None)
         if obj is None or getattr(obj, "mesh", None) is None:
             QMessageBox.warning(self, "경고", "먼저 메쉬를 선택해 주세요.")
@@ -6879,6 +7356,98 @@ class MainWindow(QMainWindow):
                     on_done=on_done_export_saved_slots,
                     on_failed=on_failed_export_saved_slots,
                 )
+            elif action == "evaluate_against_truth":
+                truth = self._coerce_synthetic_truth(getattr(obj, "tile_synthetic_truth", None))
+                if truth is None:
+                    raise ValueError("현재 메쉬에는 연결된 합성 정답이 없습니다.")
+                report = evaluate_tile_interpretation(state, truth)
+                setattr(obj, "tile_evaluation_report", report)
+                unit = str(getattr(getattr(obj, "mesh", None), "unit", "") or "mm")
+                self.status_info.setText(
+                    f"기와 해석 평가: {report.overall_score * 100.0:.0f}점 "
+                    f"(반경 오차 {report.mandrel_radius_abs_error_world if report.mandrel_radius_abs_error_world is not None else 'n/a'} {unit})"
+                )
+            elif action == "apply_synthetic_truth_hypothesis":
+                truth = self._coerce_synthetic_truth(getattr(obj, "tile_synthetic_truth", None))
+                if truth is None:
+                    raise ValueError("현재 메쉬에는 연결된 합성 정답이 없습니다.")
+                restored = TileInterpretationState.from_dict(truth.ground_truth_state.to_dict())
+                restored.saved_slots = [type(item).from_dict(item.to_dict()) for item in list(state.saved_slots or [])]
+                restored.note = "synthetic_truth_applied"
+                restored.touch()
+                state = restored
+                restored_count = self._set_object_selected_faces(obj, truth.selected_faces)
+                report = evaluate_tile_interpretation(state, truth)
+                setattr(obj, "tile_evaluation_report", report)
+                self.status_info.setText(
+                    f"기와 해석: 합성 정답 가설 적용 완료 (선택 {restored_count}면, 점수 {report.overall_score * 100.0:.0f})"
+                )
+            elif action == "export_synthetic_bundle":
+                truth = self._coerce_synthetic_truth(getattr(obj, "tile_synthetic_truth", None))
+                if truth is None:
+                    raise ValueError("현재 메쉬에는 연결된 합성 정답이 없습니다.")
+                default_name = str(getattr(obj, "name", "") or truth.mesh_name or "synthetic_tile")
+                filepath, _ = QFileDialog.getSaveFileName(
+                    self,
+                    "합성 벤치마크 저장",
+                    f"{default_name}.obj",
+                    "Wavefront OBJ (*.obj);;PLY (*.ply);;STL (*.stl)",
+                )
+                if not filepath:
+                    return
+                report = evaluate_tile_interpretation(state, truth)
+                setattr(obj, "tile_evaluation_report", report)
+                artifact = SyntheticTileArtifact(
+                    mesh=obj.mesh,
+                    truth=truth,
+                    name=str(getattr(obj, "name", "") or truth.mesh_name or "synthetic_tile"),
+                )
+                saved_paths = save_synthetic_tile_bundle(
+                    artifact,
+                    filepath,
+                    interpretation_state=state,
+                    evaluation_report=report,
+                )
+                self.status_info.setText(
+                    f"합성 벤치마크 저장 완료: {Path(saved_paths.get('bundle', filepath)).name}"
+                )
+            elif action == "run_wizard_next":
+                wizard = self._tile_wizard_status(obj, state)
+                next_action = wizard.get("next_action")
+                next_data = wizard.get("next_data")
+                if not wizard.get("next_enabled", False) or not next_action:
+                    raise ValueError(str(wizard.get("summary", "") or "현재 단계에서 더 진행할 자동 작업이 없습니다."))
+                self.on_tile_interpretation_action(str(next_action), next_data)
+                return
+            elif action == "run_wizard_all":
+                executed_steps: list[str] = []
+                for _ in range(12):
+                    wizard = self._tile_wizard_status(obj, state)
+                    next_action = wizard.get("next_action")
+                    next_data = wizard.get("next_data")
+                    if not wizard.get("next_enabled", False) or not next_action:
+                        break
+                    executed_steps.append(str(next_action))
+                    self.on_tile_interpretation_action(str(next_action), next_data)
+                    obj = getattr(self.viewport, "selected_obj", None)
+                    if obj is None or getattr(obj, "mesh", None) is None:
+                        break
+                    state = self._ensure_tile_interpretation_state(obj)
+                if not executed_steps:
+                    raise ValueError("위저드를 자동 진행할 수 없습니다. 유형/분할 가설부터 확인하세요.")
+                truth = self._coerce_synthetic_truth(getattr(obj, "tile_synthetic_truth", None))
+                if truth is not None:
+                    report = evaluate_tile_interpretation(state, truth)
+                    setattr(obj, "tile_evaluation_report", report)
+                    self.status_info.setText(
+                        f"기와 위저드 자동 진행 완료 ({len(executed_steps)}단계, 평가 {report.overall_score * 100.0:.0f}점)"
+                    )
+                else:
+                    self.status_info.setText(
+                        f"기와 위저드 자동 진행 완료 ({len(executed_steps)}단계)"
+                    )
+                self._sync_tile_panel()
+                return
             else:
                 return
         except Exception as e:

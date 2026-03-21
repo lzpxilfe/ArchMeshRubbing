@@ -94,6 +94,48 @@ class TestProjectFile(unittest.TestCase):
                             }
                         ],
                     },
+                    "tile_synthetic_truth": {
+                        "spec": {
+                            "tile_class": "sugkiwa",
+                            "split_scheme": "quarter",
+                            "length_world": 180.0,
+                            "radius_base_world": 65.0,
+                            "radius_amplitude_world": 8.0,
+                            "theta_span_deg": 0.0,
+                            "axial_samples": 20,
+                            "angular_samples": 24,
+                            "twist_deg": 4.0,
+                            "bend_world": 6.0,
+                            "axial_slope_world": 2.0,
+                            "noise_std_world": 0.0,
+                            "thickness_world": 0.0,
+                            "seed": 3,
+                            "unit": "mm",
+                            "record_view": "top",
+                            "name": "synthetic_demo",
+                        },
+                        "ground_truth_state": {"tile_class": "sugkiwa", "split_scheme": "quarter"},
+                        "axis_vector_world": [0.0, 1.0, 0.0],
+                        "axis_origin_world": [0.0, 0.0, 0.0],
+                        "section_stations": [-50.0, 0.0, 50.0],
+                        "section_radii_world": [62.0, 68.0, 62.0],
+                        "selected_faces": [0, 1, 2],
+                        "mesh_name": "synthetic_demo",
+                        "note": "ground_truth",
+                    },
+                    "tile_evaluation_report": {
+                        "tile_class_match": True,
+                        "split_scheme_match": True,
+                        "record_view_match": True,
+                        "axis_angle_error_deg": 0.5,
+                        "axis_origin_offset_world": 0.0,
+                        "section_station_mae_world": 0.2,
+                        "section_radius_mae_world": 0.3,
+                        "mandrel_radius_abs_error_world": 0.4,
+                        "completeness": 1.0,
+                        "overall_score": 0.97,
+                        "note": "synthetic_evaluation",
+                    },
                 }
             ]
         }
@@ -113,3 +155,8 @@ class TestProjectFile(unittest.TestCase):
         self.assertEqual(loaded_slots[0]["slot_key"], "slot_1")
         self.assertEqual(loaded_slots[0]["selected_faces"], [1, 2, 3])
         self.assertEqual(loaded_slots[0]["record_view"], "top")
+        loaded_truth = loaded_state.get("objects", [{}])[0].get("tile_synthetic_truth", {})
+        loaded_report = loaded_state.get("objects", [{}])[0].get("tile_evaluation_report", {})
+        self.assertEqual(loaded_truth.get("mesh_name"), "synthetic_demo")
+        self.assertEqual(loaded_truth.get("selected_faces"), [0, 1, 2])
+        self.assertAlmostEqual(float(loaded_report.get("overall_score", 0.0)), 0.97)

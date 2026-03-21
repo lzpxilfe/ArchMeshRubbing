@@ -1,6 +1,8 @@
 # 🏺 ArchMeshRubbing
 
-ArchMeshRubbing은 고고학·건축 유물의 3D 메쉬를 정렬하고, 단면을 확인하고, 펼치고, 탁본 스타일 이미지와 실측 SVG로 내보내기 위한 데스크톱 도구입니다.
+ArchMeshRubbing은 고고학·건축 유물의 3D 메쉬를 정렬하고, 단면을 확인하고, 기록면을 전개하고, 탁본 스타일 이미지와 실측 SVG로 내보내기 위한 데스크톱 도구입니다.
+
+ArchMeshRubbing is a desktop tool for aligning archaeological 3D meshes, inspecting sections, unwrapping recording surfaces, and exporting rubbing-style images and measured SVG outputs.
 
 이 프로젝트는 특히 기와, 곡면 파편, 얇은 쉘 구조처럼 내면/외면이 중요한 유물을 다루는 워크플로우를 목표로 합니다.
 
@@ -48,6 +50,34 @@ ArchMeshRubbing은 고고학·건축 유물의 3D 메쉬를 정렬하고, 단면
 3. 필요하면 단면선, ROI, 표면 선택 정보를 지정한다.
 4. 펼침 방법을 선택한다.
 5. 탁본 이미지, 실측 SVG, 통합 SVG 등 필요한 결과를 저장한다.
+
+## 🧪 Synthetic Benchmark / 합성 벤치마크
+
+실제 기와 샘플이 없더라도, 프로그램 안에서 `합성 기와(synthetic tile)`를 생성해 기준 데이터를 만들 수 있습니다. 이 synthetic workflow는 와통 반경, 2분할/4분할, 길이축, 대표 단면, 기록면(top/bottom) 정답이 포함된 회귀 세트를 만드는 데 사용됩니다.
+
+Even without real tile scans, you can generate synthetic roof-tile meshes to build a baseline regression suite. Each synthetic bundle can include the mesh, ground-truth interpretation, evaluation report, and a recording-surface review sheet.
+
+### CLI 예시 / CLI examples
+
+```bash
+python main.py --generate-synthetic sugkiwa_quarter 7 synthetic_tile.obj
+python main.py --benchmark-synthetic ./benchmarks 1,2,3
+```
+
+생성 결과에는 보통 다음 파일이 포함됩니다.
+
+The generated bundle usually contains:
+
+- `*.obj`
+- `*.truth.json`
+- `*.interpretation.json`
+- `*.evaluation.json`
+- `*.review.png`
+- `*.bundle.json`
+
+benchmark suite를 만들면 `synthetic_benchmark_summary.json`과 `synthetic_benchmark_summary.csv`도 함께 저장됩니다.
+
+When you build a benchmark suite, `synthetic_benchmark_summary.json` and `synthetic_benchmark_summary.csv` are also written.
 
 ## 📦 지원 포맷
 
@@ -217,10 +247,13 @@ pip install -r requirements-optional.txt
 
 - [레퍼런스 목록](docs/REFERENCES.md)
 - [기능-레퍼런스 매핑](docs/FEATURE_REFERENCES.md)
+- [합성 벤치마크 가이드 / Synthetic Benchmark Guide](docs/SYNTHETIC_BENCHMARKS.md)
 
 ## 📌 현재 상태
 
-이 프로젝트는 연구/제작 워크플로우를 빠르게 반복하기 위한 도구로 계속 개선 중입니다. 특히 곡면 유물의 펼침 품질, 기와류 단면 기반 전개, 자동 표면 분리 정확도를 계속 다듬는 중입니다.
+이 프로젝트는 연구/제작 워크플로우를 빠르게 반복하기 위한 도구로 계속 개선 중입니다. 특히 곡면 유물의 기록면 전개 품질, 기와류 단면 기반 전개, synthetic benchmark 기반 회귀 검증을 계속 다듬는 중입니다.
+
+This project is under active development as a research-first archaeology tool. Current focus areas include recording-surface unwrap quality for curved artifacts, fabrication-aware tile workflows, and synthetic-benchmark-based regression checks.
 
 ## 📄 라이선스
 
