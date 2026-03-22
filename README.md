@@ -1,96 +1,111 @@
 # 🏺 ArchMeshRubbing
 
-ArchMeshRubbing은 고고학 3D 메쉬를 `기록면(recording surface)` 관점에서 다루기 위한 데스크톱 도구입니다.  
-메쉬를 단순히 펼치는 것이 아니라, 연구자가 실제로 기록하고 싶은 표면을 정렬하고, 확인하고, 전개하고, 검토 시트와 SVG로 남기는 흐름을 목표로 합니다.
+ArchMeshRubbing은 고고학 3D 메쉬를 `기록면(recording surface)` 관점에서 다루는 데스크톱 도구입니다.
 
-ArchMeshRubbing is a desktop tool for archaeology-first 3D mesh work.  
-Instead of treating the mesh as generic CG geometry, it focuses on recording surfaces that archaeologists want to inspect, unwrap, review, and export.
+It is an archaeology-first desktop tool for turning 3D meshes into usable recording outputs rather than treating them as generic CG assets.
 
-## ✨ What It Does / 무엇을 할 수 있나
+핵심은 단순한 mesh flatten이 아닙니다.
 
-### 🧭 1. 3D 기록 작업의 기본 흐름
+- `정위치`: 유물을 도면 기준에 맞게 놓기
+- `실측용 도면`: 단면, 외곽, 기와 제작 가설을 정리하기
+- `탁본`: 상면/하면 기록면을 준비하고 relief를 읽기 좋은 이미지로 만들기
+- `제원측정`: 거리, 지름, 면적, 부피 같은 값을 확인하기
 
-- 3D 메쉬 불러오기
-- 바닥면 정렬과 자세 교정
-- `상/하/전/후/좌/우` 6방향 정규 뷰
-- 단면 슬라이싱, ROI, 외곽 확인
-- 현재 시점의 가시면 선택
+## ✨ Current Focus / 현재 방향
+
+- `4축 기본 워크플로우`
+  - `정위치 -> 실측용 도면 -> 탁본 -> 제원측정`
+- `기록면(recording surface)` 중심 처리
+  - triangle explode가 아니라 연속 표면 기록을 목표로 함
+- `기와 제작형 해석`
+  - 수키와/암키와
+  - 2분할/4분할 가설
+  - 길이축, 대표 단면, 와통 추정
+- `탁본형 시각화`
+  - 검토 시트(review sheet)
+  - 기록면 전개 SVG
+  - 6방향 실측 도면 패키지
+
+## 🧭 Main Workflow / 메인 워크플로우
+
+### 1. 정위치
+
+- 메쉬 불러오기
+- 바닥면 정렬
+- 표준 6방향 뷰
 - 프로젝트 저장/복원 (`.amr`)
 
-### 🗺️ 2. 기록면 전개 (Recording-Surface Unwrap)
+### 2. 실측용 도면
 
-- ARAP
-- LSCM
-- 면적 보존 계열
-- 원통 전개
-- `단면 기반 section-wise 전개`
-- 기와용 `상면 / 하면 기록면` 자동 준비
-- `연속 기록면` 미리보기
-- 기록면 검토 시트(review sheet) 저장
+- 기와 유형 / 분할 가설 입력
+- 길이축 자동 추정
+- 대표 단면 자동 준비
+- 단면 프로파일 분석
+- 와통 추정 실행
+- 실측용 SVG 저장
+- 6방향 도면 패키지 저장
 
-### 🧱 3. 기와 모드 (Tile Interpretation Workflow)
+### 3. 탁본
+
+- 상면 기록 준비
+- 하면 기록 준비
+- 기록면 미리보기
+- 기록면 검토 시트 저장
+
+기록면 검토 시트와 미리보기는 이제 다음 렌더 모드를 지원합니다.
+
+- `자동`
+- `다중광(기록면)`
+- `노멀 언샵`
+- `스펙큘러 강조`
+- `노멀 보기`
+- `자연(이미지)`
+
+### 4. 제원측정
+
+- 거리 측정
+- 지름/원호 보조
+- 면적/부피 확인용 기본 측정 도구
+
+## 🧱 Tile Workflow / 기와 해석 워크플로우
+
+기와는 단순한 U자 곡면으로 보지 않고, 제작 과정을 가진 유물로 다룹니다.
 
 - 수키와 / 암키와 / 미상
-- 2분할 / 4분할 / 미상 가설
-- 길이축 힌트 추정
-- 대표 단면 후보 생성과 채택
+- 2분할 / 4분할 / 미상
+- 길이축 힌트
+- 대표 단면 후보
 - 단면 프로파일 분석
-- 와통 반경 초벌 피팅
+- 와통 초벌 피팅
+- 상면 / 하면 기록면 준비
 - 작업 슬롯 저장 / 복원
-- 슬롯별 검토 시트 묶음 저장
 
-### 🧪 4. Synthetic Benchmark
+기본 화면에서는 핵심 단계만 보이고,
+수동 단면 조정, 연구용 라벨링, synthetic benchmark 같은 기능은 세부 토글 뒤에 숨겨 둡니다.
 
-실제 기와 스캔이 부족해도 synthetic tile을 생성해 기준 데이터를 만들 수 있습니다.
+## 🖼️ Primary Outputs / 기본 산출물
 
-You can generate synthetic roof-tile cases even when real scans are not yet available.
+기본 UI는 지금 아래 3가지를 중심으로 설계되어 있습니다.
 
-- 합성 기와 1건 생성
-- 합성 정답(ground truth) 연결
+- `기록면 검토 시트`
+- `기록면 전개 SVG`
+- `6방향 도면 패키지`
+
+기본 UI에서 제거된 오래된 우회 출력은 코드상 호환 안내만 남아 있습니다.
+
+## 🧪 Synthetic Benchmark / 합성 벤치마크
+
+실제 기와 스캔이 부족해도 합성 데이터로 워크플로우를 검증할 수 있습니다.
+
+- synthetic tile 생성
+- ground truth 연결
 - 현재 해석 상태 평가
-- 정답 가설 즉시 복원
 - synthetic bundle 저장
-- `preset × seed` benchmark suite 생성
-- case별 `review sheet` 저장
-- pass/fail threshold 기반 회귀 점검
+- `preset × seed` benchmark suite 저장
+- case별 `*.review.png` 생성
+- threshold 기반 pass/fail 요약
 
-### 🖼️ 5. 산출물
-
-- 탁본형 이미지 `PNG / TIFF / JPEG`
-- 디지털 탁본
-- 기록면 검토 시트 `*.review.png`
-- 펼침 결과 SVG
-- 실측 SVG
-- 통합 SVG
-- 정사투영 이미지
-- 프로젝트 파일 `*.amr`
-- synthetic benchmark sidecar JSON/CSV
-
-## 🧪 Main Workflows / 핵심 작업 흐름
-
-### A. 범용 기록 workflow
-
-1. 메쉬를 연다.
-2. 바닥면과 자세를 정리한다.
-3. 6방향 뷰 또는 ROI로 기록할 표면을 확인한다.
-4. 기록면 전개를 실행한다.
-5. 검토 시트, 탁본 이미지, SVG를 저장한다.
-
-### B. 기와 workflow
-
-1. 기와 유형과 분할 가설을 정한다.
-2. 길이축 힌트를 잡는다.
-3. 대표 단면 후보를 만든다.
-4. 단면 프로파일과 와통 반경을 본다.
-5. 상면 또는 하면 기록면을 준비한다.
-6. 전개, 검토 시트, SVG를 저장한다.
-
-### C. synthetic benchmark workflow
-
-1. preset과 seed를 고른다.
-2. synthetic tile 또는 benchmark suite를 생성한다.
-3. 평가 점수와 실패 케이스를 확인한다.
-4. `*.review.png`를 보며 seam, 단면 가이드, 기록면 방향을 점검한다.
+자세한 내용은 [Synthetic Benchmark Guide](docs/SYNTHETIC_BENCHMARKS.md)를 참고하세요.
 
 ## 📦 Supported Formats / 지원 포맷
 
@@ -131,114 +146,50 @@ pip install -r requirements-optional.txt
 python app_interactive.py
 ```
 
-`python` 명령이 없으면 `python3 app_interactive.py`를 사용하세요.
+`python`이 없으면 `python3 app_interactive.py`를 사용하세요.
 
 ## 🖥️ CLI Examples / CLI 예시
 
 ```bash
 python main.py --help
+python main.py mesh.obj
+python main.py --open-project sample.amr
 python main.py --info mesh.obj
-python main.py --flatten mesh.obj
+python main.py --flatten mesh.obj unwrap.png
 python main.py --review mesh.obj review.png
 python main.py --generate-synthetic sugkiwa_quarter 7 synthetic_tile.obj
 python main.py --benchmark-synthetic ./benchmarks 1,2,3
 python main.py --project mesh.obj planview.png
 ```
 
-## 🧾 Typical Outputs / 대표 결과물
-
-- `*.rubbing.png`
-- `*.review.png`
-- `*.projection.png`
-- `*.svg`
-- `*.amr`
-- `*.truth.json`
-- `*.interpretation.json`
-- `*.evaluation.json`
-- `synthetic_benchmark_summary.json`
-- `synthetic_benchmark_summary.csv`
-
-## ⌨️ Shortcuts / 자주 쓰는 단축키
-
-- `1`~`6`: 6방향 뷰
-- `F`: 선택 객체 화면 맞춤
-- `Ctrl+S`: 프로젝트 저장
-- `Ctrl+Shift+O`: 프로젝트 열기
-
-## 🛠️ Dependencies / 설치 의존성
-
-### 기본
-
-```bash
-pip install -r requirements.txt
-```
-
-주요 패키지:
-
-- `numpy`
-- `scipy`
-- `trimesh`
-- `Pillow`
-- `PyQt6`
-- `PyOpenGL`
-
-### 선택
-
-```bash
-pip install -r requirements-optional.txt
-```
-
-선택 패키지는 OpenCV 기반 보조 기능과 일부 성능 개선에 도움을 줍니다.
-
-## 🧭 Troubleshooting / 문제 해결
-
-### `python: command not found`
-
-macOS / Linux에서는 `python3`만 있는 경우가 많습니다.
-
-```bash
-python3 app_interactive.py
-```
-
-### `ModuleNotFoundError: No module named 'PyQt6'`
-
-GUI 의존성이 설치되지 않은 상태입니다.
-
-```bash
-pip install -r requirements.txt
-```
-
-### OpenCV 없이 실행하고 싶을 때
-
-OpenCV는 선택 사항입니다.
-
-```bash
-pip install -r requirements.txt
-```
-
-필요할 때만:
-
-```bash
-pip install -r requirements-optional.txt
-```
+CLI의 `--flatten`과 `--review`는 `quick full-surface` 경로입니다.
+상면/하면 기록면을 유도형으로 준비하려면 GUI를 쓰는 것이 좋습니다.
 
 ## 📚 Docs / 문서
 
+- [합성 벤치마크 가이드 / Synthetic Benchmark Guide](docs/SYNTHETIC_BENCHMARKS.md)
 - [레퍼런스 목록](docs/REFERENCES.md)
 - [기능-레퍼런스 매핑](docs/FEATURE_REFERENCES.md)
-- [합성 벤치마크 가이드 / Synthetic Benchmark Guide](docs/SYNTHETIC_BENCHMARKS.md)
+
+## 🧭 Philosophy / 철학
+
+이 프로젝트는 메쉬를 단순한 CG 자산으로 다루지 않습니다.
+
+- 메쉬 체계: 정위치, 실측용 도면, 제원측정
+- 기록면 체계: 탁본, 검토 시트, 전개 SVG
+
+즉, 내부 계산은 메쉬를 써도
+사용자가 다루는 결과는 `기록 가능한 표면`이어야 한다는 관점을 따릅니다.
 
 ## 📌 Current Status / 현재 상태
 
-이 프로젝트는 `고고학 기록면 전개 도구`로 계속 진화 중입니다.  
-현재는 특히 다음 영역을 강하게 밀고 있습니다.
+현재 버전은 다음에 집중하고 있습니다.
 
-- 곡면 유물의 연속 기록면 전개
-- 기와 제작형을 고려한 section-wise workflow
+- 4축 기본 UI 정리
+- 기와용 제작형 해석 흐름
+- 기록면 검토 시트 중심 산출물
+- 다중광/노멀 기반 탁본형 셰이딩
 - synthetic benchmark 기반 회귀 검증
-- 검토 시트 중심의 연구용 산출물
-
-This project is still evolving as an archaeology-first recording-surface tool, with current focus on continuous unwraps for curved artifacts, fabrication-aware tile workflows, synthetic-benchmark regression, and review-sheet-centered outputs.
 
 ## 📄 License / 라이선스
 
