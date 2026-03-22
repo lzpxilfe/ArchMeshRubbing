@@ -35,7 +35,6 @@ _log_path: Path | None = None
 APP_NAME = "ArchMeshRubbing"
 APP_VERSION = "0.1.0"
 ORTHO_VIEW_SCALE_DEFAULT = 1.15
-DEFAULT_MESH_UNIT = "cm"
 DEFAULT_PROJECT_FILENAME = "project.amr"
 MIN_EXPORT_WIDTH_PX = 800
 MAX_EXPORT_WIDTH_PX = 12000
@@ -224,10 +223,7 @@ from src.core.alignment_utils import (  # noqa: E402
     orient_plane_normal_toward,
     rotation_matrix_align_vectors,
 )
-from src.core.cylindrical_image_unwrapper import (  # noqa: E402
-    unwrap_cylindrical_view_image,
-)
-from src.core.unit_utils import mm_to_mesh_units  # noqa: E402
+from src.core.unit_utils import DEFAULT_MESH_UNIT, mm_to_mesh_units  # noqa: E402
 from src.core.tile_form_model import (  # noqa: E402
     AxisHint,
     AxisSource,
@@ -249,6 +245,7 @@ from src.core.tile_synthetic import (  # noqa: E402
     save_synthetic_tile_bundle,
     synthetic_tile_spec_from_preset,
 )
+from src.core.tile_profile_fitting import fit_circle_2d  # noqa: E402
 
 DEFAULT_EXPORT_DPI = RUNTIME_DEFAULTS.export_dpi
 
@@ -504,20 +501,19 @@ class HelpWidget(QTextEdit):
     
     def set_default_help(self):
         self.setHtml("""
-            <h3 style="margin:0; color:#2c5282;">🎮 조작법</h3>
-            <table style="font-size:11px;">
-                <tr><td><b>좌클릭 드래그</b></td><td>3D 회전</td></tr>
-                <tr><td><b>우클릭 드래그</b></td><td>화면 이동</td></tr>
-                <tr><td><b>스크롤</b></td><td>확대/축소</td></tr>
-                <tr><td><b>1~6</b></td><td>정면/후면/우측/좌측/상면/하면</td></tr>
-                <tr><td><b>R</b></td><td>뷰 초기화</td></tr>
-                <tr><td><b>F</b></td><td>메쉬에 맞춤</td></tr>
-            </table>
+            <h3 style="margin:0; color:#2c5282;">🧭 기본 흐름</h3>
+            <p style="font-size:11px;">
+            <b>1. 정위치</b> → <b>2. 실측용 도면</b> → <b>3. 탁본</b> → <b>4. 제원측정</b><br><br>
+            메쉬 체계에서는 정위치, 단면, 외곽, 제원측정을 다루고, 기록면 체계에서는 탁본과 기록면 도면을 만듭니다.<br><br>
+            <b>조작</b><br>
+            좌클릭 드래그: 회전 / 우클릭 드래그: 이동 / 스크롤: 확대·축소<br>
+            1~6: 정면·후면·우측·좌측·상면·하면 / F: 메쉬 맞춤 / R: 뷰 초기화
+            </p>
         """)
 
     def set_transform_help(self):
         self.setHtml("""
-            <h3 style="margin:0; color:#2c5282;">📐 정치 (Positioning)</h3>
+            <h3 style="margin:0; color:#2c5282;">📐 정위치 (Positioning)</h3>
             <p style="font-size:11px;">
             기와를 정확한 위치에 배치합니다.<br>
             <b>이동:</b> X, Y, Z 좌표를 직접 입력<br>
@@ -532,12 +528,9 @@ class HelpWidget(QTextEdit):
             <h3 style="margin:0; color:#2c5282;">🗺️ 기록면 전개 설정</h3>
             <p style="font-size:11px;">
             이 단계는 삼각형 면을 따로 터뜨리는 것이 아니라, 기록할 표면을 연속된 좌표계로 전개하기 위한 설정입니다.<br>
-            <b>곡률 반경:</b> 기와의 곡률 반경 (mm)<br>
-            <b>전개 방향:</b> 길이축/주축 방향 선택<br>
-            <b>왜곡 허용:</b> 면적/각도 왜곡 균형<br>
-            <b>컷 라인:</b> 토수기와 등 복잡한 형태용<br>
             <b>기록면 미리보기:</b> 전개 결과를 연속 탁본 이미지로 바로 확인<br><br>
-            기본 출력은 <b>탁본 이미지 + 외곽선</b> 중심이며, 와이어프레임은 기본적으로 사용하지 않습니다.
+            기본 출력은 <b>탁본 이미지 + 외곽선</b> 중심이며, 와이어프레임은 기본적으로 사용하지 않습니다.<br>
+            곡률 측정, 고급 옵션, 표면 라벨링은 <b>보정/실험 도구</b>로 숨겨져 있습니다.
             </p>
         """)
     
@@ -563,11 +556,7 @@ class HelpWidget(QTextEdit):
             - <b>현재 시점 가시면</b>: 지금 카메라에서 실제로 보이는 면만 선택<br>
             - <b>상면/하면/정면/후면/좌측/우측</b>: 표준 시점으로 맞춘 뒤 그 시점의 가시면 선택<br><br>
 
-            <b>🤖 고급 표면 라벨링(실험)</b><br>
-            - 외면/내면/미구 라벨이 꼭 필요할 때만 사용<br>
-            - 클릭: 자동 추정(auto)<br>
-            - <b>Shift + 클릭:</b> 가시성(보이는 면) 기반 강제<br>
-            - <b>Ctrl + 클릭:</b> 원통 기반 강제<br><br>
+            외면/내면/미구 라벨링은 기본 흐름이 아니라 <b>연구용 표면 라벨링</b>입니다. 필요한 경우에만 별도로 펼쳐 사용하세요.<br><br>
 
             <b>🧲 경계(면적+자석)</b><br>
             - <b>좌클릭:</b> 점 추가(자석 스냅) / <b>드래그:</b> 카메라 회전<br>
@@ -579,15 +568,28 @@ class HelpWidget(QTextEdit):
 
     def set_tile_help(self):
         self.setHtml("""
-            <h3 style="margin:0; color:#2c5282;">🏺 기와 해석</h3>
+            <h3 style="margin:0; color:#2c5282;">🏺 실측용 도면 / 기와 제작 추정</h3>
             <p style="font-size:11px;">
-            기와를 단순 곡면이 아니라 제작 과정을 가진 유물로 해석하기 위한 준비 단계입니다.<br>
-            <b>유형 가설:</b> 수키와 / 암키와 / 미상<br>
-            <b>분할 가설:</b> 2분할 / 4분할 / 미상<br>
-            <b>길이축 힌트:</b> 현재 선택 또는 전체 메쉬에서 장축을 먼저 추정<br><br>
+            기와를 단순 곡면이 아니라 제작 과정을 가진 유물로 읽어 실측용 도면을 만들기 위한 단계입니다.<br>
+            <b>기본 실측 흐름:</b> 유형/분할 가설 → 길이축 힌트 → 대표 단면 후보 → 와통 피팅<br>
+            <b>탁본 준비:</b> 메인 4축 작업 흐름의 탁본 축에서 상면/하면 기록 준비로 진행<br><br>
 
-            기와 모드의 권장 흐름은 <b>상면/하면 기록 준비 → 길이축 힌트 저장 → 대표 단면 후보 저장 → 와통 피팅</b> 입니다.<br>
-            표면 선택은 기본이 아니라 <b>보정용</b>입니다. 상면/하면 버튼을 누르면 앱이 내부적으로 현재 선택을 준비합니다.
+            이 패널은 먼저 <b>핵심 실측 단계</b>만 보여주고, 기록면 보조·작업 슬롯·synthetic benchmark 같은 도구는
+            <b>연구/검증 도구 보기</b>에서 펼치도록 정리했습니다.
+            </p>
+        """)
+
+    def set_workflow_help(self):
+        self.setHtml("""
+            <h3 style="margin:0; color:#2c5282;">🧭 작업 흐름</h3>
+            <p style="font-size:11px;">
+            기본 화면은 고고학 실무의 핵심 4축만 남겼습니다.<br>
+            <b>1. 정위치</b> → 유물을 도면 기준에 맞게 두고 시점을 정합니다.<br>
+            <b>2. 실측용 도면</b> → 제작 가설, 단면, 외곽을 정리해 도면을 만듭니다.<br>
+            <b>3. 탁본</b> → 상면/하면 기록면을 준비하고 검토 시트를 만듭니다.<br>
+            <b>4. 제원측정</b> → 거리, 지름, 면적, 부피 같은 수치를 확인합니다.<br><br>
+            이 앱은 <b>메쉬 체계</b>(정위치, 실측용 도면, 제원측정)와 <b>기록면 체계</b>(탁본)를 함께 다룹니다.
+            보조 보정 도구는 필요할 때만 따로 여세요.
             </p>
         """)
 
@@ -984,7 +986,215 @@ class TransformPanel(QWidget):
     def enterEvent(self, event):
         self.help_widget.set_transform_help()
         super().enterEvent(event)
-    
+
+
+class WorkflowPanel(QWidget):
+    """정위치 -> 실측용 도면 -> 탁본 -> 제원측정의 4축 기본 작업 패널"""
+
+    workflowRequested = pyqtSignal(str, object)
+
+    def __init__(self, help_widget: HelpWidget, parent=None):
+        super().__init__(parent)
+        self.help_widget = help_widget
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(10)
+
+        intro = QLabel(
+            "기본 화면은 정위치, 실측용 도면, 탁본, 제원측정의 4축만 남겼습니다. "
+            "메쉬 체계와 기록면 체계를 오갈 때만 세부 도구를 여세요."
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet("font-size: 11px; color: #4a5568;")
+        layout.addWidget(intro)
+
+        self.label_object_summary = QLabel("현재 메쉬가 없습니다.")
+        self.label_object_summary.setWordWrap(True)
+        self.label_object_summary.setStyleSheet("color: #2c5282; font-weight: bold;")
+        layout.addWidget(self.label_object_summary)
+
+        self.label_system_summary = QLabel("정위치와 실측 체계가 아직 시작되지 않았습니다.")
+        self.label_system_summary.setWordWrap(True)
+        self.label_system_summary.setStyleSheet("font-size: 11px; color: #4a5568;")
+        layout.addWidget(self.label_system_summary)
+
+        self.label_interpret_summary = QLabel("실측용 도면 준비가 아직 시작되지 않았습니다.")
+        self.label_interpret_summary.setWordWrap(True)
+        self.label_interpret_summary.setStyleSheet("font-size: 11px; color: #4a5568;")
+        layout.addWidget(self.label_interpret_summary)
+
+        self.label_record_summary = QLabel("탁본이 아직 시작되지 않았습니다.")
+        self.label_record_summary.setWordWrap(True)
+        self.label_record_summary.setStyleSheet("font-size: 11px; color: #4a5568;")
+        layout.addWidget(self.label_record_summary)
+
+        self.label_measure_summary = QLabel("제원측정은 필요할 때만 실행하면 됩니다.")
+        self.label_measure_summary.setWordWrap(True)
+        self.label_measure_summary.setStyleSheet("font-size: 11px; color: #4a5568;")
+        layout.addWidget(self.label_measure_summary)
+
+        self.label_next_summary = QLabel("다음 단계: 메쉬를 열고 기준 시점을 맞추세요.")
+        self.label_next_summary.setWordWrap(True)
+        self.label_next_summary.setStyleSheet("font-size: 11px; color: #4a5568;")
+        layout.addWidget(self.label_next_summary)
+
+        align_group = QGroupBox("1. 정위치")
+        align_group.setStyleSheet("QGroupBox { font-weight: bold; }")
+        align_layout = QVBoxLayout(align_group)
+        btn_open_mesh = QPushButton("메쉬 열기")
+        btn_open_mesh.clicked.connect(lambda: self.workflowRequested.emit("open_mesh", None))
+        align_layout.addWidget(btn_open_mesh)
+        btn_open_project = QPushButton("프로젝트 열기")
+        btn_open_project.clicked.connect(lambda: self.workflowRequested.emit("open_project", None))
+        align_layout.addWidget(btn_open_project)
+        btn_fit = QPushButton("메쉬에 맞춤")
+        btn_fit.clicked.connect(lambda: self.workflowRequested.emit("fit_view", None))
+        align_layout.addWidget(btn_fit)
+        view_grid = QGridLayout()
+        views = [
+            ("상면", "top"), ("정면", "front"), ("우측", "right"),
+            ("하면", "bottom"), ("후면", "back"), ("좌측", "left"),
+        ]
+        for idx, (label, key) in enumerate(views):
+            btn = QPushButton(label)
+            btn.clicked.connect(
+                lambda _checked=False, view_key=key: self.workflowRequested.emit("canonical_view", {"view": view_key})
+            )
+            view_grid.addWidget(btn, idx // 3, idx % 3)
+        align_layout.addLayout(view_grid)
+        layout.addWidget(align_group)
+
+        interpret_group = QGroupBox("2. 실측용 도면")
+        interpret_group.setStyleSheet("QGroupBox { font-weight: bold; }")
+        interpret_layout = QVBoxLayout(interpret_group)
+        self.progress_interpret = QProgressBar()
+        self.progress_interpret.setRange(0, 100)
+        self.progress_interpret.setValue(0)
+        interpret_layout.addWidget(self.progress_interpret)
+        self.btn_interpret_next = QPushButton("다음 실측 단계 실행")
+        self.btn_interpret_next.clicked.connect(lambda: self.workflowRequested.emit("run_interpretation_next", None))
+        self.btn_interpret_next.setEnabled(False)
+        interpret_layout.addWidget(self.btn_interpret_next)
+
+        btn_drawing_svg = QPushButton("실측용 SVG 저장")
+        btn_drawing_svg.clicked.connect(lambda: self.workflowRequested.emit("export_flat_svg", None))
+        interpret_layout.addWidget(btn_drawing_svg)
+
+        btn_drawing_package = QPushButton("6방향 도면 패키지 저장")
+        btn_drawing_package.clicked.connect(lambda: self.workflowRequested.emit("export_profile_package", None))
+        interpret_layout.addWidget(btn_drawing_package)
+        layout.addWidget(interpret_group)
+
+        record_group = QGroupBox("3. 탁본")
+        record_group.setStyleSheet("QGroupBox { font-weight: bold; }")
+        record_layout = QVBoxLayout(record_group)
+        btn_record_top = QPushButton("상면 기록 준비")
+        btn_record_top.clicked.connect(
+            lambda: self.workflowRequested.emit("prepare_record_surface", {"view": "top"})
+        )
+        record_layout.addWidget(btn_record_top)
+        btn_record_bottom = QPushButton("하면 기록 준비")
+        btn_record_bottom.clicked.connect(
+            lambda: self.workflowRequested.emit("prepare_record_surface", {"view": "bottom"})
+        )
+        record_layout.addWidget(btn_record_bottom)
+        btn_preview = QPushButton("기록면 미리보기")
+        btn_preview.clicked.connect(lambda: self.workflowRequested.emit("preview_recording_surface", None))
+        record_layout.addWidget(btn_preview)
+        btn_export_review = QPushButton("기록면 검토 시트 저장")
+        btn_export_review.clicked.connect(lambda: self.workflowRequested.emit("export_review_sheet", None))
+        record_layout.addWidget(btn_export_review)
+        layout.addWidget(record_group)
+
+        measure_group = QGroupBox("4. 제원측정")
+        measure_group.setStyleSheet("QGroupBox { font-weight: bold; }")
+        measure_layout = QVBoxLayout(measure_group)
+        btn_measure = QPushButton("제원측정 도구 열기")
+        btn_measure.clicked.connect(lambda: self.workflowRequested.emit("show_measure_tools", None))
+        measure_layout.addWidget(btn_measure)
+        layout.addWidget(measure_group)
+
+        btn_advanced = QPushButton("세부 패널 열기")
+        btn_advanced.clicked.connect(lambda: self.workflowRequested.emit("show_advanced_panels", None))
+        layout.addWidget(btn_advanced)
+
+        layout.addStretch(1)
+
+    def update_state(
+        self,
+        *,
+        has_object: bool,
+        object_name: str = "",
+        selected_faces: int = 0,
+        total_faces: int = 0,
+        canonical_view: str = "",
+        record_view: str = "",
+        tile_summary: str = "",
+        wizard_summary: str = "",
+        wizard_progress: int = 0,
+        wizard_next_label: str = "",
+        wizard_next_enabled: bool = False,
+    ) -> None:
+        if not has_object:
+            self.label_object_summary.setText("현재 메쉬가 없습니다.")
+            self.label_system_summary.setText("정위치와 실측 체계가 아직 시작되지 않았습니다.")
+            self.label_interpret_summary.setText("실측용 도면 준비가 아직 시작되지 않았습니다.")
+            self.label_record_summary.setText("탁본이 아직 시작되지 않았습니다.")
+            self.label_measure_summary.setText("제원측정은 필요할 때만 실행하면 됩니다.")
+            self.label_next_summary.setText("다음 단계: 메쉬를 열고 기준 시점을 맞추세요.")
+            self.progress_interpret.setValue(0)
+            self.btn_interpret_next.setText("다음 실측 단계 실행")
+            self.btn_interpret_next.setEnabled(False)
+            return
+
+        self.label_object_summary.setText(
+            f"현재 메쉬: {object_name or 'Object'} | 선택 {int(selected_faces):,} / 전체 {int(total_faces):,}면"
+        )
+        view_label = {
+            "top": "상면",
+            "bottom": "하면",
+            "front": "정면",
+            "back": "후면",
+            "left": "좌측",
+            "right": "우측",
+        }.get(str(canonical_view or "").strip().lower(), "자유 시점")
+        self.label_system_summary.setText(
+            f"정위치: {view_label} 시점 기준 | 실측 체계: 단면/외곽/투영 도면을 다룹니다."
+        )
+        if str(tile_summary or "").strip():
+            self.label_interpret_summary.setText(f"실측용 도면 상태: {tile_summary}")
+        else:
+            self.label_interpret_summary.setText("실측용 도면 상태: 아직 유형/분할/와통 가설이 정리되지 않았습니다.")
+
+        if str(record_view or "").strip().lower() in {"top", "bottom"}:
+            record_label = (
+                "상면 기록면 준비됨" if str(record_view).strip().lower() == "top" else "하면 기록면 준비됨"
+            )
+        elif int(selected_faces) > 0:
+            record_label = f"수동 선택 {int(selected_faces):,}면"
+        else:
+            record_label = "아직 기록면이 준비되지 않았습니다."
+        self.label_record_summary.setText(f"탁본 상태: {record_label}")
+        self.label_measure_summary.setText(
+            f"제원측정: 현재 선택 {int(selected_faces):,}면 | 필요 시 치수 측정 도구를 여세요."
+        )
+        self.progress_interpret.setValue(max(0, min(100, int(wizard_progress))))
+        next_label = str(wizard_next_label or "다음 실측 단계 실행")
+        next_label = next_label.replace("다음 단계:", "다음 실측 단계:")
+        self.btn_interpret_next.setText(next_label)
+        self.btn_interpret_next.setEnabled(bool(wizard_next_enabled))
+        self.label_next_summary.setText(
+            str(wizard_summary or "다음 단계: 실측용 도면을 정리하고 탁본 기록면을 준비하세요.")
+        )
+
+    def enterEvent(self, event):
+        self.help_widget.set_workflow_help()
+        super().enterEvent(event)
+
+
 class FlattenPanel(QWidget):
     """기록면 전개 설정 패널 (Phase B)"""
     
@@ -1008,6 +1218,13 @@ class FlattenPanel(QWidget):
         intro.setWordWrap(True)
         intro.setStyleSheet("font-size: 11px; color: #4a5568;")
         layout.addWidget(intro)
+
+        compact_note = QLabel(
+            "기본 도면 생성 흐름에는 전개 방법과 미리보기만 남겨두고, 곡률 측정과 라벨링은 보정/실험 도구로 뒤로 숨겼습니다."
+        )
+        compact_note.setWordWrap(True)
+        compact_note.setStyleSheet("font-size: 11px; color: #4a5568;")
+        layout.addWidget(compact_note)
         
         # 곡률 설정
         curve_group = QGroupBox("📐 곡률 설정")
@@ -1056,6 +1273,7 @@ class FlattenPanel(QWidget):
         curve_layout.addRow(arc_layout)
         
         layout.addWidget(curve_group)
+        self.curve_group = curve_group
         
         # 기록면 전개 방법
         method_group = QGroupBox("🗺️ 기록면 전개 방법")
@@ -1112,6 +1330,7 @@ class FlattenPanel(QWidget):
         adv_layout.addLayout(iter_layout)
         
         layout.addWidget(adv_group)
+        self.advanced_options_group = adv_group
 
         # 고급 표면 라벨링 (외면/내면/미구)
         surface_group = QGroupBox("🏷️ 고급 표면 라벨링 (외면/내면/미구)")
@@ -1165,14 +1384,21 @@ class FlattenPanel(QWidget):
 
 
         layout.addWidget(surface_group)
-        # Surface painting remains available for advanced/manual correction.
-        surface_group.setVisible(False)
+        self.surface_group = surface_group
         auto_hint = QLabel(
             "권장: 먼저 선택 패널에서 현재 시점 가시면을 고른 뒤, 내보내기 패널에서 '현재 선택'으로 기록면 전개/탁본을 저장하세요."
         )
         auto_hint.setStyleSheet("color: #4a5568; font-size: 11px;")
         auto_hint.setWordWrap(True)
         layout.addWidget(auto_hint)
+
+        self.btn_toggle_experimental_tools = QPushButton("보정/실험 도구 보기")
+        self.btn_toggle_experimental_tools.setCheckable(True)
+        self.btn_toggle_experimental_tools.setToolTip(
+            "곡률 측정, 고급 옵션, 표면 라벨링 같은 보정/실험용 설정을 표시합니다."
+        )
+        self.btn_toggle_experimental_tools.toggled.connect(self._set_experimental_tools_visible)
+        layout.addWidget(self.btn_toggle_experimental_tools)
         
         # 실행 버튼
         self.btn_flatten = QPushButton("🚀 기록면 전개 실행")
@@ -1203,8 +1429,27 @@ class FlattenPanel(QWidget):
         self.progress = QProgressBar()
         self.progress.setVisible(False)
         layout.addWidget(self.progress)
+
+        self._set_experimental_tools_visible(False)
         
         layout.addStretch()
+
+    def _set_experimental_tools_visible(self, visible: bool) -> None:
+        groups = [
+            getattr(self, "curve_group", None),
+            getattr(self, "advanced_options_group", None),
+            getattr(self, "surface_group", None),
+        ]
+        for group in groups:
+            if group is None:
+                continue
+            group.setVisible(bool(visible))
+        try:
+            self.btn_toggle_experimental_tools.setText(
+                "보정/실험 도구 숨기기" if visible else "보정/실험 도구 보기"
+            )
+        except Exception:
+            pass
     
     def on_flatten_clicked(self):
         options = {
@@ -1337,6 +1582,7 @@ class SelectionPanel(QWidget):
         auto_layout.addWidget(btn_auto_edge)
         
         layout.addWidget(auto_group)
+        self.auto_group = auto_group
         
         # 선택 편집
         edit_group = QGroupBox("✏️ 선택 편집")
@@ -1423,13 +1669,37 @@ class SelectionPanel(QWidget):
         assign_layout.addWidget(btn_migu)
         
         layout.addWidget(assign_group)
-        
+        self.assign_group = assign_group
+
+        self.btn_toggle_labeling_tools = QPushButton("연구용 표면 라벨링 보기")
+        self.btn_toggle_labeling_tools.setCheckable(True)
+        self.btn_toggle_labeling_tools.setToolTip(
+            "외면/내면/미구 자동 라벨링과 수동 지정 같은 연구용 기능을 표시합니다."
+        )
+        self.btn_toggle_labeling_tools.toggled.connect(self._set_labeling_tools_visible)
+        layout.addWidget(self.btn_toggle_labeling_tools)
+
         # 선택 정보
         self.label_selection = QLabel("선택된 면: 0개")
         self.label_selection.setStyleSheet("font-weight: bold; color: #2c5282;")
         layout.addWidget(self.label_selection)
+
+        self._set_labeling_tools_visible(False)
         
         layout.addStretch()
+
+    def _set_labeling_tools_visible(self, visible: bool) -> None:
+        groups = [getattr(self, "auto_group", None), getattr(self, "assign_group", None)]
+        for group in groups:
+            if group is None:
+                continue
+            group.setVisible(bool(visible))
+        try:
+            self.btn_toggle_labeling_tools.setText(
+                "연구용 표면 라벨링 숨기기" if visible else "연구용 표면 라벨링 보기"
+            )
+        except Exception:
+            pass
     
     def update_selection_count(self, count: int):
         self.label_selection.setText(f"선택된 면: {count:,}개")
@@ -1440,7 +1710,7 @@ class SelectionPanel(QWidget):
 
 
 class TileInterpretationPanel(QWidget):
-    """기와 해석 가설 패널"""
+    """기와 실측용 도면 추정 패널"""
 
     interpretationChanged = pyqtSignal(str, object)
 
@@ -1455,11 +1725,20 @@ class TileInterpretationPanel(QWidget):
         layout.setSpacing(10)
 
         intro = QLabel(
-            "기와 제작형을 바로 계산하기 전에, 유형·분할 가설과 길이축 힌트를 먼저 정리합니다."
+            "실측용 도면 축의 기본 흐름은 제작 가설 -> 길이축 -> 대표 단면 -> 와통 추정입니다. "
+            "탁본 준비는 메인 4축 작업 흐름의 탁본 축에서 진행하세요."
         )
         intro.setWordWrap(True)
         intro.setStyleSheet("font-size: 11px; color: #4a5568;")
         layout.addWidget(intro)
+
+        essential_note = QLabel(
+            "핵심 실측 단계만 먼저 보입니다. 수동 단면 조정은 '세부 실측 도구 보기', "
+            "슬롯과 synthetic benchmark는 '연구/검증 도구 보기'에서 여세요."
+        )
+        essential_note.setWordWrap(True)
+        essential_note.setStyleSheet("font-size: 11px; color: #4a5568;")
+        layout.addWidget(essential_note)
 
         hypo_group = QGroupBox("🏺 제작 가설")
         hypo_group.setStyleSheet("QGroupBox { font-weight: bold; }")
@@ -1494,6 +1773,18 @@ class TileInterpretationPanel(QWidget):
         self.label_axis_summary.setStyleSheet("color: #2c5282; font-weight: bold;")
         axis_layout.addWidget(self.label_axis_summary)
 
+        btn_axis_auto = QPushButton("길이축 자동 추정")
+        btn_axis_auto.setToolTip("전체 메쉬 기준 장축을 길이축 후보로 저장합니다.")
+        btn_axis_auto.clicked.connect(
+            lambda: self.interpretationChanged.emit("estimate_axis", {"mode": "mesh"})
+        )
+        axis_layout.addWidget(btn_axis_auto)
+
+        axis_detail_widget = QWidget()
+        axis_detail_layout = QVBoxLayout(axis_detail_widget)
+        axis_detail_layout.setContentsMargins(0, 0, 0, 0)
+        axis_detail_layout.setSpacing(6)
+
         axis_btn_row = QHBoxLayout()
         btn_axis_selected = QPushButton("현재 선택에서 추정")
         btn_axis_selected.setToolTip("현재 선택한 표면 패치의 장축을 길이축 후보로 저장합니다.")
@@ -1501,18 +1792,13 @@ class TileInterpretationPanel(QWidget):
             lambda: self.interpretationChanged.emit("estimate_axis", {"mode": "selected"})
         )
         axis_btn_row.addWidget(btn_axis_selected)
-
-        btn_axis_mesh = QPushButton("전체 메쉬에서 추정")
-        btn_axis_mesh.setToolTip("현재 메쉬 전체의 장축을 길이축 후보로 저장합니다.")
-        btn_axis_mesh.clicked.connect(
-            lambda: self.interpretationChanged.emit("estimate_axis", {"mode": "mesh"})
-        )
-        axis_btn_row.addWidget(btn_axis_mesh)
-        axis_layout.addLayout(axis_btn_row)
+        axis_detail_layout.addLayout(axis_btn_row)
 
         btn_axis_clear = QPushButton("🗑️ 길이축 힌트 초기화")
         btn_axis_clear.clicked.connect(lambda: self.interpretationChanged.emit("clear_axis", None))
-        axis_layout.addWidget(btn_axis_clear)
+        axis_detail_layout.addWidget(btn_axis_clear)
+        axis_layout.addWidget(axis_detail_widget)
+        self.axis_detail_widget = axis_detail_widget
 
         layout.addWidget(axis_group)
 
@@ -1525,24 +1811,10 @@ class TileInterpretationPanel(QWidget):
         self.label_section_summary.setStyleSheet("color: #2c5282; font-weight: bold;")
         section_layout.addWidget(self.label_section_summary)
 
-        btn_section_selected = QPushButton("현재 선택 중심 단면 추가")
-        btn_section_selected.setToolTip("현재 선택 패치의 중심 위치를 대표 단면 후보로 추가합니다.")
-        btn_section_selected.clicked.connect(
-            lambda: self.interpretationChanged.emit("add_section_candidate", {"mode": "selected"})
-        )
-        section_layout.addWidget(btn_section_selected)
-
-        btn_section_mesh = QPushButton("전체 메쉬 중심 단면 추가")
-        btn_section_mesh.setToolTip("전체 메쉬 기준 중심 위치를 대표 단면 후보로 추가합니다.")
-        btn_section_mesh.clicked.connect(
-            lambda: self.interpretationChanged.emit("add_section_candidate", {"mode": "mesh"})
-        )
-        section_layout.addWidget(btn_section_mesh)
-
-        btn_section_auto = QPushButton("대표 단면 5개 자동 제안")
-        btn_section_auto.setToolTip("길이축을 따라 대표 단면 후보 5개를 자동으로 제안합니다.")
+        btn_section_auto = QPushButton("대표 단면 자동 준비")
+        btn_section_auto.setToolTip("길이축을 따라 대표 단면 후보 5개를 자동 제안합니다.")
         btn_section_auto.clicked.connect(
-            lambda: self.interpretationChanged.emit("auto_section_candidates", {"mode": "selected", "count": 5})
+            lambda: self.interpretationChanged.emit("auto_section_candidates", {"mode": "mesh", "count": 5})
         )
         section_layout.addWidget(btn_section_auto)
 
@@ -1552,6 +1824,25 @@ class TileInterpretationPanel(QWidget):
             lambda: self.interpretationChanged.emit("analyze_section_profiles", {"mode": "selected_preferred"})
         )
         section_layout.addWidget(btn_section_analyze)
+
+        section_detail_widget = QWidget()
+        section_detail_layout = QVBoxLayout(section_detail_widget)
+        section_detail_layout.setContentsMargins(0, 0, 0, 0)
+        section_detail_layout.setSpacing(6)
+
+        btn_section_selected = QPushButton("현재 선택 중심 단면 추가")
+        btn_section_selected.setToolTip("현재 선택 패치의 중심 위치를 대표 단면 후보로 추가합니다.")
+        btn_section_selected.clicked.connect(
+            lambda: self.interpretationChanged.emit("add_section_candidate", {"mode": "selected"})
+        )
+        section_detail_layout.addWidget(btn_section_selected)
+
+        btn_section_mesh = QPushButton("전체 메쉬 중심 단면 추가")
+        btn_section_mesh.setToolTip("전체 메쉬 기준 중심 위치를 대표 단면 후보로 추가합니다.")
+        btn_section_mesh.clicked.connect(
+            lambda: self.interpretationChanged.emit("add_section_candidate", {"mode": "mesh"})
+        )
+        section_detail_layout.addWidget(btn_section_mesh)
 
         accept_row = QHBoxLayout()
         btn_section_accept_all = QPushButton("후보 모두 채택")
@@ -1566,11 +1857,13 @@ class TileInterpretationPanel(QWidget):
             lambda: self.interpretationChanged.emit("accept_middle_sections", {"count": 3})
         )
         accept_row.addWidget(btn_section_accept_middle)
-        section_layout.addLayout(accept_row)
+        section_detail_layout.addLayout(accept_row)
 
         btn_section_clear = QPushButton("🗑️ 단면 후보 초기화")
         btn_section_clear.clicked.connect(lambda: self.interpretationChanged.emit("clear_sections", None))
-        section_layout.addWidget(btn_section_clear)
+        section_detail_layout.addWidget(btn_section_clear)
+        section_layout.addWidget(section_detail_widget)
+        self.section_detail_widget = section_detail_widget
 
         layout.addWidget(section_group)
 
@@ -1583,27 +1876,42 @@ class TileInterpretationPanel(QWidget):
         self.label_mandrel_summary.setStyleSheet("color: #2c5282; font-weight: bold;")
         fit_layout.addWidget(self.label_mandrel_summary)
 
-        btn_fit_selected = QPushButton("현재 선택 우선으로 추정")
+        btn_fit_selected = QPushButton("와통 추정 실행")
         btn_fit_selected.setToolTip("현재 선택 표면이 있으면 우선 사용하고, 없으면 전체 메쉬로 와통 반경 후보를 추정합니다.")
         btn_fit_selected.clicked.connect(
             lambda: self.interpretationChanged.emit("fit_mandrel", {"mode": "selected_preferred"})
         )
         fit_layout.addWidget(btn_fit_selected)
 
+        fit_detail_widget = QWidget()
+        fit_detail_layout = QVBoxLayout(fit_detail_widget)
+        fit_detail_layout.setContentsMargins(0, 0, 0, 0)
+        fit_detail_layout.setSpacing(6)
+
         btn_fit_mesh = QPushButton("전체 메쉬로 추정")
         btn_fit_mesh.setToolTip("대표 단면 후보를 이용해 전체 메쉬 기준 와통 반경 후보를 추정합니다.")
         btn_fit_mesh.clicked.connect(
             lambda: self.interpretationChanged.emit("fit_mandrel", {"mode": "mesh"})
         )
-        fit_layout.addWidget(btn_fit_mesh)
+        fit_detail_layout.addWidget(btn_fit_mesh)
 
         btn_fit_clear = QPushButton("🗑️ 피팅 결과 초기화")
         btn_fit_clear.clicked.connect(lambda: self.interpretationChanged.emit("clear_mandrel_fit", None))
-        fit_layout.addWidget(btn_fit_clear)
+        fit_detail_layout.addWidget(btn_fit_clear)
+        fit_layout.addWidget(fit_detail_widget)
+        self.fit_detail_widget = fit_detail_widget
 
         layout.addWidget(fit_group)
 
-        record_group = QGroupBox("🧾 기록면 자동 준비")
+        self.btn_toggle_interpret_detail_tools = QPushButton("세부 실측 도구 보기")
+        self.btn_toggle_interpret_detail_tools.setCheckable(True)
+        self.btn_toggle_interpret_detail_tools.setToolTip(
+            "수동 단면 추가, 후보 채택 조정, 길이축 초기화 같은 세부 실측 도구를 표시합니다."
+        )
+        self.btn_toggle_interpret_detail_tools.toggled.connect(self._set_interpret_detail_tools_visible)
+        layout.addWidget(self.btn_toggle_interpret_detail_tools)
+
+        record_group = QGroupBox("🧾 탁본 기록면 보조")
         record_group.setStyleSheet("QGroupBox { font-weight: bold; }")
         record_layout = QVBoxLayout(record_group)
 
@@ -1638,6 +1946,7 @@ class TileInterpretationPanel(QWidget):
         record_layout.addWidget(record_note)
 
         layout.addWidget(record_group)
+        self.record_group = record_group
 
         slot_group = QGroupBox("💾 작업 슬롯")
         slot_group.setStyleSheet("QGroupBox { font-weight: bold; }")
@@ -1696,8 +2005,9 @@ class TileInterpretationPanel(QWidget):
         self.btn_export_slots = btn_export_slots
 
         layout.addWidget(slot_group)
+        self.slot_group = slot_group
 
-        wizard_group = QGroupBox("🪄 기와 모드 위저드")
+        wizard_group = QGroupBox("🪄 기와 실측 위저드")
         wizard_group.setStyleSheet("QGroupBox { font-weight: bold; }")
         wizard_layout = QVBoxLayout(wizard_group)
 
@@ -1720,6 +2030,7 @@ class TileInterpretationPanel(QWidget):
         wizard_layout.addWidget(self.btn_wizard_run_all)
 
         layout.addWidget(wizard_group)
+        self.wizard_group = wizard_group
 
         synth_group = QGroupBox("🧪 합성 데이터 / 정답 평가")
         synth_group.setStyleSheet("QGroupBox { font-weight: bold; }")
@@ -1824,6 +2135,15 @@ class TileInterpretationPanel(QWidget):
         synth_layout.addWidget(self.label_synthetic_suite_summary)
 
         layout.addWidget(synth_group)
+        self.synth_group = synth_group
+
+        self.btn_toggle_research_tools = QPushButton("연구/검증 도구 보기")
+        self.btn_toggle_research_tools.setCheckable(True)
+        self.btn_toggle_research_tools.setToolTip(
+            "기록면 보조, 작업 슬롯, 기와 위저드, synthetic benchmark 같은 연구/검증용 도구를 표시합니다."
+        )
+        self.btn_toggle_research_tools.toggled.connect(self._set_research_tools_visible)
+        layout.addWidget(self.btn_toggle_research_tools)
 
         self.label_context = QLabel("선택된 메쉬가 없습니다.")
         self.label_context.setWordWrap(True)
@@ -1837,7 +2157,45 @@ class TileInterpretationPanel(QWidget):
         self.label_workflow.setStyleSheet("font-size: 11px; color: #4a5568;")
         layout.addWidget(self.label_workflow)
 
+        self._set_interpret_detail_tools_visible(False)
+        self._set_research_tools_visible(False)
+
         layout.addStretch()
+
+    def _set_interpret_detail_tools_visible(self, visible: bool) -> None:
+        widgets = [
+            getattr(self, "axis_detail_widget", None),
+            getattr(self, "section_detail_widget", None),
+            getattr(self, "fit_detail_widget", None),
+        ]
+        for widget in widgets:
+            if widget is None:
+                continue
+            widget.setVisible(bool(visible))
+        try:
+            self.btn_toggle_interpret_detail_tools.setText(
+                "세부 실측 도구 숨기기" if visible else "세부 실측 도구 보기"
+            )
+        except Exception:
+            pass
+
+    def _set_research_tools_visible(self, visible: bool) -> None:
+        groups = [
+            getattr(self, "record_group", None),
+            getattr(self, "slot_group", None),
+            getattr(self, "wizard_group", None),
+            getattr(self, "synth_group", None),
+        ]
+        for group in groups:
+            if group is None:
+                continue
+            group.setVisible(bool(visible))
+        try:
+            self.btn_toggle_research_tools.setText(
+                "연구/검증 도구 숨기기" if visible else "연구/검증 도구 보기"
+            )
+        except Exception:
+            pass
 
     def update_state(
         self,
@@ -2391,7 +2749,7 @@ class SlicingPanel(QWidget):
 
 
 class ExportPanel(QWidget):
-    """내보내기 패널"""
+    """기본 도면 출력 패널"""
     
     exportRequested = pyqtSignal(dict)
     
@@ -2403,79 +2761,55 @@ class ExportPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(5, 5, 5, 5)
         layout.setSpacing(10)
-        
-        # 이미지 내보내기
-        img_group = QGroupBox("🖼️ 이미지 내보내기")
+
+        intro = QLabel(
+            "기본 도면 출력에는 검토 시트, 기록면 SVG, 6방향 도면 패키지만 남겼습니다. "
+            "실험적이거나 우회적인 출력은 기본 UI에서 제거했습니다."
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet("font-size: 11px; color: #4a5568;")
+        layout.addWidget(intro)
+
+        img_group = QGroupBox("🧾 기본 출력 설정")
         img_group.setStyleSheet("QGroupBox { font-weight: bold; }")
         img_layout = QFormLayout(img_group)
-        
+
         self.spin_dpi = QSpinBox()
         self.spin_dpi.setRange(72, 1200)
         self.spin_dpi.setValue(DEFAULT_EXPORT_DPI)
         self.spin_dpi.setSuffix(" DPI")
         self.spin_dpi.setToolTip("권장: 300 / 600 / 1200 PPI")
         img_layout.addRow("해상도:", self.spin_dpi)
-        
+
         self.combo_format = QComboBox()
         self.combo_format.addItems(["PNG", "TIFF", "JPEG"])
-        img_layout.addRow("포맷:", self.combo_format)
-        
+
         self.check_scale_bar = QCheckBox("스케일 바 포함")
         self.check_scale_bar.setChecked(True)
         img_layout.addRow("", self.check_scale_bar)
 
-        self.combo_rubbing_target = QComboBox()
-        self.combo_rubbing_target.addItems(
-            ["전체 메쉬", "✨ 현재 선택", "🌞 외면", "🌙 내면", "🧩 미구"]
+        self.combo_review_render_mode = QComboBox()
+        self.combo_review_render_mode.addItem("자동", "auto")
+        self.combo_review_render_mode.addItem("다중광(기록면)", "다중광(기록면)")
+        self.combo_review_render_mode.addItem("노멀 언샵", "노멀 언샵")
+        self.combo_review_render_mode.addItem("스펙큘러 강조", "스펙큘러 강조")
+        self.combo_review_render_mode.addItem("노멀 보기", "노멀 보기")
+        self.combo_review_render_mode.addItem("자연(이미지)", "자연(이미지)")
+        self.combo_review_render_mode.setToolTip(
+            "검토 시트와 미리보기에서 사용할 기록면 렌더 모드입니다.\n"
+            "자동은 기와/기록면일 때 다중광, 일반 경로는 자연(이미지)를 사용합니다."
         )
-        self.combo_rubbing_target.setToolTip(
-            "일반 탁본/기록면 전개 내보내기에서 사용할 대상을 고릅니다.\n"
-            "디지털 탁본은 전체 메쉬면 상/하면 2장, 선택 대상이면 단일 이미지로 저장합니다.\n"
-            "현재뷰 원통 이미지는 이 설정을 사용하지 않습니다."
-        )
-        img_layout.addRow("전개/탁본 대상:", self.combo_rubbing_target)
-        
-        layout.addWidget(img_group)
-        
-        # 버튼
-        btn_export_rubbing = QPushButton("📤 탁본 이미지 내보내기")
-        btn_export_rubbing.setStyleSheet("""
-            QPushButton {
-                background-color: #4299e1;
-                color: white;
-                font-weight: bold;
-                padding: 10px;
-                border-radius: 5px;
-            }
-            QPushButton:hover { background-color: #3182ce; }
-        """)
-        btn_export_rubbing.clicked.connect(
-            lambda: self.exportRequested.emit(
-                {'type': 'rubbing', 'target': self.current_rubbing_target()}
-            )
-        )
-        layout.addWidget(btn_export_rubbing)
+        img_layout.addRow("기록면 렌더:", self.combo_review_render_mode)
 
-        btn_export_rubbing_digital = QPushButton("📤 디지털 탁본 내보내기")
-        btn_export_rubbing_digital.setToolTip(
-            "전체 메쉬는 자동 분리 후 상/하면 2장, 현재 선택/외면/내면/미구는 단일 디지털 탁본으로 저장합니다."
+        self.combo_rubbing_target = QComboBox()
+        self.combo_rubbing_target.addItems(["전체 메쉬", "✨ 현재 선택"])
+        self.combo_rubbing_target.setToolTip(
+            "기본 도면 생성에서 사용할 대상을 고릅니다.\n"
+            "기본 흐름은 '현재 선택' 또는 기와 모드의 상면/하면 기록 준비 결과를 사용하는 것입니다."
         )
-        btn_export_rubbing_digital.setStyleSheet("""
-            QPushButton {
-                background-color: #805ad5;
-                color: white;
-                font-weight: bold;
-                padding: 10px;
-                border-radius: 5px;
-            }
-            QPushButton:hover { background-color: #6b46c1; }
-        """)
-        btn_export_rubbing_digital.clicked.connect(
-            lambda: self.exportRequested.emit(
-                {'type': 'rubbing_digital', 'target': self.current_rubbing_target()}
-            )
-        )
-        layout.addWidget(btn_export_rubbing_digital)
+        img_layout.addRow("도면 대상:", self.combo_rubbing_target)
+
+        layout.addWidget(img_group)
 
         btn_export_review_sheet = QPushButton("📤 기록면 검토 시트 저장")
         btn_export_review_sheet.setToolTip(
@@ -2499,141 +2833,60 @@ class ExportPanel(QWidget):
         )
         layout.addWidget(btn_export_review_sheet)
 
-        btn_export_rubbing_view_cyl = QPushButton("📤 현재뷰 원통 이미지 내보내기(초고속)")
-        btn_export_rubbing_view_cyl.setToolTip(
-            "메쉬 평면화 없이, 현재 보이는 뷰 이미지를 바로 원통 디워프해서 저장합니다."
-        )
-        btn_export_rubbing_view_cyl.setStyleSheet("""
-            QPushButton {
-                background-color: #2f855a;
-                color: white;
-                font-weight: bold;
-                padding: 10px;
-                border-radius: 5px;
-            }
-            QPushButton:hover { background-color: #276749; }
-        """)
-        btn_export_rubbing_view_cyl.clicked.connect(
-            lambda: self.exportRequested.emit(
-                {'type': 'rubbing_view_cyl', 'target': self.current_rubbing_target()}
-            )
-        )
-        layout.addWidget(btn_export_rubbing_view_cyl)
-        
-        btn_export_ortho = QPushButton("📤 정사투영 내보내기")
-        btn_export_ortho.clicked.connect(lambda: self.exportRequested.emit({'type': 'ortho'}))
-        layout.addWidget(btn_export_ortho)
-        
-        # 메쉬 내보내기
-        mesh_group = QGroupBox("💾 메쉬 내보내기")
-        mesh_group.setStyleSheet("QGroupBox { font-weight: bold; }")
-        mesh_layout = QVBoxLayout(mesh_group)
-        
-        btn_export_outer = QPushButton("외면 메쉬 저장")
-        btn_export_outer.clicked.connect(lambda: self.exportRequested.emit({'type': 'mesh_outer'}))
-        mesh_layout.addWidget(btn_export_outer)
-        
-        btn_export_inner = QPushButton("내면 메쉬 저장")
-        btn_export_inner.clicked.connect(lambda: self.exportRequested.emit({'type': 'mesh_inner'}))
-        mesh_layout.addWidget(btn_export_inner)
-        
-        btn_export_flat = QPushButton("전개된 기록면 메쉬 저장")
-        btn_export_flat.clicked.connect(lambda: self.exportRequested.emit({'type': 'mesh_flat'}))
-        mesh_layout.addWidget(btn_export_flat)
-        
         btn_export_flat_svg = QPushButton("기록면 전개 SVG 저장")
         btn_export_flat_svg.setToolTip(
             "전개 결과의 외곽선을 실측 SVG로 저장합니다.\n"
             "기본 출력은 연속 표면의 외곽선만 포함하며, 와이어프레임은 넣지 않습니다."
         )
-        btn_export_flat_svg.clicked.connect(lambda: self.exportRequested.emit({'type': 'flat_svg'}))
-        mesh_layout.addWidget(btn_export_flat_svg)
-
-        btn_export_sheet_svg = QPushButton("통합 SVG (실측+단면+표면 탁본)")
-        btn_export_sheet_svg.setToolTip(
-            "전체 메쉬면 내/외면 탁본을, 현재 선택/외면/내면/미구 대상이면 해당 표면 탁본 1장을 함께 저장합니다."
+        btn_export_flat_svg.clicked.connect(
+            lambda: self.exportRequested.emit({'type': 'flat_svg', 'target': self.current_rubbing_target()})
         )
-        btn_export_sheet_svg.clicked.connect(lambda: self.exportRequested.emit({'type': 'sheet_svg'}))
-        mesh_layout.addWidget(btn_export_sheet_svg)
+        layout.addWidget(btn_export_flat_svg)
 
-        btn_export_sheet_svg_digital = QPushButton("통합 SVG (디지털 탁본)")
-        btn_export_sheet_svg_digital.setToolTip(
-            "전체 메쉬면 디지털 상/하면 탁본을, 선택 대상이면 해당 표면의 디지털 탁본 1장을 함께 저장합니다."
-        )
-        btn_export_sheet_svg_digital.clicked.connect(lambda: self.exportRequested.emit({'type': 'sheet_svg_digital'}))
-        mesh_layout.addWidget(btn_export_sheet_svg_digital)
-        
-        layout.addWidget(mesh_group)
-        
-        # 2D 외곽선 내보내기 (SVG/PDF)
-        profile_group = QGroupBox("🛡️ 2D 실측 도면 내보내기 (SVG)")
+        profile_group = QGroupBox("📦 6방향 도면 패키지")
         profile_group.setStyleSheet("QGroupBox { font-weight: bold; color: #2b6cb0; }")
         profile_layout = QVBoxLayout(profile_group)
-        
-        # 안내 문구
-        lbl_info = QLabel("격자는 이미지, 외곽선은 벡터로 저장됩니다.\n(지정된 뷰 방향에서 투영)")
+
+        lbl_info = QLabel(
+            "Top / Bottom / Front / Back / Left / Right 기준의 2D 실측 도면을 한 폴더에 묶어 저장합니다."
+        )
         lbl_info.setStyleSheet("font-size: 11px; color: #718096;")
+        lbl_info.setWordWrap(True)
         profile_layout.addWidget(lbl_info)
 
-        # 옵션: 격자/배경 포함
         opt_row = QHBoxLayout()
         self.check_profile_include_grid = QCheckBox("격자/배경 포함 (기본)")
         self.check_profile_include_grid.setChecked(True)
-        self.check_profile_include_grid.setToolTip(
-            "체크 시 1cm 격자+화면 캡처가 SVG에 배경 이미지로 포함됩니다(파일이 커짐).\n"
-            "해제 시 벡터(외곽선/가이드)만 저장됩니다."
-        )
+        self.check_profile_include_grid.hide()
         opt_row.addWidget(self.check_profile_include_grid)
-        opt_row.addStretch(1)
         profile_layout.addLayout(opt_row)
 
-        # 옵션: 샤프 엣지(능선) 라인 포함
         feature_row = QHBoxLayout()
         self.check_profile_feature_lines = QCheckBox("✨ 샤프 엣지(능선) 라인 포함")
         self.check_profile_feature_lines.setChecked(False)
-        self.check_profile_feature_lines.setToolTip(
-            "인접 면의 각도(디하이드럴)로 '날카로운 엣지'를 검출해 SVG에 선 레이어로 추가합니다.\n"
-            "값이 낮을수록 선이 많아지고, 스캔 노이즈가 많으면 파일이 커질 수 있습니다."
-        )
+        self.check_profile_feature_lines.hide()
         feature_row.addWidget(self.check_profile_feature_lines, 1)
 
-        feature_row.addWidget(QLabel("임계각:"))
+        feature_label = QLabel("임계각:")
+        feature_label.hide()
+        feature_row.addWidget(feature_label)
         self.spin_profile_feature_angle = QDoubleSpinBox()
         self.spin_profile_feature_angle.setRange(0.0, 180.0)
         self.spin_profile_feature_angle.setSingleStep(5.0)
         self.spin_profile_feature_angle.setValue(60.0)
         self.spin_profile_feature_angle.setSuffix(" °")
-        self.spin_profile_feature_angle.setToolTip("디하이드럴 각도 임계값(도).")
         self.spin_profile_feature_angle.setEnabled(False)
         self.check_profile_feature_lines.toggled.connect(self.spin_profile_feature_angle.setEnabled)
+        self.spin_profile_feature_angle.hide()
         feature_row.addWidget(self.spin_profile_feature_angle)
         profile_layout.addLayout(feature_row)
-        
-        # 6방향 버튼 그리드
-        grid_layout = QGridLayout()
-        views = [
-            ('Top (상면)', 'top'), ('Bottom (하면)', 'bottom'),
-            ('Front (정면)', 'front'), ('Back (후면)', 'back'),
-            ('Left (좌측)', 'left'), ('Right (우측)', 'right')
-        ]
-        
-        for i, (label, view_code) in enumerate(views):
-            btn = QPushButton(label)
-            btn.setStyleSheet("text-align: left; padding: 5px;")
-            btn.clicked.connect(
-                lambda checked, v=view_code: self.exportRequested.emit(
-                    {"type": "profile_2d", "view": v}
-                )
-            )
-            grid_layout.addWidget(btn, i // 2, i % 2)
-            
-        profile_layout.addLayout(grid_layout)
 
         btn_export_pkg = QPushButton("📦 6방향 패키지 내보내기")
         btn_export_pkg.setToolTip("Top/Bottom/Front/Back/Left/Right를 한 폴더에 '뷰별 하위 폴더'로 저장합니다")
         btn_export_pkg.clicked.connect(lambda: self.exportRequested.emit({"type": "profile_2d_package"}))
         profile_layout.addWidget(btn_export_pkg)
         layout.addWidget(profile_group)
+
         layout.addStretch(1)
 
     def current_rubbing_target(self) -> str:
@@ -2643,9 +2896,6 @@ class ExportPanel(QWidget):
             idx = 0
         return {
             1: "selected",
-            2: "outer",
-            3: "inner",
-            4: "migu",
         }.get(idx, "all")
 
     def set_rubbing_target(self, target: str) -> None:
@@ -2653,11 +2903,27 @@ class ExportPanel(QWidget):
         index = {
             "all": 0,
             "selected": 1,
-            "outer": 2,
-            "inner": 3,
-            "migu": 4,
+            "outer": 1,
+            "inner": 1,
+            "migu": 1,
         }.get(key, 0)
         self.combo_rubbing_target.setCurrentIndex(int(index))
+
+    def current_review_render_mode(self) -> str:
+        try:
+            value = self.combo_review_render_mode.currentData()
+        except Exception:
+            value = None
+        text = str(value or "auto").strip()
+        return text or "auto"
+
+    def set_review_render_mode(self, mode: str) -> None:
+        key = str(mode or "auto").strip() or "auto"
+        idx = self.combo_review_render_mode.findData(key)
+        if idx < 0:
+            idx = self.combo_review_render_mode.findData("auto")
+        if idx >= 0:
+            self.combo_review_render_mode.setCurrentIndex(int(idx))
 
 
 class MeasurePanel(QWidget):
@@ -2985,7 +3251,7 @@ class SectionPanel(QWidget):
 class MainWindow(QMainWindow):
     """메인 윈도우"""
 
-    UI_STATE_VERSION = 7
+    UI_STATE_VERSION = 10
     
     def __init__(self):
         super().__init__()
@@ -3128,21 +3394,28 @@ class MainWindow(QMainWindow):
         self.props_panel = InfoBarWidget()
         self.info_dock.setWidget(self.props_panel)
 
+        # 1.5) 기본 작업 흐름
+        self.workflow_dock = QDockWidget("🧭 4축 작업 흐름", self)
+        self.workflow_dock.setObjectName("dock_workflow")
+        self.workflow_panel = WorkflowPanel(self.help_widget)
+        self.workflow_panel.workflowRequested.connect(self.on_workflow_action)
+        self.workflow_dock.setWidget(self.workflow_panel)
+
         # 2) 정치(변환)
-        self.transform_dock = QDockWidget("📐 정치 (변환)", self)
+        self.transform_dock = QDockWidget("세부 · 정위치", self)
         self.transform_dock.setObjectName("dock_transform")
         self.transform_panel = TransformPanel(self.viewport, self.help_widget)
         self.transform_dock.setWidget(self.transform_panel)
 
         # 3) 펼침
-        self.selection_dock = QDockWidget("✋ 표면 선택", self)
+        self.selection_dock = QDockWidget("보조 · 탁본 표면 보정", self)
         self.selection_dock.setObjectName("dock_selection")
         self.selection_panel = SelectionPanel(self.help_widget)
         self.selection_panel.selectionChanged.connect(self.on_selection_action)
         self.selection_dock.setWidget(self.selection_panel)
 
         # 4) 기록면 전개
-        self.flatten_dock = QDockWidget("🗺️ 기록면 전개", self)
+        self.flatten_dock = QDockWidget("세부 · 탁본", self)
         self.flatten_dock.setObjectName("dock_flatten")
         self.flatten_panel = FlattenPanel(self.help_widget)
         self.flatten_panel.flattenRequested.connect(self.on_flatten_requested)
@@ -3159,21 +3432,21 @@ class MainWindow(QMainWindow):
             pass
 
         # 4) 기와 해석
-        self.tile_dock = QDockWidget("🏺 기와 해석 (Tile)", self)
+        self.tile_dock = QDockWidget("세부 · 실측용 도면", self)
         self.tile_dock.setObjectName("dock_tile")
         self.tile_panel = TileInterpretationPanel(self.help_widget)
         self.tile_panel.interpretationChanged.connect(self.on_tile_interpretation_action)
         self.tile_dock.setWidget(self.tile_panel)
 
         # 5) 내보내기
-        self.export_dock = QDockWidget("📤 내보내기", self)
+        self.export_dock = QDockWidget("세부 · 실측/탁본 출력", self)
         self.export_dock.setObjectName("dock_export")
         self.export_panel = ExportPanel()
         self.export_panel.exportRequested.connect(self.on_export_requested)
         self.export_dock.setWidget(self.export_panel)
 
         # 5.5) 치수 측정
-        self.measure_dock = QDockWidget("📏 치수 측정", self)
+        self.measure_dock = QDockWidget("세부 · 제원측정", self)
         self.measure_dock.setObjectName("dock_measure")
         self.measure_panel = MeasurePanel()
         self.measure_panel.measureModeToggled.connect(self.toggle_measure_mode)
@@ -3186,7 +3459,7 @@ class MainWindow(QMainWindow):
         self.measure_dock.setWidget(self.measure_panel)
 
         # 6) 단면/2D 지정 도구 (슬라이싱 + 십자선 + 라인 + ROI)
-        self.section_dock = QDockWidget("📏 단면/2D 지정 도구 (Section)", self)
+        self.section_dock = QDockWidget("보조 · 실측 단면/외곽", self)
         self.section_dock.setObjectName("dock_section")
         section_scroll = QScrollArea()
         section_scroll.setWidgetResizable(True)
@@ -3243,6 +3516,8 @@ class MainWindow(QMainWindow):
         # 공통 도킹/플로팅 옵션
         for dock in [
             self.info_dock,
+            self.workflow_dock,
+            self.transform_dock,
             self.selection_dock,
             self.flatten_dock,
             self.tile_dock,
@@ -3258,16 +3533,18 @@ class MainWindow(QMainWindow):
                 | QDockWidget.DockWidgetFeature.DockWidgetClosable
             )
 
-        # 기본 레이아웃(일러스트레이터 스타일: 상단 정보/정치, 우측 분리, 레이어는 우측 하단)
+        # 기본 레이아웃: 단계형 작업 흐름 + 고급 패널 숨김
         self._apply_default_dock_layout()
 
     def _settings(self) -> QSettings:
         return QSettings("ArchMeshRubbing", "ArchMeshRubbing")
 
     def _apply_default_dock_layout(self):
-        """기본 도킹 레이아웃 적용 (저장된 레이아웃이 없을 때의 초기 배치)"""
+        """기본 도킹 레이아웃 적용: 작업 흐름 중심 화면"""
         for dock in [
             self.info_dock,
+            self.workflow_dock,
+            self.transform_dock,
             self.selection_dock,
             self.flatten_dock,
             self.tile_dock,
@@ -3287,30 +3564,22 @@ class MainWindow(QMainWindow):
         # 상단: 파일/메쉬 정보
         self.addDockWidget(Qt.DockWidgetArea.TopDockWidgetArea, self.info_dock)
 
-        # 우측: 표면 선택 + 펼침 + 기와 해석 + 단면 + 내보내기(+치수)는 탭, 레이어는 우측 하단
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.selection_dock)
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.flatten_dock)
-        self.tabifyDockWidget(self.selection_dock, self.flatten_dock)
+        # 우측: 기본 작업 흐름만 유지
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.workflow_dock)
 
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.tile_dock)
-        self.tabifyDockWidget(self.selection_dock, self.tile_dock)
+        for dock in [
+            self.transform_dock,
+            self.scene_dock,
+            self.selection_dock,
+            self.flatten_dock,
+            self.tile_dock,
+            self.section_dock,
+            self.export_dock,
+            self.measure_dock,
+        ]:
+            dock.hide()
 
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.section_dock)
-        self.tabifyDockWidget(self.selection_dock, self.section_dock)
-
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.export_dock)
-        self.tabifyDockWidget(self.selection_dock, self.export_dock)
-
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.measure_dock)
-        self.tabifyDockWidget(self.selection_dock, self.measure_dock)
-
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.scene_dock)
-        self.splitDockWidget(self.selection_dock, self.scene_dock, Qt.Orientation.Vertical)
-
-        # 크기 비율(대략적인 기본값)
-        self.resizeDocks([self.selection_dock, self.scene_dock], [780, 220], Qt.Orientation.Vertical)
-
-        self.selection_dock.raise_()
+        self.workflow_dock.raise_()
         self._hide_unused_docks()
 
     def _on_flatten_dock_visibility_changed(self, visible: bool) -> None:
@@ -3372,7 +3641,7 @@ class MainWindow(QMainWindow):
                 pass
 
     def _hide_unused_docks(self):
-        for dock in (getattr(self, "transform_dock", None), getattr(self, "help_dock", None)):
+        for dock in (getattr(self, "help_dock", None),):
             if dock is None:
                 continue
             try:
@@ -3387,6 +3656,12 @@ class MainWindow(QMainWindow):
                 dock.hide()
             except Exception:
                 pass
+        try:
+            toolbar = getattr(self, "trans_toolbar", None)
+            if toolbar is not None:
+                toolbar.hide()
+        except Exception:
+            pass
 
     def _save_ui_state(self):
         settings = self._settings()
@@ -3395,12 +3670,16 @@ class MainWindow(QMainWindow):
         settings.setValue("ui/state", self.saveState(self.UI_STATE_VERSION))
 
     def reset_panel_layout(self):
-        """사용자 레이아웃 저장값 삭제 후 기본 레이아웃으로 복구"""
+        """사용자 레이아웃 저장값 삭제 후 기본 화면으로 복구"""
         settings = self._settings()
         settings.remove("ui/geometry")
         settings.remove("ui/state")
         settings.remove("ui/state_version")
         self._apply_default_dock_layout()
+        try:
+            self.status_info.setText("기본 화면으로 복귀했습니다.")
+        except Exception:
+            pass
 
     def closeEvent(self, a0):
         if a0 is None:
@@ -4045,19 +4324,39 @@ class MainWindow(QMainWindow):
 
         view_menu.addSeparator()
 
-        action_reset_layout = QAction("패널 레이아웃 초기화", self)
+        action_show_advanced = QAction("정위치/실측/탁본 도구 열기", self)
+        action_show_advanced.triggered.connect(self._show_advanced_panels)
+        view_menu.addAction(action_show_advanced)
+
+        action_open_selection_tools = QAction("표면 보정 도구 열기", self)
+        action_open_selection_tools.triggered.connect(self._show_selection_panel)
+        view_menu.addAction(action_open_selection_tools)
+
+        action_open_section_tools = QAction("단면/외곽 도구 열기", self)
+        action_open_section_tools.triggered.connect(lambda: self.on_selection_action("open_section_tools", None))
+        view_menu.addAction(action_open_section_tools)
+
+        action_open_measure_tools = QAction("치수 측정 도구 열기", self)
+        action_open_measure_tools.triggered.connect(self._show_measure_panel)
+        view_menu.addAction(action_open_measure_tools)
+
+        action_reset_layout = QAction("기본 화면 복귀", self)
         action_reset_layout.triggered.connect(self.reset_panel_layout)
         view_menu.addAction(action_reset_layout)
 
         panels_menu = view_menu.addMenu("패널 표시/숨김")
         if panels_menu is not None:
+            panels_menu.addAction(self.workflow_dock.toggleViewAction())
             panels_menu.addAction(self.info_dock.toggleViewAction())
+            panels_menu.addAction(self.scene_dock.toggleViewAction())
+            panels_menu.addSeparator()
+            panels_menu.addAction(self.transform_dock.toggleViewAction())
+            panels_menu.addAction(self.tile_dock.toggleViewAction())
             panels_menu.addAction(self.selection_dock.toggleViewAction())
             panels_menu.addAction(self.flatten_dock.toggleViewAction())
-            panels_menu.addAction(self.tile_dock.toggleViewAction())
-            panels_menu.addAction(self.section_dock.toggleViewAction())
             panels_menu.addAction(self.export_dock.toggleViewAction())
-            panels_menu.addAction(self.scene_dock.toggleViewAction())
+            panels_menu.addAction(self.section_dock.toggleViewAction())
+            panels_menu.addAction(self.measure_dock.toggleViewAction())
         
         # 도움말 메뉴
         help_menu = menubar.addMenu("도움말(&H)")
@@ -4118,18 +4417,16 @@ class MainWindow(QMainWindow):
         action_open.triggered.connect(self.open_file)
         toolbar.addAction(action_open)
 
+        action_open_project = QAction("📁 프로젝트", self)
+        action_open_project.triggered.connect(self.open_project)
+        toolbar.addAction(action_open_project)
+
         toolbar.addSeparator()
 
         action_fit = QAction("🔍 뷰 맞춤", self)
         action_fit.setToolTip("메쉬가 화면에 꽉 차도록 카메라 조정")
         action_fit.triggered.connect(self.fit_view)
         toolbar.addAction(action_fit)
-
-        action_draw_floor = QAction("✏️ 바닥 면 그리기", self)
-        action_draw_floor.setToolTip("바닥면이 될 점들을 클릭하여 바닥면 지정을 시작 (Enter로 확정)")
-        action_draw_floor.triggered.connect(self.start_floor_picking)
-        toolbar.addAction(action_draw_floor)
-
 
         toolbar.addSeparator()
         
@@ -4163,6 +4460,30 @@ class MainWindow(QMainWindow):
         action_bottom.setToolTip("하면 뷰 (6)")
         action_bottom.triggered.connect(lambda: self._set_canonical_view("bottom"))
         toolbar.addAction(action_bottom)
+
+        toolbar.addSeparator()
+
+        action_record_top = QAction("상면 기록", self)
+        action_record_top.triggered.connect(
+            lambda: self.on_tile_interpretation_action("prepare_record_surface", {"view": "top"})
+        )
+        toolbar.addAction(action_record_top)
+
+        action_record_bottom = QAction("하면 기록", self)
+        action_record_bottom.triggered.connect(
+            lambda: self.on_tile_interpretation_action("prepare_record_surface", {"view": "bottom"})
+        )
+        toolbar.addAction(action_record_bottom)
+
+        action_preview = QAction("미리보기", self)
+        action_preview.triggered.connect(self.on_flatten_preview_requested)
+        toolbar.addAction(action_preview)
+
+        action_review = QAction("검토 시트", self)
+        action_review.triggered.connect(
+            lambda: self.on_export_requested({"type": "review_sheet", "target": "selected"})
+        )
+        toolbar.addAction(action_review)
 
     def init_statusbar(self):
         self.statusbar = QStatusBar()
@@ -4222,11 +4543,20 @@ class MainWindow(QMainWindow):
         )
         
         if filepath:
-            # 단위 선택 다이얼로그
+            self.open_file_path(filepath, prompt_unit=True)
+
+    def open_file_path(self, filepath: str, *, prompt_unit: bool = True) -> None:
+        """Open a mesh file from a known path."""
+        if not filepath:
+            return
+
+        scale_factor = 1.0
+        if bool(prompt_unit):
             dialog = UnitSelectionDialog(self)
-            if dialog.exec() == QDialog.DialogCode.Accepted:
-                scale_factor = dialog.get_scale_factor()
-                self.load_mesh(filepath, scale_factor)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            scale_factor = dialog.get_scale_factor()
+        self.load_mesh(filepath, scale_factor)
 
     def open_project(self) -> None:
         filepath, _ = QFileDialog.getOpenFileName(
@@ -4611,6 +4941,10 @@ class MainWindow(QMainWindow):
                 profile_feature_angle = float(export_panel.spin_profile_feature_angle.value())
             except Exception:
                 profile_feature_angle = 60.0
+            try:
+                review_render_mode = str(export_panel.current_review_render_mode() or "auto")
+            except Exception:
+                review_render_mode = "auto"
         else:
             dpi = DEFAULT_EXPORT_DPI
             format_index = 0
@@ -4618,6 +4952,7 @@ class MainWindow(QMainWindow):
             profile_include_grid = True
             profile_feature_lines = False
             profile_feature_angle = 60.0
+            review_render_mode = "auto"
 
         ui_state["export"] = {
             "dpi": int(dpi),
@@ -4626,6 +4961,7 @@ class MainWindow(QMainWindow):
             "profile_include_grid": bool(profile_include_grid),
             "profile_feature_lines": bool(profile_feature_lines),
             "profile_feature_angle": float(profile_feature_angle),
+            "review_render_mode": str(review_render_mode or "auto"),
         }
 
         slice_panel = getattr(self, "slice_panel", None)
@@ -5289,6 +5625,9 @@ class MainWindow(QMainWindow):
                 self.export_panel.spin_profile_feature_angle.setValue(
                     float(exp.get("profile_feature_angle", self.export_panel.spin_profile_feature_angle.value()) or 60.0)
                 )
+                self.export_panel.set_review_render_mode(
+                    str(exp.get("review_render_mode", self.export_panel.current_review_render_mode()) or "auto")
+                )
             except Exception:
                 pass
 
@@ -5409,7 +5748,9 @@ class MainWindow(QMainWindow):
                 except Exception:
                     _LOGGER.exception("Failed applying object state from project")
                 self.scene_panel.update_list(self.viewport.objects, self.viewport.selected_index)
-                self.status_info.setText(f"로드됨(프로젝트): {obj_name}")
+                self.status_info.setText(
+                    f"프로젝트 로드됨: {obj_name} | 다음: 1단계 정치에서 기준 시점을 확인하세요."
+                )
             else:
                 # 일반 메쉬 로드 시에는 X-Ray를 기본 해제해 내부 비침 혼란을 줄입니다.
                 try:
@@ -5425,7 +5766,9 @@ class MainWindow(QMainWindow):
                     self.fit_view()
                 except Exception:
                     pass
-                self.status_info.setText(f"로드됨: {Path(filepath).name}")
+                self.status_info.setText(
+                    f"메쉬 로드됨: {Path(filepath).name} | 다음: 1단계 정치에서 기준 시점을 맞추세요."
+                )
                 self.status_mesh.setText(f"V: {mesh_data.n_vertices:,} | F: {mesh_data.n_faces:,}")
                 self.status_grid.setText(f"격자: {self.viewport.grid_spacing}cm")
         finally:
@@ -5721,6 +6064,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self._sync_tile_panel()
+        self._sync_workflow_panel()
         
     def on_selection_changed(self, index):
         self.scene_panel.update_list(self.viewport.objects, index)
@@ -5743,6 +6087,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self._sync_tile_panel()
+        self._sync_workflow_panel()
 
         try:
             self.viewport.clear_measure_picks()
@@ -5764,6 +6109,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self._sync_tile_panel()
+        self._sync_workflow_panel()
 
     def _ensure_tile_interpretation_state(self, obj) -> TileInterpretationState:
         raw_state = getattr(obj, "tile_interpretation_state", None)
@@ -5862,7 +6208,8 @@ class MainWindow(QMainWindow):
                 "next_action": "fit_mandrel",
                 "next_data": {"mode": "selected_preferred"},
             }
-        if str(state.record_view or "").strip().lower() not in {"top", "bottom"}:
+        record_view_key = str(state.record_view or "").strip().lower()
+        if record_view_key not in {"top", "bottom"}:
             return {
                 "summary": "6/6 상면 또는 하면 기록면을 준비하면 위저드가 완료됩니다.",
                 "progress": 88,
@@ -5871,7 +6218,17 @@ class MainWindow(QMainWindow):
                 "next_action": "prepare_record_surface",
                 "next_data": {"view": "top"},
             }
-        record_label = "상면" if str(state.record_view).strip().lower() == "top" else "하면"
+        if selected_faces <= 0:
+            record_label = "상면" if record_view_key == "top" else "하면"
+            return {
+                "summary": f"6/6 {record_label} 기록면을 계산 중이거나 선택이 비어 있습니다. 다시 준비하거나 보정 후 진행하세요.",
+                "progress": 92,
+                "next_label": f"다음 단계: {record_label} 기록면 다시 준비",
+                "next_enabled": True,
+                "next_action": "prepare_record_surface",
+                "next_data": {"view": record_view_key},
+            }
+        record_label = "상면" if record_view_key == "top" else "하면"
         return {
             "summary": f"완료: {record_label} 기록면이 준비되었습니다. 검토 시트 저장이나 평가를 실행할 수 있습니다.",
             "progress": 100,
@@ -6032,11 +6389,19 @@ class MainWindow(QMainWindow):
     def _sync_tile_panel(self) -> None:
         panel = getattr(self, "tile_panel", None)
         if panel is None:
+            try:
+                self._sync_workflow_panel()
+            except Exception:
+                pass
             return
 
         obj = getattr(self.viewport, "selected_obj", None)
         if obj is None or getattr(obj, "mesh", None) is None:
             panel.update_state(None, object_name="", object_unit="", selected_faces=0, total_faces=0)
+            try:
+                self._sync_workflow_panel()
+            except Exception:
+                pass
             return
 
         state = self._ensure_tile_interpretation_state(obj)
@@ -6048,6 +6413,13 @@ class MainWindow(QMainWindow):
             total_faces = int(getattr(getattr(obj, "mesh", None), "n_faces", 0) or 0)
         except Exception:
             total_faces = 0
+        record_view_key = str(getattr(state, "record_view", "") or "").strip().lower()
+        if record_view_key in {"top", "bottom"}:
+            if int(selected_faces) > 0:
+                if str(getattr(state, "workflow_stage", "") or "") != "record_surface":
+                    state.workflow_stage = "record_surface"
+            elif str(getattr(state, "workflow_stage", "") or "") == "record_surface":
+                state.workflow_stage = "record_surface_pending"
         truth = self._coerce_synthetic_truth(getattr(obj, "tile_synthetic_truth", None))
         report = self._coerce_tile_evaluation_report(getattr(obj, "tile_evaluation_report", None))
         wizard = self._tile_wizard_status(obj, state)
@@ -6068,6 +6440,212 @@ class MainWindow(QMainWindow):
                 unit=str(getattr(getattr(obj, "mesh", None), "unit", "") or "mm"),
             ),
         )
+        try:
+            self._sync_workflow_panel()
+        except Exception:
+            pass
+
+    def _show_dock_on_right(self, dock: QDockWidget, *, tab_with: QDockWidget | None = None) -> None:
+        if dock is None:
+            return
+        try:
+            self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+        except Exception:
+            pass
+        try:
+            dock.show()
+        except Exception:
+            pass
+        try:
+            if tab_with is not None and tab_with is not dock and tab_with.isVisible():
+                self.tabifyDockWidget(tab_with, dock)
+        except Exception:
+            pass
+        try:
+            dock.raise_()
+        except Exception:
+            pass
+
+    def _show_measure_panel(self) -> None:
+        anchor = None
+        try:
+            if self.tile_dock.isVisible():
+                anchor = self.tile_dock
+        except Exception:
+            anchor = None
+        self._show_dock_on_right(self.measure_dock, tab_with=anchor)
+        try:
+            self.status_info.setText("제원측정 도구를 열었습니다. 기본 작업은 4축 작업 흐름 패널에서 이어집니다.")
+        except Exception:
+            pass
+
+    def _show_selection_panel(self) -> None:
+        anchor = None
+        try:
+            if self.flatten_dock.isVisible():
+                anchor = self.flatten_dock
+            elif self.tile_dock.isVisible():
+                anchor = self.tile_dock
+        except Exception:
+            anchor = None
+        self._show_dock_on_right(self.selection_dock, tab_with=anchor)
+        try:
+            self.status_info.setText("탁본 표면 보정 도구를 열었습니다. 기본 작업은 4축 작업 흐름 패널에서 이어집니다.")
+        except Exception:
+            pass
+
+    def _show_advanced_panels(self) -> None:
+        primary = [self.transform_dock, self.tile_dock, self.flatten_dock, self.export_dock]
+        try:
+            anchor = None
+            for dock in primary:
+                self._show_dock_on_right(dock, tab_with=anchor)
+                if anchor is None:
+                    anchor = dock
+            self.transform_dock.raise_()
+        except Exception:
+            pass
+        try:
+            self.workflow_dock.raise_()
+        except Exception:
+            pass
+        try:
+            toolbar = getattr(self, "trans_toolbar", None)
+            if toolbar is not None:
+                toolbar.show()
+        except Exception:
+            pass
+        try:
+            self.status_info.setText("정위치/실측/탁본 세부 도구를 열었습니다. 기본 흐름은 오른쪽 4축 작업 패널에 남아 있습니다.")
+        except Exception:
+            pass
+
+    def _sync_workflow_panel(self) -> None:
+        panel = getattr(self, "workflow_panel", None)
+        if panel is None:
+            return
+
+        obj = getattr(self.viewport, "selected_obj", None)
+        if obj is None or getattr(obj, "mesh", None) is None:
+            panel.update_state(has_object=False)
+            return
+
+        state = self._ensure_tile_interpretation_state(obj)
+        try:
+            selected_faces = len(getattr(obj, "selected_faces", set()) or set())
+        except Exception:
+            selected_faces = 0
+        try:
+            total_faces = int(getattr(getattr(obj, "mesh", None), "n_faces", 0) or 0)
+        except Exception:
+            total_faces = 0
+
+        cam = getattr(self.viewport, "camera", None)
+        canonical_view = None
+        try:
+            if cam is not None:
+                canonical_view = _canonical_view_key_from_angles(
+                    float(getattr(cam, "azimuth", 0.0) or 0.0),
+                    float(getattr(cam, "elevation", 0.0) or 0.0),
+                )
+        except Exception:
+            canonical_view = None
+
+        tile_bits: list[str] = []
+        if getattr(state, "tile_class", TileClass.UNKNOWN) != TileClass.UNKNOWN:
+            tile_bits.append(state.tile_class.label_ko)
+        if getattr(state, "split_scheme", SplitScheme.UNKNOWN) != SplitScheme.UNKNOWN:
+            tile_bits.append(state.split_scheme.label_ko)
+        if bool(getattr(getattr(state, "mandrel_fit", None), "is_defined", lambda: False)()):
+            tile_bits.append("와통")
+        tile_summary = " / ".join(tile_bits)
+
+        wizard = self._tile_wizard_status(obj, state)
+        panel.update_state(
+            has_object=True,
+            object_name=str(getattr(obj, "name", "") or "Object"),
+            selected_faces=int(selected_faces),
+            total_faces=int(total_faces),
+            canonical_view=str(canonical_view or ""),
+            record_view=str(getattr(state, "record_view", "") or ""),
+            tile_summary=tile_summary,
+            wizard_summary=str(wizard.get("summary", "") or ""),
+            wizard_progress=int(wizard.get("progress", 0) or 0),
+            wizard_next_label=str(wizard.get("next_label", "") or ""),
+            wizard_next_enabled=bool(wizard.get("next_enabled", False)),
+        )
+
+    def on_workflow_action(self, action: str, data: object) -> None:
+        if action == "open_mesh":
+            self.open_file()
+            return
+        if action == "open_project":
+            self.open_project()
+            return
+        if action == "fit_view":
+            self.fit_view()
+            return
+        if action == "canonical_view":
+            try:
+                view_key = str((data or {}).get("view", "")).strip().lower()
+            except Exception:
+                view_key = ""
+            if view_key:
+                self._set_canonical_view(view_key)
+            return
+        if action == "run_interpretation_next":
+            self.on_tile_interpretation_action("run_wizard_next", None)
+            return
+        if action == "show_section_tools":
+            self.on_selection_action("open_section_tools", None)
+            return
+        if action == "show_measure_tools":
+            self._show_measure_panel()
+            return
+        if action == "prepare_record_surface":
+            self.on_tile_interpretation_action("prepare_record_surface", data)
+            return
+        if action == "select_visible_faces":
+            self.on_selection_action("select_visible_faces", None)
+            return
+        if action == "preview_recording_surface":
+            try:
+                self.export_panel.set_rubbing_target("selected")
+            except Exception:
+                pass
+            self.on_flatten_preview_requested()
+            return
+        if action == "unwrap_recording_surface":
+            try:
+                self.export_panel.set_rubbing_target("selected")
+            except Exception:
+                pass
+            self.on_flatten_requested(self._current_flatten_panel_options(surface_target="selected"))
+            return
+        if action == "export_review_sheet":
+            try:
+                self.export_panel.set_rubbing_target("selected")
+            except Exception:
+                pass
+            self.on_export_requested({"type": "review_sheet", "target": "selected"})
+            return
+        if action == "export_flat_svg":
+            try:
+                self.export_panel.set_rubbing_target("selected")
+            except Exception:
+                pass
+            self.on_export_requested({"type": "flat_svg", "target": "selected"})
+            return
+        if action == "export_profile_package":
+            self.on_export_requested({"type": "profile_2d_package"})
+            return
+        if action == "show_advanced_panels":
+            self._show_advanced_panels()
+            self.status_info.setText("정위치/실측용 도면/탁본 세부 도구를 열었습니다.")
+            return
+        if action == "show_selection_panel":
+            self._show_selection_panel()
+            return
 
     def _build_tile_scope_mesh(self, obj, *, mode: str):
         world_mesh = self._build_world_mesh(obj)
@@ -6089,6 +6667,13 @@ class MainWindow(QMainWindow):
         if export_panel is not None:
             try:
                 export_panel.set_rubbing_target("selected")
+            except Exception:
+                pass
+
+        obj = getattr(self.viewport, "selected_obj", None)
+        if obj is not None and getattr(obj, "mesh", None) is not None:
+            try:
+                self._set_object_selected_faces(obj, [])
             except Exception:
                 pass
 
@@ -6158,6 +6743,24 @@ class MainWindow(QMainWindow):
         if text:
             return text
         return ""
+
+    @staticmethod
+    def _review_rubbing_preset_for_options(options: dict[str, Any] | None) -> str:
+        data = dict(options or {})
+        if bool(data.get("tile_guided", False)) or str(data.get("tile_record_view", "") or "").strip():
+            return "다중광(기록면)"
+        return "자연(이미지)"
+
+    def _selected_review_rubbing_preset(self, options: dict[str, Any] | None) -> str:
+        try:
+            export_panel = getattr(self, "export_panel", None)
+            mode = export_panel.current_review_render_mode() if export_panel is not None else "auto"
+        except Exception:
+            mode = "auto"
+        mode = str(mode or "auto").strip() or "auto"
+        if mode == "auto":
+            return self._review_rubbing_preset_for_options(options)
+        return mode
 
     def _build_review_summary_context(
         self,
@@ -6527,8 +7130,12 @@ class MainWindow(QMainWindow):
                     profile_point_count=item.profile_point_count,
                     profile_width_world=item.profile_width_world,
                     profile_depth_world=item.profile_depth_world,
+                    profile_center_world=item.profile_center_world,
                     profile_radius_median_world=item.profile_radius_median_world,
                     profile_radius_iqr_world=item.profile_radius_iqr_world,
+                    profile_fit_rmse_world=item.profile_fit_rmse_world,
+                    profile_arc_span_deg=item.profile_arc_span_deg,
+                    profile_fit_confidence=item.profile_fit_confidence,
                     note=item.note,
                 )
             )
@@ -6568,8 +7175,12 @@ class MainWindow(QMainWindow):
                     profile_point_count=item.profile_point_count,
                     profile_width_world=item.profile_width_world,
                     profile_depth_world=item.profile_depth_world,
+                    profile_center_world=item.profile_center_world,
                     profile_radius_median_world=item.profile_radius_median_world,
                     profile_radius_iqr_world=item.profile_radius_iqr_world,
+                    profile_fit_rmse_world=item.profile_fit_rmse_world,
+                    profile_arc_span_deg=item.profile_arc_span_deg,
+                    profile_fit_confidence=item.profile_fit_confidence,
                     note=item.note,
                 )
             )
@@ -6638,8 +7249,12 @@ class MainWindow(QMainWindow):
             profile_point_count = 0
             profile_width_world = 0.0
             profile_depth_world = 0.0
+            profile_center_world = None
             profile_radius_median_world = None
             profile_radius_iqr_world = 0.0
+            profile_fit_rmse_world = 0.0
+            profile_arc_span_deg = 0.0
+            profile_fit_confidence = 0.0
 
             try:
                 if origin is not None and normal is not None:
@@ -6660,24 +7275,66 @@ class MainWindow(QMainWindow):
 
                     if contour_pts:
                         profile_contour_count = len(contour_pts)
-                        pts = np.vstack(contour_pts)
-                        rel = pts - origin_arr
-                        u_vals = rel @ u_axis
-                        v_vals = rel @ v_axis
-                        radii = np.sqrt((u_vals * u_vals) + (v_vals * v_vals))
-                        finite = np.isfinite(u_vals) & np.isfinite(v_vals) & np.isfinite(radii)
-                        u_vals = u_vals[finite]
-                        v_vals = v_vals[finite]
-                        radii = radii[finite]
-                        if radii.size > 0:
-                            profile_point_count = int(radii.size)
-                            q05_u, q95_u = np.quantile(u_vals, [0.05, 0.95])
-                            q05_v, q95_v = np.quantile(v_vals, [0.05, 0.95])
-                            q25_r, q50_r, q75_r = np.quantile(radii, [0.25, 0.50, 0.75])
+                        best_fit = None
+                        best_points_uv = None
+                        best_score = -1.0
+                        all_points_uv: list[np.ndarray] = []
+
+                        for contour in contour_pts:
+                            rel = contour - origin_arr
+                            u_vals = rel @ u_axis
+                            v_vals = rel @ v_axis
+                            uv = np.column_stack([u_vals, v_vals]).astype(np.float64, copy=False)
+                            uv = uv[np.isfinite(uv).all(axis=1)]
+                            if uv.shape[0] < 3:
+                                continue
+                            all_points_uv.append(uv)
+                            fit = fit_circle_2d(uv)
+                            score = float(fit.confidence) * max(float(fit.used_points), 1.0)
+                            if fit.is_defined() and score > best_score:
+                                best_fit = fit
+                                best_points_uv = uv
+                                best_score = score
+
+                        if best_fit is None and all_points_uv:
+                            stacked = np.vstack(all_points_uv)
+                            fallback_fit = fit_circle_2d(stacked, min_points=6)
+                            if fallback_fit.is_defined():
+                                best_fit = fallback_fit
+                                best_points_uv = stacked
+
+                        if best_fit is not None and best_points_uv is not None:
+                            q05_u, q95_u = np.quantile(best_points_uv[:, 0], [0.05, 0.95])
+                            q05_v, q95_v = np.quantile(best_points_uv[:, 1], [0.05, 0.95])
+                            profile_point_count = int(max(best_fit.used_points, best_points_uv.shape[0]))
                             profile_width_world = float(max(0.0, q95_u - q05_u))
                             profile_depth_world = float(max(0.0, q95_v - q05_v))
-                            profile_radius_median_world = float(q50_r)
-                            profile_radius_iqr_world = float(max(0.0, q75_r - q25_r))
+                            profile_radius_median_world = float(best_fit.radius or 0.0)
+                            profile_radius_iqr_world = float(max(0.0, best_fit.radius_iqr))
+                            profile_fit_rmse_world = float(max(0.0, best_fit.rmse))
+                            profile_arc_span_deg = float(max(0.0, best_fit.arc_span_deg))
+                            profile_fit_confidence = float(np.clip(best_fit.confidence, 0.0, 1.0))
+                            if best_fit.center_xy is not None:
+                                cu, cv = best_fit.center_xy
+                                center_world = origin_arr + (u_axis * float(cu)) + (v_axis * float(cv))
+                                profile_center_world = (
+                                    float(center_world[0]),
+                                    float(center_world[1]),
+                                    float(center_world[2]),
+                                )
+                        elif all_points_uv:
+                            stacked = np.vstack(all_points_uv)
+                            radii = np.linalg.norm(stacked, axis=1)
+                            radii = radii[np.isfinite(radii)]
+                            if radii.size > 0:
+                                profile_point_count = int(radii.size)
+                                q05_u, q95_u = np.quantile(stacked[:, 0], [0.05, 0.95])
+                                q05_v, q95_v = np.quantile(stacked[:, 1], [0.05, 0.95])
+                                q25_r, q50_r, q75_r = np.quantile(radii, [0.25, 0.50, 0.75])
+                                profile_width_world = float(max(0.0, q95_u - q05_u))
+                                profile_depth_world = float(max(0.0, q95_v - q05_v))
+                                profile_radius_median_world = float(q50_r)
+                                profile_radius_iqr_world = float(max(0.0, q75_r - q25_r))
             except Exception:
                 pass
 
@@ -6692,8 +7349,12 @@ class MainWindow(QMainWindow):
                     profile_point_count=profile_point_count,
                     profile_width_world=profile_width_world,
                     profile_depth_world=profile_depth_world,
+                    profile_center_world=profile_center_world,
                     profile_radius_median_world=profile_radius_median_world,
                     profile_radius_iqr_world=profile_radius_iqr_world,
+                    profile_fit_rmse_world=profile_fit_rmse_world,
+                    profile_arc_span_deg=profile_arc_span_deg,
+                    profile_fit_confidence=profile_fit_confidence,
                     note=item.note,
                 )
             )
@@ -6721,6 +7382,11 @@ class MainWindow(QMainWindow):
             if item.profile_radius_median_world is not None and int(item.profile_point_count or 0) > 0
         ]
         if profile_ready:
+            centered_ready = [
+                item
+                for item in profile_ready
+                if item.profile_center_world is not None and float(getattr(item, "profile_fit_confidence", 0.0) or 0.0) > 0.15
+            ]
             radius_values = np.asarray(
                 [float(item.profile_radius_median_world) for item in profile_ready],
                 dtype=np.float64,
@@ -6749,6 +7415,15 @@ class MainWindow(QMainWindow):
             axis_vec = np.asarray(axis_hint.vector_world, dtype=np.float64).reshape(3)
             axis_vec = axis_vec / max(float(np.linalg.norm(axis_vec)), 1e-12)
             axis_origin = np.asarray(axis_hint.origin_world or np.zeros(3, dtype=np.float64), dtype=np.float64).reshape(3)
+            if centered_ready:
+                origin_candidates = []
+                for item in centered_ready:
+                    center_world = np.asarray(item.profile_center_world, dtype=np.float64).reshape(3)
+                    station = float(item.station or 0.0)
+                    origin_candidates.append(center_world - (axis_vec * station))
+                if origin_candidates:
+                    origin_arr = np.vstack(origin_candidates)
+                    axis_origin = np.median(origin_arr, axis=0)
             return MandrelFitResult(
                 radius_world=radius_world,
                 radius_spread_world=radius_spread_world,
@@ -7159,7 +7834,7 @@ class MainWindow(QMainWindow):
                 label = self._prepare_tile_record_surface(view=view_key)
                 state.record_view = view_key
                 state.record_strategy = "canonical_visible"
-                state.workflow_stage = "record_surface"
+                state.workflow_stage = "record_surface_pending"
                 self.status_info.setText(
                     f"기와 해석: {label} 기록면 자동 준비 중 (내부적으로 현재 선택 사용)"
                 )
@@ -7317,6 +7992,7 @@ class MainWindow(QMainWindow):
                             options=RecordingSurfaceReviewOptions(
                                 dpi=dpi,
                                 width_pixels=1600,
+                                rubbing_preset=self._selected_review_rubbing_preset(opts),
                                 title=f"기록면 검토 시트 - {record_label}",
                                 summary_lines=summary_lines,
                                 show_scale_bar=include_scale,
@@ -7781,8 +8457,11 @@ class MainWindow(QMainWindow):
 
         if action == "open_section_tools":
             try:
-                self.section_dock.show()
-                self.section_dock.raise_()
+                anchor = self.tile_dock if self.tile_dock.isVisible() else None
+            except Exception:
+                anchor = None
+            try:
+                self._show_dock_on_right(self.section_dock, tab_with=anchor)
             except Exception:
                 pass
             try:
@@ -8834,6 +9513,7 @@ class MainWindow(QMainWindow):
                     options=RecordingSurfaceReviewOptions(
                         dpi=int(self.export_panel.spin_dpi.value()) if hasattr(self, "export_panel") else DEFAULT_EXPORT_DPI,
                         width_pixels=1600,
+                        rubbing_preset=self._selected_review_rubbing_preset(options),
                         title=f"기록면 전개 미리보기 - {record_label}",
                         summary_lines=build_recording_surface_summary_lines(
                             flattened,
@@ -8907,10 +9587,32 @@ class MainWindow(QMainWindow):
             "target",
             self.export_panel.current_rubbing_target() if hasattr(self, "export_panel") else "all",
         )
+        retired_export_types = {
+            "rubbing",
+            "rubbing_digital",
+            "rubbing_view_cyl",
+            "ortho",
+            "sheet_svg",
+            "sheet_svg_digital",
+            "mesh_outer",
+            "mesh_inner",
+            "mesh_flat",
+        }
+        if export_type in retired_export_types:
+            QMessageBox.information(
+                self,
+                "기본 워크플로우에서 제거됨",
+                "이 출력 방식은 기본 고고학 워크플로우에서 제거되었습니다.\n\n"
+                "대신 '기록면 검토 시트 저장', '기록면 전개 SVG 저장', "
+                "또는 '6방향 도면 패키지 내보내기'를 사용하세요.",
+            )
+            try:
+                self.status_info.setText("기본 워크플로우에서 제거된 내보내기 방식입니다.")
+            except Exception:
+                pass
+            return
         target = _normalize_surface_target(requested_target)
         requested_target_normalized = target
-        if export_type in {"rubbing_view_cyl"}:
-            target = "all"
         
         if export_type == 'profile_2d':
             self.export_2d_profile(data.get('view'))
@@ -8919,7 +9621,7 @@ class MainWindow(QMainWindow):
         if export_type == "profile_2d_package":
             self.export_2d_profile_package()
             return
-            
+
         if not self.viewport.selected_obj:
             QMessageBox.warning(self, "경고", "선택된 메쉬가 없습니다.")
             return
@@ -8931,1071 +9633,208 @@ class MainWindow(QMainWindow):
 
         flatten_options = self._current_flatten_panel_options(surface_target=target)
         flatten_options = self._resolve_flatten_options(obj, flatten_options)
-        if export_type != "rubbing_view_cyl":
-            target = _normalize_surface_target(flatten_options.get("surface_target", target))
-            if target != requested_target_normalized and hasattr(self, "export_panel"):
-                try:
-                    self.export_panel.set_rubbing_target(target)
-                except Exception:
-                    pass
+        target = _normalize_surface_target(flatten_options.get("surface_target", target))
+        if target != requested_target_normalized and hasattr(self, "export_panel"):
+            try:
+                self.export_panel.set_rubbing_target(target)
+            except Exception:
+                pass
 
         target_label = _surface_target_label(target)
         target_face_ids = _surface_target_face_ids(obj, target)
         strategy_suffix = self._flatten_strategy_suffix(flatten_options)
-        
-        if export_type == 'rubbing':
-            filepath, _ = QFileDialog.getSaveFileName(
-                self, "탁본 이미지 저장", "", "PNG (*.png);;TIFF (*.tiff)"
-            )
-            if filepath:
-                self.status_info.setText(f"내보내기: {filepath}")
 
-                dpi = int(self.export_panel.spin_dpi.value())
-                include_scale = bool(self.export_panel.check_scale_bar.isChecked())
+        base = obj.mesh
+        translation = (
+            np.asarray(obj.translation, dtype=np.float64).copy()
+            if getattr(obj, "translation", None) is not None
+            else None
+        )
+        rotation = (
+            np.asarray(obj.rotation, dtype=np.float64).copy()
+            if getattr(obj, "rotation", None) is not None
+            else None
+        )
+        scale = float(getattr(obj, "scale", 1.0))
 
-                face_ids = target_face_ids
-                if target != "all":
-                    if face_ids.size <= 0:
-                        if target == "selected":
-                            body = (
-                                "현재 선택된 면이 없습니다.\n\n"
-                                "브러시/올가미/경계 도구로 기록할 표면을 먼저 선택한 뒤 다시 시도하세요."
-                            )
-                        else:
-                            body = (
-                                f"'{target_label}' 지정이 비어 있습니다.\n\n"
-                                "우측 '표면 선택/지정'에서 외면/내면/미구를 먼저 지정하거나,\n"
-                                "대상을 '전체 메쉬' 또는 '현재 선택'으로 바꿔 내보내세요."
-                            )
-                        QMessageBox.warning(
-                            self,
-                            "경고",
-                            body,
-                        )
-                        return
-
-                flatten_options_target = dict(flatten_options)
-                flatten_options_target["surface_target"] = target
-                key = self._flatten_cache_key(obj, flatten_options_target)
-                cached_flat = self._flattened_cache.get(key)
-                base = obj.mesh
-                translation = (
-                    np.asarray(obj.translation, dtype=np.float64).copy()
-                    if getattr(obj, "translation", None) is not None
-                    else None
+        def _ensure_recording_surface_ready(action_label: str) -> bool:
+            if target == "all" or target_face_ids.size > 0:
+                return True
+            if target == "selected":
+                body = (
+                    "현재 선택된 면이 없습니다.\n\n"
+                    f"표준 시점 버튼이나 가시면 선택으로 먼저 {action_label} 기록면을 준비한 뒤 다시 시도하세요."
                 )
-                rotation = (
-                    np.asarray(obj.rotation, dtype=np.float64).copy()
-                    if getattr(obj, "rotation", None) is not None
-                    else None
+            else:
+                body = (
+                    f"'{target_label}' 지정이 비어 있습니다.\n\n"
+                    "대상을 '전체 메쉬' 또는 '현재 선택'으로 바꾸거나,\n"
+                    "표면 선택/지정에서 먼저 영역을 지정해 주세요."
                 )
-                scale = float(getattr(obj, "scale", 1.0))
-                opts = dict(flatten_options_target)
+            QMessageBox.warning(self, "경고", body)
+            return False
 
-                def task_export_rubbing():
-                    from src.core.surface_visualizer import SurfaceVisualizer
-
-                    if cached_flat is not None:
-                        flattened = cached_flat
-                    else:
-                        mesh = MainWindow._build_world_mesh_from_transform(
-                            base, translation=translation, rotation=rotation, scale=scale
-                        )
-                        if target != "all":
-                            mesh = mesh.extract_submesh(face_ids)
-                        flattened = MainWindow._compute_flattened_mesh(mesh, opts)
-
-                    # DPI 기준으로 출력 폭 계산 (실측 스케일 유지를 위해)
-                    unit = (flattened.original_mesh.unit or "mm").lower()
-                    width_in = _width_in_inches(float(flattened.width), unit)
-                    width_pixels = max(MIN_EXPORT_WIDTH_PX, int(width_in * dpi))
-                    width_pixels = min(width_pixels, MAX_EXPORT_WIDTH_PX)  # output width guard
-
-                    visualizer = SurfaceVisualizer(default_dpi=dpi)
-                    rubbing = visualizer.generate_rubbing(
-                        flattened,
-                        width_pixels=width_pixels,
-                        preset="자연(이미지)",
-                    )
-                    rubbing.save(filepath, include_scale_bar=include_scale)
-                    return {"path": filepath, "key": key, "flattened": flattened if cached_flat is None else None}
-
-                def on_done_export_rubbing(result: Any):
-                    if isinstance(result, dict):
-                        flat = result.get("flattened")
-                        if flat is not None:
-                            self._flattened_cache[key] = flat
-
-                    QMessageBox.information(self, "완료", f"탁본 이미지가 저장되었습니다:\n{filepath}")
-                    self.status_info.setText(f"✅ 저장 완료: {Path(filepath).name}")
-
-                def on_failed(message: str):
-                    self.status_info.setText("❌ 저장 실패")
-                    QMessageBox.critical(self, "오류", self._format_error_message("탁본 저장 중 오류 발생:", message))
-
-                self._start_task(
-                    title="내보내기",
-                    label=f"탁본 이미지 생성/저장 중{strategy_suffix}...",
-                    thread=TaskThread("export_rubbing", task_export_rubbing),
-                    on_done=on_done_export_rubbing,
-                    on_failed=on_failed,
-                )
-
-        elif export_type == 'rubbing_digital':
-            filepath, _ = QFileDialog.getSaveFileName(
-                self, "디지털 탁본 저장", "", "PNG (*.png);;TIFF (*.tiff)"
-            )
-            if filepath:
-                self.status_info.setText(f"내보내기: {filepath}")
-
-                dpi = int(self.export_panel.spin_dpi.value())
-                include_scale = bool(self.export_panel.check_scale_bar.isChecked())
-                face_ids = target_face_ids
-                if target != "all" and face_ids.size <= 0:
-                    if target == "selected":
-                        body = (
-                            "현재 선택된 면이 없습니다.\n\n"
-                            "브러시/올가미/경계 도구로 디지털 탁본을 만들 표면을 먼저 선택한 뒤 다시 시도하세요."
-                        )
-                    else:
-                        body = (
-                            f"'{target_label}' 지정이 비어 있습니다.\n\n"
-                            "우측 '표면 선택/지정'에서 영역을 지정하거나,\n"
-                            "대상을 '전체 메쉬' 또는 '현재 선택'으로 바꿔 저장하세요."
-                        )
-                    QMessageBox.warning(self, "경고", body)
-                    return
-
-                base = obj.mesh
-                translation = (
-                    np.asarray(obj.translation, dtype=np.float64).copy()
-                    if getattr(obj, "translation", None) is not None
-                    else None
-                )
-                rotation = (
-                    np.asarray(obj.rotation, dtype=np.float64).copy()
-                    if getattr(obj, "rotation", None) is not None
-                    else None
-                )
-                scale = float(getattr(obj, "scale", 1.0))
-
-                out_path = Path(filepath)
-                out_suffix = out_path.suffix if out_path.suffix else ".png"
-                out_dir = out_path.parent
-                out_stem = out_path.stem
-                top_path = str(out_dir / f"{out_stem}_top{out_suffix}")
-                bottom_path = str(out_dir / f"{out_stem}_bottom{out_suffix}")
-
-                # Generic workflow keeps cylindrical flattening, but tile-guided
-                # mode reuses the interpreted axis/radius/section options.
-                opts = dict(flatten_options)
-                if not bool(flatten_options.get("tile_guided", False)):
-                    opts["method"] = "원통 펼침"
-                    opts["iterations"] = 0
-                opts["surface_target"] = target
-
-                def task_export_rubbing_digital():
-                    from src.core.surface_visualizer import SurfaceVisualizer
-                    from src.core.rubbing_sheet_exporter import RubbingSheetExporter
-
-                    mesh = MainWindow._build_world_mesh_from_transform(
-                        base, translation=translation, rotation=rotation, scale=scale
-                    )
-                    visualizer = SurfaceVisualizer(default_dpi=dpi)
-                    if target != "all":
-                        mesh = mesh.extract_submesh(face_ids)
-                        flattened = MainWindow._compute_flattened_mesh(mesh, opts)
-                        unit = (flattened.original_mesh.unit or "mm").lower()
-                        width_in = _width_in_inches(float(flattened.width), unit)
-                        width_pixels = max(MIN_EXPORT_WIDTH_PX, int(width_in * dpi))
-                        width_pixels = min(width_pixels, MAX_EXPORT_WIDTH_PX)
-                        rubbing = visualizer.generate_rubbing(
-                            flattened,
-                            width_pixels=width_pixels,
-                            preset="디지털(곡률 제거)",
-                        )
-                        rubbing.save(filepath, include_scale_bar=include_scale)
-                        return {"selected": filepath}
-
-                    splitter = RubbingSheetExporter()
-                    outer_mesh, inner_mesh = splitter.split_outer_inner(mesh, threshold=0.15)
-
-                    saved_paths: dict[str, str] = {}
-
-                    def _render_and_save(side_mesh, side_path: str) -> bool:
-                        try:
-                            n_faces = int(getattr(side_mesh, "n_faces", 0) or 0)
-                        except Exception:
-                            n_faces = 0
-                        if n_faces <= 0:
-                            return False
-
-                        flattened = MainWindow._compute_flattened_mesh(side_mesh, opts)
-                        unit = (flattened.original_mesh.unit or "mm").lower()
-                        width_in = _width_in_inches(float(flattened.width), unit)
-                        width_pixels = max(MIN_EXPORT_WIDTH_PX, int(width_in * dpi))
-                        width_pixels = min(width_pixels, MAX_EXPORT_WIDTH_PX)
-
-                        rubbing = visualizer.generate_rubbing(
-                            flattened,
-                            width_pixels=width_pixels,
-                            preset="디지털(곡률 제거)",
-                        )
-                        rubbing.save(side_path, include_scale_bar=include_scale)
-                        return True
-
-                    if _render_and_save(outer_mesh, top_path):
-                        saved_paths["top"] = top_path
-                    if _render_and_save(inner_mesh, bottom_path):
-                        saved_paths["bottom"] = bottom_path
-
-                    if not saved_paths:
-                        raise RuntimeError("내/외면 자동 분리 결과가 비어 상/하면 이미지를 생성하지 못했습니다.")
-                    return saved_paths
-
-                def on_done_export_rubbing_digital(result: Any):
-                    selected_done = ""
-                    top_done = ""
-                    bottom_done = ""
-                    if isinstance(result, dict):
-                        selected_done = str(result.get("selected", "") or "")
-                        top_done = str(result.get("top", "") or "")
-                        bottom_done = str(result.get("bottom", "") or "")
-
-                    if selected_done:
-                        QMessageBox.information(
-                            self,
-                            "완료",
-                            f"디지털 탁본이 저장되었습니다:\n{selected_done}",
-                        )
-                        self.status_info.setText(f"✅ 저장 완료: {Path(selected_done).name}")
-                        return
-
-                    lines = []
-                    if top_done:
-                        lines.append(f"- 상면: {top_done}")
-                    if bottom_done:
-                        lines.append(f"- 하면: {bottom_done}")
-
-                    QMessageBox.information(
-                        self,
-                        "완료",
-                        "디지털 탁본(상/하면)이 저장되었습니다:\n" + "\n".join(lines),
-                    )
-                    self.status_info.setText(f"✅ 저장 완료: {Path(filepath).name} (상/하면)")
-
-                def on_failed(message: str):
-                    self.status_info.setText("❌ 저장 실패")
-                    QMessageBox.critical(self, "오류", self._format_error_message("디지털 탁본 저장 중 오류 발생:", message))
-
-                self._start_task(
-                    title="내보내기",
-                    label=f"디지털 탁본 생성/저장 중{strategy_suffix}...",
-                    thread=TaskThread("export_rubbing_digital", task_export_rubbing_digital),
-                    on_done=on_done_export_rubbing_digital,
-                    on_failed=on_failed,
-                )
-
-        elif export_type == 'review_sheet':
-            filepath, _ = QFileDialog.getSaveFileName(
-                self, "기록면 검토 시트 저장", "recording_surface_review.png", "PNG (*.png);;TIFF (*.tiff)"
-            )
-            if filepath:
-                face_ids = target_face_ids
-                if target != "all" and face_ids.size <= 0:
-                    if target == "selected":
-                        body = (
-                            "현재 선택된 면이 없습니다.\n\n"
-                            "표준 시점 버튼이나 가시면 선택으로 먼저 기록면을 준비한 뒤 다시 시도하세요."
-                        )
-                    else:
-                        body = (
-                            f"'{target_label}' 지정이 비어 있습니다.\n\n"
-                            "대상을 '전체 메쉬' 또는 '현재 선택'으로 바꾸거나,\n"
-                            "표면 선택/지정에서 먼저 영역을 지정해 주세요."
-                        )
-                    QMessageBox.warning(self, "경고", body)
-                    return
-
-                flatten_options_target = dict(flatten_options)
-                flatten_options_target["surface_target"] = target
-                key = self._flatten_cache_key(obj, flatten_options_target)
-                cached_flat = self._flattened_cache.get(key)
-                base = obj.mesh
-                translation = (
-                    np.asarray(obj.translation, dtype=np.float64).copy()
-                    if getattr(obj, "translation", None) is not None
-                    else None
-                )
-                rotation = (
-                    np.asarray(obj.rotation, dtype=np.float64).copy()
-                    if getattr(obj, "rotation", None) is not None
-                    else None
-                )
-                scale = float(getattr(obj, "scale", 1.0))
-                opts = dict(flatten_options_target)
-                record_label = self._flatten_preview_record_label(flatten_options_target, target_label)
-                review_context = self._build_review_summary_context(
-                    obj,
-                    options=flatten_options_target,
-                    target_label=target_label,
-                    record_label=record_label,
-                    strategy_suffix=strategy_suffix,
-                )
-
-                def task_export_review_sheet():
-                    from src.core.recording_surface_review import (
-                        build_recording_surface_summary_lines,
-                        RecordingSurfaceReviewOptions,
-                        render_recording_surface_review,
-                    )
-
-                    if cached_flat is not None:
-                        flattened = cached_flat
-                    else:
-                        mesh = MainWindow._build_world_mesh_from_transform(
-                            base, translation=translation, rotation=rotation, scale=scale
-                        )
-                        if target != "all":
-                            mesh = mesh.extract_submesh(face_ids)
-                        flattened = MainWindow._compute_flattened_mesh(mesh, opts)
-
-                    review = render_recording_surface_review(
-                        flattened,
-                        options=RecordingSurfaceReviewOptions(
-                            dpi=int(self.export_panel.spin_dpi.value()) if hasattr(self, "export_panel") else DEFAULT_EXPORT_DPI,
-                            width_pixels=1600,
-                            title=f"기록면 검토 시트 - {record_label}",
-                            summary_lines=build_recording_surface_summary_lines(
-                                flattened,
-                                **review_context,
-                            ),
-                        ),
-                    )
-                    review.combined_image.save(filepath)
-                    return {"path": filepath, "key": key, "flattened": flattened if cached_flat is None else None}
-
-                def on_done_export_review_sheet(result: Any):
-                    if isinstance(result, dict):
-                        flat = result.get("flattened")
-                        if flat is not None:
-                            self._flattened_cache[key] = flat
-                    QMessageBox.information(self, "완료", f"기록면 검토 시트가 저장되었습니다:\n{filepath}")
-                    self.status_info.setText(f"✅ 저장 완료: {Path(filepath).name}")
-
-                def on_failed(message: str):
-                    self.status_info.setText("❌ 저장 실패")
-                    QMessageBox.critical(self, "오류", self._format_error_message("기록면 검토 시트 저장 중 오류 발생:", message))
-
-                self._start_task(
-                    title="내보내기",
-                    label=f"기록면 검토 시트 생성/저장 중{strategy_suffix}...",
-                    thread=TaskThread("export_review_sheet", task_export_review_sheet),
-                    on_done=on_done_export_review_sheet,
-                    on_failed=on_failed,
-                )
-
-        elif export_type == "rubbing_view_cyl":
-            filepath, _ = QFileDialog.getSaveFileName(
-                self, "현재뷰 원통 이미지 저장", "", "PNG (*.png);;TIFF (*.tiff)"
-            )
-            if filepath:
-                self.status_info.setText(f"내보내기: {filepath}")
-
-                if requested_target_normalized != "all":
-                    QMessageBox.information(
-                        self,
-                        "알림",
-                        "현재뷰 원통 이미지는 뷰 캡처 기반이므로 대상(외/내/미구) 분리를 사용하지 않습니다.",
-                    )
-
-                dpi = int(self.export_panel.spin_dpi.value())
-                try:
-                    wb = np.asarray(obj.get_world_bounds(), dtype=np.float64)
-                    if wb.shape == (2, 3) and np.isfinite(wb).all():
-                        ext = np.abs(wb[1] - wb[0])
-                        width_real = float(max(ext[0], ext[1], 1e-6))
-                    else:
-                        width_real = 120.0
-                except Exception:
-                    width_real = 120.0
-                unit = str(getattr(obj.mesh, "unit", "mm") or "mm").lower()
-                width_in = _width_in_inches(float(width_real), unit)
-                width_pixels = max(MIN_EXPORT_WIDTH_PX, int(max(1.0, width_in) * float(dpi)))
-                width_pixels = min(width_pixels, MAX_EXPORT_WIDTH_PX)
-
-                try:
-                    vw = max(1, int(self.viewport.width()))
-                    vh = max(1, int(self.viewport.height()))
-                    aspect = float(vh) / float(vw)
-                except Exception:
-                    aspect = 1.0
-                if not np.isfinite(aspect) or aspect <= 0.0:
-                    aspect = 1.0
-                height_pixels = max(512, int(float(width_pixels) * float(aspect)))
-                height_pixels = min(height_pixels, MAX_EXPORT_WIDTH_PX)
-
-                try:
-                    qimage, _mv, _proj, _vp = self.viewport.capture_high_res_image(
-                        width=int(width_pixels),
-                        height=int(height_pixels),
-                        only_selected=True,
-                        orthographic=False,
-                    )
-                    ba = QByteArray()
-                    qbuf = QBuffer(ba)
-                    qbuf.open(QIODevice.OpenModeFlag.WriteOnly)
-                    qimage.save(qbuf, "PNG")
-                    pil_img = Image.open(io.BytesIO(ba.data())).convert("RGB")
-                except Exception as e:
-                    QMessageBox.critical(
-                        self,
-                        "오류",
-                        self._format_error_message("현재뷰 캡처 중 오류 발생:", f"{type(e).__name__}: {e}"),
-                    )
-                    return
-
-                def task_export_rubbing_view_cyl():
-                    out = unwrap_cylindrical_view_image(
-                        pil_img,
-                        visible_angle_deg=170.0,
-                        strength=1.0,
-                    )
-                    out.save(filepath, dpi=(int(dpi), int(dpi)))
-                    return filepath
-
-                def on_done_export_rubbing_view_cyl(_result: Any):
-                    QMessageBox.information(self, "완료", f"현재뷰 원통 이미지가 저장되었습니다:\n{filepath}")
-                    self.status_info.setText(f"✅ 저장 완료: {Path(filepath).name}")
-
-                def on_failed(message: str):
-                    self.status_info.setText("❌ 저장 실패")
-                    QMessageBox.critical(self, "오류", self._format_error_message("현재뷰 원통 저장 중 오류 발생:", message))
-
-                self._start_task(
-                    title="내보내기",
-                    label="현재뷰 원통 이미지 생성/저장 중...",
-                    thread=TaskThread("export_rubbing_view_cyl", task_export_rubbing_view_cyl),
-                    on_done=on_done_export_rubbing_view_cyl,
-                    on_failed=on_failed,
-                )
-
-        elif export_type == 'ortho':
-            filepath, _ = QFileDialog.getSaveFileName(
-                self, "정사투영 이미지 저장", "", "PNG (*.png);;TIFF (*.tiff)"
-            )
-            if filepath:
-                dpi = int(self.export_panel.spin_dpi.value())
-                base = obj.mesh
-                translation = (
-                    np.asarray(obj.translation, dtype=np.float64).copy()
-                    if getattr(obj, "translation", None) is not None
-                    else None
-                )
-                rotation = (
-                    np.asarray(obj.rotation, dtype=np.float64).copy()
-                    if getattr(obj, "rotation", None) is not None
-                    else None
-                )
-                scale = float(getattr(obj, "scale", 1.0))
-
-                def task_export_ortho():
-                    from src.core.orthographic_projector import OrthographicProjector
-
-                    mesh = MainWindow._build_world_mesh_from_transform(
-                        base, translation=translation, rotation=rotation, scale=scale
-                    )
-                    projector = OrthographicProjector(resolution=2048)
-                    aligned = projector.align_mesh(mesh, method='pca')
-                    result = projector.project(aligned, direction='top', render_mode='depth')
-                    result.save(filepath, dpi=dpi)
-                    return filepath
-
-                def on_done_export_ortho(_result: Any):
-                    QMessageBox.information(self, "완료", f"정사투영 이미지가 저장되었습니다:\n{filepath}")
-                    self.status_info.setText(f"✅ 저장 완료: {Path(filepath).name}")
-
-                def on_failed(message: str):
-                    self.status_info.setText("❌ 저장 실패")
-                    QMessageBox.critical(self, "오류", self._format_error_message("정사투영 저장 중 오류 발생:", message))
-
-                self._start_task(
-                    title="내보내기",
-                    label="정사투영 이미지 생성/저장 중...",
-                    thread=TaskThread("export_ortho", task_export_ortho),
-                    on_done=on_done_export_ortho,
-                    on_failed=on_failed,
-                )
-
-        elif export_type == 'flat_svg':
-            filepath, _ = QFileDialog.getSaveFileName(
-                self, "기록면 전개 SVG 저장", "flattened.svg", "Scalable Vector Graphics (*.svg)"
-            )
-            if filepath:
-                if target != "all" and target_face_ids.size <= 0:
-                    if target == "selected":
-                        body = (
-                            "현재 선택된 면이 없습니다.\n\n"
-                            "브러시/올가미/경계 도구로 펼칠 표면을 먼저 선택한 뒤 다시 시도하세요."
-                        )
-                    else:
-                        body = (
-                            f"'{target_label}' 지정이 비어 있습니다.\n\n"
-                            "우측 '표면 선택/지정'에서 먼저 영역을 지정하거나,\n"
-                            "대상을 '전체 메쉬' 또는 '현재 선택'으로 바꿔 저장하세요."
-                        )
-                    QMessageBox.warning(self, "경고", body)
-                    return
-
-                flatten_options_target = dict(flatten_options)
-                flatten_options_target["surface_target"] = target
-                key = self._flatten_cache_key(obj, flatten_options_target)
-                cached_flat = self._flattened_cache.get(key)
-                base = obj.mesh
-                translation = (
-                    np.asarray(obj.translation, dtype=np.float64).copy()
-                    if getattr(obj, "translation", None) is not None
-                    else None
-                )
-                rotation = (
-                    np.asarray(obj.rotation, dtype=np.float64).copy()
-                    if getattr(obj, "rotation", None) is not None
-                    else None
-                )
-                scale = float(getattr(obj, "scale", 1.0))
-                opts = dict(flatten_options_target)
-
-                def task_export_flat_svg():
-                    from src.core.flattened_svg_exporter import FlattenedSVGExporter, SVGExportOptions
-
-                    if cached_flat is not None:
-                        flattened = cached_flat
-                    else:
-                        mesh = MainWindow._build_world_mesh_from_transform(
-                            base, translation=translation, rotation=rotation, scale=scale
-                        )
-                        if target != "all":
-                            mesh = mesh.extract_submesh(target_face_ids)
-                        flattened = MainWindow._compute_flattened_mesh(mesh, opts)
-                    exporter = FlattenedSVGExporter()
-
-                    # 1cm 격자를 기본 제공 (단위가 mm면 10mm)
-                    unit = (flattened.original_mesh.unit or DEFAULT_MESH_UNIT).lower()
-                    svg_unit = unit if unit in ("mm", "cm") else DEFAULT_MESH_UNIT
-                    grid = 10.0 if svg_unit == 'mm' else 1.0
-
-                    exporter.export(
-                        flattened,
-                        filepath,
-                        options=SVGExportOptions(
-                            unit=svg_unit,
-                            include_grid=True,
-                            grid_spacing=grid,
-                            include_outline=True,
-                            include_wireframe=False,
-                            stroke_width=0.05,
-                        ),
-                    )
-                    return {"path": filepath, "key": key, "flattened": flattened if cached_flat is None else None}
-
-                def on_done_export_flat_svg(result: Any):
-                    if isinstance(result, dict):
-                        flat = result.get("flattened")
-                        if flat is not None:
-                            self._flattened_cache[key] = flat
-                    QMessageBox.information(self, "완료", f"기록면 전개 SVG가 저장되었습니다:\n{filepath}")
-                    self.status_info.setText(f"✅ 저장 완료: {Path(filepath).name}")
-
-                def on_failed(message: str):
-                    self.status_info.setText("❌ 저장 실패")
-                    QMessageBox.critical(self, "오류", self._format_error_message("SVG 저장 중 오류 발생:", message))
-
-                self._start_task(
-                    title="내보내기",
-                    label=f"기록면 전개 계산/SVG 저장 중{strategy_suffix}...",
-                    thread=TaskThread("export_flat_svg", task_export_flat_svg),
-                    on_done=on_done_export_flat_svg,
-                    on_failed=on_failed,
-                )
-
-        elif export_type == 'sheet_svg':
+        if export_type == 'review_sheet':
             filepath, _ = QFileDialog.getSaveFileName(
                 self,
-                "통합 SVG 저장 (실측+단면+내/외면 탁본)",
-                "rubbing_sheet.svg",
-                "Scalable Vector Graphics (*.svg)",
+                "기록면 검토 시트 저장",
+                "recording_surface_review.png",
+                "PNG (*.png);;TIFF (*.tiff)",
             )
-            if filepath:
-                if target != "all" and target_face_ids.size <= 0:
-                    if target == "selected":
-                        body = (
-                            "현재 선택된 면이 없습니다.\n\n"
-                            "브러시/올가미/경계 도구로 통합 SVG를 만들 표면을 먼저 선택한 뒤 다시 시도하세요."
-                        )
-                    else:
-                        body = (
-                            f"'{target_label}' 지정이 비어 있습니다.\n\n"
-                            "우측 '표면 선택/지정'에서 먼저 영역을 지정하거나,\n"
-                            "대상을 '전체 메쉬' 또는 '현재 선택'으로 바꿔 저장하세요."
-                        )
-                    QMessageBox.warning(self, "경고", body)
-                    return
+            if not filepath:
+                return
+            if not _ensure_recording_surface_ready("검토 시트를 만들"):
+                return
 
-                dpi = int(self.export_panel.spin_dpi.value())
-                iterations = int(flatten_options.get("iterations", 30))
+            flatten_options_target = dict(flatten_options)
+            flatten_options_target["surface_target"] = target
+            key = self._flatten_cache_key(obj, flatten_options_target)
+            cached_flat = self._flattened_cache.get(key)
+            opts = dict(flatten_options_target)
+            record_label = self._flatten_preview_record_label(flatten_options_target, target_label)
+            review_context = self._build_review_summary_context(
+                obj,
+                options=flatten_options_target,
+                target_label=target_label,
+                record_label=record_label,
+                strategy_suffix=strategy_suffix,
+            )
 
-                base = obj.mesh
-                translation = (
-                    np.asarray(obj.translation, dtype=np.float64).copy()
-                    if getattr(obj, "translation", None) is not None
-                    else None
+            def task_export_review_sheet():
+                from src.core.recording_surface_review import (
+                    RecordingSurfaceReviewOptions,
+                    build_recording_surface_summary_lines,
+                    render_recording_surface_review,
                 )
-                rotation = (
-                    np.asarray(obj.rotation, dtype=np.float64).copy()
-                    if getattr(obj, "rotation", None) is not None
-                    else None
-                )
-                scale = float(getattr(obj, "scale", 1.0))
-                cut_lines_world = self.viewport.get_cut_lines_world()
-                cut_profiles_world = self.viewport.get_cut_sections_world()
-                outer_idx = sorted(list(getattr(obj, "outer_face_indices", set()) or []))
-                inner_idx = sorted(list(getattr(obj, "inner_face_indices", set()) or []))
 
-                radius_mm = float(flatten_options.get("radius", 0.0))
-                cylinder_radius = mm_to_mesh_units(radius_mm, getattr(base, "unit", None))
-                radius_override = _safe_float_or_none(flatten_options.get("radius_world_override", None))
-                if radius_override is not None and np.isfinite(radius_override) and radius_override > 0.0:
-                    cylinder_radius = float(radius_override)
-                cylinder_axis = flatten_options.get("direction_override", flatten_options.get("direction", "auto"))
-                initial_method = str(flatten_options.get("initial", "lscm"))
-                single_surface_label = self._single_surface_export_label(obj, target) if target != "all" else ""
-
-                def task_export_sheet_svg():
-                    from src.core.rubbing_sheet_exporter import (
-                        RubbingSheetExporter,
-                        SheetExportOptions,
-                    )
-
+                if cached_flat is not None:
+                    flattened = cached_flat
+                else:
                     mesh = MainWindow._build_world_mesh_from_transform(
                         base, translation=translation, rotation=rotation, scale=scale
                     )
-                    exporter = RubbingSheetExporter()
                     if target != "all":
                         mesh = mesh.extract_submesh(target_face_ids)
-                        exporter.export(
-                            mesh,
-                            filepath,
-                            cut_lines_world=cut_lines_world,
-                            cut_profiles_world=cut_profiles_world,
-                            options=SheetExportOptions(
-                                dpi=dpi,
-                                flatten_iterations=iterations,
-                                flatten_method=str(flatten_options.get("method", "arap")),
-                                flatten_distortion=float(flatten_options.get("distortion", 0.5)),
-                                flatten_initial_method=initial_method,
-                                cylinder_axis=cylinder_axis,
-                                cylinder_radius=cylinder_radius,
-                                section_guides=flatten_options.get("section_guides", None),
-                                section_record_view=flatten_options.get("tile_record_view", None),
-                                rubbing_preset="자연(이미지)",
-                                single_surface_label=single_surface_label,
-                            ),
-                        )
-                        return filepath
+                    flattened = MainWindow._compute_flattened_mesh(mesh, opts)
 
-                    exporter.export(
-                        mesh,
-                        filepath,
-                        cut_lines_world=cut_lines_world,
-                        cut_profiles_world=cut_profiles_world,
-                        outer_face_indices=outer_idx if outer_idx else None,
-                        inner_face_indices=inner_idx if inner_idx else None,
-                        options=SheetExportOptions(
-                            dpi=dpi,
-                            flatten_iterations=iterations,
-                            flatten_method=str(flatten_options.get("method", "arap")),
-                            flatten_distortion=float(flatten_options.get("distortion", 0.5)),
-                            flatten_initial_method=initial_method,
-                            cylinder_axis=cylinder_axis,
-                            cylinder_radius=cylinder_radius,
-                            section_guides=flatten_options.get("section_guides", None),
-                            section_record_view=flatten_options.get("tile_record_view", None),
-                            rubbing_preset="자연(이미지)",
+                review = render_recording_surface_review(
+                    flattened,
+                    options=RecordingSurfaceReviewOptions(
+                        dpi=int(self.export_panel.spin_dpi.value()) if hasattr(self, "export_panel") else DEFAULT_EXPORT_DPI,
+                        width_pixels=1600,
+                        rubbing_preset=self._selected_review_rubbing_preset(flatten_options_target),
+                        title=f"기록면 검토 시트 - {record_label}",
+                        summary_lines=build_recording_surface_summary_lines(
+                            flattened,
+                            **review_context,
                         ),
-                    )
-                    return filepath
-
-                def on_done_export_sheet_svg(_result: Any):
-                    QMessageBox.information(self, "완료", f"통합 SVG가 저장되었습니다:\n{filepath}")
-                    self.status_info.setText(f"✅ 저장 완료: {Path(filepath).name}")
-
-                def on_failed(message: str):
-                    self.status_info.setText("❌ 저장 실패")
-                    QMessageBox.critical(self, "오류", self._format_error_message("통합 SVG 저장 중 오류 발생:", message))
-
-                self._start_task(
-                    title="내보내기",
-                    label=f"통합 SVG 생성/저장 중{strategy_suffix}...",
-                    thread=TaskThread("export_sheet_svg", task_export_sheet_svg),
-                    on_done=on_done_export_sheet_svg,
-                    on_failed=on_failed,
+                    ),
                 )
+                review.combined_image.save(filepath)
+                return {"path": filepath, "key": key, "flattened": flattened if cached_flat is None else None}
 
-        elif export_type == 'sheet_svg_digital':
+            def on_done_export_review_sheet(result: Any):
+                if isinstance(result, dict):
+                    flat = result.get("flattened")
+                    if flat is not None:
+                        self._flattened_cache[key] = flat
+                QMessageBox.information(self, "완료", f"기록면 검토 시트가 저장되었습니다:\n{filepath}")
+                self.status_info.setText(f"✅ 저장 완료: {Path(filepath).name}")
+
+            def on_failed(message: str):
+                self.status_info.setText("❌ 저장 실패")
+                QMessageBox.critical(self, "오류", self._format_error_message("기록면 검토 시트 저장 중 오류 발생:", message))
+
+            self._start_task(
+                title="내보내기",
+                label=f"기록면 검토 시트 생성/저장 중{strategy_suffix}...",
+                thread=TaskThread("export_review_sheet", task_export_review_sheet),
+                on_done=on_done_export_review_sheet,
+                on_failed=on_failed,
+            )
+            return
+
+        if export_type == 'flat_svg':
             filepath, _ = QFileDialog.getSaveFileName(
                 self,
-                "통합 SVG 저장 (디지털 탁본/원통)",
-                "rubbing_sheet_digital.svg",
+                "기록면 전개 SVG 저장",
+                "flattened.svg",
                 "Scalable Vector Graphics (*.svg)",
             )
-            if filepath:
-                if target != "all" and target_face_ids.size <= 0:
-                    if target == "selected":
-                        body = (
-                            "현재 선택된 면이 없습니다.\n\n"
-                            "브러시/올가미/경계 도구로 통합 SVG를 만들 표면을 먼저 선택한 뒤 다시 시도하세요."
-                        )
-                    else:
-                        body = (
-                            f"'{target_label}' 지정이 비어 있습니다.\n\n"
-                            "우측 '표면 선택/지정'에서 먼저 영역을 지정하거나,\n"
-                            "대상을 '전체 메쉬' 또는 '현재 선택'으로 바꿔 저장하세요."
-                        )
-                    QMessageBox.warning(self, "경고", body)
-                    return
+            if not filepath:
+                return
+            if not _ensure_recording_surface_ready("전개 SVG를 만들"):
+                return
 
-                dpi = int(self.export_panel.spin_dpi.value())
+            flatten_options_target = dict(flatten_options)
+            flatten_options_target["surface_target"] = target
+            key = self._flatten_cache_key(obj, flatten_options_target)
+            cached_flat = self._flattened_cache.get(key)
+            opts = dict(flatten_options_target)
 
-                base = obj.mesh
-                translation = (
-                    np.asarray(obj.translation, dtype=np.float64).copy()
-                    if getattr(obj, "translation", None) is not None
-                    else None
-                )
-                rotation = (
-                    np.asarray(obj.rotation, dtype=np.float64).copy()
-                    if getattr(obj, "rotation", None) is not None
-                    else None
-                )
-                scale = float(getattr(obj, "scale", 1.0))
-                cut_lines_world = self.viewport.get_cut_lines_world()
-                cut_profiles_world = self.viewport.get_cut_sections_world()
-                outer_idx = sorted(list(getattr(obj, "outer_face_indices", set()) or []))
-                inner_idx = sorted(list(getattr(obj, "inner_face_indices", set()) or []))
+            def task_export_flat_svg():
+                from src.core.flattened_svg_exporter import FlattenedSVGExporter, SVGExportOptions
 
-                radius_mm = float(flatten_options.get("radius", 0.0))
-                cylinder_radius = mm_to_mesh_units(radius_mm, getattr(base, "unit", None))
-                radius_override = _safe_float_or_none(flatten_options.get("radius_world_override", None))
-                if radius_override is not None and np.isfinite(radius_override) and radius_override > 0.0:
-                    cylinder_radius = float(radius_override)
-                cylinder_axis = flatten_options.get("direction_override", flatten_options.get("direction", "auto"))
-                tile_guided = bool(flatten_options.get("tile_guided", False))
-                initial_method = str(flatten_options.get("initial", "lscm"))
-                digital_method = str(flatten_options.get("method", "cylinder")) if tile_guided else "cylinder"
-                digital_iterations = int(flatten_options.get("iterations", 30)) if tile_guided else 0
-                digital_distortion = float(flatten_options.get("distortion", 0.5)) if tile_guided else 0.0
-                single_surface_label = self._single_surface_export_label(obj, target) if target != "all" else ""
-
-                def task_export_sheet_svg_digital():
-                    from src.core.rubbing_sheet_exporter import (
-                        RubbingSheetExporter,
-                        SheetExportOptions,
-                    )
-
+                if cached_flat is not None:
+                    flattened = cached_flat
+                else:
                     mesh = MainWindow._build_world_mesh_from_transform(
                         base, translation=translation, rotation=rotation, scale=scale
                     )
-                    exporter = RubbingSheetExporter()
                     if target != "all":
                         mesh = mesh.extract_submesh(target_face_ids)
-                        exporter.export(
-                            mesh,
-                            filepath,
-                            cut_lines_world=cut_lines_world,
-                            cut_profiles_world=cut_profiles_world,
-                            options=SheetExportOptions(
-                                dpi=dpi,
-                                flatten_iterations=digital_iterations,
-                                flatten_method=digital_method,
-                                flatten_distortion=digital_distortion,
-                                flatten_initial_method=initial_method,
-                                cylinder_axis=cylinder_axis,
-                                cylinder_radius=cylinder_radius,
-                                section_guides=flatten_options.get("section_guides", None),
-                                section_record_view=flatten_options.get("tile_record_view", None),
-                                rubbing_preset="디지털(곡률 제거)",
-                                single_surface_label=single_surface_label,
-                            ),
-                        )
-                        return filepath
+                    flattened = MainWindow._compute_flattened_mesh(mesh, opts)
 
-                    exporter.export(
-                        mesh,
-                        filepath,
-                        cut_lines_world=cut_lines_world,
-                        cut_profiles_world=cut_profiles_world,
-                        outer_face_indices=outer_idx if outer_idx else None,
-                        inner_face_indices=inner_idx if inner_idx else None,
-                        options=SheetExportOptions(
-                            dpi=dpi,
-                            flatten_iterations=digital_iterations,
-                            flatten_method=digital_method,
-                            flatten_distortion=digital_distortion,
-                            flatten_initial_method=initial_method,
-                            cylinder_axis=cylinder_axis,
-                            cylinder_radius=cylinder_radius,
-                            section_guides=flatten_options.get("section_guides", None),
-                            section_record_view=flatten_options.get("tile_record_view", None),
-                            rubbing_preset="디지털(곡률 제거)",
-                        ),
-                    )
-                    return filepath
+                exporter = FlattenedSVGExporter()
+                unit = (flattened.original_mesh.unit or DEFAULT_MESH_UNIT).lower()
+                svg_unit = unit if unit in ("mm", "cm") else DEFAULT_MESH_UNIT
+                grid = 10.0 if svg_unit == "mm" else 1.0
 
-                def on_done_export_sheet_svg_digital(_result: Any):
-                    QMessageBox.information(self, "완료", f"통합 SVG(디지털 탁본)가 저장되었습니다:\n{filepath}")
-                    self.status_info.setText(f"✅ 저장 완료: {Path(filepath).name}")
-
-                def on_failed(message: str):
-                    self.status_info.setText("❌ 저장 실패")
-                    QMessageBox.critical(self, "오류", self._format_error_message("통합 SVG 저장 중 오류 발생:", message))
-
-                self._start_task(
-                    title="내보내기",
-                    label=f"통합 SVG(디지털 탁본) 생성/저장 중{strategy_suffix}...",
-                    thread=TaskThread("export_sheet_svg_digital", task_export_sheet_svg_digital),
-                    on_done=on_done_export_sheet_svg_digital,
-                    on_failed=on_failed,
+                exporter.export(
+                    flattened,
+                    filepath,
+                    options=SVGExportOptions(
+                        unit=svg_unit,
+                        include_grid=True,
+                        grid_spacing=grid,
+                        include_outline=True,
+                        include_wireframe=False,
+                        stroke_width=0.05,
+                    ),
                 )
+                return {"path": filepath, "key": key, "flattened": flattened if cached_flat is None else None}
 
-        elif export_type == 'mesh_outer':
-            filepath, _ = QFileDialog.getSaveFileName(
-                self, "외면 메쉬 저장", "", "OBJ (*.obj);;STL (*.stl);;PLY (*.ply)"
+            def on_done_export_flat_svg(result: Any):
+                if isinstance(result, dict):
+                    flat = result.get("flattened")
+                    if flat is not None:
+                        self._flattened_cache[key] = flat
+                QMessageBox.information(self, "완료", f"기록면 전개 SVG가 저장되었습니다:\n{filepath}")
+                self.status_info.setText(f"✅ 저장 완료: {Path(filepath).name}")
+
+            def on_failed(message: str):
+                self.status_info.setText("❌ 저장 실패")
+                QMessageBox.critical(self, "오류", self._format_error_message("SVG 저장 중 오류 발생:", message))
+
+            self._start_task(
+                title="내보내기",
+                label=f"기록면 전개 계산/SVG 저장 중{strategy_suffix}...",
+                thread=TaskThread("export_flat_svg", task_export_flat_svg),
+                on_done=on_done_export_flat_svg,
+                on_failed=on_failed,
             )
-            if filepath:
-                manual_outer_idx = np.asarray(
-                    sorted(list(getattr(obj, "outer_face_indices", set()) or [])),
-                    dtype=np.int32,
-                ).reshape(-1)
-                base = obj.mesh
-                translation = (
-                    np.asarray(obj.translation, dtype=np.float64).copy()
-                    if getattr(obj, "translation", None) is not None
-                    else None
-                )
-                rotation = (
-                    np.asarray(obj.rotation, dtype=np.float64).copy()
-                    if getattr(obj, "rotation", None) is not None
-                    else None
-                )
-                scale = float(getattr(obj, "scale", 1.0))
+            return
 
-                def task_export_mesh_outer():
-                    from src.core.surface_separator import SurfaceSeparator
-
-                    mesh = MainWindow._build_world_mesh_from_transform(
-                        base, translation=translation, rotation=rotation, scale=scale
-                    )
-                    source = "manual"
-                    if manual_outer_idx.size > 0:
-                        outer_idx = manual_outer_idx.astype(np.int32, copy=True)
-                    else:
-                        source = "auto"
-                        try:
-                            self._apply_surface_stability_presets(mesh)
-                        except Exception:
-                            pass
-                        separator = SurfaceSeparator()
-                        result = separator.auto_detect_surfaces(mesh, return_submeshes=False)
-                        outer_idx = np.asarray(
-                            getattr(result, "outer_face_indices", np.zeros((0,), dtype=np.int32)),
-                            dtype=np.int32,
-                        ).reshape(-1)
-
-                    n_faces = int(getattr(mesh, "n_faces", 0) or 0)
-                    if n_faces > 0 and outer_idx.size > 0:
-                        valid = (outer_idx >= 0) & (outer_idx < n_faces)
-                        outer_idx = np.unique(outer_idx[valid]).astype(np.int32, copy=False)
-                    if outer_idx.size <= 0:
-                        return {"status": "no_outer"}
-                    outer = mesh.extract_submesh(outer_idx)
-                    MeshProcessor().save_mesh(outer, filepath)
-                    return {"status": "ok", "source": source}
-
-                def on_done_export_mesh_outer(result: Any):
-                    if isinstance(result, dict) and result.get("status") == "no_outer":
-                        QMessageBox.warning(self, "경고", "외면을 감지하지 못했습니다.")
-                        return
-                    src = "수동 지정" if isinstance(result, dict) and result.get("source") == "manual" else "자동 감지"
-                    QMessageBox.information(self, "완료", f"외면 메쉬가 저장되었습니다 ({src}):\n{filepath}")
-
-                def on_failed(message: str):
-                    QMessageBox.critical(self, "오류", self._format_error_message("외면 저장 중 오류 발생:", message))
-
-                self._start_task(
-                    title="내보내기",
-                    label="외면 메쉬 분리/저장 중...",
-                    thread=TaskThread("export_mesh_outer", task_export_mesh_outer),
-                    on_done=on_done_export_mesh_outer,
-                    on_failed=on_failed,
-                )
-        elif export_type == 'mesh_inner':
-            filepath, _ = QFileDialog.getSaveFileName(
-                self, "내면 메쉬 저장", "", "OBJ (*.obj);;STL (*.stl);;PLY (*.ply)"
-            )
-            if filepath:
-                manual_inner_idx = np.asarray(
-                    sorted(list(getattr(obj, "inner_face_indices", set()) or [])),
-                    dtype=np.int32,
-                ).reshape(-1)
-                base = obj.mesh
-                translation = (
-                    np.asarray(obj.translation, dtype=np.float64).copy()
-                    if getattr(obj, "translation", None) is not None
-                    else None
-                )
-                rotation = (
-                    np.asarray(obj.rotation, dtype=np.float64).copy()
-                    if getattr(obj, "rotation", None) is not None
-                    else None
-                )
-                scale = float(getattr(obj, "scale", 1.0))
-
-                def task_export_mesh_inner():
-                    from src.core.surface_separator import SurfaceSeparator
-
-                    mesh = MainWindow._build_world_mesh_from_transform(
-                        base, translation=translation, rotation=rotation, scale=scale
-                    )
-                    source = "manual"
-                    if manual_inner_idx.size > 0:
-                        inner_idx = manual_inner_idx.astype(np.int32, copy=True)
-                    else:
-                        source = "auto"
-                        try:
-                            self._apply_surface_stability_presets(mesh)
-                        except Exception:
-                            pass
-                        separator = SurfaceSeparator()
-                        result = separator.auto_detect_surfaces(mesh, return_submeshes=False)
-                        inner_idx = np.asarray(
-                            getattr(result, "inner_face_indices", np.zeros((0,), dtype=np.int32)),
-                            dtype=np.int32,
-                        ).reshape(-1)
-
-                    n_faces = int(getattr(mesh, "n_faces", 0) or 0)
-                    if n_faces > 0 and inner_idx.size > 0:
-                        valid = (inner_idx >= 0) & (inner_idx < n_faces)
-                        inner_idx = np.unique(inner_idx[valid]).astype(np.int32, copy=False)
-                    if inner_idx.size <= 0:
-                        return {"status": "no_inner"}
-                    inner = mesh.extract_submesh(inner_idx)
-                    MeshProcessor().save_mesh(inner, filepath)
-                    return {"status": "ok", "source": source}
-
-                def on_done_export_mesh_inner(result: Any):
-                    if isinstance(result, dict) and result.get("status") == "no_inner":
-                        QMessageBox.warning(self, "경고", "내면을 감지하지 못했습니다.")
-                        return
-                    src = "수동 지정" if isinstance(result, dict) and result.get("source") == "manual" else "자동 감지"
-                    QMessageBox.information(self, "완료", f"내면 메쉬가 저장되었습니다 ({src}):\n{filepath}")
-
-                def on_failed(message: str):
-                    QMessageBox.critical(self, "오류", self._format_error_message("내면 저장 중 오류 발생:", message))
-
-                self._start_task(
-                    title="내보내기",
-                    label="내면 메쉬 분리/저장 중...",
-                    thread=TaskThread("export_mesh_inner", task_export_mesh_inner),
-                    on_done=on_done_export_mesh_inner,
-                    on_failed=on_failed,
-                )
-        elif export_type == 'mesh_flat':
-            filepath, _ = QFileDialog.getSaveFileName(
-                self, "전개된 기록면 메쉬 저장", "", "OBJ (*.obj);;STL (*.stl);;PLY (*.ply)"
-            )
-            if filepath:
-                if target != "all" and target_face_ids.size <= 0:
-                    if target == "selected":
-                        body = (
-                            "현재 선택된 면이 없습니다.\n\n"
-                            "브러시/올가미/경계 도구로 펼칠 표면을 먼저 선택한 뒤 다시 시도하세요."
-                        )
-                    else:
-                        body = (
-                            f"'{target_label}' 지정이 비어 있습니다.\n\n"
-                            "우측 '표면 선택/지정'에서 먼저 영역을 지정하거나,\n"
-                            "대상을 '전체 메쉬' 또는 '현재 선택'으로 바꿔 저장하세요."
-                        )
-                    QMessageBox.warning(self, "경고", body)
-                    return
-
-                flatten_options_target = dict(flatten_options)
-                flatten_options_target["surface_target"] = target
-                key = self._flatten_cache_key(obj, flatten_options_target)
-                cached_flat = self._flattened_cache.get(key)
-                base = obj.mesh
-                translation = (
-                    np.asarray(obj.translation, dtype=np.float64).copy()
-                    if getattr(obj, "translation", None) is not None
-                    else None
-                )
-                rotation = (
-                    np.asarray(obj.rotation, dtype=np.float64).copy()
-                    if getattr(obj, "rotation", None) is not None
-                    else None
-                )
-                scale = float(getattr(obj, "scale", 1.0))
-                opts = dict(flatten_options_target)
-
-                def task_export_mesh_flat():
-                    from src.core.mesh_loader import MeshData
-
-                    if cached_flat is not None:
-                        flattened = cached_flat
-                    else:
-                        mesh = MainWindow._build_world_mesh_from_transform(
-                            base, translation=translation, rotation=rotation, scale=scale
-                        )
-                        if target != "all":
-                            mesh = mesh.extract_submesh(target_face_ids)
-                        flattened = MainWindow._compute_flattened_mesh(mesh, opts)
-
-                    uv_real = flattened.uv.astype(np.float64) * float(flattened.scale)
-                    uv_real -= uv_real.min(axis=0)
-                    vertices_3d = np.column_stack([uv_real[:, 0], uv_real[:, 1], np.zeros(len(uv_real))])
-
-                    flat_mesh = MeshData(
-                        vertices=vertices_3d,
-                        faces=flattened.faces.copy(),
-                        normals=None,
-                        face_normals=None,
-                        uv_coords=None,
-                        texture=None,
-                        unit=flattened.original_mesh.unit,
-                        filepath=None
-                    )
-                    flat_mesh.compute_normals(compute_vertex_normals=False)
-
-                    MeshProcessor().save_mesh(flat_mesh, filepath)
-                    return {"status": "ok", "flattened": flattened if cached_flat is None else None}
-
-                def on_done_export_mesh_flat(result: Any):
-                    if isinstance(result, dict):
-                        flat = result.get("flattened")
-                        if flat is not None:
-                            self._flattened_cache[key] = flat
-                    QMessageBox.information(self, "완료", f"전개된 기록면 메쉬가 저장되었습니다:\n{filepath}")
-
-                def on_failed(message: str):
-                    QMessageBox.critical(self, "오류", self._format_error_message("전개된 기록면 메쉬 저장 중 오류 발생:", message))
-
-                self._start_task(
-                    title="내보내기",
-                    label=f"기록면 전개/메쉬 생성/저장 중{strategy_suffix}...",
-                    thread=TaskThread("export_mesh_flat", task_export_mesh_flat),
-                    on_done=on_done_export_mesh_flat,
-                    on_failed=on_failed,
-                )
+        QMessageBox.information(
+            self,
+            "지원되지 않는 출력",
+            "현재 기본 워크플로우에서는 이 출력 방식을 사용하지 않습니다.\n\n"
+            "실측용 도면 SVG, 기록면 검토 시트, 6방향 도면 패키지를 사용해 주세요.",
+        )
+        try:
+            self.status_info.setText("기본 워크플로우에 없는 출력 요청입니다.")
+        except Exception:
+            pass
     
     def export_2d_profile(self, view):
         """2D 실측 도면(SVG) 내보내기"""
@@ -10606,6 +10445,7 @@ class MainWindow(QMainWindow):
                     self.viewport.camera.fit_to_bounds(wb)
                     self.viewport.camera.pan_offset = np.array([0.0, 0.0, 0.0], dtype=np.float64)
                     self.viewport.update()
+                    self._sync_workflow_panel()
                     return
             except Exception:
                 pass
@@ -10613,6 +10453,7 @@ class MainWindow(QMainWindow):
                 self.viewport.fit_view_to_selected_object()
             except Exception:
                 pass
+            self._sync_workflow_panel()
         elif self.current_mesh is not None:
             try:
                 b = np.asarray(self.current_mesh.bounds, dtype=np.float64)
@@ -10622,6 +10463,7 @@ class MainWindow(QMainWindow):
                     self.viewport.update()
             except Exception:
                 pass
+            self._sync_workflow_panel()
 
     def _set_canonical_view(self, key: str) -> None:
         preset = CANONICAL_VIEW_PRESETS.get(str(key).strip().lower())
@@ -10780,6 +10622,7 @@ class MainWindow(QMainWindow):
         self.viewport._front_back_ortho_enabled = enable_ortho_lock
         self.viewport._canonical_view_key = view_key if (enable_ortho_lock and view_key is not None) else None
         self.viewport.update()
+        self._sync_workflow_panel()
 
     def toggle_curvature_mode(self, enabled: bool):
         """곡률 측정 모드 토글"""
@@ -12115,7 +11958,7 @@ def main():
         splash.showMessage("Initializing Main Window...")
         window = MainWindow()
 
-        # Optional: open project passed via CLI (`python main.py --open-project foo.amr`)
+        # Optional: open project/mesh passed via CLI.
         try:
             if "--open-project" in sys.argv:
                 i = sys.argv.index("--open-project")
@@ -12123,8 +11966,14 @@ def main():
                     p = str(sys.argv[i + 1])
                     if p:
                         window.open_project_path(p)
+            elif "--open-mesh" in sys.argv:
+                i = sys.argv.index("--open-mesh")
+                if i + 1 < len(sys.argv):
+                    p = str(sys.argv[i + 1])
+                    if p:
+                        window.open_file_path(p, prompt_unit=True)
         except Exception:
-            _LOGGER.exception("Failed to auto-open project from CLI args")
+            _LOGGER.exception("Failed to auto-open file from CLI args")
         
         # 3. 마무리 및 스플래시 닫기
         splash.showMessage("Ready!")

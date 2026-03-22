@@ -39,6 +39,8 @@ _LAZY_IMPORTS = {
     "MandrelFitResult": ".tile_form_model",
     "TileInterpretationSlot": ".tile_form_model",
     "TileInterpretationState": ".tile_form_model",
+    "CircleFit2DResult": ".tile_profile_fitting",
+    "fit_circle_2d": ".tile_profile_fitting",
     "SyntheticTileSpec": ".tile_synthetic",
     "SyntheticTileGroundTruth": ".tile_synthetic",
     "SyntheticTileArtifact": ".tile_synthetic",

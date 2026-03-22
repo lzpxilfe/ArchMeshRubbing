@@ -175,8 +175,12 @@ class SectionObservation:
     profile_point_count: int = 0
     profile_width_world: float = 0.0
     profile_depth_world: float = 0.0
+    profile_center_world: tuple[float, float, float] | None = None
     profile_radius_median_world: float | None = None
     profile_radius_iqr_world: float = 0.0
+    profile_fit_rmse_world: float = 0.0
+    profile_arc_span_deg: float = 0.0
+    profile_fit_confidence: float = 0.0
     note: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -190,10 +194,14 @@ class SectionObservation:
             "profile_point_count": int(max(0, int(self.profile_point_count))),
             "profile_width_world": float(max(0.0, self.profile_width_world)),
             "profile_depth_world": float(max(0.0, self.profile_depth_world)),
+            "profile_center_world": list(self.profile_center_world) if self.profile_center_world is not None else None,
             "profile_radius_median_world": (
                 float(self.profile_radius_median_world) if self.profile_radius_median_world is not None else None
             ),
             "profile_radius_iqr_world": float(max(0.0, self.profile_radius_iqr_world)),
+            "profile_fit_rmse_world": float(max(0.0, self.profile_fit_rmse_world)),
+            "profile_arc_span_deg": float(max(0.0, self.profile_arc_span_deg)),
+            "profile_fit_confidence": float(max(0.0, min(1.0, self.profile_fit_confidence))),
             "note": str(self.note or ""),
         }
 
@@ -237,6 +245,18 @@ class SectionObservation:
             profile_radius_iqr = float(data.get("profile_radius_iqr_world", 0.0) or 0.0)
         except Exception:
             profile_radius_iqr = 0.0
+        try:
+            profile_fit_rmse = float(data.get("profile_fit_rmse_world", 0.0) or 0.0)
+        except Exception:
+            profile_fit_rmse = 0.0
+        try:
+            profile_arc_span = float(data.get("profile_arc_span_deg", 0.0) or 0.0)
+        except Exception:
+            profile_arc_span = 0.0
+        try:
+            profile_fit_confidence = float(data.get("profile_fit_confidence", 0.0) or 0.0)
+        except Exception:
+            profile_fit_confidence = 0.0
         return cls(
             station=station_val,
             origin_world=_coerce_xyz(data.get("origin_world")),
@@ -247,8 +267,12 @@ class SectionObservation:
             profile_point_count=max(0, point_count),
             profile_width_world=max(0.0, profile_width if math.isfinite(profile_width) else 0.0),
             profile_depth_world=max(0.0, profile_depth if math.isfinite(profile_depth) else 0.0),
+            profile_center_world=_coerce_xyz(data.get("profile_center_world")),
             profile_radius_median_world=profile_radius_val,
             profile_radius_iqr_world=max(0.0, profile_radius_iqr if math.isfinite(profile_radius_iqr) else 0.0),
+            profile_fit_rmse_world=max(0.0, profile_fit_rmse if math.isfinite(profile_fit_rmse) else 0.0),
+            profile_arc_span_deg=max(0.0, profile_arc_span if math.isfinite(profile_arc_span) else 0.0),
+            profile_fit_confidence=max(0.0, min(1.0, profile_fit_confidence if math.isfinite(profile_fit_confidence) else 0.0)),
             note=str(data.get("note", "") or ""),
         )
 

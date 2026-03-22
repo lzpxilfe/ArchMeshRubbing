@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from typing import Optional
 
+DEFAULT_MESH_UNIT = "cm"
+
 
 def normalize_unit(unit: Optional[str]) -> str:
     u = str(unit or "").strip().lower()

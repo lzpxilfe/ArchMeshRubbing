@@ -83,8 +83,12 @@ def _ground_truth_sections(
                 profile_point_count=96,
                 profile_width_world=max(0.0, width),
                 profile_depth_world=max(0.0, depth),
+                profile_center_world=(0.0, float(station), 0.0),
                 profile_radius_median_world=float(radius),
                 profile_radius_iqr_world=0.0,
+                profile_fit_rmse_world=0.0,
+                profile_arc_span_deg=float(math.degrees(theta_span_rad)),
+                profile_fit_confidence=1.0,
                 note="ground_truth",
             )
         )
@@ -586,6 +590,7 @@ def render_synthetic_tile_review_sheet(
         flattened,
         options=RecordingSurfaceReviewOptions(
             dpi=int(max(72, int(dpi))),
+            rubbing_preset="다중광(기록면)",
             title=f"합성 기록면 검토 시트 - {str(artifact.name or artifact.truth.mesh_name or 'synthetic_tile')}",
             summary_lines=summary_lines,
         ),

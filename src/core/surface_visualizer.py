@@ -296,6 +296,14 @@ class SurfaceVisualizer:
             image = self._render_modern_rubbing(depth_map, light_angle)
         elif style == 'relief':
             image = self._render_relief(depth_map, light_angle)
+        elif style == 'multilight':
+            image = self._render_static_multilight(depth_map)
+        elif style == 'normal_unsharp':
+            image = self._render_normal_unsharp(depth_map)
+        elif style == 'specular':
+            image = self._render_specular_enhancement(depth_map, light_angle)
+        elif style == 'normals':
+            image = self._render_normal_visualization(depth_map)
         else:
             image = self._render_traditional_rubbing(depth_map, light_angle)
         
@@ -350,6 +358,54 @@ class SurfaceVisualizer:
                 reference_sigma=None,
                 height_mode="cyl_radial",
                 relief_strength=6.0,
+            ),
+            "다중광(기록면)": dict(
+                style="multilight",
+                image_mode="image",
+                smooth_sigma=0.8,
+                detail_strength=1.3,
+                detail_sigma=None,
+                splat_sigma=0.35,
+                remove_curvature=True,
+                reference_sigma=None,
+                height_mode="cyl_radial",
+                relief_strength=4.5,
+            ),
+            "노멀 언샵": dict(
+                style="normal_unsharp",
+                image_mode="image",
+                smooth_sigma=0.7,
+                detail_strength=1.5,
+                detail_sigma=None,
+                splat_sigma=0.35,
+                remove_curvature=True,
+                reference_sigma=None,
+                height_mode="cyl_radial",
+                relief_strength=4.0,
+            ),
+            "스펙큘러 강조": dict(
+                style="specular",
+                image_mode="image",
+                smooth_sigma=0.9,
+                detail_strength=1.1,
+                detail_sigma=None,
+                splat_sigma=0.35,
+                remove_curvature=True,
+                reference_sigma=None,
+                height_mode="cyl_radial",
+                relief_strength=3.5,
+            ),
+            "노멀 보기": dict(
+                style="normals",
+                image_mode="image",
+                smooth_sigma=0.8,
+                detail_strength=1.2,
+                detail_sigma=None,
+                splat_sigma=0.35,
+                remove_curvature=False,
+                reference_sigma=None,
+                height_mode="cyl_radial",
+                relief_strength=2.0,
             ),
             "레거시(메쉬)": dict(
                 style="traditional",
@@ -833,7 +889,67 @@ class SurfaceVisualizer:
             valid_mask = dilated
         
         return result
-    
+
+    @staticmethod
+    def _normalize_image_unit(image: np.ndarray) -> np.ndarray:
+        arr = np.asarray(image, dtype=np.float64)
+        if arr.size <= 0:
+            return np.zeros_like(arr, dtype=np.float64)
+        finite = np.isfinite(arr)
+        if not bool(np.any(finite)):
+            return np.zeros_like(arr, dtype=np.float64)
+        valid = arr[finite]
+        lo = float(np.min(valid))
+        hi = float(np.max(valid))
+        if not np.isfinite(lo) or not np.isfinite(hi) or abs(hi - lo) <= 1e-12:
+            return np.zeros_like(arr, dtype=np.float64)
+        out = (arr - lo) / (hi - lo)
+        if not np.isfinite(out).all():
+            out = np.nan_to_num(out, nan=0.0, posinf=1.0, neginf=0.0)
+        return np.clip(out, 0.0, 1.0)
+
+    @staticmethod
+    def _to_uint8_image(image: np.ndarray) -> np.ndarray:
+        arr = SurfaceVisualizer._normalize_image_unit(image)
+        return np.clip(arr * 255.0, 0.0, 255.0).astype(np.uint8)
+
+    def _compute_normal_field(self, depth_map: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        try:
+            grad_x = ndimage.sobel(depth_map, axis=1) / 8.0
+            grad_y = ndimage.sobel(depth_map, axis=0) / 8.0
+        except Exception:
+            grad_y, grad_x = np.gradient(depth_map)
+
+        normal_z = np.ones_like(depth_map, dtype=np.float64)
+        norm = np.sqrt((grad_x ** 2) + (grad_y ** 2) + (normal_z ** 2))
+        norm = np.where(np.isfinite(norm) & (norm > 1e-12), norm, 1.0)
+
+        nx = -grad_x / norm
+        ny = -grad_y / norm
+        nz = normal_z / norm
+        return (
+            np.asarray(nx, dtype=np.float64),
+            np.asarray(ny, dtype=np.float64),
+            np.asarray(nz, dtype=np.float64),
+        )
+
+    def _lambert_from_normals(
+        self,
+        nx: np.ndarray,
+        ny: np.ndarray,
+        nz: np.ndarray,
+        *,
+        azimuth_deg: float,
+        elevation_deg: float = 35.0,
+    ) -> np.ndarray:
+        az = np.radians(float(azimuth_deg))
+        el = np.radians(float(elevation_deg))
+        lx = np.cos(az) * np.cos(el)
+        ly = np.sin(az) * np.cos(el)
+        lz = np.sin(el)
+        intensity = (lx * nx) + (ly * ny) + (lz * nz)
+        return np.clip(intensity, 0.0, 1.0)
+
     def _render_traditional_rubbing(self, depth_map: np.ndarray,
                                      light_angle: float) -> np.ndarray:
         """
@@ -872,7 +988,21 @@ class SurfaceVisualizer:
         image = (intensity * 255).astype(np.uint8)
         
         return image
-    
+
+    def _render_static_multilight(self, depth_map: np.ndarray) -> np.ndarray:
+        """RTI-like static multi-light rendering for recording surfaces."""
+        nx, ny, nz = self._compute_normal_field(depth_map)
+        azimuths = (0.0, 35.0, 70.0, 110.0, 145.0, 215.0, 250.0, 320.0)
+        stack = np.stack(
+            [self._lambert_from_normals(nx, ny, nz, azimuth_deg=az, elevation_deg=32.0) for az in azimuths],
+            axis=0,
+        )
+        mean_img = np.mean(stack, axis=0)
+        span_img = np.max(stack, axis=0) - np.min(stack, axis=0)
+        fused = (0.35 * mean_img) + (0.85 * span_img)
+        fused = np.power(np.clip(fused, 0.0, 1.0), 0.9)
+        return self._to_uint8_image(fused)
+
     def _render_modern_rubbing(self, depth_map: np.ndarray,
                                 light_angle: float) -> np.ndarray:
         """
@@ -886,7 +1016,57 @@ class SurfaceVisualizer:
         enhanced = np.clip(enhanced, 0, 255).astype(np.uint8)
         
         return enhanced
-    
+
+    def _render_normal_unsharp(self, depth_map: np.ndarray) -> np.ndarray:
+        """Diffuse-gain / normal-unsharp-like enhancement for shallow relief."""
+        base = self._render_static_multilight(depth_map).astype(np.float64) / 255.0
+        try:
+            blur = ndimage.gaussian_filter(base, sigma=2.0)
+            detail = base - blur
+            out = np.clip(base + (1.6 * detail), 0.0, 1.0)
+        except Exception:
+            out = base
+        return self._to_uint8_image(out)
+
+    def _render_specular_enhancement(self, depth_map: np.ndarray, light_angle: float) -> np.ndarray:
+        """Specular-enhanced view inspired by RTI material enhancement."""
+        nx, ny, nz = self._compute_normal_field(depth_map)
+        diffuse = self._lambert_from_normals(nx, ny, nz, azimuth_deg=light_angle, elevation_deg=30.0)
+
+        az = np.radians(float(light_angle))
+        el = np.radians(35.0)
+        light = np.array(
+            [np.cos(az) * np.cos(el), np.sin(az) * np.cos(el), np.sin(el)],
+            dtype=np.float64,
+        )
+        view = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        half_vec = light + view
+        half_norm = float(np.linalg.norm(half_vec))
+        if not np.isfinite(half_norm) or half_norm <= 1e-12:
+            half_vec = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        else:
+            half_vec = half_vec / half_norm
+
+        spec = (nx * half_vec[0]) + (ny * half_vec[1]) + (nz * half_vec[2])
+        spec = np.clip(spec, 0.0, 1.0)
+        spec = np.power(spec, 24.0)
+        enhanced = np.clip((0.25 * diffuse) + (0.85 * spec) + (0.10 * nz), 0.0, 1.0)
+        return self._to_uint8_image(enhanced)
+
+    def _render_normal_visualization(self, depth_map: np.ndarray) -> np.ndarray:
+        """RGB normal visualization for inspection/export."""
+        nx, ny, nz = self._compute_normal_field(depth_map)
+        rgb = np.stack(
+            [
+                (nx * 0.5) + 0.5,
+                (ny * 0.5) + 0.5,
+                (nz * 0.5) + 0.5,
+            ],
+            axis=-1,
+        )
+        rgb = np.clip(rgb, 0.0, 1.0)
+        return (rgb * 255.0).astype(np.uint8)
+
     def _render_relief(self, depth_map: np.ndarray,
                        light_angle: float) -> np.ndarray:
         """

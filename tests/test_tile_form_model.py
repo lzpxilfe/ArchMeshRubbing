@@ -33,8 +33,12 @@ def test_tile_interpretation_state_roundtrip():
                 profile_point_count=42,
                 profile_width_world=5.2,
                 profile_depth_world=3.1,
+                profile_center_world=(1.1, 3.25, 3.0),
                 profile_radius_median_world=2.45,
                 profile_radius_iqr_world=0.18,
+                profile_fit_rmse_world=0.03,
+                profile_arc_span_deg=118.0,
+                profile_fit_confidence=0.81,
                 note="candidate",
             )
         ],
@@ -73,7 +77,10 @@ def test_tile_interpretation_state_roundtrip():
     assert len(restored.section_observations) == 1
     assert restored.section_observations[0].station == 1.25
     assert restored.section_observations[0].profile_point_count == 42
+    assert restored.section_observations[0].profile_center_world == (1.1, 3.25, 3.0)
     assert restored.section_observations[0].profile_radius_median_world == 2.45
+    assert restored.section_observations[0].profile_fit_rmse_world == 0.03
+    assert restored.section_observations[0].profile_arc_span_deg == 118.0
     assert restored.mandrel_fit.radius_world == 7.5
     assert restored.mandrel_fit.used_sections == 4
     assert restored.mandrel_fit.scope == "현재 선택 표면"

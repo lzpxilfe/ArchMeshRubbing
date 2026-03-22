@@ -32,6 +32,21 @@ class TestMainCLI(unittest.TestCase):
 
         mock_generate.assert_called_once_with("sugkiwa_quarter", seed=7, output_path="synthetic.obj")
 
+    def test_run_cli_routes_open_mesh_command(self):
+        with patch("main.launch_gui") as mock_launch:
+            with patch("sys.argv", ["main.py", "--open-mesh", "tile.obj"]):
+                main.run_cli()
+
+        mock_launch.assert_called_once_with(open_mesh="tile.obj")
+
+    def test_run_cli_existing_path_opens_gui(self):
+        with patch("main.launch_gui") as mock_launch:
+            with patch("main.os.path.exists", return_value=True):
+                with patch("sys.argv", ["main.py", "tile.obj"]):
+                    main.run_cli()
+
+        mock_launch.assert_called_once_with(open_mesh="tile.obj")
+
     def test_run_cli_routes_benchmark_synthetic_command(self):
         with patch("main.benchmark_synthetic_tiles") as mock_benchmark:
             with patch("sys.argv", ["main.py", "--benchmark-synthetic", "benchmarks", "1,2,3"]):

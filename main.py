@@ -23,12 +23,12 @@ from src.core.output_paths import (  # noqa: E402
     inner_surface_path,
     outer_surface_path,
 )
+from src.core.unit_utils import DEFAULT_MESH_UNIT  # noqa: E402
 
 _LOGGER = logging.getLogger(__name__)
 DEFAULT_EXPORT_DPI = DEFAULTS.export_dpi
 DEFAULT_RENDER_RESOLUTION = DEFAULTS.render_resolution
 DEFAULT_ARAP_MAX_ITERATIONS = DEFAULTS.arap_max_iterations
-DEFAULT_MESH_UNIT = "mm"
 SUPPORTED_FORMATS = ["OBJ", "PLY", "STL", "OFF", "glTF (.gltf)", "glTF Binary (.glb)"]
 
 
@@ -57,6 +57,10 @@ def run_cli():
     
     if cmd == '--gui':
         launch_gui()
+        return
+
+    if cmd == '--open-mesh' and len(sys.argv) > 2:
+        launch_gui(open_mesh=sys.argv[2])
         return
 
     if cmd == '--open-project' and len(sys.argv) > 2:
@@ -98,9 +102,9 @@ def run_cli():
         separate_mesh(sys.argv[2])
         return
     
-    # 기본: 파일 경로가 들어오면 전체 처리
+    # 기본: 파일 경로가 들어오면 인터랙티브 앱에서 연다.
     if os.path.exists(cmd):
-        process_mesh(cmd)
+        launch_gui(open_mesh=cmd)
     else:
         print(f"Error: Unknown command or file not found: {cmd}")
         print("Use --help for usage information")
@@ -114,10 +118,11 @@ def print_help():
     print("=" * 60)
     print()
     print("Usage:")
-    print("  python main.py <mesh_file>              # Full processing")
+    print("  python main.py <mesh_file>              # Launch GUI and open mesh")
     print("  python main.py --info <mesh_file>       # Show file info")
-    print("  python main.py --flatten <mesh_file> [output]    # Recording-surface unwrap only")
-    print("  python main.py --review <mesh_file> [output]     # Recording-surface review sheet")
+    print("  python main.py --open-mesh <mesh_file>  # Launch GUI and open mesh")
+    print("  python main.py --flatten <mesh_file> [output]    # Quick full-surface unwrap only")
+    print("  python main.py --review <mesh_file> [output]     # Recording-surface review sheet (quick full-surface)")
     print("  python main.py --generate-synthetic <preset> [seed] [output]  # Synthetic tile benchmark bundle + review")
     print("  python main.py --benchmark-synthetic <output_dir> [seeds]     # Synthetic benchmark suite + review sheets")
     print("  python main.py --project <mesh_file> [output]    # Orthographic projection")
@@ -155,7 +160,6 @@ def show_file_info(filepath: str):
 def process_mesh(filepath: str):
     """메쉬 전체 처리 (로드 -> 기록면 전개 -> 탁본 이미지 생성)."""
     from src.core.mesh_loader import MeshLoader
-    from src.core.flattener import ARAPFlattener
     from src.core.surface_visualizer import SurfaceVisualizer
     
     print(f"\n{'='*60}")
@@ -175,9 +179,9 @@ def process_mesh(filepath: str):
         print(f"      Has Texture: {mesh.has_texture}")
         
         # 2. Recording-surface unwrap
-        print("\n[2/4] Unwrapping recording surface (ARAP algorithm)...")
-        flattener = ARAPFlattener(max_iterations=DEFAULT_ARAP_MAX_ITERATIONS)
-        flattened = flattener.flatten(mesh)
+        print("\n[2/4] Quick recording-surface unwrap (section workflow)...")
+        print("      Note: use --gui for guided top/bottom recording-surface preparation.")
+        flattened = _quick_full_surface_unwrap(mesh)
         
         print(f"      Unwrapped size: {flattened.width:.2f} x {flattened.height:.2f} {mesh.unit}")
         print(f"      Mean distortion: {flattened.mean_distortion:.1%}")
@@ -211,7 +215,6 @@ def process_mesh(filepath: str):
 def flatten_mesh(filepath: str, output_path: str | None = None):
     """기록면 전개만 수행."""
     from src.core.mesh_loader import MeshLoader
-    from src.core.flattener import ARAPFlattener
     from src.core.surface_visualizer import SurfaceVisualizer
     
     print(f"\nUnwrapping recording surface: {filepath}")
@@ -223,8 +226,8 @@ def flatten_mesh(filepath: str, output_path: str | None = None):
         
         print(f"  Loaded: {mesh.n_vertices:,} vertices, {mesh.n_faces:,} faces")
 
-        flattener = ARAPFlattener(max_iterations=DEFAULT_ARAP_MAX_ITERATIONS)
-        flattened = flattener.flatten(mesh)
+        print("  Note: this quick path unwraps the full mesh; use --gui for guided top/bottom recording surfaces.")
+        flattened = _quick_full_surface_unwrap(mesh)
         
         print(f"  Unwrapped: {flattened.width:.2f} x {flattened.height:.2f} {mesh.unit}")
         print(f"  Distortion: {flattened.mean_distortion:.1%} (mean), {flattened.max_distortion:.1%} (max)")
@@ -246,7 +249,6 @@ def flatten_mesh(filepath: str, output_path: str | None = None):
 
 def review_mesh(filepath: str, output_path: str | None = None):
     """기록면 검토 시트 생성."""
-    from src.core.flattener import ARAPFlattener
     from src.core.mesh_loader import MeshLoader
     from src.core.recording_surface_review import (
         build_recording_surface_summary_lines,
@@ -264,8 +266,8 @@ def review_mesh(filepath: str, output_path: str | None = None):
 
         print(f"  Loaded: {mesh.n_vertices:,} vertices, {mesh.n_faces:,} faces")
 
-        flattener = ARAPFlattener(max_iterations=DEFAULT_ARAP_MAX_ITERATIONS)
-        flattened = flattener.flatten(mesh)
+        print("  Note: this quick review uses the section workflow on the full mesh; use --gui for guided recording-surface selection.")
+        flattened = _quick_full_surface_unwrap(mesh)
 
         print(f"  Unwrapped: {flattened.width:.2f} x {flattened.height:.2f} {mesh.unit}")
         print(f"  Distortion: {flattened.mean_distortion:.1%} (mean), {flattened.max_distortion:.1%} (max)")
@@ -280,9 +282,9 @@ def review_mesh(filepath: str, output_path: str | None = None):
                 width_pixels=DEFAULT_RENDER_RESOLUTION,
                 summary_lines=build_recording_surface_summary_lines(
                     flattened,
-                    record_label="전체 기록면",
+                    record_label="빠른 전체 기록면",
                     target_label="전체 메쉬",
-                    mode_label="일반 전개",
+                    mode_label="빠른 section 전개",
                 ),
             ),
             rubbing_image=rubbing.to_pil_image(),
@@ -452,7 +454,7 @@ def separate_mesh(filepath: str):
         traceback.print_exc()
 
 
-def launch_gui(*, open_project: str | None = None) -> None:
+def launch_gui(*, open_project: str | None = None, open_mesh: str | None = None) -> None:
     """Launch the interactive GUI (app_interactive.py)."""
     try:
         import app_interactive
@@ -465,6 +467,8 @@ def launch_gui(*, open_project: str | None = None) -> None:
     if open_project:
         # Let app_interactive access the argument via sys.argv.
         sys.argv = [sys.argv[0], "--open-project", str(open_project)]
+    elif open_mesh:
+        sys.argv = [sys.argv[0], "--open-mesh", str(open_mesh)]
     else:
         sys.argv = [sys.argv[0]]
 
@@ -472,6 +476,21 @@ def launch_gui(*, open_project: str | None = None) -> None:
         app_interactive.main()
     except Exception as e:
         print(f"GUI failed to start: {type(e).__name__}: {e}")
+
+
+def _quick_full_surface_unwrap(mesh):
+    """Shared quick unwrap path for non-interactive entrypoints."""
+    from src.core.flattener import flatten_with_method
+
+    return flatten_with_method(
+        mesh,
+        method="section",
+        iterations=DEFAULT_ARAP_MAX_ITERATIONS,
+        initial_method="section",
+        cylinder_axis="auto",
+        smooth_iters=2,
+        smooth_strength=0.12,
+    )
 
 
 def run_gui():
