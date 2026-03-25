@@ -287,7 +287,7 @@ except Exception:
     pass
 
 from src.gui.viewport_3d import Viewport3D  # noqa: E402
-from src.core.mesh_loader import MeshLoader, MeshProcessor  # noqa: E402
+from src.core.mesh_loader import MeshLoader  # noqa: E402
 from src.core.profile_exporter import ProfileExporter  # noqa: E402
 from src.core.project_file import (  # noqa: E402
     ProjectFormatError,

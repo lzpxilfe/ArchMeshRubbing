@@ -2334,6 +2334,22 @@ def sectionwise_cylindrical_parameterization(
     vertices = np.asarray(mesh.vertices, dtype=np.float64)
     if vertices.ndim != 2 or vertices.shape[0] == 0 or vertices.shape[1] < 3:
         return np.zeros((0, 2), dtype=np.float64)
+    guides = _coerce_section_guides(section_guides)
+    record_view_key = str(record_view or "").strip().lower()
+    guide_station_values_raw = np.asarray(
+        [float(item["station"]) for item in guides if item.get("station", None) is not None],
+        dtype=np.float64,
+    ).reshape(-1)
+    guide_radius_values_raw = np.asarray(
+        [
+            float(item["radius_world"])
+            for item in guides
+            if item.get("radius_world", None) is not None
+            and np.isfinite(float(item["radius_world"]))
+            and float(item["radius_world"]) > 0.0
+        ],
+        dtype=np.float64,
+    ).reshape(-1)
 
     def _fallback(reason: str) -> np.ndarray | tuple[np.ndarray, dict[str, Any]]:
         uv_res = cylindrical_parameterization(
@@ -2347,12 +2363,24 @@ def sectionwise_cylindrical_parameterization(
             uv0, meta0 = uv_res
         else:
             uv0, meta0 = uv_res, {}
+        uv_out = np.asarray(uv0, dtype=np.float64)
+        if uv_out.ndim == 2 and uv_out.shape[1] >= 2 and record_view_key == "bottom":
+            finite_u = np.isfinite(uv_out[:, 0])
+            if bool(np.any(finite_u)):
+                uv_out = uv_out[:, :2].copy()
+                uv_out[finite_u, 0] = -uv_out[finite_u, 0]
+                uv_out[finite_u, 0] -= float(np.min(uv_out[finite_u, 0]))
         meta_out = dict(meta0 or {})
         meta_out["sectionwise_fallback"] = True
         meta_out["sectionwise_reason"] = str(reason)
+        meta_out["section_axis_input"] = str(axis)
+        meta_out["section_guided_count"] = int(np.unique(guide_station_values_raw).size)
+        meta_out["section_guided_radius_count"] = int(guide_radius_values_raw.size)
+        meta_out["section_record_view"] = record_view_key
+        meta_out["section_u_flipped"] = bool(record_view_key == "bottom")
         if bool(return_meta):
-            return uv0, meta_out
-        return uv0
+            return uv_out, meta_out
+        return uv_out
 
     a, axis_source = _estimate_section_longitudinal_axis(vertices, axis=axis)
     try:
@@ -2402,7 +2430,6 @@ def sectionwise_cylindrical_parameterization(
     if not np.isfinite(span) or span < 1e-9:
         return _fallback("degenerate_span")
 
-    guides = _coerce_section_guides(section_guides)
     guide_station_values = np.asarray(
         [float(item["station"]) for item in guides if item.get("station", None) is not None],
         dtype=np.float64,
@@ -2629,7 +2656,6 @@ def sectionwise_cylindrical_parameterization(
     u[finite] = theta_wrapped * r_local
     v_out[finite] = v[finite]
 
-    record_view_key = str(record_view or "").strip().lower()
     flip_u = record_view_key == "bottom"
     if flip_u:
         u[finite] = -u[finite]
