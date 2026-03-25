@@ -58,6 +58,8 @@ It is an archaeology-first desktop tool for turning 3D meshes into usable record
 - `다중광(기록면)`
 - `자연(이미지)+CLAHE`
 - `로컬 대비(텍스처)`
+- `하이브리드(형상+텍스처)`
+- `텍스처 판독(실사)`
 - `노멀 언샵`
 - `스펙큘러 강조`
 - `노멀 보기`
@@ -65,6 +67,7 @@ It is an archaeology-first desktop tool for turning 3D meshes into usable record
 
 기본 출력 패널에서 렌더 모드 위에 `질감 강조`, `추가 스무딩`, `텍스처 보정`을 덧붙여
 기록면의 미세한 음각/양각 표현을 직접 조절할 수 있습니다.
+텍스처가 포함된 메쉬는 `하이브리드`/`텍스처 판독` 모드에서 실제 UV 텍스처를 평면화 결과에 합성합니다.
 
 ### 4. 제원측정
 

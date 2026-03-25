@@ -193,6 +193,8 @@ class SurfaceVisualizer:
         texture_detail_scale: float = 1.0,
         texture_smooth_sigma_extra: float = 0.0,
         texture_postprocess_extra: str | list[str] | tuple[str, ...] | None = None,
+        texture_source: str = "none",
+        texture_blend: float = 0.35,
     ) -> RubbingImage:
         """
         탁본 효과 이미지 생성
@@ -218,6 +220,9 @@ class SurfaceVisualizer:
             texture_detail_scale: 프리셋/기본 detail_strength에 곱해지는 질감 강조 배율.
             texture_smooth_sigma_extra: 프리셋/기본 smooth_sigma에 더하는 추가 스무딩(px).
             texture_postprocess_extra: 프리셋 후처리에 추가로 합칠 보정 단계.
+            texture_source: 'none' | 'texture' | 'hybrid'. 실제 메쉬 텍스처를
+                탁본 렌더에 반영하는 모드.
+            texture_blend: hybrid 모드에서 형상 렌더와 텍스처 기여도를 섞는 비율.
 
         Returns:
             RubbingImage: 탁본 이미지
@@ -240,6 +245,8 @@ class SurfaceVisualizer:
             invert = preset_cfg.get("invert", invert)
             splat_sigma = preset_cfg.get("splat_sigma", None)
             texture_postprocess = preset_cfg.get("texture_postprocess", texture_postprocess)
+            texture_source = preset_cfg.get("texture_source", texture_source)
+            texture_blend = preset_cfg.get("texture_blend", texture_blend)
         else:
             splat_sigma = None
 
@@ -261,6 +268,12 @@ class SurfaceVisualizer:
             texture_postprocess,
             texture_postprocess_extra,
         )
+        texture_source_key = str(texture_source or "none").strip().lower()
+        try:
+            texture_blend_f = float(texture_blend)
+        except Exception:
+            texture_blend_f = 0.35
+        texture_blend_f = float(np.clip(texture_blend_f, 0.0, 1.0))
 
         if flattened is None or getattr(flattened, "uv", None) is None or getattr(flattened, "faces", None) is None:
             raise ValueError("Flattened mesh is missing uv/faces.")
@@ -355,6 +368,22 @@ class SurfaceVisualizer:
         else:
             image = self._render_traditional_rubbing(depth_map, light_angle)
 
+        if texture_source_key in {"texture", "hybrid"}:
+            texture_map = self._create_texture_map(
+                flattened,
+                width_pixels,
+                height_pixels,
+                smooth_sigma=max(0.0, float(smooth_sigma)) * 0.5,
+            )
+            if texture_map is not None and texture_map.size > 0:
+                image = self._merge_texture_render(
+                    image,
+                    texture_map,
+                    source=texture_source_key,
+                    blend=texture_blend_f,
+                    detail_scale=detail_scale,
+                )
+
         image = self._apply_rubbing_postprocess(image, texture_postprocess)
         
         return RubbingImage(
@@ -414,6 +443,31 @@ class SurfaceVisualizer:
                 detail_sigma=None,
                 splat_sigma=0.35,
                 texture_postprocess="local_contrast,soft_denoise",
+            ),
+            "텍스처 판독(실사)": dict(
+                style="traditional",
+                image_mode="image",
+                smooth_sigma=0.7,
+                detail_strength=1.0,
+                detail_sigma=None,
+                splat_sigma=0.3,
+                texture_source="texture",
+                texture_postprocess="clahe,local_contrast",
+            ),
+            "하이브리드(형상+텍스처)": dict(
+                style="multilight",
+                image_mode="image",
+                smooth_sigma=0.8,
+                detail_strength=1.25,
+                detail_sigma=None,
+                splat_sigma=0.35,
+                remove_curvature=True,
+                reference_sigma=None,
+                height_mode="cyl_radial",
+                relief_strength=4.0,
+                texture_source="hybrid",
+                texture_blend=0.34,
+                texture_postprocess="clahe",
             ),
             "디지털(곡률 제거)": dict(
                 style="modern",
@@ -778,6 +832,248 @@ class SurfaceVisualizer:
         if not np.isfinite(out).all():
             out = np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
         return out
+
+    @staticmethod
+    def _texture_to_luma01(texture: np.ndarray | None) -> np.ndarray | None:
+        if texture is None:
+            return None
+        arr = np.asarray(texture)
+        if arr.size <= 0:
+            return None
+        if arr.ndim == 2:
+            return SurfaceVisualizer._as_float01_image(arr)
+        if arr.ndim != 3:
+            return None
+        if arr.shape[2] <= 0:
+            return None
+
+        rgb = np.asarray(arr[..., :3], dtype=np.float64)
+        if rgb.shape[2] == 1:
+            rgb = np.repeat(rgb, 3, axis=2)
+        if rgb.shape[2] < 3:
+            return None
+
+        if np.asarray(texture).dtype == np.uint8:
+            rgb = np.clip(rgb / 255.0, 0.0, 1.0)
+        else:
+            rgb = SurfaceVisualizer._as_float01_image(rgb)
+
+        weights = np.array([0.299, 0.587, 0.114], dtype=np.float64)
+        luma = np.tensordot(rgb[..., :3], weights, axes=([-1], [0]))
+        if not np.isfinite(luma).all():
+            luma = np.nan_to_num(luma, nan=0.0, posinf=0.0, neginf=0.0)
+        return np.clip(np.asarray(luma, dtype=np.float64), 0.0, 1.0)
+
+    @staticmethod
+    def _sample_texture_image(texture_01: np.ndarray, u: np.ndarray, v: np.ndarray) -> np.ndarray:
+        tex = np.asarray(texture_01, dtype=np.float64)
+        if tex.ndim != 2 or tex.size <= 0:
+            return np.zeros_like(np.asarray(u, dtype=np.float64), dtype=np.float64)
+
+        uu = np.asarray(u, dtype=np.float64)
+        vv = np.asarray(v, dtype=np.float64)
+        uu = np.nan_to_num(uu, nan=0.0, posinf=0.0, neginf=0.0)
+        vv = np.nan_to_num(vv, nan=0.0, posinf=0.0, neginf=0.0)
+        uu = np.clip(uu, 0.0, 1.0)
+        vv = np.clip(vv, 0.0, 1.0)
+
+        h, w = tex.shape
+        x = uu * float(max(1, w - 1))
+        y = (1.0 - vv) * float(max(1, h - 1))
+
+        x0 = np.floor(x).astype(np.int32)
+        y0 = np.floor(y).astype(np.int32)
+        x1 = np.clip(x0 + 1, 0, w - 1)
+        y1 = np.clip(y0 + 1, 0, h - 1)
+
+        wx = x - x0.astype(np.float64)
+        wy = y - y0.astype(np.float64)
+
+        s00 = tex[y0, x0]
+        s10 = tex[y0, x1]
+        s01 = tex[y1, x0]
+        s11 = tex[y1, x1]
+
+        top = ((1.0 - wx) * s00) + (wx * s10)
+        bottom = ((1.0 - wx) * s01) + (wx * s11)
+        return np.clip(((1.0 - wy) * top) + (wy * bottom), 0.0, 1.0)
+
+    def _sample_texture_vertices(self, texture_01: np.ndarray, uv_coords: np.ndarray) -> np.ndarray:
+        uv = np.asarray(uv_coords, dtype=np.float64)
+        if uv.ndim != 2 or uv.shape[0] == 0 or uv.shape[1] < 2:
+            return np.zeros((0,), dtype=np.float64)
+        values = self._sample_texture_image(texture_01, uv[:, 0], uv[:, 1])
+        if not np.isfinite(values).all():
+            values = np.nan_to_num(values, nan=0.0, posinf=0.0, neginf=0.0)
+        return np.asarray(values, dtype=np.float64).reshape(-1)
+
+    def _rasterize_triangle_texture(
+        self,
+        uv_dst: np.ndarray,
+        uv_src: np.ndarray,
+        *,
+        width: int,
+        height: int,
+        texture_01: np.ndarray,
+        buffer: np.ndarray,
+        count: np.ndarray,
+    ) -> None:
+        px = np.asarray(uv_dst[:, 0], dtype=np.float64) * float(width - 1)
+        py = (1.0 - np.asarray(uv_dst[:, 1], dtype=np.float64)) * float(height - 1)
+
+        min_x = max(0, int(np.floor(px.min())))
+        max_x = min(width - 1, int(np.ceil(px.max())))
+        min_y = max(0, int(np.floor(py.min())))
+        max_y = min(height - 1, int(np.ceil(py.max())))
+        if min_x > max_x or min_y > max_y:
+            return
+
+        v0 = np.array([px[0], py[0]], dtype=np.float64)
+        v1 = np.array([px[1], py[1]], dtype=np.float64)
+        v2 = np.array([px[2], py[2]], dtype=np.float64)
+        area = (v1[0] - v0[0]) * (v2[1] - v0[1]) - (v2[0] - v0[0]) * (v1[1] - v0[1])
+        if abs(area) < 1e-10:
+            return
+
+        xs = np.arange(min_x, max_x + 1, dtype=np.float64) + 0.5
+        ys = np.arange(min_y, max_y + 1, dtype=np.float64) + 0.5
+        gx, gy = np.meshgrid(xs, ys)
+
+        w0 = ((v1[0] - gx) * (v2[1] - gy) - (v2[0] - gx) * (v1[1] - gy)) / area
+        w1 = ((v2[0] - gx) * (v0[1] - gy) - (v0[0] - gx) * (v2[1] - gy)) / area
+        w2 = 1.0 - w0 - w1
+        mask = (w0 >= -1e-9) & (w1 >= -1e-9) & (w2 >= -1e-9)
+        if not bool(np.any(mask)):
+            return
+
+        su = (w0 * float(uv_src[0, 0])) + (w1 * float(uv_src[1, 0])) + (w2 * float(uv_src[2, 0]))
+        sv = (w0 * float(uv_src[0, 1])) + (w1 * float(uv_src[1, 1])) + (w2 * float(uv_src[2, 1]))
+        samples = self._sample_texture_image(texture_01, su, sv)
+
+        region = np.s_[min_y:max_y + 1, min_x:max_x + 1]
+        region_buffer = buffer[region]
+        region_count = count[region]
+        region_buffer[mask] += samples[mask]
+        region_count[mask] += 1.0
+
+    def _create_texture_map(
+        self,
+        flattened: FlattenedMesh,
+        width: int,
+        height: int,
+        *,
+        smooth_sigma: float = 0.0,
+    ) -> np.ndarray | None:
+        original = getattr(flattened, "original_mesh", None)
+        if original is None or not bool(getattr(original, "has_texture", False)):
+            return None
+
+        texture_01 = self._texture_to_luma01(getattr(original, "texture", None))
+        uv_src = np.asarray(getattr(original, "uv_coords", None), dtype=np.float64)
+        uv_dst = np.asarray(flattened.normalize().uv, dtype=np.float64)
+        faces = np.asarray(getattr(flattened, "faces", None), dtype=np.int32)
+
+        if texture_01 is None:
+            return None
+        if uv_src.ndim != 2 or uv_src.shape[1] < 2 or uv_src.shape[0] != uv_dst.shape[0]:
+            return None
+        if faces.ndim != 2 or faces.shape[0] == 0 or faces.shape[1] < 3:
+            return None
+
+        h = int(max(1, height))
+        w = int(max(1, width))
+        try:
+            raster_thr = int(getattr(self, "_texture_raster_threshold_faces", 40000) or 40000)
+        except Exception:
+            raster_thr = 40000
+
+        if int(faces.shape[0]) > max(5000, raster_thr):
+            vertex_values = self._sample_texture_vertices(texture_01, uv_src[:, :2])
+            texture_map = self._create_value_map_image_based(
+                flattened,
+                vertex_values,
+                w,
+                h,
+                smooth_sigma=max(0.25, float(smooth_sigma)),
+                splat_sigma=0.25,
+            )
+            return self._normalize_image_unit(texture_map)
+
+        buffer = np.zeros((h, w), dtype=np.float64)
+        count = np.zeros((h, w), dtype=np.float64)
+        for face in faces[:, :3]:
+            try:
+                self._rasterize_triangle_texture(
+                    uv_dst[face],
+                    uv_src[face, :2],
+                    width=w,
+                    height=h,
+                    texture_01=texture_01,
+                    buffer=buffer,
+                    count=count,
+                )
+            except Exception:
+                continue
+
+        mask = count > 0.0
+        if not bool(np.any(mask)):
+            vertex_values = self._sample_texture_vertices(texture_01, uv_src[:, :2])
+            texture_map = self._create_value_map_image_based(
+                flattened,
+                vertex_values,
+                w,
+                h,
+                smooth_sigma=max(0.25, float(smooth_sigma)),
+                splat_sigma=0.25,
+            )
+            return self._normalize_image_unit(texture_map)
+
+        buffer[mask] /= count[mask]
+        if not bool(mask.all()):
+            buffer = self._fill_holes(buffer, mask)
+
+        try:
+            sigma = float(smooth_sigma)
+        except Exception:
+            sigma = 0.0
+        if np.isfinite(sigma) and sigma > 0.0:
+            try:
+                buffer = ndimage.gaussian_filter(buffer, sigma=float(sigma))
+            except Exception:
+                pass
+        return np.clip(np.asarray(buffer, dtype=np.float64), 0.0, 1.0)
+
+    def _prepare_texture_detail_map(self, texture_map: np.ndarray, *, detail_scale: float) -> np.ndarray:
+        arr = np.clip(np.asarray(texture_map, dtype=np.float64), 0.0, 1.0)
+        gain = 1.1 + (0.35 * max(0.0, float(detail_scale) - 1.0))
+        try:
+            arr = self._apply_local_contrast(arr, window=24, gain=gain)
+        except Exception:
+            pass
+        try:
+            base = ndimage.gaussian_filter(arr, sigma=1.4)
+            arr = np.clip(arr + (0.35 * (arr - base)), 0.0, 1.0)
+        except Exception:
+            pass
+        return np.clip(arr, 0.0, 1.0)
+
+    def _merge_texture_render(
+        self,
+        image: np.ndarray,
+        texture_map: np.ndarray,
+        *,
+        source: str,
+        blend: float,
+        detail_scale: float,
+    ) -> np.ndarray:
+        texture_view = self._prepare_texture_detail_map(texture_map, detail_scale=detail_scale)
+        source_key = str(source or "none").strip().lower()
+        if source_key == "texture":
+            return self._to_uint8_image(texture_view)
+
+        relief = self._as_float01_image(image)
+        out = np.clip(((1.0 - blend) * relief) + (blend * texture_view), 0.0, 1.0)
+        return self._to_uint8_image(out)
 
     def _create_value_map(
         self,

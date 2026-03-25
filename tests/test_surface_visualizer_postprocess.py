@@ -49,6 +49,63 @@ class TestSurfaceVisualizerPostprocess(unittest.TestCase):
             distortion_per_face=np.asarray([0.01, 0.02], dtype=np.float64),
         )
 
+    def _make_textured_flattened_mesh(self) -> FlattenedMesh:
+        mesh = MeshData(
+            vertices=np.asarray(
+                [
+                    [0.0, 0.0, 0.0],
+                    [1.0, 0.0, 0.2],
+                    [1.0, 1.0, 0.4],
+                    [0.0, 1.0, 0.1],
+                ],
+                dtype=np.float64,
+            ),
+            faces=np.asarray(
+                [
+                    [0, 1, 2],
+                    [0, 2, 3],
+                ],
+                dtype=np.int32,
+            ),
+            uv_coords=np.asarray(
+                [
+                    [0.0, 0.0],
+                    [1.0, 0.0],
+                    [1.0, 1.0],
+                    [0.0, 1.0],
+                ],
+                dtype=np.float64,
+            ),
+            texture=np.asarray(
+                [
+                    [[0, 0, 0], [255, 255, 255]],
+                    [[255, 255, 255], [0, 0, 0]],
+                ],
+                dtype=np.uint8,
+            ),
+            unit="cm",
+        )
+        return FlattenedMesh(
+            uv=np.asarray(
+                [
+                    [0.0, 0.0],
+                    [1.0, 0.0],
+                    [1.0, 1.0],
+                    [0.0, 1.0],
+                ],
+                dtype=np.float64,
+            ),
+            faces=np.asarray(
+                [
+                    [0, 1, 2],
+                    [0, 2, 3],
+                ],
+                dtype=np.int32,
+            ),
+            original_mesh=mesh,
+            distortion_per_face=np.asarray([0.01, 0.02], dtype=np.float64),
+        )
+
     def test_preset_with_image_postprocess(self):
         flattened = self._make_flattened_mesh()
         visualizer = SurfaceVisualizer()
@@ -74,6 +131,33 @@ class TestSurfaceVisualizerPostprocess(unittest.TestCase):
         self.assertEqual(img.image.dtype, np.uint8)
         self.assertGreaterEqual(int(img.image.min()), 0)
         self.assertLessEqual(int(img.image.max()), 255)
+
+    def test_texture_source_uses_mesh_texture(self):
+        flattened = self._make_textured_flattened_mesh()
+        visualizer = SurfaceVisualizer()
+        img = visualizer.generate_rubbing(
+            flattened,
+            width_pixels=64,
+            texture_source="texture",
+            texture_postprocess="local_contrast",
+            height_mode="normal_z",
+        )
+        self.assertEqual(img.image.dtype, np.uint8)
+        self.assertEqual(img.image.ndim, 2)
+        self.assertGreater(int(img.image.max()), int(img.image.min()))
+
+    def test_hybrid_texture_preset_outputs_variation(self):
+        flattened = self._make_textured_flattened_mesh()
+        visualizer = SurfaceVisualizer()
+        img = visualizer.generate_rubbing(
+            flattened,
+            width_pixels=64,
+            preset="하이브리드(형상+텍스처)",
+            height_mode="normal_z",
+        )
+        self.assertEqual(img.image.dtype, np.uint8)
+        self.assertEqual(img.image.ndim, 2)
+        self.assertGreater(int(np.std(img.image)), 0)
 
     def test_normalize_postprocess_steps(self):
         steps = SurfaceVisualizer._normalize_postprocess_steps(" CLAHE, local_contrast , denoise ")

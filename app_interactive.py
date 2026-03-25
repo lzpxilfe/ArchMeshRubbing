@@ -2793,6 +2793,8 @@ class ExportPanel(QWidget):
         self.combo_review_render_mode.addItem("다중광(기록면)", "다중광(기록면)")
         self.combo_review_render_mode.addItem("자연(이미지)+CLAHE", "자연(이미지)+CLAHE")
         self.combo_review_render_mode.addItem("로컬 대비(텍스처)", "로컬 대비(텍스처)")
+        self.combo_review_render_mode.addItem("하이브리드(형상+텍스처)", "하이브리드(형상+텍스처)")
+        self.combo_review_render_mode.addItem("텍스처 판독(실사)", "텍스처 판독(실사)")
         self.combo_review_render_mode.addItem("노멀 언샵", "노멀 언샵")
         self.combo_review_render_mode.addItem("스펙큘러 강조", "스펙큘러 강조")
         self.combo_review_render_mode.addItem("노멀 보기", "노멀 보기")
@@ -2800,6 +2802,7 @@ class ExportPanel(QWidget):
         self.combo_review_render_mode.setToolTip(
             "검토 시트와 미리보기에서 사용할 기록면 렌더 모드입니다.\n"
             "자동은 기와/기록면일 때 다중광, 일반 경로는 자연(이미지)를 사용합니다.\n"
+            "텍스처가 있는 메쉬는 하이브리드/텍스처 판독 모드에서 실사 텍스처를 함께 사용합니다.\n"
             "텍스처 보강은 CLAHE/로컬 대비 기반 후처리(실험적) 옵션입니다."
         )
         img_layout.addRow("기록면 렌더:", self.combo_review_render_mode)
@@ -6864,11 +6867,18 @@ class MainWindow(QMainWindow):
             return text
         return ""
 
-    @staticmethod
-    def _review_rubbing_preset_for_options(options: dict[str, Any] | None) -> str:
+    def _review_rubbing_preset_for_options(self, options: dict[str, Any] | None) -> str:
         data = dict(options or {})
         if bool(data.get("tile_guided", False)) or str(data.get("tile_record_view", "") or "").strip():
             return "다중광(기록면)"
+        obj = getattr(getattr(self, "viewport", None), "selected_obj", None)
+        mesh = getattr(obj, "mesh", None) if obj is not None else None
+        try:
+            has_texture = bool(getattr(mesh, "has_texture", False))
+        except Exception:
+            has_texture = False
+        if has_texture:
+            return "하이브리드(형상+텍스처)"
         return "자연(이미지)"
 
     def _selected_review_rubbing_preset(self, options: dict[str, Any] | None) -> str:
