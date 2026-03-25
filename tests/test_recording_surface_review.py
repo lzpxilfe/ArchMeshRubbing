@@ -1,5 +1,6 @@
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 from PIL import Image
@@ -166,6 +167,46 @@ class TestRecordingSurfaceReview(unittest.TestCase):
 
         self.assertTrue(np.any(top_right_crop < 150))
         self.assertTrue(np.any(bottom_left_crop < 150))
+
+    def test_render_review_sheet_passes_texture_adjustments_to_visualizer(self):
+        flattened = self._make_flattened_square()
+        captured = {}
+
+        class _FakeRubbing:
+            def to_pil_image(self):
+                return Image.new("L", (320, 160), color=180)
+
+        class _FakeVisualizer:
+            def __init__(self, default_dpi=300):
+                captured["dpi"] = int(default_dpi)
+
+            def generate_rubbing(self, flattened_arg, **kwargs):
+                captured["flattened"] = flattened_arg
+                captured.update(kwargs)
+                return _FakeRubbing()
+
+        with patch("src.core.surface_visualizer.SurfaceVisualizer", _FakeVisualizer):
+            review = render_recording_surface_review(
+                flattened,
+                options=RecordingSurfaceReviewOptions(
+                    dpi=450,
+                    width_pixels=900,
+                    rubbing_preset="자연(이미지)+CLAHE",
+                    rubbing_detail_scale=1.35,
+                    rubbing_smooth_sigma_extra=0.4,
+                    rubbing_texture_postprocess="unsharp",
+                    title="기록면 검토 시트",
+                ),
+            )
+
+        self.assertEqual(captured.get("dpi"), 450)
+        self.assertEqual(captured.get("flattened"), flattened)
+        self.assertEqual(captured.get("width_pixels"), 900)
+        self.assertEqual(captured.get("preset"), "자연(이미지)+CLAHE")
+        self.assertAlmostEqual(float(captured.get("texture_detail_scale", 0.0)), 1.35, places=6)
+        self.assertAlmostEqual(float(captured.get("texture_smooth_sigma_extra", 0.0)), 0.4, places=6)
+        self.assertEqual(captured.get("texture_postprocess_extra"), "unsharp")
+        self.assertEqual(review.rubbing_image.size, (320, 160))
 
     def test_render_review_sheet_for_tile_guided_section_unwrap(self):
         mesh, row_radii = self._make_variable_radius_u_patch()

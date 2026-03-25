@@ -69,6 +69,9 @@ class SheetExportOptions:
     rubbing_smooth_sigma: float = 0.0
     rubbing_detail_strength: float = 1.0
     rubbing_detail_sigma: float | None = None
+    rubbing_texture_detail_scale: float = 1.0
+    rubbing_texture_smooth_sigma_extra: float = 0.0
+    rubbing_texture_postprocess: str | None = None
 
     include_labels: bool = True
     label_font_size_mm: float = 3.5
@@ -423,6 +426,9 @@ class RubbingSheetExporter:
             smooth_sigma=float(getattr(options, "rubbing_smooth_sigma", 0.0)),
             detail_strength=float(getattr(options, "rubbing_detail_strength", 1.0)),
             detail_sigma=getattr(options, "rubbing_detail_sigma", None),
+            texture_detail_scale=float(getattr(options, "rubbing_texture_detail_scale", 1.0) or 1.0),
+            texture_smooth_sigma_extra=float(getattr(options, "rubbing_texture_smooth_sigma_extra", 0.0) or 0.0),
+            texture_postprocess_extra=getattr(options, "rubbing_texture_postprocess", None),
         )
         return flattened, rubbing
 

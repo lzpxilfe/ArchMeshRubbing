@@ -36,6 +36,31 @@ For the feature-by-feature mapping, see:
 - `[R9]` Dihedral-angle sharp edge criterion
   - Standard mesh-processing practice: classify feature edges by dihedral angle between adjacent face normals.
 
+- `[R10]` Polynomial Texture Maps (PTM)
+  - Tom Malzbender, Dan Gelb, Hans Wolters, “Polynomial Texture Maps,” *ACM SIGGRAPH 2001 Conference Proceedings*, 2001, pp. 519-528.
+  - Technical Report version: HP Labs, *HPL-2001-33R1 Polynomial Texture Maps*.
+  - https://shiftleft.com/mirrors/www.hpl.hp.com/techreports/2001/HPL-2001-33R1.html
+
+- `[R11]` Reflectance transformation / PTM origin
+  - T. Malzbender et al., “Enhancement of Shape Perception by Surface Reflectance Transformation,” *HP Labs Technical Report HPL-2000-38R1*, 2000.
+  - https://shiftleft.com/mirrors/www.hpl.hp.com/techreports/2000/HPL-2000-38R1.html
+
+- `[R12]` Bilateral filtering
+  - C. Tomasi, R. Manduchi, “Bilateral Filtering for Gray and Color Images,” *ICCV*, 1998.
+  - https://doi.org/10.1109/ICCV.1998.710815
+
+- `[R13]` CLAHE
+  - Karel J. Zuiderveld, “Contrast Limited Adaptive Histogram Equalization,” *Graphics Gems IV*, 1994.
+  - https://doi.org/10.1016/b978-0-12-336156-1.50061-6
+
+- `[R14]` Archaeological PTM / RTI deployment
+  - Graeme Earl, Kirk Martinez, Tom Malzbender, “Archaeological applications of polynomial texture mapping: analysis, conservation and representation,” *Journal of Archaeological Science*, 2010.
+  - https://doi.org/10.1016/j.jas.2010.03.009
+
+- `[R15]` RTI workflows and implementation
+  - Ted Kinsman, “An Easy to Build Reflectance Transformation Imaging (RTI) System,” *Journal of Biocommunication*, 2016.
+  - https://doi.org/10.5210/jbc.v40i1.6625
+
 ## Libraries / Official Docs
 
 - `[L1]` NumPy - https://numpy.org/
@@ -45,6 +70,9 @@ For the feature-by-feature mapping, see:
 - `[L5]` OpenCV - https://docs.opencv.org/
 - `[L6]` PyQt6 - https://doc.qt.io/qtforpython-6/
 - `[L7]` PyOpenGL - https://pyopengl.sourceforge.net/
+- `[L8]` OpenCV CLAHE API - https://docs.opencv.org/4.x/d6/dc7/group__imgproc__hist.html
+- `[L9]` OpenCV Bilateral Filter API - https://docs.opencv.org/4.x/d4/d86/group__imgproc__filter.html
+- `[L10]` OpenCV filtering tutorials (smoothing, denoise, bilateral) - https://docs.opencv.org/4.x/d4/d13/tutorial_py_filtering.html
 
 ## Notes
 
@@ -52,4 +80,3 @@ For the feature-by-feature mapping, see:
 - When adding a new major algorithm, include both:
   - a bibliography entry here (`[R*]` or `[L*]`)
   - a feature mapping entry in `docs/FEATURE_REFERENCES.md`
-

@@ -9,8 +9,27 @@ from dataclasses import dataclass
 import numpy as np
 from PIL import Image
 from scipy import ndimage
+from typing import Any
 
 from .flattener import FlattenedMesh
+
+
+_CV2_MODULE = None
+_CV2_CHECKED = False
+
+
+def _get_cv2() -> Any | None:
+    """Load OpenCV lazily for optional texture enhancement filters."""
+    global _CV2_MODULE, _CV2_CHECKED
+    if _CV2_CHECKED:
+        return _CV2_MODULE
+    _CV2_CHECKED = True
+    try:
+        import cv2  # type: ignore[import-not-found]
+        _CV2_MODULE = cv2
+    except Exception:
+        _CV2_MODULE = None
+    return _CV2_MODULE
 
 
 @dataclass
@@ -170,6 +189,10 @@ class SurfaceVisualizer:
         smooth_sigma: float = 0.0,
         detail_strength: float = 1.0,
         detail_sigma: float | None = None,
+        texture_postprocess: str | list[str] | tuple[str, ...] | None = None,
+        texture_detail_scale: float = 1.0,
+        texture_smooth_sigma_extra: float = 0.0,
+        texture_postprocess_extra: str | list[str] | tuple[str, ...] | None = None,
     ) -> RubbingImage:
         """
         탁본 효과 이미지 생성
@@ -190,6 +213,11 @@ class SurfaceVisualizer:
             smooth_sigma: 이미지 기반 렌더링 시 부드럽게 하는 정도(px).
             detail_strength: 디테일 강조/완화 정도 (1.0=기본).
             detail_sigma: 디테일 추출용 블러 sigma(px). None이면 자동.
+            texture_postprocess: 렌더 후 보정 단계 이름 또는 쉼표 구분 문자열
+                (예: "clahe", "local_contrast", "clahe,soft_denoise").
+            texture_detail_scale: 프리셋/기본 detail_strength에 곱해지는 질감 강조 배율.
+            texture_smooth_sigma_extra: 프리셋/기본 smooth_sigma에 더하는 추가 스무딩(px).
+            texture_postprocess_extra: 프리셋 후처리에 추가로 합칠 보정 단계.
 
         Returns:
             RubbingImage: 탁본 이미지
@@ -211,8 +239,28 @@ class SurfaceVisualizer:
             height_mode = preset_cfg.get("height_mode", height_mode)
             invert = preset_cfg.get("invert", invert)
             splat_sigma = preset_cfg.get("splat_sigma", None)
+            texture_postprocess = preset_cfg.get("texture_postprocess", texture_postprocess)
         else:
             splat_sigma = None
+
+        try:
+            detail_scale = float(texture_detail_scale)
+        except Exception:
+            detail_scale = 1.0
+        if np.isfinite(detail_scale) and detail_scale > 0.0:
+            detail_strength = float(detail_strength) * detail_scale
+
+        try:
+            smooth_extra = float(texture_smooth_sigma_extra)
+        except Exception:
+            smooth_extra = 0.0
+        if np.isfinite(smooth_extra) and smooth_extra > 0.0:
+            smooth_sigma = max(0.0, float(smooth_sigma) + smooth_extra)
+
+        texture_postprocess = self._merge_postprocess_steps(
+            texture_postprocess,
+            texture_postprocess_extra,
+        )
 
         if flattened is None or getattr(flattened, "uv", None) is None or getattr(flattened, "faces", None) is None:
             raise ValueError("Flattened mesh is missing uv/faces.")
@@ -306,6 +354,8 @@ class SurfaceVisualizer:
             image = self._render_normal_visualization(depth_map)
         else:
             image = self._render_traditional_rubbing(depth_map, light_angle)
+
+        image = self._apply_rubbing_postprocess(image, texture_postprocess)
         
         return RubbingImage(
             image=image,
@@ -331,6 +381,15 @@ class SurfaceVisualizer:
                 detail_sigma=None,
                 splat_sigma=0.4,
             ),
+            "자연(이미지)+CLAHE": dict(
+                style="traditional",
+                image_mode="image",
+                smooth_sigma=1.2,
+                detail_strength=1.2,
+                detail_sigma=None,
+                splat_sigma=0.4,
+                texture_postprocess="clahe",
+            ),
             "선명(이미지)": dict(
                 style="modern",
                 image_mode="image",
@@ -346,6 +405,15 @@ class SurfaceVisualizer:
                 detail_strength=0.8,
                 detail_sigma=None,
                 splat_sigma=0.6,
+            ),
+            "로컬 대비(텍스처)": dict(
+                style="traditional",
+                image_mode="image",
+                smooth_sigma=0.9,
+                detail_strength=1.1,
+                detail_sigma=None,
+                splat_sigma=0.35,
+                texture_postprocess="local_contrast,soft_denoise",
             ),
             "디지털(곡률 제거)": dict(
                 style="modern",
@@ -370,6 +438,7 @@ class SurfaceVisualizer:
                 reference_sigma=None,
                 height_mode="cyl_radial",
                 relief_strength=4.5,
+                texture_postprocess="clahe",
             ),
             "노멀 언샵": dict(
                 style="normal_unsharp",
@@ -424,6 +493,157 @@ class SurfaceVisualizer:
             if key_low in name.lower():
                 return dict(cfg)
         return None
+
+    @staticmethod
+    def _normalize_postprocess_steps(
+        texture_postprocess: str | list[str] | tuple[str, ...] | None,
+    ) -> tuple[str, ...]:
+        if texture_postprocess is None:
+            return ()
+        if isinstance(texture_postprocess, (list, tuple)):
+            values: list[str] = []
+            for step in texture_postprocess:
+                if step is None:
+                    continue
+                text = str(step).strip().lower()
+                if text:
+                    values.append(text)
+            return tuple(values)
+        text = str(texture_postprocess).strip()
+        if not text:
+            return ()
+        if "," in text:
+            return tuple(part.strip().lower() for part in text.split(",") if part.strip())
+        return (text.lower(),)
+
+    @staticmethod
+    def _merge_postprocess_steps(
+        *values: str | list[str] | tuple[str, ...] | None,
+    ) -> tuple[str, ...]:
+        merged: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            for step in SurfaceVisualizer._normalize_postprocess_steps(value):
+                if step in seen:
+                    continue
+                seen.add(step)
+                merged.append(step)
+        return tuple(merged)
+
+    @staticmethod
+    def _as_float01_image(image: np.ndarray) -> np.ndarray:
+        raw = np.asarray(image)
+        if raw.size == 0:
+            return np.zeros_like(raw, dtype=np.float64)
+        if raw.dtype == np.uint8:
+            return np.clip(raw.astype(np.float64) / 255.0, 0.0, 1.0)
+
+        arr = np.asarray(raw, dtype=np.float64)
+        arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+        finite = np.isfinite(arr)
+        if not bool(np.any(finite)):
+            return np.zeros_like(arr, dtype=np.float64)
+        valid = arr[finite]
+        lo = float(np.percentile(valid, 1.0))
+        hi = float(np.percentile(valid, 99.0))
+        if not np.isfinite(lo) or not np.isfinite(hi) or abs(hi - lo) <= 1e-12:
+            return np.zeros_like(arr, dtype=np.float64)
+        scale = 1.0 / (float(hi) - float(lo))
+        return np.clip((arr - lo) * scale, 0.0, 1.0)
+
+    @staticmethod
+    def _apply_local_contrast(
+        image_01: np.ndarray,
+        *,
+        window: int = 32,
+        gain: float = 1.4,
+    ) -> np.ndarray:
+        if image_01.size == 0:
+            return image_01
+
+        if not np.issubdtype(image_01.dtype, np.floating):
+            image_01 = np.asarray(image_01, dtype=np.float64)
+
+        if image_01.ndim != 2:
+            return image_01
+
+        w = max(1, int(window))
+        if w <= 1:
+            return image_01
+
+        mean = ndimage.uniform_filter(image_01, size=w, mode="nearest")
+        mean2 = ndimage.uniform_filter(image_01 * image_01, size=w, mode="nearest")
+        variance = np.maximum(0.0, mean2 - mean * mean)
+        std = np.sqrt(variance)
+        std = np.clip(std, 1e-6, None)
+        out = (image_01 - mean) / std
+        out = 0.5 + gain * out * 0.12
+        return np.clip(out, 0.0, 1.0)
+
+    @staticmethod
+    def _apply_clahe_like(
+        image_01: np.ndarray,
+        *,
+        clip_limit: float = 2.0,
+        tile: int = 8,
+    ) -> np.ndarray:
+        if image_01.size == 0:
+            return image_01
+        if image_01.ndim != 2:
+            return image_01
+
+        cv2 = _get_cv2()
+        img8 = np.clip(np.rint(np.asarray(image_01, dtype=np.float64) * 255.0), 0.0, 255.0).astype(np.uint8)
+        if cv2 is not None:
+            try:
+                tile_grid = (max(2, int(tile)), max(2, int(tile)))
+                clahe = cv2.createCLAHE(clipLimit=float(clip_limit), tileGridSize=tile_grid)
+                out = clahe.apply(img8)
+                return np.clip(out.astype(np.float64) / 255.0, 0.0, 1.0)
+            except Exception:
+                pass
+
+        # Fallback: local contrast stretch using mean/std normalization.
+        return SurfaceVisualizer._apply_local_contrast(image_01, window=max(16, int(tile) * 4), gain=1.6)
+
+    def _apply_rubbing_postprocess(
+        self,
+        image: np.ndarray,
+        texture_postprocess: str | list[str] | tuple[str, ...] | None,
+    ) -> np.ndarray:
+        """Apply image-domain postprocessing for texture-like enhancement."""
+        steps = self._normalize_postprocess_steps(texture_postprocess)
+        if not steps:
+            return image
+
+        arr = self._as_float01_image(image)
+
+        for step in steps:
+            if step == "clahe":
+                arr = self._apply_clahe_like(arr, clip_limit=2.0, tile=8)
+            elif step == "local_contrast":
+                arr = self._apply_local_contrast(arr, window=32, gain=1.4)
+            elif step in {"soft_denoise", "denoise", "bilateral"}:
+                if arr.size == 0:
+                    continue
+                cv2 = _get_cv2()
+                if cv2 is not None:
+                    img8 = np.clip(np.rint(arr * 255.0), 0.0, 255.0).astype(np.uint8)
+                    try:
+                        arr = cv2.bilateralFilter(img8, d=0, sigmaColor=28, sigmaSpace=18).astype(np.float64) / 255.0
+                    except Exception:
+                        pass
+            elif step == "soften":
+                arr = self._to_uint8_image(arr.astype(np.float64) if arr.ndim == 2 else arr)
+                arr = ndimage.gaussian_filter(arr.astype(np.float64) / 255.0, sigma=1.1)
+            elif step in {"sharpen", "unsharp"}:
+                try:
+                    base = ndimage.gaussian_filter(arr, sigma=2.0)
+                    arr = np.clip(arr + 0.65 * (arr - base), 0.0, 1.0)
+                except Exception:
+                    pass
+
+        return self._to_uint8_image(arr)
 
     def _estimate_thickness_axis(self, vertices: np.ndarray) -> np.ndarray:
         """PCA 기반 두께(시트 법선) 축 추정. (얇은 쉘/기와에 안정적)"""

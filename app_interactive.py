@@ -2791,15 +2791,56 @@ class ExportPanel(QWidget):
         self.combo_review_render_mode = QComboBox()
         self.combo_review_render_mode.addItem("자동", "auto")
         self.combo_review_render_mode.addItem("다중광(기록면)", "다중광(기록면)")
+        self.combo_review_render_mode.addItem("자연(이미지)+CLAHE", "자연(이미지)+CLAHE")
+        self.combo_review_render_mode.addItem("로컬 대비(텍스처)", "로컬 대비(텍스처)")
         self.combo_review_render_mode.addItem("노멀 언샵", "노멀 언샵")
         self.combo_review_render_mode.addItem("스펙큘러 강조", "스펙큘러 강조")
         self.combo_review_render_mode.addItem("노멀 보기", "노멀 보기")
         self.combo_review_render_mode.addItem("자연(이미지)", "자연(이미지)")
         self.combo_review_render_mode.setToolTip(
             "검토 시트와 미리보기에서 사용할 기록면 렌더 모드입니다.\n"
-            "자동은 기와/기록면일 때 다중광, 일반 경로는 자연(이미지)를 사용합니다."
+            "자동은 기와/기록면일 때 다중광, 일반 경로는 자연(이미지)를 사용합니다.\n"
+            "텍스처 보강은 CLAHE/로컬 대비 기반 후처리(실험적) 옵션입니다."
         )
         img_layout.addRow("기록면 렌더:", self.combo_review_render_mode)
+
+        self.spin_texture_detail_scale = QDoubleSpinBox()
+        self.spin_texture_detail_scale.setRange(0.25, 3.0)
+        self.spin_texture_detail_scale.setSingleStep(0.05)
+        self.spin_texture_detail_scale.setDecimals(2)
+        self.spin_texture_detail_scale.setValue(1.0)
+        self.spin_texture_detail_scale.setSuffix(" x")
+        self.spin_texture_detail_scale.setToolTip(
+            "선택한 렌더 모드 위에 추가로 질감/요철 강조를 곱해 적용합니다.\n"
+            "1.0은 기본, 1보다 크면 더 선명해집니다."
+        )
+        img_layout.addRow("질감 강조:", self.spin_texture_detail_scale)
+
+        self.spin_texture_smooth_extra = QDoubleSpinBox()
+        self.spin_texture_smooth_extra.setRange(0.0, 4.0)
+        self.spin_texture_smooth_extra.setSingleStep(0.1)
+        self.spin_texture_smooth_extra.setDecimals(2)
+        self.spin_texture_smooth_extra.setValue(0.0)
+        self.spin_texture_smooth_extra.setSuffix(" px")
+        self.spin_texture_smooth_extra.setToolTip(
+            "기본 렌더 위에 추가로 적용할 부드럽게 하기 정도입니다.\n"
+            "거친 노이즈를 줄이고 싶은 경우에 올립니다."
+        )
+        img_layout.addRow("추가 스무딩:", self.spin_texture_smooth_extra)
+
+        self.combo_texture_postprocess = QComboBox()
+        self.combo_texture_postprocess.addItem("기본 유지", "")
+        self.combo_texture_postprocess.addItem("CLAHE 추가", "clahe")
+        self.combo_texture_postprocess.addItem("로컬 대비 추가", "local_contrast")
+        self.combo_texture_postprocess.addItem("샤프닝 추가", "unsharp")
+        self.combo_texture_postprocess.addItem("부드럽게", "soften")
+        self.combo_texture_postprocess.addItem("CLAHE + 샤프닝", "clahe,unsharp")
+        self.combo_texture_postprocess.addItem("로컬 대비 + 부드럽게", "local_contrast,soften")
+        self.combo_texture_postprocess.setToolTip(
+            "렌더 모드 프리셋 뒤에 덧붙일 추가 텍스처 보정입니다.\n"
+            "기본 유지는 프리셋 자체의 후처리만 사용합니다."
+        )
+        img_layout.addRow("텍스처 보정:", self.combo_texture_postprocess)
 
         self.combo_rubbing_target = QComboBox()
         self.combo_rubbing_target.addItems(["전체 메쉬", "✨ 현재 선택"])
@@ -2924,6 +2965,62 @@ class ExportPanel(QWidget):
             idx = self.combo_review_render_mode.findData("auto")
         if idx >= 0:
             self.combo_review_render_mode.setCurrentIndex(int(idx))
+
+    def current_texture_detail_scale(self) -> float:
+        try:
+            value = float(self.spin_texture_detail_scale.value())
+        except Exception:
+            value = 1.0
+        if not np.isfinite(value) or value <= 0.0:
+            return 1.0
+        return value
+
+    def current_texture_smooth_extra(self) -> float:
+        try:
+            value = float(self.spin_texture_smooth_extra.value())
+        except Exception:
+            value = 0.0
+        if not np.isfinite(value) or value <= 0.0:
+            return 0.0
+        return value
+
+    def current_texture_postprocess(self) -> str:
+        try:
+            value = self.combo_texture_postprocess.currentData()
+        except Exception:
+            value = ""
+        text = str(value or "").strip()
+        return text
+
+    def set_texture_adjustments(
+        self,
+        *,
+        detail_scale: float = 1.0,
+        smooth_extra: float = 0.0,
+        postprocess: str = "",
+    ) -> None:
+        try:
+            detail_value = float(detail_scale)
+        except Exception:
+            detail_value = 1.0
+        if not np.isfinite(detail_value) or detail_value <= 0.0:
+            detail_value = 1.0
+        self.spin_texture_detail_scale.setValue(detail_value)
+
+        try:
+            smooth_value = float(smooth_extra)
+        except Exception:
+            smooth_value = 0.0
+        if not np.isfinite(smooth_value) or smooth_value <= 0.0:
+            smooth_value = 0.0
+        self.spin_texture_smooth_extra.setValue(smooth_value)
+
+        key = str(postprocess or "").strip()
+        idx = self.combo_texture_postprocess.findData(key)
+        if idx < 0:
+            idx = self.combo_texture_postprocess.findData("")
+        if idx >= 0:
+            self.combo_texture_postprocess.setCurrentIndex(int(idx))
 
 
 class MeasurePanel(QWidget):
@@ -4945,6 +5042,18 @@ class MainWindow(QMainWindow):
                 review_render_mode = str(export_panel.current_review_render_mode() or "auto")
             except Exception:
                 review_render_mode = "auto"
+            try:
+                texture_detail_scale = float(export_panel.current_texture_detail_scale())
+            except Exception:
+                texture_detail_scale = 1.0
+            try:
+                texture_smooth_extra = float(export_panel.current_texture_smooth_extra())
+            except Exception:
+                texture_smooth_extra = 0.0
+            try:
+                texture_postprocess = str(export_panel.current_texture_postprocess() or "")
+            except Exception:
+                texture_postprocess = ""
         else:
             dpi = DEFAULT_EXPORT_DPI
             format_index = 0
@@ -4953,6 +5062,9 @@ class MainWindow(QMainWindow):
             profile_feature_lines = False
             profile_feature_angle = 60.0
             review_render_mode = "auto"
+            texture_detail_scale = 1.0
+            texture_smooth_extra = 0.0
+            texture_postprocess = ""
 
         ui_state["export"] = {
             "dpi": int(dpi),
@@ -4962,6 +5074,9 @@ class MainWindow(QMainWindow):
             "profile_feature_lines": bool(profile_feature_lines),
             "profile_feature_angle": float(profile_feature_angle),
             "review_render_mode": str(review_render_mode or "auto"),
+            "texture_detail_scale": float(texture_detail_scale),
+            "texture_smooth_extra": float(texture_smooth_extra),
+            "texture_postprocess": str(texture_postprocess or ""),
         }
 
         slice_panel = getattr(self, "slice_panel", None)
@@ -5627,6 +5742,11 @@ class MainWindow(QMainWindow):
                 )
                 self.export_panel.set_review_render_mode(
                     str(exp.get("review_render_mode", self.export_panel.current_review_render_mode()) or "auto")
+                )
+                self.export_panel.set_texture_adjustments(
+                    detail_scale=float(exp.get("texture_detail_scale", self.export_panel.current_texture_detail_scale()) or 1.0),
+                    smooth_extra=float(exp.get("texture_smooth_extra", self.export_panel.current_texture_smooth_extra()) or 0.0),
+                    postprocess=str(exp.get("texture_postprocess", self.export_panel.current_texture_postprocess()) or ""),
                 )
             except Exception:
                 pass
@@ -6761,6 +6881,40 @@ class MainWindow(QMainWindow):
         if mode == "auto":
             return self._review_rubbing_preset_for_options(options)
         return mode
+
+    def _current_review_texture_options(self) -> dict[str, Any]:
+        export_panel = getattr(self, "export_panel", None)
+        if export_panel is None:
+            return {
+                "rubbing_detail_scale": 1.0,
+                "rubbing_smooth_sigma_extra": 0.0,
+                "rubbing_texture_postprocess": None,
+            }
+
+        try:
+            detail_scale = float(export_panel.current_texture_detail_scale())
+        except Exception:
+            detail_scale = 1.0
+        if not np.isfinite(detail_scale) or detail_scale <= 0.0:
+            detail_scale = 1.0
+
+        try:
+            smooth_extra = float(export_panel.current_texture_smooth_extra())
+        except Exception:
+            smooth_extra = 0.0
+        if not np.isfinite(smooth_extra) or smooth_extra <= 0.0:
+            smooth_extra = 0.0
+
+        try:
+            postprocess = str(export_panel.current_texture_postprocess() or "").strip()
+        except Exception:
+            postprocess = ""
+
+        return {
+            "rubbing_detail_scale": float(detail_scale),
+            "rubbing_smooth_sigma_extra": float(smooth_extra),
+            "rubbing_texture_postprocess": (postprocess or None),
+        }
 
     def _build_review_summary_context(
         self,
@@ -7993,6 +8147,7 @@ class MainWindow(QMainWindow):
                                 dpi=dpi,
                                 width_pixels=1600,
                                 rubbing_preset=self._selected_review_rubbing_preset(opts),
+                                **self._current_review_texture_options(),
                                 title=f"기록면 검토 시트 - {record_label}",
                                 summary_lines=summary_lines,
                                 show_scale_bar=include_scale,
@@ -9514,6 +9669,7 @@ class MainWindow(QMainWindow):
                         dpi=int(self.export_panel.spin_dpi.value()) if hasattr(self, "export_panel") else DEFAULT_EXPORT_DPI,
                         width_pixels=1600,
                         rubbing_preset=self._selected_review_rubbing_preset(options),
+                        **self._current_review_texture_options(),
                         title=f"기록면 전개 미리보기 - {record_label}",
                         summary_lines=build_recording_surface_summary_lines(
                             flattened,
@@ -9723,6 +9879,7 @@ class MainWindow(QMainWindow):
                         dpi=int(self.export_panel.spin_dpi.value()) if hasattr(self, "export_panel") else DEFAULT_EXPORT_DPI,
                         width_pixels=1600,
                         rubbing_preset=self._selected_review_rubbing_preset(flatten_options_target),
+                        **self._current_review_texture_options(),
                         title=f"기록면 검토 시트 - {record_label}",
                         summary_lines=build_recording_surface_summary_lines(
                             flattened,

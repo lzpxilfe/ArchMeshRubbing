@@ -29,6 +29,7 @@ Reference IDs are defined in:
 | Silhouette extraction (2D drawing) | occupancy raster + contour extraction (OpenCV/SciPy fallback) | `[L5]`, `[L2]`, `[R6]` | library + paper + heuristic | `src/core/profile_exporter.py` |
 | Feature line extraction | dihedral-angle sharp edge detection | `[R9]` | heuristic (common practice) | `src/core/feature_line_extractor.py` |
 | Rubbing image rendering | depth/value map + Sobel gradient shading + Gaussian filtering | `[L2]` | library + heuristic | `src/core/surface_visualizer.py` |
+| Rubbing texture postprocessing | CLAHE, local-contrast normalization, bilateral smoothing (optional), post-sharpen fallback | `[R13]`, `[R10]`, `[R15]`, `[L8]`, `[L9]` | paper + library + heuristic | `src/core/surface_visualizer.py` |
 | Orthographic projection | orthographic projection/depth/silhouette style raster pipeline | `[R7]` | concept + heuristic | `src/core/orthographic_projector.py` |
 | Unified SVG sheet export | top outline + section vectors + rubbing images composition | - | heuristic | `src/core/rubbing_sheet_exporter.py` |
 
