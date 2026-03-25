@@ -177,7 +177,8 @@ class SurfaceVisualizer:
         flattened: FlattenedMesh,
         width_pixels: int = 2000,
         style: str = 'traditional',
-        light_angle: float = 45.0,
+        light_angle: float | None = None,
+        light_elevation: float | None = None,
         *,
         height_mode: str = "normal_z",
         remove_curvature: bool = False,
@@ -203,7 +204,8 @@ class SurfaceVisualizer:
             flattened: 평면화된 메쉬
             width_pixels: 출력 이미지 너비 (픽셀)
             style: 스타일 ('traditional', 'modern', 'relief')
-            light_angle: 조명 각도 (도)
+            light_angle: 조명 각도 (도). None이면 프리셋 또는 기본값 사용.
+            light_elevation: 조명 고도 (도). None이면 프리셋 또는 기본값 사용.
             height_mode: 높이값 소스 ('normal_z'|'axis').
             remove_curvature: 곡률(저주파)을 제거하여 디지털 탁본처럼 만듭니다.
             reference_sigma: 곡률 제거용 가우시안 sigma(px). None이면 해상도에 맞춰 자동.
@@ -243,12 +245,30 @@ class SurfaceVisualizer:
             relief_strength = preset_cfg.get("relief_strength", relief_strength)
             height_mode = preset_cfg.get("height_mode", height_mode)
             invert = preset_cfg.get("invert", invert)
+            if light_angle is None:
+                light_angle = preset_cfg.get("light_angle", light_angle)
+            if light_elevation is None:
+                light_elevation = preset_cfg.get("light_elevation", light_elevation)
             splat_sigma = preset_cfg.get("splat_sigma", None)
             texture_postprocess = preset_cfg.get("texture_postprocess", texture_postprocess)
             texture_source = preset_cfg.get("texture_source", texture_source)
             texture_blend = preset_cfg.get("texture_blend", texture_blend)
         else:
             splat_sigma = None
+
+        try:
+            light_angle = float(45.0 if light_angle is None else light_angle)
+        except Exception:
+            light_angle = 45.0
+        if not np.isfinite(light_angle):
+            light_angle = 45.0
+
+        try:
+            light_elevation = float(30.0 if light_elevation is None else light_elevation)
+        except Exception:
+            light_elevation = 30.0
+        if not np.isfinite(light_elevation):
+            light_elevation = 30.0
 
         try:
             detail_scale = float(texture_detail_scale)
@@ -352,21 +372,21 @@ class SurfaceVisualizer:
         
         # 스타일에 따른 렌더링
         if style == 'traditional':
-            image = self._render_traditional_rubbing(depth_map, light_angle)
+            image = self._render_traditional_rubbing(depth_map, light_angle, light_elevation)
         elif style == 'modern':
-            image = self._render_modern_rubbing(depth_map, light_angle)
+            image = self._render_modern_rubbing(depth_map, light_angle, light_elevation)
         elif style == 'relief':
-            image = self._render_relief(depth_map, light_angle)
+            image = self._render_relief(depth_map, light_angle, light_elevation)
         elif style == 'multilight':
-            image = self._render_static_multilight(depth_map)
+            image = self._render_static_multilight(depth_map, light_angle, light_elevation)
         elif style == 'normal_unsharp':
-            image = self._render_normal_unsharp(depth_map)
+            image = self._render_normal_unsharp(depth_map, light_angle, light_elevation)
         elif style == 'specular':
-            image = self._render_specular_enhancement(depth_map, light_angle)
+            image = self._render_specular_enhancement(depth_map, light_angle, light_elevation)
         elif style == 'normals':
             image = self._render_normal_visualization(depth_map)
         else:
-            image = self._render_traditional_rubbing(depth_map, light_angle)
+            image = self._render_traditional_rubbing(depth_map, light_angle, light_elevation)
 
         if texture_source_key in {"texture", "hybrid"}:
             texture_map = self._create_texture_map(
@@ -409,6 +429,7 @@ class SurfaceVisualizer:
                 detail_strength=1.2,
                 detail_sigma=None,
                 splat_sigma=0.4,
+                light_elevation=30.0,
             ),
             "자연(이미지)+CLAHE": dict(
                 style="traditional",
@@ -417,6 +438,7 @@ class SurfaceVisualizer:
                 detail_strength=1.2,
                 detail_sigma=None,
                 splat_sigma=0.4,
+                light_elevation=28.0,
                 texture_postprocess="clahe",
             ),
             "선명(이미지)": dict(
@@ -426,6 +448,7 @@ class SurfaceVisualizer:
                 detail_strength=1.8,
                 detail_sigma=None,
                 splat_sigma=0.3,
+                light_elevation=24.0,
             ),
             "부드러움": dict(
                 style="traditional",
@@ -434,6 +457,7 @@ class SurfaceVisualizer:
                 detail_strength=0.8,
                 detail_sigma=None,
                 splat_sigma=0.6,
+                light_elevation=38.0,
             ),
             "로컬 대비(텍스처)": dict(
                 style="traditional",
@@ -442,6 +466,7 @@ class SurfaceVisualizer:
                 detail_strength=1.1,
                 detail_sigma=None,
                 splat_sigma=0.35,
+                light_elevation=22.0,
                 texture_postprocess="local_contrast,soft_denoise",
             ),
             "텍스처 판독(실사)": dict(
@@ -451,6 +476,7 @@ class SurfaceVisualizer:
                 detail_strength=1.0,
                 detail_sigma=None,
                 splat_sigma=0.3,
+                light_elevation=18.0,
                 texture_source="texture",
                 texture_postprocess="clahe,local_contrast",
             ),
@@ -465,9 +491,22 @@ class SurfaceVisualizer:
                 reference_sigma=None,
                 height_mode="cyl_radial",
                 relief_strength=4.0,
+                light_elevation=22.0,
                 texture_source="hybrid",
                 texture_blend=0.34,
                 texture_postprocess="clahe",
+            ),
+            "형상 Relief": dict(
+                style="multilight",
+                image_mode="image",
+                smooth_sigma=0.7,
+                detail_strength=1.25,
+                detail_sigma=None,
+                splat_sigma=0.35,
+                height_mode="normal_z",
+                remove_curvature=False,
+                relief_strength=2.2,
+                light_elevation=18.0,
             ),
             "디지털(곡률 제거)": dict(
                 style="modern",
@@ -480,6 +519,7 @@ class SurfaceVisualizer:
                 reference_sigma=None,
                 height_mode="cyl_radial",
                 relief_strength=6.0,
+                light_elevation=20.0,
             ),
             "다중광(기록면)": dict(
                 style="multilight",
@@ -492,6 +532,7 @@ class SurfaceVisualizer:
                 reference_sigma=None,
                 height_mode="cyl_radial",
                 relief_strength=4.5,
+                light_elevation=22.0,
                 texture_postprocess="clahe",
             ),
             "노멀 언샵": dict(
@@ -505,6 +546,7 @@ class SurfaceVisualizer:
                 reference_sigma=None,
                 height_mode="cyl_radial",
                 relief_strength=4.0,
+                light_elevation=20.0,
             ),
             "스펙큘러 강조": dict(
                 style="specular",
@@ -517,6 +559,7 @@ class SurfaceVisualizer:
                 reference_sigma=None,
                 height_mode="cyl_radial",
                 relief_strength=3.5,
+                light_elevation=24.0,
             ),
             "노멀 보기": dict(
                 style="normals",
@@ -1466,8 +1509,12 @@ class SurfaceVisualizer:
         intensity = (lx * nx) + (ly * ny) + (lz * nz)
         return np.clip(intensity, 0.0, 1.0)
 
-    def _render_traditional_rubbing(self, depth_map: np.ndarray,
-                                     light_angle: float) -> np.ndarray:
+    def _render_traditional_rubbing(
+        self,
+        depth_map: np.ndarray,
+        light_angle: float,
+        light_elevation: float = 30.0,
+    ) -> np.ndarray:
         """
         전통적인 탁본 스타일 렌더링
         
@@ -1482,35 +1529,37 @@ class SurfaceVisualizer:
         except Exception:
             grad_y, grad_x = np.gradient(depth_map)
         
-        # 조명 방향
-        light_rad = np.radians(light_angle)
-        light_x = np.cos(light_rad)
-        light_y = np.sin(light_rad)
-        
-        # 램버시안 셰이딩
-        # 법선 벡터: (-grad_x, -grad_y, 1) 정규화
         normal_z = np.ones_like(depth_map)
         norm = np.sqrt(grad_x**2 + grad_y**2 + normal_z**2)
         
         nx = -grad_x / norm
         ny = -grad_y / norm
         nz = normal_z / norm
-        
-        # 조명과 법선의 내적
-        intensity = light_x * nx + light_y * ny + 0.5 * nz
-        intensity = np.clip(intensity, 0, 1)
-        
-        # 탁본 효과: 높은 곳이 밝게
-        image = (intensity * 255).astype(np.uint8)
-        
-        return image
 
-    def _render_static_multilight(self, depth_map: np.ndarray) -> np.ndarray:
+        diffuse = self._lambert_from_normals(
+            nx,
+            ny,
+            nz,
+            azimuth_deg=light_angle,
+            elevation_deg=light_elevation,
+        )
+        ambient = np.clip((0.10 + (0.20 * np.sin(np.radians(float(light_elevation))))) + (0.08 * nz), 0.0, 1.0)
+        intensity = np.clip((0.88 * diffuse) + ambient, 0.0, 1.0)
+        return self._to_uint8_image(intensity)
+
+    def _render_static_multilight(
+        self,
+        depth_map: np.ndarray,
+        light_angle: float = 45.0,
+        light_elevation: float = 32.0,
+    ) -> np.ndarray:
         """RTI-like static multi-light rendering for recording surfaces."""
         nx, ny, nz = self._compute_normal_field(depth_map)
-        azimuths = (0.0, 35.0, 70.0, 110.0, 145.0, 215.0, 250.0, 320.0)
+        base_az = float(light_angle)
+        offsets = (-145.0, -110.0, -75.0, -35.0, 0.0, 70.0, 105.0, 175.0)
+        azimuths = tuple(base_az + off for off in offsets)
         stack = np.stack(
-            [self._lambert_from_normals(nx, ny, nz, azimuth_deg=az, elevation_deg=32.0) for az in azimuths],
+            [self._lambert_from_normals(nx, ny, nz, azimuth_deg=az, elevation_deg=light_elevation) for az in azimuths],
             axis=0,
         )
         mean_img = np.mean(stack, axis=0)
@@ -1519,12 +1568,16 @@ class SurfaceVisualizer:
         fused = np.power(np.clip(fused, 0.0, 1.0), 0.9)
         return self._to_uint8_image(fused)
 
-    def _render_modern_rubbing(self, depth_map: np.ndarray,
-                                light_angle: float) -> np.ndarray:
+    def _render_modern_rubbing(
+        self,
+        depth_map: np.ndarray,
+        light_angle: float,
+        light_elevation: float = 30.0,
+    ) -> np.ndarray:
         """
         현대적인 탁본 스타일 (고대비)
         """
-        base = self._render_traditional_rubbing(depth_map, light_angle)
+        base = self._render_traditional_rubbing(depth_map, light_angle, light_elevation)
         
         # 대비 증가
         enhanced = base.astype(np.float64)
@@ -1533,9 +1586,14 @@ class SurfaceVisualizer:
         
         return enhanced
 
-    def _render_normal_unsharp(self, depth_map: np.ndarray) -> np.ndarray:
+    def _render_normal_unsharp(
+        self,
+        depth_map: np.ndarray,
+        light_angle: float = 45.0,
+        light_elevation: float = 32.0,
+    ) -> np.ndarray:
         """Diffuse-gain / normal-unsharp-like enhancement for shallow relief."""
-        base = self._render_static_multilight(depth_map).astype(np.float64) / 255.0
+        base = self._render_static_multilight(depth_map, light_angle, light_elevation).astype(np.float64) / 255.0
         try:
             blur = ndimage.gaussian_filter(base, sigma=2.0)
             detail = base - blur
@@ -1544,13 +1602,18 @@ class SurfaceVisualizer:
             out = base
         return self._to_uint8_image(out)
 
-    def _render_specular_enhancement(self, depth_map: np.ndarray, light_angle: float) -> np.ndarray:
+    def _render_specular_enhancement(
+        self,
+        depth_map: np.ndarray,
+        light_angle: float,
+        light_elevation: float = 30.0,
+    ) -> np.ndarray:
         """Specular-enhanced view inspired by RTI material enhancement."""
         nx, ny, nz = self._compute_normal_field(depth_map)
-        diffuse = self._lambert_from_normals(nx, ny, nz, azimuth_deg=light_angle, elevation_deg=30.0)
+        diffuse = self._lambert_from_normals(nx, ny, nz, azimuth_deg=light_angle, elevation_deg=light_elevation)
 
         az = np.radians(float(light_angle))
-        el = np.radians(35.0)
+        el = np.radians(float(light_elevation))
         light = np.array(
             [np.cos(az) * np.cos(el), np.sin(az) * np.cos(el), np.sin(el)],
             dtype=np.float64,
@@ -1583,8 +1646,12 @@ class SurfaceVisualizer:
         rgb = np.clip(rgb, 0.0, 1.0)
         return (rgb * 255.0).astype(np.uint8)
 
-    def _render_relief(self, depth_map: np.ndarray,
-                       light_angle: float) -> np.ndarray:
+    def _render_relief(
+        self,
+        depth_map: np.ndarray,
+        light_angle: float,
+        light_elevation: float = 30.0,
+    ) -> np.ndarray:
         """
         릴리프(양각) 효과 렌더링
         """
@@ -1595,12 +1662,19 @@ class SurfaceVisualizer:
         # 조명 방향에 따른 음영
         light_rad = np.radians(light_angle)
         emboss = np.cos(light_rad) * grad_x + np.sin(light_rad) * grad_y
-        
-        # 정규화
-        emboss = (emboss - emboss.min()) / (emboss.max() - emboss.min() + 1e-10)
-        image = (emboss * 255).astype(np.uint8)
-        
-        return image
+        gain = max(0.15, float(np.cos(np.radians(float(light_elevation)))))
+        base = 0.5 + (0.18 * float(np.sin(np.radians(float(light_elevation)))))
+        try:
+            sigma = max(1.0, 0.01 * float(min(depth_map.shape[:2])))
+            scale = float(np.std(ndimage.gaussian_filter(emboss, sigma=0.0 if sigma < 1e-12 else sigma)))
+        except Exception:
+            scale = 0.0
+        if not np.isfinite(scale) or scale <= 1e-12:
+            scale = float(np.std(emboss))
+        if not np.isfinite(scale) or scale <= 1e-12:
+            scale = 1.0
+        normalized = base + ((gain * 0.35) * (emboss / scale))
+        return self._to_uint8_image(np.clip(normalized, 0.0, 1.0))
     
     def generate_depth_map(self, flattened: FlattenedMesh,
                            width_pixels: int = 2000) -> RubbingImage:

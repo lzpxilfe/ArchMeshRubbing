@@ -195,6 +195,8 @@ class TestRecordingSurfaceReview(unittest.TestCase):
                     rubbing_detail_scale=1.35,
                     rubbing_smooth_sigma_extra=0.4,
                     rubbing_texture_postprocess="unsharp",
+                    rubbing_light_angle=32.0,
+                    rubbing_light_elevation=19.0,
                     title="기록면 검토 시트",
                 ),
             )
@@ -206,6 +208,8 @@ class TestRecordingSurfaceReview(unittest.TestCase):
         self.assertAlmostEqual(float(captured.get("texture_detail_scale", 0.0)), 1.35, places=6)
         self.assertAlmostEqual(float(captured.get("texture_smooth_sigma_extra", 0.0)), 0.4, places=6)
         self.assertEqual(captured.get("texture_postprocess_extra"), "unsharp")
+        self.assertAlmostEqual(float(captured.get("light_angle", 0.0)), 32.0, places=6)
+        self.assertAlmostEqual(float(captured.get("light_elevation", 0.0)), 19.0, places=6)
         self.assertEqual(review.rubbing_image.size, (320, 160))
 
     def test_render_review_sheet_for_tile_guided_section_unwrap(self):

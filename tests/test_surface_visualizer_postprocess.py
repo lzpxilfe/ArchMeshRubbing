@@ -159,6 +159,27 @@ class TestSurfaceVisualizerPostprocess(unittest.TestCase):
         self.assertEqual(img.image.ndim, 2)
         self.assertGreater(int(np.std(img.image)), 0)
 
+    def test_light_elevation_control_changes_render(self):
+        flattened = self._make_flattened_mesh()
+        visualizer = SurfaceVisualizer()
+        low = visualizer.generate_rubbing(
+            flattened,
+            width_pixels=96,
+            style="traditional",
+            light_angle=35.0,
+            light_elevation=12.0,
+            height_mode="normal_z",
+        )
+        high = visualizer.generate_rubbing(
+            flattened,
+            width_pixels=96,
+            style="traditional",
+            light_angle=35.0,
+            light_elevation=62.0,
+            height_mode="normal_z",
+        )
+        self.assertFalse(np.array_equal(low.image, high.image))
+
     def test_normalize_postprocess_steps(self):
         steps = SurfaceVisualizer._normalize_postprocess_steps(" CLAHE, local_contrast , denoise ")
         self.assertEqual(tuple(steps), ("clahe", "local_contrast", "denoise"))
