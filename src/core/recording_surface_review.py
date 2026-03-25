@@ -28,8 +28,8 @@ class RecordingSurfaceReviewOptions:
     rubbing_detail_scale: float = 1.0
     rubbing_smooth_sigma_extra: float = 0.0
     rubbing_texture_postprocess: str | None = None
-    rubbing_light_angle: float = 45.0
-    rubbing_light_elevation: float = 28.0
+    rubbing_light_angle: float | None = None
+    rubbing_light_elevation: float | None = None
     title: str = "기록면 검토 시트"
     panel_title_rubbing: str = "연속 탁본형 기록면"
     panel_title_outline: str = "외곽 확인"
@@ -393,8 +393,8 @@ def render_recording_surface_review(
             flattened,
             width_pixels=int(options.width_pixels),
             preset=str(options.rubbing_preset),
-            light_angle=float(getattr(options, "rubbing_light_angle", 45.0) or 45.0),
-            light_elevation=float(getattr(options, "rubbing_light_elevation", 28.0) or 28.0),
+            light_angle=getattr(options, "rubbing_light_angle", None),
+            light_elevation=getattr(options, "rubbing_light_elevation", None),
             texture_detail_scale=float(getattr(options, "rubbing_detail_scale", 1.0) or 1.0),
             texture_smooth_sigma_extra=float(getattr(options, "rubbing_smooth_sigma_extra", 0.0) or 0.0),
             texture_postprocess_extra=getattr(options, "rubbing_texture_postprocess", None),

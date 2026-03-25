@@ -195,7 +195,7 @@ class TestRecordingSurfaceReview(unittest.TestCase):
                     rubbing_detail_scale=1.35,
                     rubbing_smooth_sigma_extra=0.4,
                     rubbing_texture_postprocess="unsharp",
-                    rubbing_light_angle=32.0,
+                    rubbing_light_angle=0.0,
                     rubbing_light_elevation=19.0,
                     title="기록면 검토 시트",
                 ),
@@ -208,9 +208,40 @@ class TestRecordingSurfaceReview(unittest.TestCase):
         self.assertAlmostEqual(float(captured.get("texture_detail_scale", 0.0)), 1.35, places=6)
         self.assertAlmostEqual(float(captured.get("texture_smooth_sigma_extra", 0.0)), 0.4, places=6)
         self.assertEqual(captured.get("texture_postprocess_extra"), "unsharp")
-        self.assertAlmostEqual(float(captured.get("light_angle", 0.0)), 32.0, places=6)
+        self.assertAlmostEqual(float(captured.get("light_angle", -1.0)), 0.0, places=6)
         self.assertAlmostEqual(float(captured.get("light_elevation", 0.0)), 19.0, places=6)
         self.assertEqual(review.rubbing_image.size, (320, 160))
+
+    def test_render_review_sheet_leaves_light_unset_for_preset_defaults(self):
+        flattened = self._make_flattened_square()
+        captured = {}
+
+        class _FakeRubbing:
+            def to_pil_image(self):
+                return Image.new("L", (320, 160), color=180)
+
+        class _FakeVisualizer:
+            def __init__(self, default_dpi=300):
+                captured["dpi"] = int(default_dpi)
+
+            def generate_rubbing(self, flattened_arg, **kwargs):
+                captured["flattened"] = flattened_arg
+                captured.update(kwargs)
+                return _FakeRubbing()
+
+        with patch("src.core.surface_visualizer.SurfaceVisualizer", _FakeVisualizer):
+            render_recording_surface_review(
+                flattened,
+                options=RecordingSurfaceReviewOptions(
+                    dpi=300,
+                    width_pixels=640,
+                    rubbing_preset="부드러움",
+                    title="기록면 검토 시트",
+                ),
+            )
+
+        self.assertIsNone(captured.get("light_angle"))
+        self.assertIsNone(captured.get("light_elevation"))
 
     def test_render_review_sheet_for_tile_guided_section_unwrap(self):
         mesh, row_radii = self._make_variable_radius_u_patch()

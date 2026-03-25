@@ -2939,6 +2939,14 @@ class ExportPanel(QWidget):
         )
         img_layout.addRow("텍스처 보정:", self.combo_texture_postprocess)
 
+        self.check_custom_light = QCheckBox("사용자 지정 조명축")
+        self.check_custom_light.setChecked(False)
+        self.check_custom_light.setToolTip(
+            "끄면 렌더 프리셋의 기본 조명값을 그대로 사용합니다.\n"
+            "켜면 아래 조명 방향/고도 값을 강제로 적용합니다."
+        )
+        img_layout.addRow("", self.check_custom_light)
+
         self.spin_light_azimuth = QDoubleSpinBox()
         self.spin_light_azimuth.setRange(-180.0, 180.0)
         self.spin_light_azimuth.setSingleStep(5.0)
@@ -2962,6 +2970,8 @@ class ExportPanel(QWidget):
             "낮을수록 사광, 높을수록 정면광에 가깝습니다."
         )
         img_layout.addRow("조명 고도:", self.spin_light_elevation)
+        self.check_custom_light.toggled.connect(self._sync_light_control_enabled_state)
+        self._sync_light_control_enabled_state()
 
         self.check_compare_preview = QCheckBox("비교 뷰 탭 포함")
         self.check_compare_preview.setChecked(True)
@@ -3182,6 +3192,21 @@ class ExportPanel(QWidget):
         if not np.isfinite(value):
             return 28.0
         return value
+
+    def current_custom_light_enabled(self) -> bool:
+        try:
+            return bool(self.check_custom_light.isChecked())
+        except Exception:
+            return False
+
+    def _sync_light_control_enabled_state(self) -> None:
+        enabled = self.current_custom_light_enabled()
+        self.spin_light_azimuth.setEnabled(enabled)
+        self.spin_light_elevation.setEnabled(enabled)
+
+    def set_custom_light_enabled(self, enabled: bool) -> None:
+        self.check_custom_light.setChecked(bool(enabled))
+        self._sync_light_control_enabled_state()
 
     def set_light_controls(self, *, azimuth: float = 45.0, elevation: float = 28.0) -> None:
         try:
@@ -5254,6 +5279,10 @@ class MainWindow(QMainWindow):
             except Exception:
                 light_elevation = 28.0
             try:
+                use_custom_light = bool(export_panel.current_custom_light_enabled())
+            except Exception:
+                use_custom_light = False
+            try:
                 compare_preview = bool(export_panel.current_compare_preview_enabled())
             except Exception:
                 compare_preview = True
@@ -5271,6 +5300,7 @@ class MainWindow(QMainWindow):
             artifact_profile = "auto"
             light_azimuth = 45.0
             light_elevation = 28.0
+            use_custom_light = False
             compare_preview = True
 
         ui_state["export"] = {
@@ -5287,6 +5317,7 @@ class MainWindow(QMainWindow):
             "artifact_profile": str(artifact_profile or "auto"),
             "light_azimuth": float(light_azimuth),
             "light_elevation": float(light_elevation),
+            "use_custom_light": bool(use_custom_light),
             "compare_preview": bool(compare_preview),
         }
 
@@ -5962,9 +5993,18 @@ class MainWindow(QMainWindow):
                     smooth_extra=float(exp.get("texture_smooth_extra", self.export_panel.current_texture_smooth_extra()) or 0.0),
                     postprocess=str(exp.get("texture_postprocess", self.export_panel.current_texture_postprocess()) or ""),
                 )
+                light_azimuth = _safe_float_or_none(
+                    exp.get("light_azimuth", self.export_panel.current_light_azimuth())
+                )
+                light_elevation = _safe_float_or_none(
+                    exp.get("light_elevation", self.export_panel.current_light_elevation())
+                )
                 self.export_panel.set_light_controls(
-                    azimuth=float(exp.get("light_azimuth", self.export_panel.current_light_azimuth()) or 45.0),
-                    elevation=float(exp.get("light_elevation", self.export_panel.current_light_elevation()) or 28.0),
+                    azimuth=45.0 if light_azimuth is None else float(light_azimuth),
+                    elevation=28.0 if light_elevation is None else float(light_elevation),
+                )
+                self.export_panel.set_custom_light_enabled(
+                    bool(exp.get("use_custom_light", self.export_panel.current_custom_light_enabled()))
                 )
                 self.export_panel.set_compare_preview_enabled(
                     bool(exp.get("compare_preview", self.export_panel.current_compare_preview_enabled()))
@@ -7196,8 +7236,13 @@ class MainWindow(QMainWindow):
         export_panel = getattr(self, "export_panel", None)
         if export_panel is None:
             return {
-                "rubbing_light_angle": 45.0,
-                "rubbing_light_elevation": 28.0,
+                "rubbing_light_angle": None,
+                "rubbing_light_elevation": None,
+            }
+        if not bool(export_panel.current_custom_light_enabled()):
+            return {
+                "rubbing_light_angle": None,
+                "rubbing_light_elevation": None,
             }
 
         try:
@@ -10002,13 +10047,19 @@ class MainWindow(QMainWindow):
         resolved_profile = self._resolved_review_artifact_profile(options)
         resolved_preset = self._selected_review_rubbing_preset(options)
         light_options = self._current_review_light_options()
+        light_angle_label = light_options.get("rubbing_light_angle", None)
+        light_elevation_label = light_options.get("rubbing_light_elevation", None)
+        if light_angle_label is None or light_elevation_label is None:
+            light_summary = "프리셋 기본 조명"
+        else:
+            light_summary = f"조명 {float(light_angle_label):.1f}° / 고도 {float(light_elevation_label):.1f}°"
         info = QLabel(
             f"기록면: {record_label} | 대상: {target_label}{strategy_suffix}\n"
             f"왼쪽은 연속 탁본형 기록면, 오른쪽은 외곽 확인용 뷰입니다.\n"
             f"둘 다 삼각형 와이어프레임이 아니라 기록면 전개 결과를 읽기 쉽게 보여주기 위한 미리보기입니다.\n"
             f"현재 유형: {_ARTIFACT_PROFILE_LABELS.get(resolved_profile, '자동')} | "
             f"기본 렌더: {resolved_preset} | "
-            f"조명 {float(light_options['rubbing_light_angle']):.1f}° / 고도 {float(light_options['rubbing_light_elevation']):.1f}°"
+            f"{light_summary}"
         )
         info.setWordWrap(True)
         info.setStyleSheet("font-size: 11px; color: #2d3748;")
@@ -10086,10 +10137,12 @@ class MainWindow(QMainWindow):
             )
             compare_width = max(480, min(960, int(review.rubbing_image.size[0]) if review.rubbing_image.size[0] > 0 else 800))
             compare_texture_options = self._current_review_texture_options(options)
+            compare_light_angle = light_options.get("rubbing_light_angle", None)
+            compare_light_elevation = light_options.get("rubbing_light_elevation", None)
             compare_kwargs = {
                 "width_pixels": int(compare_width),
-                "light_angle": float(light_options["rubbing_light_angle"]),
-                "light_elevation": float(light_options["rubbing_light_elevation"]),
+                "light_angle": (None if compare_light_angle is None else float(compare_light_angle)),
+                "light_elevation": (None if compare_light_elevation is None else float(compare_light_elevation)),
                 "texture_detail_scale": float(compare_texture_options.get("rubbing_detail_scale", 1.0) or 1.0),
                 "texture_smooth_sigma_extra": float(compare_texture_options.get("rubbing_smooth_sigma_extra", 0.0) or 0.0),
                 "texture_postprocess_extra": compare_texture_options.get("rubbing_texture_postprocess", None),
