@@ -9,8 +9,27 @@ from dataclasses import dataclass
 import numpy as np
 from PIL import Image
 from scipy import ndimage
+from typing import Any
 
 from .flattener import FlattenedMesh
+
+
+_CV2_MODULE = None
+_CV2_CHECKED = False
+
+
+def _get_cv2() -> Any | None:
+    """Load OpenCV lazily for optional texture enhancement filters."""
+    global _CV2_MODULE, _CV2_CHECKED
+    if _CV2_CHECKED:
+        return _CV2_MODULE
+    _CV2_CHECKED = True
+    try:
+        import cv2  # type: ignore[import-not-found]
+        _CV2_MODULE = cv2
+    except Exception:
+        _CV2_MODULE = None
+    return _CV2_MODULE
 
 
 @dataclass
@@ -158,7 +177,8 @@ class SurfaceVisualizer:
         flattened: FlattenedMesh,
         width_pixels: int = 2000,
         style: str = 'traditional',
-        light_angle: float = 45.0,
+        light_angle: float | None = None,
+        light_elevation: float | None = None,
         *,
         height_mode: str = "normal_z",
         remove_curvature: bool = False,
@@ -170,6 +190,12 @@ class SurfaceVisualizer:
         smooth_sigma: float = 0.0,
         detail_strength: float = 1.0,
         detail_sigma: float | None = None,
+        texture_postprocess: str | list[str] | tuple[str, ...] | None = None,
+        texture_detail_scale: float = 1.0,
+        texture_smooth_sigma_extra: float = 0.0,
+        texture_postprocess_extra: str | list[str] | tuple[str, ...] | None = None,
+        texture_source: str = "none",
+        texture_blend: float = 0.35,
     ) -> RubbingImage:
         """
         탁본 효과 이미지 생성
@@ -178,7 +204,8 @@ class SurfaceVisualizer:
             flattened: 평면화된 메쉬
             width_pixels: 출력 이미지 너비 (픽셀)
             style: 스타일 ('traditional', 'modern', 'relief')
-            light_angle: 조명 각도 (도)
+            light_angle: 조명 각도 (도). None이면 프리셋 또는 기본값 사용.
+            light_elevation: 조명 고도 (도). None이면 프리셋 또는 기본값 사용.
             height_mode: 높이값 소스 ('normal_z'|'axis').
             remove_curvature: 곡률(저주파)을 제거하여 디지털 탁본처럼 만듭니다.
             reference_sigma: 곡률 제거용 가우시안 sigma(px). None이면 해상도에 맞춰 자동.
@@ -190,6 +217,14 @@ class SurfaceVisualizer:
             smooth_sigma: 이미지 기반 렌더링 시 부드럽게 하는 정도(px).
             detail_strength: 디테일 강조/완화 정도 (1.0=기본).
             detail_sigma: 디테일 추출용 블러 sigma(px). None이면 자동.
+            texture_postprocess: 렌더 후 보정 단계 이름 또는 쉼표 구분 문자열
+                (예: "clahe", "local_contrast", "clahe,soft_denoise").
+            texture_detail_scale: 프리셋/기본 detail_strength에 곱해지는 질감 강조 배율.
+            texture_smooth_sigma_extra: 프리셋/기본 smooth_sigma에 더하는 추가 스무딩(px).
+            texture_postprocess_extra: 프리셋 후처리에 추가로 합칠 보정 단계.
+            texture_source: 'none' | 'texture' | 'hybrid'. 실제 메쉬 텍스처를
+                탁본 렌더에 반영하는 모드.
+            texture_blend: hybrid 모드에서 형상 렌더와 텍스처 기여도를 섞는 비율.
 
         Returns:
             RubbingImage: 탁본 이미지
@@ -210,9 +245,55 @@ class SurfaceVisualizer:
             relief_strength = preset_cfg.get("relief_strength", relief_strength)
             height_mode = preset_cfg.get("height_mode", height_mode)
             invert = preset_cfg.get("invert", invert)
+            if light_angle is None:
+                light_angle = preset_cfg.get("light_angle", light_angle)
+            if light_elevation is None:
+                light_elevation = preset_cfg.get("light_elevation", light_elevation)
             splat_sigma = preset_cfg.get("splat_sigma", None)
+            texture_postprocess = preset_cfg.get("texture_postprocess", texture_postprocess)
+            texture_source = preset_cfg.get("texture_source", texture_source)
+            texture_blend = preset_cfg.get("texture_blend", texture_blend)
         else:
             splat_sigma = None
+
+        try:
+            light_angle = float(45.0 if light_angle is None else light_angle)
+        except Exception:
+            light_angle = 45.0
+        if not np.isfinite(light_angle):
+            light_angle = 45.0
+
+        try:
+            light_elevation = float(30.0 if light_elevation is None else light_elevation)
+        except Exception:
+            light_elevation = 30.0
+        if not np.isfinite(light_elevation):
+            light_elevation = 30.0
+
+        try:
+            detail_scale = float(texture_detail_scale)
+        except Exception:
+            detail_scale = 1.0
+        if np.isfinite(detail_scale) and detail_scale > 0.0:
+            detail_strength = float(detail_strength) * detail_scale
+
+        try:
+            smooth_extra = float(texture_smooth_sigma_extra)
+        except Exception:
+            smooth_extra = 0.0
+        if np.isfinite(smooth_extra) and smooth_extra > 0.0:
+            smooth_sigma = max(0.0, float(smooth_sigma) + smooth_extra)
+
+        texture_postprocess = self._merge_postprocess_steps(
+            texture_postprocess,
+            texture_postprocess_extra,
+        )
+        texture_source_key = str(texture_source or "none").strip().lower()
+        try:
+            texture_blend_f = float(texture_blend)
+        except Exception:
+            texture_blend_f = 0.35
+        texture_blend_f = float(np.clip(texture_blend_f, 0.0, 1.0))
 
         if flattened is None or getattr(flattened, "uv", None) is None or getattr(flattened, "faces", None) is None:
             raise ValueError("Flattened mesh is missing uv/faces.")
@@ -291,21 +372,39 @@ class SurfaceVisualizer:
         
         # 스타일에 따른 렌더링
         if style == 'traditional':
-            image = self._render_traditional_rubbing(depth_map, light_angle)
+            image = self._render_traditional_rubbing(depth_map, light_angle, light_elevation)
         elif style == 'modern':
-            image = self._render_modern_rubbing(depth_map, light_angle)
+            image = self._render_modern_rubbing(depth_map, light_angle, light_elevation)
         elif style == 'relief':
-            image = self._render_relief(depth_map, light_angle)
+            image = self._render_relief(depth_map, light_angle, light_elevation)
         elif style == 'multilight':
-            image = self._render_static_multilight(depth_map)
+            image = self._render_static_multilight(depth_map, light_angle, light_elevation)
         elif style == 'normal_unsharp':
-            image = self._render_normal_unsharp(depth_map)
+            image = self._render_normal_unsharp(depth_map, light_angle, light_elevation)
         elif style == 'specular':
-            image = self._render_specular_enhancement(depth_map, light_angle)
+            image = self._render_specular_enhancement(depth_map, light_angle, light_elevation)
         elif style == 'normals':
             image = self._render_normal_visualization(depth_map)
         else:
-            image = self._render_traditional_rubbing(depth_map, light_angle)
+            image = self._render_traditional_rubbing(depth_map, light_angle, light_elevation)
+
+        if texture_source_key in {"texture", "hybrid"}:
+            texture_map = self._create_texture_map(
+                flattened,
+                width_pixels,
+                height_pixels,
+                smooth_sigma=max(0.0, float(smooth_sigma)) * 0.5,
+            )
+            if texture_map is not None and texture_map.size > 0:
+                image = self._merge_texture_render(
+                    image,
+                    texture_map,
+                    source=texture_source_key,
+                    blend=texture_blend_f,
+                    detail_scale=detail_scale,
+                )
+
+        image = self._apply_rubbing_postprocess(image, texture_postprocess)
         
         return RubbingImage(
             image=image,
@@ -330,6 +429,17 @@ class SurfaceVisualizer:
                 detail_strength=1.2,
                 detail_sigma=None,
                 splat_sigma=0.4,
+                light_elevation=30.0,
+            ),
+            "자연(이미지)+CLAHE": dict(
+                style="traditional",
+                image_mode="image",
+                smooth_sigma=1.2,
+                detail_strength=1.2,
+                detail_sigma=None,
+                splat_sigma=0.4,
+                light_elevation=28.0,
+                texture_postprocess="clahe",
             ),
             "선명(이미지)": dict(
                 style="modern",
@@ -338,6 +448,7 @@ class SurfaceVisualizer:
                 detail_strength=1.8,
                 detail_sigma=None,
                 splat_sigma=0.3,
+                light_elevation=24.0,
             ),
             "부드러움": dict(
                 style="traditional",
@@ -346,6 +457,56 @@ class SurfaceVisualizer:
                 detail_strength=0.8,
                 detail_sigma=None,
                 splat_sigma=0.6,
+                light_elevation=38.0,
+            ),
+            "로컬 대비(텍스처)": dict(
+                style="traditional",
+                image_mode="image",
+                smooth_sigma=0.9,
+                detail_strength=1.1,
+                detail_sigma=None,
+                splat_sigma=0.35,
+                light_elevation=22.0,
+                texture_postprocess="local_contrast,soft_denoise",
+            ),
+            "텍스처 판독(실사)": dict(
+                style="traditional",
+                image_mode="image",
+                smooth_sigma=0.7,
+                detail_strength=1.0,
+                detail_sigma=None,
+                splat_sigma=0.3,
+                light_elevation=18.0,
+                texture_source="texture",
+                texture_postprocess="clahe,local_contrast",
+            ),
+            "하이브리드(형상+텍스처)": dict(
+                style="multilight",
+                image_mode="image",
+                smooth_sigma=0.8,
+                detail_strength=1.25,
+                detail_sigma=None,
+                splat_sigma=0.35,
+                remove_curvature=True,
+                reference_sigma=None,
+                height_mode="cyl_radial",
+                relief_strength=4.0,
+                light_elevation=22.0,
+                texture_source="hybrid",
+                texture_blend=0.34,
+                texture_postprocess="clahe",
+            ),
+            "형상 Relief": dict(
+                style="multilight",
+                image_mode="image",
+                smooth_sigma=0.7,
+                detail_strength=1.25,
+                detail_sigma=None,
+                splat_sigma=0.35,
+                height_mode="normal_z",
+                remove_curvature=False,
+                relief_strength=2.2,
+                light_elevation=18.0,
             ),
             "디지털(곡률 제거)": dict(
                 style="modern",
@@ -358,6 +519,7 @@ class SurfaceVisualizer:
                 reference_sigma=None,
                 height_mode="cyl_radial",
                 relief_strength=6.0,
+                light_elevation=20.0,
             ),
             "다중광(기록면)": dict(
                 style="multilight",
@@ -370,6 +532,8 @@ class SurfaceVisualizer:
                 reference_sigma=None,
                 height_mode="cyl_radial",
                 relief_strength=4.5,
+                light_elevation=22.0,
+                texture_postprocess="clahe",
             ),
             "노멀 언샵": dict(
                 style="normal_unsharp",
@@ -382,6 +546,7 @@ class SurfaceVisualizer:
                 reference_sigma=None,
                 height_mode="cyl_radial",
                 relief_strength=4.0,
+                light_elevation=20.0,
             ),
             "스펙큘러 강조": dict(
                 style="specular",
@@ -394,6 +559,7 @@ class SurfaceVisualizer:
                 reference_sigma=None,
                 height_mode="cyl_radial",
                 relief_strength=3.5,
+                light_elevation=24.0,
             ),
             "노멀 보기": dict(
                 style="normals",
@@ -424,6 +590,157 @@ class SurfaceVisualizer:
             if key_low in name.lower():
                 return dict(cfg)
         return None
+
+    @staticmethod
+    def _normalize_postprocess_steps(
+        texture_postprocess: str | list[str] | tuple[str, ...] | None,
+    ) -> tuple[str, ...]:
+        if texture_postprocess is None:
+            return ()
+        if isinstance(texture_postprocess, (list, tuple)):
+            values: list[str] = []
+            for step in texture_postprocess:
+                if step is None:
+                    continue
+                text = str(step).strip().lower()
+                if text:
+                    values.append(text)
+            return tuple(values)
+        text = str(texture_postprocess).strip()
+        if not text:
+            return ()
+        if "," in text:
+            return tuple(part.strip().lower() for part in text.split(",") if part.strip())
+        return (text.lower(),)
+
+    @staticmethod
+    def _merge_postprocess_steps(
+        *values: str | list[str] | tuple[str, ...] | None,
+    ) -> tuple[str, ...]:
+        merged: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            for step in SurfaceVisualizer._normalize_postprocess_steps(value):
+                if step in seen:
+                    continue
+                seen.add(step)
+                merged.append(step)
+        return tuple(merged)
+
+    @staticmethod
+    def _as_float01_image(image: np.ndarray) -> np.ndarray:
+        raw = np.asarray(image)
+        if raw.size == 0:
+            return np.zeros_like(raw, dtype=np.float64)
+        if raw.dtype == np.uint8:
+            return np.clip(raw.astype(np.float64) / 255.0, 0.0, 1.0)
+
+        arr = np.asarray(raw, dtype=np.float64)
+        arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+        finite = np.isfinite(arr)
+        if not bool(np.any(finite)):
+            return np.zeros_like(arr, dtype=np.float64)
+        valid = arr[finite]
+        lo = float(np.percentile(valid, 1.0))
+        hi = float(np.percentile(valid, 99.0))
+        if not np.isfinite(lo) or not np.isfinite(hi) or abs(hi - lo) <= 1e-12:
+            return np.zeros_like(arr, dtype=np.float64)
+        scale = 1.0 / (float(hi) - float(lo))
+        return np.clip((arr - lo) * scale, 0.0, 1.0)
+
+    @staticmethod
+    def _apply_local_contrast(
+        image_01: np.ndarray,
+        *,
+        window: int = 32,
+        gain: float = 1.4,
+    ) -> np.ndarray:
+        if image_01.size == 0:
+            return image_01
+
+        if not np.issubdtype(image_01.dtype, np.floating):
+            image_01 = np.asarray(image_01, dtype=np.float64)
+
+        if image_01.ndim != 2:
+            return image_01
+
+        w = max(1, int(window))
+        if w <= 1:
+            return image_01
+
+        mean = ndimage.uniform_filter(image_01, size=w, mode="nearest")
+        mean2 = ndimage.uniform_filter(image_01 * image_01, size=w, mode="nearest")
+        variance = np.maximum(0.0, mean2 - mean * mean)
+        std = np.sqrt(variance)
+        std = np.clip(std, 1e-6, None)
+        out = (image_01 - mean) / std
+        out = 0.5 + gain * out * 0.12
+        return np.clip(out, 0.0, 1.0)
+
+    @staticmethod
+    def _apply_clahe_like(
+        image_01: np.ndarray,
+        *,
+        clip_limit: float = 2.0,
+        tile: int = 8,
+    ) -> np.ndarray:
+        if image_01.size == 0:
+            return image_01
+        if image_01.ndim != 2:
+            return image_01
+
+        cv2 = _get_cv2()
+        img8 = np.clip(np.rint(np.asarray(image_01, dtype=np.float64) * 255.0), 0.0, 255.0).astype(np.uint8)
+        if cv2 is not None:
+            try:
+                tile_grid = (max(2, int(tile)), max(2, int(tile)))
+                clahe = cv2.createCLAHE(clipLimit=float(clip_limit), tileGridSize=tile_grid)
+                out = clahe.apply(img8)
+                return np.clip(out.astype(np.float64) / 255.0, 0.0, 1.0)
+            except Exception:
+                pass
+
+        # Fallback: local contrast stretch using mean/std normalization.
+        return SurfaceVisualizer._apply_local_contrast(image_01, window=max(16, int(tile) * 4), gain=1.6)
+
+    def _apply_rubbing_postprocess(
+        self,
+        image: np.ndarray,
+        texture_postprocess: str | list[str] | tuple[str, ...] | None,
+    ) -> np.ndarray:
+        """Apply image-domain postprocessing for texture-like enhancement."""
+        steps = self._normalize_postprocess_steps(texture_postprocess)
+        if not steps:
+            return image
+
+        arr = self._as_float01_image(image)
+
+        for step in steps:
+            if step == "clahe":
+                arr = self._apply_clahe_like(arr, clip_limit=2.0, tile=8)
+            elif step == "local_contrast":
+                arr = self._apply_local_contrast(arr, window=32, gain=1.4)
+            elif step in {"soft_denoise", "denoise", "bilateral"}:
+                if arr.size == 0:
+                    continue
+                cv2 = _get_cv2()
+                if cv2 is not None:
+                    img8 = np.clip(np.rint(arr * 255.0), 0.0, 255.0).astype(np.uint8)
+                    try:
+                        arr = cv2.bilateralFilter(img8, d=0, sigmaColor=28, sigmaSpace=18).astype(np.float64) / 255.0
+                    except Exception:
+                        pass
+            elif step == "soften":
+                arr = self._to_uint8_image(arr.astype(np.float64) if arr.ndim == 2 else arr)
+                arr = ndimage.gaussian_filter(arr.astype(np.float64) / 255.0, sigma=1.1)
+            elif step in {"sharpen", "unsharp"}:
+                try:
+                    base = ndimage.gaussian_filter(arr, sigma=2.0)
+                    arr = np.clip(arr + 0.65 * (arr - base), 0.0, 1.0)
+                except Exception:
+                    pass
+
+        return self._to_uint8_image(arr)
 
     def _estimate_thickness_axis(self, vertices: np.ndarray) -> np.ndarray:
         """PCA 기반 두께(시트 법선) 축 추정. (얇은 쉘/기와에 안정적)"""
@@ -558,6 +875,248 @@ class SurfaceVisualizer:
         if not np.isfinite(out).all():
             out = np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
         return out
+
+    @staticmethod
+    def _texture_to_luma01(texture: np.ndarray | None) -> np.ndarray | None:
+        if texture is None:
+            return None
+        arr = np.asarray(texture)
+        if arr.size <= 0:
+            return None
+        if arr.ndim == 2:
+            return SurfaceVisualizer._as_float01_image(arr)
+        if arr.ndim != 3:
+            return None
+        if arr.shape[2] <= 0:
+            return None
+
+        rgb = np.asarray(arr[..., :3], dtype=np.float64)
+        if rgb.shape[2] == 1:
+            rgb = np.repeat(rgb, 3, axis=2)
+        if rgb.shape[2] < 3:
+            return None
+
+        if np.asarray(texture).dtype == np.uint8:
+            rgb = np.clip(rgb / 255.0, 0.0, 1.0)
+        else:
+            rgb = SurfaceVisualizer._as_float01_image(rgb)
+
+        weights = np.array([0.299, 0.587, 0.114], dtype=np.float64)
+        luma = np.tensordot(rgb[..., :3], weights, axes=([-1], [0]))
+        if not np.isfinite(luma).all():
+            luma = np.nan_to_num(luma, nan=0.0, posinf=0.0, neginf=0.0)
+        return np.clip(np.asarray(luma, dtype=np.float64), 0.0, 1.0)
+
+    @staticmethod
+    def _sample_texture_image(texture_01: np.ndarray, u: np.ndarray, v: np.ndarray) -> np.ndarray:
+        tex = np.asarray(texture_01, dtype=np.float64)
+        if tex.ndim != 2 or tex.size <= 0:
+            return np.zeros_like(np.asarray(u, dtype=np.float64), dtype=np.float64)
+
+        uu = np.asarray(u, dtype=np.float64)
+        vv = np.asarray(v, dtype=np.float64)
+        uu = np.nan_to_num(uu, nan=0.0, posinf=0.0, neginf=0.0)
+        vv = np.nan_to_num(vv, nan=0.0, posinf=0.0, neginf=0.0)
+        uu = np.clip(uu, 0.0, 1.0)
+        vv = np.clip(vv, 0.0, 1.0)
+
+        h, w = tex.shape
+        x = uu * float(max(1, w - 1))
+        y = (1.0 - vv) * float(max(1, h - 1))
+
+        x0 = np.floor(x).astype(np.int32)
+        y0 = np.floor(y).astype(np.int32)
+        x1 = np.clip(x0 + 1, 0, w - 1)
+        y1 = np.clip(y0 + 1, 0, h - 1)
+
+        wx = x - x0.astype(np.float64)
+        wy = y - y0.astype(np.float64)
+
+        s00 = tex[y0, x0]
+        s10 = tex[y0, x1]
+        s01 = tex[y1, x0]
+        s11 = tex[y1, x1]
+
+        top = ((1.0 - wx) * s00) + (wx * s10)
+        bottom = ((1.0 - wx) * s01) + (wx * s11)
+        return np.clip(((1.0 - wy) * top) + (wy * bottom), 0.0, 1.0)
+
+    def _sample_texture_vertices(self, texture_01: np.ndarray, uv_coords: np.ndarray) -> np.ndarray:
+        uv = np.asarray(uv_coords, dtype=np.float64)
+        if uv.ndim != 2 or uv.shape[0] == 0 or uv.shape[1] < 2:
+            return np.zeros((0,), dtype=np.float64)
+        values = self._sample_texture_image(texture_01, uv[:, 0], uv[:, 1])
+        if not np.isfinite(values).all():
+            values = np.nan_to_num(values, nan=0.0, posinf=0.0, neginf=0.0)
+        return np.asarray(values, dtype=np.float64).reshape(-1)
+
+    def _rasterize_triangle_texture(
+        self,
+        uv_dst: np.ndarray,
+        uv_src: np.ndarray,
+        *,
+        width: int,
+        height: int,
+        texture_01: np.ndarray,
+        buffer: np.ndarray,
+        count: np.ndarray,
+    ) -> None:
+        px = np.asarray(uv_dst[:, 0], dtype=np.float64) * float(width - 1)
+        py = (1.0 - np.asarray(uv_dst[:, 1], dtype=np.float64)) * float(height - 1)
+
+        min_x = max(0, int(np.floor(px.min())))
+        max_x = min(width - 1, int(np.ceil(px.max())))
+        min_y = max(0, int(np.floor(py.min())))
+        max_y = min(height - 1, int(np.ceil(py.max())))
+        if min_x > max_x or min_y > max_y:
+            return
+
+        v0 = np.array([px[0], py[0]], dtype=np.float64)
+        v1 = np.array([px[1], py[1]], dtype=np.float64)
+        v2 = np.array([px[2], py[2]], dtype=np.float64)
+        area = (v1[0] - v0[0]) * (v2[1] - v0[1]) - (v2[0] - v0[0]) * (v1[1] - v0[1])
+        if abs(area) < 1e-10:
+            return
+
+        xs = np.arange(min_x, max_x + 1, dtype=np.float64) + 0.5
+        ys = np.arange(min_y, max_y + 1, dtype=np.float64) + 0.5
+        gx, gy = np.meshgrid(xs, ys)
+
+        w0 = ((v1[0] - gx) * (v2[1] - gy) - (v2[0] - gx) * (v1[1] - gy)) / area
+        w1 = ((v2[0] - gx) * (v0[1] - gy) - (v0[0] - gx) * (v2[1] - gy)) / area
+        w2 = 1.0 - w0 - w1
+        mask = (w0 >= -1e-9) & (w1 >= -1e-9) & (w2 >= -1e-9)
+        if not bool(np.any(mask)):
+            return
+
+        su = (w0 * float(uv_src[0, 0])) + (w1 * float(uv_src[1, 0])) + (w2 * float(uv_src[2, 0]))
+        sv = (w0 * float(uv_src[0, 1])) + (w1 * float(uv_src[1, 1])) + (w2 * float(uv_src[2, 1]))
+        samples = self._sample_texture_image(texture_01, su, sv)
+
+        region = np.s_[min_y:max_y + 1, min_x:max_x + 1]
+        region_buffer = buffer[region]
+        region_count = count[region]
+        region_buffer[mask] += samples[mask]
+        region_count[mask] += 1.0
+
+    def _create_texture_map(
+        self,
+        flattened: FlattenedMesh,
+        width: int,
+        height: int,
+        *,
+        smooth_sigma: float = 0.0,
+    ) -> np.ndarray | None:
+        original = getattr(flattened, "original_mesh", None)
+        if original is None or not bool(getattr(original, "has_texture", False)):
+            return None
+
+        texture_01 = self._texture_to_luma01(getattr(original, "texture", None))
+        uv_src = np.asarray(getattr(original, "uv_coords", None), dtype=np.float64)
+        uv_dst = np.asarray(flattened.normalize().uv, dtype=np.float64)
+        faces = np.asarray(getattr(flattened, "faces", None), dtype=np.int32)
+
+        if texture_01 is None:
+            return None
+        if uv_src.ndim != 2 or uv_src.shape[1] < 2 or uv_src.shape[0] != uv_dst.shape[0]:
+            return None
+        if faces.ndim != 2 or faces.shape[0] == 0 or faces.shape[1] < 3:
+            return None
+
+        h = int(max(1, height))
+        w = int(max(1, width))
+        try:
+            raster_thr = int(getattr(self, "_texture_raster_threshold_faces", 40000) or 40000)
+        except Exception:
+            raster_thr = 40000
+
+        if int(faces.shape[0]) > max(5000, raster_thr):
+            vertex_values = self._sample_texture_vertices(texture_01, uv_src[:, :2])
+            texture_map = self._create_value_map_image_based(
+                flattened,
+                vertex_values,
+                w,
+                h,
+                smooth_sigma=max(0.25, float(smooth_sigma)),
+                splat_sigma=0.25,
+            )
+            return self._normalize_image_unit(texture_map)
+
+        buffer = np.zeros((h, w), dtype=np.float64)
+        count = np.zeros((h, w), dtype=np.float64)
+        for face in faces[:, :3]:
+            try:
+                self._rasterize_triangle_texture(
+                    uv_dst[face],
+                    uv_src[face, :2],
+                    width=w,
+                    height=h,
+                    texture_01=texture_01,
+                    buffer=buffer,
+                    count=count,
+                )
+            except Exception:
+                continue
+
+        mask = count > 0.0
+        if not bool(np.any(mask)):
+            vertex_values = self._sample_texture_vertices(texture_01, uv_src[:, :2])
+            texture_map = self._create_value_map_image_based(
+                flattened,
+                vertex_values,
+                w,
+                h,
+                smooth_sigma=max(0.25, float(smooth_sigma)),
+                splat_sigma=0.25,
+            )
+            return self._normalize_image_unit(texture_map)
+
+        buffer[mask] /= count[mask]
+        if not bool(mask.all()):
+            buffer = self._fill_holes(buffer, mask)
+
+        try:
+            sigma = float(smooth_sigma)
+        except Exception:
+            sigma = 0.0
+        if np.isfinite(sigma) and sigma > 0.0:
+            try:
+                buffer = ndimage.gaussian_filter(buffer, sigma=float(sigma))
+            except Exception:
+                pass
+        return np.clip(np.asarray(buffer, dtype=np.float64), 0.0, 1.0)
+
+    def _prepare_texture_detail_map(self, texture_map: np.ndarray, *, detail_scale: float) -> np.ndarray:
+        arr = np.clip(np.asarray(texture_map, dtype=np.float64), 0.0, 1.0)
+        gain = 1.1 + (0.35 * max(0.0, float(detail_scale) - 1.0))
+        try:
+            arr = self._apply_local_contrast(arr, window=24, gain=gain)
+        except Exception:
+            pass
+        try:
+            base = ndimage.gaussian_filter(arr, sigma=1.4)
+            arr = np.clip(arr + (0.35 * (arr - base)), 0.0, 1.0)
+        except Exception:
+            pass
+        return np.clip(arr, 0.0, 1.0)
+
+    def _merge_texture_render(
+        self,
+        image: np.ndarray,
+        texture_map: np.ndarray,
+        *,
+        source: str,
+        blend: float,
+        detail_scale: float,
+    ) -> np.ndarray:
+        texture_view = self._prepare_texture_detail_map(texture_map, detail_scale=detail_scale)
+        source_key = str(source or "none").strip().lower()
+        if source_key == "texture":
+            return self._to_uint8_image(texture_view)
+
+        relief = self._as_float01_image(image)
+        out = np.clip(((1.0 - blend) * relief) + (blend * texture_view), 0.0, 1.0)
+        return self._to_uint8_image(out)
 
     def _create_value_map(
         self,
@@ -950,8 +1509,12 @@ class SurfaceVisualizer:
         intensity = (lx * nx) + (ly * ny) + (lz * nz)
         return np.clip(intensity, 0.0, 1.0)
 
-    def _render_traditional_rubbing(self, depth_map: np.ndarray,
-                                     light_angle: float) -> np.ndarray:
+    def _render_traditional_rubbing(
+        self,
+        depth_map: np.ndarray,
+        light_angle: float,
+        light_elevation: float = 30.0,
+    ) -> np.ndarray:
         """
         전통적인 탁본 스타일 렌더링
         
@@ -966,35 +1529,37 @@ class SurfaceVisualizer:
         except Exception:
             grad_y, grad_x = np.gradient(depth_map)
         
-        # 조명 방향
-        light_rad = np.radians(light_angle)
-        light_x = np.cos(light_rad)
-        light_y = np.sin(light_rad)
-        
-        # 램버시안 셰이딩
-        # 법선 벡터: (-grad_x, -grad_y, 1) 정규화
         normal_z = np.ones_like(depth_map)
         norm = np.sqrt(grad_x**2 + grad_y**2 + normal_z**2)
         
         nx = -grad_x / norm
         ny = -grad_y / norm
         nz = normal_z / norm
-        
-        # 조명과 법선의 내적
-        intensity = light_x * nx + light_y * ny + 0.5 * nz
-        intensity = np.clip(intensity, 0, 1)
-        
-        # 탁본 효과: 높은 곳이 밝게
-        image = (intensity * 255).astype(np.uint8)
-        
-        return image
 
-    def _render_static_multilight(self, depth_map: np.ndarray) -> np.ndarray:
+        diffuse = self._lambert_from_normals(
+            nx,
+            ny,
+            nz,
+            azimuth_deg=light_angle,
+            elevation_deg=light_elevation,
+        )
+        ambient = np.clip((0.10 + (0.20 * np.sin(np.radians(float(light_elevation))))) + (0.08 * nz), 0.0, 1.0)
+        intensity = np.clip((0.88 * diffuse) + ambient, 0.0, 1.0)
+        return self._to_uint8_image(intensity)
+
+    def _render_static_multilight(
+        self,
+        depth_map: np.ndarray,
+        light_angle: float = 45.0,
+        light_elevation: float = 32.0,
+    ) -> np.ndarray:
         """RTI-like static multi-light rendering for recording surfaces."""
         nx, ny, nz = self._compute_normal_field(depth_map)
-        azimuths = (0.0, 35.0, 70.0, 110.0, 145.0, 215.0, 250.0, 320.0)
+        base_az = float(light_angle)
+        offsets = (-145.0, -110.0, -75.0, -35.0, 0.0, 70.0, 105.0, 175.0)
+        azimuths = tuple(base_az + off for off in offsets)
         stack = np.stack(
-            [self._lambert_from_normals(nx, ny, nz, azimuth_deg=az, elevation_deg=32.0) for az in azimuths],
+            [self._lambert_from_normals(nx, ny, nz, azimuth_deg=az, elevation_deg=light_elevation) for az in azimuths],
             axis=0,
         )
         mean_img = np.mean(stack, axis=0)
@@ -1003,12 +1568,16 @@ class SurfaceVisualizer:
         fused = np.power(np.clip(fused, 0.0, 1.0), 0.9)
         return self._to_uint8_image(fused)
 
-    def _render_modern_rubbing(self, depth_map: np.ndarray,
-                                light_angle: float) -> np.ndarray:
+    def _render_modern_rubbing(
+        self,
+        depth_map: np.ndarray,
+        light_angle: float,
+        light_elevation: float = 30.0,
+    ) -> np.ndarray:
         """
         현대적인 탁본 스타일 (고대비)
         """
-        base = self._render_traditional_rubbing(depth_map, light_angle)
+        base = self._render_traditional_rubbing(depth_map, light_angle, light_elevation)
         
         # 대비 증가
         enhanced = base.astype(np.float64)
@@ -1017,9 +1586,14 @@ class SurfaceVisualizer:
         
         return enhanced
 
-    def _render_normal_unsharp(self, depth_map: np.ndarray) -> np.ndarray:
+    def _render_normal_unsharp(
+        self,
+        depth_map: np.ndarray,
+        light_angle: float = 45.0,
+        light_elevation: float = 32.0,
+    ) -> np.ndarray:
         """Diffuse-gain / normal-unsharp-like enhancement for shallow relief."""
-        base = self._render_static_multilight(depth_map).astype(np.float64) / 255.0
+        base = self._render_static_multilight(depth_map, light_angle, light_elevation).astype(np.float64) / 255.0
         try:
             blur = ndimage.gaussian_filter(base, sigma=2.0)
             detail = base - blur
@@ -1028,13 +1602,18 @@ class SurfaceVisualizer:
             out = base
         return self._to_uint8_image(out)
 
-    def _render_specular_enhancement(self, depth_map: np.ndarray, light_angle: float) -> np.ndarray:
+    def _render_specular_enhancement(
+        self,
+        depth_map: np.ndarray,
+        light_angle: float,
+        light_elevation: float = 30.0,
+    ) -> np.ndarray:
         """Specular-enhanced view inspired by RTI material enhancement."""
         nx, ny, nz = self._compute_normal_field(depth_map)
-        diffuse = self._lambert_from_normals(nx, ny, nz, azimuth_deg=light_angle, elevation_deg=30.0)
+        diffuse = self._lambert_from_normals(nx, ny, nz, azimuth_deg=light_angle, elevation_deg=light_elevation)
 
         az = np.radians(float(light_angle))
-        el = np.radians(35.0)
+        el = np.radians(float(light_elevation))
         light = np.array(
             [np.cos(az) * np.cos(el), np.sin(az) * np.cos(el), np.sin(el)],
             dtype=np.float64,
@@ -1067,8 +1646,12 @@ class SurfaceVisualizer:
         rgb = np.clip(rgb, 0.0, 1.0)
         return (rgb * 255.0).astype(np.uint8)
 
-    def _render_relief(self, depth_map: np.ndarray,
-                       light_angle: float) -> np.ndarray:
+    def _render_relief(
+        self,
+        depth_map: np.ndarray,
+        light_angle: float,
+        light_elevation: float = 30.0,
+    ) -> np.ndarray:
         """
         릴리프(양각) 효과 렌더링
         """
@@ -1079,12 +1662,19 @@ class SurfaceVisualizer:
         # 조명 방향에 따른 음영
         light_rad = np.radians(light_angle)
         emboss = np.cos(light_rad) * grad_x + np.sin(light_rad) * grad_y
-        
-        # 정규화
-        emboss = (emboss - emboss.min()) / (emboss.max() - emboss.min() + 1e-10)
-        image = (emboss * 255).astype(np.uint8)
-        
-        return image
+        gain = max(0.15, float(np.cos(np.radians(float(light_elevation)))))
+        base = 0.5 + (0.18 * float(np.sin(np.radians(float(light_elevation)))))
+        try:
+            sigma = max(1.0, 0.01 * float(min(depth_map.shape[:2])))
+            scale = float(np.std(ndimage.gaussian_filter(emboss, sigma=0.0 if sigma < 1e-12 else sigma)))
+        except Exception:
+            scale = 0.0
+        if not np.isfinite(scale) or scale <= 1e-12:
+            scale = float(np.std(emboss))
+        if not np.isfinite(scale) or scale <= 1e-12:
+            scale = 1.0
+        normalized = base + ((gain * 0.35) * (emboss / scale))
+        return self._to_uint8_image(np.clip(normalized, 0.0, 1.0))
     
     def generate_depth_map(self, flattened: FlattenedMesh,
                            width_pixels: int = 2000) -> RubbingImage:

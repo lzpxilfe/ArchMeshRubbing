@@ -21,7 +21,7 @@ from PyQt6.QtWidgets import (
     QSlider, QSpinBox, QStatusBar, QToolBar, QFrame,
     QMessageBox, QTextEdit, QProgressBar, QComboBox,
     QCheckBox, QScrollArea, QSizePolicy, QButtonGroup, QDialog, QLineEdit,
-    QGridLayout, QProgressDialog, QMenu
+    QGridLayout, QProgressDialog, QMenu, QTabWidget
 )
 from PyQt6.QtCore import Qt, QTimer, QSize, pyqtSignal, QThread, QBuffer, QByteArray, QIODevice
 from PyQt6.QtCore import QSettings
@@ -75,6 +75,62 @@ _EXPORT_SURFACE_TARGET_LABELS: dict[str, str] = {
     "inner": "내면",
     "migu": "미구",
 }
+_ARTIFACT_PROFILE_LABELS: dict[str, str] = {
+    "auto": "자동",
+    "general": "일반 표면",
+    "tile": "기와/곡면",
+    "inscription": "명문/세선",
+    "weathered": "마모/풍화",
+    "stone": "암각/석재",
+    "painted": "채색/강한 텍스처",
+}
+_ARTIFACT_PROFILE_DEFAULTS: dict[str, dict[str, object]] = {
+    "general": dict(
+        preset="자연(이미지)",
+        detail_scale=1.0,
+        smooth_extra=0.0,
+        postprocess=None,
+        compare_relief_preset="형상 Relief",
+    ),
+    "tile": dict(
+        preset="다중광(기록면)",
+        detail_scale=1.05,
+        smooth_extra=0.05,
+        postprocess=None,
+        compare_relief_preset="다중광(기록면)",
+    ),
+    "inscription": dict(
+        preset="노멀 언샵",
+        detail_scale=1.25,
+        smooth_extra=0.0,
+        postprocess="unsharp",
+        compare_relief_preset="형상 Relief",
+    ),
+    "weathered": dict(
+        preset="자연(이미지)+CLAHE",
+        preset_texture="하이브리드(형상+텍스처)",
+        detail_scale=1.15,
+        smooth_extra=0.15,
+        postprocess="clahe",
+        compare_relief_preset="형상 Relief",
+    ),
+    "stone": dict(
+        preset="스펙큘러 강조",
+        preset_texture="하이브리드(형상+텍스처)",
+        detail_scale=1.10,
+        smooth_extra=0.05,
+        postprocess="clahe",
+        compare_relief_preset="형상 Relief",
+    ),
+    "painted": dict(
+        preset="자연(이미지)+CLAHE",
+        preset_texture="텍스처 판독(실사)",
+        detail_scale=1.0,
+        smooth_extra=0.0,
+        postprocess="clahe",
+        compare_relief_preset="형상 Relief",
+    ),
+}
 
 
 def _normalize_surface_target(value: object) -> str:
@@ -84,6 +140,30 @@ def _normalize_surface_target(value: object) -> str:
 
 def _surface_target_label(value: object) -> str:
     return _EXPORT_SURFACE_TARGET_LABELS.get(_normalize_surface_target(value), "전체 메쉬")
+
+
+def _normalize_artifact_profile(value: object) -> str:
+    key = str(value or "auto").strip().lower()
+    return key if key in _ARTIFACT_PROFILE_LABELS else "auto"
+
+
+def _merge_texture_postprocess_texts(*values: object) -> str:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, (list, tuple, set)):
+            items = value
+        else:
+            items = str(value or "").split(",")
+        for item in items:
+            step = str(item or "").strip().lower()
+            if not step or step in seen:
+                continue
+            seen.add(step)
+            merged.append(step)
+    return ",".join(merged)
 
 
 def _surface_target_face_ids(obj: object, value: object) -> np.ndarray:
@@ -207,7 +287,7 @@ except Exception:
     pass
 
 from src.gui.viewport_3d import Viewport3D  # noqa: E402
-from src.core.mesh_loader import MeshLoader, MeshProcessor  # noqa: E402
+from src.core.mesh_loader import MeshLoader  # noqa: E402
 from src.core.profile_exporter import ProfileExporter  # noqa: E402
 from src.core.project_file import (  # noqa: E402
     ProjectFormatError,
@@ -2788,18 +2868,117 @@ class ExportPanel(QWidget):
         self.check_scale_bar.setChecked(True)
         img_layout.addRow("", self.check_scale_bar)
 
+        self.combo_artifact_profile = QComboBox()
+        self.combo_artifact_profile.addItem("자동", "auto")
+        self.combo_artifact_profile.addItem("일반 표면", "general")
+        self.combo_artifact_profile.addItem("기와/곡면", "tile")
+        self.combo_artifact_profile.addItem("명문/세선", "inscription")
+        self.combo_artifact_profile.addItem("마모/풍화", "weathered")
+        self.combo_artifact_profile.addItem("암각/석재", "stone")
+        self.combo_artifact_profile.addItem("채색/강한 텍스처", "painted")
+        self.combo_artifact_profile.setToolTip(
+            "유물 유형별 기본 탁본 프리셋 묶음입니다.\n"
+            "렌더 모드가 '자동'일 때 추천 프리셋과 기본 보정 강도에 반영됩니다."
+        )
+        img_layout.addRow("유물 유형:", self.combo_artifact_profile)
+
         self.combo_review_render_mode = QComboBox()
         self.combo_review_render_mode.addItem("자동", "auto")
         self.combo_review_render_mode.addItem("다중광(기록면)", "다중광(기록면)")
+        self.combo_review_render_mode.addItem("자연(이미지)+CLAHE", "자연(이미지)+CLAHE")
+        self.combo_review_render_mode.addItem("로컬 대비(텍스처)", "로컬 대비(텍스처)")
+        self.combo_review_render_mode.addItem("하이브리드(형상+텍스처)", "하이브리드(형상+텍스처)")
+        self.combo_review_render_mode.addItem("텍스처 판독(실사)", "텍스처 판독(실사)")
         self.combo_review_render_mode.addItem("노멀 언샵", "노멀 언샵")
         self.combo_review_render_mode.addItem("스펙큘러 강조", "스펙큘러 강조")
         self.combo_review_render_mode.addItem("노멀 보기", "노멀 보기")
         self.combo_review_render_mode.addItem("자연(이미지)", "자연(이미지)")
         self.combo_review_render_mode.setToolTip(
             "검토 시트와 미리보기에서 사용할 기록면 렌더 모드입니다.\n"
-            "자동은 기와/기록면일 때 다중광, 일반 경로는 자연(이미지)를 사용합니다."
+            "자동은 기와/기록면일 때 다중광, 일반 경로는 자연(이미지)를 사용합니다.\n"
+            "텍스처가 있는 메쉬는 하이브리드/텍스처 판독 모드에서 실사 텍스처를 함께 사용합니다.\n"
+            "텍스처 보강은 CLAHE/로컬 대비 기반 후처리(실험적) 옵션입니다."
         )
         img_layout.addRow("기록면 렌더:", self.combo_review_render_mode)
+
+        self.spin_texture_detail_scale = QDoubleSpinBox()
+        self.spin_texture_detail_scale.setRange(0.25, 3.0)
+        self.spin_texture_detail_scale.setSingleStep(0.05)
+        self.spin_texture_detail_scale.setDecimals(2)
+        self.spin_texture_detail_scale.setValue(1.0)
+        self.spin_texture_detail_scale.setSuffix(" x")
+        self.spin_texture_detail_scale.setToolTip(
+            "선택한 렌더 모드 위에 추가로 질감/요철 강조를 곱해 적용합니다.\n"
+            "1.0은 기본, 1보다 크면 더 선명해집니다."
+        )
+        img_layout.addRow("질감 강조:", self.spin_texture_detail_scale)
+
+        self.spin_texture_smooth_extra = QDoubleSpinBox()
+        self.spin_texture_smooth_extra.setRange(0.0, 4.0)
+        self.spin_texture_smooth_extra.setSingleStep(0.1)
+        self.spin_texture_smooth_extra.setDecimals(2)
+        self.spin_texture_smooth_extra.setValue(0.0)
+        self.spin_texture_smooth_extra.setSuffix(" px")
+        self.spin_texture_smooth_extra.setToolTip(
+            "기본 렌더 위에 추가로 적용할 부드럽게 하기 정도입니다.\n"
+            "거친 노이즈를 줄이고 싶은 경우에 올립니다."
+        )
+        img_layout.addRow("추가 스무딩:", self.spin_texture_smooth_extra)
+
+        self.combo_texture_postprocess = QComboBox()
+        self.combo_texture_postprocess.addItem("기본 유지", "")
+        self.combo_texture_postprocess.addItem("CLAHE 추가", "clahe")
+        self.combo_texture_postprocess.addItem("로컬 대비 추가", "local_contrast")
+        self.combo_texture_postprocess.addItem("샤프닝 추가", "unsharp")
+        self.combo_texture_postprocess.addItem("부드럽게", "soften")
+        self.combo_texture_postprocess.addItem("CLAHE + 샤프닝", "clahe,unsharp")
+        self.combo_texture_postprocess.addItem("로컬 대비 + 부드럽게", "local_contrast,soften")
+        self.combo_texture_postprocess.setToolTip(
+            "렌더 모드 프리셋 뒤에 덧붙일 추가 텍스처 보정입니다.\n"
+            "기본 유지는 프리셋 자체의 후처리만 사용합니다."
+        )
+        img_layout.addRow("텍스처 보정:", self.combo_texture_postprocess)
+
+        self.check_custom_light = QCheckBox("사용자 지정 조명축")
+        self.check_custom_light.setChecked(False)
+        self.check_custom_light.setToolTip(
+            "끄면 렌더 프리셋의 기본 조명값을 그대로 사용합니다.\n"
+            "켜면 아래 조명 방향/고도 값을 강제로 적용합니다."
+        )
+        img_layout.addRow("", self.check_custom_light)
+
+        self.spin_light_azimuth = QDoubleSpinBox()
+        self.spin_light_azimuth.setRange(-180.0, 180.0)
+        self.spin_light_azimuth.setSingleStep(5.0)
+        self.spin_light_azimuth.setDecimals(1)
+        self.spin_light_azimuth.setValue(45.0)
+        self.spin_light_azimuth.setSuffix(" °")
+        self.spin_light_azimuth.setToolTip(
+            "탁본 조명 방향(방위각)입니다.\n"
+            "0°는 오른쪽, -90°는 앞, 90°는 뒤쪽 사광에 가깝습니다."
+        )
+        img_layout.addRow("조명 방향:", self.spin_light_azimuth)
+
+        self.spin_light_elevation = QDoubleSpinBox()
+        self.spin_light_elevation.setRange(5.0, 85.0)
+        self.spin_light_elevation.setSingleStep(2.0)
+        self.spin_light_elevation.setDecimals(1)
+        self.spin_light_elevation.setValue(28.0)
+        self.spin_light_elevation.setSuffix(" °")
+        self.spin_light_elevation.setToolTip(
+            "탁본 조명 고도입니다.\n"
+            "낮을수록 사광, 높을수록 정면광에 가깝습니다."
+        )
+        img_layout.addRow("조명 고도:", self.spin_light_elevation)
+        self.check_custom_light.toggled.connect(self._sync_light_control_enabled_state)
+        self._sync_light_control_enabled_state()
+
+        self.check_compare_preview = QCheckBox("비교 뷰 탭 포함")
+        self.check_compare_preview.setChecked(True)
+        self.check_compare_preview.setToolTip(
+            "미리보기 창에 원본 / Relief / Texture / Hybrid 비교 탭을 추가합니다."
+        )
+        img_layout.addRow("", self.check_compare_preview)
 
         self.combo_rubbing_target = QComboBox()
         self.combo_rubbing_target.addItems(["전체 메쉬", "✨ 현재 선택"])
@@ -2924,6 +3103,136 @@ class ExportPanel(QWidget):
             idx = self.combo_review_render_mode.findData("auto")
         if idx >= 0:
             self.combo_review_render_mode.setCurrentIndex(int(idx))
+
+    def current_artifact_profile(self) -> str:
+        try:
+            value = self.combo_artifact_profile.currentData()
+        except Exception:
+            value = "auto"
+        return _normalize_artifact_profile(value)
+
+    def set_artifact_profile(self, profile: str) -> None:
+        key = _normalize_artifact_profile(profile)
+        idx = self.combo_artifact_profile.findData(key)
+        if idx < 0:
+            idx = self.combo_artifact_profile.findData("auto")
+        if idx >= 0:
+            self.combo_artifact_profile.setCurrentIndex(int(idx))
+
+    def current_texture_detail_scale(self) -> float:
+        try:
+            value = float(self.spin_texture_detail_scale.value())
+        except Exception:
+            value = 1.0
+        if not np.isfinite(value) or value <= 0.0:
+            return 1.0
+        return value
+
+    def current_texture_smooth_extra(self) -> float:
+        try:
+            value = float(self.spin_texture_smooth_extra.value())
+        except Exception:
+            value = 0.0
+        if not np.isfinite(value) or value <= 0.0:
+            return 0.0
+        return value
+
+    def current_texture_postprocess(self) -> str:
+        try:
+            value = self.combo_texture_postprocess.currentData()
+        except Exception:
+            value = ""
+        text = str(value or "").strip()
+        return text
+
+    def set_texture_adjustments(
+        self,
+        *,
+        detail_scale: float = 1.0,
+        smooth_extra: float = 0.0,
+        postprocess: str = "",
+    ) -> None:
+        try:
+            detail_value = float(detail_scale)
+        except Exception:
+            detail_value = 1.0
+        if not np.isfinite(detail_value) or detail_value <= 0.0:
+            detail_value = 1.0
+        self.spin_texture_detail_scale.setValue(detail_value)
+
+        try:
+            smooth_value = float(smooth_extra)
+        except Exception:
+            smooth_value = 0.0
+        if not np.isfinite(smooth_value) or smooth_value <= 0.0:
+            smooth_value = 0.0
+        self.spin_texture_smooth_extra.setValue(smooth_value)
+
+        key = str(postprocess or "").strip()
+        idx = self.combo_texture_postprocess.findData(key)
+        if idx < 0:
+            idx = self.combo_texture_postprocess.findData("")
+        if idx >= 0:
+            self.combo_texture_postprocess.setCurrentIndex(int(idx))
+
+    def current_light_azimuth(self) -> float:
+        try:
+            value = float(self.spin_light_azimuth.value())
+        except Exception:
+            value = 45.0
+        if not np.isfinite(value):
+            return 45.0
+        return value
+
+    def current_light_elevation(self) -> float:
+        try:
+            value = float(self.spin_light_elevation.value())
+        except Exception:
+            value = 28.0
+        if not np.isfinite(value):
+            return 28.0
+        return value
+
+    def current_custom_light_enabled(self) -> bool:
+        try:
+            return bool(self.check_custom_light.isChecked())
+        except Exception:
+            return False
+
+    def _sync_light_control_enabled_state(self) -> None:
+        enabled = self.current_custom_light_enabled()
+        self.spin_light_azimuth.setEnabled(enabled)
+        self.spin_light_elevation.setEnabled(enabled)
+
+    def set_custom_light_enabled(self, enabled: bool) -> None:
+        self.check_custom_light.setChecked(bool(enabled))
+        self._sync_light_control_enabled_state()
+
+    def set_light_controls(self, *, azimuth: float = 45.0, elevation: float = 28.0) -> None:
+        try:
+            az = float(azimuth)
+        except Exception:
+            az = 45.0
+        if not np.isfinite(az):
+            az = 45.0
+        self.spin_light_azimuth.setValue(az)
+
+        try:
+            el = float(elevation)
+        except Exception:
+            el = 28.0
+        if not np.isfinite(el):
+            el = 28.0
+        self.spin_light_elevation.setValue(el)
+
+    def current_compare_preview_enabled(self) -> bool:
+        try:
+            return bool(self.check_compare_preview.isChecked())
+        except Exception:
+            return True
+
+    def set_compare_preview_enabled(self, enabled: bool) -> None:
+        self.check_compare_preview.setChecked(bool(enabled))
 
 
 class MeasurePanel(QWidget):
@@ -4945,6 +5254,38 @@ class MainWindow(QMainWindow):
                 review_render_mode = str(export_panel.current_review_render_mode() or "auto")
             except Exception:
                 review_render_mode = "auto"
+            try:
+                texture_detail_scale = float(export_panel.current_texture_detail_scale())
+            except Exception:
+                texture_detail_scale = 1.0
+            try:
+                texture_smooth_extra = float(export_panel.current_texture_smooth_extra())
+            except Exception:
+                texture_smooth_extra = 0.0
+            try:
+                texture_postprocess = str(export_panel.current_texture_postprocess() or "")
+            except Exception:
+                texture_postprocess = ""
+            try:
+                artifact_profile = str(export_panel.current_artifact_profile() or "auto")
+            except Exception:
+                artifact_profile = "auto"
+            try:
+                light_azimuth = float(export_panel.current_light_azimuth())
+            except Exception:
+                light_azimuth = 45.0
+            try:
+                light_elevation = float(export_panel.current_light_elevation())
+            except Exception:
+                light_elevation = 28.0
+            try:
+                use_custom_light = bool(export_panel.current_custom_light_enabled())
+            except Exception:
+                use_custom_light = False
+            try:
+                compare_preview = bool(export_panel.current_compare_preview_enabled())
+            except Exception:
+                compare_preview = True
         else:
             dpi = DEFAULT_EXPORT_DPI
             format_index = 0
@@ -4953,6 +5294,14 @@ class MainWindow(QMainWindow):
             profile_feature_lines = False
             profile_feature_angle = 60.0
             review_render_mode = "auto"
+            texture_detail_scale = 1.0
+            texture_smooth_extra = 0.0
+            texture_postprocess = ""
+            artifact_profile = "auto"
+            light_azimuth = 45.0
+            light_elevation = 28.0
+            use_custom_light = False
+            compare_preview = True
 
         ui_state["export"] = {
             "dpi": int(dpi),
@@ -4962,6 +5311,14 @@ class MainWindow(QMainWindow):
             "profile_feature_lines": bool(profile_feature_lines),
             "profile_feature_angle": float(profile_feature_angle),
             "review_render_mode": str(review_render_mode or "auto"),
+            "texture_detail_scale": float(texture_detail_scale),
+            "texture_smooth_extra": float(texture_smooth_extra),
+            "texture_postprocess": str(texture_postprocess or ""),
+            "artifact_profile": str(artifact_profile or "auto"),
+            "light_azimuth": float(light_azimuth),
+            "light_elevation": float(light_elevation),
+            "use_custom_light": bool(use_custom_light),
+            "compare_preview": bool(compare_preview),
         }
 
         slice_panel = getattr(self, "slice_panel", None)
@@ -5627,6 +5984,30 @@ class MainWindow(QMainWindow):
                 )
                 self.export_panel.set_review_render_mode(
                     str(exp.get("review_render_mode", self.export_panel.current_review_render_mode()) or "auto")
+                )
+                self.export_panel.set_artifact_profile(
+                    str(exp.get("artifact_profile", self.export_panel.current_artifact_profile()) or "auto")
+                )
+                self.export_panel.set_texture_adjustments(
+                    detail_scale=float(exp.get("texture_detail_scale", self.export_panel.current_texture_detail_scale()) or 1.0),
+                    smooth_extra=float(exp.get("texture_smooth_extra", self.export_panel.current_texture_smooth_extra()) or 0.0),
+                    postprocess=str(exp.get("texture_postprocess", self.export_panel.current_texture_postprocess()) or ""),
+                )
+                light_azimuth = _safe_float_or_none(
+                    exp.get("light_azimuth", self.export_panel.current_light_azimuth())
+                )
+                light_elevation = _safe_float_or_none(
+                    exp.get("light_elevation", self.export_panel.current_light_elevation())
+                )
+                self.export_panel.set_light_controls(
+                    azimuth=45.0 if light_azimuth is None else float(light_azimuth),
+                    elevation=28.0 if light_elevation is None else float(light_elevation),
+                )
+                self.export_panel.set_custom_light_enabled(
+                    bool(exp.get("use_custom_light", self.export_panel.current_custom_light_enabled()))
+                )
+                self.export_panel.set_compare_preview_enabled(
+                    bool(exp.get("compare_preview", self.export_panel.current_compare_preview_enabled()))
                 )
             except Exception:
                 pass
@@ -6744,11 +7125,18 @@ class MainWindow(QMainWindow):
             return text
         return ""
 
-    @staticmethod
-    def _review_rubbing_preset_for_options(options: dict[str, Any] | None) -> str:
-        data = dict(options or {})
-        if bool(data.get("tile_guided", False)) or str(data.get("tile_record_view", "") or "").strip():
-            return "다중광(기록면)"
+    def _review_rubbing_preset_for_options(self, options: dict[str, Any] | None) -> str:
+        defaults = self._review_artifact_defaults(options)
+        has_texture = self._selected_review_mesh_has_texture()
+        if has_texture:
+            preset_texture = str(defaults.get("preset_texture", "") or "").strip()
+            if preset_texture:
+                return preset_texture
+        preset = str(defaults.get("preset", "") or "").strip()
+        if preset:
+            return preset
+        if has_texture:
+            return "하이브리드(형상+텍스처)"
         return "자연(이미지)"
 
     def _selected_review_rubbing_preset(self, options: dict[str, Any] | None) -> str:
@@ -6761,6 +7149,118 @@ class MainWindow(QMainWindow):
         if mode == "auto":
             return self._review_rubbing_preset_for_options(options)
         return mode
+
+    def _selected_review_mesh_has_texture(self) -> bool:
+        obj = getattr(getattr(self, "viewport", None), "selected_obj", None)
+        mesh = getattr(obj, "mesh", None) if obj is not None else None
+        try:
+            return bool(getattr(mesh, "has_texture", False))
+        except Exception:
+            return False
+
+    def _resolved_review_artifact_profile(self, options: dict[str, Any] | None) -> str:
+        export_panel = getattr(self, "export_panel", None)
+        try:
+            selected = export_panel.current_artifact_profile() if export_panel is not None else "auto"
+        except Exception:
+            selected = "auto"
+        selected = _normalize_artifact_profile(selected)
+        if selected != "auto":
+            return selected
+
+        data = dict(options or {})
+        if bool(data.get("tile_guided", False)) or str(data.get("tile_record_view", "") or "").strip():
+            return "tile"
+        if self._selected_review_mesh_has_texture():
+            return "painted"
+        return "general"
+
+    def _review_artifact_defaults(self, options: dict[str, Any] | None) -> dict[str, object]:
+        key = self._resolved_review_artifact_profile(options)
+        defaults = _ARTIFACT_PROFILE_DEFAULTS.get(key)
+        if isinstance(defaults, dict):
+            return dict(defaults)
+        return dict(_ARTIFACT_PROFILE_DEFAULTS.get("general", {}))
+
+    def _current_review_texture_options(self, options: dict[str, Any] | None = None) -> dict[str, Any]:
+        export_panel = getattr(self, "export_panel", None)
+        if export_panel is None:
+            return {
+                "rubbing_detail_scale": 1.0,
+                "rubbing_smooth_sigma_extra": 0.0,
+                "rubbing_texture_postprocess": None,
+            }
+
+        try:
+            detail_scale = float(export_panel.current_texture_detail_scale())
+        except Exception:
+            detail_scale = 1.0
+        if not np.isfinite(detail_scale) or detail_scale <= 0.0:
+            detail_scale = 1.0
+
+        try:
+            smooth_extra = float(export_panel.current_texture_smooth_extra())
+        except Exception:
+            smooth_extra = 0.0
+        if not np.isfinite(smooth_extra) or smooth_extra <= 0.0:
+            smooth_extra = 0.0
+
+        try:
+            postprocess = str(export_panel.current_texture_postprocess() or "").strip()
+        except Exception:
+            postprocess = ""
+
+        try:
+            mode = str(export_panel.current_review_render_mode() or "auto").strip() or "auto"
+        except Exception:
+            mode = "auto"
+        if mode == "auto":
+            defaults = self._review_artifact_defaults(options)
+            try:
+                detail_scale *= float(defaults.get("detail_scale", 1.0) or 1.0)
+            except Exception:
+                pass
+            try:
+                smooth_extra += float(defaults.get("smooth_extra", 0.0) or 0.0)
+            except Exception:
+                pass
+            postprocess = _merge_texture_postprocess_texts(defaults.get("postprocess", None), postprocess)
+
+        return {
+            "rubbing_detail_scale": float(detail_scale),
+            "rubbing_smooth_sigma_extra": float(smooth_extra),
+            "rubbing_texture_postprocess": (postprocess or None),
+        }
+
+    def _current_review_light_options(self) -> dict[str, Any]:
+        export_panel = getattr(self, "export_panel", None)
+        if export_panel is None:
+            return {
+                "rubbing_light_angle": None,
+                "rubbing_light_elevation": None,
+            }
+        if not bool(export_panel.current_custom_light_enabled()):
+            return {
+                "rubbing_light_angle": None,
+                "rubbing_light_elevation": None,
+            }
+
+        try:
+            light_angle = float(export_panel.current_light_azimuth())
+        except Exception:
+            light_angle = 45.0
+        try:
+            light_elevation = float(export_panel.current_light_elevation())
+        except Exception:
+            light_elevation = 28.0
+        if not np.isfinite(light_angle):
+            light_angle = 45.0
+        if not np.isfinite(light_elevation):
+            light_elevation = 28.0
+        return {
+            "rubbing_light_angle": float(light_angle),
+            "rubbing_light_elevation": float(light_elevation),
+        }
 
     def _build_review_summary_context(
         self,
@@ -7993,6 +8493,8 @@ class MainWindow(QMainWindow):
                                 dpi=dpi,
                                 width_pixels=1600,
                                 rubbing_preset=self._selected_review_rubbing_preset(opts),
+                                **self._current_review_texture_options(opts),
+                                **self._current_review_light_options(),
                                 title=f"기록면 검토 시트 - {record_label}",
                                 summary_lines=summary_lines,
                                 show_scale_bar=include_scale,
@@ -9514,6 +10016,8 @@ class MainWindow(QMainWindow):
                         dpi=int(self.export_panel.spin_dpi.value()) if hasattr(self, "export_panel") else DEFAULT_EXPORT_DPI,
                         width_pixels=1600,
                         rubbing_preset=self._selected_review_rubbing_preset(options),
+                        **self._current_review_texture_options(options),
+                        **self._current_review_light_options(),
                         title=f"기록면 전개 미리보기 - {record_label}",
                         summary_lines=build_recording_surface_summary_lines(
                             flattened,
@@ -9540,18 +10044,28 @@ class MainWindow(QMainWindow):
         dialog.resize(1320, 900)
 
         layout = QVBoxLayout(dialog)
+        resolved_profile = self._resolved_review_artifact_profile(options)
+        resolved_preset = self._selected_review_rubbing_preset(options)
+        light_options = self._current_review_light_options()
+        light_angle_label = light_options.get("rubbing_light_angle", None)
+        light_elevation_label = light_options.get("rubbing_light_elevation", None)
+        if light_angle_label is None or light_elevation_label is None:
+            light_summary = "프리셋 기본 조명"
+        else:
+            light_summary = f"조명 {float(light_angle_label):.1f}° / 고도 {float(light_elevation_label):.1f}°"
         info = QLabel(
             f"기록면: {record_label} | 대상: {target_label}{strategy_suffix}\n"
             f"왼쪽은 연속 탁본형 기록면, 오른쪽은 외곽 확인용 뷰입니다.\n"
-            f"둘 다 삼각형 와이어프레임이 아니라 기록면 전개 결과를 읽기 쉽게 보여주기 위한 미리보기입니다."
+            f"둘 다 삼각형 와이어프레임이 아니라 기록면 전개 결과를 읽기 쉽게 보여주기 위한 미리보기입니다.\n"
+            f"현재 유형: {_ARTIFACT_PROFILE_LABELS.get(resolved_profile, '자동')} | "
+            f"기본 렌더: {resolved_preset} | "
+            f"{light_summary}"
         )
         info.setWordWrap(True)
         info.setStyleSheet("font-size: 11px; color: #2d3748;")
         layout.addWidget(info)
 
-        preview_row = QHBoxLayout()
-
-        def _make_preview_panel(title: str, pixmap: QPixmap) -> QWidget:
+        def _make_preview_panel(title: str, pixmap: QPixmap | None, note: str | None = None) -> QWidget:
             panel = QWidget()
             panel_layout = QVBoxLayout(panel)
             panel_layout.setContentsMargins(0, 0, 0, 0)
@@ -9561,18 +10075,112 @@ class MainWindow(QMainWindow):
             title_label.setStyleSheet("font-weight: bold; color: #2c5282;")
             panel_layout.addWidget(title_label)
 
-            scroll = QScrollArea()
-            scroll.setWidgetResizable(True)
-            image_label = QLabel()
-            image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            image_label.setPixmap(pixmap)
-            scroll.setWidget(image_label)
-            panel_layout.addWidget(scroll, 1)
+            note_text = str(note or "").strip()
+            if note_text:
+                note_label = QLabel(note_text)
+                note_label.setWordWrap(True)
+                note_label.setStyleSheet("font-size: 10px; color: #4a5568;")
+                panel_layout.addWidget(note_label)
+
+            if pixmap is not None:
+                scroll = QScrollArea()
+                scroll.setWidgetResizable(True)
+                image_label = QLabel()
+                image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                image_label.setPixmap(pixmap)
+                scroll.setWidget(image_label)
+                panel_layout.addWidget(scroll, 1)
+            else:
+                empty_label = QLabel("미리보기를 생성하지 못했습니다.")
+                empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                empty_label.setStyleSheet("color: #718096; padding: 24px;")
+                panel_layout.addWidget(empty_label, 1)
             return panel
 
-        preview_row.addWidget(_make_preview_panel("연속 탁본형 기록면", pixmap_rubbing), 1)
-        preview_row.addWidget(_make_preview_panel("외곽 확인", pixmap_outline), 1)
-        layout.addLayout(preview_row, 1)
+        standard_page = QWidget()
+        standard_layout = QHBoxLayout(standard_page)
+        standard_layout.setContentsMargins(0, 0, 0, 0)
+        standard_layout.setSpacing(12)
+        standard_layout.addWidget(_make_preview_panel("연속 탁본형 기록면", pixmap_rubbing), 1)
+        standard_layout.addWidget(_make_preview_panel("외곽 확인", pixmap_outline), 1)
+
+        compare_enabled = bool(self.export_panel.current_compare_preview_enabled()) if hasattr(self, "export_panel") else True
+        if compare_enabled:
+            tabs = QTabWidget()
+            tabs.addTab(standard_page, "기본 미리보기")
+
+            compare_page = QWidget()
+            compare_layout = QVBoxLayout(compare_page)
+            compare_layout.setContentsMargins(0, 0, 0, 0)
+            compare_layout.setSpacing(10)
+
+            compare_info = QLabel(
+                "원본 / Relief / Texture / Hybrid를 같은 조명축과 같은 보정값으로 비교합니다."
+            )
+            compare_info.setWordWrap(True)
+            compare_info.setStyleSheet("font-size: 11px; color: #4a5568;")
+            compare_layout.addWidget(compare_info)
+
+            compare_grid = QGridLayout()
+            compare_grid.setContentsMargins(0, 0, 0, 0)
+            compare_grid.setHorizontalSpacing(12)
+            compare_grid.setVerticalSpacing(12)
+            compare_layout.addLayout(compare_grid, 1)
+
+            from src.core.surface_visualizer import SurfaceVisualizer
+
+            compare_defaults = self._review_artifact_defaults(options)
+            compare_relief_preset = str(compare_defaults.get("compare_relief_preset", "형상 Relief") or "형상 Relief")
+            has_texture = self._selected_review_mesh_has_texture()
+            compare_visualizer = SurfaceVisualizer(
+                default_dpi=int(self.export_panel.spin_dpi.value()) if hasattr(self, "export_panel") else DEFAULT_EXPORT_DPI
+            )
+            compare_width = max(480, min(960, int(review.rubbing_image.size[0]) if review.rubbing_image.size[0] > 0 else 800))
+            compare_texture_options = self._current_review_texture_options(options)
+            compare_light_angle = light_options.get("rubbing_light_angle", None)
+            compare_light_elevation = light_options.get("rubbing_light_elevation", None)
+            compare_kwargs = {
+                "width_pixels": int(compare_width),
+                "light_angle": (None if compare_light_angle is None else float(compare_light_angle)),
+                "light_elevation": (None if compare_light_elevation is None else float(compare_light_elevation)),
+                "texture_detail_scale": float(compare_texture_options.get("rubbing_detail_scale", 1.0) or 1.0),
+                "texture_smooth_sigma_extra": float(compare_texture_options.get("rubbing_smooth_sigma_extra", 0.0) or 0.0),
+                "texture_postprocess_extra": compare_texture_options.get("rubbing_texture_postprocess", None),
+            }
+            compare_specs = (
+                ("원본", "자연(이미지)", "프리셋: 자연(이미지)"),
+                ("Relief", compare_relief_preset, f"프리셋: {compare_relief_preset}"),
+                ("Texture", "텍스처 판독(실사)", "프리셋: 텍스처 판독(실사)"),
+                ("Hybrid", "하이브리드(형상+텍스처)", "프리셋: 하이브리드(형상+텍스처)"),
+            )
+            for idx, (title, preset_name, note) in enumerate(compare_specs):
+                panel_note = str(note or "")
+                if (not has_texture) and preset_name in {"텍스처 판독(실사)", "하이브리드(형상+텍스처)"}:
+                    panel_note = (
+                        f"{panel_note}\n메쉬 UV 텍스처가 없어 형상 기반 렌더로 대체 표시합니다."
+                    ).strip()
+                try:
+                    compare_rubbing = compare_visualizer.generate_rubbing(
+                        flattened,
+                        preset=preset_name,
+                        **compare_kwargs,
+                    )
+                    compare_pixmap = self._pixmap_from_pil_image(compare_rubbing.to_pil_image())
+                except Exception as compare_error:
+                    compare_pixmap = None
+                    panel_note = (
+                        f"{panel_note}\n생성 실패: {type(compare_error).__name__}: {compare_error}"
+                    ).strip()
+                compare_grid.addWidget(
+                    _make_preview_panel(title, compare_pixmap, panel_note),
+                    idx // 2,
+                    idx % 2,
+                )
+
+            tabs.addTab(compare_page, "비교 뷰")
+            layout.addWidget(tabs, 1)
+        else:
+            layout.addWidget(standard_page, 1)
 
         close_btn = QPushButton("닫기")
         close_btn.clicked.connect(dialog.accept)
@@ -9723,6 +10331,8 @@ class MainWindow(QMainWindow):
                         dpi=int(self.export_panel.spin_dpi.value()) if hasattr(self, "export_panel") else DEFAULT_EXPORT_DPI,
                         width_pixels=1600,
                         rubbing_preset=self._selected_review_rubbing_preset(flatten_options_target),
+                        **self._current_review_texture_options(flatten_options_target),
+                        **self._current_review_light_options(),
                         title=f"기록면 검토 시트 - {record_label}",
                         summary_lines=build_recording_surface_summary_lines(
                             flattened,
