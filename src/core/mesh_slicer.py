@@ -83,8 +83,19 @@ class MeshSlicer:
     
     def get_z_range(self) -> Tuple[float, float]:
         """메쉬의 Z축 범위를 반환합니다."""
-        z_min = self.mesh.vertices[:, 2].min()
-        z_max = self.mesh.vertices[:, 2].max()
+        vertices = np.asarray(getattr(self.mesh, "vertices", np.zeros((0, 3), dtype=np.float64)))
+        if vertices.ndim != 2 or vertices.size == 0:
+            return (0.0, 0.0)
+        if vertices.shape[1] < 3:
+            return (0.0, 0.0)
+
+        z_vals = vertices[:, 2]
+        z_finite = np.isfinite(z_vals)
+        if not bool(np.any(z_finite)):
+            return (0.0, 0.0)
+
+        z_min = float(np.min(z_vals[z_finite]))
+        z_max = float(np.max(z_vals[z_finite]))
         return (z_min, z_max)
     
     def slice_multiple_z(self, z_values: List[float]) -> dict[float, List[np.ndarray]]:

@@ -211,6 +211,30 @@ class OrthographicProjector:
         else:
             faces = faces[:, :3]
 
+        # 투영 좌표
+        x_coords = vertices[:, x_axis]
+        y_coords = vertices[:, y_axis]
+        z_coords = vertices[:, depth_axis]
+        
+        if flip_depth:
+            z_coords = -z_coords
+
+        def _non_degenerate_projection_count(candidate_faces: np.ndarray) -> int:
+            if candidate_faces.size == 0:
+                return 0
+            try:
+                f = np.asarray(candidate_faces[:, :3], dtype=np.int32)
+                xs = x_coords[f]
+                ys = y_coords[f]
+                area2 = (
+                    xs[:, 0] * (ys[:, 1] - ys[:, 2])
+                    + xs[:, 1] * (ys[:, 2] - ys[:, 0])
+                    + xs[:, 2] * (ys[:, 0] - ys[:, 1])
+                )
+                return int(np.count_nonzero(np.isfinite(area2) & (np.abs(area2) > 1e-12)))
+            except Exception:
+                return 0
+
         # Safety: downsample faces for rasterization on huge meshes.
         try:
             max_faces = int(getattr(self, "MAX_FACES_FOR_RASTERIZE", 200_000))
@@ -222,14 +246,13 @@ class OrthographicProjector:
             stride = int(np.ceil(float(n_faces_full) / float(max_faces)))
             stride = max(1, stride)
             faces = faces[::stride]
-        
-        # 투영 좌표
-        x_coords = vertices[:, x_axis]
-        y_coords = vertices[:, y_axis]
-        z_coords = vertices[:, depth_axis]
-        
-        if flip_depth:
-            z_coords = -z_coords
+            if _non_degenerate_projection_count(faces) <= 0:
+                # 샘플링 위치가 퇴화 삼각형 쪽으로만 맞는 경우, 더 촘촘히 복원.
+                attempts = 0
+                while stride > 1 and _non_degenerate_projection_count(faces) <= 0 and attempts < 8:
+                    stride = max(1, stride // 2)
+                    faces = faces[::stride]
+                    attempts += 1
         
         # 바운딩 박스
         x_min, x_max = float(x_coords.min()), float(x_coords.max())
@@ -281,6 +304,8 @@ class OrthographicProjector:
         
         # 래스터화
         for face in faces:
+            if face.size < 3 or x_coords.size == 0 or y_coords.size == 0 or z_coords.size == 0:
+                continue
             self._rasterize_triangle(
                 x_coords[face], y_coords[face], z_coords[face],
                 x_min, x_max, y_min, y_max,
@@ -317,6 +342,11 @@ class OrthographicProjector:
                             img_width: int, img_height: int,
                             depth_buffer: np.ndarray) -> None:
         """삼각형 래스터화 (Z-버퍼 알고리즘)"""
+        if x.size < 3 or y.size < 3 or z.size < 3:
+            return
+        if not np.all(np.isfinite(x)) or not np.all(np.isfinite(y)) or not np.all(np.isfinite(z)):
+            return
+
         # 화면 좌표로 변환
         dx = float(x_max - x_min)
         dy = float(y_max - y_min)

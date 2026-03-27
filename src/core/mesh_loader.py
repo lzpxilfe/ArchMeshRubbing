@@ -110,6 +110,38 @@ class MeshData:
                 "MeshData.__post_init__ face index filtering failed",
                 exc_info=True,
             )
+        # 퇴화 면(무너진 삼각형/중복 정점 면) 제거.
+        # 이 값들은 후속 분리/정규화 단계에서 수치 불안정을 키울 수 있어 명시적으로 제외합니다.
+        try:
+            if self.vertices.shape[0] > 0 and faces.shape[0] > 0:
+                f = np.asarray(faces, dtype=np.int32, copy=False)
+                v0 = self.vertices[f[:, 0]]
+                v1 = self.vertices[f[:, 1]]
+                v2 = self.vertices[f[:, 2]]
+                duplicate_vert = (f[:, 0] == f[:, 1]) | (f[:, 1] == f[:, 2]) | (f[:, 2] == f[:, 0])
+                area2 = np.cross(v1 - v0, v2 - v0)
+                area2 = np.sum(area2 * area2, axis=1)
+                degenerate = duplicate_vert | (area2 <= 0.0) | ~np.isfinite(area2)
+                if np.any(degenerate):
+                    keep = ~degenerate
+                    removed = int(faces.shape[0]) - int(np.count_nonzero(keep))
+                    if removed > 0:
+                        faces = f[keep]
+                        log_once(
+                            _LOGGER,
+                            "mesh_loader:post_init_prune_degenerate",
+                            logging.WARNING,
+                            "MeshData.__post_init__ removed %d degenerate faces",
+                            removed,
+                        )
+        except Exception:
+            log_once(
+                _LOGGER,
+                "mesh_loader:post_init_face_degenerate_filter",
+                logging.DEBUG,
+                "MeshData.__post_init__ degenerate-face filtering skipped",
+                exc_info=True,
+            )
         self.faces = faces
         
         if self.normals is not None:
@@ -251,8 +283,11 @@ class MeshData:
 
                     cross = np.cross(v1 - v0, v2 - v0)
                     norms = np.linalg.norm(cross, axis=1, keepdims=True)
-                    norms[norms == 0] = 1  # 0으로 나누기 방지
-                    out[start:end] = (cross / norms).astype(np.float32, copy=False)
+                    out_chunk = np.zeros((f.shape[0], 3), dtype=np.float32)
+                    valid = np.isfinite(norms[:, 0]) & (norms[:, 0] > 0.0)
+                    if np.any(valid):
+                        out_chunk[valid] = (cross[valid] / norms[valid]).astype(np.float32, copy=False)
+                    out[start:end] = out_chunk
                 self.face_normals = out
 
         if self.face_normals is None:
@@ -262,8 +297,10 @@ class MeshData:
             
             cross = np.cross(v1 - v0, v2 - v0)
             norms = np.linalg.norm(cross, axis=1, keepdims=True)
-            norms[norms == 0] = 1  # 0으로 나누기 방지
-            self.face_normals = (cross / norms).astype(np.float32, copy=False)
+            self.face_normals = np.zeros((cross.shape[0], 3), dtype=np.float32)
+            valid = np.isfinite(norms[:, 0]) & (norms[:, 0] > 0.0)
+            if np.any(valid):
+                self.face_normals[valid] = (cross[valid] / norms[valid]).astype(np.float32, copy=False)
         
         if compute_vertex_normals and self.normals is None:
             # 정점 법선 = 인접 면 법선의 평균
@@ -276,8 +313,13 @@ class MeshData:
             np.add.at(self.normals, faces[:, 2], face_normals)
             
             norms = np.linalg.norm(self.normals, axis=1, keepdims=True)
-            norms[norms == 0] = 1
-            self.normals = self.normals / norms
+            valid = np.isfinite(norms[:, 0]) & (norms[:, 0] > 0.0)
+            normals = self.normals
+            if np.any(valid):
+                normals[valid] = normals[valid] / norms[valid]
+            if np.any(~valid):
+                normals[~valid] = 0.0
+            self.normals = normals
     
     def get_edges(self) -> np.ndarray:
         """모든 엣지 목록 반환 (N, 2)"""

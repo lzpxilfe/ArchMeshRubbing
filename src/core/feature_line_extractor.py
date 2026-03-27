@@ -41,8 +41,11 @@ def _compute_face_normals(mesh: MeshData) -> np.ndarray:
     v2 = vertices[faces[:, 2]]
     n = np.cross(v1 - v0, v2 - v0)
     norms = np.linalg.norm(n, axis=1, keepdims=True)
-    norms[norms == 0] = 1.0
-    n = n / norms
+    valid = np.isfinite(norms[:, 0]) & (norms[:, 0] > 0.0)
+    normals = np.zeros_like(n, dtype=np.float64)
+    if np.any(valid):
+        normals[valid] = n[valid] / norms[valid]
+    n = normals
     return n
 
 
@@ -212,4 +215,3 @@ def extract_sharp_edges(
         pass
 
     return result
-
