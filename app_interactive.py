@@ -75,11 +75,11 @@ _EXPORT_SURFACE_TARGET_LABELS: dict[str, str] = {
     "inner": "내면",
     "migu": "미구",
 }
-_METHOD_NAME_ARAP = "ARAP (형태 보존)"
-_METHOD_NAME_LSCM = "LSCM (각도 보존)"
-_METHOD_NAME_AREA = "면적 보존"
-_METHOD_NAME_CYLINDER = "원통 펼침"
-_METHOD_NAME_SECTION = "단면 기반 펼침 (기와)"
+_METHOD_NAME_ARAP = "저왜곡 펼침"
+_METHOD_NAME_LSCM = "각도 보존 펼침"
+_METHOD_NAME_AREA = "기록면 기반 펼침"
+_METHOD_NAME_CYLINDER = "곡면 추적 펼침"
+_METHOD_NAME_SECTION = "기와 추천 펼침"
 _SECTION_RECOMMEND_TAG = "기와 추천"
 
 
@@ -252,6 +252,7 @@ from src.core.tile_synthetic import (  # noqa: E402
     synthetic_tile_spec_from_preset,
 )
 from src.core.tile_profile_fitting import fit_circle_2d  # noqa: E402
+from src.core.flatten_policy import recommend_flatten_mode  # noqa: E402
 
 DEFAULT_EXPORT_DPI = RUNTIME_DEFAULTS.export_dpi
 
@@ -1513,6 +1514,8 @@ class FlattenPanel(QWidget):
         reason: str,
         *,
         auto_applied: bool,
+        alternatives: list[str] | None = None,
+        fallback_hint: str = "",
     ) -> None:
         method_label = str(method_label or "").strip()
         reason = str(reason or "").strip()
@@ -1520,10 +1523,18 @@ class FlattenPanel(QWidget):
             self.clear_flatten_method_recommendation()
             return
         if not reason:
-            reason = "기와형/곡면 단면 반복성 기반으로 단면 펼침이 기본 추천됩니다."
+            reason = "기와형/곡면 단면 반복성 기반으로 기와 추천 펼침이 기본 추천됩니다."
         status = "현재 기본값에 적용됨" if bool(auto_applied) else "수동 선택 후 변경 가능"
+        extras: list[str] = []
+        alt_labels = [str(item or "").strip() for item in list(alternatives or []) if str(item or "").strip()]
+        if alt_labels:
+            extras.append(f"다른 선택: {', '.join(alt_labels[:3])}")
+        fallback_hint = str(fallback_hint or "").strip()
+        if fallback_hint:
+            extras.append(f"문제 시 {fallback_hint}")
+        tail = f"<br><span style='color:#4a5568;'>{' | '.join(extras)}</span>" if extras else ""
         self.label_recommendation.setText(
-            f"<b>[{_SECTION_RECOMMEND_TAG}]</b> {status} | {method_label}: {reason}"
+            f"<b>[{_SECTION_RECOMMEND_TAG}]</b> {status} | {method_label}: {reason}{tail}"
         )
         self.label_recommendation.setVisible(True)
 
@@ -6582,11 +6593,45 @@ class MainWindow(QMainWindow):
             float(np.round(float(np.linalg.norm(span)), 6)),
         )
 
+    @staticmethod
+    def _flatten_recommendation_state_key(state: TileInterpretationState | None) -> tuple[Any, ...]:
+        if state is None:
+            return ()
+        axis_hint = getattr(state, "axis_hint", None)
+        try:
+            axis_vec = tuple(
+                np.round(
+                    np.asarray(getattr(axis_hint, "vector_world", ()) or (), dtype=np.float64).reshape(-1)[:3],
+                    4,
+                ).tolist()
+            )
+        except Exception:
+            axis_vec = ()
+        accepted_sections = sum(
+            1 for item in list(getattr(state, "section_observations", []) or []) if bool(getattr(item, "accepted", False))
+        )
+        analyzed_sections = sum(
+            1 for item in list(getattr(state, "section_observations", []) or []) if int(getattr(item, "profile_point_count", 0) or 0) > 0
+        )
+        mandrel = getattr(state, "mandrel_fit", None)
+        try:
+            radius_world = float(getattr(mandrel, "radius_world", None))
+        except Exception:
+            radius_world = None
+        return (
+            str(getattr(state, "tile_class", "") or ""),
+            axis_vec,
+            int(accepted_sections),
+            int(analyzed_sections),
+            None if radius_world is None or not np.isfinite(radius_world) else float(np.round(radius_world, 4)),
+            str(getattr(state, "record_view", "") or ""),
+        )
+
     def _tile_flatten_recommendation(self, mesh, state: TileInterpretationState | None) -> dict[str, Any]:
         if mesh is None:
             return {
                 "enabled": False,
-                "method": _METHOD_NAME_SECTION,
+                "method": _METHOD_NAME_ARAP,
                 "reason": "",
                 "confidence": 0.0,
                 "applied_default_method": _METHOD_NAME_ARAP,
@@ -6596,7 +6641,7 @@ class MainWindow(QMainWindow):
         if key is None:
             return {
                 "enabled": False,
-                "method": _METHOD_NAME_SECTION,
+                "method": _METHOD_NAME_ARAP,
                 "reason": "",
                 "confidence": 0.0,
                 "applied_default_method": _METHOD_NAME_ARAP,
@@ -6604,217 +6649,15 @@ class MainWindow(QMainWindow):
 
         rec_key = id(mesh)
         cached = self._flatten_recommendation_cache.get(rec_key)
-        if cached is not None and isinstance(cached, tuple) and cached[0] == key:
+        cache_key = (key, self._flatten_recommendation_state_key(state))
+        if cached is not None and isinstance(cached, tuple) and cached[0] == cache_key:
             cached_result = cached[1]
             if isinstance(cached_result, dict):
                 return cached_result
 
-        vertices = np.asarray(getattr(mesh, "vertices", None), dtype=np.float64).reshape(-1, 3)
-        finite = np.isfinite(vertices).all(axis=1)
-        vertices = vertices[finite]
-        if vertices.shape[0] < 180:
-            result: dict[str, Any] = {
-                "enabled": False,
-                "method": _METHOD_NAME_SECTION,
-                "reason": "",
-                "confidence": 0.0,
-                "applied_default_method": _METHOD_NAME_ARAP,
-            }
-            self._flatten_recommendation_cache[rec_key] = (key, result)
-            return result
-
-        centered = vertices - np.mean(vertices, axis=0)
-        cov = centered.T @ centered
-        try:
-            eigvals, eigvecs = np.linalg.eigh(cov)
-        except Exception:
-            result = {
-                "enabled": False,
-                "method": _METHOD_NAME_SECTION,
-                "reason": "",
-                "confidence": 0.0,
-                "applied_default_method": _METHOD_NAME_ARAP,
-            }
-            self._flatten_recommendation_cache[rec_key] = (key, result)
-            return result
-
-        order = np.argsort(eigvals)[::-1]
-        eigvals = np.asarray(eigvals[order], dtype=np.float64)
-        eigvecs = np.asarray(eigvecs[:, order], dtype=np.float64)
-        if eigvals.shape[0] < 3:
-            result = {
-                "enabled": False,
-                "method": _METHOD_NAME_SECTION,
-                "reason": "",
-                "confidence": 0.0,
-                "applied_default_method": _METHOD_NAME_ARAP,
-            }
-            self._flatten_recommendation_cache[rec_key] = (key, result)
-            return result
-
-        scale = np.maximum(np.sqrt(eigvals), 1e-12)
-        length_ratio = float(scale[0] / max(scale[1], 1e-12))
-        shape_ratio = float(scale[1] / max(scale[2], 1e-12))
-
-        axis_vec = np.asarray(eigvecs[:, 0], dtype=np.float64).reshape(3)
-        if getattr(state, "axis_hint", None) is not None:
-            axis_hint = getattr(state, "axis_hint", None)
-            try:
-                axis_hint_vec = np.asarray(axis_hint.vector_world, dtype=np.float64).reshape(3)
-            except Exception:
-                axis_hint_vec = None
-            if axis_hint_vec is not None and np.isfinite(axis_hint_vec).all() and np.linalg.norm(axis_hint_vec) > 1e-12:
-                axis_vec = axis_hint_vec / float(np.linalg.norm(axis_hint_vec))
-
-        nrm = float(np.linalg.norm(axis_vec))
-        if not np.isfinite(nrm) or nrm < 1e-12:
-            axis_vec = np.asarray(eigvecs[:, 0], dtype=np.float64).reshape(3)
-            nrm = float(np.linalg.norm(axis_vec))
-        axis_vec = axis_vec / max(nrm, 1e-12)
-
-        proj = centered @ axis_vec
-        finite_proj = proj[np.isfinite(proj)]
-        if finite_proj.size < 20:
-            result = {
-                "enabled": False,
-                "method": _METHOD_NAME_SECTION,
-                "reason": "",
-                "confidence": 0.0,
-                "applied_default_method": _METHOD_NAME_ARAP,
-            }
-            self._flatten_recommendation_cache[rec_key] = (key, result)
-            return result
-
-        s_min, s_max = float(np.quantile(finite_proj, 0.02)), float(np.quantile(finite_proj, 0.98))
-        span = max(s_max - s_min, 1e-12)
-
-        ref = np.array([1.0, 0.0, 0.0], dtype=np.float64)
-        if abs(float(axis_vec[0])) > 0.95:
-            ref = np.array([0.0, 1.0, 0.0], dtype=np.float64)
-        basis1 = np.cross(axis_vec, ref)
-        basis_norm = float(np.linalg.norm(basis1))
-        if not np.isfinite(basis_norm) or basis_norm < 1e-12:
-            ref = np.array([0.0, 1.0, 0.0], dtype=np.float64)
-            basis1 = np.cross(axis_vec, ref)
-            basis_norm = float(np.linalg.norm(basis1))
-        if not np.isfinite(basis_norm) or basis_norm < 1e-12:
-            basis1 = np.array([0.0, 0.0, 0.0], dtype=np.float64)
-        else:
-            basis1 = basis1 / basis_norm
-        basis2 = np.cross(axis_vec, basis1)
-
-        station_count = min(12, max(7, vertices.shape[0] // 240))
-        stations = np.quantile(finite_proj, np.linspace(0.1, 0.9, station_count))
-        half_window = max(0.012 * span, span / max(1.5 * station_count, 1.0))
-        fit_conf: list[float] = []
-        fit_span: list[float] = []
-        fit_radius: list[float] = []
-        fit_rmse_rel: list[float] = []
-        fit_pts: list[float] = []
-
-        for station in stations:
-            mask = np.abs(finite_proj - float(station)) <= half_window
-            mask_idx = np.nonzero(mask)[0]
-            if mask_idx.size < 12:
-                continue
-            ring = centered[mask_idx]
-            q = ring - (projection := np.outer(np.asarray(proj[mask_idx], dtype=np.float64), axis_vec))
-            x = q @ basis1
-            y = q @ basis2
-            xy = np.column_stack([x, y])
-            fit = fit_circle_2d(xy, min_points=12)
-            if not bool(getattr(fit, "is_defined", lambda: False)()):
-                continue
-            radius = float(getattr(fit, "radius", 0.0))
-            if not np.isfinite(radius) or radius <= 1e-9:
-                continue
-            used_pts = int(getattr(fit, "used_points", 0))
-            rmse = float(getattr(fit, "rmse", 0.0))
-            span_deg = float(getattr(fit, "arc_span_deg", 0.0))
-            fit_conf.append(float(np.clip(float(getattr(fit, "confidence", 0.0)), 0.0, 1.0)))
-            fit_span.append(float(span_deg))
-            fit_radius.append(radius)
-            fit_rmse_rel.append(float(rmse / max(radius, 1e-12)))
-            fit_pts.append(float(used_pts))
-
-        valid_sections = len(fit_conf)
-        if valid_sections < max(4, station_count // 2):
-            result = {
-                "enabled": False,
-                "method": _METHOD_NAME_SECTION,
-                "reason": "",
-                "confidence": 0.0,
-                "applied_default_method": _METHOD_NAME_ARAP,
-            }
-            self._flatten_recommendation_cache[rec_key] = (key, result)
-            return result
-
-        conf_med = float(np.median(fit_conf))
-        span_med = float(np.median(fit_span))
-        radius_mean = float(np.mean(fit_radius))
-        radius_std = float(np.std(fit_radius))
-        rmse_med = float(np.median(fit_rmse_rel))
-        radius_cv = float(radius_std / max(radius_mean, 1e-12))
-        section_density = valid_sections / max(float(station_count), 1.0)
-
-        score = 0.0
-        evidence: list[str] = []
-        if length_ratio >= 3.0:
-            score += 0.32
-            evidence.append("장축 대 횡축 길이비가 큼")
-        elif length_ratio >= 2.0:
-            score += 0.20
-            evidence.append("장축이 비교적 뚜렷함")
-        else:
-            score += 0.05
-
-        if shape_ratio >= 1.4:
-            score += 0.08
-
-        if conf_med >= 0.45:
-            score += 0.18
-            evidence.append("반복 단면의 원호 적합 신뢰도가 높음")
-        elif conf_med >= 0.30:
-            score += 0.10
-
-        if span_med >= 45.0:
-            score += 0.10
-            evidence.append(f"단면 곡면 스팬 중간값 {span_med:.0f}°")
-
-        if rmse_med <= 0.35:
-            score += 0.14
-
-        if section_density >= 0.7:
-            score += 0.10
-
-        if radius_cv <= 0.35:
-            score += 0.08
-        elif radius_cv <= 0.55:
-            score += 0.05
-
-        if state is not None:
-            section_count = len([item for item in list(getattr(state, "section_observations", []) or []) if bool(getattr(item, "accepted", False))])
-            if section_count >= 3:
-                score += 0.12
-                evidence.append(f"대표 단면 {section_count}개가 이미 제안됨")
-            elif section_count >= 1:
-                score += 0.06
-                evidence.append("대표 단면 후보 존재")
-            if bool(getattr(state, "mandrel_fit", None)) and bool(getattr(state.mandrel_fit, "is_defined", lambda: False)()):
-                score += 0.10
-                evidence.append("와통 피팅 정보 존재")
-            if bool(getattr(state, "axis_hint", None) and getattr(state.axis_hint, "is_defined", lambda: False)()):
-                score += 0.06
-
-        enabled = bool(score >= 0.55)
-        result = {
-            "enabled": bool(enabled),
-            "method": _METHOD_NAME_SECTION,
-            "reason": (" / ".join(evidence[:4]) if evidence else ""),
-            "confidence": float(np.clip(score, 0.0, 1.0)),
-            "applied_default_method": _METHOD_NAME_ARAP,
-        }
-        self._flatten_recommendation_cache[rec_key] = (key, result)
+        recommendation = recommend_flatten_mode(mesh, state, _METHOD_NAME_ARAP)
+        result = recommendation.as_dict()
+        self._flatten_recommendation_cache[rec_key] = (cache_key, result)
         return result
 
     def _sync_flatten_recommendation_for_current_selection(self, state: TileInterpretationState | None) -> None:
@@ -6834,6 +6677,25 @@ class MainWindow(QMainWindow):
 
         method_label = str(rec.get("method", _METHOD_NAME_SECTION))
         reason = str(rec.get("reason", "")).strip()
+        alternatives = [
+            str(item.get("label", "")).strip()
+            for item in list(rec.get("alternatives", []) or [])
+            if isinstance(item, dict) and str(item.get("label", "")).strip()
+        ]
+        fallback_chain = [
+            str(item or "").strip()
+            for item in list(rec.get("fallback_chain", []) or [])
+            if str(item or "").strip()
+        ]
+        fallback_label_map = {
+            "section": _METHOD_NAME_SECTION,
+            "area": _METHOD_NAME_AREA,
+            "cylinder": _METHOD_NAME_CYLINDER,
+            "arap": _METHOD_NAME_ARAP,
+            "lscm": _METHOD_NAME_LSCM,
+        }
+        fallback_labels = [fallback_label_map.get(item, item) for item in fallback_chain[1:]]
+        fallback_hint = " → ".join(fallback_labels[:3])
         auto_applied = False
         if not bool(self._flatten_method_user_override):
             current_method = str(panel.combo_method.currentText() or "").strip()
@@ -6841,7 +6703,13 @@ class MainWindow(QMainWindow):
                 if self._set_flatten_method_by_text(method_label):
                     auto_applied = True
 
-        panel.set_flatten_method_recommendation(method_label, reason, auto_applied=auto_applied)
+        panel.set_flatten_method_recommendation(
+            method_label,
+            reason,
+            auto_applied=auto_applied,
+            alternatives=alternatives,
+            fallback_hint=fallback_hint,
+        )
 
     def _show_dock_on_right(self, dock: QDockWidget, *, tab_with: QDockWidget | None = None) -> None:
         if dock is None:
@@ -7326,24 +7194,10 @@ class MainWindow(QMainWindow):
                 return resolved
 
         record_view = str(getattr(state, "record_view", "") or "").strip().lower()
-        if record_view not in {"top", "bottom"}:
-            return resolved
-
-        resolved["tile_guided"] = True
-        resolved["tile_record_view"] = record_view
-        resolved["tile_record_strategy"] = str(getattr(state, "record_strategy", "") or "canonical_visible")
-
-        if selected_face_ids is None:
-            selected_face_ids = _surface_target_face_ids(obj, "selected")
-        else:
-            selected_face_ids = np.asarray(selected_face_ids, dtype=np.int32).reshape(-1)
-        if selected_face_ids.size > 0:
-            resolved["surface_target"] = "selected"
-
-        # Tile mode keeps user preference; section mode is used as default when method is not explicitly chosen.
         method_text = str(resolved.get("method", "")).strip()
         if not method_text:
-            resolved["method"] = _METHOD_NAME_SECTION
+            rec = recommend_flatten_mode(getattr(obj, "mesh", None), state, None)
+            resolved["method"] = str(rec.ui_label or _METHOD_NAME_SECTION)
         else:
             resolved["method"] = method_text
         if resolved["method"] == _METHOD_NAME_SECTION:
@@ -7365,6 +7219,17 @@ class MainWindow(QMainWindow):
         section_guides = self._tile_section_guides(state)
         if section_guides:
             resolved["section_guides"] = section_guides
+
+        if record_view in {"top", "bottom"}:
+            resolved["tile_guided"] = True
+            resolved["tile_record_view"] = record_view
+            resolved["tile_record_strategy"] = str(getattr(state, "record_strategy", "") or "canonical_visible")
+            if selected_face_ids is None:
+                selected_face_ids = _surface_target_face_ids(obj, "selected")
+            else:
+                selected_face_ids = np.asarray(selected_face_ids, dtype=np.int32).reshape(-1)
+            if selected_face_ids.size > 0:
+                resolved["surface_target"] = "selected"
 
         return resolved
 
@@ -9625,7 +9490,7 @@ class MainWindow(QMainWindow):
     def _compute_flattened_mesh(mesh, options: dict[str, Any]):
         from src.core.flattener import flatten_with_method
 
-        method = str(options.get('method', 'ARAP (형태 보존)'))
+        method = str(options.get('method', _METHOD_NAME_ARAP))
         iterations = int(options.get('iterations', 30))
         boundary_type = str(options.get('boundary', 'free'))
         initial = str(options.get('initial', 'lscm'))
@@ -9635,15 +9500,16 @@ class MainWindow(QMainWindow):
 
         def normalize_method(text: str) -> str:
             t = str(text or "").strip().lower()
-            if "arap" in t:
+            source = str(text or "")
+            if ("저왜곡" in source) or ("arap" in t):
                 return "arap"
-            if "lscm" in t:
+            if ("각도 보존" in source) or ("lscm" in t):
                 return "lscm"
-            if ("면적" in text) or ("area" in t):
+            if ("기록면 기반" in source) or ("면적" in source) or ("area" in t):
                 return "area"
-            if ("단면" in text) or ("기와" in text) or ("section" in t) or ("tile" in t):
+            if ("기와 추천" in source) or ("단면" in source) or ("기와" in source) or ("section" in t) or ("tile" in t):
                 return "section"
-            if ("원통" in text) or ("cyl" in t):
+            if ("곡면 추적" in source) or ("원통" in source) or ("cyl" in t):
                 return "cylinder"
             return "arap"
 
