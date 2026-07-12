@@ -1133,6 +1133,10 @@ def test_prepared_scene_vbo_failure_is_detached_and_success_swaps_once() -> None
         assert not viewport.line_section_enabled
         assert viewport._surface_magnetic_dist is None
         assert viewport._cached_modelview is None
+        np.testing.assert_array_equal(
+            viewport._amr_scene_render_origin_world_mm,
+            [0.5, 0.5, 0.0],
+        )
         assert emitted_meshes == [mesh]
         assert emitted_selections == [0]
         viewport.cleanup_scene_objects(previous)
@@ -1156,6 +1160,16 @@ def test_native_project_save_never_serializes_legacy_ui_state() -> None:
     window._artifact_session = session
     window.viewport.objects = [obj]
     window.viewport.selected_index = 0
+    obj._amr_vbo_origin_local_mm = np.array(
+        [1_000_000_000.0, -1_000_000_000.0, 500_000_000.0],
+        dtype=np.float64,
+    )
+    window.viewport._amr_scene_render_origin_world_mm = np.array(
+        [1_000_000_010.0, -999_999_990.0, 500_000_005.0],
+        dtype=np.float64,
+    )
+    canonical_before = session.document.canonical_json_bytes()
+    document_sha_before = session.document.canonical_sha256
     try:
         with (
             patch("app_interactive.save_amr_artifact_project") as save_native,
@@ -1174,6 +1188,8 @@ def test_native_project_save_never_serializes_legacy_ui_state() -> None:
             "/tmp/native-artifact.amr",
             session.document,
         )
+        assert session.document.canonical_json_bytes() == canonical_before
+        assert session.document.canonical_sha256 == document_sha_before
     finally:
         window.deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
@@ -1441,6 +1457,10 @@ def test_record_append_rebinds_live_document_without_rebuilding_the_vbo() -> Non
     obj = _projected_scene_object(session)
     obj.vbo_id = 777
     obj.vertex_count = int(obj.mesh.n_vertices)
+    obj._amr_vbo_origin_local_mm = np.array(
+        [1_000_000_000.0, -1_000_000_000.0, 500_000_000.0],
+        dtype=np.float64,
+    )
     window = MainWindow()
     window._artifact_session = session
     window._current_project_path = "/tmp/gui-record-rebind.amr"
@@ -1449,12 +1469,18 @@ def test_record_append_rebinds_live_document_without_rebuilding_the_vbo() -> Non
     window.viewport.objects = [obj]
     window.viewport.selected_index = 0
     window.viewport.undo_stack = [("preserve", object())]
+    window.viewport._amr_scene_render_origin_world_mm = np.array(
+        [10.0, 20.0, 30.0],
+        dtype=np.float64,
+    )
     window._flattened_cache["preserve"] = object()
     objects_identity = window.viewport.objects
     mesh_identity = obj.mesh
     undo_identity = window.viewport.undo_stack
     cache_identity = window._flattened_cache
     generation = window.viewport._projection_generation
+    vbo_origin_before = obj._amr_vbo_origin_local_mm.copy()
+    scene_origin_before = window.viewport._amr_scene_render_origin_world_mm.copy()
     try:
         with (
             patch.object(window.viewport, "prepare_mesh_object") as prepare,
@@ -1482,6 +1508,14 @@ def test_record_append_rebinds_live_document_without_rebuilding_the_vbo() -> Non
         assert window.current_mesh is mesh_identity
         assert obj.vbo_id == 777
         assert obj.vertex_count == mesh_identity.n_vertices
+        np.testing.assert_array_equal(
+            obj._amr_vbo_origin_local_mm,
+            vbo_origin_before,
+        )
+        np.testing.assert_array_equal(
+            window.viewport._amr_scene_render_origin_world_mm,
+            scene_origin_before,
+        )
         assert window.viewport._projection_generation == generation
         assert window.viewport.undo_stack is undo_identity
         assert window._flattened_cache is cache_identity
@@ -4078,6 +4112,7 @@ def test_update_vbo_reports_failure_and_scene_cleanup_invalidates_buffer() -> No
         n_vertices=3,
         normals=np.asarray([[0, 0, 1]] * 3, dtype=np.float32),
         face_normals=np.asarray([[0, 0, 1]], dtype=np.float32),
+        bounds=np.asarray([[0, 0, 0], [1, 1, 0]], dtype=np.float64),
     )
     obj = SceneObject(mesh, "failure fixture")
     window = MainWindow()
@@ -4089,6 +4124,7 @@ def test_update_vbo_reports_failure_and_scene_cleanup_invalidates_buffer() -> No
             assert window.viewport.update_vbo(obj) is False
         assert obj.vbo_id is None
         assert obj.vertex_count == 0
+        np.testing.assert_array_equal(obj._amr_vbo_origin_local_mm, np.zeros(3))
 
         obj.vbo_id = 77
         obj.vertex_count = 3
@@ -4098,7 +4134,282 @@ def test_update_vbo_reports_failure_and_scene_cleanup_invalidates_buffer() -> No
         delete_buffers.assert_called_once_with(1, [77])
         assert obj.vbo_id is None
         assert obj.vertex_count == 0
+        np.testing.assert_array_equal(obj._amr_vbo_origin_local_mm, np.zeros(3))
     finally:
         window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_large_coordinate_vbo_is_relative_and_world_mesh_is_untouched() -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+
+    base = np.array(
+        [1_000_000_000.0, -1_000_000_000.0, 500_000_000.0],
+        dtype=np.float64,
+    )
+    vertices = base + np.array(
+        [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.125, 0.0]],
+        dtype=np.float64,
+    )
+    faces = np.array([[0, 1, 2]], dtype=np.int32)
+    mesh = MeshData(vertices=vertices.copy(), faces=faces)
+    obj = SceneObject(mesh, "large-coordinate artifact")
+    window = MainWindow()
+    uploaded: dict[str, np.ndarray] = {}
+
+    def capture_upload(_target, _size, data, _usage) -> None:
+        uploaded["data"] = np.asarray(data).copy()
+
+    try:
+        with (
+            patch.object(window.viewport, "context", return_value=None),
+            patch("src.gui.viewport_3d.glGenBuffers", return_value=91),
+            patch("src.gui.viewport_3d.glBindBuffer"),
+            patch("src.gui.viewport_3d.glBufferData", side_effect=capture_upload),
+        ):
+            assert window.viewport.update_vbo(obj)
+
+        data = uploaded["data"]
+        assert data.dtype == np.float32
+        assert data.shape == (3, 6)
+        expected_origin = np.array(
+            [base[0] + 0.5, base[1] + 0.0625, base[2]],
+            dtype=np.float64,
+        )
+        np.testing.assert_array_equal(
+            obj._amr_vbo_origin_local_mm,
+            expected_origin,
+        )
+        expected_positions = (
+            vertices[faces.reshape(-1)] - expected_origin
+        ).astype(np.float32)
+        np.testing.assert_array_equal(data[:, :3], expected_positions)
+        assert np.unique(data[:, 0]).size == 2
+        assert np.unique(data[:, 1]).size == 2
+        np.testing.assert_array_equal(data[:, 3:], [[0.0, 0.0, 1.0]] * 3)
+
+        # CPU/document-facing geometry remains absolute float64 and reconstructs
+        # exactly from the transient render coordinates.
+        np.testing.assert_array_equal(mesh.vertices, vertices)
+        assert mesh.vertices.dtype == np.float64
+        scene_origin = expected_origin.copy()
+        render_model = obj.render_model_matrix(scene_origin)
+        rendered = (
+            data[:, :3].astype(np.float64) @ render_model[:3, :3].T
+            + render_model[:3, 3]
+        )
+        reconstructed_world = rendered + scene_origin
+        np.testing.assert_array_equal(
+            reconstructed_world,
+            vertices[faces.reshape(-1)],
+        )
+    finally:
+        obj.vbo_id = None
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_large_coordinate_immediate_fallback_uses_bounds_origin() -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    base = np.array(
+        [1_000_000_000.0, -1_000_000_000.0, 500_000_000.0],
+        dtype=np.float64,
+    )
+    vertices = base + np.array(
+        [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.125, 0.0]],
+        dtype=np.float64,
+    )
+    mesh = MeshData(
+        vertices=vertices.copy(),
+        faces=np.array([[0, 1, 2]], dtype=np.int32),
+    )
+    obj = SceneObject(mesh, "large-coordinate fallback")
+    viewport = Viewport3D()
+    expected_origin = np.array(
+        [base[0] + 0.5, base[1] + 0.0625, base[2]],
+        dtype=np.float64,
+    )
+    viewport._amr_scene_render_origin_world_mm = expected_origin.copy()
+    viewport.flat_shading = True
+    viewport.solid_shell_render = False
+    submitted: list[np.ndarray] = []
+    model_matrices: list[np.ndarray] = []
+    try:
+        with (
+            patch(
+                "src.gui.viewport_3d.glMultMatrixd",
+                side_effect=lambda matrix: model_matrices.append(
+                    np.asarray(matrix, dtype=np.float64).copy()
+                ),
+            ),
+            patch("src.gui.viewport_3d.glDisable"),
+            patch("src.gui.viewport_3d.glEnable"),
+            patch("src.gui.viewport_3d.glColor4f"),
+            patch("src.gui.viewport_3d.glBegin"),
+            patch("src.gui.viewport_3d.glNormal3f"),
+            patch(
+                "src.gui.viewport_3d.glVertex3fv",
+                side_effect=lambda point: submitted.append(
+                    np.asarray(point, dtype=np.float32).copy()
+                ),
+            ),
+            patch("src.gui.viewport_3d.glEnd"),
+        ):
+            viewport._draw_scene_object_impl(obj)
+
+        expected_relative = (vertices - expected_origin).astype(np.float32)
+        np.testing.assert_array_equal(submitted, expected_relative)
+        assert np.unique(np.asarray(submitted)[:, 0]).size == 2
+        assert np.unique(np.asarray(submitted)[:, 1]).size == 2
+        assert len(model_matrices) == 1
+        np.testing.assert_allclose(model_matrices[0], np.eye(4), rtol=0.0, atol=1e-12)
+        np.testing.assert_array_equal(mesh.vertices, vertices)
+        np.testing.assert_array_equal(obj._amr_vbo_origin_local_mm, np.zeros(3))
+    finally:
+        viewport.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_failed_scene_swap_restores_private_render_origin() -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    session = _artifact_session()
+    obj = _projected_scene_object(session)
+    window = MainWindow()
+    old_origin = np.array(
+        [1_000_000_000.5, -999_999_999.5, 500_000_000.0],
+        dtype=np.float64,
+    )
+    window.viewport.objects = [obj]
+    window.viewport.selected_index = 0
+    window.viewport._amr_scene_render_origin_world_mm = old_origin.copy()
+    window.current_mesh = obj.mesh
+    window.current_filepath = session.resolved_source_path
+    window._artifact_session = session
+    try:
+        snapshot = window._snapshot_live_scene_for_project_swap()
+        window.viewport._amr_scene_render_origin_world_mm = np.array(
+            [-4_000_000_000.0, 3_000_000_000.0, 2_000_000_000.0],
+            dtype=np.float64,
+        )
+
+        window._restore_live_scene_after_failed_swap(snapshot, [])
+
+        np.testing.assert_array_equal(
+            window.viewport._amr_scene_render_origin_world_mm,
+            old_origin,
+        )
+        assert window.viewport.objects == [obj]
+        assert window.viewport.selected_index == 0
+        assert window.current_mesh is obj.mesh
+        assert window._artifact_session is session
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_native_vector_preview_submits_render_relative_world_points() -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    viewport = Viewport3D()
+    origin = np.array(
+        [1_000_000_000.0, -1_000_000_000.0, 500_000_000.0],
+        dtype=np.float64,
+    )
+    viewport._amr_scene_render_origin_world_mm = origin.copy()
+    viewport.native_vector_preview_world = [
+        (
+            origin
+            + np.array(
+                [[0.0, 0.0, 0.0], [0.125, 1.0, 3.0]],
+                dtype=np.float64,
+            ),
+            False,
+        )
+    ]
+    submitted: list[tuple[float, float, float]] = []
+    try:
+        with (
+            patch("src.gui.viewport_3d.glPushAttrib"),
+            patch("src.gui.viewport_3d.glPopAttrib"),
+            patch("src.gui.viewport_3d.glDisable"),
+            patch("src.gui.viewport_3d.glEnable"),
+            patch("src.gui.viewport_3d.glBlendFunc"),
+            patch("src.gui.viewport_3d.glColor4f"),
+            patch("src.gui.viewport_3d.glLineWidth"),
+            patch("src.gui.viewport_3d.glBegin"),
+            patch("src.gui.viewport_3d.glEnd"),
+            patch(
+                "src.gui.viewport_3d.glVertex3f",
+                side_effect=lambda x, y, z: submitted.append((x, y, z)),
+            ),
+        ):
+            viewport.draw_native_vector_preview()
+
+        assert submitted == [(0.0, 0.0, 0.0), (0.125, 1.0, 3.0)]
+    finally:
+        viewport.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_large_coordinate_face_pick_keeps_float64_centroid_separation() -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    base = np.array(
+        [1_000_000_000.0, -1_000_000_000.0, 500_000_000.0],
+        dtype=np.float64,
+    )
+    vertices = base + np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [0.25, 0.0, 0.0],
+            [0.0, 0.25, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.25, 0.0, 0.0],
+            [1.0, 0.25, 0.0],
+        ],
+        dtype=np.float64,
+    )
+    mesh = MeshData(
+        vertices=vertices,
+        faces=np.array([[0, 1, 2], [3, 4, 5]], dtype=np.int32),
+    )
+    viewport = Viewport3D()
+    obj = SceneObject(mesh, "large-coordinate pick")
+    viewport.objects = [obj]
+    viewport.selected_index = 0
+    try:
+        first = viewport.pick_face_at_point(
+            base + [0.05, 0.05, 0.0],
+            return_index=True,
+            prefer_front=False,
+            k_hint=2,
+        )
+        second = viewport.pick_face_at_point(
+            base + [1.05, 0.05, 0.0],
+            return_index=True,
+            prefer_front=False,
+            k_hint=2,
+        )
+
+        assert first is not None and first[0] == 0
+        assert second is not None and second[0] == 1
+        assert obj._face_centroids is not None
+        assert obj._face_centroids.dtype == np.float64
+        assert obj._face_centroids[1, 0] - obj._face_centroids[0, 0] == 1.0
+    finally:
+        viewport.deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         app.processEvents()

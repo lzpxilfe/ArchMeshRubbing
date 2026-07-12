@@ -422,6 +422,7 @@ _ALIGNMENT_STATUS_UNVERIFIABLE = "legacy_unverifiable"
 _ALIGNMENT_STATUS_BAKED_UNVERIFIABLE = "legacy_baked_unverifiable"
 _VIEWPORT_PROJECT_SWAP_FIELDS = (
     "_mesh_center",
+    "_amr_scene_render_origin_world_mm",
     "picking_mode",
     "curvature_pick_mode",
     "picked_points",
@@ -748,7 +749,10 @@ class MeshLoadThread(QThread):
                     faces = np.asarray(getattr(mesh_data, "faces", None), dtype=np.int32)
                     verts = np.asarray(getattr(mesh_data, "vertices", None), dtype=np.float64)
                     if faces.ndim == 2 and faces.shape[1] >= 3 and verts.ndim == 2 and verts.shape[1] >= 3:
-                        centroids = np.empty((int(faces.shape[0]), 3), dtype=np.float32)
+                        # CPU picking authority stays absolute float64.  Casting
+                        # these centroids at survey offsets would collapse
+                        # millimetre-adjacent faces before the renderer sees them.
+                        centroids = np.empty((int(faces.shape[0]), 3), dtype=np.float64)
                         try:
                             chunk = int(getattr(mesh_data, "_amr_precompute_face_centroids_chunk", 250000) or 250000)
                         except Exception:
@@ -763,7 +767,7 @@ class MeshLoadThread(QThread):
                             v0 = verts[f[:, 0], :3]
                             v1 = verts[f[:, 1], :3]
                             v2 = verts[f[:, 2], :3]
-                            centroids[start:end, :] = ((v0 + v1 + v2) / 3.0).astype(np.float32, copy=False)
+                            centroids[start:end, :] = (v0 + v1 + v2) / 3.0
 
                         if not self.isInterruptionRequested():
                             setattr(mesh_data, "_amr_face_centroids", centroids)

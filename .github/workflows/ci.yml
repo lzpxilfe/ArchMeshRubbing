@@ -106,6 +106,7 @@ jobs:
           tests/test_canonical_png.py
           tests/test_vector_schemas.py
           tests/test_rubbing_schemas.py
+          tests/test_render_coordinates.py
           tests/test_rotation_convention.py
           tests/test_app_gui_launcher.py
           tests/test_gui_smoke.py

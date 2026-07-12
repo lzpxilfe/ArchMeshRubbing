@@ -211,6 +211,70 @@ class TestCanonicalCutlineGeometry(unittest.TestCase):
             "0253922427a4deab3069bffb68fb91359b2afb753a07d60370d332c61e9ce491",
         )
 
+    def test_large_shared_world_offset_preserves_local_paths_and_qc(self):
+        box = _box((0.25, 2.0, 2.0))
+        baseline_frame = _top_frame()
+        baseline = extract_cutline_geometry(
+            box.vertices,
+            box.faces,
+            baseline_frame,
+        )
+        offset_world_mm = np.asarray(
+            [1_000_000_000.0, -1_000_000_000.0, 1_000_000_000.0],
+            dtype=np.float64,
+        )
+        translated_vertices = (
+            np.asarray(box.vertices, dtype=np.float64) + offset_world_mm
+        )
+        translated_vertices_before = translated_vertices.copy()
+        translated_frame = PlanarFrame(
+            origin_world_mm=(
+                float(offset_world_mm[0]),
+                float(offset_world_mm[1]),
+                float(offset_world_mm[2]),
+            ),
+            u_axis_world=baseline_frame.u_axis_world,
+            v_axis_world=baseline_frame.v_axis_world,
+            normal_world=baseline_frame.normal_world,
+        )
+
+        translated = extract_cutline_geometry(
+            translated_vertices,
+            box.faces,
+            translated_frame,
+        )
+
+        self.assertEqual(translated.payload.paths, baseline.payload.paths)
+        self.assertEqual(translated.qc_dict(), baseline.qc_dict())
+        baseline_payload_qc = baseline.payload.qc_summary()
+        translated_payload_qc = translated.payload.qc_summary()
+        baseline_payload_sha256 = baseline_payload_qc.pop("payload_sha256")
+        translated_payload_sha256 = translated_payload_qc.pop("payload_sha256")
+        self.assertEqual(
+            translated_payload_qc,
+            baseline_payload_qc,
+        )
+        self.assertEqual(
+            translated.payload.frame.origin_world_mm,
+            tuple(float(value) for value in offset_world_mm),
+        )
+        self.assertEqual(
+            translated.payload.frame.u_axis_world,
+            baseline.payload.frame.u_axis_world,
+        )
+        self.assertEqual(
+            translated.payload.frame.v_axis_world,
+            baseline.payload.frame.v_axis_world,
+        )
+        self.assertEqual(
+            translated.payload.frame.normal_world,
+            baseline.payload.frame.normal_world,
+        )
+        self.assertEqual(translated_payload_sha256, translated.payload.sha256)
+        self.assertEqual(baseline_payload_sha256, baseline.payload.sha256)
+        self.assertNotEqual(translated_payload_sha256, baseline_payload_sha256)
+        np.testing.assert_array_equal(translated_vertices, translated_vertices_before)
+
     def test_face_order_winding_and_multiple_components_are_deterministic(self):
         box = _box()
         baseline = extract_cutline_geometry(

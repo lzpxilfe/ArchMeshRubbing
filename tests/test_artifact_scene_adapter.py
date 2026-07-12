@@ -306,6 +306,80 @@ class TestArtifactSceneAdapter(unittest.TestCase):
         self.assertIsNone(projection.mesh.normals)
         self.assertIsNone(projection.mesh.face_normals)
 
+    def test_large_align_translation_preserves_submillimeter_world_features(self):
+        source = MeshData(
+            vertices=np.asarray(
+                [
+                    [0.0, 0.0, 0.0],
+                    [0.0125, 0.0, 0.0],
+                    [0.0, 0.1, 0.0],
+                    [0.0, 0.0, 0.1],
+                ],
+                dtype=np.float64,
+            ),
+            faces=np.asarray([[0, 1, 2], [0, 2, 3]], dtype=np.int32),
+            unit="cm",
+            filepath=Path("/relocated/large-coordinate-artifact.ply"),
+            source_identity=_fingerprint(),
+            source_format="ply",
+        )
+        source_vertices_before = source.vertices.copy()
+        source_faces_before = source.faces.copy()
+        translation_mm = np.asarray(
+            [1_000_000_000.0, -1_000_000_000.0, 500_000_000.0],
+            dtype=np.float64,
+        )
+        document = replace(
+            _document(),
+            align_revisions=(
+                _align(
+                    translation=(
+                        float(translation_mm[0]),
+                        float(translation_mm[1]),
+                        float(translation_mm[2]),
+                    )
+                ),
+            ),
+        )
+
+        projection = ArtifactSceneAdapter(document).materialize(
+            source,
+            _verified_identity(),
+        )
+
+        canonical_features_mm = np.asarray(
+            [
+                [0.0, 0.0, 0.0],
+                [0.125, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=np.float64,
+        )
+        expected_world_mm = canonical_features_mm + translation_mm
+        self.assertEqual(projection.mesh.vertices.dtype, np.dtype(np.float64))
+        np.testing.assert_array_equal(projection.mesh.vertices, expected_world_mm)
+        np.testing.assert_array_equal(
+            projection.mesh.vertices - translation_mm,
+            canonical_features_mm,
+        )
+        self.assertEqual(
+            float(projection.mesh.vertices[1, 0] - projection.mesh.vertices[0, 0]),
+            0.125,
+        )
+        self.assertEqual(
+            float(projection.mesh.vertices[2, 1] - projection.mesh.vertices[0, 1]),
+            1.0,
+        )
+        np.testing.assert_array_equal(
+            projection.snapshot.matrix[:3, 3],
+            translation_mm,
+        )
+        np.testing.assert_array_equal(source.vertices, source_vertices_before)
+        np.testing.assert_array_equal(source.faces, source_faces_before)
+        self.assertFalse(np.shares_memory(projection.mesh.vertices, source.vertices))
+        self.assertFalse(np.shares_memory(projection.mesh.faces, source.faces))
+
     def test_materialization_is_deterministic_and_never_chains_projected_state(self):
         adapter = ArtifactSceneAdapter(_document())
         source = _source_mesh()

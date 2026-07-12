@@ -138,11 +138,19 @@ from ..core.alignment_utils import (
     transform_plane_world_to_local,
     transform_points,
 )
+from .render_coordinates import (
+    absolute_modelview_from_render,
+    encode_relative_float32,
+    rebase_affine_for_render,
+    render_origin_from_bounds,
+    world_to_render_points,
+)
 
 _LOGGER = logging.getLogger(__name__)
 ORTHO_VIEW_SCALE_DEFAULT = 1.15
 MOUSE_DELTA_SPIKE_CLAMP_PX = 120.0
 CAMERA_ROTATE_SENSITIVITY_DEFAULT = 0.35
+VBO_UPLOAD_VERTEX_CHUNK = 131_072
 CAMERA_PAN_SENSITIVITY_DEFAULT = 0.22
 
 
@@ -1143,7 +1151,7 @@ class _SurfaceLassoSelectThread(QThread):
                 try:
                     fc = np.asarray(face_centroids_all)
                     if fc.ndim == 2 and int(fc.shape[0]) == int(faces.shape[0]) and int(fc.shape[1]) >= 3:
-                        cent = np.asarray(fc[cand, :3], dtype=np.float32)
+                        cent = np.asarray(fc[cand, :3], dtype=np.float64)
                 except Exception:
                     cent = None
 
@@ -1164,7 +1172,7 @@ class _SurfaceLassoSelectThread(QThread):
                 v1 = vertices[f[:, 1], :3].astype(np.float64, copy=False)
                 v2 = vertices[f[:, 2], :3].astype(np.float64, copy=False)
                 if cent is None:
-                    cent = ((v0 + v1 + v2) / 3.0).astype(np.float32, copy=False)
+                    cent = np.asarray((v0 + v1 + v2) / 3.0, dtype=np.float64)
                 if normals is None:
                     n = np.cross(v1 - v0, v2 - v0)
                     nn = np.linalg.norm(n, axis=1)
@@ -1198,7 +1206,7 @@ class _SurfaceLassoSelectThread(QThread):
                         try:
                             fc0 = np.asarray(face_centroids_all)
                             if fc0.ndim == 2 and int(fc0.shape[0]) == int(faces.shape[0]) and int(fc0.shape[1]) >= 3:
-                                sc = np.asarray(fc0[int(seed), :3], dtype=np.float32).reshape(-1)
+                                sc = np.asarray(fc0[int(seed), :3], dtype=np.float64).reshape(-1)
                         except Exception:
                             sc = None
                     if sc is None:
@@ -1206,8 +1214,8 @@ class _SurfaceLassoSelectThread(QThread):
                         sc = (
                             (vertices[int(sf[0]), :3] + vertices[int(sf[1]), :3] + vertices[int(sf[2]), :3])
                             / 3.0
-                        ).astype(np.float32, copy=False)
-                    _d2, seed_pos2 = tree.query(np.asarray(sc, dtype=np.float32), k=1)
+                        ).astype(np.float64, copy=False)
+                    _d2, seed_pos2 = tree.query(np.asarray(sc, dtype=np.float64), k=1)
                     seed_pos = int(np.asarray(seed_pos2).reshape(-1)[0])
                 except Exception:
                     seed_pos = 0
@@ -1737,12 +1745,21 @@ class TrackballCamera:
         self.center += up_v * (dy * move_speed)
         self.center += forward_h * (dz * move_speed)
 
-    def apply(self):
-        """Apply camera transform to OpenGL."""
+    def apply(self, render_origin_world_mm: object | None = None):
+        """Apply the camera in absolute or transient render-relative space."""
         try:
             pos = self.position
             target = self.look_at
             up = self.up_vector
+            if render_origin_world_mm is not None:
+                origin = np.asarray(
+                    render_origin_world_mm,
+                    dtype=np.float64,
+                ).reshape(-1)
+                if origin.size != 3 or not np.isfinite(origin).all():
+                    raise ValueError("render origin must be a finite 3-vector")
+                pos = pos - origin
+                target = target - origin
             gluLookAt(
                 pos[0], pos[1], pos[2],
                 target[0], target[1], target[2],
@@ -1781,6 +1798,10 @@ class SceneObject:
         # ?뚮뜑留?由ъ냼??
         self.vbo_id: int | None = None
         self.vertex_count: int = 0
+        # Renderer-only cache metadata.  Canonical mesh vertices remain absolute
+        # float64 coordinates; only the uploaded GL_FLOAT payload is local to
+        # this origin.  This value must never enter a document, record, or export.
+        self._amr_vbo_origin_local_mm = np.zeros(3, dtype=np.float64)
         self.selected_faces: set[int] = set()
         self.outer_face_indices: set[int] = set()
         self.inner_face_indices: set[int] = set()
@@ -1799,6 +1820,30 @@ class SceneObject:
         self._face_adjacency: list[list[int]] | None = None
         self._face_adjacency_faces_count: int = 0
         self._amr_artifact_projection_snapshot: ArtifactProjectionSnapshot | None = None
+
+    def local_to_world_matrix(self) -> np.ndarray:
+        """Return the one authoritative preview transform for render and picking."""
+
+        pivot = getattr(self, "_amr_preview_pivot_mm", None)
+        return (
+            scene_trs_matrix_about_pivot(
+                self.translation,
+                self.rotation,
+                self.scale,
+                pivot,
+            )
+            if pivot is not None
+            else scene_trs_matrix(self.translation, self.rotation, self.scale)
+        )
+
+    def render_model_matrix(self, scene_origin_world_mm: object) -> np.ndarray:
+        """Map this object's VBO-relative coordinates into scene render space."""
+
+        return rebase_affine_for_render(
+            self.local_to_world_matrix(),
+            self._amr_vbo_origin_local_mm,
+            scene_origin_world_mm,
+        )
 
     def compare_and_swap_artifact_binding(
         self,
@@ -1829,18 +1874,7 @@ class SceneObject:
         if not self.mesh:
             return np.array([[0,0,0],[0,0,0]])
 
-        pivot = getattr(self, "_amr_preview_pivot_mm", None)
-        matrix = (
-            scene_trs_matrix_about_pivot(
-                self.translation,
-                self.rotation,
-                self.scale,
-                pivot,
-            )
-            if pivot is not None
-            else scene_trs_matrix(self.translation, self.rotation, self.scale)
-        )
-        return transform_bounds(self.mesh.bounds, matrix)
+        return transform_bounds(self.mesh.bounds, self.local_to_world_matrix())
         
     def cleanup(self):
         try:
@@ -1859,6 +1893,7 @@ class SceneObject:
             # deleted buffer id available for undo or later rendering code.
             self.vbo_id = None
             self.vertex_count = 0
+            self._amr_vbo_origin_local_mm = np.zeros(3, dtype=np.float64)
 
 
 class Viewport3D(QOpenGLWidget):
@@ -1900,6 +1935,9 @@ class Viewport3D(QOpenGLWidget):
         self.objects = []
         self.selected_index = -1
         self._mesh_center: np.ndarray = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+        # Stable for one live scene.  It is runtime-only and deliberately
+        # excluded from ArtifactDocument/session/project serialization.
+        self._amr_scene_render_origin_world_mm = np.zeros(3, dtype=np.float64)
         
         # ?뚮뜑留??ㅼ젙
         self.grid_size = 500.0  # cm (???ш쾶 ?뺤옣)
@@ -2146,6 +2184,94 @@ class Viewport3D(QOpenGLWidget):
         if 0 <= self.selected_index < len(self.objects):
             return self.objects[self.selected_index]
         return None
+
+    def _scene_render_origin_world_mm(self) -> np.ndarray:
+        try:
+            origin = np.asarray(
+                self._amr_scene_render_origin_world_mm,
+                dtype=np.float64,
+            ).reshape(-1)
+            if origin.size == 3 and np.isfinite(origin).all():
+                return origin.copy()
+        except Exception:
+            pass
+        return np.zeros(3, dtype=np.float64)
+
+    def _set_scene_render_origin_from_object(self, obj: SceneObject | None) -> None:
+        """Choose one stable world origin for the lifetime of the live scene."""
+
+        origin = np.zeros(3, dtype=np.float64)
+        if obj is not None:
+            try:
+                origin = render_origin_from_bounds(obj.get_world_bounds())
+            except Exception:
+                _log_ignored_exception("Scene render-origin selection failed")
+        self._amr_scene_render_origin_world_mm = np.asarray(
+            origin,
+            dtype=np.float64,
+        ).reshape(3)
+
+    @staticmethod
+    def _object_draw_origin_local_mm(obj: SceneObject) -> np.ndarray:
+        """Return the local origin matching the active mesh draw path.
+
+        A valid VBO must use the origin that encoded its payload.  If upload
+        failed, immediate-mode fallback still subtracts a fresh bounds midpoint
+        in float64 before any GL_FLOAT conversion.
+        """
+
+        try:
+            has_vbo = (
+                int(getattr(obj, "vbo_id", 0) or 0) > 0
+                and int(getattr(obj, "vertex_count", 0) or 0) > 0
+            )
+        except Exception:
+            has_vbo = False
+        if has_vbo:
+            try:
+                origin = np.asarray(
+                    getattr(obj, "_amr_vbo_origin_local_mm", None),
+                    dtype=np.float64,
+                ).reshape(-1)
+                if origin.size == 3 and np.isfinite(origin).all():
+                    return origin.copy()
+            except Exception:
+                pass
+        mesh = getattr(obj, "mesh", None)
+        if mesh is None:
+            raise ValueError("scene object has no mesh draw origin")
+        return render_origin_from_bounds(mesh.bounds)
+
+    def _push_absolute_world_modelview(self) -> None:
+        """Temporarily render existing absolute-world overlays under a relative camera."""
+
+        origin = self._scene_render_origin_world_mm()
+        world_to_render = np.eye(4, dtype=np.float64)
+        world_to_render[:3, 3] = -origin
+        glPushMatrix()
+        glMultMatrixd(np.ascontiguousarray(world_to_render.T))
+
+    @staticmethod
+    def _pop_absolute_world_modelview() -> None:
+        glPopMatrix()
+
+    def _draw_in_absolute_world(self, callback, *args, **kwargs):
+        """Run one legacy absolute-world overlay without leaking matrix state."""
+
+        self._push_absolute_world_modelview()
+        try:
+            return callback(*args, **kwargs)
+        finally:
+            self._pop_absolute_world_modelview()
+
+    def _submit_world_vertex(self, point_world: object) -> None:
+        """Submit one absolute float64 world point in the active render frame."""
+
+        point = np.asarray(point_world, dtype=np.float64).reshape(-1)
+        if point.size != 3 or not np.isfinite(point).all():
+            raise ValueError("world render point must be a finite 3-vector")
+        relative = point - self._scene_render_origin_world_mm()
+        glVertex3f(float(relative[0]), float(relative[1]), float(relative[2]))
     
     def initializeGL(self):
         """OpenGL 珥덇린??"""
@@ -2550,8 +2676,10 @@ class Viewport3D(QOpenGLWidget):
         glClear(int(GL_COLOR_BUFFER_BIT) | int(GL_DEPTH_BUFFER_BIT))
         glLoadIdentity()
         
-        # 移대찓???곸슜
-        self.camera.apply()
+        # Keep all GPU coordinates near zero.  CPU/document coordinates remain
+        # absolute world millimetres and are never mutated by this render frame.
+        render_origin = self._scene_render_origin_world_mm()
+        self.camera.apply(render_origin)
 
         # Reset clip planes every frame so stale ROI/floor clipping never leaks into global overlays.
         try:
@@ -2563,11 +2691,16 @@ class Viewport3D(QOpenGLWidget):
         except Exception:
             _log_ignored_exception()
 
-        # 諛붾떏 愿??z<0) ?섏씠?쇱씠?몄슜 ?대━???됰㈃ 媛깆떊 (移대찓???대룞/?뚯쟾???곕씪 留??꾨젅???꾩슂)
-        if self.floor_penetration_highlight:
-            self._update_floor_penetration_clip_plane()
-        if self.roi_enabled:
-            self._update_roi_clip_planes()
+        # Clip equations are authored in absolute world space.  Define them
+        # under the compatibility matrix so OpenGL stores the same eye planes.
+        self._push_absolute_world_modelview()
+        try:
+            if self.floor_penetration_highlight:
+                self._update_floor_penetration_clip_plane()
+            if self.roi_enabled:
+                self._update_roi_clip_planes()
+        finally:
+            self._pop_absolute_world_modelview()
         
         # 0. 愿묒썝 ?꾩튂 ?낅뜲?댄듃 (諛앷퀬 洹좎씪??議곕챸)
         if not self.flat_shading:
@@ -2621,7 +2754,11 @@ class Viewport3D(QOpenGLWidget):
                 self.draw_scene_object(obj, is_selected=True)
                 # ROI濡??섎┛ 硫댁쓣 梨꾩썙 ?⑤㈃ ?뺤씤???쎄쾶 蹂댁씠?꾨줉 罹??쒓퍚) ?뚮뜑留?
                 if bool(getattr(self, "roi_caps_enabled", False)):
-                    self.draw_roi_caps()
+                    self._push_absolute_world_modelview()
+                    try:
+                        self.draw_roi_caps()
+                    finally:
+                        self._pop_absolute_world_modelview()
 
                 try:
                     glDisable(GL_CLIP_PLANE1)
@@ -2660,7 +2797,11 @@ class Viewport3D(QOpenGLWidget):
                 if self.roi_enabled and bool(getattr(self, "roi_caps_enabled", False)):
                     try:
                         glDepthMask(GL_FALSE)
-                        self.draw_roi_caps()
+                        self._push_absolute_world_modelview()
+                        try:
+                            self.draw_roi_caps()
+                        finally:
+                            self._pop_absolute_world_modelview()
                     finally:
                         glDepthMask(GL_TRUE)
 
@@ -2675,28 +2816,28 @@ class Viewport3D(QOpenGLWidget):
             
         # 3. ?ㅻ쾭?덉씠 ?붿냼 (Depth write off: depth buffer??硫붿돩留??좎?)
         # Draw world axes after solids so they remain visible after mesh load.
-        self.draw_axes()
+        self._draw_in_absolute_world(self.draw_axes)
         glDepthMask(GL_FALSE)
 
         # 3.1 怨〓쪧 ?쇳똿 ?붿냼
-        self.draw_picked_points()
-        self.draw_fitted_arc()
+        self._draw_in_absolute_world(self.draw_picked_points)
+        self._draw_in_absolute_world(self.draw_fitted_arc)
 
         # 3.2 ?쒕㈃ 吏??李띿? ?? ?쒖떆
-        self.draw_surface_paint_points()
+        self._draw_in_absolute_world(self.draw_surface_paint_points)
         # 3.3 ?쒕㈃ 吏??硫댁쟻/Area) ?ш?誘??ㅻ쾭?덉씠
-        self.draw_surface_lasso_overlay()
+        self._draw_in_absolute_world(self.draw_surface_lasso_overlay)
         # 3.4 ?쒕㈃ 吏??寃쎄퀎/?먯꽍) ?ш?誘??ㅻ쾭?덉씠
-        self.draw_surface_magnetic_lasso_overlay()
+        self._draw_in_absolute_world(self.draw_surface_magnetic_lasso_overlay)
 
         # 3.5 諛붾떏 ?뺣젹 ???쒖떆
-        self.draw_floor_picks()
+        self._draw_in_absolute_world(self.draw_floor_picks)
 
         # 3.6 Mesh slicing plane/contours disabled (ROI + line-section workflow only).
 
         # 3.7 ??옄???⑤㈃
         if self.crosshair_enabled:
-            self.draw_crosshair()
+            self._draw_in_absolute_world(self.draw_crosshair)
 
         # 3.7.25 ?⑤㈃??2媛? 媛?대뱶
         if (
@@ -2705,18 +2846,18 @@ class Viewport3D(QOpenGLWidget):
             or self._has_visible_polyline_layers()
             or any(bool(x) for x in (getattr(self, "_cut_line_final", [False, False]) or [False, False]))
         ):
-            self.draw_cut_lines()
+            self._draw_in_absolute_world(self.draw_cut_lines)
 
         self.draw_native_vector_preview()
 
         # 3.7.5 ?좏삎 ?⑤㈃ (Top-view cut line)
         if self.line_section_enabled:
-            self.draw_line_section()
+            self._draw_in_absolute_world(self.draw_line_section)
              
         # 3.8 2D ROI ?щ줈???곸뿭
         if self.roi_enabled:
-            self.draw_roi_cut_edges()
-            self.draw_roi_box()
+            self._draw_in_absolute_world(self.draw_roi_cut_edges)
+            self._draw_in_absolute_world(self.draw_roi_box)
 
         glDepthMask(GL_TRUE)
 
@@ -2725,13 +2866,26 @@ class Viewport3D(QOpenGLWidget):
         # 4. ?뚯쟾 湲곗쫰紐?(?좏깮??媛앹껜?먮쭔, ?쇳궧 紐⑤뱶 ?꾨땺 ?뚮쭔)
         if self.selected_obj and self.picking_mode == 'none':
             if not self.roi_enabled:
-                self.draw_rotation_gizmo(self.selected_obj)
+                self._draw_in_absolute_world(
+                    self.draw_rotation_gizmo,
+                    self.selected_obj,
+                )
             # 硫붿돩 移섏닔/以묒떖???ㅻ쾭?덉씠
-            self.draw_mesh_dimensions(self.selected_obj)
+            self._draw_in_absolute_world(
+                self.draw_mesh_dimensions,
+                self.selected_obj,
+            )
             
         # 5. UI ?ㅻ쾭?덉씠 (HUD)
         self.draw_orientation_hud()
         self.draw_surface_runtime_hud()
+
+        # Existing input handlers read the current GL matrices as absolute
+        # world transforms.  Restore that compatibility state after the
+        # relative GPU pass so depth unprojection returns canonical world mm.
+        glMatrixMode(GL_MODELVIEW)
+        glLoadIdentity()
+        self.camera.apply()
 
     def _update_floor_penetration_clip_plane(self):
         """?붾뱶 諛붾떏(Z=0) 湲곗??쇰줈 '?꾨옒履?留??④린???대━???됰㈃ ?뺤쓽"""
@@ -2785,12 +2939,13 @@ class Viewport3D(QOpenGLWidget):
         
         # Keep floor tone neutral to reduce visual noise and preserve depth cues.
         glColor4f(0.82, 0.84, 0.86, 0.16)
+        center = np.asarray(self.camera.look_at, dtype=np.float64).reshape(3)
         # ?뺤젏 ?쒖꽌: 諛섏떆怨?諛⑺뼢 = ?꾩そ???욌㈃ (Z-up)
         glBegin(GL_QUADS)
-        glVertex3f(-size, -size, 0)
-        glVertex3f(size, -size, 0)
-        glVertex3f(size, size, 0)
-        glVertex3f(-size, size, 0)
+        self._submit_world_vertex([center[0] - size, center[1] - size, 0.0])
+        self._submit_world_vertex([center[0] + size, center[1] - size, 0.0])
+        self._submit_world_vertex([center[0] + size, center[1] + size, 0.0])
+        self._submit_world_vertex([center[0] - size, center[1] + size, 0.0])
         glEnd()
         
         glDisable(GL_CULL_FACE)
@@ -2924,10 +3079,10 @@ class Viewport3D(QOpenGLWidget):
                 v2[ax0] = snap_0 - half_range
                 v3[ax0] = snap_0 + half_range
 
-                glVertex3f(float(v0[0]), float(v0[1]), float(v0[2]))
-                glVertex3f(float(v1[0]), float(v1[1]), float(v1[2]))
-                glVertex3f(float(v2[0]), float(v2[1]), float(v2[2]))
-                glVertex3f(float(v3[0]), float(v3[1]), float(v3[2]))
+                self._submit_world_vertex(v0)
+                self._submit_world_vertex(v1)
+                self._submit_world_vertex(v2)
+                self._submit_world_vertex(v3)
             glEnd()
 
         glLineWidth(1.0)
@@ -5491,7 +5646,7 @@ class Viewport3D(QOpenGLWidget):
                     continue
                 glBegin(GL_LINE_LOOP if closed else GL_LINE_STRIP)
                 for point in array:
-                    glVertex3f(float(point[0]), float(point[1]), float(point[2]))
+                    self._submit_world_vertex(point)
                 glEnd()
         finally:
             glPopAttrib()
@@ -7263,7 +7418,7 @@ class Viewport3D(QOpenGLWidget):
 
         world_v = transform_points(
             obj.mesh.vertices,
-            scene_trs_matrix(obj.translation, obj.rotation, obj.scale),
+            obj.local_to_world_matrix(),
         )
         
         # 2. ROI ?곸뿭 ?댁쓽 ?먮뱾 ?꾪꽣留?
@@ -7742,13 +7897,21 @@ class Viewport3D(QOpenGLWidget):
         except Exception:
             _log_ignored_exception()
 
-        pivot = getattr(obj, "_amr_preview_pivot_mm", None)
-        local_to_world_matrix = (
-            scene_trs_matrix_about_pivot(tr, rot, sc, pivot)
-            if pivot is not None
-            else scene_trs_matrix(tr, rot, sc)
+        try:
+            vbo_id = int(getattr(obj, "vbo_id", 0) or 0)
+        except Exception:
+            vbo_id = 0
+        can_draw_vbo = (
+            vbo_id > 0 and int(getattr(obj, "vertex_count", 0) or 0) > 0
         )
-        glMultMatrixd(np.ascontiguousarray(local_to_world_matrix.T))
+        render_origin = self._scene_render_origin_world_mm()
+        local_vbo_origin = self._object_draw_origin_local_mm(obj)
+        render_model_matrix = rebase_affine_for_render(
+            obj.local_to_world_matrix(),
+            local_vbo_origin,
+            render_origin,
+        )
+        glMultMatrixd(np.ascontiguousarray(render_model_matrix.T))
 
         alpha_f = float(alpha)
         if not np.isfinite(alpha_f):
@@ -7802,7 +7965,10 @@ class Viewport3D(QOpenGLWidget):
             for face_idx in self.brush_selected_faces:
                 f = obj.mesh.faces[face_idx]
                 for v_idx in f:
-                    glVertex3fv(obj.mesh.vertices[v_idx])
+                    glVertex3fv(
+                        np.asarray(obj.mesh.vertices[v_idx], dtype=np.float64)
+                        - local_vbo_origin
+                    )
             glEnd()
             glDisable(GL_POLYGON_OFFSET_FILL)
             glEnable(GL_LIGHTING)
@@ -7819,17 +7985,15 @@ class Viewport3D(QOpenGLWidget):
             for face_idx in obj.selected_faces:
                 f = obj.mesh.faces[int(face_idx)]
                 for v_idx in f:
-                    glVertex3fv(obj.mesh.vertices[v_idx])
+                    glVertex3fv(
+                        np.asarray(obj.mesh.vertices[v_idx], dtype=np.float64)
+                        - local_vbo_origin
+                    )
             glEnd()
             glDisable(GL_POLYGON_OFFSET_FILL)
             glEnable(GL_LIGHTING)
             glPopMatrix()
 
-        try:
-            vbo_id = int(getattr(obj, "vbo_id", 0) or 0)
-        except Exception:
-            vbo_id = 0
-        can_draw_vbo = vbo_id > 0 and int(getattr(obj, "vertex_count", 0) or 0) > 0
         if can_draw_vbo:
             # VBO 諛⑹떇 ?뚮뜑留?
             glEnableClientState(GL_VERTEX_ARRAY)
@@ -8023,7 +8187,10 @@ class Viewport3D(QOpenGLWidget):
             # Fallback path: keep mesh visible even when VBO creation fails.
             try:
                 faces = np.asarray(obj.mesh.faces, dtype=np.int32)
-                vertices = np.asarray(obj.mesh.vertices, dtype=np.float32)
+                vertices = encode_relative_float32(
+                    obj.mesh.vertices,
+                    local_vbo_origin,
+                )
                 if faces.ndim == 2 and int(faces.shape[1]) >= 3 and int(faces.shape[0]) > 0 and int(vertices.shape[0]) > 0:
                     if obj.mesh.face_normals is None or int(len(obj.mesh.face_normals)) != int(faces.shape[0]):
                         obj.mesh.compute_normals(compute_vertex_normals=False)
@@ -8049,7 +8216,10 @@ class Viewport3D(QOpenGLWidget):
         
         # 諛붾떏 ?묒큺 硫??섏씠?쇱씠?몃뒗 ?뺤튂(諛붾떏 ?뺣젹) 愿??紐⑤뱶?먯꽌留??쒖떆 (??⑸웾 硫붿돩 ?깅뒫)
         if is_selected and self.picking_mode in {'floor_3point', 'floor_face', 'floor_brush'}:
-            self._draw_floor_contact_faces(obj)
+            self._draw_floor_contact_faces(
+                obj,
+                local_vbo_origin=local_vbo_origin,
+            )
 
         glDisable(GL_CULL_FACE)
 
@@ -8169,7 +8339,12 @@ class Viewport3D(QOpenGLWidget):
             except Exception:
                 _log_ignored_exception()
     
-    def _draw_floor_contact_faces(self, obj: SceneObject):
+    def _draw_floor_contact_faces(
+        self,
+        obj: SceneObject,
+        *,
+        local_vbo_origin: np.ndarray,
+    ):
         """諛붾떏(Z=0) 洹쇱쿂 硫댁쓣 珥덈줉?됱쑝濡??섏씠?쇱씠??(?뺤튂 怨쇱젙 以??쒖떆)"""
         if obj.mesh is None or obj.mesh.faces is None:
             return
@@ -8201,7 +8376,7 @@ class Viewport3D(QOpenGLWidget):
         v_indices = sample_faces[:, 0]
         world_points = transform_points(
             vertices[v_indices],
-            scene_trs_matrix(obj.translation, obj.rotation, obj.scale),
+            obj.local_to_world_matrix(),
         )
         world_z = world_points[:, 2]
         
@@ -8248,7 +8423,10 @@ class Viewport3D(QOpenGLWidget):
             else:
                 glColor4f(0.5, 1.0, 0.5, alpha_near)  # ?고븳 珥덈줉 (洹쇱쿂)
             for v_idx in f:
-                glVertex3fv(vertices[v_idx])
+                glVertex3fv(
+                    np.asarray(vertices[v_idx], dtype=np.float64)
+                    - local_vbo_origin
+                )
         glEnd()
 
         # Keep contact highlight as translucent fill only.
@@ -8374,18 +8552,14 @@ class Viewport3D(QOpenGLWidget):
         glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)
         
         glPushMatrix()
-        pivot = getattr(obj, "_amr_preview_pivot_mm", None)
-        local_to_world_matrix = (
-            scene_trs_matrix_about_pivot(
-                obj.translation,
-                obj.rotation,
-                obj.scale,
-                pivot,
-            )
-            if pivot is not None
-            else scene_trs_matrix(obj.translation, obj.rotation, obj.scale)
+        origin = np.asarray(
+            getattr(obj, "_amr_vbo_origin_local_mm", np.zeros(3)),
+            dtype=np.float64,
+        ).reshape(3)
+        render_model = obj.render_model_matrix(
+            self._scene_render_origin_world_mm()
         )
-        glMultMatrixd(np.ascontiguousarray(local_to_world_matrix.T))
+        glMultMatrixd(np.ascontiguousarray(render_model.T))
         
         vertices = obj.mesh.vertices
         faces = obj.mesh.faces
@@ -8393,7 +8567,9 @@ class Viewport3D(QOpenGLWidget):
         glBegin(GL_TRIANGLES)
         for face in faces:
             for vi in face:
-                glVertex3fv(vertices[vi])
+                glVertex3fv(
+                    np.asarray(vertices[vi], dtype=np.float64) - origin
+                )
         glEnd()
         
         glPopMatrix()
@@ -8430,7 +8606,7 @@ class Viewport3D(QOpenGLWidget):
         centroids_cache = None
         try:
             if pre_centroids is not None:
-                fc = np.asarray(pre_centroids, dtype=np.float32).copy()
+                fc = np.asarray(pre_centroids, dtype=np.float64).copy()
                 n_faces = int(getattr(mesh, "n_faces", int(fc.shape[0])) or int(fc.shape[0]))
                 if (
                     fc.ndim == 2
@@ -8438,13 +8614,13 @@ class Viewport3D(QOpenGLWidget):
                     and int(fc.shape[0]) == n_faces
                     and (pre_centroids_faces <= 0 or int(fc.shape[0]) == int(pre_centroids_faces))
                 ):
-                    c = np.asarray(center[:3], dtype=np.float32).reshape(1, 3)
+                    c = np.asarray(center[:3], dtype=np.float64).reshape(1, 3)
                     fc = fc[:, :3]
                     try:
                         fc -= c
                         centroids_cache = fc
                     except Exception:
-                        centroids_cache = (fc - c).astype(np.float32, copy=False)
+                        centroids_cache = np.asarray(fc - c, dtype=np.float64)
         except Exception:
             centroids_cache = None
 
@@ -8461,6 +8637,7 @@ class Viewport3D(QOpenGLWidget):
         
         # VBO ?곗씠???앹꽦
         self.update_vbo(new_obj)
+        Viewport3D._set_scene_render_origin_from_object(self, new_obj)
 
         # Attach centroid cache after update_vbo (it invalidates caches defensively).
         if centroids_cache is not None:
@@ -8543,6 +8720,12 @@ class Viewport3D(QOpenGLWidget):
                 raise ValueError("prepared object has no uploaded vertices")
             if int(getattr(obj, "vbo_id", 0) or 0) <= 0:
                 raise ValueError("prepared object has no valid VBO")
+            origin = np.asarray(
+                getattr(obj, "_amr_vbo_origin_local_mm", None),
+                dtype=np.float64,
+            ).reshape(-1)
+            if origin.size != 3 or not np.isfinite(origin).all():
+                raise ValueError("prepared object has no valid VBO render origin")
 
     def _reset_projection_transients(self) -> None:
         """Clear mutable overlays/caches that belong to the previous scene."""
@@ -8682,6 +8865,7 @@ class Viewport3D(QOpenGLWidget):
         self.objects = prepared
         self.selected_index = selected
         self._reset_projection_transients()
+        self._set_scene_render_origin_from_object(prepared[selected])
         if fit_camera:
             try:
                 self._front_back_ortho_enabled = False
@@ -8735,6 +8919,7 @@ class Viewport3D(QOpenGLWidget):
 
         self.objects = []
         self.selected_index = -1
+        self._amr_scene_render_origin_world_mm = np.zeros(3, dtype=np.float64)
         self._reset_projection_transients()
         # Undo entries retain SceneObject and sometimes a full vertex copy.
         # A scene boundary must release those references; transactional project
@@ -9047,6 +9232,13 @@ class Viewport3D(QOpenGLWidget):
         except Exception:
             prev_vertex_count = 0
         try:
+            prev_vbo_origin = np.asarray(
+                getattr(obj, "_amr_vbo_origin_local_mm", np.zeros(3)),
+                dtype=np.float64,
+            ).reshape(3).copy()
+        except Exception:
+            prev_vbo_origin = np.zeros(3, dtype=np.float64)
+        try:
             if obj is None or obj.mesh is None:
                 return False
 
@@ -9088,9 +9280,18 @@ class Viewport3D(QOpenGLWidget):
             if vertex_count <= 0:
                 raise RuntimeError("mesh has no triangle vertices for VBO upload")
 
+            candidate_vbo_origin = render_origin_from_bounds(obj.mesh.bounds)
+
             # [vx,vy,vz,nx,ny,nz] float32 interleaved (avoid huge temporaries)
             data = np.empty((vertex_count, 6), dtype=np.float32)
-            np.take(obj.mesh.vertices, v_indices, axis=0, out=data[:, :3])
+            source_vertices = np.asarray(obj.mesh.vertices, dtype=np.float64)
+            for start in range(0, vertex_count, VBO_UPLOAD_VERTEX_CHUNK):
+                stop = min(vertex_count, start + VBO_UPLOAD_VERTEX_CHUNK)
+                absolute_chunk = source_vertices[v_indices[start:stop]]
+                data[start:stop, :3] = encode_relative_float32(
+                    absolute_chunk,
+                    candidate_vbo_origin,
+                )
             use_vertex_normals = False
             try:
                 vn = np.asarray(getattr(obj.mesh, "normals", None), dtype=np.float32)
@@ -9130,6 +9331,7 @@ class Viewport3D(QOpenGLWidget):
             glBufferData(GL_ARRAY_BUFFER, data.nbytes, data, GL_STATIC_DRAW)
             glBindBuffer(GL_ARRAY_BUFFER, 0)
             obj.vertex_count = vertex_count
+            obj._amr_vbo_origin_local_mm = candidate_vbo_origin.copy()
 
             # Picking cache invalidate (mesh vertices may have changed)
             try:
@@ -9155,6 +9357,7 @@ class Viewport3D(QOpenGLWidget):
                     prev_vbo = int(prev_vbo_id or 0)
                     obj.vbo_id = prev_vbo if prev_vbo > 0 else None
                 obj.vertex_count = prev_vertex_count
+                obj._amr_vbo_origin_local_mm = prev_vbo_origin.copy()
             except Exception:
                 _log_ignored_exception()
             return False
@@ -9173,9 +9376,8 @@ class Viewport3D(QOpenGLWidget):
         """?좏깮??媛앹껜??移대찓??珥덉젏 留욎땄"""
         obj = self.selected_obj
         if obj:
-            self.camera.fit_to_bounds(obj.mesh.bounds)
-            self.camera.center = obj.translation.copy()
-            self.camera.pan_offset = np.array([0.0, 0.0, 0.0])
+            self.camera.fit_to_bounds(obj.get_world_bounds())
+            self.camera.pan_offset = np.array([0.0, 0.0, 0.0], dtype=np.float64)
             self.update()
             
     def set_mesh_translation(self, x, y, z):
@@ -9242,15 +9444,11 @@ class Viewport3D(QOpenGLWidget):
             return
         
         # 1. Render path and bake path share the same authoritative matrix.
-        local_to_world_matrix = scene_trs_matrix(
-            obj.translation,
-            obj.rotation,
-            obj.scale,
-        )
+        local_to_world_matrix = obj.local_to_world_matrix()
         vertices = transform_points(obj.mesh.vertices, local_to_world_matrix)
         
         # 3. ?곗씠???낅뜲?댄듃
-        obj.mesh.vertices = vertices.astype(np.float32)
+        obj.mesh.vertices = np.asarray(vertices, dtype=np.float64).copy()
         # 罹먯떆 臾댄슚??(vertices 蹂寃?
         try:
             obj.mesh._bounds = None
@@ -9350,7 +9548,7 @@ class Viewport3D(QOpenGLWidget):
             try:
                 verts_arr = np.asarray(mesh_vertices, dtype=np.float64)
                 if verts_arr.ndim == 2 and verts_arr.shape[0] > 0 and verts_arr.shape[1] >= 3:
-                    obj.mesh.vertices = verts_arr[:, :3].astype(np.float32, copy=True)
+                    obj.mesh.vertices = verts_arr[:, :3].astype(np.float64, copy=True)
                     try:
                         obj.mesh._bounds = None
                         obj.mesh._centroid = None
@@ -11473,8 +11671,9 @@ class Viewport3D(QOpenGLWidget):
         glDepthMask(GL_TRUE)
         glClear(int(GL_COLOR_BUFFER_BIT) | int(GL_DEPTH_BUFFER_BIT))
         glLoadIdentity()
-        
-        self.camera.apply()
+
+        render_origin = self._scene_render_origin_world_mm()
+        self.camera.apply(render_origin)
 
         if orthographic:
             try:
@@ -11516,7 +11715,10 @@ class Viewport3D(QOpenGLWidget):
                     ],
                     dtype=np.float64,
                 )
-                v_h = np.hstack([corners, np.ones((8, 1), dtype=np.float64)])
+                corners_render = world_to_render_points(corners, render_origin)
+                v_h = np.hstack(
+                    [corners_render, np.ones((8, 1), dtype=np.float64)]
+                )
                 eye = v_h @ mv.T
 
                 x_min, x_max = float(np.min(eye[:, 0])), float(np.max(eye[:, 0]))
@@ -11575,7 +11777,10 @@ class Viewport3D(QOpenGLWidget):
             self.draw_scene_object(obj, is_selected=(i == sel))
         
         # 4. ?됰젹 罹≪쿂 (SVG ?ъ쁺 ?뺣젹??
-        mv = glGetDoublev(GL_MODELVIEW_MATRIX)
+        mv_render_raw = glGetDoublev(GL_MODELVIEW_MATRIX)
+        mv_render = np.asarray(mv_render_raw, dtype=np.float64).reshape(4, 4).T
+        mv_absolute = absolute_modelview_from_render(mv_render, render_origin)
+        mv = np.ascontiguousarray(mv_absolute.T)
         proj = glGetDoublev(GL_PROJECTION_MATRIX)
         vp = glGetIntegerv(GL_VIEWPORT)
         
@@ -13540,7 +13745,7 @@ class Viewport3D(QOpenGLWidget):
                     v0 = v[f[:, 0]]
                     v1 = v[f[:, 1]]
                     v2 = v[f[:, 2]]
-                    centroids = ((v0 + v1 + v2) / 3.0).astype(np.float32, copy=False)
+                    centroids = np.asarray((v0 + v1 + v2) / 3.0, dtype=np.float64)
                 except Exception:
                     centroids = None
                     tree = None
@@ -13607,11 +13812,7 @@ class Viewport3D(QOpenGLWidget):
             if cam_w.size < 3 or not np.isfinite(cam_w[:3]).all():
                 return None
             world_to_local_matrix = np.linalg.inv(
-                scene_trs_matrix(
-                    getattr(obj, "translation", [0.0, 0.0, 0.0]),
-                    getattr(obj, "rotation", [0.0, 0.0, 0.0]),
-                    float(getattr(obj, "scale", 1.0)),
-                )
+                obj.local_to_world_matrix()
             )
             return transform_points(cam_w[:3], world_to_local_matrix)
         except Exception:
@@ -13669,7 +13870,7 @@ class Viewport3D(QOpenGLWidget):
                 v0 = v[f[:, 0]]
                 v1 = v[f[:, 1]]
                 v2 = v[f[:, 2]]
-                centroids = ((v0 + v1 + v2) / 3.0).astype(np.float32, copy=False)
+                centroids = np.asarray((v0 + v1 + v2) / 3.0, dtype=np.float64)
             except Exception:
                 centroids = None
             tree = None
@@ -13938,7 +14139,7 @@ class Viewport3D(QOpenGLWidget):
                     v0 = v[f[:, 0]]
                     v1 = v[f[:, 1]]
                     v2 = v[f[:, 2]]
-                    centroids = ((v0 + v1 + v2) / 3.0).astype(np.float32, copy=False)
+                    centroids = np.asarray((v0 + v1 + v2) / 3.0, dtype=np.float64)
                     try:
                         from scipy import spatial as _spatial
 
@@ -14294,11 +14495,7 @@ class Viewport3D(QOpenGLWidget):
         
         # 硫붿돩 濡쒖뺄 醫뚰몴濡?蹂??(T/R/S ?????
         try:
-            local_to_world_matrix = scene_trs_matrix(
-                getattr(obj, "translation", [0.0, 0.0, 0.0]),
-                getattr(obj, "rotation", [0.0, 0.0, 0.0]),
-                float(getattr(obj, "scale", 1.0)),
-            )
+            local_to_world_matrix = obj.local_to_world_matrix()
             world_to_local_matrix = np.linalg.inv(local_to_world_matrix)
         except Exception:
             local_to_world_matrix = np.eye(4, dtype=np.float64)
@@ -14327,7 +14524,7 @@ class Viewport3D(QOpenGLWidget):
                 v0 = v[f[:, 0]]
                 v1 = v[f[:, 1]]
                 v2 = v[f[:, 2]]
-                centroids = ((v0 + v1 + v2) / 3.0).astype(np.float32, copy=False)
+                centroids = np.asarray((v0 + v1 + v2) / 3.0, dtype=np.float64)
             except Exception:
                 centroids = None
 

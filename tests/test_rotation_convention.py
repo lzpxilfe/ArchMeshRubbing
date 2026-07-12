@@ -10,7 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from app_interactive import MainWindow, SliceComputeThread
 from src.core.mesh_loader import MeshData
 from src.core.profile_exporter import ProfileExporter
-from src.gui.viewport_3d import SceneObject, Viewport3D
+from src.gui.viewport_3d import SceneObject, TrackballCamera, Viewport3D
 
 
 _GOLDEN_TRANSLATION = np.array([10.0, 20.0, 30.0], dtype=np.float64)
@@ -58,6 +58,97 @@ class TestRotationConvention(unittest.TestCase):
             rtol=0.0,
             atol=1e-10,
         )
+
+    def test_camera_applies_only_render_relative_eye_and_target(self):
+        camera = TrackballCamera()
+        camera.center = np.array(
+            [1_000_000_000.0, -2_000_000_000.0, 500_000_000.0],
+            dtype=np.float64,
+        )
+        camera.pan_offset = np.array([0.125, 1.0, -0.5], dtype=np.float64)
+        camera.distance = 10.0
+        camera.azimuth = 0.0
+        camera.elevation = 0.0
+        render_origin = camera.center.copy()
+
+        with patch("src.gui.viewport_3d.gluLookAt") as look_at:
+            camera.apply(render_origin)
+
+        args = look_at.call_args.args
+        np.testing.assert_allclose(args[:3], [10.125, 1.0, -0.5], atol=1e-12)
+        np.testing.assert_allclose(args[3:6], [0.125, 1.0, -0.5], atol=1e-12)
+        np.testing.assert_array_equal(args[6:9], [0.0, 0.0, 1.0])
+
+    def test_scene_object_render_matrix_preserves_pivoted_absolute_world_points(self):
+        base = np.array(
+            [1_000_000_000.0, -1_000_000_000.0, 500_000_000.0],
+            dtype=np.float64,
+        )
+        mesh = MeshData(
+            vertices=base
+            + np.array(
+                [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.125, 0.0]],
+                dtype=np.float64,
+            ),
+            faces=np.array([[0, 1, 2]], dtype=np.int32),
+        )
+        original_vertices = mesh.vertices.copy()
+        obj = SceneObject(mesh, "render-origin golden")
+        obj.translation = np.array([4.0, -3.0, 2.0], dtype=np.float64)
+        obj.rotation = np.array([10.0, 20.0, 30.0], dtype=np.float64)
+        obj.scale = 1.25
+        obj._amr_preview_pivot_mm = mesh.centroid.copy()
+        obj._amr_vbo_origin_local_mm = np.array(
+            [base[0] + 0.5, base[1] + 0.0625, base[2]],
+            dtype=np.float64,
+        )
+        scene_origin = np.asarray(obj.get_world_bounds(), dtype=np.float64).mean(axis=0)
+
+        relative = (
+            mesh.vertices - obj._amr_vbo_origin_local_mm
+        ).astype(np.float32)
+        render_matrix = obj.render_model_matrix(scene_origin)
+        rendered = (
+            relative.astype(np.float64) @ render_matrix[:3, :3].T
+            + render_matrix[:3, 3]
+        )
+        reconstructed = rendered + scene_origin
+        expected = (
+            mesh.vertices @ obj.local_to_world_matrix()[:3, :3].T
+            + obj.local_to_world_matrix()[:3, 3]
+        )
+
+        np.testing.assert_allclose(reconstructed, expected, rtol=0.0, atol=1e-6)
+        np.testing.assert_array_equal(mesh.vertices, original_vertices)
+
+    def test_fit_view_uses_absolute_world_bounds_at_large_survey_offset(self):
+        base = np.array(
+            [1_000_000_000.0, -1_000_000_000.0, 500_000_000.0],
+            dtype=np.float64,
+        )
+        mesh = MeshData(
+            vertices=base
+            + np.array(
+                [[0.0, 0.0, 0.0], [4.0, 0.0, 0.0], [0.0, 2.0, 1.0]],
+                dtype=np.float64,
+            ),
+            faces=np.array([[0, 1, 2]], dtype=np.int32),
+        )
+        obj = SceneObject(mesh, "large-coordinate fit")
+        camera = TrackballCamera()
+        viewport_like = SimpleNamespace(
+            selected_obj=obj,
+            camera=camera,
+            update=Mock(),
+        )
+
+        Viewport3D.fit_view_to_selected_object(viewport_like)
+
+        bounds = np.asarray(obj.get_world_bounds(), dtype=np.float64)
+        np.testing.assert_array_equal(camera.center, bounds.mean(axis=0))
+        np.testing.assert_array_equal(camera.pan_offset, np.zeros(3))
+        self.assertEqual(camera.distance, 8.0)
+        viewport_like.update.assert_called_once_with()
 
     def test_main_window_world_mesh_builder_matches_fixed_trs_golden(self):
         source = self._golden_point_mesh()
@@ -170,6 +261,7 @@ class TestRotationConvention(unittest.TestCase):
             rtol=0.0,
             atol=1e-6,
         )
+        self.assertEqual(obj.mesh.vertices.dtype, np.dtype(np.float64))
         np.testing.assert_array_equal(obj.translation, [0.0, 0.0, 0.0])
         np.testing.assert_array_equal(obj.rotation, [0.0, 0.0, 0.0])
         self.assertEqual(obj.scale, 1.0)
