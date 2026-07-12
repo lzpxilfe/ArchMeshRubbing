@@ -31,6 +31,8 @@
     "src/core/artifact_rubbing_record.py",
     "src/core/artifact_rubbing_export.py",
     "src/core/canonical_png.py",
+    "src/gui/opengl_context.py",
+    "src/gui/opengl_driver_smoke.py",
     "src/gui/render_coordinates.py",
     "tests/test_project_file.py",
     "tests/test_build_info.py",
@@ -58,7 +60,8 @@
     "tests/test_canonical_png.py",
     "tests/test_vector_schemas.py",
     "tests/test_rubbing_schemas.py",
-    "tests/test_render_coordinates.py"
+    "tests/test_render_coordinates.py",
+    "tests/test_opengl_driver_smoke.py"
   ],
   "exclude": [
     "**/__pycache__",

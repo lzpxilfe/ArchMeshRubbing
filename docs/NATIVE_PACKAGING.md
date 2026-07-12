@@ -44,9 +44,19 @@ Windows에서는 활성화 명령만 `.venv\Scripts\activate`로 바꾼다. 기�
 9. canonical Cutline golden
 10. canonical Digital Rubbing golden
 
-Offscreen에서 `QOpenGLWidget`을 생성하는 검사는 module/plugin 누락을 잡지만 실제 GPU context와 frame 정확성을 증명하지 않는다. Xvfb+Mesa 또는 실제 데스크톱 세션에서의 GL context/render smoke가 별도 릴리스 게이트다.
+Offscreen에서 `QOpenGLWidget`을 생성하는 검사는 module/plugin 누락을 잡지만 실제 GPU context와 frame 정확성을 증명하지 않는다. Source checkout에는 native QPA에서 실제 `Viewport3D`의 context/FBO/VBO/pixel/depth/pick을 실행하는 `src.gui.opengl_driver_smoke`가 추가됐고, Linux CI는 Xvfb+xcb+Mesa llvmpipe를 별도 차단 job으로 구성한다. 이 검사는 아직 frozen executable self-test나 대표 하드웨어 GPU 인증이 아니다.
 
-2026-07-12 로컬 증거 `native-self-test-local-smoke-8bd26e3a4733-darwin-3.json`은 Python 3.12.13, macOS arm64에서 10/10 통과했다. 이 unsigned build manifest는 `source_tree=dirty`를 명시하며 Windows, Linux, Intel Mac, universal2 또는 공개 배포 준비를 증명하지 않는다.
+앱과 driver smoke는 QApplication 생성 전에 같은 OpenGL 2.1 compatibility·24-bit depth surface format을 요청한다. macOS 로컬 실행 예시는 다음과 같다. report는 기존 파일을 덮어쓰지 않으므로 존재하지 않는 새 경로를 사용한다.
+
+```bash
+python -m src.gui.opengl_driver_smoke \
+  --qt-platform cocoa \
+  --report build/opengl-driver-smoke.json
+```
+
+2026-07-12 Python 3.12.13/macOS arm64 Apple M4의 developer working tree에서 61개 실제 GL 조건이 통과했다. report는 commit/tree 상태·runtime lock·dependency version·UTC 시각을 포함한다. 원격 Linux job이 실행되기 전에는 llvmpipe 통과로 표현하지 않는다.
+
+2026-07-12 로컬 증거 `native-self-test-local-smoke-898a8bfc144f-darwin.json`은 code commit `898a8bfc144f`의 clean source tree, Python 3.12.13, macOS arm64에서 10/10 통과했다. 이 unsigned build는 Windows, Linux, Intel Mac, universal2 또는 공개 배포 준비를 증명하지 않는다.
 
 ## 3-OS CI
 
@@ -59,7 +69,9 @@ Offscreen에서 `QOpenGLWidget`을 생성하는 검사는 module/plugin 누락�
 - OS별 frozen executable의 file-based self-test
 - report의 전체 check 성공 확인
 
-워크플로우에는 artifact upload나 release 단계가 없다. 원격 workflow가 실제로 성공하기 전에는 3개 OS가 검증됐다고 표현하지 않는다.
+`package-smoke.yml`에는 frozen executable artifact upload나 release 단계가 없다. 원격 workflow가 실제로 성공하기 전에는 3개 OS가 검증됐다고 표현하지 않는다.
+
+Source CI의 별도 `opengl-driver-smoke`는 Ubuntu 24.04 + Xvfb + Mesa llvmpipe에서 actual-GL 경로를 실행한다. `package-smoke.yml`의 frozen self-test는 계속 offscreen이므로 두 결과를 합쳐 “세 OS frozen GPU 검증”으로 표현해서는 안 된다. macOS·Windows native QPA와 frozen executable용 actual-GL 명령은 플랫폼별 runner 안정성과 Windows Qt/PyOpenGL DLL 경계를 확인한 뒤 추가한다.
 
 ## 공개 배포 차단 게이트
 
@@ -80,7 +92,7 @@ Offscreen에서 `QOpenGLWidget`을 생성하는 검사는 module/plugin 누락�
 - Windows Authenticode와 macOS Developer ID/notarization
 - 실제 포함 파일 기준 SBOM과 제3자 NOTICE/license bundle
 - OS·architecture별 설치/제거/파일 연결 smoke
-- 실제 OpenGL context와 대표 GPU/driver smoke
+- Windows·macOS·Linux frozen executable의 실제 OpenGL context/render smoke와 대표 GPU/driver pilot
 - large mesh, low-memory, non-ASCII path, offline machine pilot
 - clean source tree 또는 source archive digest를 포함하는 build provenance
 - 공개 산출물 하나를 선택하는 패키징 규칙과 checksum/signature

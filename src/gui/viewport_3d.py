@@ -1955,6 +1955,10 @@ class Viewport3D(QOpenGLWidget):
     
     def __init__(self, parent=None):
         super().__init__(parent)
+        # Depth picking happens after paintGL returns.  Qt's default
+        # NoPartialUpdate policy may invalidate color/depth attachments after
+        # composition, so preserve the widget FBO between frames explicitly.
+        self.setUpdateBehavior(QOpenGLWidget.UpdateBehavior.PartialUpdate)
         
         # Camera
         self.camera = TrackballCamera()

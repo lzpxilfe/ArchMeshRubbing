@@ -16766,6 +16766,12 @@ def main():
 
         sys.excepthook = _excepthook
 
+        # Viewport3D uses the OpenGL 2.1 fixed-function compatibility API.
+        # Qt must receive that contract before QApplication creates any native
+        # graphics resources.
+        from src.gui.opengl_context import install_compatibility_surface_format
+
+        install_compatibility_surface_format()
         app = QApplication(sys.argv)
         app.setStyle('Fusion')
         

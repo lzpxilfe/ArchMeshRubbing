@@ -464,7 +464,7 @@ v1 import는 입력 파일을 수정하지 않는 순수·결정적·멱등 변�
 - legacy `legacy_ui_state`에서 `artifact_document`로 단위·geometry·Align을 추정하지 않는 보존적 migration
 - 여섯 개의 독립 Outline record를 원자적으로 계산·commit하고 한 bundle로 배포하는 multi-view package
 - 실제 GPU driver frame의 scene-swap 원자성 및 시각적 동일성
-- 실제 GPU driver에서 검증한 `>= 1e9 mm` 장면의 millimeter 이하 visual/depth-picking 정밀도
+- Windows·Linux·macOS와 frozen executable 전체에서 검증한 `>= 1e9 mm` 장면의 millimeter 이하 visual/depth-picking 정밀도
 - autosave와 crash recovery discovery
 - 전자서명 또는 provenance authority 인증
 
@@ -478,7 +478,7 @@ v1 import는 입력 파일을 수정하지 않는 순수·결정적·멱등 변�
 
 native vector preview·ground/grid와 cutline·ROI·pick·gizmo 등 활성 world overlay는 world point에서 `R`을 CPU float64로 빼고 제출한다. local marker/HUD primitive는 각 local/pixel 좌표를 유지한다. CPU face centroid와 face 계산은 absolute float64를 유지하며, 고해상도 capture가 반환하는 modelview는 기존 absolute-world 소비자와 호환되도록 복원한다.
 
-depth pick·screen projection·ray·Ctrl drag은 해당 depth buffer를 그린 modelview·projection·viewport·`R`을 `RenderFrameSnapshot`으로 고정한다. 같은 paint depth pass의 visibility·selected object·ROI bounds/caps·X-ray·solid-shell·all-object TRS·VBO geometry revision을 별도 transient depth signature로 원자적으로 함께 게시한다. resize·scene swap·projection generation 변경·object transform 뒤와 state 변경 후 repaint 전의 live snapshot은 폐기하고, 드래그는 press-time snapshot을 release/reset까지 유지한다. 선택 객체가 바뀌면 worker·gizmo/ROI gesture·미완성 surface polygon을 종료한다. 이는 좌표·depth authority 계약이지 실제 GPU depth buffer 정밀도의 증명은 아니다.
+depth pick·screen projection·ray·Ctrl drag은 해당 depth buffer를 그린 modelview·projection·viewport·`R`을 `RenderFrameSnapshot`으로 고정한다. 같은 paint depth pass의 visibility·selected object·ROI bounds/caps·X-ray·solid-shell·all-object TRS·VBO geometry revision을 별도 transient depth signature로 원자적으로 함께 게시한다. resize·scene swap·projection generation 변경·object transform 뒤와 state 변경 후 repaint 전의 live snapshot은 폐기하고, 드래그는 press-time snapshot을 release/reset까지 유지한다. 선택 객체가 바뀌면 worker·gizmo/ROI gesture·미완성 surface polygon을 종료한다. 이 계약만으로 실제 GPU depth 정밀도가 증명되는 것은 아니며, 별도 native-process smoke가 실제 widget FBO readback과 pick을 검증한다.
 
 두 transient origin `O`와 `R`은 다음 권위 데이터에 들어가면 안 된다.
 
@@ -487,7 +487,7 @@ depth pick·screen projection·ray·Ctrl drag은 해당 depth buffer를 그린 m
 - 저장된 record·QC·selection
 - SVG/3D export의 world 좌표
 
-현재 게이트는 pure coordinate algebra, mocked relative VBO/overlay submission, frame-bound project/unproject/depth-pick 수명주기, absolute float64 face 계산, source/scene materialization 불변과 document canonical hash 비직렬화를 검증한다. 실제 OpenGL driver frame과 depth-buffer 기반 pick reconstruction 정밀도는 별도 후속 게이트다.
+현재 게이트는 pure coordinate algebra, mocked relative VBO/overlay submission, frame-bound project/unproject/depth-pick 수명주기, absolute float64 face 계산, source/scene materialization 불변과 document canonical hash 비직렬화를 검증한다. 별도 `src.gui.opengl_driver_smoke`는 native QPA의 실제 `Viewport3D` widget FBO에서 `[1e9,-2e9,3e9] mm` 장면, relative VBO, 두 depth component, gap 예상 지점의 background와 overlay 예상 위치의 green pixel, 0.125 mm depth-pick 복원을 원근·정사영으로 검증한다. 로컬 macOS Apple M4 결과는 통과했으며 Linux llvmpipe 원격 결과와 다른 OS·frozen·대표 GPU·compositor presentation은 아직 별도 게이트다.
 
 ### Legacy destructive bake 임시 안전 조건
 

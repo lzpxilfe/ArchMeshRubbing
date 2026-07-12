@@ -15,7 +15,7 @@ python -m pip install -r requirements.txt -r requirements-dev.txt
 
 ## 차단 게이트
 
-Pull request에서 다음 세 검사가 모두 통과해야 한다.
+Pull request에서 다음 code-quality 검사와 별도의 actual-OpenGL job이 모두 통과해야 한다.
 
 ```bash
 python -m ruff check .
@@ -25,7 +25,19 @@ python -m pytest -q
 
 - Ruff는 전체 트리를 검사한다.
 - pytest는 pytest 함수와 `unittest.TestCase`를 모두 수집한다. 별도의 `unittest discover`는 하위 호환성 확인용이며 CI의 권위 수집기가 아니다.
-- `pyright-m0.json`은 persistence·source·unit·matrix 경계에 더해 M0-6의 `artifact_document`, `geometry_identity`, `artifact_scene_adapter`, `artifact_session`, core cooperative cancellation, Qt/OpenGL-free `artifact_workbench`·`artifact_workflow_progress`·`artifact_measurements`·`artifact_exports`, Qt/OpenGL-free render-coordinate algebra인 `src/gui/render_coordinates.py`, known-record registry, RFC 8785 canonical JSON, vector record/export, Cutline, fixed-grid Outline/topology, Digital Rubbing record/extractor, canonical GA8 PNG와 offline rubbing export 및 해당 테스트를 포함하는 M0 신뢰 커널 범위다. 독립 프로세스 왕복·offline vector/rubbing package 테스트도 목록에 포함한다. wrapper 명령은 활성 Python interpreter를 Pyright에 명시하므로 Windows·macOS·Linux에서 같은 방식으로 dependency를 해석한다.
+- `pyright-m0.json`은 persistence·source·unit·matrix 경계에 더해 M0-6의 `artifact_document`, `geometry_identity`, `artifact_scene_adapter`, `artifact_session`, core cooperative cancellation, Qt/OpenGL-free `artifact_workbench`·`artifact_workflow_progress`·`artifact_measurements`·`artifact_exports`, `src/gui/opengl_context.py`의 명시적 surface 계약, actual-driver CLI와 actual context를 열지 않는 helper/support tests, Qt/OpenGL-free render-coordinate algebra인 `src/gui/render_coordinates.py`, known-record registry, RFC 8785 canonical JSON, vector record/export, Cutline, fixed-grid Outline/topology, Digital Rubbing record/extractor, canonical GA8 PNG와 offline rubbing export 및 해당 테스트를 포함하는 M0 신뢰 커널 범위다. 독립 프로세스 왕복·offline vector/rubbing package 테스트도 목록에 포함한다. wrapper 명령은 활성 Python interpreter를 Pyright에 명시하므로 Windows·macOS·Linux에서 같은 방식으로 dependency를 해석한다.
+
+`opengl-driver-smoke` job은 일반 pytest와 분리한다. Ubuntu 24.04에서 24-bit Xvfb 화면, native `xcb`, Mesa llvmpipe를 사용하고 `continue-on-error`나 context 실패 skip 없이 다음 명령에 해당하는 검사를 실행한다.
+
+```bash
+xvfb-run -a \
+  -s "-screen 0 1280x1024x24 +extension GLX +render -noreset" \
+  python -m src.gui.opengl_driver_smoke \
+  --qt-platform xcb \
+  --report build/opengl-driver-smoke.json
+```
+
+이 job은 실제 OpenGL context/FBO/VBO/pixel/depth readback을 사용하지만 Mesa software rasterizer 검증이다. 대표 하드웨어 GPU 인증이라고 표현하지 않는다. 새 job의 원격 성공 결과를 확인하기 전에는 구성 완료와 통과를 구분한다.
 
 M0-6 native artifact 신뢰 경계를 빠르게 재검증할 때는 다음 focused suite를 사용한다. 이 명령은 full pytest를 대체하지 않는다.
 
@@ -59,6 +71,7 @@ python -m pytest -q \
   tests/test_rubbing_schemas.py \
   tests/test_render_coordinates.py \
   tests/test_viewport_render_origin.py \
+  tests/test_opengl_driver_smoke.py \
   tests/test_rotation_convention.py \
   tests/test_app_gui_launcher.py \
   tests/test_gui_smoke.py
@@ -116,10 +129,11 @@ python -m pytest -q \
 
 | 검사 | 결과 |
 |---|---:|
-| Python 3.12.13 `python -m pytest -q` | 558 passed, 113 subtests passed |
-| 3-OS persistence-smoke 명시 suite의 로컬 실행 | 487 passed, 113 subtests passed |
+| Python 3.12.13 `python -m pytest -q` | 566 passed, 113 subtests passed |
+| 3-OS persistence-smoke 명시 suite의 로컬 실행 | 495 passed, 113 subtests passed |
 | `python -m ruff check .` | passed |
 | M0 Pyright wrapper command | 0 errors |
+| Python 3.12.13 macOS arm64 actual OpenGL driver smoke | 61/61 passed on developer working tree, Apple M4, perspective + top orthographic |
 | ArtifactDocument + vector/rubbing payload/export Draft 2020-12 schemas + golden | passed |
 | Python 3.12.13 macOS arm64 frozen self-test | 10/10 passed at code commit `898a8bfc144f` (unsigned, `source_tree=clean`, `native-self-test-local-smoke-898a8bfc144f-darwin.json`) |
 
@@ -127,7 +141,7 @@ python -m pytest -q \
 
 전체 트리 Pyright는 아직 통과하지 않는다. CI에서는 이 결과를 `continue-on-error`로 보고하여 부채가 보이게 하되, M0 범위를 넘는 기존 오류 때문에 모든 변경을 막지는 않는다. 신뢰 커널 전환이 진행될 때마다 차단 범위를 넓힌다. 독립 프로세스 테스트의 worker program은 Python 문자열이므로 Pyright가 문자열 내부를 분석하지는 않지만, 차단 pytest가 두 문자열을 각각 새 interpreter에서 실제 실행한다.
 
-Windows·macOS·Linux persistence matrix에서는 프로젝트 저장, source/geometry identity, ArtifactDocument·scene adapter·session·application workbench와 record-derived workflow progress, ticketed Open과 explicit Align gate, RFC 8785/vector record/export/Cutline/Outline/topology/schema, Digital Rubbing record/extractor/canonical PNG/export/schema, 독립 프로세스 source 및 relocated vector/rubbing-package 왕복, render-coordinate algebra·relative VBO/native preview smoke, matrix golden, GUI 런처, MainWindow 생성, native source-of-truth binding, native Cutline/Outline/Rubbing command, 3/6/6 순차 gate와 reopen·Align 진행도 복원, session/version/epoch 및 projection-generation late-result 방어, legacy export 우회와 unported operation/save fail-closed, source mismatch ordering, scene-swap rollback과 fatal authority fallback 스모크를 실행하도록 설정한다. Linux quality job은 별도로 전체 테스트를 실행한다. CI는 job 환경에서, GUI 스모크 테스트는 모듈 로딩 시 `QT_QPA_PLATFORM=offscreen`을 설정한다. 이 스모크는 CPU/document/scene transaction과 widget wiring을 검증하지만 GPU/OpenGL 프레임의 실제 렌더링이나 시각적 정확성은 보장하지 않는다. 원격 matrix가 실제로 통과하기 전에는 3개 OS 완료로 표현하지 않는다.
+Windows·macOS·Linux persistence matrix에서는 프로젝트 저장, source/geometry identity, ArtifactDocument·scene adapter·session·application workbench와 record-derived workflow progress, ticketed Open과 explicit Align gate, RFC 8785/vector record/export/Cutline/Outline/topology/schema, Digital Rubbing record/extractor/canonical PNG/export/schema, 독립 프로세스 source 및 relocated vector/rubbing-package 왕복, render-coordinate algebra·relative VBO/native preview smoke, matrix golden, GUI 런처, MainWindow 생성, native source-of-truth binding, native Cutline/Outline/Rubbing command, 3/6/6 순차 gate와 reopen·Align 진행도 복원, session/version/epoch 및 projection-generation late-result 방어, legacy export 우회와 unported operation/save fail-closed, source mismatch ordering, scene-swap rollback과 fatal authority fallback 스모크를 실행하도록 설정한다. Linux quality job은 별도로 전체 테스트를 실행한다. 이 matrix의 GUI 스모크는 `QT_QPA_PLATFORM=offscreen`을 사용하므로 CPU/document/scene transaction과 widget wiring만 검증하고 실제 OpenGL frame을 증명하지 않는다. 실제 source viewport frame은 별도 Linux Xvfb+xcb+llvmpipe job이 담당한다. 원격 matrix와 새 GL job이 실제로 통과하기 전에는 완료로 표현하지 않는다.
 
 별도 `package-smoke.yml`은 세 OS에서 exact Python 3.12 build lock, immutable build manifest, PyInstaller spec과 frozen executable의 file-report self-test를 실행하도록 구성한다. 이 검사는 실제 `MainWindow`/QOpenGLWidget/OpenGL import, 6개 mesh parser, PNG codec과 canonical document/vector/rubbing을 포함하지만 offscreen 실제 GL context/render는 보장하지 않는다. 라이선스 게이트가 해결되기 전에는 artifact upload와 release 단계를 두지 않는다. code commit `898a8bfc144f`의 clean source tree에서 로컬 macOS arm64 10/10만 확인됐으며 원격 3-OS 결과는 아직 없다.
 
@@ -137,11 +151,19 @@ Native GUI의 한-artifact Open/Align commit/save/load는 `ArtifactWorkbench.sna
 
 Native measurement 취소는 `QThread.terminate()`를 사용하지 않는다. 사용자 요청은 먼저 record 게시 권위를 회수하고, Cutline face/path, Outline polygon/union/topology, Digital Rubbing face/row/integral/relief의 다음 안전 경계에서 worker가 고유 core 취소 예외로 종료한다. 현재 실행 중인 단일 NumPy·GEOS 호출, worker 시작 전 Rubbing resource estimate와 scene materialize/source 재검증은 선점할 수 없으므로 “즉시 종료”로 표현하지 않는다. 앱 종료 중 실행 worker를 취소하고 종료 완료를 기다리는 수명주기와 preflight의 worker 이관은 후속 차단 항목이다.
 
-### 대좌표 render-origin: 좌표 경계는 차단, 실제 GPU 프레임은 비차단
+### 대좌표 render-origin: 실제 source driver 게이트 추가
 
 현재 차단 suite는 absolute float64 world-mm document/mesh 불변, `>= 1e9 mm` offset의 mm/sub-mm feature, CPU float64 subtraction 뒤 객체별 relative float32 VBO payload, 안정적인 scene origin에 대한 camera/model affine rebasing, 활성 world overlay의 relative 제출, absolute float64 CPU face 계산과 render origin 비직렬화를 검증한다. 또한 exact modelview·projection·viewport·scene origin과 depth-affecting scene signature를 같이 게시한 frame authority의 project/unproject/ray, depth pick·Ctrl drag 수명주기, 변환·resize·scene rollback·repaint 전 상태 변경 후 stale frame 거부를 검증한다. pure coordinate helper와 해당 테스트는 M0 Pyright에, mocked OpenGL upload·overlay·interaction 테스트는 명시 3-OS persistence suite에 포함한다.
 
-이 증거는 mocked OpenGL과 수학 계약에 대한 것이다. 실제 GPU driver가 그린 픽셀과 depth buffer를 사용한 `>= 1e9 mm` 장면의 millimeter/sub-millimeter visual·picking 정밀도를 증명하지 않는다. 실제 OpenGL context의 대좌표 visual/depth-picking smoke는 아직 비차단 항목이다. render origin은 metadata·Align·record·QC·hash·export 권위 값에 저장하지 않는다.
+`src/gui/opengl_driver_smoke.py`는 OpenGL 2.1 compatibility·24-bit depth를 QApplication 전에 요청하고 native QPA에서 `WA_DontShowOnScreen`인 실제 `Viewport3D` widget FBO를 렌더·readback한다. compositor의 최종 on-screen presentation을 검증하는 테스트는 아니다. `[1e9, -2e9, 3e9] mm` 기준점에 0.25 mm 간격으로 분리된 두 판과 0.125 mm 높이차, 0.25 mm native vector overlay를 만든다. 실제 production `add_mesh_object → update_vbo → paintGL → RenderFrameSnapshot → glReadPixels → pick_point_on_mesh_info`를 통과하며 다음을 fail closed로 확인한다.
+
+- GL vendor/renderer/version, current widget context, depth-preserving `PartialUpdate`, complete default FBO, depth bits
+- 별도 Qt FBO의 정확한 RGBA/depth clear-readback
+- driver VBO object와 작은 relative float32 payload; 원본 absolute float64 vertex 불변
+- 원근/상면 정사영 각각의 두 depth component, plate pixel, 빈 gap, relative overlay pixel
+- 보정 검색을 끈 실제 depth pick, 같은 frame serial, 해석적 ray-plane oracle와 0.125 mm 높이차
+
+2026-07-12 로컬 Python 3.12.13/macOS arm64 Apple M4(`OpenGL 2.1 Metal - 90.5`)의 developer working tree에서는 61개 조건이 통과했다. 원근 pick 높이차는 `0.124783 mm`, 최대 ray-plane 오차는 `0.001213 mm`; 정사영 높이차는 `0.124998 mm`, 최대 오차는 `0.00000191 mm`였다. JSON은 tested commit/tree 상태, runtime-lock SHA-256, dependency version과 UTC 시각을 포함하고, CI에서 생성된 성공·실패 report는 14일 artifact로 보존하도록 구성한다. 이 값은 한 로컬 장치의 증거이며 Linux llvmpipe 원격 결과, Windows, Intel Mac, frozen executable, 대표 GPU/driver를 대신하지 않는다. render origin은 metadata·Align·record·QC·hash·export 권위 값에 저장하지 않는다.
 
 ## 게이트 변경 원칙
 
