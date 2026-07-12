@@ -48,6 +48,7 @@ Align 확정 뒤에도 모든 기능이 한꺼번에 열리지는 않습니다. 
 ### 0. 원본 보존형 ArtifactDocument + 검증 Cutline/Outline/Digital Rubbing
 
 - 원본 file SHA-256, decode geometry SHA-256, 확인된 단위·축, immutable Align revision을 분리해 저장
+- 새 문서는 원본의 절대 경로를 canonical manifest에 넣지 않고 `external:<original_name>` locator만 저장함. 실제 OS 경로는 현재 session에만 유지하므로 같은 원본·recipe의 문서와 SVG/PNG hash가 drive/root 위치에 따라 달라지지 않음
 - Open → Align commit → Cutline record가 항상 source-space 원본에서 canonical millimeter로 다시 계산됨
 - Top/Front/Right 단면을 명시적 right-handed plane frame으로 기록
 - 화면용 단면 tape나 world XY 투영을 SVG 원본으로 사용하지 않음
@@ -71,7 +72,7 @@ Align 확정 뒤에도 모든 기능이 한꺼번에 열리지는 않습니다. 
 - export 중 같은 Align에 무관한 record가 추가돼도 안전하게 게시하지만 Align/Open 완료로 권위가 바뀌면 destination을 만들지 않고 자신이 소유한 staging만 정리함
 - scene publication의 rollback·scene 복원·finalize 자체가 불확실하면 fatal authority 상태로 전환해 검증된 Open 전까지 저장·실측·내보내기를 차단
 
-Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 `SurfaceVisualizer`/flatten 기반 PNG·SVG를 측정 산출물로 내보내는 우회 경로를 차단합니다. 검증된 Cutline/Outline record는 `.amr-vector`, Digital Rubbing record는 `.amr-rubbing`으로 내보냅니다. 로컬 차단 테스트와 3-OS CI matrix 구성은 완료됐지만 원격 Windows·macOS·Linux matrix 통과 및 설치형 바이너리 배포는 아직 확인 전입니다.
+Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 `SurfaceVisualizer`/flatten 기반 PNG·SVG를 측정 산출물로 내보내는 우회 경로를 차단합니다. 검증된 Cutline/Outline record는 `.amr-vector`, Digital Rubbing record는 `.amr-rubbing`으로 내보냅니다. Source checkout의 Python 3.12 품질 게이트와 Windows·macOS·Linux persistence matrix는 code commit `166103dcf0ea`의 [GitHub Actions run 29182584810](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29182584810)에서 모두 통과했습니다. 설치형/frozen 바이너리 배포 검증은 아직 별도 과제입니다.
 
 ### 1. 기와형 메쉬용 기본 추천 펼침
 
@@ -139,7 +140,7 @@ Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 `Surfac
 - [`src/application/artifact_exports.py`](src/application/artifact_exports.py): vector/rubbing export의 exact capability, worker staging, 안전한 정리와 final-authority publication
 - Open/new import/project reopen과 Align commit/parent activation은 ticket과 compare-and-swap 검증을 거쳐 `prepare → activate → finalize`되며, scene swap 실패는 이전 authority로 rollback
 - Cutline/Outline/Digital Rubbing은 GUI에서 파라미터만 캡처하고 단일 worker에서 계산합니다. worker는 문서를 변경하지 않으며, 완료 결과는 예약된 record ID와 일회성 result capability를 검증한 뒤 현재의 같은 Align session에 rebase합니다. record append publication은 GPU 장면을 교체하지 않습니다. 재개방한 기록은 READY + FRESH 목록에서 명시적으로 선택하고, 일시적인 Open/scene 충돌로 게시하지 못한 측정 결과는 새 ID를 만들지 않고 재시도합니다.
-- vector/rubbing export는 비싼 생성·탁본 재계산을 worker에서 staging까지만 수행합니다. 최종 no-replace rename은 현재 권위를 다시 검증한 뒤 실행하며, 목적지 경합에서는 기존 승자를 보존합니다. rename 뒤 directory `fsync`에 실제 I/O 오류가 나면 저장 완료와 crash durability 미확정을 구분해 경고합니다.
+- vector/rubbing export는 비싼 생성·탁본 재계산을 worker에서 staging까지만 수행합니다. 최종 no-replace rename은 현재 권위를 다시 검증한 뒤 실행하며, 목적지 경합에서는 기존 승자를 보존합니다. rename 뒤 directory `fsync`가 실패하거나 Windows처럼 지원 여부를 확인할 수 없으면 저장 완료와 crash durability 미확정을 구분해 경고합니다.
 
 ### Artifact trust core
 
@@ -161,7 +162,7 @@ Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 `Surfac
 - main mesh VBO, camera/model transform, native vector preview, ground/grid와 활성 cutline·ROI·pick·gizmo 등 world overlay를 render-relative 제출로 이식
 - 한 frame의 modelview·projection·viewport·scene origin을 묶은 `RenderFrameSnapshot`과 그 프레임의 visibility·ROI·X-ray·object TRS/geometry depth signature로 depth unprojection, screen projection, ray, Ctrl drag의 좌표·픽셀 계약을 일치시킴
 - 라쏘/가시 면 worker 결과는 시작 객체·mesh·TRS·depth authority와 완료 시점을 다시 비교하며, magnetic depth-edge cache는 잡힌 frame authority와 함께만 재사용. 객체 전환 시 미완성 gesture/polygon도 종료
-- mocked OpenGL·pure float64 게이트와 별도로, 로컬 macOS Apple M4의 실제 OpenGL context에서 `>= 1e9 mm` 장면의 0.25 mm gap·0.125 mm 높이차를 원근/정사영 모두 검증함. Linux CI는 Xvfb+xcb+Mesa llvmpipe의 실제 GL 경로를 차단 job으로 구성했지만 원격 성공 결과 전에는 통과로 표현하지 않음
+- mocked OpenGL·pure float64 게이트와 별도로, 로컬 macOS Apple M4와 Linux CI의 Xvfb+xcb+Mesa llvmpipe 실제 OpenGL context에서 `>= 1e9 mm` 장면의 0.25 mm gap·0.125 mm 높이차를 원근/정사영 모두 검증함. Linux actual-GL 61/61 결과는 commit `166103dcf0ea`의 run `29182584810`에 결합됨
 
 기존 기와 기록면 기능도 flatten 코어를 책임별로 분리해 유지합니다.
 
@@ -277,7 +278,7 @@ python -m pip install -r requirements/build-py312.lock
 python tools/build_native.py
 ```
 
-이 명령은 기존 산출물을 기본적으로 덮어쓰지 않고, 빌드 뒤 실제 frozen executable의 offline self-test를 실행합니다. 현재 공개 바이너리는 만들지 않습니다. 저장소의 GPLv2-only 표기와 bundled PyQt6의 GPL-3.0-only 라이선스 결정을 먼저 해결해야 하며, 서명·notarization·실제 3-OS 원격 결과도 남아 있습니다. 자세한 절차와 차단 게이트는 [docs/NATIVE_PACKAGING.md](docs/NATIVE_PACKAGING.md)를 참고하세요.
+이 명령은 기존 산출물을 기본적으로 덮어쓰지 않고, 빌드 뒤 실제 frozen executable의 offline self-test를 실행합니다. 현재 공개 바이너리는 만들지 않습니다. 저장소의 GPLv2-only 표기와 bundled PyQt6의 GPL-3.0-only 라이선스 결정을 먼저 해결해야 하며, 서명·notarization·frozen 3-OS 원격 결과도 남아 있습니다. 자세한 절차와 차단 게이트는 [docs/NATIVE_PACKAGING.md](docs/NATIVE_PACKAGING.md)를 참고하세요.
 
 ---
 
@@ -297,6 +298,7 @@ python main.py --project mesh.obj planview.png
 
 `--flatten`, `--review`는 빠른 전체 경로용입니다.
 상면/하면 기록면을 유도형으로 준비하려면 GUI 사용을 권장합니다.
+합성 기와 생성·평가·review sheet 흐름은 [합성 벤치마크 가이드](docs/SYNTHETIC_BENCHMARKS.md)를 참고하세요.
 
 ---
 
@@ -373,7 +375,8 @@ python main.py --project mesh.obj planview.png
 - Cutline 면·경로, Outline fixed-grid/union/topology, Digital Rubbing raster/relief 내부의 안전 경계까지 사용자 cooperative cancellation 연결
 - 대좌표 render-origin 이식: relative VBO·camera/model rebasing·world overlay 제출과 frame-bound depth picking/drag 계약 구현
 - 실제 OpenGL driver smoke 구현: code commit `f25b424d6936`의 clean source tree, Python 3.12.13/macOS Apple M4에서 61개 context/FBO/VBO/pixel/depth/pick 조건 통과, 0.125 mm 높이차를 원근 `0.124783 mm`, 정사영 `0.124998 mm`로 복원. report는 commit/tree 상태·runtime lock·dependency version·UTC 시각을 기록함
-- 다음 단계: 새 Linux llvmpipe 차단 job의 원격 결과 확인, Windows·macOS CI/frozen 실제 context 확대, 종료 중 worker 정리와 동기 preflight 분리, 라이선스 결정, 대표 GPU·대용량 실제 유물 pilot 진행
+- source checkout CI 검증: commit `166103dcf0ea`의 run `29182584810`에서 quality `572 passed`, macOS/Ubuntu persistence 각 `501 passed`, Windows persistence `498 passed + 3 platform-specific skips`, Linux llvmpipe actual-GL `61/61` 통과
+- 다음 단계: Windows·macOS native QPA와 3-OS frozen actual-GL 확대, 종료 중 worker 정리와 동기 preflight 분리, 라이선스 결정, 대표 GPU·대용량 실제 유물 pilot 진행
 
 ---
 

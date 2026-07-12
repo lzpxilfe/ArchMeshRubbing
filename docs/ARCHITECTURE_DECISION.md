@@ -16,7 +16,7 @@ ArchMeshRubbing을 전면 재작성하지 않는다. 검증 가능한 headless �
 
 - `app_interactive.py`는 약 16,800줄, `src/gui/viewport_3d.py`는 약 15,600줄이며 각각 수백 개 메서드와 많은 광범위 예외 처리를 포함한다. UI, 상태, 렌더링, 작업 실행, 저장 정책이 서로 강하게 얽혀 있어 이 두 파일을 계속 확장하는 비용은 높다.
 - 반면 source identity, 명시적 단위, immutable Align revision, canonical JSON/PNG, Cutline, Outline, Digital Rubbing, offline export는 GUI와 분리된 코어와 버전 스키마를 가진다.
-- Python 3.12 기준 전체 `558 passed, 113 subtests passed`, M0 Pyright `0 errors`, Ruff 통과가 현재 계약을 보호한다.
+- source commit `166103dcf0ea`의 Python 3.12 CI에서 전체 `572 passed, 117 subtests passed`, M0 Pyright `0 errors`, Ruff 통과가 현재 계약을 보호한다.
 - Python 3.12 macOS arm64 unsigned frozen 앱은 code commit `898a8bfc144f`의 clean source tree에서 실제 GUI import/생성, 6개 mesh parser, PNG codec과 canonical document/vector/rubbing을 포함한 offline self-test 10개를 모두 통과했다. 이 결과는 로컬 개발 스모크이며 서명·설치·원격 3-OS 공개 배포 증거가 아니다.
 
 전면 재작성은 이 검증 자산과 오래 축적된 기와 처리 알고리즘까지 동시에 다시 만들게 한다. 반대로 기존 GUI에 기능을 계속 덧붙이면 mutable scene 상태와 권위 기록이 다시 섞인다. 따라서 코어는 보존하고 셸은 교체하는 경계가 가장 안전하다.
@@ -44,7 +44,7 @@ Legacy 기능은 즉시 삭제하지 않는다. 연구 검토용이면 명확히
 4. `Workflow panels`: command를 호출하고 record 상태를 표시하되 계산·저장을 직접 수행하지 않는다.
 5. `Persistence/export`: GUI와 독립된 코어 API만 사용한다.
 
-Viewport adapter의 대좌표 표시 경계는 권위 geometry를 recenter하지 않고 두 transient origin으로 분리한다. 객체별 `O`는 relative float32 VBO encoding에만, scene별 `R`은 camera/model render frame에만 사용한다. 두 값은 document/session/record/export authority 밖에 있으며 same-render record append에서도 scene/VBO와 함께 유지된다. main mesh·native vector preview·cutline·ROI·pick·gizmo 등 활성 world overlay는 CPU float64에서 `R`을 뺀 뒤 GPU에 제출한다. depth pick·screen projection·Ctrl drag은 해당 depth frame의 modelview·projection·viewport·`R`과 visibility·ROI·X-ray·object TRS/geometry revision을 read-only frame authority로 함께 게시한다. 상태가 먼저 바뀌고 repaint가 뒤따라오는 구간은 stale frame으로 fail closed한다. 실제 `Viewport3D` source path의 survey-scale VBO/pixel/depth/pick은 로컬 macOS native driver에서 검증했고 Linux Xvfb+Mesa 차단 job을 구성했다. 다만 원격 Linux 결과, Windows·macOS/frozen matrix, 대표 GPU와 scene-swap 프레임 원자성은 남아 있으므로 renderer 교체가 완료된 것으로 판정하지 않는다.
+Viewport adapter의 대좌표 표시 경계는 권위 geometry를 recenter하지 않고 두 transient origin으로 분리한다. 객체별 `O`는 relative float32 VBO encoding에만, scene별 `R`은 camera/model render frame에만 사용한다. 두 값은 document/session/record/export authority 밖에 있으며 same-render record append에서도 scene/VBO와 함께 유지된다. main mesh·native vector preview·cutline·ROI·pick·gizmo 등 활성 world overlay는 CPU float64에서 `R`을 뺀 뒤 GPU에 제출한다. depth pick·screen projection·Ctrl drag은 해당 depth frame의 modelview·projection·viewport·`R`과 visibility·ROI·X-ray·object TRS/geometry revision을 read-only frame authority로 함께 게시한다. 상태가 먼저 바뀌고 repaint가 뒤따라오는 구간은 stale frame으로 fail closed한다. 실제 `Viewport3D` source path의 survey-scale VBO/pixel/depth/pick은 로컬 macOS native driver와 source CI의 Linux Xvfb+xcb+Mesa llvmpipe에서 검증했다. Windows·macOS CI native QPA, frozen executable, 대표 GPU와 scene-swap 프레임 원자성은 남아 있으므로 renderer 교체가 완료된 것으로 판정하지 않는다.
 
 GUI 버튼의 초록색 완료 표시는 위젯 내부 boolean이 아니라 `READY + FRESH` record에서 파생해야 한다. Align이 바뀌면 후속 기록을 물리적으로 삭제하기보다 immutable history에 남기고 stale로 판정하여 현재 산출물로 사용하지 못하게 한다. 이 결정은 `src/application/artifact_workflow_progress.py`의 Qt/OpenGL-free view-set 모델과 Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6 GUI gate로 구현했다. 프로젝트 재열기와 이전 Align 재활성화도 별도 UI 상태 없이 같은 record graph에서 진행도를 복원한다.
 

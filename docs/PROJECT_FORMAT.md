@@ -89,10 +89,12 @@ AMR v2 container는 payload 종류와 payload schema를 분리한다.
 
 - 파일 내용 identity는 `sha256 + size_bytes`이며, artifact source binding은 여기에 `identity_scope`까지 같은지 확인한다. 현재 권위 tuple은 `(primary_file_bytes, sha256, size_bytes)`다.
 - `path`, `mtime_ns`, `original_name`, `format`은 탐색·표시용 hint다.
+- 새 ArtifactDocument의 `SourceAsset.asset_ref`는 `external:<original_name>`인 상대 locator다. 현재 세션의 native 절대경로는 `ArtifactSession.resolved_source_path`에만 유지하므로 drive/root가 달라도 같은 source·recipe·revision은 같은 canonical document와 export hash를 만든다. 기존 `external:<absolute-path>` 문서도 계속 읽으며, 상대 locator가 프로젝트 옆에서 해결되지 않으면 source picker로 검증 파일을 다시 지정한다.
 - 경로와 이름이 달라도 SHA-256과 크기가 같으면 `relocated=true`인 verified 결과로 열 수 있다.
 - `parse_format`은 파일명이 바뀐 동일 원본도 처음과 같은 parser로 해석하기 위한 import recipe다. 후보 파일의 suffix와 별도로 보존한다.
 - 같은 크기라도 SHA-256이 다르면 mismatch이며 face ID, cutline, 기록면 데이터 등을 replacement mesh에 적용하지 않는다.
 - hash와 mesh parser는 동일한 열린 file descriptor를 사용한다. 경로를 다시 열어 다른 파일의 geometry에 이전 hash를 붙이지 않는다.
+- Windows의 path `stat`과 descriptor `fstat`은 `ctime` 의미가 다르므로 혼합 비교에서는 device/inode/size/mtime만 비교한다. 열린 descriptor의 전후 비교에서는 change time까지 유지해 같은 크기·mtime의 소비 중 변경을 계속 거부한다.
 - 저장 시 디스크 파일을 다시 hash하지 않는다. import 당시 geometry와 함께 보관한 immutable identity만 직렬화한다.
 
 Artifact payload를 다시 열 때 parser 선택도 검증 대상이다. `GeometryRevision.import_recipe.format`에 최초 parser format을 저장하고, resolved source의 현재 suffix보다 이 값을 우선해 `MeshLoader.load(..., source_format=saved_format)`로 decode한다. loader는 같은 열린 descriptor에서 raw byte fingerprint와 geometry를 얻는다. 이후 `ArtifactSession.bind_loaded_document()`는 다음을 모두 만족할 때만 문서와 mesh를 결합한다.
@@ -142,7 +144,7 @@ ArtifactDocument
 
 | 모델 | 권위 내용 |
 |---|---|
-| `SourceAsset` | raw asset의 SHA-256, 바이트 크기, media type, 원래 이름, `asset_ref`, `role=primary_mesh`, identity 범위 |
+| `SourceAsset` | raw asset의 SHA-256, 바이트 크기, media type, 원래 이름, non-authoritative `asset_ref`, `role=primary_mesh`, identity 범위 |
 | `GeometryRevision` | 결정적 import 결과의 별도 geometry hash·hash scope, source asset ID, import recipe, topology-map reference, QC |
 | `SourceMetadataRevision` | geometry의 단위·축 매핑·handedness와 `source_to_canonical_mm`; parent revision |
 | `AlignRevision` | confirmed metadata 위에 적용할 proper rigid 4×4 행렬, parent revision, recipe, QC |
@@ -395,7 +397,7 @@ DerivedRecord(type=raster.digital_rubbing.v1)
 - depth는 정수 µm tick으로 양자화하고 masked square local-mean integral image에서 raised/incised/bidirectional relief를 계산한다. tone mapping도 정수 규칙을 사용한다.
 - coverage는 binary alpha인 GA8(`grayscale-alpha-8/v1`)이고 구멍/비투영 영역은 alpha 0이다. 화면 배경색은 권위 pixel에 합성하지 않는다.
 - vertex/face/pixel/dimension/reference-radius/triangle-pixel-test 상한을 넘으면 해상도 축소, sampling 또는 다른 알고리즘으로 조용히 전환하지 않고 실패한다.
-- face order·winding·duplicate, hole, large absolute survey offset과 늦은 Align 결과를 차단 테스트로 검증한다. barycentric edge rule은 recipe에 명시하지만, 실제 원격 3-OS golden이 통과하기 전에는 플랫폼 간 exact raster bytes를 완료로 주장하지 않는다.
+- face order·winding·duplicate, hole, large absolute survey offset과 늦은 Align 결과를 차단 테스트로 검증한다. barycentric edge rule은 recipe에 명시하며, source commit `166103dcf0ea`의 Python 3.12 Windows·macOS·Linux persistence matrix에서 canonical raster/export golden이 모두 통과했다.
 
 GUI 계산은 worker에서 시작 당시 immutable `ArtifactSession`만 사용한다. 완료 callback은 exact result capability와 source/render projection을 검사한다. 같은 Align에서 다른 record가 중간에 추가되면 captured computation을 current immutable descendant document에 rebase하므로 기존 기록을 잃지 않으며, Align/Open authority가 바뀐 late result만 폐기한다. candidate publication은 `prepare_record_commit()`의 session/version/epoch CAS, append-only ancestor와 expected record ID 집합 검증을 다시 통과한다. record append는 SceneObject binding만 교체하고 VBO를 다시 만들지 않는다. 미리보기는 receipt와 맞는 최초 계산 raster만 표시하며 export 권위로 재사용하지 않는다. 재개방 기록의 background preview가 진행 중일 때 같은-Align record가 추가돼도 pending selection을 보존하고 완료 시 exact record/receipt를 다시 확인한다.
 
@@ -487,7 +489,7 @@ depth pick·screen projection·ray·Ctrl drag은 해당 depth buffer를 그린 m
 - 저장된 record·QC·selection
 - SVG/3D export의 world 좌표
 
-현재 게이트는 pure coordinate algebra, mocked relative VBO/overlay submission, frame-bound project/unproject/depth-pick 수명주기, absolute float64 face 계산, source/scene materialization 불변과 document canonical hash 비직렬화를 검증한다. 별도 `src.gui.opengl_driver_smoke`는 native QPA의 실제 `Viewport3D` widget FBO에서 `[1e9,-2e9,3e9] mm` 장면, relative VBO, 두 depth component, gap 예상 지점의 background와 overlay 예상 위치의 green pixel, 0.125 mm depth-pick 복원을 원근·정사영으로 검증한다. 로컬 macOS Apple M4 결과는 통과했으며 Linux llvmpipe 원격 결과와 다른 OS·frozen·대표 GPU·compositor presentation은 아직 별도 게이트다.
+현재 게이트는 pure coordinate algebra, mocked relative VBO/overlay submission, frame-bound project/unproject/depth-pick 수명주기, absolute float64 face 계산, source/scene materialization 불변과 document canonical hash 비직렬화를 검증한다. 별도 `src.gui.opengl_driver_smoke`는 native QPA의 실제 `Viewport3D` widget FBO에서 `[1e9,-2e9,3e9] mm` 장면, relative VBO, 두 depth component, gap 예상 지점의 background와 overlay 예상 위치의 green pixel, 0.125 mm depth-pick 복원을 원근·정사영으로 검증한다. 로컬 macOS Apple M4와 source CI의 Ubuntu xcb + Mesa llvmpipe 결과는 통과했다. Windows/macOS CI native QPA, frozen executable, 대표 하드웨어 GPU와 compositor presentation은 아직 별도 게이트다.
 
 ### Legacy destructive bake 임시 안전 조건
 

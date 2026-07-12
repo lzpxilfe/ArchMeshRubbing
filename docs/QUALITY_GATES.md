@@ -37,7 +37,7 @@ xvfb-run -a \
   --report build/opengl-driver-smoke.json
 ```
 
-이 job은 실제 OpenGL context/FBO/VBO/pixel/depth readback을 사용하지만 Mesa software rasterizer 검증이다. 대표 하드웨어 GPU 인증이라고 표현하지 않는다. 새 job의 원격 성공 결과를 확인하기 전에는 구성 완료와 통과를 구분한다.
+이 job은 실제 OpenGL context/FBO/VBO/pixel/depth readback을 사용하지만 Mesa software rasterizer 검증이다. 대표 하드웨어 GPU 인증이라고 표현하지 않는다. code commit `166103dcf0ea`의 [GitHub Actions run 29182584810](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29182584810)에서 xcb + llvmpipe actual-GL report의 61개 조건이 통과했다.
 
 M0-6 native artifact 신뢰 경계를 빠르게 재검증할 때는 다음 focused suite를 사용한다. 이 명령은 full pytest를 대체하지 않는다.
 
@@ -125,14 +125,16 @@ python -m pytest -q \
 
 ## 현재 기준선
 
-2026-07-12 M0-6 로컬 검증 결과:
+2026-07-12 M0-6 검증 결과:
 
 | 검사 | 결과 |
 |---|---:|
-| Python 3.12.13 `python -m pytest -q` | 566 passed, 113 subtests passed |
-| 3-OS persistence-smoke 명시 suite의 로컬 실행 | 495 passed, 113 subtests passed |
-| `python -m ruff check .` | passed |
-| M0 Pyright wrapper command | 0 errors |
+| GitHub Actions Python 3.12.13 quality `python -m pytest -q` | 572 passed, 117 subtests passed |
+| macOS / Ubuntu persistence smoke | 각각 501 passed, 117 subtests passed |
+| Windows persistence smoke | 498 passed, 3 platform-specific skips, 117 subtests passed |
+| GitHub Actions `python -m ruff check .` | passed |
+| GitHub Actions M0 Pyright wrapper command | 0 errors |
+| Ubuntu 24.04 xcb + Mesa llvmpipe actual OpenGL | 61/61 passed at clean source commit `166103dcf0ea`, run `29182584810` |
 | Python 3.12.13 macOS arm64 actual OpenGL driver smoke | 61/61 passed at clean code commit `f25b424d6936`, Apple M4, perspective + top orthographic |
 | ArtifactDocument + vector/rubbing payload/export Draft 2020-12 schemas + golden | passed |
 | Python 3.12.13 macOS arm64 frozen self-test | 10/10 passed at code commit `898a8bfc144f` (unsigned, `source_tree=clean`, `native-self-test-local-smoke-898a8bfc144f-darwin.json`) |
@@ -141,7 +143,7 @@ python -m pytest -q \
 
 전체 트리 Pyright는 아직 통과하지 않는다. CI에서는 이 결과를 `continue-on-error`로 보고하여 부채가 보이게 하되, M0 범위를 넘는 기존 오류 때문에 모든 변경을 막지는 않는다. 신뢰 커널 전환이 진행될 때마다 차단 범위를 넓힌다. 독립 프로세스 테스트의 worker program은 Python 문자열이므로 Pyright가 문자열 내부를 분석하지는 않지만, 차단 pytest가 두 문자열을 각각 새 interpreter에서 실제 실행한다.
 
-Windows·macOS·Linux persistence matrix에서는 프로젝트 저장, source/geometry identity, ArtifactDocument·scene adapter·session·application workbench와 record-derived workflow progress, ticketed Open과 explicit Align gate, RFC 8785/vector record/export/Cutline/Outline/topology/schema, Digital Rubbing record/extractor/canonical PNG/export/schema, 독립 프로세스 source 및 relocated vector/rubbing-package 왕복, render-coordinate algebra·relative VBO/native preview smoke, matrix golden, GUI 런처, MainWindow 생성, native source-of-truth binding, native Cutline/Outline/Rubbing command, 3/6/6 순차 gate와 reopen·Align 진행도 복원, session/version/epoch 및 projection-generation late-result 방어, legacy export 우회와 unported operation/save fail-closed, source mismatch ordering, scene-swap rollback과 fatal authority fallback 스모크를 실행하도록 설정한다. Linux quality job은 별도로 전체 테스트를 실행한다. 이 matrix의 GUI 스모크는 `QT_QPA_PLATFORM=offscreen`을 사용하므로 CPU/document/scene transaction과 widget wiring만 검증하고 실제 OpenGL frame을 증명하지 않는다. 실제 source viewport frame은 별도 Linux Xvfb+xcb+llvmpipe job이 담당한다. 원격 matrix와 새 GL job이 실제로 통과하기 전에는 완료로 표현하지 않는다.
+Windows·macOS·Linux persistence matrix에서는 프로젝트 저장, source/geometry identity, ArtifactDocument·scene adapter·session·application workbench와 record-derived workflow progress, ticketed Open과 explicit Align gate, RFC 8785/vector record/export/Cutline/Outline/topology/schema, Digital Rubbing record/extractor/canonical PNG/export/schema, 독립 프로세스 source 및 relocated vector/rubbing-package 왕복, render-coordinate algebra·relative VBO/native preview smoke, matrix golden, GUI 런처, MainWindow 생성, native source-of-truth binding, native Cutline/Outline/Rubbing command, 3/6/6 순차 gate와 reopen·Align 진행도 복원, session/version/epoch 및 projection-generation late-result 방어, legacy export 우회와 unported operation/save fail-closed, source mismatch ordering, scene-swap rollback과 fatal authority fallback 스모크를 실행한다. Linux quality job은 별도로 전체 테스트를 실행한다. commit `166103dcf0ea`의 run `29182584810`에서 세 persistence job과 quality job이 모두 통과했다. 이 matrix의 GUI 스모크는 `QT_QPA_PLATFORM=offscreen`을 사용하므로 CPU/document/scene transaction과 widget wiring만 검증하고 실제 OpenGL frame을 증명하지 않는다. 실제 source viewport frame은 별도 Linux Xvfb+xcb+llvmpipe job이 담당한다.
 
 별도 `package-smoke.yml`은 세 OS에서 exact Python 3.12 build lock, immutable build manifest, PyInstaller spec과 frozen executable의 file-report self-test를 실행하도록 구성한다. 이 검사는 실제 `MainWindow`/QOpenGLWidget/OpenGL import, 6개 mesh parser, PNG codec과 canonical document/vector/rubbing을 포함하지만 offscreen 실제 GL context/render는 보장하지 않는다. 라이선스 게이트가 해결되기 전에는 artifact upload와 release 단계를 두지 않는다. code commit `898a8bfc144f`의 clean source tree에서 로컬 macOS arm64 10/10만 확인됐으며 원격 3-OS 결과는 아직 없다.
 
@@ -163,7 +165,7 @@ Native measurement 취소는 `QThread.terminate()`를 사용하지 않는다. �
 - 원근/상면 정사영 각각의 두 depth component, plate pixel, 빈 gap, relative overlay pixel
 - 보정 검색을 끈 실제 depth pick, 같은 frame serial, 해석적 ray-plane oracle와 0.125 mm 높이차
 
-2026-07-12 로컬 Python 3.12.13/macOS arm64 Apple M4(`OpenGL 2.1 Metal - 90.5`)에서는 code commit `f25b424d6936e6e8832a81c7a6683cb58515e546`의 clean source tree와 결합된 `opengl-driver-smoke-f25b424-darwin-arm64.json`이 61개 조건을 통과했다. 원근 pick 높이차는 `0.124783 mm`, 최대 ray-plane 오차는 `0.001213 mm`; 정사영 높이차는 `0.124998 mm`, 최대 오차는 `0.00000191 mm`였다. JSON은 tested commit/tree 상태, runtime-lock SHA-256, dependency version과 UTC 시각을 포함하고, CI에서 생성된 성공·실패 report는 14일 artifact로 보존하도록 구성한다. 이 값은 한 로컬 장치의 증거이며 Linux llvmpipe 원격 결과, Windows, Intel Mac, frozen executable, 대표 GPU/driver를 대신하지 않는다. render origin은 metadata·Align·record·QC·hash·export 권위 값에 저장하지 않는다.
+2026-07-12 로컬 Python 3.12.13/macOS arm64 Apple M4(`OpenGL 2.1 Metal - 90.5`)에서는 code commit `f25b424d6936e6e8832a81c7a6683cb58515e546`의 clean source tree와 결합된 `opengl-driver-smoke-f25b424-darwin-arm64.json`이 61개 조건을 통과했다. 원근 pick 높이차는 `0.124783 mm`, 최대 ray-plane 오차는 `0.001213 mm`; 정사영 높이차는 `0.124998 mm`, 최대 오차는 `0.00000191 mm`였다. Linux CI에서는 clean source commit `166103dcf0ea`와 결합된 xcb + llvmpipe report가 61/61을 통과했고 원근 높이차 `0.124599 mm`·최대 오차 `0.002970 mm`, 정사영 높이차 `0.124998 mm`·최대 오차 `0.00000381 mm`를 기록했다. JSON은 tested commit/tree 상태, runtime-lock SHA-256, dependency version과 UTC 시각을 포함하고, CI report는 14일 artifact로 보존한다. 이 두 결과는 Linux software rasterizer와 한 macOS 장치의 증거이며 Windows, Intel Mac, frozen executable, 대표 하드웨어 GPU/driver 또는 compositor presentation을 대신하지 않는다. render origin은 metadata·Align·record·QC·hash·export 권위 값에 저장하지 않는다.
 
 ## 게이트 변경 원칙
 
