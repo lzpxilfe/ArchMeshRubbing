@@ -27,7 +27,11 @@ from app_interactive import (
     _validate_project_source_declarations,
     _verify_loaded_project_source,
 )
-from src.application.artifact_exports import ArtifactExportState
+from src.application.artifact_exports import (
+    ArtifactExportKind,
+    ArtifactExportPublication,
+    ArtifactExportState,
+)
 from src.application.artifact_measurements import (
     MeasurementOperationState,
 )
@@ -2393,12 +2397,16 @@ def test_native_vector_export_worker_stages_before_gui_final_publish(
         thread = start_task.call_args.kwargs["thread"]
         assert isinstance(thread, TaskThread)
         assert thread._task_name == "export_native_vector"
-        result = thread._fn()
-        assert not destination.exists()
-        assert result.staging_directory.is_dir()
+        with patch(
+            "src.core.artifact_vector_export._fsync_parent",
+            return_value=True,
+        ):
+            result = thread._fn()
+            assert not destination.exists()
+            assert result.staging_directory.is_dir()
 
-        with patch.object(QMessageBox, "warning") as warning:
-            start_task.call_args.kwargs["on_done"](result)
+            with patch.object(QMessageBox, "warning") as warning:
+                start_task.call_args.kwargs["on_done"](result)
         warning.assert_not_called()
         validate_vector_export_package(destination)
         assert not result.staging_directory.exists()
@@ -2407,6 +2415,41 @@ def test_native_vector_export_worker_stages_before_gui_final_publish(
             is ArtifactExportState.COMPLETED
         )
         assert "SVG" in window.status_info.text()
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_native_export_publication_warns_when_durability_is_unconfirmed(
+    tmp_path: Path,
+) -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    destination = tmp_path / "published.amr-vector"
+    destination.mkdir()
+    publication = ArtifactExportPublication(
+        operation_id="export:gui-durability-warning",
+        kind=ArtifactExportKind.VECTOR,
+        record_id="record:gui-durability-warning",
+        destination=destination,
+        document_sha256="a" * 64,
+        align_revision_id="align:gui-durability-warning",
+        durability_confirmed=False,
+        warning_message="directory fsync is unsupported",
+    )
+    window = MainWindow()
+    try:
+        with patch.object(QMessageBox, "warning") as warning:
+            window._report_native_export_publication(
+                publication,
+                artifact_label="SVG",
+            )
+
+        assert destination.is_dir()
+        assert "미확정" in window.status_info.text()
+        warning.assert_called_once()
     finally:
         window.deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
@@ -2517,12 +2560,16 @@ def test_native_rubbing_export_worker_stages_before_gui_final_publish(
         thread = start_task.call_args.kwargs["thread"]
         assert isinstance(thread, TaskThread)
         assert thread._task_name == "export_native_digital_rubbing"
-        result = thread._fn()
-        assert not destination.exists()
-        assert result.staging_directory.is_dir()
+        with patch(
+            "src.core.artifact_rubbing_export.fsync_export_directory",
+            return_value=True,
+        ):
+            result = thread._fn()
+            assert not destination.exists()
+            assert result.staging_directory.is_dir()
 
-        with patch.object(QMessageBox, "warning") as warning:
-            start_task.call_args.kwargs["on_done"](result)
+            with patch.object(QMessageBox, "warning") as warning:
+                start_task.call_args.kwargs["on_done"](result)
         warning.assert_not_called()
         validate_rubbing_export_package(destination)
         assert not result.staging_directory.exists()

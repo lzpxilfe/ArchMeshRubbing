@@ -53,6 +53,41 @@ def _session() -> ArtifactSession:
 
 
 class TestArtifactSession(unittest.TestCase):
+    def test_document_identity_does_not_depend_on_native_source_location(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first_path = root / "site-a" / "artifact.ply"
+            second_path = root / "site-b" / "artifact.ply"
+
+            def create(source_path: Path) -> ArtifactSession:
+                return ArtifactSession.create_from_source(
+                    _mesh(),
+                    resolved_source_path=str(source_path),
+                    unit="cm",
+                    axes={"source_x": "+X", "source_y": "+Y", "source_z": "+Z"},
+                    handedness="right",
+                    software_version="0.1.0",
+                    operator="tester",
+                    created_at=STAMP,
+                    document_id="artifact:path-independent",
+                    metadata_revision_id="metadata:m1",
+                    align_revision_id="align:a1",
+                )
+
+            first = create(first_path)
+            second = create(second_path)
+
+        self.assertNotEqual(first.resolved_source_path, second.resolved_source_path)
+        self.assertEqual(first.document.source_assets[0].asset_ref, "external:artifact.ply")
+        self.assertEqual(second.document.source_assets[0].asset_ref, "external:artifact.ply")
+        self.assertNotIn(str(root).encode("utf-8"), first.document.canonical_json_bytes())
+        self.assertNotIn(str(root).encode("utf-8"), second.document.canonical_json_bytes())
+        self.assertEqual(
+            first.document.canonical_json_bytes(),
+            second.document.canonical_json_bytes(),
+        )
+        self.assertEqual(first.document.canonical_sha256, second.document.canonical_sha256)
+
     def test_create_materialize_and_source_snapshot_are_canonical_and_immutable(self):
         original = _mesh()
         session = ArtifactSession.create_from_source(

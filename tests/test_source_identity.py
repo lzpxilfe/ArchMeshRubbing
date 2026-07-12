@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import hashlib
 import json
 import os
@@ -10,6 +11,7 @@ from unittest.mock import patch
 
 import trimesh
 
+import src.core.source_identity as source_identity
 from src.core.mesh_loader import MeshLoader
 from src.core.source_identity import (
     DEFAULT_HASH_CHUNK_SIZE,
@@ -133,6 +135,81 @@ class TestSourceIdentity(unittest.TestCase):
             ):
                 with self.assertRaises((SourceChangedError, PermissionError)):
                     fingerprint_file(source, chunk_size=8)
+
+    def test_windows_path_and_descriptor_ctimes_are_not_compared(self) -> None:
+        payload = b"same file, incompatible Windows ctime meanings"
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "stable.ply"
+            source.write_bytes(payload)
+            baseline = source_identity._stat_snapshot(source.stat())
+            path_snapshot = replace(baseline, ctime_ns=10)
+            descriptor_snapshot = replace(baseline, ctime_ns=20)
+            snapshots = (
+                path_snapshot,
+                descriptor_snapshot,
+                descriptor_snapshot,
+                path_snapshot,
+                descriptor_snapshot,
+                path_snapshot,
+            )
+            with patch.object(
+                source_identity,
+                "_path_descriptor_ctime_comparable",
+                return_value=False,
+            ), patch.object(
+                source_identity,
+                "_stat_snapshot",
+                side_effect=snapshots,
+            ):
+                fingerprint = fingerprint_file(source)
+
+        self.assertEqual(fingerprint.sha256, hashlib.sha256(payload).hexdigest())
+
+    def test_windows_descriptor_ctime_change_is_still_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "changed.ply"
+            source.write_bytes(b"descriptor change remains authoritative")
+            baseline = source_identity._stat_snapshot(source.stat())
+            path_snapshot = replace(baseline, ctime_ns=10)
+            opened_snapshot = replace(baseline, ctime_ns=20)
+            changed_snapshot = replace(baseline, ctime_ns=21)
+            with patch.object(
+                source_identity,
+                "_path_descriptor_ctime_comparable",
+                return_value=False,
+            ), patch.object(
+                source_identity,
+                "_stat_snapshot",
+                side_effect=(
+                    path_snapshot,
+                    opened_snapshot,
+                    changed_snapshot,
+                ),
+            ):
+                with self.assertRaises(SourceChangedError):
+                    fingerprint_file(source)
+
+    def test_windows_mixed_stat_comparison_keeps_non_ctime_fields(self) -> None:
+        baseline = source_identity._StatSnapshot(
+            device=1,
+            inode=2,
+            size_bytes=3,
+            mtime_ns=4,
+            ctime_ns=5,
+        )
+        for field_name in ("device", "inode", "size_bytes", "mtime_ns"):
+            with self.subTest(field_name=field_name):
+                changed = replace(
+                    baseline,
+                    **{field_name: getattr(baseline, field_name) + 1},
+                )
+                with self.assertRaises(SourceChangedError):
+                    source_identity._raise_if_changed(
+                        Path("source.ply"),
+                        baseline,
+                        changed,
+                        compare_ctime=False,
+                    )
 
     def test_missing_source_has_typed_result(self) -> None:
         with tempfile.TemporaryDirectory() as td:

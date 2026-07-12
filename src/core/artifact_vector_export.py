@@ -1523,6 +1523,10 @@ def _rename_directory_noreplace(source: Path, destination: Path) -> None:
             os.rename(source, destination)
         except FileExistsError as exc:
             raise ArtifactVectorExportError("export destination already exists") from exc
+        except OSError as exc:
+            raise ArtifactVectorExportError(
+                f"cannot atomically publish vector export: {exc}"
+            ) from exc
         return
     else:
         raise ArtifactVectorExportError(

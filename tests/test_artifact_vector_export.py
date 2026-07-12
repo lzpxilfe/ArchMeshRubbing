@@ -251,11 +251,11 @@ class TestArtifactVectorExportScaleAndProvenance(unittest.TestCase):
         self.assertEqual(first.sidecar_sha256, second.sidecar_sha256)
         self.assertEqual(
             first.svg_sha256,
-            "cb21d0414b8fa7441e56e7c528f2be9d8ed1b319cc17d9ff76b4b60febea31cb",
+            "2c5b670d7fdb70f42917b8166cf8c5c63aad0b84792487b714f58c9293162bc9",
         )
         self.assertEqual(
             first.sidecar_sha256,
-            "aa246e12660e830364a0602f43d3fa055cb4a3894d87fc874651e29365951ac1",
+            "48f48218c06ce1bfe6d2aff644c30874bb00b7aa7f46d53090ed66531b69b02b",
         )
 
     def test_multiple_cutline_components_survive_without_world_xy_collapse(self):
@@ -646,6 +646,15 @@ class TestArtifactVectorExportFailClosed(unittest.TestCase):
 
 
 class TestArtifactVectorExportPackage(unittest.TestCase):
+    def setUp(self) -> None:
+        self._confirmed_directory_fsync = patch.object(
+            vector_export,
+            "_fsync_parent",
+            return_value=True,
+        )
+        self._confirmed_directory_fsync.start()
+        self.addCleanup(self._confirmed_directory_fsync.stop)
+
     def test_prepared_capability_is_exact_destination_bound_and_single_use(self):
         document = _committed_session().document
         with tempfile.TemporaryDirectory() as temporary:
@@ -777,6 +786,27 @@ class TestArtifactVectorExportPackage(unittest.TestCase):
             staging.rename(root / "moved-somewhere-else")
             self.assertFalse(discard_staged_vector_package(staging, destination))
 
+    def test_windows_missing_rename_is_a_typed_export_error(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch.object(
+                vector_export.sys,
+                "platform",
+                "win32",
+            ), patch.object(vector_export.os, "name", "nt"):
+                with self.assertRaisesRegex(
+                    ArtifactVectorExportError,
+                    "cannot atomically publish",
+                ):
+                    vector_export._rename_directory_noreplace(
+                        root / "missing-stage",
+                        root / "destination",
+                    )
+
+    @unittest.skipIf(
+        os.name == "nt",
+        "requires descriptor-relative POSIX cleanup",
+    )
     def test_discard_detects_top_directory_swap_and_preserves_foreign(self):
         document = _committed_session().document
         with tempfile.TemporaryDirectory() as temporary:
@@ -873,6 +903,7 @@ class TestArtifactVectorExportPackage(unittest.TestCase):
             self.assertTrue(destination.is_dir())
 
     def test_einval_directory_fsync_is_explicitly_unconfirmed(self):
+        self._confirmed_directory_fsync.stop()
         with tempfile.TemporaryDirectory() as temporary, patch.object(
             vector_export.os,
             "fsync",

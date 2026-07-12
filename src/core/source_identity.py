@@ -207,11 +207,30 @@ def _raise_if_changed(
     source_path: Path,
     expected: _StatSnapshot,
     observed: _StatSnapshot,
+    *,
+    compare_ctime: bool = True,
 ) -> None:
-    if expected != observed:
+    if (
+        expected.device != observed.device
+        or expected.inode != observed.inode
+        or expected.size_bytes != observed.size_bytes
+        or expected.mtime_ns != observed.mtime_ns
+        or (compare_ctime and expected.ctime_ns != observed.ctime_ns)
+    ):
         raise SourceChangedError(
             f"Source changed while calculating its fingerprint: {source_path}"
         )
+
+
+def _path_descriptor_ctime_comparable() -> bool:
+    """Whether path ``stat`` and descriptor ``fstat`` expose the same ctime.
+
+    CPython on Windows reports creation time for ``Path.stat().st_ctime`` but
+    the file change time for ``os.fstat().st_ctime``. Descriptor-to-descriptor
+    comparisons remain meaningful there, so only mixed comparisons omit ctime.
+    """
+
+    return os.name != "nt"
 
 
 @contextmanager
@@ -238,7 +257,12 @@ def open_fingerprinted_file(
 
     with source_path.open("rb") as stream:
         opened_file = _stat_snapshot(os.fstat(stream.fileno()))
-        _raise_if_changed(source_path, before_path, opened_file)
+        _raise_if_changed(
+            source_path,
+            before_path,
+            opened_file,
+            compare_ctime=_path_descriptor_ctime_comparable(),
+        )
 
         while True:
             chunk = stream.read(chunk_size)
@@ -255,7 +279,12 @@ def open_fingerprinted_file(
             raise SourceChangedError(
                 f"Source disappeared while calculating its fingerprint: {source_path}"
             ) from exc
-        _raise_if_changed(source_path, after_hash_file, after_hash_path)
+        _raise_if_changed(
+            source_path,
+            after_hash_file,
+            after_hash_path,
+            compare_ctime=_path_descriptor_ctime_comparable(),
+        )
 
         if bytes_read != after_hash_file.size_bytes:
             raise SourceChangedError(
@@ -280,7 +309,12 @@ def open_fingerprinted_file(
             raise SourceChangedError(
                 f"Source disappeared while it was being consumed: {source_path}"
             ) from exc
-        _raise_if_changed(source_path, after_consumer_file, after_consumer_path)
+        _raise_if_changed(
+            source_path,
+            after_consumer_file,
+            after_consumer_path,
+            compare_ctime=_path_descriptor_ctime_comparable(),
+        )
 
 
 def fingerprint_file(

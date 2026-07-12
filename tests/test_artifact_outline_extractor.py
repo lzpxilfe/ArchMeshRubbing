@@ -724,7 +724,10 @@ class TestArtifactOutlineCommandAndExport(unittest.TestCase):
             created_at=STAMP,
             operator="tester",
         )
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory() as temporary, patch(
+            "src.core.artifact_vector_export._fsync_parent",
+            return_value=True,
+        ):
             destination = Path(temporary) / "annulus.amr-vector"
             package = export_vector_package(
                 destination,

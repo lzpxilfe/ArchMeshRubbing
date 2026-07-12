@@ -33,6 +33,10 @@ STAMP = "2026-07-12T00:00:00Z"
 SOURCE_SHA = "a" * 64
 
 
+def _resolved(path: str) -> str:
+    return str(Path(path).expanduser().resolve(strict=False))
+
+
 class SequentialIds:
     def __init__(self) -> None:
         self.value = 0
@@ -306,7 +310,7 @@ def test_failed_replacement_preserves_live_authority_and_save_target() -> None:
     failed = workbench.fail_load(ticket, RuntimeError("source mismatch"))
 
     assert failed.session is live
-    assert failed.project_path == "/projects/live.amr"
+    assert failed.project_path == _resolved("/projects/live.amr")
     assert failed.phase is WorkflowPhase.READY
     assert failed.failure is not None
     assert failed.failure.message == "source mismatch"
@@ -333,8 +337,10 @@ def test_project_reopen_accepts_relocated_identical_source_and_saved_parser() ->
 
     assert ready.session is not None
     assert ready.session.document is saved.document
-    assert ready.session.resolved_source_path == "/relocated/artifact.raw-scan"
-    assert ready.project_path == "/projects/saved.amr"
+    assert ready.session.resolved_source_path == _resolved(
+        "/relocated/artifact.raw-scan"
+    )
+    assert ready.project_path == _resolved("/projects/saved.amr")
     assert ready.can_measure
 
 
@@ -473,7 +479,7 @@ def test_record_commit_rebinds_document_without_materializing_a_mesh() -> None:
 
     assert not ready.tentative
     assert ready.session is candidate
-    assert ready.project_path == "/projects/live.amr"
+    assert ready.project_path == _resolved("/projects/live.amr")
     assert events == [activation.previous, ready]
 
 
@@ -796,7 +802,7 @@ def test_publish_rollback_restores_previous_authority_without_observing_candidat
         RuntimeError("injected scene swap failure"),
     )
     assert rolled_back.session is live
-    assert rolled_back.project_path == "/projects/live.amr"
+    assert rolled_back.project_path == _resolved("/projects/live.amr")
     assert rolled_back.authority_epoch > activation.current.authority_epoch
     assert rolled_back.failure is not None
     assert events == [activation.previous, rolled_back]

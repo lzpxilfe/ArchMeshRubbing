@@ -206,7 +206,7 @@ class ArtifactSession:
         align_id = align_revision_id or _new_id("align")
         source_asset = SourceAsset.from_fingerprint(
             fingerprint,
-            asset_ref=f"external:{resolved_path}",
+            asset_ref=f"external:{fingerprint.original_name}",
             media_type=_media_type(source.source_format),
         )
         geometry = GeometryRevision(

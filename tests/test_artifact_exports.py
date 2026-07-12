@@ -9,6 +9,8 @@ import numpy as np
 import pytest
 
 import src.application.artifact_exports as artifact_exports
+import src.core.artifact_rubbing_export as rubbing_export
+import src.core.artifact_vector_export as vector_export
 from src.application.artifact_exports import (
     ArtifactExportController,
     ArtifactExportError,
@@ -43,6 +45,20 @@ from src.core.source_identity import SourceFingerprint
 
 
 STAMP = "2026-07-12T00:00:00Z"
+
+
+@pytest.fixture(autouse=True)
+def _confirmed_export_directory_fsync():
+    with patch.object(
+        vector_export,
+        "_fsync_parent",
+        return_value=True,
+    ), patch.object(
+        rubbing_export,
+        "fsync_export_directory",
+        return_value=True,
+    ):
+        yield
 
 
 class SequentialIds:
@@ -548,6 +564,7 @@ def test_post_rename_durability_error_is_completed_with_warning(
     assert publication.durability_confirmed is False
     assert publication.warning_message is not None
     assert "fsync" in publication.warning_message
+    assert controller.summary(item).state is ArtifactExportState.COMPLETED
 
 
 def test_staging_moved_visible_before_authority_is_failed_not_stale(

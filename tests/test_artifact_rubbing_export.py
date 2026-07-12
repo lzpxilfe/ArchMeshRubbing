@@ -4,6 +4,7 @@ from dataclasses import replace
 import errno
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -123,6 +124,15 @@ def _sidecar(bundle) -> dict[str, Any]:
 
 
 class TestRubbingExport(unittest.TestCase):
+    def setUp(self) -> None:
+        self._confirmed_directory_fsync = patch.object(
+            rubbing_export,
+            "fsync_export_directory",
+            return_value=True,
+        )
+        self._confirmed_directory_fsync.start()
+        self.addCleanup(self._confirmed_directory_fsync.stop)
+
     def test_prepared_capability_is_exact_and_single_use(self):
         session, computation = _committed()
         with tempfile.TemporaryDirectory() as temporary:
@@ -208,6 +218,10 @@ class TestRubbingExport(unittest.TestCase):
             self.assertTrue(raised.exception.committed)
             self.assertTrue(destination.is_dir())
 
+    @unittest.skipIf(
+        os.name == "nt",
+        "requires descriptor-relative POSIX cleanup",
+    )
     def test_discard_detects_top_directory_swap_and_preserves_foreign(self):
         session, computation = _committed()
         with tempfile.TemporaryDirectory() as temporary:
@@ -508,11 +522,11 @@ class TestRubbingExport(unittest.TestCase):
         self.assertEqual(bundle.pixels_per_meter, 10_000)
         self.assertEqual(
             bundle.png_sha256,
-            "acec498e5fe02d77685b873a420d674d3da4c54144342b94dba383cb963a9ff5",
+            "278f6e795c4386f61eedffe43c05441ec1812555f50fa1e8b00b5c2af89b93a3",
         )
         self.assertEqual(
             bundle.sidecar_sha256,
-            "34f5777092d193e7307d4014a82d51416c47f3a29acd6cd11906feb5b513e91f",
+            "36748f68e5e1e22dcf7738273a8d56d71d06c5874a547bffe324a9a7c186c594",
         )
         pixels, ppm, metadata = decode_canonical_ga8_png(bundle.png_bytes)
         np.testing.assert_array_equal(pixels, computation.raster.pixels)
