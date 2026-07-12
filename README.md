@@ -269,12 +269,15 @@ python main.py --project mesh.obj planview.png
 
 ## 📦 지원 포맷
 
+원본 hash와 재현 가능한 geometry identity를 함께 보존하는 native 작업 문서의 권위 원본은 다음 포맷을 지원합니다.
+
 - `OBJ`
 - `PLY`
 - `STL`
 - `OFF`
-- `glTF (.gltf)`
 - `glTF Binary (.glb)`
+
+외부 `.bin` 파일을 참조할 수 있는 `glTF (.gltf)`는 parser 호환성만 유지하며, sidecar까지 하나의 source identity로 묶는 manifest가 구현되기 전에는 권위 원본으로 열지 않습니다. 현재는 self-contained `.glb`로 변환해 사용하세요.
 
 ---
 
@@ -340,3 +343,12 @@ python main.py --project mesh.obj planview.png
 GNU General Public License v2.0 (GPLv2)
 
 현재 문구는 `or later`를 포함하지 않습니다. PyQt6를 포함한 공개 바이너리 배포는 [native packaging license gate](docs/NATIVE_PACKAGING.md#라이선스)가 해결될 때까지 보류합니다.
+
+## Citation
+
+이 저장소가 연구, 수업, 현장 업무에 도움이 되었다면 GitHub의 **Cite this repository** 버튼으로 인용해 주세요.
+
+[![Cite this repository](https://img.shields.io/badge/Cite_this-repository-2ea44f?logo=github)](https://github.com/lzpxilfe/ArchMeshRubbing)
+[![Star this repository](https://img.shields.io/github/stars/lzpxilfe/ArchMeshRubbing?style=social)](https://github.com/lzpxilfe/ArchMeshRubbing)
+
+인용 메타데이터는 [CITATION.cff](CITATION.cff)에 보관합니다.
