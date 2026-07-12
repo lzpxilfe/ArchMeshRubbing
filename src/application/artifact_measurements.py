@@ -66,6 +66,12 @@ from .artifact_workbench import (
     StaleWorkflowOperationError,
     WorkflowSnapshot,
 )
+from .artifact_workflow_progress import (
+    ArtifactWorkflowStep,
+    REQUIRED_CUTLINE_VIEWS,
+    REQUIRED_SIX_VIEWS,
+    workflow_step_record_ids,
+)
 
 
 DEFAULT_RUBBING_MEMORY_BUDGET_BYTES = 1024 * 1024 * 1024
@@ -826,6 +832,27 @@ class ArtifactMeasurementController:
         if not isinstance(session, ArtifactSession):
             raise ArtifactMeasurementError("no active ArtifactDocument session")
         self._workbench.require_stable_session(session, measurement=True)
+        prerequisite_ids: tuple[str, ...] = ()
+        if kind is MeasurementOperationKind.OUTLINE:
+            prerequisite_ids = workflow_step_record_ids(
+                session,
+                ArtifactWorkflowStep.CUTLINE,
+            )
+            if len(prerequisite_ids) != len(REQUIRED_CUTLINE_VIEWS):
+                raise ArtifactMeasurementError(
+                    "Outline requires READY + FRESH Top, Front, and Right "
+                    "Cutline records"
+                )
+        elif kind is MeasurementOperationKind.DIGITAL_RUBBING:
+            prerequisite_ids = workflow_step_record_ids(
+                session,
+                ArtifactWorkflowStep.OUTLINE,
+            )
+            if len(prerequisite_ids) != len(REQUIRED_SIX_VIEWS):
+                raise ArtifactMeasurementError(
+                    "Digital Rubbing requires six dependency-valid READY + FRESH "
+                    "Outline records"
+                )
         encoded_recipe = _recipe_bytes(recipe)
         canonical_recipe = _recipe_dict(encoded_recipe)
         try:
@@ -842,12 +869,17 @@ class ArtifactMeasurementController:
                 "artifact authority changed while measurement work was captured"
             )
 
-        dependencies = tuple(
+        requested_dependencies = tuple(
             _required_text(value, field_name="dependency record ID")
             for value in depends_on_record_ids
         )
-        if len(set(dependencies)) != len(dependencies):
+        if len(set(requested_dependencies)) != len(requested_dependencies):
             raise ArtifactMeasurementError("dependency record IDs must be unique")
+        dependencies = (*prerequisite_ids, *(
+            dependency_id
+            for dependency_id in requested_dependencies
+            if dependency_id not in prerequisite_ids
+        ))
         for dependency_id in dependencies:
             dependency = session.document.record_index.get(dependency_id)
             if dependency is None:

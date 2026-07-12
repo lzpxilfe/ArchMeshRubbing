@@ -41,6 +41,7 @@ from src.application.artifact_workflow_progress import (
     ArtifactWorkflowStepProgress,
     REQUIRED_CUTLINE_VIEWS,
     REQUIRED_SIX_VIEWS,
+    workflow_step_record_ids,
 )
 from src.core.artifact_session import ArtifactSession, ArtifactSessionError
 from src.application.artifact_workbench import (
@@ -187,6 +188,48 @@ def _artifact_box_session() -> ArtifactSession:
         created_at="2026-07-11T00:00:00Z",
         revision_id="align:gui-box",
     )
+
+
+def _artifact_box_session_with_cutlines() -> ArtifactSession:
+    session = _artifact_box_session()
+    for view in REQUIRED_CUTLINE_VIEWS:
+        computation = compute_artifact_cutline(
+            session,
+            _native_cutline_frame(view, 0.0),
+        )
+        session = commit_vector_computation(
+            session,
+            computation,
+            record_id=f"record:gui-prerequisite:cutline:{view}",
+            created_at="2026-07-11T00:00:01Z",
+            operator="pytest",
+        )
+    return session
+
+
+def _artifact_box_session_with_outlines() -> ArtifactSession:
+    session = _artifact_box_session_with_cutlines()
+    cutline_ids = workflow_step_record_ids(
+        session,
+        ArtifactWorkflowStep.CUTLINE,
+    )
+    for view in REQUIRED_SIX_VIEWS:
+        computation = compute_artifact_outline(
+            session,
+            view,
+            precision_grid_mm=0.01,
+        )
+        session = commit_vector_computation(
+            session,
+            computation,
+            record_id=f"record:gui-prerequisite:outline:{view}",
+            created_at="2026-07-11T00:00:02Z",
+            operator="pytest",
+            depends_on_record_ids=cutline_ids,
+        )
+    return session
+
+
 def _projected_scene_object(session: ArtifactSession) -> SceneObject:
     projection = session.materialize()
     obj = SceneObject(projection.mesh, "native artifact")
@@ -1809,8 +1852,11 @@ def test_reopened_project_requires_explicit_durable_record_selection() -> None:
         assert not window.section_panel.btn_native_outline.isEnabled()
         assert not window.section_panel.btn_native_rubbing.isEnabled()
         assert window.section_panel.btn_native_cutline.text().endswith("(1/3)")
-        assert window.section_panel.btn_native_outline.text().endswith("(1/6)")
-        assert window.section_panel.btn_native_rubbing.text().endswith("(1/6)")
+        # The durable records remain explicitly selectable for inspection, but
+        # records created without complete predecessor coverage cannot advance
+        # the authoritative workflow after reopen.
+        assert window.section_panel.btn_native_outline.text().endswith("(0/6)")
+        assert window.section_panel.btn_native_rubbing.text().endswith("(0/6)")
         assert not window.section_panel.btn_native_vector_export.isEnabled()
         assert not window.section_panel.btn_native_rubbing_export.isEnabled()
 
@@ -2164,7 +2210,7 @@ def test_native_outline_command_commits_verified_record_and_closed_preview() -> 
     app = QApplication.instance()
     if app is None:
         app = QApplication([])
-    session = _artifact_box_session()
+    session = _artifact_box_session_with_cutlines()
     obj = _projected_scene_object(session)
     window = MainWindow()
     window._artifact_session = session
@@ -2197,6 +2243,12 @@ def test_native_outline_command_commits_verified_record_and_closed_preview() -> 
         assert record.type == "vector.outline.v1"
         assert record.recipe["view"] == "right"
         assert record.recipe["precision_grid_mm"] == 0.01
+        assert set(record.depends_on_record_ids) == set(
+            workflow_step_record_ids(
+                session,
+                ArtifactWorkflowStep.CUTLINE,
+            )
+        )
         assert record.qc["outline_topology"]["topology_valid"] is True
         assert captured["kwargs"] == {
             "project_path": "/tmp/gui-outline.amr",
@@ -2267,7 +2319,7 @@ def test_native_rubbing_command_commits_previews_and_recomputes_offline_export()
     app = QApplication.instance()
     if app is None:
         app = QApplication([])
-    session = _artifact_box_session()
+    session = _artifact_box_session_with_outlines()
     window = MainWindow()
     window._artifact_session = session
     window._current_project_path = "/tmp/gui-rubbing.amr"
@@ -2308,6 +2360,12 @@ def test_native_rubbing_command_commits_previews_and_recomputes_offline_export()
         assert record.type == "raster.digital_rubbing.v1"
         assert record.recipe["view"] == "top"
         assert record.recipe["pixel_policy"]["pixels_per_mm"] == 2
+        assert set(record.depends_on_record_ids) == set(
+            workflow_step_record_ids(
+                session,
+                ArtifactWorkflowStep.OUTLINE,
+            )
+        )
         receipt = rubbing_receipt_from_record(record)
         assert receipt["pixels_per_meter"] == 2_000
         assert captured["kwargs"] == {
@@ -2732,7 +2790,8 @@ def test_native_rubbing_handler_uses_worker_and_late_result_cannot_overwrite_ses
     app = QApplication.instance()
     if app is None:
         app = QApplication([])
-    session = _artifact_box_session()
+    session = _artifact_box_session_with_outlines()
+    initial_record_ids = set(session.document.record_index)
     window = MainWindow()
     window._artifact_session = session
     window._current_project_path = "/tmp/gui-rubbing-late.amr"
@@ -2778,7 +2837,7 @@ def test_native_rubbing_handler_uses_worker_and_late_result_cannot_overwrite_ses
         publish.assert_not_called()
         warning.assert_not_called()
         assert "결과 폐기" in window.status_info.text()
-        assert window._artifact_session.document.records == ()
+        assert set(window._artifact_session.document.record_index) == initial_record_ids
         assert window._artifact_session.document.active_align_revision_id == (
             "align:late-rubbing"
         )
@@ -2903,7 +2962,7 @@ def test_native_rubbing_worker_accepts_a_new_record_sorted_before_existing_ids()
     app = QApplication.instance()
     if app is None:
         app = QApplication([])
-    base = _artifact_box_session()
+    base = _artifact_box_session_with_outlines()
     computation = compute_artifact_rubbing(
         base,
         "top",
@@ -2957,7 +3016,11 @@ def test_native_rubbing_worker_accepts_a_new_record_sorted_before_existing_ids()
         assert record_id == "record:rubbing:a-new"
         committed = captured["session"]
         assert isinstance(committed, ArtifactSession)
-        assert tuple(record.id for record in committed.document.records) == (
+        assert tuple(
+            record.id
+            for record in committed.document.records
+            if record.type == "raster.digital_rubbing.v1"
+        ) == (
             "record:rubbing:a-new",
             "record:rubbing:z-existing",
         )

@@ -69,7 +69,7 @@ python -m src.gui.opengl_driver_smoke \
 - OS별 frozen executable의 file-based self-test
 - report의 전체 check 성공 확인
 
-`package-smoke.yml`에는 frozen executable artifact upload나 release 단계가 없다. 원격 workflow가 실제로 성공하기 전에는 3개 OS가 검증됐다고 표현하지 않는다.
+`package-smoke.yml`에는 frozen executable artifact upload나 release 단계가 없다. commit `e4bf6dcac4b1`의 [run `29213279508`](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29213279508)에서 Ubuntu, Windows, macOS frozen build와 각 OS 실행 파일의 self-test/report 검증이 모두 첫 시도에 통과했다. 이는 unsigned CI smoke 증거이며 공개 설치 파일을 제공한다는 뜻은 아니다.
 
 Source CI의 별도 `opengl-driver-smoke`는 Ubuntu 24.04 + Xvfb + Mesa llvmpipe에서 actual-GL 경로를 실행한다. `package-smoke.yml`의 frozen self-test는 계속 offscreen이므로 두 결과를 합쳐 “세 OS frozen GPU 검증”으로 표현해서는 안 된다. macOS·Windows native QPA와 frozen executable용 actual-GL 명령은 플랫폼별 runner 안정성과 Windows Qt/PyOpenGL DLL 경계를 확인한 뒤 추가한다.
 

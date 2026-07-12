@@ -28,7 +28,14 @@ from src.application.artifact_workbench import (
     StaleWorkflowOperationError,
     WorkflowBusyError,
 )
+from src.application.artifact_workflow_progress import (
+    ArtifactWorkflowStep,
+    REQUIRED_CUTLINE_VIEWS,
+    REQUIRED_SIX_VIEWS,
+    workflow_step_record_ids,
+)
 from src.core.artifact_cancellation import ArtifactComputationCancelledError
+from src.core.artifact_outline_extractor import compute_artifact_outline
 from src.core.artifact_rubbing_extractor import (
     ArtifactRubbingComputation,
     RUBBING_ESTIMATED_PEAK_BYTES_PER_PIXEL,
@@ -37,7 +44,11 @@ from src.core.artifact_rubbing_extractor import (
     RUBBING_ESTIMATE_MATERIALIZED_ATTRIBUTE_MULTIPLIER,
 )
 from src.core.artifact_session import ArtifactSession
-from src.core.artifact_vector_extractor import ArtifactVectorComputation
+from src.core.artifact_vector_extractor import (
+    ArtifactVectorComputation,
+    commit_vector_computation,
+    compute_artifact_cutline,
+)
 from src.core.artifact_vector_record import PlanarFrame
 from src.core.mesh_loader import MeshData
 from src.core.source_identity import SourceFingerprint
@@ -134,13 +145,66 @@ def _session(
     )
 
 
-def _cutline_frame() -> PlanarFrame:
-    return PlanarFrame(
-        origin_world_mm=(0.0, 0.0, 0.0),
-        u_axis_world=(1.0, 0.0, 0.0),
-        v_axis_world=(0.0, 1.0, 0.0),
-        normal_world=(0.0, 0.0, 1.0),
+def _cutline_frame(view: str = "top") -> PlanarFrame:
+    if view == "top":
+        return PlanarFrame(
+            origin_world_mm=(0.0, 0.0, 0.0),
+            u_axis_world=(1.0, 0.0, 0.0),
+            v_axis_world=(0.0, 1.0, 0.0),
+            normal_world=(0.0, 0.0, 1.0),
+        )
+    if view == "front":
+        return PlanarFrame(
+            origin_world_mm=(0.0, 0.0, 0.0),
+            u_axis_world=(1.0, 0.0, 0.0),
+            v_axis_world=(0.0, 0.0, 1.0),
+            normal_world=(0.0, -1.0, 0.0),
+        )
+    if view == "right":
+        return PlanarFrame(
+            origin_world_mm=(0.0, 0.0, 0.0),
+            u_axis_world=(0.0, 1.0, 0.0),
+            v_axis_world=(0.0, 0.0, 1.0),
+            normal_world=(1.0, 0.0, 0.0),
+        )
+    raise AssertionError(f"unsupported test Cutline view: {view}")
+
+
+def _session_with_cutlines(*, source_mesh: MeshData | None = None) -> ArtifactSession:
+    session = _session(source_mesh=source_mesh)
+    for view in REQUIRED_CUTLINE_VIEWS:
+        computation = compute_artifact_cutline(session, _cutline_frame(view))
+        session = commit_vector_computation(
+            session,
+            computation,
+            record_id=f"record:prerequisite:cutline:{view}",
+            created_at=STAMP,
+            operator="pytest",
+        )
+    return session
+
+
+def _session_with_outlines(*, source_mesh: MeshData | None = None) -> ArtifactSession:
+    session = _session_with_cutlines(source_mesh=source_mesh)
+    cutline_ids = workflow_step_record_ids(
+        session,
+        ArtifactWorkflowStep.CUTLINE,
     )
+    for view in REQUIRED_SIX_VIEWS:
+        computation = compute_artifact_outline(
+            session,
+            view,
+            precision_grid_mm=0.01,
+        )
+        session = commit_vector_computation(
+            session,
+            computation,
+            record_id=f"record:prerequisite:outline:{view}",
+            created_at=STAMP,
+            operator="pytest",
+            depends_on_record_ids=cutline_ids,
+        )
+    return session
 
 
 def _headless_publisher(workbench: ArtifactWorkbench):
@@ -187,6 +251,53 @@ def test_begin_requires_explicit_align_before_reserving_work() -> None:
     assert workbench.snapshot.session.document.records == ()
 
 
+def test_begin_enforces_sequence_and_captures_canonical_prerequisites() -> None:
+    empty_controller = ArtifactMeasurementController(
+        ArtifactWorkbench(session=_session()),
+        id_factory=SequentialIds(),
+    )
+    with pytest.raises(ArtifactMeasurementError, match="Outline requires"):
+        empty_controller.begin_outline(
+            "top",
+            precision_grid_mm=0.01,
+            record_id="record:outline:too-early",
+        )
+    with pytest.raises(ArtifactMeasurementError, match="Digital Rubbing requires"):
+        _begin_rubbing(empty_controller, record_id="record:rubbing:too-early")
+    assert empty_controller.active_summaries == ()
+
+    cutline_session = _session_with_cutlines()
+    cutline_controller = ArtifactMeasurementController(
+        ArtifactWorkbench(session=cutline_session),
+        id_factory=SequentialIds(),
+    )
+    outline = cutline_controller.begin_outline(
+        "top",
+        precision_grid_mm=0.01,
+        record_id="record:outline:with-dependencies",
+    )
+    assert outline.depends_on_record_ids == workflow_step_record_ids(
+        cutline_session,
+        ArtifactWorkflowStep.CUTLINE,
+    )
+    cutline_controller.cancel(outline)
+
+    outline_session = _session_with_outlines()
+    outline_controller = ArtifactMeasurementController(
+        ArtifactWorkbench(session=outline_session),
+        id_factory=SequentialIds(),
+    )
+    rubbing = _begin_rubbing(
+        outline_controller,
+        record_id="record:rubbing:with-dependencies",
+    )
+    assert rubbing.depends_on_record_ids == workflow_step_record_ids(
+        outline_session,
+        ArtifactWorkflowStep.OUTLINE,
+    )
+    outline_controller.cancel(rubbing)
+
+
 def test_cutline_executes_and_publishes_only_the_reserved_record_id() -> None:
     session = _session()
     workbench = ArtifactWorkbench(session=session, id_factory=SequentialIds())
@@ -224,7 +335,12 @@ def test_cutline_executes_and_publishes_only_the_reserved_record_id() -> None:
 
 
 def test_same_align_parallel_results_rebase_without_lost_updates() -> None:
-    session = _session()
+    session = _session_with_cutlines()
+    initial_record_ids = set(session.document.record_index)
+    expected_outline_dependencies = workflow_step_record_ids(
+        session,
+        ArtifactWorkflowStep.CUTLINE,
+    )
     source_mesh = session.source_mesh
     workbench = ArtifactWorkbench(session=session, id_factory=SequentialIds())
     controller = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
@@ -241,6 +357,7 @@ def test_same_align_parallel_results_rebase_without_lost_updates() -> None:
         created_at=STAMP,
         operator="pytest",
     )
+    assert outline.depends_on_record_ids == expected_outline_dependencies
     cutline_result = controller.execute(cutline)
     outline_result = controller.execute(outline)
 
@@ -258,7 +375,7 @@ def test_same_align_parallel_results_rebase_without_lost_updates() -> None:
     current = workbench.snapshot.session
     assert current is not None
     assert current.source_mesh is source_mesh
-    assert set(current.document.record_index) == {
+    assert set(current.document.record_index) == initial_record_ids | {
         "record:z-cutline",
         "record:a-outline",
     }
@@ -361,7 +478,7 @@ def test_cancel_revokes_a_computed_result_and_releases_record_reservation() -> N
 
 
 def test_duplicate_active_record_reservation_is_atomic() -> None:
-    workbench = ArtifactWorkbench(session=_session())
+    workbench = ArtifactWorkbench(session=_session_with_cutlines())
     controller = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
     first = controller.begin_cutline(
         _cutline_frame(),
@@ -381,7 +498,7 @@ def test_duplicate_active_record_reservation_is_atomic() -> None:
 
 
 def test_controllers_share_record_reservations_for_one_workbench() -> None:
-    workbench = ArtifactWorkbench(session=_session())
+    workbench = ArtifactWorkbench(session=_session_with_cutlines())
     first = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
     second = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
     item = first.begin_cutline(
@@ -534,9 +651,8 @@ def test_pending_open_keeps_result_retryable_until_open_is_resolved() -> None:
     assert controller.summary(item).state is MeasurementOperationState.RUNNING
     workbench.cancel_load(ticket)
     with pytest.raises(ArtifactMeasurementError, match="is reserved by"):
-        controller.begin_outline(
-            "top",
-            precision_grid_mm=0.01,
+        controller.begin_cutline(
+            _cutline_frame("front"),
             record_id="record:pending-open-retry",
             created_at=STAMP,
         )
@@ -546,7 +662,9 @@ def test_pending_open_keeps_result_retryable_until_open_is_resolved() -> None:
 
 
 def test_same_align_external_commit_causes_automatic_rebase_retry() -> None:
-    workbench = ArtifactWorkbench(session=_session(), id_factory=SequentialIds())
+    session = _session_with_cutlines()
+    initial_record_ids = set(session.document.record_index)
+    workbench = ArtifactWorkbench(session=session, id_factory=SequentialIds())
     first = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
     external = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
     first_item = first.begin_cutline(
@@ -582,7 +700,7 @@ def test_same_align_external_commit_causes_automatic_rebase_retry() -> None:
     current = workbench.snapshot.session
     assert current is not None
     assert calls == 2
-    assert set(current.document.record_index) == {
+    assert set(current.document.record_index) == initial_record_ids | {
         "record:first",
         "record:external",
     }
@@ -756,7 +874,10 @@ def test_align_finalized_inside_publisher_cannot_return_false_success() -> None:
 
 
 def test_rubbing_preflight_matches_raster_and_enforces_memory_budget() -> None:
-    workbench = ArtifactWorkbench(session=_session(), id_factory=SequentialIds())
+    workbench = ArtifactWorkbench(
+        session=_session_with_outlines(),
+        id_factory=SequentialIds(),
+    )
     tiny_budget = ArtifactMeasurementController(
         workbench,
         id_factory=SequentialIds(),
@@ -791,7 +912,7 @@ def test_rubbing_texture_copy_is_budgeted_before_materialization() -> None:
     textured_mesh = _box_mesh()
     textured_mesh.uv_coords = np.zeros((8, 2), dtype=np.float64)
     textured_mesh.texture = np.zeros((64, 64, 4), dtype=np.uint8)
-    textured_session = _session(source_mesh=textured_mesh)
+    textured_session = _session_with_outlines(source_mesh=textured_mesh)
     source_mesh = textured_session.source_mesh
     attribute_bytes = int(
         source_mesh.uv_coords.nbytes + source_mesh.texture.nbytes  # type: ignore[union-attr]
@@ -824,7 +945,7 @@ def test_rubbing_texture_copy_is_budgeted_before_materialization() -> None:
     assert constrained.active_summaries == ()
 
     plain = ArtifactMeasurementController(
-        ArtifactWorkbench(session=_session()),
+        ArtifactWorkbench(session=_session_with_outlines()),
         id_factory=SequentialIds(),
     )
     textured = ArtifactMeasurementController(
@@ -854,7 +975,7 @@ def test_rubbing_texture_copy_is_budgeted_before_materialization() -> None:
 
 
 def test_only_one_active_rubbing_owns_the_raster_budget() -> None:
-    workbench = ArtifactWorkbench(session=_session())
+    workbench = ArtifactWorkbench(session=_session_with_outlines())
     controller = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
     first = _begin_rubbing(controller, record_id="record:rubbing:first")
 
@@ -867,7 +988,7 @@ def test_only_one_active_rubbing_owns_the_raster_budget() -> None:
 
 
 def test_controllers_share_rubbing_admission_for_one_workbench() -> None:
-    workbench = ArtifactWorkbench(session=_session())
+    workbench = ArtifactWorkbench(session=_session_with_outlines())
     ids = SequentialIds()
     first = ArtifactMeasurementController(workbench, id_factory=ids)
     second = ArtifactMeasurementController(
@@ -890,7 +1011,7 @@ def test_controllers_share_rubbing_admission_for_one_workbench() -> None:
 
 
 def test_cancelled_running_rubbing_keeps_memory_slot_until_worker_exits() -> None:
-    workbench = ArtifactWorkbench(session=_session())
+    workbench = ArtifactWorkbench(session=_session_with_outlines())
     controller = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
     item = _begin_rubbing(controller, record_id="record:rubbing:blocked")
     started = Event()
@@ -1057,7 +1178,7 @@ def test_worker_failure_outranks_stale_requested_during_execution() -> None:
 
 
 def test_execute_claim_is_exactly_once_under_concurrency() -> None:
-    workbench = ArtifactWorkbench(session=_session())
+    workbench = ArtifactWorkbench(session=_session_with_outlines())
     controller = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
     item = _begin_rubbing(controller, record_id="record:rubbing:execute-once")
     original_execute = execute_measurement_work_item
@@ -1104,7 +1225,7 @@ def test_execute_claim_is_exactly_once_under_concurrency() -> None:
 
 
 def test_cumulative_rubbing_estimates_cannot_overbook_configured_budget() -> None:
-    workbench = ArtifactWorkbench(session=_session())
+    workbench = ArtifactWorkbench(session=_session_with_outlines())
     ids = SequentialIds()
     probe = ArtifactMeasurementController(
         workbench,
@@ -1130,7 +1251,7 @@ def test_cumulative_rubbing_estimates_cannot_overbook_configured_budget() -> Non
 
 
 def test_rubbing_admission_honors_every_active_controller_memory_budget() -> None:
-    workbench = ArtifactWorkbench(session=_session())
+    workbench = ArtifactWorkbench(session=_session_with_outlines())
     ids = SequentialIds()
     probe = ArtifactMeasurementController(
         workbench,
@@ -1200,7 +1321,17 @@ def test_controller_cancel_reaches_each_extractor_and_maps_core_signal(
     kind: MeasurementOperationKind,
     extractor_name: str,
 ) -> None:
-    workbench = ArtifactWorkbench(session=_session())
+    session = (
+        _session_with_cutlines()
+        if kind is MeasurementOperationKind.OUTLINE
+        else (
+            _session_with_outlines()
+            if kind is MeasurementOperationKind.DIGITAL_RUBBING
+            else _session()
+        )
+    )
+    initial_records = session.document.records
+    workbench = ArtifactWorkbench(session=session)
     controller = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
     record_id = f"record:cooperative-cancel:{kind.value}"
     if kind is MeasurementOperationKind.CUTLINE:
@@ -1235,7 +1366,7 @@ def test_controller_cancel_reaches_each_extractor_and_maps_core_signal(
     summary = controller.summary(item)
     assert summary.state is MeasurementOperationState.CANCELLED
     assert workbench.snapshot.session is not None
-    assert workbench.snapshot.session.document.records == ()
+    assert workbench.snapshot.session.document.records == initial_records
 
 
 def test_core_cancellation_signal_is_mapped_at_the_application_boundary() -> None:

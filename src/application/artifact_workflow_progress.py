@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from src.core.artifact_document import (
+    DerivedRecord,
     RecordFreshness,
     RecordLifecycleStatus,
 )
@@ -200,6 +201,105 @@ def _ordered_completed_views(
     return tuple(view for view in required_views if view in completed)
 
 
+def _dependency_views(
+    record: DerivedRecord,
+    record_views: Mapping[str, str],
+) -> frozenset[str]:
+    return frozenset(
+        record_views[record_id]
+        for record_id in record.depends_on_record_ids
+        if record_id in record_views
+    )
+
+
+def _eligible_record_ids_by_step(
+    session: ArtifactSession,
+) -> dict[ArtifactWorkflowStep, dict[str, str]]:
+    """Select one deterministic dependency-valid record per canonical view."""
+
+    document = session.document
+    freshnesses = document.record_freshnesses()
+    fresh_records = tuple(
+        record
+        for record in document.records
+        if record.lifecycle_status is RecordLifecycleStatus.READY
+        and freshnesses.get(record.id) is RecordFreshness.FRESH
+    )
+
+    cutline_record_views: dict[str, str] = {}
+    cutline_ids_by_view: dict[str, str] = {}
+    for record in fresh_records:
+        if record.type != _CUTLINE_RECORD_TYPE:
+            continue
+        view = _cutline_view(record.recipe)
+        if view is None:
+            continue
+        cutline_record_views[record.id] = view
+        cutline_ids_by_view[view] = record.id
+
+    required_cutline_views = frozenset(REQUIRED_CUTLINE_VIEWS)
+    outline_record_views: dict[str, str] = {}
+    outline_ids_by_view: dict[str, str] = {}
+    for record in fresh_records:
+        if record.type != _OUTLINE_RECORD_TYPE:
+            continue
+        view = _declared_view(
+            record.recipe,
+            expected_kind=VectorRecordKind.OUTLINE.value,
+            required_views=REQUIRED_SIX_VIEWS,
+        )
+        if view is None or not required_cutline_views.issubset(
+            _dependency_views(record, cutline_record_views)
+        ):
+            continue
+        outline_record_views[record.id] = view
+        outline_ids_by_view[view] = record.id
+
+    required_outline_views = frozenset(REQUIRED_SIX_VIEWS)
+    rubbing_ids_by_view: dict[str, str] = {}
+    for record in fresh_records:
+        if record.type != RUBBING_RECORD_TYPE:
+            continue
+        view = _declared_view(
+            record.recipe,
+            expected_kind="digital_rubbing",
+            required_views=REQUIRED_SIX_VIEWS,
+        )
+        if view is None or not required_outline_views.issubset(
+            _dependency_views(record, outline_record_views)
+        ):
+            continue
+        rubbing_ids_by_view[view] = record.id
+
+    return {
+        ArtifactWorkflowStep.CUTLINE: cutline_ids_by_view,
+        ArtifactWorkflowStep.OUTLINE: outline_ids_by_view,
+        ArtifactWorkflowStep.DIGITAL_RUBBING: rubbing_ids_by_view,
+    }
+
+
+def workflow_step_record_ids(
+    session: ArtifactSession,
+    step: ArtifactWorkflowStep,
+) -> tuple[str, ...]:
+    """Return one dependency-valid READY+FRESH record per completed view."""
+
+    if not isinstance(session, ArtifactSession):
+        raise TypeError("session must be an ArtifactSession")
+    resolved_step = ArtifactWorkflowStep(step)
+    required_views = (
+        REQUIRED_CUTLINE_VIEWS
+        if resolved_step is ArtifactWorkflowStep.CUTLINE
+        else REQUIRED_SIX_VIEWS
+    )
+    record_ids_by_view = _eligible_record_ids_by_step(session)[resolved_step]
+    return tuple(
+        record_ids_by_view[view]
+        for view in required_views
+        if view in record_ids_by_view
+    )
+
+
 def _progress_from_completed_views(
     *,
     align_ready: bool,
@@ -256,42 +356,22 @@ def derive_artifact_workflow_progress(
     if not isinstance(align_ready, bool):
         raise TypeError("align_ready must be a bool")
 
-    document = session.document
-    freshnesses = document.record_freshnesses()
-    completed_cutline: set[str] = set()
-    completed_outline: set[str] = set()
-    completed_rubbing: set[str] = set()
-    for record in document.records:
-        if record.lifecycle_status is not RecordLifecycleStatus.READY:
-            continue
-        if freshnesses.get(record.id) is not RecordFreshness.FRESH:
-            continue
-        if record.type == _CUTLINE_RECORD_TYPE:
-            view = _cutline_view(record.recipe)
-            if view is not None:
-                completed_cutline.add(view)
-        elif record.type == _OUTLINE_RECORD_TYPE:
-            view = _declared_view(
-                record.recipe,
-                expected_kind=VectorRecordKind.OUTLINE.value,
-                required_views=REQUIRED_SIX_VIEWS,
-            )
-            if view is not None:
-                completed_outline.add(view)
-        elif record.type == RUBBING_RECORD_TYPE:
-            view = _declared_view(
-                record.recipe,
-                expected_kind="digital_rubbing",
-                required_views=REQUIRED_SIX_VIEWS,
-            )
-            if view is not None:
-                completed_rubbing.add(view)
+    record_ids_by_step = _eligible_record_ids_by_step(session)
+    completed_cutline = frozenset(
+        record_ids_by_step[ArtifactWorkflowStep.CUTLINE]
+    )
+    completed_outline = frozenset(
+        record_ids_by_step[ArtifactWorkflowStep.OUTLINE]
+    )
+    completed_rubbing = frozenset(
+        record_ids_by_step[ArtifactWorkflowStep.DIGITAL_RUBBING]
+    )
 
     return _progress_from_completed_views(
         align_ready=align_ready,
-        completed_cutline=frozenset(completed_cutline),
-        completed_outline=frozenset(completed_outline),
-        completed_rubbing=frozenset(completed_rubbing),
+        completed_cutline=completed_cutline,
+        completed_outline=completed_outline,
+        completed_rubbing=completed_rubbing,
     )
 
 
@@ -302,4 +382,5 @@ __all__ = [
     "REQUIRED_CUTLINE_VIEWS",
     "REQUIRED_SIX_VIEWS",
     "derive_artifact_workflow_progress",
+    "workflow_step_record_ids",
 ]

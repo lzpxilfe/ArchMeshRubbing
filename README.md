@@ -37,7 +37,7 @@ ArchMeshRubbing은 반대로, 고고학 연구자가 익숙한 질문에서 출�
 
 Open 직후 만들어지는 `recipe.kind="initial_identity"` Align은 canonical materialization을 위한 기준점이지 연구자의 정위치 확정이 아닙니다. 사용자가 변화량이 0인 경우까지 포함해 첫 Align을 명시적으로 확정하기 전에는 workflow가 `ALIGN_REQUIRED`에 머물며 Cutline/Outline/Digital Rubbing과 vector/rubbing export가 비활성화됩니다. 첫 확정은 immutable child Align revision을 남기고 `MEASUREMENT_READY`로 전환하며, parent activation으로 초기 기준점에 돌아가면 다시 측정이 잠깁니다.
 
-Align 확정 뒤에도 모든 기능이 한꺼번에 열리지는 않습니다. 현재 활성 Align의 고유한 `READY + FRESH` 기록을 기준으로 `Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6` 순서로 다음 단계가 열리고, 완료 버튼은 초록색으로 바뀝니다. 같은 방향을 여러 번 기록해도 한 면으로 계산합니다. Align을 바꾸면 기존 기록은 삭제하지 않고 stale로 제외하며, 이전 Align을 다시 활성화하거나 프로젝트를 재열면 문서의 record graph에서 진행도를 그대로 복원합니다.
+Align 확정 뒤에도 모든 기능이 한꺼번에 열리지는 않습니다. 현재 활성 Align의 고유한 `READY + FRESH` 기록을 기준으로 `Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6` 순서로 다음 단계가 열리고, 완료 버튼은 초록색으로 바뀝니다. application command도 같은 gate를 강제하며, 각 Outline은 Cutline 3면을, 각 Digital Rubbing은 dependency-valid Outline 6면을 직접 참조합니다. 이 선행 record coverage가 없으면 READY 기록도 완료 증거로 세지 않습니다. 같은 방향을 여러 번 기록해도 한 면으로 계산합니다. Align을 바꾸면 기존 기록은 삭제하지 않고 stale로 제외하며, 이전 Align을 다시 활성화하거나 프로젝트를 재열면 문서의 record graph에서 진행도를 그대로 복원합니다.
 
 처음 쓰는 사용자도 **5분 안에 첫 결과**를 얻는 것이 목표입니다.
 
@@ -49,6 +49,7 @@ Align 확정 뒤에도 모든 기능이 한꺼번에 열리지는 않습니다. 
 
 - 원본 file SHA-256, decode geometry SHA-256, 확인된 단위·축, immutable Align revision을 분리해 저장
 - 새 문서는 원본의 절대 경로를 canonical manifest에 넣지 않고 `external:<original_name>` locator만 저장함. 실제 OS 경로는 현재 session에만 유지하므로 같은 원본·recipe의 문서와 SVG/PNG hash가 drive/root 위치에 따라 달라지지 않음
+- 현재 `.amr` v2는 원본 hash와 외부 locator를 보존하지만 원본 file bytes 자체는 아직 포함하지 않음. 원본 파일이 없어도 프로젝트 하나로 재검증할 수 있는 content-addressed embedded-source package는 공개 안정판의 남은 P0 과제
 - Open → Align commit → Cutline record가 항상 source-space 원본에서 canonical millimeter로 다시 계산됨
 - Top/Front/Right 단면을 명시적 right-handed plane frame으로 기록
 - 화면용 단면 tape나 world XY 투영을 SVG 원본으로 사용하지 않음
@@ -72,7 +73,7 @@ Align 확정 뒤에도 모든 기능이 한꺼번에 열리지는 않습니다. 
 - export 중 같은 Align에 무관한 record가 추가돼도 안전하게 게시하지만 Align/Open 완료로 권위가 바뀌면 destination을 만들지 않고 자신이 소유한 staging만 정리함
 - scene publication의 rollback·scene 복원·finalize 자체가 불확실하면 fatal authority 상태로 전환해 검증된 Open 전까지 저장·실측·내보내기를 차단
 
-Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 `SurfaceVisualizer`/flatten 기반 PNG·SVG를 측정 산출물로 내보내는 우회 경로를 차단합니다. 검증된 Cutline/Outline record는 `.amr-vector`, Digital Rubbing record는 `.amr-rubbing`으로 내보냅니다. Source checkout의 Python 3.12 품질 게이트와 Windows·macOS·Linux persistence matrix는 code commit `166103dcf0ea`의 [GitHub Actions run 29182584810](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29182584810)에서 모두 통과했습니다. 설치형/frozen 바이너리 배포 검증은 아직 별도 과제입니다.
+Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 `SurfaceVisualizer`/flatten 기반 PNG·SVG를 측정 산출물로 내보내는 우회 경로를 차단합니다. 검증된 Cutline/Outline record는 `.amr-vector`, Digital Rubbing record는 `.amr-rubbing`으로 내보냅니다. Source checkout의 Python 3.12 품질 게이트와 Windows·macOS·Linux persistence matrix는 code commit `166103dcf0ea`의 [GitHub Actions run 29182584810](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29182584810)에서 모두 통과했습니다. 이어 commit `e4bf6dcac4b1`의 [Frozen package smoke run 29213279508](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29213279508)에서 Ubuntu·Windows·macOS frozen build와 실행 파일 self-test가 모두 통과했습니다. 공개 installer·서명·frozen native-GL 검증은 아직 별도 과제입니다.
 
 ### 1. 기와형 메쉬용 기본 추천 펼침
 
@@ -278,7 +279,7 @@ python -m pip install -r requirements/build-py312.lock
 python tools/build_native.py
 ```
 
-이 명령은 기존 산출물을 기본적으로 덮어쓰지 않고, 빌드 뒤 실제 frozen executable의 offline self-test를 실행합니다. 현재 공개 바이너리는 만들지 않습니다. 저장소의 GPLv2-only 표기와 bundled PyQt6의 GPL-3.0-only 라이선스 결정을 먼저 해결해야 하며, 서명·notarization·frozen 3-OS 원격 결과도 남아 있습니다. 자세한 절차와 차단 게이트는 [docs/NATIVE_PACKAGING.md](docs/NATIVE_PACKAGING.md)를 참고하세요.
+이 명령은 기존 산출물을 기본적으로 덮어쓰지 않고, 빌드 뒤 실제 frozen executable의 offline self-test를 실행합니다. 현재 공개 바이너리는 만들지 않습니다. 3-OS frozen build/self-test는 원격 CI에서 통과했지만, 저장소의 GPLv2-only 표기와 bundled PyQt6의 GPL-3.0-only 라이선스 결정, 서명·notarization·installer·frozen native-GL 검증이 남아 있습니다. 자세한 절차와 차단 게이트는 [docs/NATIVE_PACKAGING.md](docs/NATIVE_PACKAGING.md)를 참고하세요.
 
 ---
 
@@ -368,15 +369,16 @@ python main.py --project mesh.obj planview.png
 - `.amr-vector`/`.amr-rubbing`의 이동 가능한 offline 검증
 - 기와형 메쉬 기본 추천 펼침과 synthetic benchmark는 legacy 전문 기능으로 유지
 - code commit `898a8bfc144f` 기준 Python 3.12 macOS arm64 frozen 앱의 10-check offline self-test 통과
+- commit `e4bf6dcac4b1`의 원격 CI에서 Ubuntu·Windows·macOS frozen build와 각 실행 파일 self-test 모두 통과
 - Open/Align authority와 two-phase scene publication을 Qt/OpenGL-free `ArtifactWorkbench`로 이식
 - Cutline/Outline/Digital Rubbing command와 worker 수명주기를 Qt/OpenGL-free application shell로 이식
 - DerivedRecord의 VBO-free binding rebind와 SVG/PNG worker staging → final-authority publication 이식
-- `READY + FRESH` record graph에서 Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6 순차 활성화·초록 완료 표시·재열기/Align 복원 구현
+- dependency-valid `READY + FRESH` record graph와 application command에서 Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6 순차 gate·초록 완료 표시·재열기/Align 복원 구현
 - Cutline 면·경로, Outline fixed-grid/union/topology, Digital Rubbing raster/relief 내부의 안전 경계까지 사용자 cooperative cancellation 연결
 - 대좌표 render-origin 이식: relative VBO·camera/model rebasing·world overlay 제출과 frame-bound depth picking/drag 계약 구현
 - 실제 OpenGL driver smoke 구현: code commit `f25b424d6936`의 clean source tree, Python 3.12.13/macOS Apple M4에서 61개 context/FBO/VBO/pixel/depth/pick 조건 통과, 0.125 mm 높이차를 원근 `0.124783 mm`, 정사영 `0.124998 mm`로 복원. report는 commit/tree 상태·runtime lock·dependency version·UTC 시각을 기록함
 - source checkout CI 검증: commit `166103dcf0ea`의 run `29182584810`에서 quality `572 passed`, macOS/Ubuntu persistence 각 `501 passed`, Windows persistence `498 passed + 3 platform-specific skips`, Linux llvmpipe actual-GL `61/61` 통과
-- 다음 단계: Windows·macOS native QPA와 3-OS frozen actual-GL 확대, 종료 중 worker 정리와 동기 preflight 분리, 라이선스 결정, 대표 GPU·대용량 실제 유물 pilot 진행
+- 다음 단계: `.amr` embedded-source 원본 보존, Windows·macOS native QPA와 3-OS frozen actual-GL 확대, 종료 중 worker 정리와 동기 preflight 분리, 라이선스 결정, 대표 GPU·대용량 실제 유물 pilot 진행
 
 ---
 

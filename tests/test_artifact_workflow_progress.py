@@ -14,6 +14,7 @@ from src.application.artifact_workflow_progress import (
     REQUIRED_CUTLINE_VIEWS,
     REQUIRED_SIX_VIEWS,
     derive_artifact_workflow_progress,
+    workflow_step_record_ids,
 )
 from src.core.artifact_document import (
     ArtifactDocument,
@@ -151,6 +152,7 @@ def _append_outline(
     view: str,
     *,
     suffix: str = "ready",
+    depends_on_record_ids: tuple[str, ...] | None = None,
 ) -> ArtifactSession:
     computation = compute_artifact_outline(
         session,
@@ -163,6 +165,11 @@ def _append_outline(
         record_id=f"record:outline:{view}:{suffix}",
         created_at=STAMP,
         operator="pytest",
+        depends_on_record_ids=(
+            workflow_step_record_ids(session, ArtifactWorkflowStep.CUTLINE)
+            if depends_on_record_ids is None
+            else depends_on_record_ids
+        ),
     )
 
 
@@ -171,6 +178,7 @@ def _append_rubbing(
     view: str,
     *,
     suffix: str = "ready",
+    depends_on_record_ids: tuple[str, ...] | None = None,
 ) -> ArtifactSession:
     computation = compute_artifact_rubbing(
         session,
@@ -189,6 +197,11 @@ def _append_rubbing(
         record_id=f"record:rubbing:{view}:{suffix}",
         created_at=STAMP,
         operator="pytest",
+        depends_on_record_ids=(
+            workflow_step_record_ids(session, ArtifactWorkflowStep.OUTLINE)
+            if depends_on_record_ids is None
+            else depends_on_record_ids
+        ),
     )
 
 
@@ -267,8 +280,10 @@ def test_empty_progress_enables_only_cutline_after_explicit_align() -> None:
 
 def test_unique_ready_fresh_production_records_drive_the_3_6_6_sequence() -> None:
     session = _append_outline(_session(), "top", suffix="early")
+    session = _append_rubbing(session, "top", suffix="early")
     progress = derive_artifact_workflow_progress(session, align_ready=True)
-    assert progress.outline.completed_views == ("top",)
+    assert progress.outline.completed_views == ()
+    assert progress.rubbing.completed_views == ()
     assert not progress.outline.enabled
 
     session = _append_cutline(session, "top", suffix="first")
@@ -299,12 +314,37 @@ def test_unique_ready_fresh_production_records_drive_the_3_6_6_sequence() -> Non
     assert progress.outline.enabled
     assert not progress.rubbing.enabled
 
-    for view in REQUIRED_SIX_VIEWS[1:]:
+    session = _append_outline(
+        session,
+        "top",
+        suffix="partial-dependencies",
+        depends_on_record_ids=workflow_step_record_ids(
+            session,
+            ArtifactWorkflowStep.CUTLINE,
+        )[:2],
+    )
+    progress = derive_artifact_workflow_progress(session, align_ready=True)
+    assert progress.outline.completed_views == ()
+
+    for view in REQUIRED_SIX_VIEWS:
         session = _append_outline(session, view)
     progress = derive_artifact_workflow_progress(session, align_ready=True)
     assert progress.outline.completed_views == REQUIRED_SIX_VIEWS
     assert progress.outline.complete
     assert progress.rubbing.enabled
+    assert progress.rubbing.completed_views == ()
+
+    session = _append_rubbing(
+        session,
+        "top",
+        suffix="partial-dependencies",
+        depends_on_record_ids=workflow_step_record_ids(
+            session,
+            ArtifactWorkflowStep.OUTLINE,
+        )[:5],
+    )
+    progress = derive_artifact_workflow_progress(session, align_ready=True)
+    assert progress.rubbing.completed_views == ()
 
     for view in reversed(REQUIRED_SIX_VIEWS):
         session = _append_rubbing(session, view)
