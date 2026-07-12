@@ -27,7 +27,18 @@ from PyQt6.QtWidgets import (
     QCheckBox, QScrollArea, QSizePolicy, QButtonGroup, QDialog, QLineEdit,
     QGridLayout, QProgressDialog, QMenu
 )
-from PyQt6.QtCore import Qt, QTimer, QSize, pyqtSignal, QThread, QBuffer, QByteArray, QIODevice
+from PyQt6.QtCore import (
+    Qt,
+    QTimer,
+    QSize,
+    pyqtSignal,
+    QThread,
+    QBuffer,
+    QByteArray,
+    QIODevice,
+    QEvent,
+    QObject,
+)
 from PyQt6.QtCore import QSettings
 from PyQt6.QtGui import QAction, QIcon, QKeySequence, QPixmap, QShortcut
 import numpy as np
@@ -256,6 +267,7 @@ from src.application.artifact_measurements import (  # noqa: E402
     ArtifactMeasurementResult,
     ArtifactMeasurementWorkItem,
     DEFAULT_RUBBING_MEMORY_BUDGET_BYTES,
+    MeasurementCancelledError,
     MeasurementOperationKind,
     MeasurementOperationState,
 )
@@ -903,9 +915,34 @@ class TaskThread(QThread):
         try:
             result = self._fn()
             self.done.emit(result)
+        except MeasurementCancelledError as e:
+            _LOGGER.info("Task cancelled: %s", self._task_name)
+            self.failed.emit(f"{type(e).__name__}: {e}")
         except Exception as e:
             _LOGGER.exception("Task failed: %s", self._task_name)
             self.failed.emit(f"{type(e).__name__}: {e}")
+
+
+class _TaskDialogCloseGuard(QObject):
+    """Keep a cancelled task's wait dialog visible until its worker exits."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.waiting_for_worker = False
+        self.close_allowed = False
+
+    def eventFilter(self, watched, event):
+        if self.waiting_for_worker and not self.close_allowed:
+            if event.type() == QEvent.Type.Close:
+                event.ignore()
+                return True
+            if (
+                event.type() == QEvent.Type.KeyPress
+                and event.key() == Qt.Key.Key_Escape
+            ):
+                event.accept()
+                return True
+        return super().eventFilter(watched, event)
 
 
 def get_icon_path():
@@ -8605,16 +8642,24 @@ class MainWindow(QMainWindow):
         thread: TaskThread,
         on_done: Callable[[Any], None],
         on_failed: Callable[[str], None] | None = None,
+        on_cancel_requested: Callable[[], None] | None = None,
     ) -> bool:
         existing = getattr(self, "_task_thread", None)
         if existing is not None and existing.isRunning():
             QMessageBox.information(self, "작업 중", "이미 다른 작업이 진행 중입니다. 완료 후 다시 시도하세요.")
             return False
 
-        dlg = QProgressDialog(str(label), None, 0, 0, self)
+        dlg = QProgressDialog(
+            str(label),
+            "취소" if on_cancel_requested is not None else None,
+            0,
+            0,
+            self,
+        )
         dlg.setWindowTitle(str(title))
         dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
-        dlg.setCancelButton(None)
+        if on_cancel_requested is None:
+            dlg.setCancelButton(None)
         dlg.setMinimumDuration(0)
         dlg.show()
 
@@ -8625,8 +8670,14 @@ class MainWindow(QMainWindow):
 
         self._task_dialog = dlg
         self._task_thread = thread
+        dialog_close_guard = _TaskDialogCloseGuard()
+        try:
+            dlg.installEventFilter(dialog_close_guard)
+        except Exception:
+            pass
 
         progress_ended = False
+        cancel_requested = False
 
         def _end_progress():
             nonlocal progress_ended
@@ -8639,10 +8690,22 @@ class MainWindow(QMainWindow):
                 pass
 
         def _close_dialog():
+            dialog_close_guard.close_allowed = True
+            previous_blocked = None
+            try:
+                previous_blocked = dlg.blockSignals(True)
+            except Exception:
+                pass
             try:
                 dlg.close()
             except Exception:
                 pass
+            finally:
+                if previous_blocked is not None:
+                    try:
+                        dlg.blockSignals(bool(previous_blocked))
+                    except Exception:
+                        pass
             if getattr(self, "_task_dialog", None) is dlg:
                 self._task_dialog = None
             _end_progress()
@@ -8657,6 +8720,23 @@ class MainWindow(QMainWindow):
 
         def _default_failed(message: str):
             QMessageBox.critical(self, "오류", self._format_error_message("작업 실패:", message))
+
+        def _request_cancel() -> None:
+            nonlocal cancel_requested
+            if cancel_requested or on_cancel_requested is None:
+                return
+            cancel_requested = True
+            dialog_close_guard.waiting_for_worker = True
+            try:
+                on_cancel_requested()
+            except Exception:
+                _LOGGER.exception("Task cancellation callback failed: %s", title)
+            try:
+                dlg.setLabelText("취소 요청됨 · 안전한 계산 경계까지 기다리는 중...")
+                dlg.setCancelButton(None)
+                dlg.show()
+            except Exception:
+                pass
 
         def _safe_invoke(callback: Callable[[Any], None], arg: Any):
             try:
@@ -8677,6 +8757,8 @@ class MainWindow(QMainWindow):
             lambda msg: (_close_dialog(), _safe_invoke(on_failed or _default_failed, msg))
         )
         thread.finished.connect(lambda: (_close_dialog(), _cleanup_thread()))
+        if on_cancel_requested is not None:
+            dlg.canceled.connect(_request_cancel)
         try:
             thread.start()
         except Exception:
@@ -15096,6 +15178,55 @@ class MainWindow(QMainWindow):
             self._pending_native_measurement_publications.pop(work_item.id, None)
             return False
 
+    def _request_native_measurement_cancel(
+        self,
+        controller: ArtifactMeasurementController,
+        work_item: ArtifactMeasurementWorkItem,
+        *,
+        label: str,
+    ) -> None:
+        try:
+            summary = controller.cancel(work_item, reason="user_cancelled")
+        except Exception:
+            try:
+                summary = controller.summary(work_item)
+            except Exception:
+                _LOGGER.debug(
+                    "Native measurement cancellation lost its operation",
+                    exc_info=True,
+                )
+                return
+        if summary.state in {
+            MeasurementOperationState.CANCELLING,
+            MeasurementOperationState.CANCELLED,
+        }:
+            self.status_info.setText(
+                f"⏹ {label} 취소 요청됨 · 안전한 계산 경계까지 기다리는 중"
+            )
+
+    def _native_measurement_callback_is_terminal(
+        self,
+        controller: ArtifactMeasurementController,
+        work_item: ArtifactMeasurementWorkItem,
+        *,
+        label: str,
+    ) -> bool:
+        try:
+            state = controller.summary(work_item).state
+        except Exception:
+            return False
+        if state is MeasurementOperationState.CANCELLED:
+            self._pending_native_measurement_publications.pop(work_item.id, None)
+            self.status_info.setText(f"⏹ {label} 취소됨 | 기록을 만들지 않았습니다.")
+            return True
+        if state is MeasurementOperationState.STALE:
+            self._pending_native_measurement_publications.pop(work_item.id, None)
+            self.status_info.setText(
+                f"⛔ {label} 결과 폐기 | 계산 중 문서·Align이 변경됐습니다."
+            )
+            return True
+        return False
+
     def _prune_pending_native_measurement_publications(self) -> bool:
         controller = self._artifact_measurement_controller()
         for operation_id, (work_item, _result) in tuple(
@@ -15203,6 +15334,12 @@ class MainWindow(QMainWindow):
             return
 
         def on_done(result: object) -> None:
+            if self._native_measurement_callback_is_terminal(
+                controller,
+                work_item,
+                label="Cutline",
+            ):
+                return
             try:
                 if not isinstance(result, ArtifactMeasurementResult):
                     raise ArtifactWorkbenchError("Cutline worker result is invalid")
@@ -15231,6 +15368,12 @@ class MainWindow(QMainWindow):
                 detail=str(message),
             ):
                 return
+            if self._native_measurement_callback_is_terminal(
+                controller,
+                work_item,
+                label="Cutline",
+            ):
+                return
             self.status_info.setText("❌ 검증 단면 계산 실패 | 기존 문서 유지")
             QMessageBox.warning(
                 self,
@@ -15245,6 +15388,11 @@ class MainWindow(QMainWindow):
             thread=TaskThread("native_cutline", lambda: controller.execute(work_item)),
             on_done=on_done,
             on_failed=on_failed,
+            on_cancel_requested=lambda: self._request_native_measurement_cancel(
+                controller,
+                work_item,
+                label="Cutline",
+            ),
         )
         if not started:
             controller.cancel(work_item, reason="task_not_started")
@@ -15311,6 +15459,12 @@ class MainWindow(QMainWindow):
             return
 
         def on_done(result: object) -> None:
+            if self._native_measurement_callback_is_terminal(
+                controller,
+                work_item,
+                label="Outline",
+            ):
+                return
             try:
                 if not isinstance(result, ArtifactMeasurementResult):
                     raise ArtifactWorkbenchError("Outline worker result is invalid")
@@ -15339,6 +15493,12 @@ class MainWindow(QMainWindow):
                 detail=str(message),
             ):
                 return
+            if self._native_measurement_callback_is_terminal(
+                controller,
+                work_item,
+                label="Outline",
+            ):
+                return
             self.status_info.setText("❌ 검증 외곽 계산 실패 | 기존 문서 유지")
             QMessageBox.warning(
                 self,
@@ -15353,6 +15513,11 @@ class MainWindow(QMainWindow):
             thread=TaskThread("native_outline", lambda: controller.execute(work_item)),
             on_done=on_done,
             on_failed=on_failed,
+            on_cancel_requested=lambda: self._request_native_measurement_cancel(
+                controller,
+                work_item,
+                label="Outline",
+            ),
         )
         if not started:
             controller.cancel(work_item, reason="task_not_started")
@@ -15709,6 +15874,12 @@ class MainWindow(QMainWindow):
             return controller.execute(work_item)
 
         def on_done(result: object) -> None:
+            if self._native_measurement_callback_is_terminal(
+                controller,
+                work_item,
+                label="Digital Rubbing",
+            ):
+                return
             try:
                 if not isinstance(result, ArtifactMeasurementResult):
                     raise ArtifactWorkbenchError(
@@ -15743,6 +15914,12 @@ class MainWindow(QMainWindow):
                 detail=str(message),
             ):
                 return
+            if self._native_measurement_callback_is_terminal(
+                controller,
+                work_item,
+                label="Digital Rubbing",
+            ):
+                return
             self.status_info.setText("❌ Digital Rubbing 계산 실패 | 기존 문서 유지")
             QMessageBox.warning(
                 self,
@@ -15757,6 +15934,11 @@ class MainWindow(QMainWindow):
             thread=TaskThread("native_digital_rubbing", task),
             on_done=on_done,
             on_failed=on_failed,
+            on_cancel_requested=lambda: self._request_native_measurement_cancel(
+                controller,
+                work_item,
+                label="Digital Rubbing",
+            ),
         )
         if not started:
             controller.cancel(work_item, reason="task_not_started")

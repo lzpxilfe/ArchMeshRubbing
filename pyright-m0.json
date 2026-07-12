@@ -15,6 +15,7 @@
     "src/core/mesh_loader.py",
     "src/core/unit_utils.py",
     "src/core/alignment_utils.py",
+    "src/core/artifact_cancellation.py",
     "src/core/canonical_json.py",
     "src/core/artifact_document.py",
     "src/core/geometry_identity.py",

@@ -6,9 +6,10 @@ or commit rebasing.  A worker returns only an immutable computation.  Publicatio
 always rebases that computation onto the current same-Align session and then
 uses the existing ``ArtifactWorkbench`` two-phase projection transaction.
 
-Cancellation is cooperative at safe boundaries around the existing scientific
-extractors.  A cancellation request immediately revokes commit authority even
-when a long-running extractor cannot stop until its current core call returns.
+Cancellation is cooperative inside deterministic extractor chunks as well as
+at their outer boundaries.  A request immediately revokes commit authority;
+the worker stops at its next safe Python boundary after any current NumPy or
+GEOS call returns.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from typing import TypeAlias
 import uuid
 from weakref import WeakKeyDictionary
 
+from src.core.artifact_cancellation import ArtifactComputationCancelledError
 from src.core.artifact_document import OperationContext, canonical_recipe_hash
 from src.core.artifact_outline_extractor import (
     OutlineView,
@@ -102,6 +104,13 @@ class MeasurementOperationState(str, Enum):
     CANCELLED = "cancelled"
     FAILED = "failed"
     STALE = "stale"
+
+
+_TERMINAL_STATE_PRIORITY = {
+    MeasurementOperationState.CANCELLED: 1,
+    MeasurementOperationState.STALE: 2,
+    MeasurementOperationState.FAILED: 3,
+}
 
 
 MeasurementComputation: TypeAlias = (
@@ -408,16 +417,20 @@ def execute_measurement_work_item(
         if not isinstance(frame_value, Mapping):
             raise ArtifactMeasurementError("Cutline recipe has no valid frame")
         frame = PlanarFrame.from_dict(frame_value)
-        geometry = extract_cutline_geometry(
-            projection.mesh.vertices,
-            projection.mesh.faces,
-            frame,
-            classification_tolerance_mm=_recipe_float(
-                recipe,
-                "classification_tolerance_mm",
-            ),
-            stitch_tolerance_mm=_recipe_float(recipe, "stitch_tolerance_mm"),
-        )
+        try:
+            geometry = extract_cutline_geometry(
+                projection.mesh.vertices,
+                projection.mesh.faces,
+                frame,
+                classification_tolerance_mm=_recipe_float(
+                    recipe,
+                    "classification_tolerance_mm",
+                ),
+                stitch_tolerance_mm=_recipe_float(recipe, "stitch_tolerance_mm"),
+                cancellation_probe=cancellation_probe,
+            )
+        except ArtifactComputationCancelledError as exc:
+            raise MeasurementCancelledError(str(exc)) from exc
         computation: MeasurementComputation = ArtifactVectorComputation(
             context=work_item.context,
             projection_snapshot=work_item.projection_snapshot,
@@ -426,12 +439,16 @@ def execute_measurement_work_item(
             qc=geometry.qc,
         )
     elif work_item.kind is MeasurementOperationKind.OUTLINE:
-        geometry = extract_outline_geometry(
-            projection.mesh.vertices,
-            projection.mesh.faces,
-            str(recipe["view"]),
-            precision_grid_mm=_recipe_float(recipe, "precision_grid_mm"),
-        )
+        try:
+            geometry = extract_outline_geometry(
+                projection.mesh.vertices,
+                projection.mesh.faces,
+                str(recipe["view"]),
+                precision_grid_mm=_recipe_float(recipe, "precision_grid_mm"),
+                cancellation_probe=cancellation_probe,
+            )
+        except ArtifactComputationCancelledError as exc:
+            raise MeasurementCancelledError(str(exc)) from exc
         computation = ArtifactVectorComputation(
             context=work_item.context,
             projection_snapshot=work_item.projection_snapshot,
@@ -440,11 +457,15 @@ def execute_measurement_work_item(
             qc=geometry.qc,
         )
     else:
-        raster, qc = extract_digital_rubbing(
-            projection.mesh.vertices,
-            projection.mesh.faces,
-            recipe,
-        )
+        try:
+            raster, qc = extract_digital_rubbing(
+                projection.mesh.vertices,
+                projection.mesh.faces,
+                recipe,
+                cancellation_probe=cancellation_probe,
+            )
+        except ArtifactComputationCancelledError as exc:
+            raise MeasurementCancelledError(str(exc)) from exc
         computation = ArtifactRubbingComputation(
             context=work_item.context,
             projection_snapshot=work_item.projection_snapshot,
@@ -632,13 +653,12 @@ class ArtifactMeasurementController:
 
         runtime.cancellation.set()
         if runtime.executing:
-            priority = {
-                MeasurementOperationState.CANCELLED: 1,
-                MeasurementOperationState.STALE: 2,
-                MeasurementOperationState.FAILED: 3,
-            }
             current = runtime.pending_terminal_state
-            if current is None or priority[state] >= priority[current]:
+            if (
+                current is None
+                or _TERMINAL_STATE_PRIORITY[state]
+                >= _TERMINAL_STATE_PRIORITY[current]
+            ):
                 runtime.pending_terminal_state = state
                 runtime.pending_error = error
             runtime.state = MeasurementOperationState.CANCELLING
@@ -671,10 +691,21 @@ class ArtifactMeasurementController:
         default_error: BaseException | str,
     ) -> tuple[ArtifactMeasurementSummary, ArtifactWorkbenchError | None]:
         runtime.executing = False
-        state = runtime.pending_terminal_state or default_state
-        error = runtime.pending_error or default_error
+        pending_state = runtime.pending_terminal_state
+        if (
+            pending_state is None
+            or _TERMINAL_STATE_PRIORITY[pending_state]
+            < _TERMINAL_STATE_PRIORITY[default_state]
+        ):
+            pending_wins = False
+            state = default_state
+            error = default_error
+        else:
+            pending_wins = True
+            state = pending_state
+            error = runtime.pending_error
         summary = self._finish_locked(runtime, state, error)
-        if runtime.pending_terminal_state is None:
+        if not pending_wins:
             return summary, None
         return summary, self._terminal_exception(state, error)
 

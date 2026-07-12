@@ -15,7 +15,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PyQt6.QtCore import QCoreApplication, QEvent, QStandardPaths, Qt
 from PyQt6.QtGui import QKeyEvent
-from PyQt6.QtWidgets import QApplication, QMessageBox
+from PyQt6.QtTest import QTest
+from PyQt6.QtWidgets import QApplication, QMessageBox, QPushButton
 
 from app_interactive import (
     MainWindow,
@@ -27,7 +28,9 @@ from app_interactive import (
     _verify_loaded_project_source,
 )
 from src.application.artifact_exports import ArtifactExportState
-from src.application.artifact_measurements import MeasurementOperationState
+from src.application.artifact_measurements import (
+    MeasurementOperationState,
+)
 from src.application.artifact_workflow_progress import (
     ArtifactWorkflowProgress,
     ArtifactWorkflowStep,
@@ -402,6 +405,277 @@ def test_late_task_finished_signal_cannot_clear_new_thread_or_dialog() -> None:
             second.running = False
             second.done.emit("done")
             second.finished.emit()
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_start_task_exposes_one_shot_cooperative_cancel_without_terminating_thread() -> None:
+    class FakeSignal:
+        def __init__(self) -> None:
+            self.callbacks = []
+
+        def connect(self, callback) -> None:
+            self.callbacks.append(callback)
+
+        def emit(self, *args) -> None:
+            for callback in tuple(self.callbacks):
+                callback(*args)
+
+    class FakeThread:
+        def __init__(self) -> None:
+            self.done = FakeSignal()
+            self.failed = FakeSignal()
+            self.finished = FakeSignal()
+            self.started = False
+            self.deleted = False
+
+        def isRunning(self) -> bool:
+            return self.started
+
+        def start(self) -> None:
+            self.started = True
+
+        def deleteLater(self) -> None:
+            self.deleted = True
+
+    class FakeDialog:
+        instance = None
+
+        def __init__(self, label, cancel_text, *_args) -> None:
+            self.label = label
+            self.cancel_text = cancel_text
+            self.canceled = FakeSignal()
+            self.cancel_button = cancel_text
+            self.closed = False
+            self.show_count = 0
+            self.__class__.instance = self
+
+        def setWindowTitle(self, _value) -> None:
+            pass
+
+        def setWindowModality(self, _value) -> None:
+            pass
+
+        def setCancelButton(self, value) -> None:
+            self.cancel_button = value
+
+        def setMinimumDuration(self, _value) -> None:
+            pass
+
+        def setLabelText(self, value) -> None:
+            self.label = value
+
+        def show(self) -> None:
+            self.show_count += 1
+
+        def close(self) -> None:
+            self.closed = True
+
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    window = MainWindow()
+    thread = FakeThread()
+    cancelled = Mock()
+    failed = Mock()
+    try:
+        with patch("app_interactive.QProgressDialog", FakeDialog):
+            assert window._start_task(
+                title="cooperative",
+                label="working",
+                thread=thread,  # type: ignore[arg-type]
+                on_done=Mock(),
+                on_failed=failed,
+                on_cancel_requested=cancelled,
+            )
+        dialog = FakeDialog.instance
+        assert dialog is not None
+        assert dialog.cancel_text == "취소"
+        dialog.canceled.emit()
+        dialog.canceled.emit()
+        cancelled.assert_called_once_with()
+        assert dialog.cancel_button is None
+        assert "안전한 계산 경계" in dialog.label
+        assert thread.started
+        assert not thread.deleted
+
+        thread.failed.emit("MeasurementCancelledError: user_cancelled")
+        failed.assert_called_once_with("MeasurementCancelledError: user_cancelled")
+        assert dialog.closed
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_start_task_success_close_does_not_emit_a_spurious_cancel_request() -> None:
+    class FakeSignal:
+        def __init__(self) -> None:
+            self.callbacks = []
+
+        def connect(self, callback) -> None:
+            self.callbacks.append(callback)
+
+        def emit(self, *args) -> None:
+            for callback in tuple(self.callbacks):
+                callback(*args)
+
+    class FakeThread:
+        def __init__(self) -> None:
+            self.done = FakeSignal()
+            self.failed = FakeSignal()
+            self.finished = FakeSignal()
+            self.running = False
+
+        def isRunning(self) -> bool:
+            return self.running
+
+        def start(self) -> None:
+            self.running = True
+
+        def deleteLater(self) -> None:
+            pass
+
+    class FakeDialog:
+        instance = None
+
+        def __init__(self, *_args) -> None:
+            self.canceled = FakeSignal()
+            self.signals_blocked = False
+            self.closed = False
+            self.__class__.instance = self
+
+        def setWindowTitle(self, _value) -> None:
+            pass
+
+        def setWindowModality(self, _value) -> None:
+            pass
+
+        def setCancelButton(self, _value) -> None:
+            pass
+
+        def setMinimumDuration(self, _value) -> None:
+            pass
+
+        def show(self) -> None:
+            pass
+
+        def blockSignals(self, blocked: bool) -> bool:
+            previous = self.signals_blocked
+            self.signals_blocked = blocked
+            return previous
+
+        def close(self) -> None:
+            self.closed = True
+            if not self.signals_blocked:
+                self.canceled.emit()
+
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    window = MainWindow()
+    thread = FakeThread()
+    cancelled = Mock()
+    done = Mock()
+    try:
+        with patch("app_interactive.QProgressDialog", FakeDialog):
+            assert window._start_task(
+                title="cooperative",
+                label="working",
+                thread=thread,  # type: ignore[arg-type]
+                on_done=done,
+                on_cancel_requested=cancelled,
+            )
+        thread.running = False
+        thread.done.emit("result")
+
+        dialog = FakeDialog.instance
+        assert dialog is not None and dialog.closed
+        done.assert_called_once_with("result")
+        cancelled.assert_not_called()
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_cancelled_task_dialog_resists_escape_and_close_until_worker_finishes() -> None:
+    class FakeSignal:
+        def __init__(self) -> None:
+            self.callbacks = []
+
+        def connect(self, callback) -> None:
+            self.callbacks.append(callback)
+
+        def emit(self, *args) -> None:
+            for callback in tuple(self.callbacks):
+                callback(*args)
+
+    class FakeThread:
+        def __init__(self) -> None:
+            self.done = FakeSignal()
+            self.failed = FakeSignal()
+            self.finished = FakeSignal()
+            self.running = False
+            self.deleted = False
+
+        def isRunning(self) -> bool:
+            return self.running
+
+        def start(self) -> None:
+            self.running = True
+
+        def deleteLater(self) -> None:
+            self.deleted = True
+
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    window = MainWindow()
+    thread = FakeThread()
+    cancelled = Mock()
+    failed = Mock()
+    try:
+        assert window._start_task(
+            title="cooperative",
+            label="working",
+            thread=thread,  # type: ignore[arg-type]
+            on_done=Mock(),
+            on_failed=failed,
+            on_cancel_requested=cancelled,
+        )
+        dialog = window._task_dialog
+        assert dialog is not None and dialog.isVisible()
+
+        cancel_button = dialog.findChild(QPushButton)
+        assert cancel_button is not None
+        QTest.mouseClick(cancel_button, Qt.MouseButton.LeftButton)
+        app.processEvents()
+        cancelled.assert_called_once_with()
+        assert dialog.isVisible()
+
+        QTest.keyClick(dialog, Qt.Key.Key_Escape)
+        app.processEvents()
+        cancelled.assert_called_once_with()
+        assert dialog.isVisible()
+
+        assert not dialog.close()
+        app.processEvents()
+        cancelled.assert_called_once_with()
+        assert dialog.isVisible()
+
+        thread.running = False
+        thread.failed.emit("MeasurementCancelledError: user_cancelled")
+        app.processEvents()
+        failed.assert_called_once_with("MeasurementCancelledError: user_cancelled")
+        assert not dialog.isVisible()
+
+        thread.finished.emit()
+        assert thread.deleted
+        assert window._task_thread is None
+        assert window._task_dialog is None
     finally:
         window.deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
@@ -1810,6 +2084,42 @@ def test_downstream_measurement_handlers_enforce_record_derived_prerequisites() 
         app.processEvents()
 
 
+def test_native_cutline_user_cancel_is_quiet_and_never_publishes_a_record() -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    session = _artifact_box_session()
+    window = MainWindow()
+    window._artifact_session = session
+    window.viewport.objects = [_projected_scene_object(session)]
+    window.viewport.selected_index = 0
+    try:
+        with patch.object(window, "_start_task", return_value=True) as start_task:
+            window.on_native_cutline_requested()
+        callbacks = start_task.call_args.kwargs
+        cancel_requested = callbacks["on_cancel_requested"]
+        assert callable(cancel_requested)
+        cancel_requested()
+        controller = window._artifact_measurement_controller()
+        assert controller.active_summaries == ()
+        assert "취소 요청됨" in window.status_info.text()
+
+        with (
+            patch.object(window, "_publish_artifact_session_projection") as publish,
+            patch.object(QMessageBox, "warning") as warning,
+        ):
+            callbacks["on_done"](object())
+            callbacks["on_failed"]("StaleMeasurementOperationError: cancelled")
+        publish.assert_not_called()
+        warning.assert_not_called()
+        assert "취소됨" in window.status_info.text()
+        assert session.document.records == ()
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
 def test_native_outline_command_commits_verified_record_and_closed_preview() -> None:
     app = QApplication.instance()
     if app is None:
@@ -2383,7 +2693,8 @@ def test_native_rubbing_handler_uses_worker_and_late_result_cannot_overwrite_ses
         ):
             start_task.call_args.kwargs["on_done"](result)
         publish.assert_not_called()
-        warning.assert_called_once()
+        warning.assert_not_called()
+        assert "결과 폐기" in window.status_info.text()
         assert window._artifact_session.document.records == ()
         assert window._artifact_session.document.active_align_revision_id == (
             "align:late-rubbing"

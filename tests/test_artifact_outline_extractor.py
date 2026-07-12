@@ -10,6 +10,7 @@ import numpy as np
 import trimesh
 
 import src.core.artifact_outline_extractor as outline_extractor
+from src.core.artifact_cancellation import ArtifactComputationCancelledError
 from src.core.artifact_document import RecordFreshness
 from src.core.artifact_outline_extractor import (
     OUTLINE_ALGORITHM,
@@ -203,7 +204,9 @@ class TestOutlineFramesAndRecipe(unittest.TestCase):
 
     def test_backend_version_is_an_authoritative_compute_gate(self):
         with patch.object(outline_extractor.shapely, "__version__", "9.9.9"):
-            with self.assertRaisesRegex(ArtifactVectorExtractionError, "requires Shapely"):
+            with self.assertRaisesRegex(
+                ArtifactVectorExtractionError, "requires Shapely"
+            ):
                 outline_recipe("top", precision_grid_mm=0.01)
 
     def test_production_record_contract_rejects_recipe_id_and_grid_tampering(self):
@@ -280,7 +283,9 @@ class TestExactOutlineGeometry(unittest.TestCase):
                     view,
                     precision_grid_mm=0.01,
                 )
-                self.assertEqual(result.payload.qc_summary()["bounds_mm"], expected[view.value])
+                self.assertEqual(
+                    result.payload.qc_summary()["bounds_mm"], expected[view.value]
+                )
                 self.assertEqual(len(result.payload.paths), 1)
                 self.assertEqual(result.payload.paths[0].role, "exterior")
                 self.assertEqual(result.qc["projected_degenerate_triangle_count"], 8)
@@ -306,7 +311,9 @@ class TestExactOutlineGeometry(unittest.TestCase):
             "top",
             precision_grid_mm=0.01,
         )
-        self.assertEqual([path.role for path in annulus.payload.paths], ["exterior", "hole"])
+        self.assertEqual(
+            [path.role for path in annulus.payload.paths], ["exterior", "hole"]
+        )
         self.assertEqual(annulus.qc["hole_count"], 1)
         self.assertEqual(annulus.qc["outline_area_mm2"], 32.0)
         self.assertEqual(
@@ -344,14 +351,18 @@ class TestExactOutlineGeometry(unittest.TestCase):
             with self.subTest(seed=seed):
                 candidate_faces = faces.copy()
                 np.random.default_rng(seed).shuffle(candidate_faces)
-                candidate_faces = np.vstack((candidate_faces[:, ::-1], candidate_faces[:2]))
+                candidate_faces = np.vstack(
+                    (candidate_faces[:, ::-1], candidate_faces[:2])
+                )
                 candidate = extract_outline_geometry(
                     vertices,
                     candidate_faces,
                     "top",
                     precision_grid_mm=0.01,
                 ).payload
-                self.assertEqual(candidate.canonical_json_bytes(), baseline.canonical_json_bytes())
+                self.assertEqual(
+                    candidate.canonical_json_bytes(), baseline.canonical_json_bytes()
+                )
 
     def test_face_chunks_are_union_reduced_before_balanced_merge(self):
         vertices, faces = _annulus()
@@ -369,7 +380,114 @@ class TestExactOutlineGeometry(unittest.TestCase):
                 precision_grid_mm=0.01,
             )
         self.assertEqual(chunked.qc["face_chunk_count"], 4)
-        self.assertEqual(chunked.payload.canonical_json_bytes(), baseline.canonical_json_bytes())
+        self.assertEqual(
+            chunked.payload.canonical_json_bytes(), baseline.canonical_json_bytes()
+        )
+
+    def test_cancellation_signal_is_not_wrapped_as_an_extraction_error(self):
+        vertices, faces = _l_shape()
+
+        with self.assertRaises(ArtifactComputationCancelledError):
+            extract_outline_geometry(
+                vertices,
+                faces,
+                "top",
+                precision_grid_mm=0.01,
+                cancellation_probe=lambda: True,
+            )
+
+    def test_cancellation_interrupts_the_polygon_precision_loop(self):
+        vertices, base_faces = _rectangle(0.0, 0.0, 1.0, 1.0)
+        faces = np.repeat(base_faces[:1], 600, axis=0)
+        set_precision_calls = 0
+        actual_set_precision = outline_extractor.set_precision
+
+        def counted_set_precision(*args, **kwargs):
+            nonlocal set_precision_calls
+            set_precision_calls += 1
+            return actual_set_precision(*args, **kwargs)
+
+        with patch.object(
+            outline_extractor,
+            "set_precision",
+            side_effect=counted_set_precision,
+        ):
+            with self.assertRaises(ArtifactComputationCancelledError):
+                extract_outline_geometry(
+                    vertices,
+                    faces,
+                    "top",
+                    precision_grid_mm=0.01,
+                    cancellation_probe=lambda: set_precision_calls > 0,
+                )
+
+        self.assertGreater(set_precision_calls, 0)
+        self.assertLess(set_precision_calls, len(faces))
+
+    def test_cancellation_after_projection_stops_before_referenced_vertex_scan(self):
+        vertices, faces = _annulus()
+        cancellation_requested = False
+        actual_column_stack = outline_extractor.np.column_stack
+
+        def project_then_cancel(*args, **kwargs):
+            nonlocal cancellation_requested
+            result = actual_column_stack(*args, **kwargs)
+            cancellation_requested = True
+            return result
+
+        with (
+            patch.object(
+                outline_extractor.np,
+                "column_stack",
+                side_effect=project_then_cancel,
+            ),
+            patch.object(
+                outline_extractor.np,
+                "unique",
+                wraps=outline_extractor.np.unique,
+            ) as unique,
+        ):
+            with self.assertRaises(ArtifactComputationCancelledError):
+                extract_outline_geometry(
+                    vertices,
+                    faces,
+                    "top",
+                    precision_grid_mm=0.01,
+                    cancellation_probe=lambda: cancellation_requested,
+                )
+
+        self.assertTrue(cancellation_requested)
+        unique.assert_not_called()
+
+    def test_false_cancellation_probe_preserves_canonical_result(self):
+        vertices, faces = _annulus()
+        baseline = extract_outline_geometry(
+            vertices,
+            faces,
+            "top",
+            precision_grid_mm=0.01,
+        )
+        probe_calls = 0
+
+        def keep_running() -> bool:
+            nonlocal probe_calls
+            probe_calls += 1
+            return False
+
+        candidate = extract_outline_geometry(
+            vertices,
+            faces,
+            "top",
+            precision_grid_mm=0.01,
+            cancellation_probe=keep_running,
+        )
+
+        self.assertGreater(probe_calls, 0)
+        self.assertEqual(
+            candidate.payload.canonical_json_bytes(),
+            baseline.payload.canonical_json_bytes(),
+        )
+        self.assertEqual(candidate.qc, baseline.qc)
 
     def test_large_survey_offset_uses_translated_integer_lattice(self):
         vertices, faces = _l_shape()
@@ -381,13 +499,18 @@ class TestExactOutlineGeometry(unittest.TestCase):
             precision_grid_mm=0.01,
         )
         self.assertEqual(result.qc["outline_area_mm2"], 5.0)
-        self.assertEqual(result.qc["grid_origin_index_uv"], [100_000_000_000, -100_000_000_000])
-        self.assertEqual(result.payload.qc_summary()["bounds_mm"], [
-            1_000_000_000.0,
-            -1_000_000_000.0,
-            1_000_000_003.0,
-            -999_999_997.0,
-        ])
+        self.assertEqual(
+            result.qc["grid_origin_index_uv"], [100_000_000_000, -100_000_000_000]
+        )
+        self.assertEqual(
+            result.payload.qc_summary()["bounds_mm"],
+            [
+                1_000_000_000.0,
+                -1_000_000_000.0,
+                1_000_000_003.0,
+                -999_999_997.0,
+            ],
+        )
 
 
 class TestGridAndSafetyPolicy(unittest.TestCase):
@@ -440,7 +563,9 @@ class TestGridAndSafetyPolicy(unittest.TestCase):
         vertices, faces = _rectangle(0.0, 0.0, 1.0, 1.0)
         for invalid in (0.0, -1.0, float("nan"), True):
             with self.subTest(grid=invalid):
-                with self.assertRaisesRegex(ArtifactVectorExtractionError, "greater than zero"):
+                with self.assertRaisesRegex(
+                    ArtifactVectorExtractionError, "greater than zero"
+                ):
                     extract_outline_geometry(
                         vertices,
                         faces,
@@ -448,7 +573,9 @@ class TestGridAndSafetyPolicy(unittest.TestCase):
                         precision_grid_mm=invalid,
                     )
         with patch.object(outline_extractor, "MAX_OUTLINE_FACES", 1):
-            with self.assertRaisesRegex(ArtifactVectorExtractionError, "face safety limit"):
+            with self.assertRaisesRegex(
+                ArtifactVectorExtractionError, "face safety limit"
+            ):
                 extract_outline_geometry(
                     vertices,
                     faces,
@@ -456,7 +583,9 @@ class TestGridAndSafetyPolicy(unittest.TestCase):
                     precision_grid_mm=0.01,
                 )
         with patch.object(outline_extractor, "MAX_GRID_INDEX", 10):
-            with self.assertRaisesRegex(ArtifactVectorExtractionError, "integer safety range"):
+            with self.assertRaisesRegex(
+                ArtifactVectorExtractionError, "integer safety range"
+            ):
                 extract_outline_geometry(
                     vertices + np.array([100.0, 0.0, 0.0]),
                     faces,
@@ -492,6 +621,33 @@ class TestGridAndSafetyPolicy(unittest.TestCase):
 
 
 class TestArtifactOutlineCommandAndExport(unittest.TestCase):
+    def test_compute_cancellation_during_final_computation_cannot_escape(self):
+        box = _box((2.0, 2.0, 2.0))
+        session = _session(box.vertices, box.faces)
+        cancellation_requested = False
+        actual_computation_type = outline_extractor.ArtifactVectorComputation
+
+        def computation_then_cancel(*args, **kwargs):
+            nonlocal cancellation_requested
+            computation = actual_computation_type(*args, **kwargs)
+            cancellation_requested = True
+            return computation
+
+        with patch.object(
+            outline_extractor,
+            "ArtifactVectorComputation",
+            side_effect=computation_then_cancel,
+        ):
+            with self.assertRaises(ArtifactComputationCancelledError):
+                compute_artifact_outline(
+                    session,
+                    "top",
+                    precision_grid_mm=0.01,
+                    cancellation_probe=lambda: cancellation_requested,
+                )
+
+        self.assertTrue(cancellation_requested)
+
     def test_cm_source_is_converted_once_committed_and_revalidated(self):
         box = _box((2.0, 2.0, 2.0))
         session = _session(box.vertices, box.faces, unit="cm")

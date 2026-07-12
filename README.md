@@ -61,6 +61,7 @@ Align 확정 뒤에도 모든 기능이 한꺼번에 열리지는 않습니다. 
 - vector/rubbing package는 원본 mesh와 GUI가 없어도 이동 후 별도 프로세스에서 offline 검증 가능
 - Qt/OpenGL과 분리된 `ArtifactWorkbench`가 ticketed Open, 명시적 Align readiness, `state_version`/`authority_epoch` 기반 publication을 소유
 - native DerivedRecord worker는 시작 session과 projection을, viewport의 cut-section/ROI worker는 worker identity와 projection generation을 확인하여 늦은 결과가 현재 문서·overlay·새 worker를 덮지 못하게 함
+- Cutline·Outline·Digital Rubbing worker는 공통 취소 Event를 계산 내부의 deterministic chunk 경계까지 전달하며, 사용자는 진행 창에서 강제 스레드 종료 없이 취소를 요청할 수 있음
 - DerivedRecord 추가는 같은 render projection의 문서 binding만 compare-and-swap하며 live mesh·VBO·카메라·선택·preview cache를 다시 만들지 않음
 - SVG/PNG export worker는 보이지 않는 same-parent staging package를 완전 검증해 exact inode/fingerprint capability를 만들고, GUI callback이 현재 Workbench의 source·Align·exact `READY + FRESH` record를 다시 확인한 뒤 빠른 재확인·rename으로만 공개
 - export 중 같은 Align에 무관한 record가 추가돼도 안전하게 게시하지만 Align/Open 완료로 권위가 바뀌면 destination을 만들지 않고 자신이 소유한 staging만 정리함
@@ -130,7 +131,7 @@ Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 `Surfac
 
 - [`src/application/artifact_workbench.py`](src/application/artifact_workbench.py): 한 artifact의 session/project path, 단일 pending Open, workflow readiness와 projection publication authority
 - [`src/application/artifact_workflow_progress.py`](src/application/artifact_workflow_progress.py): 검증된 session의 `READY + FRESH` view coverage에서 Cutline 3면·Outline 6면·Digital Rubbing 6면 진행도와 순차 gate를 재구성
-- [`src/application/artifact_measurements.py`](src/application/artifact_measurements.py): Cutline/Outline/Digital Rubbing의 immutable work item, Workbench 공유 예약·메모리 admission, 취소, exact result capability와 same-Align rebase
+- [`src/application/artifact_measurements.py`](src/application/artifact_measurements.py): Cutline/Outline/Digital Rubbing의 immutable work item, Workbench 공유 예약·메모리 admission, cooperative cancellation, exact result capability와 same-Align rebase
 - [`src/application/artifact_exports.py`](src/application/artifact_exports.py): vector/rubbing export의 exact capability, worker staging, 안전한 정리와 final-authority publication
 - Open/new import/project reopen과 Align commit/parent activation은 ticket과 compare-and-swap 검증을 거쳐 `prepare → activate → finalize`되며, scene swap 실패는 이전 authority로 rollback
 - Cutline/Outline/Digital Rubbing은 GUI에서 파라미터만 캡처하고 단일 worker에서 계산합니다. worker는 문서를 변경하지 않으며, 완료 결과는 예약된 record ID와 일회성 result capability를 검증한 뒤 현재의 같은 Align session에 rebase합니다. record append publication은 GPU 장면을 교체하지 않습니다. 재개방한 기록은 READY + FRESH 목록에서 명시적으로 선택하고, 일시적인 Open/scene 충돌로 게시하지 못한 측정 결과는 새 ID를 만들지 않고 재시도합니다.
@@ -138,6 +139,7 @@ Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 `Surfac
 
 ### Artifact trust core
 
+- [`src/core/artifact_cancellation.py`](src/core/artifact_cancellation.py): GUI와 무관한 cooperative cancellation probe·고유 종료 신호
 - [`src/core/artifact_document.py`](src/core/artifact_document.py): source·metadata·Align·DerivedRecord revision graph
 - [`src/core/artifact_session.py`](src/core/artifact_session.py): 검증 source와 immutable document의 materialization 경계
 - [`src/core/artifact_vector_extractor.py`](src/core/artifact_vector_extractor.py): canonical-mm Cutline
@@ -341,12 +343,13 @@ python main.py --project mesh.obj planview.png
 - recipe·QC·receipt가 있는 6면 Digital Rubbing과 1:1 `.amr-rubbing` export
 - `.amr-vector`/`.amr-rubbing`의 이동 가능한 offline 검증
 - 기와형 메쉬 기본 추천 펼침과 synthetic benchmark는 legacy 전문 기능으로 유지
-- Python 3.12 macOS arm64 frozen 앱의 10-check offline self-test 통과
+- code commit `898a8bfc144f` 기준 Python 3.12 macOS arm64 frozen 앱의 10-check offline self-test 통과
 - Open/Align authority와 two-phase scene publication을 Qt/OpenGL-free `ArtifactWorkbench`로 이식
 - Cutline/Outline/Digital Rubbing command와 worker 수명주기를 Qt/OpenGL-free application shell로 이식
 - DerivedRecord의 VBO-free binding rebind와 SVG/PNG worker staging → final-authority publication 이식
 - `READY + FRESH` record graph에서 Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6 순차 활성화·초록 완료 표시·재열기/Align 복원 구현
-- 다음 단계: cooperative cancellation/render-origin, 실제 원격 3-OS CI, 라이선스 결정, GPU/대용량 유물 pilot 진행
+- Cutline 면·경로, Outline fixed-grid/union/topology, Digital Rubbing raster/relief 내부의 안전 경계까지 사용자 cooperative cancellation 연결
+- 다음 단계: render-origin, 종료 중 worker 정리와 동기 preflight 분리, 실제 원격 3-OS CI, 라이선스 결정, GPU/대용량 유물 pilot 진행
 
 ---
 

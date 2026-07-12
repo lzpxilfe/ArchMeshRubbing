@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import trimesh
 
+import src.core.artifact_vector_extractor as vector_extractor
+from src.core.artifact_cancellation import ArtifactComputationCancelledError
 from src.core.artifact_document import RecordFreshness
 from src.core.artifact_session import ArtifactSession
 from src.core.artifact_vector_extractor import (
@@ -79,6 +82,115 @@ def _session_cm_box() -> ArtifactSession:
 
 
 class TestCanonicalCutlineGeometry(unittest.TestCase):
+    def test_cancellation_is_cooperative_and_false_probe_preserves_exact_result(self):
+        box = _box()
+        baseline = extract_cutline_geometry(box.vertices, box.faces, _top_frame())
+
+        with self.assertRaises(ArtifactComputationCancelledError):
+            extract_cutline_geometry(
+                box.vertices,
+                box.faces,
+                _top_frame(),
+                cancellation_probe=lambda: True,
+            )
+
+        delayed_poll_count = 0
+
+        def cancel_after_progress() -> bool:
+            nonlocal delayed_poll_count
+            delayed_poll_count += 1
+            return delayed_poll_count >= 20
+
+        with self.assertRaises(ArtifactComputationCancelledError):
+            extract_cutline_geometry(
+                box.vertices,
+                box.faces,
+                _top_frame(),
+                cancellation_probe=cancel_after_progress,
+            )
+        self.assertGreaterEqual(delayed_poll_count, 20)
+
+        false_poll_count = 0
+
+        def never_cancel() -> bool:
+            nonlocal false_poll_count
+            false_poll_count += 1
+            return False
+
+        candidate = extract_cutline_geometry(
+            box.vertices,
+            box.faces,
+            _top_frame(),
+            cancellation_probe=never_cancel,
+        )
+        self.assertGreater(false_poll_count, 1)
+        self.assertEqual(
+            candidate.payload.canonical_json_bytes(),
+            baseline.payload.canonical_json_bytes(),
+        )
+        self.assertEqual(candidate.qc_dict(), baseline.qc_dict())
+
+    def test_cancellation_after_mesh_cross_stops_before_next_large_reduction(self):
+        box = _box()
+        frame = _top_frame()
+        cancellation_requested = False
+        actual_cross = vector_extractor.np.cross
+
+        def cross_then_cancel(*args, **kwargs):
+            nonlocal cancellation_requested
+            result = actual_cross(*args, **kwargs)
+            cancellation_requested = True
+            return result
+
+        with (
+            patch.object(
+                vector_extractor.np,
+                "cross",
+                side_effect=cross_then_cancel,
+            ),
+            patch.object(
+                vector_extractor.np,
+                "einsum",
+                wraps=vector_extractor.np.einsum,
+            ) as einsum,
+        ):
+            with self.assertRaises(ArtifactComputationCancelledError):
+                extract_cutline_geometry(
+                    box.vertices,
+                    box.faces,
+                    frame,
+                    cancellation_probe=lambda: cancellation_requested,
+                )
+
+        self.assertTrue(cancellation_requested)
+        einsum.assert_not_called()
+
+    def test_cancellation_during_final_result_construction_cannot_escape(self):
+        box = _box()
+        cancellation_requested = False
+        actual_result_type = vector_extractor.CutlineGeometryResult
+
+        def result_then_cancel(*args, **kwargs):
+            nonlocal cancellation_requested
+            result = actual_result_type(*args, **kwargs)
+            cancellation_requested = True
+            return result
+
+        with patch.object(
+            vector_extractor,
+            "CutlineGeometryResult",
+            side_effect=result_then_cancel,
+        ):
+            with self.assertRaises(ArtifactComputationCancelledError):
+                extract_cutline_geometry(
+                    box.vertices,
+                    box.faces,
+                    _top_frame(),
+                    cancellation_probe=lambda: cancellation_requested,
+                )
+
+        self.assertTrue(cancellation_requested)
+
     def test_exact_box_section_is_four_point_ccw_golden(self):
         box = _box()
         result = extract_cutline_geometry(box.vertices, box.faces, _top_frame())
@@ -101,7 +213,9 @@ class TestCanonicalCutlineGeometry(unittest.TestCase):
 
     def test_face_order_winding_and_multiple_components_are_deterministic(self):
         box = _box()
-        baseline = extract_cutline_geometry(box.vertices, box.faces, _top_frame()).payload
+        baseline = extract_cutline_geometry(
+            box.vertices, box.faces, _top_frame()
+        ).payload
         for seed in range(10):
             with self.subTest(seed=seed):
                 faces = np.asarray(box.faces, dtype=np.int64).copy()
@@ -112,7 +226,9 @@ class TestCanonicalCutlineGeometry(unittest.TestCase):
                     faces,
                     _top_frame(),
                 ).payload
-                self.assertEqual(candidate.canonical_json_bytes(), baseline.canonical_json_bytes())
+                self.assertEqual(
+                    candidate.canonical_json_bytes(), baseline.canonical_json_bytes()
+                )
                 self.assertEqual(candidate.sha256, baseline.sha256)
 
         left = _box()
@@ -137,7 +253,9 @@ class TestCanonicalCutlineGeometry(unittest.TestCase):
 
     def test_right_and_oblique_frames_preserve_plane_coordinates(self):
         box = _box((2.0, 4.0, 6.0))
-        right = extract_cutline_geometry(box.vertices, box.faces, _right_frame()).payload
+        right = extract_cutline_geometry(
+            box.vertices, box.faces, _right_frame()
+        ).payload
         self.assertEqual(right.qc_summary()["bounds_mm"], [-2.0, -3.0, 2.0, 3.0])
         for path in right.paths:
             for u, v in path.points_mm:
@@ -243,6 +361,31 @@ class TestCutlineAmbiguityPolicy(unittest.TestCase):
 
 
 class TestArtifactCutlineCommand(unittest.TestCase):
+    def test_compute_cancellation_during_final_computation_cannot_escape(self):
+        session = _session_cm_box()
+        cancellation_requested = False
+        actual_computation_type = vector_extractor.ArtifactVectorComputation
+
+        def computation_then_cancel(*args, **kwargs):
+            nonlocal cancellation_requested
+            computation = actual_computation_type(*args, **kwargs)
+            cancellation_requested = True
+            return computation
+
+        with patch.object(
+            vector_extractor,
+            "ArtifactVectorComputation",
+            side_effect=computation_then_cancel,
+        ):
+            with self.assertRaises(ArtifactComputationCancelledError):
+                compute_artifact_cutline(
+                    session,
+                    _top_frame(),
+                    cancellation_probe=lambda: cancellation_requested,
+                )
+
+        self.assertTrue(cancellation_requested)
+
     def test_cm_source_is_materialized_to_mm_exactly_once_and_committed(self):
         session = _session_cm_box()
         source_before = session.source_mesh.vertices.copy()
@@ -253,7 +396,9 @@ class TestArtifactCutlineCommand(unittest.TestCase):
             [-10.0, -10.0, 10.0, 10.0],
         )
         np.testing.assert_array_equal(session.source_mesh.vertices, source_before)
-        self.assertEqual(computation.recipe["coordinate_space"], "canonical_mm_planar/v1")
+        self.assertEqual(
+            computation.recipe["coordinate_space"], "canonical_mm_planar/v1"
+        )
         self.assertEqual(computation.context.align_revision_id, "align:a1")
         self.assertTrue(computation_matches_active_projection(session, computation))
 

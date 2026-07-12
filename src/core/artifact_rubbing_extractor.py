@@ -19,6 +19,11 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 
 from .alignment_utils import require_affine_matrix4x4
+from .artifact_cancellation import (
+    CancellationProbe,
+    poll_cancellation,
+    raise_if_cancelled,
+)
 from .artifact_document import OperationContext, canonical_recipe_hash
 from .artifact_outline_extractor import OutlineView, outline_frame
 from .artifact_scene_adapter import ArtifactProjectionSnapshot
@@ -506,24 +511,41 @@ def _rasterize_front_depth(
     pixels_per_mm: int,
     margin_pixels: int,
     layer_separation_mm: float,
+    cancellation_probe: CancellationProbe | None = None,
 ) -> tuple[np.ndarray, int, int, dict[str, int]]:
+    raise_if_cancelled(cancellation_probe)
     origin = np.asarray(frame.origin_world_mm, dtype=np.float64)
     u_axis = np.asarray(frame.u_axis_world, dtype=np.float64)
     v_axis = np.asarray(frame.v_axis_world, dtype=np.float64)
     normal = np.asarray(frame.normal_world, dtype=np.float64)
     relative = vertices - origin
+    raise_if_cancelled(cancellation_probe)
     projected = np.column_stack((relative @ u_axis, relative @ v_axis))
+    raise_if_cancelled(cancellation_probe)
     depths = relative @ normal
+    raise_if_cancelled(cancellation_probe)
     referenced = np.unique(faces.reshape(-1))
+    raise_if_cancelled(cancellation_probe)
     scaled = projected[referenced] * float(pixels_per_mm)
-    if not np.isfinite(scaled).all() or not np.isfinite(depths[referenced]).all():
+    raise_if_cancelled(cancellation_probe)
+    scaled_is_finite = bool(np.isfinite(scaled).all())
+    raise_if_cancelled(cancellation_probe)
+    referenced_depths_are_finite = bool(np.isfinite(depths[referenced]).all())
+    raise_if_cancelled(cancellation_probe)
+    if not scaled_is_finite or not referenced_depths_are_finite:
         raise ArtifactRubbingError("rubbing projection contains non-finite coordinates")
-    if float(np.max(np.abs(scaled))) > MAX_RUBBING_GRID_INDEX:
+    maximum_scaled_coordinate = float(np.max(np.abs(scaled)))
+    raise_if_cancelled(cancellation_probe)
+    if maximum_scaled_coordinate > MAX_RUBBING_GRID_INDEX:
         raise ArtifactRubbingError("rubbing projection exceeds the pixel-grid safety range")
     content_min_u = math.floor(float(np.min(scaled[:, 0])))
+    raise_if_cancelled(cancellation_probe)
     content_max_u = math.ceil(float(np.max(scaled[:, 0])))
+    raise_if_cancelled(cancellation_probe)
     content_min_v = math.floor(float(np.min(scaled[:, 1])))
+    raise_if_cancelled(cancellation_probe)
     content_max_v = math.ceil(float(np.max(scaled[:, 1])))
+    raise_if_cancelled(cancellation_probe)
     minimum_u = content_min_u - margin_pixels
     maximum_u = content_max_u + margin_pixels
     minimum_v = content_min_v - margin_pixels
@@ -542,12 +564,16 @@ def _rasterize_front_depth(
     local = projected * float(pixels_per_mm) - np.array(
         [minimum_u, minimum_v], dtype=np.float64
     )
+    raise_if_cancelled(cancellation_probe)
     depth_buffer = np.full((height, width), -np.inf, dtype=np.float64)
+    raise_if_cancelled(cancellation_probe)
     second_depth_buffer = np.full((height, width), -np.inf, dtype=np.float64)
+    raise_if_cancelled(cancellation_probe)
     projected_zero_area = 0
     triangle_pixel_tests = 0
     epsilon = 1e-12
-    for face in faces:
+    for face_index, face in enumerate(faces):
+        poll_cancellation(cancellation_probe, face_index)
         triangle = local[face]
         triangle_depth = depths[face]
         ax, ay = float(triangle[0, 0]), float(triangle[0, 1])
@@ -571,6 +597,7 @@ def _rasterize_front_depth(
             )
         xs = np.arange(minimum_x, maximum_x + 1, dtype=np.float64) + 0.5
         for y_start in range(minimum_y, maximum_y + 1, RASTER_ROW_BLOCK_SIZE):
+            raise_if_cancelled(cancellation_probe)
             y_stop = min(maximum_y + 1, y_start + RASTER_ROW_BLOCK_SIZE)
             ys = np.arange(y_start, y_stop, dtype=np.float64)[:, None] + 0.5
             x_grid = xs[None, :]
@@ -600,12 +627,17 @@ def _rasterize_front_depth(
             )
             if bool(np.any(new_second)):
                 second[new_second] = interpolated[new_second]
+    raise_if_cancelled(cancellation_probe)
     covered = np.isfinite(depth_buffer)
+    raise_if_cancelled(cancellation_probe)
     covered_count = int(np.count_nonzero(covered))
+    raise_if_cancelled(cancellation_probe)
     if covered_count == 0:
         raise ArtifactRubbingError("rubbing projection covers no physical pixel centres")
     multiple_layers = np.isfinite(second_depth_buffer)
+    raise_if_cancelled(cancellation_probe)
     multi_layer_pixel_count = int(np.count_nonzero(multiple_layers))
+    raise_if_cancelled(cancellation_probe)
     maximum_second_layer_gap_um = 0
     if multi_layer_pixel_count:
         maximum_second_layer_gap_um = int(
@@ -619,6 +651,8 @@ def _rasterize_front_depth(
                 * 1000.0
             )
         )
+        raise_if_cancelled(cancellation_probe)
+    raise_if_cancelled(cancellation_probe)
     return depth_buffer, minimum_u, minimum_v, {
         "artboard_height_pixels": height,
         "artboard_width_pixels": width,
@@ -632,11 +666,20 @@ def _rasterize_front_depth(
     }
 
 
-def _integral_image(values: np.ndarray) -> np.ndarray:
+def _integral_image(
+    values: np.ndarray,
+    *,
+    cancellation_probe: CancellationProbe | None = None,
+) -> np.ndarray:
+    raise_if_cancelled(cancellation_probe)
     integral = np.asarray(values, dtype=np.int64).copy()
     np.cumsum(integral, axis=0, dtype=np.int64, out=integral)
+    raise_if_cancelled(cancellation_probe)
     np.cumsum(integral, axis=1, dtype=np.int64, out=integral)
-    return np.pad(integral, ((1, 0), (1, 0)), mode="constant")
+    raise_if_cancelled(cancellation_probe)
+    padded = np.pad(integral, ((1, 0), (1, 0)), mode="constant")
+    raise_if_cancelled(cancellation_probe)
+    return padded
 
 
 def _render_local_relief(
@@ -647,35 +690,63 @@ def _render_local_relief(
     effective_black_point_ticks: int,
     relief_polarity: str,
     minimum_reference_sample_count: int,
+    cancellation_probe: CancellationProbe | None = None,
 ) -> tuple[np.ndarray, dict[str, int]]:
+    raise_if_cancelled(cancellation_probe)
     covered = np.isfinite(depth_buffer)
+    raise_if_cancelled(cancellation_probe)
     covered_depths = depth_buffer[covered]
+    raise_if_cancelled(cancellation_probe)
     minimum_depth = float(np.min(covered_depths))
+    raise_if_cancelled(cancellation_probe)
     span_mm = float(np.max(covered_depths) - minimum_depth)
+    raise_if_cancelled(cancellation_probe)
     scaled = (depth_buffer[covered] - minimum_depth) * (
         1000.0 / float(depth_quantization_um)
     )
-    if not np.isfinite(scaled).all() or float(np.max(scaled)) > MAX_RUBBING_DEPTH_TICKS:
+    raise_if_cancelled(cancellation_probe)
+    scaled_is_finite = bool(np.isfinite(scaled).all())
+    raise_if_cancelled(cancellation_probe)
+    maximum_scaled_depth = float(np.max(scaled))
+    raise_if_cancelled(cancellation_probe)
+    if not scaled_is_finite or maximum_scaled_depth > MAX_RUBBING_DEPTH_TICKS:
         raise ArtifactRubbingError("rubbing depth span exceeds the quantized safety range")
     height = int(np.size(depth_buffer, axis=0))
     width = int(np.size(depth_buffer, axis=1))
     ticks = np.zeros((height, width), dtype=np.int64)
+    raise_if_cancelled(cancellation_probe)
     ticks[covered] = np.rint(scaled).astype(np.int64)
+    raise_if_cancelled(cancellation_probe)
     maximum_tick = int(ticks[covered].max())
+    raise_if_cancelled(cancellation_probe)
     covered_count = int(np.count_nonzero(covered))
+    raise_if_cancelled(cancellation_probe)
     if maximum_tick * covered_count > MAX_RUBBING_INTEGRAL_SUM:
         raise ArtifactRubbingError("rubbing integer integral would overflow")
-    sum_integral = _integral_image(ticks)
-    count_integral = _integral_image(covered.astype(np.int64))
+    raise_if_cancelled(cancellation_probe)
+    sum_integral = _integral_image(
+        ticks,
+        cancellation_probe=cancellation_probe,
+    )
+    count_integral = _integral_image(
+        covered.astype(np.int64),
+        cancellation_probe=cancellation_probe,
+    )
     x_indices = np.arange(width, dtype=np.int64)
+    raise_if_cancelled(cancellation_probe)
     x0 = np.maximum(0, x_indices - reference_radius_pixels)
+    raise_if_cancelled(cancellation_probe)
     x1 = np.minimum(width, x_indices + reference_radius_pixels + 1)
+    raise_if_cancelled(cancellation_probe)
     output = np.empty((height, width, 2), dtype=np.uint8)
+    raise_if_cancelled(cancellation_probe)
     output[:, :, 0] = 255
     output[:, :, 1] = 0
+    raise_if_cancelled(cancellation_probe)
     ink_sum = 0
     inked_count = 0
     for row_start in range(0, height, RASTER_ROW_BLOCK_SIZE):
+        raise_if_cancelled(cancellation_probe)
         row_stop = min(height, row_start + RASTER_ROW_BLOCK_SIZE)
         rows = np.arange(row_start, row_stop, dtype=np.int64)
         y0 = np.maximum(0, rows - reference_radius_pixels)
@@ -718,8 +789,10 @@ def _render_local_relief(
         )
         ink_sum += int(np.sum(drop[mask_block], dtype=np.int64))
         inked_count += int(np.count_nonzero(drop[mask_block] > 0))
+    raise_if_cancelled(cancellation_probe)
     # Raster work used v-increasing rows. PNG/raster row zero is the top.
     top_down = np.ascontiguousarray(np.flipud(output))
+    raise_if_cancelled(cancellation_probe)
     return top_down, {
         "depth_span_quantized_ticks": maximum_tick,
         "depth_span_unquantized_um_rounded": int(round(span_mm * 1000.0)),
@@ -732,11 +805,19 @@ def extract_digital_rubbing(
     vertices_world_mm: object,
     faces: object,
     recipe: Mapping[str, Any],
+    *,
+    cancellation_probe: CancellationProbe | None = None,
 ) -> tuple[DigitalRubbingRaster, dict[str, Any]]:
     """Render one deterministic front-surface rubbing from canonical-mm triangles."""
 
+    raise_if_cancelled(cancellation_probe)
     validated = validate_rubbing_recipe(recipe)
-    vertices, face_array = _validated_mesh_arrays(vertices_world_mm, faces)
+    vertices, face_array = _validated_mesh_arrays(
+        vertices_world_mm,
+        faces,
+        cancellation_probe=cancellation_probe,
+    )
+    raise_if_cancelled(cancellation_probe)
     if vertices.shape[0] > MAX_RUBBING_VERTICES:
         raise ArtifactRubbingError("rubbing exceeds the vertex safety limit")
     if face_array.shape[0] > MAX_RUBBING_FACES:
@@ -757,6 +838,7 @@ def extract_digital_rubbing(
         pixels_per_mm=pixels_per_mm,
         margin_pixels=int(pixel_policy["margin_pixels"]),
         layer_separation_mm=float(depth_policy["quantization_um"]) / 1000.0,
+        cancellation_probe=cancellation_probe,
     )
     pixels, relief_qc = _render_local_relief(
         depth,
@@ -767,7 +849,9 @@ def extract_digital_rubbing(
         minimum_reference_sample_count=int(
             relief_policy["minimum_reference_sample_count"]
         ),
+        cancellation_probe=cancellation_probe,
     )
+    raise_if_cancelled(cancellation_probe)
     raster = DigitalRubbingRaster(
         pixels=pixels,
         frame=frame,
@@ -776,6 +860,9 @@ def extract_digital_rubbing(
         minimum_u_pixel_index=minimum_u,
         minimum_v_pixel_index=minimum_v,
     )
+    raise_if_cancelled(cancellation_probe)
+    raster_summary = raster.qc_summary()
+    raise_if_cancelled(cancellation_probe)
     qc = {
         "all_projected_faces_included": True,
         "input_face_count": int(face_array.shape[0]),
@@ -784,8 +871,9 @@ def extract_digital_rubbing(
         "view": view.value,
         **raster_qc,
         **relief_qc,
-        **raster.qc_summary(),
+        **raster_summary,
     }
+    raise_if_cancelled(cancellation_probe)
     return raster, qc
 
 
@@ -902,9 +990,11 @@ def compute_artifact_rubbing(
     black_point_um: int,
     ink_strength_percent: int,
     relief_polarity: str,
+    cancellation_probe: CancellationProbe | None = None,
 ) -> ArtifactRubbingComputation:
     if not isinstance(session, ArtifactSession):
         raise ArtifactRubbingError("session must be an ArtifactSession")
+    raise_if_cancelled(cancellation_probe)
     recipe = rubbing_recipe(
         view,
         pixels_per_mm=pixels_per_mm,
@@ -920,23 +1010,30 @@ def compute_artifact_rubbing(
         projection = session.materialize()
     except ArtifactSessionError as exc:
         raise ArtifactRubbingError(str(exc)) from exc
+    raise_if_cancelled(cancellation_probe)
     raster, qc = extract_digital_rubbing(
         projection.mesh.vertices,
         projection.mesh.faces,
         recipe,
+        cancellation_probe=cancellation_probe,
     )
-    return ArtifactRubbingComputation(
+    raise_if_cancelled(cancellation_probe)
+    computation = ArtifactRubbingComputation(
         context=context,
         projection_snapshot=projection.snapshot,
         raster=raster,
         recipe=recipe,
         qc=qc,
     )
+    raise_if_cancelled(cancellation_probe)
+    return computation
 
 
 def compute_artifact_rubbing_from_recipe(
     session: ArtifactSession,
     recipe: Mapping[str, Any],
+    *,
+    cancellation_probe: CancellationProbe | None = None,
 ) -> ArtifactRubbingComputation:
     validated = validate_rubbing_recipe(recipe)
     pixel = validated["pixel_policy"]
@@ -955,6 +1052,7 @@ def compute_artifact_rubbing_from_recipe(
         black_point_um=int(relief["black_point_requested_um"]),
         ink_strength_percent=int(relief["ink_strength_percent"]),
         relief_polarity=str(relief["polarity"]),
+        cancellation_probe=cancellation_probe,
     )
 
 

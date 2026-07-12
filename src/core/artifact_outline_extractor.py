@@ -22,6 +22,11 @@ from shapely.errors import GEOSException
 from shapely.geometry import MultiPolygon, Polygon
 from shapely.geometry.base import BaseGeometry
 
+from .artifact_cancellation import (
+    CancellationProbe,
+    poll_cancellation,
+    raise_if_cancelled,
+)
 from .artifact_session import ArtifactSession, ArtifactSessionError
 from .artifact_document import canonical_recipe_hash
 from .artifact_outline_topology import validate_outline_topology
@@ -188,12 +193,16 @@ def outline_recipe(
 def validate_outline_record_contract(
     payload: VectorGeometryPayload,
     recipe: Mapping[str, Any],
+    *,
+    cancellation_probe: CancellationProbe | None = None,
 ) -> None:
     """Re-prove the production recipe, grid, topology, and path identity."""
 
-    if not isinstance(payload, VectorGeometryPayload) or VectorRecordKind(
-        payload.kind
-    ) is not VectorRecordKind.OUTLINE:
+    raise_if_cancelled(cancellation_probe)
+    if (
+        not isinstance(payload, VectorGeometryPayload)
+        or VectorRecordKind(payload.kind) is not VectorRecordKind.OUTLINE
+    ):
         raise ArtifactVectorExtractionError(
             "outline record contract requires an outline vector payload"
         )
@@ -212,9 +221,11 @@ def validate_outline_record_contract(
         )
 
     integers_by_id: dict[str, tuple[tuple[int, int], ...]] = {}
-    for path in payload.paths:
+    for path_index, path in enumerate(payload.paths):
+        poll_cancellation(cancellation_probe, path_index)
         integer_points: list[tuple[int, int]] = []
-        for x, y in path.points_mm:
+        for point_index, (x, y) in enumerate(path.points_mm):
+            poll_cancellation(cancellation_probe, point_index)
             scaled_x = x / grid
             scaled_y = y / grid
             if max(abs(scaled_x), abs(scaled_y)) > MAX_GRID_INDEX:
@@ -231,24 +242,29 @@ def validate_outline_record_contract(
             integer_points.append((x_index, y_index))
         points = tuple(integer_points)
         for index, current in enumerate(points):
+            poll_cancellation(cancellation_probe, index)
             previous = points[index - 1]
             following = points[(index + 1) % len(points)]
-            cross = (current[0] - previous[0]) * (
-                following[1] - current[1]
-            ) - (current[1] - previous[1]) * (following[0] - current[0])
+            cross = (current[0] - previous[0]) * (following[1] - current[1]) - (
+                current[1] - previous[1]
+            ) * (following[0] - current[0])
             if cross == 0:
                 raise ArtifactVectorExtractionError(
                     "outline payload contains a non-canonical collinear ring point"
                 )
         integers_by_id[path.id] = points
 
-    topology = validate_outline_topology(payload)
+    topology = validate_outline_topology(
+        payload,
+        cancellation_probe=cancellation_probe,
+    )
     exterior_paths = sorted(
         (path for path in payload.paths if path.role == "exterior"),
         key=lambda path: integers_by_id[path.id],
     )
     exterior_id_by_component: dict[int, str] = {}
     for component_index, path in enumerate(exterior_paths):
+        poll_cancellation(cancellation_probe, component_index)
         match = _EXTERIOR_ID_RE.fullmatch(path.id)
         if match is None or int(match.group(1)) != component_index:
             raise ArtifactVectorExtractionError(
@@ -260,7 +276,8 @@ def validate_outline_record_contract(
     holes_by_component: dict[int, list[VectorPath]] = {
         index: [] for index in exterior_id_by_component
     }
-    for path in payload.paths:
+    for path_index, path in enumerate(payload.paths):
+        poll_cancellation(cancellation_probe, path_index)
         if path.role != "hole":
             continue
         match = _HOLE_ID_RE.fullmatch(path.id)
@@ -276,6 +293,7 @@ def validate_outline_record_contract(
             )
         holes_by_component[component_index].append(path)
     for component_index, holes in holes_by_component.items():
+        poll_cancellation(cancellation_probe, component_index)
         ordered = sorted(holes, key=lambda path: integers_by_id[path.id])
         for hole_index, path in enumerate(ordered):
             expected_id = (
@@ -285,6 +303,7 @@ def validate_outline_record_contract(
                 raise ArtifactVectorExtractionError(
                     "outline hole IDs do not match canonical within-component order"
                 )
+    raise_if_cancelled(cancellation_probe)
 
 
 @dataclass(frozen=True, slots=True)
@@ -296,7 +315,9 @@ class OutlineGeometryResult:
         if not isinstance(self.payload, VectorGeometryPayload):
             raise ArtifactVectorExtractionError("payload must be VectorGeometryPayload")
         if VectorRecordKind(self.payload.kind) is not VectorRecordKind.OUTLINE:
-            raise ArtifactVectorExtractionError("outline result payload kind must be outline")
+            raise ArtifactVectorExtractionError(
+                "outline result payload kind must be outline"
+            )
         if not isinstance(self.qc, dict):
             raise ArtifactVectorExtractionError("qc must be an object")
 
@@ -329,7 +350,9 @@ def _validate_intermediate_geometry(
     geometry: BaseGeometry,
     *,
     stage: str,
+    cancellation_probe: CancellationProbe | None = None,
 ) -> None:
+    raise_if_cancelled(cancellation_probe)
     polygons = _polygon_sequence(geometry)
     if not polygons:
         raise ArtifactVectorExtractionError(f"outline {stage} geometry is empty")
@@ -339,9 +362,12 @@ def _validate_intermediate_geometry(
             f"{MAX_OUTLINE_INTERMEDIATE_POLYGONS}-polygon safety limit"
         )
     coordinate_count = 0
-    for polygon in polygons:
+    for polygon_index, polygon in enumerate(polygons):
+        poll_cancellation(cancellation_probe, polygon_index)
         coordinate_count += len(polygon.exterior.coords)
-        coordinate_count += sum(len(interior.coords) for interior in polygon.interiors)
+        for interior_index, interior in enumerate(polygon.interiors):
+            poll_cancellation(cancellation_probe, interior_index)
+            coordinate_count += len(interior.coords)
     if coordinate_count > MAX_OUTLINE_INTERMEDIATE_COORDINATES:
         raise ArtifactVectorExtractionError(
             f"outline {stage} exceeds the "
@@ -351,32 +377,50 @@ def _validate_intermediate_geometry(
         raise ArtifactVectorExtractionError(
             f"outline {stage} geometry is invalid: {is_valid_reason(geometry)}"
         )
+    raise_if_cancelled(cancellation_probe)
 
 
 def _batched_union(
     geometries: Sequence[BaseGeometry],
     *,
     grid_size: float | None,
+    cancellation_probe: CancellationProbe | None = None,
 ) -> BaseGeometry:
+    raise_if_cancelled(cancellation_probe)
     if not geometries:
-        raise ArtifactVectorExtractionError("outline has no polygonal projected triangles")
+        raise ArtifactVectorExtractionError(
+            "outline has no polygonal projected triangles"
+        )
     level = list(geometries)
     try:
         batches: list[BaseGeometry] = []
         for start in range(0, len(level), OUTLINE_UNION_BATCH_SIZE):
+            poll_cancellation(
+                cancellation_probe,
+                start // OUTLINE_UNION_BATCH_SIZE,
+            )
             chunk = level[start : start + OUTLINE_UNION_BATCH_SIZE]
+            raise_if_cancelled(cancellation_probe)
             merged = (
                 union_all(chunk)
                 if grid_size is None
                 else union_all(chunk, grid_size=grid_size)
             )
-            _validate_intermediate_geometry(merged, stage="batch-union")
+            raise_if_cancelled(cancellation_probe)
+            _validate_intermediate_geometry(
+                merged,
+                stage="batch-union",
+                cancellation_probe=cancellation_probe,
+            )
             batches.append(merged)
         level = batches
         while len(level) > 1:
+            raise_if_cancelled(cancellation_probe)
             next_level: list[BaseGeometry] = []
             for index in range(0, len(level), 2):
+                poll_cancellation(cancellation_probe, index // 2)
                 pair = level[index : index + 2]
+                raise_if_cancelled(cancellation_probe)
                 merged = (
                     pair[0]
                     if len(pair) == 1
@@ -386,27 +430,40 @@ def _batched_union(
                         else union_all(pair, grid_size=grid_size)
                     )
                 )
-                _validate_intermediate_geometry(merged, stage="balanced-union")
+                raise_if_cancelled(cancellation_probe)
+                _validate_intermediate_geometry(
+                    merged,
+                    stage="balanced-union",
+                    cancellation_probe=cancellation_probe,
+                )
                 next_level.append(merged)
             level = next_level
+        raise_if_cancelled(cancellation_probe)
         return level[0]
     except (GEOSException, ValueError, TypeError) as exc:
-        raise ArtifactVectorExtractionError(f"outline polygon union failed: {exc}") from exc
+        raise ArtifactVectorExtractionError(
+            f"outline polygon union failed: {exc}"
+        ) from exc
 
 
 def _balanced_union(
     geometries: Sequence[BaseGeometry],
     *,
     grid_size: float | None,
+    cancellation_probe: CancellationProbe | None = None,
 ) -> BaseGeometry:
+    raise_if_cancelled(cancellation_probe)
     if not geometries:
         raise ArtifactVectorExtractionError("outline has no non-empty union batches")
     level = list(geometries)
     try:
         while len(level) > 1:
+            raise_if_cancelled(cancellation_probe)
             next_level: list[BaseGeometry] = []
             for index in range(0, len(level), 2):
+                poll_cancellation(cancellation_probe, index // 2)
                 pair = level[index : index + 2]
+                raise_if_cancelled(cancellation_probe)
                 merged = (
                     pair[0]
                     if len(pair) == 1
@@ -416,9 +473,15 @@ def _balanced_union(
                         else union_all(pair, grid_size=grid_size)
                     )
                 )
-                _validate_intermediate_geometry(merged, stage="balanced-union")
+                raise_if_cancelled(cancellation_probe)
+                _validate_intermediate_geometry(
+                    merged,
+                    stage="balanced-union",
+                    cancellation_probe=cancellation_probe,
+                )
                 next_level.append(merged)
             level = next_level
+        raise_if_cancelled(cancellation_probe)
         return level[0]
     except (GEOSException, ValueError, TypeError) as exc:
         raise ArtifactVectorExtractionError(
@@ -428,12 +491,19 @@ def _balanced_union(
 
 def _remove_integer_collinear(
     points: Sequence[tuple[int, int]],
+    *,
+    cancellation_probe: CancellationProbe | None = None,
 ) -> tuple[tuple[tuple[int, int], ...], int]:
+    raise_if_cancelled(cancellation_probe)
     result = list(points)
     removed = 0
+    pass_index = 0
     while len(result) > 3:
+        poll_cancellation(cancellation_probe, pass_index)
+        pass_index += 1
         removable: set[int] = set()
         for index, current in enumerate(result):
+            poll_cancellation(cancellation_probe, index)
             previous = result[index - 1]
             following = result[(index + 1) % len(result)]
             first_x = current[0] - previous[0]
@@ -448,17 +518,33 @@ def _remove_integer_collinear(
                 removable.add(index)
         if not removable or len(result) - len(removable) < 3:
             break
-        result = [point for index, point in enumerate(result) if index not in removable]
+        raise_if_cancelled(cancellation_probe)
+        retained: list[tuple[int, int]] = []
+        for index, point in enumerate(result):
+            poll_cancellation(cancellation_probe, index)
+            if index not in removable:
+                retained.append(point)
+        result = retained
+        raise_if_cancelled(cancellation_probe)
         removed += len(removable)
+    raise_if_cancelled(cancellation_probe)
     return tuple(result), removed
 
 
-def _integer_ring_area2(points: Sequence[tuple[int, int]]) -> int:
-    return sum(
-        points[index][0] * points[(index + 1) % len(points)][1]
-        - points[(index + 1) % len(points)][0] * points[index][1]
-        for index in range(len(points))
-    )
+def _integer_ring_area2(
+    points: Sequence[tuple[int, int]],
+    *,
+    cancellation_probe: CancellationProbe | None = None,
+) -> int:
+    area2 = 0
+    for index in range(len(points)):
+        poll_cancellation(cancellation_probe, index)
+        area2 += (
+            points[index][0] * points[(index + 1) % len(points)][1]
+            - points[(index + 1) % len(points)][0] * points[index][1]
+        )
+    raise_if_cancelled(cancellation_probe)
+    return area2
 
 
 def _canonical_integer_ring(
@@ -467,10 +553,13 @@ def _canonical_integer_ring(
     grid: float,
     grid_origin: tuple[int, int],
     clockwise: bool,
+    cancellation_probe: CancellationProbe | None = None,
 ) -> tuple[tuple[tuple[int, int], ...], int, float]:
+    raise_if_cancelled(cancellation_probe)
     points: list[tuple[int, int]] = []
     max_residual = 0.0
-    for coordinate in coordinates:
+    for coordinate_index, coordinate in enumerate(coordinates):
+        poll_cancellation(cancellation_probe, coordinate_index)
         x = float(coordinate[0])
         y = float(coordinate[1])
         local_x_index = int(round(x))
@@ -497,14 +586,25 @@ def _canonical_integer_ring(
         points.pop()
     if len(points) < 3:
         raise ArtifactVectorExtractionError("outline union contains a collapsed ring")
-    reduced, removed = _remove_integer_collinear(points)
-    area2 = _integer_ring_area2(reduced)
+    reduced, removed = _remove_integer_collinear(
+        points,
+        cancellation_probe=cancellation_probe,
+    )
+    area2 = _integer_ring_area2(
+        reduced,
+        cancellation_probe=cancellation_probe,
+    )
     if area2 == 0:
         raise ArtifactVectorExtractionError("outline union contains a zero-area ring")
     if (clockwise and area2 > 0) or (not clockwise and area2 < 0):
         reduced = tuple(reversed(reduced))
-    start = min(range(len(reduced)), key=lambda index: reduced[index])
+    start = 0
+    for index in range(1, len(reduced)):
+        poll_cancellation(cancellation_probe, index)
+        if reduced[index] < reduced[start]:
+            start = index
     reduced = reduced[start:] + reduced[:start]
+    raise_if_cancelled(cancellation_probe)
     return reduced, removed, max_residual
 
 
@@ -512,14 +612,38 @@ def _float_ring(
     points: Sequence[tuple[int, int]],
     *,
     grid: float,
+    cancellation_probe: CancellationProbe | None = None,
 ) -> tuple[tuple[float, float], ...]:
-    return tuple(
-        (
-            0.0 if x == 0 else float(x * grid),
-            0.0 if y == 0 else float(y * grid),
+    floats: list[tuple[float, float]] = []
+    for index, (x, y) in enumerate(points):
+        poll_cancellation(cancellation_probe, index)
+        floats.append(
+            (
+                0.0 if x == 0 else float(x * grid),
+                0.0 if y == 0 else float(y * grid),
+            )
         )
-        for x, y in points
-    )
+    raise_if_cancelled(cancellation_probe)
+    return tuple(floats)
+
+
+def _ring_segment_lengths(
+    paths: Sequence[VectorPath],
+    *,
+    cancellation_probe: CancellationProbe | None = None,
+) -> Iterable[float]:
+    segment_index = 0
+    for path in paths:
+        for index in range(len(path.points_mm)):
+            poll_cancellation(cancellation_probe, segment_index)
+            segment_index += 1
+            yield math.hypot(
+                path.points_mm[(index + 1) % len(path.points_mm)][0]
+                - path.points_mm[index][0],
+                path.points_mm[(index + 1) % len(path.points_mm)][1]
+                - path.points_mm[index][1],
+            )
+    raise_if_cancelled(cancellation_probe)
 
 
 def _payload_from_union(
@@ -528,7 +652,9 @@ def _payload_from_union(
     frame: PlanarFrame,
     grid: float,
     grid_origin: tuple[int, int],
+    cancellation_probe: CancellationProbe | None = None,
 ) -> tuple[VectorGeometryPayload, dict[str, Any]]:
+    raise_if_cancelled(cancellation_probe)
     components: list[
         tuple[
             tuple[tuple[int, int], ...],
@@ -537,49 +663,64 @@ def _payload_from_union(
     ] = []
     collinear_removed = 0
     max_grid_residual = 0.0
-    for polygon in _polygon_sequence(geometry):
+    for polygon_index, polygon in enumerate(_polygon_sequence(geometry)):
+        poll_cancellation(cancellation_probe, polygon_index)
         exterior, removed, residual = _canonical_integer_ring(
             polygon.exterior.coords,
             grid=grid,
             grid_origin=grid_origin,
             clockwise=False,
+            cancellation_probe=cancellation_probe,
         )
         collinear_removed += removed
         max_grid_residual = max(max_grid_residual, residual)
         holes: list[tuple[tuple[int, int], ...]] = []
-        for interior in polygon.interiors:
+        for interior_index, interior in enumerate(polygon.interiors):
+            poll_cancellation(cancellation_probe, interior_index)
             hole, removed, residual = _canonical_integer_ring(
                 interior.coords,
                 grid=grid,
                 grid_origin=grid_origin,
                 clockwise=True,
+                cancellation_probe=cancellation_probe,
             )
             holes.append(hole)
             collinear_removed += removed
             max_grid_residual = max(max_grid_residual, residual)
         components.append((exterior, tuple(sorted(holes))))
+    raise_if_cancelled(cancellation_probe)
     components.sort(key=lambda item: (item[0], item[1]))
+    raise_if_cancelled(cancellation_probe)
 
     paths: list[VectorPath] = []
     for component_index, (exterior, component_holes) in enumerate(components):
+        poll_cancellation(cancellation_probe, component_index)
         paths.append(
             VectorPath(
                 id=f"outline:component:{component_index:04d}:exterior",
                 role="exterior",
                 closed=True,
-                points_mm=_float_ring(exterior, grid=grid),
+                points_mm=_float_ring(
+                    exterior,
+                    grid=grid,
+                    cancellation_probe=cancellation_probe,
+                ),
             )
         )
         for hole_index, hole in enumerate(component_holes):
+            poll_cancellation(cancellation_probe, hole_index)
             paths.append(
                 VectorPath(
                     id=(
-                        f"outline:component:{component_index:04d}:"
-                        f"hole:{hole_index:04d}"
+                        f"outline:component:{component_index:04d}:hole:{hole_index:04d}"
                     ),
                     role="hole",
                     closed=True,
-                    points_mm=_float_ring(hole, grid=grid),
+                    points_mm=_float_ring(
+                        hole,
+                        grid=grid,
+                        cancellation_probe=cancellation_probe,
+                    ),
                 )
             )
     point_count = sum(len(path.points_mm) for path in paths)
@@ -587,6 +728,7 @@ def _payload_from_union(
         raise ArtifactVectorExtractionError(
             f"outline exceeds the {MAX_VECTOR_POINTS}-point vector safety limit"
         )
+    raise_if_cancelled(cancellation_probe)
     payload = VectorGeometryPayload(
         schema_version=VECTOR_PAYLOAD_SCHEMA_VERSION,
         kind=VectorRecordKind.OUTLINE,
@@ -594,29 +736,42 @@ def _payload_from_union(
         frame=frame,
         paths=tuple(paths),
     )
+    raise_if_cancelled(cancellation_probe)
 
     try:
-        topology = validate_outline_topology(payload)
+        topology = validate_outline_topology(
+            payload,
+            cancellation_probe=cancellation_probe,
+        )
     except ValueError as exc:
         raise ArtifactVectorExtractionError(
             f"canonical outline topology is invalid: {exc}"
         ) from exc
-    area_lattice2 = sum(
-        abs(_integer_ring_area2(exterior))
-        - sum(abs(_integer_ring_area2(hole)) for hole in component_holes)
-        for exterior, component_holes in components
-    )
+    area_lattice2 = 0
+    for component_index, (exterior, component_holes) in enumerate(components):
+        poll_cancellation(cancellation_probe, component_index)
+        component_area2 = abs(
+            _integer_ring_area2(
+                exterior,
+                cancellation_probe=cancellation_probe,
+            )
+        )
+        for hole_index, hole in enumerate(component_holes):
+            poll_cancellation(cancellation_probe, hole_index)
+            component_area2 -= abs(
+                _integer_ring_area2(
+                    hole,
+                    cancellation_probe=cancellation_probe,
+                )
+            )
+        area_lattice2 += component_area2
     outline_area_mm2 = round(area_lattice2 * grid * grid / 2.0, 12)
     outline_perimeter_mm = round(
         math.fsum(
-            math.hypot(
-                path.points_mm[(index + 1) % len(path.points_mm)][0]
-                - path.points_mm[index][0],
-                path.points_mm[(index + 1) % len(path.points_mm)][1]
-                - path.points_mm[index][1],
+            _ring_segment_lengths(
+                payload.paths,
+                cancellation_probe=cancellation_probe,
             )
-            for path in payload.paths
-            for index in range(len(path.points_mm))
         ),
         12,
     )
@@ -629,6 +784,7 @@ def _payload_from_union(
         raise ArtifactVectorExtractionError(
             "integer-lattice and topology-validator outline areas disagree"
         )
+    raise_if_cancelled(cancellation_probe)
     return payload, {
         "component_count": len(components),
         "hole_count": sum(
@@ -648,13 +804,20 @@ def extract_outline_geometry(
     view: OutlineView | str,
     *,
     precision_grid_mm: float,
+    cancellation_probe: CancellationProbe | None = None,
 ) -> OutlineGeometryResult:
     """Project and fixed-grid union every triangle into one canonical view."""
 
+    raise_if_cancelled(cancellation_probe)
     _require_outline_backend()
     resolved = _outline_view(view)
     grid = _precision_grid(precision_grid_mm)
-    vertices, face_array = _validated_mesh_arrays(vertices_world_mm, faces)
+    vertices, face_array = _validated_mesh_arrays(
+        vertices_world_mm,
+        faces,
+        cancellation_probe=cancellation_probe,
+    )
+    raise_if_cancelled(cancellation_probe)
     if vertices.shape[0] > MAX_OUTLINE_VERTICES:
         raise ArtifactVectorExtractionError(
             f"outline exceeds the {MAX_OUTLINE_VERTICES}-vertex safety limit"
@@ -668,30 +831,45 @@ def extract_outline_geometry(
     u_axis = np.asarray(frame.u_axis_world, dtype=np.float64)
     v_axis = np.asarray(frame.v_axis_world, dtype=np.float64)
     relative = vertices - origin
+    raise_if_cancelled(cancellation_probe)
     projected_vertices = np.column_stack((relative @ u_axis, relative @ v_axis))
+    raise_if_cancelled(cancellation_probe)
     referenced_indices = np.unique(face_array.reshape(-1))
+    raise_if_cancelled(cancellation_probe)
     with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
         referenced_scaled = projected_vertices[referenced_indices] / grid
-    if not np.isfinite(referenced_scaled).all():
+    raise_if_cancelled(cancellation_probe)
+    referenced_scaled_is_finite = bool(np.isfinite(referenced_scaled).all())
+    raise_if_cancelled(cancellation_probe)
+    if not referenced_scaled_is_finite:
         raise ArtifactVectorExtractionError(
             "outline projection is non-finite at the selected precision grid"
         )
-    if np.max(np.abs(referenced_scaled)) > MAX_GRID_INDEX:
+    maximum_grid_index = float(np.max(np.abs(referenced_scaled)))
+    raise_if_cancelled(cancellation_probe)
+    if maximum_grid_index > MAX_GRID_INDEX:
         raise ArtifactVectorExtractionError(
             "outline coordinates exceed the fixed-grid integer safety range"
         )
-    grid_origin = (
-        math.floor(float(np.min(referenced_scaled[:, 0]))),
-        math.floor(float(np.min(referenced_scaled[:, 1]))),
-    )
+    minimum_u_index = math.floor(float(np.min(referenced_scaled[:, 0])))
+    raise_if_cancelled(cancellation_probe)
+    minimum_v_index = math.floor(float(np.min(referenced_scaled[:, 1])))
+    raise_if_cancelled(cancellation_probe)
+    grid_origin = (minimum_u_index, minimum_v_index)
     with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
         lattice_vertices = projected_vertices / grid - np.asarray(
             grid_origin, dtype=np.float64
         )
-    if not np.isfinite(lattice_vertices[referenced_indices]).all():
+    raise_if_cancelled(cancellation_probe)
+    lattice_vertices_are_finite = bool(
+        np.isfinite(lattice_vertices[referenced_indices]).all()
+    )
+    raise_if_cancelled(cancellation_probe)
+    if not lattice_vertices_are_finite:
         raise ArtifactVectorExtractionError(
             "outline lattice coordinates are non-finite"
         )
+    raise_if_cancelled(cancellation_probe)
 
     snapped_batches: list[BaseGeometry] = []
     raw_batches: list[BaseGeometry] = []
@@ -703,25 +881,27 @@ def extract_outline_geometry(
     fixed_grid_triangle_count = 0
     face_chunk_count = 0
     for start in range(0, face_array.shape[0], OUTLINE_UNION_BATCH_SIZE):
+        raise_if_cancelled(cancellation_probe)
         face_chunk_count += 1
         face_chunk = face_array[start : start + OUTLINE_UNION_BATCH_SIZE]
         triangles = lattice_vertices[face_chunk]
-        twice_area = (
-            (triangles[:, 1, 0] - triangles[:, 0, 0])
-            * (triangles[:, 2, 1] - triangles[:, 0, 1])
-            - (triangles[:, 1, 1] - triangles[:, 0, 1])
-            * (triangles[:, 2, 0] - triangles[:, 0, 0])
+        twice_area = (triangles[:, 1, 0] - triangles[:, 0, 0]) * (
+            triangles[:, 2, 1] - triangles[:, 0, 1]
+        ) - (triangles[:, 1, 1] - triangles[:, 0, 1]) * (
+            triangles[:, 2, 0] - triangles[:, 0, 0]
         )
         projected_degenerate_count += int(np.count_nonzero(twice_area == 0.0))
         candidate_triangles = triangles[twice_area != 0.0]
         projected_non_degenerate_count += int(candidate_triangles.shape[0])
         if candidate_triangles.shape[0] == 0:
+            raise_if_cancelled(cancellation_probe)
             continue
 
         raw_polygons: list[Polygon] = []
         snapped_polygons: list[BaseGeometry] = []
         try:
-            for coordinates in candidate_triangles:
+            for triangle_index, coordinates in enumerate(candidate_triangles):
+                poll_cancellation(cancellation_probe, triangle_index)
                 polygon = Polygon(coordinates)
                 raw_polygons.append(polygon)
                 snapped = set_precision(polygon, 1.0, mode="valid_output")
@@ -740,15 +920,27 @@ def extract_outline_geometry(
         fixed_grid_triangle_count += len(snapped_polygons)
         if snapped_polygons:
             snapped_batches.append(
-                _batched_union(snapped_polygons, grid_size=1.0)
+                _batched_union(
+                    snapped_polygons,
+                    grid_size=1.0,
+                    cancellation_probe=cancellation_probe,
+                )
             )
         if raw_comparison_available:
             try:
-                raw_batches.append(_batched_union(raw_polygons, grid_size=None))
+                raw_batches.append(
+                    _batched_union(
+                        raw_polygons,
+                        grid_size=None,
+                        cancellation_probe=cancellation_probe,
+                    )
+                )
             except ArtifactVectorExtractionError as exc:
                 raw_comparison_available = False
                 raw_comparison_failure = type(exc).__name__
                 raw_batches.clear()
+        raise_if_cancelled(cancellation_probe)
+    raise_if_cancelled(cancellation_probe)
 
     if projected_non_degenerate_count == 0:
         raise ArtifactVectorExtractionError(
@@ -759,7 +951,12 @@ def extract_outline_geometry(
             "all projected triangle areas collapse at the selected precision grid"
         )
 
-    snapped_union = _balanced_union(snapped_batches, grid_size=1.0)
+    snapped_union = _balanced_union(
+        snapped_batches,
+        grid_size=1.0,
+        cancellation_probe=cancellation_probe,
+    )
+    raise_if_cancelled(cancellation_probe)
     if snapped_union.is_empty:
         raise ArtifactVectorExtractionError(
             "outline polygon union is empty at the selected precision grid"
@@ -778,7 +975,11 @@ def extract_outline_geometry(
             raise ArtifactVectorExtractionError(
                 raw_comparison_failure or "raw comparison has no batches"
             )
-        unsnapped_union = _balanced_union(raw_batches, grid_size=None)
+        unsnapped_union = _balanced_union(
+            raw_batches,
+            grid_size=None,
+            cancellation_probe=cancellation_probe,
+        )
         unsnapped_component_count = _polygon_count(unsnapped_union)
         unsnapped_area_mm2 = round(
             float(unsnapped_union.area) * grid * grid,
@@ -794,6 +995,7 @@ def extract_outline_geometry(
         frame=frame,
         grid=grid,
         grid_origin=grid_origin,
+        cancellation_probe=cancellation_probe,
     )
     component_merge_count = (
         max(0, unsnapped_component_count - snapped_component_count)
@@ -836,6 +1038,7 @@ def extract_outline_geometry(
         "view": resolved.value,
         **topology_qc,
     }
+    raise_if_cancelled(cancellation_probe)
     return OutlineGeometryResult(payload=payload, qc=qc)
 
 
@@ -844,9 +1047,11 @@ def compute_artifact_outline(
     view: OutlineView | str,
     *,
     precision_grid_mm: float,
+    cancellation_probe: CancellationProbe | None = None,
 ) -> ArtifactVectorComputation:
     """Capture document context and compute one six-view authoritative outline."""
 
+    raise_if_cancelled(cancellation_probe)
     if not isinstance(session, ArtifactSession):
         raise ArtifactVectorExtractionError("session must be an ArtifactSession")
     resolved = _outline_view(view)
@@ -858,19 +1063,24 @@ def compute_artifact_outline(
         projection = session.materialize()
     except ArtifactSessionError as exc:
         raise ArtifactVectorExtractionError(str(exc)) from exc
+    raise_if_cancelled(cancellation_probe)
     geometry = extract_outline_geometry(
         projection.mesh.vertices,
         projection.mesh.faces,
         resolved,
         precision_grid_mm=precision_grid_mm,
+        cancellation_probe=cancellation_probe,
     )
-    return ArtifactVectorComputation(
+    raise_if_cancelled(cancellation_probe)
+    computation = ArtifactVectorComputation(
         context=context,
         projection_snapshot=projection.snapshot,
         payload=geometry.payload,
         recipe=recipe,
         qc=geometry.qc,
     )
+    raise_if_cancelled(cancellation_probe)
+    return computation
 
 
 __all__ = [

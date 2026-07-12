@@ -10,6 +10,7 @@ import numpy as np
 import trimesh
 
 import src.core.artifact_rubbing_extractor as rubbing_extractor
+from src.core.artifact_cancellation import ArtifactComputationCancelledError
 from src.core.artifact_document import RecordFreshness
 from src.core.artifact_rubbing_extractor import (
     ArtifactRubbingError,
@@ -188,6 +189,117 @@ class TestRubbingRecipe(unittest.TestCase):
 
 
 class TestRubbingRaster(unittest.TestCase):
+    def test_cancellation_is_cooperative_and_false_probe_preserves_exact_raster(self):
+        vertices, faces = _bump()
+        baseline, baseline_qc = extract_digital_rubbing(
+            vertices,
+            faces,
+            _recipe(),
+        )
+
+        with self.assertRaises(ArtifactComputationCancelledError):
+            extract_digital_rubbing(
+                vertices,
+                faces,
+                _recipe(),
+                cancellation_probe=lambda: True,
+            )
+
+        poll_count = 0
+
+        def cancel_after_progress() -> bool:
+            nonlocal poll_count
+            poll_count += 1
+            return poll_count >= 12
+
+        with self.assertRaises(ArtifactComputationCancelledError):
+            extract_digital_rubbing(
+                vertices,
+                faces,
+                _recipe(),
+                cancellation_probe=cancel_after_progress,
+            )
+        self.assertGreaterEqual(poll_count, 12)
+
+        false_poll_count = 0
+
+        def never_cancel() -> bool:
+            nonlocal false_poll_count
+            false_poll_count += 1
+            return False
+
+        candidate, candidate_qc = extract_digital_rubbing(
+            vertices,
+            faces,
+            _recipe(),
+            cancellation_probe=never_cancel,
+        )
+        self.assertGreater(false_poll_count, 1)
+        self.assertEqual(candidate.raster_sha256, baseline.raster_sha256)
+        np.testing.assert_array_equal(candidate.pixels, baseline.pixels)
+        self.assertEqual(candidate_qc, baseline_qc)
+
+    def test_cancellation_after_projection_stops_before_next_large_numpy_step(self):
+        vertices, faces = _bump()
+        recipe = _recipe()
+        cancellation_requested = False
+        actual_column_stack = rubbing_extractor.np.column_stack
+
+        def project_then_cancel(*args, **kwargs):
+            nonlocal cancellation_requested
+            result = actual_column_stack(*args, **kwargs)
+            cancellation_requested = True
+            return result
+
+        with (
+            patch.object(
+                rubbing_extractor.np,
+                "column_stack",
+                side_effect=project_then_cancel,
+            ),
+            patch.object(
+                rubbing_extractor.np,
+                "unique",
+                wraps=rubbing_extractor.np.unique,
+            ) as unique,
+        ):
+            with self.assertRaises(ArtifactComputationCancelledError):
+                extract_digital_rubbing(
+                    vertices,
+                    faces,
+                    recipe,
+                    cancellation_probe=lambda: cancellation_requested,
+                )
+
+        self.assertTrue(cancellation_requested)
+        unique.assert_not_called()
+
+    def test_cancellation_during_final_raster_construction_cannot_escape(self):
+        vertices, faces = _bump()
+        cancellation_requested = False
+        actual_raster_type = rubbing_extractor.DigitalRubbingRaster
+
+        def raster_then_cancel(*args, **kwargs):
+            nonlocal cancellation_requested
+            raster = actual_raster_type(*args, **kwargs)
+            cancellation_requested = True
+            return raster
+
+        with patch.object(
+            rubbing_extractor,
+            "DigitalRubbingRaster",
+            side_effect=raster_then_cancel,
+        ):
+            with self.assertRaises(ArtifactComputationCancelledError):
+                extract_digital_rubbing(
+                    vertices,
+                    faces,
+                    _recipe(),
+                    cancellation_probe=lambda: cancellation_requested,
+                )
+
+        self.assertTrue(cancellation_requested)
+
     def test_flat_plane_has_exact_scale_mask_and_golden_semantic_hash(self):
         vertices, faces = _plane()
         raster, qc = extract_digital_rubbing(vertices, faces, _recipe())
@@ -273,6 +385,39 @@ class TestRubbingRaster(unittest.TestCase):
 
 
 class TestRubbingRecordWorkflow(unittest.TestCase):
+    def test_compute_cancellation_during_final_computation_cannot_escape(self):
+        vertices, faces = _bump()
+        session = _session(vertices, faces)
+        cancellation_requested = False
+        actual_computation_type = rubbing_extractor.ArtifactRubbingComputation
+
+        def computation_then_cancel(*args, **kwargs):
+            nonlocal cancellation_requested
+            computation = actual_computation_type(*args, **kwargs)
+            cancellation_requested = True
+            return computation
+
+        with patch.object(
+            rubbing_extractor,
+            "ArtifactRubbingComputation",
+            side_effect=computation_then_cancel,
+        ):
+            with self.assertRaises(ArtifactComputationCancelledError):
+                compute_artifact_rubbing(
+                    session,
+                    "top",
+                    pixels_per_mm=10,
+                    margin_um=0,
+                    reference_radius_um=500,
+                    depth_quantization_um=10,
+                    black_point_um=100,
+                    ink_strength_percent=100,
+                    relief_polarity="bidirectional",
+                    cancellation_probe=lambda: cancellation_requested,
+                )
+
+        self.assertTrue(cancellation_requested)
+
     def test_cm_source_is_converted_once_committed_saved_and_recomputed(self):
         box = trimesh.creation.box(extents=(2.0, 2.0, 1.0))
         session = _session(box.vertices, box.faces, unit="cm")

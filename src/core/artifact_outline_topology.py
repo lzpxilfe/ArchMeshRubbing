@@ -13,6 +13,7 @@ error carrying deterministic, JSON-compatible diagnostics.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 import math
 from typing import Any, Sequence
@@ -21,6 +22,11 @@ from shapely import LinearRing, MultiPolygon, Polygon, contains_properly
 from shapely.errors import GEOSException
 from shapely.validation import explain_validity
 
+from .artifact_cancellation import (
+    CancellationProbe,
+    poll_cancellation,
+    raise_if_cancelled,
+)
 from .artifact_vector_record import (
     VectorGeometryPayload,
     VectorPath,
@@ -135,7 +141,12 @@ def _issue(
     )
 
 
-def _ring_geometry(path: VectorPath) -> _RingGeometry:
+def _ring_geometry(
+    path: VectorPath,
+    *,
+    cancellation_probe: CancellationProbe | None = None,
+) -> _RingGeometry:
+    raise_if_cancelled(cancellation_probe)
     if path.role not in {"exterior", "hole"}:
         raise _issue(
             "invalid_ring_role",
@@ -159,6 +170,7 @@ def _ring_geometry(path: VectorPath) -> _RingGeometry:
             path,
         ) from exc
 
+    raise_if_cancelled(cancellation_probe)
     area = float(polygon.area)
     if not math.isfinite(area) or area <= 0.0:
         raise _issue(
@@ -166,32 +178,42 @@ def _ring_geometry(path: VectorPath) -> _RingGeometry:
             "outline rings must enclose a finite non-zero area",
             path,
         )
-    if not bool(ring.is_simple) or not bool(ring.is_ring):
+    raise_if_cancelled(cancellation_probe)
+    is_simple = bool(ring.is_simple)
+    raise_if_cancelled(cancellation_probe)
+    is_ring = bool(ring.is_ring)
+    if not is_simple or not is_ring:
         raise _issue(
             "ring_not_simple",
             f"outline ring is not simple: {explain_validity(ring)}",
             path,
         )
+    raise_if_cancelled(cancellation_probe)
     if not bool(polygon.is_valid):
         raise _issue(
             "ring_invalid",
             f"outline ring is invalid: {explain_validity(polygon)}",
             path,
         )
+    raise_if_cancelled(cancellation_probe)
     return _RingGeometry(path=path, polygon=polygon)
 
 
 def _validate_hole_owners(
     exteriors: Sequence[_RingGeometry],
     holes: Sequence[_RingGeometry],
+    *,
+    cancellation_probe: CancellationProbe | None = None,
 ) -> tuple[tuple[_RingGeometry, _RingGeometry], ...]:
     assignments: list[tuple[_RingGeometry, _RingGeometry]] = []
-    for hole in holes:
-        owners = tuple(
-            exterior
-            for exterior in exteriors
-            if bool(contains_properly(exterior.polygon, hole.polygon))
-        )
+    for hole_index, hole in enumerate(holes):
+        poll_cancellation(cancellation_probe, hole_index)
+        owners_list: list[_RingGeometry] = []
+        for exterior in exteriors:
+            raise_if_cancelled(cancellation_probe)
+            if bool(contains_properly(exterior.polygon, hole.polygon)):
+                owners_list.append(exterior)
+        owners = tuple(owners_list)
         if len(owners) > 1:
             raise _issue(
                 "hole_multiple_exteriors",
@@ -200,11 +222,12 @@ def _validate_hole_owners(
                 *(owner.path for owner in owners),
             )
         if not owners:
-            intersecting = tuple(
-                exterior
-                for exterior in exteriors
-                if bool(exterior.polygon.intersects(hole.polygon))
-            )
+            intersecting_list: list[_RingGeometry] = []
+            for exterior in exteriors:
+                raise_if_cancelled(cancellation_probe)
+                if bool(exterior.polygon.intersects(hole.polygon)):
+                    intersecting_list.append(exterior)
+            intersecting = tuple(intersecting_list)
             if intersecting:
                 raise _issue(
                     "hole_not_strictly_inside",
@@ -218,14 +241,21 @@ def _validate_hole_owners(
                 hole.path,
             )
         assignments.append((hole, owners[0]))
+    raise_if_cancelled(cancellation_probe)
     return tuple(assignments)
 
 
-def _validate_hole_pairs(holes: Sequence[_RingGeometry]) -> None:
+def _validate_hole_pairs(
+    holes: Sequence[_RingGeometry],
+    *,
+    cancellation_probe: CancellationProbe | None = None,
+) -> None:
     for index, first in enumerate(holes):
         for second in holes[index + 1 :]:
+            raise_if_cancelled(cancellation_probe)
             if bool(first.polygon.disjoint(second.polygon)):
                 continue
+            raise_if_cancelled(cancellation_probe)
             if bool(first.polygon.touches(second.polygon)):
                 raise _issue(
                     "holes_touch",
@@ -239,13 +269,20 @@ def _validate_hole_pairs(holes: Sequence[_RingGeometry]) -> None:
                 first.path,
                 second.path,
             )
+    raise_if_cancelled(cancellation_probe)
 
 
-def _validate_exterior_pairs(exteriors: Sequence[_RingGeometry]) -> None:
+def _validate_exterior_pairs(
+    exteriors: Sequence[_RingGeometry],
+    *,
+    cancellation_probe: CancellationProbe | None = None,
+) -> None:
     for index, first in enumerate(exteriors):
         for second in exteriors[index + 1 :]:
+            raise_if_cancelled(cancellation_probe)
             if bool(first.polygon.disjoint(second.polygon)):
                 continue
+            raise_if_cancelled(cancellation_probe)
             if bool(first.polygon.touches(second.polygon)):
                 raise _issue(
                     "exteriors_touch",
@@ -259,6 +296,7 @@ def _validate_exterior_pairs(exteriors: Sequence[_RingGeometry]) -> None:
                 first.path,
                 second.path,
             )
+    raise_if_cancelled(cancellation_probe)
 
 
 def _finite_float(value: float) -> float:
@@ -271,20 +309,32 @@ def _finite_float(value: float) -> float:
     return 0.0 if number == 0.0 else number
 
 
-def _path_area_mm2(path: VectorPath) -> float:
+def _path_area_mm2(
+    path: VectorPath,
+    *,
+    cancellation_probe: CancellationProbe | None = None,
+) -> float:
     origin_x, origin_y = path.points_mm[0]
-    area = 0.5 * math.fsum(
-        (path.points_mm[index][0] - origin_x)
-        * (path.points_mm[(index + 1) % len(path.points_mm)][1] - origin_y)
-        - (path.points_mm[(index + 1) % len(path.points_mm)][0] - origin_x)
-        * (path.points_mm[index][1] - origin_y)
-        for index in range(len(path.points_mm))
-    )
+
+    def area_terms() -> Iterator[float]:
+        for index in range(len(path.points_mm)):
+            poll_cancellation(cancellation_probe, index)
+            yield (
+                (path.points_mm[index][0] - origin_x)
+                * (path.points_mm[(index + 1) % len(path.points_mm)][1] - origin_y)
+                - (path.points_mm[(index + 1) % len(path.points_mm)][0] - origin_x)
+                * (path.points_mm[index][1] - origin_y)
+            )
+        raise_if_cancelled(cancellation_probe)
+
+    area = 0.5 * math.fsum(area_terms())
     return abs(_finite_float(area))
 
 
 def validate_outline_topology(
     payload: VectorGeometryPayload,
+    *,
+    cancellation_probe: CancellationProbe | None = None,
 ) -> OutlineTopologyDiagnostics:
     """Validate and summarize an outline Polygon or MultiPolygon.
 
@@ -293,6 +343,7 @@ def validate_outline_topology(
     the explicit ``exterior`` and ``hole`` roles.
     """
 
+    raise_if_cancelled(cancellation_probe)
     if not isinstance(payload, VectorGeometryPayload):
         raise ArtifactOutlineTopologyError(
             "invalid_payload_type",
@@ -305,7 +356,12 @@ def validate_outline_topology(
         )
 
     paths = tuple(sorted(payload.paths, key=_path_order_key))
-    rings = tuple(_ring_geometry(path) for path in paths)
+    raise_if_cancelled(cancellation_probe)
+    rings_list: list[_RingGeometry] = []
+    for path_index, path in enumerate(paths):
+        poll_cancellation(cancellation_probe, path_index)
+        rings_list.append(_ring_geometry(path, cancellation_probe=cancellation_probe))
+    rings = tuple(rings_list)
     exteriors = tuple(ring for ring in rings if ring.path.role == "exterior")
     holes = tuple(ring for ring in rings if ring.path.role == "hole")
     if not exteriors:
@@ -314,9 +370,13 @@ def validate_outline_topology(
             "outline topology requires at least one exterior ring",
         )
 
-    assignments = _validate_hole_owners(exteriors, holes)
-    _validate_hole_pairs(holes)
-    _validate_exterior_pairs(exteriors)
+    assignments = _validate_hole_owners(
+        exteriors,
+        holes,
+        cancellation_probe=cancellation_probe,
+    )
+    _validate_hole_pairs(holes, cancellation_probe=cancellation_probe)
+    _validate_exterior_pairs(exteriors, cancellation_probe=cancellation_probe)
 
     owner_by_hole_id = {
         hole.path.id: exterior.path.id for hole, exterior in assignments
@@ -324,12 +384,14 @@ def validate_outline_topology(
     holes_by_exterior_id: dict[str, list[_RingGeometry]] = {
         exterior.path.id: [] for exterior in exteriors
     }
-    for hole, exterior in assignments:
+    for assignment_index, (hole, exterior) in enumerate(assignments):
+        poll_cancellation(cancellation_probe, assignment_index)
         holes_by_exterior_id[exterior.path.id].append(hole)
 
     components: list[Polygon] = []
     component_hole_counts: list[int] = []
     for exterior in exteriors:
+        raise_if_cancelled(cancellation_probe)
         component_holes = tuple(holes_by_exterior_id[exterior.path.id])
         try:
             component = Polygon(
@@ -343,6 +405,7 @@ def validate_outline_topology(
                 exterior.path,
                 *(hole.path for hole in component_holes),
             ) from exc
+        raise_if_cancelled(cancellation_probe)
         if not bool(component.is_valid):
             raise _issue(
                 "component_invalid",
@@ -352,6 +415,7 @@ def validate_outline_topology(
             )
         components.append(component)
         component_hole_counts.append(len(component_holes))
+        raise_if_cancelled(cancellation_probe)
 
     geometry: Polygon | MultiPolygon
     if len(components) == 1:
@@ -366,6 +430,7 @@ def validate_outline_topology(
                 path_ids=tuple(exterior.path.id for exterior in exteriors),
             ) from exc
 
+    raise_if_cancelled(cancellation_probe)
     validity_reason = explain_validity(geometry)
     if not bool(geometry.is_valid):
         raise ArtifactOutlineTopologyError(
@@ -377,24 +442,41 @@ def validate_outline_topology(
     assignment_ids = tuple(
         (hole.path.id, owner_by_hole_id[hole.path.id]) for hole in holes
     )
-    all_points = tuple(point for path in paths for point in path.points_mm)
+    all_points_list: list[tuple[float, float]] = []
+    point_index = 0
+    for path in paths:
+        for point in path.points_mm:
+            poll_cancellation(cancellation_probe, point_index)
+            point_index += 1
+            all_points_list.append(point)
+    all_points = tuple(all_points_list)
     bounds = (
         min(point[0] for point in all_points),
         min(point[1] for point in all_points),
         max(point[0] for point in all_points),
         max(point[1] for point in all_points),
     )
-    component_areas = tuple(
-        _finite_float(
-            _path_area_mm2(exterior.path)
-            - math.fsum(
-                _path_area_mm2(hole.path)
-                for hole in holes_by_exterior_id[exterior.path.id]
+    component_areas_list: list[float] = []
+    for exterior_index, exterior in enumerate(exteriors):
+        poll_cancellation(cancellation_probe, exterior_index)
+        component_areas_list.append(
+            _finite_float(
+                _path_area_mm2(
+                    exterior.path,
+                    cancellation_probe=cancellation_probe,
+                )
+                - math.fsum(
+                    _path_area_mm2(
+                        hole.path,
+                        cancellation_probe=cancellation_probe,
+                    )
+                    for hole in holes_by_exterior_id[exterior.path.id]
+                )
             )
         )
-        for exterior in exteriors
-    )
+    component_areas = tuple(component_areas_list)
     total_area = _finite_float(math.fsum(component_areas))
+    raise_if_cancelled(cancellation_probe)
     return OutlineTopologyDiagnostics(
         geometry_type=geometry.geom_type,
         exterior_path_ids=tuple(exterior.path.id for exterior in exteriors),

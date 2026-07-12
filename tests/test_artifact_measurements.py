@@ -14,6 +14,7 @@ from src.application.artifact_measurements import (
     ArtifactMeasurementError,
     ArtifactMeasurementResult,
     MeasurementCancelledError,
+    MeasurementOperationKind,
     MeasurementOperationState,
     MeasurementResourceLimitError,
     StaleMeasurementOperationError,
@@ -27,6 +28,7 @@ from src.application.artifact_workbench import (
     StaleWorkflowOperationError,
     WorkflowBusyError,
 )
+from src.core.artifact_cancellation import ArtifactComputationCancelledError
 from src.core.artifact_rubbing_extractor import (
     ArtifactRubbingComputation,
     RUBBING_ESTIMATED_PEAK_BYTES_PER_PIXEL,
@@ -933,6 +935,127 @@ def test_cancelled_running_rubbing_keeps_memory_slot_until_worker_exits() -> Non
     controller.cancel(replacement)
 
 
+def test_worker_failure_outranks_cancel_requested_during_execution() -> None:
+    workbench = ArtifactWorkbench(session=_session())
+    controller = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
+    item = controller.begin_cutline(
+        _cutline_frame(),
+        record_id="record:cancel-vs-failure",
+    )
+    started = Event()
+    release = Event()
+    errors: list[BaseException] = []
+
+    def failing_worker(_item, *, cancellation_probe):
+        started.set()
+        assert release.wait(timeout=2.0)
+        assert cancellation_probe()
+        raise RuntimeError("worker failed after cancellation was requested")
+
+    def run() -> None:
+        try:
+            controller.execute(item)
+        except BaseException as exc:  # noqa: BLE001 - asserted below
+            errors.append(exc)
+
+    with patch(
+        "src.application.artifact_measurements.execute_measurement_work_item",
+        side_effect=failing_worker,
+    ):
+        worker = Thread(target=run, daemon=True)
+        worker.start()
+        assert started.wait(timeout=2.0)
+        assert (
+            controller.cancel(item).state
+            is MeasurementOperationState.CANCELLING
+        )
+        release.set()
+        worker.join(timeout=2.0)
+
+    assert not worker.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], RuntimeError)
+    assert str(errors[0]) == "worker failed after cancellation was requested"
+    summary = controller.summary(item)
+    assert summary.state is MeasurementOperationState.FAILED
+    assert summary.error_type == "RuntimeError"
+    assert summary.message == "worker failed after cancellation was requested"
+    assert workbench.snapshot.session is not None
+    assert workbench.snapshot.session.document.records == ()
+
+    replacement = controller.begin_cutline(
+        _cutline_frame(),
+        record_id=item.record_id,
+    )
+    controller.cancel(replacement)
+
+
+def test_worker_failure_outranks_stale_requested_during_execution() -> None:
+    workbench = ArtifactWorkbench(session=_session(), id_factory=SequentialIds())
+    controller = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
+    item = controller.begin_cutline(
+        _cutline_frame(),
+        record_id="record:stale-vs-failure",
+    )
+    started = Event()
+    release = Event()
+    errors: list[BaseException] = []
+
+    def failing_worker(_item, *, cancellation_probe):
+        started.set()
+        assert release.wait(timeout=2.0)
+        assert cancellation_probe()
+        raise RuntimeError("worker failed after its Align became stale")
+
+    def run() -> None:
+        try:
+            controller.execute(item)
+        except BaseException as exc:  # noqa: BLE001 - asserted below
+            errors.append(exc)
+
+    with patch(
+        "src.application.artifact_measurements.execute_measurement_work_item",
+        side_effect=failing_worker,
+    ):
+        worker = Thread(target=run, daemon=True)
+        worker.start()
+        assert started.wait(timeout=2.0)
+        changed = workbench.prepare_align_commit(
+            translation_mm=(1.0, 0.0, 0.0),
+            rotation_deg=(0.0, 0.0, 0.0),
+            scale=1.0,
+            pivot_mm=(0.0, 0.0, 0.0),
+            operator="pytest",
+            created_at=STAMP,
+            revision_id="align:stale-vs-failure",
+        )
+        assert changed is not None
+        _headless_publisher(workbench)(changed)
+        assert (
+            controller.summary(item).state
+            is MeasurementOperationState.CANCELLING
+        )
+        release.set()
+        worker.join(timeout=2.0)
+
+    assert not worker.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], RuntimeError)
+    assert str(errors[0]) == "worker failed after its Align became stale"
+    summary = controller.summary(item)
+    assert summary.state is MeasurementOperationState.FAILED
+    assert summary.error_type == "RuntimeError"
+    assert summary.message == "worker failed after its Align became stale"
+    assert workbench.snapshot.session is not None
+    assert workbench.snapshot.session.document.records == ()
+
+    replacement = controller.begin_cutline(
+        _cutline_frame(),
+        record_id=item.record_id,
+    )
+    controller.cancel(replacement)
+
+
 def test_execute_claim_is_exactly_once_under_concurrency() -> None:
     workbench = ArtifactWorkbench(session=_session())
     controller = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
@@ -1062,6 +1185,74 @@ def test_cancellation_probe_discards_result_at_safe_boundary() -> None:
     assert isinstance(active, ArtifactSession)
     assert active is item.captured_session
     assert active.document.records == ()
+    controller.cancel(item)
+
+
+@pytest.mark.parametrize(
+    ("kind", "extractor_name"),
+    (
+        (MeasurementOperationKind.CUTLINE, "extract_cutline_geometry"),
+        (MeasurementOperationKind.OUTLINE, "extract_outline_geometry"),
+        (MeasurementOperationKind.DIGITAL_RUBBING, "extract_digital_rubbing"),
+    ),
+)
+def test_controller_cancel_reaches_each_extractor_and_maps_core_signal(
+    kind: MeasurementOperationKind,
+    extractor_name: str,
+) -> None:
+    workbench = ArtifactWorkbench(session=_session())
+    controller = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
+    record_id = f"record:cooperative-cancel:{kind.value}"
+    if kind is MeasurementOperationKind.CUTLINE:
+        item = controller.begin_cutline(_cutline_frame(), record_id=record_id)
+    elif kind is MeasurementOperationKind.OUTLINE:
+        item = controller.begin_outline(
+            "top",
+            precision_grid_mm=0.01,
+            record_id=record_id,
+        )
+    else:
+        item = _begin_rubbing(controller, record_id=record_id)
+
+    observed_probe = None
+
+    def cancel_inside_extractor(*_args, **kwargs):
+        nonlocal observed_probe
+        observed_probe = kwargs.get("cancellation_probe")
+        assert callable(observed_probe)
+        controller.cancel(item)
+        assert observed_probe()
+        raise ArtifactComputationCancelledError("cancelled inside core extractor")
+
+    with patch(
+        f"src.application.artifact_measurements.{extractor_name}",
+        side_effect=cancel_inside_extractor,
+    ):
+        with pytest.raises(MeasurementCancelledError, match="user_cancelled"):
+            controller.execute(item)
+
+    assert callable(observed_probe)
+    summary = controller.summary(item)
+    assert summary.state is MeasurementOperationState.CANCELLED
+    assert workbench.snapshot.session is not None
+    assert workbench.snapshot.session.document.records == ()
+
+
+def test_core_cancellation_signal_is_mapped_at_the_application_boundary() -> None:
+    workbench = ArtifactWorkbench(session=_session())
+    controller = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
+    item = controller.begin_cutline(
+        _cutline_frame(),
+        record_id="record:core-cancel-mapping",
+    )
+
+    with patch(
+        "src.application.artifact_measurements.extract_cutline_geometry",
+        side_effect=ArtifactComputationCancelledError("core boundary cancelled"),
+    ):
+        with pytest.raises(MeasurementCancelledError, match="core boundary"):
+            execute_measurement_work_item(item, cancellation_probe=lambda: False)
+
     controller.cancel(item)
 
 
