@@ -127,6 +127,7 @@ import ctypes
 
 from ..core.mesh_loader import MeshData
 from ..core.mesh_slicer import MeshSlicer
+from ..core.artifact_scene_adapter import ArtifactProjectionSnapshot
 from ..core.artifact_vector_record import VectorGeometryPayload
 from ..core.logging_utils import log_once
 from ..core.alignment_utils import (
@@ -1797,6 +1798,25 @@ class SceneObject:
         self._face_centroid_faces_count: int = 0
         self._face_adjacency: list[list[int]] | None = None
         self._face_adjacency_faces_count: int = 0
+        self._amr_artifact_projection_snapshot: ArtifactProjectionSnapshot | None = None
+
+    def compare_and_swap_artifact_binding(
+        self,
+        expected: ArtifactProjectionSnapshot,
+        candidate: ArtifactProjectionSnapshot,
+    ) -> None:
+        """Replace only the immutable document binding for one render-equivalent mesh."""
+
+        if not isinstance(expected, ArtifactProjectionSnapshot) or not isinstance(
+            candidate,
+            ArtifactProjectionSnapshot,
+        ):
+            raise TypeError("artifact bindings must be ArtifactProjectionSnapshot values")
+        if self._amr_artifact_projection_snapshot != expected:
+            raise RuntimeError("live artifact binding changed before record publication")
+        if not expected.has_same_render_projection(candidate):
+            raise RuntimeError("record binding changed the live render projection")
+        self._amr_artifact_projection_snapshot = candidate
         
     def to_trimesh(self):
         """trimesh 媛앹껜 諛섑솚 (罹먯떛)"""

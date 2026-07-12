@@ -60,7 +60,7 @@ from src.core.canonical_json import CanonicalJSONError, canonical_json_bytes
 from .artifact_workbench import (
     ArtifactWorkbench,
     ArtifactWorkbenchError,
-    ProjectionTransition,
+    RecordBindingTransition,
     StaleWorkflowOperationError,
     WorkflowSnapshot,
 )
@@ -108,7 +108,7 @@ MeasurementComputation: TypeAlias = (
     ArtifactVectorComputation | ArtifactRubbingComputation
 )
 CancellationProbe: TypeAlias = Callable[[], bool]
-MeasurementPublisher: TypeAlias = Callable[[ProjectionTransition], None]
+MeasurementPublisher: TypeAlias = Callable[[RecordBindingTransition], None]
 
 
 def _utc_now() -> str:
@@ -684,17 +684,7 @@ class ArtifactMeasurementController:
     ) -> tuple[object, ...]:
         """Coordinate authority key; document hash intentionally excluded."""
 
-        return (
-            snapshot.document_id,
-            snapshot.document_schema_version,
-            snapshot.source_asset_id,
-            snapshot.geometry_revision_id,
-            snapshot.source_metadata_revision_id,
-            snapshot.align_revision_id,
-            snapshot.geometry_sha256,
-            snapshot.geometry_hash_scope,
-            snapshot.matrix4x4,
-        )
+        return snapshot.render_key
 
     def _on_workbench_snapshot(self, snapshot: WorkflowSnapshot) -> None:
         """Permanently revoke work after a finalized Open/Align authority change."""
@@ -1260,7 +1250,7 @@ class ArtifactMeasurementController:
         self,
         work_item: ArtifactMeasurementWorkItem,
         result: ArtifactMeasurementResult,
-    ) -> ProjectionTransition:
+    ) -> RecordBindingTransition:
         current = self._workbench.snapshot.session
         if not isinstance(current, ArtifactSession):
             raise StaleMeasurementOperationError(
@@ -1316,7 +1306,7 @@ class ArtifactMeasurementController:
         else:  # pragma: no cover - guarded by ArtifactMeasurementResult
             raise ArtifactMeasurementError("unsupported measurement computation")
 
-        return self._workbench.prepare_session_commit(
+        return self._workbench.prepare_record_commit(
             current,
             candidate,
             expected_new_record_ids=(work_item.record_id,),
@@ -1396,7 +1386,7 @@ class ArtifactMeasurementController:
             self._validate_result(work_item, result)
 
         candidate: ArtifactSession | None = None
-        transition: ProjectionTransition | None = None
+        transition: RecordBindingTransition | None = None
         with self._publication_lock:
             with self._lock:
                 runtime = self._require_runtime_locked(

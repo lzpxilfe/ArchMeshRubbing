@@ -59,6 +59,9 @@ Open 직후 만들어지는 `recipe.kind="initial_identity"` Align은 canonical 
 - vector/rubbing package는 원본 mesh와 GUI가 없어도 이동 후 별도 프로세스에서 offline 검증 가능
 - Qt/OpenGL과 분리된 `ArtifactWorkbench`가 ticketed Open, 명시적 Align readiness, `state_version`/`authority_epoch` 기반 publication을 소유
 - native DerivedRecord worker는 시작 session과 projection을, viewport의 cut-section/ROI worker는 worker identity와 projection generation을 확인하여 늦은 결과가 현재 문서·overlay·새 worker를 덮지 못하게 함
+- DerivedRecord 추가는 같은 render projection의 문서 binding만 compare-and-swap하며 live mesh·VBO·카메라·선택·preview cache를 다시 만들지 않음
+- SVG/PNG export worker는 보이지 않는 same-parent staging package를 완전 검증해 exact inode/fingerprint capability를 만들고, GUI callback이 현재 Workbench의 source·Align·exact `READY + FRESH` record를 다시 확인한 뒤 빠른 재확인·rename으로만 공개
+- export 중 같은 Align에 무관한 record가 추가돼도 안전하게 게시하지만 Align/Open 완료로 권위가 바뀌면 destination을 만들지 않고 자신이 소유한 staging만 정리함
 - scene publication의 rollback·scene 복원·finalize 자체가 불확실하면 fatal authority 상태로 전환해 검증된 Open 전까지 저장·실측·내보내기를 차단
 
 Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 `SurfaceVisualizer`/flatten 기반 PNG·SVG를 측정 산출물로 내보내는 우회 경로를 차단합니다. 검증된 Cutline/Outline record는 `.amr-vector`, Digital Rubbing record는 `.amr-rubbing`으로 내보냅니다. 로컬 차단 테스트와 3-OS CI matrix 구성은 완료됐지만 원격 Windows·macOS·Linux matrix 통과 및 설치형 바이너리 배포는 아직 확인 전입니다.
@@ -125,8 +128,10 @@ Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 `Surfac
 
 - [`src/application/artifact_workbench.py`](src/application/artifact_workbench.py): 한 artifact의 session/project path, 단일 pending Open, workflow readiness와 projection publication authority
 - [`src/application/artifact_measurements.py`](src/application/artifact_measurements.py): Cutline/Outline/Digital Rubbing의 immutable work item, Workbench 공유 예약·메모리 admission, 취소, exact result capability와 same-Align rebase
+- [`src/application/artifact_exports.py`](src/application/artifact_exports.py): vector/rubbing export의 exact capability, worker staging, 안전한 정리와 final-authority publication
 - Open/new import/project reopen과 Align commit/parent activation은 ticket과 compare-and-swap 검증을 거쳐 `prepare → activate → finalize`되며, scene swap 실패는 이전 authority로 rollback
-- Cutline/Outline/Digital Rubbing은 GUI에서 파라미터만 캡처하고 단일 worker에서 계산합니다. worker는 문서를 변경하지 않으며, 완료 결과는 예약된 record ID와 일회성 result capability를 검증한 뒤 현재의 같은 Align session에 rebase합니다. 재개방한 기록은 READY + FRESH 목록에서 명시적으로 선택하고, 일시적인 Open/scene 충돌로 게시하지 못한 결과는 새 ID를 만들지 않고 재시도합니다.
+- Cutline/Outline/Digital Rubbing은 GUI에서 파라미터만 캡처하고 단일 worker에서 계산합니다. worker는 문서를 변경하지 않으며, 완료 결과는 예약된 record ID와 일회성 result capability를 검증한 뒤 현재의 같은 Align session에 rebase합니다. record append publication은 GPU 장면을 교체하지 않습니다. 재개방한 기록은 READY + FRESH 목록에서 명시적으로 선택하고, 일시적인 Open/scene 충돌로 게시하지 못한 측정 결과는 새 ID를 만들지 않고 재시도합니다.
+- vector/rubbing export는 비싼 생성·탁본 재계산을 worker에서 staging까지만 수행합니다. 최종 no-replace rename은 현재 권위를 다시 검증한 뒤 실행하며, 목적지 경합에서는 기존 승자를 보존합니다. rename 뒤 directory `fsync`에 실제 I/O 오류가 나면 저장 완료와 crash durability 미확정을 구분해 경고합니다.
 
 ### Artifact trust core
 
@@ -336,7 +341,8 @@ python main.py --project mesh.obj planview.png
 - Python 3.12 macOS arm64 frozen 앱의 10-check offline self-test 통과
 - Open/Align authority와 two-phase scene publication을 Qt/OpenGL-free `ArtifactWorkbench`로 이식
 - Cutline/Outline/Digital Rubbing command와 worker 수명주기를 Qt/OpenGL-free application shell로 이식
-- 다음 단계: export 작업의 최종 authority 재검증, record-only scene rebind, 실제 원격 3-OS CI, 라이선스 결정, GPU/대용량 유물 pilot 진행
+- DerivedRecord의 VBO-free binding rebind와 SVG/PNG worker staging → final-authority publication 이식
+- 다음 단계: record graph 기반 순차 workflow 완료 표시, cooperative cancellation/render-origin, 실제 원격 3-OS CI, 라이선스 결정, GPU/대용량 유물 pilot 진행
 
 ---
 

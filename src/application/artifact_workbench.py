@@ -16,21 +16,27 @@ from enum import Enum
 import logging
 from pathlib import Path
 from threading import RLock
-from typing import TypeAlias
+from typing import TypeAlias, TypeVar
 import uuid
 
 import numpy as np
 
 from src.core.artifact_document import (
     ArtifactDocument,
+    DerivedRecord,
     GeometryRevision,
     Handedness,
     MetadataConfirmationStatus,
     SourceAsset,
     SourceMetadataRevision,
+    RecordFreshness,
+    RecordLifecycleStatus,
     source_to_canonical_mm_matrix,
 )
-from src.core.artifact_scene_adapter import ArtifactSceneProjection
+from src.core.artifact_scene_adapter import (
+    ArtifactProjectionSnapshot,
+    ArtifactSceneProjection,
+)
 from src.core.artifact_session import ArtifactSession, ArtifactSessionError
 from src.core.mesh_loader import MeshData, MeshLoader
 
@@ -40,6 +46,7 @@ _INITIAL_ALIGN_RECIPE = "initial_identity"
 _AXIS_KEYS = ("source_x", "source_y", "source_z")
 _EXTERNAL_GEOMETRY_SOURCE_FORMATS = frozenset({"gltf"})
 _KEEP_PROJECT_PATH = object()
+_T = TypeVar("_T")
 
 
 class ArtifactWorkbenchError(ValueError):
@@ -298,6 +305,21 @@ class ProjectionTransition:
 
 
 @dataclass(frozen=True, slots=True)
+class RecordBindingTransition:
+    """DerivedRecord append that reuses an unchanged live mesh projection."""
+
+    id: str
+    base_state_version: int
+    base_authority_epoch: int
+    expected_session: ArtifactSession
+    candidate_session: ArtifactSession
+    expected_snapshot: ArtifactProjectionSnapshot
+    candidate_snapshot: ArtifactProjectionSnapshot
+    expected_new_record_ids: tuple[str, ...]
+    project_path: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class ProjectionActivation:
     id: str
     transition_id: str
@@ -337,6 +359,7 @@ class ArtifactWorkbench:
             failure=None,
         )
         self._tentative_activation_id: str | None = None
+        self._external_effect_publication_lease: object | None = None
         self._observers: dict[str, Observer] = {}
         self._observer_versions: dict[str, int] = {}
         self._notification_queue: deque[Notification] = deque()
@@ -417,7 +440,12 @@ class ArtifactWorkbench:
         if should_drain:
             self._drain_notifications()
 
+    def _require_no_external_effect_publication(self) -> None:
+        if self._external_effect_publication_lease is not None:
+            raise WorkflowBusyError("an external effect publication is in progress")
+
     def _require_open_slot(self) -> WorkflowSnapshot:
+        self._require_no_external_effect_publication()
         if self._tentative_activation_id is not None:
             raise WorkflowBusyError("a projection publication is in progress")
         if self._state.pending_load is not None:
@@ -463,6 +491,160 @@ class ArtifactWorkbench:
             if not measurement and not state.can_save:
                 raise ArtifactWorkbenchError("artifact authority is not stable for save")
             return session
+
+    @staticmethod
+    def _require_export_document_ancestor(
+        captured: ArtifactSession,
+        current: ArtifactSession,
+    ) -> None:
+        if current.source_mesh is not captured.source_mesh:
+            raise StaleWorkflowOperationError(
+                "export source session changed after staging began"
+            )
+        old = captured.document
+        new = current.document
+        if (
+            new.document_id != old.document_id
+            or new.schema_version != old.schema_version
+            or new.software_version != old.software_version
+            or new.extensions != old.extensions
+        ):
+            raise StaleWorkflowOperationError(
+                "export document identity changed after staging began"
+            )
+        for old_index, new_index, label in (
+            (old.source_asset_index, new.source_asset_index, "source asset"),
+            (old.geometry_revision_index, new.geometry_revision_index, "geometry revision"),
+            (
+                old.source_metadata_revision_index,
+                new.source_metadata_revision_index,
+                "metadata revision",
+            ),
+            (old.align_revision_index, new.align_revision_index, "Align revision"),
+            (old.record_index, new.record_index, "derived record"),
+        ):
+            for item_id, value in old_index.items():
+                if new_index.get(item_id) != value:
+                    raise StaleWorkflowOperationError(
+                        f"captured {label} {item_id!r} was removed or rewritten"
+                    )
+
+    def publish_record_effect_if_current(
+        self,
+        captured_session: ArtifactSession,
+        captured_snapshot: ArtifactProjectionSnapshot,
+        *,
+        record_id: str,
+        expected_record: DerivedRecord,
+        publish: Callable[[], _T],
+    ) -> _T:
+        """Linearize one fast external publish against current record authority.
+
+        Expensive package construction and validation must happen before this
+        call.  The callback runs under the Workbench lock and should perform
+        only the final same-filesystem no-replace rename.
+        """
+
+        if not isinstance(captured_session, ArtifactSession):
+            raise ArtifactWorkbenchError("captured_session must be an ArtifactSession")
+        if not isinstance(captured_snapshot, ArtifactProjectionSnapshot):
+            raise ArtifactWorkbenchError(
+                "captured_snapshot must be an ArtifactProjectionSnapshot"
+            )
+        if captured_session.projection_snapshot() != captured_snapshot:
+            raise StaleWorkflowOperationError(
+                "captured export session no longer matches its snapshot"
+            )
+        record_key = _required_text(record_id, field_name="record ID")
+        if not isinstance(expected_record, DerivedRecord):
+            raise ArtifactWorkbenchError("expected_record must be a DerivedRecord")
+        if (
+            expected_record.id != record_key
+            or captured_session.document.record_index.get(record_key) != expected_record
+        ):
+            raise ArtifactWorkbenchError(
+                "expected export record does not match the captured document"
+            )
+        if not callable(publish):
+            raise ArtifactWorkbenchError("export publisher must be callable")
+
+        for _attempt in range(8):
+            with self._lock:
+                observed = self._require_command_slot()
+                current = observed.session
+                if current is None:
+                    raise ArtifactWorkbenchError(
+                        "no active ArtifactSession for export publish"
+                    )
+                if not observed.can_measure:
+                    raise ArtifactWorkbenchError(
+                        "explicit Align confirmation is required before export"
+                    )
+
+            self._require_export_document_ancestor(captured_session, current)
+            current_snapshot = current.projection_snapshot()
+            if not captured_snapshot.has_same_render_projection(current_snapshot):
+                raise StaleWorkflowOperationError(
+                    "export projection authority changed after staging began"
+                )
+            current_record = current.document.record_index.get(record_key)
+            if current_record is None or current_record != expected_record:
+                raise StaleWorkflowOperationError(
+                    "export record changed after staging began"
+                )
+            if (
+                current_record.lifecycle_status is not RecordLifecycleStatus.READY
+                or current.document.record_freshness(record_key)
+                is not RecordFreshness.FRESH
+            ):
+                raise StaleWorkflowOperationError(
+                    "export record is no longer READY + FRESH"
+                )
+
+            with self._lock:
+                if self._state is not observed:
+                    continue
+                self._require_command_slot()
+                lease = object()
+                self._external_effect_publication_lease = lease
+                try:
+                    try:
+                        result = publish()
+                    except BaseException as callback_error:
+                        try:
+                            self._require_external_effect_postcondition(
+                                lease=lease,
+                                expected_state=observed,
+                            )
+                        except ArtifactWorkbenchError as authority_error:
+                            raise authority_error from callback_error
+                        raise
+                    self._require_external_effect_postcondition(
+                        lease=lease,
+                        expected_state=observed,
+                    )
+                    return result
+                finally:
+                    self._external_effect_publication_lease = None
+
+        raise StaleWorkflowOperationError(
+            "artifact authority kept changing while export publication was prepared"
+        )
+
+    def _require_external_effect_postcondition(
+        self,
+        *,
+        lease: object,
+        expected_state: WorkflowSnapshot,
+    ) -> None:
+        if self._external_effect_publication_lease is not lease:
+            raise ArtifactWorkbenchError(
+                "external effect publication lost its authority lease"
+            )
+        if self._state is not expected_state:
+            raise ArtifactWorkbenchError(
+                "artifact authority changed during external effect publication"
+            )
 
     def begin_new_import(
         self,
@@ -573,6 +755,7 @@ class ArtifactWorkbench:
     def _require_current_ticket(self, ticket: ArtifactLoadTicket) -> WorkflowSnapshot:
         if not isinstance(ticket, ArtifactLoadTicket):
             raise ArtifactWorkbenchError("ticket must be an ArtifactLoadTicket")
+        self._require_no_external_effect_publication()
         if self._tentative_activation_id is not None:
             raise WorkflowBusyError("a projection publication is in progress")
         state = self._state
@@ -961,6 +1144,87 @@ class ArtifactWorkbench:
                 project_path=candidate_project_path,
             )
 
+    def prepare_record_commit(
+        self,
+        captured_session: ArtifactSession,
+        candidate_session: ArtifactSession,
+        *,
+        expected_new_record_ids: tuple[str, ...],
+        transition_id: str | None = None,
+        project_path: str | None | object = _KEEP_PROJECT_PATH,
+    ) -> RecordBindingTransition:
+        """Prepare an append-only document rebind without materializing a mesh."""
+
+        if not isinstance(captured_session, ArtifactSession) or not isinstance(
+            candidate_session,
+            ArtifactSession,
+        ):
+            raise ArtifactWorkbenchError("record commit needs ArtifactSession values")
+        expected_ids = tuple(
+            sorted(
+                _required_text(record_id, field_name="expected record ID")
+                for record_id in expected_new_record_ids
+            )
+        )
+        if not expected_ids:
+            raise ArtifactWorkbenchError("record commit must append at least one record")
+        if len(set(expected_ids)) != len(expected_ids):
+            raise ArtifactWorkbenchError("expected record IDs must be unique")
+        with self._lock:
+            state = self._require_command_slot()
+            if state.session is not captured_session:
+                raise StaleWorkflowOperationError(
+                    "captured session is no longer the active authority"
+                )
+            base_state_version = state.state_version
+            base_authority_epoch = state.authority_epoch
+            candidate_project_path = (
+                state.project_path
+                if project_path is _KEEP_PROJECT_PATH
+                else (
+                    _normalized_path(project_path, field_name="project_path")
+                    if project_path is not None
+                    else None
+                )
+            )
+        self._validate_session_extension(
+            captured_session,
+            candidate_session,
+            kind=WorkflowTransitionKind.SESSION_UPDATE,
+            expected_new_record_ids=expected_ids,
+        )
+        expected_snapshot = captured_session.projection_snapshot()
+        candidate_snapshot = candidate_session.projection_snapshot()
+        if not expected_snapshot.has_same_render_projection(candidate_snapshot):
+            raise ArtifactWorkbenchError(
+                "a record commit changed the live render projection"
+            )
+        if expected_snapshot.document_sha256 == candidate_snapshot.document_sha256:
+            raise ArtifactWorkbenchError(
+                "record commit did not change the canonical document"
+            )
+        with self._lock:
+            current = self._require_command_slot()
+            if (
+                current.state_version != base_state_version
+                or current.authority_epoch != base_authority_epoch
+                or current.session is not captured_session
+            ):
+                raise StaleWorkflowOperationError(
+                    "artifact authority changed while the record binding was prepared"
+                )
+            return RecordBindingTransition(
+                id=transition_id or self._id_factory("record-binding"),
+                base_state_version=base_state_version,
+                base_authority_epoch=base_authority_epoch,
+                expected_session=captured_session,
+                candidate_session=candidate_session,
+                expected_snapshot=expected_snapshot,
+                candidate_snapshot=candidate_snapshot,
+                expected_new_record_ids=expected_ids,
+                project_path=candidate_project_path,
+            )
+
     def activate_projection(
         self,
         transition: ProjectionTransition,
@@ -970,6 +1234,7 @@ class ArtifactWorkbench:
         if not isinstance(transition, ProjectionTransition):
             raise ArtifactWorkbenchError("transition must be a ProjectionTransition")
         with self._lock:
+            self._require_no_external_effect_publication()
             if self._tentative_activation_id is not None:
                 raise WorkflowBusyError("another projection publication is in progress")
             state = self._state
@@ -1008,8 +1273,76 @@ class ArtifactWorkbench:
             self._tentative_activation_id = activation.id
             return activation
 
+    def activate_record_binding(
+        self,
+        transition: RecordBindingTransition,
+        *,
+        activation_id: str | None = None,
+    ) -> ProjectionActivation:
+        if not isinstance(transition, RecordBindingTransition):
+            raise ArtifactWorkbenchError(
+                "transition must be a RecordBindingTransition"
+            )
+        if (
+            transition.expected_session.projection_snapshot()
+            != transition.expected_snapshot
+            or transition.candidate_session.projection_snapshot()
+            != transition.candidate_snapshot
+        ):
+            raise ArtifactWorkbenchError(
+                "record binding snapshots do not match their immutable sessions"
+            )
+        if not transition.expected_snapshot.has_same_render_projection(
+            transition.candidate_snapshot
+        ):
+            raise ArtifactWorkbenchError(
+                "record binding cannot change the live render projection"
+            )
+        self._validate_session_extension(
+            transition.expected_session,
+            transition.candidate_session,
+            kind=WorkflowTransitionKind.SESSION_UPDATE,
+            expected_new_record_ids=transition.expected_new_record_ids,
+        )
+        with self._lock:
+            self._require_no_external_effect_publication()
+            if self._tentative_activation_id is not None:
+                raise WorkflowBusyError("another authority publication is in progress")
+            state = self._state
+            if (
+                state.state_version != transition.base_state_version
+                or state.authority_epoch != transition.base_authority_epoch
+                or state.session is not transition.expected_session
+            ):
+                raise StaleWorkflowOperationError(
+                    "record binding was prepared for stale authority"
+                )
+            if state.pending_load is not None:
+                raise WorkflowBusyError(
+                    "cannot publish a record binding during artifact Open"
+                )
+            activation = ProjectionActivation(
+                id=activation_id or self._id_factory("activation"),
+                transition_id=transition.id,
+                previous=state,
+                current=WorkflowSnapshot(
+                    state_version=state.state_version + 1,
+                    authority_epoch=state.authority_epoch + 1,
+                    session=transition.candidate_session,
+                    project_path=transition.project_path,
+                    pending_load=None,
+                    failure=None,
+                    tentative=True,
+                    faulted=state.faulted,
+                ),
+            )
+            self._state = activation.current
+            self._tentative_activation_id = activation.id
+            return activation
+
     def finalize_projection(self, activation: ProjectionActivation) -> WorkflowSnapshot:
         with self._lock:
+            self._require_no_external_effect_publication()
             if (
                 self._tentative_activation_id != activation.id
                 or self._state is not activation.current
@@ -1027,22 +1360,53 @@ class ArtifactWorkbench:
         self._notify(current)
         return current
 
+    def finalize_record_binding(
+        self,
+        activation: ProjectionActivation,
+    ) -> WorkflowSnapshot:
+        return self.finalize_projection(activation)
+
     def rollback_projection(
         self,
         activation: ProjectionActivation,
         error: BaseException | str,
     ) -> WorkflowSnapshot:
+        return self._rollback_activation(
+            activation,
+            error,
+            operation="projection_publish",
+        )
+
+    def rollback_record_binding(
+        self,
+        activation: ProjectionActivation,
+        error: BaseException | str,
+    ) -> WorkflowSnapshot:
+        return self._rollback_activation(
+            activation,
+            error,
+            operation="record_binding_publish",
+        )
+
+    def _rollback_activation(
+        self,
+        activation: ProjectionActivation,
+        error: BaseException | str,
+        *,
+        operation: str,
+    ) -> WorkflowSnapshot:
         with self._lock:
+            self._require_no_external_effect_publication()
             if (
                 self._tentative_activation_id != activation.id
                 or self._state is not activation.current
             ):
                 raise StaleWorkflowOperationError(
-                    "projection activation cannot be rolled back after authority changed"
+                    "authority activation cannot be rolled back after authority changed"
                 )
             failure = WorkflowFailure(
                 operation_id=activation.transition_id,
-                operation="projection_publish",
+                operation=operation,
                 error_type=(type(error).__name__ if isinstance(error, BaseException) else "Error"),
                 message=str(error),
             )
@@ -1074,6 +1438,11 @@ class ArtifactWorkbench:
         for the rarer case where rollback, scene restoration, or finalization
         itself fails and the application can no longer prove a coherent live
         authority. A verified Open may subsequently replace this faulted state.
+
+        Unlike ordinary authority mutators, this emergency path is deliberately
+        allowed while an external effect callback holds its publication lease.
+        The publisher's postcondition then detects the authority change while
+        this method leaves the Workbench failed closed.
         """
 
         if session is not None:
@@ -1158,6 +1527,7 @@ __all__ = [
     "ConfirmedSourceMetadata",
     "ProjectionActivation",
     "ProjectionTransition",
+    "RecordBindingTransition",
     "StaleWorkflowOperationError",
     "WorkflowBusyError",
     "WorkflowFailure",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import errno
 import hashlib
 import json
 import os
@@ -8,6 +9,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 import xml.etree.ElementTree as ET
@@ -24,7 +26,13 @@ from src.core.artifact_vector_export import (
     VECTOR_EXPORT_SVG_NAME,
     VectorSVGOptions,
     build_vector_export,
+    discard_prepared_vector_package,
+    discard_staged_vector_package,
     export_vector_package,
+    prepare_staged_vector_publication,
+    publish_prepared_vector_package,
+    publish_staged_vector_package,
+    stage_vector_package,
     validate_vector_export_bytes,
     validate_vector_export_package,
 )
@@ -638,6 +646,414 @@ class TestArtifactVectorExportFailClosed(unittest.TestCase):
 
 
 class TestArtifactVectorExportPackage(unittest.TestCase):
+    def test_prepared_capability_is_exact_destination_bound_and_single_use(self):
+        document = _committed_session().document
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            destination = root / "exact.amr-vector"
+            staging = stage_vector_package(
+                destination,
+                document,
+                "record:cutline-0",
+            )
+            prepared = prepare_staged_vector_publication(
+                staging,
+                destination,
+                document=document,
+            )
+
+            with self.assertRaisesRegex(
+                ArtifactVectorExportError,
+                "invalid or consumed",
+            ):
+                publish_prepared_vector_package(replace(prepared))
+            with self.assertRaisesRegex(
+                ArtifactVectorExportError,
+                "different destination",
+            ):
+                prepare_staged_vector_publication(
+                    staging,
+                    root / "other.amr-vector",
+                    document=document,
+                )
+
+            self.assertEqual(
+                publish_prepared_vector_package(prepared),
+                destination,
+            )
+            with self.assertRaises(ArtifactVectorExportError) as raised:
+                publish_prepared_vector_package(prepared)
+            self.assertTrue(raised.exception.committed)
+
+    def test_public_publish_rejects_never_owned_and_replaced_staging(self):
+        document = _committed_session().document
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            destination = root / "owned.amr-vector"
+            foreign = root / f".amrv-stage-{'f' * 32}"
+            foreign.mkdir()
+            with self.assertRaisesRegex(
+                ArtifactVectorExportError,
+                "not created by this process",
+            ):
+                publish_staged_vector_package(foreign, destination)
+
+            staging = stage_vector_package(
+                destination,
+                document,
+                "record:cutline-0",
+            )
+            prepared = prepare_staged_vector_publication(
+                staging,
+                destination,
+                document=document,
+            )
+            moved_owned = root / "moved-owned"
+            staging.rename(moved_owned)
+            staging.mkdir()
+            sentinel = staging / "foreign.txt"
+            sentinel.write_text("preserve", encoding="utf-8")
+            with self.assertRaisesRegex(
+                ArtifactVectorExportError,
+                "replaced",
+            ):
+                publish_prepared_vector_package(prepared)
+            self.assertFalse(discard_prepared_vector_package(prepared))
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve")
+            self.assertTrue(moved_owned.is_dir())
+
+    def test_fixed_length_stage_supports_long_destination_name(self):
+        document = _committed_session().document
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / ("유" * 70 + ".amr-vector")
+            staging = stage_vector_package(
+                destination,
+                document,
+                "record:cutline-0",
+            )
+            self.assertEqual(len(staging.name), len(".amrv-stage-") + 32)
+            self.assertNotIn(destination.name, staging.name)
+            prepared = prepare_staged_vector_publication(
+                staging,
+                destination,
+                document=document,
+            )
+            self.assertEqual(
+                publish_prepared_vector_package(prepared),
+                destination,
+            )
+
+    def test_pre_moved_stage_is_reported_as_committed_visible_effect(self):
+        document = _committed_session().document
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "pre-moved.amr-vector"
+            staging = stage_vector_package(
+                destination,
+                document,
+                "record:cutline-0",
+            )
+            prepared = prepare_staged_vector_publication(
+                staging,
+                destination,
+                document=document,
+            )
+            staging.rename(destination)
+
+            with self.assertRaises(ArtifactVectorExportError) as raised:
+                discard_prepared_vector_package(prepared)
+            self.assertTrue(raised.exception.committed)
+            self.assertTrue(destination.is_dir())
+
+    def test_missing_owned_stage_is_not_successfully_discarded(self):
+        document = _committed_session().document
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            destination = root / "missing.amr-vector"
+            staging = stage_vector_package(
+                destination,
+                document,
+                "record:cutline-0",
+            )
+            staging.rename(root / "moved-somewhere-else")
+            self.assertFalse(discard_staged_vector_package(staging, destination))
+
+    def test_discard_detects_top_directory_swap_and_preserves_foreign(self):
+        document = _committed_session().document
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            destination = root / "swap.amr-vector"
+            staging = stage_vector_package(
+                destination,
+                document,
+                "record:cutline-0",
+            )
+            moved_owned = root / "moved-after-open"
+            original_empty = vector_export._empty_vector_directory_fd
+
+            def swap_then_empty(directory_fd: int) -> None:
+                quarantine = next(root.glob(".amrv-discard-*"))
+                quarantine.rename(moved_owned)
+                quarantine.mkdir()
+                (quarantine / "foreign.txt").write_text(
+                    "preserve",
+                    encoding="utf-8",
+                )
+                original_empty(directory_fd)
+
+            with patch.object(
+                vector_export,
+                "_empty_vector_directory_fd",
+                side_effect=swap_then_empty,
+            ), patch.object(
+                vector_export.shutil,
+                "rmtree",
+                side_effect=AssertionError("POSIX cleanup must not use rmtree"),
+            ):
+                self.assertFalse(
+                    discard_staged_vector_package(staging, destination)
+                )
+
+            self.assertEqual(
+                (staging / "foreign.txt").read_text(encoding="utf-8"),
+                "preserve",
+            )
+            self.assertTrue(moved_owned.is_dir())
+
+    def test_windows_fallback_quarantines_and_cleans_owned_inode(self):
+        document = _committed_session().document
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "windows.amr-vector"
+            staging = stage_vector_package(
+                destination,
+                document,
+                "record:cutline-0",
+            )
+            real_rmtree = vector_export.shutil.rmtree
+            with patch.object(
+                vector_export,
+                "_descriptor_cleanup_available",
+                return_value=False,
+            ), patch.object(
+                vector_export,
+                "_windows_cleanup_fallback_required",
+                return_value=True,
+            ), patch.object(
+                vector_export.shutil,
+                "rmtree",
+                wraps=real_rmtree,
+            ) as rmtree:
+                self.assertTrue(
+                    discard_staged_vector_package(staging, destination)
+                )
+            rmtree.assert_called_once()
+            self.assertFalse(staging.exists())
+
+    def test_unsupported_directory_fsync_is_committed_uncertainty(self):
+        document = _committed_session().document
+        with tempfile.TemporaryDirectory() as temporary, patch.object(
+            vector_export,
+            "_fsync_parent",
+            return_value=False,
+        ):
+            destination = Path(temporary) / "unsupported-fsync.amr-vector"
+            staging = stage_vector_package(
+                destination,
+                document,
+                "record:cutline-0",
+            )
+            prepared = prepare_staged_vector_publication(
+                staging,
+                destination,
+                document=document,
+            )
+            with self.assertRaises(ArtifactVectorExportError) as raised:
+                publish_prepared_vector_package(prepared)
+            self.assertTrue(raised.exception.committed)
+            self.assertIn("unsupported", str(raised.exception))
+            self.assertTrue(destination.is_dir())
+
+    def test_einval_directory_fsync_is_explicitly_unconfirmed(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(
+            vector_export.os,
+            "fsync",
+            side_effect=OSError(errno.EINVAL, "unsupported"),
+        ):
+            self.assertFalse(vector_export._fsync_parent(Path(temporary)))
+
+    def test_post_rename_destination_inode_is_verified(self):
+        document = _committed_session().document
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            destination = root / "verify-inode.amr-vector"
+            staging = stage_vector_package(
+                destination,
+                document,
+                "record:cutline-0",
+            )
+            prepared = prepare_staged_vector_publication(
+                staging,
+                destination,
+                document=document,
+            )
+            moved_owned = root / "published-owned-moved"
+            real_rename = vector_export._rename_directory_noreplace
+
+            def replace_after_rename(source: Path, target: Path) -> None:
+                real_rename(source, target)
+                target.rename(moved_owned)
+                target.mkdir()
+                (target / "foreign.txt").write_text("preserve", encoding="utf-8")
+
+            with patch.object(
+                vector_export,
+                "_rename_directory_noreplace",
+                side_effect=replace_after_rename,
+            ):
+                with self.assertRaises(ArtifactVectorExportError) as raised:
+                    publish_prepared_vector_package(prepared)
+            self.assertTrue(raised.exception.committed)
+            self.assertEqual(
+                (destination / "foreign.txt").read_text(encoding="utf-8"),
+                "preserve",
+            )
+            self.assertTrue(moved_owned.is_dir())
+
+    def test_stage_is_same_parent_verified_and_does_not_publish_destination(self):
+        document = _committed_session().document
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            destination = root / "staged.amr-vector"
+            collision = "c" * 32
+            owned = "a" * 32
+            foreign = root / f".amrv-stage-{collision}"
+            foreign.mkdir()
+            sentinel = foreign / "foreign-sentinel.txt"
+            sentinel.write_text("do not remove", encoding="utf-8")
+
+            with patch.object(
+                vector_export.uuid,
+                "uuid4",
+                side_effect=[
+                    SimpleNamespace(hex=collision),
+                    SimpleNamespace(hex=owned),
+                ],
+            ):
+                staging = stage_vector_package(
+                    destination,
+                    document,
+                    "record:cutline-0",
+                )
+
+            self.assertEqual(staging.parent, destination.parent)
+            self.assertEqual(staging.name, f".amrv-stage-{owned}")
+            self.assertFalse(destination.exists())
+            validate_vector_export_package(staging, document=document)
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "do not remove")
+
+            with patch.object(vector_export, "_fsync_parent") as fsync_parent:
+                published = publish_staged_vector_package(
+                    staging,
+                    destination,
+                    document=document,
+                )
+            self.assertEqual(published, destination)
+            fsync_parent.assert_called_once_with(destination.parent)
+            self.assertFalse(staging.exists())
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "do not remove")
+
+    def test_stage_collision_budget_preserves_foreign_directory(self):
+        document = _committed_session().document
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            destination = root / "busy.amr-vector"
+            collision = "c" * 32
+            foreign = root / f".amrv-stage-{collision}"
+            foreign.mkdir()
+            sentinel = foreign / "sentinel.txt"
+            sentinel.write_text("foreign", encoding="utf-8")
+
+            with patch.object(
+                vector_export.uuid,
+                "uuid4",
+                return_value=SimpleNamespace(hex=collision),
+            ) as uuid4:
+                with self.assertRaisesRegex(
+                    ArtifactVectorExportError,
+                    "after 16 attempts",
+                ):
+                    stage_vector_package(
+                        destination,
+                        document,
+                        "record:cutline-0",
+                    )
+
+            self.assertEqual(uuid4.call_count, 16)
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "foreign")
+            self.assertFalse(destination.exists())
+
+    def test_discard_removes_only_the_registered_staging_inode(self):
+        document = _committed_session().document
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            destination = root / "discard.amr-vector"
+            staging = stage_vector_package(
+                destination,
+                document,
+                "record:cutline-0",
+            )
+            self.assertTrue(
+                discard_staged_vector_package(staging, destination)
+            )
+            self.assertFalse(staging.exists())
+
+            replaced = stage_vector_package(
+                destination,
+                document,
+                "record:cutline-0",
+            )
+            original = root / "moved-owned-staging"
+            replaced.rename(original)
+            replaced.mkdir()
+            sentinel = replaced / "foreign.txt"
+            sentinel.write_text("preserve", encoding="utf-8")
+            self.assertFalse(
+                discard_staged_vector_package(replaced, destination)
+            )
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve")
+            self.assertTrue(original.is_dir())
+
+    def test_publish_reports_committed_directory_fsync_uncertainty(self):
+        document = _committed_session().document
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "uncertain.amr-vector"
+            staging = stage_vector_package(
+                destination,
+                document,
+                "record:cutline-0",
+            )
+            with patch.object(
+                vector_export,
+                "_fsync_parent",
+                side_effect=OSError(errno.EIO, "injected fsync failure"),
+            ):
+                with self.assertRaises(ArtifactVectorExportError) as raised:
+                    publish_staged_vector_package(
+                        staging,
+                        destination,
+                        document=document,
+                    )
+            self.assertTrue(raised.exception.committed)
+            self.assertTrue(destination.is_dir())
+            self.assertFalse(staging.exists())
+
+    def test_invalid_record_does_not_create_destination_parent(self):
+        document = _committed_session().document
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "new-parent" / "bad.amr-vector"
+            with self.assertRaisesRegex(ArtifactVectorExportError, "does not exist"):
+                stage_vector_package(destination, document, "record:missing")
+            self.assertFalse(destination.parent.exists())
+
     def test_atomic_two_file_package_is_relocatable_and_non_overwriting(self):
         document = _committed_session().document
         with tempfile.TemporaryDirectory() as temporary:
@@ -699,6 +1115,33 @@ class TestArtifactVectorExportPackage(unittest.TestCase):
 
             self.assertTrue(destination.is_dir())
             self.assertEqual(list(destination.iterdir()), [])
+            self.assertEqual(
+                list(destination.parent.glob(".amrv-stage-*")),
+                [],
+            )
+
+    def test_publish_race_preserves_destination_and_returned_staging(self):
+        document = _committed_session().document
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "raced-stage.amr-vector"
+            staging = stage_vector_package(
+                destination,
+                document,
+                "record:cutline-0",
+            )
+            destination.mkdir()
+            sentinel = destination / "winner.txt"
+            sentinel.write_text("other process", encoding="utf-8")
+
+            with self.assertRaisesRegex(ArtifactVectorExportError, "already exists"):
+                publish_staged_vector_package(
+                    staging,
+                    destination,
+                    document=document,
+                )
+
+            self.assertTrue(staging.is_dir())
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "other process")
 
     def test_package_size_cap_is_checked_before_unbounded_read(self):
         with tempfile.TemporaryDirectory() as temporary:

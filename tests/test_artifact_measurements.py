@@ -23,6 +23,7 @@ from src.application.artifact_workbench import (
     ArtifactWorkbench,
     ArtifactWorkbenchError,
     ConfirmedSourceMetadata,
+    RecordBindingTransition,
     StaleWorkflowOperationError,
     WorkflowBusyError,
 )
@@ -142,8 +143,12 @@ def _cutline_frame() -> PlanarFrame:
 
 def _headless_publisher(workbench: ArtifactWorkbench):
     def publish(transition) -> None:
-        activation = workbench.activate_projection(transition)
-        workbench.finalize_projection(activation)
+        if isinstance(transition, RecordBindingTransition):
+            activation = workbench.activate_record_binding(transition)
+            workbench.finalize_record_binding(activation)
+        else:
+            activation = workbench.activate_projection(transition)
+            workbench.finalize_projection(activation)
 
     return publish
 
@@ -593,7 +598,7 @@ def test_publisher_leaving_tentative_authority_fails_closed_without_busy_lock() 
     result = controller.execute(item)
 
     def broken_publisher(transition) -> None:
-        workbench.activate_projection(transition)
+        workbench.activate_record_binding(transition)
         raise RuntimeError("publisher crashed after activation")
 
     with pytest.raises(RuntimeError, match="publisher crashed"):

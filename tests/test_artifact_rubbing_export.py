@@ -1,22 +1,34 @@
 from __future__ import annotations
 
+from dataclasses import replace
+import errno
 import hashlib
 import json
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 from typing import Any
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
+import src.core.artifact_rubbing_export as rubbing_export
 from src.core.artifact_rubbing_export import (
     ArtifactRubbingExportError,
+    MAX_IGNORABLE_OS_METADATA_BYTES,
     RUBBING_EXPORT_PNG_NAME,
     RUBBING_EXPORT_SIDECAR_NAME,
     build_rubbing_export,
+    discard_prepared_rubbing_package,
+    discard_staged_rubbing_package,
     export_rubbing_package,
+    prepare_staged_rubbing_publication,
+    publish_prepared_rubbing_package,
+    publish_staged_rubbing_package,
+    stage_rubbing_package,
     validate_rubbing_export_bytes,
     validate_rubbing_export_package,
 )
@@ -111,6 +123,379 @@ def _sidecar(bundle) -> dict[str, Any]:
 
 
 class TestRubbingExport(unittest.TestCase):
+    def test_prepared_capability_is_exact_and_single_use(self):
+        session, computation = _committed()
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "exact.amr-rubbing"
+            staging = stage_rubbing_package(
+                destination,
+                session.document,
+                "record:rubbing:export",
+                computation.raster,
+            )
+            prepared = prepare_staged_rubbing_publication(
+                staging,
+                destination,
+                document=session.document,
+            )
+            with self.assertRaisesRegex(
+                ArtifactRubbingExportError,
+                "invalid or consumed",
+            ):
+                publish_prepared_rubbing_package(replace(prepared))
+
+            self.assertEqual(
+                publish_prepared_rubbing_package(prepared),
+                destination,
+            )
+            with self.assertRaises(ArtifactRubbingExportError) as raised:
+                publish_prepared_rubbing_package(prepared)
+            self.assertTrue(raised.exception.committed)
+
+    def test_public_publish_rejects_never_owned_staging(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            foreign = root / f".amrr-stage-{'f' * 32}"
+            foreign.mkdir()
+            destination = root / "foreign.amr-rubbing"
+            with self.assertRaisesRegex(
+                ArtifactRubbingExportError,
+                "not created by this process",
+            ):
+                publish_staged_rubbing_package(foreign, destination)
+            self.assertFalse(destination.exists())
+
+    def test_fixed_length_stage_supports_long_destination_name(self):
+        session, computation = _committed()
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / ("탁" * 70 + ".amr-rubbing")
+            staging = stage_rubbing_package(
+                destination,
+                session.document,
+                "record:rubbing:export",
+                computation.raster,
+            )
+            self.assertEqual(len(staging.name), len(".amrr-stage-") + 32)
+            self.assertNotIn(destination.name, staging.name)
+            prepared = prepare_staged_rubbing_publication(
+                staging,
+                destination,
+                document=session.document,
+            )
+            self.assertEqual(
+                publish_prepared_rubbing_package(prepared),
+                destination,
+            )
+
+    def test_pre_moved_stage_is_reported_as_committed_visible_effect(self):
+        session, computation = _committed()
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "pre-moved.amr-rubbing"
+            staging = stage_rubbing_package(
+                destination,
+                session.document,
+                "record:rubbing:export",
+                computation.raster,
+            )
+            prepared = prepare_staged_rubbing_publication(
+                staging,
+                destination,
+                document=session.document,
+            )
+            staging.rename(destination)
+            with self.assertRaises(ArtifactRubbingExportError) as raised:
+                discard_prepared_rubbing_package(prepared)
+            self.assertTrue(raised.exception.committed)
+            self.assertTrue(destination.is_dir())
+
+    def test_discard_detects_top_directory_swap_and_preserves_foreign(self):
+        session, computation = _committed()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            destination = root / "swap.amr-rubbing"
+            staging = stage_rubbing_package(
+                destination,
+                session.document,
+                "record:rubbing:export",
+                computation.raster,
+            )
+            moved_owned = root / "moved-after-open"
+            original_empty = rubbing_export._empty_rubbing_directory_fd
+
+            def swap_then_empty(directory_fd: int) -> None:
+                quarantine = next(root.glob(".amrr-discard-*"))
+                quarantine.rename(moved_owned)
+                quarantine.mkdir()
+                (quarantine / "foreign.txt").write_text(
+                    "preserve",
+                    encoding="utf-8",
+                )
+                original_empty(directory_fd)
+
+            with patch.object(
+                rubbing_export,
+                "_empty_rubbing_directory_fd",
+                side_effect=swap_then_empty,
+            ), patch.object(
+                rubbing_export.shutil,
+                "rmtree",
+                side_effect=AssertionError("POSIX cleanup must not use rmtree"),
+            ):
+                self.assertFalse(
+                    discard_staged_rubbing_package(staging, destination)
+                )
+            self.assertEqual(
+                (staging / "foreign.txt").read_text(encoding="utf-8"),
+                "preserve",
+            )
+            self.assertTrue(moved_owned.is_dir())
+
+    def test_windows_fallback_quarantines_and_cleans_owned_inode(self):
+        session, computation = _committed()
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "windows.amr-rubbing"
+            staging = stage_rubbing_package(
+                destination,
+                session.document,
+                "record:rubbing:export",
+                computation.raster,
+            )
+            real_rmtree = rubbing_export.shutil.rmtree
+            with patch.object(
+                rubbing_export,
+                "_descriptor_cleanup_available",
+                return_value=False,
+            ), patch.object(
+                rubbing_export,
+                "_windows_cleanup_fallback_required",
+                return_value=True,
+            ), patch.object(
+                rubbing_export.shutil,
+                "rmtree",
+                wraps=real_rmtree,
+            ) as rmtree:
+                self.assertTrue(
+                    discard_staged_rubbing_package(staging, destination)
+                )
+            rmtree.assert_called_once()
+            self.assertFalse(staging.exists())
+
+    def test_unsupported_directory_fsync_is_committed_uncertainty(self):
+        session, computation = _committed()
+        with tempfile.TemporaryDirectory() as temporary, patch.object(
+            rubbing_export,
+            "fsync_export_directory",
+            return_value=False,
+        ):
+            destination = Path(temporary) / "unsupported.amr-rubbing"
+            staging = stage_rubbing_package(
+                destination,
+                session.document,
+                "record:rubbing:export",
+                computation.raster,
+            )
+            prepared = prepare_staged_rubbing_publication(
+                staging,
+                destination,
+                document=session.document,
+            )
+            with self.assertRaises(ArtifactRubbingExportError) as raised:
+                publish_prepared_rubbing_package(prepared)
+            self.assertTrue(raised.exception.committed)
+            self.assertIn("unsupported", str(raised.exception))
+            self.assertTrue(destination.is_dir())
+
+    def test_post_rename_destination_inode_is_verified(self):
+        session, computation = _committed()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            destination = root / "verify-inode.amr-rubbing"
+            staging = stage_rubbing_package(
+                destination,
+                session.document,
+                "record:rubbing:export",
+                computation.raster,
+            )
+            prepared = prepare_staged_rubbing_publication(
+                staging,
+                destination,
+                document=session.document,
+            )
+            moved_owned = root / "published-owned-moved"
+            real_rename = rubbing_export.publish_export_directory_noreplace
+
+            def replace_after_rename(source: Path, target: Path) -> None:
+                real_rename(source, target)
+                target.rename(moved_owned)
+                target.mkdir()
+                (target / "foreign.txt").write_text("preserve", encoding="utf-8")
+
+            with patch.object(
+                rubbing_export,
+                "publish_export_directory_noreplace",
+                side_effect=replace_after_rename,
+            ):
+                with self.assertRaises(ArtifactRubbingExportError) as raised:
+                    publish_prepared_rubbing_package(prepared)
+            self.assertTrue(raised.exception.committed)
+            self.assertEqual(
+                (destination / "foreign.txt").read_text(encoding="utf-8"),
+                "preserve",
+            )
+            self.assertTrue(moved_owned.is_dir())
+
+    def test_stage_is_same_parent_verified_and_does_not_publish_destination(self):
+        session, computation = _committed()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            destination = root / "staged.amr-rubbing"
+            collision = "c" * 32
+            owned = "a" * 32
+            foreign = root / f".amrr-stage-{collision}"
+            foreign.mkdir()
+            sentinel = foreign / "foreign-sentinel.txt"
+            sentinel.write_text("do not remove", encoding="utf-8")
+
+            with patch.object(
+                rubbing_export.uuid,
+                "uuid4",
+                side_effect=[
+                    SimpleNamespace(hex=collision),
+                    SimpleNamespace(hex=owned),
+                ],
+            ):
+                staging = stage_rubbing_package(
+                    destination,
+                    session.document,
+                    "record:rubbing:export",
+                    computation.raster,
+                )
+
+            self.assertEqual(staging.parent, destination.parent)
+            self.assertEqual(staging.name, f".amrr-stage-{owned}")
+            self.assertFalse(destination.exists())
+            validate_rubbing_export_package(staging, document=session.document)
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "do not remove")
+
+            with patch.object(
+                rubbing_export,
+                "fsync_export_directory",
+            ) as fsync_directory:
+                published = publish_staged_rubbing_package(
+                    staging,
+                    destination,
+                    document=session.document,
+                )
+            self.assertEqual(published, destination)
+            fsync_directory.assert_called_once_with(destination.parent)
+            self.assertFalse(staging.exists())
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "do not remove")
+
+    def test_stage_collision_budget_preserves_foreign_directory(self):
+        session, computation = _committed()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            destination = root / "busy.amr-rubbing"
+            collision = "c" * 32
+            foreign = root / f".amrr-stage-{collision}"
+            foreign.mkdir()
+            sentinel = foreign / "sentinel.txt"
+            sentinel.write_text("foreign", encoding="utf-8")
+
+            with patch.object(
+                rubbing_export.uuid,
+                "uuid4",
+                return_value=SimpleNamespace(hex=collision),
+            ) as uuid4:
+                with self.assertRaisesRegex(
+                    ArtifactRubbingExportError,
+                    "after 16 attempts",
+                ):
+                    stage_rubbing_package(
+                        destination,
+                        session.document,
+                        "record:rubbing:export",
+                        computation.raster,
+                    )
+
+            self.assertEqual(uuid4.call_count, 16)
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "foreign")
+            self.assertFalse(destination.exists())
+
+    def test_discard_removes_only_the_registered_staging_inode(self):
+        session, computation = _committed()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            destination = root / "discard.amr-rubbing"
+            staging = stage_rubbing_package(
+                destination,
+                session.document,
+                "record:rubbing:export",
+                computation.raster,
+            )
+            self.assertTrue(
+                discard_staged_rubbing_package(staging, destination)
+            )
+            self.assertFalse(staging.exists())
+
+            replaced = stage_rubbing_package(
+                destination,
+                session.document,
+                "record:rubbing:export",
+                computation.raster,
+            )
+            original = root / "moved-owned-rubbing-staging"
+            replaced.rename(original)
+            replaced.mkdir()
+            sentinel = replaced / "foreign.txt"
+            sentinel.write_text("preserve", encoding="utf-8")
+            self.assertFalse(
+                discard_staged_rubbing_package(replaced, destination)
+            )
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve")
+            self.assertTrue(original.is_dir())
+
+    def test_publish_reports_committed_directory_fsync_uncertainty(self):
+        session, computation = _committed()
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "uncertain.amr-rubbing"
+            staging = stage_rubbing_package(
+                destination,
+                session.document,
+                "record:rubbing:export",
+                computation.raster,
+            )
+            with patch.object(
+                rubbing_export,
+                "fsync_export_directory",
+                side_effect=OSError(errno.EIO, "injected fsync failure"),
+            ):
+                with self.assertRaises(ArtifactRubbingExportError) as raised:
+                    publish_staged_rubbing_package(
+                        staging,
+                        destination,
+                        document=session.document,
+                    )
+            self.assertTrue(raised.exception.committed)
+            self.assertTrue(destination.is_dir())
+            self.assertFalse(staging.exists())
+
+    def test_invalid_record_does_not_create_destination_parent(self):
+        session, computation = _committed()
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "new-parent" / "bad.amr-rubbing"
+            with self.assertRaisesRegex(
+                ArtifactRubbingExportError,
+                "does not exist",
+            ):
+                stage_rubbing_package(
+                    destination,
+                    session.document,
+                    "record:missing",
+                    computation.raster,
+                )
+            self.assertFalse(destination.parent.exists())
+
     def test_build_is_exact_scaled_private_and_golden(self):
         session, computation = _committed()
         bundle = build_rubbing_export(
@@ -259,6 +644,8 @@ class TestRubbingExport(unittest.TestCase):
                 computation.raster,
             )
             (package / ".DS_Store").write_bytes(b"metadata")
+            validate_rubbing_export_package(package)
+            (package / "unexpected.txt").write_text("unsafe", encoding="utf-8")
             with self.assertRaisesRegex(ArtifactRubbingExportError, "exactly two"):
                 validate_rubbing_export_package(package)
 
@@ -275,6 +662,91 @@ class TestRubbingExport(unittest.TestCase):
                 sorted(path.name for path in package.iterdir()),
                 sorted([RUBBING_EXPORT_PNG_NAME, RUBBING_EXPORT_SIDECAR_NAME]),
             )
+
+    def test_ignorable_os_metadata_is_bounded_and_must_be_regular(self):
+        session, computation = _committed()
+        with tempfile.TemporaryDirectory() as temporary:
+            package = export_rubbing_package(
+                Path(temporary) / "metadata.amr-rubbing",
+                session.document,
+                "record:rubbing:export",
+                computation.raster,
+            )
+            metadata = package / ".DS_Store"
+            with metadata.open("wb") as stream:
+                stream.truncate(MAX_IGNORABLE_OS_METADATA_BYTES + 1)
+            with self.assertRaisesRegex(
+                ArtifactRubbingExportError,
+                "OS metadata entry is unsafe",
+            ):
+                validate_rubbing_export_package(package)
+
+    def test_export_publish_race_preserves_winner_and_cleans_owned_staging(self):
+        session, computation = _committed()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            destination = root / "raced.amr-rubbing"
+            real_publish = rubbing_export.publish_export_directory_noreplace
+
+            def create_competing_destination(source: Path, target: Path) -> None:
+                target.mkdir()
+                (target / "winner.txt").write_text(
+                    "other process",
+                    encoding="utf-8",
+                )
+                real_publish(source, target)
+
+            with patch.object(
+                rubbing_export,
+                "publish_export_directory_noreplace",
+                side_effect=create_competing_destination,
+            ):
+                with self.assertRaisesRegex(
+                    ArtifactRubbingExportError,
+                    "already exists",
+                ):
+                    export_rubbing_package(
+                        destination,
+                        session.document,
+                        "record:rubbing:export",
+                        computation.raster,
+                    )
+
+            self.assertEqual(
+                (destination / "winner.txt").read_text(encoding="utf-8"),
+                "other process",
+            )
+            self.assertEqual(
+                list(root.glob(".amrr-stage-*")),
+                [],
+            )
+
+    def test_publish_race_preserves_destination_and_returned_staging(self):
+        session, computation = _committed()
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "raced-stage.amr-rubbing"
+            staging = stage_rubbing_package(
+                destination,
+                session.document,
+                "record:rubbing:export",
+                computation.raster,
+            )
+            destination.mkdir()
+            sentinel = destination / "winner.txt"
+            sentinel.write_text("other process", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                ArtifactRubbingExportError,
+                "already exists",
+            ):
+                publish_staged_rubbing_package(
+                    staging,
+                    destination,
+                    document=session.document,
+                )
+
+            self.assertTrue(staging.is_dir())
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "other process")
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+from dataclasses import replace
 from pathlib import Path
 from threading import Event, Thread
 from unittest.mock import patch
@@ -19,6 +20,11 @@ from src.application.artifact_workbench import (
     WorkflowTransitionKind,
 )
 from src.core.artifact_session import ArtifactSession
+from src.core.artifact_vector_extractor import (
+    commit_vector_computation,
+    compute_artifact_cutline,
+)
+from src.core.artifact_vector_record import PlanarFrame
 from src.core.mesh_loader import MeshData
 from src.core.source_identity import SourceFingerprint
 
@@ -94,6 +100,29 @@ def _session(*, explicit_align: bool = False) -> ArtifactSession:
         operator="pytest",
         created_at=STAMP,
         revision_id="align:confirmed",
+    )
+
+
+def _record_candidate(
+    session: ArtifactSession,
+    *,
+    record_id: str = "record:workbench-cutline",
+) -> ArtifactSession:
+    computation = compute_artifact_cutline(
+        session,
+        PlanarFrame(
+            origin_world_mm=(150.0, 0.0, 0.0),
+            u_axis_world=(0.0, 1.0, 0.0),
+            v_axis_world=(0.0, 0.0, 1.0),
+            normal_world=(1.0, 0.0, 0.0),
+        ),
+    )
+    return commit_vector_computation(
+        session,
+        computation,
+        record_id=record_id,
+        created_at=STAMP,
+        operator="pytest",
     )
 
 
@@ -409,6 +438,334 @@ def test_session_update_cannot_smuggle_an_align_authority_change() -> None:
             expected_new_record_ids=(),
         )
     assert workbench.session is live
+
+
+def test_record_commit_rebinds_document_without_materializing_a_mesh() -> None:
+    live = _session(explicit_align=True)
+    candidate = _record_candidate(live)
+    workbench = ArtifactWorkbench(
+        session=live,
+        project_path="/projects/live.amr",
+        id_factory=SequentialIds(),
+    )
+    events = []
+    workbench.subscribe(events.append)
+
+    with patch.object(
+        ArtifactSession,
+        "materialize",
+        side_effect=AssertionError("record commit must not materialize a mesh"),
+    ) as materialize:
+        transition = workbench.prepare_record_commit(
+            live,
+            candidate,
+            expected_new_record_ids=("record:workbench-cutline",),
+        )
+        activation = workbench.activate_record_binding(transition)
+        ready = workbench.finalize_record_binding(activation)
+    materialize.assert_not_called()
+    assert transition.expected_snapshot.document_sha256 != (
+        transition.candidate_snapshot.document_sha256
+    )
+    assert transition.expected_snapshot.has_same_render_projection(
+        transition.candidate_snapshot
+    )
+
+    assert not ready.tentative
+    assert ready.session is candidate
+    assert ready.project_path == "/projects/live.amr"
+    assert events == [activation.previous, ready]
+
+
+def test_record_binding_rollback_restores_previous_authority() -> None:
+    live = _session(explicit_align=True)
+    candidate = _record_candidate(live, record_id="record:rollback")
+    workbench = ArtifactWorkbench(session=live, id_factory=SequentialIds())
+    transition = workbench.prepare_record_commit(
+        live,
+        candidate,
+        expected_new_record_ids=("record:rollback",),
+    )
+    activation = workbench.activate_record_binding(transition)
+
+    rolled_back = workbench.rollback_record_binding(
+        activation,
+        RuntimeError("injected binding failure"),
+    )
+
+    assert rolled_back.session is live
+    assert not rolled_back.tentative
+    assert rolled_back.failure is not None
+    assert rolled_back.failure.operation == "record_binding_publish"
+
+
+def test_record_binding_activation_rejects_a_forged_snapshot_capability() -> None:
+    live = _session(explicit_align=True)
+    candidate = _record_candidate(live, record_id="record:forged-binding")
+    workbench = ArtifactWorkbench(session=live, id_factory=SequentialIds())
+    transition = workbench.prepare_record_commit(
+        live,
+        candidate,
+        expected_new_record_ids=("record:forged-binding",),
+    )
+    forged = replace(
+        transition,
+        candidate_snapshot=transition.expected_snapshot,
+    )
+
+    with pytest.raises(ArtifactWorkbenchError, match="immutable sessions"):
+        workbench.activate_record_binding(forged)
+
+    assert workbench.session is live
+    assert not workbench.snapshot.tentative
+
+
+def test_export_effect_allows_same_align_append_and_rejects_align_change() -> None:
+    base = _session(explicit_align=True)
+    captured = _record_candidate(base, record_id="record:export-root")
+    expected_record = captured.document.record_index["record:export-root"]
+    snapshot = captured.projection_snapshot()
+    workbench = ArtifactWorkbench(session=captured, id_factory=SequentialIds())
+
+    appended = _record_candidate(captured, record_id="record:unrelated")
+    transition = workbench.prepare_record_commit(
+        captured,
+        appended,
+        expected_new_record_ids=("record:unrelated",),
+    )
+    activation = workbench.activate_record_binding(transition)
+    workbench.finalize_record_binding(activation)
+
+    published: list[str] = []
+    result = workbench.publish_record_effect_if_current(
+        captured,
+        snapshot,
+        record_id="record:export-root",
+        expected_record=expected_record,
+        publish=lambda: published.append("same-align") or "published",
+    )
+    assert result == "published"
+    assert published == ["same-align"]
+
+    align = workbench.prepare_align_commit(
+        translation_mm=(1.0, 0.0, 0.0),
+        rotation_deg=(0.0, 0.0, 0.0),
+        scale=1.0,
+        pivot_mm=(0.0, 0.0, 0.0),
+        operator="pytest",
+        created_at=STAMP,
+        revision_id="align:after-export-stage",
+    )
+    assert align is not None
+    _publish(workbench, align)
+
+    with pytest.raises(StaleWorkflowOperationError, match="projection authority"):
+        workbench.publish_record_effect_if_current(
+            captured,
+            snapshot,
+            record_id="record:export-root",
+            expected_record=expected_record,
+            publish=lambda: published.append("stale"),
+        )
+    assert published == ["same-align"]
+
+
+def test_export_effect_is_busy_during_pending_open() -> None:
+    base = _session(explicit_align=True)
+    captured = _record_candidate(base, record_id="record:export-pending")
+    workbench = ArtifactWorkbench(session=captured, id_factory=SequentialIds())
+    ticket = workbench.begin_new_import(
+        "/source/replacement.ply",
+        _metadata(),
+        software_version="0.1.0",
+        operator="pytest",
+    )
+    called = False
+
+    def publish() -> None:
+        nonlocal called
+        called = True
+
+    with pytest.raises(WorkflowBusyError, match="pending"):
+        workbench.publish_record_effect_if_current(
+            captured,
+            captured.projection_snapshot(),
+            record_id="record:export-pending",
+            expected_record=captured.document.record_index["record:export-pending"],
+            publish=publish,
+        )
+    assert not called
+    workbench.cancel_load(ticket)
+
+
+def test_export_effect_lease_blocks_reentrant_authority_mutators() -> None:
+    base = _session(explicit_align=True)
+    captured = _record_candidate(base, record_id="record:export-reentrant")
+    record = captured.document.record_index["record:export-reentrant"]
+    workbench = ArtifactWorkbench(
+        session=captured,
+        project_path="/projects/live.amr",
+        id_factory=SequentialIds(),
+    )
+    before = workbench.snapshot
+
+    def publish() -> str:
+        with pytest.raises(WorkflowBusyError, match="external effect publication"):
+            workbench.synchronize_legacy_session(
+                base,
+                project_path="/projects/reentrant.amr",
+            )
+        with pytest.raises(WorkflowBusyError, match="external effect publication"):
+            workbench.begin_new_import(
+                "/source/reentrant.ply",
+                _metadata(),
+                software_version="0.1.0",
+                operator="pytest",
+            )
+        with pytest.raises(WorkflowBusyError, match="external effect publication"):
+            workbench.prepare_align_commit(
+                translation_mm=(1.0, 0.0, 0.0),
+                rotation_deg=(0.0, 0.0, 0.0),
+                scale=1.0,
+                pivot_mm=(0.0, 0.0, 0.0),
+                operator="pytest",
+                revision_id="align:reentrant",
+            )
+        return "published"
+
+    result = workbench.publish_record_effect_if_current(
+        captured,
+        captured.projection_snapshot(),
+        record_id=record.id,
+        expected_record=record,
+        publish=publish,
+    )
+
+    assert result == "published"
+    assert workbench.snapshot is before
+
+
+def test_export_effect_callback_exception_clears_publication_lease() -> None:
+    base = _session(explicit_align=True)
+    captured = _record_candidate(base, record_id="record:export-exception")
+    record = captured.document.record_index["record:export-exception"]
+    workbench = ArtifactWorkbench(session=captured, id_factory=SequentialIds())
+    before = workbench.snapshot
+
+    def publish() -> None:
+        raise RuntimeError("injected publish failure")
+
+    with pytest.raises(RuntimeError, match="injected publish failure"):
+        workbench.publish_record_effect_if_current(
+            captured,
+            captured.projection_snapshot(),
+            record_id=record.id,
+            expected_record=record,
+            publish=publish,
+        )
+
+    assert workbench.snapshot is before
+    transition = workbench.prepare_align_commit(
+        translation_mm=(1.0, 0.0, 0.0),
+        rotation_deg=(0.0, 0.0, 0.0),
+        scale=1.0,
+        pivot_mm=(0.0, 0.0, 0.0),
+        operator="pytest",
+        revision_id="align:after-publish-failure",
+    )
+    assert transition is not None
+
+
+def test_export_effect_serializes_a_concurrent_authority_mutator() -> None:
+    base = _session(explicit_align=True)
+    captured = _record_candidate(base, record_id="record:export-concurrent")
+    record = captured.document.record_index["record:export-concurrent"]
+    workbench = ArtifactWorkbench(session=captured, id_factory=SequentialIds())
+    callback_entered = Event()
+    release_callback = Event()
+    mutator_started = Event()
+    mutator_finished = Event()
+    results: list[str] = []
+    errors: list[BaseException] = []
+
+    def publish() -> str:
+        callback_entered.set()
+        if not release_callback.wait(timeout=2.0):
+            raise RuntimeError("test did not release export callback")
+        return "published"
+
+    def run_publish() -> None:
+        try:
+            results.append(
+                workbench.publish_record_effect_if_current(
+                    captured,
+                    captured.projection_snapshot(),
+                    record_id=record.id,
+                    expected_record=record,
+                    publish=publish,
+                )
+            )
+        except BaseException as exc:  # pragma: no cover - failure diagnostics
+            errors.append(exc)
+
+    def run_mutator() -> None:
+        try:
+            mutator_started.set()
+            workbench.begin_new_import(
+                "/source/concurrent.ply",
+                _metadata(),
+                software_version="0.1.0",
+                operator="pytest",
+            )
+        except BaseException as exc:  # pragma: no cover - failure diagnostics
+            errors.append(exc)
+        finally:
+            mutator_finished.set()
+
+    publish_thread = Thread(target=run_publish)
+    publish_thread.start()
+    assert callback_entered.wait(timeout=2.0)
+    mutator_thread = Thread(target=run_mutator)
+    mutator_thread.start()
+    assert mutator_started.wait(timeout=2.0)
+    assert not mutator_finished.wait(timeout=0.05)
+
+    release_callback.set()
+    publish_thread.join(timeout=2.0)
+    mutator_thread.join(timeout=2.0)
+
+    assert not publish_thread.is_alive()
+    assert not mutator_thread.is_alive()
+    assert errors == []
+    assert results == ["published"]
+    assert workbench.snapshot.pending_load is not None
+
+
+def test_export_effect_detects_emergency_authority_change_and_stays_faulted() -> None:
+    base = _session(explicit_align=True)
+    captured = _record_candidate(base, record_id="record:export-fault")
+    record = captured.document.record_index["record:export-fault"]
+    workbench = ArtifactWorkbench(session=captured, id_factory=SequentialIds())
+
+    def publish() -> None:
+        workbench.enter_faulted_state(
+            session=captured,
+            project_path=None,
+            error="injected uncertain external effect",
+        )
+
+    with pytest.raises(ArtifactWorkbenchError, match="authority changed"):
+        workbench.publish_record_effect_if_current(
+            captured,
+            captured.projection_snapshot(),
+            record_id=record.id,
+            expected_record=record,
+            publish=publish,
+        )
+
+    assert workbench.snapshot.faulted
+    assert workbench.snapshot.failure is not None
+    assert workbench.snapshot.failure.fatal
 
 
 def test_publish_rollback_restores_previous_authority_without_observing_candidate() -> None:

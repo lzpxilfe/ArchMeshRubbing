@@ -245,6 +245,7 @@ from src.application.artifact_workbench import (  # noqa: E402
     ArtifactWorkbenchError,
     ProjectionActivation,
     ProjectionTransition,
+    RecordBindingTransition,
     StaleWorkflowOperationError,
     WorkflowBusyError,
     WorkflowStage,
@@ -257,6 +258,14 @@ from src.application.artifact_measurements import (  # noqa: E402
     DEFAULT_RUBBING_MEMORY_BUDGET_BYTES,
     MeasurementOperationKind,
     MeasurementOperationState,
+)
+from src.application.artifact_exports import (  # noqa: E402
+    ArtifactExportController,
+    ArtifactExportError,
+    ArtifactExportPublication,
+    ArtifactExportResult,
+    ArtifactExportState,
+    ArtifactExportWorkItem,
 )
 from src.core.artifact_vector_extractor import (  # noqa: E402
     ArtifactVectorComputation,
@@ -287,12 +296,10 @@ from src.core.artifact_rubbing_record import (  # noqa: E402
 from src.core.artifact_rubbing_export import (  # noqa: E402
     ArtifactRubbingExportError,
     RUBBING_EXPORT_DIRECTORY_SUFFIX,
-    export_rubbing_package,
 )
 from src.core.artifact_vector_export import (  # noqa: E402
     ArtifactVectorExportError,
     VECTOR_EXPORT_DIRECTORY_SUFFIX,
-    export_vector_package,
 )
 from src.core.artifact_vector_record import (  # noqa: E402
     PlanarFrame,
@@ -380,6 +387,11 @@ from src.core.tile_profile_fitting import fit_circle_2d  # noqa: E402
 from src.core.flatten_policy import recommend_flatten_mode  # noqa: E402
 
 DEFAULT_EXPORT_DPI = RUNTIME_DEFAULTS.export_dpi
+
+_ARTIFACT_AUTHORITY_REOPEN_STATUS = (
+    "⛔ 문서 권위 복원 실패 | 저장·실측·내보내기 차단, "
+    "검증된 원본을 다시 여세요"
+)
 
 _SOURCE_BINDING_CAPTURED = "captured_at_import"
 _SOURCE_BINDING_LEGACY = "legacy_unverified"
@@ -4106,6 +4118,10 @@ class MainWindow(QMainWindow):
         self._artifact_measurements = ArtifactMeasurementController(
             self._artifact_workbench
         )
+        self._artifact_exports = ArtifactExportController(
+            self._artifact_workbench,
+            rubbing_memory_budget_bytes=DEFAULT_RUBBING_MEMORY_BUDGET_BYTES,
+        )
         self._pending_native_measurement_publications: dict[
             str,
             tuple[ArtifactMeasurementWorkItem, ArtifactMeasurementResult],
@@ -4117,6 +4133,9 @@ class MainWindow(QMainWindow):
         self._native_rubbing_preview_record_id: str | None = None
         self._native_rubbing_preview_document_id: str | None = None
         self._native_rubbing_preview_geometry_ref: str | None = None
+        self._native_rubbing_preview_pending_record_id: str | None = None
+        self._native_rubbing_preview_pending_record: Any | None = None
+        self._native_rubbing_preview_pending_token: object | None = None
         self._artifact_load_active: bool = False
         self._artifact_pending_document: ArtifactDocument | None = None
         self._artifact_pending_project_path: str | None = None
@@ -4585,6 +4604,22 @@ class MainWindow(QMainWindow):
         ):
             controller = ArtifactMeasurementController(workbench)
             self._artifact_measurements = controller
+        return controller
+
+    def _artifact_export_controller(self) -> ArtifactExportController:
+        """Return the Qt-free stage/final-publish export controller."""
+
+        workbench = self._artifact_workbench_controller()
+        controller = getattr(self, "_artifact_exports", None)
+        if (
+            not isinstance(controller, ArtifactExportController)
+            or controller.workbench is not workbench
+        ):
+            controller = ArtifactExportController(
+                workbench,
+                rubbing_memory_budget_bytes=DEFAULT_RUBBING_MEMORY_BUDGET_BYTES,
+            )
+            self._artifact_exports = controller
         return controller
 
     def _native_workflow_stage(self) -> WorkflowStage:
@@ -7653,11 +7688,188 @@ class MainWindow(QMainWindow):
                 )
             self._artifact_workbench = fallback
         try:
-            self.status_info.setText(
-                "⛔ 문서 권위 복원 실패 | 저장·실측·내보내기 차단, 검증된 원본을 다시 여세요"
-            )
+            self.status_info.setText(_ARTIFACT_AUTHORITY_REOPEN_STATUS)
         except Exception:
             pass
+
+    def _restore_artifact_authority_fault_status(self) -> bool:
+        """Keep the reopen-required banner dominant after a fatal authority fault."""
+
+        faulted = bool(getattr(self, "_artifact_authority_faulted", False))
+        controller = getattr(self, "_artifact_workbench", None)
+        if isinstance(controller, ArtifactWorkbench) and controller.snapshot.faulted:
+            faulted = True
+            self._artifact_authority_faulted = True
+        if not faulted:
+            return False
+        try:
+            self.status_info.setText(_ARTIFACT_AUTHORITY_REOPEN_STATUS)
+        except Exception:
+            pass
+        return True
+
+    def _report_artifact_authority_callback_failure(
+        self,
+        *,
+        context: str,
+        detail: str,
+    ) -> bool:
+        """Report callback fallout without replacing the fail-closed UI state."""
+
+        if not self._restore_artifact_authority_fault_status():
+            return False
+        QMessageBox.critical(
+            self,
+            "문서 권위 복원 실패",
+            "문서와 화면의 권위를 확정적으로 복원하지 못했습니다. "
+            "저장·실측·내보내기를 차단했습니다. 검증된 원본 또는 "
+            f"프로젝트를 다시 여세요.\n\n{context}\n{detail}",
+        )
+        return True
+
+    def _publish_artifact_record_binding(
+        self,
+        session: ArtifactSession,
+        transition: RecordBindingTransition,
+        *,
+        status_text: str,
+    ) -> None:
+        """Publish an append-only document update without rebuilding the live VBO."""
+
+        controller = self._artifact_workbench_controller()
+        old_session = self._artifact_session
+        if (
+            not isinstance(old_session, ArtifactSession)
+            or transition.expected_session is not old_session
+            or transition.candidate_session is not session
+        ):
+            raise StaleWorkflowOperationError(
+                "record binding does not match the active GUI authority"
+            )
+        if old_session.projection_snapshot() != transition.expected_snapshot:
+            raise StaleWorkflowOperationError(
+                "record binding expected snapshot is stale"
+            )
+        if session.projection_snapshot() != transition.candidate_snapshot:
+            raise ArtifactWorkbenchError(
+                "record binding candidate snapshot is invalid"
+            )
+        objects = getattr(self.viewport, "objects", None)
+        if not isinstance(objects, list) or len(objects) != 1:
+            raise ArtifactWorkbenchError(
+                "record binding requires exactly one live artifact object"
+            )
+        obj = objects[0]
+        if (
+            getattr(obj, "mesh", None) is not self.current_mesh
+            or getattr(obj, "_amr_artifact_projection_snapshot", None)
+            != transition.expected_snapshot
+        ):
+            raise StaleWorkflowOperationError(
+                "live scene object does not match the record binding authority"
+            )
+        if not transition.expected_snapshot.has_same_render_projection(
+            transition.candidate_snapshot
+        ):
+            raise ArtifactWorkbenchError(
+                "record binding cannot change the live render projection"
+            )
+
+        old_project_path = self._current_project_path
+        old_binding = transition.expected_snapshot
+        activation: ProjectionActivation | None = None
+        binding_changed = False
+        finalize_attempted = False
+        try:
+            activation = controller.activate_record_binding(transition)
+            self._artifact_session = session
+            self._current_project_path = transition.project_path
+            obj.compare_and_swap_artifact_binding(
+                transition.expected_snapshot,
+                transition.candidate_snapshot,
+            )
+            binding_changed = True
+            finalize_attempted = True
+            controller.finalize_record_binding(activation)
+        except Exception as publication_error:
+            if activation is None:
+                raise
+            restore_error: BaseException | None = None
+            try:
+                if binding_changed:
+                    obj.compare_and_swap_artifact_binding(
+                        transition.candidate_snapshot,
+                        old_binding,
+                    )
+                self._artifact_session = old_session
+                self._current_project_path = old_project_path
+                if (
+                    getattr(obj, "_amr_artifact_projection_snapshot", None)
+                    != old_binding
+                    or self._artifact_session is not old_session
+                ):
+                    raise RuntimeError(
+                        "record binding rollback did not restore the exact GUI authority"
+                    )
+            except Exception as exc:
+                restore_error = exc
+                _LOGGER.critical("Record binding GUI rollback failed", exc_info=True)
+
+            rollback_error: BaseException | None = None
+            if restore_error is None:
+                try:
+                    controller.rollback_record_binding(
+                        activation,
+                        RuntimeError("record binding publication failed"),
+                    )
+                except Exception as exc:
+                    rollback_error = exc
+                    _LOGGER.critical(
+                        "Record binding Workbench rollback failed",
+                        exc_info=True,
+                    )
+            if (
+                restore_error is not None
+                or rollback_error is not None
+                or finalize_attempted
+            ):
+                self._mark_artifact_authority_faulted(
+                    controller,
+                    session=None,
+                    project_path=None,
+                    error=restore_error or rollback_error or publication_error,
+                    operation_id=transition.id,
+                )
+            raise
+
+        snapshot = controller.snapshot
+        if (
+            snapshot.tentative
+            or snapshot.session is not session
+            or self._artifact_session is not session
+            or getattr(obj, "_amr_artifact_projection_snapshot", None)
+            != transition.candidate_snapshot
+        ):
+            self._mark_artifact_authority_faulted(
+                controller,
+                session=None,
+                project_path=None,
+                error=RuntimeError(
+                    "record binding finalize did not prove coherent authority"
+                ),
+                operation_id=transition.id,
+            )
+            raise ArtifactWorkbenchError(
+                "record binding finalize did not prove coherent authority"
+            )
+
+        try:
+            self._sync_native_cutline_controls(reset_offset=False)
+            self.status_unit.setText("단위: mm (canonical)")
+            self.status_info.setText(status_text)
+            self.viewport.update()
+        except Exception:
+            _LOGGER.debug("Record binding UI refresh failed", exc_info=True)
 
     def _publish_artifact_session_projection(
         self,
@@ -7666,9 +7878,20 @@ class MainWindow(QMainWindow):
         project_path: str | None,
         fit_camera: bool,
         status_text: str,
-        workflow_transition: ProjectionTransition | None = None,
+        workflow_transition: ProjectionTransition | RecordBindingTransition | None = None,
         expected_new_record_ids: tuple[str, ...] | None = None,
     ) -> None:
+        if isinstance(workflow_transition, RecordBindingTransition):
+            if workflow_transition.candidate_session is not session:
+                raise ArtifactWorkbenchError(
+                    "record binding candidate does not match the published session"
+                )
+            self._publish_artifact_record_binding(
+                session,
+                workflow_transition,
+                status_text=status_text,
+            )
+            return
         old_session = self._artifact_session
         controller = self._artifact_workbench_controller()
         if workflow_transition is None:
@@ -8393,7 +8616,12 @@ class MainWindow(QMainWindow):
             lambda msg: (_close_dialog(), _safe_invoke(on_failed or _default_failed, msg))
         )
         thread.finished.connect(lambda: (_close_dialog(), _cleanup_thread()))
-        thread.start()
+        try:
+            thread.start()
+        except Exception:
+            _close_dialog()
+            _cleanup_thread()
+            raise
         return True
 
     def on_mesh_loaded(self, mesh):
@@ -14194,6 +14422,9 @@ class MainWindow(QMainWindow):
         self._native_rubbing_preview_record_id = None
         self._native_rubbing_preview_document_id = None
         self._native_rubbing_preview_geometry_ref = None
+        self._native_rubbing_preview_pending_record_id = None
+        self._native_rubbing_preview_pending_record = None
+        self._native_rubbing_preview_pending_token = None
         panel = getattr(self, "section_panel", None)
         if panel is None or not hasattr(panel, "label_native_rubbing_preview"):
             return
@@ -14238,6 +14469,9 @@ class MainWindow(QMainWindow):
         self._native_rubbing_preview_record_id = record.id
         self._native_rubbing_preview_document_id = session.document.document_id
         self._native_rubbing_preview_geometry_ref = record.geometry_ref
+        self._native_rubbing_preview_pending_record_id = None
+        self._native_rubbing_preview_pending_record = None
+        self._native_rubbing_preview_pending_token = None
 
     def _preview_native_vector_record(
         self,
@@ -14311,6 +14545,37 @@ class MainWindow(QMainWindow):
             rubbing_record = self._current_native_rubbing_record()
             selected_vector_id = vector_record.id if vector_record is not None else None
             selected_rubbing_id = rubbing_record.id if rubbing_record is not None else None
+            if selected_rubbing_id is None:
+                pending_id = getattr(
+                    self,
+                    "_native_rubbing_preview_pending_record_id",
+                    None,
+                )
+                pending_record = getattr(
+                    self,
+                    "_native_rubbing_preview_pending_record",
+                    None,
+                )
+                pending_token = getattr(
+                    self,
+                    "_native_rubbing_preview_pending_token",
+                    None,
+                )
+                current_pending = (
+                    session.document.record_index.get(pending_id)
+                    if isinstance(pending_id, str)
+                    else None
+                )
+                if (
+                    pending_token is not None
+                    and current_pending is not None
+                    and current_pending == pending_record
+                    and self._native_rubbing_record_is_exportable(
+                        session,
+                        current_pending,
+                    )
+                ):
+                    selected_rubbing_id = pending_id
             for record in session.document.records:
                 try:
                     if self._native_vector_record_is_exportable(session, record):
@@ -14415,16 +14680,30 @@ class MainWindow(QMainWindow):
             return
 
         self._clear_native_rubbing_preview()
+        preview_token = object()
+        self._native_rubbing_preview_pending_record_id = record_id
+        self._native_rubbing_preview_pending_record = record
+        self._native_rubbing_preview_pending_token = preview_token
         panel.btn_native_rubbing_export.setEnabled(False)
 
+        def owns_preview_request() -> bool:
+            return (
+                getattr(self, "_native_rubbing_preview_pending_token", None)
+                is preview_token
+            )
+
         def current_record_if_authoritative():
+            if not owns_preview_request():
+                return None
             current = getattr(self, "_artifact_session", None)
             if not isinstance(current, ArtifactSession):
                 return None
             try:
                 if (
                     current.source_mesh is not session.source_mesh
-                    or current.projection_snapshot() != captured_snapshot
+                    or not current.projection_snapshot().has_same_render_projection(
+                        captured_snapshot
+                    )
                     or str(panel.combo_native_rubbing_record.currentData() or "")
                     != record_id
                 ):
@@ -14443,6 +14722,10 @@ class MainWindow(QMainWindow):
             return current, current_record
 
         def on_done(result: object) -> None:
+            if not owns_preview_request():
+                return
+            if self._restore_artifact_authority_fault_status():
+                return
             authoritative = current_record_if_authoritative()
             if not isinstance(result, DigitalRubbingRaster) or authoritative is None:
                 self._clear_native_rubbing_preview()
@@ -14465,6 +14748,10 @@ class MainWindow(QMainWindow):
             self.status_info.setText(f"✅ 탁본 기록 선택: {current_record.id}")
 
         def on_failed(message: str) -> None:
+            if not owns_preview_request():
+                return
+            if self._restore_artifact_authority_fault_status():
+                return
             if str(panel.combo_native_rubbing_record.currentData() or "") != record_id:
                 return
             self._clear_native_rubbing_preview()
@@ -14478,17 +14765,32 @@ class MainWindow(QMainWindow):
             )
 
         self.status_info.setText("탁본 기록 미리보기 재계산 중...")
-        started = self._start_task(
-            title="Digital Rubbing 기록 미리보기",
-            label="저장된 recipe로 탁본 raster를 재검증하는 중...",
-            thread=TaskThread(
-                "native_rubbing_record_preview",
-                lambda: MainWindow._recompute_native_rubbing_record(session, record),
-            ),
-            on_done=on_done,
-            on_failed=on_failed,
-        )
-        if not started:
+        try:
+            started = self._start_task(
+                title="Digital Rubbing 기록 미리보기",
+                label="저장된 recipe로 탁본 raster를 재검증하는 중...",
+                thread=TaskThread(
+                    "native_rubbing_record_preview",
+                    lambda: MainWindow._recompute_native_rubbing_record(session, record),
+                ),
+                on_done=on_done,
+                on_failed=on_failed,
+            )
+        except Exception as exc:
+            if not owns_preview_request():
+                return
+            self._clear_native_rubbing_preview()
+            self._reset_native_record_choice(panel.combo_native_rubbing_record)
+            panel.btn_native_rubbing_export.setEnabled(False)
+            if not self._restore_artifact_authority_fault_status():
+                self.status_info.setText("❌ 탁본 기록 미리보기 시작 실패")
+                QMessageBox.warning(
+                    self,
+                    "탁본 기록 미리보기 실패",
+                    f"{type(exc).__name__}: {exc}",
+                )
+            return
+        if not started and owns_preview_request():
             self._clear_native_rubbing_preview()
             self._reset_native_record_choice(panel.combo_native_rubbing_record)
             panel.btn_native_rubbing_export.setEnabled(False)
@@ -14527,8 +14829,18 @@ class MainWindow(QMainWindow):
             return
         session = self._artifact_session
         assert isinstance(session, ArtifactSession)
-        projection = session.materialize()
-        bounds = np.asarray(projection.mesh.bounds, dtype=np.float64)
+        live_obj = getattr(self.viewport, "selected_obj", None)
+        live_mesh = getattr(live_obj, "mesh", None)
+        if (
+            live_obj is None
+            or live_mesh is None
+            or getattr(live_obj, "_amr_artifact_projection_snapshot", None)
+            != session.projection_snapshot()
+        ):
+            raise ArtifactSessionError(
+                "native cutline controls require the current live projection"
+            )
+        bounds = np.asarray(live_mesh.bounds, dtype=np.float64)
         view = str(panel.combo_native_cutline_view.currentData() or "top")
         axis = _NATIVE_CUTLINE_AXIS_INDEX.get(view, 2)
         minimum = float(bounds[0, axis])
@@ -14562,7 +14874,20 @@ class MainWindow(QMainWindow):
         panel.btn_native_rubbing_export.setEnabled(current_rubbing is not None)
         preview_id = getattr(self, "_native_rubbing_preview_record_id", None)
         if not isinstance(preview_id, str):
-            if current_rubbing is None:
+            pending_preview_id = getattr(
+                self,
+                "_native_rubbing_preview_pending_record_id",
+                None,
+            )
+            pending_preview_token = getattr(
+                self,
+                "_native_rubbing_preview_pending_token",
+                None,
+            )
+            if current_rubbing is None and (
+                not isinstance(pending_preview_id, str)
+                or pending_preview_token is None
+            ):
                 self._clear_native_rubbing_preview()
         else:
             preview_record = session.document.record_index.get(preview_id)
@@ -14639,7 +14964,7 @@ class MainWindow(QMainWindow):
 
         measurement_controller = self._artifact_measurement_controller()
 
-        def publish(transition: ProjectionTransition) -> None:
+        def publish(transition: RecordBindingTransition) -> None:
             self._publish_artifact_session_projection(
                 transition.candidate_session,
                 project_path=self._current_project_path,
@@ -14743,6 +15068,11 @@ class MainWindow(QMainWindow):
         try:
             self._publish_native_measurement_result(work_item, result)
         except Exception as exc:
+            if self._report_artifact_authority_callback_failure(
+                context="실측 결과 재게시 중 권위 확인 실패",
+                detail=f"{type(exc).__name__}: {exc}",
+            ):
+                return
             if self._native_measurement_publication_is_pending(work_item):
                 self.status_info.setText(
                     "⏸ 실측 결과 게시 보류 | Open·scene 전환 완료 후 다시 시도"
@@ -14819,6 +15149,11 @@ class MainWindow(QMainWindow):
                     raise ArtifactWorkbenchError("Cutline worker result is invalid")
                 self._publish_native_measurement_result(work_item, result)
             except Exception as exc:
+                if self._report_artifact_authority_callback_failure(
+                    context="Cutline 결과 게시 중 권위 확인 실패",
+                    detail=f"{type(exc).__name__}: {exc}",
+                ):
+                    return
                 pending = self._native_measurement_publication_is_pending(work_item)
                 self.status_info.setText(
                     "⏸ Cutline 결과 게시 보류 | 재시도 버튼 사용"
@@ -14832,6 +15167,11 @@ class MainWindow(QMainWindow):
                 )
 
         def on_failed(message: str) -> None:
+            if self._report_artifact_authority_callback_failure(
+                context="Cutline worker 종료 콜백",
+                detail=str(message),
+            ):
+                return
             self.status_info.setText("❌ 검증 단면 계산 실패 | 기존 문서 유지")
             QMessageBox.warning(
                 self,
@@ -14911,6 +15251,11 @@ class MainWindow(QMainWindow):
                     raise ArtifactWorkbenchError("Outline worker result is invalid")
                 self._publish_native_measurement_result(work_item, result)
             except Exception as exc:
+                if self._report_artifact_authority_callback_failure(
+                    context="Outline 결과 게시 중 권위 확인 실패",
+                    detail=f"{type(exc).__name__}: {exc}",
+                ):
+                    return
                 pending = self._native_measurement_publication_is_pending(work_item)
                 self.status_info.setText(
                     "⏸ Outline 결과 게시 보류 | 재시도 버튼 사용"
@@ -14924,6 +15269,11 @@ class MainWindow(QMainWindow):
                 )
 
         def on_failed(message: str) -> None:
+            if self._report_artifact_authority_callback_failure(
+                context="Outline worker 종료 콜백",
+                detail=str(message),
+            ):
+                return
             self.status_info.setText("❌ 검증 외곽 계산 실패 | 기존 문서 유지")
             QMessageBox.warning(
                 self,
@@ -14941,6 +15291,66 @@ class MainWindow(QMainWindow):
         )
         if not started:
             controller.cancel(work_item, reason="task_not_started")
+
+    @staticmethod
+    def _cancel_native_export_if_staged(
+        controller: ArtifactExportController,
+        work_item: ArtifactExportWorkItem,
+        *,
+        reason: str,
+    ) -> str | None:
+        """Best-effort cleanup for a GUI callback that cannot consume its stage."""
+
+        try:
+            if controller.summary(work_item).state is ArtifactExportState.STAGED:
+                controller.cancel(work_item, reason=reason)
+        except Exception as exc:
+            return str(exc)
+        return None
+
+    @staticmethod
+    def _cancel_unstarted_native_export(
+        controller: ArtifactExportController,
+        work_item: ArtifactExportWorkItem,
+        *,
+        reason: str,
+    ) -> str | None:
+        """Release a READY destination reservation when no worker owns it."""
+
+        try:
+            controller.cancel(work_item, reason=reason)
+        except Exception as exc:
+            return str(exc)
+        return None
+
+    def _report_native_export_publication(
+        self,
+        publication: ArtifactExportPublication,
+        *,
+        artifact_label: str,
+    ) -> None:
+        if self._report_artifact_authority_callback_failure(
+            context=f"{artifact_label} 패키지 게시 완료 콜백",
+            detail="문서 권위가 fault 상태인 동안 성공 표시를 차단했습니다.",
+        ):
+            return
+        destination = publication.destination
+        if publication.durability_confirmed:
+            self.status_info.setText(
+                f"✅ 1:1 {artifact_label} + provenance 저장: {destination.name}"
+            )
+            return
+        warning = publication.warning_message or (
+            "패키지는 원자적으로 게시됐지만 crash durability를 확인하지 못했습니다."
+        )
+        self.status_info.setText(
+            f"⚠️ {artifact_label} 패키지 저장됨 | crash durability 미확정"
+        )
+        QMessageBox.warning(
+            self,
+            "내보내기 내구성 경고",
+            f"패키지는 저장됐지만 디렉터리 동기화를 확인하지 못했습니다.\n\n{warning}",
+        )
 
     def _export_native_vector_record(
         self,
@@ -14967,7 +15377,23 @@ class MainWindow(QMainWindow):
             session, record
         ):
             raise ArtifactVectorExportError("no READY + FRESH vector record to export")
-        return export_vector_package(destination, session.document, record.id)
+        controller = self._artifact_export_controller()
+        work_item: ArtifactExportWorkItem | None = None
+        result: ArtifactExportResult | None = None
+        try:
+            work_item = controller.begin_vector(destination, record.id)
+            result = controller.execute(work_item)
+            return controller.publish_result(work_item, result).destination
+        except WorkflowBusyError as exc:
+            if work_item is not None and result is not None:
+                controller.discard_result(
+                    work_item,
+                    result,
+                    reason="synchronous export blocked by pending Open",
+                )
+            raise ArtifactVectorExportError(str(exc)) from exc
+        except ArtifactExportError as exc:
+            raise ArtifactVectorExportError(str(exc)) from exc
 
     def on_native_vector_export_requested(self) -> None:
         session = getattr(self, "_artifact_session", None)
@@ -15001,18 +15427,142 @@ class MainWindow(QMainWindow):
         if not selected.endswith(VECTOR_EXPORT_DIRECTORY_SUFFIX):
             selected += VECTOR_EXPORT_DIRECTORY_SUFFIX
         try:
-            destination = self._export_native_vector_record(
-                selected,
-                record_id=record.id,
-            )
-            self.status_info.setText(f"✅ 1:1 SVG + provenance 저장: {destination.name}")
+            controller = self._artifact_export_controller()
+            work_item = controller.begin_vector(selected, record.id)
         except Exception as exc:
-            self.status_info.setText("❌ 벡터 패키지 저장 실패")
+            self.status_info.setText("❌ 벡터 패키지 준비 실패")
             QMessageBox.warning(
                 self,
                 "벡터 내보내기 실패",
                 f"{type(exc).__name__}: {exc}",
             )
+            return
+
+        def on_done(value: object) -> None:
+            try:
+                if self._artifact_export_controller() is not controller:
+                    raise ArtifactExportError(
+                        "vector export controller authority was replaced"
+                    )
+                if not isinstance(value, ArtifactExportResult):
+                    raise ArtifactExportError("vector export worker result is invalid")
+                publication = controller.publish_result(work_item, value)
+            except WorkflowBusyError as exc:
+                cleanup_message = ""
+                try:
+                    if isinstance(value, ArtifactExportResult):
+                        controller.discard_result(
+                            work_item,
+                            value,
+                            reason="pending Open blocked final export publication",
+                        )
+                except Exception as cleanup_exc:
+                    cleanup_message = f"\n임시 패키지 정리 확인 실패: {cleanup_exc}"
+                if self._report_artifact_authority_callback_failure(
+                    context="SVG 패키지 최종 게시 중 권위 확인 실패",
+                    detail=f"{type(exc).__name__}: {exc}{cleanup_message}",
+                ):
+                    return
+                self.status_info.setText(
+                    "⛔ 벡터 게시 취소 | Open 완료 후 다시 내보내세요"
+                )
+                QMessageBox.warning(
+                    self,
+                    "벡터 내보내기 게시 취소",
+                    f"{type(exc).__name__}: {exc}{cleanup_message}",
+                )
+                return
+            except Exception as exc:
+                cleanup_error = self._cancel_native_export_if_staged(
+                    controller,
+                    work_item,
+                    reason="invalid or rejected vector export callback",
+                )
+                detail = f"{type(exc).__name__}: {exc}" + (
+                    f"\n임시 패키지 정리 확인 실패: {cleanup_error}"
+                    if cleanup_error
+                    else ""
+                )
+                if self._report_artifact_authority_callback_failure(
+                    context="SVG 패키지 게시 콜백 실패",
+                    detail=detail,
+                ):
+                    return
+                self.status_info.setText("❌ 벡터 패키지 저장 실패")
+                QMessageBox.warning(
+                    self,
+                    "벡터 내보내기 실패",
+                    f"{type(exc).__name__}: {exc}"
+                    + (
+                        f"\n임시 패키지 정리 확인 실패: {cleanup_error}"
+                        if cleanup_error
+                        else ""
+                    ),
+                )
+                return
+            self._report_native_export_publication(publication, artifact_label="SVG")
+
+        def on_failed(message: str) -> None:
+            if self._report_artifact_authority_callback_failure(
+                context="SVG 패키지 worker 종료 콜백",
+                detail=str(message),
+            ):
+                return
+            self.status_info.setText("❌ 벡터 패키지 생성 실패")
+            QMessageBox.warning(
+                self,
+                "벡터 내보내기 실패",
+                self._format_error_message("패키지 생성 중 오류가 발생했습니다:", message),
+            )
+
+        try:
+            started = self._start_task(
+                title="벡터 내보내기",
+                label="1:1 SVG와 provenance 패키지를 검증하는 중...",
+                thread=TaskThread(
+                    "export_native_vector",
+                    lambda: controller.execute(work_item),
+                ),
+                on_done=on_done,
+                on_failed=on_failed,
+            )
+        except Exception as exc:
+            cleanup_error = self._cancel_unstarted_native_export(
+                controller,
+                work_item,
+                reason="task_start_failed",
+            )
+            detail = f"{type(exc).__name__}: {exc}" + (
+                f"\n내보내기 예약 해제 확인 실패: {cleanup_error}"
+                if cleanup_error
+                else ""
+            )
+            if self._report_artifact_authority_callback_failure(
+                context="SVG 패키지 worker 시작 실패",
+                detail=detail,
+            ):
+                return
+            self.status_info.setText("❌ 벡터 패키지 작업 시작 실패")
+            QMessageBox.warning(self, "벡터 내보내기 실패", detail)
+            return
+        if not started:
+            cleanup_error = self._cancel_unstarted_native_export(
+                controller,
+                work_item,
+                reason="task_not_started",
+            )
+            if cleanup_error:
+                if self._report_artifact_authority_callback_failure(
+                    context="SVG 패키지 worker 미시작",
+                    detail=f"내보내기 예약 해제 확인 실패: {cleanup_error}",
+                ):
+                    return
+                self.status_info.setText("❌ 벡터 내보내기 예약 해제 확인 실패")
+                QMessageBox.warning(
+                    self,
+                    "벡터 내보내기 정리 실패",
+                    cleanup_error,
+                )
 
     def _native_rubbing_options_from_panel(self) -> dict[str, Any]:
         panel = self.section_panel
@@ -15095,6 +15645,11 @@ class MainWindow(QMainWindow):
                     )
                 self._publish_native_measurement_result(work_item, result)
             except Exception as exc:
+                if self._report_artifact_authority_callback_failure(
+                    context="Digital Rubbing 결과 게시 중 권위 확인 실패",
+                    detail=f"{type(exc).__name__}: {exc}",
+                ):
+                    return
                 pending = self._native_measurement_publication_is_pending(work_item)
                 self.status_info.setText(
                     "⏸ Digital Rubbing 결과 게시 보류 | 재시도 버튼 사용"
@@ -15112,6 +15667,11 @@ class MainWindow(QMainWindow):
                 )
 
         def on_failed(message: str) -> None:
+            if self._report_artifact_authority_callback_failure(
+                context="Digital Rubbing worker 종료 콜백",
+                detail=str(message),
+            ):
+                return
             self.status_info.setText("❌ Digital Rubbing 계산 실패 | 기존 문서 유지")
             QMessageBox.warning(
                 self,
@@ -15157,20 +15717,6 @@ class MainWindow(QMainWindow):
             )
         return computation.raster
 
-    @staticmethod
-    def _export_native_rubbing_record_for_session(
-        destination: str | os.PathLike[str],
-        session: ArtifactSession,
-        record,
-    ) -> Path:
-        raster = MainWindow._recompute_native_rubbing_record(session, record)
-        return export_rubbing_package(
-            destination,
-            session.document,
-            record.id,
-            raster,
-        )
-
     def _export_native_rubbing_record(
         self,
         destination: str | os.PathLike[str],
@@ -15196,15 +15742,30 @@ class MainWindow(QMainWindow):
             if record_id is not None
             else self._current_native_rubbing_record()
         )
-        if record is None:
+        if record is None or not self._native_rubbing_record_is_exportable(
+            session,
+            record,
+        ):
             raise ArtifactRubbingExportError(
                 "no READY + FRESH Digital Rubbing record to export"
             )
-        return self._export_native_rubbing_record_for_session(
-            destination,
-            session,
-            record,
-        )
+        controller = self._artifact_export_controller()
+        work_item: ArtifactExportWorkItem | None = None
+        result: ArtifactExportResult | None = None
+        try:
+            work_item = controller.begin_rubbing(destination, record.id)
+            result = controller.execute(work_item)
+            return controller.publish_result(work_item, result).destination
+        except WorkflowBusyError as exc:
+            if work_item is not None and result is not None:
+                controller.discard_result(
+                    work_item,
+                    result,
+                    reason="synchronous export blocked by pending Open",
+                )
+            raise ArtifactRubbingExportError(str(exc)) from exc
+        except ArtifactExportError as exc:
+            raise ArtifactRubbingExportError(str(exc)) from exc
 
     def on_native_rubbing_export_requested(self) -> None:
         session = getattr(self, "_artifact_session", None)
@@ -15239,21 +15800,88 @@ class MainWindow(QMainWindow):
             return
         if not selected.endswith(RUBBING_EXPORT_DIRECTORY_SUFFIX):
             selected += RUBBING_EXPORT_DIRECTORY_SUFFIX
-
-        def task():
-            return MainWindow._export_native_rubbing_record_for_session(
-                selected,
-                session,
-                record,
+        try:
+            controller = self._artifact_export_controller()
+            work_item = controller.begin_rubbing(selected, record.id)
+        except Exception as exc:
+            self.status_info.setText("❌ Digital Rubbing 내보내기 준비 실패")
+            QMessageBox.warning(
+                self,
+                "Digital Rubbing 내보내기 실패",
+                f"{type(exc).__name__}: {exc}",
             )
+            return
 
-        def on_done(destination: object) -> None:
-            path = Path(destination)
-            self.status_info.setText(
-                f"✅ 1:1 PNG + provenance 저장: {path.name}"
-            )
+        def on_done(value: object) -> None:
+            try:
+                if self._artifact_export_controller() is not controller:
+                    raise ArtifactExportError(
+                        "rubbing export controller authority was replaced"
+                    )
+                if not isinstance(value, ArtifactExportResult):
+                    raise ArtifactExportError("rubbing export worker result is invalid")
+                publication = controller.publish_result(work_item, value)
+            except WorkflowBusyError as exc:
+                cleanup_message = ""
+                try:
+                    if isinstance(value, ArtifactExportResult):
+                        controller.discard_result(
+                            work_item,
+                            value,
+                            reason="pending Open blocked final export publication",
+                        )
+                except Exception as cleanup_exc:
+                    cleanup_message = f"\n임시 패키지 정리 확인 실패: {cleanup_exc}"
+                if self._report_artifact_authority_callback_failure(
+                    context="Digital Rubbing 패키지 최종 게시 중 권위 확인 실패",
+                    detail=f"{type(exc).__name__}: {exc}{cleanup_message}",
+                ):
+                    return
+                self.status_info.setText(
+                    "⛔ 탁본 게시 취소 | Open 완료 후 다시 내보내세요"
+                )
+                QMessageBox.warning(
+                    self,
+                    "Digital Rubbing 게시 취소",
+                    f"{type(exc).__name__}: {exc}{cleanup_message}",
+                )
+                return
+            except Exception as exc:
+                cleanup_error = self._cancel_native_export_if_staged(
+                    controller,
+                    work_item,
+                    reason="invalid or rejected rubbing export callback",
+                )
+                detail = f"{type(exc).__name__}: {exc}" + (
+                    f"\n임시 패키지 정리 확인 실패: {cleanup_error}"
+                    if cleanup_error
+                    else ""
+                )
+                if self._report_artifact_authority_callback_failure(
+                    context="Digital Rubbing 패키지 게시 콜백 실패",
+                    detail=detail,
+                ):
+                    return
+                self.status_info.setText("❌ Digital Rubbing 패키지 저장 실패")
+                QMessageBox.warning(
+                    self,
+                    "Digital Rubbing 내보내기 실패",
+                    f"{type(exc).__name__}: {exc}"
+                    + (
+                        f"\n임시 패키지 정리 확인 실패: {cleanup_error}"
+                        if cleanup_error
+                        else ""
+                    ),
+                )
+                return
+            self._report_native_export_publication(publication, artifact_label="PNG")
 
         def on_failed(message: str) -> None:
+            if self._report_artifact_authority_callback_failure(
+                context="Digital Rubbing export worker 종료 콜백",
+                detail=str(message),
+            ):
+                return
             self.status_info.setText("❌ Digital Rubbing 패키지 저장 실패")
             QMessageBox.warning(
                 self,
@@ -15261,13 +15889,56 @@ class MainWindow(QMainWindow):
                 self._format_error_message("패키지 생성 중 오류가 발생했습니다:", message),
             )
 
-        self._start_task(
-            title="Digital Rubbing 내보내기",
-            label="record recipe 재계산 및 1:1 PNG 검증 중...",
-            thread=TaskThread("export_native_digital_rubbing", task),
-            on_done=on_done,
-            on_failed=on_failed,
-        )
+        try:
+            started = self._start_task(
+                title="Digital Rubbing 내보내기",
+                label="record recipe 재계산 및 1:1 PNG 검증 중...",
+                thread=TaskThread(
+                    "export_native_digital_rubbing",
+                    lambda: controller.execute(work_item),
+                ),
+                on_done=on_done,
+                on_failed=on_failed,
+            )
+        except Exception as exc:
+            cleanup_error = self._cancel_unstarted_native_export(
+                controller,
+                work_item,
+                reason="task_start_failed",
+            )
+            detail = f"{type(exc).__name__}: {exc}" + (
+                f"\n내보내기 예약 해제 확인 실패: {cleanup_error}"
+                if cleanup_error
+                else ""
+            )
+            if self._report_artifact_authority_callback_failure(
+                context="Digital Rubbing export worker 시작 실패",
+                detail=detail,
+            ):
+                return
+            self.status_info.setText("❌ Digital Rubbing 패키지 작업 시작 실패")
+            QMessageBox.warning(self, "Digital Rubbing 내보내기 실패", detail)
+            return
+        if not started:
+            cleanup_error = self._cancel_unstarted_native_export(
+                controller,
+                work_item,
+                reason="task_not_started",
+            )
+            if cleanup_error:
+                if self._report_artifact_authority_callback_failure(
+                    context="Digital Rubbing export worker 미시작",
+                    detail=f"내보내기 예약 해제 확인 실패: {cleanup_error}",
+                ):
+                    return
+                self.status_info.setText(
+                    "❌ Digital Rubbing 내보내기 예약 해제 확인 실패"
+                )
+                QMessageBox.warning(
+                    self,
+                    "Digital Rubbing 내보내기 정리 실패",
+                    cleanup_error,
+                )
 
     def on_crosshair_toggled(self, enabled):
         """십자선 모드 토글 핸들러 (Viewport3D와 연동)"""

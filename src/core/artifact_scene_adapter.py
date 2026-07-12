@@ -135,6 +135,33 @@ class ArtifactProjectionSnapshot:
 
         return np.asarray(self.matrix4x4, dtype=np.float64).copy()
 
+    @property
+    def render_key(self) -> tuple[object, ...]:
+        """Identity of the live geometry projection, excluding document content.
+
+        Appending a DerivedRecord changes ``document_sha256`` without changing
+        any coordinates or GPU buffers.  Consumers may reuse an existing mesh
+        only when this complete render key remains equal.
+        """
+
+        return (
+            self.document_id,
+            self.document_schema_version,
+            self.source_asset_id,
+            self.geometry_revision_id,
+            self.source_metadata_revision_id,
+            self.align_revision_id,
+            self.geometry_sha256,
+            self.geometry_hash_scope,
+            self.matrix4x4,
+        )
+
+    def has_same_render_projection(self, other: object) -> bool:
+        return (
+            isinstance(other, ArtifactProjectionSnapshot)
+            and self.render_key == other.render_key
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class ArtifactSceneProjection:

@@ -235,7 +235,8 @@ M0-3에서 시작한 durable core와 현재 native GUI/application 경계는 다
 - artifact project reopen은 외부 source를 saved parser/unit으로 CPU staging에서 다시 검증한다. `ArtifactWorkbench`는 한 pending Open ticket과 `state_version`/`authority_epoch`를 검증하고, candidate projection을 준비한 뒤 scene notification 동안에만 tentative authority로 활성화한다. scene swap 성공 후 finalize하고, 실패하면 이전 session·scene·project path로 rollback한다. observer는 finalize 전 candidate를 보지 않는다.
 - rollback·scene 복원·finalize 자체가 실패해 application authority와 live scene의 일치를 증명할 수 없으면 fatal authority 상태로 전환한다. 이 상태에서는 ordinary Save target을 해제하고 저장·실측·내보내기를 모두 거부하며, 검증된 새 Open만 정상 authority를 회복한다.
 - artifact save는 active document만 쓰기 전에 정확히 한 projection, current snapshot, identity preview, source에서 재현한 vertices/faces 일치, destructive bake 부재를 확인한다. `ALIGN_REQUIRED` document 자체는 보존할 수 있지만 Cutline/Outline/Digital Rubbing 계산과 vector/rubbing export는 명시적 Align 전까지 차단한다. 아직 `DerivedRecord`로 승격되지 않은 cutline·선택·기록면·평가 등의 결과가 하나라도 있으면 누락한 채 저장하지 않고 fail closed한다.
-- Cutline/Outline/Digital Rubbing은 application layer가 canonical recipe, projection context, exact record ID와 result capability를 소유한다. worker는 session을 commit하지 않고 computation만 반환하며, 완료 시 captured document가 current document의 immutable ancestor이고 active source/metadata/Align/matrix가 같을 때만 current session에 rebase하여 expected record ID 하나를 publish한다. Align/Open finalize 뒤 늦은 결과는 되살아나지 않는다. pending Open이나 rollback 가능한 scene 준비 실패는 계산 결과와 예약 ID를 보존해 명시적으로 재시도하며, 그동안 저장과 새 실측을 차단한다. Rubbing은 Workbench 공유 누적 peak-memory budget, 대형 UV/texture 복사 비용의 사전 산정과 실행 exactly-once를 적용한다.
+- Cutline/Outline/Digital Rubbing은 application layer가 canonical recipe, projection context, exact record ID와 result capability를 소유한다. worker는 session을 commit하지 않고 computation만 반환하며, 완료 시 captured document가 current document의 immutable ancestor이고 active source/metadata/Align/matrix가 같을 때만 current session에 rebase하여 expected record ID 하나를 publish한다. DerivedRecord append는 `RecordBindingTransition`으로 live object의 immutable document snapshot만 CAS하고 기존 mesh/VBO/scene selection을 보존한다. Align/Open finalize 뒤 늦은 결과는 되살아나지 않는다. pending Open이나 rollback 가능한 binding 준비 실패는 계산 결과와 예약 ID를 보존해 명시적으로 재시도하며, 그동안 저장과 새 실측을 차단한다. Rubbing은 Workbench 공유 누적 peak-memory budget, 대형 UV/texture 복사 비용의 사전 산정과 실행 exactly-once를 적용한다.
+- vector/rubbing export는 exact work item/result capability를 별도로 예약한다. worker는 비싼 SVG 생성 또는 Rubbing recipe 재계산·receipt 비교, package 전체 검증을 수행하고 destination·parent·staging inode·member fingerprint에 묶인 prepared capability까지 만든다. final dispatcher는 current source session, render projection과 exact `READY + FRESH` record를 Workbench lock에서 다시 확인한 뒤 빠른 fingerprint 재확인과 atomic no-replace rename만 실행한다. 같은 Align의 append-only record 추가는 허용하고 Align/Open 완료는 destination을 만들지 않은 채 stale 처리한다. pending Open은 core에서 재시도 가능한 stage로 남지만 현재 GUI는 안전하게 정리하고 Open 완료 후 재실행을 안내한다.
 - `Open → Align commit → save → independent-process load → source rebind → materialize` 왕복을 별도 프로세스에서 검증한다.
 
 `tests/test_artifact_new_process_roundtrip.py`의 차단 게이트는 다음 순서를 실제로 수행한다.
@@ -343,7 +344,7 @@ GUI는 한 번에 한 view의 `vector.outline.v1` record를 만든다. 여섯 vi
 | `artifact.svg` | canonical-mm payload에서 다시 만든 1:1 presentation derivative |
 | `artifact.amr-vector.json` | payload, recipe, QC, source/document/revision provenance, dependency closure, artifact hash |
 
-Finder/Explorer가 추가하는 `.DS_Store`, `Thumbs.db`, `desktop.ini`는 1 MiB 이하의 일반 파일일 때만 무시한다. 그 외 추가 member, symlink, oversized member는 거부한다. writer는 같은 parent의 임시 directory에 두 파일을 쓰고 flush/fsync/자체 검증한 뒤 Linux `renameat2(RENAME_NOREPLACE)`, macOS `renamex_np(RENAME_EXCL)`, Windows non-replacing rename으로 publish한다. 목적지가 경합 중 생겨도 덮어쓰지 않는다. directory mode는 강제 0700이 아니라 사용자의 umask를 따른다.
+Finder/Explorer가 추가하는 `.DS_Store`, `Thumbs.db`, `desktop.ini`는 1 MiB 이하의 일반 파일일 때만 무시한다. 그 외 추가 member, symlink, oversized member는 거부한다. writer는 같은 parent의 임시 directory에 두 파일을 쓰고 flush/fsync/자체 검증한 뒤 Linux `renameat2(RENAME_NOREPLACE)`, macOS `renamex_np(RENAME_EXCL)`, Windows non-replacing rename으로 publish한다. 목적지가 경합 중 생겨도 덮어쓰지 않는다. staging 이름은 목적지 이름 길이와 무관한 고정 길이 UUID component로 배타 생성하며 충돌한 foreign directory를 검사·재사용·삭제하지 않는다. 안전한 discard는 staging을 먼저 고유 quarantine 이름으로 원자 이동하고 POSIX에서는 descriptor-relative로 소유 inode의 내용만 제거한다. Windows는 고유 quarantine과 inode 재확인 뒤 표준 라이브러리의 best-available cleanup을 사용하며, 증명할 수 없으면 foreign path를 보존하고 실패한다. directory mode는 강제 0700이 아니라 사용자의 umask를 따른다. final rename 뒤 실제 오류뿐 아니라 미지원 directory `fsync`도 package가 이미 공개된 `committed=true` durability-uncertain 상태로 전달한다.
 
 1:1 규칙은 다음과 같다.
 
@@ -396,7 +397,7 @@ DerivedRecord(type=raster.digital_rubbing.v1)
 - vertex/face/pixel/dimension/reference-radius/triangle-pixel-test 상한을 넘으면 해상도 축소, sampling 또는 다른 알고리즘으로 조용히 전환하지 않고 실패한다.
 - face order·winding·duplicate, hole, large absolute survey offset과 늦은 Align 결과를 차단 테스트로 검증한다. barycentric edge rule은 recipe에 명시하지만, 실제 원격 3-OS golden이 통과하기 전에는 플랫폼 간 exact raster bytes를 완료로 주장하지 않는다.
 
-GUI 계산은 worker에서 시작 당시 immutable `ArtifactSession`만 사용한다. 완료 callback은 projection snapshot뿐 아니라 시작 당시 session object identity도 검사한다. 같은 Align에서 다른 record가 중간에 추가된 경우에도 오래된 document를 publish해 그 기록을 잃을 수 있으므로 late result를 폐기한다. candidate publication은 `prepare_session_commit()`의 session/version/epoch compare-and-swap과 expected record ID 집합 검증을 다시 통과해야 한다. 미리보기는 receipt와 맞는 최초 계산 raster만 표시하며 export 권위로 재사용하지 않는다.
+GUI 계산은 worker에서 시작 당시 immutable `ArtifactSession`만 사용한다. 완료 callback은 exact result capability와 source/render projection을 검사한다. 같은 Align에서 다른 record가 중간에 추가되면 captured computation을 current immutable descendant document에 rebase하므로 기존 기록을 잃지 않으며, Align/Open authority가 바뀐 late result만 폐기한다. candidate publication은 `prepare_record_commit()`의 session/version/epoch CAS, append-only ancestor와 expected record ID 집합 검증을 다시 통과한다. record append는 SceneObject binding만 교체하고 VBO를 다시 만들지 않는다. 미리보기는 receipt와 맞는 최초 계산 raster만 표시하며 export 권위로 재사용하지 않는다. 재개방 기록의 background preview가 진행 중일 때 같은-Align record가 추가돼도 pending selection을 보존하고 완료 시 exact record/receipt를 다시 확인한다.
 
 ### Canonical PNG와 `.amr-rubbing`
 
@@ -411,7 +412,7 @@ PNG writer는 `IHDR → sRGB → pHYs → iTXt → IDAT → IEND` 순서, row fi
 
 sidecar의 artifact descriptor를 제외한 normative claim 전체를 RFC 8785 SHA-256으로 묶어 PNG iTXt metadata에 넣고, sidecar artifact descriptor는 PNG exact-byte SHA-256과 byte length를 가진다. validator는 PNG CRC/Adler/chunk/metadata/pixel hash/semantic raster hash, receipt, recipe, public provenance, scale와 privacy 선언을 모두 대조한다. 원본 document가 없어도 이동한 package를 별도 PID에서 offline 검증할 수 있고, document를 함께 주면 READY + FRESH record와 manifest까지 비교한다. machine-readable sidecar 계약은 `schemas/rubbing_export-1.0.0.schema.json`이다.
 
-writer는 vector package와 같은 same-parent staging, file/directory `fsync`, self-validation, OS별 atomic no-replace publish를 사용한다. 기존 목적지, 추가 member와 symlink는 거부한다. 이 package의 hash도 무결성 값이며 제작자 전자서명은 아니다.
+writer는 vector package와 같은 same-parent staging, prepared inode/fingerprint capability, file/directory `fsync`, self-validation, OS별 atomic no-replace publish를 사용한다. staging 이름은 배타적으로 예약하고 충돌한 foreign directory를 재사용·삭제하지 않는다. application cleanup도 등록한 device/inode가 그대로일 때만 수행한다. 기존 목적지, 추가 member와 symlink는 거부하며 `.DS_Store`, `Thumbs.db`, `desktop.ini`만 vector와 같은 1 MiB 제한으로 무시한다. final rename 뒤 실제 또는 미지원 directory `fsync`는 destination이 이미 게시된 `committed=true` 오류이며 GUI는 저장 완료와 crash durability 미확정을 구분한다. 이 package의 hash도 무결성 값이며 제작자 전자서명은 아니다.
 
 ## 원자적 저장 절차
 

@@ -1,5 +1,19 @@
 """GUI-independent application coordination for the native workbench."""
 
+from .artifact_exports import (
+    ArtifactExportController,
+    ArtifactExportError,
+    ArtifactExportKind,
+    ArtifactExportPublication,
+    ArtifactExportResult,
+    ArtifactExportState,
+    ArtifactExportSummary,
+    ArtifactExportWorkItem,
+    DEFAULT_EXPORT_RUBBING_MEMORY_BUDGET_BYTES,
+    ExportCancelledError,
+    ExportResourceLimitError,
+    StaleExportOperationError,
+)
 from .artifact_measurements import (
     ArtifactMeasurementController,
     ArtifactMeasurementError,
@@ -22,6 +36,7 @@ from .artifact_workbench import (
     ConfirmedSourceMetadata,
     ProjectionActivation,
     ProjectionTransition,
+    RecordBindingTransition,
     StaleWorkflowOperationError,
     WorkflowBusyError,
     WorkflowFailure,
@@ -32,6 +47,14 @@ from .artifact_workbench import (
 )
 
 __all__ = [
+    "ArtifactExportController",
+    "ArtifactExportError",
+    "ArtifactExportKind",
+    "ArtifactExportPublication",
+    "ArtifactExportResult",
+    "ArtifactExportState",
+    "ArtifactExportSummary",
+    "ArtifactExportWorkItem",
     "ArtifactLoadTicket",
     "ArtifactMeasurementController",
     "ArtifactMeasurementError",
@@ -42,14 +65,19 @@ __all__ = [
     "ArtifactWorkbench",
     "ArtifactWorkbenchError",
     "ConfirmedSourceMetadata",
+    "DEFAULT_EXPORT_RUBBING_MEMORY_BUDGET_BYTES",
     "DEFAULT_RUBBING_MEMORY_BUDGET_BYTES",
+    "ExportCancelledError",
+    "ExportResourceLimitError",
     "MeasurementCancelledError",
     "MeasurementOperationKind",
     "MeasurementOperationState",
     "MeasurementResourceLimitError",
     "ProjectionActivation",
     "ProjectionTransition",
+    "RecordBindingTransition",
     "StaleWorkflowOperationError",
+    "StaleExportOperationError",
     "StaleMeasurementOperationError",
     "WorkflowBusyError",
     "WorkflowFailure",
