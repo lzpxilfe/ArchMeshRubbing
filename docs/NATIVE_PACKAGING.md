@@ -54,7 +54,7 @@ python -m src.gui.opengl_driver_smoke \
   --report build/opengl-driver-smoke.json
 ```
 
-2026-07-12 Python 3.12.13/macOS arm64 Apple M4의 developer working tree에서 61개 실제 GL 조건이 통과했다. report는 commit/tree 상태·runtime lock·dependency version·UTC 시각을 포함한다. 원격 Linux job이 실행되기 전에는 llvmpipe 통과로 표현하지 않는다.
+2026-07-12 code commit `f25b424d6936e6e8832a81c7a6683cb58515e546`의 clean source tree, Python 3.12.13/macOS arm64 Apple M4에서 `opengl-driver-smoke-f25b424-darwin-arm64.json`의 61개 실제 GL 조건이 통과했다. report는 commit/tree 상태·runtime lock·dependency version·UTC 시각을 포함한다. 원격 Linux job이 실행되기 전에는 llvmpipe 통과로 표현하지 않는다.
 
 2026-07-12 로컬 증거 `native-self-test-local-smoke-898a8bfc144f-darwin.json`은 code commit `898a8bfc144f`의 clean source tree, Python 3.12.13, macOS arm64에서 10/10 통과했다. 이 unsigned build는 Windows, Linux, Intel Mac, universal2 또는 공개 배포 준비를 증명하지 않는다.
 

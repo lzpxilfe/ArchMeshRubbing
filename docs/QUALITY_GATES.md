@@ -133,7 +133,7 @@ python -m pytest -q \
 | 3-OS persistence-smoke 명시 suite의 로컬 실행 | 495 passed, 113 subtests passed |
 | `python -m ruff check .` | passed |
 | M0 Pyright wrapper command | 0 errors |
-| Python 3.12.13 macOS arm64 actual OpenGL driver smoke | 61/61 passed on developer working tree, Apple M4, perspective + top orthographic |
+| Python 3.12.13 macOS arm64 actual OpenGL driver smoke | 61/61 passed at clean code commit `f25b424d6936`, Apple M4, perspective + top orthographic |
 | ArtifactDocument + vector/rubbing payload/export Draft 2020-12 schemas + golden | passed |
 | Python 3.12.13 macOS arm64 frozen self-test | 10/10 passed at code commit `898a8bfc144f` (unsigned, `source_tree=clean`, `native-self-test-local-smoke-898a8bfc144f-darwin.json`) |
 
@@ -163,7 +163,7 @@ Native measurement 취소는 `QThread.terminate()`를 사용하지 않는다. �
 - 원근/상면 정사영 각각의 두 depth component, plate pixel, 빈 gap, relative overlay pixel
 - 보정 검색을 끈 실제 depth pick, 같은 frame serial, 해석적 ray-plane oracle와 0.125 mm 높이차
 
-2026-07-12 로컬 Python 3.12.13/macOS arm64 Apple M4(`OpenGL 2.1 Metal - 90.5`)의 developer working tree에서는 61개 조건이 통과했다. 원근 pick 높이차는 `0.124783 mm`, 최대 ray-plane 오차는 `0.001213 mm`; 정사영 높이차는 `0.124998 mm`, 최대 오차는 `0.00000191 mm`였다. JSON은 tested commit/tree 상태, runtime-lock SHA-256, dependency version과 UTC 시각을 포함하고, CI에서 생성된 성공·실패 report는 14일 artifact로 보존하도록 구성한다. 이 값은 한 로컬 장치의 증거이며 Linux llvmpipe 원격 결과, Windows, Intel Mac, frozen executable, 대표 GPU/driver를 대신하지 않는다. render origin은 metadata·Align·record·QC·hash·export 권위 값에 저장하지 않는다.
+2026-07-12 로컬 Python 3.12.13/macOS arm64 Apple M4(`OpenGL 2.1 Metal - 90.5`)에서는 code commit `f25b424d6936e6e8832a81c7a6683cb58515e546`의 clean source tree와 결합된 `opengl-driver-smoke-f25b424-darwin-arm64.json`이 61개 조건을 통과했다. 원근 pick 높이차는 `0.124783 mm`, 최대 ray-plane 오차는 `0.001213 mm`; 정사영 높이차는 `0.124998 mm`, 최대 오차는 `0.00000191 mm`였다. JSON은 tested commit/tree 상태, runtime-lock SHA-256, dependency version과 UTC 시각을 포함하고, CI에서 생성된 성공·실패 report는 14일 artifact로 보존하도록 구성한다. 이 값은 한 로컬 장치의 증거이며 Linux llvmpipe 원격 결과, Windows, Intel Mac, frozen executable, 대표 GPU/driver를 대신하지 않는다. render origin은 metadata·Align·record·QC·hash·export 권위 값에 저장하지 않는다.
 
 ## 게이트 변경 원칙
 

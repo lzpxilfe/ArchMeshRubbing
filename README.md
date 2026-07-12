@@ -372,7 +372,7 @@ python main.py --project mesh.obj planview.png
 - `READY + FRESH` record graph에서 Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6 순차 활성화·초록 완료 표시·재열기/Align 복원 구현
 - Cutline 면·경로, Outline fixed-grid/union/topology, Digital Rubbing raster/relief 내부의 안전 경계까지 사용자 cooperative cancellation 연결
 - 대좌표 render-origin 이식: relative VBO·camera/model rebasing·world overlay 제출과 frame-bound depth picking/drag 계약 구현
-- 실제 OpenGL driver smoke 구현: 로컬 Python 3.12.13/macOS Apple M4의 developer working tree에서 61개 context/FBO/VBO/pixel/depth/pick 조건 통과, 0.125 mm 높이차를 원근 `0.124783 mm`, 정사영 `0.124998 mm`로 복원. report는 commit/tree 상태·runtime lock·dependency version·UTC 시각을 기록함
+- 실제 OpenGL driver smoke 구현: code commit `f25b424d6936`의 clean source tree, Python 3.12.13/macOS Apple M4에서 61개 context/FBO/VBO/pixel/depth/pick 조건 통과, 0.125 mm 높이차를 원근 `0.124783 mm`, 정사영 `0.124998 mm`로 복원. report는 commit/tree 상태·runtime lock·dependency version·UTC 시각을 기록함
 - 다음 단계: 새 Linux llvmpipe 차단 job의 원격 결과 확인, Windows·macOS CI/frozen 실제 context 확대, 종료 중 worker 정리와 동기 preflight 분리, 라이선스 결정, 대표 GPU·대용량 실제 유물 pilot 진행
 
 ---
