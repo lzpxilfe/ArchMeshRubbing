@@ -1,6 +1,22 @@
 name: Frozen package smoke
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/package-smoke.yml"
+      - "ArchMeshRubbing.spec"
+      - "LICENSE"
+      - "README.md"
+      - "main.py"
+      - "app_interactive.py"
+      - "requirements/build-py312.lock"
+      - "requirements/runtime-py312.lock"
+      - "resources/**"
+      - "schemas/**"
+      - "src/**"
+      - "tools/generate_build_info.py"
   pull_request:
     paths:
       - ".github/workflows/package-smoke.yml"

@@ -60,7 +60,7 @@ python -m src.gui.opengl_driver_smoke \
 
 ## 3-OS CI
 
-`.github/workflows/package-smoke.yml`은 pull request와 수동 실행에서 Ubuntu, Windows, macOS 각각 다음을 수행하도록 구성한다.
+`.github/workflows/package-smoke.yml`은 `main` push, pull request, 수동 실행에서 Ubuntu, Windows, macOS 각각 다음을 수행하도록 구성한다. `main` push는 패키지 입력 파일이 바뀐 경우에만 실행한다.
 
 - Python 3.12 설정
 - exact build lock 설치
