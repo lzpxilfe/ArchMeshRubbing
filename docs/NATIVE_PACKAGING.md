@@ -46,7 +46,7 @@ Windows에서는 활성화 명령만 `.venv\Scripts\activate`로 바꾼다. 기�
 
 Offscreen에서 `QOpenGLWidget`을 생성하는 검사는 module/plugin 누락을 잡지만 실제 GPU context와 frame 정확성을 증명하지 않는다. Xvfb+Mesa 또는 실제 데스크톱 세션에서의 GL context/render smoke가 별도 릴리스 게이트다.
 
-2026-07-12 로컬 증거 `native-self-test-local-smoke-429abafebeb6-darwin-5.json`은 Python 3.12.13, macOS arm64에서 10/10 통과했다. 이 unsigned build manifest는 `source_tree=dirty`를 명시하며 Windows, Linux, Intel Mac, universal2 또는 공개 배포 준비를 증명하지 않는다.
+2026-07-12 로컬 증거 `native-self-test-local-smoke-8bd26e3a4733-darwin-3.json`은 Python 3.12.13, macOS arm64에서 10/10 통과했다. 이 unsigned build manifest는 `source_tree=dirty`를 명시하며 Windows, Linux, Intel Mac, universal2 또는 공개 배포 준비를 증명하지 않는다.
 
 ## 3-OS CI
 

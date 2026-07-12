@@ -14,9 +14,9 @@ ArchMeshRubbing을 전면 재작성하지 않는다. 검증 가능한 headless �
 
 코드베이스에는 버릴 부분과 지킬 부분이 명확히 함께 존재한다.
 
-- `app_interactive.py`는 약 15,300줄, `src/gui/viewport_3d.py`는 약 15,100줄이며 각각 수백 개 메서드와 많은 광범위 예외 처리를 포함한다. UI, 상태, 렌더링, 작업 실행, 저장 정책이 서로 강하게 얽혀 있어 이 두 파일을 계속 확장하는 비용은 높다.
+- `app_interactive.py`는 약 15,900줄, `src/gui/viewport_3d.py`는 약 15,100줄이며 각각 수백 개 메서드와 많은 광범위 예외 처리를 포함한다. UI, 상태, 렌더링, 작업 실행, 저장 정책이 서로 강하게 얽혀 있어 이 두 파일을 계속 확장하는 비용은 높다.
 - 반면 source identity, 명시적 단위, immutable Align revision, canonical JSON/PNG, Cutline, Outline, Digital Rubbing, offline export는 GUI와 분리된 코어와 버전 스키마를 가진다.
-- Python 3.12 기준 전체 `362 passed, 113 subtests passed`, M0 Pyright `0 errors`, Ruff 통과가 현재 계약을 보호한다.
+- Python 3.12 기준 전체 `399 passed, 113 subtests passed`, M0 Pyright `0 errors`, Ruff 통과가 현재 계약을 보호한다.
 - Python 3.12 macOS arm64 unsigned frozen 앱은 실제 GUI import/생성, 6개 mesh parser, PNG codec과 canonical document/vector/rubbing을 포함한 offline self-test 10개를 모두 통과했다. 이 로컬 증거는 dirty source tree의 개발 스모크이며 공개 배포 증거가 아니다.
 
 전면 재작성은 이 검증 자산과 오래 축적된 기와 처리 알고리즘까지 동시에 다시 만들게 한다. 반대로 기존 GUI에 기능을 계속 덧붙이면 mutable scene 상태와 권위 기록이 다시 섞인다. 따라서 코어는 보존하고 셸은 교체하는 경계가 가장 안전하다.
@@ -48,13 +48,13 @@ GUI 버튼의 초록색 완료 표시는 위젯 내부 boolean이 아니라 `REA
 
 현재 `src/application/artifact_workbench.py`는 Qt·OpenGL 없이 session/project authority, ticketed Open, `state_version`/`authority_epoch` compare-and-swap, 명시적 Align readiness와 two-phase projection publication을 소유한다. Open/new import/project reopen과 Align commit/parent activation은 이 경계를 사용한다. Open이 만드는 `initial_identity`는 materialization baseline일 뿐 사용자 확정이 아니며, 변화량이 0인 첫 Align도 immutable child revision으로 남겨야 측정 단계가 열린다.
 
-DerivedRecord session update는 기존 source/metadata/Align/record를 바꿀 수 없고 추가할 record ID 집합을 명시해야 한다. scene swap 실패는 이전 권위로 rollback하며, rollback·scene 복원·finalize 자체의 성공을 증명할 수 없으면 fatal authority 상태로 전환해 검증된 Open 전까지 저장·실측·내보내기를 차단한다. viewport의 transient cut-section/ROI callback은 current worker identity, projection generation과 selected object로 fence하여 이전 scene의 결과가 새 overlay나 worker authority를 건드리지 못하게 한다. Cutline/Outline/Digital Rubbing 결과 publication은 이 검증을 사용하지만 command 입력과 계산의 소유권은 아직 MainWindow/viewport에 남아 있어 다음 이행 단계에서 옮긴다.
+DerivedRecord session update는 기존 source/metadata/Align/record를 바꿀 수 없고 추가할 record ID 집합을 명시해야 한다. scene swap 실패는 이전 권위로 rollback하며, rollback·scene 복원·finalize 자체의 성공을 증명할 수 없으면 fatal authority 상태로 전환해 검증된 Open 전까지 저장·실측·내보내기를 차단한다. viewport의 transient cut-section/ROI callback은 current worker identity, projection generation과 selected object로 fence하여 이전 scene의 결과가 새 overlay나 worker authority를 건드리지 못하게 한다. `ArtifactMeasurementController`는 Cutline/Outline/Digital Rubbing recipe와 projection context, 예약 record ID를 immutable work item으로 캡처한다. 같은 Workbench의 여러 controller는 operation/record reservation과 Rubbing admission을 공유하며 모든 active owner 중 가장 엄격한 메모리·동시 작업 한도를 지킨다. worker는 computation만 반환하고 exact result capability 검증 뒤 현재 same-Align session에 rebase한다. Align/Open finalize는 진행 중 결과를 영구 stale 처리하지만 pending Open 자체는 기존 권위를 바꾸지 않으므로 결과 capability를 재시도 가능하게 보존한다. 취소 중인 Rubbing은 worker가 실제 종료될 때까지 메모리 예약을 유지한다.
 
 ## 이행 순서
 
 1. 현재 신뢰 코어와 포맷을 고정하고 golden/스키마/3-OS CI를 차단 게이트로 유지한다.
 2. application shell package를 만들고 Open → 단위 확인 → Align을 먼저 이식한다. 이 단계는 완료됐으며 기존 GUI field는 이행 중 compatibility mirror로만 남긴다.
-3. Cutline, 6-view Outline, Digital Rubbing을 command 단위로 옮긴다. 현재 결과 publication은 보호되지만 command 입력·계산 소유권 이식은 진행 중이다.
+3. Cutline, 6-view Outline, Digital Rubbing을 command 단위로 옮긴다. immutable work item, worker computation, same-Align rebase와 exact record publication까지 이식 완료했다.
 4. 각 단계가 새 record/export로 완전히 연결되면 대응 legacy 측정 진입점을 제거한다.
 5. 실제 유물 pilot과 대용량/GPU precision 검증 후 legacy 기와 검토 기능의 유지·플러그인화·제거를 결정한다.
 6. 라이선스, 서명, 3-OS frozen smoke가 해결된 뒤에만 공개 바이너리를 만든다.

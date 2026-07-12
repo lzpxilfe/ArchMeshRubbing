@@ -15,7 +15,7 @@ import os
 import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 import uuid
 
 from PyQt6.QtWidgets import (
@@ -250,14 +250,20 @@ from src.application.artifact_workbench import (  # noqa: E402
     WorkflowStage,
     WorkflowTransitionKind,
 )
+from src.application.artifact_measurements import (  # noqa: E402
+    ArtifactMeasurementController,
+    ArtifactMeasurementResult,
+    ArtifactMeasurementWorkItem,
+    DEFAULT_RUBBING_MEMORY_BUDGET_BYTES,
+    MeasurementOperationKind,
+    MeasurementOperationState,
+)
 from src.core.artifact_vector_extractor import (  # noqa: E402
+    ArtifactVectorComputation,
     ArtifactVectorExtractionError,
-    commit_vector_computation,
-    compute_artifact_cutline,
 )
 from src.core.artifact_outline_extractor import (  # noqa: E402
     DEFAULT_OUTLINE_PRECISION_GRID_MM,
-    compute_artifact_outline,
 )
 from src.core.artifact_rubbing_extractor import (  # noqa: E402
     ArtifactRubbingComputation,
@@ -270,9 +276,8 @@ from src.core.artifact_rubbing_extractor import (  # noqa: E402
     DEFAULT_RUBBING_POLARITY,
     DEFAULT_RUBBING_REFERENCE_RADIUS_UM,
     DigitalRubbingRaster,
-    commit_artifact_rubbing,
-    compute_artifact_rubbing,
     compute_artifact_rubbing_from_recipe,
+    estimate_digital_rubbing_resources,
     require_current_rubbing_computation,
 )
 from src.core.artifact_rubbing_record import (  # noqa: E402
@@ -3647,8 +3652,11 @@ class SectionPanel(QWidget):
     nativeCutlineRequested = pyqtSignal()
     nativeCutlineViewChanged = pyqtSignal(str)
     nativeOutlineRequested = pyqtSignal()
+    nativeMeasurementRetryRequested = pyqtSignal()
+    nativeVectorRecordSelected = pyqtSignal(str)
     nativeVectorExportRequested = pyqtSignal()
     nativeRubbingRequested = pyqtSignal()
+    nativeRubbingRecordSelected = pyqtSignal(str)
     nativeRubbingExportRequested = pyqtSignal()
     
     def __init__(self, parent=None):
@@ -3752,7 +3760,31 @@ class SectionPanel(QWidget):
         )
         self.btn_native_outline.clicked.connect(self.nativeOutlineRequested.emit)
         native_layout.addWidget(self.btn_native_outline)
-        self.btn_native_vector_export = QPushButton("최근 검증 벡터 1:1 SVG 내보내기")
+        self.btn_native_measurement_retry = QPushButton("보류 결과 게시 재시도")
+        self.btn_native_measurement_retry.setEnabled(False)
+        self.btn_native_measurement_retry.setToolTip(
+            "Open 또는 scene 전환 때문에 계산 완료 결과를 아직 게시하지 못한 경우, "
+            "같은 operation capability로 다시 게시합니다."
+        )
+        self.btn_native_measurement_retry.clicked.connect(
+            self.nativeMeasurementRetryRequested.emit
+        )
+        native_layout.addWidget(self.btn_native_measurement_retry)
+        self.combo_native_vector_record = QComboBox()
+        self.combo_native_vector_record.addItem(
+            "READY + FRESH 벡터 기록을 선택하세요", None
+        )
+        self.combo_native_vector_record.setToolTip(
+            "프로젝트에 저장된 Cutline·Outline 기록 중 미리보기와 "
+            "1:1 SVG 내보내기에 사용할 기록을 명시적으로 고릅니다."
+        )
+        self.combo_native_vector_record.currentIndexChanged.connect(
+            lambda _index: self.nativeVectorRecordSelected.emit(
+                str(self.combo_native_vector_record.currentData() or "")
+            )
+        )
+        native_layout.addWidget(self.combo_native_vector_record)
+        self.btn_native_vector_export = QPushButton("선택한 검증 벡터 1:1 SVG 내보내기")
         self.btn_native_vector_export.clicked.connect(self.nativeVectorExportRequested.emit)
         native_layout.addWidget(self.btn_native_vector_export)
 
@@ -3837,8 +3869,22 @@ class SectionPanel(QWidget):
         )
         self.btn_native_rubbing.clicked.connect(self.nativeRubbingRequested.emit)
         native_layout.addWidget(self.btn_native_rubbing)
+        self.combo_native_rubbing_record = QComboBox()
+        self.combo_native_rubbing_record.addItem(
+            "READY + FRESH 탁본 기록을 선택하세요", None
+        )
+        self.combo_native_rubbing_record.setToolTip(
+            "프로젝트에 저장된 Digital Rubbing 기록 중 미리보기와 "
+            "1:1 PNG 내보내기에 사용할 기록을 명시적으로 고릅니다."
+        )
+        self.combo_native_rubbing_record.currentIndexChanged.connect(
+            lambda _index: self.nativeRubbingRecordSelected.emit(
+                str(self.combo_native_rubbing_record.currentData() or "")
+            )
+        )
+        native_layout.addWidget(self.combo_native_rubbing_record)
         self.btn_native_rubbing_export = QPushButton(
-            "최근 검증 탁본 1:1 PNG 패키지 내보내기"
+            "선택한 검증 탁본 1:1 PNG 패키지 내보내기"
         )
         self.btn_native_rubbing_export.clicked.connect(
             self.nativeRubbingExportRequested.emit
@@ -4057,9 +4103,17 @@ class MainWindow(QMainWindow):
         # source-space geometry and resolved external source path.
         self._artifact_session: ArtifactSession | None = None
         self._artifact_workbench = ArtifactWorkbench()
+        self._artifact_measurements = ArtifactMeasurementController(
+            self._artifact_workbench
+        )
+        self._pending_native_measurement_publications: dict[
+            str,
+            tuple[ArtifactMeasurementWorkItem, ArtifactMeasurementResult],
+        ] = {}
         self._artifact_authority_faulted = False
         self._artifact_load_ticket: ArtifactLoadTicket | None = None
         self._mesh_load_request_id: str | None = None
+        self._native_vector_preview_document_id: str | None = None
         self._native_rubbing_preview_record_id: str | None = None
         self._native_rubbing_preview_document_id: str | None = None
         self._native_rubbing_preview_geometry_ref: str | None = None
@@ -4265,11 +4319,20 @@ class MainWindow(QMainWindow):
         self.section_panel.nativeOutlineRequested.connect(
             self.on_native_outline_requested
         )
+        self.section_panel.nativeMeasurementRetryRequested.connect(
+            self.on_native_measurement_retry_requested
+        )
+        self.section_panel.nativeVectorRecordSelected.connect(
+            self.on_native_vector_record_selected
+        )
         self.section_panel.nativeVectorExportRequested.connect(
             self.on_native_vector_export_requested
         )
         self.section_panel.nativeRubbingRequested.connect(
             self.on_native_rubbing_requested
+        )
+        self.section_panel.nativeRubbingRecordSelected.connect(
+            self.on_native_rubbing_record_selected
         )
         self.section_panel.nativeRubbingExportRequested.connect(
             self.on_native_rubbing_export_requested
@@ -4509,6 +4572,19 @@ class MainWindow(QMainWindow):
                 session,
                 project_path=getattr(self, "_current_project_path", None),
             )
+        return controller
+
+    def _artifact_measurement_controller(self) -> ArtifactMeasurementController:
+        """Return the Qt-free derived-operation controller for this workbench."""
+
+        workbench = self._artifact_workbench_controller()
+        controller = getattr(self, "_artifact_measurements", None)
+        if (
+            not isinstance(controller, ArtifactMeasurementController)
+            or controller.workbench is not workbench
+        ):
+            controller = ArtifactMeasurementController(workbench)
+            self._artifact_measurements = controller
         return controller
 
     def _native_workflow_stage(self) -> WorkflowStage:
@@ -5563,6 +5639,13 @@ class MainWindow(QMainWindow):
         self._artifact_pending_project_path = None
         self._artifact_pending_source_metadata = None
         self._artifact_load_ticket = None
+        try:
+            self._prune_pending_native_measurement_publications()
+        except Exception:
+            _LOGGER.debug(
+                "Could not refresh pending measurement publication state",
+                exc_info=True,
+            )
 
     def _start_artifact_source_import(
         self,
@@ -5840,6 +5923,30 @@ class MainWindow(QMainWindow):
             return False
 
     def _validate_native_scene_for_save(self, session: ArtifactSession) -> None:
+        controller_factory = getattr(
+            self,
+            "_artifact_measurement_controller",
+            None,
+        )
+        active_measurements_value = (
+            controller_factory().active_summaries
+            if callable(controller_factory)
+            else ()
+        )
+        active_measurements = (
+            active_measurements_value
+            if isinstance(active_measurements_value, tuple)
+            else ()
+        )
+        if active_measurements:
+            states = ", ".join(
+                f"{summary.kind.value}:{summary.state.value}"
+                for summary in active_measurements
+            )
+            raise ProjectSerializationError(
+                "계산 또는 게시가 끝나지 않은 실측 작업이 있어 저장과 새 실측을 "
+                f"차단합니다 ({states})"
+            )
         objects = list(getattr(self.viewport, "objects", []) or [])
         if len(objects) != 1:
             raise ProjectSerializationError(
@@ -7718,11 +7825,25 @@ class MainWindow(QMainWindow):
             self.sync_transform_panel()
             self._sync_tile_panel()
             self._sync_native_cutline_controls(reset_offset=False)
-            latest_vector = self._latest_native_vector_record()
-            if latest_vector is None:
-                self.viewport.set_native_vector_preview(None)
+            preview_id = getattr(
+                self.viewport,
+                "native_vector_preview_record_id",
+                None,
+            )
+            preview_record = (
+                session.document.record_index.get(preview_id)
+                if isinstance(preview_id, str)
+                else None
+            )
+            if (
+                self._native_vector_preview_document_id
+                == session.document.document_id
+                and preview_record is not None
+                and self._native_vector_record_is_exportable(session, preview_record)
+            ):
+                self._preview_native_vector_record(session, preview_record.id)
             else:
-                self._preview_native_vector_record(session, latest_vector.id)
+                self._clear_native_vector_preview()
             self.status_unit.setText("단위: mm (canonical)")
             self.status_info.setText(status_text)
         except Exception:
@@ -8234,23 +8355,21 @@ class MainWindow(QMainWindow):
                 pass
 
         def _close_dialog():
-            d = getattr(self, "_task_dialog", None)
-            if d is not None:
-                try:
-                    d.close()
-                except Exception:
-                    pass
+            try:
+                dlg.close()
+            except Exception:
+                pass
+            if getattr(self, "_task_dialog", None) is dlg:
                 self._task_dialog = None
             _end_progress()
 
         def _cleanup_thread():
-            t = getattr(self, "_task_thread", None)
-            if t is not None:
-                try:
-                    t.deleteLater()
-                except Exception:
-                    pass
-            self._task_thread = None
+            try:
+                thread.deleteLater()
+            except Exception:
+                pass
+            if getattr(self, "_task_thread", None) is thread:
+                self._task_thread = None
 
         def _default_failed(message: str):
             QMessageBox.critical(self, "오류", self._format_error_message("작업 실패:", message))
@@ -13996,7 +14115,7 @@ class MainWindow(QMainWindow):
                 continue
         if not candidates:
             return None
-        return candidates[-1]
+        return max(candidates, key=lambda record: (str(record.created_at), record.id))
 
     @staticmethod
     def _native_vector_record_is_exportable(session, record) -> bool:
@@ -14012,13 +14131,17 @@ class MainWindow(QMainWindow):
         if not isinstance(session, ArtifactSession):
             return None
         preview_id = getattr(self.viewport, "native_vector_preview_record_id", None)
-        if isinstance(preview_id, str):
+        if (
+            isinstance(preview_id, str)
+            and self._native_vector_preview_document_id
+            == session.document.document_id
+        ):
             record = session.document.record_index.get(preview_id)
             if record is not None and self._native_vector_record_is_exportable(
                 session, record
             ):
                 return record
-        return self._latest_native_vector_record()
+        return None
 
     @staticmethod
     def _native_rubbing_record_is_exportable(session, record) -> bool:
@@ -14040,20 +14163,32 @@ class MainWindow(QMainWindow):
                     candidates.append(record)
             except Exception:
                 continue
-        return candidates[-1] if candidates else None
+        return (
+            max(candidates, key=lambda record: (str(record.created_at), record.id))
+            if candidates
+            else None
+        )
 
     def _current_native_rubbing_record(self):
         session = getattr(self, "_artifact_session", None)
         if not isinstance(session, ArtifactSession):
             return None
         preview_id = getattr(self, "_native_rubbing_preview_record_id", None)
-        if isinstance(preview_id, str):
+        if (
+            isinstance(preview_id, str)
+            and self._native_rubbing_preview_document_id
+            == session.document.document_id
+        ):
             record = session.document.record_index.get(preview_id)
             if record is not None and self._native_rubbing_record_is_exportable(
                 session, record
             ):
                 return record
-        return self._latest_native_rubbing_record()
+        return None
+
+    def _clear_native_vector_preview(self) -> None:
+        self._native_vector_preview_document_id = None
+        self.viewport.set_native_vector_preview(None)
 
     def _clear_native_rubbing_preview(self) -> None:
         self._native_rubbing_preview_record_id = None
@@ -14118,11 +14253,251 @@ class MainWindow(QMainWindow):
             )
         payload = vector_payload_from_record(record)
         self.viewport.set_native_vector_preview(payload, record_id=record.id)
+        self._native_vector_preview_document_id = session.document.document_id
+
+    @staticmethod
+    def _native_record_choice_label(record: Any) -> str:
+        record_type = str(getattr(record, "type", ""))
+        kind = {
+            "vector.cutline.v1": "Cutline",
+            "vector.outline.v1": "Outline",
+            RUBBING_RECORD_TYPE: "Digital Rubbing",
+        }.get(record_type, record_type or "Record")
+        recipe = getattr(record, "recipe", {})
+        view = (
+            str(recipe.get("view", "")).strip().title()
+            if isinstance(recipe, Mapping)
+            else ""
+        )
+        details = " · ".join(part for part in (kind, view) if part)
+        return f"{details} · {record.id} · {record.created_at}"
+
+    @staticmethod
+    def _replace_native_record_choices(
+        combo: QComboBox,
+        *,
+        placeholder: str,
+        records: list[Any],
+        selected_id: str | None,
+    ) -> None:
+        combo.blockSignals(True)
+        try:
+            combo.clear()
+            combo.addItem(placeholder, None)
+            for record in sorted(
+                records,
+                key=lambda item: (str(item.created_at), str(item.id)),
+                reverse=True,
+            ):
+                combo.addItem(MainWindow._native_record_choice_label(record), record.id)
+            selected_index = combo.findData(selected_id) if selected_id else -1
+            combo.setCurrentIndex(selected_index if selected_index >= 1 else 0)
+        finally:
+            combo.blockSignals(False)
+
+    def _refresh_native_record_selectors(
+        self,
+        session: ArtifactSession | None,
+    ) -> None:
+        panel = getattr(self, "section_panel", None)
+        if panel is None or not hasattr(panel, "combo_native_vector_record"):
+            return
+        vector_records: list[Any] = []
+        rubbing_records: list[Any] = []
+        selected_vector_id: str | None = None
+        selected_rubbing_id: str | None = None
+        if isinstance(session, ArtifactSession):
+            vector_record = self._current_native_vector_record()
+            rubbing_record = self._current_native_rubbing_record()
+            selected_vector_id = vector_record.id if vector_record is not None else None
+            selected_rubbing_id = rubbing_record.id if rubbing_record is not None else None
+            for record in session.document.records:
+                try:
+                    if self._native_vector_record_is_exportable(session, record):
+                        vector_records.append(record)
+                    elif self._native_rubbing_record_is_exportable(session, record):
+                        rubbing_records.append(record)
+                except Exception:
+                    continue
+        self._replace_native_record_choices(
+            panel.combo_native_vector_record,
+            placeholder="READY + FRESH 벡터 기록을 명시적으로 선택",
+            records=vector_records,
+            selected_id=selected_vector_id,
+        )
+        self._replace_native_record_choices(
+            panel.combo_native_rubbing_record,
+            placeholder="READY + FRESH 탁본 기록을 명시적으로 선택",
+            records=rubbing_records,
+            selected_id=selected_rubbing_id,
+        )
+
+    @staticmethod
+    def _reset_native_record_choice(combo: QComboBox) -> None:
+        combo.blockSignals(True)
+        try:
+            combo.setCurrentIndex(0)
+        finally:
+            combo.blockSignals(False)
+
+    def on_native_vector_record_selected(self, record_id: str) -> None:
+        panel = self.section_panel
+        if not record_id:
+            self._clear_native_vector_preview()
+            panel.btn_native_vector_export.setEnabled(False)
+            self.status_info.setText("벡터 기록 선택을 해제했습니다.")
+            return
+        session = getattr(self, "_artifact_session", None)
+        record = (
+            session.document.record_index.get(record_id)
+            if isinstance(session, ArtifactSession)
+            else None
+        )
+        if (
+            not self._native_measurement_ready()
+            or record is None
+            or not self._native_vector_record_is_exportable(session, record)
+        ):
+            self._clear_native_vector_preview()
+            self._reset_native_record_choice(panel.combo_native_vector_record)
+            panel.btn_native_vector_export.setEnabled(False)
+            self.status_info.setText("⛔ 선택한 벡터 기록은 READY + FRESH 상태가 아닙니다.")
+            return
+        try:
+            self._preview_native_vector_record(session, record.id)
+        except Exception as exc:
+            self._clear_native_vector_preview()
+            self._reset_native_record_choice(panel.combo_native_vector_record)
+            panel.btn_native_vector_export.setEnabled(False)
+            self.status_info.setText(f"❌ 벡터 기록 미리보기 실패: {exc}")
+            return
+        panel.btn_native_vector_export.setEnabled(True)
+        self.status_info.setText(f"✅ 벡터 기록 선택: {record.id}")
+
+    def on_native_rubbing_record_selected(self, record_id: str) -> None:
+        panel = self.section_panel
+        if not record_id:
+            self._clear_native_rubbing_preview()
+            panel.btn_native_rubbing_export.setEnabled(False)
+            self.status_info.setText("탁본 기록 선택을 해제했습니다.")
+            return
+        session = getattr(self, "_artifact_session", None)
+        record = (
+            session.document.record_index.get(record_id)
+            if isinstance(session, ArtifactSession)
+            else None
+        )
+        if (
+            not self._native_measurement_ready()
+            or record is None
+            or not self._native_rubbing_record_is_exportable(session, record)
+        ):
+            self._clear_native_rubbing_preview()
+            self._reset_native_record_choice(panel.combo_native_rubbing_record)
+            panel.btn_native_rubbing_export.setEnabled(False)
+            self.status_info.setText("⛔ 선택한 탁본 기록은 READY + FRESH 상태가 아닙니다.")
+            return
+        if self._artifact_measurement_controller().active_summaries:
+            self._clear_native_rubbing_preview()
+            self._reset_native_record_choice(panel.combo_native_rubbing_record)
+            panel.btn_native_rubbing_export.setEnabled(False)
+            self.status_info.setText(
+                "⛔ 진행·보류 중인 실측 결과를 먼저 완료하거나 해제하세요."
+            )
+            return
+        try:
+            captured_snapshot = session.projection_snapshot()
+        except Exception as exc:
+            self._clear_native_rubbing_preview()
+            self._reset_native_record_choice(panel.combo_native_rubbing_record)
+            panel.btn_native_rubbing_export.setEnabled(False)
+            self.status_info.setText(f"❌ 탁본 기록 권위 확인 실패: {exc}")
+            return
+
+        self._clear_native_rubbing_preview()
+        panel.btn_native_rubbing_export.setEnabled(False)
+
+        def current_record_if_authoritative():
+            current = getattr(self, "_artifact_session", None)
+            if not isinstance(current, ArtifactSession):
+                return None
+            try:
+                if (
+                    current.source_mesh is not session.source_mesh
+                    or current.projection_snapshot() != captured_snapshot
+                    or str(panel.combo_native_rubbing_record.currentData() or "")
+                    != record_id
+                ):
+                    return None
+                current_record = current.document.record_index.get(record_id)
+                if (
+                    current_record != record
+                    or not self._native_rubbing_record_is_exportable(
+                        current,
+                        current_record,
+                    )
+                ):
+                    return None
+            except Exception:
+                return None
+            return current, current_record
+
+        def on_done(result: object) -> None:
+            authoritative = current_record_if_authoritative()
+            if not isinstance(result, DigitalRubbingRaster) or authoritative is None:
+                self._clear_native_rubbing_preview()
+                self._reset_native_record_choice(panel.combo_native_rubbing_record)
+                panel.btn_native_rubbing_export.setEnabled(False)
+                self.status_info.setText(
+                    "⛔ 늦은 탁본 기록 미리보기 폐기 | 현재 문서 유지"
+                )
+                return
+            current, current_record = authoritative
+            try:
+                self._preview_native_rubbing(current, current_record.id, result)
+            except Exception as exc:
+                self._clear_native_rubbing_preview()
+                self._reset_native_record_choice(panel.combo_native_rubbing_record)
+                panel.btn_native_rubbing_export.setEnabled(False)
+                self.status_info.setText(f"❌ 탁본 기록 미리보기 실패: {exc}")
+                return
+            panel.btn_native_rubbing_export.setEnabled(True)
+            self.status_info.setText(f"✅ 탁본 기록 선택: {current_record.id}")
+
+        def on_failed(message: str) -> None:
+            if str(panel.combo_native_rubbing_record.currentData() or "") != record_id:
+                return
+            self._clear_native_rubbing_preview()
+            self._reset_native_record_choice(panel.combo_native_rubbing_record)
+            panel.btn_native_rubbing_export.setEnabled(False)
+            self.status_info.setText("❌ 탁본 기록 재계산 실패")
+            QMessageBox.warning(
+                self,
+                "탁본 기록 미리보기 실패",
+                self._format_error_message("탁본 기록 재계산 중 오류:", message),
+            )
+
+        self.status_info.setText("탁본 기록 미리보기 재계산 중...")
+        started = self._start_task(
+            title="Digital Rubbing 기록 미리보기",
+            label="저장된 recipe로 탁본 raster를 재검증하는 중...",
+            thread=TaskThread(
+                "native_rubbing_record_preview",
+                lambda: MainWindow._recompute_native_rubbing_record(session, record),
+            ),
+            on_done=on_done,
+            on_failed=on_failed,
+        )
+        if not started:
+            self._clear_native_rubbing_preview()
+            self._reset_native_record_choice(panel.combo_native_rubbing_record)
+            panel.btn_native_rubbing_export.setEnabled(False)
 
     def _sync_native_cutline_controls(self, *, reset_offset: bool) -> None:
         panel = getattr(self, "section_panel", None)
         if panel is None or not hasattr(panel, "native_group"):
             return
+        self._prune_pending_native_measurement_publications()
         native = self._native_artifact_mode()
         panel.native_group.setEnabled(native)
         panel.legacy_line_group.setEnabled(not native)
@@ -14133,7 +14508,9 @@ class MainWindow(QMainWindow):
             panel.btn_native_vector_export.setEnabled(False)
             panel.btn_native_rubbing.setEnabled(False)
             panel.btn_native_rubbing_export.setEnabled(False)
+            self._clear_native_vector_preview()
             self._clear_native_rubbing_preview()
+            self._refresh_native_record_selectors(None)
             return
         if not self._native_measurement_ready():
             panel.btn_native_cutline.setEnabled(False)
@@ -14141,7 +14518,9 @@ class MainWindow(QMainWindow):
             panel.btn_native_vector_export.setEnabled(False)
             panel.btn_native_rubbing.setEnabled(False)
             panel.btn_native_rubbing_export.setEnabled(False)
+            self._clear_native_vector_preview()
             self._clear_native_rubbing_preview()
+            self._refresh_native_record_selectors(None)
             panel.label_native_rubbing_info.setText(
                 "정치 확정 후 Cutline · Outline · Digital Rubbing을 사용할 수 있습니다."
             )
@@ -14165,17 +14544,25 @@ class MainWindow(QMainWindow):
                 spin.setValue((minimum + maximum) * 0.5)
         finally:
             spin.blockSignals(False)
-        panel.btn_native_vector_export.setEnabled(
-            self._latest_native_vector_record() is not None
-        )
+        current_vector = self._current_native_vector_record()
+        if current_vector is None and isinstance(
+            getattr(self.viewport, "native_vector_preview_record_id", None), str
+        ):
+            self._clear_native_vector_preview()
+        current_rubbing = self._current_native_rubbing_record()
+        if current_rubbing is None and isinstance(
+            getattr(self, "_native_rubbing_preview_record_id", None), str
+        ):
+            self._clear_native_rubbing_preview()
+        self._refresh_native_record_selectors(session)
+        panel.btn_native_vector_export.setEnabled(current_vector is not None)
         panel.btn_native_cutline.setEnabled(True)
         panel.btn_native_outline.setEnabled(True)
         panel.btn_native_rubbing.setEnabled(True)
-        latest_rubbing = self._latest_native_rubbing_record()
-        panel.btn_native_rubbing_export.setEnabled(latest_rubbing is not None)
+        panel.btn_native_rubbing_export.setEnabled(current_rubbing is not None)
         preview_id = getattr(self, "_native_rubbing_preview_record_id", None)
         if not isinstance(preview_id, str):
-            if latest_rubbing is None:
+            if current_rubbing is None:
                 self._clear_native_rubbing_preview()
         else:
             preview_record = session.document.record_index.get(preview_id)
@@ -14201,6 +14588,180 @@ class MainWindow(QMainWindow):
             "+00:00", "Z"
         )
 
+    def _publish_native_measurement_result(
+        self,
+        work_item: ArtifactMeasurementWorkItem,
+        result: ArtifactMeasurementResult,
+    ) -> str:
+        """Rebase one worker computation and publish its exact reserved record."""
+
+        if not isinstance(work_item, ArtifactMeasurementWorkItem) or not isinstance(
+            result,
+            ArtifactMeasurementResult,
+        ):
+            raise ArtifactWorkbenchError(
+                "native measurement worker returned an invalid operation result"
+            )
+        computation = result.computation
+        recipe = work_item.recipe_dict()
+        if work_item.kind is MeasurementOperationKind.CUTLINE:
+            assert isinstance(computation, ArtifactVectorComputation)
+            frame = recipe.get("frame")
+            normal = (
+                tuple(frame.get("normal_world", ()))
+                if isinstance(frame, dict)
+                else ()
+            )
+            view_label = {
+                (0, 0, 1): "Top",
+                (0, -1, 0): "Front",
+                (1, 0, 0): "Right",
+            }.get(normal, "Cutline")
+            status_text = (
+                f"✅ {view_label} Cutline 기록 | "
+                f"{len(computation.payload.paths)}개 경로 | canonical mm"
+            )
+        elif work_item.kind is MeasurementOperationKind.OUTLINE:
+            assert isinstance(computation, ArtifactVectorComputation)
+            status_text = (
+                f"✅ {str(recipe['view']).title()} Outline 기록 | "
+                f"{int(computation.qc.get('component_count', 0))}개 성분 · "
+                f"{int(computation.qc.get('hole_count', 0))}개 구멍 | "
+                f"grid {float(recipe['precision_grid_mm']):g} mm"
+            )
+        else:
+            assert isinstance(computation, ArtifactRubbingComputation)
+            status_text = (
+                f"✅ {str(computation.recipe['view']).title()} Digital Rubbing 기록 | "
+                f"{computation.raster.width_pixels}×{computation.raster.height_pixels} px · "
+                f"ink {int(computation.qc.get('inked_pixel_count', 0))} px"
+            )
+
+        measurement_controller = self._artifact_measurement_controller()
+
+        def publish(transition: ProjectionTransition) -> None:
+            self._publish_artifact_session_projection(
+                transition.candidate_session,
+                project_path=self._current_project_path,
+                fit_camera=False,
+                workflow_transition=transition,
+                expected_new_record_ids=(work_item.record_id,),
+                status_text=status_text,
+            )
+
+        try:
+            publication = measurement_controller.publish_result(
+                work_item,
+                result,
+                publish,
+            )
+        except Exception:
+            try:
+                summary = measurement_controller.summary(work_item)
+                if summary.state is MeasurementOperationState.RUNNING:
+                    self._pending_native_measurement_publications[work_item.id] = (
+                        work_item,
+                        result,
+                    )
+                    self.section_panel.btn_native_measurement_retry.setEnabled(
+                        self._native_measurement_ready()
+                    )
+                else:
+                    self._pending_native_measurement_publications.pop(
+                        work_item.id,
+                        None,
+                    )
+            except Exception:
+                _LOGGER.debug(
+                    "Native measurement operation was already terminal",
+                    exc_info=True,
+                )
+            raise
+        self._pending_native_measurement_publications.pop(work_item.id, None)
+        self.section_panel.btn_native_measurement_retry.setEnabled(
+            bool(self._pending_native_measurement_publications)
+            and self._native_measurement_ready()
+        )
+        if isinstance(computation, ArtifactRubbingComputation):
+            self._preview_native_rubbing(
+                publication.session,
+                publication.record_id,
+                computation.raster,
+            )
+        else:
+            self._preview_native_vector_record(
+                publication.session,
+                publication.record_id,
+            )
+        self._sync_native_cutline_controls(reset_offset=False)
+        return publication.record_id
+
+    def _native_measurement_publication_is_pending(
+        self,
+        work_item: ArtifactMeasurementWorkItem,
+    ) -> bool:
+        pending = self._pending_native_measurement_publications.get(work_item.id)
+        if pending is None or pending[0] is not work_item:
+            return False
+        try:
+            return (
+                self._artifact_measurement_controller().summary(work_item).state
+                is MeasurementOperationState.RUNNING
+            )
+        except Exception:
+            self._pending_native_measurement_publications.pop(work_item.id, None)
+            return False
+
+    def _prune_pending_native_measurement_publications(self) -> bool:
+        controller = self._artifact_measurement_controller()
+        for operation_id, (work_item, _result) in tuple(
+            self._pending_native_measurement_publications.items()
+        ):
+            try:
+                state = controller.summary(work_item).state
+            except Exception:
+                state = None
+            if state is not MeasurementOperationState.RUNNING:
+                self._pending_native_measurement_publications.pop(operation_id, None)
+        pending = bool(self._pending_native_measurement_publications)
+        panel = getattr(self, "section_panel", None)
+        if panel is not None and hasattr(panel, "btn_native_measurement_retry"):
+            panel.btn_native_measurement_retry.setEnabled(
+                pending and self._native_measurement_ready()
+            )
+        return pending
+
+    def on_native_measurement_retry_requested(self) -> None:
+        """Retry the oldest completed computation without minting a new record ID."""
+
+        if not self._prune_pending_native_measurement_publications():
+            self.status_info.setText("다시 게시할 보류 실측 결과가 없습니다.")
+            return
+        _operation_id, (work_item, result) = next(
+            iter(self._pending_native_measurement_publications.items())
+        )
+        try:
+            self._publish_native_measurement_result(work_item, result)
+        except Exception as exc:
+            if self._native_measurement_publication_is_pending(work_item):
+                self.status_info.setText(
+                    "⏸ 실측 결과 게시 보류 | Open·scene 전환 완료 후 다시 시도"
+                )
+                QMessageBox.warning(
+                    self,
+                    "실측 결과 게시 보류",
+                    "계산 결과와 예약 record ID는 그대로 보존했습니다. "
+                    "현재 Open 또는 scene 전환이 끝난 뒤 다시 시도하세요.\n\n"
+                    f"{type(exc).__name__}: {exc}",
+                )
+            else:
+                self.status_info.setText("⛔ 실측 결과 게시 권위 상실")
+                QMessageBox.warning(
+                    self,
+                    "실측 결과 게시 실패",
+                    f"{type(exc).__name__}: {exc}",
+                )
+
     def _compute_and_commit_native_cutline(
         self,
         *,
@@ -14214,28 +14775,18 @@ class MainWindow(QMainWindow):
         session = self._require_native_measurement_session(obj)
         self._validate_native_scene_for_save(session)
         frame = _native_cutline_frame(view, offset_mm)
-        computation = compute_artifact_cutline(session, frame)
-        new_record_id = record_id or f"record:cutline:{uuid.uuid4()}"
-        committed = commit_vector_computation(
-            session,
-            computation,
+        new_record_id = (
+            f"record:cutline:{uuid.uuid4()}" if record_id is None else record_id
+        )
+        controller = self._artifact_measurement_controller()
+        work_item = controller.begin_cutline(
+            frame,
             record_id=new_record_id,
-            created_at=created_at or self._utc_seconds_now(),
+            created_at=(self._utc_seconds_now() if created_at is None else created_at),
             operator=operator,
         )
-        self._publish_artifact_session_projection(
-            committed,
-            project_path=self._current_project_path,
-            fit_camera=False,
-            expected_new_record_ids=(new_record_id,),
-            status_text=(
-                f"✅ {view.title()} Cutline 기록 | "
-                f"{len(computation.payload.paths)}개 경로 | canonical mm"
-            ),
-        )
-        self._preview_native_vector_record(committed, new_record_id)
-        self._sync_native_cutline_controls(reset_offset=False)
-        return new_record_id
+        result = controller.execute(work_item)
+        return self._publish_native_measurement_result(work_item, result)
 
     def on_native_cutline_requested(self) -> None:
         try:
@@ -14243,14 +14794,61 @@ class MainWindow(QMainWindow):
                 self.section_panel.combo_native_cutline_view.currentData() or "top"
             )
             offset = float(self.section_panel.spin_native_cutline_offset.value())
-            self._compute_and_commit_native_cutline(view=view, offset_mm=offset)
+            obj = self.viewport.selected_obj
+            session = self._require_native_measurement_session(obj)
+            self._validate_native_scene_for_save(session)
+            controller = self._artifact_measurement_controller()
+            work_item = controller.begin_cutline(
+                _native_cutline_frame(view, offset),
+                record_id=f"record:cutline:{uuid.uuid4()}",
+                created_at=self._utc_seconds_now(),
+                operator="local-user",
+            )
         except Exception as exc:
+            self.status_info.setText("❌ 검증 단면 준비 실패 | 기존 문서 유지")
+            QMessageBox.warning(
+                self,
+                "Cutline 준비 실패",
+                f"단면이 모호하거나 현재 Align과 맞지 않습니다.\n\n{type(exc).__name__}: {exc}",
+            )
+            return
+
+        def on_done(result: object) -> None:
+            try:
+                if not isinstance(result, ArtifactMeasurementResult):
+                    raise ArtifactWorkbenchError("Cutline worker result is invalid")
+                self._publish_native_measurement_result(work_item, result)
+            except Exception as exc:
+                pending = self._native_measurement_publication_is_pending(work_item)
+                self.status_info.setText(
+                    "⏸ Cutline 결과 게시 보류 | 재시도 버튼 사용"
+                    if pending
+                    else "⛔ Cutline 결과 폐기 | 현재 문서 유지"
+                )
+                QMessageBox.warning(
+                    self,
+                    "Cutline 결과 게시 보류" if pending else "Cutline 결과 폐기",
+                    f"{type(exc).__name__}: {exc}",
+                )
+
+        def on_failed(message: str) -> None:
             self.status_info.setText("❌ 검증 단면 계산 실패 | 기존 문서 유지")
             QMessageBox.warning(
                 self,
                 "Cutline 계산 실패",
-                f"단면이 모호하거나 현재 Align과 맞지 않습니다.\n\n{type(exc).__name__}: {exc}",
+                self._format_error_message("단면 계산 중 오류가 발생했습니다:", message),
             )
+
+        self.status_info.setText("Cutline 계산 중 · canonical mm 재투영...")
+        started = self._start_task(
+            title="Cutline",
+            label="재현 가능한 단면 벡터 계산 중...",
+            thread=TaskThread("native_cutline", lambda: controller.execute(work_item)),
+            on_done=on_done,
+            on_failed=on_failed,
+        )
+        if not started:
+            controller.cancel(work_item, reason="task_not_started")
 
     def _compute_and_commit_native_outline(
         self,
@@ -14264,35 +14862,19 @@ class MainWindow(QMainWindow):
         obj = self.viewport.selected_obj
         session = self._require_native_measurement_session(obj)
         self._validate_native_scene_for_save(session)
-        computation = compute_artifact_outline(
-            session,
+        new_record_id = (
+            f"record:outline:{view}:{uuid.uuid4()}" if record_id is None else record_id
+        )
+        controller = self._artifact_measurement_controller()
+        work_item = controller.begin_outline(
             view,
             precision_grid_mm=precision_grid_mm,
-        )
-        new_record_id = record_id or f"record:outline:{view}:{uuid.uuid4()}"
-        committed = commit_vector_computation(
-            session,
-            computation,
             record_id=new_record_id,
-            created_at=created_at or self._utc_seconds_now(),
+            created_at=(self._utc_seconds_now() if created_at is None else created_at),
             operator=operator,
         )
-        component_count = int(computation.qc.get("component_count", 0))
-        hole_count = int(computation.qc.get("hole_count", 0))
-        self._publish_artifact_session_projection(
-            committed,
-            project_path=self._current_project_path,
-            fit_camera=False,
-            expected_new_record_ids=(new_record_id,),
-            status_text=(
-                f"✅ {view.title()} Outline 기록 | "
-                f"{component_count}개 성분 · {hole_count}개 구멍 | "
-                f"grid {precision_grid_mm:g} mm"
-            ),
-        )
-        self._preview_native_vector_record(committed, new_record_id)
-        self._sync_native_cutline_controls(reset_offset=False)
-        return new_record_id
+        result = controller.execute(work_item)
+        return self._publish_native_measurement_result(work_item, result)
 
     def on_native_outline_requested(self) -> None:
         try:
@@ -14302,18 +14884,63 @@ class MainWindow(QMainWindow):
             precision_grid_mm = float(
                 self.section_panel.spin_native_outline_grid.value()
             )
-            self._compute_and_commit_native_outline(
-                view=view,
+            obj = self.viewport.selected_obj
+            session = self._require_native_measurement_session(obj)
+            self._validate_native_scene_for_save(session)
+            controller = self._artifact_measurement_controller()
+            work_item = controller.begin_outline(
+                view,
                 precision_grid_mm=precision_grid_mm,
+                record_id=f"record:outline:{view}:{uuid.uuid4()}",
+                created_at=self._utc_seconds_now(),
+                operator="local-user",
             )
         except Exception as exc:
+            self.status_info.setText("❌ 검증 외곽 준비 실패 | 기존 문서 유지")
+            QMessageBox.warning(
+                self,
+                "Outline 준비 실패",
+                "외곽 위상이 유효하지 않거나 현재 Align과 맞지 않습니다.\n\n"
+                f"{type(exc).__name__}: {exc}",
+            )
+            return
+
+        def on_done(result: object) -> None:
+            try:
+                if not isinstance(result, ArtifactMeasurementResult):
+                    raise ArtifactWorkbenchError("Outline worker result is invalid")
+                self._publish_native_measurement_result(work_item, result)
+            except Exception as exc:
+                pending = self._native_measurement_publication_is_pending(work_item)
+                self.status_info.setText(
+                    "⏸ Outline 결과 게시 보류 | 재시도 버튼 사용"
+                    if pending
+                    else "⛔ Outline 결과 폐기 | 현재 문서 유지"
+                )
+                QMessageBox.warning(
+                    self,
+                    "Outline 결과 게시 보류" if pending else "Outline 결과 폐기",
+                    f"{type(exc).__name__}: {exc}",
+                )
+
+        def on_failed(message: str) -> None:
             self.status_info.setText("❌ 검증 외곽 계산 실패 | 기존 문서 유지")
             QMessageBox.warning(
                 self,
                 "Outline 계산 실패",
-                "외곽 위상이 유효하지 않거나 현재 Align과 맞지 않습니다.\n\n"
-                f"{type(exc).__name__}: {exc}",
+                self._format_error_message("외곽 계산 중 오류가 발생했습니다:", message),
             )
+
+        self.status_info.setText("Outline 계산 중 · canonical mm 재투영...")
+        started = self._start_task(
+            title="Outline",
+            label="재현 가능한 6면 외곽 벡터 계산 중...",
+            thread=TaskThread("native_outline", lambda: controller.execute(work_item)),
+            on_done=on_done,
+            on_failed=on_failed,
+        )
+        if not started:
+            controller.cancel(work_item, reason="task_not_started")
 
     def _export_native_vector_record(
         self,
@@ -14407,82 +15034,6 @@ class MainWindow(QMainWindow):
             ),
         }
 
-    @staticmethod
-    def _compute_and_commit_native_rubbing_session(
-        session: ArtifactSession,
-        *,
-        options: dict[str, Any],
-        record_id: str,
-        created_at: str,
-        operator: str,
-    ) -> tuple[ArtifactSession, ArtifactRubbingComputation]:
-        computation = compute_artifact_rubbing(session, **dict(options))
-        require_current_rubbing_computation(session, computation)
-        committed = commit_artifact_rubbing(
-            session,
-            computation,
-            record_id=record_id,
-            created_at=created_at,
-            operator=operator,
-        )
-        return committed, computation
-
-    def _publish_native_rubbing_result(
-        self,
-        captured_session: ArtifactSession,
-        result: object,
-    ) -> str:
-        if (
-            not isinstance(result, tuple)
-            or len(result) != 2
-            or not isinstance(result[0], ArtifactSession)
-            or not isinstance(result[1], ArtifactRubbingComputation)
-        ):
-            raise ArtifactRubbingError("Digital Rubbing worker returned an invalid result")
-        committed, computation = result
-        active = getattr(self, "_artifact_session", None)
-        if active is not captured_session:
-            raise ArtifactRubbingError(
-                "Digital Rubbing result is late; the active session changed and was preserved"
-            )
-        require_current_rubbing_computation(active, computation)
-        added_record_ids = tuple(
-            sorted(
-                set(committed.document.record_index)
-                - set(captured_session.document.record_index)
-            )
-        )
-        if len(added_record_ids) != 1:
-            raise ArtifactRubbingError(
-                "Digital Rubbing worker must add exactly one derived record"
-            )
-        record_id = added_record_ids[0]
-        record = committed.document.record_index.get(record_id)
-        if (
-            record is None
-            or record.type != RUBBING_RECORD_TYPE
-            or record.align_revision_id != computation.context.align_revision_id
-            or record.recipe_hash != computation.context.recipe_hash
-        ):
-            raise ArtifactRubbingError(
-                "Digital Rubbing worker did not append the captured computation"
-            )
-        qc = computation.qc
-        self._publish_artifact_session_projection(
-            committed,
-            project_path=self._current_project_path,
-            fit_camera=False,
-            expected_new_record_ids=(record_id,),
-            status_text=(
-                f"✅ {str(computation.recipe['view']).title()} Digital Rubbing 기록 | "
-                f"{computation.raster.width_pixels}×{computation.raster.height_pixels} px · "
-                f"ink {int(qc.get('inked_pixel_count', 0))} px"
-            ),
-        )
-        self._preview_native_rubbing(committed, record_id, computation.raster)
-        self._sync_native_cutline_controls(reset_offset=False)
-        return record_id
-
     def _compute_and_commit_native_rubbing(
         self,
         *,
@@ -14494,15 +15045,20 @@ class MainWindow(QMainWindow):
         obj = self.viewport.selected_obj
         session = self._require_native_measurement_session(obj)
         self._validate_native_scene_for_save(session)
-        new_record_id = record_id or f"record:rubbing:{options.get('view', 'top')}:{uuid.uuid4()}"
-        result = self._compute_and_commit_native_rubbing_session(
-            session,
-            options=options,
+        new_record_id = (
+            f"record:rubbing:{options.get('view', 'top')}:{uuid.uuid4()}"
+            if record_id is None
+            else record_id
+        )
+        controller = self._artifact_measurement_controller()
+        work_item = controller.begin_rubbing(
+            **dict(options),
             record_id=new_record_id,
-            created_at=created_at or self._utc_seconds_now(),
+            created_at=(self._utc_seconds_now() if created_at is None else created_at),
             operator=operator,
         )
-        return self._publish_native_rubbing_result(session, result)
+        result = controller.execute(work_item)
+        return self._publish_native_measurement_result(work_item, result)
 
     def on_native_rubbing_requested(self) -> None:
         try:
@@ -14512,6 +15068,13 @@ class MainWindow(QMainWindow):
             options = self._native_rubbing_options_from_panel()
             record_id = f"record:rubbing:{options['view']}:{uuid.uuid4()}"
             created_at = self._utc_seconds_now()
+            controller = self._artifact_measurement_controller()
+            work_item = controller.begin_rubbing(
+                **options,
+                record_id=record_id,
+                created_at=created_at,
+                operator="local-user",
+            )
         except Exception as exc:
             self.status_info.setText("❌ Digital Rubbing 준비 실패 | 기존 문서 유지")
             QMessageBox.warning(
@@ -14522,24 +15085,29 @@ class MainWindow(QMainWindow):
             return
 
         def task():
-            return MainWindow._compute_and_commit_native_rubbing_session(
-                session,
-                options=options,
-                record_id=record_id,
-                created_at=created_at,
-                operator="local-user",
-            )
+            return controller.execute(work_item)
 
         def on_done(result: object) -> None:
             try:
-                self._publish_native_rubbing_result(session, result)
+                if not isinstance(result, ArtifactMeasurementResult):
+                    raise ArtifactWorkbenchError(
+                        "Digital Rubbing worker result is invalid"
+                    )
+                self._publish_native_measurement_result(work_item, result)
             except Exception as exc:
+                pending = self._native_measurement_publication_is_pending(work_item)
                 self.status_info.setText(
-                    "⛔ 늦은 Digital Rubbing 결과 폐기 | 현재 문서 유지"
+                    "⏸ Digital Rubbing 결과 게시 보류 | 재시도 버튼 사용"
+                    if pending
+                    else "⛔ 늦은 Digital Rubbing 결과 폐기 | 현재 문서 유지"
                 )
                 QMessageBox.warning(
                     self,
-                    "Digital Rubbing 결과 폐기",
+                    (
+                        "Digital Rubbing 결과 게시 보류"
+                        if pending
+                        else "Digital Rubbing 결과 폐기"
+                    ),
                     f"{type(exc).__name__}: {exc}",
                 )
 
@@ -14552,19 +15120,34 @@ class MainWindow(QMainWindow):
             )
 
         self.status_info.setText("Digital Rubbing 계산 중 · 원본 canonical mm 재투영...")
-        self._start_task(
+        started = self._start_task(
             title="Digital Rubbing",
             label="재현 가능한 1:1 탁본 raster 계산 중...",
             thread=TaskThread("native_digital_rubbing", task),
             on_done=on_done,
             on_failed=on_failed,
         )
+        if not started:
+            controller.cancel(work_item, reason="task_not_started")
 
     @staticmethod
     def _recompute_native_rubbing_record(session: ArtifactSession, record):
         if not MainWindow._native_rubbing_record_is_exportable(session, record):
             raise ArtifactRubbingExportError(
                 "no READY + FRESH Digital Rubbing record to export"
+            )
+        snapshot = session.projection_snapshot()
+        estimate = estimate_digital_rubbing_resources(
+            session.source_mesh.vertices,
+            session.source_mesh.faces,
+            record.recipe,
+            source_to_world_mm_matrix4x4=snapshot.matrix4x4,
+            uv_coords=session.source_mesh.uv_coords,
+            texture=session.source_mesh.texture,
+        )
+        if estimate.estimated_peak_bytes > DEFAULT_RUBBING_MEMORY_BUDGET_BYTES:
+            raise ArtifactRubbingExportError(
+                "Digital Rubbing recomputation exceeds the local 1 GiB memory budget"
             )
         computation = compute_artifact_rubbing_from_recipe(session, record.recipe)
         require_current_rubbing_computation(session, computation)
@@ -14597,6 +15180,10 @@ class MainWindow(QMainWindow):
         session = getattr(self, "_artifact_session", None)
         if not isinstance(session, ArtifactSession):
             raise ArtifactRubbingExportError("no active ArtifactDocument session")
+        if self._artifact_measurement_controller().active_summaries:
+            raise ArtifactRubbingExportError(
+                "active measurement work owns the shared raster memory budget"
+            )
         try:
             self._artifact_workbench_controller().require_stable_session(
                 session,
@@ -14624,6 +15211,11 @@ class MainWindow(QMainWindow):
         record = self._current_native_rubbing_record()
         if not isinstance(session, ArtifactSession) or record is None:
             self.status_info.setText("내보낼 READY + FRESH 탁본 기록이 없습니다.")
+            return
+        if self._artifact_measurement_controller().active_summaries:
+            self.status_info.setText(
+                "⛔ 진행·보류 중인 실측 결과가 raster 예산을 사용하고 있습니다."
+            )
             return
         try:
             self._artifact_workbench_controller().require_stable_session(

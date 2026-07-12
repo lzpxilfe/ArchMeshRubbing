@@ -1,0 +1,1555 @@
+"""Qt-free lifecycle for authoritative Cutline, Outline, and Digital Rubbing.
+
+The GUI may collect parameters and dispatch :func:`execute_measurement_work_item`
+to a worker, but it does not own recipe capture, record IDs, stale-result policy,
+or commit rebasing.  A worker returns only an immutable computation.  Publication
+always rebases that computation onto the current same-Align session and then
+uses the existing ``ArtifactWorkbench`` two-phase projection transaction.
+
+Cancellation is cooperative at safe boundaries around the existing scientific
+extractors.  A cancellation request immediately revokes commit authority even
+when a long-running extractor cannot stop until its current core call returns.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from enum import Enum
+import json
+import logging
+import re
+from threading import Event, RLock
+from typing import TypeAlias
+import uuid
+from weakref import WeakKeyDictionary
+
+from src.core.artifact_document import OperationContext, canonical_recipe_hash
+from src.core.artifact_outline_extractor import (
+    OutlineView,
+    extract_outline_geometry,
+    outline_recipe,
+)
+from src.core.artifact_rubbing_extractor import (
+    ArtifactRubbingComputation,
+    DigitalRubbingResourceEstimate,
+    RUBBING_ESTIMATED_PEAK_BYTES_PER_PIXEL,
+    RUBBING_ESTIMATE_FIXED_OVERHEAD_BYTES,
+    RUBBING_ESTIMATE_GEOMETRY_MULTIPLIER,
+    RUBBING_ESTIMATE_MATERIALIZED_ATTRIBUTE_MULTIPLIER,
+    commit_artifact_rubbing,
+    estimate_digital_rubbing_resources,
+    extract_digital_rubbing,
+    rubbing_computation_matches_active_projection,
+    rubbing_materialized_attribute_bytes,
+    rubbing_recipe,
+)
+from src.core.artifact_scene_adapter import ArtifactProjectionSnapshot
+from src.core.artifact_session import ArtifactSession, ArtifactSessionError
+from src.core.artifact_vector_extractor import (
+    ArtifactVectorComputation,
+    commit_vector_computation,
+    computation_matches_active_projection,
+    cutline_recipe,
+    extract_cutline_geometry,
+)
+from src.core.artifact_vector_record import PlanarFrame, VectorRecordKind
+from src.core.canonical_json import CanonicalJSONError, canonical_json_bytes
+
+from .artifact_workbench import (
+    ArtifactWorkbench,
+    ArtifactWorkbenchError,
+    ProjectionTransition,
+    StaleWorkflowOperationError,
+    WorkflowSnapshot,
+)
+
+
+DEFAULT_RUBBING_MEMORY_BUDGET_BYTES = 1024 * 1024 * 1024
+MAX_PUBLICATION_REBASE_ATTEMPTS = 8
+_UTC_SECONDS_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+_LOGGER = logging.getLogger(__name__)
+
+
+class ArtifactMeasurementError(ArtifactWorkbenchError):
+    """A measurement operation violated its application-level contract."""
+
+
+class MeasurementCancelledError(ArtifactMeasurementError):
+    """The operation was cancelled and no record may be published."""
+
+
+class MeasurementResourceLimitError(ArtifactMeasurementError):
+    """A preflight estimate exceeds the configured local resource budget."""
+
+
+class StaleMeasurementOperationError(StaleWorkflowOperationError):
+    """A result no longer matches the active source/metadata/Align authority."""
+
+
+class MeasurementOperationKind(str, Enum):
+    CUTLINE = "cutline"
+    OUTLINE = "outline"
+    DIGITAL_RUBBING = "digital_rubbing"
+
+
+class MeasurementOperationState(str, Enum):
+    RUNNING = "running"
+    CANCELLING = "cancelling"
+    PUBLISHING = "publishing"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+    FAILED = "failed"
+    STALE = "stale"
+
+
+MeasurementComputation: TypeAlias = (
+    ArtifactVectorComputation | ArtifactRubbingComputation
+)
+CancellationProbe: TypeAlias = Callable[[], bool]
+MeasurementPublisher: TypeAlias = Callable[[ProjectionTransition], None]
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace(
+        "+00:00", "Z"
+    )
+
+
+def _new_id(prefix: str) -> str:
+    return f"{prefix}:{uuid.uuid4()}"
+
+
+def _required_text(value: object, *, field_name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ArtifactMeasurementError(f"{field_name} must be a non-empty string")
+    return value.strip()
+
+
+def _canonical_timestamp(value: object, *, field_name: str) -> str:
+    timestamp = _required_text(value, field_name=field_name)
+    if _UTC_SECONDS_RE.fullmatch(timestamp) is None:
+        raise ArtifactMeasurementError(
+            f"{field_name} must use canonical UTC seconds (YYYY-MM-DDTHH:MM:SSZ)"
+        )
+    return timestamp
+
+
+def _recipe_bytes(recipe: Mapping[str, object]) -> bytes:
+    if not isinstance(recipe, Mapping):
+        raise ArtifactMeasurementError("measurement recipe must be an object")
+    try:
+        encoded = canonical_json_bytes(recipe)
+        decoded = json.loads(encoded)
+    except (CanonicalJSONError, json.JSONDecodeError) as exc:
+        raise ArtifactMeasurementError(str(exc)) from exc
+    if not isinstance(decoded, dict):
+        raise ArtifactMeasurementError("measurement recipe must be an object")
+    return encoded
+
+
+def _recipe_dict(encoded: bytes) -> dict[str, object]:
+    try:
+        value = json.loads(encoded)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ArtifactMeasurementError("measurement recipe JSON is invalid") from exc
+    if not isinstance(value, dict):
+        raise ArtifactMeasurementError("measurement recipe JSON must contain an object")
+    return value
+
+
+def _recipe_float(recipe: Mapping[str, object], field_name: str) -> float:
+    value = recipe.get(field_name)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ArtifactMeasurementError(
+            f"measurement recipe {field_name!r} must be a number"
+        )
+    return float(value)
+
+
+def _operation_kind_for_computation(
+    computation: MeasurementComputation,
+) -> MeasurementOperationKind:
+    if isinstance(computation, ArtifactRubbingComputation):
+        return MeasurementOperationKind.DIGITAL_RUBBING
+    if isinstance(computation, ArtifactVectorComputation):
+        kind = VectorRecordKind(computation.payload.kind)
+        if kind is VectorRecordKind.CUTLINE:
+            return MeasurementOperationKind.CUTLINE
+        if kind is VectorRecordKind.OUTLINE:
+            return MeasurementOperationKind.OUTLINE
+    raise ArtifactMeasurementError("measurement computation kind is unsupported")
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class ArtifactMeasurementWorkItem:
+    """Opaque immutable compute authority; equality is intentionally identity-only."""
+
+    id: str
+    kind: MeasurementOperationKind
+    captured_session: ArtifactSession
+    context: OperationContext
+    projection_snapshot: ArtifactProjectionSnapshot
+    recipe_json: bytes
+    record_id: str
+    created_at: str
+    operator: str
+    depends_on_record_ids: tuple[str, ...]
+    base_state_version: int
+    base_authority_epoch: int
+    resource_estimate: DigitalRubbingResourceEstimate | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "id", _required_text(self.id, field_name="operation ID"))
+        object.__setattr__(
+            self,
+            "kind",
+            MeasurementOperationKind(self.kind),
+        )
+        if not isinstance(self.captured_session, ArtifactSession):
+            raise ArtifactMeasurementError("captured_session must be an ArtifactSession")
+        if not isinstance(self.context, OperationContext):
+            raise ArtifactMeasurementError("context must be an OperationContext")
+        if not isinstance(self.projection_snapshot, ArtifactProjectionSnapshot):
+            raise ArtifactMeasurementError(
+                "projection_snapshot must be an ArtifactProjectionSnapshot"
+            )
+        if not isinstance(self.recipe_json, bytes):
+            raise ArtifactMeasurementError("recipe_json must be canonical JSON bytes")
+        recipe = _recipe_dict(self.recipe_json)
+        if canonical_json_bytes(recipe) != self.recipe_json:
+            raise ArtifactMeasurementError("recipe_json is not canonical RFC 8785 JSON")
+        if canonical_recipe_hash(recipe) != self.context.recipe_hash:
+            raise ArtifactMeasurementError(
+                "measurement recipe does not match its captured OperationContext"
+            )
+        if recipe.get("kind") != self.kind.value:
+            raise ArtifactMeasurementError(
+                "measurement recipe kind does not match the work item"
+            )
+        snapshot = self.projection_snapshot
+        if (
+            tuple(self.context.source_asset_ids) != (snapshot.source_asset_id,)
+            or self.context.geometry_revision_id != snapshot.geometry_revision_id
+            or self.context.source_metadata_revision_id
+            != snapshot.source_metadata_revision_id
+            or self.context.align_revision_id != snapshot.align_revision_id
+        ):
+            raise ArtifactMeasurementError(
+                "measurement context does not match its projection snapshot"
+            )
+        if self.captured_session.projection_snapshot() != snapshot:
+            raise ArtifactMeasurementError(
+                "captured session does not match the measurement projection snapshot"
+            )
+        object.__setattr__(
+            self,
+            "record_id",
+            _required_text(self.record_id, field_name="reserved record ID"),
+        )
+        object.__setattr__(
+            self,
+            "created_at",
+            _canonical_timestamp(self.created_at, field_name="created_at"),
+        )
+        object.__setattr__(
+            self,
+            "operator",
+            _required_text(self.operator, field_name="operator"),
+        )
+        dependencies = tuple(
+            _required_text(value, field_name="dependency record ID")
+            for value in self.depends_on_record_ids
+        )
+        if len(set(dependencies)) != len(dependencies):
+            raise ArtifactMeasurementError("dependency record IDs must be unique")
+        object.__setattr__(self, "depends_on_record_ids", dependencies)
+        if type(self.base_state_version) is not int or self.base_state_version < 0:
+            raise ArtifactMeasurementError("base_state_version must be non-negative")
+        if type(self.base_authority_epoch) is not int or self.base_authority_epoch < 0:
+            raise ArtifactMeasurementError("base_authority_epoch must be non-negative")
+        if self.kind is MeasurementOperationKind.DIGITAL_RUBBING:
+            if not isinstance(self.resource_estimate, DigitalRubbingResourceEstimate):
+                raise ArtifactMeasurementError(
+                    "Digital Rubbing work needs a resource estimate"
+                )
+        elif self.resource_estimate is not None:
+            raise ArtifactMeasurementError(
+                "vector work items cannot carry a raster resource estimate"
+            )
+
+    @property
+    def recipe_hash(self) -> str:
+        return self.context.recipe_hash
+
+    def recipe_dict(self) -> dict[str, object]:
+        return _recipe_dict(self.recipe_json)
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactMeasurementResult:
+    operation_id: str
+    kind: MeasurementOperationKind
+    computation: MeasurementComputation
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "operation_id",
+            _required_text(self.operation_id, field_name="operation ID"),
+        )
+        resolved = MeasurementOperationKind(self.kind)
+        object.__setattr__(self, "kind", resolved)
+        if _operation_kind_for_computation(self.computation) is not resolved:
+            raise ArtifactMeasurementError(
+                "measurement result kind does not match its computation"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactMeasurementPublication:
+    operation_id: str
+    kind: MeasurementOperationKind
+    record_id: str
+    session: ArtifactSession
+    document_sha256: str
+    align_revision_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactMeasurementSummary:
+    operation_id: str
+    kind: MeasurementOperationKind
+    state: MeasurementOperationState
+    record_id: str
+    created_at: str
+    estimated_peak_bytes: int
+    error_type: str | None = None
+    message: str | None = None
+
+
+@dataclass(slots=True)
+class _MeasurementRuntime:
+    work_item: ArtifactMeasurementWorkItem
+    cancellation: Event
+    rubbing_memory_budget_bytes: int | None = None
+    max_active_rubbing_operations: int | None = None
+    state: MeasurementOperationState = MeasurementOperationState.RUNNING
+    executing: bool = False
+    result: ArtifactMeasurementResult | None = None
+    pending_terminal_state: MeasurementOperationState | None = None
+    pending_error: BaseException | str | None = None
+
+
+@dataclass(slots=True)
+class _WorkbenchMeasurementState:
+    """One admission and capability registry shared by a Workbench."""
+
+    lock: RLock = field(default_factory=RLock)
+    publication_lock: RLock = field(default_factory=RLock)
+    rubbing_admission_lock: RLock = field(default_factory=RLock)
+    active: dict[str, _MeasurementRuntime] = field(default_factory=dict)
+    history: dict[str, ArtifactMeasurementSummary] = field(default_factory=dict)
+    record_reservations: dict[str, str] = field(default_factory=dict)
+    observer_installed: bool = False
+
+
+_WORKBENCH_MEASUREMENT_STATES_LOCK = RLock()
+_WORKBENCH_MEASUREMENT_STATES: WeakKeyDictionary[
+    ArtifactWorkbench,
+    _WorkbenchMeasurementState,
+] = WeakKeyDictionary()
+
+
+def _measurement_state_for(
+    workbench: ArtifactWorkbench,
+) -> _WorkbenchMeasurementState:
+    with _WORKBENCH_MEASUREMENT_STATES_LOCK:
+        state = _WORKBENCH_MEASUREMENT_STATES.get(workbench)
+        if state is None:
+            state = _WorkbenchMeasurementState()
+            _WORKBENCH_MEASUREMENT_STATES[workbench] = state
+        return state
+
+
+def _raise_if_cancelled(cancellation_probe: CancellationProbe | None) -> None:
+    if cancellation_probe is not None and bool(cancellation_probe()):
+        raise MeasurementCancelledError(
+            "measurement operation was cancelled before its next safe boundary"
+        )
+
+
+def execute_measurement_work_item(
+    work_item: ArtifactMeasurementWorkItem,
+    *,
+    cancellation_probe: CancellationProbe | None = None,
+) -> ArtifactMeasurementResult:
+    """Execute one immutable work item without mutating a document or GUI."""
+
+    if not isinstance(work_item, ArtifactMeasurementWorkItem):
+        raise ArtifactMeasurementError(
+            "work_item must be an ArtifactMeasurementWorkItem"
+        )
+    _raise_if_cancelled(cancellation_probe)
+    try:
+        projection = work_item.captured_session.materialize()
+    except ArtifactSessionError as exc:
+        raise ArtifactMeasurementError(str(exc)) from exc
+    if projection.snapshot != work_item.projection_snapshot:
+        raise StaleMeasurementOperationError(
+            "captured measurement projection changed before execution"
+        )
+    _raise_if_cancelled(cancellation_probe)
+
+    recipe = work_item.recipe_dict()
+    if work_item.kind is MeasurementOperationKind.CUTLINE:
+        frame_value = recipe.get("frame")
+        if not isinstance(frame_value, Mapping):
+            raise ArtifactMeasurementError("Cutline recipe has no valid frame")
+        frame = PlanarFrame.from_dict(frame_value)
+        geometry = extract_cutline_geometry(
+            projection.mesh.vertices,
+            projection.mesh.faces,
+            frame,
+            classification_tolerance_mm=_recipe_float(
+                recipe,
+                "classification_tolerance_mm",
+            ),
+            stitch_tolerance_mm=_recipe_float(recipe, "stitch_tolerance_mm"),
+        )
+        computation: MeasurementComputation = ArtifactVectorComputation(
+            context=work_item.context,
+            projection_snapshot=work_item.projection_snapshot,
+            payload=geometry.payload,
+            recipe=recipe,
+            qc=geometry.qc,
+        )
+    elif work_item.kind is MeasurementOperationKind.OUTLINE:
+        geometry = extract_outline_geometry(
+            projection.mesh.vertices,
+            projection.mesh.faces,
+            str(recipe["view"]),
+            precision_grid_mm=_recipe_float(recipe, "precision_grid_mm"),
+        )
+        computation = ArtifactVectorComputation(
+            context=work_item.context,
+            projection_snapshot=work_item.projection_snapshot,
+            payload=geometry.payload,
+            recipe=recipe,
+            qc=geometry.qc,
+        )
+    else:
+        raster, qc = extract_digital_rubbing(
+            projection.mesh.vertices,
+            projection.mesh.faces,
+            recipe,
+        )
+        computation = ArtifactRubbingComputation(
+            context=work_item.context,
+            projection_snapshot=work_item.projection_snapshot,
+            raster=raster,
+            recipe=recipe,
+            qc=qc,
+        )
+
+    _raise_if_cancelled(cancellation_probe)
+    return ArtifactMeasurementResult(
+        operation_id=work_item.id,
+        kind=work_item.kind,
+        computation=computation,
+    )
+
+
+class ArtifactMeasurementController:
+    """Own operation capabilities, resource admission, cancellation, and rebase."""
+
+    def __init__(
+        self,
+        workbench: ArtifactWorkbench,
+        *,
+        id_factory: Callable[[str], str] = _new_id,
+        rubbing_memory_budget_bytes: int = DEFAULT_RUBBING_MEMORY_BUDGET_BYTES,
+        max_active_rubbing_operations: int = 1,
+    ) -> None:
+        if not isinstance(workbench, ArtifactWorkbench):
+            raise ArtifactMeasurementError("workbench must be an ArtifactWorkbench")
+        if not callable(id_factory):
+            raise ArtifactMeasurementError("id_factory must be callable")
+        if (
+            type(rubbing_memory_budget_bytes) is not int
+            or rubbing_memory_budget_bytes <= 0
+        ):
+            raise ArtifactMeasurementError(
+                "rubbing_memory_budget_bytes must be a positive integer"
+            )
+        if (
+            type(max_active_rubbing_operations) is not int
+            or max_active_rubbing_operations <= 0
+        ):
+            raise ArtifactMeasurementError(
+                "max_active_rubbing_operations must be a positive integer"
+            )
+        shared = _measurement_state_for(workbench)
+        self._workbench = workbench
+        self._id_factory = id_factory
+        self._rubbing_memory_budget_bytes = rubbing_memory_budget_bytes
+        self._max_active_rubbing_operations = max_active_rubbing_operations
+        self._lock = shared.lock
+        self._publication_lock = shared.publication_lock
+        self._rubbing_admission_lock = shared.rubbing_admission_lock
+        self._active = shared.active
+        self._history = shared.history
+        self._record_reservations = shared.record_reservations
+        self._unsubscribe_workbench: Callable[[], None] = lambda: None
+        with _WORKBENCH_MEASUREMENT_STATES_LOCK:
+            if not shared.observer_installed:
+                self._unsubscribe_workbench = workbench.subscribe(
+                    self._on_workbench_snapshot
+                )
+                shared.observer_installed = True
+
+    @property
+    def workbench(self) -> ArtifactWorkbench:
+        return self._workbench
+
+    @property
+    def active_summaries(self) -> tuple[ArtifactMeasurementSummary, ...]:
+        with self._lock:
+            return tuple(
+                self._summary_for_runtime(runtime)
+                for _, runtime in sorted(self._active.items())
+            )
+
+    def summary(
+        self,
+        operation: ArtifactMeasurementWorkItem | str,
+    ) -> ArtifactMeasurementSummary:
+        operation_id = (
+            operation.id
+            if isinstance(operation, ArtifactMeasurementWorkItem)
+            else _required_text(operation, field_name="operation ID")
+        )
+        with self._lock:
+            runtime = self._active.get(operation_id)
+            if runtime is not None:
+                if (
+                    isinstance(operation, ArtifactMeasurementWorkItem)
+                    and runtime.work_item is not operation
+                ):
+                    raise StaleMeasurementOperationError(
+                        "operation capability is stale"
+                    )
+                return self._summary_for_runtime(runtime)
+            summary = self._history.get(operation_id)
+            if summary is None:
+                raise StaleMeasurementOperationError("measurement operation is unknown")
+            return summary
+
+    @staticmethod
+    def _summary_for_runtime(
+        runtime: _MeasurementRuntime,
+    ) -> ArtifactMeasurementSummary:
+        estimate = runtime.work_item.resource_estimate
+        return ArtifactMeasurementSummary(
+            operation_id=runtime.work_item.id,
+            kind=runtime.work_item.kind,
+            state=runtime.state,
+            record_id=runtime.work_item.record_id,
+            created_at=runtime.work_item.created_at,
+            estimated_peak_bytes=(
+                estimate.estimated_peak_bytes if estimate is not None else 0
+            ),
+        )
+
+    def _require_runtime_locked(
+        self,
+        work_item: ArtifactMeasurementWorkItem,
+        *,
+        states: frozenset[MeasurementOperationState],
+    ) -> _MeasurementRuntime:
+        if not isinstance(work_item, ArtifactMeasurementWorkItem):
+            raise ArtifactMeasurementError(
+                "work_item must be an ArtifactMeasurementWorkItem"
+            )
+        runtime = self._active.get(work_item.id)
+        if runtime is None or runtime.work_item is not work_item:
+            raise StaleMeasurementOperationError(
+                "measurement operation capability is stale"
+            )
+        if runtime.state not in states:
+            raise StaleMeasurementOperationError(
+                f"measurement operation is already {runtime.state.value}"
+            )
+        return runtime
+
+    def _finish_locked(
+        self,
+        runtime: _MeasurementRuntime,
+        state: MeasurementOperationState,
+        error: BaseException | str | None = None,
+    ) -> ArtifactMeasurementSummary:
+        work_item = runtime.work_item
+        active = self._active.get(work_item.id)
+        if active is not runtime:
+            summary = self._history.get(work_item.id)
+            if summary is None:
+                raise StaleMeasurementOperationError(
+                    "measurement operation capability is stale"
+                )
+            return summary
+        runtime.state = state
+        estimate = work_item.resource_estimate
+        summary = ArtifactMeasurementSummary(
+            operation_id=work_item.id,
+            kind=work_item.kind,
+            state=state,
+            record_id=work_item.record_id,
+            created_at=work_item.created_at,
+            estimated_peak_bytes=(
+                estimate.estimated_peak_bytes if estimate is not None else 0
+            ),
+            error_type=(
+                type(error).__name__
+                if isinstance(error, BaseException)
+                else ("Error" if error is not None else None)
+            ),
+            message=(str(error) if error is not None else None),
+        )
+        self._active.pop(work_item.id, None)
+        if self._record_reservations.get(work_item.record_id) == work_item.id:
+            self._record_reservations.pop(work_item.record_id, None)
+        self._history[work_item.id] = summary
+        return summary
+
+    def _request_terminal_locked(
+        self,
+        runtime: _MeasurementRuntime,
+        state: MeasurementOperationState,
+        error: BaseException | str,
+    ) -> ArtifactMeasurementSummary:
+        """Revoke commit authority while retaining resources until a worker exits."""
+
+        runtime.cancellation.set()
+        if runtime.executing:
+            priority = {
+                MeasurementOperationState.CANCELLED: 1,
+                MeasurementOperationState.STALE: 2,
+                MeasurementOperationState.FAILED: 3,
+            }
+            current = runtime.pending_terminal_state
+            if current is None or priority[state] >= priority[current]:
+                runtime.pending_terminal_state = state
+                runtime.pending_error = error
+            runtime.state = MeasurementOperationState.CANCELLING
+            return self._summary_for_runtime(runtime)
+        return self._finish_locked(runtime, state, error)
+
+    @staticmethod
+    def _terminal_exception(
+        state: MeasurementOperationState,
+        error: BaseException | str | None,
+    ) -> ArtifactWorkbenchError:
+        message = str(error or state.value)
+        if state is MeasurementOperationState.CANCELLED:
+            if isinstance(error, MeasurementCancelledError):
+                return error
+            return MeasurementCancelledError(message)
+        if state is MeasurementOperationState.STALE:
+            if isinstance(error, StaleMeasurementOperationError):
+                return error
+            return StaleMeasurementOperationError(message)
+        if isinstance(error, ArtifactMeasurementError):
+            return error
+        return ArtifactMeasurementError(message)
+
+    def _finish_execution_locked(
+        self,
+        runtime: _MeasurementRuntime,
+        *,
+        default_state: MeasurementOperationState,
+        default_error: BaseException | str,
+    ) -> tuple[ArtifactMeasurementSummary, ArtifactWorkbenchError | None]:
+        runtime.executing = False
+        state = runtime.pending_terminal_state or default_state
+        error = runtime.pending_error or default_error
+        summary = self._finish_locked(runtime, state, error)
+        if runtime.pending_terminal_state is None:
+            return summary, None
+        return summary, self._terminal_exception(state, error)
+
+    @staticmethod
+    def _projection_authority_key(
+        snapshot: ArtifactProjectionSnapshot,
+    ) -> tuple[object, ...]:
+        """Coordinate authority key; document hash intentionally excluded."""
+
+        return (
+            snapshot.document_id,
+            snapshot.document_schema_version,
+            snapshot.source_asset_id,
+            snapshot.geometry_revision_id,
+            snapshot.source_metadata_revision_id,
+            snapshot.align_revision_id,
+            snapshot.geometry_sha256,
+            snapshot.geometry_hash_scope,
+            snapshot.matrix4x4,
+        )
+
+    def _on_workbench_snapshot(self, snapshot: WorkflowSnapshot) -> None:
+        """Permanently revoke work after a finalized Open/Align authority change."""
+
+        if not isinstance(snapshot, WorkflowSnapshot):
+            return
+        current_session = snapshot.session
+        current_key: tuple[object, ...] | None = None
+        if isinstance(current_session, ArtifactSession) and not snapshot.faulted:
+            try:
+                current_key = self._projection_authority_key(
+                    current_session.projection_snapshot()
+                )
+            except ArtifactSessionError:
+                current_key = None
+        with self._lock:
+            for runtime in tuple(self._active.values()):
+                work_item = runtime.work_item
+                if snapshot.faulted:
+                    self._request_terminal_locked(
+                        runtime,
+                        MeasurementOperationState.FAILED,
+                        ArtifactMeasurementError(
+                            "artifact authority faulted while measurement work was active"
+                        ),
+                    )
+                    continue
+                if current_session is None:
+                    if snapshot.pending_load is None:
+                        self._request_terminal_locked(
+                            runtime,
+                            MeasurementOperationState.STALE,
+                            StaleMeasurementOperationError(
+                                "active artifact authority was cleared"
+                            ),
+                        )
+                    continue
+                if (
+                    current_session.source_mesh
+                    is not work_item.captured_session.source_mesh
+                    or current_key
+                    != self._projection_authority_key(
+                        work_item.projection_snapshot
+                    )
+                ):
+                    self._request_terminal_locked(
+                        runtime,
+                        MeasurementOperationState.STALE,
+                        StaleMeasurementOperationError(
+                            "finalized source, metadata, or Align authority changed"
+                        ),
+                    )
+
+    @staticmethod
+    def _durable_id_exists(session: ArtifactSession, item_id: str) -> bool:
+        document = session.document
+        return any(
+            item_id in index
+            for index in (
+                document.source_asset_index,
+                document.geometry_revision_index,
+                document.source_metadata_revision_index,
+                document.align_revision_index,
+                document.record_index,
+            )
+        )
+
+    def _rubbing_admission_locked(self) -> tuple[int, int, int, int]:
+        active = [
+            runtime
+            for runtime in self._active.values()
+            if runtime.work_item.kind is MeasurementOperationKind.DIGITAL_RUBBING
+        ]
+        memory_budgets = [
+            runtime.rubbing_memory_budget_bytes
+            for runtime in active
+            if runtime.rubbing_memory_budget_bytes is not None
+        ]
+        operation_limits = [
+            runtime.max_active_rubbing_operations
+            for runtime in active
+            if runtime.max_active_rubbing_operations is not None
+        ]
+        return (
+            len(active),
+            sum(
+                runtime.work_item.resource_estimate.estimated_peak_bytes
+                for runtime in active
+                if runtime.work_item.resource_estimate is not None
+            ),
+            min((self._rubbing_memory_budget_bytes, *memory_budgets)),
+            min((self._max_active_rubbing_operations, *operation_limits)),
+        )
+
+    def _begin(
+        self,
+        *,
+        kind: MeasurementOperationKind,
+        recipe: Mapping[str, object],
+        record_id: str | None,
+        created_at: str | None,
+        operator: str,
+        selection_hash: str | None = None,
+        depends_on_record_ids: Sequence[str] = (),
+        estimate_rubbing: bool = False,
+    ) -> ArtifactMeasurementWorkItem:
+        session = self._workbench.snapshot.session
+        if not isinstance(session, ArtifactSession):
+            raise ArtifactMeasurementError("no active ArtifactDocument session")
+        self._workbench.require_stable_session(session, measurement=True)
+        encoded_recipe = _recipe_bytes(recipe)
+        canonical_recipe = _recipe_dict(encoded_recipe)
+        try:
+            context = session.capture_operation(
+                recipe=canonical_recipe,
+                selection_hash=selection_hash,
+            )
+            projection_snapshot = session.projection_snapshot()
+        except ArtifactSessionError as exc:
+            raise ArtifactMeasurementError(str(exc)) from exc
+        state = self._workbench.snapshot
+        if state.session is not session:
+            raise StaleMeasurementOperationError(
+                "artifact authority changed while measurement work was captured"
+            )
+
+        dependencies = tuple(
+            _required_text(value, field_name="dependency record ID")
+            for value in depends_on_record_ids
+        )
+        if len(set(dependencies)) != len(dependencies):
+            raise ArtifactMeasurementError("dependency record IDs must be unique")
+        for dependency_id in dependencies:
+            dependency = session.document.record_index.get(dependency_id)
+            if dependency is None:
+                raise ArtifactMeasurementError(
+                    f"dependency record {dependency_id!r} does not exist"
+                )
+            if session.document.record_freshness(dependency_id).value != "fresh":
+                raise ArtifactMeasurementError(
+                    f"dependency record {dependency_id!r} is not fresh"
+                )
+
+        resolved_record_id = _required_text(
+            (
+                self._id_factory(f"record:{kind.value}")
+                if record_id is None
+                else record_id
+            ),
+            field_name="reserved record ID",
+        )
+        operation_id = _required_text(
+            self._id_factory(f"operation:{kind.value}"),
+            field_name="operation ID",
+        )
+
+        estimate: DigitalRubbingResourceEstimate | None = None
+        if estimate_rubbing:
+            with self._lock:
+                (
+                    active_rubbing,
+                    reserved_bytes,
+                    effective_memory_budget,
+                    effective_operation_limit,
+                ) = self._rubbing_admission_locked()
+                if active_rubbing >= effective_operation_limit:
+                    raise MeasurementResourceLimitError(
+                        "another Digital Rubbing operation already owns the raster budget"
+                    )
+                if reserved_bytes >= effective_memory_budget:
+                    raise MeasurementResourceLimitError(
+                        "active Digital Rubbing work already reserves the memory budget"
+                    )
+                source_geometry_bytes = int(
+                    session.source_mesh.vertices.nbytes
+                    + session.source_mesh.faces.nbytes
+                )
+                source_materialized_attribute_bytes = (
+                    rubbing_materialized_attribute_bytes(
+                        uv_coords=session.source_mesh.uv_coords,
+                        texture=session.source_mesh.texture,
+                    )
+                )
+                minimum_estimated_bytes = (
+                    RUBBING_ESTIMATE_FIXED_OVERHEAD_BYTES
+                    + RUBBING_ESTIMATED_PEAK_BYTES_PER_PIXEL
+                    + source_geometry_bytes
+                    * RUBBING_ESTIMATE_GEOMETRY_MULTIPLIER
+                    + source_materialized_attribute_bytes
+                    * RUBBING_ESTIMATE_MATERIALIZED_ATTRIBUTE_MULTIPLIER
+                )
+                if (
+                    reserved_bytes + minimum_estimated_bytes
+                    > effective_memory_budget
+                ):
+                    raise MeasurementResourceLimitError(
+                        "Digital Rubbing minimum cumulative memory estimate exceeds "
+                        "the configured budget before projection preflight"
+                    )
+            estimate = estimate_digital_rubbing_resources(
+                session.source_mesh.vertices,
+                session.source_mesh.faces,
+                canonical_recipe,
+                source_to_world_mm_matrix4x4=projection_snapshot.matrix4x4,
+                uv_coords=session.source_mesh.uv_coords,
+                texture=session.source_mesh.texture,
+            )
+            if session.projection_snapshot() != projection_snapshot:
+                raise StaleMeasurementOperationError(
+                    "artifact projection changed during resource preflight"
+                )
+            if estimate.estimated_peak_bytes > effective_memory_budget:
+                raise MeasurementResourceLimitError(
+                    "Digital Rubbing estimated peak memory "
+                    f"{estimate.estimated_peak_bytes} bytes exceeds the configured "
+                    f"budget {effective_memory_budget} bytes"
+                )
+
+        work_item = ArtifactMeasurementWorkItem(
+            id=operation_id,
+            kind=kind,
+            captured_session=session,
+            context=context,
+            projection_snapshot=projection_snapshot,
+            recipe_json=encoded_recipe,
+            record_id=resolved_record_id,
+            created_at=str(_utc_now() if created_at is None else created_at),
+            operator=operator,
+            depends_on_record_ids=dependencies,
+            base_state_version=state.state_version,
+            base_authority_epoch=state.authority_epoch,
+            resource_estimate=estimate,
+        )
+
+        with self._lock:
+            self._workbench.require_stable_session(session, measurement=True)
+            if operation_id in self._active or operation_id in self._history:
+                raise ArtifactMeasurementError(
+                    f"operation ID {operation_id!r} has already been used"
+                )
+            if self._durable_id_exists(session, resolved_record_id):
+                raise ArtifactMeasurementError(
+                    f"record ID {resolved_record_id!r} collides with a durable document ID"
+                )
+            reservation_owner = self._record_reservations.get(resolved_record_id)
+            if reservation_owner is not None:
+                raise ArtifactMeasurementError(
+                    f"record ID {resolved_record_id!r} is reserved by {reservation_owner!r}"
+                )
+            if kind is MeasurementOperationKind.DIGITAL_RUBBING:
+                (
+                    active_rubbing,
+                    reserved_bytes,
+                    effective_memory_budget,
+                    effective_operation_limit,
+                ) = self._rubbing_admission_locked()
+                if active_rubbing >= effective_operation_limit:
+                    raise MeasurementResourceLimitError(
+                        "another Digital Rubbing operation already owns the raster budget"
+                    )
+                assert estimate is not None
+                if (
+                    reserved_bytes + estimate.estimated_peak_bytes
+                    > effective_memory_budget
+                ):
+                    raise MeasurementResourceLimitError(
+                        "Digital Rubbing cumulative estimated peak memory "
+                        f"{reserved_bytes + estimate.estimated_peak_bytes} bytes "
+                        "exceeds the configured budget "
+                        f"{effective_memory_budget} bytes"
+                    )
+            runtime = _MeasurementRuntime(
+                work_item=work_item,
+                cancellation=Event(),
+                rubbing_memory_budget_bytes=(
+                    self._rubbing_memory_budget_bytes
+                    if kind is MeasurementOperationKind.DIGITAL_RUBBING
+                    else None
+                ),
+                max_active_rubbing_operations=(
+                    self._max_active_rubbing_operations
+                    if kind is MeasurementOperationKind.DIGITAL_RUBBING
+                    else None
+                ),
+            )
+            self._active[operation_id] = runtime
+            self._record_reservations[resolved_record_id] = operation_id
+        return work_item
+
+    def begin_cutline(
+        self,
+        frame: PlanarFrame,
+        *,
+        classification_tolerance_mm: float = 1e-9,
+        stitch_tolerance_mm: float = 1e-7,
+        selection_hash: str | None = None,
+        record_id: str | None = None,
+        created_at: str | None = None,
+        operator: str = "local-user",
+        depends_on_record_ids: Sequence[str] = (),
+    ) -> ArtifactMeasurementWorkItem:
+        recipe = cutline_recipe(
+            frame,
+            classification_tolerance_mm=classification_tolerance_mm,
+            stitch_tolerance_mm=stitch_tolerance_mm,
+        )
+        return self._begin(
+            kind=MeasurementOperationKind.CUTLINE,
+            recipe=recipe,
+            record_id=record_id,
+            created_at=created_at,
+            operator=operator,
+            selection_hash=selection_hash,
+            depends_on_record_ids=depends_on_record_ids,
+        )
+
+    def begin_outline(
+        self,
+        view: OutlineView | str,
+        *,
+        precision_grid_mm: float,
+        record_id: str | None = None,
+        created_at: str | None = None,
+        operator: str = "local-user",
+        depends_on_record_ids: Sequence[str] = (),
+    ) -> ArtifactMeasurementWorkItem:
+        recipe = outline_recipe(view, precision_grid_mm=precision_grid_mm)
+        return self._begin(
+            kind=MeasurementOperationKind.OUTLINE,
+            recipe=recipe,
+            record_id=record_id,
+            created_at=created_at,
+            operator=operator,
+            depends_on_record_ids=depends_on_record_ids,
+        )
+
+    def begin_rubbing(
+        self,
+        view: OutlineView | str,
+        *,
+        pixels_per_mm: int,
+        margin_um: int,
+        reference_radius_um: int,
+        depth_quantization_um: int,
+        black_point_um: int,
+        ink_strength_percent: int,
+        relief_polarity: str,
+        record_id: str | None = None,
+        created_at: str | None = None,
+        operator: str = "local-user",
+        depends_on_record_ids: Sequence[str] = (),
+    ) -> ArtifactMeasurementWorkItem:
+        with self._rubbing_admission_lock:
+            recipe = rubbing_recipe(
+                view,
+                pixels_per_mm=pixels_per_mm,
+                margin_um=margin_um,
+                reference_radius_um=reference_radius_um,
+                depth_quantization_um=depth_quantization_um,
+                black_point_um=black_point_um,
+                ink_strength_percent=ink_strength_percent,
+                relief_polarity=relief_polarity,
+            )
+            return self._begin(
+                kind=MeasurementOperationKind.DIGITAL_RUBBING,
+                recipe=recipe,
+                record_id=record_id,
+                created_at=created_at,
+                operator=operator,
+                depends_on_record_ids=depends_on_record_ids,
+                estimate_rubbing=True,
+            )
+
+    def execute(
+        self,
+        work_item: ArtifactMeasurementWorkItem,
+    ) -> ArtifactMeasurementResult:
+        with self._lock:
+            runtime = self._require_runtime_locked(
+                work_item,
+                states=frozenset({MeasurementOperationState.RUNNING}),
+            )
+            if runtime.executing or runtime.result is not None:
+                raise StaleMeasurementOperationError(
+                    "measurement operation has already been executed"
+                )
+            runtime.executing = True
+            cancellation = runtime.cancellation
+        try:
+            result = execute_measurement_work_item(
+                work_item,
+                cancellation_probe=cancellation.is_set,
+            )
+        except MeasurementCancelledError as exc:
+            terminal_error: ArtifactWorkbenchError | None = None
+            with self._lock:
+                active = self._active.get(work_item.id)
+                if active is runtime:
+                    _summary, terminal_error = self._finish_execution_locked(
+                        runtime,
+                        default_state=MeasurementOperationState.CANCELLED,
+                        default_error=exc,
+                    )
+            if terminal_error is not None:
+                raise terminal_error from exc
+            raise
+        except Exception as exc:
+            terminal_error = None
+            with self._lock:
+                active = self._active.get(work_item.id)
+                if active is runtime:
+                    _summary, terminal_error = self._finish_execution_locked(
+                        runtime,
+                        default_state=MeasurementOperationState.FAILED,
+                        default_error=exc,
+                    )
+            if terminal_error is not None:
+                raise terminal_error from exc
+            raise
+        terminal_error = None
+        with self._lock:
+            active = self._active.get(work_item.id)
+            if active is not runtime:
+                raise MeasurementCancelledError(
+                    "measurement result lost commit authority while computing"
+                )
+            runtime.executing = False
+            if runtime.pending_terminal_state is not None:
+                state = runtime.pending_terminal_state
+                error = runtime.pending_error
+                self._finish_locked(runtime, state, error)
+                terminal_error = self._terminal_exception(state, error)
+            elif runtime.state is not MeasurementOperationState.RUNNING:
+                terminal_error = MeasurementCancelledError(
+                    "measurement result lost commit authority while computing"
+                )
+            else:
+                runtime.result = result
+        if terminal_error is not None:
+            raise terminal_error
+        return result
+
+    def cancel(
+        self,
+        work_item: ArtifactMeasurementWorkItem,
+        *,
+        reason: str = "user_cancelled",
+    ) -> ArtifactMeasurementSummary:
+        with self._lock:
+            runtime = self._require_runtime_locked(
+                work_item,
+                states=frozenset(
+                    {
+                        MeasurementOperationState.RUNNING,
+                        MeasurementOperationState.CANCELLING,
+                    }
+                ),
+            )
+            if runtime.state is MeasurementOperationState.CANCELLING:
+                return self._summary_for_runtime(runtime)
+            return self._request_terminal_locked(
+                runtime,
+                MeasurementOperationState.CANCELLED,
+                reason,
+            )
+
+    def fail(
+        self,
+        work_item: ArtifactMeasurementWorkItem,
+        error: BaseException | str,
+    ) -> ArtifactMeasurementSummary:
+        with self._lock:
+            runtime = self._require_runtime_locked(
+                work_item,
+                states=frozenset(
+                    {
+                        MeasurementOperationState.RUNNING,
+                        MeasurementOperationState.CANCELLING,
+                    }
+                ),
+            )
+            return self._request_terminal_locked(
+                runtime,
+                MeasurementOperationState.FAILED,
+                error,
+            )
+
+    @staticmethod
+    def _require_captured_document_ancestor(
+        work_item: ArtifactMeasurementWorkItem,
+        current: ArtifactSession,
+    ) -> None:
+        captured = work_item.captured_session
+        if current.source_mesh is not captured.source_mesh:
+            raise StaleMeasurementOperationError(
+                "measurement source session changed after work began"
+            )
+        old = captured.document
+        new = current.document
+        if (
+            new.document_id != old.document_id
+            or new.schema_version != old.schema_version
+            or new.software_version != old.software_version
+            or new.extensions != old.extensions
+        ):
+            raise StaleMeasurementOperationError(
+                "measurement document identity changed after work began"
+            )
+        for old_index, new_index, label in (
+            (old.source_asset_index, new.source_asset_index, "source asset"),
+            (old.geometry_revision_index, new.geometry_revision_index, "geometry revision"),
+            (
+                old.source_metadata_revision_index,
+                new.source_metadata_revision_index,
+                "metadata revision",
+            ),
+            (old.align_revision_index, new.align_revision_index, "Align revision"),
+            (old.record_index, new.record_index, "derived record"),
+        ):
+            for item_id, value in old_index.items():
+                if new_index.get(item_id) != value:
+                    raise StaleMeasurementOperationError(
+                        f"captured {label} {item_id!r} was removed or rewritten"
+                    )
+
+    @staticmethod
+    def _validate_result(
+        work_item: ArtifactMeasurementWorkItem,
+        result: ArtifactMeasurementResult,
+    ) -> None:
+        if not isinstance(result, ArtifactMeasurementResult):
+            raise ArtifactMeasurementError(
+                "worker result must be an ArtifactMeasurementResult"
+            )
+        if result.operation_id != work_item.id or result.kind is not work_item.kind:
+            raise ArtifactMeasurementError(
+                "worker result does not belong to the reserved measurement operation"
+            )
+        computation = result.computation
+        if computation.context != work_item.context:
+            raise ArtifactMeasurementError(
+                "worker result context does not match the work item"
+            )
+        if computation.projection_snapshot != work_item.projection_snapshot:
+            raise ArtifactMeasurementError(
+                "worker result projection does not match the work item"
+            )
+        recipe = (
+            computation.recipe_dict()
+            if isinstance(computation, ArtifactVectorComputation)
+            else computation.recipe_dict()
+        )
+        if _recipe_bytes(recipe) != work_item.recipe_json:
+            raise ArtifactMeasurementError(
+                "worker result recipe does not match the work item"
+            )
+        if _operation_kind_for_computation(computation) is not work_item.kind:
+            raise ArtifactMeasurementError(
+                "worker computation kind does not match the work item"
+            )
+
+    def _prepare_rebased_transition(
+        self,
+        work_item: ArtifactMeasurementWorkItem,
+        result: ArtifactMeasurementResult,
+    ) -> ProjectionTransition:
+        current = self._workbench.snapshot.session
+        if not isinstance(current, ArtifactSession):
+            raise StaleMeasurementOperationError(
+                "measurement result has no active ArtifactDocument target"
+            )
+        self._workbench.require_stable_session(current, measurement=True)
+        self._require_captured_document_ancestor(work_item, current)
+        if self._durable_id_exists(current, work_item.record_id):
+            raise ArtifactMeasurementError(
+                f"reserved record ID {work_item.record_id!r} already exists"
+            )
+        for dependency_id in work_item.depends_on_record_ids:
+            captured_dependency = work_item.captured_session.document.record_index.get(
+                dependency_id
+            )
+            current_dependency = current.document.record_index.get(dependency_id)
+            if current_dependency is None or current_dependency != captured_dependency:
+                raise StaleMeasurementOperationError(
+                    f"dependency record {dependency_id!r} changed after work began"
+                )
+            if current.document.record_freshness(dependency_id).value != "fresh":
+                raise StaleMeasurementOperationError(
+                    f"dependency record {dependency_id!r} is no longer fresh"
+                )
+
+        computation = result.computation
+        if isinstance(computation, ArtifactVectorComputation):
+            if not computation_matches_active_projection(current, computation):
+                raise StaleMeasurementOperationError(
+                    "vector result is stale for the active projection"
+                )
+            candidate = commit_vector_computation(
+                current,
+                computation,
+                record_id=work_item.record_id,
+                created_at=work_item.created_at,
+                operator=work_item.operator,
+                depends_on_record_ids=work_item.depends_on_record_ids,
+            )
+        elif isinstance(computation, ArtifactRubbingComputation):
+            if not rubbing_computation_matches_active_projection(current, computation):
+                raise StaleMeasurementOperationError(
+                    "Digital Rubbing result is stale for the active projection"
+                )
+            candidate = commit_artifact_rubbing(
+                current,
+                computation,
+                record_id=work_item.record_id,
+                created_at=work_item.created_at,
+                operator=work_item.operator,
+                depends_on_record_ids=work_item.depends_on_record_ids,
+            )
+        else:  # pragma: no cover - guarded by ArtifactMeasurementResult
+            raise ArtifactMeasurementError("unsupported measurement computation")
+
+        return self._workbench.prepare_session_commit(
+            current,
+            candidate,
+            expected_new_record_ids=(work_item.record_id,),
+            transition_id=work_item.id,
+        )
+
+    def _publication_can_retry(
+        self,
+        work_item: ArtifactMeasurementWorkItem,
+        result: ArtifactMeasurementResult,
+    ) -> bool:
+        """Return whether a rolled-back publication may reuse its computation."""
+
+        snapshot = self._workbench.snapshot
+        current = snapshot.session
+        if not isinstance(current, ArtifactSession):
+            return False
+        if snapshot.tentative or snapshot.faulted:
+            return False
+        # A pending Open only reserves the command slot.  Until its candidate
+        # is finalized, the current session remains authoritative and this
+        # computation must stay retryable if it still matches that session.
+        if snapshot.pending_load is None and not snapshot.can_measure:
+            return False
+        try:
+            self._require_captured_document_ancestor(work_item, current)
+        except ArtifactWorkbenchError:
+            return False
+        if self._durable_id_exists(current, work_item.record_id):
+            return False
+        computation = result.computation
+        if isinstance(computation, ArtifactVectorComputation):
+            return computation_matches_active_projection(current, computation)
+        if isinstance(computation, ArtifactRubbingComputation):
+            return rubbing_computation_matches_active_projection(current, computation)
+        return False
+
+    def _candidate_was_published(
+        self,
+        candidate: ArtifactSession,
+        record_id: str,
+    ) -> bool:
+        """Detect durable commit independently of later Open/readiness changes."""
+
+        snapshot = self._workbench.snapshot
+        if snapshot.tentative or not isinstance(snapshot.session, ArtifactSession):
+            return False
+        current = snapshot.session
+        if (
+            current.source_mesh is not candidate.source_mesh
+            or current.document.document_id != candidate.document.document_id
+            or current.document.schema_version != candidate.document.schema_version
+        ):
+            return False
+        expected = candidate.document.record_index.get(record_id)
+        return expected is not None and current.document.record_index.get(record_id) == expected
+
+    def publish_result(
+        self,
+        work_item: ArtifactMeasurementWorkItem,
+        result: ArtifactMeasurementResult,
+        publisher: MeasurementPublisher,
+    ) -> ArtifactMeasurementPublication:
+        """Rebase and publish on the caller's application/UI dispatcher thread."""
+
+        if not callable(publisher):
+            raise ArtifactMeasurementError("publisher must be callable")
+        with self._lock:
+            runtime = self._require_runtime_locked(
+                work_item,
+                states=frozenset({MeasurementOperationState.RUNNING}),
+            )
+            if runtime.result is not result:
+                raise ArtifactMeasurementError(
+                    "publisher requires the exact result capability returned by execute()"
+                )
+            self._validate_result(work_item, result)
+
+        candidate: ArtifactSession | None = None
+        transition: ProjectionTransition | None = None
+        with self._publication_lock:
+            with self._lock:
+                runtime = self._require_runtime_locked(
+                    work_item,
+                    states=frozenset({MeasurementOperationState.RUNNING}),
+                )
+                runtime.state = MeasurementOperationState.PUBLISHING
+            attempt = 0
+            while True:
+                candidate = None
+                transition = None
+                try:
+                    transition = self._prepare_rebased_transition(work_item, result)
+                    candidate = transition.candidate_session
+                    publisher(transition)
+                    if not self._candidate_was_published(
+                        candidate,
+                        work_item.record_id,
+                    ):
+                        raise ArtifactMeasurementError(
+                            "measurement publisher returned without finalizing its record"
+                        )
+                    break
+                except Exception as exc:
+                    published = bool(
+                        candidate is not None
+                        and self._candidate_was_published(
+                            candidate,
+                            work_item.record_id,
+                        )
+                    )
+                    if published:
+                        _LOGGER.warning(
+                            "Measurement publisher raised after record commit; "
+                            "treating operation %s as completed",
+                            work_item.id,
+                            exc_info=True,
+                        )
+                        break
+
+                    current_snapshot = self._workbench.snapshot
+                    if current_snapshot.tentative:
+                        owns_tentative = (
+                            transition is not None
+                            and candidate is not None
+                            and current_snapshot.session is candidate
+                        )
+                        if owns_tentative:
+                            assert transition is not None
+                            try:
+                                self._workbench.enter_faulted_state(
+                                    session=None,
+                                    project_path=None,
+                                    error=RuntimeError(
+                                        "measurement publisher exited with tentative authority"
+                                    ),
+                                    operation_id=transition.id,
+                                )
+                            finally:
+                                with self._lock:
+                                    active = self._active.get(work_item.id)
+                                    if active is runtime:
+                                        self._finish_locked(
+                                            runtime,
+                                            MeasurementOperationState.FAILED,
+                                            exc,
+                                        )
+                            raise
+                        # An unrelated Open/Align/record transaction owns the
+                        # tentative state. Preserve both it and this result;
+                        # its finalize/rollback notification will decide whether
+                        # the measurement becomes stale or retryable.
+                        with self._lock:
+                            active = self._active.get(work_item.id)
+                            if active is runtime:
+                                runtime.state = MeasurementOperationState.RUNNING
+                        raise
+
+                    retryable = self._publication_can_retry(work_item, result)
+                    with self._lock:
+                        active = self._active.get(work_item.id)
+                    if active is not runtime:
+                        raise StaleMeasurementOperationError(
+                            "measurement operation lost authority during publication"
+                        ) from exc
+                    if (
+                        isinstance(exc, StaleWorkflowOperationError)
+                        and retryable
+                        and attempt < MAX_PUBLICATION_REBASE_ATTEMPTS
+                    ):
+                        attempt += 1
+                        continue
+
+                    with self._lock:
+                        active = self._active.get(work_item.id)
+                        if active is runtime:
+                            if retryable:
+                                runtime.state = MeasurementOperationState.RUNNING
+                            else:
+                                self._finish_locked(
+                                    runtime,
+                                    (
+                                        MeasurementOperationState.STALE
+                                        if isinstance(
+                                            exc,
+                                            (
+                                                StaleMeasurementOperationError,
+                                                StaleWorkflowOperationError,
+                                            ),
+                                        )
+                                        else MeasurementOperationState.FAILED
+                                    ),
+                                    exc,
+                                )
+                    raise
+
+            assert candidate is not None
+            with self._lock:
+                completion = self._finish_locked(
+                    runtime,
+                    MeasurementOperationState.COMPLETED,
+                )
+            if completion.state is not MeasurementOperationState.COMPLETED:
+                raise self._terminal_exception(
+                    completion.state,
+                    completion.message,
+                )
+
+        align_id = candidate.document.active_align_revision_id
+        if align_id is None:  # pragma: no cover - stable measurement requires Align
+            raise ArtifactMeasurementError("published measurement has no active Align")
+        return ArtifactMeasurementPublication(
+            operation_id=work_item.id,
+            kind=work_item.kind,
+            record_id=work_item.record_id,
+            session=candidate,
+            document_sha256=candidate.document.canonical_sha256,
+            align_revision_id=align_id,
+        )
+
+
+__all__ = [
+    "ArtifactMeasurementController",
+    "ArtifactMeasurementError",
+    "ArtifactMeasurementPublication",
+    "ArtifactMeasurementResult",
+    "ArtifactMeasurementSummary",
+    "ArtifactMeasurementWorkItem",
+    "DEFAULT_RUBBING_MEMORY_BUDGET_BYTES",
+    "MeasurementCancelledError",
+    "MeasurementOperationKind",
+    "MeasurementOperationState",
+    "MeasurementResourceLimitError",
+    "StaleMeasurementOperationError",
+    "execute_measurement_work_item",
+]

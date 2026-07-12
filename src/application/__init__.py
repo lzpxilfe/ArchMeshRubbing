@@ -1,5 +1,20 @@
 """GUI-independent application coordination for the native workbench."""
 
+from .artifact_measurements import (
+    ArtifactMeasurementController,
+    ArtifactMeasurementError,
+    ArtifactMeasurementPublication,
+    ArtifactMeasurementResult,
+    ArtifactMeasurementSummary,
+    ArtifactMeasurementWorkItem,
+    DEFAULT_RUBBING_MEMORY_BUDGET_BYTES,
+    MeasurementCancelledError,
+    MeasurementOperationKind,
+    MeasurementOperationState,
+    MeasurementResourceLimitError,
+    StaleMeasurementOperationError,
+    execute_measurement_work_item,
+)
 from .artifact_workbench import (
     ArtifactLoadTicket,
     ArtifactWorkbench,
@@ -18,16 +33,29 @@ from .artifact_workbench import (
 
 __all__ = [
     "ArtifactLoadTicket",
+    "ArtifactMeasurementController",
+    "ArtifactMeasurementError",
+    "ArtifactMeasurementPublication",
+    "ArtifactMeasurementResult",
+    "ArtifactMeasurementSummary",
+    "ArtifactMeasurementWorkItem",
     "ArtifactWorkbench",
     "ArtifactWorkbenchError",
     "ConfirmedSourceMetadata",
+    "DEFAULT_RUBBING_MEMORY_BUDGET_BYTES",
+    "MeasurementCancelledError",
+    "MeasurementOperationKind",
+    "MeasurementOperationState",
+    "MeasurementResourceLimitError",
     "ProjectionActivation",
     "ProjectionTransition",
     "StaleWorkflowOperationError",
+    "StaleMeasurementOperationError",
     "WorkflowBusyError",
     "WorkflowFailure",
     "WorkflowPhase",
     "WorkflowSnapshot",
     "WorkflowStage",
     "WorkflowTransitionKind",
+    "execute_measurement_work_item",
 ]

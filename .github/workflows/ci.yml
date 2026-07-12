@@ -91,6 +91,7 @@ jobs:
           tests/test_artifact_scene_adapter.py
           tests/test_artifact_session.py
           tests/test_artifact_workbench.py
+          tests/test_artifact_measurements.py
           tests/test_artifact_new_process_roundtrip.py
           tests/test_canonical_json.py
           tests/test_artifact_vector_record.py

@@ -1,0 +1,1108 @@
+from __future__ import annotations
+
+import ast
+from dataclasses import replace
+from pathlib import Path
+from threading import Event, Thread
+from unittest.mock import patch
+
+import numpy as np
+import pytest
+
+from src.application.artifact_measurements import (
+    ArtifactMeasurementController,
+    ArtifactMeasurementError,
+    ArtifactMeasurementResult,
+    MeasurementCancelledError,
+    MeasurementOperationState,
+    MeasurementResourceLimitError,
+    StaleMeasurementOperationError,
+    execute_measurement_work_item,
+)
+from src.application.artifact_workbench import (
+    ArtifactWorkbench,
+    ArtifactWorkbenchError,
+    ConfirmedSourceMetadata,
+    StaleWorkflowOperationError,
+    WorkflowBusyError,
+)
+from src.core.artifact_rubbing_extractor import (
+    ArtifactRubbingComputation,
+    RUBBING_ESTIMATED_PEAK_BYTES_PER_PIXEL,
+    RUBBING_ESTIMATE_FIXED_OVERHEAD_BYTES,
+    RUBBING_ESTIMATE_GEOMETRY_MULTIPLIER,
+    RUBBING_ESTIMATE_MATERIALIZED_ATTRIBUTE_MULTIPLIER,
+)
+from src.core.artifact_session import ArtifactSession
+from src.core.artifact_vector_extractor import ArtifactVectorComputation
+from src.core.artifact_vector_record import PlanarFrame
+from src.core.mesh_loader import MeshData
+from src.core.source_identity import SourceFingerprint
+
+
+STAMP = "2026-07-12T00:00:00Z"
+SOURCE_SHA = "b" * 64
+
+
+class SequentialIds:
+    def __init__(self) -> None:
+        self.value = 0
+
+    def __call__(self, prefix: str) -> str:
+        self.value += 1
+        return f"{prefix}:test-{self.value}"
+
+
+def _box_mesh() -> MeshData:
+    vertices = np.asarray(
+        [
+            [-1.0, -1.0, -1.0],
+            [1.0, -1.0, -1.0],
+            [1.0, 1.0, -1.0],
+            [-1.0, 1.0, -1.0],
+            [-1.0, -1.0, 1.0],
+            [1.0, -1.0, 1.0],
+            [1.0, 1.0, 1.0],
+            [-1.0, 1.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
+    faces = np.asarray(
+        [
+            [0, 2, 1],
+            [0, 3, 2],
+            [4, 5, 6],
+            [4, 6, 7],
+            [0, 1, 5],
+            [0, 5, 4],
+            [1, 2, 6],
+            [1, 6, 5],
+            [2, 3, 7],
+            [2, 7, 6],
+            [3, 0, 4],
+            [3, 4, 7],
+        ],
+        dtype=np.int32,
+    )
+    return MeshData(
+        vertices=vertices,
+        faces=faces,
+        unit="cm",
+        filepath=Path("/source/box.ply"),
+        source_identity=SourceFingerprint(
+            sha256=SOURCE_SHA,
+            size_bytes=321,
+            mtime_ns=1,
+            original_name="box.ply",
+            format="ply",
+        ),
+        source_format="ply",
+    )
+
+
+def _session(
+    *,
+    explicit_align: bool = True,
+    source_mesh: MeshData | None = None,
+) -> ArtifactSession:
+    session = ArtifactSession.create_from_source(
+        _box_mesh() if source_mesh is None else source_mesh,
+        resolved_source_path="/source/box.ply",
+        unit="cm",
+        axes={"source_x": "+X", "source_y": "+Y", "source_z": "+Z"},
+        handedness="right",
+        software_version="0.1.0",
+        operator="pytest",
+        created_at=STAMP,
+        document_id="artifact:measurement-test",
+        metadata_revision_id="metadata:initial",
+        align_revision_id="align:initial",
+    )
+    if not explicit_align:
+        return session
+    return session.commit_preview(
+        translation_mm=(0.0, 0.0, 0.0),
+        rotation_deg=(0.0, 0.0, 0.0),
+        scale=1.0,
+        pivot_mm=(0.0, 0.0, 0.0),
+        operator="pytest",
+        created_at=STAMP,
+        revision_id="align:confirmed",
+    )
+
+
+def _cutline_frame() -> PlanarFrame:
+    return PlanarFrame(
+        origin_world_mm=(0.0, 0.0, 0.0),
+        u_axis_world=(1.0, 0.0, 0.0),
+        v_axis_world=(0.0, 1.0, 0.0),
+        normal_world=(0.0, 0.0, 1.0),
+    )
+
+
+def _headless_publisher(workbench: ArtifactWorkbench):
+    def publish(transition) -> None:
+        activation = workbench.activate_projection(transition)
+        workbench.finalize_projection(activation)
+
+    return publish
+
+
+def _begin_rubbing(
+    controller: ArtifactMeasurementController,
+    *,
+    record_id: str = "record:rubbing:test",
+):
+    return controller.begin_rubbing(
+        "top",
+        pixels_per_mm=1,
+        margin_um=1_000,
+        reference_radius_um=1_000,
+        depth_quantization_um=10,
+        black_point_um=250,
+        ink_strength_percent=100,
+        relief_polarity="bidirectional",
+        record_id=record_id,
+        created_at=STAMP,
+        operator="pytest",
+    )
+
+
+def test_begin_requires_explicit_align_before_reserving_work() -> None:
+    workbench = ArtifactWorkbench(session=_session(explicit_align=False))
+    controller = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
+
+    with pytest.raises(ArtifactWorkbenchError, match="explicit Align"):
+        controller.begin_cutline(_cutline_frame(), record_id="record:blocked")
+
+    assert controller.active_summaries == ()
+    assert workbench.snapshot.session is not None
+    assert workbench.snapshot.session.document.records == ()
+
+
+def test_cutline_executes_and_publishes_only_the_reserved_record_id() -> None:
+    session = _session()
+    workbench = ArtifactWorkbench(session=session, id_factory=SequentialIds())
+    controller = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
+    item = controller.begin_cutline(
+        _cutline_frame(),
+        record_id="record:cutline:reserved",
+        created_at=STAMP,
+        operator="pytest",
+    )
+
+    result = controller.execute(item)
+    assert isinstance(result.computation, ArtifactVectorComputation)
+    active = workbench.snapshot.session
+    assert isinstance(active, ArtifactSession)
+    assert active is session
+    assert active.document.records == ()
+
+    publication = controller.publish_result(
+        item,
+        result,
+        _headless_publisher(workbench),
+    )
+
+    assert publication.record_id == "record:cutline:reserved"
+    assert workbench.snapshot.session is publication.session
+    assert set(publication.session.document.record_index) == {
+        "record:cutline:reserved"
+    }
+    assert (
+        publication.session.document.record_freshness(publication.record_id).value
+        == "fresh"
+    )
+    assert controller.summary(item).state is MeasurementOperationState.COMPLETED
+
+
+def test_same_align_parallel_results_rebase_without_lost_updates() -> None:
+    session = _session()
+    source_mesh = session.source_mesh
+    workbench = ArtifactWorkbench(session=session, id_factory=SequentialIds())
+    controller = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
+    cutline = controller.begin_cutline(
+        _cutline_frame(),
+        record_id="record:z-cutline",
+        created_at=STAMP,
+        operator="pytest",
+    )
+    outline = controller.begin_outline(
+        "top",
+        precision_grid_mm=0.01,
+        record_id="record:a-outline",
+        created_at=STAMP,
+        operator="pytest",
+    )
+    cutline_result = controller.execute(cutline)
+    outline_result = controller.execute(outline)
+
+    controller.publish_result(
+        cutline,
+        cutline_result,
+        _headless_publisher(workbench),
+    )
+    controller.publish_result(
+        outline,
+        outline_result,
+        _headless_publisher(workbench),
+    )
+
+    current = workbench.snapshot.session
+    assert current is not None
+    assert current.source_mesh is source_mesh
+    assert set(current.document.record_index) == {
+        "record:z-cutline",
+        "record:a-outline",
+    }
+    assert all(
+        current.document.record_freshness(record_id).value == "fresh"
+        for record_id in current.document.record_index
+    )
+
+
+def test_align_change_makes_late_result_stale_without_adding_a_record() -> None:
+    workbench = ArtifactWorkbench(session=_session(), id_factory=SequentialIds())
+    controller = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
+    item = controller.begin_cutline(
+        _cutline_frame(),
+        record_id="record:late",
+        created_at=STAMP,
+        operator="pytest",
+    )
+    result = controller.execute(item)
+
+    align_transition = workbench.prepare_align_commit(
+        translation_mm=(1.0, 0.0, 0.0),
+        rotation_deg=(0.0, 0.0, 0.0),
+        scale=1.0,
+        pivot_mm=(0.0, 0.0, 0.0),
+        operator="pytest",
+        created_at=STAMP,
+        revision_id="align:changed",
+    )
+    assert align_transition is not None
+    _headless_publisher(workbench)(align_transition)
+
+    with pytest.raises(StaleMeasurementOperationError, match="stale"):
+        controller.publish_result(item, result, _headless_publisher(workbench))
+
+    current = workbench.snapshot.session
+    assert current is not None
+    assert "record:late" not in current.document.record_index
+    assert controller.summary(item).state is MeasurementOperationState.STALE
+
+
+def test_align_change_then_undo_does_not_revive_a_revoked_result() -> None:
+    workbench = ArtifactWorkbench(session=_session(), id_factory=SequentialIds())
+    controller = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
+    item = controller.begin_cutline(
+        _cutline_frame(),
+        record_id="record:no-revival",
+        created_at=STAMP,
+        operator="pytest",
+    )
+    result = controller.execute(item)
+
+    changed = workbench.prepare_align_commit(
+        translation_mm=(2.0, 0.0, 0.0),
+        rotation_deg=(0.0, 0.0, 0.0),
+        scale=1.0,
+        pivot_mm=(0.0, 0.0, 0.0),
+        operator="pytest",
+        created_at=STAMP,
+        revision_id="align:temporary-change",
+    )
+    assert changed is not None
+    _headless_publisher(workbench)(changed)
+    assert controller.summary(item).state is MeasurementOperationState.STALE
+
+    undo = workbench.prepare_activate_parent_align()
+    _headless_publisher(workbench)(undo)
+    current = workbench.snapshot.session
+    assert current is not None
+    assert current.document.active_align_revision_id == "align:confirmed"
+    with pytest.raises(StaleMeasurementOperationError, match="stale"):
+        controller.publish_result(item, result, _headless_publisher(workbench))
+    assert "record:no-revival" not in current.document.record_index
+
+
+def test_cancel_revokes_a_computed_result_and_releases_record_reservation() -> None:
+    workbench = ArtifactWorkbench(session=_session(), id_factory=SequentialIds())
+    controller = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
+    item = controller.begin_cutline(
+        _cutline_frame(),
+        record_id="record:reusable",
+        created_at=STAMP,
+        operator="pytest",
+    )
+    result = controller.execute(item)
+    summary = controller.cancel(item)
+    assert summary.state is MeasurementOperationState.CANCELLED
+
+    with pytest.raises(StaleMeasurementOperationError, match="stale"):
+        controller.publish_result(item, result, _headless_publisher(workbench))
+
+    replacement = controller.begin_cutline(
+        _cutline_frame(),
+        record_id="record:reusable",
+        created_at=STAMP,
+        operator="pytest",
+    )
+    assert replacement is not item
+    controller.cancel(replacement)
+
+
+def test_duplicate_active_record_reservation_is_atomic() -> None:
+    workbench = ArtifactWorkbench(session=_session())
+    controller = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
+    first = controller.begin_cutline(
+        _cutline_frame(),
+        record_id="record:collision",
+    )
+
+    with pytest.raises(ArtifactMeasurementError, match="reserved"):
+        controller.begin_outline(
+            "front",
+            precision_grid_mm=0.01,
+            record_id="record:collision",
+        )
+
+    assert len(controller.active_summaries) == 1
+    assert controller.active_summaries[0].operation_id == first.id
+    controller.cancel(first)
+
+
+def test_controllers_share_record_reservations_for_one_workbench() -> None:
+    workbench = ArtifactWorkbench(session=_session())
+    first = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
+    second = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
+    item = first.begin_cutline(
+        _cutline_frame(),
+        record_id="record:shared-reservation",
+        created_at=STAMP,
+    )
+
+    with pytest.raises(ArtifactMeasurementError, match="is reserved by"):
+        second.begin_outline(
+            "top",
+            precision_grid_mm=0.01,
+            record_id="record:shared-reservation",
+            created_at=STAMP,
+        )
+
+    assert second.active_summaries == first.active_summaries
+    first.cancel(item)
+    replacement = second.begin_outline(
+        "top",
+        precision_grid_mm=0.01,
+        record_id="record:shared-reservation",
+        created_at=STAMP,
+    )
+    second.cancel(replacement)
+
+
+def test_record_reservation_rejects_every_existing_durable_namespace() -> None:
+    session = _session()
+    durable_ids = (
+        next(iter(session.document.source_asset_index)),
+        next(iter(session.document.geometry_revision_index)),
+        next(iter(session.document.source_metadata_revision_index)),
+        next(iter(session.document.align_revision_index)),
+    )
+    workbench = ArtifactWorkbench(session=session)
+    controller = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
+
+    for durable_id in durable_ids:
+        with pytest.raises(ArtifactMeasurementError, match="durable document ID"):
+            controller.begin_cutline(
+                _cutline_frame(),
+                record_id=durable_id,
+            )
+
+    assert controller.active_summaries == ()
+
+
+def test_forged_operation_id_is_rejected_without_consuming_valid_result() -> None:
+    workbench = ArtifactWorkbench(session=_session(), id_factory=SequentialIds())
+    controller = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
+    item = controller.begin_cutline(
+        _cutline_frame(),
+        record_id="record:forgery-test",
+        created_at=STAMP,
+        operator="pytest",
+    )
+    result = controller.execute(item)
+    forged = replace(result, operation_id="operation:other")
+
+    with pytest.raises(ArtifactMeasurementError, match="exact result capability"):
+        controller.publish_result(item, forged, _headless_publisher(workbench))
+
+    assert controller.summary(item).state is MeasurementOperationState.RUNNING
+    controller.publish_result(item, result, _headless_publisher(workbench))
+    assert controller.summary(item).state is MeasurementOperationState.COMPLETED
+
+
+def test_standalone_computation_cannot_forge_controller_result_capability() -> None:
+    workbench = ArtifactWorkbench(session=_session(), id_factory=SequentialIds())
+    controller = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
+    item = controller.begin_cutline(
+        _cutline_frame(),
+        record_id="record:capability",
+        created_at=STAMP,
+        operator="pytest",
+    )
+    untrusted = execute_measurement_work_item(item)
+
+    with pytest.raises(ArtifactMeasurementError, match="exact result capability"):
+        controller.publish_result(item, untrusted, _headless_publisher(workbench))
+
+    trusted = controller.execute(item)
+    controller.publish_result(item, trusted, _headless_publisher(workbench))
+    assert controller.summary(item).state is MeasurementOperationState.COMPLETED
+
+
+def test_invalid_created_at_fails_before_registration() -> None:
+    workbench = ArtifactWorkbench(session=_session())
+    controller = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
+
+    with pytest.raises(ArtifactMeasurementError, match="canonical UTC seconds"):
+        controller.begin_cutline(
+            _cutline_frame(),
+            record_id="record:bad-time",
+            created_at="not-a-timestamp",
+        )
+
+    assert controller.active_summaries == ()
+
+
+def test_publication_rollback_keeps_result_retryable_and_reserved() -> None:
+    workbench = ArtifactWorkbench(session=_session(), id_factory=SequentialIds())
+    controller = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
+    item = controller.begin_cutline(
+        _cutline_frame(),
+        record_id="record:retry",
+        created_at=STAMP,
+        operator="pytest",
+    )
+    result = controller.execute(item)
+
+    def rejected(_transition) -> None:
+        raise RuntimeError("injected scene preparation failure")
+
+    with pytest.raises(RuntimeError, match="injected"):
+        controller.publish_result(item, result, rejected)
+
+    assert controller.summary(item).state is MeasurementOperationState.RUNNING
+    controller.publish_result(item, result, _headless_publisher(workbench))
+    assert controller.summary(item).state is MeasurementOperationState.COMPLETED
+
+
+def test_pending_open_keeps_result_retryable_until_open_is_resolved() -> None:
+    workbench = ArtifactWorkbench(session=_session(), id_factory=SequentialIds())
+    controller = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
+    item = controller.begin_cutline(
+        _cutline_frame(),
+        record_id="record:pending-open-retry",
+        created_at=STAMP,
+        operator="pytest",
+    )
+    result = controller.execute(item)
+    ticket = workbench.begin_new_import(
+        "/source/next.ply",
+        ConfirmedSourceMetadata(
+            unit="cm",
+            source_x="+X",
+            source_y="+Y",
+            source_z="+Z",
+            handedness="right",
+        ),
+        software_version="0.1.0",
+        operator="pytest",
+    )
+
+    with pytest.raises(WorkflowBusyError, match="Open request is pending"):
+        controller.publish_result(item, result, _headless_publisher(workbench))
+
+    assert controller.summary(item).state is MeasurementOperationState.RUNNING
+    workbench.cancel_load(ticket)
+    with pytest.raises(ArtifactMeasurementError, match="is reserved by"):
+        controller.begin_outline(
+            "top",
+            precision_grid_mm=0.01,
+            record_id="record:pending-open-retry",
+            created_at=STAMP,
+        )
+
+    controller.publish_result(item, result, _headless_publisher(workbench))
+    assert controller.summary(item).state is MeasurementOperationState.COMPLETED
+
+
+def test_same_align_external_commit_causes_automatic_rebase_retry() -> None:
+    workbench = ArtifactWorkbench(session=_session(), id_factory=SequentialIds())
+    first = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
+    external = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
+    first_item = first.begin_cutline(
+        _cutline_frame(),
+        record_id="record:first",
+        created_at=STAMP,
+        operator="pytest",
+    )
+    external_item = external.begin_outline(
+        "top",
+        precision_grid_mm=0.01,
+        record_id="record:external",
+        created_at=STAMP,
+        operator="pytest",
+    )
+    first_result = first.execute(first_item)
+    external_result = external.execute(external_item)
+    calls = 0
+
+    def racing_publisher(transition) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            external.publish_result(
+                external_item,
+                external_result,
+                _headless_publisher(workbench),
+            )
+        _headless_publisher(workbench)(transition)
+
+    first.publish_result(first_item, first_result, racing_publisher)
+
+    current = workbench.snapshot.session
+    assert current is not None
+    assert calls == 2
+    assert set(current.document.record_index) == {
+        "record:first",
+        "record:external",
+    }
+
+
+def test_publisher_leaving_tentative_authority_fails_closed_without_busy_lock() -> None:
+    workbench = ArtifactWorkbench(session=_session(), id_factory=SequentialIds())
+    controller = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
+    item = controller.begin_cutline(
+        _cutline_frame(),
+        record_id="record:tentative-fault",
+        created_at=STAMP,
+        operator="pytest",
+    )
+    result = controller.execute(item)
+
+    def broken_publisher(transition) -> None:
+        workbench.activate_projection(transition)
+        raise RuntimeError("publisher crashed after activation")
+
+    with pytest.raises(RuntimeError, match="publisher crashed"):
+        controller.publish_result(item, result, broken_publisher)
+
+    assert workbench.snapshot.faulted
+    assert not workbench.snapshot.tentative
+    assert controller.summary(item).state is MeasurementOperationState.FAILED
+    recovery = workbench.begin_new_import(
+        "/source/recovery.ply",
+        ConfirmedSourceMetadata(
+            unit="cm",
+            source_x="+X",
+            source_y="+Y",
+            source_z="+Z",
+            handedness="right",
+        ),
+        software_version="0.1.0",
+        operator="pytest",
+    )
+    workbench.cancel_load(recovery)
+
+
+def test_unrelated_tentative_transition_is_preserved_and_result_remains_retryable() -> None:
+    workbench = ArtifactWorkbench(session=_session(), id_factory=SequentialIds())
+    controller = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
+    item = controller.begin_cutline(
+        _cutline_frame(),
+        record_id="record:wait-for-align",
+        created_at=STAMP,
+        operator="pytest",
+    )
+    result = controller.execute(item)
+    align = workbench.prepare_align_commit(
+        translation_mm=(3.0, 0.0, 0.0),
+        rotation_deg=(0.0, 0.0, 0.0),
+        scale=1.0,
+        pivot_mm=(0.0, 0.0, 0.0),
+        operator="pytest",
+        created_at=STAMP,
+        revision_id="align:external-tentative",
+    )
+    assert align is not None
+    activation = workbench.activate_projection(align)
+
+    with pytest.raises(WorkflowBusyError, match="publication"):
+        controller.publish_result(item, result, _headless_publisher(workbench))
+
+    assert workbench.snapshot is activation.current
+    assert workbench.snapshot.tentative
+    assert not workbench.snapshot.faulted
+    assert controller.summary(item).state is MeasurementOperationState.RUNNING
+    workbench.rollback_projection(activation, RuntimeError("external scene rejected"))
+    controller.publish_result(item, result, _headless_publisher(workbench))
+    assert controller.summary(item).state is MeasurementOperationState.COMPLETED
+
+
+def test_exception_after_finalize_reports_committed_operation_as_completed() -> None:
+    workbench = ArtifactWorkbench(session=_session(), id_factory=SequentialIds())
+    controller = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
+    item = controller.begin_cutline(
+        _cutline_frame(),
+        record_id="record:committed-before-error",
+        created_at=STAMP,
+        operator="pytest",
+    )
+    result = controller.execute(item)
+
+    def publish_then_raise(transition) -> None:
+        _headless_publisher(workbench)(transition)
+        raise StaleWorkflowOperationError("late callback error")
+
+    publication = controller.publish_result(item, result, publish_then_raise)
+
+    current = workbench.snapshot.session
+    assert current is not None
+    assert publication.record_id == "record:committed-before-error"
+    assert "record:committed-before-error" in current.document.record_index
+    assert controller.summary(item).state is MeasurementOperationState.COMPLETED
+
+
+def test_open_started_after_finalize_does_not_reclassify_committed_result() -> None:
+    workbench = ArtifactWorkbench(session=_session(), id_factory=SequentialIds())
+    controller = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
+    item = controller.begin_cutline(
+        _cutline_frame(),
+        record_id="record:before-open",
+        created_at=STAMP,
+        operator="pytest",
+    )
+    result = controller.execute(item)
+    pending = []
+
+    def publish_then_open(transition) -> None:
+        _headless_publisher(workbench)(transition)
+        pending.append(
+            workbench.begin_new_import(
+                "/source/next.ply",
+                ConfirmedSourceMetadata(
+                    unit="cm",
+                    source_x="+X",
+                    source_y="+Y",
+                    source_z="+Z",
+                    handedness="right",
+                ),
+                software_version="0.1.0",
+                operator="pytest",
+            )
+        )
+
+    publication = controller.publish_result(item, result, publish_then_open)
+
+    assert publication.record_id == "record:before-open"
+    assert controller.summary(item).state is MeasurementOperationState.COMPLETED
+    assert workbench.snapshot.pending_load is pending[0]
+    assert "record:before-open" in publication.session.document.record_index
+    workbench.cancel_load(pending[0])
+
+
+def test_align_finalized_inside_publisher_cannot_return_false_success() -> None:
+    workbench = ArtifactWorkbench(session=_session(), id_factory=SequentialIds())
+    controller = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
+    item = controller.begin_cutline(
+        _cutline_frame(),
+        record_id="record:align-race",
+        created_at=STAMP,
+        operator="pytest",
+    )
+    result = controller.execute(item)
+
+    def publish_then_align(transition) -> None:
+        _headless_publisher(workbench)(transition)
+        changed = workbench.prepare_align_commit(
+            translation_mm=(3.0, 0.0, 0.0),
+            rotation_deg=(0.0, 0.0, 0.0),
+            scale=1.0,
+            pivot_mm=(0.0, 0.0, 0.0),
+            operator="pytest",
+            created_at=STAMP,
+            revision_id="align:after-measurement",
+        )
+        assert changed is not None
+        _headless_publisher(workbench)(changed)
+
+    with pytest.raises(StaleMeasurementOperationError, match="finalized"):
+        controller.publish_result(item, result, publish_then_align)
+
+    current = workbench.snapshot.session
+    assert isinstance(current, ArtifactSession)
+    assert current.document.active_align_revision_id == "align:after-measurement"
+    assert current.document.record_freshness(item.record_id).value == "stale_alignment"
+    assert controller.summary(item).state is MeasurementOperationState.STALE
+
+
+def test_rubbing_preflight_matches_raster_and_enforces_memory_budget() -> None:
+    workbench = ArtifactWorkbench(session=_session(), id_factory=SequentialIds())
+    tiny_budget = ArtifactMeasurementController(
+        workbench,
+        id_factory=SequentialIds(),
+        rubbing_memory_budget_bytes=1,
+    )
+    with pytest.raises(MeasurementResourceLimitError, match="memory estimate"):
+        _begin_rubbing(tiny_budget)
+    assert tiny_budget.active_summaries == ()
+
+    controller = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
+    item = _begin_rubbing(controller)
+    assert item.resource_estimate is not None
+    result = controller.execute(item)
+    assert isinstance(result.computation, ArtifactRubbingComputation)
+    assert item.resource_estimate.width_pixels == result.computation.raster.width_pixels
+    assert item.resource_estimate.height_pixels == result.computation.raster.height_pixels
+    assert item.resource_estimate.pixel_count == (
+        result.computation.raster.width_pixels
+        * result.computation.raster.height_pixels
+    )
+
+    publication = controller.publish_result(
+        item,
+        result,
+        _headless_publisher(workbench),
+    )
+    assert publication.record_id == "record:rubbing:test"
+    assert controller.summary(item).estimated_peak_bytes > 32 * 1024 * 1024
+
+
+def test_rubbing_texture_copy_is_budgeted_before_materialization() -> None:
+    textured_mesh = _box_mesh()
+    textured_mesh.uv_coords = np.zeros((8, 2), dtype=np.float64)
+    textured_mesh.texture = np.zeros((64, 64, 4), dtype=np.uint8)
+    textured_session = _session(source_mesh=textured_mesh)
+    source_mesh = textured_session.source_mesh
+    attribute_bytes = int(
+        source_mesh.uv_coords.nbytes + source_mesh.texture.nbytes  # type: ignore[union-attr]
+    )
+    attribute_peak_bytes = (
+        attribute_bytes * RUBBING_ESTIMATE_MATERIALIZED_ATTRIBUTE_MULTIPLIER
+    )
+    minimum_without_attributes = (
+        RUBBING_ESTIMATE_FIXED_OVERHEAD_BYTES
+        + RUBBING_ESTIMATED_PEAK_BYTES_PER_PIXEL
+        + int(source_mesh.vertices.nbytes + source_mesh.faces.nbytes)
+        * RUBBING_ESTIMATE_GEOMETRY_MULTIPLIER
+    )
+    constrained = ArtifactMeasurementController(
+        ArtifactWorkbench(session=textured_session),
+        id_factory=SequentialIds(),
+        rubbing_memory_budget_bytes=(
+            minimum_without_attributes + attribute_peak_bytes - 1
+        ),
+    )
+
+    with patch.object(
+        ArtifactSession,
+        "materialize",
+        side_effect=AssertionError("materialize must not run before budget rejection"),
+    ) as materialize:
+        with pytest.raises(MeasurementResourceLimitError, match="before projection"):
+            _begin_rubbing(constrained)
+    materialize.assert_not_called()
+    assert constrained.active_summaries == ()
+
+    plain = ArtifactMeasurementController(
+        ArtifactWorkbench(session=_session()),
+        id_factory=SequentialIds(),
+    )
+    textured = ArtifactMeasurementController(
+        ArtifactWorkbench(session=textured_session),
+        id_factory=SequentialIds(),
+    )
+    plain_item = _begin_rubbing(plain, record_id="record:rubbing:plain")
+    with patch.object(
+        ArtifactSession,
+        "materialize",
+        side_effect=AssertionError("begin must finish admission before materialization"),
+    ) as materialize:
+        textured_item = _begin_rubbing(
+            textured,
+            record_id="record:rubbing:textured",
+        )
+    materialize.assert_not_called()
+    assert plain_item.resource_estimate is not None
+    assert textured_item.resource_estimate is not None
+    assert (
+        textured_item.resource_estimate.estimated_peak_bytes
+        - plain_item.resource_estimate.estimated_peak_bytes
+        == attribute_peak_bytes
+    )
+    plain.cancel(plain_item)
+    textured.cancel(textured_item)
+
+
+def test_only_one_active_rubbing_owns_the_raster_budget() -> None:
+    workbench = ArtifactWorkbench(session=_session())
+    controller = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
+    first = _begin_rubbing(controller, record_id="record:rubbing:first")
+
+    with pytest.raises(MeasurementResourceLimitError, match="already owns"):
+        _begin_rubbing(controller, record_id="record:rubbing:second")
+
+    controller.cancel(first)
+    second = _begin_rubbing(controller, record_id="record:rubbing:second")
+    controller.cancel(second)
+
+
+def test_controllers_share_rubbing_admission_for_one_workbench() -> None:
+    workbench = ArtifactWorkbench(session=_session())
+    ids = SequentialIds()
+    first = ArtifactMeasurementController(workbench, id_factory=ids)
+    second = ArtifactMeasurementController(
+        workbench,
+        id_factory=ids,
+        max_active_rubbing_operations=2,
+    )
+    item = _begin_rubbing(first, record_id="record:rubbing:shared-first")
+
+    with pytest.raises(MeasurementResourceLimitError, match="already owns"):
+        _begin_rubbing(second, record_id="record:rubbing:shared-second")
+
+    assert second.active_summaries == first.active_summaries
+    first.cancel(item)
+    replacement = _begin_rubbing(
+        second,
+        record_id="record:rubbing:shared-second",
+    )
+    second.cancel(replacement)
+
+
+def test_cancelled_running_rubbing_keeps_memory_slot_until_worker_exits() -> None:
+    workbench = ArtifactWorkbench(session=_session())
+    controller = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
+    item = _begin_rubbing(controller, record_id="record:rubbing:blocked")
+    started = Event()
+    release = Event()
+    errors: list[BaseException] = []
+
+    def blocked(_item, *, cancellation_probe):
+        started.set()
+        if not release.wait(timeout=2.0):
+            raise RuntimeError("test worker release timed out")
+        if cancellation_probe():
+            raise MeasurementCancelledError("cancelled in blocked extractor")
+        raise AssertionError("blocked worker should have been cancelled")
+
+    def run() -> None:
+        try:
+            controller.execute(item)
+        except BaseException as exc:  # noqa: BLE001 - asserted below
+            errors.append(exc)
+
+    with patch(
+        "src.application.artifact_measurements.execute_measurement_work_item",
+        side_effect=blocked,
+    ):
+        worker = Thread(target=run, daemon=True)
+        worker.start()
+        assert started.wait(timeout=2.0)
+        cancelling = controller.cancel(item)
+        assert cancelling.state is MeasurementOperationState.CANCELLING
+        with pytest.raises(MeasurementResourceLimitError, match="already owns"):
+            _begin_rubbing(controller, record_id="record:rubbing:too-early")
+        release.set()
+        worker.join(timeout=2.0)
+
+    assert not worker.is_alive()
+    assert len(errors) == 1 and isinstance(errors[0], MeasurementCancelledError)
+    assert controller.summary(item).state is MeasurementOperationState.CANCELLED
+    replacement = _begin_rubbing(
+        controller,
+        record_id="record:rubbing:after-worker-exit",
+    )
+    controller.cancel(replacement)
+
+
+def test_execute_claim_is_exactly_once_under_concurrency() -> None:
+    workbench = ArtifactWorkbench(session=_session())
+    controller = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
+    item = _begin_rubbing(controller, record_id="record:rubbing:execute-once")
+    original_execute = execute_measurement_work_item
+    started = Event()
+    release = Event()
+    results = []
+    errors: list[BaseException] = []
+    calls = 0
+
+    def blocked(work_item, *, cancellation_probe):
+        nonlocal calls
+        calls += 1
+        started.set()
+        if not release.wait(timeout=2.0):
+            raise RuntimeError("test worker release timed out")
+        return original_execute(
+            work_item,
+            cancellation_probe=cancellation_probe,
+        )
+
+    def run() -> None:
+        try:
+            results.append(controller.execute(item))
+        except BaseException as exc:  # noqa: BLE001 - asserted below
+            errors.append(exc)
+
+    with patch(
+        "src.application.artifact_measurements.execute_measurement_work_item",
+        side_effect=blocked,
+    ):
+        worker = Thread(target=run, daemon=True)
+        worker.start()
+        assert started.wait(timeout=2.0)
+        with pytest.raises(StaleMeasurementOperationError, match="already been executed"):
+            controller.execute(item)
+        release.set()
+        worker.join(timeout=2.0)
+
+    assert not worker.is_alive()
+    assert calls == 1
+    assert len(results) == 1
+    assert errors == []
+    controller.cancel(item)
+
+
+def test_cumulative_rubbing_estimates_cannot_overbook_configured_budget() -> None:
+    workbench = ArtifactWorkbench(session=_session())
+    ids = SequentialIds()
+    probe = ArtifactMeasurementController(
+        workbench,
+        id_factory=ids,
+        max_active_rubbing_operations=2,
+    )
+    probe_item = _begin_rubbing(probe, record_id="record:rubbing:probe")
+    assert probe_item.resource_estimate is not None
+    estimate = probe_item.resource_estimate.estimated_peak_bytes
+    probe.cancel(probe_item)
+
+    controller = ArtifactMeasurementController(
+        workbench,
+        id_factory=ids,
+        max_active_rubbing_operations=2,
+        rubbing_memory_budget_bytes=estimate * 2 - 1,
+    )
+    first = _begin_rubbing(controller, record_id="record:rubbing:budget-first")
+    with pytest.raises(MeasurementResourceLimitError, match="cumulative"):
+        _begin_rubbing(controller, record_id="record:rubbing:budget-second")
+    assert len(controller.active_summaries) == 1
+    controller.cancel(first)
+
+
+def test_rubbing_admission_honors_every_active_controller_memory_budget() -> None:
+    workbench = ArtifactWorkbench(session=_session())
+    ids = SequentialIds()
+    probe = ArtifactMeasurementController(
+        workbench,
+        id_factory=ids,
+        max_active_rubbing_operations=2,
+    )
+    probe_item = _begin_rubbing(probe, record_id="record:rubbing:owner-probe")
+    assert probe_item.resource_estimate is not None
+    estimate = probe_item.resource_estimate.estimated_peak_bytes
+    probe.cancel(probe_item)
+
+    constrained = ArtifactMeasurementController(
+        workbench,
+        id_factory=ids,
+        max_active_rubbing_operations=2,
+        rubbing_memory_budget_bytes=estimate * 2 - 1,
+    )
+    permissive = ArtifactMeasurementController(
+        workbench,
+        id_factory=ids,
+        max_active_rubbing_operations=3,
+        rubbing_memory_budget_bytes=estimate * 3,
+    )
+    first = _begin_rubbing(
+        constrained,
+        record_id="record:rubbing:owner-budget-first",
+    )
+
+    with pytest.raises(MeasurementResourceLimitError, match="cumulative"):
+        _begin_rubbing(
+            permissive,
+            record_id="record:rubbing:owner-budget-second",
+        )
+
+    assert permissive.active_summaries == constrained.active_summaries
+    constrained.cancel(first)
+
+
+def test_cancellation_probe_discards_result_at_safe_boundary() -> None:
+    workbench = ArtifactWorkbench(session=_session())
+    controller = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
+    item = controller.begin_cutline(
+        _cutline_frame(),
+        record_id="record:cancel-boundary",
+    )
+    probes = iter((False, False, True))
+
+    with pytest.raises(MeasurementCancelledError, match="cancelled"):
+        execute_measurement_work_item(item, cancellation_probe=lambda: next(probes))
+
+    active = workbench.snapshot.session
+    assert isinstance(active, ArtifactSession)
+    assert active is item.captured_session
+    assert active.document.records == ()
+    controller.cancel(item)
+
+
+def test_measurement_application_layer_has_no_qt_opengl_or_gui_imports() -> None:
+    path = Path("src/application/artifact_measurements.py")
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    imported: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.append(node.module)
+    assert not any(
+        name.startswith(("PyQt", "OpenGL", "src.gui")) for name in imported
+    )
+
+
+def test_invalid_cutline_recipe_fails_before_operation_registration() -> None:
+    workbench = ArtifactWorkbench(session=_session())
+    controller = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
+
+    with pytest.raises(Exception, match="at least"):
+        controller.begin_cutline(
+            _cutline_frame(),
+            classification_tolerance_mm=0.1,
+            stitch_tolerance_mm=0.01,
+            record_id="record:invalid",
+        )
+
+    assert controller.active_summaries == ()
+
+
+def test_result_type_validation_is_eager() -> None:
+    workbench = ArtifactWorkbench(session=_session())
+    controller = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
+    item = controller.begin_cutline(
+        _cutline_frame(),
+        record_id="record:type-check",
+    )
+    result = controller.execute(item)
+
+    with pytest.raises(ArtifactMeasurementError, match="result kind"):
+        ArtifactMeasurementResult(
+            operation_id=item.id,
+            kind="digital_rubbing",  # type: ignore[arg-type]
+            computation=result.computation,
+        )
+
+    controller.cancel(item)

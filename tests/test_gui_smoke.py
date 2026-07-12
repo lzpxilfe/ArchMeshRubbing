@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import numpy as np
 
@@ -26,9 +26,12 @@ from app_interactive import (
     _validate_project_source_declarations,
     _verify_loaded_project_source,
 )
+from src.application.artifact_measurements import MeasurementOperationState
 from src.core.artifact_session import ArtifactSession, ArtifactSessionError
 from src.application.artifact_workbench import (
+    ConfirmedSourceMetadata,
     ProjectionTransition,
+    WorkflowBusyError,
     WorkflowStage,
     WorkflowTransitionKind,
 )
@@ -37,7 +40,6 @@ from src.core.artifact_rubbing_export import (
     validate_rubbing_export_package,
 )
 from src.core.artifact_rubbing_extractor import (
-    ArtifactRubbingError,
     DEFAULT_RUBBING_BLACK_POINT_UM,
     DEFAULT_RUBBING_DEPTH_QUANTIZATION_UM,
     DEFAULT_RUBBING_INK_STRENGTH_PERCENT,
@@ -45,10 +47,17 @@ from src.core.artifact_rubbing_extractor import (
     DEFAULT_RUBBING_PIXELS_PER_MM,
     DEFAULT_RUBBING_POLARITY,
     DEFAULT_RUBBING_REFERENCE_RADIUS_UM,
+    commit_artifact_rubbing,
+    compute_artifact_rubbing,
 )
 from src.core.artifact_rubbing_record import rubbing_receipt_from_record
 from src.core.artifact_vector_export import validate_vector_export_package
-from src.core.artifact_vector_extractor import extract_cutline_geometry
+from src.core.artifact_outline_extractor import compute_artifact_outline
+from src.core.artifact_vector_extractor import (
+    commit_vector_computation,
+    compute_artifact_cutline,
+    extract_cutline_geometry,
+)
 from src.core.artifact_vector_record import PlanarFrame
 from src.core.project_file import (
     ARTIFACT_PAYLOAD_TYPE,
@@ -171,6 +180,31 @@ def _projected_scene_object(session: ArtifactSession) -> SceneObject:
     return obj
 
 
+def _capture_measurement_publication(
+    window: MainWindow,
+    captured: dict[str, object],
+):
+    """Simulate the controller half of the patched GUI scene publisher."""
+
+    def capture(candidate: ArtifactSession, **kwargs) -> None:
+        transition = kwargs.get("workflow_transition")
+        assert isinstance(transition, ProjectionTransition)
+        assert transition.candidate_session is candidate
+        controller = window._artifact_workbench_controller()
+        activation = controller.activate_projection(transition)
+        window._artifact_session = candidate
+        controller.finalize_projection(activation)
+        captured["session"] = candidate
+        captured["transition"] = transition
+        captured["kwargs"] = {
+            key: value
+            for key, value in kwargs.items()
+            if key != "workflow_transition"
+        }
+
+    return capture
+
+
 def _reloaded_source_mesh(
     session: ArtifactSession,
     *,
@@ -200,6 +234,106 @@ def test_main_window_constructs_offscreen() -> None:
     finally:
         # Avoid MainWindow.closeEvent(), which intentionally asks the user to
         # confirm application exit and would block an offscreen test runner.
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_late_task_finished_signal_cannot_clear_new_thread_or_dialog() -> None:
+    class FakeSignal:
+        def __init__(self) -> None:
+            self.callbacks = []
+
+        def connect(self, callback) -> None:
+            self.callbacks.append(callback)
+
+        def emit(self, *args) -> None:
+            for callback in tuple(self.callbacks):
+                callback(*args)
+
+    class FakeThread:
+        def __init__(self) -> None:
+            self.done = FakeSignal()
+            self.failed = FakeSignal()
+            self.finished = FakeSignal()
+            self.running = False
+            self.deleted = False
+
+        def isRunning(self) -> bool:
+            return self.running
+
+        def start(self) -> None:
+            self.running = True
+
+        def deleteLater(self) -> None:
+            self.deleted = True
+
+    class FakeDialog:
+        instances = []
+
+        def __init__(self, *_args) -> None:
+            self.closed = False
+            self.instances.append(self)
+
+        def setWindowTitle(self, _value) -> None:
+            pass
+
+        def setWindowModality(self, _value) -> None:
+            pass
+
+        def setCancelButton(self, _value) -> None:
+            pass
+
+        def setMinimumDuration(self, _value) -> None:
+            pass
+
+        def show(self) -> None:
+            pass
+
+        def close(self) -> None:
+            self.closed = True
+
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    window = MainWindow()
+    first = FakeThread()
+    second = FakeThread()
+    try:
+        with (
+            patch("app_interactive.QProgressDialog", FakeDialog),
+            patch.object(window, "_status_task_begin"),
+            patch.object(window, "_status_task_end"),
+        ):
+            assert window._start_task(
+                title="first",
+                label="first",
+                thread=first,  # type: ignore[arg-type]
+                on_done=Mock(),
+            )
+            first_dialog = window._task_dialog
+            first.running = False
+            first.done.emit("done")
+
+            assert window._start_task(
+                title="second",
+                label="second",
+                thread=second,  # type: ignore[arg-type]
+                on_done=Mock(),
+            )
+            second_dialog = window._task_dialog
+            assert second_dialog is not first_dialog
+
+            first.finished.emit()
+            assert first.deleted
+            assert window._task_thread is second
+            assert window._task_dialog is second_dialog
+            assert second_dialog is not None and not second_dialog.closed
+
+            second.running = False
+            second.done.emit("done")
+            second.finished.emit()
+    finally:
         window.deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         app.processEvents()
@@ -828,15 +962,11 @@ def test_native_cutline_command_commits_record_previews_and_exports_offline() ->
     window.viewport.selected_index = 0
     captured: dict[str, object] = {}
     try:
-        def capture(candidate, **kwargs):
-            captured["session"] = candidate
-            captured["kwargs"] = kwargs
-
         with (
             patch.object(
                 window,
                 "_publish_artifact_session_projection",
-                side_effect=capture,
+                side_effect=_capture_measurement_publication(window, captured),
             ),
             patch.object(window.viewport, "set_native_vector_preview") as preview,
             patch.object(window, "_sync_native_cutline_controls"),
@@ -883,6 +1013,298 @@ def test_native_cutline_command_commits_record_previews_and_exports_offline() ->
         app.processEvents()
 
 
+def test_retryable_native_publication_is_queued_and_reuses_exact_result() -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    session = _artifact_box_session()
+    window = MainWindow()
+    window._artifact_session = session
+    window.viewport.objects = [_projected_scene_object(session)]
+    window.viewport.selected_index = 0
+    window._sync_native_cutline_controls(reset_offset=True)
+    controller = window._artifact_measurement_controller()
+    item = controller.begin_cutline(
+        _native_cutline_frame("top", 0.0),
+        record_id="record:gui-retry",
+        created_at="2026-07-11T00:00:01Z",
+        operator="pytest",
+    )
+    result = controller.execute(item)
+    captured: dict[str, object] = {}
+    capture = _capture_measurement_publication(window, captured)
+    attempt_count = 0
+
+    def fail_once(candidate: ArtifactSession, **kwargs) -> None:
+        nonlocal attempt_count
+        attempt_count += 1
+        if attempt_count == 1:
+            raise RuntimeError("temporary scene preparation failure")
+        capture(candidate, **kwargs)
+
+    try:
+        with patch.object(
+            window,
+            "_publish_artifact_session_projection",
+            side_effect=fail_once,
+        ):
+            with pytest.raises(RuntimeError, match="temporary scene"):
+                window._publish_native_measurement_result(item, result)
+
+            assert controller.summary(item).state is MeasurementOperationState.RUNNING
+            assert window._pending_native_measurement_publications[item.id] == (
+                item,
+                result,
+            )
+            assert window.section_panel.btn_native_measurement_retry.isEnabled()
+            with pytest.raises(ProjectSerializationError, match="실측 작업"):
+                window._validate_native_scene_for_save(session)
+
+            window.on_native_measurement_retry_requested()
+
+        assert controller.summary(item).state is MeasurementOperationState.COMPLETED
+        assert window._pending_native_measurement_publications == {}
+        assert not window.section_panel.btn_native_measurement_retry.isEnabled()
+        committed = captured["session"]
+        assert isinstance(committed, ArtifactSession)
+        assert committed.document.record_index[item.record_id].id == item.record_id
+        assert attempt_count == 2
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_pending_open_retry_button_reenables_after_open_is_cancelled() -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    session = _artifact_box_session()
+    window = MainWindow()
+    window._artifact_session = session
+    window.viewport.objects = [_projected_scene_object(session)]
+    window.viewport.selected_index = 0
+    window._sync_native_cutline_controls(reset_offset=True)
+    controller = window._artifact_measurement_controller()
+    item = controller.begin_cutline(
+        _native_cutline_frame("top", 0.0),
+        record_id="record:gui-pending-open",
+        created_at="2026-07-11T00:00:01Z",
+        operator="pytest",
+    )
+    result = controller.execute(item)
+    workbench = window._artifact_workbench_controller()
+    ticket = workbench.begin_new_import(
+        "/source/replacement.ply",
+        ConfirmedSourceMetadata(
+            unit="cm",
+            source_x="+X",
+            source_y="+Y",
+            source_z="+Z",
+            handedness="right",
+        ),
+        software_version="test",
+        operator="pytest",
+    )
+    window._artifact_load_ticket = ticket
+    window._artifact_load_active = True
+    captured: dict[str, object] = {}
+    try:
+        with pytest.raises(WorkflowBusyError, match="Open request is pending"):
+            window._publish_native_measurement_result(item, result)
+        assert controller.summary(item).state is MeasurementOperationState.RUNNING
+        assert not window.section_panel.btn_native_measurement_retry.isEnabled()
+
+        window._clear_artifact_pending_load(cancel_workbench=True)
+
+        assert workbench.snapshot.pending_load is None
+        assert window.section_panel.btn_native_measurement_retry.isEnabled()
+        with patch.object(
+            window,
+            "_publish_artifact_session_projection",
+            side_effect=_capture_measurement_publication(window, captured),
+        ):
+            window.on_native_measurement_retry_requested()
+        assert controller.summary(item).state is MeasurementOperationState.COMPLETED
+        assert window._pending_native_measurement_publications == {}
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_reopened_project_requires_explicit_durable_record_selection() -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    base = _artifact_box_session()
+    vector_record_id = "record:reopened-cutline"
+    vector_computation = compute_artifact_cutline(
+        base,
+        _native_cutline_frame("top", 0.0),
+    )
+    with_vector = commit_vector_computation(
+        base,
+        vector_computation,
+        record_id=vector_record_id,
+        created_at="2026-07-11T00:00:01Z",
+        operator="pytest",
+    )
+    outline_record_id = "record:reopened-outline"
+    outline_computation = compute_artifact_outline(
+        with_vector,
+        "right",
+        precision_grid_mm=0.01,
+    )
+    with_vectors = commit_vector_computation(
+        with_vector,
+        outline_computation,
+        record_id=outline_record_id,
+        created_at="2026-07-11T00:00:02Z",
+        operator="pytest",
+    )
+    rubbing_record_id = "record:reopened-rubbing"
+    rubbing_computation = compute_artifact_rubbing(
+        with_vectors,
+        "top",
+        pixels_per_mm=2,
+        margin_um=0,
+        reference_radius_um=500,
+        depth_quantization_um=10,
+        black_point_um=100,
+        ink_strength_percent=100,
+        relief_polarity="bidirectional",
+    )
+    reopened = commit_artifact_rubbing(
+        with_vectors,
+        rubbing_computation,
+        record_id=rubbing_record_id,
+        created_at="2026-07-11T00:00:03Z",
+        operator="pytest",
+    )
+    with (
+        patch("app_interactive.DEFAULT_RUBBING_MEMORY_BUDGET_BYTES", 1),
+        patch.object(
+            ArtifactSession,
+            "materialize",
+            side_effect=AssertionError("budget rejection must precede materialize"),
+        ) as materialize,
+        pytest.raises(ArtifactRubbingExportError, match="1 GiB memory budget"),
+    ):
+        MainWindow._recompute_native_rubbing_record(
+            reopened,
+            reopened.document.record_index[rubbing_record_id],
+        )
+    materialize.assert_not_called()
+    window = MainWindow()
+    window._artifact_session = reopened
+    window.viewport.objects = [_projected_scene_object(reopened)]
+    window.viewport.selected_index = 0
+    try:
+        window._sync_native_cutline_controls(reset_offset=True)
+
+        vector_combo = window.section_panel.combo_native_vector_record
+        rubbing_combo = window.section_panel.combo_native_rubbing_record
+        assert vector_combo.count() == 3
+        assert rubbing_combo.count() == 2
+        assert vector_combo.currentData() is None
+        assert rubbing_combo.currentData() is None
+        assert {vector_combo.itemData(index) for index in range(1, 3)} == {
+            vector_record_id,
+            outline_record_id,
+        }
+        assert rubbing_combo.itemData(1) == rubbing_record_id
+        assert window._current_native_vector_record() is None
+        assert window._current_native_rubbing_record() is None
+        assert not window.section_panel.btn_native_vector_export.isEnabled()
+        assert not window.section_panel.btn_native_rubbing_export.isEnabled()
+
+        controller = window._artifact_measurement_controller()
+        budget_owner = controller.begin_cutline(
+            _native_cutline_frame("top", 0.0),
+            record_id="record:preview-budget-owner",
+            created_at="2026-07-11T00:00:04Z",
+            operator="pytest",
+        )
+        with patch.object(window, "_start_task", return_value=True) as blocked_task:
+            rubbing_combo.setCurrentIndex(1)
+        blocked_task.assert_not_called()
+        assert rubbing_combo.currentData() is None
+        with pytest.raises(ArtifactRubbingExportError, match="raster memory budget"):
+            window._export_native_rubbing_record(
+                "/tmp/blocked-rubbing.amr-rubbing",
+                record_id=rubbing_record_id,
+            )
+        controller.cancel(budget_owner)
+
+        vector_combo.setCurrentIndex(vector_combo.findData(outline_record_id))
+        selected_vector = window._current_native_vector_record()
+        assert selected_vector is not None
+        assert selected_vector.id == outline_record_id
+        assert window.viewport.native_vector_preview_record_id == outline_record_id
+        assert (
+            window._native_vector_preview_document_id
+            == reopened.document.document_id
+        )
+        assert window.section_panel.btn_native_vector_export.isEnabled()
+
+        with patch.object(window, "_start_task", return_value=True) as start_task:
+            rubbing_combo.setCurrentIndex(1)
+        preview_thread = start_task.call_args.kwargs["thread"]
+        assert isinstance(preview_thread, TaskThread)
+        assert preview_thread._task_name == "native_rubbing_record_preview"
+        assert window._current_native_rubbing_record() is None
+        assert not window.section_panel.btn_native_rubbing_export.isEnabled()
+
+        raster = preview_thread._fn()
+        start_task.call_args.kwargs["on_done"](raster)
+        selected_rubbing = window._current_native_rubbing_record()
+        assert selected_rubbing is not None
+        assert selected_rubbing.id == rubbing_record_id
+        assert window._native_rubbing_preview_record_id == rubbing_record_id
+        assert (
+            window._native_rubbing_preview_document_id
+            == reopened.document.document_id
+        )
+        assert window.section_panel.label_native_rubbing_preview.pixmap() is not None
+        assert window.section_panel.btn_native_rubbing_export.isEnabled()
+
+        rubbing_combo.setCurrentIndex(0)
+        with patch.object(window, "_start_task", return_value=True) as late_task:
+            rubbing_combo.setCurrentIndex(1)
+        late_preview_done = late_task.call_args.kwargs["on_done"]
+
+        stale = reopened.commit_preview(
+            translation_mm=(1.0, 0.0, 0.0),
+            rotation_deg=(0.0, 0.0, 0.0),
+            scale=1.0,
+            operator="pytest",
+            created_at="2026-07-11T00:00:05Z",
+            revision_id="align:reopened-stale",
+        )
+        window._artifact_session = stale
+        window.viewport.objects = [_projected_scene_object(stale)]
+        window.viewport.selected_index = 0
+        window._sync_native_cutline_controls(reset_offset=False)
+        assert vector_combo.count() == 1
+        assert rubbing_combo.count() == 1
+        assert vector_combo.currentData() is None
+        assert rubbing_combo.currentData() is None
+        assert window._current_native_vector_record() is None
+        assert window._current_native_rubbing_record() is None
+        assert not window.section_panel.btn_native_vector_export.isEnabled()
+        assert not window.section_panel.btn_native_rubbing_export.isEnabled()
+
+        late_preview_done(raster)
+        assert window._current_native_rubbing_record() is None
+        assert rubbing_combo.currentData() is None
+        assert not window.section_panel.btn_native_rubbing_export.isEnabled()
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
 def test_native_outline_ui_exposes_six_views_and_explicit_mm_grid() -> None:
     app = QApplication.instance()
     if app is None:
@@ -907,6 +1329,54 @@ def test_native_outline_ui_exposes_six_views_and_explicit_mm_grid() -> None:
         app.processEvents()
 
 
+def test_cutline_and_outline_handlers_dispatch_computation_to_task_threads() -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    session = _artifact_box_session()
+    window = MainWindow()
+    window._artifact_session = session
+    window.viewport.objects = [_projected_scene_object(session)]
+    window.viewport.selected_index = 0
+    controller = Mock()
+    cutline_item = object()
+    outline_item = object()
+    controller.begin_cutline.return_value = cutline_item
+    controller.begin_outline.return_value = outline_item
+    controller.execute.side_effect = ["cutline-result", "outline-result"]
+    try:
+        with (
+            patch.object(
+                window,
+                "_artifact_measurement_controller",
+                return_value=controller,
+            ),
+            patch.object(window, "_start_task", return_value=True) as start_task,
+        ):
+            window.on_native_cutline_requested()
+            cutline_thread = start_task.call_args.kwargs["thread"]
+            assert isinstance(cutline_thread, TaskThread)
+            assert cutline_thread._task_name == "native_cutline"
+            assert cutline_thread._fn() == "cutline-result"
+
+            window.on_native_outline_requested()
+            outline_thread = start_task.call_args.kwargs["thread"]
+            assert isinstance(outline_thread, TaskThread)
+            assert outline_thread._task_name == "native_outline"
+            assert outline_thread._fn() == "outline-result"
+
+        controller.execute.assert_has_calls(
+            [
+                call(cutline_item),
+                call(outline_item),
+            ]
+        )
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
 def test_native_outline_command_commits_verified_record_and_closed_preview() -> None:
     app = QApplication.instance()
     if app is None:
@@ -920,15 +1390,11 @@ def test_native_outline_command_commits_verified_record_and_closed_preview() -> 
     window.viewport.selected_index = 0
     captured: dict[str, object] = {}
     try:
-        def capture(candidate, **kwargs):
-            captured["session"] = candidate
-            captured["kwargs"] = kwargs
-
         with (
             patch.object(
                 window,
                 "_publish_artifact_session_projection",
-                side_effect=capture,
+                side_effect=_capture_measurement_publication(window, captured),
             ),
             patch.object(window.viewport, "set_native_vector_preview") as preview,
             patch.object(window, "_sync_native_cutline_controls"),
@@ -1036,15 +1502,11 @@ def test_native_rubbing_command_commits_previews_and_recomputes_offline_export()
         "relief_polarity": "bidirectional",
     }
     try:
-        def capture(candidate, **kwargs):
-            captured["session"] = candidate
-            captured["kwargs"] = kwargs
-
         with (
             patch.object(
                 window,
                 "_publish_artifact_session_projection",
-                side_effect=capture,
+                side_effect=_capture_measurement_publication(window, captured),
             ),
             patch.object(window, "_preview_native_rubbing") as preview,
             patch.object(window, "_sync_native_cutline_controls"),
@@ -1120,62 +1582,36 @@ def test_native_rubbing_handler_uses_worker_and_late_result_cannot_overwrite_ses
     window.viewport.objects = [_projected_scene_object(session)]
     window.viewport.selected_index = 0
     try:
-        with (
-            patch.object(window, "_start_task", return_value=True) as start_task,
-            patch("app_interactive.compute_artifact_rubbing") as compute,
-        ):
+        with patch.object(window, "_start_task", return_value=True) as start_task:
             window.on_native_rubbing_requested()
-        compute.assert_not_called()
         assert start_task.call_count == 1
-        assert isinstance(start_task.call_args.kwargs["thread"], TaskThread)
+        thread = start_task.call_args.kwargs["thread"]
+        assert isinstance(thread, TaskThread)
+        result = thread._fn()
 
-        options = {
-            "view": "top",
-            "pixels_per_mm": 2,
-            "margin_um": 0,
-            "reference_radius_um": 500,
-            "depth_quantization_um": 10,
-            "black_point_um": 100,
-            "ink_strength_percent": 100,
-            "relief_polarity": "bidirectional",
-        }
-        result = window._compute_and_commit_native_rubbing_session(
-            session,
-            options=options,
-            record_id="record:late-rubbing",
-            created_at="2026-07-11T00:00:04Z",
-            operator="pytest",
-        )
-        concurrent, _computation = window._compute_and_commit_native_rubbing_session(
-            session,
-            options=options,
-            record_id="record:concurrent-rubbing",
-            created_at="2026-07-11T00:00:04Z",
-            operator="pytest",
-        )
-        window._artifact_session = concurrent
-        with (
-            patch.object(window, "_publish_artifact_session_projection") as publish,
-            pytest.raises(ArtifactRubbingError, match="late"),
-        ):
-            window._publish_native_rubbing_result(session, result)
-        publish.assert_not_called()
-        assert "record:concurrent-rubbing" in window._artifact_session.document.record_index
-
-        window._artifact_session = session.commit_preview(
+        controller = window._artifact_workbench_controller()
+        align = controller.prepare_align_commit(
             translation_mm=(1.0, 0.0, 0.0),
             rotation_deg=(0.0, 0.0, 0.0),
             scale=1.0,
+            pivot_mm=(0.0, 0.0, 0.0),
             operator="pytest",
             created_at="2026-07-11T00:00:05Z",
             revision_id="align:late-rubbing",
         )
+        assert align is not None
+        activation = controller.activate_projection(align)
+        controller.finalize_projection(activation)
+        window._artifact_session = align.candidate_session
+
         with (
             patch.object(window, "_publish_artifact_session_projection") as publish,
-            pytest.raises(ArtifactRubbingError, match="late"),
+            patch.object(QMessageBox, "warning") as warning,
         ):
-            window._publish_native_rubbing_result(session, result)
+            start_task.call_args.kwargs["on_done"](result)
         publish.assert_not_called()
+        warning.assert_called_once()
+        assert window._artifact_session.document.records == ()
         assert window._artifact_session.document.active_align_revision_id == (
             "align:late-rubbing"
         )
@@ -1301,18 +1737,20 @@ def test_native_rubbing_worker_accepts_a_new_record_sorted_before_existing_ids()
     if app is None:
         app = QApplication([])
     base = _artifact_box_session()
-    existing, _computation = MainWindow._compute_and_commit_native_rubbing_session(
+    computation = compute_artifact_rubbing(
         base,
-        options={
-            "view": "top",
-            "pixels_per_mm": 2,
-            "margin_um": 0,
-            "reference_radius_um": 500,
-            "depth_quantization_um": 10,
-            "black_point_um": 100,
-            "ink_strength_percent": 100,
-            "relief_polarity": "bidirectional",
-        },
+        "top",
+        pixels_per_mm=2,
+        margin_um=0,
+        reference_radius_um=500,
+        depth_quantization_um=10,
+        black_point_um=100,
+        ink_strength_percent=100,
+        relief_polarity="bidirectional",
+    )
+    existing = commit_artifact_rubbing(
+        base,
+        computation,
         record_id="record:rubbing:z-existing",
         created_at="2026-07-11T00:00:03Z",
         operator="pytest",
@@ -1324,15 +1762,11 @@ def test_native_rubbing_worker_accepts_a_new_record_sorted_before_existing_ids()
     window.viewport.selected_index = 0
     captured: dict[str, object] = {}
     try:
-        def capture(candidate, **kwargs):
-            captured["session"] = candidate
-            captured["kwargs"] = kwargs
-
         with (
             patch.object(
                 window,
                 "_publish_artifact_session_projection",
-                side_effect=capture,
+                side_effect=_capture_measurement_publication(window, captured),
             ),
             patch.object(window, "_preview_native_rubbing"),
             patch.object(window, "_sync_native_cutline_controls"),
@@ -1363,6 +1797,8 @@ def test_native_rubbing_worker_accepts_a_new_record_sorted_before_existing_ids()
         assert captured["kwargs"]["expected_new_record_ids"] == (
             "record:rubbing:a-new",
         )
+        assert window._latest_native_rubbing_record().id == "record:rubbing:a-new"
+        assert window._current_native_rubbing_record() is None
     finally:
         window.deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)

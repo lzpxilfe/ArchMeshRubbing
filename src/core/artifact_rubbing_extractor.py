@@ -18,6 +18,7 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
+from .alignment_utils import require_affine_matrix4x4
 from .artifact_document import OperationContext, canonical_recipe_hash
 from .artifact_outline_extractor import OutlineView, outline_frame
 from .artifact_scene_adapter import ArtifactProjectionSnapshot
@@ -53,12 +54,50 @@ MAX_RUBBING_GRID_INDEX = 2**48
 MAX_RUBBING_DEPTH_TICKS = 2**40
 MAX_RUBBING_INTEGRAL_SUM = 2**62
 RASTER_ROW_BLOCK_SIZE = 128
+RUBBING_ESTIMATED_PEAK_BYTES_PER_PIXEL = 96
+RUBBING_ESTIMATE_FIXED_OVERHEAD_BYTES = 32 * 1024 * 1024
+# Source/session projection, float64 relative/projected/depth/local arrays,
+# face widening, validator temporaries, and result ownership can coexist.  The
+# multiplier is deliberately conservative for tiny rasters with millions of
+# unreferenced vertices, where a per-pixel estimate alone is misleading.
+RUBBING_ESTIMATE_GEOMETRY_MULTIPLIER = 8
+# ``ArtifactSceneAdapter.materialize`` keeps the immutable source attributes
+# alive while allocating disjoint UV/texture copies for the projection.  Count
+# both resident arrays so admission remains conservative even though Digital
+# Rubbing itself does not consume texture data.
+RUBBING_ESTIMATE_MATERIALIZED_ATTRIBUTE_MULTIPLIER = 2
 
 _SUPPORTED_POLARITIES = frozenset({"raised", "incised", "bidirectional"})
 
 
 class ArtifactRubbingError(ValueError):
     """An authoritative Digital Rubbing result cannot be produced safely."""
+
+
+@dataclass(frozen=True, slots=True)
+class DigitalRubbingResourceEstimate:
+    """Conservative preflight estimate without allocating raster-sized arrays."""
+
+    width_pixels: int
+    height_pixels: int
+    pixel_count: int
+    vertex_count: int
+    face_count: int
+    estimated_peak_bytes: int
+
+    def __post_init__(self) -> None:
+        values = {
+            "width_pixels": self.width_pixels,
+            "height_pixels": self.height_pixels,
+            "pixel_count": self.pixel_count,
+            "vertex_count": self.vertex_count,
+            "face_count": self.face_count,
+            "estimated_peak_bytes": self.estimated_peak_bytes,
+        }
+        if any(type(value) is not int or value <= 0 for value in values.values()):
+            raise ArtifactRubbingError(
+                "Digital Rubbing resource estimate values must be positive integers"
+            )
 
 
 def _strict_int(
@@ -82,6 +121,30 @@ def _ceil_div(numerator: int, denominator: int) -> int:
     if numerator < 0 or denominator <= 0:
         raise ArtifactRubbingError("internal integer scale conversion is invalid")
     return (numerator + denominator - 1) // denominator
+
+
+def rubbing_materialized_attribute_bytes(
+    *,
+    uv_coords: np.ndarray | None,
+    texture: np.ndarray | None,
+) -> int:
+    """Return UV/texture storage copied by scene materialization, without copying.
+
+    The application calls this against the immutable source mesh before
+    ``materialize()`` so a texture that cannot fit the configured memory budget
+    is rejected before a second large allocation is attempted.
+    """
+
+    total = 0
+    for field_name, value in (("uv_coords", uv_coords), ("texture", texture)):
+        if value is None:
+            continue
+        if not isinstance(value, np.ndarray) or value.dtype.hasobject:
+            raise ArtifactRubbingError(
+                f"{field_name} must be a non-object NumPy array for resource estimation"
+            )
+        total += int(value.nbytes)
+    return total
 
 
 def _view(value: object) -> OutlineView:
@@ -726,6 +789,108 @@ def extract_digital_rubbing(
     return raster, qc
 
 
+def estimate_digital_rubbing_resources(
+    vertices_world_mm: object,
+    faces: object,
+    recipe: Mapping[str, Any],
+    *,
+    source_to_world_mm_matrix4x4: (
+        np.ndarray
+        | list[list[float]]
+        | tuple[tuple[float, ...], ...]
+        | None
+    ) = None,
+    uv_coords: np.ndarray | None = None,
+    texture: np.ndarray | None = None,
+) -> DigitalRubbingResourceEstimate:
+    """Estimate raster dimensions and peak memory before starting heavy work.
+
+    The byte estimate intentionally over-approximates the current pair of
+    float64 depth buffers, integer relief intermediates, integral images,
+    masks, output raster, row-block temporaries, and geometry copies.  It is an
+    admission-control estimate rather than a promise about allocator RSS.
+    """
+
+    validated = validate_rubbing_recipe(recipe)
+    vertices, face_array = _validated_mesh_arrays(vertices_world_mm, faces)
+    if vertices.shape[0] > MAX_RUBBING_VERTICES:
+        raise ArtifactRubbingError("rubbing exceeds the vertex safety limit")
+    if face_array.shape[0] > MAX_RUBBING_FACES:
+        raise ArtifactRubbingError("rubbing exceeds the face safety limit")
+
+    frame = outline_frame(_view(validated["view"]))
+    pixel_policy = validated["pixel_policy"]
+    assert isinstance(pixel_policy, Mapping)
+    pixels_per_mm = int(pixel_policy["pixels_per_mm"])
+    margin_pixels = int(pixel_policy["margin_pixels"])
+
+    referenced = np.unique(face_array.reshape(-1))
+    origin = np.asarray(frame.origin_world_mm, dtype=np.float64)
+    u_axis = np.asarray(frame.u_axis_world, dtype=np.float64)
+    v_axis = np.asarray(frame.v_axis_world, dtype=np.float64)
+    # Preflight must not allocate projection arrays for millions of unused
+    # vertices. Execution still accounts for all geometry in the conservative
+    # byte estimate, while physical artboard bounds need referenced vertices.
+    referenced_vertices = vertices[referenced]
+    if source_to_world_mm_matrix4x4 is not None:
+        try:
+            projection_matrix = require_affine_matrix4x4(
+                source_to_world_mm_matrix4x4,
+                field_name="source_to_world_mm_matrix4x4",
+            )
+        except (TypeError, ValueError) as exc:
+            raise ArtifactRubbingError(str(exc)) from exc
+        referenced_vertices = (
+            referenced_vertices @ projection_matrix[:3, :3].T
+            + projection_matrix[:3, 3]
+        )
+    relative = referenced_vertices - origin
+    scaled = np.column_stack((relative @ u_axis, relative @ v_axis)) * float(
+        pixels_per_mm
+    )
+    if not np.isfinite(scaled).all():
+        raise ArtifactRubbingError("rubbing projection contains non-finite coordinates")
+    if float(np.max(np.abs(scaled))) > MAX_RUBBING_GRID_INDEX:
+        raise ArtifactRubbingError("rubbing projection exceeds the pixel-grid safety range")
+
+    content_min_u = math.floor(float(np.min(scaled[:, 0])))
+    content_max_u = math.ceil(float(np.max(scaled[:, 0])))
+    content_min_v = math.floor(float(np.min(scaled[:, 1])))
+    content_max_v = math.ceil(float(np.max(scaled[:, 1])))
+    width = content_max_u - content_min_u + 2 * margin_pixels
+    height = content_max_v - content_min_v + 2 * margin_pixels
+    if width <= 0 or height <= 0:
+        raise ArtifactRubbingError("rubbing artboard has zero physical extent")
+    if width > MAX_RUBBING_DIMENSION or height > MAX_RUBBING_DIMENSION:
+        raise ArtifactRubbingError("rubbing artboard exceeds the dimension safety limit")
+    pixel_count = width * height
+    if pixel_count > MAX_RUBBING_PIXELS:
+        raise ArtifactRubbingError(
+            "rubbing artboard exceeds the pixel safety limit; choose a lower physical resolution"
+        )
+
+    geometry_bytes = int(vertices.nbytes + face_array.nbytes)
+    materialized_attribute_bytes = rubbing_materialized_attribute_bytes(
+        uv_coords=uv_coords,
+        texture=texture,
+    )
+    estimated_peak_bytes = (
+        pixel_count * RUBBING_ESTIMATED_PEAK_BYTES_PER_PIXEL
+        + geometry_bytes * RUBBING_ESTIMATE_GEOMETRY_MULTIPLIER
+        + materialized_attribute_bytes
+        * RUBBING_ESTIMATE_MATERIALIZED_ATTRIBUTE_MULTIPLIER
+        + RUBBING_ESTIMATE_FIXED_OVERHEAD_BYTES
+    )
+    return DigitalRubbingResourceEstimate(
+        width_pixels=width,
+        height_pixels=height,
+        pixel_count=pixel_count,
+        vertex_count=int(vertices.shape[0]),
+        face_count=int(face_array.shape[0]),
+        estimated_peak_bytes=estimated_peak_bytes,
+    )
+
+
 def compute_artifact_rubbing(
     session: ArtifactSession,
     view: OutlineView | str,
@@ -879,6 +1044,7 @@ __all__ = [
     "DEFAULT_RUBBING_POLARITY",
     "DEFAULT_RUBBING_REFERENCE_RADIUS_UM",
     "DigitalRubbingRaster",
+    "DigitalRubbingResourceEstimate",
     "RUBBING_ALGORITHM",
     "RUBBING_ALGORITHM_VERSION",
     "RUBBING_COORDINATE_SPACE",
@@ -888,9 +1054,15 @@ __all__ = [
     "compute_artifact_rubbing",
     "compute_artifact_rubbing_from_recipe",
     "extract_digital_rubbing",
+    "estimate_digital_rubbing_resources",
     "commit_artifact_rubbing",
     "require_current_rubbing_computation",
     "rubbing_computation_matches_active_projection",
     "rubbing_recipe",
+    "RUBBING_ESTIMATED_PEAK_BYTES_PER_PIXEL",
+    "RUBBING_ESTIMATE_FIXED_OVERHEAD_BYTES",
+    "RUBBING_ESTIMATE_GEOMETRY_MULTIPLIER",
+    "RUBBING_ESTIMATE_MATERIALIZED_ATTRIBUTE_MULTIPLIER",
+    "rubbing_materialized_attribute_bytes",
     "validate_rubbing_recipe",
 ]

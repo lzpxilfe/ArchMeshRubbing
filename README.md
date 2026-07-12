@@ -124,8 +124,9 @@ Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 `Surfac
 ### Application workflow shell
 
 - [`src/application/artifact_workbench.py`](src/application/artifact_workbench.py): 한 artifact의 session/project path, 단일 pending Open, workflow readiness와 projection publication authority
+- [`src/application/artifact_measurements.py`](src/application/artifact_measurements.py): Cutline/Outline/Digital Rubbing의 immutable work item, Workbench 공유 예약·메모리 admission, 취소, exact result capability와 same-Align rebase
 - Open/new import/project reopen과 Align commit/parent activation은 ticket과 compare-and-swap 검증을 거쳐 `prepare → activate → finalize`되며, scene swap 실패는 이전 authority로 rollback
-- Cutline/Outline/Digital Rubbing 결과 publication도 expected record ID 집합으로 보호하지만, command 입력·계산 소유권을 기존 MainWindow/viewport에서 완전히 옮기는 작업은 진행 중
+- Cutline/Outline/Digital Rubbing은 GUI에서 파라미터만 캡처하고 단일 worker에서 계산합니다. worker는 문서를 변경하지 않으며, 완료 결과는 예약된 record ID와 일회성 result capability를 검증한 뒤 현재의 같은 Align session에 rebase합니다. 재개방한 기록은 READY + FRESH 목록에서 명시적으로 선택하고, 일시적인 Open/scene 충돌로 게시하지 못한 결과는 새 ID를 만들지 않고 재시도합니다.
 
 ### Artifact trust core
 
@@ -334,7 +335,8 @@ python main.py --project mesh.obj planview.png
 - 기와형 메쉬 기본 추천 펼침과 synthetic benchmark는 legacy 전문 기능으로 유지
 - Python 3.12 macOS arm64 frozen 앱의 10-check offline self-test 통과
 - Open/Align authority와 two-phase scene publication을 Qt/OpenGL-free `ArtifactWorkbench`로 이식
-- 다음 단계: Cutline/Outline/Digital Rubbing command-shell 이식을 완료하고 실제 원격 3-OS CI, 라이선스 결정, GPU/대용량 유물 pilot 진행
+- Cutline/Outline/Digital Rubbing command와 worker 수명주기를 Qt/OpenGL-free application shell로 이식
+- 다음 단계: export 작업의 최종 authority 재검증, record-only scene rebind, 실제 원격 3-OS CI, 라이선스 결정, GPU/대용량 유물 pilot 진행
 
 ---
 

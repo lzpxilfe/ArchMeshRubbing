@@ -25,7 +25,7 @@ python -m pytest -q
 
 - Ruff는 전체 트리를 검사한다.
 - pytest는 pytest 함수와 `unittest.TestCase`를 모두 수집한다. 별도의 `unittest discover`는 하위 호환성 확인용이며 CI의 권위 수집기가 아니다.
-- `pyright-m0.json`은 persistence·source·unit·matrix 경계에 더해 M0-6의 `artifact_document`, `geometry_identity`, `artifact_scene_adapter`, `artifact_session`, Qt/OpenGL-free `artifact_workbench`, known-record registry, RFC 8785 canonical JSON, vector record/export, Cutline, fixed-grid Outline/topology, Digital Rubbing record/extractor, canonical GA8 PNG와 offline rubbing export 및 해당 테스트를 포함하는 M0 신뢰 커널 범위다. 독립 프로세스 왕복·offline vector/rubbing package 테스트도 목록에 포함한다. wrapper 명령은 활성 Python interpreter를 Pyright에 명시하므로 Windows·macOS·Linux에서 같은 방식으로 dependency를 해석한다.
+- `pyright-m0.json`은 persistence·source·unit·matrix 경계에 더해 M0-6의 `artifact_document`, `geometry_identity`, `artifact_scene_adapter`, `artifact_session`, Qt/OpenGL-free `artifact_workbench`와 `artifact_measurements`, known-record registry, RFC 8785 canonical JSON, vector record/export, Cutline, fixed-grid Outline/topology, Digital Rubbing record/extractor, canonical GA8 PNG와 offline rubbing export 및 해당 테스트를 포함하는 M0 신뢰 커널 범위다. 독립 프로세스 왕복·offline vector/rubbing package 테스트도 목록에 포함한다. wrapper 명령은 활성 Python interpreter를 Pyright에 명시하므로 Windows·macOS·Linux에서 같은 방식으로 dependency를 해석한다.
 
 M0-6 native artifact 신뢰 경계를 빠르게 재검증할 때는 다음 focused suite를 사용한다. 이 명령은 full pytest를 대체하지 않는다.
 
@@ -42,6 +42,7 @@ python -m pytest -q \
   tests/test_artifact_scene_adapter.py \
   tests/test_artifact_session.py \
   tests/test_artifact_workbench.py \
+  tests/test_artifact_measurements.py \
   tests/test_artifact_new_process_roundtrip.py \
   tests/test_canonical_json.py \
   tests/test_artifact_vector_record.py \
@@ -91,7 +92,9 @@ python -m pytest -q \
 - face order·winding·duplicate, hole, large survey offset, resource limit 및 Align 전환 후 late Digital Rubbing 결과 거부
 - canonical GA8 PNG의 고정 chunk/DEFLATE bytes, exact `pHYs`, RFC 8785 iTXt metadata, pixel/CRC/chunk/scale tamper 거부
 - `READY + FRESH + recomputed raster`만 허용하는 `.amr-rubbing` 1:1 PNG package, relocation 후 독립 PID offline 검증, no-replace publish와 privacy allowlist
-- native six-view Digital Rubbing 물리 recipe widget, worker 계산, session-identity late-result 방어, record-derived preview와 recipe 재계산 export
+- Qt-free Cutline/Outline/Digital Rubbing work item, exact result capability, same-Align 병렬 rebase, Workbench 공유 record reservation, Align/Open stale·취소·rollback 방어와 pending Open 게시 재시도
+- Digital Rubbing 누적 peak-memory admission, UV/texture materialize 복사비의 무복사 사전 차단, controller별 한도 우회 방어, 실행 exactly-once, 취소 worker 종료 전 slot 보존
+- 재개방 프로젝트의 READY + FRESH vector/rubbing 명시 선택, background recipe 재계산과 완료 시 document/Align/record 재검증, active raster 예산 중첩 차단, 일시 게시 실패 재시도 queue와 보류 중 저장 차단
 - versioned Digital Rubbing receipt/export Draft 2020-12 schemas
 
 ## 현재 기준선
@@ -100,12 +103,12 @@ python -m pytest -q \
 
 | 검사 | 결과 |
 |---|---:|
-| Python 3.12.13 `python -m pytest -q` | 362 passed, 113 subtests passed |
-| 3-OS persistence-smoke 명시 suite의 로컬 실행 | 291 passed, 113 subtests passed |
+| Python 3.12.13 `python -m pytest -q` | 399 passed, 113 subtests passed |
+| 3-OS persistence-smoke 명시 suite의 로컬 실행 | 328 passed, 113 subtests passed |
 | `python -m ruff check .` | passed |
 | M0 Pyright wrapper command | 0 errors |
 | ArtifactDocument + vector/rubbing payload/export Draft 2020-12 schemas + golden | passed |
-| Python 3.12.13 macOS arm64 frozen self-test | 10/10 passed (unsigned, `source_tree=dirty`, `native-self-test-local-smoke-429abafebeb6-darwin-5.json`) |
+| Python 3.12.13 macOS arm64 frozen self-test | 10/10 passed (unsigned, `source_tree=dirty`, `native-self-test-local-smoke-8bd26e3a4733-darwin-3.json`) |
 
 ## 아직 차단하지 않는 검사
 
@@ -117,7 +120,7 @@ Windows·macOS·Linux persistence matrix에서는 프로젝트 저장, source/ge
 
 AMR v2 `payload_type="artifact_document"` 1.0의 strict 저장·production-loader staged reopen·checksum·원자 교체와 독립 프로세스 source rebind/materialization은 현재 차단 게이트다. `tests/test_artifact_new_process_roundtrip.py`는 프로세스 A와 B의 PID가 다름을 확인하고, PLY를 다른 경로와 `.raw-scan` suffix로 옮긴 뒤 저장된 parser/unit으로 다시 decode한다. 새로 계산한 source SHA-256·크기와 geometry SHA-256, active Align ID·matrix, parser/unit, world vertices가 같아야 통과한다.
 
-Native GUI의 한-artifact Open/Align commit/save/load는 `ArtifactWorkbench.snapshot.session.document`를 source of truth로 사용하며 MainWindow의 session field는 이행 중 compatibility mirror다. Open과 Align은 ticket/CAS/two-phase publication을 사용하고, Cutline/Outline/Digital Rubbing 결과 publication은 expected record ID 집합으로 보호한다. 다만 이 세 기능의 command 입력·계산 소유권을 application shell로 완전히 옮기는 작업은 남아 있다. save 전 projection snapshot과 geometry를 재검증하고, 아직 `DerivedRecord`로 이식되지 않은 선택·기록면·평가 결과는 누락 저장하지 않고 fail closed한다. authority rollback·scene 복원·finalize가 불확실한 fatal 상태에서는 검증된 Open 전까지 저장·실측·내보내기를 모두 막는다. 별도의 legacy destructive bake 이후 Save 성공은 native Align 복원 증거가 아니다. legacy runtime은 그런 vertex mutation을 `_amr_has_unpersisted_bake`로 표시하고 snapshot 저장을 차단한다.
+Native GUI의 한-artifact Open/Align commit/save/load는 `ArtifactWorkbench.snapshot.session.document`를 source of truth로 사용하며 MainWindow의 session field는 이행 중 compatibility mirror다. Open과 Align은 ticket/CAS/two-phase publication을 사용한다. Cutline/Outline/Digital Rubbing은 Qt-free `ArtifactMeasurementController`가 recipe/context와 record ID를 Workbench 단위로 예약하고 worker computation만 받은 뒤 current same-Align session에 rebase한다. command handler는 단일 `TaskThread`를 사용하며 늦은 finished signal이 새 worker/dialog를 지우지 못한다. 재개방 기록은 자동 최신 fallback 없이 명시적으로 선택하고, rollback 가능한 게시 실패는 exact result를 재시도 queue에 보존한다. save 전 projection snapshot과 geometry를 재검증하며 active/보류 실측과 아직 `DerivedRecord`로 이식되지 않은 선택·기록면·평가 결과는 누락 저장하지 않고 fail closed한다. authority rollback·scene 복원·finalize가 불확실한 fatal 상태에서는 검증된 Open 전까지 저장·실측·내보내기를 모두 막는다. 별도의 legacy destructive bake 이후 Save 성공은 native Align 복원 증거가 아니다. legacy runtime은 그런 vertex mutation을 `_amr_has_unpersisted_bake`로 표시하고 snapshot 저장을 차단한다.
 
 ### 대좌표 GPU 정밀도: 후속 비차단 게이트
 
