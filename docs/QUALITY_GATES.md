@@ -112,7 +112,7 @@ python -m pytest -q \
 | `python -m ruff check .` | passed |
 | M0 Pyright wrapper command | 0 errors |
 | ArtifactDocument + vector/rubbing payload/export Draft 2020-12 schemas + golden | passed |
-| Python 3.12.13 macOS arm64 frozen self-test | 10/10 passed (unsigned, `source_tree=dirty`, `native-self-test-local-smoke-8bd26e3a4733-darwin-3.json`) |
+| Python 3.12.13 macOS arm64 frozen self-test | 10/10 passed at code commit `898a8bfc144f` (unsigned, `source_tree=clean`, `native-self-test-local-smoke-898a8bfc144f-darwin.json`) |
 
 ## 아직 차단하지 않는 검사
 
@@ -120,7 +120,7 @@ python -m pytest -q \
 
 Windows·macOS·Linux persistence matrix에서는 프로젝트 저장, source/geometry identity, ArtifactDocument·scene adapter·session·application workbench, ticketed Open과 explicit Align gate, RFC 8785/vector record/export/Cutline/Outline/topology/schema, Digital Rubbing record/extractor/canonical PNG/export/schema, 독립 프로세스 source 및 relocated vector/rubbing-package 왕복, matrix golden, GUI 런처, MainWindow 생성, native source-of-truth binding, native Cutline/Outline/Rubbing command, session/version/epoch 및 projection-generation late-result 방어, legacy export 우회와 unported operation/save fail-closed, source mismatch ordering, scene-swap rollback과 fatal authority fallback 스모크를 실행하도록 설정한다. Linux quality job은 별도로 전체 테스트를 실행한다. CI는 job 환경에서, GUI 스모크 테스트는 모듈 로딩 시 `QT_QPA_PLATFORM=offscreen`을 설정한다. 이 스모크는 CPU/document/scene transaction과 widget wiring을 검증하지만 GPU/OpenGL 프레임의 실제 렌더링이나 시각적 정확성은 보장하지 않는다. 원격 matrix가 실제로 통과하기 전에는 3개 OS 완료로 표현하지 않는다.
 
-별도 `package-smoke.yml`은 세 OS에서 exact Python 3.12 build lock, immutable build manifest, PyInstaller spec과 frozen executable의 file-report self-test를 실행하도록 구성한다. 이 검사는 실제 `MainWindow`/QOpenGLWidget/OpenGL import, 6개 mesh parser, PNG codec과 canonical document/vector/rubbing을 포함하지만 offscreen 실제 GL context/render는 보장하지 않는다. 라이선스 게이트가 해결되기 전에는 artifact upload와 release 단계를 두지 않는다. 로컬 macOS arm64 결과만 확인됐으며 원격 3-OS 결과는 아직 없다.
+별도 `package-smoke.yml`은 세 OS에서 exact Python 3.12 build lock, immutable build manifest, PyInstaller spec과 frozen executable의 file-report self-test를 실행하도록 구성한다. 이 검사는 실제 `MainWindow`/QOpenGLWidget/OpenGL import, 6개 mesh parser, PNG codec과 canonical document/vector/rubbing을 포함하지만 offscreen 실제 GL context/render는 보장하지 않는다. 라이선스 게이트가 해결되기 전에는 artifact upload와 release 단계를 두지 않는다. code commit `898a8bfc144f`의 clean source tree에서 로컬 macOS arm64 10/10만 확인됐으며 원격 3-OS 결과는 아직 없다.
 
 AMR v2 `payload_type="artifact_document"` 1.0의 strict 저장·production-loader staged reopen·checksum·원자 교체와 독립 프로세스 source rebind/materialization은 현재 차단 게이트다. `tests/test_artifact_new_process_roundtrip.py`는 프로세스 A와 B의 PID가 다름을 확인하고, PLY를 다른 경로와 `.raw-scan` suffix로 옮긴 뒤 저장된 parser/unit으로 다시 decode한다. 새로 계산한 source SHA-256·크기와 geometry SHA-256, active Align ID·matrix, parser/unit, world vertices가 같아야 통과한다.
 

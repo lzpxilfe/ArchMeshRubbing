@@ -17,7 +17,7 @@ ArchMeshRubbing을 전면 재작성하지 않는다. 검증 가능한 headless �
 - `app_interactive.py`는 약 15,900줄, `src/gui/viewport_3d.py`는 약 15,100줄이며 각각 수백 개 메서드와 많은 광범위 예외 처리를 포함한다. UI, 상태, 렌더링, 작업 실행, 저장 정책이 서로 강하게 얽혀 있어 이 두 파일을 계속 확장하는 비용은 높다.
 - 반면 source identity, 명시적 단위, immutable Align revision, canonical JSON/PNG, Cutline, Outline, Digital Rubbing, offline export는 GUI와 분리된 코어와 버전 스키마를 가진다.
 - Python 3.12 기준 전체 `463 passed, 113 subtests passed`, M0 Pyright `0 errors`, Ruff 통과가 현재 계약을 보호한다.
-- Python 3.12 macOS arm64 unsigned frozen 앱은 실제 GUI import/생성, 6개 mesh parser, PNG codec과 canonical document/vector/rubbing을 포함한 offline self-test 10개를 모두 통과했다. 이 로컬 증거는 dirty source tree의 개발 스모크이며 공개 배포 증거가 아니다.
+- Python 3.12 macOS arm64 unsigned frozen 앱은 code commit `898a8bfc144f`의 clean source tree에서 실제 GUI import/생성, 6개 mesh parser, PNG codec과 canonical document/vector/rubbing을 포함한 offline self-test 10개를 모두 통과했다. 이 결과는 로컬 개발 스모크이며 서명·설치·원격 3-OS 공개 배포 증거가 아니다.
 
 전면 재작성은 이 검증 자산과 오래 축적된 기와 처리 알고리즘까지 동시에 다시 만들게 한다. 반대로 기존 GUI에 기능을 계속 덧붙이면 mutable scene 상태와 권위 기록이 다시 섞인다. 따라서 코어는 보존하고 셸은 교체하는 경계가 가장 안전하다.
 
