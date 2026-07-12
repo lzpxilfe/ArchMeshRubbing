@@ -6995,6 +6995,11 @@ class MainWindow(QMainWindow):
                     setattr(vp, name, value)
                 except Exception:
                     pass
+        # The framebuffer may already contain pixels from the failed candidate
+        # scene.  Never pair those depths with a restored scene/camera frame.
+        vp._amr_render_frame_snapshot = None
+        vp._amr_render_frame_depth_signature = None
+        vp._cached_render_frame = None
         camera = getattr(vp, "camera", None)
         camera_state = snapshot.get("camera_state", {})
         if camera is not None and isinstance(camera_state, dict):

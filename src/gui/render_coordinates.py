@@ -7,6 +7,8 @@ boundary; none of the returned origins or matrices are durable authority.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
@@ -14,6 +16,7 @@ from numpy.typing import ArrayLike, NDArray
 Float64Array = NDArray[np.float64]
 Float32Array = NDArray[np.float32]
 _AFFINE_ATOL = 1e-12
+_HOMOGENEOUS_EPS = 1e-15
 
 
 def _finite_vec3(value: ArrayLike, *, field_name: str) -> Float64Array:
@@ -67,6 +70,96 @@ def _finite_affine(value: ArrayLike, *, field_name: str) -> Float64Array:
     return matrix
 
 
+def _finite_matrix4(value: ArrayLike, *, field_name: str) -> Float64Array:
+    try:
+        matrix = np.array(value, dtype=np.float64, copy=True)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} must be a finite 4x4 matrix") from exc
+    if matrix.shape != (4, 4) or not np.isfinite(matrix).all():
+        raise ValueError(f"{field_name} must be a finite 4x4 matrix")
+    return matrix
+
+
+def _integer(value: object, *, field_name: str) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(
+        value,
+        (int, np.integer),
+    ):
+        raise ValueError(f"{field_name} must be an integer")
+    return int(value)
+
+
+@dataclass(frozen=True, slots=True)
+class RenderFrameSnapshot:
+    """One immutable render-relative camera/depth coordinate contract."""
+
+    frame_serial: int
+    projection_generation: int
+    viewport: tuple[int, int, int, int]
+    modelview_render: Float64Array = field(repr=False, compare=False)
+    projection: Float64Array = field(repr=False, compare=False)
+    render_origin_world_mm: Float64Array = field(repr=False, compare=False)
+    view_projection: Float64Array = field(init=False, repr=False, compare=False)
+    inverse_view_projection: Float64Array = field(
+        init=False,
+        repr=False,
+        compare=False,
+    )
+
+    def __post_init__(self) -> None:
+        frame_serial = _integer(self.frame_serial, field_name="frame_serial")
+        generation = _integer(
+            self.projection_generation,
+            field_name="projection_generation",
+        )
+        if frame_serial < 0 or generation < 0:
+            raise ValueError("render frame counters must be non-negative integers")
+
+        try:
+            raw_viewport = tuple(self.viewport)
+        except TypeError as exc:
+            raise ValueError("viewport must contain four integers") from exc
+        if len(raw_viewport) != 4:
+            raise ValueError("viewport must contain x, y, positive width, positive height")
+        viewport = tuple(
+            _integer(value, field_name="viewport value")
+            for value in raw_viewport
+        )
+        if viewport[2] <= 0 or viewport[3] <= 0:
+            raise ValueError("viewport must contain x, y, positive width, positive height")
+
+        modelview = _finite_affine(
+            self.modelview_render,
+            field_name="modelview_render",
+        )
+        projection = _finite_matrix4(self.projection, field_name="projection")
+        origin = _finite_vec3(
+            self.render_origin_world_mm,
+            field_name="render_origin_world_mm",
+        )
+        with np.errstate(over="ignore", invalid="ignore"):
+            view_projection = projection @ modelview
+        if not np.isfinite(view_projection).all():
+            raise ValueError("render view-projection matrix is not finite")
+        try:
+            inverse = np.linalg.inv(view_projection)
+        except np.linalg.LinAlgError as exc:
+            raise ValueError("render view-projection matrix must be invertible") from exc
+        if not np.isfinite(inverse).all():
+            raise ValueError("inverse render view-projection matrix is not finite")
+
+        for array in (modelview, projection, origin, view_projection, inverse):
+            array.setflags(write=False)
+        object.__setattr__(self, "frame_serial", frame_serial)
+        object.__setattr__(self, "projection_generation", generation)
+        object.__setattr__(self, "viewport", viewport)
+        object.__setattr__(self, "modelview_render", modelview)
+        object.__setattr__(self, "projection", projection)
+        object.__setattr__(self, "render_origin_world_mm", origin)
+        object.__setattr__(self, "view_projection", view_projection)
+        object.__setattr__(self, "inverse_view_projection", inverse)
+
+
 def render_origin_from_bounds(bounds: ArrayLike) -> Float64Array:
     """Return the finite float64 midpoint of canonical world bounds.
 
@@ -108,6 +201,107 @@ def render_to_world_points(
     if not np.isfinite(absolute).all():
         raise ValueError("render-to-world translation produced non-finite coordinates")
     return np.asarray(absolute, dtype=np.float64)
+
+
+def project_world_to_window(
+    frame: RenderFrameSnapshot,
+    point_world: ArrayLike,
+) -> Float64Array:
+    """Project one absolute world point through an immutable render frame."""
+
+    if not isinstance(frame, RenderFrameSnapshot):
+        raise TypeError("frame must be a RenderFrameSnapshot")
+    point = _finite_vec3(point_world, field_name="point_world")
+    point_render = world_to_render_points(
+        point,
+        frame.render_origin_world_mm,
+    ).reshape(3)
+    homogeneous = np.array(
+        [point_render[0], point_render[1], point_render[2], 1.0],
+        dtype=np.float64,
+    )
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        clip = frame.view_projection @ homogeneous
+    w = float(clip[3])
+    if not np.isfinite(clip).all() or abs(w) <= _HOMOGENEOUS_EPS:
+        raise ValueError("world projection produced an invalid homogeneous point")
+    ndc = clip[:3] / w
+    if not np.isfinite(ndc).all():
+        raise ValueError("world projection produced non-finite device coordinates")
+    vx, vy, width, height = frame.viewport
+    window = np.array(
+        [
+            float(vx) + (float(ndc[0]) + 1.0) * float(width) * 0.5,
+            float(vy) + (float(ndc[1]) + 1.0) * float(height) * 0.5,
+            (float(ndc[2]) + 1.0) * 0.5,
+        ],
+        dtype=np.float64,
+    )
+    if not np.isfinite(window).all():
+        raise ValueError("world projection produced a non-finite window point")
+    return window
+
+
+def unproject_window_to_world(
+    frame: RenderFrameSnapshot,
+    point_window: ArrayLike,
+) -> Float64Array:
+    """Unproject one window/depth sample to absolute float64 world millimetres."""
+
+    if not isinstance(frame, RenderFrameSnapshot):
+        raise TypeError("frame must be a RenderFrameSnapshot")
+    window = _finite_vec3(point_window, field_name="point_window")
+    depth = float(window[2])
+    if depth < 0.0 or depth > 1.0:
+        raise ValueError("window depth must be within [0, 1]")
+    vx, vy, width, height = frame.viewport
+    ndc = np.array(
+        [
+            ((float(window[0]) - float(vx)) / float(width)) * 2.0 - 1.0,
+            ((float(window[1]) - float(vy)) / float(height)) * 2.0 - 1.0,
+            depth * 2.0 - 1.0,
+            1.0,
+        ],
+        dtype=np.float64,
+    )
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        render_h = frame.inverse_view_projection @ ndc
+    w = float(render_h[3])
+    if not np.isfinite(render_h).all() or abs(w) <= _HOMOGENEOUS_EPS:
+        raise ValueError("window unprojection produced an invalid homogeneous point")
+    point_render = render_h[:3] / w
+    if not np.isfinite(point_render).all():
+        raise ValueError("window unprojection produced a non-finite render point")
+    return render_to_world_points(
+        point_render,
+        frame.render_origin_world_mm,
+    ).reshape(3)
+
+
+def world_ray_from_window(
+    frame: RenderFrameSnapshot,
+    window_x: float,
+    window_y: float,
+) -> tuple[Float64Array, Float64Array]:
+    """Return one finite absolute-world ray from an immutable render frame."""
+
+    try:
+        x = float(window_x)
+        y = float(window_y)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("window coordinates must be finite") from exc
+    if not np.isfinite([x, y]).all():
+        raise ValueError("window coordinates must be finite")
+    near = unproject_window_to_world(frame, [x, y, 0.0])
+    far = unproject_window_to_world(frame, [x, y, 1.0])
+    direction = far - near
+    norm = float(np.linalg.norm(direction))
+    if not np.isfinite(norm) or norm <= _HOMOGENEOUS_EPS:
+        raise ValueError("window ray direction is invalid")
+    direction = direction / norm
+    if not np.isfinite(direction).all():
+        raise ValueError("window ray direction is not finite")
+    return near, np.asarray(direction, dtype=np.float64)
 
 
 def encode_relative_float32(
@@ -210,11 +404,15 @@ def absolute_modelview_from_render(
 
 
 __all__ = [
+    "RenderFrameSnapshot",
     "absolute_modelview_from_render",
     "encode_relative_float32",
+    "project_world_to_window",
     "rebase_affine_for_render",
     "rebase_world_plane_for_render",
     "render_origin_from_bounds",
     "render_to_world_points",
+    "unproject_window_to_world",
     "world_to_render_points",
+    "world_ray_from_window",
 ]

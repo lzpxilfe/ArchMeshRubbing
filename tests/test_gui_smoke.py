@@ -1042,6 +1042,7 @@ def test_artifact_scene_projection_can_skip_destructive_centroid_centering() -> 
     viewport_like = SimpleNamespace(
         objects=[],
         selected_index=-1,
+        _reset_selection_authority_transients=Mock(),
         update_vbo=Mock(return_value=True),
         update_grid_scale=Mock(),
         camera=SimpleNamespace(fit_to_bounds=Mock(), pan_offset=None),
@@ -1059,6 +1060,7 @@ def test_artifact_scene_projection_can_skip_destructive_centroid_centering() -> 
 
     np.testing.assert_array_equal(mesh.vertices, vertices)
     assert len(viewport_like.objects) == 1
+    viewport_like._reset_selection_authority_transients.assert_called_once_with()
     assert viewport_like.objects[0]._amr_projection_preserves_origin is True
     np.testing.assert_array_equal(
         viewport_like.objects[0].get_world_bounds(),
@@ -4117,11 +4119,24 @@ def test_update_vbo_reports_failure_and_scene_cleanup_invalidates_buffer() -> No
     obj = SceneObject(mesh, "failure fixture")
     window = MainWindow()
     try:
+        live_frame = object()
+        live_depth_signature = ("live-depth",)
+        live_cache = np.ones((2, 2), dtype=np.float32)
+        window.viewport._amr_render_frame_snapshot = live_frame
+        window.viewport._amr_render_frame_depth_signature = live_depth_signature
+        window.viewport._surface_magnetic_dist = live_cache
         with (
             patch("src.gui.viewport_3d.glGenBuffers", return_value=0),
             patch("src.gui.viewport_3d.glBindBuffer"),
         ):
             assert window.viewport.update_vbo(obj) is False
+        assert obj._amr_geometry_draw_revision == 1
+        assert window.viewport._amr_render_frame_snapshot is live_frame
+        assert (
+            window.viewport._amr_render_frame_depth_signature
+            is live_depth_signature
+        )
+        assert window.viewport._surface_magnetic_dist is live_cache
         assert obj.vbo_id is None
         assert obj.vertex_count == 0
         np.testing.assert_array_equal(obj._amr_vbo_origin_local_mm, np.zeros(3))
@@ -4171,6 +4186,7 @@ def test_large_coordinate_vbo_is_relative_and_world_mesh_is_untouched() -> None:
             patch("src.gui.viewport_3d.glBufferData", side_effect=capture_upload),
         ):
             assert window.viewport.update_vbo(obj)
+        assert obj._amr_geometry_draw_revision == 1
 
         data = uploaded["data"]
         assert data.dtype == np.float32
@@ -4300,6 +4316,9 @@ def test_failed_scene_swap_restores_private_render_origin() -> None:
             [-4_000_000_000.0, 3_000_000_000.0, 2_000_000_000.0],
             dtype=np.float64,
         )
+        window.viewport._amr_render_frame_snapshot = object()
+        window.viewport._amr_render_frame_depth_signature = ("candidate",)
+        window.viewport._cached_render_frame = object()
 
         window._restore_live_scene_after_failed_swap(snapshot, [])
 
@@ -4311,6 +4330,9 @@ def test_failed_scene_swap_restores_private_render_origin() -> None:
         assert window.viewport.selected_index == 0
         assert window.current_mesh is obj.mesh
         assert window._artifact_session is session
+        assert window.viewport._amr_render_frame_snapshot is None
+        assert window.viewport._amr_render_frame_depth_signature is None
+        assert window.viewport._cached_render_frame is None
     finally:
         window.deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)

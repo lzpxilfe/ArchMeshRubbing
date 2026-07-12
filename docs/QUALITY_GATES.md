@@ -58,6 +58,7 @@ python -m pytest -q \
   tests/test_vector_schemas.py \
   tests/test_rubbing_schemas.py \
   tests/test_render_coordinates.py \
+  tests/test_viewport_render_origin.py \
   tests/test_rotation_convention.py \
   tests/test_app_gui_launcher.py \
   tests/test_gui_smoke.py
@@ -76,7 +77,8 @@ python -m pytest -q \
 - source를 mutate·recenter하지 않는 deterministic world-mm projection과 stale snapshot 거부
 - `>= 1e9 mm` offset의 0.125/1 mm feature에서 float64 origin subtraction 뒤 relative float32 VBO encoding, pivot-aware model rebasing과 relative camera algebra
 - viewport 전용 VBO/scene origin이 document canonical bytes·SHA-256·record-binding publication에 들어가지 않고 live mesh·VBO와 함께 보존되는 경계
-- native vector preview의 render-relative vertex 제출과 absolute float64 CPU face centroid/pick separation
+- native vector preview와 cutline·ROI·pick·gizmo 등 활성 world overlay의 render-relative GL 제출, absolute float64 CPU face 계산의 분리
+- modelview·projection·viewport·scene origin과 visibility·ROI·X-ray·all-object TRS/geometry revision을 하나의 read-only frame authority로 게시한 project/unproject/ray, depth pick·Ctrl drag 수명주기와 repaint 전 mutable-state race/stale frame 거부
 - native 한-artifact session의 preview/Align commit/parent activation, source-of-truth scene binding과 unported mutation/save fail-closed
 - `initial_identity` baseline의 `ALIGN_REQUIRED`, 변화량이 0인 첫 explicit child Align의 `MEASUREMENT_READY`, parent activation 시 downstream 재차단
 - 검증된 `ArtifactSession`의 unique `READY + FRESH` view-set에서 Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6 순차 gate·초록 완료 상태를 재구성하고, DRAFT/FAILED/blocked/unknown/noncanonical 제외, malformed known record의 session 경계 거부와 reopen·Align stale/restore를 검증
@@ -84,7 +86,7 @@ python -m pytest -q \
 - `state_version`/`authority_epoch` compare-and-swap, transition 종류별 허용 변경과 expected record ID 집합 검증, 동시 candidate의 first-wins
 - same-render DerivedRecord append의 `RecordBindingTransition`, exact snapshot capability 검증, live mesh/VBO/선택/cache 보존과 binding CAS rollback
 - tentative authority를 observer에 노출하지 않는 prepare/activate/finalize, 정상 rollback과 rollback·scene 복원·finalize 불확실 시 fatal save/measure/export 차단
-- scene 교체 뒤 cut-section/ROI worker identity·projection generation·selected object fencing과 오래된 finished callback의 새 worker 보호
+- scene 교체 뒤 cut-section/ROI worker identity·projection generation·selected object fencing, surface/visible-face worker의 target mesh·TRS·render-frame fencing과 오래된 finished callback의 다른 유물·새 worker 보호
 - 서로 다른 PID에서 source relocation·saved-parser reopen 후 source/geometry hash, Align matrix와 world vertex가 같은 durable artifact round-trip
 - RFC 8785 cross-language number golden과 vector payload/recipe semantic SHA-256
 - canonical-mm Cutline의 exact box·multi-component·Front/Right/oblique frame, face order/winding, ambiguity fail-closed
@@ -114,8 +116,8 @@ python -m pytest -q \
 
 | 검사 | 결과 |
 |---|---:|
-| Python 3.12.13 `python -m pytest -q` | 521 passed, 113 subtests passed |
-| 3-OS persistence-smoke 명시 suite의 로컬 실행 | 450 passed, 113 subtests passed |
+| Python 3.12.13 `python -m pytest -q` | 558 passed, 113 subtests passed |
+| 3-OS persistence-smoke 명시 suite의 로컬 실행 | 487 passed, 113 subtests passed |
 | `python -m ruff check .` | passed |
 | M0 Pyright wrapper command | 0 errors |
 | ArtifactDocument + vector/rubbing payload/export Draft 2020-12 schemas + golden | passed |
@@ -137,9 +139,9 @@ Native measurement 취소는 `QThread.terminate()`를 사용하지 않는다. �
 
 ### 대좌표 render-origin: 좌표 경계는 차단, 실제 GPU 프레임은 비차단
 
-현재 차단 suite는 absolute float64 world-mm document/mesh 불변, `>= 1e9 mm` offset의 mm/sub-mm feature, CPU float64 subtraction 뒤 객체별 relative float32 VBO payload, 안정적인 scene origin에 대한 camera/model affine rebasing, native vector preview의 relative 제출, absolute float64 CPU face picking과 render origin 비직렬화를 검증한다. pure helper와 mocked OpenGL upload/submission은 M0 Pyright와 명시 3-OS persistence suite에 포함한다.
+현재 차단 suite는 absolute float64 world-mm document/mesh 불변, `>= 1e9 mm` offset의 mm/sub-mm feature, CPU float64 subtraction 뒤 객체별 relative float32 VBO payload, 안정적인 scene origin에 대한 camera/model affine rebasing, 활성 world overlay의 relative 제출, absolute float64 CPU face 계산과 render origin 비직렬화를 검증한다. 또한 exact modelview·projection·viewport·scene origin과 depth-affecting scene signature를 같이 게시한 frame authority의 project/unproject/ray, depth pick·Ctrl drag 수명주기, 변환·resize·scene rollback·repaint 전 상태 변경 후 stale frame 거부를 검증한다. pure coordinate helper와 해당 테스트는 M0 Pyright에, mocked OpenGL upload·overlay·interaction 테스트는 명시 3-OS persistence suite에 포함한다.
 
-이 증거는 실제 GPU driver가 그린 픽셀, depth-buffer unprojection, 또는 compatibility matrix 아래에서 여전히 absolute `glVertex3f`를 호출하는 legacy overlay의 millimeter/sub-millimeter 정밀도를 증명하지 않는다. 실제 OpenGL context의 대좌표 visual/picking smoke와 남은 overlay의 직접 relative 제출은 아직 비차단 항목이다. render origin은 metadata·Align·record·QC·hash·export 권위 값에 저장하지 않는다.
+이 증거는 mocked OpenGL과 수학 계약에 대한 것이다. 실제 GPU driver가 그린 픽셀과 depth buffer를 사용한 `>= 1e9 mm` 장면의 millimeter/sub-millimeter visual·picking 정밀도를 증명하지 않는다. 실제 OpenGL context의 대좌표 visual/depth-picking smoke는 아직 비차단 항목이다. render origin은 metadata·Align·record·QC·hash·export 권위 값에 저장하지 않는다.
 
 ## 게이트 변경 원칙
 

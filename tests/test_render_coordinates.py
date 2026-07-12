@@ -4,13 +4,17 @@ import numpy as np
 import pytest
 
 from src.gui.render_coordinates import (
+    RenderFrameSnapshot,
     absolute_modelview_from_render,
     encode_relative_float32,
+    project_world_to_window,
     rebase_affine_for_render,
     rebase_world_plane_for_render,
     render_origin_from_bounds,
     render_to_world_points,
+    unproject_window_to_world,
     world_to_render_points,
+    world_ray_from_window,
 )
 
 
@@ -169,6 +173,243 @@ def test_absolute_modelview_is_equivalent_for_world_points() -> None:
         rtol=0.0,
         atol=1e-7,
     )
+
+
+def _perspective_matrix(
+    *,
+    fov_y_deg: float = 45.0,
+    aspect: float = 1.25,
+    near: float = 1.0,
+    far: float = 100.0,
+) -> np.ndarray:
+    f = 1.0 / np.tan(np.radians(fov_y_deg) * 0.5)
+    return np.asarray(
+        [
+            [f / aspect, 0.0, 0.0, 0.0],
+            [0.0, f, 0.0, 0.0],
+            [0.0, 0.0, (far + near) / (near - far), (2.0 * far * near) / (near - far)],
+            [0.0, 0.0, -1.0, 0.0],
+        ],
+        dtype=np.float64,
+    )
+
+
+def _orthographic_matrix(
+    *,
+    left: float = -100.0,
+    right: float = 100.0,
+    bottom: float = -80.0,
+    top: float = 80.0,
+    near: float = 0.05,
+    far: float = 2_100.0,
+) -> np.ndarray:
+    return np.asarray(
+        [
+            [2.0 / (right - left), 0.0, 0.0, -(right + left) / (right - left)],
+            [0.0, 2.0 / (top - bottom), 0.0, -(top + bottom) / (top - bottom)],
+            [0.0, 0.0, -2.0 / (far - near), -(far + near) / (far - near)],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
+
+
+def _render_frame(
+    origin: np.ndarray,
+    *,
+    serial: int = 1,
+    modelview: np.ndarray | None = None,
+    projection: np.ndarray | None = None,
+) -> RenderFrameSnapshot:
+    return RenderFrameSnapshot(
+        frame_serial=serial,
+        projection_generation=7,
+        viewport=(11, 17, 1000, 800),
+        modelview_render=(
+            np.eye(4, dtype=np.float64) if modelview is None else modelview
+        ),
+        projection=(
+            _perspective_matrix() if projection is None else projection
+        ),
+        render_origin_world_mm=np.asarray(origin, dtype=np.float64),
+    )
+
+
+def test_render_frame_projection_is_invariant_to_large_world_offset() -> None:
+    zero = _render_frame(np.zeros(3), serial=1)
+    large_origin = np.asarray(
+        [1_000_000_003.0, -1_000_000_007.0, 500_000_011.0],
+        dtype=np.float64,
+    )
+    large = _render_frame(large_origin, serial=2)
+    local_points = np.asarray(
+        [[0.125, 1.0, -10.0], [1.0, -0.5, -25.0], [3.0, 0.25, -50.0]],
+        dtype=np.float64,
+    )
+
+    for local in local_points:
+        window_zero = project_world_to_window(zero, local)
+        window_large = project_world_to_window(large, large_origin + local)
+        np.testing.assert_allclose(window_large, window_zero, rtol=0.0, atol=1e-11)
+
+
+def test_nonidentity_render_frame_round_trips_large_world_points() -> None:
+    angle_x = np.radians(-11.0)
+    angle_y = np.radians(23.0)
+    rotate_x = np.asarray(
+        [
+            [1.0, 0.0, 0.0],
+            [0.0, np.cos(angle_x), -np.sin(angle_x)],
+            [0.0, np.sin(angle_x), np.cos(angle_x)],
+        ],
+        dtype=np.float64,
+    )
+    rotate_y = np.asarray(
+        [
+            [np.cos(angle_y), 0.0, np.sin(angle_y)],
+            [0.0, 1.0, 0.0],
+            [-np.sin(angle_y), 0.0, np.cos(angle_y)],
+        ],
+        dtype=np.float64,
+    )
+    modelview = np.eye(4, dtype=np.float64)
+    modelview[:3, :3] = rotate_x @ rotate_y
+    modelview[:3, 3] = [2.5, -1.25, -30.0]
+    origin = np.asarray(
+        [1_000_000_003.0, -1_000_000_007.0, 500_000_011.0],
+        dtype=np.float64,
+    )
+    frame = _render_frame(
+        origin,
+        modelview=modelview,
+        projection=_perspective_matrix(near=0.1, far=1_000.0),
+    )
+    points_world = origin + np.asarray(
+        [[0.125, 1.0, -10.0], [3.0, -0.5, -25.0], [-2.0, 4.0, -50.0]],
+        dtype=np.float64,
+    )
+
+    for point_world in points_world:
+        window = project_world_to_window(frame, point_world)
+        restored = unproject_window_to_world(frame, window)
+        np.testing.assert_allclose(restored, point_world, rtol=0.0, atol=2e-7)
+
+
+def _quantize_normalized_depth_24(depth: float) -> float:
+    levels = (1 << 24) - 1
+    return float(np.rint(float(depth) * levels) / levels)
+
+
+@pytest.mark.parametrize(
+    ("projection", "point_render", "maximum_error_mm"),
+    [
+        (
+            _perspective_matrix(near=0.05, far=2_100.0),
+            np.asarray([3.0, -2.0, -250.0], dtype=np.float64),
+            0.01,
+        ),
+        (
+            _orthographic_matrix(near=0.05, far=2_100.0),
+            np.asarray([1.0, 0.5, -1_000.0], dtype=np.float64),
+            0.001,
+        ),
+    ],
+    ids=("perspective", "canonical-orthographic"),
+)
+def test_24bit_depth_reconstruction_stays_within_explicit_clip_budget(
+    projection: np.ndarray,
+    point_render: np.ndarray,
+    maximum_error_mm: float,
+) -> None:
+    """Check representative clip configurations, not a global depth guarantee."""
+
+    origin = np.asarray(
+        [1_000_000_003.0, -1_000_000_007.0, 500_000_011.0],
+        dtype=np.float64,
+    )
+    frame = _render_frame(origin, projection=projection)
+    point_world = origin + point_render
+    window = project_world_to_window(frame, point_world)
+    sampled_window = window.copy()
+    sampled_window[2] = _quantize_normalized_depth_24(float(window[2]))
+
+    reconstructed = unproject_window_to_world(frame, sampled_window)
+    error_mm = float(np.linalg.norm(reconstructed - point_world))
+
+    assert error_mm > 0.0
+    assert error_mm < maximum_error_mm
+
+
+def test_reference_perspective_float32_depth_stays_below_two_microns() -> None:
+    origin = np.asarray(
+        [1_000_000_003.0, -1_000_000_007.0, 500_000_011.0],
+        dtype=np.float64,
+    )
+    frame = _render_frame(origin)
+    point_world = origin + [0.125, 1.0, -10.0]
+    window = project_world_to_window(frame, point_world)
+    sampled_window = window.copy()
+    sampled_window[2] = float(np.float32(sampled_window[2]))
+
+    reconstructed = unproject_window_to_world(frame, sampled_window)
+
+    np.testing.assert_allclose(reconstructed[:2], point_world[:2], rtol=0.0, atol=1e-6)
+    assert float(np.linalg.norm(reconstructed - point_world)) < 0.002
+
+
+def test_render_frame_ray_and_snapshot_origin_are_finite_and_immutable() -> None:
+    origin = np.asarray(
+        [1_000_000_003.0, -1_000_000_007.0, 500_000_011.0],
+        dtype=np.float64,
+    )
+    frame = _render_frame(origin)
+    window = project_world_to_window(frame, origin + [0.0, 0.0, -10.0])
+    ray_origin, ray_direction = world_ray_from_window(frame, window[0], window[1])
+
+    assert np.isfinite(ray_origin).all()
+    np.testing.assert_allclose(ray_direction, [0.0, 0.0, -1.0], rtol=0.0, atol=1e-12)
+    np.testing.assert_array_equal(frame.render_origin_world_mm, origin)
+    assert not frame.render_origin_world_mm.flags.writeable
+    assert not frame.modelview_render.flags.writeable
+    assert not frame.projection.flags.writeable
+    with pytest.raises(ValueError):
+        frame.render_origin_world_mm[0] = 0.0
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"frame_serial": -1},
+        {"frame_serial": 1.0},
+        {"projection_generation": True},
+        {"viewport": (0, 0, 0, 100)},
+        {"viewport": (0, 0, 100.5, 100)},
+        {"projection": np.zeros((4, 4))},
+        {"render_origin_world_mm": [0.0, np.nan, 0.0]},
+    ],
+)
+def test_render_frame_rejects_invalid_contract(kwargs: dict[str, object]) -> None:
+    values: dict[str, object] = {
+        "frame_serial": 1,
+        "projection_generation": 0,
+        "viewport": (0, 0, 100, 100),
+        "modelview_render": np.eye(4),
+        "projection": _perspective_matrix(),
+        "render_origin_world_mm": np.zeros(3),
+    }
+    values.update(kwargs)
+    with pytest.raises(ValueError):
+        RenderFrameSnapshot(**values)  # type: ignore[arg-type]
+
+
+def test_render_frame_projection_rejects_nonfinite_and_invalid_depth() -> None:
+    frame = _render_frame(np.zeros(3))
+    with pytest.raises(ValueError):
+        project_world_to_window(frame, [np.nan, 0.0, -10.0])
+    with pytest.raises(ValueError, match="depth"):
+        unproject_window_to_world(frame, [10.0, 10.0, 1.1])
+    with pytest.raises(ValueError):
+        world_ray_from_window(frame, np.inf, 10.0)
 
 
 @pytest.mark.parametrize(

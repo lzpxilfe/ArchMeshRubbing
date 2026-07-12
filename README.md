@@ -60,11 +60,12 @@ Align 확정 뒤에도 모든 기능이 한꺼번에 열리지는 않습니다. 
 - canonical GA8 PNG는 고정 chunk/DEFLATE bytes와 exact `pHYs`를 사용하며, `*.amr-rubbing/`에 provenance sidecar와 함께 저장
 - vector/rubbing package는 원본 mesh와 GUI가 없어도 이동 후 별도 프로세스에서 offline 검증 가능
 - Qt/OpenGL과 분리된 `ArtifactWorkbench`가 ticketed Open, 명시적 Align readiness, `state_version`/`authority_epoch` 기반 publication을 소유
-- native DerivedRecord worker는 시작 session과 projection을, viewport의 cut-section/ROI worker는 worker identity와 projection generation을 확인하여 늦은 결과가 현재 문서·overlay·새 worker를 덮지 못하게 함
+- native DerivedRecord worker는 시작 session과 projection을, viewport의 cut-section/ROI/surface-selection worker는 worker identity·target mesh/TRS·render frame을 확인하여 늦은 결과가 현재 문서·overlay·다른 유물·새 worker를 덮지 못하게 함
 - Cutline·Outline·Digital Rubbing worker는 공통 취소 Event를 계산 내부의 deterministic chunk 경계까지 전달하며, 사용자는 진행 창에서 강제 스레드 종료 없이 취소를 요청할 수 있음
 - DerivedRecord 추가는 같은 render projection의 문서 binding만 compare-and-swap하며 live mesh·VBO·카메라·선택·preview cache를 다시 만들지 않음
 - 대좌표 장면은 CPU·문서의 절대 float64 world-mm 좌표를 유지하면서, 객체별 VBO origin을 float64에서 먼저 빼 relative `GL_FLOAT`로 업로드하고 live scene의 안정적인 render origin에 camera·model transform을 rebase함
-- 두 render origin은 viewport 전용 transient 상태이며 ArtifactDocument·record·QC·hash·export에 기록하지 않음. native vector preview는 render-relative로 제출하고 CPU face picking은 absolute float64 계산을 유지함
+- 두 origin은 viewport 전용 transient 상태이며 ArtifactDocument·record·QC·hash·export에 기록하지 않음. mesh·cutline·ROI·pick·gizmo 등 활성 world overlay를 render-relative로 제출하고 CPU face 계산은 absolute float64를 유지함
+- depth pick·screen projection·Ctrl drag는 해당 depth buffer를 그린 modelview·projection·viewport·scene origin과 visibility·ROI·X-ray·object TRS/geometry revision을 하나의 read-only frame authority로 묶어 다른 시점의 상태가 섞이지 않게 함
 - SVG/PNG export worker는 보이지 않는 same-parent staging package를 완전 검증해 exact inode/fingerprint capability를 만들고, GUI callback이 현재 Workbench의 source·Align·exact `READY + FRESH` record를 다시 확인한 뒤 빠른 재확인·rename으로만 공개
 - export 중 같은 Align에 무관한 record가 추가돼도 안전하게 게시하지만 Align/Open 완료로 권위가 바뀌면 destination을 만들지 않고 자신이 소유한 staging만 정리함
 - scene publication의 rollback·scene 복원·finalize 자체가 불확실하면 fatal authority 상태로 전환해 검증된 Open 전까지 저장·실측·내보내기를 차단
@@ -154,8 +155,10 @@ Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 `Surfac
 ### Renderer precision boundary
 
 - [`src/gui/render_coordinates.py`](src/gui/render_coordinates.py): absolute float64 연구 좌표를 변경하지 않고 객체별 VBO origin과 scene render origin으로 GPU 표시 좌표만 rebasing하는 Qt/OpenGL-free 수학 경계
-- main mesh VBO, camera/model transform, native vector preview, ground/grid, CPU face picking과 고해상도 capture modelview 호환까지 1차 이식
-- 실제 OpenGL driver의 pixel/depth-picking 검증과 legacy cutline·ROI·pick·gizmo immediate-mode overlay의 직접 relative 제출은 아직 남아 있음
+- main mesh VBO, camera/model transform, native vector preview, ground/grid와 활성 cutline·ROI·pick·gizmo 등 world overlay를 render-relative 제출로 이식
+- 한 frame의 modelview·projection·viewport·scene origin을 묶은 `RenderFrameSnapshot`과 그 프레임의 visibility·ROI·X-ray·object TRS/geometry depth signature로 depth unprojection, screen projection, ray, Ctrl drag의 좌표·픽셀 계약을 일치시킴
+- 라쏘/가시 면 worker 결과는 시작 객체·mesh·TRS·depth authority와 완료 시점을 다시 비교하며, magnetic depth-edge cache는 잡힌 frame authority와 함께만 재사용. 객체 전환 시 미완성 gesture/polygon도 종료
+- mocked OpenGL과 pure float64 수학 게이트는 통과하지만, 실제 GPU driver에서 `>= 1e9 mm` 장면의 pixel·depth buffer·mm 이하 시각/피킹 정밀도는 아직 후속 검증 항목
 
 기존 기와 기록면 기능도 flatten 코어를 책임별로 분리해 유지합니다.
 
@@ -357,8 +360,8 @@ python main.py --project mesh.obj planview.png
 - DerivedRecord의 VBO-free binding rebind와 SVG/PNG worker staging → final-authority publication 이식
 - `READY + FRESH` record graph에서 Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6 순차 활성화·초록 완료 표시·재열기/Align 복원 구현
 - Cutline 면·경로, Outline fixed-grid/union/topology, Digital Rubbing raster/relief 내부의 안전 경계까지 사용자 cooperative cancellation 연결
-- 대좌표 render-origin 1차 이식: relative VBO, camera/model rebasing, native vector preview와 float64 CPU face picking 구현
-- 다음 단계: legacy immediate-mode overlay의 직접 relative 제출, 실제 OpenGL driver 기반 대좌표 시각·depth-picking 검증, 종료 중 worker 정리와 동기 preflight 분리, 실제 원격 3-OS CI, 라이선스 결정, GPU/대용량 유물 pilot 진행
+- 대좌표 render-origin 이식: relative VBO·camera/model rebasing·world overlay 제출과 frame-bound depth picking/drag 계약 구현
+- 다음 단계: 실제 OpenGL driver 기반 대좌표 시각·depth-picking 검증, 종료 중 worker 정리와 동기 preflight 분리, 실제 원격 3-OS CI, 라이선스 결정, GPU/대용량 유물 pilot 진행
 
 ---
 

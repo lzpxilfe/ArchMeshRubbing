@@ -122,7 +122,7 @@ from OpenGL.GL import (
     glVertexPointer,
     glViewport,
 )
-from OpenGL.GLU import gluLookAt, gluPerspective, gluProject, gluUnProject
+from OpenGL.GLU import gluLookAt, gluPerspective
 import ctypes
 
 from ..core.mesh_loader import MeshData
@@ -139,11 +139,15 @@ from ..core.alignment_utils import (
     transform_points,
 )
 from .render_coordinates import (
+    RenderFrameSnapshot,
     absolute_modelview_from_render,
     encode_relative_float32,
+    project_world_to_window,
     rebase_affine_for_render,
     render_origin_from_bounds,
+    unproject_window_to_world,
     world_to_render_points,
+    world_ray_from_window,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -961,9 +965,7 @@ class _SurfaceLassoSelectThread(QThread):
         self,
         vertices: np.ndarray,
         faces: np.ndarray,
-        translation: np.ndarray,
-        rotation_deg: np.ndarray,
-        scale: float,
+        local_to_world_matrix: np.ndarray,
         camera_pos_world: np.ndarray | None,
         modelview: np.ndarray,
         projection: np.ndarray,
@@ -973,6 +975,7 @@ class _SurfaceLassoSelectThread(QThread):
         depth_origin: tuple[int, int],
         depth_map: np.ndarray | None,
         *,
+        render_origin_world_mm: np.ndarray | None = None,
         face_centroids: np.ndarray | None = None,
         face_normals: np.ndarray | None = None,
         depth_tol: float = 0.01,
@@ -986,9 +989,20 @@ class _SurfaceLassoSelectThread(QThread):
         super().__init__()
         self._vertices = np.asarray(vertices)
         self._faces = np.asarray(faces)
-        self._translation = np.asarray(translation, dtype=np.float64).reshape(-1)
-        self._rotation = np.asarray(rotation_deg, dtype=np.float64).reshape(-1)
-        self._scale = float(scale)
+        self._local_to_world_matrix = np.asarray(
+            local_to_world_matrix,
+            dtype=np.float64,
+        ).reshape(4, 4).copy()
+        if (
+            not np.isfinite(self._local_to_world_matrix).all()
+            or not np.allclose(
+                self._local_to_world_matrix[3],
+                [0.0, 0.0, 0.0, 1.0],
+                rtol=0.0,
+                atol=1e-12,
+            )
+        ):
+            raise ValueError("local-to-world matrix must be a finite affine")
         self._camera_pos_world = None if camera_pos_world is None else np.asarray(camera_pos_world, dtype=np.float64).reshape(-1)
         self._mv = np.asarray(modelview, dtype=np.float64).reshape(4, 4)
         self._proj = np.asarray(projection, dtype=np.float64).reshape(4, 4)
@@ -1004,6 +1018,18 @@ class _SurfaceLassoSelectThread(QThread):
         self._depth = None if depth_map is None else np.asarray(depth_map)
         self._depth_tol = float(depth_tol)
         self._max_selected = int(max_selected_faces)
+        self._render_origin_world_mm = np.zeros(3, dtype=np.float64)
+        try:
+            if render_origin_world_mm is not None:
+                origin = np.asarray(
+                    render_origin_world_mm,
+                    dtype=np.float64,
+                ).reshape(-1)
+                if origin.size != 3 or not np.isfinite(origin).all():
+                    raise ValueError("render origin must be a finite 3-vector")
+                self._render_origin_world_mm = origin.copy()
+        except Exception as exc:
+            raise ValueError("render origin must be a finite 3-vector") from exc
 
         self._face_centroids: np.ndarray | None = None
         try:
@@ -1297,10 +1323,7 @@ class _SurfaceLassoSelectThread(QThread):
             mv = np.asarray(self._mv, dtype=np.float64)
             proj = np.asarray(self._proj, dtype=np.float64)
             # Row-vector projection matrix: (P*M*v)^T = v^T*M^T*P^T
-            try:
-                mvp_t = mv.T @ proj.T
-            except Exception:
-                mvp_t = None
+            mvp_t = mv.T @ proj.T
 
             depth = self._depth
             if depth is not None:
@@ -1336,15 +1359,9 @@ class _SurfaceLassoSelectThread(QThread):
                     j = i
                 return inside
 
-            # Object transform (local -> world)
-            trans = self._translation
-            if trans.size < 3:
-                trans = np.array([0.0, 0.0, 0.0], dtype=np.float64)
-            rot = self._rotation
-            if rot.size < 3:
-                rot = np.array([0.0, 0.0, 0.0], dtype=np.float64)
-            scale = float(self._scale) if abs(float(self._scale)) > 1e-12 else 1.0
-            local_to_world_matrix = scene_trs_matrix(trans[:3], rot[:3], scale)
+            # Object transform is captured from the same pivot-aware authority
+            # used by render and CPU picking.
+            local_to_world_matrix = self._local_to_world_matrix
             world_to_local_matrix = np.linalg.inv(local_to_world_matrix)
 
             # Camera position in local coords (for front-face filtering).
@@ -1413,14 +1430,14 @@ class _SurfaceLassoSelectThread(QThread):
 
                 # Local -> world
                 cent_w = transform_points(cent, local_to_world_matrix)
+                cent_render = cent_w - self._render_origin_world_mm.reshape(1, 3)
 
                 # Project (row-vector convention)
-                ones = np.ones((cent_w.shape[0], 1), dtype=np.float64)
-                v_h = np.hstack([cent_w.astype(np.float64, copy=False), ones])
-                if mvp_t is None:
-                    clip = v_h @ mv @ proj
-                else:
-                    clip = v_h @ mvp_t
+                ones = np.ones((cent_render.shape[0], 1), dtype=np.float64)
+                v_h = np.hstack(
+                    [cent_render.astype(np.float64, copy=False), ones]
+                )
+                clip = v_h @ mvp_t
                 w = clip[:, 3]
                 valid = np.isfinite(w) & (w > 1e-12)
                 if not np.any(valid):
@@ -1802,6 +1819,7 @@ class SceneObject:
         # float64 coordinates; only the uploaded GL_FLOAT payload is local to
         # this origin.  This value must never enter a document, record, or export.
         self._amr_vbo_origin_local_mm = np.zeros(3, dtype=np.float64)
+        self._amr_geometry_draw_revision = 0
         self.selected_faces: set[int] = set()
         self.outer_face_indices: set[int] = set()
         self.inner_face_indices: set[int] = set()
@@ -1844,6 +1862,21 @@ class SceneObject:
             self._amr_vbo_origin_local_mm,
             scene_origin_world_mm,
         )
+
+    def world_pivot(self) -> np.ndarray:
+        """Return the transform/gizmo pivot in absolute float64 world millimetres."""
+
+        pivot = getattr(self, "_amr_preview_pivot_mm", None)
+        if pivot is None:
+            pivot = self.mesh.centroid
+        world = transform_points(
+            np.asarray(pivot, dtype=np.float64).reshape(3),
+            self.local_to_world_matrix(),
+        )
+        result = np.asarray(world, dtype=np.float64).reshape(-1)
+        if result.size != 3 or not np.isfinite(result).all():
+            raise ValueError("scene object pivot must be a finite world point")
+        return result.copy()
 
     def compare_and_swap_artifact_binding(
         self,
@@ -1938,6 +1971,9 @@ class Viewport3D(QOpenGLWidget):
         # Stable for one live scene.  It is runtime-only and deliberately
         # excluded from ArtifactDocument/session/project serialization.
         self._amr_scene_render_origin_world_mm = np.zeros(3, dtype=np.float64)
+        self._amr_render_frame_serial = 0
+        self._amr_render_frame_snapshot: RenderFrameSnapshot | None = None
+        self._amr_render_frame_depth_signature: tuple | None = None
         
         # ?뚮뜑留??ㅼ젙
         self.grid_size = 500.0  # cm (???ш쾶 ?뺤옣)
@@ -2161,6 +2197,7 @@ class Viewport3D(QOpenGLWidget):
         self._cached_viewport = None
         self._cached_modelview = None
         self._cached_projection = None
+        self._cached_render_frame: RenderFrameSnapshot | None = None
         self._ctrl_drag_active = False
         self._hover_axis = None
         
@@ -2210,6 +2247,8 @@ class Viewport3D(QOpenGLWidget):
             origin,
             dtype=np.float64,
         ).reshape(3)
+        self._amr_render_frame_snapshot = None
+        self._amr_render_frame_depth_signature = None
 
     @staticmethod
     def _object_draw_origin_local_mm(obj: SceneObject) -> np.ndarray:
@@ -2255,23 +2294,192 @@ class Viewport3D(QOpenGLWidget):
     def _pop_absolute_world_modelview() -> None:
         glPopMatrix()
 
-    def _draw_in_absolute_world(self, callback, *args, **kwargs):
-        """Run one legacy absolute-world overlay without leaking matrix state."""
-
-        self._push_absolute_world_modelview()
-        try:
-            return callback(*args, **kwargs)
-        finally:
-            self._pop_absolute_world_modelview()
-
-    def _submit_world_vertex(self, point_world: object) -> None:
-        """Submit one absolute float64 world point in the active render frame."""
+    def _world_to_render_point(self, point_world: object) -> np.ndarray:
+        """Convert one absolute world point before it crosses a GPU boundary."""
 
         point = np.asarray(point_world, dtype=np.float64).reshape(-1)
         if point.size != 3 or not np.isfinite(point).all():
             raise ValueError("world render point must be a finite 3-vector")
-        relative = point - self._scene_render_origin_world_mm()
+        relative = world_to_render_points(
+            point,
+            self._scene_render_origin_world_mm(),
+        ).reshape(3)
+        return relative
+
+    def _submit_world_vertex(self, point_world: object) -> None:
+        """Submit one absolute float64 world point in the active render frame."""
+
+        relative = self._world_to_render_point(point_world)
         glVertex3f(float(relative[0]), float(relative[1]), float(relative[2]))
+
+    def _submit_world_xyz(self, x: float, y: float, z: float) -> None:
+        """Submit one absolute world XYZ triple through the render-origin boundary."""
+
+        self._submit_world_vertex([x, y, z])
+
+    def _translate_to_world_point(self, point_world: object) -> None:
+        """Translate the active render matrix to one absolute world point."""
+
+        relative = self._world_to_render_point(point_world)
+        glTranslatef(float(relative[0]), float(relative[1]), float(relative[2]))
+
+    def _depth_state_signature_for_frame(
+        self,
+        frame: RenderFrameSnapshot,
+    ) -> tuple:
+        """Describe every mutable authority that can change the mesh depth pass."""
+
+        if not isinstance(frame, RenderFrameSnapshot):
+            raise TypeError("frame must be a RenderFrameSnapshot")
+        object_state: list[tuple[object, ...]] = []
+        for item in list(getattr(self, "objects", None) or []):
+            matrix = np.asarray(
+                item.local_to_world_matrix(),
+                dtype=np.float64,
+            ).reshape(4, 4)
+            object_state.append(
+                (
+                    id(item),
+                    id(getattr(item, "mesh", None)),
+                    bool(getattr(item, "visible", True)),
+                    int(getattr(item, "vbo_id", 0) or 0),
+                    int(getattr(item, "vertex_count", 0) or 0),
+                    int(getattr(item, "_amr_geometry_draw_revision", 0) or 0),
+                    matrix.tobytes(),
+                )
+            )
+
+        try:
+            roi_bounds = tuple(
+                float(value)
+                for value in np.asarray(
+                    getattr(self, "roi_bounds", ()),
+                    dtype=np.float64,
+                ).reshape(-1)
+            )
+        except Exception:
+            roi_bounds = ()
+        cap_state: list[tuple[object, ...]] = []
+        caps = getattr(self, "roi_cap_verts", None)
+        if isinstance(caps, dict):
+            for key in sorted(caps):
+                value = caps.get(key)
+                if value is None:
+                    cap_state.append((str(key), 0, ()))
+                    continue
+                array = np.asarray(value)
+                cap_state.append((str(key), id(value), tuple(array.shape)))
+
+        return (
+            int(frame.projection_generation),
+            frame.viewport,
+            frame.modelview_render.tobytes(),
+            frame.projection.tobytes(),
+            frame.render_origin_world_mm.tobytes(),
+            int(getattr(self, "selected_index", -1)),
+            bool(getattr(self, "xray_mode", False)),
+            bool(getattr(self, "solid_shell_render", True)),
+            bool(getattr(self, "roi_enabled", False)),
+            bool(getattr(self, "roi_caps_enabled", False)),
+            roi_bounds,
+            tuple(cap_state),
+            tuple(object_state),
+        )
+
+    def _capture_render_frame_snapshot(self) -> RenderFrameSnapshot:
+        """Capture the current relative GL camera as one immutable pick frame."""
+
+        viewport_raw = glGetIntegerv(GL_VIEWPORT)
+        viewport_values = tuple(int(value) for value in viewport_raw[:4])
+        modelview = np.asarray(
+            glGetDoublev(GL_MODELVIEW_MATRIX),
+            dtype=np.float64,
+        ).reshape(4, 4).T
+        projection = np.asarray(
+            glGetDoublev(GL_PROJECTION_MATRIX),
+            dtype=np.float64,
+        ).reshape(4, 4).T
+        serial = int(getattr(self, "_amr_render_frame_serial", 0)) + 1
+        frame = RenderFrameSnapshot(
+            frame_serial=serial,
+            projection_generation=int(getattr(self, "_projection_generation", 0)),
+            viewport=viewport_values,
+            modelview_render=modelview,
+            projection=projection,
+            render_origin_world_mm=self._scene_render_origin_world_mm(),
+        )
+        depth_signature = self._depth_state_signature_for_frame(frame)
+        self._amr_render_frame_serial = serial
+        self._amr_render_frame_snapshot = frame
+        self._amr_render_frame_depth_signature = depth_signature
+        return frame
+
+    @staticmethod
+    def _camera_world_position_for_frame(frame: RenderFrameSnapshot) -> np.ndarray:
+        """Recover the absolute camera position from the captured modelview."""
+
+        if not isinstance(frame, RenderFrameSnapshot):
+            raise TypeError("frame must be a RenderFrameSnapshot")
+        inverse_modelview = np.linalg.inv(frame.modelview_render)
+        camera_render = np.asarray(inverse_modelview[:3, 3], dtype=np.float64)
+        camera_world = camera_render + frame.render_origin_world_mm
+        if camera_world.shape != (3,) or not np.isfinite(camera_world).all():
+            raise ValueError("render frame camera position is invalid")
+        return camera_world
+
+    def _current_render_frame_snapshot(self) -> RenderFrameSnapshot | None:
+        frame = getattr(self, "_amr_render_frame_snapshot", None)
+        if not isinstance(frame, RenderFrameSnapshot):
+            return None
+        if frame.projection_generation != int(
+            getattr(self, "_projection_generation", 0)
+        ):
+            return None
+        if not np.array_equal(
+            frame.render_origin_world_mm,
+            self._scene_render_origin_world_mm(),
+        ):
+            return None
+        captured_depth_signature = getattr(
+            self,
+            "_amr_render_frame_depth_signature",
+            None,
+        )
+        if not isinstance(captured_depth_signature, tuple):
+            return None
+        try:
+            current_depth_signature = self._depth_state_signature_for_frame(frame)
+        except Exception:
+            return None
+        if current_depth_signature != captured_depth_signature:
+            return None
+        return frame
+
+    def _project_world_point(
+        self,
+        point_world: object,
+        frame: RenderFrameSnapshot | None = None,
+    ) -> np.ndarray:
+        """Project an absolute point through one immutable render frame."""
+
+        active = frame if frame is not None else self._current_render_frame_snapshot()
+        if active is None:
+            raise RuntimeError("no current render frame is available")
+        return project_world_to_window(active, point_world)
+
+    def _unproject_world_point(
+        self,
+        window_x: float,
+        window_y: float,
+        depth: float,
+        frame: RenderFrameSnapshot | None = None,
+    ) -> np.ndarray:
+        """Restore one depth sample through the exact frame that produced it."""
+
+        active = frame if frame is not None else self._current_render_frame_snapshot()
+        if active is None:
+            raise RuntimeError("no current render frame is available")
+        return unproject_window_to_world(active, [window_x, window_y, depth])
     
     def initializeGL(self):
         """OpenGL 珥덇린??"""
@@ -2308,6 +2516,9 @@ class Viewport3D(QOpenGLWidget):
     
     def resizeGL(self, w: int, h: int):
         """酉고룷???ш린 蹂寃?"""
+        self._amr_render_frame_snapshot = None
+        self._amr_render_frame_depth_signature = None
+        self._cached_render_frame = None
         glViewport(0, 0, w, h)
 
         self._apply_main_projection(w, h)
@@ -2660,6 +2871,12 @@ class Viewport3D(QOpenGLWidget):
     
     def paintGL(self):
         """洹몃━湲?"""
+        # A clear/partial frame must never be paired with the previous depth
+        # contract if this paint exits before the mesh pass publishes a frame.
+        # Keep the press-time drag frame alive across repaints; it is a gesture
+        # snapshot and is cleared only by resize/reset/release.
+        self._amr_render_frame_snapshot = None
+        self._amr_render_frame_depth_signature = None
         try:
             self._apply_main_projection(self.width(), self.height())
         except Exception:
@@ -2754,11 +2971,7 @@ class Viewport3D(QOpenGLWidget):
                 self.draw_scene_object(obj, is_selected=True)
                 # ROI濡??섎┛ 硫댁쓣 梨꾩썙 ?⑤㈃ ?뺤씤???쎄쾶 蹂댁씠?꾨줉 罹??쒓퍚) ?뚮뜑留?
                 if bool(getattr(self, "roi_caps_enabled", False)):
-                    self._push_absolute_world_modelview()
-                    try:
-                        self.draw_roi_caps()
-                    finally:
-                        self._pop_absolute_world_modelview()
+                    self.draw_roi_caps()
 
                 try:
                     glDisable(GL_CLIP_PLANE1)
@@ -2797,11 +3010,7 @@ class Viewport3D(QOpenGLWidget):
                 if self.roi_enabled and bool(getattr(self, "roi_caps_enabled", False)):
                     try:
                         glDepthMask(GL_FALSE)
-                        self._push_absolute_world_modelview()
-                        try:
-                            self.draw_roi_caps()
-                        finally:
-                            self._pop_absolute_world_modelview()
+                        self.draw_roi_caps()
                     finally:
                         glDepthMask(GL_TRUE)
 
@@ -2814,30 +3023,40 @@ class Viewport3D(QOpenGLWidget):
                     except Exception:
                         _log_ignored_exception("Failed to disable ROI clip planes", level=logging.WARNING)
             
+        # Publish the exact relative camera/depth frame only after the mesh
+        # depth pass is complete.  Every interactive projection/unprojection
+        # must use this snapshot and its captured scene origin together.
+        try:
+            self._capture_render_frame_snapshot()
+        except Exception:
+            self._amr_render_frame_snapshot = None
+            self._amr_render_frame_depth_signature = None
+            _log_ignored_exception("Render frame snapshot capture failed", level=logging.WARNING)
+
         # 3. ?ㅻ쾭?덉씠 ?붿냼 (Depth write off: depth buffer??硫붿돩留??좎?)
         # Draw world axes after solids so they remain visible after mesh load.
-        self._draw_in_absolute_world(self.draw_axes)
+        self.draw_axes()
         glDepthMask(GL_FALSE)
 
         # 3.1 怨〓쪧 ?쇳똿 ?붿냼
-        self._draw_in_absolute_world(self.draw_picked_points)
-        self._draw_in_absolute_world(self.draw_fitted_arc)
+        self.draw_picked_points()
+        self.draw_fitted_arc()
 
         # 3.2 ?쒕㈃ 吏??李띿? ?? ?쒖떆
-        self._draw_in_absolute_world(self.draw_surface_paint_points)
+        self.draw_surface_paint_points()
         # 3.3 ?쒕㈃ 吏??硫댁쟻/Area) ?ш?誘??ㅻ쾭?덉씠
-        self._draw_in_absolute_world(self.draw_surface_lasso_overlay)
+        self.draw_surface_lasso_overlay()
         # 3.4 ?쒕㈃ 吏??寃쎄퀎/?먯꽍) ?ш?誘??ㅻ쾭?덉씠
-        self._draw_in_absolute_world(self.draw_surface_magnetic_lasso_overlay)
+        self.draw_surface_magnetic_lasso_overlay()
 
         # 3.5 諛붾떏 ?뺣젹 ???쒖떆
-        self._draw_in_absolute_world(self.draw_floor_picks)
+        self.draw_floor_picks()
 
         # 3.6 Mesh slicing plane/contours disabled (ROI + line-section workflow only).
 
         # 3.7 ??옄???⑤㈃
         if self.crosshair_enabled:
-            self._draw_in_absolute_world(self.draw_crosshair)
+            self.draw_crosshair()
 
         # 3.7.25 ?⑤㈃??2媛? 媛?대뱶
         if (
@@ -2846,18 +3065,18 @@ class Viewport3D(QOpenGLWidget):
             or self._has_visible_polyline_layers()
             or any(bool(x) for x in (getattr(self, "_cut_line_final", [False, False]) or [False, False]))
         ):
-            self._draw_in_absolute_world(self.draw_cut_lines)
+            self.draw_cut_lines()
 
         self.draw_native_vector_preview()
 
         # 3.7.5 ?좏삎 ?⑤㈃ (Top-view cut line)
         if self.line_section_enabled:
-            self._draw_in_absolute_world(self.draw_line_section)
+            self.draw_line_section()
              
         # 3.8 2D ROI ?щ줈???곸뿭
         if self.roi_enabled:
-            self._draw_in_absolute_world(self.draw_roi_cut_edges)
-            self._draw_in_absolute_world(self.draw_roi_box)
+            self.draw_roi_cut_edges()
+            self.draw_roi_box()
 
         glDepthMask(GL_TRUE)
 
@@ -2866,26 +3085,16 @@ class Viewport3D(QOpenGLWidget):
         # 4. ?뚯쟾 湲곗쫰紐?(?좏깮??媛앹껜?먮쭔, ?쇳궧 紐⑤뱶 ?꾨땺 ?뚮쭔)
         if self.selected_obj and self.picking_mode == 'none':
             if not self.roi_enabled:
-                self._draw_in_absolute_world(
-                    self.draw_rotation_gizmo,
-                    self.selected_obj,
-                )
+                self.draw_rotation_gizmo(self.selected_obj)
             # 硫붿돩 移섏닔/以묒떖???ㅻ쾭?덉씠
-            self._draw_in_absolute_world(
-                self.draw_mesh_dimensions,
-                self.selected_obj,
-            )
+            self.draw_mesh_dimensions(self.selected_obj)
             
         # 5. UI ?ㅻ쾭?덉씠 (HUD)
         self.draw_orientation_hud()
         self.draw_surface_runtime_hud()
 
-        # Existing input handlers read the current GL matrices as absolute
-        # world transforms.  Restore that compatibility state after the
-        # relative GPU pass so depth unprojection returns canonical world mm.
-        glMatrixMode(GL_MODELVIEW)
-        glLoadIdentity()
-        self.camera.apply()
+        # Keep the GL state render-relative.  Event handlers consume the
+        # immutable frame snapshot above instead of ambient absolute matrices.
 
     def _update_floor_penetration_clip_plane(self):
         """?붾뱶 諛붾떏(Z=0) 湲곗??쇰줈 '?꾨옒履?留??④린???대━???됰㈃ ?뺤쓽"""
@@ -3201,10 +3410,10 @@ class Viewport3D(QOpenGLWidget):
         glLineWidth(1.0)
         glColor4f(0.5, 0.5, 0.5, 0.5)
         glBegin(GL_LINES)
-        glVertex3f(-s, cy, 0)
-        glVertex3f(s, cy, 0)
-        glVertex3f(cx, -s, 0)
-        glVertex3f(cx, s, 0)
+        self._submit_world_xyz(cx - s, cy, 0.0)
+        self._submit_world_xyz(cx + s, cy, 0.0)
+        self._submit_world_xyz(cx, cy - s, 0.0)
+        self._submit_world_xyz(cx, cy + s, 0.0)
         glEnd()
         
         # 2. 硫붿돩 ?ъ쁺 ?⑤㈃ (媛뺥븳 ?몃???
@@ -3222,7 +3431,7 @@ class Viewport3D(QOpenGLWidget):
             glColor3f(1.0, 1.0, 0.0) # Yellow
             glBegin(GL_LINE_STRIP)
             for pt in world_x_profile:
-                glVertex3fv(pt)
+                self._submit_world_vertex(pt)
             glEnd()
             
         # Y ?꾨줈?뚯씪: Y異?諛⑺뼢?쇰줈 媛濡쒖?瑜대뒗 ??(X = cx)
@@ -3231,7 +3440,7 @@ class Viewport3D(QOpenGLWidget):
             glColor3f(0.0, 1.0, 1.0) # Cyan
             glBegin(GL_LINE_STRIP)
             for pt in world_y_profile:
-                glVertex3fv(pt)
+                self._submit_world_vertex(pt)
             glEnd()
             
         glLineWidth(1.0)
@@ -3836,9 +4045,10 @@ class Viewport3D(QOpenGLWidget):
 
         try:
             self.makeCurrent()
-            viewport = glGetIntegerv(GL_VIEWPORT)
-            modelview = glGetDoublev(GL_MODELVIEW_MATRIX)
-            projection = glGetDoublev(GL_PROJECTION_MATRIX)
+            frame = self._current_render_frame_snapshot()
+            if frame is None:
+                return None
+            viewport = np.asarray(frame.viewport, dtype=np.int32)
         except Exception:
             return None
 
@@ -3902,10 +4112,8 @@ class Viewport3D(QOpenGLWidget):
                 wy = float(arr[1]) + off_y
                 wz = 0.0
                 try:
-                    win = gluProject(wx, wy, wz, modelview, projection, viewport)
+                    win = self._project_world_point([wx, wy, wz], frame)
                 except Exception:
-                    win = None
-                if not win:
                     continue
                 qx, qy = self._gl_window_to_qt_xy(float(win[0]), float(win[1]), viewport=viewport)
                 if np.isfinite([qx, qy]).all():
@@ -4302,6 +4510,14 @@ class Viewport3D(QOpenGLWidget):
 
     def _on_mesh_transform_changed(self):
         """硫붿돩 蹂???? ?⑤㈃/ROI ???섏〈 ?곗씠?곕? ?붾컮?댁뒪 媛깆떊."""
+        # This slot is the central boundary for both viewport gestures and
+        # transform-toolbar signals emitted by MainWindow.
+        self._amr_render_frame_snapshot = None
+        self._amr_render_frame_depth_signature = None
+        self._invalidate_surface_magnetic_cache()
+        self.clear_surface_lasso()
+        self.clear_surface_magnetic_lasso(clear_cache=True)
+        self.clear_surface_paint_points()
         self._clear_cutline_tape_cache()
         try:
             if getattr(self, "crosshair_enabled", False):
@@ -4774,8 +4990,8 @@ class Viewport3D(QOpenGLWidget):
         glLineWidth(2.5)
         glColor4f(1.0, 0.55, 0.0, 0.85)
         glBegin(GL_LINES)
-        glVertex3f(float(p0[0]), float(p0[1]), z)
-        glVertex3f(float(p1[0]), float(p1[1]), z)
+        self._submit_world_xyz(float(p0[0]), float(p0[1]), z)
+        self._submit_world_xyz(float(p1[0]), float(p1[1]), z)
         glEnd()
 
         # 2) ?붾뱶?ъ씤??留덉빱
@@ -4788,7 +5004,7 @@ class Viewport3D(QOpenGLWidget):
                     continue
                 glBegin(GL_LINE_STRIP)
                 for pt in contour:
-                    glVertex3fv(pt)
+                    self._submit_world_vertex(pt)
                 glEnd()
 
         glLineWidth(1.0)
@@ -5175,10 +5391,10 @@ class Viewport3D(QOpenGLWidget):
             v01 = p0 - s0
             v11 = p1 - s1
             v10 = p1 + s1
-            glVertex3f(float(v00[0]), float(v00[1]), float(v00[2]))
-            glVertex3f(float(v01[0]), float(v01[1]), float(v01[2]))
-            glVertex3f(float(v11[0]), float(v11[1]), float(v11[2]))
-            glVertex3f(float(v10[0]), float(v10[1]), float(v10[2]))
+            self._submit_world_vertex(v00)
+            self._submit_world_vertex(v01)
+            self._submit_world_vertex(v11)
+            self._submit_world_vertex(v10)
         glEnd()
 
         # Center glossy stroke
@@ -5187,7 +5403,7 @@ class Viewport3D(QOpenGLWidget):
         glBegin(GL_LINE_STRIP)
         for i in range(n):
             p = arr[i] + off[i] * 1.05
-            glVertex3f(float(p[0]), float(p[1]), float(p[2]))
+            self._submit_world_vertex(p)
         glEnd()
 
         # Edge strokes (rubber band silhouette)
@@ -5196,12 +5412,12 @@ class Viewport3D(QOpenGLWidget):
         glBegin(GL_LINE_STRIP)
         for i in range(n):
             p = arr[i] + off[i] + side[i] * hw
-            glVertex3f(float(p[0]), float(p[1]), float(p[2]))
+            self._submit_world_vertex(p)
         glEnd()
         glBegin(GL_LINE_STRIP)
         for i in range(n):
             p = arr[i] + off[i] - side[i] * hw
-            glVertex3f(float(p[0]), float(p[1]), float(p[2]))
+            self._submit_world_vertex(p)
         glEnd()
 
     def _build_cutline_surface_tape_strips(
@@ -5698,7 +5914,7 @@ class Viewport3D(QOpenGLWidget):
                         p0 = np.asarray(line[0], dtype=np.float64)
                         glPointSize(7.0)
                         glBegin(GL_POINTS)
-                        glVertex3f(float(p0[0]), float(p0[1]), z)
+                        self._submit_world_xyz(float(p0[0]), float(p0[1]), z)
                         glEnd()
                         glPointSize(1.0)
                         continue
@@ -5706,7 +5922,7 @@ class Viewport3D(QOpenGLWidget):
                     glBegin(GL_LINE_STRIP)
                     for p in line:
                         p0 = np.asarray(p, dtype=np.float64)
-                        glVertex3f(float(p0[0]), float(p0[1]), z)
+                        self._submit_world_xyz(float(p0[0]), float(p0[1]), z)
                     glEnd()
 
             # Mesh-attached "sticker / rubber-band" overlay.
@@ -5802,7 +6018,11 @@ class Viewport3D(QOpenGLWidget):
                             continue
                         glBegin(GL_LINE_STRIP)
                         for p0 in pts_h:
-                            glVertex3f(float(p0[0]), float(p0[1]), float(p0[2] + tape_lift * 1.85))
+                            self._submit_world_xyz(
+                                float(p0[0]),
+                                float(p0[1]),
+                                float(p0[2] + tape_lift * 1.85),
+                            )
                         glEnd()
 
                 glColor4f(
@@ -5822,7 +6042,11 @@ class Viewport3D(QOpenGLWidget):
                         continue
                     glBegin(GL_LINE_STRIP)
                     for p0 in pts:
-                        glVertex3f(float(p0[0]), float(p0[1]), float(p0[2] + tape_lift * 1.55))
+                        self._submit_world_xyz(
+                            float(p0[0]),
+                            float(p0[1]),
+                            float(p0[2] + tape_lift * 1.55),
+                        )
                     glEnd()
 
             # ?꾨━酉??멸렇癒쇳듃
@@ -5837,8 +6061,8 @@ class Viewport3D(QOpenGLWidget):
                         glColor4f(float(cprev[0]), float(cprev[1]), float(cprev[2]), 0.95)
                         glLineWidth(2.0)
                         glBegin(GL_LINES)
-                        glVertex3f(float(p_last[0]), float(p_last[1]), z)
-                        glVertex3f(float(p_prev[0]), float(p_prev[1]), z)
+                        self._submit_world_xyz(float(p_last[0]), float(p_last[1]), z)
+                        self._submit_world_xyz(float(p_prev[0]), float(p_prev[1]), z)
                         glEnd()
                 except Exception:
                     _log_ignored_exception()
@@ -5861,7 +6085,7 @@ class Viewport3D(QOpenGLWidget):
                     glBegin(GL_LINE_STRIP)
                     for p in pts:
                         p0 = np.asarray(p, dtype=np.float64)
-                        glVertex3f(float(p0[0]), float(p0[1]), z_profile)
+                        self._submit_world_xyz(float(p0[0]), float(p0[1]), z_profile)
                     glEnd()
                 glDisable(GL_LINE_SMOOTH)
 
@@ -5916,7 +6140,11 @@ class Viewport3D(QOpenGLWidget):
                         for p in pts:
                             arr = np.asarray(p, dtype=np.float64).reshape(-1)
                             if arr.size >= 2:
-                                glVertex3f(float(arr[0]) + off_x, float(arr[1]) + off_y, float(z_use))
+                                self._submit_world_xyz(
+                                    float(arr[0]) + off_x,
+                                    float(arr[1]) + off_y,
+                                    float(z_use),
+                                )
                         glEnd()
                     except Exception:
                         continue
@@ -6287,6 +6515,7 @@ class Viewport3D(QOpenGLWidget):
         
         x1, x2, y1, y2 = self.roi_bounds
         z = 0.08 # 諛붾떏?먯꽌 ?댁쭩 ?꾩? (Z-fight 諛⑹?)
+        vertex = self._submit_world_xyz
 
         # Ensure min/max ordering (defensive)
         try:
@@ -6302,19 +6531,19 @@ class Viewport3D(QOpenGLWidget):
         try:
             glColor4f(0.98, 0.82, 0.35, 0.10)
             glBegin(GL_QUADS)
-            glVertex3f(float(x1), float(y1), float(z))
-            glVertex3f(float(x2), float(y1), float(z))
-            glVertex3f(float(x2), float(y2), float(z))
-            glVertex3f(float(x1), float(y2), float(z))
+            vertex(float(x1), float(y1), float(z))
+            vertex(float(x2), float(y1), float(z))
+            vertex(float(x2), float(y2), float(z))
+            vertex(float(x1), float(y2), float(z))
             glEnd()
 
             glLineWidth(2.0)
             glColor4f(0.95, 0.62, 0.16, 0.68)
             glBegin(GL_LINE_LOOP)
-            glVertex3f(float(x1), float(y1), float(z))
-            glVertex3f(float(x2), float(y1), float(z))
-            glVertex3f(float(x2), float(y2), float(z))
-            glVertex3f(float(x1), float(y2), float(z))
+            vertex(float(x1), float(y1), float(z))
+            vertex(float(x2), float(y1), float(z))
+            vertex(float(x2), float(y2), float(z))
+            vertex(float(x1), float(y2), float(z))
             glEnd()
         except Exception:
             try:
@@ -6375,63 +6604,63 @@ class Viewport3D(QOpenGLWidget):
             sdy = -py * half_w * 0.32
             glColor4f(0.0, 0.0, 0.0, 0.22 if active else 0.16)
             glBegin(GL_QUADS)
-            glVertex3f(float(tail_l[0] + sdx), float(tail_l[1] + sdy), float(z))
-            glVertex3f(float(neck_l[0] + sdx), float(neck_l[1] + sdy), float(z))
-            glVertex3f(float(neck_r[0] + sdx), float(neck_r[1] + sdy), float(z))
-            glVertex3f(float(tail_r[0] + sdx), float(tail_r[1] + sdy), float(z))
+            vertex(float(tail_l[0] + sdx), float(tail_l[1] + sdy), float(z))
+            vertex(float(neck_l[0] + sdx), float(neck_l[1] + sdy), float(z))
+            vertex(float(neck_r[0] + sdx), float(neck_r[1] + sdy), float(z))
+            vertex(float(tail_r[0] + sdx), float(tail_r[1] + sdy), float(z))
             glEnd()
             glBegin(GL_TRIANGLES)
-            glVertex3f(float(head_l[0] + sdx), float(head_l[1] + sdy), float(z))
-            glVertex3f(float(tip[0] + sdx), float(tip[1] + sdy), float(z))
-            glVertex3f(float(head_r[0] + sdx), float(head_r[1] + sdy), float(z))
+            vertex(float(head_l[0] + sdx), float(head_l[1] + sdy), float(z))
+            vertex(float(tip[0] + sdx), float(tip[1] + sdy), float(z))
+            vertex(float(head_r[0] + sdx), float(head_r[1] + sdy), float(z))
             glEnd()
 
             glColor4f(*fill)
             glBegin(GL_QUADS)
-            glVertex3f(float(tail_l[0]), float(tail_l[1]), float(z))
-            glVertex3f(float(neck_l[0]), float(neck_l[1]), float(z))
-            glVertex3f(float(neck_r[0]), float(neck_r[1]), float(z))
-            glVertex3f(float(tail_r[0]), float(tail_r[1]), float(z))
+            vertex(float(tail_l[0]), float(tail_l[1]), float(z))
+            vertex(float(neck_l[0]), float(neck_l[1]), float(z))
+            vertex(float(neck_r[0]), float(neck_r[1]), float(z))
+            vertex(float(tail_r[0]), float(tail_r[1]), float(z))
             glEnd()
             glBegin(GL_TRIANGLES)
-            glVertex3f(float(head_l[0]), float(head_l[1]), float(z))
-            glVertex3f(float(tip[0]), float(tip[1]), float(z))
-            glVertex3f(float(head_r[0]), float(head_r[1]), float(z))
+            vertex(float(head_l[0]), float(head_l[1]), float(z))
+            vertex(float(tip[0]), float(tip[1]), float(z))
+            vertex(float(head_r[0]), float(head_r[1]), float(z))
             glEnd()
 
             # bevel highlight/shadow strips to mimic 3D spear
             sh = half_w * 0.28
             glColor4f(1.0, 1.0, 1.0, 0.42 if active else 0.30)
             glBegin(GL_QUADS)
-            glVertex3f(float(tail_l[0]), float(tail_l[1]), float(z))
-            glVertex3f(float(neck_l[0]), float(neck_l[1]), float(z))
-            glVertex3f(float(neck_l[0] + px * sh), float(neck_l[1] + py * sh), float(z))
-            glVertex3f(float(tail_l[0] + px * sh), float(tail_l[1] + py * sh), float(z))
+            vertex(float(tail_l[0]), float(tail_l[1]), float(z))
+            vertex(float(neck_l[0]), float(neck_l[1]), float(z))
+            vertex(float(neck_l[0] + px * sh), float(neck_l[1] + py * sh), float(z))
+            vertex(float(tail_l[0] + px * sh), float(tail_l[1] + py * sh), float(z))
             glEnd()
             glBegin(GL_TRIANGLES)
-            glVertex3f(float(head_l[0]), float(head_l[1]), float(z))
-            glVertex3f(float(tip[0]), float(tip[1]), float(z))
-            glVertex3f(float(head_l[0] + px * sh), float(head_l[1] + py * sh), float(z))
+            vertex(float(head_l[0]), float(head_l[1]), float(z))
+            vertex(float(tip[0]), float(tip[1]), float(z))
+            vertex(float(head_l[0] + px * sh), float(head_l[1] + py * sh), float(z))
             glEnd()
 
             glColor4f(0.0, 0.0, 0.0, 0.26 if active else 0.20)
             glBegin(GL_QUADS)
-            glVertex3f(float(tail_r[0] - px * sh), float(tail_r[1] - py * sh), float(z))
-            glVertex3f(float(neck_r[0] - px * sh), float(neck_r[1] - py * sh), float(z))
-            glVertex3f(float(neck_r[0]), float(neck_r[1]), float(z))
-            glVertex3f(float(tail_r[0]), float(tail_r[1]), float(z))
+            vertex(float(tail_r[0] - px * sh), float(tail_r[1] - py * sh), float(z))
+            vertex(float(neck_r[0] - px * sh), float(neck_r[1] - py * sh), float(z))
+            vertex(float(neck_r[0]), float(neck_r[1]), float(z))
+            vertex(float(tail_r[0]), float(tail_r[1]), float(z))
             glEnd()
 
             glColor4f(*stroke)
             glLineWidth(1.6)
             glBegin(GL_LINE_LOOP)
-            glVertex3f(float(tail_l[0]), float(tail_l[1]), float(z))
-            glVertex3f(float(neck_l[0]), float(neck_l[1]), float(z))
-            glVertex3f(float(head_l[0]), float(head_l[1]), float(z))
-            glVertex3f(float(tip[0]), float(tip[1]), float(z))
-            glVertex3f(float(head_r[0]), float(head_r[1]), float(z))
-            glVertex3f(float(neck_r[0]), float(neck_r[1]), float(z))
-            glVertex3f(float(tail_r[0]), float(tail_r[1]), float(z))
+            vertex(float(tail_l[0]), float(tail_l[1]), float(z))
+            vertex(float(neck_l[0]), float(neck_l[1]), float(z))
+            vertex(float(head_l[0]), float(head_l[1]), float(z))
+            vertex(float(tip[0]), float(tip[1]), float(z))
+            vertex(float(head_r[0]), float(head_r[1]), float(z))
+            vertex(float(neck_r[0]), float(neck_r[1]), float(z))
+            vertex(float(tail_r[0]), float(tail_r[1]), float(z))
             glEnd()
             glLineWidth(1.0)
 
@@ -6444,10 +6673,10 @@ class Viewport3D(QOpenGLWidget):
                 glColor4f(1.0, 1.0, 1.0, 0.95)
             glLineWidth(2.0)
             glBegin(GL_LINE_LOOP)
-            glVertex3f(float(mid_x - csize), float(mid_y), float(z))
-            glVertex3f(float(mid_x), float(mid_y + csize), float(z))
-            glVertex3f(float(mid_x + csize), float(mid_y), float(z))
-            glVertex3f(float(mid_x), float(mid_y - csize), float(z))
+            vertex(float(mid_x - csize), float(mid_y), float(z))
+            vertex(float(mid_x), float(mid_y + csize), float(z))
+            vertex(float(mid_x + csize), float(mid_y), float(z))
+            vertex(float(mid_x), float(mid_y - csize), float(z))
             glEnd()
         except Exception:
             try:
@@ -6509,7 +6738,7 @@ class Viewport3D(QOpenGLWidget):
                         continue
                     glBegin(GL_LINE_STRIP)
                     for pt in cnt:
-                        glVertex3fv(pt)
+                        self._submit_world_vertex(pt)
                     glEnd()
                 except Exception:
                     continue
@@ -6546,7 +6775,7 @@ class Viewport3D(QOpenGLWidget):
 
             try:
                 for v in verts:
-                    glVertex3f(float(v[0]), float(v[1]), float(v[2]))
+                    self._submit_world_vertex(v)
             except Exception:
                 continue
         glEnd()
@@ -6827,7 +7056,7 @@ class Viewport3D(QOpenGLWidget):
                 continue
 
             if verts:
-                self.roi_cap_verts[key] = np.asarray(verts, dtype=np.float32)
+                self.roi_cap_verts[key] = np.asarray(verts, dtype=np.float64)
 
     def draw_roi_section_plots(self):
         """ROI ?⑤㈃ 諛붾떏 諛곗튂 誘몃━蹂닿린 (x異??⑤㈃=+X 諛⑺뼢, y異??⑤㈃=+Y 諛⑺뼢)."""
@@ -7443,7 +7672,7 @@ class Viewport3D(QOpenGLWidget):
 
     
     def draw_axes(self):
-        """Draw world XYZ axes (Z-up)."""
+        """Draw world-axis direction guides through the scene render origin."""
         glDisable(GL_LIGHTING)
         glDisable(GL_DEPTH_TEST)
 
@@ -7469,6 +7698,10 @@ class Viewport3D(QOpenGLWidget):
         world_extent = max(200.0, cam_dist * horizon_factor)
         axis_length = max(120.0, world_extent * 0.35)
         axis_length = min(axis_length, 200_000.0)
+        # Show world-axis directions through the current scene origin.  The
+        # geographic world origin may be kilometres away from one artifact and
+        # cannot share a useful float32 render frame with millimetre features.
+        anchor = self._scene_render_origin_world_mm()
 
         view_key = self._camera_canonical_view_key()
 
@@ -7486,18 +7719,18 @@ class Viewport3D(QOpenGLWidget):
 
         if 0 in visible_axes:
             glColor3f(0.95, 0.2, 0.2)
-            glVertex3f(float(-axis_length), 0.0, 0.0)
-            glVertex3f(float(axis_length), 0.0, 0.0)
+            self._submit_world_vertex(anchor + [-axis_length, 0.0, 0.0])
+            self._submit_world_vertex(anchor + [axis_length, 0.0, 0.0])
 
         if 1 in visible_axes:
             glColor3f(0.2, 0.85, 0.2)
-            glVertex3f(0.0, float(-axis_length), 0.0)
-            glVertex3f(0.0, float(axis_length), 0.0)
+            self._submit_world_vertex(anchor + [0.0, -axis_length, 0.0])
+            self._submit_world_vertex(anchor + [0.0, axis_length, 0.0])
 
         if 2 in visible_axes:
             glColor3f(0.2, 0.2, 0.95)
-            glVertex3f(0.0, 0.0, float(-axis_length))
-            glVertex3f(0.0, 0.0, float(axis_length))
+            self._submit_world_vertex(anchor + [0.0, 0.0, -axis_length])
+            self._submit_world_vertex(anchor + [0.0, 0.0, axis_length])
 
         glEnd()
         glPopMatrix()
@@ -7953,47 +8186,6 @@ class Viewport3D(QOpenGLWidget):
             # 遺덊닾紐?硫붿돩??alpha=1.0??紐낆떆???섎룄移??딆? ?대? 鍮꾩묠??留됱뒿?덈떎.
             glColor4f(float(col[0]), float(col[1]), float(col[2]), 1.0)
             
-        # 釉뚮윭?쒕줈 ?좏깮??硫??섏씠?쇱씠??(?꾩떆 ?ㅻ쾭?덉씠)
-        if is_selected and self.picking_mode == 'floor_brush' and self.brush_selected_faces:
-            glPushMatrix()
-            glDisable(GL_LIGHTING)
-            # 硫붿돩蹂대떎 ?꾩＜ ?쎄컙 ?욎뿉 洹몃━湲?(Z-fight 諛⑹?)
-            glPolygonOffset(-1.0, -1.0)
-            glEnable(GL_POLYGON_OFFSET_FILL)
-            glColor3f(1.0, 0.2, 0.2)
-            glBegin(GL_TRIANGLES)
-            for face_idx in self.brush_selected_faces:
-                f = obj.mesh.faces[face_idx]
-                for v_idx in f:
-                    glVertex3fv(
-                        np.asarray(obj.mesh.vertices[v_idx], dtype=np.float64)
-                        - local_vbo_origin
-                    )
-            glEnd()
-            glDisable(GL_POLYGON_OFFSET_FILL)
-            glEnable(GL_LIGHTING)
-            glPopMatrix()
-
-        # ?좏깮??硫??섏씠?쇱씠??(SelectionPanel)
-        if is_selected and self.picking_mode in {'select_face', 'select_brush'} and obj.selected_faces:
-            glPushMatrix()
-            glDisable(GL_LIGHTING)
-            glPolygonOffset(-1.0, -1.0)
-            glEnable(GL_POLYGON_OFFSET_FILL)
-            glColor3f(1.0, 0.8, 0.0)
-            glBegin(GL_TRIANGLES)
-            for face_idx in obj.selected_faces:
-                f = obj.mesh.faces[int(face_idx)]
-                for v_idx in f:
-                    glVertex3fv(
-                        np.asarray(obj.mesh.vertices[v_idx], dtype=np.float64)
-                        - local_vbo_origin
-                    )
-            glEnd()
-            glDisable(GL_POLYGON_OFFSET_FILL)
-            glEnable(GL_LIGHTING)
-            glPopMatrix()
-
         if can_draw_vbo:
             # VBO 諛⑹떇 ?뚮뜑留?
             glEnableClientState(GL_VERTEX_ARRAY)
@@ -8213,6 +8405,15 @@ class Viewport3D(QOpenGLWidget):
                         self._draw_surface_assignment_overlay_immediate(obj, faces, vertices, depth_write=depth_write)
             except Exception:
                 _log_ignored_exception("Immediate-mode mesh fallback failed", level=logging.WARNING)
+
+        # Selection diagnostics are color overlays only.  Draw them after the
+        # base mesh with depth writes disabled so they cannot corrupt the depth
+        # contract consumed by picking and magnetic-edge caches.
+        self._draw_mesh_selection_highlights(
+            obj,
+            local_vbo_origin=local_vbo_origin,
+            is_selected=is_selected,
+        )
         
         # 諛붾떏 ?묒큺 硫??섏씠?쇱씠?몃뒗 ?뺤튂(諛붾떏 ?뺣젹) 愿??紐⑤뱶?먯꽌留??쒖떆 (??⑸웾 硫붿돩 ?깅뒫)
         if is_selected and self.picking_mode in {'floor_3point', 'floor_face', 'floor_brush'}:
@@ -8222,6 +8423,58 @@ class Viewport3D(QOpenGLWidget):
             )
 
         glDisable(GL_CULL_FACE)
+
+    def _draw_mesh_selection_highlights(
+        self,
+        obj: SceneObject,
+        *,
+        local_vbo_origin: np.ndarray,
+        is_selected: bool,
+    ) -> None:
+        """Draw brush/face diagnostics without changing mesh depth pixels."""
+
+        draw_floor = bool(
+            is_selected
+            and self.picking_mode == "floor_brush"
+            and self.brush_selected_faces
+        )
+        draw_selection = bool(
+            is_selected
+            and self.picking_mode in {"select_face", "select_brush"}
+            and obj.selected_faces
+        )
+        if not draw_floor and not draw_selection:
+            return
+
+        glPushAttrib(GL_ALL_ATTRIB_BITS)
+        glPushMatrix()
+        try:
+            glDisable(GL_LIGHTING)
+            glDepthMask(GL_FALSE)
+            glPolygonOffset(-1.0, -1.0)
+            glEnable(GL_POLYGON_OFFSET_FILL)
+            if draw_floor:
+                glColor3f(1.0, 0.2, 0.2)
+            else:
+                glColor3f(1.0, 0.8, 0.0)
+            face_indices = (
+                self.brush_selected_faces if draw_floor else obj.selected_faces
+            )
+            glBegin(GL_TRIANGLES)
+            for face_idx in face_indices:
+                face = obj.mesh.faces[int(face_idx)]
+                for vertex_idx in face:
+                    glVertex3fv(
+                        np.asarray(
+                            obj.mesh.vertices[int(vertex_idx)],
+                            dtype=np.float64,
+                        )
+                        - local_vbo_origin
+                    )
+            glEnd()
+        finally:
+            glPopMatrix()
+            glPopAttrib()
 
     def _draw_floor_penetration_immediate(
         self,
@@ -8397,6 +8650,7 @@ class Viewport3D(QOpenGLWidget):
         glDisable(GL_CULL_FACE)
         glEnable(GL_BLEND)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        glDepthMask(GL_FALSE)
         
         glEnable(GL_POLYGON_OFFSET_FILL)
         glPolygonOffset(-4.0, -4.0)
@@ -8457,10 +8711,10 @@ class Viewport3D(QOpenGLWidget):
         glLineWidth(2.0)
         marker_size = 1.5  # 怨좎젙 ?ш린 1.5cm
         glBegin(GL_LINES)
-        glVertex3f(center_x - marker_size, center_y, z)
-        glVertex3f(center_x + marker_size, center_y, z)
-        glVertex3f(center_x, center_y - marker_size, z)
-        glVertex3f(center_x, center_y + marker_size, z)
+        self._submit_world_xyz(center_x - marker_size, center_y, z)
+        self._submit_world_xyz(center_x + marker_size, center_y, z)
+        self._submit_world_xyz(center_x, center_y - marker_size, z)
+        self._submit_world_xyz(center_x, center_y + marker_size, z)
         glEnd()
         
         # ?먯젏 ?쒖떆 (?뱀깋 ?묒? ??
@@ -8468,7 +8722,11 @@ class Viewport3D(QOpenGLWidget):
         glBegin(GL_LINE_LOOP)
         for i in range(16):
             angle = 2.0 * np.pi * i / 16
-            glVertex3f(0.5 * np.cos(angle), 0.5 * np.sin(angle), z)
+            self._submit_world_xyz(
+                center_x + 0.5 * np.cos(angle),
+                center_y + 0.5 * np.sin(angle),
+                z,
+            )
         glEnd()
         
         glLineWidth(1.0)
@@ -8484,8 +8742,12 @@ class Viewport3D(QOpenGLWidget):
         glDisable(GL_DEPTH_TEST)
         
         glPushMatrix()
-        # ?좏깮??媛앹껜???꾩튂濡??대룞
-        glTranslatef(*obj.translation)
+        # Anchor the local gizmo only after subtracting the scene origin.
+        self._translate_to_world_point(obj.world_pivot())
+        rotation = np.asarray(obj.rotation, dtype=np.float64).reshape(3)
+        glRotatef(float(rotation[0]), 1.0, 0.0, 0.0)
+        glRotatef(float(rotation[1]), 0.0, 1.0, 0.0)
+        glRotatef(float(rotation[2]), 0.0, 0.0, 1.0)
         
         # 湲곗쫰紐??ш린 ?ㅼ젙 (媛앹껜 ?ㅼ???諛섏쁺)
         size = self.gizmo_size * obj.scale
@@ -8632,8 +8894,11 @@ class Viewport3D(QOpenGLWidget):
         
         new_obj = SceneObject(mesh, name)
         new_obj._amr_projection_preserves_origin = not bool(center_at_origin)
+        next_selected_index = len(self.objects)
+        if next_selected_index != int(getattr(self, "selected_index", -1)):
+            self._reset_selection_authority_transients()
         self.objects.append(new_obj)
-        self.selected_index = len(self.objects) - 1
+        self.selected_index = next_selected_index
         
         # VBO ?곗씠???앹꽦
         self.update_vbo(new_obj)
@@ -8731,6 +8996,8 @@ class Viewport3D(QOpenGLWidget):
         """Clear mutable overlays/caches that belong to the previous scene."""
 
         self._projection_generation = int(getattr(self, "_projection_generation", 0)) + 1
+        self._amr_render_frame_snapshot = None
+        self._amr_render_frame_depth_signature = None
         # Do not terminate QThreads from the GUI thread. Detach their authority
         # and let their fenced finished callbacks release the worker objects.
         try:
@@ -8824,6 +9091,7 @@ class Viewport3D(QOpenGLWidget):
         self._cached_viewport = None
         self._cached_modelview = None
         self._cached_projection = None
+        self._cached_render_frame = None
         self._front_back_ortho_enabled = False
         self._canonical_view_key = None
         self._ortho_frame_override = None
@@ -9067,6 +9335,12 @@ class Viewport3D(QOpenGLWidget):
 
     def _emit_mesh_transform_changed(self, *, suspend_tape_sec: float = 0.35) -> None:
         """Emit transform-changed and briefly suspend expensive cutline tape attachment."""
+        # Object TRS changes immediately, while the framebuffer still contains
+        # pixels from the previous transform until the queued repaint runs.
+        # Disable live pick/projection against that stale frame without touching
+        # the press-time frame that makes an active drag stable across repaints.
+        self._amr_render_frame_snapshot = None
+        self._amr_render_frame_depth_signature = None
         try:
             sec = float(suspend_tape_sec)
         except Exception:
@@ -9138,28 +9412,16 @@ class Viewport3D(QOpenGLWidget):
         
         try:
             self.makeCurrent()
-            viewport = glGetIntegerv(GL_VIEWPORT)
-            modelview = glGetDoublev(GL_MODELVIEW_MATRIX)
-            projection = glGetDoublev(GL_PROJECTION_MATRIX)
+            frame = self._current_render_frame_snapshot()
+            if frame is None:
+                return None
+            viewport = np.asarray(frame.viewport, dtype=np.int32)
             gl_x, gl_y = self._qt_to_gl_window_xy(float(screen_x), float(screen_y), viewport=viewport)
 
-            # Project object center to screen to get a reference point for gizmo size
-            obj_screen_pos = gluProject(*obj.translation, modelview, projection, viewport)
-            if not obj_screen_pos:
-                return None
+            center = obj.world_pivot()
 
             # Calculate a world-space ray from screen coordinates
-            near_pt = gluUnProject(gl_x, gl_y, 0.0, modelview, projection, viewport)
-            far_pt = gluUnProject(gl_x, gl_y, 1.0, modelview, projection, viewport)
-            if not near_pt or not far_pt:
-                return None
-            
-            ray_origin = np.array(near_pt)
-            ray_dir = np.array(far_pt) - ray_origin
-            ray_norm = float(np.linalg.norm(ray_dir))
-            if ray_norm <= 1e-12:
-                return None
-            ray_dir /= ray_norm
+            ray_origin, ray_dir = world_ray_from_window(frame, gl_x, gl_y)
             
             best_axis = None
             min_ray_t = float('inf')
@@ -9180,7 +9442,6 @@ class Viewport3D(QOpenGLWidget):
             tol_ratio = float(getattr(self, "_gizmo_pick_width_ratio", 0.12) or 0.12)
             tol_ratio = float(max(0.06, min(tol_ratio, 0.30)))
             threshold = max(pixel_world_size * 8.0, float(scaled_gizmo_radius) * tol_ratio)
-            center = obj.translation
             rot_mat = self._object_rotation_matrix_world(obj)
             
             # Define the planes for each axis's circle
@@ -9223,6 +9484,17 @@ class Viewport3D(QOpenGLWidget):
         """媛앹껜??VBO ?앹꽦 諛??곗씠???꾩넚"""
         made_current = False
         created_vbo = False
+        if obj is not None:
+            obj._amr_geometry_draw_revision = int(
+                getattr(obj, "_amr_geometry_draw_revision", 0)
+            ) + 1
+            is_live_object = any(
+                item is obj for item in (getattr(self, "objects", None) or [])
+            )
+            if is_live_object:
+                self._amr_render_frame_snapshot = None
+                self._amr_render_frame_depth_signature = None
+                self._invalidate_surface_magnetic_cache()
         try:
             prev_vbo_id = int(getattr(obj, "vbo_id", 0) or 0) if obj is not None else 0
         except Exception:
@@ -9400,6 +9672,8 @@ class Viewport3D(QOpenGLWidget):
             
     def select_object(self, index):
         if 0 <= index < len(self.objects):
+            if int(index) != int(getattr(self, "selected_index", -1)):
+                self._reset_selection_authority_transients()
             self.selected_index = index
             try:
                 if int(getattr(self, "_active_polyline_layer_obj_index", -1)) != int(index):
@@ -9410,6 +9684,40 @@ class Viewport3D(QOpenGLWidget):
                 self._active_polyline_layer_index = -1
             self.update()
             self.selectionChanged.emit(index)
+
+    def _reset_selection_authority_transients(self) -> None:
+        """Detach selected-object interactions before publishing a new owner."""
+
+        self._amr_render_frame_snapshot = None
+        self._amr_render_frame_depth_signature = None
+        self._cached_render_frame = None
+        self._cached_viewport = None
+        self._cached_modelview = None
+        self._cached_projection = None
+        self._ctrl_drag_active = False
+        self.mouse_button = None
+        self.last_mouse_pos = None
+        self.last_mouse_posf = None
+        self.active_gizmo_axis = None
+        self.gizmo_drag_start = None
+        self._gizmo_drag_screen_angle = None
+        self._polyline_layer_dragging = False
+        self._polyline_layer_drag_world_start = None
+        self._polyline_layer_drag_offset_start = None
+        self._polyline_layer_drag_axis_lock = None
+        self._polyline_layer_drag_moved = False
+        self.roi_rect_dragging = False
+        self.roi_rect_start = None
+        self._roi_move_dragging = False
+        self._roi_move_last_xy = None
+        self.active_roi_edge = None
+        self._cancel_surface_lasso_thread()
+        self._cancel_surface_magnetic_thread()
+        self._cancel_visible_face_select_thread()
+        self._invalidate_surface_magnetic_cache()
+        self.clear_surface_lasso()
+        self.clear_surface_magnetic_lasso(clear_cache=True)
+        self.clear_surface_paint_points()
 
     def bake_object_transform(self, obj: SceneObject):
         """
@@ -9583,9 +9891,13 @@ class Viewport3D(QOpenGLWidget):
             return False
         try:
             self.makeCurrent()
-            self._cached_viewport = glGetIntegerv(GL_VIEWPORT)
-            self._cached_modelview = glGetDoublev(GL_MODELVIEW_MATRIX)
-            self._cached_projection = glGetDoublev(GL_PROJECTION_MATRIX)
+            frame = self._current_render_frame_snapshot()
+            if frame is None:
+                return False
+            self._cached_render_frame = frame
+            self._cached_viewport = np.asarray(frame.viewport, dtype=np.int32)
+            self._cached_modelview = np.ascontiguousarray(frame.modelview_render.T)
+            self._cached_projection = np.ascontiguousarray(frame.projection.T)
 
             gl_x, gl_y = self._qt_to_gl_window_xy(
                 float(event.pos().x()),
@@ -9600,20 +9912,15 @@ class Viewport3D(QOpenGLWidget):
 
             # 諛곌꼍???대┃??寃쎌슦 媛앹껜 以묒떖 源딆씠濡??泥?
             if self._drag_depth >= 1.0:
-                obj_win_pos = gluProject(
-                    *obj.translation,
-                    self._cached_modelview,
-                    self._cached_projection,
-                    self._cached_viewport,
-                )
-                if obj_win_pos:
-                    self._drag_depth = float(obj_win_pos[2])
+                obj_win_pos = self._project_world_point(obj.world_pivot(), frame)
+                self._drag_depth = float(obj_win_pos[2])
             return True
         except Exception:
             _log_ignored_exception("Failed to initialize ctrl-drag cache", level=logging.WARNING)
             self._cached_viewport = None
             self._cached_modelview = None
             self._cached_projection = None
+            self._cached_render_frame = None
             self._drag_depth = 1.0
             return False
     
@@ -9702,9 +10009,18 @@ class Viewport3D(QOpenGLWidget):
 
                         # 罹먯떆 留ㅽ듃由?뒪 ???(?깅뒫 理쒖쟻??
                         self.makeCurrent()
-                        self._cached_viewport = glGetIntegerv(GL_VIEWPORT)
-                        self._cached_modelview = glGetDoublev(GL_MODELVIEW_MATRIX)
-                        self._cached_projection = glGetDoublev(GL_PROJECTION_MATRIX)
+                        frame = self._current_render_frame_snapshot()
+                        if frame is None:
+                            self.active_gizmo_axis = None
+                            return
+                        self._cached_render_frame = frame
+                        self._cached_viewport = np.asarray(frame.viewport, dtype=np.int32)
+                        self._cached_modelview = np.ascontiguousarray(
+                            frame.modelview_render.T
+                        )
+                        self._cached_projection = np.ascontiguousarray(
+                            frame.projection.T
+                        )
 
                         angle = self._calculate_gizmo_angle(event.pos().x(), event.pos().y())
                         if angle is not None:
@@ -10191,7 +10507,7 @@ class Viewport3D(QOpenGLWidget):
                     modifiers = event.modifiers()
                     info = self.pick_point_on_mesh_info(event.pos().x(), event.pos().y())
                     if info is not None:
-                        point, depth_value, gl_x, gl_y, viewport, modelview, projection = info
+                        point, depth_value, gl_x, gl_y, _viewport, frame = info
                         res = self.pick_face_at_point(point, return_index=True)
                         if res:
                             idx, _verts = res
@@ -10213,9 +10529,7 @@ class Viewport3D(QOpenGLWidget):
                                     int(gl_x),
                                     int(gl_y),
                                     float(depth_value),
-                                    viewport,
-                                    modelview,
-                                    projection,
+                                    frame,
                                     float(px_r),
                                 )
                                 if np.isfinite(r_px) and float(r_px) > 0.0:
@@ -10254,19 +10568,19 @@ class Viewport3D(QOpenGLWidget):
                                     p0 = np.asarray(self.surface_lasso_points[0], dtype=np.float64).reshape(-1)
                                     if p0.size >= 3:
                                         self.makeCurrent()
-                                        vp0 = glGetIntegerv(GL_VIEWPORT)
-                                        mv0 = glGetDoublev(GL_MODELVIEW_MATRIX)
-                                        pr0 = glGetDoublev(GL_PROJECTION_MATRIX)
-                                        win = gluProject(float(p0[0]), float(p0[1]), float(p0[2]), mv0, pr0, vp0)
-                                        if win:
-                                            qx0, qy0 = self._gl_window_to_qt_xy(float(win[0]), float(win[1]), viewport=vp0)
-                                            dx0 = float(event.pos().x()) - float(qx0)
-                                            dy0 = float(event.pos().y()) - float(qy0)
-                                            if float(np.hypot(dx0, dy0)) <= float(snap_px):
-                                                self._finish_surface_lasso(event.modifiers(), seed_pos=event.pos())
-                                                self._surface_area_left_press_pos = None
-                                                self._surface_area_left_dragged = False
-                                                return
+                                        frame = self._current_render_frame_snapshot()
+                                        if frame is None:
+                                            raise RuntimeError("no current render frame")
+                                        vp0 = np.asarray(frame.viewport, dtype=np.int32)
+                                        win = self._project_world_point(p0[:3], frame)
+                                        qx0, qy0 = self._gl_window_to_qt_xy(float(win[0]), float(win[1]), viewport=vp0)
+                                        dx0 = float(event.pos().x()) - float(qx0)
+                                        dy0 = float(event.pos().y()) - float(qy0)
+                                        if float(np.hypot(dx0, dy0)) <= float(snap_px):
+                                            self._finish_surface_lasso(event.modifiers(), seed_pos=event.pos())
+                                            self._surface_area_left_press_pos = None
+                                            self._surface_area_left_dragged = False
+                                            return
                                 except Exception:
                                     _log_ignored_exception()
 
@@ -10353,20 +10667,20 @@ class Viewport3D(QOpenGLWidget):
                                 p0 = np.asarray(self.surface_lasso_points[0], dtype=np.float64).reshape(-1)
                                 if p0.size >= 3:
                                     self.makeCurrent()
-                                    vp0 = glGetIntegerv(GL_VIEWPORT)
-                                    mv0 = glGetDoublev(GL_MODELVIEW_MATRIX)
-                                    pr0 = glGetDoublev(GL_PROJECTION_MATRIX)
-                                    win = gluProject(float(p0[0]), float(p0[1]), float(p0[2]), mv0, pr0, vp0)
-                                    if win:
-                                        qx0, qy0 = self._gl_window_to_qt_xy(float(win[0]), float(win[1]), viewport=vp0)
-                                        dx0 = float(event.pos().x()) - float(qx0)
-                                        dy0 = float(event.pos().y()) - float(qy0)
-                                        if float(np.hypot(dx0, dy0)) <= float(snap_px):
-                                            self._finish_surface_lasso(event.modifiers(), seed_pos=event.pos())
-                                            self._surface_magnetic_left_press_pos = None
-                                            self._surface_magnetic_left_dragged = False
-                                            self._surface_magnetic_space_nav = False
-                                            return
+                                    frame = self._current_render_frame_snapshot()
+                                    if frame is None:
+                                        raise RuntimeError("no current render frame")
+                                    vp0 = np.asarray(frame.viewport, dtype=np.int32)
+                                    win = self._project_world_point(p0[:3], frame)
+                                    qx0, qy0 = self._gl_window_to_qt_xy(float(win[0]), float(win[1]), viewport=vp0)
+                                    dx0 = float(event.pos().x()) - float(qx0)
+                                    dy0 = float(event.pos().y()) - float(qy0)
+                                    if float(np.hypot(dx0, dy0)) <= float(snap_px):
+                                        self._finish_surface_lasso(event.modifiers(), seed_pos=event.pos())
+                                        self._surface_magnetic_left_press_pos = None
+                                        self._surface_magnetic_left_dragged = False
+                                        self._surface_magnetic_space_nav = False
+                                        return
                             except Exception:
                                 _log_ignored_exception()
 
@@ -10438,6 +10752,7 @@ class Viewport3D(QOpenGLWidget):
         self._cached_viewport = None
         self._cached_modelview = None
         self._cached_projection = None
+        self._cached_render_frame = None
         self._ctrl_drag_active = False
         
         self.update()
@@ -10722,6 +11037,7 @@ class Viewport3D(QOpenGLWidget):
                 )
                 and obj
                 and self._cached_viewport is not None
+                and self._cached_render_frame is not None
             ):
                 # 留덉슦???꾨젅????罹≪쿂??源딆씠? 留ㅽ듃由?뒪 ?ъ궗??(?깅뒫 ?μ긽)
                 curr_x, curr_y = self._qt_to_gl_window_xy(
@@ -10735,28 +11051,26 @@ class Viewport3D(QOpenGLWidget):
                     viewport=self._cached_viewport,
                 )
 
-                curr_world = gluUnProject(
+                curr_world = self._unproject_world_point(
                     curr_x,
                     curr_y,
                     self._drag_depth,
-                    self._cached_modelview,
-                    self._cached_projection,
-                    self._cached_viewport,
+                    self._cached_render_frame,
                 )
-                prev_world = gluUnProject(
+                prev_world = self._unproject_world_point(
                     prev_x,
                     prev_y,
                     self._drag_depth,
-                    self._cached_modelview,
-                    self._cached_projection,
-                    self._cached_viewport,
+                    self._cached_render_frame,
                 )
                 
-                if curr_world and prev_world:
-                    delta_world = np.array(curr_world, dtype=np.float64) - np.array(prev_world, dtype=np.float64)
-                    # Preserve full 3-axis movement even in canonical 6-way views.
-                    if np.isfinite(delta_world).all():
-                        obj.translation += delta_world
+                delta_world = np.array(curr_world, dtype=np.float64) - np.array(
+                    prev_world,
+                    dtype=np.float64,
+                )
+                # Preserve full 3-axis movement even in canonical 6-way views.
+                if np.isfinite(delta_world).all():
+                    obj.translation += delta_world
                 
                 self._emit_mesh_transform_changed(suspend_tape_sec=0.24)
                 self.update()
@@ -11014,68 +11328,55 @@ class Viewport3D(QOpenGLWidget):
             return None
 
         try:
-            if self._cached_viewport is not None:
-                viewport = self._cached_viewport
-                modelview = self._cached_modelview
-                projection = self._cached_projection
-            else:
+            frame = self._cached_render_frame
+            if frame is None:
                 self.makeCurrent()
-                viewport = glGetIntegerv(GL_VIEWPORT)
-                modelview = glGetDoublev(GL_MODELVIEW_MATRIX)
-                projection = glGetDoublev(GL_PROJECTION_MATRIX)
+                frame = self._current_render_frame_snapshot()
+            if frame is None:
+                return None
+            viewport = np.asarray(frame.viewport, dtype=np.int32)
 
             gl_x, gl_y = self._qt_to_gl_window_xy(float(screen_x), float(screen_y), viewport=viewport)
-            near_pt = gluUnProject(gl_x, gl_y, 0.0, modelview, projection, viewport)
-            far_pt = gluUnProject(gl_x, gl_y, 1.0, modelview, projection, viewport)
+            ray_origin, ray_dir = world_ray_from_window(frame, gl_x, gl_y)
+            center = obj.world_pivot()
 
-            if near_pt and far_pt:
-                ray_origin = np.asarray(near_pt, dtype=np.float64).reshape(3)
-                ray_dir = np.asarray(far_pt, dtype=np.float64).reshape(3) - ray_origin
-                ray_norm = float(np.linalg.norm(ray_dir))
-                if ray_norm > 1e-12:
-                    ray_dir = ray_dir / ray_norm
-                    center = np.asarray(obj.translation, dtype=np.float64).reshape(3)
+            rot_mat = self._object_rotation_matrix_world(obj)
+            if self.active_gizmo_axis == "X":
+                normal_local = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+                basis_u_local = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+                basis_v_local = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+            elif self.active_gizmo_axis == "Y":
+                normal_local = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+                basis_u_local = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+                basis_v_local = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+            else:
+                normal_local = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+                basis_u_local = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+                basis_v_local = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+            normal = rot_mat @ normal_local
+            basis_u = rot_mat @ basis_u_local
+            basis_v = rot_mat @ basis_v_local
+            n_norm = float(np.linalg.norm(normal))
+            u_norm = float(np.linalg.norm(basis_u))
+            v_norm = float(np.linalg.norm(basis_v))
+            if n_norm <= 1e-12 or u_norm <= 1e-12 or v_norm <= 1e-12:
+                return None
+            normal = normal / n_norm
+            basis_u = basis_u / u_norm
+            basis_v = basis_v / v_norm
 
-                    rot_mat = self._object_rotation_matrix_world(obj)
-                    if self.active_gizmo_axis == "X":
-                        normal_local = np.array([1.0, 0.0, 0.0], dtype=np.float64)
-                        basis_u_local = np.array([0.0, 1.0, 0.0], dtype=np.float64)
-                        basis_v_local = np.array([0.0, 0.0, 1.0], dtype=np.float64)
-                    elif self.active_gizmo_axis == "Y":
-                        normal_local = np.array([0.0, 1.0, 0.0], dtype=np.float64)
-                        basis_u_local = np.array([1.0, 0.0, 0.0], dtype=np.float64)
-                        basis_v_local = np.array([0.0, 0.0, 1.0], dtype=np.float64)
-                    else:
-                        normal_local = np.array([0.0, 0.0, 1.0], dtype=np.float64)
-                        basis_u_local = np.array([1.0, 0.0, 0.0], dtype=np.float64)
-                        basis_v_local = np.array([0.0, 1.0, 0.0], dtype=np.float64)
-                    normal = rot_mat @ normal_local
-                    basis_u = rot_mat @ basis_u_local
-                    basis_v = rot_mat @ basis_v_local
-                    n_norm = float(np.linalg.norm(normal))
-                    u_norm = float(np.linalg.norm(basis_u))
-                    v_norm = float(np.linalg.norm(basis_v))
-                    if n_norm <= 1e-12 or u_norm <= 1e-12 or v_norm <= 1e-12:
-                        return None
-                    normal = normal / n_norm
-                    basis_u = basis_u / u_norm
-                    basis_v = basis_v / v_norm
-
-                    denom = float(np.dot(ray_dir, normal))
-                    if abs(denom) > 1e-8:
-                        t = float(np.dot(center - ray_origin, normal) / denom)
-                        if t > 0.0 and np.isfinite(t):
-                            hit_pt = ray_origin + ray_dir * t
-                            local = hit_pt - center
-                            u = float(np.dot(local, basis_u))
-                            v = float(np.dot(local, basis_v))
-                            return float(np.arctan2(v, u))
+            denom = float(np.dot(ray_dir, normal))
+            if abs(denom) > 1e-8:
+                t = float(np.dot(center - ray_origin, normal) / denom)
+                if t > 0.0 and np.isfinite(t):
+                    hit_pt = ray_origin + ray_dir * t
+                    local = hit_pt - center
+                    u = float(np.dot(local, basis_u))
+                    v = float(np.dot(local, basis_v))
+                    return float(np.arctan2(v, u))
 
             # Fallback: 2D center-angle in screen space.
-            center = np.asarray(obj.translation, dtype=np.float64).reshape(3)
-            win_pos = gluProject(center[0], center[1], center[2], modelview, projection, viewport)
-            if not win_pos:
-                return None
+            win_pos = self._project_world_point(center, frame)
             center_x, center_y = self._gl_window_to_qt_xy(float(win_pos[0]), float(win_pos[1]), viewport=viewport)
             dx = float(screen_x) - float(center_x)
             dy = float(screen_y) - float(center_y)
@@ -11089,20 +11390,15 @@ class Viewport3D(QOpenGLWidget):
         if not obj:
             return None
         try:
-            if self._cached_viewport is not None:
-                viewport = self._cached_viewport
-                modelview = self._cached_modelview
-                projection = self._cached_projection
-            else:
+            frame = self._cached_render_frame
+            if frame is None:
                 self.makeCurrent()
-                viewport = glGetIntegerv(GL_VIEWPORT)
-                modelview = glGetDoublev(GL_MODELVIEW_MATRIX)
-                projection = glGetDoublev(GL_PROJECTION_MATRIX)
-
-            center = np.asarray(obj.translation, dtype=np.float64).reshape(3)
-            win_pos = gluProject(center[0], center[1], center[2], modelview, projection, viewport)
-            if not win_pos:
+                frame = self._current_render_frame_snapshot()
+            if frame is None:
                 return None
+            viewport = np.asarray(frame.viewport, dtype=np.int32)
+            center = obj.world_pivot()
+            win_pos = self._project_world_point(center, frame)
             center_x, center_y = self._gl_window_to_qt_xy(float(win_pos[0]), float(win_pos[1]), viewport=viewport)
             dx = float(screen_x) - float(center_x)
             dy = float(screen_y) - float(center_y)
@@ -11531,9 +11827,10 @@ class Viewport3D(QOpenGLWidget):
         # 1) Screen-space hit test (stable regardless of mesh scale / zoom).
         try:
             self.makeCurrent()
-            viewport = glGetIntegerv(GL_VIEWPORT)
-            modelview = glGetDoublev(GL_MODELVIEW_MATRIX)
-            projection = glGetDoublev(GL_PROJECTION_MATRIX)
+            frame = self._current_render_frame_snapshot()
+            if frame is None:
+                return None
+            viewport = np.asarray(frame.viewport, dtype=np.int32)
 
             x1, x2, y1, y2 = self.roi_bounds
             try:
@@ -11570,9 +11867,7 @@ class Viewport3D(QOpenGLWidget):
                 for edge in keys:
                     try:
                         wx, wy, wz = handles[edge]
-                        win = gluProject(float(wx), float(wy), float(wz), modelview, projection, viewport)
-                        if not win:
-                            continue
+                        win = self._project_world_point([wx, wy, wz], frame)
                         qx, qy = self._gl_window_to_qt_xy(float(win[0]), float(win[1]), viewport=viewport)
                         dx = float(pos.x()) - float(qx)
                         dy = float(pos.y()) - float(qy)
@@ -11871,25 +12166,12 @@ class Viewport3D(QOpenGLWidget):
         """?붾㈃ 醫뚰몴?먯꽌 ?붾뱶 ?덉씠(origin, dir) 怨꾩궛"""
         try:
             self.makeCurrent()
-
-            viewport = glGetIntegerv(GL_VIEWPORT)
-            modelview = glGetDoublev(GL_MODELVIEW_MATRIX)
-            projection = glGetDoublev(GL_PROJECTION_MATRIX)
+            frame = self._current_render_frame_snapshot()
+            if frame is None:
+                return None, None
+            viewport = np.asarray(frame.viewport, dtype=np.int32)
             gl_x, gl_y = self._qt_to_gl_window_xy(float(screen_x), float(screen_y), viewport=viewport)
-
-            near_pt = gluUnProject(gl_x, gl_y, 0.0, modelview, projection, viewport)
-            far_pt = gluUnProject(gl_x, gl_y, 1.0, modelview, projection, viewport)
-            if not near_pt or not far_pt:
-                return None, None
-
-            ray_origin = np.array(near_pt, dtype=float)
-            ray_dir = np.array(far_pt, dtype=float) - ray_origin
-            norm = float(np.linalg.norm(ray_dir))
-            if norm < 1e-12:
-                return None, None
-            ray_dir /= norm
-
-            return ray_origin, ray_dir
+            return world_ray_from_window(frame, gl_x, gl_y)
         except Exception:
             return None, None
 
@@ -11918,7 +12200,7 @@ class Viewport3D(QOpenGLWidget):
         ?붾㈃ 醫뚰몴瑜?硫붿돩 ?쒕㈃??3D 醫뚰몴濡?蹂?섑빀?덈떎.
 
         Returns:
-            (pt_world, depth_value, gl_x, gl_y, viewport, modelview, projection) ?먮뒗 None
+            (pt_world, depth_value, gl_x, gl_y, viewport, render_frame) or None
         """
         if not self.objects:
             return None
@@ -11929,9 +12211,10 @@ class Viewport3D(QOpenGLWidget):
         # OpenGL 酉고룷?? ?ъ쁺, 紐⑤뜽酉??됰젹 媛?몄삤湲?
         self.makeCurrent()
 
-        viewport = glGetIntegerv(GL_VIEWPORT)
-        modelview = glGetDoublev(GL_MODELVIEW_MATRIX)
-        projection = glGetDoublev(GL_PROJECTION_MATRIX)
+        frame = self._current_render_frame_snapshot()
+        if frame is None:
+            return None
+        viewport = np.asarray(frame.viewport, dtype=np.int32)
         gl_x, gl_y = self._qt_to_gl_window_xy(float(screen_x), float(screen_y), viewport=viewport)
 
         def is_bg(depth_val: float) -> bool:
@@ -12001,16 +12284,17 @@ class Viewport3D(QOpenGLWidget):
             return None
 
         # Convert screen coordinates to world coordinates.
-        world_x, world_y, world_z = gluUnProject(
-            float(gl_x),
-            float(gl_y),
-            float(depth_value),
-            modelview,
-            projection,
-            viewport,
-        )
-
-        pt = np.array([world_x, world_y, world_z], dtype=np.float64)
+        try:
+            pt = self._unproject_world_point(
+                float(gl_x),
+                float(gl_y),
+                float(depth_value),
+                frame,
+            )
+        except (RuntimeError, TypeError, ValueError):
+            return None
+        if pt.shape != (3,) or not np.isfinite(pt).all():
+            return None
 
         # Extra guard: ensure the picked point is near the selected object's world bounds.
         # This prevents accidental picks on other geometry / stale depth artifacts.
@@ -12031,8 +12315,7 @@ class Viewport3D(QOpenGLWidget):
             int(gl_x),
             int(gl_y),
             viewport,
-            modelview,
-            projection,
+            frame,
         )
 
     def pick_point_on_mesh(
@@ -12059,9 +12342,7 @@ class Viewport3D(QOpenGLWidget):
         gl_x: int,
         gl_y: int,
         depth_value: float,
-        viewport,
-        modelview,
-        projection,
+        frame: RenderFrameSnapshot,
         px_radius: float,
     ) -> float:
         """媛숈? depth plane?먯꽌 px 嫄곕━ -> world 嫄곕━濡??섏궛(洹쇱궗)."""
@@ -12078,10 +12359,9 @@ class Viewport3D(QOpenGLWidget):
         if not np.isfinite(d) or d >= 1.0 or d < 0.0:
             return 0.0
 
-        try:
-            vx, vy, vw, vh = [int(v) for v in viewport[:4]]
-        except Exception:
-            vx, vy, vw, vh = 0, 0, int(self.width()), int(self.height())
+        if not isinstance(frame, RenderFrameSnapshot):
+            return 0.0
+        vx, vy, vw, vh = frame.viewport
         vw = max(1, vw)
         vh = max(1, vh)
 
@@ -12092,12 +12372,8 @@ class Viewport3D(QOpenGLWidget):
             x1 = int(np.clip(x0 + 1, vx, vx + vw - 1))
 
         try:
-            w0 = np.asarray(
-                gluUnProject(float(x0), float(y0), float(d), modelview, projection, viewport), dtype=np.float64
-            ).reshape(-1)
-            w1 = np.asarray(
-                gluUnProject(float(x1), float(y0), float(d), modelview, projection, viewport), dtype=np.float64
-            ).reshape(-1)
+            w0 = self._unproject_world_point(float(x0), float(y0), float(d), frame)
+            w1 = self._unproject_world_point(float(x1), float(y0), float(d), frame)
             if w0.size < 3 or w1.size < 3 or (not np.isfinite(w0[:3]).all()) or (not np.isfinite(w1[:3]).all()):
                 return 0.0
             return float(np.linalg.norm(w1[:3] - w0[:3]))
@@ -12311,6 +12587,88 @@ class Viewport3D(QOpenGLWidget):
         except Exception:
             _log_ignored_exception()
 
+    def _invalidate_surface_magnetic_cache(self) -> None:
+        """Drop depth-edge data that no longer belongs to the live frame."""
+
+        self._surface_magnetic_dist = None
+        self._surface_magnetic_nn_y = None
+        self._surface_magnetic_nn_x = None
+        self._surface_magnetic_cache_viewport = None
+        self._surface_magnetic_cache_sig = None
+
+    def _bind_surface_worker_context(
+        self,
+        worker: _SurfaceLassoSelectThread,
+        obj: SceneObject,
+        frame: RenderFrameSnapshot,
+    ) -> None:
+        """Bind a projection worker to the exact object and render contract."""
+
+        worker._amr_target_object = obj
+        worker._amr_target_mesh = obj.mesh
+        worker._amr_render_frame = frame
+        depth_signature = self._surface_magnetic_cache_signature(frame)
+        if depth_signature is None:
+            raise RuntimeError("surface worker has no current depth contract")
+        worker._amr_depth_signature = depth_signature
+
+    def _surface_worker_current_target(
+        self,
+        worker: object,
+    ) -> SceneObject | None:
+        """Return the captured target only while every input authority is current."""
+
+        obj = getattr(worker, "_amr_target_object", None)
+        mesh = getattr(worker, "_amr_target_mesh", None)
+        launch_frame = getattr(worker, "_amr_render_frame", None)
+        launch_depth_signature = getattr(worker, "_amr_depth_signature", None)
+        if (
+            not isinstance(obj, SceneObject)
+            or obj is not self.selected_obj
+            or getattr(obj, "mesh", None) is not mesh
+            or not isinstance(launch_frame, RenderFrameSnapshot)
+            or not isinstance(launch_depth_signature, tuple)
+        ):
+            return None
+        current_frame = self._current_render_frame_snapshot()
+        if current_frame is None:
+            return None
+        if (
+            current_frame.projection_generation
+            != launch_frame.projection_generation
+            or current_frame.viewport != launch_frame.viewport
+            or not np.array_equal(
+                current_frame.render_origin_world_mm,
+                launch_frame.render_origin_world_mm,
+            )
+            or not np.array_equal(
+                current_frame.modelview_render,
+                launch_frame.modelview_render,
+            )
+            or not np.array_equal(
+                current_frame.projection,
+                launch_frame.projection,
+            )
+        ):
+            return None
+        current_depth_signature = getattr(
+            self,
+            "_amr_render_frame_depth_signature",
+            None,
+        )
+        if current_depth_signature != launch_depth_signature:
+            return None
+        try:
+            captured_matrix = np.asarray(
+                getattr(worker, "_local_to_world_matrix"),
+                dtype=np.float64,
+            ).reshape(4, 4)
+            if not np.array_equal(obj.local_to_world_matrix(), captured_matrix):
+                return None
+        except Exception:
+            return None
+        return obj
+
     def _cancel_visible_face_select_thread(self) -> None:
         thr = getattr(self, "_visible_face_select_thread", None)
         if thr is None:
@@ -12345,11 +12703,12 @@ class Viewport3D(QOpenGLWidget):
 
         try:
             self.makeCurrent()
-            viewport = glGetIntegerv(GL_VIEWPORT)
-            mv_raw = glGetDoublev(GL_MODELVIEW_MATRIX)
-            proj_raw = glGetDoublev(GL_PROJECTION_MATRIX)
-            mv = np.asarray(mv_raw, dtype=np.float64).reshape(4, 4).T
-            proj = np.asarray(proj_raw, dtype=np.float64).reshape(4, 4).T
+            frame = self._current_render_frame_snapshot()
+            if frame is None:
+                raise RuntimeError("no current render frame")
+            viewport = np.asarray(frame.viewport, dtype=np.int32)
+            mv = frame.modelview_render
+            proj = frame.projection
         except Exception as e:
             self.status_info = f"👁️ 현재 시점 가시면 계산 준비 실패: {e}"
             self.update()
@@ -12417,13 +12776,8 @@ class Viewport3D(QOpenGLWidget):
             thr2 = _SurfaceLassoSelectThread(
                 obj.mesh.vertices,
                 obj.mesh.faces,
-                np.asarray(getattr(obj, "translation", [0.0, 0.0, 0.0]), dtype=np.float64),
-                np.asarray(getattr(obj, "rotation", [0.0, 0.0, 0.0]), dtype=np.float64),
-                float(getattr(obj, "scale", 1.0)),
-                np.asarray(
-                    getattr(getattr(self, "camera", None), "position", np.array([0.0, 0.0, 0.0])),
-                    dtype=np.float64,
-                ),
+                obj.local_to_world_matrix(),
+                self._camera_world_position_for_frame(frame),
                 mv,
                 proj,
                 np.asarray(viewport, dtype=np.int32),
@@ -12431,6 +12785,7 @@ class Viewport3D(QOpenGLWidget):
                 (gl_x0, gl_y0, gl_x1, gl_y1),
                 (gl_x0, gl_y0),
                 depth_map,
+                render_origin_world_mm=frame.render_origin_world_mm,
                 face_centroids=getattr(obj, "_face_centroids", None),
                 face_normals=getattr(getattr(obj, "mesh", None), "face_normals", None),
                 depth_tol=tol,
@@ -12438,6 +12793,7 @@ class Viewport3D(QOpenGLWidget):
                 wand_seed_face_idx=None,
                 wand_enabled=False,
             )
+            self._bind_surface_worker_context(thr2, obj, frame)
             thr2.computed.connect(self._on_visible_face_select_computed)
             thr2.failed.connect(self._on_visible_face_select_failed)
             self._visible_face_select_thread = thr2
@@ -12469,82 +12825,25 @@ class Viewport3D(QOpenGLWidget):
 
         self.update()
 
-    def _surface_magnetic_cache_signature(self) -> tuple:
-        """Signature used to decide whether the magnetic edge cache is stale."""
-        try:
-            self.makeCurrent()
-        except Exception:
-            pass
-        try:
-            vp = glGetIntegerv(GL_VIEWPORT)
-            vx, vy, vw, vh = [int(v) for v in vp[:4]]
-        except Exception:
-            vx, vy, vw, vh = 0, 0, int(self.width()), int(self.height())
+    def _surface_magnetic_cache_signature(
+        self,
+        frame: RenderFrameSnapshot | None = None,
+    ) -> tuple | None:
+        """Bind the depth-edge cache to one rendered depth contract."""
 
-        obj = getattr(self, "selected_obj", None)
-        obj_id = id(obj) if obj is not None else 0
-        try:
-            mesh_id = id(getattr(obj, "mesh", None)) if obj is not None else 0
-        except Exception:
-            mesh_id = 0
-        try:
-            tr = np.asarray(getattr(obj, "translation", [0.0, 0.0, 0.0]), dtype=np.float64).reshape(-1)
-            if tr.size >= 3:
-                obj_t = (float(round(float(tr[0]), 6)), float(round(float(tr[1]), 6)), float(round(float(tr[2]), 6)))
-            else:
-                obj_t = (0.0, 0.0, 0.0)
-        except Exception:
-            obj_t = (0.0, 0.0, 0.0)
-        try:
-            rr = np.asarray(getattr(obj, "rotation", [0.0, 0.0, 0.0]), dtype=np.float64).reshape(-1)
-            if rr.size >= 3:
-                obj_r = (float(round(float(rr[0]), 4)), float(round(float(rr[1]), 4)), float(round(float(rr[2]), 4)))
-            else:
-                obj_r = (0.0, 0.0, 0.0)
-        except Exception:
-            obj_r = (0.0, 0.0, 0.0)
-        try:
-            sc = float(getattr(obj, "scale", 1.0) or 1.0)
-            obj_s = float(round(sc, 6)) if np.isfinite(sc) else 1.0
-        except Exception:
-            obj_s = 1.0
-        try:
-            cam = getattr(self, "camera", None)
-            az = float(getattr(cam, "azimuth", 0.0) or 0.0)
-            el = float(getattr(cam, "elevation", 0.0) or 0.0)
-            dist = float(getattr(cam, "distance", 0.0) or 0.0)
-            la = np.asarray(getattr(cam, "look_at", [0.0, 0.0, 0.0]), dtype=np.float64).reshape(-1)
-            if la.size >= 3:
-                look_at = (float(round(float(la[0]), 5)), float(round(float(la[1]), 5)), float(round(float(la[2]), 5)))
-            else:
-                look_at = (0.0, 0.0, 0.0)
-        except Exception:
-            az, el, dist = 0.0, 0.0, 0.0
-            look_at = (0.0, 0.0, 0.0)
-
-        # Rounded for stability (avoid recompute due to tiny float noise)
-        return (
-            int(obj_id),
-            int(mesh_id),
-            int(vx),
-            int(vy),
-            int(vw),
-            int(vh),
-            float(round(az, 3)),
-            float(round(el, 3)),
-            float(round(dist, 4)),
-            look_at,
-            obj_t,
-            obj_r,
-            float(obj_s),
-        )
+        current = self._current_render_frame_snapshot()
+        active = current if frame is None else frame
+        if current is None or active is not current:
+            return None
+        signature = getattr(self, "_amr_render_frame_depth_signature", None)
+        return signature if isinstance(signature, tuple) else None
 
     def _ensure_surface_magnetic_cache(self, *, force: bool = False) -> bool:
-        sig = None
-        try:
-            sig = self._surface_magnetic_cache_signature()
-        except Exception:
-            sig = None
+        frame = self._current_render_frame_snapshot()
+        sig = self._surface_magnetic_cache_signature(frame)
+        if frame is None or sig is None:
+            self._invalidate_surface_magnetic_cache()
+            return False
 
         if (
             (not force)
@@ -12557,40 +12856,38 @@ class Viewport3D(QOpenGLWidget):
         ):
             return True
 
-        ok = self._compute_surface_magnetic_cache()
-        try:
-            self._surface_magnetic_cache_sig = sig
-        except Exception:
-            self._surface_magnetic_cache_sig = None
-        return bool(ok)
+        ok = self._compute_surface_magnetic_cache(frame)
+        if not ok:
+            self._invalidate_surface_magnetic_cache()
+            return False
+        self._surface_magnetic_cache_sig = sig
+        return True
 
-    def _compute_surface_magnetic_cache(self) -> bool:
+    def _compute_surface_magnetic_cache(
+        self,
+        frame: RenderFrameSnapshot | None = None,
+    ) -> bool:
         """Compute distance-to-edge cache from the current depth buffer."""
         if ndimage is None:
-            self._surface_magnetic_dist = None
-            self._surface_magnetic_nn_y = None
-            self._surface_magnetic_nn_x = None
-            self._surface_magnetic_cache_viewport = None
+            self._invalidate_surface_magnetic_cache()
             return False
 
         obj = getattr(self, "selected_obj", None)
         if obj is None or getattr(obj, "mesh", None) is None:
-            self._surface_magnetic_dist = None
-            self._surface_magnetic_nn_y = None
-            self._surface_magnetic_nn_x = None
-            self._surface_magnetic_cache_viewport = None
+            self._invalidate_surface_magnetic_cache()
             return False
 
         try:
             self.makeCurrent()
         except Exception:
+            self._invalidate_surface_magnetic_cache()
             return False
 
-        try:
-            vp = glGetIntegerv(GL_VIEWPORT)
-            vx, vy, vw, vh = [int(v) for v in vp[:4]]
-        except Exception:
-            vx, vy, vw, vh = 0, 0, int(self.width()), int(self.height())
+        active = frame if frame is not None else self._current_render_frame_snapshot()
+        if active is None:
+            self._invalidate_surface_magnetic_cache()
+            return False
+        vx, vy, vw, vh = active.viewport
         vw = max(1, int(vw))
         vh = max(1, int(vh))
 
@@ -12601,22 +12898,17 @@ class Viewport3D(QOpenGLWidget):
             if depth.ndim != 2:
                 depth = depth.reshape((vh, vw))
         except Exception:
-            self._surface_magnetic_dist = None
-            self._surface_magnetic_nn_y = None
-            self._surface_magnetic_nn_x = None
-            self._surface_magnetic_cache_viewport = None
+            self._invalidate_surface_magnetic_cache()
             return False
 
         if depth.size == 0:
+            self._invalidate_surface_magnetic_cache()
             return False
 
         depth = np.asarray(depth, dtype=np.float32)
         mask_obj = np.isfinite(depth) & (depth < 1.0)
         if not bool(np.any(mask_obj)):
-            self._surface_magnetic_dist = None
-            self._surface_magnetic_nn_y = None
-            self._surface_magnetic_nn_x = None
-            self._surface_magnetic_cache_viewport = None
+            self._invalidate_surface_magnetic_cache()
             return False
 
         # Background as far plane for stable gradients.
@@ -12696,6 +12988,15 @@ class Viewport3D(QOpenGLWidget):
 
     def _surface_magnetic_snap_gl(self, gl_x: int, gl_y: int) -> tuple[int, int]:
         """Snap (gl_x,gl_y) to nearest edge pixel when within snap radius."""
+        try:
+            current_sig = self._surface_magnetic_cache_signature()
+        except Exception:
+            current_sig = None
+        if (
+            current_sig is None
+            or current_sig != getattr(self, "_surface_magnetic_cache_sig", None)
+        ):
+            return int(gl_x), int(gl_y)
         dist = getattr(self, "_surface_magnetic_dist", None)
         nnx = getattr(self, "_surface_magnetic_nn_x", None)
         nny = getattr(self, "_surface_magnetic_nn_y", None)
@@ -12821,7 +13122,7 @@ class Viewport3D(QOpenGLWidget):
             return False
 
         try:
-            picked_world, _picked_depth, gl_x, gl_y, viewport, _modelview, _projection = info
+            picked_world, _picked_depth, gl_x, gl_y, viewport, _frame = info
         except Exception:
             return False
 
@@ -12972,16 +13273,14 @@ class Viewport3D(QOpenGLWidget):
                 seed_face_idx = -1
 
         self.makeCurrent()
-        viewport = glGetIntegerv(GL_VIEWPORT)
-        mv_raw = glGetDoublev(GL_MODELVIEW_MATRIX)
-        proj_raw = glGetDoublev(GL_PROJECTION_MATRIX)
-
-        try:
-            mv = np.asarray(mv_raw, dtype=np.float64).reshape(4, 4).T
-            proj = np.asarray(proj_raw, dtype=np.float64).reshape(4, 4).T
-        except Exception:
-            mv = np.eye(4, dtype=np.float64)
-            proj = np.eye(4, dtype=np.float64)
+        frame = self._current_render_frame_snapshot()
+        if frame is None:
+            self.status_info = f"{icon} {lbl}: current render frame is unavailable."
+            self.update()
+            return
+        viewport = np.asarray(frame.viewport, dtype=np.int32)
+        mv = frame.modelview_render
+        proj = frame.projection
 
         try:
             vx, vy, vw, vh = [int(v) for v in viewport[:4]]
@@ -12994,14 +13293,7 @@ class Viewport3D(QOpenGLWidget):
         proj_xy: list[tuple[float, float]] = []
         for p in pts_world:
             try:
-                px, py, _pz = gluProject(
-                    float(p[0]),
-                    float(p[1]),
-                    float(p[2]),
-                    mv_raw,
-                    proj_raw,
-                    viewport,
-                )
+                px, py, _pz = self._project_world_point(p, frame)
                 if not (np.isfinite(px) and np.isfinite(py)):
                     continue
                 proj_xy.append((float(px), float(py)))
@@ -13077,10 +13369,8 @@ class Viewport3D(QOpenGLWidget):
             thr2 = _SurfaceLassoSelectThread(
                 obj.mesh.vertices,
                 obj.mesh.faces,
-                np.asarray(getattr(obj, "translation", [0.0, 0.0, 0.0]), dtype=np.float64),
-                np.asarray(getattr(obj, "rotation", [0.0, 0.0, 0.0]), dtype=np.float64),
-                float(getattr(obj, "scale", 1.0)),
-                np.asarray(getattr(getattr(self, "camera", None), "position", np.array([0.0, 0.0, 0.0])), dtype=np.float64),
+                obj.local_to_world_matrix(),
+                self._camera_world_position_for_frame(frame),
                 mv,
                 proj,
                 np.asarray(viewport, dtype=np.int32),
@@ -13088,6 +13378,7 @@ class Viewport3D(QOpenGLWidget):
                 (int(gl_x0), int(gl_y0), int(gl_x1), int(gl_y1)),
                 (int(gl_x0), int(gl_y0)),
                 depth_map,
+                render_origin_world_mm=frame.render_origin_world_mm,
                 face_centroids=getattr(obj, "_face_centroids", None),
                 face_normals=getattr(getattr(obj, "mesh", None), "face_normals", None),
                 depth_tol=tol,
@@ -13098,6 +13389,7 @@ class Viewport3D(QOpenGLWidget):
                 wand_knn_k=int(getattr(self, "_surface_area_wand_knn_k", 12) or 12),
                 wand_time_budget_s=float(getattr(self, "_surface_area_wand_time_budget_s", 2.0) or 2.0),
             )
+            self._bind_surface_worker_context(thr2, obj, frame)
             thr2.computed.connect(self._on_surface_lasso_computed)
             thr2.failed.connect(self._on_surface_lasso_failed)
             self._surface_lasso_thread = thr2
@@ -13117,15 +13409,15 @@ class Viewport3D(QOpenGLWidget):
         self.update()
 
     def _on_surface_lasso_computed(self, result: object) -> None:
-        if self.sender() is not getattr(self, "_surface_lasso_thread", None):
+        worker = self.sender()
+        if worker is not getattr(self, "_surface_lasso_thread", None):
             return
         self._surface_lasso_thread = None
 
-        obj = self.selected_obj
-        if obj is None or getattr(obj, "mesh", None) is None:
+        obj = self._surface_worker_current_target(worker)
+        if obj is None:
             _icon, lbl = self._surface_lasso_tool_strings()
-            self.status_info = f"?좑툘 {lbl}: ?좏깮 ??곸씠 ?놁뒿?덈떎."
-            self.clear_surface_lasso()
+            self.status_info = f"{lbl}: stale selection result ignored."
             self.update()
             return
 
@@ -13280,7 +13572,10 @@ class Viewport3D(QOpenGLWidget):
                     cx = float(np.mean(pts_arr[:, 0]))
                     cy = float(np.mean(pts_arr[:, 1]))
                     self.makeCurrent()
-                    vp0 = glGetIntegerv(GL_VIEWPORT)
+                    seed_frame = self._current_render_frame_snapshot()
+                    if seed_frame is None:
+                        raise RuntimeError("no current render frame")
+                    vp0 = np.asarray(seed_frame.viewport, dtype=np.int32)
                     qx0, qy0 = self._gl_window_to_qt_xy(cx, cy, viewport=vp0)
                     p_seed = self.pick_point_on_mesh(int(round(qx0)), int(round(qy0)))
                     if p_seed is not None:
@@ -13291,16 +13586,14 @@ class Viewport3D(QOpenGLWidget):
                 seed_face_idx = -1
 
         self.makeCurrent()
-        viewport = glGetIntegerv(GL_VIEWPORT)
-        mv_raw = glGetDoublev(GL_MODELVIEW_MATRIX)
-        proj_raw = glGetDoublev(GL_PROJECTION_MATRIX)
-        try:
-            mv = np.asarray(mv_raw, dtype=np.float64).reshape(4, 4)
-            proj = np.asarray(proj_raw, dtype=np.float64).reshape(4, 4)
-        except Exception:
+        frame = self._current_render_frame_snapshot()
+        if frame is None:
             self.status_info = "?㎠ 寃쎄퀎(硫댁쟻+?먯꽍): 移대찓???곹깭瑜??쎌쓣 ???놁뒿?덈떎."
             self.update()
             return
+        viewport = np.asarray(frame.viewport, dtype=np.int32)
+        mv = frame.modelview_render
+        proj = frame.projection
 
         try:
             vx, vy, vw, vh = [int(v) for v in viewport[:4]]
@@ -13382,10 +13675,8 @@ class Viewport3D(QOpenGLWidget):
             thr2 = _SurfaceLassoSelectThread(
                 obj.mesh.vertices,
                 obj.mesh.faces,
-                np.asarray(getattr(obj, "translation", [0.0, 0.0, 0.0]), dtype=np.float64),
-                np.asarray(getattr(obj, "rotation", [0.0, 0.0, 0.0]), dtype=np.float64),
-                float(getattr(obj, "scale", 1.0)),
-                np.asarray(getattr(getattr(self, "camera", None), "position", np.array([0.0, 0.0, 0.0])), dtype=np.float64),
+                obj.local_to_world_matrix(),
+                self._camera_world_position_for_frame(frame),
                 mv,
                 proj,
                 np.asarray(viewport, dtype=np.int32),
@@ -13393,6 +13684,7 @@ class Viewport3D(QOpenGLWidget):
                 (int(gl_x0), int(gl_y0), int(gl_x1), int(gl_y1)),
                 (int(gl_x0), int(gl_y0)),
                 depth_map,
+                render_origin_world_mm=frame.render_origin_world_mm,
                 face_centroids=getattr(obj, "_face_centroids", None),
                 face_normals=getattr(getattr(obj, "mesh", None), "face_normals", None),
                 depth_tol=tol,
@@ -13403,6 +13695,7 @@ class Viewport3D(QOpenGLWidget):
                 wand_knn_k=int(getattr(self, "_surface_area_wand_knn_k", 12) or 12),
                 wand_time_budget_s=float(getattr(self, "_surface_area_wand_time_budget_s", 2.0) or 2.0),
             )
+            self._bind_surface_worker_context(thr2, obj, frame)
             thr2.computed.connect(self._on_surface_magnetic_computed)
             thr2.failed.connect(self._on_surface_magnetic_failed)
             self._surface_magnetic_thread = thr2
@@ -13420,14 +13713,14 @@ class Viewport3D(QOpenGLWidget):
         self.update()
 
     def _on_surface_magnetic_computed(self, result: object) -> None:
-        if self.sender() is not getattr(self, "_surface_magnetic_thread", None):
+        worker = self.sender()
+        if worker is not getattr(self, "_surface_magnetic_thread", None):
             return
         self._surface_magnetic_thread = None
 
-        obj = self.selected_obj
-        if obj is None or getattr(obj, "mesh", None) is None:
-            self.status_info = "?좑툘 寃쎄퀎(硫댁쟻+?먯꽍): ?좏깮 ??곸씠 ?놁뒿?덈떎."
-            self.clear_surface_magnetic_lasso(clear_cache=False)
+        obj = self._surface_worker_current_target(worker)
+        if obj is None:
+            self.status_info = "Boundary(area+magnetic): stale selection result ignored."
             self.update()
             return
 
@@ -13535,13 +13828,14 @@ class Viewport3D(QOpenGLWidget):
         self.update()
 
     def _on_visible_face_select_computed(self, result: object) -> None:
-        if self.sender() is not getattr(self, "_visible_face_select_thread", None):
+        worker = self.sender()
+        if worker is not getattr(self, "_visible_face_select_thread", None):
             return
         self._visible_face_select_thread = None
 
-        obj = self.selected_obj
-        if obj is None or getattr(obj, "mesh", None) is None:
-            self.status_info = "👁️ 현재 시점 가시면: 선택 대상이 없습니다."
+        obj = self._surface_worker_current_target(worker)
+        if obj is None:
+            self.status_info = "👁️ 현재 시점 가시면: 오래된 계산 결과를 무시했습니다."
             self.update()
             return
 
@@ -14265,7 +14559,7 @@ class Viewport3D(QOpenGLWidget):
         info = self.pick_point_on_mesh_info(pos.x(), pos.y())
         if info is None:
             return
-        point, depth_value, gl_x, gl_y, viewport, modelview, projection = info
+        point, depth_value, gl_x, gl_y, _viewport, frame = info
         try:
             self._record_surface_paint_point(point, getattr(self, "_surface_paint_target", "outer"))
         except Exception:
@@ -14295,9 +14589,7 @@ class Viewport3D(QOpenGLWidget):
                     int(gl_x),
                     int(gl_y),
                     float(depth_value),
-                    viewport,
-                    modelview,
-                    projection,
+                    frame,
                     float(px_r),
                 )
             )
@@ -14712,7 +15004,7 @@ class Viewport3D(QOpenGLWidget):
                 except Exception:
                     continue
                 glPushMatrix()
-                glTranslatef(x, y, z)
+                self._translate_to_world_point([x, y, z])
 
                 # ?묒? 援?(?몃쭖泥대줈 洹쇱궗) - ?ш린 0.08cm
                 size = 0.08
@@ -14745,8 +15037,8 @@ class Viewport3D(QOpenGLWidget):
                 glLineWidth(2.5)
                 glColor4f(0.1, 0.85, 0.95, 0.85)
                 glBegin(GL_LINES)
-                glVertex3f(float(mp[0][0]), float(mp[0][1]), float(mp[0][2]))
-                glVertex3f(float(mp[1][0]), float(mp[1][1]), float(mp[1][2]))
+                self._submit_world_vertex(mp[0])
+                self._submit_world_vertex(mp[1])
                 glEnd()
                 glLineWidth(1.0)
             except Exception:
@@ -14788,7 +15080,7 @@ class Viewport3D(QOpenGLWidget):
                     x, y, z = float(p[0]), float(p[1]), float(p[2])
                 except Exception:
                     continue
-                glVertex3f(x, y, z)
+                self._submit_world_xyz(x, y, z)
             glEnd()
 
         except Exception:
@@ -14816,7 +15108,10 @@ class Viewport3D(QOpenGLWidget):
                 return
 
             self.makeCurrent()
-            viewport = glGetIntegerv(GL_VIEWPORT)
+            frame = self._current_render_frame_snapshot()
+            if frame is None:
+                return
+            viewport = np.asarray(frame.viewport, dtype=np.int32)
             try:
                 vx, vy, w, h = [int(v) for v in viewport[:4]]
             except Exception:
@@ -14825,14 +15120,10 @@ class Viewport3D(QOpenGLWidget):
                 return
 
             # Project world points -> viewport-relative pixels (top-left origin)
-            modelview = glGetDoublev(GL_MODELVIEW_MATRIX)
-            projection = glGetDoublev(GL_PROJECTION_MATRIX)
             screen_pts: list[tuple[float, float]] = []
             for p in pts:
                 try:
-                    win = gluProject(float(p[0]), float(p[1]), float(p[2]), modelview, projection, viewport)
-                    if not win:
-                        continue
+                    win = self._project_world_point(p, frame)
                     xw, yw = float(win[0]), float(win[1])
                     # viewport origin may not be (0,0)
                     sx = xw - float(vx)
@@ -15002,7 +15293,10 @@ class Viewport3D(QOpenGLWidget):
                 return
 
             self.makeCurrent()
-            viewport = glGetIntegerv(GL_VIEWPORT)
+            frame = self._current_render_frame_snapshot()
+            if frame is None:
+                return
+            viewport = np.asarray(frame.viewport, dtype=np.int32)
             try:
                 vx, vy, w, h = [int(v) for v in viewport[:4]]
             except Exception:
@@ -15011,14 +15305,10 @@ class Viewport3D(QOpenGLWidget):
                 return
 
             # Project world points -> viewport-relative pixels (top-left origin)
-            modelview = glGetDoublev(GL_MODELVIEW_MATRIX)
-            projection = glGetDoublev(GL_PROJECTION_MATRIX)
             screen_pts: list[tuple[float, float]] = []
             for p in pts_world:
                 try:
-                    win = gluProject(float(p[0]), float(p[1]), float(p[2]), modelview, projection, viewport)
-                    if not win:
-                        continue
+                    win = self._project_world_point(p, frame)
                     xw, yw = float(win[0]), float(win[1])
                     sx = xw - float(vx)
                     sy = float(int(vy + h - 1)) - yw
@@ -15232,14 +15522,14 @@ class Viewport3D(QOpenGLWidget):
         # ??洹몃━湲?
         glBegin(GL_LINE_LOOP)
         for point in arc_points:
-            glVertex3fv(point)
+            self._submit_world_vertex(point)
         glEnd()
         
         # 以묒떖?먯꽌 ?먯＜源뚯? ??(諛섏?由??쒖떆)
         glColor3f(1.0, 1.0, 0.0)  # ?몃???
         glBegin(GL_LINES)
-        glVertex3fv(arc.center)
-        glVertex3fv(arc_points[0])
+        self._submit_world_vertex(arc.center)
+        self._submit_world_vertex(arc_points[0])
         glEnd()
         
         glLineWidth(1.0)
@@ -15258,7 +15548,7 @@ class Viewport3D(QOpenGLWidget):
         glPointSize(12.0)
         glBegin(GL_POINTS)
         for point in self.floor_picks:
-            glVertex3fv(point)
+            self._submit_world_vertex(point)
         glEnd()
         
         # ???ъ씠 ?곌껐??(?몃???
@@ -15267,18 +15557,18 @@ class Viewport3D(QOpenGLWidget):
             glLineWidth(3.0)
             glBegin(GL_LINE_STRIP)
             for point in self.floor_picks:
-                glVertex3fv(point)
+                self._submit_world_vertex(point)
             glEnd()
             
             # ??긽 ?쒖옉???앹젏 ?곌껐?섏뿬 ?곸뿭 ?쒖떆
             glBegin(GL_LINES)
-            glVertex3fv(self.floor_picks[-1])
-            glVertex3fv(self.floor_picks[0])
+            self._submit_world_vertex(self.floor_picks[-1])
+            self._submit_world_vertex(self.floor_picks[0])
             glEnd()
             
             glBegin(GL_LINE_STRIP)
             for point in self.floor_picks:
-                glVertex3fv(point)
+                self._submit_world_vertex(point)
             glEnd()
             
             # 諛섑닾紐??곸뿭 硫??쒖떆 (異⑸텇???먯씠 紐⑥씠硫?
@@ -15288,7 +15578,7 @@ class Viewport3D(QOpenGLWidget):
                 glColor4f(0.2, 0.8, 0.2, 0.3)  # 珥덈줉??諛섑닾紐?                # ?ㅺ컖??硫?(Triangle Fan)
                 glBegin(GL_TRIANGLE_FAN)
                 for point in self.floor_picks:
-                    glVertex3fv(point)
+                    self._submit_world_vertex(point)
                 glEnd()
         
         # ??踰덊샇 ?쒖떆???묒? 留덉빱 (1, 2, 3)
@@ -15296,7 +15586,9 @@ class Viewport3D(QOpenGLWidget):
         marker_size = 0.3
         for i, point in enumerate(self.floor_picks):
             glPushMatrix()
-            glTranslatef(point[0], point[1], point[2] + 0.5)
+            self._translate_to_world_point(
+                [float(point[0]), float(point[1]), float(point[2]) + 0.5]
+            )
             # ?レ옄 ????ш린濡?援щ텇 (1=?묒??? 2=以묎컙?? 3=?곗썝)
             size = marker_size * (i + 1)
             glBegin(GL_LINE_LOOP)

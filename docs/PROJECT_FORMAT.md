@@ -464,11 +464,11 @@ v1 import는 입력 파일을 수정하지 않는 순수·결정적·멱등 변�
 - legacy `legacy_ui_state`에서 `artifact_document`로 단위·geometry·Align을 추정하지 않는 보존적 migration
 - 여섯 개의 독립 Outline record를 원자적으로 계산·commit하고 한 bundle로 배포하는 multi-view package
 - 실제 GPU driver frame의 scene-swap 원자성 및 시각적 동일성
-- 실제 GPU driver에서 검증한 `>= 1e9 mm` 장면의 millimeter 이하 visual/depth-picking 정밀도와 남은 legacy immediate-mode overlay의 완전한 render-relative 제출
+- 실제 GPU driver에서 검증한 `>= 1e9 mm` 장면의 millimeter 이하 visual/depth-picking 정밀도
 - autosave와 crash recovery discovery
 - 전자서명 또는 provenance authority 인증
 
-현재 native GUI는 source와 새 scene object를 기존 live scene과 분리해 load·검증하고, 준비된 projection을 검증한 다음 `ArtifactWorkbench` authority와 scene을 two-phase로 교체한다. missing, parse failure, hash mismatch, VBO 준비 또는 swap 실패 시 staging만 폐기하고 이전 scene·session·저장 경로를 복원한다. scene 교체는 projection generation을 증가시키고 이전 cut-section/ROI worker authority를 분리한다. 해당 callback은 current worker identity, generation과 selected object가 모두 일치할 때만 overlay를 갱신하며, 오래된 finished callback은 새 worker pointer를 지울 수 없다. rollback·scene 복원·finalize가 불확실하면 fatal state가 모든 저장·실측·내보내기를 차단한다. offscreen smoke는 이 transaction, worker fencing과 rollback 순서를 검증하지만 실제 GPU driver가 표시한 프레임 사이에 부분 장면이 전혀 노출되지 않는지까지 측정하지 않는다.
+현재 native GUI는 source와 새 scene object를 기존 live scene과 분리해 load·검증하고, 준비된 projection을 검증한 다음 `ArtifactWorkbench` authority와 scene을 two-phase로 교체한다. missing, parse failure, hash mismatch, VBO 준비 또는 swap 실패 시 staging만 폐기하고 이전 scene·session·저장 경로를 복원한다. scene 교체는 projection generation을 증가시키고 이전 cut-section/ROI worker authority를 분리한다. 해당 callback은 current worker identity, generation과 selected object가 모두 일치할 때만 overlay를 갱신하며, 오래된 finished callback은 새 worker pointer를 지울 수 없다. surface/visible-face callback은 target object·mesh·TRS·render-frame 계약을 추가로 확인해 A 유물의 face ID를 B 유물에 적용하지 않는다. rollback·scene 복원·finalize가 불확실하면 fatal state가 모든 저장·실측·내보내기를 차단한다. offscreen smoke는 이 transaction, worker fencing과 rollback 순서를 검증하지만 실제 GPU driver가 표시한 프레임 사이에 부분 장면이 전혀 노출되지 않는지까지 측정하지 않는다.
 
 ### 대좌표와 transient render-origin 경계
 
@@ -476,7 +476,9 @@ v1 import는 입력 파일을 수정하지 않는 순수·결정적·멱등 변�
 
 표시 경계에서는 객체별 local VBO origin `O`를 mesh bounds의 midpoint에서 정하고 `q = float32(v - O)`를 CPU float64 연산 뒤 업로드한다. live scene에는 안정적인 world origin `R`을 두며, local-to-world affine `M`은 `T(-R) @ M @ T(O)`로 rebase하고 camera eye/target에서도 `R`을 뺀다. `O`와 `R`은 scene/VBO 수명에만 존재하는 private runtime 상태다.
 
-native vector preview와 ground/grid는 world point에서 `R`을 빼고 제출하며, CPU face centroid와 face picking은 absolute float64를 유지한다. 고해상도 capture가 반환하는 modelview는 기존 absolute-world 소비자와 호환되도록 복원한다. 다만 legacy cutline·ROI·pick·gizmo 등 일부 immediate-mode overlay는 아직 absolute vertex와 compatibility matrix를 사용하므로 대좌표의 millimeter 이하 시각 정밀도까지 보장하지 않는다.
+native vector preview·ground/grid와 cutline·ROI·pick·gizmo 등 활성 world overlay는 world point에서 `R`을 CPU float64로 빼고 제출한다. local marker/HUD primitive는 각 local/pixel 좌표를 유지한다. CPU face centroid와 face 계산은 absolute float64를 유지하며, 고해상도 capture가 반환하는 modelview는 기존 absolute-world 소비자와 호환되도록 복원한다.
+
+depth pick·screen projection·ray·Ctrl drag은 해당 depth buffer를 그린 modelview·projection·viewport·`R`을 `RenderFrameSnapshot`으로 고정한다. 같은 paint depth pass의 visibility·selected object·ROI bounds/caps·X-ray·solid-shell·all-object TRS·VBO geometry revision을 별도 transient depth signature로 원자적으로 함께 게시한다. resize·scene swap·projection generation 변경·object transform 뒤와 state 변경 후 repaint 전의 live snapshot은 폐기하고, 드래그는 press-time snapshot을 release/reset까지 유지한다. 선택 객체가 바뀌면 worker·gizmo/ROI gesture·미완성 surface polygon을 종료한다. 이는 좌표·depth authority 계약이지 실제 GPU depth buffer 정밀도의 증명은 아니다.
 
 두 transient origin `O`와 `R`은 다음 권위 데이터에 들어가면 안 된다.
 
@@ -485,7 +487,7 @@ native vector preview와 ground/grid는 world point에서 `R`을 빼고 제출�
 - 저장된 record·QC·selection
 - SVG/3D export의 world 좌표
 
-현재 게이트는 pure coordinate algebra, mocked relative VBO upload/native preview submission, absolute float64 face picking, source/scene materialization 불변과 document canonical hash 비직렬화를 검증한다. 실제 OpenGL driver frame과 depth-buffer 기반 pick reconstruction은 별도 후속 게이트다.
+현재 게이트는 pure coordinate algebra, mocked relative VBO/overlay submission, frame-bound project/unproject/depth-pick 수명주기, absolute float64 face 계산, source/scene materialization 불변과 document canonical hash 비직렬화를 검증한다. 실제 OpenGL driver frame과 depth-buffer 기반 pick reconstruction 정밀도는 별도 후속 게이트다.
 
 ### Legacy destructive bake 임시 안전 조건
 
