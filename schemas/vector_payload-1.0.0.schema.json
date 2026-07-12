@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:archmeshrubbing:schema:vector-payload:1.0.0",
+  "title": "ArchMeshRubbing Canonical-mm Vector Payload 1.0.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "kind", "coordinate_space", "frame", "paths"],
+  "properties": {
+    "schema_version": {"const": "1.0.0"},
+    "kind": {"enum": ["cutline", "outline"]},
+    "coordinate_space": {"const": "canonical_mm_planar/v1"},
+    "frame": {"$ref": "#/$defs/frame"},
+    "paths": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 4096,
+      "items": {"$ref": "#/$defs/path"}
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"kind": {"const": "cutline"}}},
+      "then": {
+        "properties": {
+          "paths": {
+            "items": {
+              "properties": {"role": {"const": "section"}}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"kind": {"const": "outline"}}},
+      "then": {
+        "properties": {
+          "paths": {
+            "contains": {
+              "properties": {"role": {"const": "exterior"}},
+              "required": ["role"]
+            },
+            "items": {
+              "properties": {
+                "closed": {"const": true},
+                "role": {"enum": ["exterior", "hole"]}
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "nonEmptyString": {"type": "string", "pattern": ".*\\S.*"},
+    "vec3": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {"type": "number"}
+    },
+    "point2": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {"type": "number"}
+    },
+    "frame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["origin_world_mm", "u_axis_world", "v_axis_world", "normal_world"],
+      "properties": {
+        "origin_world_mm": {"$ref": "#/$defs/vec3"},
+        "u_axis_world": {"$ref": "#/$defs/vec3"},
+        "v_axis_world": {"$ref": "#/$defs/vec3"},
+        "normal_world": {"$ref": "#/$defs/vec3"}
+      }
+    },
+    "path": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "role", "closed", "points_mm"],
+      "properties": {
+        "id": {"$ref": "#/$defs/nonEmptyString"},
+        "role": {"$ref": "#/$defs/nonEmptyString"},
+        "closed": {"type": "boolean"},
+        "points_mm": {
+          "type": "array",
+          "minItems": 2,
+          "items": {"$ref": "#/$defs/point2"}
+        }
+      }
+    }
+  }
+}

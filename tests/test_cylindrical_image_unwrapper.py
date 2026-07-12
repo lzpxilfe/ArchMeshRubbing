@@ -84,7 +84,6 @@ def test_unwrap_seam_shift_rolls_output_horizontally():
 def test_band_unwrap_straightens_curved_strip_to_full_height():
     h, w = 120, 240
     img = np.full((h, w, 3), 255, dtype=np.uint8)
-    xs = np.arange(w, dtype=np.float64)
     top = 24.0 + 12.0 * np.sin(np.linspace(-1.0, 1.0, num=w) * np.pi)
     thickness = 30.0 + 4.0 * np.cos(np.linspace(-1.0, 1.0, num=w) * np.pi)
     bottom = top + thickness

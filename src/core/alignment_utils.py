@@ -7,11 +7,260 @@ from __future__ import annotations
 import numpy as np
 
 
+MATRIX_ATOL = 1e-9
+
+
 def _as_vec3(value: np.ndarray | list[float] | tuple[float, ...]) -> np.ndarray:
     arr = np.asarray(value, dtype=np.float64).reshape(-1)
     if arr.size < 3:
         raise ValueError("Expected at least 3 values for a 3D vector.")
     return arr[:3]
+
+
+def _finite_vec3(
+    value: np.ndarray | list[float] | tuple[float, ...],
+    *,
+    field_name: str,
+) -> np.ndarray:
+    arr = _as_vec3(value).astype(np.float64, copy=False)
+    if not np.isfinite(arr).all():
+        raise ValueError(f"{field_name} must contain only finite values")
+    return arr
+
+
+def scene_rotation_matrix(
+    rotation_deg: np.ndarray | list[float] | tuple[float, ...],
+) -> np.ndarray:
+    """Return the legacy viewport's one authoritative Euler rotation matrix.
+
+    The fixed-function renderer calls ``glRotatef(X)``, then ``Y``, then ``Z``.
+    OpenGL post-multiplies the current matrix, so column-vector geometry is
+    transformed by ``Rx @ Ry @ Rz``.  In SciPy terminology this is intrinsic
+    uppercase ``"XYZ"``; lowercase ``"xyz"`` is a different rotation order.
+    Euler angles are a UI adapter only.  Durable alignment uses a 4x4 matrix.
+    """
+
+    rx, ry, rz = np.deg2rad(
+        _finite_vec3(rotation_deg, field_name="rotation_deg")
+    )
+    cx, sx = float(np.cos(rx)), float(np.sin(rx))
+    cy, sy = float(np.cos(ry)), float(np.sin(ry))
+    cz, sz = float(np.cos(rz)), float(np.sin(rz))
+
+    rot_x = np.array(
+        [[1.0, 0.0, 0.0], [0.0, cx, -sx], [0.0, sx, cx]],
+        dtype=np.float64,
+    )
+    rot_y = np.array(
+        [[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]],
+        dtype=np.float64,
+    )
+    rot_z = np.array(
+        [[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]],
+        dtype=np.float64,
+    )
+    return rot_x @ rot_y @ rot_z
+
+
+def scene_trs_matrix(
+    translation: np.ndarray | list[float] | tuple[float, ...],
+    rotation_deg: np.ndarray | list[float] | tuple[float, ...],
+    scale: float,
+) -> np.ndarray:
+    """Build the legacy scene transform as ``T @ Rx @ Ry @ Rz @ S``.
+
+    Matrices are float64, row-major when serialized, and applied to column
+    vectors.  Only a finite positive uniform scale is accepted; scientific
+    alignment revisions themselves are rigid and reject scale separately.
+    """
+
+    translation_vec = _finite_vec3(translation, field_name="translation")
+    scale_value = float(scale)
+    if not np.isfinite(scale_value) or scale_value <= 0.0:
+        raise ValueError("scale must be a finite positive value")
+
+    matrix = np.eye(4, dtype=np.float64)
+    matrix[:3, :3] = scene_rotation_matrix(rotation_deg) * scale_value
+    matrix[:3, 3] = translation_vec
+    return matrix
+
+
+def scene_trs_matrix_about_pivot(
+    translation: np.ndarray | list[float] | tuple[float, ...],
+    rotation_deg: np.ndarray | list[float] | tuple[float, ...],
+    scale: float,
+    pivot: np.ndarray | list[float] | tuple[float, ...],
+) -> np.ndarray:
+    """Build ``T(delta) @ T(pivot) @ R @ S @ T(-pivot)``.
+
+    Canonical ArtifactDocument geometry retains its scientific origin instead
+    of being destructively centered.  This explicit runtime preview pivot
+    preserves object-centered interaction while keeping durable vertices and
+    Align matrices unmodified until commit.
+    """
+
+    pivot_vec = _finite_vec3(pivot, field_name="pivot")
+    delta = scene_trs_matrix(translation, rotation_deg, scale)
+    to_pivot = np.eye(4, dtype=np.float64)
+    to_pivot[:3, 3] = pivot_vec
+    from_pivot = np.eye(4, dtype=np.float64)
+    from_pivot[:3, 3] = -pivot_vec
+    # delta already contains translation. Insert the pivot around its linear
+    # component without applying translation twice.
+    translation_only = np.eye(4, dtype=np.float64)
+    translation_only[:3, 3] = delta[:3, 3]
+    linear = delta.copy()
+    linear[:3, 3] = 0.0
+    return translation_only @ to_pivot @ linear @ from_pivot
+
+
+def require_affine_matrix4x4(
+    matrix: np.ndarray | list[list[float]] | tuple[tuple[float, ...], ...],
+    *,
+    field_name: str = "matrix4x4",
+) -> np.ndarray:
+    """Return a finite invertible affine matrix or raise ``ValueError``."""
+
+    arr = np.asarray(matrix, dtype=np.float64)
+    if arr.shape != (4, 4):
+        raise ValueError(f"{field_name} must have shape (4, 4)")
+    if not np.isfinite(arr).all():
+        raise ValueError(f"{field_name} must contain only finite values")
+    if not np.allclose(arr[3], [0.0, 0.0, 0.0, 1.0], rtol=0.0, atol=MATRIX_ATOL):
+        raise ValueError(f"{field_name} must be an affine column-vector matrix")
+    determinant = float(np.linalg.det(arr[:3, :3]))
+    if not np.isfinite(determinant) or abs(determinant) <= MATRIX_ATOL:
+        raise ValueError(f"{field_name} must have an invertible linear component")
+    return arr.copy()
+
+
+def require_rigid_matrix4x4(
+    matrix: np.ndarray | list[list[float]] | tuple[tuple[float, ...], ...],
+    *,
+    field_name: str = "matrix4x4",
+) -> np.ndarray:
+    """Return a proper rigid transform, rejecting scale, shear and reflection."""
+
+    arr = require_affine_matrix4x4(matrix, field_name=field_name)
+    rotation = arr[:3, :3]
+    if not np.allclose(
+        rotation.T @ rotation,
+        np.eye(3, dtype=np.float64),
+        rtol=0.0,
+        atol=MATRIX_ATOL,
+    ):
+        raise ValueError(f"{field_name} must be rigid (scale/shear are not allowed)")
+    determinant = float(np.linalg.det(rotation))
+    if not np.isclose(determinant, 1.0, rtol=0.0, atol=MATRIX_ATOL):
+        raise ValueError(f"{field_name} must be a proper rotation with determinant +1")
+    return arr
+
+
+def compose_align_matrices(
+    delta_matrix: np.ndarray | list[list[float]],
+    parent_matrix: np.ndarray | list[list[float]],
+) -> np.ndarray:
+    """Compose an Align delta as ``A_new = delta @ parent``."""
+
+    delta = require_rigid_matrix4x4(delta_matrix, field_name="delta_matrix")
+    parent = require_rigid_matrix4x4(parent_matrix, field_name="parent_matrix")
+    return require_rigid_matrix4x4(
+        delta @ parent,
+        field_name="composed_align_matrix",
+    )
+
+
+def transform_points(
+    points: np.ndarray | list[list[float]],
+    matrix: np.ndarray | list[list[float]],
+) -> np.ndarray:
+    """Apply a column-vector affine matrix to an ``(..., 3)`` point array."""
+
+    pts = np.asarray(points, dtype=np.float64)
+    if pts.ndim == 0 or pts.shape[-1] != 3:
+        raise ValueError("points must have shape (..., 3)")
+    if not np.isfinite(pts).all():
+        raise ValueError("points must contain only finite values")
+    affine = require_affine_matrix4x4(matrix)
+    original_shape = pts.shape
+    flat = pts.reshape(-1, 3)
+    transformed = flat @ affine[:3, :3].T + affine[:3, 3]
+    return transformed.reshape(original_shape)
+
+
+def transform_directions(
+    directions: np.ndarray | list[list[float]],
+    matrix: np.ndarray | list[list[float]],
+    *,
+    normalize: bool = False,
+) -> np.ndarray:
+    """Transform direction vectors without applying translation."""
+
+    vectors = np.asarray(directions, dtype=np.float64)
+    if vectors.ndim == 0 or vectors.shape[-1] != 3:
+        raise ValueError("directions must have shape (..., 3)")
+    if not np.isfinite(vectors).all():
+        raise ValueError("directions must contain only finite values")
+    affine = require_affine_matrix4x4(matrix)
+    original_shape = vectors.shape
+    transformed = vectors.reshape(-1, 3) @ affine[:3, :3].T
+    if normalize:
+        lengths = np.linalg.norm(transformed, axis=1)
+        if np.any(lengths <= MATRIX_ATOL) or not np.isfinite(lengths).all():
+            raise ValueError("cannot normalize a zero-length transformed direction")
+        transformed = transformed / lengths[:, None]
+    return transformed.reshape(original_shape)
+
+
+def transform_plane_world_to_local(
+    origin_world: np.ndarray | list[float] | tuple[float, ...],
+    normal_world: np.ndarray | list[float] | tuple[float, ...],
+    local_to_world: np.ndarray | list[list[float]],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Convert a world-space plane into local coordinates exactly."""
+
+    affine = require_affine_matrix4x4(local_to_world, field_name="local_to_world")
+    inverse = np.linalg.inv(affine)
+    origin_local = transform_points(
+        _finite_vec3(origin_world, field_name="origin_world").reshape(1, 3),
+        inverse,
+    )[0]
+    # n_world . (L*x_local + t - origin_world) = 0, so local normal is L^T*n.
+    normal = affine[:3, :3].T @ _finite_vec3(normal_world, field_name="normal_world")
+    normal_local = normalize_vector(normal)
+    if normal_local is None:
+        raise ValueError("normal_world produces a degenerate local plane normal")
+    return origin_local, normal_local
+
+
+def bounds_corners(bounds: np.ndarray | list[list[float]]) -> np.ndarray:
+    """Return the eight corners of a finite ``[[min], [max]]`` bounds array."""
+
+    arr = np.asarray(bounds, dtype=np.float64)
+    if arr.shape != (2, 3) or not np.isfinite(arr).all():
+        raise ValueError("bounds must be a finite array with shape (2, 3)")
+    if np.any(arr[0] > arr[1]):
+        raise ValueError("bounds minimum must not exceed maximum")
+    low, high = arr
+    return np.asarray(
+        [
+            [x, y, z]
+            for x in (low[0], high[0])
+            for y in (low[1], high[1])
+            for z in (low[2], high[2])
+        ],
+        dtype=np.float64,
+    )
+
+
+def transform_bounds(
+    bounds: np.ndarray | list[list[float]],
+    matrix: np.ndarray | list[list[float]],
+) -> np.ndarray:
+    """Transform AABB corners and return the enclosing world-space AABB."""
+
+    corners = transform_points(bounds_corners(bounds), matrix)
+    return np.asarray([corners.min(axis=0), corners.max(axis=0)], dtype=np.float64)
 
 
 def normalize_vector(

@@ -3,6 +3,7 @@ import unittest
 import numpy as np
 
 from src.core.flattener import flatten_with_method
+from src.core.flatten_models_sectionwise import sectionwise_quality_gate
 from src.core.mesh_loader import MeshData
 
 
@@ -53,6 +54,36 @@ def _make_variable_radius_u_patch(
 
 
 class TestFlattenerSectionwise(unittest.TestCase):
+    def test_sectionwise_quality_gate_uses_radian_arc_span(self):
+        meta = {
+            "section_fit_valid_count": 12,
+            "section_count": 12,
+            "section_spacing": 1.0,
+            "section_centerline_length": 10.0,
+            "section_mean_span": float(np.deg2rad(30.0)),
+        }
+
+        needs_fallback, reason = sectionwise_quality_gate(meta)
+        self.assertFalse(needs_fallback)
+        self.assertEqual(reason, "")
+
+        meta["section_mean_span"] = float(np.deg2rad(10.0))
+        needs_fallback, reason = sectionwise_quality_gate(meta)
+        self.assertTrue(needs_fallback)
+        self.assertEqual(reason, "section_arc_span_too_small")
+
+    def test_sparse_sectionwise_input_reports_policy_fallback(self):
+        mesh, _row_radii, _theta_span = _make_variable_radius_u_patch(n_theta=4, n_len=2)
+
+        out = flatten_with_method(mesh, method="section", cylinder_axis="y")
+        meta = dict(getattr(out, "meta", {}) or {})
+
+        self.assertEqual(str(meta.get("flatten_method")), "area")
+        self.assertEqual(str(meta.get("requested_flatten_method")), "section")
+        self.assertEqual(str(meta.get("fallback_from")), "section")
+        self.assertEqual(str(meta.get("fallback_reason")), "too_few_points")
+        self.assertEqual(str(meta.get("fallback_used_method")), "area")
+
     def test_sectionwise_unwrap_tracks_variable_cross_section_width(self):
         mesh, row_radii, theta_span = _make_variable_radius_u_patch()
         n_rows = int(row_radii.size)
@@ -89,6 +120,10 @@ class TestFlattenerSectionwise(unittest.TestCase):
         self.assertEqual(str(meta.get("flatten_method")), "section")
         self.assertTrue(bool(meta.get("sectionwise", False)))
         self.assertGreaterEqual(int(meta.get("section_count", 0)), 12)
+        mean_span_rad = float(meta.get("section_mean_span_rad", 0.0))
+        mean_span_deg = float(meta.get("section_mean_span_deg", 0.0))
+        self.assertAlmostEqual(float(meta.get("section_mean_span", 0.0)), mean_span_rad)
+        self.assertAlmostEqual(mean_span_deg, float(np.rad2deg(mean_span_rad)))
 
     def test_arap_accepts_section_initialization(self):
         mesh, _row_radii, _theta_span = _make_variable_radius_u_patch()

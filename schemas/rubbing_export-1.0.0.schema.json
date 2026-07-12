@@ -1,0 +1,822 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:archmeshrubbing:schema:rubbing-export:1.0.0",
+  "title": "ArchMeshRubbing Digital Rubbing Export Sidecar 1.0.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "artifact",
+    "format",
+    "presentation",
+    "privacy",
+    "provenance",
+    "qc",
+    "raster_receipt",
+    "recipe",
+    "schema_version"
+  ],
+  "properties": {
+    "artifact": {"$ref": "#/$defs/artifact"},
+    "format": {"const": "archmeshrubbing_rubbing_export"},
+    "presentation": {"$ref": "#/$defs/presentation"},
+    "privacy": {"$ref": "#/$defs/privacy"},
+    "provenance": {"$ref": "#/$defs/provenance"},
+    "qc": {"$ref": "#/$defs/qc"},
+    "raster_receipt": {
+      "$ref": "urn:archmeshrubbing:schema:rubbing-receipt:1.0.0"
+    },
+    "recipe": {"$ref": "#/$defs/rubbingRecipe"},
+    "schema_version": {"const": "1.0.0"}
+  },
+  "$defs": {
+    "nonEmptyString": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "nullableId": {
+      "anyOf": [
+        {"$ref": "#/$defs/nonEmptyString"},
+        {"type": "null"}
+      ]
+    },
+    "stringArray": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/nonEmptyString"}
+    },
+    "matrix4x4": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": {
+        "type": "array",
+        "minItems": 4,
+        "maxItems": 4,
+        "items": {"type": "number"}
+      }
+    },
+    "view": {
+      "enum": ["top", "bottom", "front", "back", "right", "left"]
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["file", "media_type", "sha256", "size_bytes"],
+      "properties": {
+        "file": {"const": "artifact.png"},
+        "media_type": {"const": "image/png"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 67108864
+        }
+      }
+    },
+    "presentation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artboard_pixel_bounds_uv",
+        "height_mm_exact",
+        "height_pixels",
+        "physical_scale",
+        "pixel_pitch_mm_exact",
+        "pixels_per_meter",
+        "unit",
+        "width_mm_exact",
+        "width_pixels"
+      ],
+      "properties": {
+        "artboard_pixel_bounds_uv": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": {"type": "integer"}
+        },
+        "height_mm_exact": {
+          "$ref": "urn:archmeshrubbing:schema:rubbing-receipt:1.0.0#/$defs/exactDimensionMm"
+        },
+        "height_pixels": {
+          "$ref": "urn:archmeshrubbing:schema:rubbing-receipt:1.0.0#/$defs/dimensionPixels"
+        },
+        "physical_scale": {"const": "1:1_planar_sampling"},
+        "pixel_pitch_mm_exact": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["denominator", "numerator"],
+          "properties": {
+            "denominator": {
+              "$ref": "urn:archmeshrubbing:schema:rubbing-receipt:1.0.0#/$defs/pixelsPerMeter"
+            },
+            "numerator": {"const": 1000}
+          }
+        },
+        "pixels_per_meter": {
+          "$ref": "urn:archmeshrubbing:schema:rubbing-receipt:1.0.0#/$defs/pixelsPerMeter"
+        },
+        "unit": {"const": "mm"},
+        "width_mm_exact": {
+          "$ref": "urn:archmeshrubbing:schema:rubbing-receipt:1.0.0#/$defs/exactDimensionMm"
+        },
+        "width_pixels": {
+          "$ref": "urn:archmeshrubbing:schema:rubbing-receipt:1.0.0#/$defs/dimensionPixels"
+        }
+      }
+    },
+    "privacy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "absolute_source_path_embedded",
+        "annotations_embedded_in_primary_png",
+        "external_resources",
+        "review_labels_embedded_in_primary_png"
+      ],
+      "properties": {
+        "absolute_source_path_embedded": {"const": false},
+        "annotations_embedded_in_primary_png": {"const": false},
+        "external_resources": {"const": false},
+        "review_labels_embedded_in_primary_png": {"const": false}
+      }
+    },
+    "documentReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "active_align_revision_id",
+        "active_source_metadata_revision_id",
+        "document_id",
+        "manifest_sha256",
+        "schema_version",
+        "software_version"
+      ],
+      "properties": {
+        "active_align_revision_id": {"$ref": "#/$defs/nonEmptyString"},
+        "active_source_metadata_revision_id": {"$ref": "#/$defs/nonEmptyString"},
+        "document_id": {"$ref": "#/$defs/nonEmptyString"},
+        "manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "schema_version": {"const": "1.0.0"},
+        "software_version": {"$ref": "#/$defs/nonEmptyString"}
+      }
+    },
+    "recordReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "align_revision_id",
+        "created_at",
+        "depends_on_record_ids",
+        "geometry_revision_id",
+        "geometry_ref",
+        "id",
+        "lifecycle_status",
+        "operator",
+        "recipe_hash",
+        "selection_hash",
+        "type"
+      ],
+      "properties": {
+        "align_revision_id": {"$ref": "#/$defs/nonEmptyString"},
+        "created_at": {"$ref": "#/$defs/timestamp"},
+        "depends_on_record_ids": {"$ref": "#/$defs/stringArray"},
+        "geometry_revision_id": {"$ref": "#/$defs/nonEmptyString"},
+        "geometry_ref": {
+          "type": "string",
+          "pattern": "^urn:archmeshrubbing:digital-rubbing-raster:sha256:[0-9a-f]{64}$"
+        },
+        "id": {"$ref": "#/$defs/nonEmptyString"},
+        "lifecycle_status": {"const": "ready"},
+        "operator": {"$ref": "#/$defs/nonEmptyString"},
+        "recipe_hash": {"$ref": "#/$defs/sha256"},
+        "selection_hash": {
+          "anyOf": [
+            {"$ref": "#/$defs/sha256"},
+            {"type": "null"}
+          ]
+        },
+        "type": {"const": "raster.digital_rubbing.v1"}
+      }
+    },
+    "dependencyReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "align_revision_id",
+        "depends_on_record_ids",
+        "freshness",
+        "geometry_ref",
+        "geometry_revision_id",
+        "id",
+        "lifecycle_status",
+        "recipe_hash",
+        "type"
+      ],
+      "properties": {
+        "align_revision_id": {"$ref": "#/$defs/nonEmptyString"},
+        "depends_on_record_ids": {"$ref": "#/$defs/stringArray"},
+        "freshness": {"const": "fresh"},
+        "geometry_ref": {"$ref": "#/$defs/nonEmptyString"},
+        "geometry_revision_id": {"$ref": "#/$defs/nonEmptyString"},
+        "id": {"$ref": "#/$defs/nonEmptyString"},
+        "lifecycle_status": {"const": "ready"},
+        "recipe_hash": {"$ref": "#/$defs/sha256"},
+        "type": {"$ref": "#/$defs/nonEmptyString"}
+      }
+    },
+    "alignRevision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "created_at",
+        "id",
+        "matrix4x4",
+        "operator",
+        "parent_id",
+        "qc",
+        "recipe",
+        "source_metadata_revision_id"
+      ],
+      "properties": {
+        "created_at": {"$ref": "#/$defs/timestamp"},
+        "id": {"$ref": "#/$defs/nonEmptyString"},
+        "matrix4x4": {"$ref": "#/$defs/matrix4x4"},
+        "operator": {"$ref": "#/$defs/nonEmptyString"},
+        "parent_id": {"$ref": "#/$defs/nullableId"},
+        "qc": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "proper_rigid": {},
+            "rigid": {}
+          }
+        },
+        "recipe": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "convention": {},
+            "kind": {},
+            "pivot_mm": {},
+            "rotation_deg": {},
+            "translation_mm": {}
+          }
+        },
+        "source_metadata_revision_id": {"$ref": "#/$defs/nonEmptyString"}
+      }
+    },
+    "metadataRevision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "axes",
+        "confirmation_status",
+        "created_at",
+        "geometry_revision_id",
+        "handedness",
+        "id",
+        "operator",
+        "parent_id",
+        "source_to_canonical_mm",
+        "unit"
+      ],
+      "properties": {
+        "axes": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["source_x", "source_y", "source_z"],
+          "properties": {
+            "source_x": {"enum": ["+X", "-X", "+Y", "-Y", "+Z", "-Z"]},
+            "source_y": {"enum": ["+X", "-X", "+Y", "-Y", "+Z", "-Z"]},
+            "source_z": {"enum": ["+X", "-X", "+Y", "-Y", "+Z", "-Z"]}
+          }
+        },
+        "confirmation_status": {"const": "confirmed"},
+        "created_at": {"$ref": "#/$defs/timestamp"},
+        "geometry_revision_id": {"$ref": "#/$defs/nonEmptyString"},
+        "handedness": {"enum": ["right", "left"]},
+        "id": {"$ref": "#/$defs/nonEmptyString"},
+        "operator": {"$ref": "#/$defs/nonEmptyString"},
+        "parent_id": {"$ref": "#/$defs/nullableId"},
+        "source_to_canonical_mm": {"$ref": "#/$defs/matrix4x4"},
+        "unit": {"enum": ["mm", "cm", "m"]}
+      }
+    },
+    "geometryRevision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "created_at",
+        "geometry_hash_scope",
+        "geometry_sha256",
+        "id",
+        "import_recipe",
+        "operator",
+        "qc",
+        "source_asset_ids"
+      ],
+      "properties": {
+        "created_at": {"$ref": "#/$defs/timestamp"},
+        "geometry_hash_scope": {
+          "const": "positions-f64le+triangles-i32le/v1"
+        },
+        "geometry_sha256": {"$ref": "#/$defs/sha256"},
+        "id": {"$ref": "#/$defs/nonEmptyString"},
+        "import_recipe": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "format": {},
+            "loader": {},
+            "maintain_order": {},
+            "process": {},
+            "sanitizer": {}
+          }
+        },
+        "operator": {"$ref": "#/$defs/nonEmptyString"},
+        "qc": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "face_count": {},
+            "finite_vertices": {},
+            "vertex_count": {}
+          }
+        },
+        "source_asset_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/nonEmptyString"}
+        }
+      }
+    },
+    "sourceAsset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "identity_scope",
+        "media_type",
+        "original_name",
+        "role",
+        "sha256",
+        "size_bytes"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "identity_scope": {"const": "primary_file_bytes"},
+        "media_type": {"$ref": "#/$defs/nonEmptyString"},
+        "original_name": {"$ref": "#/$defs/nonEmptyString"},
+        "role": {"const": "primary_mesh"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "size_bytes": {"type": "integer", "minimum": 0}
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "align_revision",
+        "dependency_closure",
+        "document",
+        "geometry_revision",
+        "record",
+        "source_assets",
+        "source_metadata_revision"
+      ],
+      "properties": {
+        "align_revision": {"$ref": "#/$defs/alignRevision"},
+        "dependency_closure": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/dependencyReceipt"}
+        },
+        "document": {"$ref": "#/$defs/documentReceipt"},
+        "geometry_revision": {"$ref": "#/$defs/geometryRevision"},
+        "record": {"$ref": "#/$defs/recordReceipt"},
+        "source_assets": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/sourceAsset"}
+        },
+        "source_metadata_revision": {"$ref": "#/$defs/metadataRevision"}
+      }
+    },
+    "rasterQc": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "alpha_binary",
+        "covered_gray_max",
+        "covered_gray_min",
+        "covered_pixel_count",
+        "height_pixels",
+        "ink_sum",
+        "inked_pixel_count",
+        "pixel_count",
+        "pixel_format",
+        "pixels_per_meter",
+        "raster_sha256",
+        "raw_pixel_sha256",
+        "width_pixels"
+      ],
+      "properties": {
+        "alpha_binary": {"const": true},
+        "covered_gray_max": {"type": "integer", "minimum": 0, "maximum": 255},
+        "covered_gray_min": {"type": "integer", "minimum": 0, "maximum": 255},
+        "covered_pixel_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8000000
+        },
+        "height_pixels": {
+          "$ref": "urn:archmeshrubbing:schema:rubbing-receipt:1.0.0#/$defs/dimensionPixels"
+        },
+        "ink_sum": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2040000000
+        },
+        "inked_pixel_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 8000000
+        },
+        "pixel_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8000000
+        },
+        "pixel_format": {"const": "grayscale-alpha-8/v1"},
+        "pixels_per_meter": {
+          "$ref": "urn:archmeshrubbing:schema:rubbing-receipt:1.0.0#/$defs/pixelsPerMeter"
+        },
+        "raster_sha256": {"$ref": "#/$defs/sha256"},
+        "raw_pixel_sha256": {"$ref": "#/$defs/sha256"},
+        "width_pixels": {
+          "$ref": "urn:archmeshrubbing:schema:rubbing-receipt:1.0.0#/$defs/dimensionPixels"
+        }
+      }
+    },
+    "recordQc": {
+      "type": "object",
+      "required": [
+        "alpha_binary",
+        "covered_gray_max",
+        "covered_gray_min",
+        "covered_pixel_count",
+        "height_pixels",
+        "ink_sum",
+        "inked_pixel_count",
+        "pixel_count",
+        "pixel_format",
+        "pixels_per_meter",
+        "raster_sha256",
+        "raw_pixel_sha256",
+        "width_pixels"
+      ],
+      "properties": {
+        "all_projected_faces_included": {"const": true},
+        "alpha_binary": {"const": true},
+        "artboard_height_pixels": {
+          "$ref": "urn:archmeshrubbing:schema:rubbing-receipt:1.0.0#/$defs/dimensionPixels"
+        },
+        "artboard_width_pixels": {
+          "$ref": "urn:archmeshrubbing:schema:rubbing-receipt:1.0.0#/$defs/dimensionPixels"
+        },
+        "covered_gray_max": {"type": "integer", "minimum": 0, "maximum": 255},
+        "covered_gray_min": {"type": "integer", "minimum": 0, "maximum": 255},
+        "covered_pixel_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8000000
+        },
+        "depth_span_quantized_ticks": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1099511627776
+        },
+        "depth_span_unquantized_um_rounded": {"type": "integer", "minimum": 0},
+        "height_pixels": {
+          "$ref": "urn:archmeshrubbing:schema:rubbing-receipt:1.0.0#/$defs/dimensionPixels"
+        },
+        "ink_sum": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2040000000
+        },
+        "inked_pixel_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 8000000
+        },
+        "input_face_count": {"type": "integer", "minimum": 1, "maximum": 2000000},
+        "input_vertex_count": {"type": "integer", "minimum": 3, "maximum": 5000000},
+        "maximum_second_layer_gap_um_rounded": {"type": "integer", "minimum": 0},
+        "multi_layer_pixel_count": {"type": "integer", "minimum": 0, "maximum": 8000000},
+        "pixel_count": {"type": "integer", "minimum": 1, "maximum": 8000000},
+        "pixel_format": {"const": "grayscale-alpha-8/v1"},
+        "pixels_per_meter": {
+          "$ref": "urn:archmeshrubbing:schema:rubbing-receipt:1.0.0#/$defs/pixelsPerMeter"
+        },
+        "projected_nonzero_area_face_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2000000
+        },
+        "projected_zero_area_face_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2000000
+        },
+        "raster_sha256": {"$ref": "#/$defs/sha256"},
+        "raw_pixel_sha256": {"$ref": "#/$defs/sha256"},
+        "sampling_applied": {"const": false},
+        "triangle_pixel_test_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 250000000
+        },
+        "view": {"$ref": "#/$defs/view"},
+        "width_pixels": {
+          "$ref": "urn:archmeshrubbing:schema:rubbing-receipt:1.0.0#/$defs/dimensionPixels"
+        }
+      },
+      "additionalProperties": true
+    },
+    "qc": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["export_gate", "raster", "record", "scale"],
+      "properties": {
+        "export_gate": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "raster_recomputed_and_verified",
+            "record_freshness",
+            "record_lifecycle_status"
+          ],
+          "properties": {
+            "raster_recomputed_and_verified": {"const": true},
+            "record_freshness": {"const": "fresh"},
+            "record_lifecycle_status": {"const": "ready"}
+          }
+        },
+        "raster": {"$ref": "#/$defs/rasterQc"},
+        "record": {"$ref": "#/$defs/recordQc"},
+        "scale": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["physical_scale", "png_phys_matches_sidecar", "unit"],
+          "properties": {
+            "physical_scale": {"const": "1:1_planar_sampling"},
+            "png_phys_matches_sidecar": {"const": true},
+            "unit": {"const": "mm"}
+          }
+        }
+      }
+    },
+    "rubbingRecipe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "algorithm",
+        "algorithm_version",
+        "artboard_policy",
+        "coordinate_space",
+        "depth_policy",
+        "frame",
+        "kind",
+        "pixel_policy",
+        "rasterization_policy",
+        "relief_policy",
+        "resource_limits",
+        "view"
+      ],
+      "properties": {
+        "algorithm": {"const": "archmeshrubbing.orthographic_local_mean_relief"},
+        "algorithm_version": {"const": "1.0.0"},
+        "artboard_policy": {"const": "global_pixel_lattice_bounds_plus_margin/v1"},
+        "coordinate_space": {"const": "canonical_mm_orthographic_raster/v1"},
+        "depth_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "front_surface",
+            "quantization_rounding",
+            "quantization_um"
+          ],
+          "properties": {
+            "front_surface": {"const": "maximum_frame_normal_depth"},
+            "quantization_rounding": {"const": "nearest_ties_to_even/v1"},
+            "quantization_um": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000000
+            }
+          }
+        },
+        "frame": {
+          "$ref": "urn:archmeshrubbing:schema:rubbing-receipt:1.0.0#/$defs/frame"
+        },
+        "kind": {"const": "digital_rubbing"},
+        "pixel_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "margin_pixels",
+            "margin_requested_um",
+            "pixel_centres",
+            "pixel_format",
+            "pixels_per_meter",
+            "pixels_per_mm",
+            "row_order"
+          ],
+          "properties": {
+            "margin_pixels": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100000000
+            },
+            "margin_requested_um": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000000
+            },
+            "pixel_centres": {"const": "half_integer_global_lattice/v1"},
+            "pixel_format": {"const": "grayscale-alpha-8/v1"},
+            "pixels_per_meter": {
+              "$ref": "urn:archmeshrubbing:schema:rubbing-receipt:1.0.0#/$defs/pixelsPerMeter"
+            },
+            "pixels_per_mm": {"type": "integer", "minimum": 1, "maximum": 100},
+            "row_order": {"const": "top_to_bottom_v_descending"}
+          }
+        },
+        "rasterization_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "backfaces",
+            "edge_rule",
+            "multi_layer_policy",
+            "projected_zero_area_faces",
+            "sampling",
+            "z_tie"
+          ],
+          "properties": {
+            "backfaces": {"const": "include"},
+            "edge_rule": {"const": "barycentric_nonnegative_with_fixed_epsilon/v1"},
+            "multi_layer_policy": {"const": "frontmost_and_count_second_depth/v1"},
+            "projected_zero_area_faces": {"const": "drop_and_count"},
+            "sampling": {"const": "none"},
+            "z_tie": {"const": "geometry_invariant_max_depth"}
+          }
+        },
+        "relief_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "black_point_requested_um",
+            "effective_black_point_ticks",
+            "effective_black_point_um",
+            "ink_strength_percent",
+            "minimum_reference_sample_count",
+            "polarity",
+            "reference_filter",
+            "reference_radius_pixels",
+            "reference_radius_requested_um",
+            "tone_rounding"
+          ],
+          "properties": {
+            "black_point_requested_um": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000000000
+            },
+            "effective_black_point_ticks": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100000000000
+            },
+            "effective_black_point_um": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100000000000
+            },
+            "ink_strength_percent": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 400
+            },
+            "minimum_reference_sample_count": {"const": 3},
+            "polarity": {"enum": ["raised", "incised", "bidirectional"]},
+            "reference_filter": {
+              "const": "masked_square_local_mean_integer_integral/v1"
+            },
+            "reference_radius_pixels": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 512
+            },
+            "reference_radius_requested_um": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000000000
+            },
+            "tone_rounding": {"const": "nearest_half_up_integer/v1"}
+          }
+        },
+        "resource_limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "max_dimension",
+            "max_faces",
+            "max_pixels",
+            "max_triangle_pixel_tests",
+            "max_vertices"
+          ],
+          "properties": {
+            "max_dimension": {"const": 100000},
+            "max_faces": {"const": 2000000},
+            "max_pixels": {"const": 8000000},
+            "max_triangle_pixel_tests": {"const": 250000000},
+            "max_vertices": {"const": 5000000}
+          }
+        },
+        "view": {"$ref": "#/$defs/view"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"view": {"const": "top"}}, "required": ["view"]},
+          "then": {"properties": {"frame": {"const": {
+            "origin_world_mm": [0, 0, 0],
+            "u_axis_world": [1, 0, 0],
+            "v_axis_world": [0, 1, 0],
+            "normal_world": [0, 0, 1]
+          }}}}
+        },
+        {
+          "if": {"properties": {"view": {"const": "bottom"}}, "required": ["view"]},
+          "then": {"properties": {"frame": {"const": {
+            "origin_world_mm": [0, 0, 0],
+            "u_axis_world": [1, 0, 0],
+            "v_axis_world": [0, -1, 0],
+            "normal_world": [0, 0, -1]
+          }}}}
+        },
+        {
+          "if": {"properties": {"view": {"const": "front"}}, "required": ["view"]},
+          "then": {"properties": {"frame": {"const": {
+            "origin_world_mm": [0, 0, 0],
+            "u_axis_world": [1, 0, 0],
+            "v_axis_world": [0, 0, 1],
+            "normal_world": [0, -1, 0]
+          }}}}
+        },
+        {
+          "if": {"properties": {"view": {"const": "back"}}, "required": ["view"]},
+          "then": {"properties": {"frame": {"const": {
+            "origin_world_mm": [0, 0, 0],
+            "u_axis_world": [-1, 0, 0],
+            "v_axis_world": [0, 0, 1],
+            "normal_world": [0, 1, 0]
+          }}}}
+        },
+        {
+          "if": {"properties": {"view": {"const": "right"}}, "required": ["view"]},
+          "then": {"properties": {"frame": {"const": {
+            "origin_world_mm": [0, 0, 0],
+            "u_axis_world": [0, 1, 0],
+            "v_axis_world": [0, 0, 1],
+            "normal_world": [1, 0, 0]
+          }}}}
+        },
+        {
+          "if": {"properties": {"view": {"const": "left"}}, "required": ["view"]},
+          "then": {"properties": {"frame": {"const": {
+            "origin_world_mm": [0, 0, 0],
+            "u_axis_world": [0, -1, 0],
+            "v_axis_world": [0, 0, 1],
+            "normal_world": [-1, 0, 0]
+          }}}}
+        }
+      ]
+    }
+  }
+}

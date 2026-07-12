@@ -5,8 +5,11 @@ on:
   workflow_dispatch:
 
 jobs:
-  test:
+  quality:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      QT_QPA_PLATFORM: offscreen
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -15,15 +18,91 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements/runtime-py312.lock
+            requirements-dev.txt
 
       - name: Install
         run: |
           python -m pip install -U pip
-          python -m pip install ruff
-          python -m pip install -r requirements.txt
+          python -m pip install -r requirements.txt -r requirements-dev.txt
 
       - name: Lint (ruff)
-        run: ruff check .
+        run: python -m ruff check .
 
-      - name: Tests (unittest)
-        run: python -m unittest discover -s tests -p "test_*.py"
+      - name: Type check (M0 trust kernel)
+        run: >-
+          python -c "import subprocess,sys;
+          raise SystemExit(subprocess.call([sys.executable,'-m','pyright',
+          '--pythonpath',sys.executable,'-p','pyright-m0.json']))"
+
+      - name: Tests (pytest)
+        run: python -m pytest -q
+
+      - name: Full-tree type debt report
+        continue-on-error: true
+        run: >-
+          python -m pyright
+          --pythonpath "$(python -c 'import sys; print(sys.executable)')"
+          -p pyrightconfig.json
+
+  persistence-smoke:
+    name: Persistence smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      QT_QPA_PLATFORM: offscreen
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements/runtime-py312.lock
+            requirements-dev.txt
+
+      - name: Install
+        run: |
+          python -m pip install -U pip
+          python -m pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Persistence, artifact, matrix, identity, and GUI smoke
+        run: >-
+          python -m pytest -q
+          tests/test_project_file.py
+          tests/test_build_info.py
+          tests/test_build_native.py
+          tests/test_build_manifest.py
+          tests/test_source_identity.py
+          tests/test_alignment_utils.py
+          tests/test_artifact_document.py
+          tests/test_geometry_identity.py
+          tests/test_artifact_scene_adapter.py
+          tests/test_artifact_session.py
+          tests/test_artifact_workbench.py
+          tests/test_artifact_new_process_roundtrip.py
+          tests/test_canonical_json.py
+          tests/test_artifact_vector_record.py
+          tests/test_artifact_vector_export.py
+          tests/test_artifact_vector_extractor.py
+          tests/test_artifact_outline_extractor.py
+          tests/test_artifact_outline_topology.py
+          tests/test_artifact_rubbing_extractor.py
+          tests/test_artifact_rubbing_export.py
+          tests/test_canonical_png.py
+          tests/test_vector_schemas.py
+          tests/test_rubbing_schemas.py
+          tests/test_rotation_convention.py
+          tests/test_app_gui_launcher.py
+          tests/test_gui_smoke.py

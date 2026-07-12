@@ -65,7 +65,9 @@ def sectionwise_quality_gate(
 
     fit_valid = int(info.get("section_fit_valid_count", 0) or 0)
     section_count = int(info.get("section_count", 0) or 0)
-    mean_span = float(info.get("section_mean_span", 0.0) or 0.0)
+    mean_span_rad = float(
+        info.get("section_mean_span_rad", info.get("section_mean_span", 0.0)) or 0.0
+    )
     spacing = float(info.get("section_spacing", 0.0) or 0.0)
     centerline = float(info.get("section_centerline_length", 0.0) or 0.0)
 
@@ -73,7 +75,7 @@ def sectionwise_quality_gate(
         return True, "section_fit_too_sparse"
     if centerline <= 1e-9 or spacing <= 1e-9:
         return True, "section_trace_degenerate"
-    if mean_span < 20.0:
+    if mean_span_rad < float(np.deg2rad(20.0)):
         return True, "section_arc_span_too_small"
 
     dist = dict(distortion_summary or {})
@@ -409,6 +411,7 @@ def sectionwise_cylindrical_parameterization(
         uv = np.nan_to_num(uv, nan=0.0, posinf=0.0, neginf=0.0)
 
     if bool(return_meta):
+        mean_span_rad = float(np.mean(spans[np.isfinite(spans)])) if np.isfinite(spans).any() else 0.0
         meta = {
             "sectionwise": True,
             "section_axis_input": str(axis),
@@ -426,7 +429,10 @@ def sectionwise_cylindrical_parameterization(
             "section_spacing": float(spacing),
             "section_centerline_length": float(centerline_arc[-1]) if centerline_arc.size else 0.0,
             "section_mean_radius": float(np.mean(r_sec[np.isfinite(r_sec)])) if np.isfinite(r_sec).any() else 0.0,
-            "section_mean_span": float(np.mean(spans[np.isfinite(spans)])) if np.isfinite(spans).any() else 0.0,
+            # Keep the legacy key for readers written before units were explicit.
+            "section_mean_span": mean_span_rad,
+            "section_mean_span_rad": mean_span_rad,
+            "section_mean_span_deg": float(np.rad2deg(mean_span_rad)),
             "section_seam_hint": None if seam_hint is None else float(seam_hint),
             "section_record_view": record_view_key,
             "section_u_flipped": bool(flip_u),

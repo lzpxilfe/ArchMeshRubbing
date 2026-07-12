@@ -100,6 +100,7 @@ from OpenGL.GL import (
     glLineWidth,
     glLoadIdentity,
     glLoadMatrixd,
+    glMultMatrixd,
     glMaterialf,
     glMaterialfv,
     glMatrixMode,
@@ -115,7 +116,6 @@ from OpenGL.GL import (
     glPushMatrix,
     glReadPixels,
     glRotatef,
-    glScalef,
     glTranslatef,
     glVertex3f,
     glVertex3fv,
@@ -127,7 +127,16 @@ import ctypes
 
 from ..core.mesh_loader import MeshData
 from ..core.mesh_slicer import MeshSlicer
+from ..core.artifact_vector_record import VectorGeometryPayload
 from ..core.logging_utils import log_once
+from ..core.alignment_utils import (
+    scene_rotation_matrix,
+    scene_trs_matrix,
+    scene_trs_matrix_about_pivot,
+    transform_bounds,
+    transform_plane_world_to_local,
+    transform_points,
+)
 
 _LOGGER = logging.getLogger(__name__)
 ORTHO_VIEW_SCALE_DEFAULT = 1.15
@@ -163,33 +172,35 @@ class _CrosshairProfileThread(QThread):
 
     def run(self):
         try:
-            from scipy.spatial.transform import Rotation as R
-
             obj = self._mesh.to_trimesh()
             slicer = MeshSlicer(obj)
 
-            inv_rot = R.from_euler('XYZ', self._rotation, degrees=True).inv().as_matrix()
-            inv_scale = 1.0 / self._scale if self._scale != 0 else 1.0
-
-            def world_to_local(pt_world: np.ndarray) -> np.ndarray:
-                return inv_scale * (inv_rot @ (pt_world - self._translation))
-
-            rot_mat = R.from_euler('XYZ', self._rotation, degrees=True).as_matrix()
+            local_to_world_matrix = scene_trs_matrix(
+                self._translation,
+                self._rotation,
+                self._scale,
+            )
 
             def local_to_world(pts_local: np.ndarray) -> np.ndarray:
-                return (rot_mat @ (pts_local * self._scale).T).T + self._translation
+                return transform_points(pts_local, local_to_world_matrix)
 
             # Plane X-profile (Y = cy): origin can be any point on plane
             w_orig_x = np.array([0.0, self._cy, 0.0], dtype=np.float64)
             w_norm_x = np.array([0.0, 1.0, 0.0], dtype=np.float64)
-            l_orig_x = world_to_local(w_orig_x)
-            l_norm_x = inv_rot @ w_norm_x
+            l_orig_x, l_norm_x = transform_plane_world_to_local(
+                w_orig_x,
+                w_norm_x,
+                local_to_world_matrix,
+            )
 
             # Plane Y-profile (X = cx)
             w_orig_y = np.array([self._cx, 0.0, 0.0], dtype=np.float64)
             w_norm_y = np.array([1.0, 0.0, 0.0], dtype=np.float64)
-            l_orig_y = world_to_local(w_orig_y)
-            l_norm_y = inv_rot @ w_norm_y
+            l_orig_y, l_norm_y = transform_plane_world_to_local(
+                w_orig_y,
+                w_norm_y,
+                local_to_world_matrix,
+            )
 
             contours_x = slicer.slice_with_plane(l_orig_x.tolist(), l_norm_x.tolist())
             contours_y = slicer.slice_with_plane(l_orig_y.tolist(), l_norm_y.tolist())
@@ -242,8 +253,6 @@ class _LineSectionProfileThread(QThread):
 
     def run(self):
         try:
-            from scipy.spatial.transform import Rotation as R
-
             p0 = self._p0
             p1 = self._p1
 
@@ -258,21 +267,23 @@ class _LineSectionProfileThread(QThread):
             world_normal = np.array([d_unit[1], -d_unit[0], 0.0], dtype=np.float64)
             world_origin = p0
 
-            inv_rot = R.from_euler('XYZ', self._rotation, degrees=True).inv().as_matrix()
-            inv_scale = 1.0 / self._scale if self._scale != 0 else 1.0
-            local_origin = inv_scale * inv_rot @ (world_origin - self._translation)
-            local_normal = inv_rot @ world_normal
+            local_to_world_matrix = scene_trs_matrix(
+                self._translation,
+                self._rotation,
+                self._scale,
+            )
+            local_origin, local_normal = transform_plane_world_to_local(
+                world_origin,
+                world_normal,
+                local_to_world_matrix,
+            )
 
             slicer = MeshSlicer(self._mesh.to_trimesh())
             contours_local = slicer.slice_with_plane(local_origin, local_normal)
 
-            rot_mat = R.from_euler('XYZ', self._rotation, degrees=True).as_matrix()
-            trans = self._translation
-            scale = self._scale
-
             world_contours = []
             for cnt in contours_local:
-                world_contours.append((rot_mat @ (cnt * scale).T).T + trans)
+                world_contours.append(transform_points(cnt, local_to_world_matrix))
 
             best_profile = []
             best_span = 0.0
@@ -338,7 +349,6 @@ class _CutPolylineSectionProfileThread(QThread):
 
     def run(self):
         try:
-            from scipy.spatial.transform import Rotation as R
             payload_base = {
                 "index": self._index,
                 "translation": [
@@ -412,9 +422,11 @@ class _CutPolylineSectionProfileThread(QThread):
                 except Exception:
                     _log_ignored_exception()
 
-            inv_rot = R.from_euler('XYZ', self._rotation, degrees=True).inv().as_matrix()
-            inv_scale = 1.0 / self._scale if self._scale != 0 else 1.0
-            rot_mat = R.from_euler('XYZ', self._rotation, degrees=True).as_matrix()
+            local_to_world_matrix = scene_trs_matrix(
+                self._translation,
+                self._rotation,
+                self._scale,
+            )
 
             slicer = MeshSlicer(self._mesh.to_trimesh())
 
@@ -487,8 +499,11 @@ class _CutPolylineSectionProfileThread(QThread):
 
                 d_unit = d / seg_len
                 world_normal = np.array([d_unit[1], -d_unit[0], 0.0], dtype=np.float64)
-                local_origin = inv_scale * inv_rot @ (np.asarray(seg_p0, dtype=np.float64) - self._translation)
-                local_normal = inv_rot @ world_normal
+                local_origin, local_normal = transform_plane_world_to_local(
+                    np.asarray(seg_p0, dtype=np.float64),
+                    world_normal,
+                    local_to_world_matrix,
+                )
 
                 contours_local = slicer.slice_with_plane(local_origin.tolist(), local_normal.tolist())
                 if not contours_local:
@@ -504,7 +519,10 @@ class _CutPolylineSectionProfileThread(QThread):
                 for cnt in contours_local:
                     if cnt is None or len(cnt) < 2:
                         continue
-                    arr = (rot_mat @ (np.asarray(cnt, dtype=np.float64).reshape(-1, 3) * self._scale).T).T + self._translation
+                    arr = transform_points(
+                        np.asarray(cnt, dtype=np.float64).reshape(-1, 3),
+                        local_to_world_matrix,
+                    )
                     if arr.shape[0] < 2:
                         continue
 
@@ -864,8 +882,6 @@ class _RoiCutEdgesThread(QThread):
 
     def run(self):
         try:
-            from scipy.spatial.transform import Rotation as R
-
             if self._roi_bounds.size < 4:
                 self.computed.emit({"x1": [], "x2": [], "y1": [], "y2": []})
                 return
@@ -875,9 +891,11 @@ class _RoiCutEdgesThread(QThread):
                 x1, x2 = x2, x1
             if y1 > y2:
                 y1, y2 = y2, y1
-            inv_rot = R.from_euler('XYZ', self._rotation, degrees=True).inv().as_matrix()
-            inv_scale = 1.0 / self._scale if self._scale != 0 else 1.0
-            rot_mat = R.from_euler('XYZ', self._rotation, degrees=True).as_matrix()
+            local_to_world_matrix = scene_trs_matrix(
+                self._translation,
+                self._rotation,
+                self._scale,
+            )
 
             tm = self._mesh_or_tm
             if isinstance(tm, MeshData):
@@ -890,14 +908,17 @@ class _RoiCutEdgesThread(QThread):
             def slice_world_plane(world_origin: np.ndarray, world_normal: np.ndarray):
                 world_origin = np.asarray(world_origin, dtype=np.float64)
                 world_normal = np.asarray(world_normal, dtype=np.float64)
-                local_origin = inv_scale * inv_rot @ (world_origin - self._translation)
-                local_normal = inv_rot @ world_normal
+                local_origin, local_normal = transform_plane_world_to_local(
+                    world_origin,
+                    world_normal,
+                    local_to_world_matrix,
+                )
                 contours_local = slicer.slice_with_plane(local_origin, local_normal)
                 out = []
                 for cnt in contours_local or []:
                     if cnt is None or len(cnt) < 2:
                         continue
-                    out.append((rot_mat @ (cnt * self._scale).T).T + self._translation)
+                    out.append(transform_points(cnt, local_to_world_matrix))
                 return out
 
             keys = self._plane_keys if self._plane_keys else ("x1", "x2", "y1", "y2")
@@ -1314,22 +1335,15 @@ class _SurfaceLassoSelectThread(QThread):
             if rot.size < 3:
                 rot = np.array([0.0, 0.0, 0.0], dtype=np.float64)
             scale = float(self._scale) if abs(float(self._scale)) > 1e-12 else 1.0
-
-            rx, ry, rz = np.radians(rot[:3])
-            cx, sx = float(np.cos(rx)), float(np.sin(rx))
-            cy, sy = float(np.cos(ry)), float(np.sin(ry))
-            cz, sz = float(np.cos(rz)), float(np.sin(rz))
-            rot_x = np.array([[1.0, 0.0, 0.0], [0.0, cx, -sx], [0.0, sx, cx]], dtype=np.float64)
-            rot_y = np.array([[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]], dtype=np.float64)
-            rot_z = np.array([[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]], dtype=np.float64)
-            rot_mat = rot_x @ rot_y @ rot_z
+            local_to_world_matrix = scene_trs_matrix(trans[:3], rot[:3], scale)
+            world_to_local_matrix = np.linalg.inv(local_to_world_matrix)
 
             # Camera position in local coords (for front-face filtering).
             cam_local: np.ndarray | None = None
             try:
                 cam_w = self._camera_pos_world
                 if cam_w is not None and cam_w.size >= 3 and np.isfinite(cam_w[:3]).all():
-                    cam_local = (rot_mat.T @ (cam_w[:3] - trans[:3])) / float(scale)
+                    cam_local = transform_points(cam_w[:3], world_to_local_matrix)
             except Exception:
                 cam_local = None
 
@@ -1389,7 +1403,7 @@ class _SurfaceLassoSelectThread(QThread):
                     cent = (v0 + v1 + v2) / 3.0
 
                 # Local -> world
-                cent_w = (rot_mat @ (cent * scale).T).T + trans[:3]
+                cent_w = transform_points(cent, local_to_world_matrix)
 
                 # Project (row-vector convention)
                 ones = np.ones((cent_w.shape[0], 1), dtype=np.float64)
@@ -1794,47 +1808,37 @@ class SceneObject:
         """?붾뱶 醫뚰몴怨꾩뿉?쒖쓽 寃쎄퀎 諛뺤뒪 諛섑솚"""
         if not self.mesh:
             return np.array([[0,0,0],[0,0,0]])
-            
-        # 濡쒖뺄 諛붿슫??
-        lb = self.mesh.bounds
-        
-        # 8媛쒖쓽 瑗?쭞???앹꽦
-        v = np.array([
-            [lb[0,0], lb[0,1], lb[0,2]], [lb[1,0], lb[0,1], lb[0,2]],
-            [lb[0,0], lb[1,1], lb[0,2]], [lb[1,0], lb[1,1], lb[0,2]],
-            [lb[0,0], lb[0,1], lb[1,2]], [lb[1,0], lb[0,1], lb[1,2]],
-            [lb[0,0], lb[1,1], lb[1,2]], [lb[1,0], lb[1,1], lb[1,2]]
-        ])
 
-        # ?붾뱶 蹂???곸슜 (R * (S * V) + T)
-        rx, ry, rz = np.radians(self.rotation)
-        cx, sx = float(np.cos(rx)), float(np.sin(rx))
-        cy, sy = float(np.cos(ry)), float(np.sin(ry))
-        cz, sz = float(np.cos(rz)), float(np.sin(rz))
-
-        rot_x = np.array([[1.0, 0.0, 0.0], [0.0, cx, -sx], [0.0, sx, cx]], dtype=np.float64)
-        rot_y = np.array([[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]], dtype=np.float64)
-        rot_z = np.array([[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]], dtype=np.float64)
-
-        # OpenGL ?곸슜 ?쒖꽌(glRotatef X->Y->Z)? ?숈씪??intrinsic 'xyz' (Rx @ Ry @ Rz)
-        rot_mat = rot_x @ rot_y @ rot_z
-
-        world_v = (rot_mat @ (v * float(self.scale)).T).T + self.translation
-
-        return np.array([world_v.min(axis=0), world_v.max(axis=0)])
+        pivot = getattr(self, "_amr_preview_pivot_mm", None)
+        matrix = (
+            scene_trs_matrix_about_pivot(
+                self.translation,
+                self.rotation,
+                self.scale,
+                pivot,
+            )
+            if pivot is not None
+            else scene_trs_matrix(self.translation, self.rotation, self.scale)
+        )
+        return transform_bounds(self.mesh.bounds, matrix)
         
     def cleanup(self):
-        if self.vbo_id is not None:
-            # OpenGL 而⑦뀓?ㅽ듃媛 ?쒖꽦?붾맂 ?곹깭?먯꽌 ?몄텧?섏뼱????
-            try:
-                vbo_id = int(self.vbo_id or 0)
-            except Exception:
-                vbo_id = 0
+        try:
+            vbo_id = int(self.vbo_id or 0)
+        except Exception:
+            vbo_id = 0
+        try:
             if vbo_id > 0:
-                try:
-                    glDeleteBuffers(1, [vbo_id])
-                except Exception:
-                    _log_ignored_exception()
+                # OpenGL resources must be released while the owning context
+                # is current.  Callers arrange that before cleanup().
+                glDeleteBuffers(1, [vbo_id])
+        except Exception:
+            _log_ignored_exception()
+        finally:
+            # cleanup() is a terminal, idempotent transition.  Never leave a
+            # deleted buffer id available for undo or later rendering code.
+            self.vbo_id = None
+            self.vertex_count = 0
 
 
 class Viewport3D(QOpenGLWidget):
@@ -1859,6 +1863,7 @@ class Viewport3D(QOpenGLWidget):
     measurePointPicked = pyqtSignal(np.ndarray)
     sliceScanRequested = pyqtSignal(float)
     sliceCaptureRequested = pyqtSignal(float)
+    undoRequested = pyqtSignal()
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2027,6 +2032,10 @@ class Viewport3D(QOpenGLWidget):
         self.roi_section_world = {"x": [], "y": []}  # ROI濡??살? ?⑤㈃(諛붾떏 諛곗튂)
         # ROI ?⑤㈃ "梨꾩?"(罹? ?쒖떆. 湲곕낯? ?멸낸?좊쭔 蹂댁씠?꾨줉 OFF.
         self.roi_caps_enabled = True
+        # Monotonic scene authority fence for asynchronous overlay workers.
+        # Results captured before a projection swap must never mutate the new
+        # scene, even when their queued Qt signals arrive after the swap.
+        self._projection_generation = 0
         self._roi_edges_pending_bounds = None
         self._roi_edges_thread = None
         self._roi_edges_timer = QTimer(self)
@@ -2053,6 +2062,8 @@ class Viewport3D(QOpenGLWidget):
         self.cut_section_world = [[], []]     # 諛붾떏??諛곗튂???⑤㈃ ?대━?쇱씤(?붾뱶 醫뚰몴)
         self.cut_section_contours_world = [[], []]  # 3D mesh-attached section contours
         self.cut_section_contours_local = [[], []]  # Mesh-local section contours (stable across transforms)
+        self.native_vector_preview_world: list[tuple[np.ndarray, bool]] = []
+        self.native_vector_preview_record_id: str | None = None
         self._cutline_tape_cache: dict[tuple[Any, ...], list[list[np.ndarray]]] = {}
         self._cutline_tape_suspend_until = 0.0
         self._cut_section_pending_indices: set[int] = set()
@@ -2676,6 +2687,8 @@ class Viewport3D(QOpenGLWidget):
         ):
             self.draw_cut_lines()
 
+        self.draw_native_vector_preview()
+
         # 3.7.5 ?좏삎 ?⑤㈃ (Top-view cut line)
         if self.line_section_enabled:
             self.draw_line_section()
@@ -2976,30 +2989,28 @@ class Viewport3D(QOpenGLWidget):
         # 濡쒖쭅: P_world = R * (S * P_local) + T
         # P_local = (1/S) * R^T * (P_world - T)
 
-        from scipy.spatial.transform import Rotation as R
-        inv_rot = R.from_euler('XYZ', obj.rotation, degrees=True).inv().as_matrix()
-        inv_scale = 1.0 / obj.scale if obj.scale != 0 else 1.0
+        local_to_world_matrix = scene_trs_matrix(
+            obj.translation,
+            obj.rotation,
+            obj.scale,
+        )
         
         # ?붾뱶 ?됰㈃ [0, 0, 1] dot (P - [0, 0, Z_slice]) = 0
         # 濡쒗봽 醫뚰몴?먯꽌???됰㈃ origin怨?normal 怨꾩궛
         world_origin = np.array([0.0, 0.0, float(self.slice_z)], dtype=np.float64)
-        local_origin = inv_scale * inv_rot @ (world_origin - obj.translation)
-
         world_normal = np.array([0.0, 0.0, 1.0], dtype=np.float64)
-        local_normal = inv_rot @ world_normal # ?뚯쟾留??곸슜 (踰뺤꽑踰≫꽣?대?濡?
+        local_origin, local_normal = transform_plane_world_to_local(
+            world_origin,
+            world_normal,
+            local_to_world_matrix,
+        )
 
         self.slice_contours = slicer.slice_with_plane(local_origin.tolist(), local_normal.tolist())
         
         # 異붿텧??濡쒖뺄 醫뚰몴 ?⑤㈃???붾뱶 醫뚰몴濡?蹂?섑븯?????(?뚮뜑留곸슜)
-        rot_mat = R.from_euler('XYZ', obj.rotation, degrees=True).as_matrix()
-        scale = obj.scale
-        trans = obj.translation
-        
         world_contours = []
         for cnt in self.slice_contours:
-            # P_world = R * (S * P_local) + T
-            w_cnt = (rot_mat @ (cnt * scale).T).T + trans
-            world_contours.append(w_cnt)
+            world_contours.append(transform_points(cnt, local_to_world_matrix))
             
         self.slice_contours = world_contours
         self.update()
@@ -4165,17 +4176,7 @@ class Viewport3D(QOpenGLWidget):
     def _rotation_matrix_from_euler_xyz_deg(self, rotation_deg: Any) -> np.ndarray:
         """Return XYZ-order local->world rotation matrix from degree euler."""
         try:
-            rot_deg = np.asarray(rotation_deg, dtype=np.float64).reshape(-1)
-            if rot_deg.size < 3:
-                return np.eye(3, dtype=np.float64)
-            rx, ry, rz = np.radians(rot_deg[:3])
-            cx, sx = float(np.cos(rx)), float(np.sin(rx))
-            cy, sy = float(np.cos(ry)), float(np.sin(ry))
-            cz, sz = float(np.cos(rz)), float(np.sin(rz))
-            rot_x = np.array([[1.0, 0.0, 0.0], [0.0, cx, -sx], [0.0, sx, cx]], dtype=np.float64)
-            rot_y = np.array([[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]], dtype=np.float64)
-            rot_z = np.array([[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]], dtype=np.float64)
-            return rot_x @ rot_y @ rot_z
+            return scene_rotation_matrix(rotation_deg)
         except Exception:
             return np.eye(3, dtype=np.float64)
 
@@ -4202,10 +4203,12 @@ class Viewport3D(QOpenGLWidget):
             sc = 1.0
         if (not np.isfinite(sc)) or abs(sc) < 1e-12:
             sc = 1.0
-        inv_scale = 1.0 / sc
-
-        rot_mat = self._rotation_matrix_from_euler_xyz_deg(rotation_deg)
-        inv_rot = rot_mat.T
+        try:
+            world_to_local_matrix = np.linalg.inv(
+                scene_trs_matrix(tr, rotation_deg, sc)
+            )
+        except Exception:
+            return out
 
         for cnt in contours_world or []:
             pts: list[np.ndarray] = []
@@ -4213,7 +4216,7 @@ class Viewport3D(QOpenGLWidget):
                 arr = np.asarray(p, dtype=np.float64).reshape(-1)
                 if arr.size < 3 or not np.isfinite(arr[:3]).all():
                     continue
-                lp = inv_scale * (inv_rot @ (arr[:3] - tr))
+                lp = transform_points(arr[:3], world_to_local_matrix)
                 if lp.size >= 3 and np.isfinite(lp[:3]).all():
                     pts.append(lp[:3].copy())
             if len(pts) >= 2:
@@ -4242,7 +4245,14 @@ class Viewport3D(QOpenGLWidget):
         if (not np.isfinite(sc)) or abs(sc) < 1e-12:
             sc = 1.0
 
-        rot_mat = self._rotation_matrix_from_euler_xyz_deg(getattr(obj, "rotation", [0.0, 0.0, 0.0]))
+        try:
+            local_to_world_matrix = scene_trs_matrix(
+                tr,
+                getattr(obj, "rotation", [0.0, 0.0, 0.0]),
+                sc,
+            )
+        except Exception:
+            return []
         out: list[list[np.ndarray]] = []
         for cnt in contours_local or []:
             pts: list[np.ndarray] = []
@@ -4250,7 +4260,7 @@ class Viewport3D(QOpenGLWidget):
                 arr = np.asarray(p, dtype=np.float64).reshape(-1)
                 if arr.size < 3 or not np.isfinite(arr[:3]).all():
                     continue
-                wp = (rot_mat @ (arr[:3] * sc)) + tr
+                wp = transform_points(arr[:3], local_to_world_matrix)
                 if wp.size >= 3 and np.isfinite(wp[:3]).all():
                     pts.append(wp[:3].copy())
             if len(pts) >= 2:
@@ -4367,7 +4377,8 @@ class Viewport3D(QOpenGLWidget):
             self.update()
             return
 
-        self._cut_section_thread = _CutPolylineSectionProfileThread(
+        generation = int(getattr(self, "_projection_generation", 0))
+        worker = _CutPolylineSectionProfileThread(
             obj.mesh,
             translation=obj.translation.copy(),
             rotation_deg=obj.rotation.copy(),
@@ -4375,10 +4386,90 @@ class Viewport3D(QOpenGLWidget):
             index=idx,
             polyline_world=[np.asarray(p, dtype=np.float64).copy() for p in poly],
         )
-        self._cut_section_thread.computed.connect(self._on_cut_section_computed)
-        self._cut_section_thread.failed.connect(self._on_cut_section_failed)
-        self._cut_section_thread.finished.connect(self._on_cut_section_finished)
-        self._cut_section_thread.start()
+        self._cut_section_thread = worker
+        worker.computed.connect(
+            lambda result, owner=worker, captured_generation=generation, selected=obj: (
+                self._dispatch_cut_section_computed(
+                    owner,
+                    captured_generation,
+                    selected,
+                    result,
+                )
+            )
+        )
+        worker.failed.connect(
+            lambda message, owner=worker, captured_generation=generation, selected=obj: (
+                self._dispatch_cut_section_failed(
+                    owner,
+                    captured_generation,
+                    selected,
+                    message,
+                )
+            )
+        )
+        worker.finished.connect(
+            lambda owner=worker, captured_generation=generation, selected=obj: (
+                self._dispatch_cut_section_finished(
+                    owner,
+                    captured_generation,
+                    selected,
+                )
+            )
+        )
+        worker.start()
+
+    def _dispatch_cut_section_computed(
+        self,
+        owner: object,
+        generation: int,
+        selected_obj: object,
+        result: object,
+    ) -> None:
+        if (
+            getattr(self, "_cut_section_thread", None) is not owner
+            or int(getattr(self, "_projection_generation", 0)) != int(generation)
+            or self.selected_obj is not selected_obj
+        ):
+            return
+        self._on_cut_section_computed(result)
+
+    def _dispatch_cut_section_failed(
+        self,
+        owner: object,
+        generation: int,
+        selected_obj: object,
+        message: str,
+    ) -> None:
+        if (
+            getattr(self, "_cut_section_thread", None) is not owner
+            or int(getattr(self, "_projection_generation", 0)) != int(generation)
+            or self.selected_obj is not selected_obj
+        ):
+            return
+        self._on_cut_section_failed(message)
+
+    def _dispatch_cut_section_finished(
+        self,
+        owner: object,
+        generation: int,
+        selected_obj: object,
+    ) -> None:
+        try:
+            owner.deleteLater()  # type: ignore[attr-defined]
+        except Exception:
+            _log_ignored_exception()
+
+        # An old finished signal may arrive after a newer worker has started.
+        # Only the worker that still owns the slot may clear it.
+        if getattr(self, "_cut_section_thread", None) is not owner:
+            return
+        self._cut_section_thread = None
+        if (
+            int(getattr(self, "_projection_generation", 0)) == int(generation)
+            and self.selected_obj is selected_obj
+            and getattr(self, "_cut_section_pending_indices", None)
+        ):
+            self._cut_section_timer.start(1)
 
     def _on_cut_section_finished(self):
         thread = getattr(self, "_cut_section_thread", None)
@@ -5327,6 +5418,64 @@ class Viewport3D(QOpenGLWidget):
             return []
         return [best_loop]
 
+    def set_native_vector_preview(
+        self,
+        payload: VectorGeometryPayload | None,
+        *,
+        record_id: str | None = None,
+    ) -> None:
+        """Project a verified planar payload into world space for display only."""
+
+        if payload is None:
+            self.native_vector_preview_world = []
+            self.native_vector_preview_record_id = None
+            self.update()
+            return
+        if not isinstance(payload, VectorGeometryPayload):
+            raise TypeError("payload must be VectorGeometryPayload or None")
+        origin = np.asarray(payload.frame.origin_world_mm, dtype=np.float64)
+        u_axis = np.asarray(payload.frame.u_axis_world, dtype=np.float64)
+        v_axis = np.asarray(payload.frame.v_axis_world, dtype=np.float64)
+        preview: list[tuple[np.ndarray, bool]] = []
+        for path in payload.paths:
+            points = np.asarray(path.points_mm, dtype=np.float64)
+            world = (
+                origin.reshape(1, 3)
+                + points[:, 0:1] * u_axis.reshape(1, 3)
+                + points[:, 1:2] * v_axis.reshape(1, 3)
+            )
+            if world.ndim != 2 or world.shape[0] < 2 or not np.isfinite(world).all():
+                raise ValueError("native vector preview contains invalid world points")
+            preview.append((world, bool(path.closed)))
+        self.native_vector_preview_world = preview
+        self.native_vector_preview_record_id = str(record_id) if record_id else None
+        self.update()
+
+    def draw_native_vector_preview(self) -> None:
+        """Draw a non-authoritative overlay derived from a verified vector record."""
+
+        preview = list(getattr(self, "native_vector_preview_world", []) or [])
+        if not preview:
+            return
+        glPushAttrib(GL_ALL_ATTRIB_BITS)
+        try:
+            glDisable(GL_LIGHTING)
+            glDisable(GL_DEPTH_TEST)
+            glEnable(GL_BLEND)
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+            glColor4f(0.1, 0.95, 0.35, 0.98)
+            glLineWidth(3.0)
+            for points, closed in preview:
+                array = np.asarray(points, dtype=np.float64)
+                if array.ndim != 2 or array.shape[0] < 2 or array.shape[1] != 3:
+                    continue
+                glBegin(GL_LINE_LOOP if closed else GL_LINE_STRIP)
+                for point in array:
+                    glVertex3f(float(point[0]), float(point[1]), float(point[2]))
+                glEnd()
+        finally:
+            glPopAttrib()
+
     def draw_cut_lines(self):
         """?⑤㈃??2媛? 媛?대뱶 ?쇱씤 ?쒓컖??(??긽 ?붾㈃ ?꾨줈)"""
         lines = getattr(self, "cut_lines", [[], []])
@@ -5816,12 +5965,16 @@ class Viewport3D(QOpenGLWidget):
         world_origin = p0
 
         obj = self.selected_obj
-        from scipy.spatial.transform import Rotation as R
-        inv_rot = R.from_euler('XYZ', obj.rotation, degrees=True).inv().as_matrix()
-        inv_scale = 1.0 / obj.scale if obj.scale != 0 else 1.0
-
-        local_origin = inv_scale * inv_rot @ (world_origin - obj.translation)
-        local_normal = inv_rot @ world_normal
+        local_to_world_matrix = scene_trs_matrix(
+            obj.translation,
+            obj.rotation,
+            obj.scale,
+        )
+        local_origin, local_normal = transform_plane_world_to_local(
+            world_origin,
+            world_normal,
+            local_to_world_matrix,
+        )
 
         tm = obj.to_trimesh()
         if tm is None:
@@ -5830,14 +5983,9 @@ class Viewport3D(QOpenGLWidget):
         contours_local = slicer.slice_with_plane(local_origin.tolist(), local_normal.tolist())
 
         # ?붾뱶 醫뚰몴濡?蹂???뚮뜑留??꾨줈?뚯씪??
-        rot_mat = R.from_euler('XYZ', obj.rotation, degrees=True).as_matrix()
-        trans = obj.translation
-        scale = obj.scale
-
         world_contours = []
         for cnt in contours_local:
-            w_cnt = (rot_mat @ (cnt * scale).T).T + trans
-            world_contours.append(w_cnt)
+            world_contours.append(transform_points(cnt, local_to_world_matrix))
         self.line_section_contours = world_contours
 
         # ?꾨줈?뚯씪: (嫄곕━, ?믪씠) - ?쇱씤 諛⑺뼢?쇰줈 ?ъ쁺
@@ -5886,26 +6034,25 @@ class Viewport3D(QOpenGLWidget):
             
         obj = self.selected_obj
         cx, cy = self.crosshair_pos
-        
-        from scipy.spatial.transform import Rotation as R
-        inv_rot = R.from_euler('XYZ', obj.rotation, degrees=True).inv().as_matrix()
-        inv_scale = 1.0 / obj.scale if obj.scale != 0 else 1.0
-        
-        def get_world_to_local(pts_world):
-            # P_local = (1/S) * R^T * (P_world - T)
-            return inv_scale * (inv_rot @ (pts_world - obj.translation).T).T
+
+        local_to_world_matrix = scene_trs_matrix(
+            obj.translation,
+            obj.rotation,
+            obj.scale,
+        )
 
         def get_local_to_world(pts_local):
-            # P_world = R * (S * P_local) + T
-            rot_mat = R.from_euler('XYZ', obj.rotation, degrees=True).as_matrix()
-            return (rot_mat @ (pts_local * obj.scale).T).T + obj.translation
+            return transform_points(pts_local, local_to_world_matrix)
 
         # 2. X異?諛⑺뼢 ?⑤㈃ (?됰㈃: Y = cy)
         # ?붾뱶 ?곸쓽 ?됰㈃: Origin=[0, cy, 0], Normal=[0, 1, 0]
         w_orig_x = np.array([0, cy, 0])
         w_norm_x = np.array([0, 1, 0])
-        l_orig_x = get_world_to_local(w_orig_x.reshape(1,3))[0]
-        l_norm_x = inv_rot @ w_norm_x # 踰뺤꽑? ?뚯쟾留?        
+        l_orig_x, l_norm_x = transform_plane_world_to_local(
+            w_orig_x,
+            w_norm_x,
+            local_to_world_matrix,
+        )
         # MeshData.section ?먮윭 ?섏젙???꾪빐 to_trimesh() ?ъ슜
         tm = obj.to_trimesh()
         if tm is None:
@@ -5919,8 +6066,11 @@ class Viewport3D(QOpenGLWidget):
         # 3. Y異?諛⑺뼢 ?⑤㈃ (?됰㈃: X = cx)
         w_orig_y = np.array([cx, 0, 0])
         w_norm_y = np.array([1, 0, 0]) # X異뺤뿉 ?섏쭅???됰㈃
-        l_orig_y = get_world_to_local(w_orig_y.reshape(1,3))[0]
-        l_norm_y = inv_rot @ w_norm_y
+        l_orig_y, l_norm_y = transform_plane_world_to_local(
+            w_orig_y,
+            w_norm_y,
+            local_to_world_matrix,
+        )
         contours_y = slicer.slice_with_plane(l_orig_y.tolist(), l_norm_y.tolist())
         
         # 4. 寃곌낵 泥섎━ (洹몃옒?꾩슜 媛怨?
@@ -6682,11 +6832,6 @@ class Viewport3D(QOpenGLWidget):
             y1, y2 = y2, y1
 
         try:
-            from scipy.spatial.transform import Rotation as R
-        except Exception:
-            return out
-
-        try:
             roi_mesh_source = obj.to_trimesh()
         except Exception:
             roi_mesh_source = None
@@ -6701,10 +6846,11 @@ class Viewport3D(QOpenGLWidget):
             return out
 
         try:
-            inv_rot = R.from_euler("XYZ", obj.rotation, degrees=True).inv().as_matrix()
-            inv_scale = 1.0 / float(obj.scale) if float(obj.scale) != 0.0 else 1.0
-            rot_mat = R.from_euler("XYZ", obj.rotation, degrees=True).as_matrix()
-            trans = np.asarray(obj.translation, dtype=np.float64).reshape(3)
+            local_to_world_matrix = scene_trs_matrix(
+                obj.translation,
+                obj.rotation,
+                obj.scale,
+            )
         except Exception:
             return out
 
@@ -6716,8 +6862,11 @@ class Viewport3D(QOpenGLWidget):
         def slice_world_plane(world_origin: np.ndarray, world_normal: np.ndarray) -> list[np.ndarray]:
             world_origin = np.asarray(world_origin, dtype=np.float64).reshape(3)
             world_normal = np.asarray(world_normal, dtype=np.float64).reshape(3)
-            local_origin = inv_scale * (inv_rot @ (world_origin - trans))
-            local_normal = inv_rot @ world_normal
+            local_origin, local_normal = transform_plane_world_to_local(
+                world_origin,
+                world_normal,
+                local_to_world_matrix,
+            )
             contours_local = slicer.slice_with_plane(local_origin, local_normal)
             sliced: list[np.ndarray] = []
             for cnt in contours_local or []:
@@ -6727,7 +6876,7 @@ class Viewport3D(QOpenGLWidget):
                     continue
                 if arr.shape[0] < 2:
                     continue
-                sliced.append((rot_mat @ (arr * float(obj.scale)).T).T + trans)
+                sliced.append(transform_points(arr, local_to_world_matrix))
             return sliced
 
         try:
@@ -6866,7 +7015,8 @@ class Viewport3D(QOpenGLWidget):
         except Exception:
             plane_keys = None
 
-        self._roi_edges_thread = _RoiCutEdgesThread(
+        generation = int(getattr(self, "_projection_generation", 0))
+        worker = _RoiCutEdgesThread(
             roi_mesh_source,
             translation=obj.translation.copy(),
             rotation_deg=obj.rotation.copy(),
@@ -6874,10 +7024,89 @@ class Viewport3D(QOpenGLWidget):
             roi_bounds=bounds,
             plane_keys=plane_keys,
         )
-        self._roi_edges_thread.computed.connect(self._on_roi_edges_computed)
-        self._roi_edges_thread.failed.connect(self._on_roi_edges_failed)
-        self._roi_edges_thread.finished.connect(self._on_roi_edges_finished)
-        self._roi_edges_thread.start()
+        self._roi_edges_thread = worker
+        worker.computed.connect(
+            lambda result, owner=worker, captured_generation=generation, selected=obj: (
+                self._dispatch_roi_edges_computed(
+                    owner,
+                    captured_generation,
+                    selected,
+                    result,
+                )
+            )
+        )
+        worker.failed.connect(
+            lambda message, owner=worker, captured_generation=generation, selected=obj: (
+                self._dispatch_roi_edges_failed(
+                    owner,
+                    captured_generation,
+                    selected,
+                    message,
+                )
+            )
+        )
+        worker.finished.connect(
+            lambda owner=worker, captured_generation=generation, selected=obj: (
+                self._dispatch_roi_edges_finished(
+                    owner,
+                    captured_generation,
+                    selected,
+                )
+            )
+        )
+        worker.start()
+
+    def _dispatch_roi_edges_computed(
+        self,
+        owner: object,
+        generation: int,
+        selected_obj: object,
+        result: object,
+    ) -> None:
+        if (
+            getattr(self, "_roi_edges_thread", None) is not owner
+            or int(getattr(self, "_projection_generation", 0)) != int(generation)
+            or self.selected_obj is not selected_obj
+        ):
+            return
+        self._on_roi_edges_computed(result)
+
+    def _dispatch_roi_edges_failed(
+        self,
+        owner: object,
+        generation: int,
+        selected_obj: object,
+        message: str,
+    ) -> None:
+        if (
+            getattr(self, "_roi_edges_thread", None) is not owner
+            or int(getattr(self, "_projection_generation", 0)) != int(generation)
+            or self.selected_obj is not selected_obj
+        ):
+            return
+        self._on_roi_edges_failed(message)
+
+    def _dispatch_roi_edges_finished(
+        self,
+        owner: object,
+        generation: int,
+        selected_obj: object,
+    ) -> None:
+        try:
+            owner.deleteLater()  # type: ignore[attr-defined]
+        except Exception:
+            _log_ignored_exception()
+
+        if getattr(self, "_roi_edges_thread", None) is not owner:
+            return
+        self._roi_edges_thread = None
+        if (
+            int(getattr(self, "_projection_generation", 0)) == int(generation)
+            and self.selected_obj is selected_obj
+            and getattr(self, "roi_enabled", False)
+            and self._roi_edges_pending_bounds is not None
+        ):
+            self._roi_edges_timer.start(1)
 
     def _on_roi_edges_finished(self):
         thread = getattr(self, "_roi_edges_thread", None)
@@ -7011,10 +7240,11 @@ class Viewport3D(QOpenGLWidget):
             
         obj = self.selected_obj
         x1, x2, y1, y2 = self.roi_bounds
-        
-        from scipy.spatial.transform import Rotation as R
-        rot_mat = R.from_euler('XYZ', obj.rotation, degrees=True).as_matrix()
-        world_v = (rot_mat @ (obj.mesh.vertices * obj.scale).T).T + obj.translation
+
+        world_v = transform_points(
+            obj.mesh.vertices,
+            scene_trs_matrix(obj.translation, obj.rotation, obj.scale),
+        )
         
         # 2. ROI ?곸뿭 ?댁쓽 ?먮뱾 ?꾪꽣留?
         mask = (world_v[:, 0] >= x1) & (world_v[:, 0] <= x2) & \
@@ -7482,7 +7712,7 @@ class Viewport3D(QOpenGLWidget):
             sc = float(getattr(obj, "scale", 1.0) or 1.0)
         except Exception:
             sc = 1.0
-        if (not np.isfinite(sc)) or abs(sc) < 1e-9:
+        if (not np.isfinite(sc)) or sc <= 0.0:
             sc = 1.0
 
         try:
@@ -7492,11 +7722,13 @@ class Viewport3D(QOpenGLWidget):
         except Exception:
             _log_ignored_exception()
 
-        glTranslatef(float(tr[0]), float(tr[1]), float(tr[2]))
-        glRotatef(float(rot[0]), 1, 0, 0)
-        glRotatef(float(rot[1]), 0, 1, 0)
-        glRotatef(float(rot[2]), 0, 0, 1)
-        glScalef(float(sc), float(sc), float(sc))
+        pivot = getattr(obj, "_amr_preview_pivot_mm", None)
+        local_to_world_matrix = (
+            scene_trs_matrix_about_pivot(tr, rot, sc, pivot)
+            if pivot is not None
+            else scene_trs_matrix(tr, rot, sc)
+        )
+        glMultMatrixd(np.ascontiguousarray(local_to_world_matrix.T))
 
         alpha_f = float(alpha)
         if not np.isfinite(alpha_f):
@@ -7928,10 +8160,6 @@ class Viewport3D(QOpenGLWidget):
         faces = obj.mesh.faces
         vertices = obj.mesh.vertices
         
-        # ?뚯쟾 ?됰젹 怨꾩궛
-        from scipy.spatial.transform import Rotation as R
-        r = R.from_euler('XYZ', obj.rotation, degrees=True).as_matrix()
-        
         total_faces = len(faces)
         
         # ?섑뵆留?(???硫붿돩)
@@ -7951,12 +8179,11 @@ class Viewport3D(QOpenGLWidget):
         
         sample_faces = faces[indices]
         v_indices = sample_faces[:, 0]
-        v_points = vertices[v_indices] * obj.scale
-        
-        # ?붾뱶 Z 醫뚰몴 怨꾩궛
-        world_z = (r[2, 0] * v_points[:, 0] + 
-                   r[2, 1] * v_points[:, 1] + 
-                   r[2, 2] * v_points[:, 2]) + obj.translation[2]
+        world_points = transform_points(
+            vertices[v_indices],
+            scene_trs_matrix(obj.translation, obj.rotation, obj.scale),
+        )
+        world_z = world_points[:, 2]
         
         # 諛붾떏 洹쇱쿂 媛먯? (Z < 0.5cm ?먮뒗 Z < 0)
         # ?뺤튂 紐⑤뱶?먯꽌??諛붾떏 洹쇱쿂(0.5cm ?대궡)源뚯? ?쒖떆
@@ -8127,11 +8354,18 @@ class Viewport3D(QOpenGLWidget):
         glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)
         
         glPushMatrix()
-        glTranslatef(*obj.translation)
-        glRotatef(obj.rotation[0], 1, 0, 0)
-        glRotatef(obj.rotation[1], 0, 1, 0)
-        glRotatef(obj.rotation[2], 0, 0, 1)
-        glScalef(obj.scale, obj.scale, obj.scale)
+        pivot = getattr(obj, "_amr_preview_pivot_mm", None)
+        local_to_world_matrix = (
+            scene_trs_matrix_about_pivot(
+                obj.translation,
+                obj.rotation,
+                obj.scale,
+                pivot,
+            )
+            if pivot is not None
+            else scene_trs_matrix(obj.translation, obj.rotation, obj.scale)
+        )
+        glMultMatrixd(np.ascontiguousarray(local_to_world_matrix.T))
         
         vertices = obj.mesh.vertices
         faces = obj.mesh.faces
@@ -8146,7 +8380,7 @@ class Viewport3D(QOpenGLWidget):
         glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
         glEnable(GL_LIGHTING)
     
-    def add_mesh_object(self, mesh, name=None):
+    def add_mesh_object(self, mesh, name=None, *, center_at_origin: bool = True):
         """??硫붿돩瑜??ъ뿉 異붽?"""
         if name is None:
             name = f"Object_{len(self.objects) + 1}"
@@ -8158,21 +8392,25 @@ class Viewport3D(QOpenGLWidget):
         except Exception:
             pre_centroids_faces = 0
 
-        # 硫붿돩 ?먯껜瑜??먯젏?쇰줈 ?쇳꽣留?(濡쒖뺄 醫뚰몴怨??앹꽦)
-        center = mesh.centroid
-        mesh.vertices -= center
-        # 罹먯떆 臾댄슚??(vertices 蹂寃?
-        try:
-            mesh._bounds = None
-            mesh._centroid = None
-            mesh._surface_area = None
-        except Exception:
-            _log_ignored_exception()
+        # Legacy scenes center geometry destructively. ArtifactDocument scene
+        # projections are already canonical world-mm geometry and must retain
+        # their origin exactly; camera fitting is sufficient for visibility.
+        if bool(center_at_origin):
+            center = np.asarray(mesh.centroid, dtype=np.float64).reshape(3)
+            mesh.vertices -= center
+            try:
+                mesh._bounds = None
+                mesh._centroid = None
+                mesh._surface_area = None
+            except Exception:
+                _log_ignored_exception()
+        else:
+            center = np.zeros(3, dtype=np.float64)
         # 濡쒕뵫 ?쒖젏?먮뒗 face normals留??꾩슂 (vertex normals???꾩슂????怨꾩궛)
         centroids_cache = None
         try:
             if pre_centroids is not None:
-                fc = np.asarray(pre_centroids, dtype=np.float32)
+                fc = np.asarray(pre_centroids, dtype=np.float32).copy()
                 n_faces = int(getattr(mesh, "n_faces", int(fc.shape[0])) or int(fc.shape[0]))
                 if (
                     fc.ndim == 2
@@ -8197,6 +8435,7 @@ class Viewport3D(QOpenGLWidget):
             _log_ignored_exception()
         
         new_obj = SceneObject(mesh, name)
+        new_obj._amr_projection_preserves_origin = not bool(center_at_origin)
         self.objects.append(new_obj)
         self.selected_index = len(self.objects) - 1
         
@@ -8231,6 +8470,232 @@ class Viewport3D(QOpenGLWidget):
         self.selectionChanged.emit(self.selected_index)
         self.update()
 
+    def prepare_mesh_object(
+        self,
+        mesh: MeshData,
+        name: str | None = None,
+        *,
+        artifact_binding: Any | None = None,
+    ) -> SceneObject:
+        """Prepare one VBO-backed object without mutating the live scene.
+
+        Native ArtifactDocument loads and Align commits use this as their
+        fallible GPU staging boundary.  No scene pointer, camera, signal, undo
+        stack or tool state changes until ``swap_prepared_scene`` is called.
+        """
+
+        if not isinstance(mesh, MeshData):
+            raise TypeError("mesh must be a MeshData")
+        obj = SceneObject(mesh, str(name or "Artifact"))
+        obj._amr_projection_preserves_origin = True
+        obj._amr_artifact_projection_snapshot = artifact_binding
+        if artifact_binding is not None:
+            obj._amr_preview_pivot_mm = np.asarray(mesh.centroid, dtype=np.float64).copy()
+        try:
+            if not self.update_vbo(obj):
+                raise RuntimeError("VBO upload failed")
+            vertex_count = int(getattr(obj, "vertex_count", 0) or 0)
+            vbo_id = int(getattr(obj, "vbo_id", 0) or 0)
+            if vertex_count <= 0 or vbo_id <= 0:
+                raise RuntimeError("VBO upload produced an invalid prepared object")
+            return obj
+        except Exception:
+            try:
+                self.cleanup_scene_objects([obj])
+            except Exception:
+                _log_ignored_exception("Prepared SceneObject cleanup failed")
+            raise
+
+    @staticmethod
+    def validate_prepared_scene(objects: list[SceneObject] | tuple[SceneObject, ...]) -> None:
+        if not objects:
+            raise ValueError("prepared scene must contain at least one object")
+        seen: set[int] = set()
+        for obj in objects:
+            if not isinstance(obj, SceneObject):
+                raise TypeError("prepared scene must contain only SceneObject values")
+            if id(obj) in seen:
+                raise ValueError("prepared scene contains a duplicate object")
+            seen.add(id(obj))
+            if getattr(obj, "mesh", None) is None:
+                raise ValueError("prepared object has no mesh")
+            if int(getattr(obj, "vertex_count", 0) or 0) <= 0:
+                raise ValueError("prepared object has no uploaded vertices")
+            if int(getattr(obj, "vbo_id", 0) or 0) <= 0:
+                raise ValueError("prepared object has no valid VBO")
+
+    def _reset_projection_transients(self) -> None:
+        """Clear mutable overlays/caches that belong to the previous scene."""
+
+        self._projection_generation = int(getattr(self, "_projection_generation", 0)) + 1
+        # Do not terminate QThreads from the GUI thread. Detach their authority
+        # and let their fenced finished callbacks release the worker objects.
+        try:
+            self._cut_section_timer.stop()
+            self._roi_edges_timer.stop()
+        except Exception:
+            _log_ignored_exception("Projection overlay timer stop failed")
+        self._cut_section_thread = None
+        self._roi_edges_thread = None
+        self._roi_edges_pending_bounds = None
+
+        self.undo_stack = []
+        self.picking_mode = "none"
+        self.curvature_pick_mode = False
+        self.picked_points = []
+        self.fitted_arc = None
+        self.measure_picked_points = []
+        self.slice_enabled = False
+        self.slice_z = 0.0
+        self.slice_contours = []
+        self.crosshair_enabled = False
+        self.crosshair_pos = np.array([0.0, 0.0], dtype=np.float64)
+        self.x_profile = []
+        self.y_profile = []
+        self._world_x_profile = []
+        self._world_y_profile = []
+        self.roi_enabled = False
+        self.active_roi_edge = None
+        self.roi_rect_dragging = False
+        self.roi_rect_start = None
+        self._roi_bounds_changed = False
+        self._roi_move_dragging = False
+        self._roi_move_last_xy = None
+        self._roi_commit_axis_hint = None
+        self._roi_last_adjust_axis = None
+        self._roi_commit_plane_hint = None
+        self._roi_last_adjust_plane = None
+        self.roi_bounds = [-10.0, 10.0, -10.0, 10.0]
+        self.roi_cut_edges = {"x1": [], "x2": [], "y1": [], "y2": []}
+        self.roi_cap_verts = {"x1": None, "x2": None, "y1": None, "y2": None}
+        self.roi_section_world = {"x": [], "y": []}
+        self.roi_caps_enabled = True
+        self.cut_lines_enabled = False
+        self.cut_lines = [[], []]
+        self.cut_line_axis_lock = ["x", "y"]
+        self.cut_line_active = 0
+        self.cut_line_drawing = False
+        self.cut_line_preview = None
+        self._cut_line_final = [False, False]
+        self.cut_section_profiles = [[], []]
+        self.cut_section_world = [[], []]
+        self.cut_section_contours_world = [[], []]
+        self.cut_section_contours_local = [[], []]
+        self.native_vector_preview_world = []
+        self.native_vector_preview_record_id = None
+        self.line_section_enabled = False
+        self.line_section_dragging = False
+        self.line_section_start = None
+        self.line_section_end = None
+        self.line_profile = []
+        self.line_section_contours = []
+        self.floor_picks = []
+        self._floor_pick_ready = True
+        self._floor_pick_ready_at = 0.0
+        self.surface_paint_points = []
+        self.surface_lasso_points = []
+        self.surface_lasso_face_indices = []
+        self.surface_lasso_preview = None
+        self.surface_magnetic_points = []
+        self._surface_magnetic_drawing = False
+        self._surface_magnetic_cursor_qt = None
+        self._surface_magnetic_left_press_pos = None
+        self._surface_magnetic_left_dragged = False
+        self._surface_magnetic_right_press_pos = None
+        self._surface_magnetic_right_dragged = False
+        self._surface_magnetic_last_add_t = 0.0
+        self._surface_magnetic_space_nav = False
+        self._surface_magnetic_dist = None
+        self._surface_magnetic_nn_y = None
+        self._surface_magnetic_nn_x = None
+        self._surface_magnetic_cache_viewport = None
+        self._surface_magnetic_cache_sig = None
+        self._surface_grow_state = {}
+        self._active_polyline_layer_obj_index = -1
+        self._active_polyline_layer_index = -1
+        self._polyline_layer_dragging = False
+        self._polyline_layer_drag_world_start = None
+        self._polyline_layer_drag_offset_start = None
+        self._polyline_layer_drag_axis_lock = None
+        self._polyline_layer_drag_moved = False
+        self._cached_viewport = None
+        self._cached_modelview = None
+        self._cached_projection = None
+        self._front_back_ortho_enabled = False
+        self._canonical_view_key = None
+        self._ortho_frame_override = None
+        self._mesh_center = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+        try:
+            self._cancel_surface_lasso_thread()
+            self._cancel_surface_magnetic_thread()
+            self._cancel_visible_face_select_thread()
+        except Exception:
+            _log_ignored_exception("Projection worker cancellation failed")
+        try:
+            self._cut_section_pending_indices.clear()
+        except Exception:
+            pass
+        try:
+            self._cutline_tape_cache.clear()
+        except Exception:
+            try:
+                self._cutline_tape_cache = {}
+            except Exception:
+                pass
+
+    def swap_prepared_scene(
+        self,
+        objects: list[SceneObject] | tuple[SceneObject, ...],
+        *,
+        selected_index: int = 0,
+        fit_camera: bool = False,
+    ) -> list[SceneObject]:
+        """Perform a no-GL-work pointer swap and emit one coherent update."""
+
+        prepared = list(objects)
+        self.validate_prepared_scene(prepared)
+        selected = int(selected_index)
+        if selected < 0 or selected >= len(prepared):
+            raise ValueError("selected_index is outside the prepared scene")
+
+        previous = list(getattr(self, "objects", []) or [])
+        self.objects = prepared
+        self.selected_index = selected
+        self._reset_projection_transients()
+        if fit_camera:
+            try:
+                self._front_back_ortho_enabled = False
+                self._canonical_view_key = None
+                self._ortho_frame_override = None
+                self.update_grid_scale()
+                self.camera.fit_to_bounds(prepared[selected].get_world_bounds())
+                self.camera.pan_offset = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+            except Exception:
+                _log_ignored_exception("Prepared scene camera fit failed")
+        try:
+            self.meshLoaded.emit(prepared[selected].mesh)
+            self.selectionChanged.emit(selected)
+            self.update()
+        except Exception:
+            _log_ignored_exception("Prepared scene notification failed")
+        return previous
+
+    def cleanup_scene_objects(self, objects: list[SceneObject] | tuple[SceneObject, ...]) -> None:
+        """Release detached scene resources after a successful pointer swap."""
+
+        try:
+            self.makeCurrent()
+        except Exception:
+            pass
+        live_ids = {id(obj) for obj in getattr(self, "objects", []) or []}
+        for obj in objects:
+            if id(obj) in live_ids:
+                continue
+            try:
+                obj.cleanup()
+            except Exception:
+                _log_ignored_exception("Detached SceneObject cleanup failed")
+
     def clear_scene(self) -> None:
         """?ъ쓽 紐⑤뱺 媛앹껜/?ㅻ쾭?덉씠瑜??쒓굅?섍퀬 湲곕낯 ?곹깭濡?由ъ뀑?⑸땲??"""
         try:
@@ -8250,6 +8715,11 @@ class Viewport3D(QOpenGLWidget):
 
         self.objects = []
         self.selected_index = -1
+        self._reset_projection_transients()
+        # Undo entries retain SceneObject and sometimes a full vertex copy.
+        # A scene boundary must release those references; transactional project
+        # loading snapshots/restores this list when the replacement rolls back.
+        self.undo_stack = []
         self._mesh_center = np.array([0.0, 0.0, 0.0], dtype=np.float64)
 
         # Tool / overlay state
@@ -8544,7 +9014,7 @@ class Viewport3D(QOpenGLWidget):
         except Exception:
             return None
 
-    def update_vbo(self, obj: SceneObject):
+    def update_vbo(self, obj: SceneObject) -> bool:
         """媛앹껜??VBO ?앹꽦 諛??곗씠???꾩넚"""
         made_current = False
         created_vbo = False
@@ -8558,7 +9028,7 @@ class Viewport3D(QOpenGLWidget):
             prev_vertex_count = 0
         try:
             if obj is None or obj.mesh is None:
-                return
+                return False
 
             try:
                 ctx = self.context()
@@ -8595,6 +9065,8 @@ class Viewport3D(QOpenGLWidget):
 
             v_indices = faces.reshape(-1)
             vertex_count = int(v_indices.size)
+            if vertex_count <= 0:
+                raise RuntimeError("mesh has no triangle vertices for VBO upload")
 
             # [vx,vy,vz,nx,ny,nz] float32 interleaved (avoid huge temporaries)
             data = np.empty((vertex_count, 6), dtype=np.float32)
@@ -8648,6 +9120,7 @@ class Viewport3D(QOpenGLWidget):
                 obj._face_adjacency_faces_count = 0
             except Exception:
                 _log_ignored_exception()
+            return True
         except Exception:
             try:
                 _LOGGER.exception("VBO creation failed for %s", getattr(obj, "name", "<unknown>"))
@@ -8664,6 +9137,7 @@ class Viewport3D(QOpenGLWidget):
                 obj.vertex_count = prev_vertex_count
             except Exception:
                 _log_ignored_exception()
+            return False
         finally:
             try:
                 glBindBuffer(GL_ARRAY_BUFFER, 0)
@@ -8724,6 +9198,11 @@ class Viewport3D(QOpenGLWidget):
         - ?댄썑 0?먯꽌遺???몃? 議곗젙 媛??        """
         if not obj:
             return
+        if getattr(obj, "_amr_artifact_projection_snapshot", None) is not None:
+            raise RuntimeError(
+                "ArtifactDocument projections cannot be destructively baked; "
+                "commit an Align revision through MainWindow"
+            )
         
         # 蹂?섏씠 ?놁쑝硫??ㅽ궢
         has_transform = (
@@ -8742,30 +9221,13 @@ class Viewport3D(QOpenGLWidget):
                 _log_ignored_exception()
             return
         
-        # 1. ?뚯쟾 ?됰젹 怨꾩궛
-        rx, ry, rz = np.radians(obj.rotation)
-        
-        cos_x, sin_x = np.cos(rx), np.sin(rx)
-        rot_x = np.array([[1, 0, 0], [0, cos_x, -sin_x], [0, sin_x, cos_x]])
-        
-        cos_y, sin_y = np.cos(ry), np.sin(ry)
-        rot_y = np.array([[cos_y, 0, sin_y], [0, 1, 0], [-sin_y, 0, cos_y]])
-        
-        cos_z, sin_z = np.cos(rz), np.sin(rz)
-        rot_z = np.array([[cos_z, -sin_z, 0], [sin_z, cos_z, 0], [0, 0, 1]])
-        
-        # OpenGL ?뚮뜑留?glRotate X->Y->Z)怨??숈씪???⑹꽦 ?뚯쟾
-        rotation_matrix = rot_x @ rot_y @ rot_z
-        
-        # 2. ?뺤젏 蹂??(S -> R -> T ?쒖꽌, ?뚮뜑留곴낵 ?숈씪)
-        # ?ㅼ???
-        vertices = obj.mesh.vertices * obj.scale
-        
-        # ?뚯쟾
-        vertices = (rotation_matrix @ vertices.T).T
-        
-        # ?대룞 (?붾뱶 醫뚰몴???곸슜)
-        vertices = vertices + obj.translation
+        # 1. Render path and bake path share the same authoritative matrix.
+        local_to_world_matrix = scene_trs_matrix(
+            obj.translation,
+            obj.rotation,
+            obj.scale,
+        )
+        vertices = transform_points(obj.mesh.vertices, local_to_world_matrix)
         
         # 3. ?곗씠???낅뜲?댄듃
         obj.mesh.vertices = vertices.astype(np.float32)
@@ -8786,6 +9248,11 @@ class Viewport3D(QOpenGLWidget):
         obj.translation = np.array([0.0, 0.0, 0.0])
         obj.rotation = np.array([0.0, 0.0, 0.0])
         obj.scale = 1.0
+        # Legacy scene snapshots cannot yet persist baked vertices.  Mark this
+        # object so the project saver can refuse a falsely reproducible save
+        # until the M0-3 revision adapter owns this operation.
+        obj._amr_has_unpersisted_bake = True
+        obj._amr_alignment_status = "legacy_baked_unverifiable"
 
         # 4.5 怨좎젙 ?곹깭 媛깆떊 (?ㅼ닔濡??吏곸뿬??蹂듦? 媛??
         try:
@@ -8828,7 +9295,13 @@ class Viewport3D(QOpenGLWidget):
             'obj': obj,
             'translation': obj.translation.copy(),
             'rotation': obj.rotation.copy(),
-            'scale': obj.scale if isinstance(obj.scale, (int, float)) else obj.scale.copy() if hasattr(obj.scale, 'copy') else obj.scale
+            'scale': obj.scale if isinstance(obj.scale, (int, float)) else obj.scale.copy() if hasattr(obj.scale, 'copy') else obj.scale,
+            'amr_has_unpersisted_bake': bool(
+                getattr(obj, '_amr_has_unpersisted_bake', False)
+            ),
+            'amr_alignment_status': str(
+                getattr(obj, '_amr_alignment_status', 'legacy_mutable_trs')
+            ),
         }
         if bool(include_mesh):
             try:
@@ -8873,6 +9346,12 @@ class Viewport3D(QOpenGLWidget):
                         self.update_vbo(obj)
                     except Exception:
                         _log_ignored_exception()
+                    obj._amr_has_unpersisted_bake = bool(
+                        state.get('amr_has_unpersisted_bake', False)
+                    )
+                    obj._amr_alignment_status = str(
+                        state.get('amr_alignment_status', 'legacy_mutable_trs')
+                    )
             except Exception:
                 _log_ignored_exception()
         
@@ -10720,7 +11199,7 @@ class Viewport3D(QOpenGLWidget):
         
         # 4. Ctrl+Z: Undo
         if event.key() == Qt.Key.Key_Z and (event.modifiers() & Qt.KeyboardModifier.ControlModifier):
-            self.undo()
+            self.undoRequested.emit()
             return
 
         # 湲곗쫰紐⑤굹 移대찓??酉?愿????
@@ -13107,28 +13586,14 @@ class Viewport3D(QOpenGLWidget):
             cam_w = np.asarray(getattr(cam, "position", None), dtype=np.float64).reshape(-1)
             if cam_w.size < 3 or not np.isfinite(cam_w[:3]).all():
                 return None
-
-            trans = np.asarray(getattr(obj, "translation", [0.0, 0.0, 0.0]), dtype=np.float64).reshape(-1)
-            if trans.size < 3:
-                trans = np.array([0.0, 0.0, 0.0], dtype=np.float64)
-            rot_deg = np.asarray(getattr(obj, "rotation", [0.0, 0.0, 0.0]), dtype=np.float64).reshape(-1)
-            if rot_deg.size < 3:
-                rot_deg = np.array([0.0, 0.0, 0.0], dtype=np.float64)
-            scale = float(getattr(obj, "scale", 1.0))
-            if abs(scale) < 1e-12:
-                scale = 1.0
-
-            rx, ry, rz = np.radians(rot_deg[:3])
-            cx, sx = float(np.cos(rx)), float(np.sin(rx))
-            cy, sy = float(np.cos(ry)), float(np.sin(ry))
-            cz, sz = float(np.cos(rz)), float(np.sin(rz))
-
-            rot_x = np.array([[1.0, 0.0, 0.0], [0.0, cx, -sx], [0.0, sx, cx]], dtype=np.float64)
-            rot_y = np.array([[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]], dtype=np.float64)
-            rot_z = np.array([[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]], dtype=np.float64)
-            rot_mat = rot_x @ rot_y @ rot_z
-
-            return (rot_mat.T @ (cam_w[:3] - trans[:3])) / float(scale)
+            world_to_local_matrix = np.linalg.inv(
+                scene_trs_matrix(
+                    getattr(obj, "translation", [0.0, 0.0, 0.0]),
+                    getattr(obj, "rotation", [0.0, 0.0, 0.0]),
+                    float(getattr(obj, "scale", 1.0)),
+                )
+            )
+            return transform_points(cam_w[:3], world_to_local_matrix)
         except Exception:
             return None
 
@@ -13809,36 +14274,20 @@ class Viewport3D(QOpenGLWidget):
         
         # 硫붿돩 濡쒖뺄 醫뚰몴濡?蹂??(T/R/S ?????
         try:
-            trans = np.asarray(getattr(obj, "translation", [0.0, 0.0, 0.0]), dtype=np.float64).reshape(-1)
-            if trans.size < 3:
-                trans = np.array([0.0, 0.0, 0.0], dtype=np.float64)
-            rot_deg = np.asarray(getattr(obj, "rotation", [0.0, 0.0, 0.0]), dtype=np.float64).reshape(-1)
-            if rot_deg.size < 3:
-                rot_deg = np.array([0.0, 0.0, 0.0], dtype=np.float64)
-            scale = float(getattr(obj, "scale", 1.0))
-            if abs(scale) < 1e-12:
-                scale = 1.0
-
-            rx, ry, rz = np.radians(rot_deg[:3])
-            cx, sx = float(np.cos(rx)), float(np.sin(rx))
-            cy, sy = float(np.cos(ry)), float(np.sin(ry))
-            cz, sz = float(np.cos(rz)), float(np.sin(rz))
-
-            rot_x = np.array([[1.0, 0.0, 0.0], [0.0, cx, -sx], [0.0, sx, cx]], dtype=np.float64)
-            rot_y = np.array([[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]], dtype=np.float64)
-            rot_z = np.array([[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]], dtype=np.float64)
-            rot_mat = rot_x @ rot_y @ rot_z
+            local_to_world_matrix = scene_trs_matrix(
+                getattr(obj, "translation", [0.0, 0.0, 0.0]),
+                getattr(obj, "rotation", [0.0, 0.0, 0.0]),
+                float(getattr(obj, "scale", 1.0)),
+            )
+            world_to_local_matrix = np.linalg.inv(local_to_world_matrix)
         except Exception:
-            trans = np.asarray(getattr(obj, "translation", [0.0, 0.0, 0.0]), dtype=np.float64).reshape(-1)
-            if trans.size < 3:
-                trans = np.array([0.0, 0.0, 0.0], dtype=np.float64)
-            scale = 1.0
-            rot_mat = np.eye(3, dtype=np.float64)
+            local_to_world_matrix = np.eye(4, dtype=np.float64)
+            world_to_local_matrix = np.eye(4, dtype=np.float64)
 
         pt = np.asarray(point, dtype=np.float64).reshape(-1)
         if pt.size < 3:
             return None
-        lp = (rot_mat.T @ (pt[:3] - trans[:3])) / float(scale)
+        lp = transform_points(pt[:3], world_to_local_matrix)
         
         vertices = obj.mesh.vertices
         faces = obj.mesh.faces
@@ -13973,7 +14422,7 @@ class Viewport3D(QOpenGLWidget):
         try:
             cam_w = np.asarray(getattr(getattr(self, "camera", None), "position", None), dtype=np.float64).reshape(-1)
             if cam_w.size >= 3 and np.isfinite(cam_w[:3]).all():
-                cam_local = (rot_mat.T @ (cam_w[:3] - trans[:3])) / float(scale)
+                cam_local = transform_points(cam_w[:3], world_to_local_matrix)
         except Exception:
             cam_local = None
 
@@ -14019,7 +14468,7 @@ class Viewport3D(QOpenGLWidget):
             v_list = []
             for vi in best_face:
                 v = np.asarray(vertices[int(vi)], dtype=np.float64)
-                w = (rot_mat @ (v[:3] * float(scale))) + trans[:3]
+                w = transform_points(v[:3], local_to_world_matrix)
                 v_list.append(w)
             if return_index:
                 return best_face_idx, v_list

@@ -1,0 +1,114 @@
+name: Frozen package smoke
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/package-smoke.yml"
+      - "ArchMeshRubbing.spec"
+      - "LICENSE"
+      - "README.md"
+      - "main.py"
+      - "app_interactive.py"
+      - "requirements/build-py312.lock"
+      - "requirements/runtime-py312.lock"
+      - "resources/**"
+      - "schemas/**"
+      - "src/**"
+      - "tools/generate_build_info.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: frozen-package-smoke-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frozen-package-smoke:
+    name: Frozen package smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    env:
+      QT_QPA_PLATFORM: offscreen
+      LIBGL_ALWAYS_SOFTWARE: "1"
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements/build-py312.lock
+            requirements/runtime-py312.lock
+
+      - name: Install Linux graphics runtime
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            libegl1 \
+            libgl1 \
+            libglu1-mesa \
+            libopengl0 \
+            libxkbcommon-x11-0 \
+            libxcb-cursor0
+
+      - name: Install frozen-build lock
+        run: python -m pip install --requirement requirements/build-py312.lock
+
+      - name: Generate immutable build manifest
+        run: >-
+          python tools/generate_build_info.py
+          --channel ci-smoke
+          --commit "${{ github.sha }}"
+          --output build/generated/build_info.json
+
+      - name: Build frozen application
+        run: python -m PyInstaller --clean --noconfirm ArchMeshRubbing.spec
+
+      - name: Run frozen self-test (Linux)
+        if: runner.os == 'Linux'
+        run: >-
+          dist/ArchMeshRubbing/ArchMeshRubbing
+          --self-test-report build/frozen-self-test.json
+
+      - name: Run frozen self-test (macOS bundle)
+        if: runner.os == 'macOS'
+        run: >-
+          dist/ArchMeshRubbing.app/Contents/MacOS/ArchMeshRubbing
+          --self-test-report build/frozen-self-test.json
+
+      - name: Run frozen self-test (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $process = Start-Process `
+            -FilePath "dist\ArchMeshRubbing\ArchMeshRubbing.exe" `
+            -ArgumentList "--self-test-report", "build\frozen-self-test.json" `
+            -Wait `
+            -PassThru
+          if ($process.ExitCode -ne 0) {
+            throw "Frozen self-test exited with code $($process.ExitCode)"
+          }
+
+      - name: Validate frozen self-test report
+        run: >-
+          python -c "import json,pathlib;
+          p=pathlib.Path('build/frozen-self-test.json');
+          d=json.loads(p.read_text(encoding='utf-8'));
+          assert d.get('ok') is True, json.dumps(d, ensure_ascii=False, indent=2);
+          assert d.get('checks') and all(c.get('ok') is True for c in d['checks']), d;
+          print('Frozen self-test passed:', p)"
+
+      # Deliberately no artifact upload or release step. Public binary
+      # distribution remains disabled until the repository license gate is
+      # resolved.

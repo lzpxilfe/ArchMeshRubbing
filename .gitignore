@@ -23,6 +23,7 @@ wheels/
 # PyInstaller
 *.manifest
 *.spec
+!ArchMeshRubbing.spec
 
 # Environments
 .env

@@ -244,8 +244,8 @@ class TestRecordingSurfaceReview(unittest.TestCase):
             ),
         )
 
-        self.assertEqual(mesh.n_vertices, 15)
-        self.assertEqual(mesh.n_faces, 16)
+        self.assertEqual(mesh.n_vertices, 25)
+        self.assertEqual(mesh.n_faces, 32)
         self.assertTrue(np.isfinite(np.asarray(flattened.uv, dtype=np.float64)).all())
         self.assertGreater(review.combined_image.size[0], 1000)
         self.assertGreater(review.combined_image.size[1], 150)

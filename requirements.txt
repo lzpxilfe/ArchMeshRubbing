@@ -1,9 +1,4 @@
-# Core dependencies
-numpy>=1.24.0
-scipy>=1.11.0
-trimesh>=4.0.0
-Pillow>=10.0.0
-
-# GUI
-PyQt6>=6.5.0
-PyOpenGL>=3.1.7
+# Supported source/runtime environment. Keep the human-facing install command
+# stable while resolving exactly the same versions used by frozen builds and
+# the offline self-test.
+-r requirements/runtime-py312.lock

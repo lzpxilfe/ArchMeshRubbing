@@ -1,0 +1,509 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:archmeshrubbing:schema:artifact-document:1.0.0",
+  "title": "ArchMeshRubbing ArtifactDocument 1.0.0",
+  "description": "Authoritative single-artifact provenance, revision, alignment, and derived-record graph.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "document_id",
+    "software_version",
+    "source_assets",
+    "geometry_revisions",
+    "source_metadata_revisions",
+    "align_revisions",
+    "active_source_metadata_revision_id",
+    "active_align_revision_id",
+    "records",
+    "extensions"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "document_id": {
+      "$ref": "#/$defs/nonEmptyString"
+    },
+    "software_version": {
+      "$ref": "#/$defs/nonEmptyString"
+    },
+    "source_assets": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/sourceAsset"
+      }
+    },
+    "geometry_revisions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/geometryRevision"
+      }
+    },
+    "source_metadata_revisions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/sourceMetadataRevision"
+      }
+    },
+    "align_revisions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/alignRevision"
+      }
+    },
+    "active_source_metadata_revision_id": {
+      "$ref": "#/$defs/nullableId"
+    },
+    "active_align_revision_id": {
+      "$ref": "#/$defs/nullableId"
+    },
+    "records": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/derivedRecord"
+      }
+    },
+    "extensions": {
+      "$ref": "#/$defs/extensions"
+    }
+  },
+  "$defs": {
+    "nonEmptyString": {
+      "type": "string",
+      "pattern": ".*\\S.*"
+    },
+    "nullableId": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "jsonValue": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "string"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/jsonValue"
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/jsonValue"
+          }
+        }
+      ]
+    },
+    "jsonObject": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/jsonValue"
+      }
+    },
+    "extensions": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": ":"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/jsonValue"
+      }
+    },
+    "matrix4x4": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": {
+        "type": "array",
+        "minItems": 4,
+        "maxItems": 4,
+        "items": {
+          "type": "number"
+        }
+      }
+    },
+    "axes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_x",
+        "source_y",
+        "source_z"
+      ],
+      "properties": {
+        "source_x": {
+          "enum": [
+            "+X",
+            "-X",
+            "+Y",
+            "-Y",
+            "+Z",
+            "-Z"
+          ]
+        },
+        "source_y": {
+          "enum": [
+            "+X",
+            "-X",
+            "+Y",
+            "-Y",
+            "+Z",
+            "-Z"
+          ]
+        },
+        "source_z": {
+          "enum": [
+            "+X",
+            "-X",
+            "+Y",
+            "-Y",
+            "+Z",
+            "-Z"
+          ]
+        }
+      }
+    },
+    "sourceAsset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "sha256",
+        "size_bytes",
+        "media_type",
+        "original_name",
+        "asset_ref",
+        "role",
+        "identity_scope",
+        "extensions"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "media_type": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "original_name": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "asset_ref": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "role": {
+          "const": "primary_mesh"
+        },
+        "identity_scope": {
+          "const": "primary_file_bytes"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions"
+        }
+      }
+    },
+    "geometryRevision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "source_asset_ids",
+        "geometry_sha256",
+        "geometry_hash_scope",
+        "import_recipe",
+        "topology_map_ref",
+        "qc",
+        "created_at",
+        "operator",
+        "extensions"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "source_asset_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          }
+        },
+        "geometry_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "geometry_hash_scope": {
+          "const": "positions-f64le+triangles-i32le/v1"
+        },
+        "import_recipe": {
+          "$ref": "#/$defs/jsonObject"
+        },
+        "topology_map_ref": {
+          "$ref": "#/$defs/nullableId"
+        },
+        "qc": {
+          "$ref": "#/$defs/jsonObject"
+        },
+        "created_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "operator": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions"
+        }
+      }
+    },
+    "sourceMetadataRevision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "parent_id",
+        "geometry_revision_id",
+        "unit",
+        "axes",
+        "handedness",
+        "confirmation_status",
+        "source_to_canonical_mm",
+        "created_at",
+        "operator",
+        "extensions"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "parent_id": {
+          "$ref": "#/$defs/nullableId"
+        },
+        "geometry_revision_id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "unit": {
+          "enum": [
+            "mm",
+            "cm",
+            "m",
+            "unknown"
+          ]
+        },
+        "axes": {
+          "$ref": "#/$defs/axes"
+        },
+        "handedness": {
+          "enum": [
+            "unknown",
+            "right",
+            "left"
+          ]
+        },
+        "confirmation_status": {
+          "enum": [
+            "unconfirmed",
+            "confirmed"
+          ]
+        },
+        "source_to_canonical_mm": {
+          "$ref": "#/$defs/matrix4x4"
+        },
+        "created_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "operator": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "confirmation_status": {
+                "const": "confirmed"
+              }
+            },
+            "required": [
+              "confirmation_status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "unit": {
+                "enum": [
+                  "mm",
+                  "cm",
+                  "m"
+                ]
+              },
+              "handedness": {
+                "enum": [
+                  "right",
+                  "left"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "alignRevision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "parent_id",
+        "source_metadata_revision_id",
+        "matrix4x4",
+        "recipe",
+        "qc",
+        "created_at",
+        "operator",
+        "extensions"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "parent_id": {
+          "$ref": "#/$defs/nullableId"
+        },
+        "source_metadata_revision_id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "matrix4x4": {
+          "$ref": "#/$defs/matrix4x4"
+        },
+        "recipe": {
+          "$ref": "#/$defs/jsonObject"
+        },
+        "qc": {
+          "$ref": "#/$defs/jsonObject"
+        },
+        "created_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "operator": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions"
+        }
+      }
+    },
+    "derivedRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type",
+        "geometry_revision_id",
+        "align_revision_id",
+        "depends_on_record_ids",
+        "geometry_ref",
+        "recipe",
+        "recipe_hash",
+        "selection_hash",
+        "qc",
+        "lifecycle_status",
+        "created_at",
+        "operator",
+        "extensions"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "type": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "geometry_revision_id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "align_revision_id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "depends_on_record_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          }
+        },
+        "geometry_ref": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "recipe": {
+          "$ref": "#/$defs/jsonObject"
+        },
+        "recipe_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "selection_hash": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "qc": {
+          "$ref": "#/$defs/jsonObject"
+        },
+        "lifecycle_status": {
+          "enum": [
+            "draft",
+            "ready",
+            "failed"
+          ]
+        },
+        "created_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "operator": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions"
+        }
+      }
+    }
+  }
+}

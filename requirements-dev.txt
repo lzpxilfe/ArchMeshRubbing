@@ -1,0 +1,6 @@
+# Reproducible local/CI quality tooling. Runtime dependencies stay in
+# requirements.txt and are installed alongside this file.
+pytest==9.1.1
+pyright==1.1.411
+ruff==0.15.7
+jsonschema==4.26.0

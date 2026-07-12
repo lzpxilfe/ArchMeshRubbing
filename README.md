@@ -4,9 +4,9 @@
 >
 > 3D 메쉬를 일반 CG 자산처럼 다루지 않고, **기록면(recording surface)** 과 **판독 가능한 산출물** 중심으로 다루는 고고학 연구용 데스크톱 도구입니다.
 
-ArchMeshRubbing은 길쭉한 기와형 메쉬를 불러와,
-`정위치 → 기록면 선택 → 장축 확인/수정 → 펼치기 → rubbing 시각화 → PNG/SVG export`
-흐름으로 빠르게 첫 결과를 얻는 것을 목표로 합니다.
+ArchMeshRubbing은 스캔한 문화유산 3D 메쉬를 원본 보존형 연구 자료로 불러와,
+`Open → 단위·축 확인 → Align → Cutline/Outline → Digital Rubbing → 1:1 SVG/PNG export`
+흐름으로 기록하고 다시 검증하는 오프라인 오픈소스 워크벤치를 목표로 합니다. 기와형 메쉬의 기록면 전개 기능은 이 기반 위에 남아 있는 전문 워크플로우입니다.
 
 ---
 
@@ -26,20 +26,42 @@ ArchMeshRubbing은 반대로, 고고학 연구자가 익숙한 질문에서 출�
 
 ## 🧭 핵심 사용자 흐름
 
-기본 흐름은 아래 6단계를 기준으로 설계되어 있습니다.
+새 native 흐름은 아래 6단계를 기준으로 설계되어 있습니다.
 
-1. `파일 불러오기`
-2. `정위치`
-3. `기록면/관심영역 선택`
-4. `장축 확인/수정`
-5. `기와 추천 펼침(sectionwise 기본 추천)`
-6. `rubbing 시각화 후 PNG/SVG export`
+1. `원본 파일 불러오기와 SHA-256 확인`
+2. `단위·축 확인 및 정위치(Align revision) 확정`
+3. `Top/Front/Right Cutline 기록`
+4. `6면 Outline 기록`
+5. `6면 Digital Rubbing 계산·기록`
+6. `READY + FRESH 기록에서 1:1 SVG/PNG package export`
+
+Open 직후 만들어지는 `recipe.kind="initial_identity"` Align은 canonical materialization을 위한 기준점이지 연구자의 정위치 확정이 아닙니다. 사용자가 변화량이 0인 경우까지 포함해 첫 Align을 명시적으로 확정하기 전에는 workflow가 `ALIGN_REQUIRED`에 머물며 Cutline/Outline/Digital Rubbing과 vector/rubbing export가 비활성화됩니다. 첫 확정은 immutable child Align revision을 남기고 `MEASUREMENT_READY`로 전환하며, parent activation으로 초기 기준점에 돌아가면 다시 측정이 잠깁니다.
 
 처음 쓰는 사용자도 **5분 안에 첫 결과**를 얻는 것이 목표입니다.
 
 ---
 
 ## 🪄 이번 구현에서 강화된 핵심 기능
+
+### 0. 원본 보존형 ArtifactDocument + 검증 Cutline/Outline/Digital Rubbing
+
+- 원본 file SHA-256, decode geometry SHA-256, 확인된 단위·축, immutable Align revision을 분리해 저장
+- Open → Align commit → Cutline record가 항상 source-space 원본에서 canonical millimeter로 다시 계산됨
+- Top/Front/Right 단면을 명시적 right-handed plane frame으로 기록
+- 화면용 단면 tape나 world XY 투영을 SVG 원본으로 사용하지 않음
+- Cutline payload·recipe·QC를 RFC 8785 semantic hash와 함께 `.amr`에 보존
+- Top/Bottom/Front/Back/Right/Left 6면 Outline을 전체 삼각형의 고정 mm 격자 투영 합집합으로 계산
+- Outline의 오목부·구멍·분리 성분을 모두 보존하고 self-intersection·hole 소유권·component 중첩을 저장/재로딩 때 재검증
+- Shapely 2.1.2 + GEOS 3.13.1, precision grid, grid collapse/merge receipt를 recipe·QC에 고정
+- `READY + FRESH` 기록만 `*.amr-vector/`의 1:1 `artifact.svg` + provenance sidecar로 내보냄
+- Digital Rubbing은 6면 canonical frame, 정수 pixels/mm·µm recipe, front-depth raster와 QC를 `raster.digital_rubbing.v1` record로 보존
+- canonical GA8 PNG는 고정 chunk/DEFLATE bytes와 exact `pHYs`를 사용하며, `*.amr-rubbing/`에 provenance sidecar와 함께 저장
+- vector/rubbing package는 원본 mesh와 GUI가 없어도 이동 후 별도 프로세스에서 offline 검증 가능
+- Qt/OpenGL과 분리된 `ArtifactWorkbench`가 ticketed Open, 명시적 Align readiness, `state_version`/`authority_epoch` 기반 publication을 소유
+- native DerivedRecord worker는 시작 session과 projection을, viewport의 cut-section/ROI worker는 worker identity와 projection generation을 확인하여 늦은 결과가 현재 문서·overlay·새 worker를 덮지 못하게 함
+- scene publication의 rollback·scene 복원·finalize 자체가 불확실하면 fatal authority 상태로 전환해 검증된 Open 전까지 저장·실측·내보내기를 차단
+
+Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 `SurfaceVisualizer`/flatten 기반 PNG·SVG를 측정 산출물로 내보내는 우회 경로를 차단합니다. 검증된 Cutline/Outline record는 `.amr-vector`, Digital Rubbing record는 `.amr-rubbing`으로 내보냅니다. 로컬 차단 테스트와 3-OS CI matrix 구성은 완료됐지만 원격 Windows·macOS·Linux matrix 통과 및 설치형 바이너리 배포는 아직 확인 전입니다.
 
 ### 1. 기와형 메쉬용 기본 추천 펼침
 
@@ -61,9 +83,9 @@ ArchMeshRubbing은 반대로, 고고학 연구자가 익숙한 질문에서 출�
 - sectionwise 품질이 부족하면 fallback 경로 제공
   - `sectionwise → area → cylinder → arap`
 
-### 3. rubbing-like 판독 시각화
+### 3. Legacy rubbing-like 판독 시각화
 
-예쁜 렌더보다 **문양/흔적 판독성**을 우선합니다.
+예쁜 렌더보다 **문양/흔적 판독성**을 우선하는 기존 검토 경로입니다. 이 결과는 연구 검토 이미지이며, 위 `raster.digital_rubbing.v1`의 재현 가능한 1:1 PNG와 구분합니다.
 
 - `normal` 기반 시각화
 - `curvature` 기반 시각화
@@ -73,11 +95,13 @@ ArchMeshRubbing은 반대로, 고고학 연구자가 익숙한 질문에서 출�
 
 ### 4. 연구 산출물 중심 export
 
+- `*.amr-vector/`: 검증 Cutline/Outline 1:1 SVG + provenance
+- `*.amr-rubbing/`: 검증 Digital Rubbing 1:1 PNG + provenance
 - `flattened 좌표`
-- `기록면 전개 SVG`
-- `rubbing PNG`
-- `기록면 검토 시트`
-- `6방향 실측 도면 패키지`
+- `기록면 전개 SVG` (legacy 검토용)
+- `rubbing PNG` (legacy 검토용)
+- `기록면 검토 시트` (legacy 검토용)
+- `6방향 도면 패키지` (legacy 검토용)
 
 ---
 
@@ -95,7 +119,26 @@ ArchMeshRubbing은 반대로, 고고학 연구자가 익숙한 질문에서 출�
 
 ## 🧠 제품 구조와 코어 구조
 
-최근 리팩터로 flatten 코어를 책임별로 분리했습니다.
+새 측정 경로는 GUI와 분리된 headless 신뢰 코어를 사용합니다.
+
+### Application workflow shell
+
+- [`src/application/artifact_workbench.py`](src/application/artifact_workbench.py): 한 artifact의 session/project path, 단일 pending Open, workflow readiness와 projection publication authority
+- Open/new import/project reopen과 Align commit/parent activation은 ticket과 compare-and-swap 검증을 거쳐 `prepare → activate → finalize`되며, scene swap 실패는 이전 authority로 rollback
+- Cutline/Outline/Digital Rubbing 결과 publication도 expected record ID 집합으로 보호하지만, command 입력·계산 소유권을 기존 MainWindow/viewport에서 완전히 옮기는 작업은 진행 중
+
+### Artifact trust core
+
+- [`src/core/artifact_document.py`](src/core/artifact_document.py): source·metadata·Align·DerivedRecord revision graph
+- [`src/core/artifact_session.py`](src/core/artifact_session.py): 검증 source와 immutable document의 materialization 경계
+- [`src/core/artifact_vector_extractor.py`](src/core/artifact_vector_extractor.py): canonical-mm Cutline
+- [`src/core/artifact_outline_extractor.py`](src/core/artifact_outline_extractor.py): fixed-grid 6면 Outline
+- [`src/core/artifact_rubbing_extractor.py`](src/core/artifact_rubbing_extractor.py): deterministic 6면 Digital Rubbing raster
+- [`src/core/artifact_vector_export.py`](src/core/artifact_vector_export.py): `.amr-vector` 1:1 SVG package
+- [`src/core/artifact_rubbing_export.py`](src/core/artifact_rubbing_export.py): `.amr-rubbing` canonical PNG package
+- [`src/core/project_file.py`](src/core/project_file.py): strict AMR v2 저장·로딩과 원자 교체
+
+기존 기와 기록면 기능도 flatten 코어를 책임별로 분리해 유지합니다.
 
 ### Core layout
 
@@ -124,10 +167,11 @@ ArchMeshRubbing은 반대로, 고고학 연구자가 익숙한 질문에서 출�
 - OBJ/PLY/STL/GLTF 메쉬에서 기록면을 펼친 2D 결과 생성
 - 기와형 메쉬는 기본적으로 `기와 추천 펼침` 우선
 
-### 디지털 탁본(rubbing-like)
+### 디지털 탁본
 
-- 표면 미세 요철을 읽기 쉽도록 대비 강화
-- 포토리얼리스틱 렌더가 아니라 **판독 보조 이미지**에 집중
+- native 경로는 원본과 활성 Align에서 6면 raster를 다시 계산하고 recipe·QC·raster hash를 기록
+- `artifact.png`는 1:1 planar sampling과 exact pixels-per-meter를 선언
+- 포토리얼리스틱 렌더가 아니라 **재현 가능한 판독 보조 이미지**에 집중
 
 ### 실측/검토 패키지
 
@@ -136,14 +180,18 @@ ArchMeshRubbing은 반대로, 고고학 연구자가 익숙한 질문에서 출�
 - review sheet
 - 6방향 도면 패키지
 
+위 전개·review sheet·기존 6방향 도면은 현재 **검토용 legacy 산출물**입니다. 1:1 측정 산출물로 검증되는 새 경로는 ArtifactDocument record에서 생성한 `.amr-vector` SVG와 `.amr-rubbing` PNG입니다.
+
 ---
 
 ## ⚡ Quick Start
 
+현재 Quick Start는 source checkout 실행 절차입니다. 서명된 Windows·macOS·Linux 설치 파일은 아직 제공하지 않으며, 첫 공개 안정판 전에 OS별 frozen build·설치·실행 검증을 별도 게이트로 통과해야 합니다.
+
 ### macOS / Linux
 
 ```bash
-python3 -m venv .venv
+python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 pip install -r requirements.txt
@@ -154,7 +202,7 @@ python app_interactive.py
 ### Windows
 
 ```bat
-py -3 -m venv .venv
+py -3.12 -m venv .venv
 .venv\Scripts\activate
 python -m pip install --upgrade pip
 pip install -r requirements.txt
@@ -167,6 +215,36 @@ python app_interactive.py
 ```bash
 python main.py --gui
 ```
+
+---
+
+## 🧪 개발 품질 게이트
+
+개발·CI 환경은 런타임 의존성과 함께 `requirements-dev.txt`를 설치합니다.
+
+```bash
+python -m pip install -r requirements.txt -r requirements-dev.txt
+python -m ruff check .
+python -c "import subprocess,sys; raise SystemExit(subprocess.call([sys.executable,'-m','pyright','--pythonpath',sys.executable,'-p','pyright-m0.json']))"
+python -m pytest -q
+```
+
+`pyright-m0.json`은 현재 M0 신뢰 커널 범위의 차단 게이트입니다. 전체 트리 타입 검사는 아직 부채를 보고하는 단계이며, 통과를 뜻하지 않습니다. 재현 환경, 게이트 범위, GUI 스모크 테스트의 한계는 [docs/QUALITY_GATES.md](docs/QUALITY_GATES.md)에 기록합니다.
+
+프로젝트 저장 형식, 원자적 저장 보장, 원본 SHA-256의 범위와 v1 migration 정책은 [docs/PROJECT_FORMAT.md](docs/PROJECT_FORMAT.md)를 참고하세요.
+
+구조 개편 방향과 보존/교체 경계는 [docs/ARCHITECTURE_DECISION.md](docs/ARCHITECTURE_DECISION.md)에 기록합니다.
+
+### 로컬 native smoke build
+
+Python 3.12의 깨끗한 환경에서만 unsigned 로컬 앱을 만듭니다.
+
+```bash
+python -m pip install -r requirements/build-py312.lock
+python tools/build_native.py
+```
+
+이 명령은 기존 산출물을 기본적으로 덮어쓰지 않고, 빌드 뒤 실제 frozen executable의 offline self-test를 실행합니다. 현재 공개 바이너리는 만들지 않습니다. 저장소의 GPLv2-only 표기와 bundled PyQt6의 GPL-3.0-only 라이선스 결정을 먼저 해결해야 하며, 서명·notarization·실제 3-OS 원격 결과도 남아 있습니다. 자세한 절차와 차단 게이트는 [docs/NATIVE_PACKAGING.md](docs/NATIVE_PACKAGING.md)를 참고하세요.
 
 ---
 
@@ -246,15 +324,19 @@ python main.py --project mesh.obj planview.png
 
 현재 버전은 특히 아래에 집중하고 있습니다.
 
-- `기와형 메쉬 기본 추천 펼침(sectionwise)`
-- `장축/단면/와통 정보를 활용하는 유도형 기록면 전개`
-- `rubbing-like 시각화`
-- `기록면 전개 SVG + PNG export`
-- `4축 기본 UI 정리`
-- `synthetic benchmark 기반 회귀 검증 기반`
+- 원본 hash·명시적 단위·immutable Align revision 기반 `ArtifactDocument`
+- canonical-mm Cutline과 6면 fixed-grid Outline
+- recipe·QC·receipt가 있는 6면 Digital Rubbing과 1:1 `.amr-rubbing` export
+- `.amr-vector`/`.amr-rubbing`의 이동 가능한 offline 검증
+- 기와형 메쉬 기본 추천 펼침과 synthetic benchmark는 legacy 전문 기능으로 유지
+- Python 3.12 macOS arm64 frozen 앱의 10-check offline self-test 통과
+- Open/Align authority와 two-phase scene publication을 Qt/OpenGL-free `ArtifactWorkbench`로 이식
+- 다음 단계: Cutline/Outline/Digital Rubbing command-shell 이식을 완료하고 실제 원격 3-OS CI, 라이선스 결정, GPU/대용량 유물 pilot 진행
 
 ---
 
 ## 📄 License
 
 GNU General Public License v2.0 (GPLv2)
+
+현재 문구는 `or later`를 포함하지 않습니다. PyQt6를 포함한 공개 바이너리 배포는 [native packaging license gate](docs/NATIVE_PACKAGING.md#라이선스)가 해결될 때까지 보류합니다.

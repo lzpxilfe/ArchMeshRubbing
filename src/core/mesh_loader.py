@@ -12,6 +12,7 @@ import logging
 import numpy as np
 
 from .logging_utils import log_once
+from .source_identity import SourceFingerprint, open_fingerprinted_file
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -44,6 +45,12 @@ class MeshData:
     texture: Optional[np.ndarray] = None
     unit: str = 'mm'
     filepath: Optional[Path] = None
+    # Identity of the raw primary file before unit scaling, centering, or any
+    # other geometry mutation. Sidecars are intentionally outside M0-1 scope.
+    source_identity: Optional[SourceFingerprint] = None
+    # Parser recipe is separate from filename/extension hints so a byte-identical
+    # relocated file can be renamed without changing how its bytes are decoded.
+    source_format: Optional[str] = None
     
     # Computed properties cache
     _bounds: Optional[np.ndarray] = field(default=None, repr=False)
@@ -451,7 +458,9 @@ class MeshData:
             uv_coords=self.uv_coords.copy() if self.uv_coords is not None else None,
             texture=self.texture.copy() if self.texture is not None else None,
             unit=self.unit,
-            filepath=self.filepath
+            filepath=self.filepath,
+            source_identity=self.source_identity,
+            source_format=self.source_format,
         )
     
     def to_trimesh(self) -> 'trimesh.Trimesh':
@@ -483,7 +492,9 @@ class MeshData:
     @classmethod
     def from_trimesh(cls, mesh: 'trimesh.Trimesh',
                      filepath: Optional[Path] = None,
-                     unit: str = 'mm') -> 'MeshData':
+                     unit: str = 'mm',
+                     source_identity: Optional[SourceFingerprint] = None,
+                     source_format: Optional[str] = None) -> 'MeshData':
         """trimesh 객체에서 생성"""
         # 텍스처 추출 시도
         texture = None
@@ -509,7 +520,9 @@ class MeshData:
             uv_coords=uv_coords,
             texture=texture,
             unit=unit,
-            filepath=filepath
+            filepath=filepath,
+            source_identity=source_identity,
+            source_format=source_format,
         )
     
     def extract_submesh(self, face_indices: np.ndarray) -> 'MeshData':
@@ -530,6 +543,8 @@ class MeshData:
                 texture=self.texture,
                 unit=self.unit,
                 filepath=self.filepath,
+                source_identity=self.source_identity,
+                source_format=self.source_format,
             )
 
         # 크래시 방지: 인덱스 범위 밖 제거
@@ -546,6 +561,8 @@ class MeshData:
                 texture=self.texture,
                 unit=self.unit,
                 filepath=self.filepath,
+                source_identity=self.source_identity,
+                source_format=self.source_format,
             )
 
         selected_faces = faces[face_indices]
@@ -595,6 +612,8 @@ class MeshData:
             texture=self.texture,  # 텍스처는 공유
             unit=self.unit,
             filepath=self.filepath,
+            source_identity=self.source_identity,
+            source_format=self.source_format,
         )
 
 
@@ -642,13 +661,22 @@ class MeshLoader:
         
         return ';;'.join(filters)
     
-    def load(self, filepath: Union[str, Path], unit: Optional[str] = None) -> MeshData:
+    def load(
+        self,
+        filepath: Union[str, Path],
+        unit: Optional[str] = None,
+        *,
+        source_format: Optional[str] = None,
+    ) -> MeshData:
         """
         메쉬 파일 로드
         
         Args:
             filepath: 메쉬 파일 경로
             unit: 좌표 단위 (None이면 default_unit 사용)
+            source_format: relocated project source의 원래 parser 형식 hint.
+                파일 이름은 identity가 아니므로 suffix가 바뀌어도 저장된
+                primary format으로 동일 바이트를 파싱할 수 있습니다.
             
         Returns:
             MeshData: 로드된 메쉬 데이터
@@ -662,22 +690,40 @@ class MeshLoader:
         if not filepath.exists():
             raise FileNotFoundError(f"File not found: {filepath}")
         
-        ext = filepath.suffix.lower()
-        if ext not in self.SUPPORTED_FORMATS:
+        path_ext = filepath.suffix.lower()
+        format_hint = str(source_format or "").strip().lower().removeprefix('.')
+        parse_ext = f".{format_hint}" if format_hint else path_ext
+        if parse_ext not in self.SUPPORTED_FORMATS:
             raise ValueError(
-                f"Unsupported format: {ext}\n"
+                f"Unsupported format: {parse_ext or path_ext}\n"
                 f"Supported formats: {list(self.SUPPORTED_FORMATS.keys())}"
             )
-        
+
         unit = unit or self.default_unit
-        
-        # trimesh로 로드
-        try:
-            # 대용량 메쉬 로드 성능: 불필요한 후처리(process) 비활성화
-            mesh = trimesh.load(str(filepath), force='mesh', process=False, maintain_order=True)
-        except TypeError:
-            # 구버전 trimesh 호환
-            mesh = trimesh.load(str(filepath), force='mesh')
+
+        # Hash and parse the exact same open descriptor. Reopening by path here
+        # would allow a same-size/same-mtime replacement to pair one file's
+        # hash with another file's geometry. This work runs in MeshLoadThread
+        # for the GUI, so large-file hashing never blocks the UI thread.
+        with open_fingerprinted_file(filepath) as (source_stream, source_identity):
+            file_type = parse_ext.removeprefix('.')
+            try:
+                # 대용량 메쉬 로드 성능: 불필요한 후처리(process) 비활성화
+                mesh = trimesh.load(
+                    source_stream,
+                    file_type=file_type,
+                    force='mesh',
+                    process=False,
+                    maintain_order=True,
+                )
+            except TypeError:
+                # 구버전 trimesh 호환
+                source_stream.seek(0)
+                mesh = trimesh.load(
+                    source_stream,
+                    file_type=file_type,
+                    force='mesh',
+                )
         
         # Scene인 경우 단일 메쉬로 병합
         if isinstance(mesh, trimesh.Scene):
@@ -690,7 +736,13 @@ class MeshLoader:
             raise TypeError(f"Expected trimesh.Trimesh, got {type(mesh).__name__}")
 
         # MeshData로 변환
-        mesh_data = MeshData.from_trimesh(mesh, filepath=filepath, unit=unit)
+        mesh_data = MeshData.from_trimesh(
+            mesh,
+            filepath=filepath,
+            unit=unit,
+            source_identity=source_identity,
+            source_format=file_type,
+        )
         
         # 법선 계산 (없는 경우)
         # 로딩 시점에는 face normals만 계산 (vertex normals는 필요 시점에 계산)

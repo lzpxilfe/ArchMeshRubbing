@@ -1,9 +1,23 @@
+import os
 import unittest
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import numpy as np
 
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from app_interactive import MainWindow, SliceComputeThread
 from src.core.mesh_loader import MeshData
 from src.core.profile_exporter import ProfileExporter
+from src.gui.viewport_3d import SceneObject, Viewport3D
+
+
+_GOLDEN_TRANSLATION = np.array([10.0, 20.0, 30.0], dtype=np.float64)
+_GOLDEN_ROTATION_DEG = np.array([90.0, 90.0, 0.0], dtype=np.float64)
+_GOLDEN_SCALE = 2.0
+_GOLDEN_LOCAL_POINT = np.array([[1.0, 0.0, 0.0]], dtype=np.float64)
+_GOLDEN_WORLD_POINT = np.array([[10.0, 22.0, 30.0]], dtype=np.float64)
 
 
 def _opengl_rotation_matrix_xyz_deg(rotation_deg: np.ndarray) -> np.ndarray:
@@ -22,6 +36,146 @@ def _opengl_rotation_matrix_xyz_deg(rotation_deg: np.ndarray) -> np.ndarray:
 
 
 class TestRotationConvention(unittest.TestCase):
+    @staticmethod
+    def _golden_point_mesh() -> MeshData:
+        return MeshData(
+            vertices=_GOLDEN_LOCAL_POINT.copy(),
+            faces=np.zeros((0, 3), dtype=np.int32),
+            unit="cm",
+        )
+
+    def test_scene_object_world_bounds_match_fixed_trs_golden(self):
+        obj = SceneObject(self._golden_point_mesh(), name="golden")
+        obj.translation = _GOLDEN_TRANSLATION.copy()
+        obj.rotation = _GOLDEN_ROTATION_DEG.copy()
+        obj.scale = _GOLDEN_SCALE
+
+        bounds = np.asarray(obj.get_world_bounds(), dtype=np.float64)
+
+        np.testing.assert_allclose(
+            bounds,
+            np.vstack([_GOLDEN_WORLD_POINT, _GOLDEN_WORLD_POINT]),
+            rtol=0.0,
+            atol=1e-10,
+        )
+
+    def test_main_window_world_mesh_builder_matches_fixed_trs_golden(self):
+        source = self._golden_point_mesh()
+
+        transformed = MainWindow._build_world_mesh_from_transform(
+            source,
+            translation=_GOLDEN_TRANSLATION,
+            rotation=_GOLDEN_ROTATION_DEG,
+            scale=_GOLDEN_SCALE,
+        )
+
+        np.testing.assert_allclose(
+            transformed.vertices,
+            _GOLDEN_WORLD_POINT,
+            rtol=0.0,
+            atol=1e-10,
+        )
+        np.testing.assert_array_equal(source.vertices, _GOLDEN_LOCAL_POINT)
+
+    def test_slice_thread_plane_and_contour_match_fixed_trs_golden(self):
+        captured: dict[str, np.ndarray] = {}
+
+        class CapturingMeshSlicer:
+            def __init__(self, _mesh):
+                pass
+
+            def slice_with_plane(self, origin, normal):
+                captured["origin"] = np.asarray(origin, dtype=np.float64).copy()
+                captured["normal"] = np.asarray(normal, dtype=np.float64).copy()
+                return [_GOLDEN_LOCAL_POINT.copy()]
+
+        results: list[tuple[float, object]] = []
+        failures: list[tuple[float, str]] = []
+        thread = SliceComputeThread(
+            self._golden_point_mesh(),
+            _GOLDEN_TRANSLATION,
+            _GOLDEN_ROTATION_DEG,
+            _GOLDEN_SCALE,
+            30.0,
+        )
+        thread.computed.connect(lambda z, contours: results.append((float(z), contours)))
+        thread.failed.connect(lambda z, message: failures.append((float(z), str(message))))
+
+        with patch("src.core.mesh_slicer.MeshSlicer", CapturingMeshSlicer):
+            thread.run()
+
+        self.assertEqual(failures, [])
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0][0], 30.0)
+        np.testing.assert_allclose(
+            captured["origin"],
+            [-10.0, 0.0, -5.0],
+            rtol=0.0,
+            atol=1e-10,
+        )
+        np.testing.assert_allclose(
+            captured["normal"],
+            [0.0, 1.0, 0.0],
+            rtol=0.0,
+            atol=1e-10,
+        )
+        contours = results[0][1]
+        self.assertIsInstance(contours, list)
+        self.assertEqual(len(contours), 1)
+        np.testing.assert_allclose(
+            np.asarray(contours[0], dtype=np.float64),
+            _GOLDEN_WORLD_POINT,
+            rtol=0.0,
+            atol=1e-10,
+        )
+
+    def test_profile_exporter_world_bounds_match_fixed_trs_golden(self):
+        exporter = ProfileExporter(resolution=64)
+        identity = np.eye(4, dtype=np.float64)
+        viewport = np.array([0, 0, 64, 64], dtype=np.int32)
+
+        _, bounds = exporter.extract_silhouette(
+            self._golden_point_mesh(),
+            view="top",
+            translation=_GOLDEN_TRANSLATION,
+            rotation=_GOLDEN_ROTATION_DEG,
+            scale=_GOLDEN_SCALE,
+            opengl_matrices=(identity, identity, viewport),
+            viewport_image=None,
+        )
+
+        np.testing.assert_allclose(
+            np.asarray(bounds["world_bounds"], dtype=np.float64),
+            np.vstack([_GOLDEN_WORLD_POINT, _GOLDEN_WORLD_POINT]),
+            rtol=0.0,
+            atol=1e-10,
+        )
+
+    def test_legacy_bake_uses_fixed_trs_golden_and_marks_save_as_unsafe(self):
+        obj = SceneObject(self._golden_point_mesh(), name="golden")
+        obj.translation = _GOLDEN_TRANSLATION.copy()
+        obj.rotation = _GOLDEN_ROTATION_DEG.copy()
+        obj.scale = _GOLDEN_SCALE
+        viewport_like = SimpleNamespace(
+            update_vbo=Mock(),
+            update=Mock(),
+            _emit_mesh_transform_changed=Mock(),
+        )
+
+        Viewport3D.bake_object_transform(viewport_like, obj)
+
+        np.testing.assert_allclose(
+            obj.mesh.vertices,
+            _GOLDEN_WORLD_POINT,
+            rtol=0.0,
+            atol=1e-6,
+        )
+        np.testing.assert_array_equal(obj.translation, [0.0, 0.0, 0.0])
+        np.testing.assert_array_equal(obj.rotation, [0.0, 0.0, 0.0])
+        self.assertEqual(obj.scale, 1.0)
+        self.assertTrue(obj._amr_has_unpersisted_bake)
+        self.assertEqual(obj._amr_alignment_status, "legacy_baked_unverifiable")
+
     def test_profile_exporter_world_bounds_rotation_matches_opengl(self):
         vertices = np.array(
             [
@@ -80,4 +234,3 @@ class TestRotationConvention(unittest.TestCase):
 
         np.testing.assert_allclose(world_bounds[0], expected_min, rtol=0.0, atol=1e-10)
         np.testing.assert_allclose(world_bounds[1], expected_max, rtol=0.0, atol=1e-10)
-

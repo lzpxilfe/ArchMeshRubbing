@@ -24,6 +24,7 @@ from src.core.output_paths import (  # noqa: E402
     outer_surface_path,
 )
 from src.core.unit_utils import DEFAULT_MESH_UNIT  # noqa: E402
+from src import build_info  # noqa: E402
 
 _LOGGER = logging.getLogger(__name__)
 DEFAULT_EXPORT_DPI = DEFAULTS.export_dpi
@@ -32,8 +33,33 @@ DEFAULT_ARAP_MAX_ITERATIONS = DEFAULTS.arap_max_iterations
 SUPPORTED_FORMATS = ["OBJ", "PLY", "STL", "OFF", "glTF (.gltf)", "glTF Binary (.glb)"]
 
 
-def run_cli():
+def run_cli() -> int | None:
     """명령줄 인터페이스 실행."""
+    # Release diagnostics must remain usable even when logging cannot create a
+    # file or one of the heavy runtime imports is damaged.  Handle them before
+    # the normal application logging path.
+    if len(sys.argv) >= 2:
+        release_command = sys.argv[1]
+        if release_command == "--version":
+            print(build_info.version_text())
+            return 0
+        if release_command == "--diagnostics-json":
+            print(build_info.diagnostics_json())
+            return 0
+        if release_command == "--self-test":
+            report = build_info.run_self_test()
+            print(build_info.diagnostics_json(report))
+            return 0 if bool(report.get("ok")) else 1
+        if release_command == "--self-test-report":
+            if len(sys.argv) != 3:
+                return 2
+            report = build_info.run_self_test()
+            try:
+                build_info.write_json_report(sys.argv[2], report)
+            except Exception:
+                return 2
+            return 0 if bool(report.get("ok")) else 1
+
     try:
         from src.core.logging_utils import setup_logging
 
@@ -42,8 +68,11 @@ def run_cli():
         _LOGGER.debug("Failed to initialize logging: %s", e, exc_info=True)
 
     if len(sys.argv) < 2:
+        if bool(getattr(sys, "frozen", False)):
+            launch_gui()
+            return 0
         print_help()
-        return
+        return 0
     
     cmd = sys.argv[1]
     
@@ -118,6 +147,10 @@ def print_help():
     print("=" * 60)
     print()
     print("Usage:")
+    print("  python main.py --version                 # Show application version")
+    print("  python main.py --diagnostics-json        # Print machine-readable runtime diagnostics")
+    print("  python main.py --self-test               # Run offline, read-only packaged-app checks")
+    print("  python main.py --self-test-report PATH   # Write a no-overwrite packaged-app report")
     print("  python main.py <mesh_file>              # Launch GUI and open mesh")
     print("  python main.py --info <mesh_file>       # Show file info")
     print("  python main.py --open-mesh <mesh_file>  # Launch GUI and open mesh")
@@ -505,4 +538,6 @@ def run_gui():
 
 
 if __name__ == '__main__':
-    run_cli()
+    _exit_code = run_cli()
+    if _exit_code is not None:
+        raise SystemExit(_exit_code)

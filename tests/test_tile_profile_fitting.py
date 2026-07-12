@@ -30,7 +30,6 @@ def test_fit_circle_2d_recovers_arc_radius():
 
 def test_fit_circle_2d_tolerates_small_noise():
     theta = np.linspace(-0.9, 0.9, 48, dtype=np.float64)
-    center = np.array([0.0, 0.0], dtype=np.float64)
     radius = 5.0
     pts = np.column_stack([np.cos(theta) * radius, np.sin(theta) * radius])
     pts += np.column_stack(

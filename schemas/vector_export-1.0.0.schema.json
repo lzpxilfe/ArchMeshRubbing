@@ -1,0 +1,348 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:archmeshrubbing:schema:vector-export:1.0.0",
+  "title": "ArchMeshRubbing 1:1 Vector Export Sidecar 1.0.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "artifact",
+    "format",
+    "presentation",
+    "provenance",
+    "qc",
+    "recipe",
+    "schema_version",
+    "vector_payload",
+    "vector_payload_sha256"
+  ],
+  "properties": {
+    "artifact": {"$ref": "#/$defs/artifact"},
+    "format": {"const": "archmeshrubbing_vector_export"},
+    "presentation": {"$ref": "#/$defs/presentation"},
+    "provenance": {"$ref": "#/$defs/provenance"},
+    "qc": {"$ref": "#/$defs/qc"},
+    "recipe": {"type": "object"},
+    "schema_version": {"const": "1.0.0"},
+    "vector_payload": {"$ref": "urn:archmeshrubbing:schema:vector-payload:1.0.0"},
+    "vector_payload_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "nonEmptyString": {"type": "string", "pattern": ".*\\S.*"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "nullableId": {
+      "anyOf": [{"$ref": "#/$defs/nonEmptyString"}, {"type": "null"}]
+    },
+    "stringArray": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/nonEmptyString"}
+    },
+    "matrix4x4": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": {
+        "type": "array",
+        "minItems": 4,
+        "maxItems": 4,
+        "items": {"type": "number"}
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["file", "media_type", "sha256", "size_bytes"],
+      "properties": {
+        "file": {"const": "artifact.svg"},
+        "media_type": {"const": "image/svg+xml"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "size_bytes": {"type": "integer", "minimum": 1}
+      }
+    },
+    "presentation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "content_bounds_mm",
+        "height_mm",
+        "margin_mm",
+        "physical_scale",
+        "stroke_color",
+        "stroke_width_mm",
+        "title",
+        "unit",
+        "view_box",
+        "width_mm"
+      ],
+      "properties": {
+        "content_bounds_mm": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": {"type": "number"}
+        },
+        "height_mm": {"type": "number", "exclusiveMinimum": 0},
+        "margin_mm": {"type": "number", "minimum": 0},
+        "physical_scale": {"const": "1:1"},
+        "stroke_color": {"type": "string", "pattern": "^#[0-9a-f]{6}$"},
+        "stroke_width_mm": {"type": "number", "exclusiveMinimum": 0},
+        "title": {"$ref": "#/$defs/nonEmptyString"},
+        "unit": {"const": "mm"},
+        "view_box": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": {"type": "string"}
+        },
+        "width_mm": {"type": "number", "exclusiveMinimum": 0}
+      }
+    },
+    "documentReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "active_align_revision_id",
+        "active_source_metadata_revision_id",
+        "document_id",
+        "manifest_sha256",
+        "schema_version",
+        "software_version"
+      ],
+      "properties": {
+        "active_align_revision_id": {"$ref": "#/$defs/nonEmptyString"},
+        "active_source_metadata_revision_id": {"$ref": "#/$defs/nonEmptyString"},
+        "document_id": {"$ref": "#/$defs/nonEmptyString"},
+        "manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "schema_version": {"const": "1.0.0"},
+        "software_version": {"$ref": "#/$defs/nonEmptyString"}
+      }
+    },
+    "recordReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "align_revision_id",
+        "created_at",
+        "depends_on_record_ids",
+        "geometry_revision_id",
+        "geometry_ref",
+        "id",
+        "lifecycle_status",
+        "operator",
+        "recipe_hash",
+        "selection_hash",
+        "type"
+      ],
+      "properties": {
+        "align_revision_id": {"$ref": "#/$defs/nonEmptyString"},
+        "created_at": {"$ref": "#/$defs/timestamp"},
+        "depends_on_record_ids": {"$ref": "#/$defs/stringArray"},
+        "geometry_revision_id": {"$ref": "#/$defs/nonEmptyString"},
+        "geometry_ref": {"$ref": "#/$defs/nonEmptyString"},
+        "id": {"$ref": "#/$defs/nonEmptyString"},
+        "lifecycle_status": {"const": "ready"},
+        "operator": {"$ref": "#/$defs/nonEmptyString"},
+        "recipe_hash": {"$ref": "#/$defs/sha256"},
+        "selection_hash": {
+          "anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]
+        },
+        "type": {"enum": ["vector.cutline.v1", "vector.outline.v1"]}
+      }
+    },
+    "dependencyReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "align_revision_id",
+        "depends_on_record_ids",
+        "freshness",
+        "geometry_ref",
+        "geometry_revision_id",
+        "id",
+        "lifecycle_status",
+        "recipe_hash",
+        "type"
+      ],
+      "properties": {
+        "align_revision_id": {"$ref": "#/$defs/nonEmptyString"},
+        "depends_on_record_ids": {"$ref": "#/$defs/stringArray"},
+        "freshness": {"const": "fresh"},
+        "geometry_ref": {"$ref": "#/$defs/nonEmptyString"},
+        "geometry_revision_id": {"$ref": "#/$defs/nonEmptyString"},
+        "id": {"$ref": "#/$defs/nonEmptyString"},
+        "lifecycle_status": {"const": "ready"},
+        "recipe_hash": {"$ref": "#/$defs/sha256"},
+        "type": {"$ref": "#/$defs/nonEmptyString"}
+      }
+    },
+    "alignRevision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "created_at",
+        "id",
+        "matrix4x4",
+        "operator",
+        "parent_id",
+        "qc",
+        "recipe",
+        "source_metadata_revision_id"
+      ],
+      "properties": {
+        "created_at": {"$ref": "#/$defs/timestamp"},
+        "id": {"$ref": "#/$defs/nonEmptyString"},
+        "matrix4x4": {"$ref": "#/$defs/matrix4x4"},
+        "operator": {"$ref": "#/$defs/nonEmptyString"},
+        "parent_id": {"$ref": "#/$defs/nullableId"},
+        "qc": {"type": "object"},
+        "recipe": {"type": "object"},
+        "source_metadata_revision_id": {"$ref": "#/$defs/nonEmptyString"}
+      }
+    },
+    "metadataRevision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "axes",
+        "confirmation_status",
+        "created_at",
+        "geometry_revision_id",
+        "handedness",
+        "id",
+        "operator",
+        "parent_id",
+        "source_to_canonical_mm",
+        "unit"
+      ],
+      "properties": {
+        "axes": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["source_x", "source_y", "source_z"],
+          "properties": {
+            "source_x": {"type": "string"},
+            "source_y": {"type": "string"},
+            "source_z": {"type": "string"}
+          }
+        },
+        "confirmation_status": {"const": "confirmed"},
+        "created_at": {"$ref": "#/$defs/timestamp"},
+        "geometry_revision_id": {"$ref": "#/$defs/nonEmptyString"},
+        "handedness": {"enum": ["right", "left"]},
+        "id": {"$ref": "#/$defs/nonEmptyString"},
+        "operator": {"$ref": "#/$defs/nonEmptyString"},
+        "parent_id": {"$ref": "#/$defs/nullableId"},
+        "source_to_canonical_mm": {"$ref": "#/$defs/matrix4x4"},
+        "unit": {"enum": ["mm", "cm", "m"]}
+      }
+    },
+    "geometryRevision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "created_at",
+        "geometry_hash_scope",
+        "geometry_sha256",
+        "id",
+        "import_recipe",
+        "operator",
+        "qc",
+        "source_asset_ids"
+      ],
+      "properties": {
+        "created_at": {"$ref": "#/$defs/timestamp"},
+        "geometry_hash_scope": {"const": "positions-f64le+triangles-i32le/v1"},
+        "geometry_sha256": {"$ref": "#/$defs/sha256"},
+        "id": {"$ref": "#/$defs/nonEmptyString"},
+        "import_recipe": {"type": "object"},
+        "operator": {"$ref": "#/$defs/nonEmptyString"},
+        "qc": {"type": "object"},
+        "source_asset_ids": {"$ref": "#/$defs/stringArray"}
+      }
+    },
+    "sourceAsset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "identity_scope",
+        "media_type",
+        "original_name",
+        "role",
+        "sha256",
+        "size_bytes"
+      ],
+      "properties": {
+        "id": {"$ref": "#/$defs/nonEmptyString"},
+        "identity_scope": {"const": "primary_file_bytes"},
+        "media_type": {"$ref": "#/$defs/nonEmptyString"},
+        "original_name": {"$ref": "#/$defs/nonEmptyString"},
+        "role": {"const": "primary_mesh"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "size_bytes": {"type": "integer", "minimum": 0}
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "align_revision",
+        "dependency_closure",
+        "document",
+        "geometry_revision",
+        "record",
+        "source_assets",
+        "source_metadata_revision"
+      ],
+      "properties": {
+        "align_revision": {"$ref": "#/$defs/alignRevision"},
+        "dependency_closure": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/dependencyReceipt"}
+        },
+        "document": {"$ref": "#/$defs/documentReceipt"},
+        "geometry_revision": {"$ref": "#/$defs/geometryRevision"},
+        "record": {"$ref": "#/$defs/recordReceipt"},
+        "source_assets": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/sourceAsset"}
+        },
+        "source_metadata_revision": {"$ref": "#/$defs/metadataRevision"}
+      }
+    },
+    "qc": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["export_gate", "payload", "record", "scale"],
+      "properties": {
+        "export_gate": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["payload_verified", "record_freshness", "record_lifecycle_status"],
+          "properties": {
+            "payload_verified": {"const": true},
+            "record_freshness": {"const": "fresh"},
+            "record_lifecycle_status": {"const": "ready"}
+          }
+        },
+        "payload": {"type": "object"},
+        "record": {"type": "object"},
+        "scale": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["physical_scale", "unit", "viewbox_matches_physical_dimensions"],
+          "properties": {
+            "physical_scale": {"const": "1:1"},
+            "unit": {"const": "mm"},
+            "viewbox_matches_physical_dimensions": {"const": true}
+          }
+        }
+      }
+    }
+  }
+}

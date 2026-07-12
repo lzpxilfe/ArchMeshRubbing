@@ -14,6 +14,12 @@ import sys
 from types import ModuleType
 from typing import Any, cast
 
+from .alignment_utils import (
+    scene_trs_matrix,
+    transform_bounds,
+    transform_directions,
+    transform_points,
+)
 from .logging_utils import log_once
 
 _LOGGER = logging.getLogger(__name__)
@@ -389,6 +395,11 @@ class ProfileExporter:
         world_units_per_cm: 1cm에 해당하는 world 단위 수. None이면 mesh.unit(mm/cm/m)에서 추정합니다.
         """
         wupc = _resolve_world_units_per_cm(mesh, world_units_per_cm)
+        local_to_world = scene_trs_matrix(
+            [0.0, 0.0, 0.0] if translation is None else translation,
+            [0.0, 0.0, 0.0] if rotation is None else rotation,
+            scale,
+        )
         cv2_mod = _get_cv2()
         if opengl_matrices:
             mv_raw, proj_raw, vp = opengl_matrices
@@ -403,31 +414,9 @@ class ProfileExporter:
             w_min = None
             w_max = None
             try:
-                lb = np.asarray(mesh.bounds, dtype=np.float64)
-                corners = np.array(
-                    [
-                        [lb[0, 0], lb[0, 1], lb[0, 2]],
-                        [lb[1, 0], lb[0, 1], lb[0, 2]],
-                        [lb[0, 0], lb[1, 1], lb[0, 2]],
-                        [lb[1, 0], lb[1, 1], lb[0, 2]],
-                        [lb[0, 0], lb[0, 1], lb[1, 2]],
-                        [lb[1, 0], lb[0, 1], lb[1, 2]],
-                        [lb[0, 0], lb[1, 1], lb[1, 2]],
-                        [lb[1, 0], lb[1, 1], lb[1, 2]],
-                    ],
-                    dtype=np.float64,
-                )
-                corners = corners * float(scale)
-                if rotation is not None:
-                    from scipy.spatial.transform import Rotation as R
-                    # Match OpenGL fixed-function order: glRotate(X) -> glRotate(Y) -> glRotate(Z)
-                    # which corresponds to intrinsic "XYZ" in SciPy.
-                    r = R.from_euler('XYZ', rotation, degrees=True)
-                    corners = r.apply(corners)
-                if translation is not None:
-                    corners = corners + translation
-                w_min = corners.min(axis=0)
-                w_max = corners.max(axis=0)
+                world_bounds = transform_bounds(mesh.bounds, local_to_world)
+                w_min = world_bounds[0]
+                w_max = world_bounds[1]
             except Exception:
                 log_once(
                     _LOGGER,
@@ -438,13 +427,7 @@ class ProfileExporter:
                 )
 
             if w_min is None or w_max is None:
-                v_all = np.asarray(mesh.vertices, dtype=np.float64) * float(scale)
-                if rotation is not None:
-                    from scipy.spatial.transform import Rotation as R
-                    r = R.from_euler('XYZ', rotation, degrees=True)
-                    v_all = r.apply(v_all)
-                if translation is not None:
-                    v_all = v_all + translation
+                v_all = transform_points(mesh.vertices, local_to_world)
                 w_min = v_all.min(axis=0)
                 w_max = v_all.max(axis=0)
 
@@ -580,13 +563,7 @@ class ProfileExporter:
                 unique_idx = np.unique(faces.reshape(-1))
                 faces = np.searchsorted(unique_idx, faces).astype(np.int32, copy=False)
 
-                vertices = np.asarray(mesh.vertices[unique_idx], dtype=np.float64) * float(scale)
-                if rotation is not None:
-                    from scipy.spatial.transform import Rotation as R
-                    r = R.from_euler('XYZ', rotation, degrees=True)
-                    vertices = r.apply(vertices)
-                if translation is not None:
-                    vertices = vertices + translation
+                vertices = transform_points(mesh.vertices[unique_idx], local_to_world)
 
                 v_homo = np.hstack([vertices, np.ones((len(vertices), 1))])
                 v_clip = v_homo @ mvp  # (N, 4)
@@ -647,13 +624,7 @@ class ProfileExporter:
         ax0, ax1 = view_config['axes']
         
         # 정점 변환
-        vertices = mesh.vertices.copy() * scale
-        if rotation is not None and np.any(rotation != 0):
-            from scipy.spatial.transform import Rotation as R
-            r = R.from_euler('XYZ', rotation, degrees=True)
-            vertices = r.apply(vertices)
-        if translation is not None:
-            vertices = vertices + translation
+        vertices = transform_points(mesh.vertices, local_to_world)
         
         # 2D 투영 (실제 좌표)
         proj_2d = vertices[:, [ax0, ax1]]
@@ -1036,6 +1007,11 @@ class ProfileExporter:
 
         grid_spacing은 cm 단위입니다. world_units_per_cm를 지정하면 메쉬 단위를 cm로 환산하는 기준을 강제할 수 있습니다.
         """
+        local_to_world = scene_trs_matrix(
+            [0.0, 0.0, 0.0] if translation is None else translation,
+            [0.0, 0.0, 0.0] if rotation is None else rotation,
+            scale,
+        )
         contours, bounds = self.extract_silhouette(
             mesh,
             view,
@@ -1195,12 +1171,11 @@ class ProfileExporter:
                                 fn_arr = None
 
                             if fn_arr is not None and fn_arr.ndim == 2 and fn_arr.shape[1] >= 3 and fn_arr.shape[0] > 0:
-                                fn3 = fn_arr[:, :3].copy()
-                                if rotation is not None:
-                                    from scipy.spatial.transform import Rotation as R
-
-                                    r = R.from_euler("XYZ", rotation, degrees=True)
-                                    fn3 = r.apply(fn3)
+                                fn3 = transform_directions(
+                                    fn_arr[:, :3],
+                                    local_to_world,
+                                    normalize=True,
+                                )
 
                                 n_eye = fn3 @ mv[:3, :3].T
                                 front = n_eye[:, 2] > 0.0
@@ -1229,14 +1204,7 @@ class ProfileExporter:
                             p1 = v[e[:, 1]]
 
                             # Local -> world transform
-                            pts = np.vstack([p0, p1]) * float(scale)
-                            if rotation is not None:
-                                from scipy.spatial.transform import Rotation as R
-
-                                r = R.from_euler("XYZ", rotation, degrees=True)
-                                pts = r.apply(pts)
-                            if translation is not None:
-                                pts = pts + np.asarray(translation, dtype=np.float64).reshape(1, 3)
+                            pts = transform_points(np.vstack([p0, p1]), local_to_world)
 
                             if matrices_src is not None and bool(bounds.get("is_pixels")):
                                 try:

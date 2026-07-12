@@ -5,14 +5,18 @@ Licensed under the GNU General Public License v2.0 (GPL2)
 """
 
 import sys
+import copy
 import logging
 import subprocess
 import json
 import time
 import hashlib
-from datetime import datetime
+import os
+import unicodedata
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+import uuid
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -213,12 +217,124 @@ except Exception:
     pass
 
 from src.gui.viewport_3d import Viewport3D  # noqa: E402
-from src.core.mesh_loader import MeshLoader, MeshProcessor  # noqa: E402
+from src.core.mesh_loader import MeshLoader  # noqa: E402
 from src.core.profile_exporter import ProfileExporter  # noqa: E402
 from src.core.project_file import (  # noqa: E402
+    ARTIFACT_PAYLOAD_TYPE,
+    MIGRATION_MARKER_NAME,
     ProjectFormatError,
+    ProjectSaveError,
+    ProjectSerializationError,
+    UnsupportedPayloadError,
+    load_artifact_project as load_amr_artifact_project,
     load_project as load_amr_project,
+    save_artifact_project as save_amr_artifact_project,
     save_project as save_amr_project,
+)
+from src.core.artifact_document import ArtifactDocument  # noqa: E402
+from src.core.artifact_scene_adapter import (  # noqa: E402
+    ArtifactProjectionSnapshot,
+)
+from src.core.artifact_session import (  # noqa: E402
+    ArtifactSession,
+    ArtifactSessionError,
+)
+from src.application.artifact_workbench import (  # noqa: E402
+    ArtifactLoadTicket,
+    ArtifactWorkbench,
+    ArtifactWorkbenchError,
+    ProjectionActivation,
+    ProjectionTransition,
+    StaleWorkflowOperationError,
+    WorkflowBusyError,
+    WorkflowStage,
+    WorkflowTransitionKind,
+)
+from src.core.artifact_vector_extractor import (  # noqa: E402
+    ArtifactVectorExtractionError,
+    commit_vector_computation,
+    compute_artifact_cutline,
+)
+from src.core.artifact_outline_extractor import (  # noqa: E402
+    DEFAULT_OUTLINE_PRECISION_GRID_MM,
+    compute_artifact_outline,
+)
+from src.core.artifact_rubbing_extractor import (  # noqa: E402
+    ArtifactRubbingComputation,
+    ArtifactRubbingError,
+    DEFAULT_RUBBING_BLACK_POINT_UM,
+    DEFAULT_RUBBING_DEPTH_QUANTIZATION_UM,
+    DEFAULT_RUBBING_INK_STRENGTH_PERCENT,
+    DEFAULT_RUBBING_MARGIN_UM,
+    DEFAULT_RUBBING_PIXELS_PER_MM,
+    DEFAULT_RUBBING_POLARITY,
+    DEFAULT_RUBBING_REFERENCE_RADIUS_UM,
+    DigitalRubbingRaster,
+    commit_artifact_rubbing,
+    compute_artifact_rubbing,
+    compute_artifact_rubbing_from_recipe,
+    require_current_rubbing_computation,
+)
+from src.core.artifact_rubbing_record import (  # noqa: E402
+    RUBBING_RECORD_TYPE,
+    rubbing_receipt_from_record,
+)
+from src.core.artifact_rubbing_export import (  # noqa: E402
+    ArtifactRubbingExportError,
+    RUBBING_EXPORT_DIRECTORY_SUFFIX,
+    export_rubbing_package,
+)
+from src.core.artifact_vector_export import (  # noqa: E402
+    ArtifactVectorExportError,
+    VECTOR_EXPORT_DIRECTORY_SUFFIX,
+    export_vector_package,
+)
+from src.core.artifact_vector_record import (  # noqa: E402
+    PlanarFrame,
+    VectorRecordKind,
+    vector_payload_from_record,
+)
+
+
+_NATIVE_CUTLINE_AXIS_INDEX = {"top": 2, "front": 1, "right": 0}
+
+
+def _native_cutline_frame(view: str, offset_mm: float) -> PlanarFrame:
+    """Return the fixed right-handed survey plane for Top/Front/Right cuts."""
+
+    key = str(view or "").strip().lower()
+    offset = float(offset_mm)
+    if not np.isfinite(offset):
+        raise ArtifactVectorExtractionError("cutline offset must be finite millimetres")
+    if key == "top":
+        return PlanarFrame(
+            origin_world_mm=(0.0, 0.0, offset),
+            u_axis_world=(1.0, 0.0, 0.0),
+            v_axis_world=(0.0, 1.0, 0.0),
+            normal_world=(0.0, 0.0, 1.0),
+        )
+    if key == "front":
+        return PlanarFrame(
+            origin_world_mm=(0.0, offset, 0.0),
+            u_axis_world=(1.0, 0.0, 0.0),
+            v_axis_world=(0.0, 0.0, 1.0),
+            normal_world=(0.0, -1.0, 0.0),
+        )
+    if key == "right":
+        return PlanarFrame(
+            origin_world_mm=(offset, 0.0, 0.0),
+            u_axis_world=(0.0, 1.0, 0.0),
+            v_axis_world=(0.0, 0.0, 1.0),
+            normal_world=(1.0, 0.0, 0.0),
+        )
+    raise ArtifactVectorExtractionError(f"unsupported native Cutline view: {view!r}")
+from src.core.source_identity import (  # noqa: E402
+    SourceFingerprint,
+    SourceVerification,
+    SourceVerificationStatus,
+    compare_fingerprints,
+    legacy_unverified_source,
+    missing_source,
 )
 from src.core.runtime_defaults import DEFAULTS as RUNTIME_DEFAULTS  # noqa: E402
 from src.gui.profile_graph_widget import ProfileGraphWidget  # noqa: E402
@@ -228,6 +344,10 @@ from src.core.alignment_utils import (  # noqa: E402
     fit_plane_normal,
     orient_plane_normal_toward,
     rotation_matrix_align_vectors,
+    scene_rotation_matrix,
+    scene_trs_matrix,
+    transform_plane_world_to_local,
+    transform_points,
 )
 from src.core.unit_utils import DEFAULT_MESH_UNIT, mm_to_mesh_units  # noqa: E402
 from src.core.tile_form_model import (  # noqa: E402
@@ -256,21 +376,309 @@ from src.core.flatten_policy import recommend_flatten_mode  # noqa: E402
 
 DEFAULT_EXPORT_DPI = RUNTIME_DEFAULTS.export_dpi
 
+_SOURCE_BINDING_CAPTURED = "captured_at_import"
+_SOURCE_BINDING_LEGACY = "legacy_unverified"
+_SOURCE_BINDING_GENERATED = "generated_ephemeral"
+_SOURCE_BINDING_VALUES = {
+    _SOURCE_BINDING_CAPTURED,
+    _SOURCE_BINDING_LEGACY,
+    _SOURCE_BINDING_GENERATED,
+}
+_ALIGNMENT_STATUS_MUTABLE_TRS = "legacy_mutable_trs"
+_ALIGNMENT_STATUS_UNVERIFIABLE = "legacy_unverifiable"
+_ALIGNMENT_STATUS_BAKED_UNVERIFIABLE = "legacy_baked_unverifiable"
+_VIEWPORT_PROJECT_SWAP_FIELDS = (
+    "_mesh_center",
+    "picking_mode",
+    "curvature_pick_mode",
+    "picked_points",
+    "fitted_arc",
+    "measure_picked_points",
+    "slice_enabled",
+    "slice_z",
+    "slice_contours",
+    "crosshair_enabled",
+    "crosshair_pos",
+    "x_profile",
+    "y_profile",
+    "_world_x_profile",
+    "_world_y_profile",
+    "roi_enabled",
+    "active_roi_edge",
+    "roi_rect_dragging",
+    "roi_rect_start",
+    "_roi_bounds_changed",
+    "_roi_move_dragging",
+    "_roi_move_last_xy",
+    "_roi_commit_axis_hint",
+    "_roi_last_adjust_axis",
+    "_roi_commit_plane_hint",
+    "_roi_last_adjust_plane",
+    "roi_bounds",
+    "roi_cut_edges",
+    "roi_cap_verts",
+    "roi_section_world",
+    "roi_caps_enabled",
+    "cut_lines_enabled",
+    "cut_lines",
+    "cut_line_axis_lock",
+    "cut_line_active",
+    "cut_line_drawing",
+    "cut_line_preview",
+    "_cut_line_final",
+    "cut_section_profiles",
+    "cut_section_world",
+    "cut_section_contours_world",
+    "cut_section_contours_local",
+    "_active_polyline_layer_obj_index",
+    "_active_polyline_layer_index",
+    "_polyline_layer_dragging",
+    "_polyline_layer_drag_world_start",
+    "_polyline_layer_drag_offset_start",
+    "_polyline_layer_drag_axis_lock",
+    "_polyline_layer_drag_moved",
+    "_cut_section_pending_indices",
+    "line_section_enabled",
+    "line_section_dragging",
+    "line_section_start",
+    "line_section_end",
+    "line_profile",
+    "line_section_contours",
+    "floor_picks",
+    "_floor_pick_ready",
+    "_floor_pick_ready_at",
+    "surface_paint_points",
+    "surface_lasso_points",
+    "surface_lasso_face_indices",
+    "surface_lasso_preview",
+    "grid_spacing",
+    "grid_size",
+    "undo_stack",
+    "_front_back_ortho_enabled",
+    "_canonical_view_key",
+    "_ortho_frame_override",
+)
+
+
+def _normalized_path_hint(path: str) -> str:
+    try:
+        value = os.path.normcase(str(Path(path).expanduser().resolve(strict=False)))
+    except Exception:
+        value = os.path.normcase(str(path))
+    return unicodedata.normalize("NFC", value)
+
+
+def _same_filesystem_target(first: str, second: str) -> bool:
+    try:
+        first_path = Path(first).expanduser()
+        second_path = Path(second).expanduser()
+        if first_path.exists() and second_path.exists():
+            return os.path.samefile(first_path, second_path)
+    except (OSError, ValueError):
+        pass
+    return _normalized_path_hint(first) == _normalized_path_hint(second)
+
+
+def _mesh_source_payload(mesh: Any, mesh_path: str | None) -> dict[str, Any]:
+    """Serialize the identity captured when this in-memory geometry was imported.
+
+    Deliberately never re-hash ``mesh_path`` here: the file may have changed
+    after import, and attaching its new hash to old in-memory geometry would
+    create false provenance.
+    """
+    identity = getattr(mesh, "source_identity", None) if mesh is not None else None
+    binding_status = str(
+        getattr(mesh, "_amr_source_binding_status", "") or ""
+    ).strip()
+
+    if mesh_path:
+        if not isinstance(identity, SourceFingerprint):
+            raise ProjectSerializationError(
+                f"External mesh {mesh_path!r} has no immutable source identity; "
+                "reload the source before saving"
+            )
+        if not binding_status:
+            binding_status = _SOURCE_BINDING_CAPTURED
+    else:
+        if identity is not None and not isinstance(identity, SourceFingerprint):
+            raise ProjectSerializationError("Mesh source identity has an invalid runtime type")
+        if not binding_status:
+            binding_status = _SOURCE_BINDING_GENERATED
+
+    if binding_status not in _SOURCE_BINDING_VALUES:
+        raise ProjectSerializationError(
+            f"Unsupported mesh source binding status: {binding_status!r}"
+        )
+    parse_format = str(
+        getattr(mesh, "source_format", "")
+        or (identity.format if identity is not None else "")
+    ).strip().lower().removeprefix(".")
+    if identity is not None and f".{parse_format}" not in MeshLoader.SUPPORTED_FORMATS:
+        raise ProjectSerializationError(
+            f"Unsupported mesh source parser format: {parse_format!r}"
+        )
+    return {
+        "identity": identity.to_dict() if identity is not None else None,
+        "binding_status": binding_status,
+        "parse_format": parse_format or None,
+    }
+
+
+def _validate_project_source_declarations(
+    state: dict[str, Any],
+    *,
+    migrated_from_v1: bool,
+) -> None:
+    """Reject invalid v2 source declarations before the live scene is cleared."""
+    objects = state.get("objects", [])
+    if not isinstance(objects, list):
+        raise ProjectFormatError("Invalid project state: 'objects' must be a list")
+
+    for index, obj_state in enumerate(objects):
+        if not isinstance(obj_state, dict):
+            raise ProjectFormatError(f"Invalid project object at index {index}")
+        mesh_info = obj_state.get("mesh", {})
+        if not isinstance(mesh_info, dict):
+            raise ProjectFormatError(f"Invalid mesh declaration at object index {index}")
+        path_hint = str(mesh_info.get("path", "") or "").strip()
+        if not path_hint:
+            continue
+
+        source = mesh_info.get("source")
+        if not isinstance(source, dict):
+            if migrated_from_v1:
+                continue
+            raise ProjectFormatError(
+                f"Object {index} has an external mesh path but no source declaration"
+            )
+        binding_status = str(source.get("binding_status", "") or "").strip()
+        if binding_status not in _SOURCE_BINDING_VALUES:
+            raise ProjectFormatError(
+                f"Object {index} has unsupported source binding status: {binding_status!r}"
+            )
+        raw_identity = source.get("identity")
+        if raw_identity is None:
+            if binding_status == _SOURCE_BINDING_LEGACY:
+                continue
+            raise ProjectFormatError(
+                f"Object {index} has no source identity for external mesh {path_hint!r}"
+            )
+        if not isinstance(raw_identity, dict):
+            raise ProjectFormatError(f"Object {index} source identity must be an object")
+        try:
+            identity = SourceFingerprint.from_dict(raw_identity)
+        except ValueError as exc:
+            raise ProjectFormatError(
+                f"Object {index} has invalid source identity: {exc}"
+            ) from exc
+        parse_format = str(source.get("parse_format", identity.format) or "").strip()
+        parse_ext = f".{parse_format.lower().removeprefix('.')}"
+        if parse_ext not in MeshLoader.SUPPORTED_FORMATS:
+            raise ProjectFormatError(
+                f"Object {index} has unsupported source parser format: {parse_format!r}"
+            )
+
+
+def _verify_loaded_project_source(
+    mesh_data: Any,
+    obj_state: dict[str, Any],
+    loaded_path: str,
+    *,
+    migrated_from_v1: bool,
+) -> tuple[SourceVerification, str]:
+    """Compare saved and imported identities before any scene mutation."""
+    mesh_info = obj_state.get("mesh", {})
+    if not isinstance(mesh_info, dict):
+        return (
+            SourceVerification(
+                status=SourceVerificationStatus.UNREADABLE,
+                checked_path=str(loaded_path),
+                detail="project mesh declaration is not an object",
+            ),
+            _SOURCE_BINDING_LEGACY if migrated_from_v1 else _SOURCE_BINDING_CAPTURED,
+        )
+
+    source = mesh_info.get("source")
+    if not isinstance(source, dict):
+        source = {}
+    binding_status = str(source.get("binding_status", "") or "").strip()
+    if migrated_from_v1:
+        return legacy_unverified_source(str(loaded_path)), _SOURCE_BINDING_LEGACY
+
+    raw_identity = source.get("identity")
+    if raw_identity is None and binding_status == _SOURCE_BINDING_LEGACY:
+        return legacy_unverified_source(str(loaded_path)), _SOURCE_BINDING_LEGACY
+    if not isinstance(raw_identity, dict):
+        return (
+            SourceVerification(
+                status=SourceVerificationStatus.UNREADABLE,
+                checked_path=str(loaded_path),
+                detail="project source identity is missing or invalid",
+            ),
+            binding_status or _SOURCE_BINDING_CAPTURED,
+        )
+
+    try:
+        expected = SourceFingerprint.from_dict(raw_identity)
+    except ValueError as exc:
+        return (
+            SourceVerification(
+                status=SourceVerificationStatus.UNREADABLE,
+                checked_path=str(loaded_path),
+                detail=f"invalid expected source identity: {exc}",
+            ),
+            binding_status or _SOURCE_BINDING_CAPTURED,
+        )
+
+    actual = getattr(mesh_data, "source_identity", None)
+    if not isinstance(actual, SourceFingerprint):
+        return (
+            SourceVerification(
+                status=SourceVerificationStatus.UNREADABLE,
+                checked_path=str(loaded_path),
+                expected=expected,
+                detail="mesh loader did not provide a source identity",
+            ),
+            binding_status or _SOURCE_BINDING_CAPTURED,
+        )
+
+    stored_path = str(mesh_info.get("path", "") or "").strip()
+    relocated = bool(stored_path) and _normalized_path_hint(stored_path) != _normalized_path_hint(
+        str(loaded_path)
+    )
+    verification = compare_fingerprints(
+        expected,
+        actual,
+        checked_path=str(loaded_path),
+        relocated=relocated,
+    )
+    return verification, binding_status or _SOURCE_BINDING_CAPTURED
+
 
 class MeshLoadThread(QThread):
     loaded = pyqtSignal(object, str)
     failed = pyqtSignal(str)
 
-    def __init__(self, filepath: str, scale_factor: float, default_unit: str):
+    def __init__(
+        self,
+        filepath: str,
+        scale_factor: float,
+        default_unit: str,
+        source_format: str | None = None,
+    ):
         super().__init__()
         self._filepath = str(filepath)
         self._scale_factor = float(scale_factor)
         self._default_unit = str(default_unit)
+        self._source_format = str(source_format or "").strip().lower() or None
 
     def run(self):
         try:
             loader = MeshLoader(default_unit=self._default_unit)
-            mesh_data = loader.load(self._filepath)
+            mesh_data = loader.load(
+                self._filepath,
+                source_format=self._source_format,
+            )
 
             if self._scale_factor != 1.0:
                 mesh_data.vertices *= self._scale_factor
@@ -351,26 +759,28 @@ class SliceComputeThread(QThread):
     def run(self):
         try:
             from src.core.mesh_slicer import MeshSlicer
-            from scipy.spatial.transform import Rotation as R
 
             slicer = MeshSlicer(self._mesh_data.to_trimesh())
 
-            inv_rot = R.from_euler('xyz', self._rotation, degrees=True).inv().as_matrix()
-            inv_scale = 1.0 / self._scale if self._scale != 0 else 1.0
+            local_to_world = scene_trs_matrix(
+                self._translation,
+                self._rotation,
+                self._scale,
+            )
 
             world_origin = np.array([0.0, 0.0, self._z], dtype=np.float64)
-            local_origin = inv_scale * inv_rot @ (world_origin - self._translation)
-
             world_normal = np.array([0.0, 0.0, 1.0], dtype=np.float64)
-            local_normal = inv_rot @ world_normal
+            local_origin, local_normal = transform_plane_world_to_local(
+                world_origin,
+                world_normal,
+                local_to_world,
+            )
 
             contours_local = slicer.slice_with_plane(local_origin, local_normal)
 
-            rot_mat = R.from_euler('xyz', self._rotation, degrees=True).as_matrix()
             world_contours = []
             for cnt in contours_local:
-                w_cnt = (rot_mat @ (cnt * self._scale).T).T + self._translation
-                world_contours.append(w_cnt)
+                world_contours.append(transform_points(cnt, local_to_world))
 
             self.computed.emit(self._z, world_contours)
         except Exception as e:
@@ -698,38 +1108,126 @@ class SplashScreen(QWidget):
 
 
 class UnitSelectionDialog(QDialog):
-    """메쉬 로딩 시 단위를 선택하는 다이얼로그"""
+    """Confirm source unit and signed-axis mapping before scientific use."""
     last_index = 0  # 클래스 변수로 마지막 선택 기억
+    last_axes = {"source_x": "+X", "source_y": "+Y", "source_z": "+Z"}
     
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("단위 선택")
-        self.setFixedWidth(280)
+        self.setWindowTitle("원본 단위·좌표축 확인")
+        self.setFixedWidth(420)
         
         layout = QVBoxLayout(self)
-        label = QLabel("파일의 원본 단위를 선택하세요:\n(숫자 184.9가 18.49cm가 되려면 mm 선택)")
+        label = QLabel(
+            "파일에 기록된 원본 단위와 좌표축을 확인하세요.\n"
+            "이 선택은 원본을 변경하지 않고 metadata revision으로 저장됩니다."
+        )
         label.setStyleSheet("color: #4a5568; font-size: 11px;")
+        label.setWordWrap(True)
         layout.addWidget(label)
         
         self.combo = QComboBox()
-        self.combo.addItems(["Millimeters (mm) -> 1/10 축소", "Centimeters (cm) -> 그대로", "Meters (m) -> 100배 확대"])
+        self.combo.addItems(["Millimeters (mm)", "Centimeters (cm)", "Meters (m)"])
         self.combo.setCurrentIndex(UnitSelectionDialog.last_index) 
         layout.addWidget(self.combo)
+
+        axis_group = QGroupBox("원본 축 → canonical 축")
+        axis_layout = QFormLayout(axis_group)
+        self.axis_combos: dict[str, QComboBox] = {}
+        axis_values = ["+X", "-X", "+Y", "-Y", "+Z", "-Z"]
+        for key, label_text in (
+            ("source_x", "원본 X"),
+            ("source_y", "원본 Y"),
+            ("source_z", "원본 Z"),
+        ):
+            axis_combo = QComboBox()
+            axis_combo.addItems(axis_values)
+            saved = UnitSelectionDialog.last_axes.get(key, f"+{key[-1].upper()}")
+            axis_combo.setCurrentText(saved)
+            axis_combo.currentIndexChanged.connect(self._update_accept_enabled)
+            self.axis_combos[key] = axis_combo
+            axis_layout.addRow(label_text, axis_combo)
+        layout.addWidget(axis_group)
+
+        self.confirm_metadata = QCheckBox(
+            "위 단위와 축 매핑을 확인했습니다 (오른손/왼손은 매핑에서 계산)"
+        )
+        self.confirm_metadata.setChecked(False)
+        self.confirm_metadata.toggled.connect(self._update_accept_enabled)
+        layout.addWidget(self.confirm_metadata)
         
         btn_layout = QHBoxLayout()
-        ok_btn = QPushButton("확인")
-        ok_btn.setDefault(True)
-        ok_btn.clicked.connect(self.accept_and_save)
+        self.ok_btn = QPushButton("확인")
+        self.ok_btn.setDefault(True)
+        self.ok_btn.setEnabled(False)
+        self.ok_btn.clicked.connect(self.accept_and_save)
         cancel_btn = QPushButton("취소")
         cancel_btn.clicked.connect(self.reject)
-        btn_layout.addWidget(ok_btn)
+        btn_layout.addWidget(self.ok_btn)
         btn_layout.addWidget(cancel_btn)
         
         layout.addLayout(btn_layout)
 
+    def _axes(self) -> dict[str, str]:
+        return {
+            key: str(combo.currentText()).strip()
+            for key, combo in self.axis_combos.items()
+        }
+
+    def _axes_are_bijective(self) -> bool:
+        values = list(self._axes().values())
+        return len({value[-1] for value in values if value}) == 3
+
+    def _update_accept_enabled(self, *_args) -> None:
+        self.ok_btn.setEnabled(
+            bool(self.confirm_metadata.isChecked()) and self._axes_are_bijective()
+        )
+
     def accept_and_save(self):
+        if not self._axes_are_bijective():
+            QMessageBox.warning(
+                self,
+                "좌표축 확인",
+                "원본 X/Y/Z는 canonical X/Y/Z에 각각 한 번씩 대응해야 합니다.",
+            )
+            return
+        if not self.confirm_metadata.isChecked():
+            return
         UnitSelectionDialog.last_index = self.combo.currentIndex()
+        UnitSelectionDialog.last_axes = self._axes()
         self.accept()
+
+    def get_source_metadata(self) -> dict[str, Any]:
+        units = ("mm", "cm", "m")
+        index = int(self.combo.currentIndex())
+        unit = units[index] if 0 <= index < len(units) else "unknown"
+        axes = self._axes()
+        vectors = {
+            "+X": np.array([1.0, 0.0, 0.0]),
+            "-X": np.array([-1.0, 0.0, 0.0]),
+            "+Y": np.array([0.0, 1.0, 0.0]),
+            "-Y": np.array([0.0, -1.0, 0.0]),
+            "+Z": np.array([0.0, 0.0, 1.0]),
+            "-Z": np.array([0.0, 0.0, -1.0]),
+        }
+        axes_are_bijective = self._axes_are_bijective()
+        if axes_are_bijective:
+            matrix = np.column_stack(
+                [vectors[axes[key]] for key in ("source_x", "source_y", "source_z")]
+            )
+            handedness = "right" if float(np.linalg.det(matrix)) > 0.0 else "left"
+        else:
+            handedness = "unknown"
+        return {
+            "unit": unit,
+            "axes": axes,
+            "handedness": handedness,
+            "confirmation_status": (
+                "confirmed"
+                if self.confirm_metadata.isChecked() and axes_are_bijective
+                else "unconfirmed"
+            ),
+        }
 
     def get_scale_factor(self):
         idx = self.combo.currentIndex()
@@ -3146,6 +3644,12 @@ class SectionPanel(QWidget):
     saveSectionLayersRequested = pyqtSignal()
     roiToggled = pyqtSignal(bool)
     silhouetteRequested = pyqtSignal()
+    nativeCutlineRequested = pyqtSignal()
+    nativeCutlineViewChanged = pyqtSignal(str)
+    nativeOutlineRequested = pyqtSignal()
+    nativeVectorExportRequested = pyqtSignal()
+    nativeRubbingRequested = pyqtSignal()
+    nativeRubbingExportRequested = pyqtSignal()
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -3189,8 +3693,188 @@ class SectionPanel(QWidget):
         self.graph_y.setVisible(False)
         line.setVisible(False)
 
+        native_group = QGroupBox("검증된 단면 · ArtifactDocument")
+        native_layout = QVBoxLayout(native_group)
+        native_form = QFormLayout()
+        self.combo_native_cutline_view = QComboBox()
+        self.combo_native_cutline_view.addItem("Top · XY / Z 위치", "top")
+        self.combo_native_cutline_view.addItem("Front · XZ / Y 위치", "front")
+        self.combo_native_cutline_view.addItem("Right · YZ / X 위치", "right")
+        self.combo_native_cutline_view.currentIndexChanged.connect(
+            lambda _index: self.nativeCutlineViewChanged.emit(
+                str(self.combo_native_cutline_view.currentData() or "top")
+            )
+        )
+        native_form.addRow("단면 방향", self.combo_native_cutline_view)
+        self.spin_native_cutline_offset = QDoubleSpinBox()
+        self.spin_native_cutline_offset.setDecimals(4)
+        self.spin_native_cutline_offset.setRange(-1_000_000_000.0, 1_000_000_000.0)
+        self.spin_native_cutline_offset.setSingleStep(0.1)
+        self.spin_native_cutline_offset.setSuffix(" mm")
+        native_form.addRow("평면 위치", self.spin_native_cutline_offset)
+        native_layout.addLayout(native_form)
+        self.btn_native_cutline = QPushButton("단면 계산 · 기록")
+        self.btn_native_cutline.setToolTip(
+            "원본에서 canonical-mm 단면을 다시 계산하고 recipe·QC와 함께 기록합니다."
+        )
+        self.btn_native_cutline.clicked.connect(self.nativeCutlineRequested.emit)
+        native_layout.addWidget(self.btn_native_cutline)
+
+        outline_line = QFrame()
+        outline_line.setFrameShape(QFrame.Shape.HLine)
+        outline_line.setFrameShadow(QFrame.Shadow.Sunken)
+        native_layout.addWidget(outline_line)
+        native_outline_form = QFormLayout()
+        self.combo_native_outline_view = QComboBox()
+        self.combo_native_outline_view.addItem("Top · +Z", "top")
+        self.combo_native_outline_view.addItem("Bottom · -Z", "bottom")
+        self.combo_native_outline_view.addItem("Front · -Y", "front")
+        self.combo_native_outline_view.addItem("Back · +Y", "back")
+        self.combo_native_outline_view.addItem("Right · +X", "right")
+        self.combo_native_outline_view.addItem("Left · -X", "left")
+        native_outline_form.addRow("외곽 방향", self.combo_native_outline_view)
+        self.spin_native_outline_grid = QDoubleSpinBox()
+        self.spin_native_outline_grid.setDecimals(6)
+        self.spin_native_outline_grid.setRange(0.000001, 1_000_000.0)
+        self.spin_native_outline_grid.setSingleStep(0.01)
+        self.spin_native_outline_grid.setValue(DEFAULT_OUTLINE_PRECISION_GRID_MM)
+        self.spin_native_outline_grid.setSuffix(" mm")
+        self.spin_native_outline_grid.setToolTip(
+            "삼각형 투영을 합집합하기 전 적용할 고정 mm 격자입니다. "
+            "격자보다 좁은 특징은 합쳐지거나 사라질 수 있으며 QC에 기록됩니다."
+        )
+        native_outline_form.addRow("외곽 정밀도", self.spin_native_outline_grid)
+        native_layout.addLayout(native_outline_form)
+        self.btn_native_outline = QPushButton("외곽 계산 · 기록")
+        self.btn_native_outline.setToolTip(
+            "전체 삼각형을 canonical-mm 평면에 투영하고 오목부·구멍·분리 성분을 "
+            "보존한 Outline record를 만듭니다."
+        )
+        self.btn_native_outline.clicked.connect(self.nativeOutlineRequested.emit)
+        native_layout.addWidget(self.btn_native_outline)
+        self.btn_native_vector_export = QPushButton("최근 검증 벡터 1:1 SVG 내보내기")
+        self.btn_native_vector_export.clicked.connect(self.nativeVectorExportRequested.emit)
+        native_layout.addWidget(self.btn_native_vector_export)
+
+        rubbing_line = QFrame()
+        rubbing_line.setFrameShape(QFrame.Shape.HLine)
+        rubbing_line.setFrameShadow(QFrame.Shadow.Sunken)
+        native_layout.addWidget(rubbing_line)
+        rubbing_title = QLabel("디지털 탁본 · 재현 가능한 1:1 raster")
+        rubbing_title.setStyleSheet("font-weight: bold;")
+        native_layout.addWidget(rubbing_title)
+        native_rubbing_form = QFormLayout()
+        self.combo_native_rubbing_view = QComboBox()
+        for label, value in (
+            ("Top · +Z", "top"),
+            ("Bottom · -Z", "bottom"),
+            ("Front · -Y", "front"),
+            ("Back · +Y", "back"),
+            ("Right · +X", "right"),
+            ("Left · -X", "left"),
+        ):
+            self.combo_native_rubbing_view.addItem(label, value)
+        native_rubbing_form.addRow("탁본 방향", self.combo_native_rubbing_view)
+
+        self.spin_native_rubbing_pixels_per_mm = QSpinBox()
+        self.spin_native_rubbing_pixels_per_mm.setRange(1, 100)
+        self.spin_native_rubbing_pixels_per_mm.setValue(DEFAULT_RUBBING_PIXELS_PER_MM)
+        self.spin_native_rubbing_pixels_per_mm.setSuffix(" px/mm")
+        native_rubbing_form.addRow("해상도", self.spin_native_rubbing_pixels_per_mm)
+
+        def _micrometre_spin(value: int, *, minimum: int = 1) -> QSpinBox:
+            spin = QSpinBox()
+            spin.setRange(minimum, 1_000_000_000)
+            spin.setValue(int(value))
+            spin.setSuffix(" µm")
+            return spin
+
+        self.spin_native_rubbing_margin_um = _micrometre_spin(
+            DEFAULT_RUBBING_MARGIN_UM,
+            minimum=0,
+        )
+        native_rubbing_form.addRow("여백", self.spin_native_rubbing_margin_um)
+        self.spin_native_rubbing_reference_radius_um = _micrometre_spin(
+            DEFAULT_RUBBING_REFERENCE_RADIUS_UM
+        )
+        native_rubbing_form.addRow(
+            "표면 기준 반경", self.spin_native_rubbing_reference_radius_um
+        )
+        self.spin_native_rubbing_depth_quantization_um = _micrometre_spin(
+            DEFAULT_RUBBING_DEPTH_QUANTIZATION_UM
+        )
+        self.spin_native_rubbing_depth_quantization_um.setMaximum(1_000_000)
+        native_rubbing_form.addRow(
+            "깊이 양자화", self.spin_native_rubbing_depth_quantization_um
+        )
+        self.spin_native_rubbing_black_point_um = _micrometre_spin(
+            DEFAULT_RUBBING_BLACK_POINT_UM
+        )
+        native_rubbing_form.addRow(
+            "검정 기준 깊이", self.spin_native_rubbing_black_point_um
+        )
+        self.spin_native_rubbing_strength = QSpinBox()
+        self.spin_native_rubbing_strength.setRange(1, 400)
+        self.spin_native_rubbing_strength.setValue(
+            DEFAULT_RUBBING_INK_STRENGTH_PERCENT
+        )
+        self.spin_native_rubbing_strength.setSuffix(" %")
+        native_rubbing_form.addRow("먹 농도", self.spin_native_rubbing_strength)
+        self.combo_native_rubbing_polarity = QComboBox()
+        self.combo_native_rubbing_polarity.addItem("양각·음각 모두", "bidirectional")
+        self.combo_native_rubbing_polarity.addItem("양각", "raised")
+        self.combo_native_rubbing_polarity.addItem("음각", "incised")
+        polarity_index = self.combo_native_rubbing_polarity.findData(
+            DEFAULT_RUBBING_POLARITY
+        )
+        self.combo_native_rubbing_polarity.setCurrentIndex(max(0, polarity_index))
+        native_rubbing_form.addRow("표면 극성", self.combo_native_rubbing_polarity)
+        native_layout.addLayout(native_rubbing_form)
+
+        self.btn_native_rubbing = QPushButton("탁본 계산 · 기록")
+        self.btn_native_rubbing.setToolTip(
+            "현재 source·단위·Align에서 CPU로 다시 계산하고 recipe·QC·raster receipt를 기록합니다."
+        )
+        self.btn_native_rubbing.clicked.connect(self.nativeRubbingRequested.emit)
+        native_layout.addWidget(self.btn_native_rubbing)
+        self.btn_native_rubbing_export = QPushButton(
+            "최근 검증 탁본 1:1 PNG 패키지 내보내기"
+        )
+        self.btn_native_rubbing_export.clicked.connect(
+            self.nativeRubbingExportRequested.emit
+        )
+        native_layout.addWidget(self.btn_native_rubbing_export)
+        self.label_native_rubbing_preview = QLabel(
+            "계산된 탁본 미리보기는 여기에 표시됩니다.\n"
+            "미리보기 픽셀은 export 권위가 아니며 record recipe에서 다시 계산합니다."
+        )
+        self.label_native_rubbing_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.label_native_rubbing_preview.setWordWrap(True)
+        self.label_native_rubbing_preview.setMinimumHeight(160)
+        self.label_native_rubbing_preview.setStyleSheet(
+            "background: #f7fafc; border: 1px solid #cbd5e0; color: #4a5568;"
+        )
+        native_layout.addWidget(self.label_native_rubbing_preview)
+        self.label_native_rubbing_info = QLabel("READY + FRESH 탁본 기록 없음")
+        self.label_native_rubbing_info.setWordWrap(True)
+        self.label_native_rubbing_info.setStyleSheet(
+            "color: #4a5568; font-size: 10px;"
+        )
+        native_layout.addWidget(self.label_native_rubbing_info)
+        native_note = QLabel(
+            "초록 선은 기록 payload에서 다시 만든 화면 투영입니다. "
+            "Cutline과 6면 Outline은 원본에서 다시 계산되며 화면 픽셀을 측정값으로 쓰지 않습니다."
+        )
+        native_note.setWordWrap(True)
+        native_note.setStyleSheet("color: #4a5568; font-size: 10px;")
+        native_layout.addWidget(native_note)
+        native_group.setEnabled(False)
+        self.native_group = native_group
+        layout.addWidget(native_group)
+
         # 4. 2D 단면선(2개) - 상면에서 가로/세로(꺾임 가능) 가이드 라인
         line_group = QGroupBox("✏️ 2D 단면선 지정 (상면, 2개)")
+        self.legacy_line_group = line_group
         line_layout = QVBoxLayout(line_group)
 
         self.btn_line = QPushButton("✏️ 단면선 그리기 시작")
@@ -3245,6 +3929,7 @@ class SectionPanel(QWidget):
         
         # 5. 2D ROI 영역 지정 (상면 투영)
         roi_group = QGroupBox("✂️ 2D 영역 지정 (상면 Cropping)")
+        self.legacy_roi_group = roi_group
         roi_layout = QVBoxLayout(roi_group)
         
         self.btn_roi = QPushButton("📐 영역 지정 모드 시작")
@@ -3356,6 +4041,32 @@ class MainWindow(QMainWindow):
         self._project_load_queue: list[dict[str, Any]] = []
         self._project_load_state: dict[str, Any] | None = None
         self._project_load_current: dict[str, Any] | None = None
+        self._project_load_from_legacy: bool = False
+        self._project_requires_save_as: bool = False
+        self._legacy_project_path: str | None = None
+        self._last_source_verification: SourceVerification | None = None
+        self._project_has_legacy_bindings: bool = False
+        self._project_pending_path: str | None = None
+        self._project_load_failed: bool = False
+        self._project_staged_objects: list[
+            tuple[Any, str, dict[str, Any], SourceVerification, str]
+        ] = []
+        self._project_previous_context: dict[str, Any] | None = None
+        # Native ArtifactDocument mode is mutually exclusive with writable
+        # legacy_ui_state.  The session owns the immutable document, verified
+        # source-space geometry and resolved external source path.
+        self._artifact_session: ArtifactSession | None = None
+        self._artifact_workbench = ArtifactWorkbench()
+        self._artifact_authority_faulted = False
+        self._artifact_load_ticket: ArtifactLoadTicket | None = None
+        self._mesh_load_request_id: str | None = None
+        self._native_rubbing_preview_record_id: str | None = None
+        self._native_rubbing_preview_document_id: str | None = None
+        self._native_rubbing_preview_geometry_ref: str | None = None
+        self._artifact_load_active: bool = False
+        self._artifact_pending_document: ArtifactDocument | None = None
+        self._artifact_pending_project_path: str | None = None
+        self._artifact_pending_source_metadata: dict[str, Any] | None = None
         
         self.init_ui()
         self.init_menu()
@@ -3380,10 +4091,11 @@ class MainWindow(QMainWindow):
         self.viewport.floorAlignmentConfirmed.connect(self.on_floor_alignment_confirmed)
         self.viewport.surfaceAssignmentChanged.connect(self.on_surface_assignment_changed)
         self.viewport.measurePointPicked.connect(self.on_measure_point_picked)
+        self.viewport.undoRequested.connect(self.undo_last_action)
         
         # 단축키 설정 (Undo: Ctrl+Z)
         self.undo_shortcut = QShortcut(QKeySequence("Ctrl+Z"), self)
-        self.undo_shortcut.activated.connect(self.viewport.undo)
+        self.undo_shortcut.activated.connect(self.undo_last_action)
         
         # 상단 정치 툴바 추가
         self.trans_toolbar = TransformToolbar(self.viewport, self)
@@ -3544,8 +4256,24 @@ class MainWindow(QMainWindow):
         self.section_panel.cutLineClearRequested.connect(self.on_cut_line_clear_requested)
         self.section_panel.cutLinesClearAllRequested.connect(self.on_cut_lines_clear_all_requested)
         self.section_panel.roiToggled.connect(self.on_roi_toggled)
-        self.section_panel.silhouetteRequested.connect(self.viewport.extract_roi_silhouette)
+        self.section_panel.silhouetteRequested.connect(self.on_silhouette_requested)
         self.section_panel.saveSectionLayersRequested.connect(self.on_save_section_layers_requested)
+        self.section_panel.nativeCutlineRequested.connect(self.on_native_cutline_requested)
+        self.section_panel.nativeCutlineViewChanged.connect(
+            self.on_native_cutline_view_changed
+        )
+        self.section_panel.nativeOutlineRequested.connect(
+            self.on_native_outline_requested
+        )
+        self.section_panel.nativeVectorExportRequested.connect(
+            self.on_native_vector_export_requested
+        )
+        self.section_panel.nativeRubbingRequested.connect(
+            self.on_native_rubbing_requested
+        )
+        self.section_panel.nativeRubbingExportRequested.connect(
+            self.on_native_rubbing_export_requested
+        )
 
         self.viewport.lineProfileUpdated.connect(self.section_panel.update_line_profile)
         self.viewport.roiSilhouetteExtracted.connect(self.on_silhouette_extracted)
@@ -3756,8 +4484,97 @@ class MainWindow(QMainWindow):
         self._save_ui_state()
         super().closeEvent(a0)
 
+    def _native_artifact_mode(self) -> bool:
+        return isinstance(getattr(self, "_artifact_session", None), ArtifactSession)
+
+    def _artifact_workbench_controller(self) -> ArtifactWorkbench:
+        """Return the Qt-free authority controller during the shell migration."""
+
+        controller = getattr(self, "_artifact_workbench", None)
+        if not isinstance(controller, ArtifactWorkbench):
+            controller = ArtifactWorkbench()
+            self._artifact_workbench = controller
+        session = getattr(self, "_artifact_session", None)
+        session = session if isinstance(session, ArtifactSession) else None
+        snapshot = controller.snapshot
+        # Older GUI tests and not-yet-ported record commands still assign the
+        # compatibility field directly.  Production Open/Align never needs
+        # this bridge; it exists so one vertical slice can migrate safely.
+        if (
+            not bool(getattr(self, "_artifact_authority_faulted", False))
+            and snapshot.pending_load is None
+            and snapshot.session is not session
+        ):
+            controller.synchronize_legacy_session(
+                session,
+                project_path=getattr(self, "_current_project_path", None),
+            )
+        return controller
+
+    def _native_workflow_stage(self) -> WorkflowStage:
+        if not self._native_artifact_mode():
+            return WorkflowStage.EMPTY
+        return self._artifact_workbench_controller().snapshot.stage
+
+    def _native_measurement_ready(self) -> bool:
+        if not self._native_artifact_mode() or bool(
+            getattr(self, "_artifact_authority_faulted", False)
+        ):
+            return False
+        return self._artifact_workbench_controller().snapshot.can_measure
+
+    def _require_native_projection_session(self, obj: Any) -> ArtifactSession:
+        if bool(getattr(self, "_artifact_authority_faulted", False)):
+            raise ArtifactSessionError(
+                "artifact authority is faulted; reopen a verified source or project"
+            )
+        session = getattr(self, "_artifact_session", None)
+        if not isinstance(session, ArtifactSession):
+            raise ArtifactSessionError("no active ArtifactDocument session")
+        objects = list(getattr(self.viewport, "objects", []) or [])
+        if len(objects) != 1 or objects[0] is not obj:
+            raise ArtifactSessionError(
+                "native ArtifactDocument must own exactly one projected object"
+            )
+        binding = getattr(obj, "_amr_artifact_projection_snapshot", None)
+        if not isinstance(binding, ArtifactProjectionSnapshot):
+            raise ArtifactSessionError("native projection has no document binding")
+        if binding != session.projection_snapshot():
+            raise ArtifactSessionError("native projection binding is stale")
+        return session
+
+    def _require_native_measurement_session(self, obj: Any) -> ArtifactSession:
+        session = self._require_native_projection_session(obj)
+        controller = self._artifact_workbench_controller()
+        try:
+            controller.require_stable_session(session, measurement=True)
+        except ArtifactWorkbenchError as exc:
+            raise ArtifactSessionError(str(exc)) from exc
+        return session
+
+    def _reject_native_unported_mutation(self, action_name: str) -> bool:
+        """Fail closed when a legacy tool would mutate a native projection."""
+
+        if not self._native_artifact_mode():
+            return False
+        message = (
+            f"{action_name}은 아직 ArtifactDocument revision 명령으로 전환되지 않았습니다. "
+            "원본과 재현성을 보호하기 위해 현재 문서에서는 실행하지 않습니다. "
+            "이동·회전 preview와 '정치 확정'을 사용하세요."
+        )
+        try:
+            self.viewport.status_info = message
+            self.status_info.setText(f"⛔ {action_name} 차단 | 원본 projection 유지")
+            self.viewport.update()
+        except Exception:
+            pass
+        QMessageBox.warning(self, "지원 전 정렬 도구", message)
+        return True
+
     def start_floor_picking(self):
         """바닥면 그리기(점 찍기) 모드 시작"""
+        if self._reject_native_unported_mutation("3점 바닥 정렬"):
+            return
         if self.viewport.selected_obj is None:
             return
         # X-Ray는 바닥면 판독을 방해하고 "방충망"처럼 보여 정렬 오판을 유발할 수 있어 자동 해제.
@@ -3799,6 +4616,8 @@ class MainWindow(QMainWindow):
 
     def start_floor_picking_face(self):
         """면 선택 바닥 정렬 모드 시작"""
+        if self._reject_native_unported_mutation("면 바닥 정렬"):
+            return
         if self.viewport.selected_obj is None:
             return
         try:
@@ -3838,6 +4657,8 @@ class MainWindow(QMainWindow):
 
     def start_floor_picking_brush(self):
         """브러시 바닥 정렬 모드 시작"""
+        if self._reject_native_unported_mutation("브러시 바닥 정렬"):
+            return
         if self.viewport.selected_obj is None:
             return
         try:
@@ -3861,6 +4682,8 @@ class MainWindow(QMainWindow):
 
     def on_align_to_brush_selected(self):
         """Align by brushed-face normal and keep brushed region touching XY plane."""
+        if self._reject_native_unported_mutation("브러시 바닥 정렬"):
+            return
         obj = self.viewport.selected_obj
         if not obj or not self.viewport.brush_selected_faces:
             return
@@ -4012,6 +4835,8 @@ class MainWindow(QMainWindow):
 
     def align_mesh_to_normal(self, normal, *, pivot=None) -> np.ndarray | None:
         """주어진 법선을 월드 +Z로 정렬 (메쉬에 직접 반영/Bake)."""
+        if self._reject_native_unported_mutation("법선 바닥 정렬"):
+            return None
         obj = self.viewport.selected_obj
         if not obj:
             return
@@ -4039,6 +4864,8 @@ class MainWindow(QMainWindow):
         obj.mesh.compute_normals(compute_vertex_normals=False, force=True)
         obj._trimesh = None
         obj.rotation = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+        obj._amr_has_unpersisted_bake = True
+        obj._amr_alignment_status = _ALIGNMENT_STATUS_BAKED_UNVERIFIABLE
         self.viewport.update_vbo(obj)
         self.sync_transform_panel()
         return R
@@ -4139,6 +4966,8 @@ class MainWindow(QMainWindow):
 
     def on_floor_alignment_confirmed(self):
         """Enter 키 입력 시 호출: 선택된 점들을 기반으로 평면 정렬 수행"""
+        if self._reject_native_unported_mutation("바닥 정렬 확정"):
+            return
         obj = self.viewport.selected_obj
         if not obj or not self.viewport.floor_picks:
             return
@@ -4604,18 +5433,28 @@ class MainWindow(QMainWindow):
         if filepath:
             self.open_file_path(filepath, prompt_unit=True)
 
-    def open_file_path(self, filepath: str, *, prompt_unit: bool = True) -> None:
+    def open_file_path(
+        self,
+        filepath: str,
+        *,
+        prompt_unit: bool = True,
+        source_metadata: dict[str, Any] | None = None,
+    ) -> None:
         """Open a mesh file from a known path."""
         if not filepath:
             return
 
-        scale_factor = 1.0
         if bool(prompt_unit):
             dialog = UnitSelectionDialog(self)
             if dialog.exec() != QDialog.DialogCode.Accepted:
                 return
-            scale_factor = dialog.get_scale_factor()
-        self.load_mesh(filepath, scale_factor)
+            source_metadata = dialog.get_source_metadata()
+        if not isinstance(source_metadata, dict):
+            # Compatibility-only programmatic path. User-facing Open always
+            # requires explicit metadata and enters native document mode.
+            self.load_mesh(filepath, 1.0)
+            return
+        self._start_artifact_source_import(filepath, source_metadata)
 
     def open_project(self) -> None:
         filepath, _ = QFileDialog.getOpenFileName(
@@ -4632,10 +5471,41 @@ class MainWindow(QMainWindow):
         """Open a project file (.amr) from a known path (no file dialog)."""
         if not filepath:
             return
+        thread = getattr(self, "_mesh_load_thread", None)
+        if (
+            bool(getattr(self, "_artifact_load_active", False))
+            or bool(getattr(self, "_project_load_active", False))
+            or (thread is not None and thread.isRunning())
+        ):
+            QMessageBox.information(
+                self,
+                "로딩 중",
+                "이미 다른 원본 또는 프로젝트를 검증하고 있습니다.",
+            )
+            return
 
         try:
-            doc = load_amr_project(filepath)
+            try:
+                doc = load_amr_project(filepath)
+            except UnsupportedPayloadError as payload_error:
+                if payload_error.payload_type != ARTIFACT_PAYLOAD_TYPE:
+                    raise
+                artifact_document = load_amr_artifact_project(filepath)
+                self._start_artifact_project_load(artifact_document, filepath)
+                return
             state = doc.get("state", {})
+            migration = doc.get(MIGRATION_MARKER_NAME, {})
+            migrated_from_v1 = bool(
+                isinstance(migration, dict)
+                and migration.get("from_version") == 1
+                and migration.get("requires_save_as") is True
+            )
+            if not isinstance(state, dict):
+                raise ProjectFormatError("Invalid project state")
+            _validate_project_source_declarations(
+                state,
+                migrated_from_v1=migrated_from_v1,
+            )
         except (OSError, ProjectFormatError) as e:
             QMessageBox.critical(self, "오류", f"프로젝트를 열 수 없습니다:\n{e}")
             return
@@ -4648,41 +5518,250 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "경고", "프로젝트에 로드할 객체(objects)가 없습니다.")
             return
 
-        # Reset scene and start queued mesh loads
-        try:
-            self.viewport.clear_scene()
-        except Exception:
-            try:
-                self.viewport.objects = []
-                self.viewport.selected_index = -1
-                self.viewport.picking_mode = "none"
-                self.viewport.update()
-            except Exception:
-                pass
+        # Keep the live scene intact while every external source is loaded and
+        # verified in CPU staging. It is swapped only after the full queue
+        # succeeds, so a late mismatch cannot destroy unsaved work.
+        self._project_previous_context = {
+            "current_project_path": self._current_project_path,
+            "requires_save_as": self._project_requires_save_as,
+            "legacy_project_path": self._legacy_project_path,
+            "has_legacy_bindings": self._project_has_legacy_bindings,
+            "load_failed": self._project_load_failed,
+        }
+        self._project_staged_objects = []
 
-        self.scene_panel.update_list(self.viewport.objects, self.viewport.selected_index)
-        self.current_mesh = None
-        self.current_filepath = None
-
-        self._current_project_path = str(filepath)
+        # A migrated v1 file is never overwritten by the first v2 save.
+        self._project_load_from_legacy = migrated_from_v1
+        self._project_requires_save_as = migrated_from_v1
+        self._legacy_project_path = str(filepath) if migrated_from_v1 else None
+        # Commit the destination path only after every queued source has been
+        # verified and applied. Saving is disabled while this transaction is
+        # active or after it fails.
+        self._project_pending_path = str(filepath)
+        self._project_load_failed = False
+        self._last_source_verification = None
+        self._project_has_legacy_bindings = migrated_from_v1
         self._project_load_active = True
-        self._project_load_state = state if isinstance(state, dict) else {}
+        self._project_load_state = state
         self._project_load_queue = [o for o in objects if isinstance(o, dict)]
         self._project_load_current = None
 
         self.status_info.setText(f"📁 프로젝트 로딩 중: {Path(filepath).name}")
         self._start_next_project_object_load()
 
+    def _clear_artifact_pending_load(self, *, cancel_workbench: bool = True) -> None:
+        ticket = getattr(self, "_artifact_load_ticket", None)
+        if cancel_workbench and isinstance(ticket, ArtifactLoadTicket):
+            try:
+                controller = self._artifact_workbench_controller()
+                if controller.snapshot.pending_load is ticket:
+                    controller.cancel_load(ticket)
+            except (ArtifactWorkbenchError, StaleWorkflowOperationError):
+                _LOGGER.debug("Artifact Open ticket was already completed", exc_info=True)
+        self._artifact_load_active = False
+        self._artifact_pending_document = None
+        self._artifact_pending_project_path = None
+        self._artifact_pending_source_metadata = None
+        self._artifact_load_ticket = None
+
+    def _start_artifact_source_import(
+        self,
+        filepath: str,
+        source_metadata: dict[str, Any],
+    ) -> None:
+        if bool(getattr(self, "_artifact_load_active", False)) or bool(
+            getattr(self, "_project_load_active", False)
+        ):
+            QMessageBox.information(
+                self,
+                "로딩 중",
+                "이미 다른 원본 또는 프로젝트를 검증하고 있습니다.",
+            )
+            return
+        if str(source_metadata.get("confirmation_status", "")) != "confirmed":
+            QMessageBox.warning(
+                self,
+                "원본 metadata 미확정",
+                "단위와 좌표축을 확인해야 원본을 실측 문서로 열 수 있습니다.",
+            )
+            return
+        thread = getattr(self, "_mesh_load_thread", None)
+        if thread is not None and thread.isRunning():
+            QMessageBox.information(self, "로딩 중", "이미 다른 메쉬를 로딩 중입니다.")
+            return
+        source_format = Path(filepath).suffix.lower().removeprefix(".")
+        if f".{source_format}" not in MeshLoader.SUPPORTED_FORMATS:
+            QMessageBox.critical(self, "오류", f"지원하지 않는 원본 형식: {source_format!r}")
+            return
+        try:
+            ticket = self._artifact_workbench_controller().begin_new_import(
+                filepath,
+                source_metadata,
+                software_version=APP_VERSION,
+                operator="local-user",
+            )
+        except (ArtifactWorkbenchError, WorkflowBusyError) as exc:
+            QMessageBox.warning(self, "원본 열기 차단", str(exc))
+            return
+        self._artifact_load_active = True
+        self._artifact_load_ticket = ticket
+        self._artifact_pending_document = None
+        self._artifact_pending_project_path = None
+        self._artifact_pending_source_metadata = copy.deepcopy(source_metadata)
+        started = self._start_async_load(
+            filepath,
+            1.0,
+            source_format=ticket.source_format,
+            source_unit=ticket.source_unit,
+            artifact_ticket=ticket,
+        )
+        if not started:
+            self._clear_artifact_pending_load(cancel_workbench=True)
+
+    def _artifact_source_context(
+        self,
+        document: ArtifactDocument,
+    ) -> tuple[Any, Any, Any]:
+        metadata_id = document.active_source_metadata_revision_id
+        if metadata_id is None:
+            raise ProjectFormatError("ArtifactDocument has no active metadata revision")
+        metadata = document.source_metadata_revision_index[metadata_id]
+        geometry = document.geometry_revision_index[metadata.geometry_revision_id]
+        if len(geometry.source_asset_ids) != 1:
+            raise ProjectFormatError("M0-3 supports exactly one source asset")
+        source_asset = document.source_asset_index[geometry.source_asset_ids[0]]
+        return source_asset, geometry, metadata
+
+    def _resolve_artifact_source_path(
+        self,
+        source_asset: Any,
+        project_path: str,
+    ) -> str | None:
+        raw_ref = str(getattr(source_asset, "asset_ref", "") or "").strip()
+        raw_path = raw_ref.removeprefix("external:")
+        candidate = Path(raw_path).expanduser()
+        if not candidate.is_absolute():
+            candidate = Path(project_path).resolve(strict=False).parent / candidate
+        if candidate.exists():
+            return str(candidate)
+
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            f"원본 파일 찾기: {getattr(source_asset, 'original_name', 'artifact')}",
+            str(candidate.parent if candidate.parent.exists() else ""),
+            "3D Files (*.obj *.ply *.stl *.off *.gltf *.glb);;All Files (*)",
+        )
+        return str(selected) if selected else None
+
+    def _start_artifact_project_load(
+        self,
+        document: ArtifactDocument,
+        project_path: str,
+    ) -> None:
+        if bool(getattr(self, "_artifact_load_active", False)) or bool(
+            getattr(self, "_project_load_active", False)
+        ):
+            QMessageBox.information(
+                self,
+                "로딩 중",
+                "이미 다른 원본 또는 프로젝트를 검증하고 있습니다.",
+            )
+            return
+        try:
+            source_asset, geometry, metadata = self._artifact_source_context(document)
+            resolved = self._resolve_artifact_source_path(source_asset, project_path)
+            if not resolved:
+                raise ProjectFormatError("ArtifactDocument source was not resolved")
+            source_format = str(geometry.import_recipe.get("format", "") or "").strip().lower()
+            if f".{source_format}" not in MeshLoader.SUPPORTED_FORMATS:
+                raise ProjectFormatError(
+                    f"ArtifactDocument has unsupported parser format: {source_format!r}"
+                )
+            if str(metadata.confirmation_status.value) != "confirmed":
+                raise ProjectFormatError("ArtifactDocument metadata is not confirmed")
+            thread = getattr(self, "_mesh_load_thread", None)
+            if thread is not None and thread.isRunning():
+                raise ProjectFormatError("another mesh load is already active")
+        except (ArtifactSessionError, ProjectFormatError, KeyError, ValueError) as exc:
+            QMessageBox.critical(self, "오류", f"ArtifactDocument를 열 수 없습니다:\n{exc}")
+            return
+
+        try:
+            ticket = self._artifact_workbench_controller().begin_project_reopen(
+                document,
+                project_path=project_path,
+                resolved_source_path=resolved,
+            )
+        except (ArtifactWorkbenchError, WorkflowBusyError) as exc:
+            QMessageBox.critical(self, "오류", f"ArtifactDocument를 열 수 없습니다:\n{exc}")
+            return
+
+        self._artifact_load_active = True
+        self._artifact_load_ticket = ticket
+        self._artifact_pending_document = document
+        self._artifact_pending_project_path = str(project_path)
+        self._artifact_pending_source_metadata = None
+        started = self._start_async_load(
+            ticket.source_path,
+            1.0,
+            source_format=ticket.source_format,
+            source_unit=ticket.source_unit,
+            artifact_ticket=ticket,
+        )
+        if not started:
+            self._clear_artifact_pending_load(cancel_workbench=True)
+
     def save_project(self) -> None:
+        if bool(getattr(self, "_artifact_load_active", False)) or bool(
+            getattr(self, "_project_load_active", False)
+        ) or bool(
+            getattr(self, "_project_load_failed", False)
+        ) or bool(
+            getattr(self, "_artifact_authority_faulted", False)
+        ):
+            QMessageBox.warning(
+                self,
+                "프로젝트 저장 차단",
+                "프로젝트 원본 검증이 진행 중이거나 실패했습니다. 부분 scene을 저장하지 "
+                "않도록 차단했습니다. 정상 프로젝트를 다시 여세요.",
+            )
+            return
+        if bool(getattr(self, "_project_requires_save_as", False)):
+            QMessageBox.information(
+                self,
+                "구버전 프로젝트 보존",
+                "이 프로젝트는 AMR v1에서 읽었습니다. 원본을 보존하기 위해 "
+                "첫 저장은 새 AMR v2 파일로만 할 수 있습니다.",
+            )
+            self.save_project_as()
+            return
         if not getattr(self, "_current_project_path", None):
             self.save_project_as()
             return
         self._write_project(str(self._current_project_path))
 
     def save_project_as(self) -> None:
+        if bool(getattr(self, "_artifact_load_active", False)) or bool(
+            getattr(self, "_project_load_active", False)
+        ) or bool(
+            getattr(self, "_project_load_failed", False)
+        ) or bool(
+            getattr(self, "_artifact_authority_faulted", False)
+        ):
+            QMessageBox.warning(
+                self,
+                "프로젝트 저장 차단",
+                "검증에 실패한 부분 scene은 새 프로젝트로도 저장할 수 없습니다. "
+                "정상 프로젝트를 다시 여세요.",
+            )
+            return
         default_name = DEFAULT_PROJECT_FILENAME
+        legacy_path = str(getattr(self, "_legacy_project_path", "") or "").strip()
+        if bool(getattr(self, "_project_requires_save_as", False)) and legacy_path:
+            legacy = Path(legacy_path)
+            default_name = str(legacy.with_name(f"{legacy.stem}-v2.amr"))
         try:
-            if self.current_filepath:
+            if self.current_filepath and not legacy_path:
                 default_name = str(Path(str(self.current_filepath)).with_suffix(".amr").name)
         except Exception:
             default_name = DEFAULT_PROJECT_FILENAME
@@ -4703,22 +5782,198 @@ class MainWindow(QMainWindow):
             self._current_project_path = str(filepath)
 
     def _write_project(self, filepath: str) -> bool:
+        if bool(getattr(self, "_artifact_load_active", False)) or bool(
+            getattr(self, "_project_load_active", False)
+        ) or bool(
+            getattr(self, "_project_load_failed", False)
+        ) or bool(
+            getattr(self, "_artifact_authority_faulted", False)
+        ):
+            return False
+        legacy_path = str(getattr(self, "_legacy_project_path", "") or "").strip()
+        if bool(getattr(self, "_project_requires_save_as", False)) and legacy_path:
+            if _same_filesystem_target(filepath, legacy_path):
+                QMessageBox.warning(
+                    self,
+                    "구버전 프로젝트 보존",
+                    "AMR v1 원본은 덮어쓸 수 없습니다. 다른 파일 이름을 선택하세요.",
+                )
+                return False
         try:
-            state = self._collect_project_state()
-
             sha, dirty = _safe_git_info(str(Path(basedir)))
             meta = {
                 "app": APP_NAME,
                 "version": APP_VERSION,
                 "git": f"{sha}{'*' if dirty else ''}" if sha else "unknown",
             }
-            save_amr_project(filepath, state, meta=meta)
+            session = getattr(self, "_artifact_session", None)
+            if isinstance(session, ArtifactSession):
+                self._artifact_workbench_controller().require_stable_session(session)
+                self._validate_native_scene_for_save(session)
+                save_amr_artifact_project(filepath, session.document, meta=meta)
+            else:
+                state = self._collect_project_state()
+                save_amr_project(filepath, state, meta=meta)
+            self._project_requires_save_as = False
+            self._legacy_project_path = None
             self.status_info.setText(f"✅ 프로젝트 저장: {Path(filepath).name}")
             return True
+        except ProjectSaveError as e:
+            if e.committed:
+                self._project_requires_save_as = False
+                self._legacy_project_path = None
+                QMessageBox.warning(
+                    self,
+                    "저장 내구성 경고",
+                    "프로젝트 파일은 원자적으로 교체되었지만 디렉터리 동기화에 "
+                    "실패했습니다. 파일은 다시 열 수 있으나 직후 시스템 장애에 대한 "
+                    f"내구성은 확정할 수 없습니다.\n\n{e}",
+                )
+                self.status_info.setText("⚠️ 프로젝트 저장됨 | crash durability 미확정")
+                return True
+            QMessageBox.critical(self, "오류", f"프로젝트 저장 실패:\n{e}")
+            self.status_info.setText("❌ 프로젝트 저장 실패")
+            return False
         except Exception as e:
             QMessageBox.critical(self, "오류", f"프로젝트 저장 실패:\n{type(e).__name__}: {e}")
             self.status_info.setText("❌ 프로젝트 저장 실패")
             return False
+
+    def _validate_native_scene_for_save(self, session: ArtifactSession) -> None:
+        objects = list(getattr(self.viewport, "objects", []) or [])
+        if len(objects) != 1:
+            raise ProjectSerializationError(
+                "ArtifactDocument M0-3 save requires exactly one projected artifact"
+            )
+        obj = objects[0]
+        binding = getattr(obj, "_amr_artifact_projection_snapshot", None)
+        if not isinstance(binding, ArtifactProjectionSnapshot):
+            raise ProjectSerializationError(
+                "Native scene object has no authoritative projection binding"
+            )
+        expected = session.projection_snapshot()
+        if binding != expected:
+            raise ProjectSerializationError(
+                "Native scene projection is stale for the active ArtifactDocument"
+            )
+        if not np.allclose(obj.translation, [0.0, 0.0, 0.0], rtol=0.0, atol=1e-12):
+            raise ProjectSerializationError(
+                "현재 보이는 이동 preview를 먼저 정치 확정하거나 초기화하세요"
+            )
+        if not np.allclose(obj.rotation, [0.0, 0.0, 0.0], rtol=0.0, atol=1e-12):
+            raise ProjectSerializationError(
+                "현재 보이는 회전 preview를 먼저 정치 확정하거나 초기화하세요"
+            )
+        if not np.isclose(float(obj.scale), 1.0, rtol=0.0, atol=1e-12):
+            raise ProjectSerializationError(
+                "Native Align은 scale preview를 저장할 수 없습니다"
+            )
+        if bool(getattr(obj, "_amr_has_unpersisted_bake", False)):
+            raise ProjectSerializationError(
+                "Native projection에 문서화되지 않은 vertex bake 흔적이 있습니다"
+            )
+
+        expected_mesh = session.materialize().mesh
+        actual_mesh = getattr(obj, "mesh", None)
+        try:
+            vertices_match = np.array_equal(
+                np.asarray(actual_mesh.vertices),
+                np.asarray(expected_mesh.vertices),
+            )
+            faces_match = np.array_equal(
+                np.asarray(actual_mesh.faces),
+                np.asarray(expected_mesh.faces),
+            )
+        except Exception:
+            vertices_match = False
+            faces_match = False
+        if not vertices_match or not faces_match:
+            raise ProjectSerializationError(
+                "Native scene geometry가 ArtifactDocument의 canonical projection과 다릅니다"
+            )
+
+        def contains_material_result(value: Any) -> bool:
+            if value is None:
+                return False
+            if isinstance(value, np.ndarray):
+                return bool(value.size)
+            if isinstance(value, dict):
+                return any(contains_material_result(item) for item in value.values())
+            if isinstance(value, (list, tuple, set, frozenset)):
+                if not value:
+                    return False
+                if all(
+                    isinstance(item, (dict, list, tuple, set, frozenset, np.ndarray))
+                    or item is None
+                    for item in value
+                ):
+                    return any(contains_material_result(item) for item in value)
+                return True
+            if isinstance(value, str):
+                return bool(value.strip())
+            return bool(value)
+
+        raw_tile_state = getattr(obj, "tile_interpretation_state", None)
+        tile_state_changed = False
+        if raw_tile_state is not None:
+            try:
+                normalized_tile_state = (
+                    raw_tile_state
+                    if isinstance(raw_tile_state, TileInterpretationState)
+                    else TileInterpretationState.from_dict(raw_tile_state)
+                )
+                tile_state_changed = (
+                    normalized_tile_state.to_dict()
+                    != TileInterpretationState().to_dict()
+                )
+            except Exception:
+                tile_state_changed = True
+
+        unported_values = (
+            getattr(obj, "polyline_layers", []),
+            getattr(obj, "fitted_arcs", []),
+            getattr(obj, "selected_faces", set()),
+            getattr(obj, "outer_face_indices", set()),
+            getattr(obj, "inner_face_indices", set()),
+            getattr(obj, "migu_face_indices", set()),
+            getattr(obj, "surface_assist_unresolved_face_indices", set()),
+            getattr(obj, "surface_assist_meta", {}),
+            getattr(obj, "surface_assist_runtime", {}),
+            getattr(obj, "tile_synthetic_truth", None),
+            getattr(obj, "tile_evaluation_report", None),
+            getattr(self.viewport, "picked_points", []),
+            getattr(self.viewport, "fitted_arc", None),
+            getattr(self.viewport, "measure_picked_points", []),
+            getattr(self.viewport, "slice_contours", []),
+            getattr(self.viewport, "x_profile", []),
+            getattr(self.viewport, "y_profile", []),
+            getattr(self.viewport, "_world_x_profile", []),
+            getattr(self.viewport, "_world_y_profile", []),
+            getattr(self.viewport, "roi_cut_edges", {}),
+            getattr(self.viewport, "roi_cap_verts", {}),
+            getattr(self.viewport, "roi_section_world", {}),
+            getattr(self.viewport, "cut_lines", []),
+            getattr(self.viewport, "cut_line_preview", None),
+            getattr(self.viewport, "cut_section_profiles", []),
+            getattr(self.viewport, "cut_section_world", []),
+            getattr(self.viewport, "cut_section_contours_world", []),
+            getattr(self.viewport, "cut_section_contours_local", []),
+            getattr(self.viewport, "line_profile", []),
+            getattr(self.viewport, "line_section_contours", []),
+            getattr(self.viewport, "floor_picks", []),
+            getattr(self.viewport, "brush_selected_faces", set()),
+            getattr(self.viewport, "surface_paint_points", []),
+            getattr(self.viewport, "surface_lasso_points", []),
+            getattr(self.viewport, "surface_lasso_face_indices", []),
+            getattr(self.viewport, "surface_magnetic_points", []),
+        )
+        if tile_state_changed or any(
+            contains_material_result(value) for value in unported_values
+        ):
+            raise ProjectSerializationError(
+                "현재 장면에는 아직 ArtifactDocument record로 승격되지 않은 결과가 "
+                "있습니다. M0-4 record 전환 전에는 이를 포함한 저장을 차단합니다."
+            )
 
     def _collect_project_state(self) -> dict[str, Any]:
         vp = self.viewport
@@ -4787,6 +6042,12 @@ class MainWindow(QMainWindow):
 
         objects: list[dict[str, Any]] = []
         for obj in getattr(vp, "objects", []) or []:
+            if bool(getattr(obj, "_amr_has_unpersisted_bake", False)):
+                raise ProjectSerializationError(
+                    "정치 확정으로 변경된 메쉬 정점은 현재 AMR legacy payload에 "
+                    "재현 가능하게 저장할 수 없습니다. 원본을 다시 열어 TRS 상태로 "
+                    "저장하거나 M0-3 정렬 revision 경로를 사용하세요."
+                )
             mesh = getattr(obj, "mesh", None)
             synthetic_truth = self._coerce_synthetic_truth(getattr(obj, "tile_synthetic_truth", None))
             evaluation_report = self._coerce_tile_evaluation_report(getattr(obj, "tile_evaluation_report", None))
@@ -4802,6 +6063,19 @@ class MainWindow(QMainWindow):
                 source_scale = float(getattr(mesh, "_amr_source_scale_factor", 1.0))
             except Exception:
                 source_scale = 1.0
+            source_payload = _mesh_source_payload(mesh, mesh_path)
+            alignment_status = str(
+                getattr(obj, "_amr_alignment_status", "")
+                or _ALIGNMENT_STATUS_MUTABLE_TRS
+            ).strip()
+            if alignment_status not in {
+                _ALIGNMENT_STATUS_MUTABLE_TRS,
+                _ALIGNMENT_STATUS_UNVERIFIABLE,
+                _ALIGNMENT_STATUS_BAKED_UNVERIFIABLE,
+            }:
+                raise ProjectSerializationError(
+                    f"Unsupported alignment status: {alignment_status!r}"
+                )
 
             # Polyline layers (sections/guides)
             poly_layers: list[dict[str, Any]] = []
@@ -4854,7 +6128,12 @@ class MainWindow(QMainWindow):
                 {
                     "name": str(getattr(obj, "name", "")).strip() or "Object",
                     "visible": bool(getattr(obj, "visible", True)),
-                    "mesh": {"path": mesh_path, "source_scale_factor": source_scale},
+                    "mesh": {
+                        "path": mesh_path,
+                        "source_scale_factor": source_scale,
+                        "source": source_payload,
+                    },
+                    "alignment": {"status": alignment_status},
                     "transform": {
                         "translation": f3(getattr(obj, "translation", [0, 0, 0])),
                         "rotation_deg": f3(getattr(obj, "rotation", [0, 0, 0])),
@@ -5034,6 +6313,63 @@ class MainWindow(QMainWindow):
             "ui": ui_state,
         }
 
+    def _discard_project_staging_and_restore_context(self) -> None:
+        previous = getattr(self, "_project_previous_context", None)
+        previous_load_failed = False
+        if isinstance(previous, dict):
+            self._current_project_path = previous.get("current_project_path")
+            self._project_requires_save_as = bool(previous.get("requires_save_as", False))
+            legacy_path = previous.get("legacy_project_path")
+            self._legacy_project_path = str(legacy_path) if legacy_path else None
+            self._project_has_legacy_bindings = bool(
+                previous.get("has_legacy_bindings", False)
+            )
+            previous_load_failed = bool(previous.get("load_failed", False))
+        self._project_previous_context = None
+        self._project_staged_objects = []
+        self._project_pending_path = None
+        self._project_load_failed = previous_load_failed
+
+    def _abort_project_source_load(
+        self,
+        verification: SourceVerification,
+        *,
+        message: str,
+    ) -> None:
+        """Stop queued loading before unverified state reaches a scene object."""
+        self._last_source_verification = verification
+        self._project_load_active = False
+        self._project_load_queue = []
+        self._project_load_current = None
+        self._project_load_state = None
+        self._project_load_from_legacy = False
+        self._discard_project_staging_and_restore_context()
+        self.status_info.setText(f"❌ 원본 검증 실패: {verification.status.value}")
+        if verification.status is SourceVerificationStatus.MISSING:
+            QMessageBox.warning(self, "원본 파일 없음", message)
+        else:
+            QMessageBox.critical(self, "원본 검증 실패", message)
+
+    def _expected_source_for_project_object(
+        self,
+        obj_state: dict[str, Any],
+    ) -> SourceFingerprint | None:
+        if bool(getattr(self, "_project_load_from_legacy", False)):
+            return None
+        mesh_info = obj_state.get("mesh", {})
+        if not isinstance(mesh_info, dict):
+            return None
+        source = mesh_info.get("source", {})
+        if not isinstance(source, dict):
+            return None
+        raw_identity = source.get("identity")
+        if not isinstance(raw_identity, dict):
+            return None
+        try:
+            return SourceFingerprint.from_dict(raw_identity)
+        except ValueError:
+            return None
+
     def _start_next_project_object_load(self) -> None:
         if not bool(getattr(self, "_project_load_active", False)):
             return
@@ -5058,19 +6394,36 @@ class MainWindow(QMainWindow):
                 "3D Files (*.obj *.ply *.stl *.off *.gltf *.glb);;All Files (*)",
             )
             if not mesh_path:
-                # Skip this object
-                self._project_load_current = None
-                self._start_next_project_object_load()
+                verification = missing_source(
+                    str(mesh_info.get("path", "") or ""),
+                    expected=self._expected_source_for_project_object(obj_state),
+                    detail="source file is missing and no replacement was selected",
+                )
+                self._abort_project_source_load(
+                    verification,
+                    message=(
+                        "프로젝트의 원본 메쉬를 찾지 못했습니다. 불완전한 상태로 작업을 "
+                        "계속하지 않도록 프로젝트 로딩을 중단했습니다."
+                    ),
+                )
                 return
-            mesh_info["path"] = mesh_path
-            obj_state["mesh"] = mesh_info
 
         try:
             scale_factor = float(mesh_info.get("source_scale_factor", 1.0) or 1.0)
         except Exception:
             scale_factor = 1.0
 
-        self._start_async_load(mesh_path, scale_factor)
+        expected_source = self._expected_source_for_project_object(obj_state)
+        source_info = mesh_info.get("source", {})
+        saved_parse_format = (
+            str(source_info.get("parse_format", "") or "").strip().lower()
+            if isinstance(source_info, dict)
+            else ""
+        )
+        source_format = saved_parse_format or (
+            expected_source.format if expected_source is not None else None
+        )
+        self._start_async_load(mesh_path, scale_factor, source_format=source_format)
 
     def _apply_loaded_object_state(self, obj, obj_state: dict[str, Any]) -> None:
         if obj is None or not isinstance(obj_state, dict):
@@ -5109,11 +6462,46 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+        alignment = obj_state.get("alignment", {})
+        if not isinstance(alignment, dict):
+            alignment = {}
+        alignment_status = str(
+            alignment.get("status", _ALIGNMENT_STATUS_MUTABLE_TRS)
+            or _ALIGNMENT_STATUS_MUTABLE_TRS
+        ).strip()
+        if alignment_status not in {
+            _ALIGNMENT_STATUS_MUTABLE_TRS,
+            _ALIGNMENT_STATUS_UNVERIFIABLE,
+            _ALIGNMENT_STATUS_BAKED_UNVERIFIABLE,
+        }:
+            alignment_status = _ALIGNMENT_STATUS_UNVERIFIABLE
         try:
-            obj.fixed_state_valid = bool(tr.get("fixed_state_valid", getattr(obj, "fixed_state_valid", False)))
-            obj.fixed_translation = f3(tr.get("fixed_translation", getattr(obj, "fixed_translation", [0, 0, 0])))
-            obj.fixed_rotation = f3(tr.get("fixed_rotation_deg", getattr(obj, "fixed_rotation", [0, 0, 0])))
-            obj.fixed_scale = float(tr.get("fixed_scale", getattr(obj, "fixed_scale", 1.0)) or 1.0)
+            obj._amr_alignment_status = alignment_status
+        except Exception:
+            pass
+
+        try:
+            if alignment_status in {
+                _ALIGNMENT_STATUS_UNVERIFIABLE,
+                _ALIGNMENT_STATUS_BAKED_UNVERIFIABLE,
+            }:
+                # A v1 baked/fixed alignment cannot be reconstructed from the
+                # raw source because neither baked vertices nor its matrix was
+                # stored. Never expose the old fixed state as trustworthy.
+                obj.fixed_state_valid = False
+            else:
+                obj.fixed_state_valid = bool(
+                    tr.get("fixed_state_valid", getattr(obj, "fixed_state_valid", False))
+                )
+                obj.fixed_translation = f3(
+                    tr.get("fixed_translation", getattr(obj, "fixed_translation", [0, 0, 0]))
+                )
+                obj.fixed_rotation = f3(
+                    tr.get("fixed_rotation_deg", getattr(obj, "fixed_rotation", [0, 0, 0]))
+                )
+                obj.fixed_scale = float(
+                    tr.get("fixed_scale", getattr(obj, "fixed_scale", 1.0)) or 1.0
+                )
         except Exception:
             pass
 
@@ -5292,20 +6680,256 @@ class MainWindow(QMainWindow):
         except Exception:
             obj.tile_evaluation_report = None
 
+    def _snapshot_live_scene_for_project_swap(self) -> dict[str, Any]:
+        vp = self.viewport
+        viewport_fields: dict[str, Any] = {}
+        for name in _VIEWPORT_PROJECT_SWAP_FIELDS:
+            if not hasattr(vp, name):
+                continue
+            value = getattr(vp, name)
+            if name == "_cut_section_pending_indices":
+                try:
+                    value = set(value)
+                except Exception:
+                    pass
+            elif isinstance(value, np.ndarray):
+                value = value.copy()
+            viewport_fields[name] = value
+
+        camera_state: dict[str, Any] = {}
+        camera = getattr(vp, "camera", None)
+        if camera is not None:
+            try:
+                camera_items = vars(camera).items()
+            except TypeError:
+                camera_items = ()
+            for name, value in camera_items:
+                try:
+                    camera_state[name] = copy.deepcopy(value)
+                except Exception:
+                    camera_state[name] = value
+
+        return {
+            "objects": list(getattr(vp, "objects", []) or []),
+            "selected_index": int(getattr(vp, "selected_index", -1)),
+            "viewport_fields": viewport_fields,
+            "camera_state": camera_state,
+            "current_mesh": self.current_mesh,
+            "current_filepath": self.current_filepath,
+            "artifact_session": getattr(self, "_artifact_session", None),
+        }
+
+    def _restore_live_scene_after_failed_swap(
+        self,
+        snapshot: dict[str, Any],
+        new_objects: list[Any],
+    ) -> None:
+        vp = self.viewport
+        old_objects = list(snapshot.get("objects", []) or [])
+        old_object_ids = {id(obj) for obj in old_objects}
+        try:
+            vp.makeCurrent()
+        except Exception:
+            pass
+        cleaned_ids: set[int] = set()
+        for obj in new_objects:
+            obj_id = id(obj)
+            if obj_id in cleaned_ids or obj_id in old_object_ids:
+                continue
+            cleaned_ids.add(obj_id)
+            try:
+                obj.cleanup()
+            except Exception:
+                pass
+
+        vp.objects = old_objects
+        vp.selected_index = int(snapshot.get("selected_index", -1))
+        fields = snapshot.get("viewport_fields", {})
+        if isinstance(fields, dict):
+            for name, value in fields.items():
+                try:
+                    setattr(vp, name, value)
+                except Exception:
+                    pass
+        camera = getattr(vp, "camera", None)
+        camera_state = snapshot.get("camera_state", {})
+        if camera is not None and isinstance(camera_state, dict):
+            for name, value in camera_state.items():
+                try:
+                    setattr(camera, name, value)
+                except Exception:
+                    pass
+
+        self.current_mesh = snapshot.get("current_mesh")
+        current_filepath = snapshot.get("current_filepath")
+        self.current_filepath = str(current_filepath) if current_filepath else None
+        artifact_session = snapshot.get("artifact_session")
+        self._artifact_session = (
+            artifact_session if isinstance(artifact_session, ArtifactSession) else None
+        )
+        try:
+            self.scene_panel.update_list(vp.objects, vp.selected_index)
+            vp.selectionChanged.emit(vp.selected_index)
+            vp.update()
+            self.sync_transform_panel()
+            self._sync_tile_panel()
+        except Exception:
+            pass
+
     def _finish_project_load(self) -> None:
         state = getattr(self, "_project_load_state", None)
+        loaded_from_legacy = bool(getattr(self, "_project_load_from_legacy", False))
+        pending_path = str(getattr(self, "_project_pending_path", "") or "").strip()
+        staged = list(getattr(self, "_project_staged_objects", []) or [])
+        has_legacy_bindings = bool(
+            getattr(self, "_project_has_legacy_bindings", False)
+        )
+
+        expected_objects = state.get("objects", []) if isinstance(state, dict) else []
+        if not isinstance(expected_objects, list) or len(staged) != len(expected_objects):
+            self._project_load_active = False
+            self._project_load_queue = []
+            self._project_load_current = None
+            self._project_load_state = None
+            self._project_load_from_legacy = False
+            self._discard_project_staging_and_restore_context()
+            self.status_info.setText("❌ 프로젝트 staging 불완전 | 기존 scene 유지")
+            QMessageBox.critical(
+                self,
+                "프로젝트 로딩 실패",
+                "모든 원본이 staging되지 않아 기존 scene을 유지했습니다.",
+            )
+            return
+
         self._project_load_active = False
         self._project_load_queue = []
         self._project_load_current = None
         self._project_load_state = None
+        self._project_load_from_legacy = False
 
         if not isinstance(state, dict):
             state = {}
 
         try:
+            scene_snapshot = self._snapshot_live_scene_for_project_swap()
+        except Exception as exc:
+            _LOGGER.exception("Failed snapshotting live scene before project swap")
+            self._discard_project_staging_and_restore_context()
+            self.status_info.setText("❌ 기존 scene snapshot 실패 | 기존 scene 유지")
+            QMessageBox.critical(
+                self,
+                "프로젝트 scene 교체 실패",
+                "기존 scene을 안전하게 보존할 수 없어 프로젝트 교체를 중단했습니다."
+                f"\n\n{type(exc).__name__}: {exc}",
+            )
+            return
+
+        old_objects = list(scene_snapshot.get("objects", []) or [])
+        new_objects: list[Any] = []
+        try:
+            # Detach the old scene without releasing its GPU resources.  The
+            # detached objects remain the rollback target until every staged
+            # object and global project setting has materialized successfully.
+            # Publish legacy authority before add_mesh_object emits callbacks;
+            # rollback restores the native session from scene_snapshot.
+            self._artifact_session = None
+            self.viewport.objects = []
+            self.viewport.selected_index = -1
+            self.viewport.clear_scene()
+            self.current_mesh = None
+            self.current_filepath = None
+
+            for mesh_data, filepath, obj_state, _verification, _binding in staged:
+                self.current_mesh = mesh_data
+                self.current_filepath = filepath
+                obj_name = str(obj_state.get("name", "")).strip() or Path(filepath).name
+                self.viewport.add_mesh_object(mesh_data, name=obj_name)
+                obj_loaded = self.viewport.selected_obj
+                if obj_loaded is None:
+                    raise RuntimeError("mesh materialization produced no scene object")
+                new_objects.append(obj_loaded)
+                try:
+                    vertex_count = int(getattr(obj_loaded, "vertex_count", 0) or 0)
+                    vbo_id = int(getattr(obj_loaded, "vbo_id", 0) or 0)
+                except Exception:
+                    vertex_count = 0
+                    vbo_id = 0
+                if vertex_count <= 0 or vbo_id <= 0:
+                    if not self.viewport.update_vbo(obj_loaded):
+                        raise RuntimeError(f"VBO upload failed for {obj_name!r}")
+                    try:
+                        vertex_count = int(getattr(obj_loaded, "vertex_count", 0) or 0)
+                        vbo_id = int(getattr(obj_loaded, "vbo_id", 0) or 0)
+                    except Exception:
+                        vertex_count = 0
+                        vbo_id = 0
+                if vertex_count <= 0 or vbo_id <= 0:
+                    raise RuntimeError(f"VBO upload produced invalid state for {obj_name!r}")
+                self._apply_loaded_object_state(obj_loaded, obj_state)
+
             self._apply_project_state(state)
+        except Exception as exc:
+            _LOGGER.exception("Failed materializing staged project")
+            old_object_ids = {id(obj) for obj in old_objects}
+            for obj in list(getattr(self.viewport, "objects", []) or []):
+                if id(obj) not in old_object_ids:
+                    new_objects.append(obj)
+
+            restore_error: Exception | None = None
+            try:
+                self._restore_live_scene_after_failed_swap(scene_snapshot, new_objects)
+                restored_objects = list(getattr(self.viewport, "objects", []) or [])
+                if len(restored_objects) != len(old_objects) or any(
+                    actual is not expected
+                    for actual, expected in zip(restored_objects, old_objects, strict=True)
+                ):
+                    raise RuntimeError("live scene rollback identity check failed")
+            except Exception as restore_exc:
+                restore_error = restore_exc
+                _LOGGER.exception("Failed restoring live scene after project swap failure")
+
+            self._discard_project_staging_and_restore_context()
+            if restore_error is None:
+                self.status_info.setText("❌ project scene 교체 실패 | 기존 scene 복원")
+                detail = "기존 scene을 복원했으며 현재 프로젝트는 계속 저장할 수 있습니다."
+            else:
+                self._project_load_failed = True
+                self._current_project_path = None
+                self._project_requires_save_as = False
+                self._legacy_project_path = None
+                self._project_has_legacy_bindings = False
+                self.status_info.setText("❌ project scene 복원 실패 | 저장 차단")
+                detail = (
+                    "기존 scene 복원까지 실패해 부분 상태 저장을 차단했습니다."
+                    f"\n복원 오류: {type(restore_error).__name__}: {restore_error}"
+                )
+            QMessageBox.critical(
+                self,
+                "프로젝트 scene 교체 실패",
+                "모든 원본 검증 후 scene을 교체하는 단계에서 실패했습니다. "
+                f"{detail}\n\n{type(exc).__name__}: {exc}",
+            )
+            return
+
+        # Commit point: the new scene is complete.  Only now may resources
+        # owned by the detached previous scene be released.
+        try:
+            self.viewport.makeCurrent()
         except Exception:
-            _LOGGER.exception("Failed applying project global state")
+            pass
+        for old_obj in old_objects:
+            try:
+                old_obj.cleanup()
+            except Exception:
+                _LOGGER.warning("Previous SceneObject cleanup failed after project swap", exc_info=True)
+
+        self._project_staged_objects = []
+        self._project_previous_context = None
+        self._project_pending_path = None
+        self._project_load_failed = False
+        self._current_project_path = None if loaded_from_legacy else (pending_path or None)
+        self._flattened_cache.clear()
+        self._flatten_recommendation_cache.clear()
 
         self.scene_panel.update_list(self.viewport.objects, self.viewport.selected_index)
         try:
@@ -5315,7 +6939,13 @@ class MainWindow(QMainWindow):
         self._sync_tile_panel()
 
         try:
-            self.status_info.setText("✅ 프로젝트 로딩 완료")
+            if loaded_from_legacy or has_legacy_bindings:
+                self.status_info.setText(
+                    "⚠️ 프로젝트 로딩 완료 | 원본 SHA 기록, 구버전 기록 연결은 미검증"
+                    + (" | 첫 저장은 새 v2 파일" if loaded_from_legacy else "")
+                )
+            else:
+                self.status_info.setText("✅ 프로젝트 로딩 완료 | 원본 SHA-256 검증됨")
         except Exception:
             pass
 
@@ -5730,21 +7360,37 @@ class MainWindow(QMainWindow):
         urls = mime_data.urls()
         if urls:
             filepath = urls[0].toLocalFile()
-            # 드롭 시에도 단위 선택 다이얼로그 표시
-            dialog = UnitSelectionDialog(self)
-            if dialog.exec() == QDialog.DialogCode.Accepted:
-                scale_factor = dialog.get_scale_factor()
-                self.load_mesh(filepath, scale_factor)
+            # Drag-and-drop follows the same explicit metadata/native document
+            # boundary as File > Open; it must never append a ghost legacy mesh.
+            self.open_file_path(filepath, prompt_unit=True)
+            a0.acceptProposedAction()
     
     def load_mesh(self, filepath: str, scale_factor: float = 1.0):
+        if self._native_artifact_mode():
+            QMessageBox.warning(
+                self,
+                "메쉬 추가 차단",
+                "ArtifactDocument는 한 문서당 하나의 검증된 원본만 소유합니다. "
+                "새 원본은 파일 열기로 별도 문서로 여세요.",
+            )
+            self.status_info.setText("⛔ legacy 메쉬 추가 차단 | native 문서 유지")
+            return False
         self._start_async_load(filepath, scale_factor)
-        return
+        return True
     
-    def _start_async_load(self, filepath: str, scale_factor: float):
+    def _start_async_load(
+        self,
+        filepath: str,
+        scale_factor: float,
+        *,
+        source_format: str | None = None,
+        source_unit: str | None = None,
+        artifact_ticket: ArtifactLoadTicket | None = None,
+    ) -> bool:
         thread = getattr(self, "_mesh_load_thread", None)
         if thread is not None and thread.isRunning():
             QMessageBox.information(self, "로딩 중", "이미 다른 메쉬를 로딩 중입니다.")
-            return
+            return False
 
         name = Path(filepath).name
         self.status_info.setText(f"로딩 중: {name}")
@@ -5762,22 +7408,496 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        self._mesh_load_thread = MeshLoadThread(
+        load_thread = MeshLoadThread(
             filepath=str(filepath),
             scale_factor=float(scale_factor),
-            default_unit=str(getattr(self.mesh_loader, "default_unit", DEFAULT_MESH_UNIT)),
+            default_unit=str(
+                source_unit
+                or getattr(self.mesh_loader, "default_unit", DEFAULT_MESH_UNIT)
+            ),
+            source_format=source_format,
         )
-        self._mesh_load_thread.loaded.connect(self._on_mesh_load_thread_loaded)
-        self._mesh_load_thread.failed.connect(self._on_mesh_load_thread_failed)
-        self._mesh_load_thread.finished.connect(self._on_mesh_load_thread_finished)
-        self._mesh_load_thread.start()
+        request_id = (
+            artifact_ticket.id
+            if isinstance(artifact_ticket, ArtifactLoadTicket)
+            else f"mesh-load:{uuid.uuid4()}"
+        )
+        self._mesh_load_thread = load_thread
+        self._mesh_load_request_id = request_id
+        load_thread.loaded.connect(
+            lambda mesh, path, owner=load_thread, rid=request_id, ticket=artifact_ticket: (
+                self._dispatch_mesh_load_success(owner, rid, ticket, mesh, path)
+            )
+        )
+        load_thread.failed.connect(
+            lambda message, owner=load_thread, rid=request_id, ticket=artifact_ticket: (
+                self._dispatch_mesh_load_failure(owner, rid, ticket, message)
+            )
+        )
+        load_thread.finished.connect(
+            lambda owner=load_thread, rid=request_id: self._dispatch_mesh_load_finished(
+                owner,
+                rid,
+            )
+        )
+        load_thread.start()
+        return True
 
-    def _on_mesh_load_thread_loaded(self, mesh_data, filepath: str):
+    def _mesh_load_result_is_current(self, owner: QThread, request_id: str) -> bool:
+        return (
+            owner is getattr(self, "_mesh_load_thread", None)
+            and request_id == getattr(self, "_mesh_load_request_id", None)
+        )
+
+    def _dispatch_mesh_load_success(
+        self,
+        owner: QThread,
+        request_id: str,
+        artifact_ticket: ArtifactLoadTicket | None,
+        mesh_data: object,
+        filepath: str,
+    ) -> None:
+        if not self._mesh_load_result_is_current(owner, request_id):
+            _LOGGER.info("Discarded stale mesh-load success: %s", request_id)
+            return
+        if (
+            artifact_ticket is not None
+            and artifact_ticket is not getattr(self, "_artifact_load_ticket", None)
+        ):
+            _LOGGER.info("Discarded superseded Artifact Open success: %s", request_id)
+            return
+        self._on_mesh_load_thread_loaded(
+            mesh_data,
+            filepath,
+            artifact_ticket=artifact_ticket,
+        )
+
+    def _dispatch_mesh_load_failure(
+        self,
+        owner: QThread,
+        request_id: str,
+        artifact_ticket: ArtifactLoadTicket | None,
+        message: str,
+    ) -> None:
+        if not self._mesh_load_result_is_current(owner, request_id):
+            _LOGGER.info("Discarded stale mesh-load failure: %s", request_id)
+            return
+        if (
+            artifact_ticket is not None
+            and artifact_ticket is not getattr(self, "_artifact_load_ticket", None)
+        ):
+            _LOGGER.info("Discarded superseded Artifact Open failure: %s", request_id)
+            return
+        self._on_mesh_load_thread_failed(message, artifact_ticket=artifact_ticket)
+
+    def _dispatch_mesh_load_finished(self, owner: QThread, request_id: str) -> None:
+        if not self._mesh_load_result_is_current(owner, request_id):
+            try:
+                owner.deleteLater()
+            except Exception:
+                pass
+            _LOGGER.info("Ignored stale mesh-load finished signal: %s", request_id)
+            return
+        self._on_mesh_load_thread_finished(owner=owner, request_id=request_id)
+
+    def _mark_artifact_authority_faulted(
+        self,
+        controller: ArtifactWorkbench,
+        *,
+        session: ArtifactSession | None,
+        project_path: str | None,
+        error: BaseException,
+        operation_id: str | None,
+    ) -> None:
+        """Block all writes after an application/scene rollback becomes uncertain."""
+
+        self._artifact_authority_faulted = True
+        self._project_load_failed = True
+        # A faulted target must never be overwritten by an ordinary Save.
+        self._current_project_path = None
+        try:
+            controller.enter_faulted_state(
+                session=session,
+                project_path=project_path,
+                error=error,
+                operation_id=operation_id,
+            )
+        except Exception:
+            _LOGGER.critical(
+                "Artifact controller could not enter its fatal state",
+                exc_info=True,
+            )
+            # Preserve a fail-closed controller even if the existing instance
+            # was itself corrupted or replaced by a test double.
+            fallback = ArtifactWorkbench()
+            try:
+                fallback.enter_faulted_state(
+                    session=session,
+                    project_path=project_path,
+                    error=error,
+                    operation_id=operation_id,
+                )
+            except Exception:
+                fallback.enter_faulted_state(
+                    session=None,
+                    project_path=None,
+                    error=error,
+                    operation_id=operation_id,
+                )
+            self._artifact_workbench = fallback
+        try:
+            self.status_info.setText(
+                "⛔ 문서 권위 복원 실패 | 저장·실측·내보내기 차단, 검증된 원본을 다시 여세요"
+            )
+        except Exception:
+            pass
+
+    def _publish_artifact_session_projection(
+        self,
+        session: ArtifactSession,
+        *,
+        project_path: str | None,
+        fit_camera: bool,
+        status_text: str,
+        workflow_transition: ProjectionTransition | None = None,
+        expected_new_record_ids: tuple[str, ...] | None = None,
+    ) -> None:
+        old_session = self._artifact_session
+        controller = self._artifact_workbench_controller()
+        if workflow_transition is None:
+            if not isinstance(old_session, ArtifactSession):
+                raise ArtifactWorkbenchError(
+                    "native projection replacement requires a ticketed Open transition"
+                )
+            workflow_transition = controller.prepare_session_commit(
+                old_session,
+                session,
+                expected_new_record_ids=expected_new_record_ids,
+                project_path=project_path,
+            )
+        elif workflow_transition.candidate_session is not session:
+            raise ArtifactWorkbenchError(
+                "workflow transition candidate does not match the published session"
+            )
+        projection = workflow_transition.projection
+        effective_project_path = workflow_transition.project_path
+        source_asset, _geometry, _metadata = self._artifact_source_context(
+            session.document
+        )
+        prepared = None
+        activation: ProjectionActivation | None = None
+        scene_snapshot = self._snapshot_live_scene_for_project_swap()
+        old_project_path = self._current_project_path
+        old_requires_save_as = self._project_requires_save_as
+        old_legacy_path = self._legacy_project_path
+        old_has_legacy = self._project_has_legacy_bindings
+        old_project_load_failed = self._project_load_failed
+        is_open_transition = workflow_transition.kind in {
+            WorkflowTransitionKind.NEW_SOURCE,
+            WorkflowTransitionKind.REOPEN_PROJECT,
+        }
+        authority_published = False
+        finalize_attempted = False
+        old_objects: list[Any] = []
+        try:
+            prepared = self.viewport.prepare_mesh_object(
+                projection.mesh,
+                str(getattr(source_asset, "original_name", "") or "Artifact"),
+                artifact_binding=projection.snapshot,
+            )
+            self.viewport.validate_prepared_scene([prepared])
+
+            # Publish the authority before scene notifications. Signal
+            # callbacks must never observe a new projection with an old doc.
+            activation = controller.activate_projection(workflow_transition)
+            self._artifact_session = session
+            self.current_mesh = projection.mesh
+            self.current_filepath = session.resolved_source_path
+            self._current_project_path = (
+                str(effective_project_path) if effective_project_path else None
+            )
+            self._project_requires_save_as = False
+            self._legacy_project_path = None
+            self._project_has_legacy_bindings = False
+            self._project_load_failed = (
+                False if is_open_transition else old_project_load_failed
+            )
+            authority_published = True
+
+            old_objects = self.viewport.swap_prepared_scene(
+                [prepared],
+                selected_index=0,
+                fit_camera=fit_camera,
+            )
+            self._flattened_cache.clear()
+            self._flatten_recommendation_cache.clear()
+            assert activation is not None
+            finalize_attempted = True
+            controller.finalize_projection(activation)
+            if is_open_transition:
+                self._artifact_authority_faulted = False
+        except Exception as publication_error:
+            self._artifact_session = old_session
+            self._current_project_path = old_project_path
+            self._project_requires_save_as = old_requires_save_as
+            self._legacy_project_path = old_legacy_path
+            self._project_has_legacy_bindings = old_has_legacy
+            self._project_load_failed = old_project_load_failed
+            rollback_error: BaseException | None = None
+            if activation is not None:
+                try:
+                    controller.rollback_projection(
+                        activation,
+                        RuntimeError("scene projection publication failed"),
+                    )
+                except Exception as exc:
+                    rollback_error = exc
+                    _LOGGER.critical(
+                        "Artifact application authority rollback failed",
+                        exc_info=True,
+                    )
+            if not authority_published:
+                if prepared is not None:
+                    self.viewport.cleanup_scene_objects([prepared])
+                if rollback_error is not None or finalize_attempted:
+                    self._mark_artifact_authority_faulted(
+                        controller,
+                        session=old_session,
+                        project_path=old_project_path,
+                        error=rollback_error or publication_error,
+                        operation_id=(
+                            workflow_transition.id
+                            if workflow_transition is not None
+                            else None
+                        ),
+                    )
+                raise
+            restore_error: BaseException | None = None
+            try:
+                self._restore_live_scene_after_failed_swap(
+                    scene_snapshot,
+                    [prepared] if prepared is not None else [],
+                )
+                expected_objects = list(scene_snapshot.get("objects", []) or [])
+                restored_objects = list(getattr(self.viewport, "objects", []) or [])
+                if (
+                    len(restored_objects) != len(expected_objects)
+                    or any(
+                        restored is not expected
+                        for restored, expected in zip(
+                            restored_objects,
+                            expected_objects,
+                            strict=True,
+                        )
+                    )
+                    or self._artifact_session is not old_session
+                    or self.current_mesh is not scene_snapshot.get("current_mesh")
+                ):
+                    raise RuntimeError(
+                        "scene restoration did not recover the exact previous authority"
+                    )
+            except Exception as exc:
+                restore_error = exc
+                _LOGGER.critical(
+                    "Artifact live-scene restoration failed",
+                    exc_info=True,
+                )
+            if rollback_error is not None or restore_error is not None or finalize_attempted:
+                self._mark_artifact_authority_faulted(
+                    controller,
+                    session=old_session,
+                    project_path=old_project_path,
+                    error=rollback_error or restore_error or publication_error,
+                    operation_id=workflow_transition.id,
+                )
+            raise
+
+        self.viewport.cleanup_scene_objects(old_objects)
+        try:
+            self.scene_panel.update_list(self.viewport.objects, self.viewport.selected_index)
+            self.sync_transform_panel()
+            self._sync_tile_panel()
+            self._sync_native_cutline_controls(reset_offset=False)
+            latest_vector = self._latest_native_vector_record()
+            if latest_vector is None:
+                self.viewport.set_native_vector_preview(None)
+            else:
+                self._preview_native_vector_record(session, latest_vector.id)
+            self.status_unit.setText("단위: mm (canonical)")
+            self.status_info.setText(status_text)
+        except Exception:
+            _LOGGER.debug("Artifact projection UI refresh failed", exc_info=True)
+
+    def _finish_artifact_source_loaded(
+        self,
+        mesh_data,
+        filepath: str,
+        *,
+        artifact_ticket: ArtifactLoadTicket | None = None,
+    ) -> None:
+        pending_document = self._artifact_pending_document
+        pending_project_path = self._artifact_pending_project_path
+        pending_metadata = self._artifact_pending_source_metadata
+        try:
+            transition: ProjectionTransition | None = None
+            if isinstance(artifact_ticket, ArtifactLoadTicket):
+                transition = self._artifact_workbench_controller().prepare_loaded_source(
+                    artifact_ticket,
+                    mesh_data,
+                    resolved_source_path=str(filepath),
+                )
+                session = transition.candidate_session
+                if artifact_ticket.document is not None:
+                    status = (
+                        f"✅ ArtifactDocument 로딩 완료: "
+                        f"{Path(pending_project_path or '').name} "
+                        "| source·geometry·Align 검증됨"
+                    )
+                else:
+                    status = (
+                        f"✅ 원본 등록 완료: {Path(filepath).name} | canonical mm | "
+                        "다음: 정치 preview 후 정치 확정"
+                    )
+            elif pending_document is not None:
+                session = ArtifactSession.bind_loaded_document(
+                    pending_document,
+                    mesh_data,
+                    resolved_source_path=str(filepath),
+                )
+                status = (
+                    f"✅ ArtifactDocument 로딩 완료: {Path(pending_project_path or '').name} "
+                    "| source·geometry·Align 검증됨"
+                )
+            elif isinstance(pending_metadata, dict):
+                session = ArtifactSession.create_from_source(
+                    mesh_data,
+                    resolved_source_path=str(filepath),
+                    unit=str(pending_metadata.get("unit", "")),
+                    axes=dict(pending_metadata.get("axes", {})),
+                    handedness=str(pending_metadata.get("handedness", "unknown")),
+                    software_version=APP_VERSION,
+                    operator="local-user",
+                )
+                status = (
+                    f"✅ 원본 등록 완료: {Path(filepath).name} | canonical mm | "
+                    "다음: 정치 preview 후 정치 확정"
+                )
+            else:
+                raise ArtifactSessionError("artifact load request has no document or metadata")
+
+            self._publish_artifact_session_projection(
+                session,
+                project_path=pending_project_path,
+                fit_camera=True,
+                status_text=status,
+                workflow_transition=transition,
+            )
+            self._clear_artifact_pending_load(cancel_workbench=False)
+        except Exception as exc:
+            if isinstance(artifact_ticket, ArtifactLoadTicket):
+                try:
+                    controller = self._artifact_workbench_controller()
+                    if controller.snapshot.pending_load == artifact_ticket:
+                        controller.fail_load(artifact_ticket, exc)
+                except (ArtifactWorkbenchError, StaleWorkflowOperationError):
+                    _LOGGER.debug("Artifact Open failure was stale", exc_info=True)
+            self._clear_artifact_pending_load(cancel_workbench=False)
+            self.status_info.setText("❌ ArtifactDocument staging 실패 | 기존 scene 유지")
+            QMessageBox.critical(
+                self,
+                "ArtifactDocument 로딩 실패",
+                "원본·geometry·장면 검증 중 실패하여 기존 작업을 유지했습니다."
+                f"\n\n{type(exc).__name__}: {exc}",
+            )
+
+    def _on_mesh_load_thread_loaded(
+        self,
+        mesh_data,
+        filepath: str,
+        *,
+        artifact_ticket: ArtifactLoadTicket | None = None,
+    ):
         try:
             dlg = getattr(self, "_mesh_load_dialog", None)
             if dlg is not None:
                 dlg.setLabelText("장면에 추가하는 중...")
                 QApplication.processEvents()
+
+            if bool(getattr(self, "_artifact_load_active", False)):
+                self._finish_artifact_source_loaded(
+                    mesh_data,
+                    filepath,
+                    artifact_ticket=artifact_ticket,
+                )
+                return
+
+            project_obj_state = (
+                getattr(self, "_project_load_current", None)
+                if getattr(self, "_project_load_active", False)
+                else None
+            )
+            source_verification: SourceVerification | None = None
+            source_binding_status = ""
+            if isinstance(project_obj_state, dict):
+                source_verification, binding_status = _verify_loaded_project_source(
+                    mesh_data,
+                    project_obj_state,
+                    filepath,
+                    migrated_from_v1=bool(
+                        getattr(self, "_project_load_from_legacy", False)
+                    ),
+                )
+                source_binding_status = binding_status
+                if binding_status == _SOURCE_BINDING_LEGACY:
+                    self._project_has_legacy_bindings = True
+                self._last_source_verification = source_verification
+                try:
+                    setattr(mesh_data, "_amr_source_verification", source_verification)
+                    setattr(mesh_data, "_amr_source_binding_status", binding_status)
+                except Exception:
+                    pass
+
+                if source_verification.status not in {
+                    SourceVerificationStatus.VERIFIED,
+                    SourceVerificationStatus.LEGACY_UNVERIFIED,
+                }:
+                    expected = source_verification.expected
+                    actual = source_verification.actual
+                    expected_text = expected.id if expected is not None else "없음"
+                    actual_text = actual.id if actual is not None else "읽을 수 없음"
+                    self._abort_project_source_load(
+                        source_verification,
+                        message=(
+                            "저장된 프로젝트와 선택한 원본 메쉬의 바이트가 일치하지 않아 "
+                            "face ID와 기록 데이터를 적용하지 않았습니다.\n\n"
+                            f"기대값: {expected_text}\n실제값: {actual_text}"
+                        ),
+                    )
+                    return
+
+                self._project_staged_objects.append(
+                    (
+                        mesh_data,
+                        str(filepath),
+                        project_obj_state,
+                        source_verification,
+                        source_binding_status,
+                    )
+                )
+                self.status_info.setText(
+                    f"원본 검증 완료, scene 교체 대기: {Path(filepath).name}"
+                )
+                return
+
+            if self._native_artifact_mode():
+                QMessageBox.critical(
+                    self,
+                    "메쉬 추가 차단",
+                    "검증되지 않은 legacy 메쉬 로드가 native ArtifactDocument 장면에 "
+                    "도달해 적용하지 않았습니다.",
+                )
+                self.status_info.setText("⛔ hybrid scene 차단 | native 문서 유지")
+                return
 
             self.current_mesh = mesh_data
             self.current_filepath = filepath
@@ -5788,7 +7908,6 @@ class MainWindow(QMainWindow):
 
             # Normal file load vs project load(.amr)
             obj_name = Path(filepath).name
-            project_obj_state = getattr(self, "_project_load_current", None) if getattr(self, "_project_load_active", False) else None
             if isinstance(project_obj_state, dict):
                 obj_name = str(project_obj_state.get("name", "")).strip() or obj_name
 
@@ -5807,8 +7926,20 @@ class MainWindow(QMainWindow):
                 except Exception:
                     _LOGGER.exception("Failed applying object state from project")
                 self.scene_panel.update_list(self.viewport.objects, self.viewport.selected_index)
+                if source_binding_status == _SOURCE_BINDING_LEGACY:
+                    source_note = " | 원본 SHA 기록, 구버전 기록 연결 미검증"
+                elif source_verification is not None and source_verification.relocated:
+                    source_note = " | 이동된 동일 원본 SHA-256 확인"
+                elif (
+                    source_verification is not None
+                    and source_verification.status is SourceVerificationStatus.LEGACY_UNVERIFIED
+                ):
+                    source_note = " | 구버전 원본 연결 미검증"
+                else:
+                    source_note = " | 원본 SHA-256 확인"
                 self.status_info.setText(
-                    f"프로젝트 로드됨: {obj_name} | 다음: 1단계 정치에서 기준 시점을 확인하세요."
+                    f"프로젝트 로드됨: {obj_name}{source_note} | "
+                    "다음: 1단계 정치에서 기준 시점을 확인하세요."
                 )
             else:
                 # 일반 메쉬 로드 시에는 X-Ray를 기본 해제해 내부 비침 혼란을 줄입니다.
@@ -5836,18 +7967,38 @@ class MainWindow(QMainWindow):
                 dlg.close()
                 self._mesh_load_dialog = None
 
-    def _on_mesh_load_thread_failed(self, message: str):
+    def _on_mesh_load_thread_failed(
+        self,
+        message: str,
+        *,
+        artifact_ticket: ArtifactLoadTicket | None = None,
+    ):
         dlg = getattr(self, "_mesh_load_dialog", None)
         if dlg is not None:
             dlg.close()
             self._mesh_load_dialog = None
 
-        # Abort project load if a mesh fails to load.
-        if bool(getattr(self, "_project_load_active", False)):
+        # Abort project staging if a mesh fails to load. The live scene has not
+        # been touched yet, so discard only staged CPU data and restore the
+        # previous save context.
+        failed_artifact_staging = bool(getattr(self, "_artifact_load_active", False))
+        if failed_artifact_staging:
+            if isinstance(artifact_ticket, ArtifactLoadTicket):
+                try:
+                    controller = self._artifact_workbench_controller()
+                    if controller.snapshot.pending_load == artifact_ticket:
+                        controller.fail_load(artifact_ticket, message)
+                except (ArtifactWorkbenchError, StaleWorkflowOperationError):
+                    _LOGGER.debug("Artifact Open failure was stale", exc_info=True)
+            self._clear_artifact_pending_load(cancel_workbench=False)
+        failed_project_staging = bool(getattr(self, "_project_load_active", False))
+        if failed_project_staging:
             self._project_load_active = False
             self._project_load_queue = []
             self._project_load_current = None
             self._project_load_state = None
+            self._project_load_from_legacy = False
+            self._discard_project_staging_and_restore_context()
 
         msg = f"파일 로드 실패:\n{message}"
         try:
@@ -5858,17 +8009,32 @@ class MainWindow(QMainWindow):
             pass
 
         QMessageBox.critical(self, "오류", msg)
-        self.status_info.setText("로드 실패")
+        self.status_info.setText(
+            "로드 실패 | 기존 scene 유지"
+            if failed_project_staging or failed_artifact_staging
+            else "로드 실패"
+        )
         self.status_mesh.setText("")
 
-    def _on_mesh_load_thread_finished(self):
-        thread = getattr(self, "_mesh_load_thread", None)
+    def _on_mesh_load_thread_finished(
+        self,
+        *,
+        owner: QThread | None = None,
+        request_id: str | None = None,
+    ):
+        thread = owner or getattr(self, "_mesh_load_thread", None)
+        if owner is not None and not self._mesh_load_result_is_current(
+            owner,
+            str(request_id or ""),
+        ):
+            return
         if thread is not None:
             try:
                 thread.deleteLater()
             except Exception:
                 pass
         self._mesh_load_thread = None
+        self._mesh_load_request_id = None
         try:
             self._status_task_end()
         except Exception:
@@ -8433,7 +10599,19 @@ class MainWindow(QMainWindow):
 
         # 고정 상태 버튼 활성/비활성
         try:
-            self.trans_toolbar.btn_fixed.setEnabled(bool(getattr(obj, "fixed_state_valid", False)))
+            if self._native_artifact_mode():
+                has_preview = (
+                    not np.allclose(obj.translation, [0.0, 0.0, 0.0])
+                    or not np.allclose(obj.rotation, [0.0, 0.0, 0.0])
+                    or not np.isclose(float(obj.scale), 1.0)
+                )
+                self.trans_toolbar.btn_fixed.setEnabled(bool(has_preview))
+                self.trans_toolbar.scale_spin.setEnabled(False)
+            else:
+                self.trans_toolbar.btn_fixed.setEnabled(
+                    bool(getattr(obj, "fixed_state_valid", False))
+                )
+                self.trans_toolbar.scale_spin.setEnabled(True)
         except Exception:
             pass
         
@@ -8467,7 +10645,8 @@ class MainWindow(QMainWindow):
         obj = self.viewport.selected_obj
         if not obj:
             return
-        
+
+        native = self._native_artifact_mode()
         obj.translation = np.array([
             self.trans_toolbar.trans_x.value(),
             self.trans_toolbar.trans_y.value(),
@@ -8478,7 +10657,20 @@ class MainWindow(QMainWindow):
             self.trans_toolbar.rot_y.value(),
             self.trans_toolbar.rot_z.value()
         ])
-        obj.scale = self.trans_toolbar.scale_spin.value()
+        if native:
+            obj.scale = 1.0
+            if not np.isclose(float(self.trans_toolbar.scale_spin.value()), 1.0):
+                self.trans_toolbar.scale_spin.blockSignals(True)
+                self.trans_toolbar.scale_spin.setValue(1.0)
+                self.trans_toolbar.scale_spin.blockSignals(False)
+            try:
+                self.status_info.setText(
+                    "정치 preview | 저장 전 '정치 확정'으로 Align revision을 만드세요"
+                )
+            except Exception:
+                pass
+        else:
+            obj.scale = self.trans_toolbar.scale_spin.value()
         self.viewport.update()
         self.viewport.meshTransformChanged.emit()
 
@@ -8487,16 +10679,95 @@ class MainWindow(QMainWindow):
         obj = self.viewport.selected_obj
         if not obj:
             return
-        
+
+        if self._native_artifact_mode():
+            try:
+                self._require_native_projection_session(obj)
+                controller = self._artifact_workbench_controller()
+                pivot = np.asarray(
+                    getattr(obj, "_amr_preview_pivot_mm", obj.mesh.centroid),
+                    dtype=np.float64,
+                ).reshape(3)
+                transition = controller.prepare_align_commit(
+                    translation_mm=np.asarray(obj.translation, dtype=np.float64),
+                    rotation_deg=np.asarray(obj.rotation, dtype=np.float64),
+                    scale=float(obj.scale),
+                    pivot_mm=pivot,
+                    operator="local-user",
+                )
+                if transition is None:
+                    self.status_info.setText("정치 preview 변경이 없어 현재 revision을 유지합니다")
+                    return
+                candidate = transition.candidate_session
+                self._publish_artifact_session_projection(
+                    candidate,
+                    project_path=self._current_project_path,
+                    fit_camera=False,
+                    status_text="✅ 정치 확정 | 새 Align revision 생성",
+                    workflow_transition=transition,
+                )
+            except Exception as exc:
+                QMessageBox.critical(
+                    self,
+                    "정치 확정 실패",
+                    "Align revision과 장면을 원자적으로 교체하지 못해 기존 preview를 "
+                    f"유지했습니다.\n\n{type(exc).__name__}: {exc}",
+                )
+            return
+
         self.viewport.bake_object_transform(obj)
         self.sync_transform_panel() # 툴바 값 리셋됨
         self.viewport.status_info = f"{obj.name} 정치(Bake) 완료. 변환값이 초기화되었습니다."
         self.viewport.update()
 
+    def undo_last_action(self):
+        """Undo a native preview/revision, otherwise delegate to legacy undo."""
+
+        obj = self.viewport.selected_obj
+        if not self._native_artifact_mode():
+            self.viewport.undo()
+            return
+        if obj is None:
+            return
+        try:
+            self._require_native_projection_session(obj)
+            has_preview = (
+                not np.allclose(obj.translation, [0.0, 0.0, 0.0], rtol=0.0, atol=1e-12)
+                or not np.allclose(obj.rotation, [0.0, 0.0, 0.0], rtol=0.0, atol=1e-12)
+                or not np.isclose(float(obj.scale), 1.0, rtol=0.0, atol=1e-12)
+            )
+            if has_preview:
+                self.reset_transform()
+                self.status_info.setText("↶ 정치 preview 취소 | 확정 revision 유지")
+                return
+            controller = self._artifact_workbench_controller()
+            transition = controller.prepare_activate_parent_align()
+            candidate = transition.candidate_session
+            self._publish_artifact_session_projection(
+                candidate,
+                project_path=self._current_project_path,
+                fit_camera=False,
+                status_text="↶ 이전 Align revision 활성화",
+                workflow_transition=transition,
+            )
+        except (ArtifactSessionError, ArtifactWorkbenchError) as exc:
+            self.status_info.setText(f"Undo할 이전 Align revision이 없습니다: {exc}")
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Align Undo 실패",
+                f"기존 revision을 유지했습니다.\n\n{type(exc).__name__}: {exc}",
+            )
+
     def restore_fixed_state(self):
         """정치 확정 이후의 고정 상태로 복귀"""
         obj = self.viewport.selected_obj
         if not obj:
+            return
+
+        if self._native_artifact_mode():
+            self.reset_transform()
+            self.status_info.setText("정치 preview 초기화 | 확정 Align revision 유지")
             return
 
         self.viewport.restore_fixed_state(obj)
@@ -8535,6 +10806,8 @@ class MainWindow(QMainWindow):
 
     def fit_ground_plane(self):
         """현재 자세를 유지하고 메쉬를 XY 바닥(Z=0)에 안착."""
+        if self._reject_native_unported_mutation("기준평면 맞추기"):
+            return
         obj = self.viewport.selected_obj
         if not obj:
             return
@@ -8561,6 +10834,8 @@ class MainWindow(QMainWindow):
 
         if abs(min_z) > 1e-9:
             obj.mesh.vertices[:, 2] -= min_z
+            obj._amr_has_unpersisted_bake = True
+            obj._amr_alignment_status = _ALIGNMENT_STATUS_BAKED_UNVERIFIABLE
             try:
                 obj.mesh._bounds = None
                 obj.mesh._centroid = None
@@ -9262,18 +11537,11 @@ class MainWindow(QMainWindow):
                 if idx is None:
                     major_axis = "x" if use_x else "y"
 
-                    # Rotation matrix (local -> world)
+                    # Rotation matrix (local -> world), shared with the renderer.
                     rot_deg = np.asarray(getattr(obj, "rotation", [0.0, 0.0, 0.0]), dtype=np.float64).reshape(-1)
                     if rot_deg.size < 3:
                         rot_deg = np.array([0.0, 0.0, 0.0], dtype=np.float64)
-                    rx, ry, rz = np.radians(rot_deg[:3])
-                    cx, sx = float(np.cos(rx)), float(np.sin(rx))
-                    cy, sy = float(np.cos(ry)), float(np.sin(ry))
-                    cz, sz = float(np.cos(rz)), float(np.sin(rz))
-                    rot_x = np.array([[1.0, 0.0, 0.0], [0.0, cx, -sx], [0.0, sx, cx]], dtype=np.float64)
-                    rot_y = np.array([[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]], dtype=np.float64)
-                    rot_z = np.array([[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]], dtype=np.float64)
-                    rot_mat = rot_x @ rot_y @ rot_z
+                    rot_mat = scene_rotation_matrix(rot_deg[:3])
 
                     # Face normals (world)
                     try:
@@ -9462,16 +11730,13 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _build_world_mesh_from_transform(base, *, translation, rotation, scale: float):
         from src.core.mesh_loader import MeshData
-        from scipy.spatial.transform import Rotation as R
 
-        vertices = base.vertices.astype(np.float64) * float(scale)
-
-        if rotation is not None and not np.allclose(rotation, [0, 0, 0]):
-            rot = R.from_euler('xyz', rotation, degrees=True).as_matrix()
-            vertices = (rot @ vertices.T).T
-
-        if translation is not None and not np.allclose(translation, [0, 0, 0]):
-            vertices = vertices + np.asarray(translation, dtype=np.float64)
+        local_to_world = scene_trs_matrix(
+            [0.0, 0.0, 0.0] if translation is None else translation,
+            [0.0, 0.0, 0.0] if rotation is None else rotation,
+            scale,
+        )
+        vertices = transform_points(base.vertices, local_to_world)
 
         mesh = MeshData(
             vertices=vertices,
@@ -9849,9 +12114,43 @@ class MainWindow(QMainWindow):
 
         dialog.exec()
 
+    def _reject_native_legacy_profile_export(self) -> bool:
+        if not self._native_artifact_mode():
+            return False
+        message = (
+            "화면 캡처/OpenCV 기반 2D 도면은 ArtifactDocument의 1:1 측정 산출물이 "
+            "아닙니다. 검증된 Cutline/Outline record를 만든 뒤 '최근 검증 벡터 1:1 SVG "
+            "내보내기'를 사용하세요."
+        )
+        self.status_info.setText("⛔ legacy 화면 SVG 차단 | 검증 벡터 내보내기 사용")
+        QMessageBox.warning(self, "검증되지 않은 내보내기 차단", message)
+        return True
+
+    def _reject_native_legacy_surface_export(self, export_type: object) -> bool:
+        if not self._native_artifact_mode() or export_type not in {
+            "flat_svg",
+            "review_sheet",
+            "rubbing",
+            "rubbing_digital",
+            "rubbing_view_cyl",
+        }:
+            return False
+        message = (
+            "기존 펼침·화면·SurfaceVisualizer 기반 출력은 ArtifactDocument의 "
+            "재현 가능한 측정 산출물이 아닙니다. '탁본 계산 · 기록' 후 "
+            "'최근 검증 탁본 1:1 PNG 패키지 내보내기'를 사용하세요."
+        )
+        self.status_info.setText(
+            "⛔ legacy 탁본/펼침 출력 차단 | 검증 Digital Rubbing 사용"
+        )
+        QMessageBox.warning(self, "검증되지 않은 탁본 출력 차단", message)
+        return True
+
     def on_export_requested(self, data):
         """내보내기 요청 처리"""
         export_type = data.get('type')
+        if self._reject_native_legacy_surface_export(export_type):
+            return
         requested_target = (data or {}).get(
             "target",
             self.export_panel.current_rubbing_target() if hasattr(self, "export_panel") else "all",
@@ -9884,10 +12183,14 @@ class MainWindow(QMainWindow):
         requested_target_normalized = target
         
         if export_type == 'profile_2d':
+            if self._reject_native_legacy_profile_export():
+                return
             self.export_2d_profile(data.get('view'))
             return
 
         if export_type == "profile_2d_package":
+            if self._reject_native_legacy_profile_export():
+                return
             self.export_2d_profile_package()
             return
 
@@ -10107,6 +12410,8 @@ class MainWindow(QMainWindow):
     
     def export_2d_profile(self, view):
         """2D 실측 도면(SVG) 내보내기"""
+        if self._reject_native_legacy_profile_export():
+            return
         obj = self.viewport.selected_obj
         if not obj:
             QMessageBox.warning(self, "경고", "선택된 메쉬가 없습니다.")
@@ -10251,6 +12556,8 @@ class MainWindow(QMainWindow):
     
     def export_2d_profile_package(self):
         """2D 실측 도면(SVG) 6방향 패키지 내보내기"""
+        if self._reject_native_legacy_profile_export():
+            return
         obj = self.viewport.selected_obj
         if not obj:
             QMessageBox.warning(self, "경고", "선택된 메쉬가 없습니다.")
@@ -10637,24 +12944,14 @@ class MainWindow(QMainWindow):
     
     def bake_and_center(self):
         """정치: 현재 회전을 메쉬 버텍스에 영구 적용하고 변환 리셋"""
+        if self._reject_native_unported_mutation("정치 후 중심 이동"):
+            return
         obj = self.viewport.selected_obj
         if obj is None:
             return
         
-        # 회전 행렬 계산
-        rx, ry, rz = np.radians(obj.rotation)
-        
-        cos_x, sin_x = np.cos(rx), np.sin(rx)
-        rot_x = np.array([[1, 0, 0], [0, cos_x, -sin_x], [0, sin_x, cos_x]])
-        
-        cos_y, sin_y = np.cos(ry), np.sin(ry)
-        rot_y = np.array([[cos_y, 0, sin_y], [0, 1, 0], [-sin_y, 0, cos_y]])
-        
-        cos_z, sin_z = np.cos(rz), np.sin(rz)
-        rot_z = np.array([[cos_z, -sin_z, 0], [sin_z, cos_z, 0], [0, 0, 1]])
-        
-        # OpenGL 렌더링(glRotate X->Y->Z)과 동일한 합성 회전
-        rotation_matrix = rot_x @ rot_y @ rot_z
+        # OpenGL 렌더링과 동일한 중앙 회전 계약.
+        rotation_matrix = scene_rotation_matrix(obj.rotation)
         
         # 메쉬 버텍스에 회전과 스케일 적용
         obj.mesh.vertices = (rotation_matrix @ obj.mesh.vertices.T).T * obj.scale
@@ -10685,6 +12982,8 @@ class MainWindow(QMainWindow):
         obj.translation = np.array([0.0, 0.0, 0.0])
         obj.rotation = np.array([0.0, 0.0, 0.0])
         obj.scale = 1.0
+        obj._amr_has_unpersisted_bake = True
+        obj._amr_alignment_status = _ALIGNMENT_STATUS_BAKED_UNVERIFIABLE
         
         self.sync_transform_panel()
         self.viewport.update()
@@ -11561,6 +13860,14 @@ class MainWindow(QMainWindow):
 
     def on_roi_toggled(self, enabled):
         """2D ROI 모드 토글 핸들러"""
+        if enabled and self._native_artifact_mode():
+            try:
+                self.section_panel.btn_roi.blockSignals(True)
+                self.section_panel.btn_roi.setChecked(False)
+            finally:
+                self.section_panel.btn_roi.blockSignals(False)
+            self.status_info.setText("⛔ 화면 ROI는 측정값이 아닙니다 | 검증된 외곽 도구 사용")
+            return
         if enabled:
             try:
                 self._disable_measure_mode()
@@ -11660,6 +13967,716 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def on_silhouette_requested(self) -> None:
+        if self._native_artifact_mode():
+            message = (
+                "현재 ROI 외곽선은 화면/convex-hull 기반이라 오목부, 구멍, 분리 성분을 "
+                "보존하지 못합니다. 위의 '외곽 계산 · 기록'에서 6면 방향과 mm 정밀도를 "
+                "선택해 검증된 Outline을 만드세요."
+            )
+            self.status_info.setText("⛔ 화면 외곽선 차단 | 검증된 Outline 도구 사용")
+            QMessageBox.warning(self, "화면 외곽선은 검토용", message)
+            return
+        self.viewport.extract_roi_silhouette()
+
+    def _latest_native_vector_record(self):
+        session = getattr(self, "_artifact_session", None)
+        if not isinstance(session, ArtifactSession):
+            return None
+        known_types = {kind.record_type for kind in VectorRecordKind}
+        candidates = []
+        for record in session.document.records:
+            try:
+                if (
+                    record.type in known_types
+                    and self._native_vector_record_is_exportable(session, record)
+                ):
+                    candidates.append(record)
+            except Exception:
+                continue
+        if not candidates:
+            return None
+        return candidates[-1]
+
+    @staticmethod
+    def _native_vector_record_is_exportable(session, record) -> bool:
+        return bool(
+            isinstance(session, ArtifactSession)
+            and record.type in {kind.record_type for kind in VectorRecordKind}
+            and str(record.lifecycle_status.value) == "ready"
+            and session.document.record_freshness(record.id).value == "fresh"
+        )
+
+    def _current_native_vector_record(self):
+        session = getattr(self, "_artifact_session", None)
+        if not isinstance(session, ArtifactSession):
+            return None
+        preview_id = getattr(self.viewport, "native_vector_preview_record_id", None)
+        if isinstance(preview_id, str):
+            record = session.document.record_index.get(preview_id)
+            if record is not None and self._native_vector_record_is_exportable(
+                session, record
+            ):
+                return record
+        return self._latest_native_vector_record()
+
+    @staticmethod
+    def _native_rubbing_record_is_exportable(session, record) -> bool:
+        return bool(
+            isinstance(session, ArtifactSession)
+            and getattr(record, "type", None) == RUBBING_RECORD_TYPE
+            and str(record.lifecycle_status.value) == "ready"
+            and session.document.record_freshness(record.id).value == "fresh"
+        )
+
+    def _latest_native_rubbing_record(self):
+        session = getattr(self, "_artifact_session", None)
+        if not isinstance(session, ArtifactSession):
+            return None
+        candidates = []
+        for record in session.document.records:
+            try:
+                if self._native_rubbing_record_is_exportable(session, record):
+                    candidates.append(record)
+            except Exception:
+                continue
+        return candidates[-1] if candidates else None
+
+    def _current_native_rubbing_record(self):
+        session = getattr(self, "_artifact_session", None)
+        if not isinstance(session, ArtifactSession):
+            return None
+        preview_id = getattr(self, "_native_rubbing_preview_record_id", None)
+        if isinstance(preview_id, str):
+            record = session.document.record_index.get(preview_id)
+            if record is not None and self._native_rubbing_record_is_exportable(
+                session, record
+            ):
+                return record
+        return self._latest_native_rubbing_record()
+
+    def _clear_native_rubbing_preview(self) -> None:
+        self._native_rubbing_preview_record_id = None
+        self._native_rubbing_preview_document_id = None
+        self._native_rubbing_preview_geometry_ref = None
+        panel = getattr(self, "section_panel", None)
+        if panel is None or not hasattr(panel, "label_native_rubbing_preview"):
+            return
+        panel.label_native_rubbing_preview.clear()
+        panel.label_native_rubbing_preview.setText(
+            "READY + FRESH 탁본을 계산하면 미리보기가 표시됩니다.\n"
+            "프로젝트를 다시 연 경우 export 또는 재계산으로 픽셀을 검증합니다."
+        )
+        panel.label_native_rubbing_info.setText("READY + FRESH 탁본 기록 없음")
+
+    def _preview_native_rubbing(
+        self,
+        session: ArtifactSession,
+        record_id: str,
+        raster: DigitalRubbingRaster,
+    ) -> None:
+        record = session.document.record_index.get(record_id)
+        if record is None or not self._native_rubbing_record_is_exportable(
+            session, record
+        ):
+            raise ArtifactRubbingError(
+                "native Digital Rubbing preview requires a READY + FRESH record"
+            )
+        if raster.receipt() != rubbing_receipt_from_record(record):
+            raise ArtifactRubbingError(
+                "native Digital Rubbing preview does not match its record receipt"
+            )
+        image = Image.fromarray(raster.pixels, mode="LA").convert("RGBA")
+        pixmap = self._pixmap_from_pil_image(image)
+        scaled = pixmap.scaled(
+            420,
+            260,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        panel = self.section_panel
+        panel.label_native_rubbing_preview.setPixmap(scaled)
+        panel.label_native_rubbing_info.setText(
+            f"{record.recipe['view']} · {raster.width_pixels}×{raster.height_pixels} px · "
+            f"{raster.pixels_per_meter // 1000} px/mm · record {record.id}"
+        )
+        self._native_rubbing_preview_record_id = record.id
+        self._native_rubbing_preview_document_id = session.document.document_id
+        self._native_rubbing_preview_geometry_ref = record.geometry_ref
+
+    def _preview_native_vector_record(
+        self,
+        session: ArtifactSession,
+        record_id: str,
+    ) -> None:
+        record = session.document.record_index.get(record_id)
+        if record is None or not self._native_vector_record_is_exportable(
+            session, record
+        ):
+            raise ArtifactVectorExtractionError(
+                "native vector preview requires a READY + FRESH record"
+            )
+        payload = vector_payload_from_record(record)
+        self.viewport.set_native_vector_preview(payload, record_id=record.id)
+
+    def _sync_native_cutline_controls(self, *, reset_offset: bool) -> None:
+        panel = getattr(self, "section_panel", None)
+        if panel is None or not hasattr(panel, "native_group"):
+            return
+        native = self._native_artifact_mode()
+        panel.native_group.setEnabled(native)
+        panel.legacy_line_group.setEnabled(not native)
+        panel.legacy_roi_group.setEnabled(not native)
+        if not native:
+            panel.btn_native_cutline.setEnabled(False)
+            panel.btn_native_outline.setEnabled(False)
+            panel.btn_native_vector_export.setEnabled(False)
+            panel.btn_native_rubbing.setEnabled(False)
+            panel.btn_native_rubbing_export.setEnabled(False)
+            self._clear_native_rubbing_preview()
+            return
+        if not self._native_measurement_ready():
+            panel.btn_native_cutline.setEnabled(False)
+            panel.btn_native_outline.setEnabled(False)
+            panel.btn_native_vector_export.setEnabled(False)
+            panel.btn_native_rubbing.setEnabled(False)
+            panel.btn_native_rubbing_export.setEnabled(False)
+            self._clear_native_rubbing_preview()
+            panel.label_native_rubbing_info.setText(
+                "정치 확정 후 Cutline · Outline · Digital Rubbing을 사용할 수 있습니다."
+            )
+            return
+        session = self._artifact_session
+        assert isinstance(session, ArtifactSession)
+        projection = session.materialize()
+        bounds = np.asarray(projection.mesh.bounds, dtype=np.float64)
+        view = str(panel.combo_native_cutline_view.currentData() or "top")
+        axis = _NATIVE_CUTLINE_AXIS_INDEX.get(view, 2)
+        minimum = float(bounds[0, axis])
+        maximum = float(bounds[1, axis])
+        span = max(maximum - minimum, 1e-6)
+        spin = panel.spin_native_cutline_offset
+        previous = float(spin.value())
+        spin.blockSignals(True)
+        try:
+            spin.setRange(minimum, maximum)
+            spin.setSingleStep(max(span / 200.0, 0.001))
+            if reset_offset or previous < minimum or previous > maximum:
+                spin.setValue((minimum + maximum) * 0.5)
+        finally:
+            spin.blockSignals(False)
+        panel.btn_native_vector_export.setEnabled(
+            self._latest_native_vector_record() is not None
+        )
+        panel.btn_native_cutline.setEnabled(True)
+        panel.btn_native_outline.setEnabled(True)
+        panel.btn_native_rubbing.setEnabled(True)
+        latest_rubbing = self._latest_native_rubbing_record()
+        panel.btn_native_rubbing_export.setEnabled(latest_rubbing is not None)
+        preview_id = getattr(self, "_native_rubbing_preview_record_id", None)
+        if not isinstance(preview_id, str):
+            if latest_rubbing is None:
+                self._clear_native_rubbing_preview()
+        else:
+            preview_record = session.document.record_index.get(preview_id)
+            if (
+                self._native_rubbing_preview_document_id
+                != session.document.document_id
+                or preview_record is None
+                or self._native_rubbing_preview_geometry_ref
+                != getattr(preview_record, "geometry_ref", None)
+                or not self._native_rubbing_record_is_exportable(session, preview_record)
+            ):
+                self._clear_native_rubbing_preview()
+
+    def on_native_cutline_view_changed(self, _view: str) -> None:
+        try:
+            self._sync_native_cutline_controls(reset_offset=True)
+        except Exception as exc:
+            self.status_info.setText(f"❌ native 단면 범위 갱신 실패: {exc}")
+
+    @staticmethod
+    def _utc_seconds_now() -> str:
+        return datetime.now(timezone.utc).isoformat(timespec="seconds").replace(
+            "+00:00", "Z"
+        )
+
+    def _compute_and_commit_native_cutline(
+        self,
+        *,
+        view: str,
+        offset_mm: float,
+        record_id: str | None = None,
+        created_at: str | None = None,
+        operator: str = "local-user",
+    ) -> str:
+        obj = self.viewport.selected_obj
+        session = self._require_native_measurement_session(obj)
+        self._validate_native_scene_for_save(session)
+        frame = _native_cutline_frame(view, offset_mm)
+        computation = compute_artifact_cutline(session, frame)
+        new_record_id = record_id or f"record:cutline:{uuid.uuid4()}"
+        committed = commit_vector_computation(
+            session,
+            computation,
+            record_id=new_record_id,
+            created_at=created_at or self._utc_seconds_now(),
+            operator=operator,
+        )
+        self._publish_artifact_session_projection(
+            committed,
+            project_path=self._current_project_path,
+            fit_camera=False,
+            expected_new_record_ids=(new_record_id,),
+            status_text=(
+                f"✅ {view.title()} Cutline 기록 | "
+                f"{len(computation.payload.paths)}개 경로 | canonical mm"
+            ),
+        )
+        self._preview_native_vector_record(committed, new_record_id)
+        self._sync_native_cutline_controls(reset_offset=False)
+        return new_record_id
+
+    def on_native_cutline_requested(self) -> None:
+        try:
+            view = str(
+                self.section_panel.combo_native_cutline_view.currentData() or "top"
+            )
+            offset = float(self.section_panel.spin_native_cutline_offset.value())
+            self._compute_and_commit_native_cutline(view=view, offset_mm=offset)
+        except Exception as exc:
+            self.status_info.setText("❌ 검증 단면 계산 실패 | 기존 문서 유지")
+            QMessageBox.warning(
+                self,
+                "Cutline 계산 실패",
+                f"단면이 모호하거나 현재 Align과 맞지 않습니다.\n\n{type(exc).__name__}: {exc}",
+            )
+
+    def _compute_and_commit_native_outline(
+        self,
+        *,
+        view: str,
+        precision_grid_mm: float,
+        record_id: str | None = None,
+        created_at: str | None = None,
+        operator: str = "local-user",
+    ) -> str:
+        obj = self.viewport.selected_obj
+        session = self._require_native_measurement_session(obj)
+        self._validate_native_scene_for_save(session)
+        computation = compute_artifact_outline(
+            session,
+            view,
+            precision_grid_mm=precision_grid_mm,
+        )
+        new_record_id = record_id or f"record:outline:{view}:{uuid.uuid4()}"
+        committed = commit_vector_computation(
+            session,
+            computation,
+            record_id=new_record_id,
+            created_at=created_at or self._utc_seconds_now(),
+            operator=operator,
+        )
+        component_count = int(computation.qc.get("component_count", 0))
+        hole_count = int(computation.qc.get("hole_count", 0))
+        self._publish_artifact_session_projection(
+            committed,
+            project_path=self._current_project_path,
+            fit_camera=False,
+            expected_new_record_ids=(new_record_id,),
+            status_text=(
+                f"✅ {view.title()} Outline 기록 | "
+                f"{component_count}개 성분 · {hole_count}개 구멍 | "
+                f"grid {precision_grid_mm:g} mm"
+            ),
+        )
+        self._preview_native_vector_record(committed, new_record_id)
+        self._sync_native_cutline_controls(reset_offset=False)
+        return new_record_id
+
+    def on_native_outline_requested(self) -> None:
+        try:
+            view = str(
+                self.section_panel.combo_native_outline_view.currentData() or "top"
+            )
+            precision_grid_mm = float(
+                self.section_panel.spin_native_outline_grid.value()
+            )
+            self._compute_and_commit_native_outline(
+                view=view,
+                precision_grid_mm=precision_grid_mm,
+            )
+        except Exception as exc:
+            self.status_info.setText("❌ 검증 외곽 계산 실패 | 기존 문서 유지")
+            QMessageBox.warning(
+                self,
+                "Outline 계산 실패",
+                "외곽 위상이 유효하지 않거나 현재 Align과 맞지 않습니다.\n\n"
+                f"{type(exc).__name__}: {exc}",
+            )
+
+    def _export_native_vector_record(
+        self,
+        destination: str | os.PathLike[str],
+        *,
+        record_id: str | None = None,
+    ) -> Path:
+        session = getattr(self, "_artifact_session", None)
+        if not isinstance(session, ArtifactSession):
+            raise ArtifactVectorExportError("no active ArtifactDocument session")
+        try:
+            self._artifact_workbench_controller().require_stable_session(
+                session,
+                measurement=True,
+            )
+        except ArtifactWorkbenchError as exc:
+            raise ArtifactVectorExportError(str(exc)) from exc
+        record = (
+            session.document.record_index.get(record_id)
+            if record_id is not None
+            else self._current_native_vector_record()
+        )
+        if record is None or not self._native_vector_record_is_exportable(
+            session, record
+        ):
+            raise ArtifactVectorExportError("no READY + FRESH vector record to export")
+        return export_vector_package(destination, session.document, record.id)
+
+    def on_native_vector_export_requested(self) -> None:
+        session = getattr(self, "_artifact_session", None)
+        if not isinstance(session, ArtifactSession):
+            self.status_info.setText("내보낼 ArtifactDocument가 없습니다.")
+            return
+        try:
+            self._artifact_workbench_controller().require_stable_session(
+                session,
+                measurement=True,
+            )
+        except ArtifactWorkbenchError as exc:
+            self.status_info.setText(f"⛔ 벡터 내보내기 차단: {exc}")
+            return
+        record = self._current_native_vector_record()
+        if record is None:
+            self.status_info.setText("내보낼 READY + FRESH 벡터 기록이 없습니다.")
+            return
+        source_path = Path(str(self.current_filepath or "artifact"))
+        default_path = source_path.with_name(
+            f"{source_path.stem}-{record.type.split('.')[1]}{VECTOR_EXPORT_DIRECTORY_SUFFIX}"
+        )
+        selected, _filter = QFileDialog.getSaveFileName(
+            self,
+            "1:1 벡터 패키지 저장",
+            str(default_path),
+            "ArchMeshRubbing Vector Package (*.amr-vector)",
+        )
+        if not selected:
+            return
+        if not selected.endswith(VECTOR_EXPORT_DIRECTORY_SUFFIX):
+            selected += VECTOR_EXPORT_DIRECTORY_SUFFIX
+        try:
+            destination = self._export_native_vector_record(
+                selected,
+                record_id=record.id,
+            )
+            self.status_info.setText(f"✅ 1:1 SVG + provenance 저장: {destination.name}")
+        except Exception as exc:
+            self.status_info.setText("❌ 벡터 패키지 저장 실패")
+            QMessageBox.warning(
+                self,
+                "벡터 내보내기 실패",
+                f"{type(exc).__name__}: {exc}",
+            )
+
+    def _native_rubbing_options_from_panel(self) -> dict[str, Any]:
+        panel = self.section_panel
+        return {
+            "view": str(panel.combo_native_rubbing_view.currentData() or "top"),
+            "pixels_per_mm": int(panel.spin_native_rubbing_pixels_per_mm.value()),
+            "margin_um": int(panel.spin_native_rubbing_margin_um.value()),
+            "reference_radius_um": int(
+                panel.spin_native_rubbing_reference_radius_um.value()
+            ),
+            "depth_quantization_um": int(
+                panel.spin_native_rubbing_depth_quantization_um.value()
+            ),
+            "black_point_um": int(panel.spin_native_rubbing_black_point_um.value()),
+            "ink_strength_percent": int(panel.spin_native_rubbing_strength.value()),
+            "relief_polarity": str(
+                panel.combo_native_rubbing_polarity.currentData()
+                or DEFAULT_RUBBING_POLARITY
+            ),
+        }
+
+    @staticmethod
+    def _compute_and_commit_native_rubbing_session(
+        session: ArtifactSession,
+        *,
+        options: dict[str, Any],
+        record_id: str,
+        created_at: str,
+        operator: str,
+    ) -> tuple[ArtifactSession, ArtifactRubbingComputation]:
+        computation = compute_artifact_rubbing(session, **dict(options))
+        require_current_rubbing_computation(session, computation)
+        committed = commit_artifact_rubbing(
+            session,
+            computation,
+            record_id=record_id,
+            created_at=created_at,
+            operator=operator,
+        )
+        return committed, computation
+
+    def _publish_native_rubbing_result(
+        self,
+        captured_session: ArtifactSession,
+        result: object,
+    ) -> str:
+        if (
+            not isinstance(result, tuple)
+            or len(result) != 2
+            or not isinstance(result[0], ArtifactSession)
+            or not isinstance(result[1], ArtifactRubbingComputation)
+        ):
+            raise ArtifactRubbingError("Digital Rubbing worker returned an invalid result")
+        committed, computation = result
+        active = getattr(self, "_artifact_session", None)
+        if active is not captured_session:
+            raise ArtifactRubbingError(
+                "Digital Rubbing result is late; the active session changed and was preserved"
+            )
+        require_current_rubbing_computation(active, computation)
+        added_record_ids = tuple(
+            sorted(
+                set(committed.document.record_index)
+                - set(captured_session.document.record_index)
+            )
+        )
+        if len(added_record_ids) != 1:
+            raise ArtifactRubbingError(
+                "Digital Rubbing worker must add exactly one derived record"
+            )
+        record_id = added_record_ids[0]
+        record = committed.document.record_index.get(record_id)
+        if (
+            record is None
+            or record.type != RUBBING_RECORD_TYPE
+            or record.align_revision_id != computation.context.align_revision_id
+            or record.recipe_hash != computation.context.recipe_hash
+        ):
+            raise ArtifactRubbingError(
+                "Digital Rubbing worker did not append the captured computation"
+            )
+        qc = computation.qc
+        self._publish_artifact_session_projection(
+            committed,
+            project_path=self._current_project_path,
+            fit_camera=False,
+            expected_new_record_ids=(record_id,),
+            status_text=(
+                f"✅ {str(computation.recipe['view']).title()} Digital Rubbing 기록 | "
+                f"{computation.raster.width_pixels}×{computation.raster.height_pixels} px · "
+                f"ink {int(qc.get('inked_pixel_count', 0))} px"
+            ),
+        )
+        self._preview_native_rubbing(committed, record_id, computation.raster)
+        self._sync_native_cutline_controls(reset_offset=False)
+        return record_id
+
+    def _compute_and_commit_native_rubbing(
+        self,
+        *,
+        options: dict[str, Any],
+        record_id: str | None = None,
+        created_at: str | None = None,
+        operator: str = "local-user",
+    ) -> str:
+        obj = self.viewport.selected_obj
+        session = self._require_native_measurement_session(obj)
+        self._validate_native_scene_for_save(session)
+        new_record_id = record_id or f"record:rubbing:{options.get('view', 'top')}:{uuid.uuid4()}"
+        result = self._compute_and_commit_native_rubbing_session(
+            session,
+            options=options,
+            record_id=new_record_id,
+            created_at=created_at or self._utc_seconds_now(),
+            operator=operator,
+        )
+        return self._publish_native_rubbing_result(session, result)
+
+    def on_native_rubbing_requested(self) -> None:
+        try:
+            obj = self.viewport.selected_obj
+            session = self._require_native_measurement_session(obj)
+            self._validate_native_scene_for_save(session)
+            options = self._native_rubbing_options_from_panel()
+            record_id = f"record:rubbing:{options['view']}:{uuid.uuid4()}"
+            created_at = self._utc_seconds_now()
+        except Exception as exc:
+            self.status_info.setText("❌ Digital Rubbing 준비 실패 | 기존 문서 유지")
+            QMessageBox.warning(
+                self,
+                "Digital Rubbing 준비 실패",
+                f"{type(exc).__name__}: {exc}",
+            )
+            return
+
+        def task():
+            return MainWindow._compute_and_commit_native_rubbing_session(
+                session,
+                options=options,
+                record_id=record_id,
+                created_at=created_at,
+                operator="local-user",
+            )
+
+        def on_done(result: object) -> None:
+            try:
+                self._publish_native_rubbing_result(session, result)
+            except Exception as exc:
+                self.status_info.setText(
+                    "⛔ 늦은 Digital Rubbing 결과 폐기 | 현재 문서 유지"
+                )
+                QMessageBox.warning(
+                    self,
+                    "Digital Rubbing 결과 폐기",
+                    f"{type(exc).__name__}: {exc}",
+                )
+
+        def on_failed(message: str) -> None:
+            self.status_info.setText("❌ Digital Rubbing 계산 실패 | 기존 문서 유지")
+            QMessageBox.warning(
+                self,
+                "Digital Rubbing 계산 실패",
+                self._format_error_message("탁본 계산 중 오류가 발생했습니다:", message),
+            )
+
+        self.status_info.setText("Digital Rubbing 계산 중 · 원본 canonical mm 재투영...")
+        self._start_task(
+            title="Digital Rubbing",
+            label="재현 가능한 1:1 탁본 raster 계산 중...",
+            thread=TaskThread("native_digital_rubbing", task),
+            on_done=on_done,
+            on_failed=on_failed,
+        )
+
+    @staticmethod
+    def _recompute_native_rubbing_record(session: ArtifactSession, record):
+        if not MainWindow._native_rubbing_record_is_exportable(session, record):
+            raise ArtifactRubbingExportError(
+                "no READY + FRESH Digital Rubbing record to export"
+            )
+        computation = compute_artifact_rubbing_from_recipe(session, record.recipe)
+        require_current_rubbing_computation(session, computation)
+        if computation.raster.receipt() != rubbing_receipt_from_record(record):
+            raise ArtifactRubbingExportError(
+                "recomputed Digital Rubbing raster does not match its record receipt"
+            )
+        return computation.raster
+
+    @staticmethod
+    def _export_native_rubbing_record_for_session(
+        destination: str | os.PathLike[str],
+        session: ArtifactSession,
+        record,
+    ) -> Path:
+        raster = MainWindow._recompute_native_rubbing_record(session, record)
+        return export_rubbing_package(
+            destination,
+            session.document,
+            record.id,
+            raster,
+        )
+
+    def _export_native_rubbing_record(
+        self,
+        destination: str | os.PathLike[str],
+        *,
+        record_id: str | None = None,
+    ) -> Path:
+        session = getattr(self, "_artifact_session", None)
+        if not isinstance(session, ArtifactSession):
+            raise ArtifactRubbingExportError("no active ArtifactDocument session")
+        try:
+            self._artifact_workbench_controller().require_stable_session(
+                session,
+                measurement=True,
+            )
+        except ArtifactWorkbenchError as exc:
+            raise ArtifactRubbingExportError(str(exc)) from exc
+        record = (
+            session.document.record_index.get(record_id)
+            if record_id is not None
+            else self._current_native_rubbing_record()
+        )
+        if record is None:
+            raise ArtifactRubbingExportError(
+                "no READY + FRESH Digital Rubbing record to export"
+            )
+        return self._export_native_rubbing_record_for_session(
+            destination,
+            session,
+            record,
+        )
+
+    def on_native_rubbing_export_requested(self) -> None:
+        session = getattr(self, "_artifact_session", None)
+        record = self._current_native_rubbing_record()
+        if not isinstance(session, ArtifactSession) or record is None:
+            self.status_info.setText("내보낼 READY + FRESH 탁본 기록이 없습니다.")
+            return
+        try:
+            self._artifact_workbench_controller().require_stable_session(
+                session,
+                measurement=True,
+            )
+        except ArtifactWorkbenchError as exc:
+            self.status_info.setText(f"⛔ Digital Rubbing 내보내기 차단: {exc}")
+            return
+        source_path = Path(str(self.current_filepath or "artifact"))
+        default_path = source_path.with_name(
+            f"{source_path.stem}-digital-rubbing{RUBBING_EXPORT_DIRECTORY_SUFFIX}"
+        )
+        selected, _filter = QFileDialog.getSaveFileName(
+            self,
+            "1:1 Digital Rubbing 패키지 저장",
+            str(default_path),
+            "ArchMeshRubbing Rubbing Package (*.amr-rubbing)",
+        )
+        if not selected:
+            return
+        if not selected.endswith(RUBBING_EXPORT_DIRECTORY_SUFFIX):
+            selected += RUBBING_EXPORT_DIRECTORY_SUFFIX
+
+        def task():
+            return MainWindow._export_native_rubbing_record_for_session(
+                selected,
+                session,
+                record,
+            )
+
+        def on_done(destination: object) -> None:
+            path = Path(destination)
+            self.status_info.setText(
+                f"✅ 1:1 PNG + provenance 저장: {path.name}"
+            )
+
+        def on_failed(message: str) -> None:
+            self.status_info.setText("❌ Digital Rubbing 패키지 저장 실패")
+            QMessageBox.warning(
+                self,
+                "Digital Rubbing 내보내기 실패",
+                self._format_error_message("패키지 생성 중 오류가 발생했습니다:", message),
+            )
+
+        self._start_task(
+            title="Digital Rubbing 내보내기",
+            label="record recipe 재계산 및 1:1 PNG 검증 중...",
+            thread=TaskThread("export_native_digital_rubbing", task),
+            on_done=on_done,
+            on_failed=on_failed,
+        )
+
     def on_crosshair_toggled(self, enabled):
         """십자선 모드 토글 핸들러 (Viewport3D와 연동)"""
         if enabled:
@@ -11700,6 +14717,14 @@ class MainWindow(QMainWindow):
 
     def on_line_section_toggled(self, enabled):
         """단면선(2개) 모드 토글 핸들러"""
+        if enabled and self._native_artifact_mode():
+            try:
+                self.section_panel.btn_line.blockSignals(True)
+                self.section_panel.btn_line.setChecked(False)
+            finally:
+                self.section_panel.btn_line.blockSignals(False)
+            self.status_info.setText("⛔ 화면용 legacy 단면선 차단 | 검증된 단면 사용")
+            return
         if enabled:
             try:
                 self._disable_measure_mode()
@@ -11789,6 +14814,11 @@ class MainWindow(QMainWindow):
 
     def on_save_section_layers_requested(self):
         """현재 단면/가이드 결과를 레이어로 저장(스냅샷)."""
+        if self._native_artifact_mode():
+            self.status_info.setText(
+                "⛔ legacy 단면 레이어 차단 | 위의 '단면 계산 · 기록'을 사용하세요"
+            )
+            return
         try:
             added = int(
                 self.viewport.save_current_sections_to_layers(
@@ -11858,6 +14888,11 @@ class MainWindow(QMainWindow):
 
     def _on_cut_lines_auto_ended(self):
         self._sync_cutline_button_state(False)
+        if self._native_artifact_mode():
+            self.status_info.setText(
+                "⛔ 화면용 Cutline 자동 저장 안 함 | 검증된 단면 명령을 사용하세요"
+            )
+            return
         try:
             added = int(
                 self.viewport.save_current_sections_to_layers(
@@ -12110,35 +15145,33 @@ class MainWindow(QMainWindow):
         if file_path:
             try:
                 from src.core.mesh_slicer import MeshSlicer
-                from scipy.spatial.transform import Rotation as R
                 slicer = MeshSlicer(obj.mesh)
-
-                inv_rot = R.from_euler('xyz', obj.rotation, degrees=True).inv().as_matrix()
-                inv_scale = 1.0 / obj.scale if obj.scale != 0 else 1.0
 
                 world_origin = np.array([0.0, 0.0, float(height)], dtype=np.float64)
                 world_normal = np.array([0.0, 0.0, 1.0], dtype=np.float64)
                 translation = np.asarray(obj.translation, dtype=np.float64).reshape(3,)
-
-                local_origin = inv_scale * (inv_rot @ (world_origin - translation))
-                local_normal = inv_rot @ world_normal
+                local_to_world = scene_trs_matrix(
+                    translation,
+                    obj.rotation,
+                    float(obj.scale),
+                )
+                local_origin, local_normal = transform_plane_world_to_local(
+                    world_origin,
+                    world_normal,
+                    local_to_world,
+                )
 
                 contours_local = slicer.slice_with_plane(local_origin, local_normal)
                 if not contours_local:
                     QMessageBox.warning(self, "경고", f"Z={height:.2f} 높이에서 단면을 찾을 수 없습니다.")
                     return
 
-                rot = R.from_euler('xyz', obj.rotation, degrees=True).as_matrix()
-                scale = float(obj.scale)
-                t = translation.reshape(1, 3)
-
                 contours_world: list[np.ndarray] = []
                 for contour in contours_local:
                     arr = np.asarray(contour, dtype=np.float64)
                     if arr.ndim != 2 or arr.shape[0] < 2 or arr.shape[1] < 3:
                         continue
-                    world_pts = (rot @ (arr[:, :3] * scale).T).T + t
-                    contours_world.append(world_pts)
+                    contours_world.append(transform_points(arr[:, :3], local_to_world))
 
                 if not contours_world:
                     QMessageBox.warning(self, "경고", "유효한 단면 폴리라인이 없습니다.")
