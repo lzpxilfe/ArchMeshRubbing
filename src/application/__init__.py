@@ -29,6 +29,14 @@ from .artifact_measurements import (
     StaleMeasurementOperationError,
     execute_measurement_work_item,
 )
+from .artifact_workflow_progress import (
+    ArtifactWorkflowProgress,
+    ArtifactWorkflowStep,
+    ArtifactWorkflowStepProgress,
+    REQUIRED_CUTLINE_VIEWS,
+    REQUIRED_SIX_VIEWS,
+    derive_artifact_workflow_progress,
+)
 from .artifact_workbench import (
     ArtifactLoadTicket,
     ArtifactWorkbench,
@@ -64,6 +72,9 @@ __all__ = [
     "ArtifactMeasurementWorkItem",
     "ArtifactWorkbench",
     "ArtifactWorkbenchError",
+    "ArtifactWorkflowProgress",
+    "ArtifactWorkflowStep",
+    "ArtifactWorkflowStepProgress",
     "ConfirmedSourceMetadata",
     "DEFAULT_EXPORT_RUBBING_MEMORY_BUDGET_BYTES",
     "DEFAULT_RUBBING_MEMORY_BUDGET_BYTES",
@@ -75,6 +86,8 @@ __all__ = [
     "MeasurementResourceLimitError",
     "ProjectionActivation",
     "ProjectionTransition",
+    "REQUIRED_CUTLINE_VIEWS",
+    "REQUIRED_SIX_VIEWS",
     "RecordBindingTransition",
     "StaleWorkflowOperationError",
     "StaleExportOperationError",
@@ -85,5 +98,6 @@ __all__ = [
     "WorkflowSnapshot",
     "WorkflowStage",
     "WorkflowTransitionKind",
+    "derive_artifact_workflow_progress",
     "execute_measurement_work_item",
 ]

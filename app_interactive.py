@@ -259,6 +259,10 @@ from src.application.artifact_measurements import (  # noqa: E402
     MeasurementOperationKind,
     MeasurementOperationState,
 )
+from src.application.artifact_workflow_progress import (  # noqa: E402
+    ArtifactWorkflowProgress,
+    derive_artifact_workflow_progress,
+)
 from src.application.artifact_exports import (  # noqa: E402
     ArtifactExportController,
     ArtifactExportError,
@@ -3714,6 +3718,19 @@ class SectionPanel(QWidget):
         line.setVisible(False)
 
         native_group = QGroupBox("검증된 단면 · ArtifactDocument")
+        native_group.setStyleSheet(
+            """
+            QPushButton[workflowComplete="true"] {
+                background-color: #38a169;
+                color: white;
+                font-weight: bold;
+            }
+            QPushButton[workflowComplete="true"]:disabled {
+                background-color: #9ae6b4;
+                color: #f0fff4;
+            }
+            """
+        )
         native_layout = QVBoxLayout(native_group)
         native_form = QFormLayout()
         self.combo_native_cutline_view = QComboBox()
@@ -3926,6 +3943,7 @@ class SectionPanel(QWidget):
         native_note.setWordWrap(True)
         native_note.setStyleSheet("color: #4a5568; font-size: 10px;")
         native_layout.addWidget(native_note)
+        self.apply_native_workflow_progress(ArtifactWorkflowProgress.empty())
         native_group.setEnabled(False)
         self.native_group = native_group
         layout.addWidget(native_group)
@@ -4013,6 +4031,40 @@ class SectionPanel(QWidget):
         
         layout.addStretch()
         
+    @staticmethod
+    def _apply_native_step_progress(button, label: str, progress) -> None:
+        button.setText(
+            f"{label} ({progress.completed_count}/{progress.required_count})"
+        )
+        button.setEnabled(progress.enabled)
+        button.setProperty("workflowComplete", progress.complete)
+        style = button.style()
+        style.unpolish(button)
+        style.polish(button)
+        button.update()
+
+    def apply_native_workflow_progress(
+        self,
+        progress: ArtifactWorkflowProgress,
+    ) -> None:
+        if not isinstance(progress, ArtifactWorkflowProgress):
+            raise TypeError("progress must be ArtifactWorkflowProgress")
+        self._apply_native_step_progress(
+            self.btn_native_cutline,
+            "단면 계산 · 기록",
+            progress.cutline,
+        )
+        self._apply_native_step_progress(
+            self.btn_native_outline,
+            "외곽 계산 · 기록",
+            progress.outline,
+        )
+        self._apply_native_step_progress(
+            self.btn_native_rubbing,
+            "탁본 계산 · 기록",
+            progress.rubbing,
+        )
+
     def on_btn_toggled(self, checked):
         if checked:
             self.btn_toggle.setText("🎯 십자선 단면 모드 중지")
@@ -4633,6 +4685,15 @@ class MainWindow(QMainWindow):
         ):
             return False
         return self._artifact_workbench_controller().snapshot.can_measure
+
+    def _native_record_workflow_progress(self) -> ArtifactWorkflowProgress:
+        session = getattr(self, "_artifact_session", None)
+        if not isinstance(session, ArtifactSession):
+            return ArtifactWorkflowProgress.empty()
+        return derive_artifact_workflow_progress(
+            session,
+            align_ready=self._native_measurement_ready(),
+        )
 
     def _require_native_projection_session(self, obj: Any) -> ArtifactSession:
         if bool(getattr(self, "_artifact_authority_faulted", False)):
@@ -14805,20 +14866,16 @@ class MainWindow(QMainWindow):
         panel.legacy_line_group.setEnabled(not native)
         panel.legacy_roi_group.setEnabled(not native)
         if not native:
-            panel.btn_native_cutline.setEnabled(False)
-            panel.btn_native_outline.setEnabled(False)
+            panel.apply_native_workflow_progress(ArtifactWorkflowProgress.empty())
             panel.btn_native_vector_export.setEnabled(False)
-            panel.btn_native_rubbing.setEnabled(False)
             panel.btn_native_rubbing_export.setEnabled(False)
             self._clear_native_vector_preview()
             self._clear_native_rubbing_preview()
             self._refresh_native_record_selectors(None)
             return
         if not self._native_measurement_ready():
-            panel.btn_native_cutline.setEnabled(False)
-            panel.btn_native_outline.setEnabled(False)
+            panel.apply_native_workflow_progress(ArtifactWorkflowProgress.empty())
             panel.btn_native_vector_export.setEnabled(False)
-            panel.btn_native_rubbing.setEnabled(False)
             panel.btn_native_rubbing_export.setEnabled(False)
             self._clear_native_vector_preview()
             self._clear_native_rubbing_preview()
@@ -14840,6 +14897,11 @@ class MainWindow(QMainWindow):
             raise ArtifactSessionError(
                 "native cutline controls require the current live projection"
             )
+        workflow_progress = derive_artifact_workflow_progress(
+            session,
+            align_ready=True,
+        )
+        panel.apply_native_workflow_progress(workflow_progress)
         bounds = np.asarray(live_mesh.bounds, dtype=np.float64)
         view = str(panel.combo_native_cutline_view.currentData() or "top")
         axis = _NATIVE_CUTLINE_AXIS_INDEX.get(view, 2)
@@ -14868,9 +14930,6 @@ class MainWindow(QMainWindow):
             self._clear_native_rubbing_preview()
         self._refresh_native_record_selectors(session)
         panel.btn_native_vector_export.setEnabled(current_vector is not None)
-        panel.btn_native_cutline.setEnabled(True)
-        panel.btn_native_outline.setEnabled(True)
-        panel.btn_native_rubbing.setEnabled(True)
         panel.btn_native_rubbing_export.setEnabled(current_rubbing is not None)
         preview_id = getattr(self, "_native_rubbing_preview_record_id", None)
         if not isinstance(preview_id, str):
@@ -15227,6 +15286,12 @@ class MainWindow(QMainWindow):
             obj = self.viewport.selected_obj
             session = self._require_native_measurement_session(obj)
             self._validate_native_scene_for_save(session)
+            progress = self._native_record_workflow_progress()
+            if not progress.outline.enabled:
+                raise ArtifactSessionError(
+                    "Outline requires READY + FRESH Top, Front, and Right "
+                    "Cutline records"
+                )
             controller = self._artifact_measurement_controller()
             work_item = controller.begin_outline(
                 view,
@@ -15615,6 +15680,12 @@ class MainWindow(QMainWindow):
             obj = self.viewport.selected_obj
             session = self._require_native_measurement_session(obj)
             self._validate_native_scene_for_save(session)
+            progress = self._native_record_workflow_progress()
+            if not progress.rubbing.enabled:
+                raise ArtifactSessionError(
+                    "Digital Rubbing requires complete READY + FRESH "
+                    "Cutline and six-view Outline records"
+                )
             options = self._native_rubbing_options_from_panel()
             record_id = f"record:rubbing:{options['view']}:{uuid.uuid4()}"
             created_at = self._utc_seconds_now()

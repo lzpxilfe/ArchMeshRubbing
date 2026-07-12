@@ -28,6 +28,13 @@ from app_interactive import (
 )
 from src.application.artifact_exports import ArtifactExportState
 from src.application.artifact_measurements import MeasurementOperationState
+from src.application.artifact_workflow_progress import (
+    ArtifactWorkflowProgress,
+    ArtifactWorkflowStep,
+    ArtifactWorkflowStepProgress,
+    REQUIRED_CUTLINE_VIEWS,
+    REQUIRED_SIX_VIEWS,
+)
 from src.core.artifact_session import ArtifactSession, ArtifactSessionError
 from src.application.artifact_workbench import (
     ConfirmedSourceMetadata,
@@ -243,6 +250,59 @@ def test_main_window_constructs_offscreen() -> None:
     finally:
         # Avoid MainWindow.closeEvent(), which intentionally asks the user to
         # confirm application exit and would block an offscreen test runner.
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_native_workflow_buttons_show_record_counts_and_green_completion() -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    window = MainWindow()
+    complete = ArtifactWorkflowProgress(
+        align_ready=True,
+        cutline=ArtifactWorkflowStepProgress(
+            step=ArtifactWorkflowStep.CUTLINE,
+            required_views=REQUIRED_CUTLINE_VIEWS,
+            completed_views=REQUIRED_CUTLINE_VIEWS,
+            enabled=True,
+        ),
+        outline=ArtifactWorkflowStepProgress(
+            step=ArtifactWorkflowStep.OUTLINE,
+            required_views=REQUIRED_SIX_VIEWS,
+            completed_views=REQUIRED_SIX_VIEWS,
+            enabled=True,
+        ),
+        rubbing=ArtifactWorkflowStepProgress(
+            step=ArtifactWorkflowStep.DIGITAL_RUBBING,
+            required_views=REQUIRED_SIX_VIEWS,
+            completed_views=REQUIRED_SIX_VIEWS,
+            enabled=True,
+        ),
+    )
+    try:
+        panel = window.section_panel
+        panel.native_group.setEnabled(True)
+        panel.apply_native_workflow_progress(complete)
+        for button, suffix in (
+            (panel.btn_native_cutline, "(3/3)"),
+            (panel.btn_native_outline, "(6/6)"),
+            (panel.btn_native_rubbing, "(6/6)"),
+        ):
+            assert button.isEnabled()
+            assert button.text().endswith(suffix)
+            assert button.property("workflowComplete") is True
+
+        panel.apply_native_workflow_progress(ArtifactWorkflowProgress.empty())
+        for button in (
+            panel.btn_native_cutline,
+            panel.btn_native_outline,
+            panel.btn_native_rubbing,
+        ):
+            assert not button.isEnabled()
+            assert button.property("workflowComplete") is False
+    finally:
         window.deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         app.processEvents()
@@ -917,6 +977,9 @@ def test_initial_identity_requires_explicit_align_before_measurement() -> None:
         assert not window.section_panel.btn_native_cutline.isEnabled()
         assert not window.section_panel.btn_native_outline.isEnabled()
         assert not window.section_panel.btn_native_rubbing.isEnabled()
+        assert window.section_panel.btn_native_cutline.text().endswith("(0/3)")
+        assert window.section_panel.btn_native_outline.text().endswith("(0/6)")
+        assert window.section_panel.btn_native_rubbing.text().endswith("(0/6)")
         with pytest.raises(ArtifactSessionError, match="explicit Align confirmation"):
             window._compute_and_commit_native_cutline(view="top", offset_mm=0.0)
 
@@ -950,8 +1013,82 @@ def test_initial_identity_requires_explicit_align_before_measurement() -> None:
         window._sync_native_cutline_controls(reset_offset=True)
         assert window._native_workflow_stage() is WorkflowStage.MEASUREMENT_READY
         assert window.section_panel.btn_native_cutline.isEnabled()
-        assert window.section_panel.btn_native_outline.isEnabled()
-        assert window.section_panel.btn_native_rubbing.isEnabled()
+        assert not window.section_panel.btn_native_outline.isEnabled()
+        assert not window.section_panel.btn_native_rubbing.isEnabled()
+        assert window.section_panel.btn_native_cutline.text().endswith("(0/3)")
+        assert window.section_panel.btn_native_outline.text().endswith("(0/6)")
+        assert window.section_panel.btn_native_rubbing.text().endswith("(0/6)")
+        assert not window.section_panel.btn_native_cutline.property(
+            "workflowComplete"
+        )
+        assert not window.section_panel.btn_native_outline.property(
+            "workflowComplete"
+        )
+        assert not window.section_panel.btn_native_rubbing.property(
+            "workflowComplete"
+        )
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_cutline_progress_reopens_and_tracks_align_stale_restore() -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    session = _artifact_box_session()
+    for index, view in enumerate(REQUIRED_CUTLINE_VIEWS, start=1):
+        computation = compute_artifact_cutline(
+            session,
+            _native_cutline_frame(view, 0.0),
+        )
+        session = commit_vector_computation(
+            session,
+            computation,
+            record_id=f"record:workflow-cutline:{view}",
+            created_at=f"2026-07-11T00:00:0{index}Z",
+            operator="pytest",
+        )
+    completed_align_id = session.document.active_align_revision_id
+    assert completed_align_id is not None
+
+    window = MainWindow()
+    window._artifact_session = session
+    window.viewport.objects = [_projected_scene_object(session)]
+    window.viewport.selected_index = 0
+    try:
+        window._sync_native_cutline_controls(reset_offset=True)
+        panel = window.section_panel
+        assert panel.btn_native_cutline.text().endswith("(3/3)")
+        assert panel.btn_native_cutline.property("workflowComplete") is True
+        assert panel.btn_native_outline.isEnabled()
+        assert not panel.btn_native_rubbing.isEnabled()
+
+        changed = session.commit_preview(
+            translation_mm=(0.25, 0.0, 0.0),
+            rotation_deg=(0.0, 0.0, 0.0),
+            scale=1.0,
+            operator="pytest",
+            created_at="2026-07-11T00:00:04Z",
+            revision_id="align:workflow-progress-changed",
+        )
+        window._artifact_session = changed
+        window.viewport.objects = [_projected_scene_object(changed)]
+        window.viewport.selected_index = 0
+        window._sync_native_cutline_controls(reset_offset=True)
+        assert panel.btn_native_cutline.text().endswith("(0/3)")
+        assert panel.btn_native_cutline.property("workflowComplete") is False
+        assert not panel.btn_native_outline.isEnabled()
+
+        restored = changed.activate_align(completed_align_id)
+        window._artifact_session = restored
+        window.viewport.objects = [_projected_scene_object(restored)]
+        window.viewport.selected_index = 0
+        window._sync_native_cutline_controls(reset_offset=True)
+        assert panel.btn_native_cutline.text().endswith("(3/3)")
+        assert panel.btn_native_cutline.property("workflowComplete") is True
+        assert panel.btn_native_outline.isEnabled()
     finally:
         window.deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
@@ -1354,6 +1491,12 @@ def test_reopened_project_requires_explicit_durable_record_selection() -> None:
         assert rubbing_combo.itemData(1) == rubbing_record_id
         assert window._current_native_vector_record() is None
         assert window._current_native_rubbing_record() is None
+        assert window.section_panel.btn_native_cutline.isEnabled()
+        assert not window.section_panel.btn_native_outline.isEnabled()
+        assert not window.section_panel.btn_native_rubbing.isEnabled()
+        assert window.section_panel.btn_native_cutline.text().endswith("(1/3)")
+        assert window.section_panel.btn_native_outline.text().endswith("(1/6)")
+        assert window.section_panel.btn_native_rubbing.text().endswith("(1/6)")
         assert not window.section_panel.btn_native_vector_export.isEnabled()
         assert not window.section_panel.btn_native_rubbing_export.isEnabled()
 
@@ -1600,6 +1743,13 @@ def test_cutline_and_outline_handlers_dispatch_computation_to_task_threads() -> 
                 "_artifact_measurement_controller",
                 return_value=controller,
             ),
+            patch.object(
+                window,
+                "_native_record_workflow_progress",
+                return_value=SimpleNamespace(
+                    outline=SimpleNamespace(enabled=True),
+                ),
+            ),
             patch.object(window, "_start_task", return_value=True) as start_task,
         ):
             window.on_native_cutline_requested()
@@ -1620,6 +1770,40 @@ def test_cutline_and_outline_handlers_dispatch_computation_to_task_threads() -> 
                 call(outline_item),
             ]
         )
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_downstream_measurement_handlers_enforce_record_derived_prerequisites() -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    session = _artifact_box_session()
+    window = MainWindow()
+    window._artifact_session = session
+    window.viewport.objects = [_projected_scene_object(session)]
+    window.viewport.selected_index = 0
+    controller = Mock()
+    try:
+        with (
+            patch.object(
+                window,
+                "_artifact_measurement_controller",
+                return_value=controller,
+            ),
+            patch.object(window, "_start_task") as start_task,
+            patch.object(QMessageBox, "warning") as warning,
+        ):
+            window.on_native_outline_requested()
+            window.on_native_rubbing_requested()
+
+        controller.begin_outline.assert_not_called()
+        controller.begin_rubbing.assert_not_called()
+        start_task.assert_not_called()
+        assert warning.call_count == 2
+        assert session.document.records == ()
     finally:
         window.deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
@@ -2162,7 +2346,16 @@ def test_native_rubbing_handler_uses_worker_and_late_result_cannot_overwrite_ses
     window.viewport.objects = [_projected_scene_object(session)]
     window.viewport.selected_index = 0
     try:
-        with patch.object(window, "_start_task", return_value=True) as start_task:
+        with (
+            patch.object(
+                window,
+                "_native_record_workflow_progress",
+                return_value=SimpleNamespace(
+                    rubbing=SimpleNamespace(enabled=True),
+                ),
+            ),
+            patch.object(window, "_start_task", return_value=True) as start_task,
+        ):
             window.on_native_rubbing_requested()
         assert start_task.call_count == 1
         thread = start_task.call_args.kwargs["thread"]

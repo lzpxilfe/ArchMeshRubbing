@@ -25,7 +25,7 @@ python -m pytest -q
 
 - Ruff는 전체 트리를 검사한다.
 - pytest는 pytest 함수와 `unittest.TestCase`를 모두 수집한다. 별도의 `unittest discover`는 하위 호환성 확인용이며 CI의 권위 수집기가 아니다.
-- `pyright-m0.json`은 persistence·source·unit·matrix 경계에 더해 M0-6의 `artifact_document`, `geometry_identity`, `artifact_scene_adapter`, `artifact_session`, Qt/OpenGL-free `artifact_workbench`·`artifact_measurements`·`artifact_exports`, known-record registry, RFC 8785 canonical JSON, vector record/export, Cutline, fixed-grid Outline/topology, Digital Rubbing record/extractor, canonical GA8 PNG와 offline rubbing export 및 해당 테스트를 포함하는 M0 신뢰 커널 범위다. 독립 프로세스 왕복·offline vector/rubbing package 테스트도 목록에 포함한다. wrapper 명령은 활성 Python interpreter를 Pyright에 명시하므로 Windows·macOS·Linux에서 같은 방식으로 dependency를 해석한다.
+- `pyright-m0.json`은 persistence·source·unit·matrix 경계에 더해 M0-6의 `artifact_document`, `geometry_identity`, `artifact_scene_adapter`, `artifact_session`, Qt/OpenGL-free `artifact_workbench`·`artifact_workflow_progress`·`artifact_measurements`·`artifact_exports`, known-record registry, RFC 8785 canonical JSON, vector record/export, Cutline, fixed-grid Outline/topology, Digital Rubbing record/extractor, canonical GA8 PNG와 offline rubbing export 및 해당 테스트를 포함하는 M0 신뢰 커널 범위다. 독립 프로세스 왕복·offline vector/rubbing package 테스트도 목록에 포함한다. wrapper 명령은 활성 Python interpreter를 Pyright에 명시하므로 Windows·macOS·Linux에서 같은 방식으로 dependency를 해석한다.
 
 M0-6 native artifact 신뢰 경계를 빠르게 재검증할 때는 다음 focused suite를 사용한다. 이 명령은 full pytest를 대체하지 않는다.
 
@@ -42,6 +42,7 @@ python -m pytest -q \
   tests/test_artifact_scene_adapter.py \
   tests/test_artifact_session.py \
   tests/test_artifact_workbench.py \
+  tests/test_artifact_workflow_progress.py \
   tests/test_artifact_exports.py \
   tests/test_artifact_measurements.py \
   tests/test_artifact_new_process_roundtrip.py \
@@ -74,6 +75,7 @@ python -m pytest -q \
 - source를 mutate·recenter하지 않는 deterministic world-mm projection과 stale snapshot 거부
 - native 한-artifact session의 preview/Align commit/parent activation, source-of-truth scene binding과 unported mutation/save fail-closed
 - `initial_identity` baseline의 `ALIGN_REQUIRED`, 변화량이 0인 첫 explicit child Align의 `MEASUREMENT_READY`, parent activation 시 downstream 재차단
+- 검증된 `ArtifactSession`의 unique `READY + FRESH` view-set에서 Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6 순차 gate·초록 완료 상태를 재구성하고, DRAFT/FAILED/blocked/unknown/noncanonical 제외, malformed known record의 session 경계 거부와 reopen·Align stale/restore를 검증
 - 단일 pending Open ticket, cancelled/superseded worker callback 거부, replacement 실패 시 기존 session·project path 보존
 - `state_version`/`authority_epoch` compare-and-swap, transition 종류별 허용 변경과 expected record ID 집합 검증, 동시 candidate의 first-wins
 - same-render DerivedRecord append의 `RecordBindingTransition`, exact snapshot capability 검증, live mesh/VBO/선택/cache 보존과 binding CAS rollback
@@ -107,8 +109,8 @@ python -m pytest -q \
 
 | 검사 | 결과 |
 |---|---:|
-| Python 3.12.13 `python -m pytest -q` | 463 passed, 113 subtests passed |
-| 3-OS persistence-smoke 명시 suite의 로컬 실행 | 392 passed, 113 subtests passed |
+| Python 3.12.13 `python -m pytest -q` | 471 passed, 113 subtests passed |
+| 3-OS persistence-smoke 명시 suite의 로컬 실행 | 400 passed, 113 subtests passed |
 | `python -m ruff check .` | passed |
 | M0 Pyright wrapper command | 0 errors |
 | ArtifactDocument + vector/rubbing payload/export Draft 2020-12 schemas + golden | passed |
@@ -118,7 +120,7 @@ python -m pytest -q \
 
 전체 트리 Pyright는 아직 통과하지 않는다. CI에서는 이 결과를 `continue-on-error`로 보고하여 부채가 보이게 하되, M0 범위를 넘는 기존 오류 때문에 모든 변경을 막지는 않는다. 신뢰 커널 전환이 진행될 때마다 차단 범위를 넓힌다. 독립 프로세스 테스트의 worker program은 Python 문자열이므로 Pyright가 문자열 내부를 분석하지는 않지만, 차단 pytest가 두 문자열을 각각 새 interpreter에서 실제 실행한다.
 
-Windows·macOS·Linux persistence matrix에서는 프로젝트 저장, source/geometry identity, ArtifactDocument·scene adapter·session·application workbench, ticketed Open과 explicit Align gate, RFC 8785/vector record/export/Cutline/Outline/topology/schema, Digital Rubbing record/extractor/canonical PNG/export/schema, 독립 프로세스 source 및 relocated vector/rubbing-package 왕복, matrix golden, GUI 런처, MainWindow 생성, native source-of-truth binding, native Cutline/Outline/Rubbing command, session/version/epoch 및 projection-generation late-result 방어, legacy export 우회와 unported operation/save fail-closed, source mismatch ordering, scene-swap rollback과 fatal authority fallback 스모크를 실행하도록 설정한다. Linux quality job은 별도로 전체 테스트를 실행한다. CI는 job 환경에서, GUI 스모크 테스트는 모듈 로딩 시 `QT_QPA_PLATFORM=offscreen`을 설정한다. 이 스모크는 CPU/document/scene transaction과 widget wiring을 검증하지만 GPU/OpenGL 프레임의 실제 렌더링이나 시각적 정확성은 보장하지 않는다. 원격 matrix가 실제로 통과하기 전에는 3개 OS 완료로 표현하지 않는다.
+Windows·macOS·Linux persistence matrix에서는 프로젝트 저장, source/geometry identity, ArtifactDocument·scene adapter·session·application workbench와 record-derived workflow progress, ticketed Open과 explicit Align gate, RFC 8785/vector record/export/Cutline/Outline/topology/schema, Digital Rubbing record/extractor/canonical PNG/export/schema, 독립 프로세스 source 및 relocated vector/rubbing-package 왕복, matrix golden, GUI 런처, MainWindow 생성, native source-of-truth binding, native Cutline/Outline/Rubbing command, 3/6/6 순차 gate와 reopen·Align 진행도 복원, session/version/epoch 및 projection-generation late-result 방어, legacy export 우회와 unported operation/save fail-closed, source mismatch ordering, scene-swap rollback과 fatal authority fallback 스모크를 실행하도록 설정한다. Linux quality job은 별도로 전체 테스트를 실행한다. CI는 job 환경에서, GUI 스모크 테스트는 모듈 로딩 시 `QT_QPA_PLATFORM=offscreen`을 설정한다. 이 스모크는 CPU/document/scene transaction과 widget wiring을 검증하지만 GPU/OpenGL 프레임의 실제 렌더링이나 시각적 정확성은 보장하지 않는다. 원격 matrix가 실제로 통과하기 전에는 3개 OS 완료로 표현하지 않는다.
 
 별도 `package-smoke.yml`은 세 OS에서 exact Python 3.12 build lock, immutable build manifest, PyInstaller spec과 frozen executable의 file-report self-test를 실행하도록 구성한다. 이 검사는 실제 `MainWindow`/QOpenGLWidget/OpenGL import, 6개 mesh parser, PNG codec과 canonical document/vector/rubbing을 포함하지만 offscreen 실제 GL context/render는 보장하지 않는다. 라이선스 게이트가 해결되기 전에는 artifact upload와 release 단계를 두지 않는다. code commit `898a8bfc144f`의 clean source tree에서 로컬 macOS arm64 10/10만 확인됐으며 원격 3-OS 결과는 아직 없다.
 

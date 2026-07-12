@@ -37,6 +37,8 @@ ArchMeshRubbing은 반대로, 고고학 연구자가 익숙한 질문에서 출�
 
 Open 직후 만들어지는 `recipe.kind="initial_identity"` Align은 canonical materialization을 위한 기준점이지 연구자의 정위치 확정이 아닙니다. 사용자가 변화량이 0인 경우까지 포함해 첫 Align을 명시적으로 확정하기 전에는 workflow가 `ALIGN_REQUIRED`에 머물며 Cutline/Outline/Digital Rubbing과 vector/rubbing export가 비활성화됩니다. 첫 확정은 immutable child Align revision을 남기고 `MEASUREMENT_READY`로 전환하며, parent activation으로 초기 기준점에 돌아가면 다시 측정이 잠깁니다.
 
+Align 확정 뒤에도 모든 기능이 한꺼번에 열리지는 않습니다. 현재 활성 Align의 고유한 `READY + FRESH` 기록을 기준으로 `Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6` 순서로 다음 단계가 열리고, 완료 버튼은 초록색으로 바뀝니다. 같은 방향을 여러 번 기록해도 한 면으로 계산합니다. Align을 바꾸면 기존 기록은 삭제하지 않고 stale로 제외하며, 이전 Align을 다시 활성화하거나 프로젝트를 재열면 문서의 record graph에서 진행도를 그대로 복원합니다.
+
 처음 쓰는 사용자도 **5분 안에 첫 결과**를 얻는 것이 목표입니다.
 
 ---
@@ -127,6 +129,7 @@ Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 `Surfac
 ### Application workflow shell
 
 - [`src/application/artifact_workbench.py`](src/application/artifact_workbench.py): 한 artifact의 session/project path, 단일 pending Open, workflow readiness와 projection publication authority
+- [`src/application/artifact_workflow_progress.py`](src/application/artifact_workflow_progress.py): 검증된 session의 `READY + FRESH` view coverage에서 Cutline 3면·Outline 6면·Digital Rubbing 6면 진행도와 순차 gate를 재구성
 - [`src/application/artifact_measurements.py`](src/application/artifact_measurements.py): Cutline/Outline/Digital Rubbing의 immutable work item, Workbench 공유 예약·메모리 admission, 취소, exact result capability와 same-Align rebase
 - [`src/application/artifact_exports.py`](src/application/artifact_exports.py): vector/rubbing export의 exact capability, worker staging, 안전한 정리와 final-authority publication
 - Open/new import/project reopen과 Align commit/parent activation은 ticket과 compare-and-swap 검증을 거쳐 `prepare → activate → finalize`되며, scene swap 실패는 이전 authority로 rollback
@@ -342,7 +345,8 @@ python main.py --project mesh.obj planview.png
 - Open/Align authority와 two-phase scene publication을 Qt/OpenGL-free `ArtifactWorkbench`로 이식
 - Cutline/Outline/Digital Rubbing command와 worker 수명주기를 Qt/OpenGL-free application shell로 이식
 - DerivedRecord의 VBO-free binding rebind와 SVG/PNG worker staging → final-authority publication 이식
-- 다음 단계: record graph 기반 순차 workflow 완료 표시, cooperative cancellation/render-origin, 실제 원격 3-OS CI, 라이선스 결정, GPU/대용량 유물 pilot 진행
+- `READY + FRESH` record graph에서 Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6 순차 활성화·초록 완료 표시·재열기/Align 복원 구현
+- 다음 단계: cooperative cancellation/render-origin, 실제 원격 3-OS CI, 라이선스 결정, GPU/대용량 유물 pilot 진행
 
 ---
 
