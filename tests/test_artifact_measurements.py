@@ -42,6 +42,7 @@ from src.core.artifact_rubbing_extractor import (
     RUBBING_ESTIMATE_FIXED_OVERHEAD_BYTES,
     RUBBING_ESTIMATE_GEOMETRY_MULTIPLIER,
     RUBBING_ESTIMATE_MATERIALIZED_ATTRIBUTE_MULTIPLIER,
+    estimate_digital_rubbing_resources,
 )
 from src.core.artifact_session import ArtifactSession
 from src.core.artifact_vector_extractor import (
@@ -890,16 +891,26 @@ def test_rubbing_preflight_matches_raster_and_enforces_memory_budget() -> None:
     assert tiny_budget.active_summaries == ()
 
     controller = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
-    item = _begin_rubbing(controller)
-    assert item.resource_estimate is not None
-    result = controller.execute(item)
+    with patch(
+        "src.application.artifact_measurements.estimate_digital_rubbing_resources",
+        wraps=estimate_digital_rubbing_resources,
+    ) as estimate_preflight:
+        item = _begin_rubbing(controller)
+        estimate_preflight.assert_not_called()
+        assert item.resource_estimate is None
+        minimum_reservation = controller.summary(item).estimated_peak_bytes
+        result = controller.execute(item)
+        estimate_preflight.assert_called_once()
     assert isinstance(result.computation, ArtifactRubbingComputation)
-    assert item.resource_estimate.width_pixels == result.computation.raster.width_pixels
-    assert item.resource_estimate.height_pixels == result.computation.raster.height_pixels
-    assert item.resource_estimate.pixel_count == (
+    estimate = controller.rubbing_resource_estimate(item)
+    assert estimate is not None
+    assert estimate.width_pixels == result.computation.raster.width_pixels
+    assert estimate.height_pixels == result.computation.raster.height_pixels
+    assert estimate.pixel_count == (
         result.computation.raster.width_pixels
         * result.computation.raster.height_pixels
     )
+    assert estimate.estimated_peak_bytes > minimum_reservation
 
     publication = controller.publish_result(
         item,
@@ -965,11 +976,17 @@ def test_rubbing_texture_copy_is_budgeted_before_materialization() -> None:
             record_id="record:rubbing:textured",
         )
     materialize.assert_not_called()
-    assert plain_item.resource_estimate is not None
-    assert textured_item.resource_estimate is not None
+    assert plain_item.resource_estimate is None
+    assert textured_item.resource_estimate is None
+    plain.execute(plain_item)
+    textured.execute(textured_item)
+    plain_estimate = plain.rubbing_resource_estimate(plain_item)
+    textured_estimate = textured.rubbing_resource_estimate(textured_item)
+    assert plain_estimate is not None
+    assert textured_estimate is not None
     assert (
-        textured_item.resource_estimate.estimated_peak_bytes
-        - plain_item.resource_estimate.estimated_peak_bytes
+        textured_estimate.estimated_peak_bytes
+        - plain_estimate.estimated_peak_bytes
         == attribute_peak_bytes
     )
     plain.cancel(plain_item)
@@ -1054,6 +1071,83 @@ def test_cancelled_running_rubbing_keeps_memory_slot_until_worker_exits() -> Non
     replacement = _begin_rubbing(
         controller,
         record_id="record:rubbing:after-worker-exit",
+    )
+    controller.cancel(replacement)
+
+
+def test_cancel_during_worker_rubbing_preflight_releases_only_after_estimator_exits(
+) -> None:
+    workbench = ArtifactWorkbench(session=_session_with_outlines())
+    controller = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
+    item = _begin_rubbing(
+        controller,
+        record_id="record:rubbing:blocked-preflight",
+    )
+    started = Event()
+    release = Event()
+    errors: list[BaseException] = []
+
+    def blocked_estimate(*args, **kwargs):
+        started.set()
+        if not release.wait(timeout=2.0):
+            raise RuntimeError("test preflight release timed out")
+        return estimate_digital_rubbing_resources(*args, **kwargs)
+
+    def run() -> None:
+        try:
+            controller.execute(item)
+        except BaseException as exc:  # noqa: BLE001 - asserted below
+            errors.append(exc)
+
+    with patch(
+        "src.application.artifact_measurements.estimate_digital_rubbing_resources",
+        side_effect=blocked_estimate,
+    ):
+        worker = Thread(target=run, daemon=True)
+        worker.start()
+        assert started.wait(timeout=2.0)
+        cancelling = controller.cancel(item)
+        assert cancelling.state is MeasurementOperationState.CANCELLING
+        assert controller.rubbing_resource_estimate(item) is None
+        with pytest.raises(MeasurementResourceLimitError, match="already owns"):
+            _begin_rubbing(
+                controller,
+                record_id="record:rubbing:preflight-still-owned",
+            )
+        release.set()
+        worker.join(timeout=2.0)
+
+    assert not worker.is_alive()
+    assert len(errors) == 1 and isinstance(errors[0], MeasurementCancelledError)
+    assert controller.summary(item).state is MeasurementOperationState.CANCELLED
+    replacement = _begin_rubbing(
+        controller,
+        record_id="record:rubbing:after-preflight-exit",
+    )
+    controller.cancel(replacement)
+
+
+def test_worker_preflight_failure_is_terminal_and_releases_record_reservation() -> None:
+    workbench = ArtifactWorkbench(session=_session())
+    controller = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
+    item = controller.begin_cutline(
+        _cutline_frame(),
+        record_id="record:preflight-failure",
+    )
+
+    def fail_preflight() -> None:
+        raise RuntimeError("canonical scene mismatch")
+
+    with pytest.raises(RuntimeError, match="canonical scene mismatch"):
+        controller.execute(item, preflight=fail_preflight)
+
+    summary = controller.summary(item)
+    assert summary.state is MeasurementOperationState.FAILED
+    assert summary.message == "canonical scene mismatch"
+    assert controller.active_summaries == ()
+    replacement = controller.begin_cutline(
+        _cutline_frame(),
+        record_id=item.record_id,
     )
     controller.cancel(replacement)
 
@@ -1235,8 +1329,8 @@ def test_cumulative_rubbing_estimates_cannot_overbook_configured_budget() -> Non
         max_active_rubbing_operations=2,
     )
     probe_item = _begin_rubbing(probe, record_id="record:rubbing:probe")
-    assert probe_item.resource_estimate is not None
-    estimate = probe_item.resource_estimate.estimated_peak_bytes
+    probe.execute(probe_item)
+    estimate = probe.summary(probe_item).estimated_peak_bytes
     probe.cancel(probe_item)
 
     controller = ArtifactMeasurementController(
@@ -1246,8 +1340,10 @@ def test_cumulative_rubbing_estimates_cannot_overbook_configured_budget() -> Non
         rubbing_memory_budget_bytes=estimate * 2 - 1,
     )
     first = _begin_rubbing(controller, record_id="record:rubbing:budget-first")
+    second = _begin_rubbing(controller, record_id="record:rubbing:budget-second")
+    controller.execute(first)
     with pytest.raises(MeasurementResourceLimitError, match="cumulative"):
-        _begin_rubbing(controller, record_id="record:rubbing:budget-second")
+        controller.execute(second)
     assert len(controller.active_summaries) == 1
     controller.cancel(first)
 
@@ -1261,8 +1357,8 @@ def test_rubbing_admission_honors_every_active_controller_memory_budget() -> Non
         max_active_rubbing_operations=2,
     )
     probe_item = _begin_rubbing(probe, record_id="record:rubbing:owner-probe")
-    assert probe_item.resource_estimate is not None
-    estimate = probe_item.resource_estimate.estimated_peak_bytes
+    probe.execute(probe_item)
+    estimate = probe.summary(probe_item).estimated_peak_bytes
     probe.cancel(probe_item)
 
     constrained = ArtifactMeasurementController(
@@ -1281,12 +1377,14 @@ def test_rubbing_admission_honors_every_active_controller_memory_budget() -> Non
         constrained,
         record_id="record:rubbing:owner-budget-first",
     )
+    second = _begin_rubbing(
+        permissive,
+        record_id="record:rubbing:owner-budget-second",
+    )
+    constrained.execute(first)
 
     with pytest.raises(MeasurementResourceLimitError, match="cumulative"):
-        _begin_rubbing(
-            permissive,
-            record_id="record:rubbing:owner-budget-second",
-        )
+        permissive.execute(second)
 
     assert permissive.active_summaries == constrained.active_summaries
     constrained.cancel(first)

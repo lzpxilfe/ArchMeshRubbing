@@ -302,12 +302,21 @@ class ArtifactMeasurementWorkItem:
             raise ArtifactMeasurementError("base_state_version must be non-negative")
         if type(self.base_authority_epoch) is not int or self.base_authority_epoch < 0:
             raise ArtifactMeasurementError("base_authority_epoch must be non-negative")
-        if self.kind is MeasurementOperationKind.DIGITAL_RUBBING:
-            if not isinstance(self.resource_estimate, DigitalRubbingResourceEstimate):
-                raise ArtifactMeasurementError(
-                    "Digital Rubbing work needs a resource estimate"
-                )
-        elif self.resource_estimate is not None:
+        if (
+            self.kind is MeasurementOperationKind.DIGITAL_RUBBING
+            and self.resource_estimate is not None
+            and not isinstance(
+                self.resource_estimate,
+                DigitalRubbingResourceEstimate,
+            )
+        ):
+            raise ArtifactMeasurementError(
+                "Digital Rubbing resource estimate has an invalid type"
+            )
+        if (
+            self.kind is not MeasurementOperationKind.DIGITAL_RUBBING
+            and self.resource_estimate is not None
+        ):
             raise ArtifactMeasurementError(
                 "non-raster work items cannot carry a raster resource estimate"
             )
@@ -368,6 +377,8 @@ class _MeasurementRuntime:
     cancellation: Event
     rubbing_memory_budget_bytes: int | None = None
     max_active_rubbing_operations: int | None = None
+    resource_estimate: DigitalRubbingResourceEstimate | None = None
+    reserved_peak_bytes: int = 0
     state: MeasurementOperationState = MeasurementOperationState.RUNNING
     executing: bool = False
     result: ArtifactMeasurementResult | None = None
@@ -609,11 +620,32 @@ class ArtifactMeasurementController:
                 raise StaleMeasurementOperationError("measurement operation is unknown")
             return summary
 
+    def rubbing_resource_estimate(
+        self,
+        work_item: ArtifactMeasurementWorkItem,
+    ) -> DigitalRubbingResourceEstimate | None:
+        """Return the worker-computed estimate while its exact operation is active."""
+
+        with self._lock:
+            runtime = self._require_runtime_locked(
+                work_item,
+                states=frozenset(
+                    {
+                        MeasurementOperationState.RUNNING,
+                        MeasurementOperationState.CANCELLING,
+                        MeasurementOperationState.PUBLISHING,
+                    }
+                ),
+            )
+            if work_item.kind is not MeasurementOperationKind.DIGITAL_RUBBING:
+                return None
+            return runtime.resource_estimate or work_item.resource_estimate
+
     @staticmethod
     def _summary_for_runtime(
         runtime: _MeasurementRuntime,
     ) -> ArtifactMeasurementSummary:
-        estimate = runtime.work_item.resource_estimate
+        estimate = runtime.resource_estimate or runtime.work_item.resource_estimate
         return ArtifactMeasurementSummary(
             operation_id=runtime.work_item.id,
             kind=runtime.work_item.kind,
@@ -621,7 +653,9 @@ class ArtifactMeasurementController:
             record_id=runtime.work_item.record_id,
             created_at=runtime.work_item.created_at,
             estimated_peak_bytes=(
-                estimate.estimated_peak_bytes if estimate is not None else 0
+                estimate.estimated_peak_bytes
+                if estimate is not None
+                else runtime.reserved_peak_bytes
             ),
         )
 
@@ -662,7 +696,7 @@ class ArtifactMeasurementController:
                 )
             return summary
         runtime.state = state
-        estimate = work_item.resource_estimate
+        estimate = runtime.resource_estimate or work_item.resource_estimate
         summary = ArtifactMeasurementSummary(
             operation_id=work_item.id,
             kind=work_item.kind,
@@ -670,7 +704,9 @@ class ArtifactMeasurementController:
             record_id=work_item.record_id,
             created_at=work_item.created_at,
             estimated_peak_bytes=(
-                estimate.estimated_peak_bytes if estimate is not None else 0
+                estimate.estimated_peak_bytes
+                if estimate is not None
+                else runtime.reserved_peak_bytes
             ),
             error_type=(
                 type(error).__name__
@@ -841,9 +877,8 @@ class ArtifactMeasurementController:
         return (
             len(active),
             sum(
-                runtime.work_item.resource_estimate.estimated_peak_bytes
+                runtime.reserved_peak_bytes
                 for runtime in active
-                if runtime.work_item.resource_estimate is not None
             ),
             min((self._rubbing_memory_budget_bytes, *memory_budgets)),
             min((self._max_active_rubbing_operations, *operation_limits)),
@@ -954,6 +989,7 @@ class ArtifactMeasurementController:
         )
 
         estimate: DigitalRubbingResourceEstimate | None = None
+        minimum_estimated_bytes = 0
         if estimate_rubbing:
             with self._lock:
                 (
@@ -992,24 +1028,6 @@ class ArtifactMeasurementController:
                         "Digital Rubbing minimum cumulative memory estimate exceeds "
                         "the configured budget before projection preflight"
                     )
-            estimate = estimate_digital_rubbing_resources(
-                session.source_mesh.vertices,
-                session.source_mesh.faces,
-                canonical_recipe,
-                source_to_world_mm_matrix4x4=projection_snapshot.matrix4x4,
-                uv_coords=session.source_mesh.uv_coords,
-                texture=session.source_mesh.texture,
-            )
-            if session.projection_snapshot() != projection_snapshot:
-                raise StaleMeasurementOperationError(
-                    "artifact projection changed during resource preflight"
-                )
-            if estimate.estimated_peak_bytes > effective_memory_budget:
-                raise MeasurementResourceLimitError(
-                    "Digital Rubbing estimated peak memory "
-                    f"{estimate.estimated_peak_bytes} bytes exceeds the configured "
-                    f"budget {effective_memory_budget} bytes"
-                )
 
         work_item = ArtifactMeasurementWorkItem(
             id=operation_id,
@@ -1053,14 +1071,13 @@ class ArtifactMeasurementController:
                     raise MeasurementResourceLimitError(
                         "another Digital Rubbing operation already owns the raster budget"
                     )
-                assert estimate is not None
                 if (
-                    reserved_bytes + estimate.estimated_peak_bytes
+                    reserved_bytes + minimum_estimated_bytes
                     > effective_memory_budget
                 ):
                     raise MeasurementResourceLimitError(
-                        "Digital Rubbing cumulative estimated peak memory "
-                        f"{reserved_bytes + estimate.estimated_peak_bytes} bytes "
+                        "Digital Rubbing cumulative minimum memory reservation "
+                        f"{reserved_bytes + minimum_estimated_bytes} bytes "
                         "exceeds the configured budget "
                         f"{effective_memory_budget} bytes"
                     )
@@ -1076,6 +1093,12 @@ class ArtifactMeasurementController:
                     self._max_active_rubbing_operations
                     if kind is MeasurementOperationKind.DIGITAL_RUBBING
                     else None
+                ),
+                resource_estimate=estimate,
+                reserved_peak_bytes=(
+                    minimum_estimated_bytes
+                    if kind is MeasurementOperationKind.DIGITAL_RUBBING
+                    else 0
                 ),
             )
             self._active[operation_id] = runtime
@@ -1200,9 +1223,69 @@ class ArtifactMeasurementController:
                 estimate_rubbing=True,
             )
 
+    def _prepare_rubbing_resource_estimate(
+        self,
+        runtime: _MeasurementRuntime,
+        cancellation: Event,
+    ) -> None:
+        """Expand a cheap admission reservation on the executing worker."""
+
+        work_item = runtime.work_item
+        if work_item.kind is not MeasurementOperationKind.DIGITAL_RUBBING:
+            return
+        _raise_if_cancelled(cancellation.is_set)
+        session = work_item.captured_session
+        estimate = estimate_digital_rubbing_resources(
+            session.source_mesh.vertices,
+            session.source_mesh.faces,
+            work_item.recipe_dict(),
+            source_to_world_mm_matrix4x4=work_item.projection_snapshot.matrix4x4,
+            uv_coords=session.source_mesh.uv_coords,
+            texture=session.source_mesh.texture,
+        )
+        if session.projection_snapshot() != work_item.projection_snapshot:
+            raise StaleMeasurementOperationError(
+                "artifact projection changed during resource preflight"
+            )
+        _raise_if_cancelled(cancellation.is_set)
+
+        with self._rubbing_admission_lock, self._lock:
+            active = self._active.get(work_item.id)
+            if active is not runtime or cancellation.is_set():
+                raise MeasurementCancelledError(
+                    "Digital Rubbing resource preflight lost operation authority"
+                )
+            if runtime.state is not MeasurementOperationState.RUNNING:
+                raise MeasurementCancelledError(
+                    "Digital Rubbing resource preflight was cancelled"
+                )
+            (
+                _active_rubbing,
+                reserved_bytes,
+                effective_memory_budget,
+                _effective_operation_limit,
+            ) = self._rubbing_admission_locked()
+            other_reserved_bytes = max(
+                0,
+                reserved_bytes - runtime.reserved_peak_bytes,
+            )
+            cumulative_peak_bytes = (
+                other_reserved_bytes + estimate.estimated_peak_bytes
+            )
+            if cumulative_peak_bytes > effective_memory_budget:
+                raise MeasurementResourceLimitError(
+                    "Digital Rubbing cumulative estimated peak memory "
+                    f"{cumulative_peak_bytes} bytes exceeds the configured budget "
+                    f"{effective_memory_budget} bytes"
+                )
+            runtime.resource_estimate = estimate
+            runtime.reserved_peak_bytes = estimate.estimated_peak_bytes
+
     def execute(
         self,
         work_item: ArtifactMeasurementWorkItem,
+        *,
+        preflight: Callable[[], None] | None = None,
     ) -> ArtifactMeasurementResult:
         with self._lock:
             runtime = self._require_runtime_locked(
@@ -1216,6 +1299,11 @@ class ArtifactMeasurementController:
             runtime.executing = True
             cancellation = runtime.cancellation
         try:
+            _raise_if_cancelled(cancellation.is_set)
+            if preflight is not None:
+                preflight()
+                _raise_if_cancelled(cancellation.is_set)
+            self._prepare_rubbing_resource_estimate(runtime, cancellation)
             result = execute_measurement_work_item(
                 work_item,
                 cancellation_probe=cancellation.is_set,

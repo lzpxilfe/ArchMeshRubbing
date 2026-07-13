@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
-from unittest.mock import Mock, call, patch
+from unittest.mock import ANY, Mock, call, patch
 
 import numpy as np
 
@@ -2501,21 +2501,47 @@ def test_native_outline_ui_exposes_six_views_and_explicit_mm_grid() -> None:
         app.processEvents()
 
 
-def test_cutline_and_outline_handlers_dispatch_computation_to_task_threads() -> None:
+def test_native_measurement_handlers_defer_materialization_to_task_threads() -> None:
     app = QApplication.instance()
     if app is None:
         app = QApplication([])
-    session = _artifact_box_session()
+    session = _artifact_box_session_with_outlines()
     window = MainWindow()
     window._artifact_session = session
     window.viewport.objects = [_projected_scene_object(session)]
     window.viewport.selected_index = 0
     controller = Mock()
+    controller.active_summaries = ()
     cutline_item = object()
     outline_item = object()
+    rubbing_item = object()
+    tile_item = object()
     controller.begin_cutline.return_value = cutline_item
     controller.begin_outline.return_value = outline_item
-    controller.execute.side_effect = ["cutline-result", "outline-result"]
+    controller.begin_rubbing.return_value = rubbing_item
+    controller.begin_tile_unwrap.return_value = tile_item
+    worker_results = {
+        id(cutline_item): "cutline-result",
+        id(outline_item): "outline-result",
+        id(rubbing_item): "rubbing-result",
+        id(tile_item): "tile-result",
+    }
+
+    def execute_with_preflight(item, *, preflight):
+        preflight()
+        return worker_results[id(item)]
+
+    controller.execute.side_effect = execute_with_preflight
+    original_materialize = ArtifactSession.materialize
+    materialization_allowed = False
+    materialization_calls: list[ArtifactSession] = []
+
+    def guarded_materialize(current: ArtifactSession):
+        if not materialization_allowed:
+            raise AssertionError("GUI handler materialized the canonical scene")
+        materialization_calls.append(current)
+        return original_materialize(current)
+
     try:
         with (
             patch.object(
@@ -2528,28 +2554,48 @@ def test_cutline_and_outline_handlers_dispatch_computation_to_task_threads() -> 
                 "_native_record_workflow_progress",
                 return_value=SimpleNamespace(
                     outline=SimpleNamespace(enabled=True),
+                    rubbing=SimpleNamespace(enabled=True),
                 ),
             ),
             patch.object(window, "_start_task", return_value=True) as start_task,
+            patch.object(ArtifactSession, "materialize", new=guarded_materialize),
         ):
             window.on_native_cutline_requested()
             cutline_thread = start_task.call_args.kwargs["thread"]
             assert isinstance(cutline_thread, TaskThread)
             assert cutline_thread._task_name == "native_cutline"
-            assert cutline_thread._fn() == "cutline-result"
 
             window.on_native_outline_requested()
             outline_thread = start_task.call_args.kwargs["thread"]
             assert isinstance(outline_thread, TaskThread)
             assert outline_thread._task_name == "native_outline"
+
+            window.on_native_rubbing_requested()
+            rubbing_thread = start_task.call_args.kwargs["thread"]
+            assert isinstance(rubbing_thread, TaskThread)
+            assert rubbing_thread._task_name == "native_digital_rubbing"
+
+            window.on_native_tile_unwrap_requested()
+            tile_thread = start_task.call_args.kwargs["thread"]
+            assert isinstance(tile_thread, TaskThread)
+            assert tile_thread._task_name == "native_tile_unwrap"
+
+            assert materialization_calls == []
+            materialization_allowed = True
+            assert cutline_thread._fn() == "cutline-result"
             assert outline_thread._fn() == "outline-result"
+            assert rubbing_thread._fn() == "rubbing-result"
+            assert tile_thread._fn() == "tile-result"
 
         controller.execute.assert_has_calls(
             [
-                call(cutline_item),
-                call(outline_item),
+                call(cutline_item, preflight=ANY),
+                call(outline_item, preflight=ANY),
+                call(rubbing_item, preflight=ANY),
+                call(tile_item, preflight=ANY),
             ]
         )
+        assert materialization_calls == [session, session, session, session]
     finally:
         window.deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
@@ -2743,6 +2789,77 @@ def test_native_tile_unwrap_ui_requires_explicit_axis_view_and_selection() -> No
             "n_sections": 32,
         }
         assert "현재 선택 3면" in panel.label_native_tile_selection.text()
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+@pytest.mark.parametrize("change_selection_before_publish", [False, True])
+def test_native_tile_unwrap_only_clears_unchanged_consumed_selection(
+    change_selection_before_publish: bool,
+) -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    session = _artifact_tile_session()
+    obj = _projected_scene_object(session)
+    selected_faces = tuple(range(int(session.source_mesh.faces.shape[0])))
+    obj.selected_faces = set(selected_faces)
+    window = MainWindow()
+    window._artifact_session = session
+    window._current_project_path = "/tmp/gui-selected-tile.amr"
+    window.current_filepath = session.resolved_source_path
+    window.current_mesh = obj.mesh
+    window.viewport.objects = [obj]
+    window.viewport.selected_index = 0
+    panel = window.section_panel
+    panel.combo_native_tile_target.setCurrentIndex(
+        panel.combo_native_tile_target.findData("selected")
+    )
+    captured: dict[str, object] = {}
+    try:
+        with (
+            patch.object(window, "_start_task", return_value=True) as start_task,
+            patch.object(QMessageBox, "warning") as warning,
+        ):
+            window.on_native_tile_unwrap_requested()
+        warning.assert_not_called()
+        assert start_task.call_count == 1
+        callbacks = start_task.call_args.kwargs
+        thread = callbacks["thread"]
+        assert isinstance(thread, TaskThread)
+        assert thread._task_name == "native_tile_unwrap"
+        result = thread._fn()
+        if change_selection_before_publish:
+            obj.selected_faces = {0}
+
+        with (
+            patch.object(
+                window,
+                "_publish_artifact_session_projection",
+                side_effect=_capture_measurement_publication(window, captured),
+            ),
+            patch.object(window, "_sync_native_cutline_controls"),
+            patch.object(QMessageBox, "warning") as warning,
+        ):
+            callbacks["on_done"](result)
+
+        warning.assert_not_called()
+        committed = captured["session"]
+        assert isinstance(committed, ArtifactSession)
+        record = committed.document.records[-1]
+        assert record.type == TILE_UNWRAP_RECORD_TYPE
+        assert record.recipe["selection"]["selected_face_count"] == len(
+            selected_faces
+        )
+        if change_selection_before_publish:
+            assert obj.selected_faces == {0}
+            with pytest.raises(ProjectSerializationError, match="record로 승격"):
+                window._validate_native_scene_for_save(committed)
+        else:
+            assert obj.selected_faces == set()
+            window._validate_native_scene_for_save(committed)
     finally:
         window.deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)

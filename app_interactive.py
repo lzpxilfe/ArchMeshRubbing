@@ -331,6 +331,7 @@ from src.core.artifact_tile_unwrap_extractor import (  # noqa: E402
     TileUnwrapMesh,
     compute_artifact_tile_unwrap_from_recipe,
     require_current_tile_unwrap_computation,
+    selection_face_indices,
 )
 from src.core.artifact_tile_unwrap_record import (  # noqa: E402
     TILE_UNWRAP_RECORD_TYPE,
@@ -6709,7 +6710,14 @@ class MainWindow(QMainWindow):
             self.status_info.setText("프로젝트 저장 실패")
             return False
 
-    def _validate_native_scene_for_save(self, session: ArtifactSession) -> None:
+    def _capture_native_scene_preflight(
+        self,
+        session: ArtifactSession,
+        *,
+        allowed_selected_face_indices: tuple[int, ...] | None = None,
+    ) -> Callable[[], None]:
+        """Capture GUI-only guards and defer canonical mesh comparison to a worker."""
+
         controller_factory = getattr(
             self,
             "_artifact_measurement_controller",
@@ -6767,24 +6775,31 @@ class MainWindow(QMainWindow):
                 "Native projection에 문서화되지 않은 vertex bake 흔적이 있습니다"
             )
 
-        expected_mesh = session.materialize().mesh
         actual_mesh = getattr(obj, "mesh", None)
-        try:
-            vertices_match = np.array_equal(
-                np.asarray(actual_mesh.vertices),
-                np.asarray(expected_mesh.vertices),
-            )
-            faces_match = np.array_equal(
-                np.asarray(actual_mesh.faces),
-                np.asarray(expected_mesh.faces),
-            )
-        except Exception:
-            vertices_match = False
-            faces_match = False
-        if not vertices_match or not faces_match:
-            raise ProjectSerializationError(
-                "Native scene geometry가 ArtifactDocument의 canonical projection과 다릅니다"
-            )
+
+        def validate_geometry() -> None:
+            if session.projection_snapshot() != expected:
+                raise ProjectSerializationError(
+                    "Native scene preflight projection changed before execution"
+                )
+            expected_mesh = session.materialize().mesh
+            try:
+                vertices_match = np.array_equal(
+                    np.asarray(actual_mesh.vertices),
+                    np.asarray(expected_mesh.vertices),
+                )
+                faces_match = np.array_equal(
+                    np.asarray(actual_mesh.faces),
+                    np.asarray(expected_mesh.faces),
+                )
+            except Exception:
+                vertices_match = False
+                faces_match = False
+            if not vertices_match or not faces_match:
+                raise ProjectSerializationError(
+                    "Native scene geometry가 ArtifactDocument의 canonical projection과 "
+                    "다릅니다"
+                )
 
         def contains_material_result(value: Any) -> bool:
             if value is None:
@@ -6823,10 +6838,25 @@ class MainWindow(QMainWindow):
             except Exception:
                 tile_state_changed = True
 
+        selected_faces = tuple(
+            sorted(int(value) for value in (getattr(obj, "selected_faces", set()) or set()))
+        )
+        if allowed_selected_face_indices is not None:
+            allowed_selection = tuple(
+                sorted(int(value) for value in allowed_selected_face_indices)
+            )
+            if selected_faces != allowed_selection:
+                raise ProjectSerializationError(
+                    "기와 전개 face selection이 preflight capture와 다릅니다"
+                )
+            unported_selected_faces: tuple[int, ...] = ()
+        else:
+            unported_selected_faces = selected_faces
+
         unported_values = (
             getattr(obj, "polyline_layers", []),
             getattr(obj, "fitted_arcs", []),
-            getattr(obj, "selected_faces", set()),
+            unported_selected_faces,
             getattr(obj, "outer_face_indices", set()),
             getattr(obj, "inner_face_indices", set()),
             getattr(obj, "migu_face_indices", set()),
@@ -6868,6 +6898,10 @@ class MainWindow(QMainWindow):
                 "현재 장면에는 아직 ArtifactDocument record로 승격되지 않은 결과가 "
                 "있습니다. M0-4 record 전환 전에는 이를 포함한 저장을 차단합니다."
             )
+        return validate_geometry
+
+    def _validate_native_scene_for_save(self, session: ArtifactSession) -> None:
+        MainWindow._capture_native_scene_preflight(self, session)()
 
     def _collect_project_state(self) -> dict[str, Any]:
         vp = self.viewport
@@ -16290,6 +16324,29 @@ class MainWindow(QMainWindow):
             bool(self._pending_native_measurement_publications)
             and self._native_measurement_ready()
         )
+        if work_item.kind is MeasurementOperationKind.TILE_UNWRAP:
+            try:
+                selection = recipe.get("selection")
+                if isinstance(selection, Mapping):
+                    captured_selection = tuple(
+                        int(value) for value in selection_face_indices(selection)
+                    )
+                    live_obj = getattr(self.viewport, "selected_obj", None)
+                    live_selection = tuple(
+                        sorted(
+                            int(value)
+                            for value in (
+                                getattr(live_obj, "selected_faces", set()) or set()
+                            )
+                        )
+                    )
+                    if live_selection and live_selection == captured_selection:
+                        self._set_object_selected_faces(live_obj, ())
+            except Exception:
+                _LOGGER.debug(
+                    "Published tile selection could not be consumed",
+                    exc_info=True,
+                )
         if isinstance(computation, ArtifactRubbingComputation):
             self._preview_native_rubbing(
                 publication.session,
@@ -16368,6 +16425,16 @@ class MainWindow(QMainWindow):
                 "joined measurement worker retained publication authority: "
                 f"{state.value}"
             )
+
+    @staticmethod
+    def _execute_native_measurement_with_preflight(
+        preflight: Callable[[], None],
+        controller: ArtifactMeasurementController,
+        work_item: ArtifactMeasurementWorkItem,
+    ) -> ArtifactMeasurementResult:
+        """Run canonical scene materialization on the measurement worker."""
+
+        return controller.execute(work_item, preflight=preflight)
 
     def _native_measurement_callback_is_terminal(
         self,
@@ -16481,7 +16548,7 @@ class MainWindow(QMainWindow):
             offset = float(self.section_panel.spin_native_cutline_offset.value())
             obj = self.viewport.selected_obj
             session = self._require_native_measurement_session(obj)
-            self._validate_native_scene_for_save(session)
+            preflight = self._capture_native_scene_preflight(session)
             controller = self._artifact_measurement_controller()
             work_item = controller.begin_cutline(
                 _native_cutline_frame(view, offset),
@@ -16550,7 +16617,14 @@ class MainWindow(QMainWindow):
         started = self._start_task(
             title="Cutline",
             label="재현 가능한 단면 벡터 계산 중...",
-            thread=TaskThread("native_cutline", lambda: controller.execute(work_item)),
+            thread=TaskThread(
+                "native_cutline",
+                lambda: self._execute_native_measurement_with_preflight(
+                    preflight,
+                    controller,
+                    work_item,
+                ),
+            ),
             on_done=on_done,
             on_failed=on_failed,
             on_cancel_requested=lambda: self._request_native_measurement_cancel(
@@ -16602,7 +16676,7 @@ class MainWindow(QMainWindow):
             )
             obj = self.viewport.selected_obj
             session = self._require_native_measurement_session(obj)
-            self._validate_native_scene_for_save(session)
+            preflight = self._capture_native_scene_preflight(session)
             progress = self._native_record_workflow_progress()
             if not progress.outline.enabled:
                 raise ArtifactSessionError(
@@ -16679,7 +16753,14 @@ class MainWindow(QMainWindow):
         started = self._start_task(
             title="Outline",
             label="재현 가능한 6면 외곽 벡터 계산 중...",
-            thread=TaskThread("native_outline", lambda: controller.execute(work_item)),
+            thread=TaskThread(
+                "native_outline",
+                lambda: self._execute_native_measurement_with_preflight(
+                    preflight,
+                    controller,
+                    work_item,
+                ),
+            ),
             on_done=on_done,
             on_failed=on_failed,
             on_cancel_requested=lambda: self._request_native_measurement_cancel(
@@ -17111,7 +17192,7 @@ class MainWindow(QMainWindow):
         try:
             obj = self.viewport.selected_obj
             session = self._require_native_measurement_session(obj)
-            self._validate_native_scene_for_save(session)
+            preflight = self._capture_native_scene_preflight(session)
             progress = self._native_record_workflow_progress()
             if not progress.rubbing.enabled:
                 raise ArtifactSessionError(
@@ -17138,7 +17219,11 @@ class MainWindow(QMainWindow):
             return
 
         def task():
-            return controller.execute(work_item)
+            return self._execute_native_measurement_with_preflight(
+                preflight,
+                controller,
+                work_item,
+            )
 
         def on_done(result: object) -> None:
             if self._native_measurement_callback_is_terminal(
@@ -17520,7 +17605,11 @@ class MainWindow(QMainWindow):
     ) -> str:
         obj = self.viewport.selected_obj
         session = self._require_native_measurement_session(obj)
-        self._validate_native_scene_for_save(session)
+        MainWindow._capture_native_scene_preflight(
+            self,
+            session,
+            allowed_selected_face_indices=selected_face_indices,
+        )()
         new_record_id = (
             f"record:tile-unwrap:{record_view}:{uuid.uuid4()}"
             if record_id is None
@@ -17543,8 +17632,11 @@ class MainWindow(QMainWindow):
         try:
             obj = self.viewport.selected_obj
             session = self._require_native_measurement_session(obj)
-            self._validate_native_scene_for_save(session)
             options = self._native_tile_unwrap_options_from_panel()
+            preflight = self._capture_native_scene_preflight(
+                session,
+                allowed_selected_face_indices=options["selected_face_indices"],
+            )
             record_id = (
                 f"record:tile-unwrap:{options['record_view']}:{uuid.uuid4()}"
             )
@@ -17620,7 +17712,11 @@ class MainWindow(QMainWindow):
             label="선택·축·기록면을 고정한 µm 전개 좌표 계산 중...",
             thread=TaskThread(
                 "native_tile_unwrap",
-                lambda: controller.execute(work_item),
+                lambda: self._execute_native_measurement_with_preflight(
+                    preflight,
+                    controller,
+                    work_item,
+                ),
             ),
             on_done=on_done,
             on_failed=on_failed,
