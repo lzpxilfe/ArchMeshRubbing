@@ -24,7 +24,6 @@ from src.gui.opengl_driver_smoke import (
     PROBE_BASE_WORLD_MM,
     PROBE_GAP_WIDTH_MM,
     PROBE_STEP_HEIGHT_MM,
-    WINDOWS_PROBE_POSITION,
     configure_probe_window,
     connected_component_sizes,
     probe_geometry,
@@ -69,12 +68,12 @@ def test_windows_probe_uses_positioned_native_tool_window() -> None:
         qt=_FakeQt,
     )
 
-    assert policy == "offscreen-positioned-native-tool-window"
+    assert policy == "shown-nonactivating-native-tool-window"
     assert viewport.window_flags == [(_FakeQt.WindowType.Tool, True)]
     assert viewport.attributes == [
         (_FakeQt.WidgetAttribute.WA_ShowWithoutActivating, True)
     ]
-    assert viewport.positions == [WINDOWS_PROBE_POSITION]
+    assert viewport.positions == []
 
 
 def test_non_windows_probe_remains_hidden() -> None:

@@ -30,7 +30,6 @@ REPORT_SCHEMA = "archmeshrubbing.opengl_driver_smoke"
 REPORT_SCHEMA_VERSION = 1
 ROOT = Path(__file__).resolve().parents[2]
 PROBE_WIDGET_SIZE = (768, 768)
-WINDOWS_PROBE_POSITION = (-10_000, -10_000)
 PROBE_BASE_WORLD_MM = np.array(
     [1_000_000_000.0, -2_000_000_000.0, 3_000_000_000.0],
     dtype=np.float64,
@@ -106,15 +105,15 @@ def configure_probe_window(
         # QOpenGLWidget creates its context/FBO as part of a shown top-level
         # window.  WA_DontShowOnScreen prevents that normal qwindows lifecycle
         # and has terminated the process inside Qt's software-GL setup.  A
-        # native tool window positioned far outside the desktop exercises the
-        # same lifecycle as the application without taking focus.
+        # native non-activating tool window exercises the same lifecycle as
+        # the application without taking focus.  It must remain exposed:
+        # qwindows can collapse an entirely off-desktop OpenGL FBO to 64 px.
         viewport.setWindowFlag(qt.WindowType.Tool, True)
         viewport.setAttribute(
             qt.WidgetAttribute.WA_ShowWithoutActivating,
             True,
         )
-        viewport.move(*WINDOWS_PROBE_POSITION)
-        return "offscreen-positioned-native-tool-window"
+        return "shown-nonactivating-native-tool-window"
 
     viewport.setAttribute(qt.WidgetAttribute.WA_DontShowOnScreen, True)
     return "dont-show-on-screen"
@@ -523,11 +522,10 @@ def _render_mode(
     )
     viewport.camera.pan_offset = np.zeros(3, dtype=np.float64)
     viewport.camera.distance = 8.0
-    # A qwindows top-level intentionally positioned outside the desktop can be
-    # treated as non-exposed, so update()/repaint() may be coalesced away.
-    # QOpenGLWidget.makeCurrent() binds the widget's real default FBO; invoke
-    # the production paintGL path there so this precision gate is independent
-    # of compositor exposure while still exercising the actual context/FBO.
+    # Automated desktops may coalesce update()/repaint() independently of the
+    # widget FBO. QOpenGLWidget.makeCurrent() binds its real default FBO;
+    # invoke the production paintGL path there so this precision gate is
+    # independent of compositor scheduling while exercising the actual FBO.
     viewport.makeCurrent()
     try:
         viewport.paintGL()
@@ -570,6 +568,20 @@ def _render_mode(
         f"{mode}.viewport_positive",
         width > 0 and height > 0,
         {"viewport": frame.viewport},
+    )
+    pixel_ratio = float(viewport.devicePixelRatioF())
+    expected_physical_size = (
+        int(round(float(viewport.width()) * pixel_ratio)),
+        int(round(float(viewport.height()) * pixel_ratio)),
+    )
+    recorder.require(
+        f"{mode}.viewport_matches_widget_pixels",
+        (vx, vy) == (0, 0) and (width, height) == expected_physical_size,
+        {
+            "actual": (width, height),
+            "expected": expected_physical_size,
+            "device_pixel_ratio": pixel_ratio,
+        },
     )
 
     viewport.makeCurrent()
@@ -873,15 +885,21 @@ def run_driver_smoke(
             "qt.probe_surface_policy",
             surface_policy
             == (
-                "offscreen-positioned-native-tool-window"
+                "shown-nonactivating-native-tool-window"
                 if actual_platform == "windows"
                 else "dont-show-on-screen"
             ),
             {"policy": surface_policy},
         )
-        viewport.resize(*PROBE_WIDGET_SIZE)
+        viewport.setFixedSize(*PROBE_WIDGET_SIZE)
         viewport.show()
         _wait_for_context(app, viewport, context_timeout_s)
+        logical_size = (int(viewport.width()), int(viewport.height()))
+        recorder.require(
+            "qt.widget_probe_size",
+            logical_size == PROBE_WIDGET_SIZE,
+            {"logical_size": logical_size},
+        )
         context = viewport.context()
         recorder.require(
             "qt.widget_context_valid",
@@ -1043,9 +1061,9 @@ def run_driver_smoke(
             np.array_equal(mesh.vertices, source_snapshot),
         )
         # The diagnostic may not emit a compositor-level frameSwapped signal
-        # when it uses WA_DontShowOnScreen or a far-off-desktop Windows tool
-        # window.  The published frame serial plus actual widget FBO readback
-        # above are the blocking paintGL evidence.
+        # when it uses WA_DontShowOnScreen or an automated Windows desktop.
+        # The published frame serial plus actual widget FBO readback above are
+        # the blocking paintGL evidence.
         report["context"]["frame_swap_count"] = len(frame_swaps)
     except Exception as exc:
         caught = exc
