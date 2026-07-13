@@ -149,13 +149,33 @@ jobs:
             ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
           )
           if ($isccCandidates.Count -eq 0) {
-            throw "Inno Setup compiler was not found on the pinned Windows runner"
+            throw "Inno Setup compiler was not found on the Windows runner"
           }
           $iscc = $isccCandidates[0]
-          $compilerVersion = (Get-Item $iscc).VersionInfo.ProductVersion
-          if (-not $compilerVersion.StartsWith("6.")) {
-            throw "Inno Setup 6 is required, found $compilerVersion"
+          $versionInfo = (Get-Item $iscc).VersionInfo
+          $compilerVersion = @(
+            $versionInfo.ProductVersion
+            $versionInfo.FileVersion
+          ) | Where-Object { $_ -match '^6\.' } | Select-Object -First 1
+          if (-not $compilerVersion) {
+            # The hosted image's ISCC.exe currently exposes 0.0.0.0 in its
+            # Win32 version resource. Chocolatey is the image's authoritative
+            # installed-package inventory and provides machine-readable output.
+            $packageRows = @(& choco list innosetup --exact --limit-output 2>$null)
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not query the installed Inno Setup package version"
+            }
+            $packageRow = $packageRows |
+              Where-Object { $_ -match '^innosetup\|6\.' } |
+              Select-Object -First 1
+            if ($packageRow) {
+              $compilerVersion = ($packageRow -split '\|', 2)[1]
+            }
           }
+          if (-not $compilerVersion -or -not $compilerVersion.StartsWith("6.")) {
+            throw "Inno Setup 6 is required; package/version metadata did not identify it"
+          }
+          $compilerHash = (Get-FileHash -Algorithm SHA256 $iscc).Hash.ToLowerInvariant()
           Write-Host "Using Inno Setup $compilerVersion from $iscc"
 
           & $iscc `
@@ -193,6 +213,7 @@ jobs:
             installer_size = (Get-Item $installer).Length
             authenticode_status = $signature.Status.ToString()
             compiler_product_version = $compilerVersion
+            compiler_sha256 = $compilerHash
             runner_image = $env:ImageOS
             runner_image_version = $env:ImageVersion
           }
