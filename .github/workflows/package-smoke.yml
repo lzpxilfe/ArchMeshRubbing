@@ -134,6 +134,9 @@ jobs:
             throw "Frozen self-test exceeded 120 seconds"
           }
           if ($process.ExitCode -ne 0) {
+            if (Test-Path "build\frozen-self-test.json") {
+              Get-Content "build\frozen-self-test.json"
+            }
             throw "Frozen self-test exited with code $($process.ExitCode)"
           }
 

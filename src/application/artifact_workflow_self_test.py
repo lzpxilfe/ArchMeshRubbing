@@ -366,9 +366,17 @@ def _export_and_verify_survey(
     if (
         publication.destination != destination
         or len(publication.record_ids) != 15
-        or not publication.durability_confirmed
     ):
         raise RuntimeError("complete survey publication receipt is invalid")
+    if publication.durability_confirmed:
+        if publication.warning_message is not None:
+            raise RuntimeError(
+                "durable survey publication unexpectedly carried a warning"
+            )
+    elif not publication.warning_message:
+        raise RuntimeError(
+            "committed survey publication did not report its durability warning"
+        )
 
     relocated = directory / "relocated-complete-workflow.amr-survey"
     destination.rename(relocated)

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+from unittest.mock import patch
 
+import src.core.artifact_survey_export as artifact_survey_export
 from src.application.artifact_workflow_self_test import (
     run_artifact_workflow_self_test,
 )
@@ -42,6 +44,21 @@ def test_complete_workflow_self_test_has_deterministic_offline_receipts() -> Non
     )
     assert result.png_sha256 == (
         "268ad9fc5910358a2a2882809c6928d9c9fd66685ed25bc2b182ccc211336e8d"
+    )
+
+
+def test_complete_workflow_accepts_explicit_committed_directory_fsync_warning(
+) -> None:
+    with patch.object(
+        artifact_survey_export,
+        "fsync_export_directory",
+        return_value=False,
+    ):
+        result = run_artifact_workflow_self_test()
+
+    assert result.record_count == 15
+    assert result.survey_manifest_sha256 == (
+        "bfa36ee1595405d4568f90cae54ca175954b75e6ca5d87364330b3532e260e10"
     )
 
 

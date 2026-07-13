@@ -24,6 +24,7 @@ from src.core.artifact_rubbing_extractor import (
     commit_artifact_rubbing,
     compute_artifact_rubbing,
 )
+from src.core.canonical_json import canonical_json_bytes
 from src.core.artifact_session import ArtifactSession
 from src.core.artifact_survey_export import (
     ArtifactSurveyExportError,
@@ -281,10 +282,7 @@ def test_manifest_binds_each_child_and_rejects_tampering(tmp_path: Path) -> None
     manifest_path = destination / SURVEY_EXPORT_MANIFEST_NAME
     manifest = json.loads(manifest_path.read_bytes())
     manifest["artifacts"][0]["primary_sha256"] = "0" * 64
-    manifest_path.write_text(
-        json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n",
-        encoding="utf-8",
-    )
+    manifest_path.write_bytes(canonical_json_bytes(manifest) + b"\n")
     with pytest.raises(ArtifactSurveyExportError, match="does not exactly describe"):
         validate_survey_export_package(destination)
 
