@@ -86,6 +86,9 @@ def test_self_test_passes_with_complete_offline_artifact_workflow() -> None:
     assert "survey=verified-atomic-15" in checks[
         "artifact_complete_workflow_offline"
     ]["detail"]
+    assert "pilot=artifact-pass-human-driver-pending" in checks[
+        "artifact_complete_workflow_offline"
+    ]["detail"]
     diagnostics = cast(dict[str, object], report["diagnostics"])
     assert diagnostics["application"] == {
         "name": "ArchMeshRubbing",

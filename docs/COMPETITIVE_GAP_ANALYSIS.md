@@ -29,7 +29,7 @@
 | project/history | project save/load UI가 표시됨 | content-addressed self-contained `.amr`, parser dependency closure, 외부 원본 삭제 뒤 독립 프로세스 reopen, immutable record graph | ArchMeshRubbing 우위 |
 | offline·라이선스 | 체험 제한과 PRO/구독 안내가 표시됨 | 오픈소스 지향, 계정·license server 없는 offline architecture, outbound 차단 Windows package gate | ArchMeshRubbing 방향 우위. 실제 공개 license 결정과 서명 배포 전에는 완료 아님 |
 | 언어 | 한국어·영어·중국어·일본어 선택 UI가 표시됨 | 주 UI가 한국어 중심 | ARIA 우세. 문자열 catalog와 번역 검증이 P2 |
-| 접근성·온보딩 | 기능이 한 화면에 통합되어 있으나 공개 체험 제한이 존재 | 엄격한 native workflow·진행 gate·기와 신뢰 경로의 desktop binding 구현 | 기능 연결은 완료. 5분 첫 결과 usability pilot 증거가 없어 아직 우위 주장 불가 |
+| 접근성·온보딩 | 기능이 한 화면에 통합되어 있으나 공개 체험 제한이 존재 | 엄격한 native workflow·진행 gate·기와 신뢰 경로의 desktop binding과 10항목 archaeologist review/elapsed-time field-pilot 계약 구현 | 측정 절차는 준비됨. 실제 5분 첫 결과 usability pilot 증거가 없어 아직 우위 주장 불가 |
 | 시각 체계 | 공개 화면에 emoji 기반 label이 다수 보임 | 33개 handcrafted 16×16 pixel icon, deterministic cache와 frozen startup test | ArchMeshRubbing 차별화. 고대비·확대·키보드 접근성 검증은 필요 |
 | Windows 전달 | 웹 소개에서 설치형 제품으로 안내됨 | hash-locked build, SPDX/NOTICE/evidence, compiler-independent portable ZIP, 한글 경로·firewall-offline·actual qwindows OpenGL CI | 공급망 검증은 ArchMeshRubbing 우위. 서명·대표 GPU·실물 pilot은 미완료 |
 
@@ -41,6 +41,7 @@
 - 완료: 기록면 전체/현재 face selection, 장축 `X/Y/Z`, Top/Bottom, section 수와 QC를 한 화면에서 검토한다.
 - 완료: 선택한 `READY + FRESH` record를 recipe로 재계산하고 exact receipt를 확인한 뒤에만 `.amr-unwrap`으로 내보내며 기존 자유 flatten export와 구분한다.
 - 완료: Cutline 3/3·Outline 6/6·Digital Rubbing 6/6을 한 버튼으로 `.amr-survey`에 원자 게시하고 이동 후 exact project와 offline 재검증한다.
+- 완료: 한 project/survey, 현재 Windows build의 native OpenGL report, 정량 scale과 10항목 고고학자 review를 canonical 단일 파일럿 report로 묶고 근거가 빠지면 `incomplete`로 남기는 공개 CLI·schema를 마련했다.
 - 공개 가능한 암키와·수키와 scan set을 마련해 폭/길이/단면 arc 오차, foldover, 처리시간을 기록한다.
 - SVG를 Illustrator/Inkscape로 열어 physical size를 실물 자와 대조한다.
 

@@ -16,6 +16,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import subprocess
 import sys
 import tempfile
@@ -212,7 +213,20 @@ def _json_value(value: Any) -> Any:
 
 
 def _source_provenance() -> dict[str, Any]:
-    commit = str(os.environ.get("GITHUB_SHA") or "").strip().lower()
+    embedded: dict[str, object] = {}
+    try:
+        from src import build_info
+
+        embedded = build_info.build_metadata()
+    except Exception:
+        embedded = {}
+
+    embedded_manifest = embedded.get("manifest_present") is True
+    commit = (
+        str(embedded.get("commit") or "").strip().lower()
+        if embedded_manifest
+        else str(os.environ.get("GITHUB_SHA") or "").strip().lower()
+    )
     if len(commit) not in {40, 64} or any(
         character not in "0123456789abcdef" for character in commit
     ):
@@ -228,24 +242,31 @@ def _source_provenance() -> dict[str, Any]:
         except (OSError, subprocess.SubprocessError):
             commit = "unknown"
 
-    try:
-        status = subprocess.run(
-            ["git", "status", "--porcelain=v1", "--untracked-files=normal"],
-            cwd=ROOT,
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        ).stdout
-        source_tree = "dirty" if status.strip() else "clean"
-    except (OSError, subprocess.SubprocessError):
-        source_tree = "unknown"
+    if embedded_manifest:
+        source_tree = str(embedded.get("source_tree") or "unknown")
+    else:
+        try:
+            status = subprocess.run(
+                ["git", "status", "--porcelain=v1", "--untracked-files=normal"],
+                cwd=ROOT,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            ).stdout
+            source_tree = "dirty" if status.strip() else "clean"
+        except (OSError, subprocess.SubprocessError):
+            source_tree = "unknown"
 
-    lock_path = ROOT / "requirements" / "runtime-py312.lock"
-    try:
-        lock_sha256 = hashlib.sha256(lock_path.read_bytes()).hexdigest()
-    except OSError:
-        lock_sha256 = "unknown"
+    embedded_lock = str(embedded.get("dependency_lock_sha256") or "")
+    if re.fullmatch(r"[0-9a-f]{64}", embedded_lock):
+        lock_sha256 = embedded_lock
+    else:
+        lock_path = ROOT / "requirements" / "runtime-py312.lock"
+        try:
+            lock_sha256 = hashlib.sha256(lock_path.read_bytes()).hexdigest()
+        except OSError:
+            lock_sha256 = "unknown"
 
     distributions: dict[str, str] = {}
     for name in ("numpy", "PyOpenGL", "PyQt6", "PyQt6-Qt6"):

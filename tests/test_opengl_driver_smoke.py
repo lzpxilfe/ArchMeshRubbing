@@ -24,6 +24,7 @@ from src.gui.opengl_driver_smoke import (
     PROBE_BASE_WORLD_MM,
     PROBE_GAP_WIDTH_MM,
     PROBE_STEP_HEIGHT_MM,
+    _source_provenance,
     configure_probe_window,
     connected_component_sizes,
     probe_geometry,
@@ -32,6 +33,32 @@ from src.gui.opengl_driver_smoke import (
 from src.gui.viewport_3d import gluLookAt, gluPerspective
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_source_provenance_prefers_frozen_manifest_without_git() -> None:
+    commit = "a" * 40
+    lock_sha256 = "b" * 64
+    metadata = {
+        "channel": "stable",
+        "commit": commit,
+        "dependency_lock_sha256": lock_sha256,
+        "manifest_present": True,
+        "source_tree": "clean",
+        "windows_wheel_lock_sha256": "c" * 64,
+    }
+
+    with (
+        patch("src.build_info.build_metadata", return_value=metadata),
+        patch(
+            "src.gui.opengl_driver_smoke.subprocess.run",
+            side_effect=AssertionError("frozen provenance must not invoke Git"),
+        ),
+    ):
+        provenance = _source_provenance()
+
+    assert provenance["commit"] == commit
+    assert provenance["source_tree"] == "clean"
+    assert provenance["runtime_lock_sha256"] == lock_sha256
 
 
 class _FakeQt:

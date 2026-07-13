@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:archmeshrubbing:schema:field-pilot-verification:1.0.0",
+  "title": "ArchMeshRubbing Field Pilot Verification Receipt 1.0.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "input_name", "ok", "schema_version"],
+  "properties": {
+    "error": {"$ref": "#/$defs/error"},
+    "evidence": {"$ref": "#/$defs/evidence"},
+    "format": {"const": "archmeshrubbing_field_pilot_verification"},
+    "input_name": {"$ref": "#/$defs/safeName"},
+    "ok": {"type": "boolean"},
+    "schema_version": {"const": "1.0.0"}
+  },
+  "oneOf": [
+    {
+      "properties": {"ok": {"const": true}},
+      "required": ["evidence"],
+      "not": {"required": ["error"]}
+    },
+    {
+      "properties": {"ok": {"const": false}},
+      "required": ["error"],
+      "not": {"required": ["evidence"]}
+    }
+  ],
+  "$defs": {
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": {"const": "verification_failed"},
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifact_document_sha256",
+        "opengl_report_sha256",
+        "pilot_outcome",
+        "pilot_sha256",
+        "review_normalized_sha256",
+        "scope",
+        "survey_artifact_set_sha256"
+      ],
+      "properties": {
+        "artifact_document_sha256": {"$ref": "#/$defs/nullableSha256"},
+        "opengl_report_sha256": {"$ref": "#/$defs/nullableSha256"},
+        "pilot_outcome": {"enum": ["verified", "failed", "incomplete"]},
+        "pilot_sha256": {"$ref": "#/$defs/sha256"},
+        "review_normalized_sha256": {"$ref": "#/$defs/sha256"},
+        "scope": {"const": "single_artifact_single_machine"},
+        "survey_artifact_set_sha256": {"$ref": "#/$defs/nullableSha256"}
+      }
+    },
+    "nullableSha256": {
+      "anyOf": [
+        {"$ref": "#/$defs/sha256"},
+        {"type": "null"}
+      ]
+    },
+    "safeName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^[^/\\\\\\u0000-\\u001f\\u007f]+$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

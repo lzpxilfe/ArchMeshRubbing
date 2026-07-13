@@ -39,6 +39,7 @@ def test_complete_workflow_self_test_has_deterministic_offline_receipts() -> Non
     assert result.survey_artifact_set_sha256 == (
         "5d607381f90a3f78f5211d47ea9507f3a55c1196eb3ab8d8c991ca1c077d08b1"
     )
+    assert result.field_pilot_contract == "artifact-pass-human-driver-pending"
     assert result.svg_sha256 == (
         "aaf2c7c1136242074fbc2862894c821673646687c55cea36f1f6e3408c569d23"
     )

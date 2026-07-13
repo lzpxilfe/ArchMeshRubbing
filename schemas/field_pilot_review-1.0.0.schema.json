@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:archmeshrubbing:schema:field-pilot-review:1.0.0",
+  "title": "ArchMeshRubbing Field Pilot Review 1.0.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "artifact_label",
+    "checks",
+    "format",
+    "measurements",
+    "notes",
+    "project_document_sha256",
+    "reviewed_at_utc",
+    "reviewer_id",
+    "schema_version",
+    "survey_artifact_set_sha256"
+  ],
+  "properties": {
+    "artifact_label": {"$ref": "#/$defs/shortText"},
+    "checks": {"$ref": "#/$defs/checks"},
+    "format": {"const": "archmeshrubbing_field_pilot_review"},
+    "measurements": {"$ref": "#/$defs/measurements"},
+    "notes": {
+      "type": "string",
+      "maxLength": 4096,
+      "pattern": "^[^\\u0000-\\u0008\\u000b\\u000c\\u000e-\\u001f\\u007f]*$"
+    },
+    "project_document_sha256": {"$ref": "#/$defs/nullableSha256"},
+    "reviewed_at_utc": {"$ref": "#/$defs/nullableTimestamp"},
+    "reviewer_id": {"$ref": "#/$defs/shortText"},
+    "schema_version": {"const": "1.0.0"},
+    "survey_artifact_set_sha256": {"$ref": "#/$defs/nullableSha256"}
+  },
+  "$defs": {
+    "checkStatus": {"enum": ["pass", "fail", "not_tested"]},
+    "checks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_unit",
+        "align_grounding",
+        "cutline_fidelity",
+        "outline_fidelity",
+        "rubbing_legibility",
+        "physical_scale_1_1",
+        "original_source_preserved",
+        "offline_operation",
+        "workflow_stability",
+        "workflow_usability"
+      ],
+      "properties": {
+        "source_unit": {"$ref": "#/$defs/checkStatus"},
+        "align_grounding": {"$ref": "#/$defs/checkStatus"},
+        "cutline_fidelity": {"$ref": "#/$defs/checkStatus"},
+        "outline_fidelity": {"$ref": "#/$defs/checkStatus"},
+        "rubbing_legibility": {"$ref": "#/$defs/checkStatus"},
+        "physical_scale_1_1": {"$ref": "#/$defs/checkStatus"},
+        "original_source_preserved": {"$ref": "#/$defs/checkStatus"},
+        "offline_operation": {"$ref": "#/$defs/checkStatus"},
+        "workflow_stability": {"$ref": "#/$defs/checkStatus"},
+        "workflow_usability": {"$ref": "#/$defs/checkStatus"}
+      }
+    },
+    "measurements": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scale_expected_mm",
+        "scale_observed_mm",
+        "scale_tolerance_mm",
+        "workflow_elapsed_minutes"
+      ],
+      "properties": {
+        "scale_expected_mm": {"$ref": "#/$defs/nullablePositiveNumber"},
+        "scale_observed_mm": {"$ref": "#/$defs/nullablePositiveNumber"},
+        "scale_tolerance_mm": {"$ref": "#/$defs/nullableNonNegativeNumber"},
+        "workflow_elapsed_minutes": {"$ref": "#/$defs/nullablePositiveNumber"}
+      }
+    },
+    "nullableNonNegativeNumber": {
+      "anyOf": [
+        {"type": "number", "minimum": 0},
+        {"type": "null"}
+      ]
+    },
+    "nullablePositiveNumber": {
+      "anyOf": [
+        {"type": "number", "exclusiveMinimum": 0},
+        {"type": "null"}
+      ]
+    },
+    "nullableSha256": {
+      "anyOf": [
+        {"$ref": "#/$defs/sha256"},
+        {"type": "null"}
+      ]
+    },
+    "nullableTimestamp": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+        },
+        {"type": "null"}
+      ]
+    },
+    "shortText": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

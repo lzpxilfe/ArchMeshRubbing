@@ -58,6 +58,8 @@ DerivedRecord session update는 기존 source/metadata/Align/record를 바꿀 �
 
 `ArtifactExportController`는 1:1 vector/rubbing/tile-unwrap package를 별도 authority effect로 취급한다. `ArtifactSurveyExportController`는 dependency-valid 3/6/6의 exact record 15개를 고정하고, 기존 9개 vector·6개 rubbing package와 canonical aggregate manifest를 하나의 `.amr-survey` staging tree로 만든다. worker는 목적지와 같은 parent에 숨김 staging을 만들고 전체 package를 검증한 뒤 destination·parent·device/inode·entry fingerprint에 묶인 일회성 prepared capability를 반환한다. final dispatcher는 captured source·render projection·캡처한 모든 `READY + FRESH` record를 현재 Workbench에서 다시 확인한 뒤 빠른 fingerprint 재확인과 no-replace rename만 실행한다. 같은 Align의 append-only record 변경은 허용하지만 Align/Open 완료는 stale 처리한다. staging 삭제는 먼저 고유 quarantine으로 원자 이동하고 소유 inode를 확인한 뒤 수행하며, 목적지 경합의 승자나 교체된 foreign path는 보존한다. rename 뒤 실제 또는 미지원 directory `fsync`는 published-but-durability-uncertain 결과로 전달한다.
 
+현장 파일럿은 새 측정 authority를 만들지 않는다. `src/core/field_pilot.py`는 이미 검증된 self-contained `.amr`, exact-project `.amr-survey`, 동일 runtime lock이며 양쪽 build commit이 알려졌을 때 commit도 같은 Windows native OpenGL report와 고고학자의 닫힌 review를 읽어 단일 증거 report로 결합한다. report는 canonical self-hash와 `authentication=none`, `single_artifact_single_machine`, `single_pilot_only_not_release_approval`을 강제한다. hostname·사용자명·절대 path는 자동 수집하지 않으며, human/driver 근거가 없으면 package self-test에서도 완료로 승격하지 않는다. 이 contract가 실제 대표 유물 pilot을 대신하지는 않는다.
+
 Native project Save는 GUI가 immutable `ArtifactSession`, project path와 Workbench state/authority version을 캡처한 뒤 기존 fail-closed project writer 전체를 worker에서 실행한다. 따라서 live/source geometry exact comparison, Git metadata subprocess, source closure 재해시, ZIP64 streaming, file/directory fsync, staged package production-reader 재개방과 source/Align materialization이 GUI event loop를 점유하지 않는다. writer의 atomic replace가 끝난 뒤 authority가 바뀌었으면 이미 기록된 파일을 과거 snapshot으로 명시하고 현재 Save As 경로·migration flag를 채택하지 않는다. 완료 경로는 Workbench의 `adopt_saved_project_path` compare-and-swap만 갱신하며 path-only state version을 전진시키되 document/render authority epoch는 유지한다. 정상 UI에서는 application-modal 진행 대화상자가 다른 명령을 막으며, programmatic authority 경합도 이 완료 fence가 숨기지 않는다. directory fsync 이후의 committed-but-uncertain 결과는 실패로 오인하지 않고 기존 내구성 경고를 유지한다.
 
 비정상 종료 save-temp 복구는 project writer의 은닉 파일을 자동 소유물로 간주하지 않는다. 사용자가 고른 단일 폴더에서 exact writer basename을 가진 regular file만 bounded discovery하고, 발견한 device/inode/size/mtime capability가 유지된 descriptor를 새 목적지 parent staging으로 복사한다. staging이 production embedded-session loader에서 source/geometry/Align까지 완전히 재현된 뒤에만 OS별 atomic no-replace rename으로 게시한다. 후보·기존 intended destination은 어떤 결과에서도 변경하지 않고, 새 파일을 live Workbench 권위로 채택하는 동작도 별도 Project Open 확인으로 분리한다.
@@ -71,7 +73,7 @@ Native project Save는 GUI가 immutable `ArtifactSession`, project path와 Workb
 3. Cutline, 6-view Outline, Digital Rubbing을 command 단위로 옮긴다. immutable work item, worker computation, same-Align rebase와 VBO-free exact record publication까지 이식 완료했다.
 4. vector/rubbing/survey/tile-unwrap export를 worker staging과 final Workbench authority publication으로 분리한다. 이 단계는 이식 완료했으며 실제 대형 package에서 lock hold 시간과 취소 지연을 후속 측정한다.
 5. 각 단계가 새 record/export로 완전히 연결되면 대응 legacy 측정 진입점을 제거한다.
-6. 실제 유물 pilot과 대용량/GPU precision 검증 후 legacy 기와 검토 기능의 유지·플러그인화·제거를 결정한다.
+6. 구현된 field-pilot contract로 실제 유물, 대용량/저메모리/GPU precision과 고고학자 review 증거를 수집한 뒤 legacy 기와 검토 기능의 유지·플러그인화·제거를 결정한다.
 7. Windows wheel hash lock, 실제 payload manifest, SPDX/NOTICE와 검증형 portable ZIP을 유지한다. ZIP은 한글 경로에 추출해 outbound 차단 complete workflow·actual-frame·삭제를 다시 통과해야 한다. 라이선스 결론, 서명 정책, 상위 build provenance와 대표 Windows pilot이 해결된 뒤에만 공개 바이너리를 만든다.
 
 ## 완료 기준
@@ -81,7 +83,7 @@ Native project Save는 GUI가 immutable `ArtifactSession`, project path와 Workb
 - GUI 없이 동일 document와 source로 같은 canonical hash를 재현한다.
 - Windows frozen CI와 Windows native-QPA/실제 OpenGL smoke가 통과한다. (commit `b12d4874a4a8`에서 충족)
 - Windows portable ZIP의 모든 entry와 release evidence를 검증하고, 비 ASCII 경로 추출본에서 outbound 차단 complete workflow·actual-frame·삭제가 통과한다.
-- 대표 유물군 pilot에서 단위·정렬·선 정밀도·탁본 판독 결과를 고고학자가 검수한다.
+- 대표 유물군 pilot에서 단위·정렬·선 정밀도·탁본 판독 결과를 고고학자가 검수하고, project/survey/Windows driver와 함께 canonical report로 보존한다.
 - 공개 배포 전 프로젝트와 GUI toolkit의 라이선스가 호환되고 제3자 고지가 완성된다.
 
 ## 전면 재작성을 다시 검토할 조건

@@ -459,6 +459,9 @@ def _check_resources() -> str:
         "portable_archive_manifest-1.0.0.schema.json",
         "source_archive-1.0.0.schema.json",
         "build_provenance-1.0.0.schema.json",
+        "field_pilot_review-1.0.0.schema.json",
+        "field_pilot_report-1.0.0.schema.json",
+        "field_pilot_verification-1.0.0.schema.json",
     )
     for name in required_schemas:
         if not resource_path("schemas", name).is_file():

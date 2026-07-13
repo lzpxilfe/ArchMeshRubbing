@@ -100,6 +100,93 @@ def run_cli() -> int | None:
                 except Exception:
                     return 2
             return 0 if bool(report.get("ok")) else 1
+        if release_command == "--field-pilot-review-template":
+            if len(sys.argv) != 3:
+                return 2
+            try:
+                from src.core.field_pilot import (
+                    write_field_pilot_review_template,
+                )
+
+                publication = write_field_pilot_review_template(sys.argv[2])
+                if publication.warning_message:
+                    print(publication.warning_message, file=sys.stderr)
+            except Exception as exc:
+                message = str(exc) if isinstance(exc, ValueError) else type(exc).__name__
+                print(f"field-pilot template failed: {message}", file=sys.stderr)
+                return 2
+            return 0
+        if release_command == "--field-pilot":
+            if len(sys.argv) < 6:
+                return 2
+            project_path = sys.argv[2]
+            survey_path = sys.argv[3]
+            options: dict[str, str] = {}
+            allowed = {"--report", "--review", "--opengl-report"}
+            index = 4
+            while index < len(sys.argv):
+                option = sys.argv[index]
+                if (
+                    option not in allowed
+                    or option in options
+                    or index + 1 >= len(sys.argv)
+                ):
+                    return 2
+                options[option] = sys.argv[index + 1]
+                index += 2
+            if "--report" not in options:
+                return 2
+            try:
+                from src.core.field_pilot import (
+                    build_field_pilot_report,
+                    write_field_pilot_report,
+                )
+
+                report = build_field_pilot_report(
+                    project_path,
+                    survey_path,
+                    review=options.get("--review"),
+                    opengl_report=options.get("--opengl-report"),
+                )
+                publication = write_field_pilot_report(
+                    options["--report"],
+                    report,
+                )
+                if publication.warning_message:
+                    print(publication.warning_message, file=sys.stderr)
+                print(build_info.diagnostics_json(report))
+                outcome = report.get("outcome")
+                return (
+                    0
+                    if isinstance(outcome, dict)
+                    and outcome.get("pilot") == "verified"
+                    else 1
+                )
+            except Exception as exc:
+                message = str(exc) if isinstance(exc, ValueError) else type(exc).__name__
+                print(f"field-pilot report failed: {message}", file=sys.stderr)
+                return 2
+        if release_command == "--verify-field-pilot":
+            if len(sys.argv) not in {3, 5}:
+                return 2
+            receipt_path: str | None = None
+            if len(sys.argv) == 5:
+                if sys.argv[3] != "--report":
+                    return 2
+                receipt_path = sys.argv[4]
+            from src.core.field_pilot import (
+                build_field_pilot_verification_report,
+            )
+
+            report = build_field_pilot_verification_report(sys.argv[2])
+            if receipt_path is None:
+                print(build_info.diagnostics_json(report))
+            else:
+                try:
+                    build_info.write_json_report(receipt_path, report)
+                except Exception:
+                    return 2
+            return 0 if bool(report.get("ok")) else 1
         if release_command == "--opengl-driver-smoke-report":
             if len(sys.argv) != 3:
                 return 2
@@ -215,6 +302,10 @@ def print_help():
     print("  python main.py --verify-artifact PATH    # Verify an AMR or export package offline")
     print("  python main.py --verify-artifact PATH --against-project PROJECT.amr")
     print("  python main.py --verify-artifact PATH --report REPORT.json")
+    print("  python main.py --field-pilot-review-template REVIEW.json")
+    print("  python main.py --field-pilot PROJECT.amr SURVEY.amr-survey --report PILOT.json")
+    print("    [--review REVIEW.json] [--opengl-report OPENGL.json]")
+    print("  python main.py --verify-field-pilot PILOT.json [--report RECEIPT.json]")
     print("  python main.py --opengl-driver-smoke-report PATH  # Verify a native OpenGL frame")
     print("  python main.py <mesh_file>              # Launch GUI and open mesh")
     print("  python main.py --info <mesh_file>       # Show file info")

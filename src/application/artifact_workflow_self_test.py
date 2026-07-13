@@ -45,6 +45,10 @@ from src.core.artifact_survey_export import validate_survey_export_package
 from src.core.artifact_verification import build_artifact_verification_report
 from src.core.artifact_vector_export import validate_vector_export_package
 from src.core.artifact_vector_record import PlanarFrame
+from src.core.field_pilot import (
+    build_field_pilot_report,
+    validate_field_pilot_report,
+)
 from src.core.mesh_loader import MeshLoader
 from src.core.project_file import (
     load_artifact_session_project,
@@ -117,6 +121,7 @@ class ArtifactWorkflowSelfTestResult:
     rubbing_set_sha256: str
     survey_manifest_sha256: str
     survey_artifact_set_sha256: str
+    field_pilot_contract: str
     svg_sha256: str
     png_sha256: str
 
@@ -138,6 +143,7 @@ class ArtifactWorkflowSelfTestResult:
             f"survey_manifest={self.survey_manifest_sha256[:12]}, "
             f"survey_set={self.survey_artifact_set_sha256[:12]}, "
             "survey=verified-atomic-15, "
+            f"pilot={self.field_pilot_contract}, "
             "recovery=verified-create-new"
         )
 
@@ -403,6 +409,7 @@ def _export_and_verify_survey(
     return {
         "manifest_sha256": bundle.manifest_sha256,
         "artifact_set_sha256": bundle.artifact_set_sha256,
+        "relocated_path": str(relocated),
     }
 
 
@@ -644,6 +651,27 @@ def _run_in_directory(directory: Path) -> ArtifactWorkflowSelfTestResult:
         project_path=recovered_path,
         session=restored,
     )
+    pilot_report = validate_field_pilot_report(
+        build_field_pilot_report(
+            recovered_path,
+            survey_receipt["relocated_path"],
+            created_at_utc=_STAMP,
+        )
+    )
+    pilot_outcome = _require_mapping(
+        pilot_report.get("outcome"),
+        label="field-pilot outcome",
+    )
+    if (
+        pilot_outcome.get("artifact_verification") != "pass"
+        or pilot_outcome.get("human_review") != "incomplete"
+        or pilot_outcome.get("opengl_driver") != "not_provided"
+        or pilot_outcome.get("pilot") != "incomplete"
+        or pilot_outcome.get("windows_runtime") not in {"pass", "not_target"}
+    ):
+        raise RuntimeError(
+            "packaged field-pilot contract did not remain fail-closed"
+        )
 
     top_cutline = next(
         receipt
@@ -670,6 +698,7 @@ def _run_in_directory(directory: Path) -> ArtifactWorkflowSelfTestResult:
         rubbing_set_sha256=_receipt_set_sha256(rubbing_receipts),
         survey_manifest_sha256=survey_receipt["manifest_sha256"],
         survey_artifact_set_sha256=survey_receipt["artifact_set_sha256"],
+        field_pilot_contract="artifact-pass-human-driver-pending",
         svg_sha256=top_cutline["svg_sha256"],
         png_sha256=top_rubbing["png_sha256"],
     )

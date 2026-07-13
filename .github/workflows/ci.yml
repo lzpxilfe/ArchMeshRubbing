@@ -93,6 +93,7 @@ jobs:
           tests/test_project_file.py
           tests/test_project_recovery.py
           tests/test_build_info.py
+          tests/test_main_cli.py
           tests/test_build_provenance.py
           tests/test_build_native.py
           tests/test_portable_archive.py
@@ -126,6 +127,7 @@ jobs:
           tests/test_artifact_tile_unwrap.py
           tests/test_artifact_tile_unwrap_export.py
           tests/test_artifact_verification.py
+          tests/test_field_pilot.py
           tests/test_canonical_png.py
           tests/test_vector_schemas.py
           tests/test_rubbing_schemas.py
