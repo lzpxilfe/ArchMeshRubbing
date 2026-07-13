@@ -15,7 +15,7 @@ ArchMeshRubbing을 전면 재작성하지 않는다. 검증 가능한 headless �
 코드베이스에는 버릴 부분과 지킬 부분이 명확히 함께 존재한다.
 
 - `app_interactive.py`는 약 16,800줄, `src/gui/viewport_3d.py`는 약 15,600줄이며 각각 수백 개 메서드와 많은 광범위 예외 처리를 포함한다. UI, 상태, 렌더링, 작업 실행, 저장 정책이 서로 강하게 얽혀 있어 이 두 파일을 계속 확장하는 비용은 높다.
-- 반면 source identity, 명시적 단위, immutable Align revision, canonical JSON/PNG, Cutline, Outline, Digital Rubbing, offline export는 GUI와 분리된 코어와 버전 스키마를 가진다.
+- 반면 primary source identity, versioned parser source closure, 명시적 단위, immutable Align revision, canonical JSON/PNG, Cutline, Outline, Digital Rubbing, offline export는 GUI와 분리된 코어와 버전 스키마를 가진다.
 - source commit `166103dcf0ea`의 Python 3.12 CI에서 전체 `572 passed, 117 subtests passed`, M0 Pyright `0 errors`, Ruff 통과가 현재 계약을 보호한다.
 - Python 3.12 macOS arm64 unsigned frozen 앱은 code commit `898a8bfc144f`의 clean source tree에서 실제 GUI import/생성, 6개 mesh parser, PNG codec과 canonical document/vector/rubbing을 포함한 offline self-test 10개를 모두 통과했다. 이 결과는 로컬 개발 스모크이며 서명·설치·원격 3-OS 공개 배포 증거가 아니다.
 
@@ -25,7 +25,7 @@ ArchMeshRubbing을 전면 재작성하지 않는다. 검증 가능한 headless �
 
 | 보존·강화 | 점진 교체·격리 |
 |---|---|
-| `ArtifactDocument`, `ArtifactSession`, `ArtifactWorkbench`, measurement/export controller, source/geometry identity | `app_interactive.py`의 단일 `MainWindow` 오케스트레이션 |
+| `ArtifactDocument`, `ArtifactSession`, `ArtifactWorkbench`, measurement/export controller, source manifest/bundle과 source/geometry identity | `app_interactive.py`의 단일 `MainWindow` 오케스트레이션 |
 | canonical-mm Align/Cutline/Outline/Rubbing 계산 | `viewport_3d.py`의 데이터 소유·도구 상태·렌더링 혼합 |
 | RFC 8785 JSON, canonical PNG, versioned schemas | mutable `legacy_ui_state`와 암묵적 작업 완료 상태 |
 | `.amr`, `.amr-vector`, `.amr-rubbing` 검증·원자 저장 | screenshot/OpenCV/convex-hull을 실측 산출물로 쓰는 우회 경로 |
@@ -33,6 +33,8 @@ ArchMeshRubbing을 전면 재작성하지 않는다. 검증 가능한 headless �
 | 기와형 flatten 알고리즘과 검토용 legacy 기능 | 플랫폼별 수동 빌드·바로가기 스크립트 |
 
 Legacy 기능은 즉시 삭제하지 않는다. 연구 검토용이면 명확히 `legacy review`로 표시하고, 1:1 측정 결과처럼 보이지 않게 분리한다. 새 포맷으로 안전하게 승격할 수 없는 상태는 추정 변환하지 않고 fail closed한다.
+
+Source 경계도 같은 원칙을 따른다. `SourceAsset`은 고고학적 권위 원본인 primary mesh identity를 유지하고, MTL·texture·buffer는 `GeometryRevision.import_recipe`의 versioned parser input closure로 기록한다. 새 import가 외부 resource를 읽지 않으면 v1 `deny_external`, source root 안의 상대 resource를 실제로 읽으면 v2 `closed_manifest`로 확정한다. `.amr`은 두 profile 모두 content-addressed bytes로 운반하고 reopen 때 filesystem을 탐색하지 않는다. host path, remote URI, root/symlink 탈출은 신뢰 코어 밖의 편의 기능으로도 fallback하지 않는다.
 
 ## 새 셸의 경계
 

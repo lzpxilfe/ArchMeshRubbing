@@ -98,9 +98,11 @@ _PUBLIC_GEOMETRY_RECIPE_KEYS = frozenset(
         "process",
         "recipe_id",
         "recipe_version",
+        "resolver_profile",
         "runtime_lock_sha256",
         "sanitizer",
         "scene_merge",
+        "source_manifest",
     }
 )
 _PUBLIC_GEOMETRY_QC_KEYS = frozenset(
@@ -1200,6 +1202,31 @@ def _validate_provenance_shape(value: object) -> Mapping[str, Any]:
         sorted(str(asset["id"]) for asset in assets)
     ):
         raise ArtifactVectorExportError("geometry and source asset provenance do not match")
+    try:
+        import_execution = validate_mesh_import_recipe(
+            geometry.import_recipe,
+            allow_legacy=True,
+            require_current_runtime=False,
+        )
+    except MeshImportRecipeError as exc:
+        raise ArtifactVectorExportError(
+            f"invalid provenance mesh import recipe: {exc}"
+        ) from exc
+    if import_execution.source_manifest is not None:
+        if len(assets) != 1:
+            raise ArtifactVectorExportError(
+                "closed source manifest currently requires one primary source asset"
+            )
+        primary = import_execution.source_manifest.primary_entry
+        asset = assets[0]
+        if (
+            asset["id"] != primary.content_id
+            or asset["sha256"] != primary.sha256
+            or asset["size_bytes"] != primary.size_bytes
+        ):
+            raise ArtifactVectorExportError(
+                "source manifest primary entry does not match source asset provenance"
+            )
     return provenance
 
 

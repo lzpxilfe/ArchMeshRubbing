@@ -65,6 +65,7 @@
     "meshImportRecipe": {
       "oneOf": [
         {"$ref": "urn:archmeshrubbing:schema:mesh-import-recipe:1.0.0"},
+        {"$ref": "urn:archmeshrubbing:schema:mesh-import-recipe:2.0.0"},
         {"$ref": "#/$defs/legacyFullImportRecipe"},
         {"$ref": "#/$defs/legacyDocumentImportRecipe"}
       ]

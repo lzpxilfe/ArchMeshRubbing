@@ -114,9 +114,13 @@ class TestRubbingSchemas(unittest.TestCase):
         cls.import_recipe_schema = _load_schema(
             "mesh_import_recipe-1.0.0.schema.json"
         )
+        cls.import_recipe_v2_schema = _load_schema(
+            "mesh_import_recipe-2.0.0.schema.json"
+        )
         jsonschema.Draft202012Validator.check_schema(cls.receipt_schema)
         jsonschema.Draft202012Validator.check_schema(cls.export_schema)
         jsonschema.Draft202012Validator.check_schema(cls.import_recipe_schema)
+        jsonschema.Draft202012Validator.check_schema(cls.import_recipe_v2_schema)
         cls.receipt_validator = jsonschema.Draft202012Validator(cls.receipt_schema)
         registry = referencing.Registry().with_resource(
             cls.receipt_schema["$id"],
@@ -125,6 +129,10 @@ class TestRubbingSchemas(unittest.TestCase):
         registry = registry.with_resource(
             cls.import_recipe_schema["$id"],
             referencing.Resource.from_contents(cls.import_recipe_schema),
+        )
+        registry = registry.with_resource(
+            cls.import_recipe_v2_schema["$id"],
+            referencing.Resource.from_contents(cls.import_recipe_v2_schema),
         )
         cls.export_validator = jsonschema.Draft202012Validator(
             cls.export_schema,

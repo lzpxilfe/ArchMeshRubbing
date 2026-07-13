@@ -330,6 +330,7 @@ def test_mesh_load_thread_passes_exact_import_recipe_to_loader() -> None:
         "mm",
         source_format="ply",
         import_recipe=recipe,
+        capture_dependencies=True,
     )
     try:
         with patch("app_interactive.MeshLoader", return_value=loader):
@@ -339,6 +340,7 @@ def test_mesh_load_thread_passes_exact_import_recipe_to_loader() -> None:
             "/source/artifact.ply",
             source_format="ply",
             import_recipe=recipe,
+            capture_dependencies=True,
         )
     finally:
         thread.deleteLater()

@@ -13,7 +13,7 @@ also changing scene materialisation.
 from __future__ import annotations
 
 import copy
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import errno
@@ -32,6 +32,7 @@ import zipfile
 
 from .artifact_document import (
     ARTIFACT_DOCUMENT_SCHEMA_VERSION,
+    PRIMARY_SOURCE_ASSET_ROLE,
     ArtifactDocument,
     ArtifactDocumentError,
 )
@@ -46,6 +47,7 @@ from .source_bundle import (
     source_blob_member,
 )
 from .source_identity import SourceChangedError, open_fingerprinted_file
+from .source_manifest import ResolvedSourceResource, SourceManifestEntry
 
 if TYPE_CHECKING:
     from .artifact_session import ArtifactSession
@@ -1139,13 +1141,10 @@ def _write_embedded_artifact_archive(
     *,
     manifest_bytes: bytes,
     source_index_bytes: bytes,
-    source_member: str,
-    source_stream: BinaryIO,
-    expected_source_sha256: str,
-    expected_source_size_bytes: int,
+    source_blobs: tuple[tuple[str, BinaryIO, str, int], ...],
     checksums_bytes: bytes,
 ) -> None:
-    """Stream one verified primary source into an AMR ZIP64 archive."""
+    """Stream verified, content-addressed source blobs into a ZIP64 archive."""
 
     with zipfile.ZipFile(handle, "w", allowZip64=True) as zf:
         zf.writestr(
@@ -1159,31 +1158,37 @@ def _write_embedded_artifact_archive(
             compress_type=zipfile.ZIP_DEFLATED,
         )
 
-        source_info = zipfile.ZipInfo(source_member)
-        source_info.compress_type = zipfile.ZIP_STORED
-        source_info.file_size = expected_source_size_bytes
-        digest = hashlib.sha256()
-        copied = 0
-        with zf.open(source_info, "w", force_zip64=True) as destination:
-            while True:
-                chunk = source_stream.read(_COPY_CHUNK_BYTES)
-                if not chunk:
-                    break
-                copied += len(chunk)
-                if copied > expected_source_size_bytes:
-                    raise SourceChangedError(
-                        "Source grew while it was being embedded in the project"
-                    )
-                digest.update(chunk)
-                destination.write(chunk)
-        if copied != expected_source_size_bytes:
-            raise SourceChangedError(
-                "Source size changed while it was being embedded in the project"
-            )
-        if not hmac.compare_digest(digest.hexdigest(), expected_source_sha256):
-            raise SourceChangedError(
-                "Source SHA-256 changed while it was being embedded in the project"
-            )
+        for (
+            source_member,
+            source_stream,
+            expected_source_sha256,
+            expected_source_size_bytes,
+        ) in source_blobs:
+            source_info = zipfile.ZipInfo(source_member)
+            source_info.compress_type = zipfile.ZIP_STORED
+            source_info.file_size = expected_source_size_bytes
+            digest = hashlib.sha256()
+            copied = 0
+            with zf.open(source_info, "w", force_zip64=True) as destination:
+                while True:
+                    chunk = source_stream.read(_COPY_CHUNK_BYTES)
+                    if not chunk:
+                        break
+                    copied += len(chunk)
+                    if copied > expected_source_size_bytes:
+                        raise SourceChangedError(
+                            "Source grew while it was being embedded in the project"
+                        )
+                    digest.update(chunk)
+                    destination.write(chunk)
+            if copied != expected_source_size_bytes:
+                raise SourceChangedError(
+                    "Source size changed while it was being embedded in the project"
+                )
+            if not hmac.compare_digest(digest.hexdigest(), expected_source_sha256):
+                raise SourceChangedError(
+                    "Source SHA-256 changed while it was being embedded in the project"
+                )
 
         zf.writestr(
             CHECKSUMS_NAME,
@@ -1207,7 +1212,7 @@ def _open_artifact_session_source(
     *,
     locator: str,
     source_member: str,
-    expected_identity_scope: str,
+    expected_identity_scope: str | None,
     expected_sha256: str,
     expected_size_bytes: int,
 ) -> Iterator[tuple[BinaryIO, tuple[int, int] | None]]:
@@ -1243,7 +1248,7 @@ def _open_artifact_session_source(
             and entry.size_bytes == expected_size_bytes
             and entry.source_asset_id == f"sha256:{expected_sha256}"
         ]
-        if len(matches) != 1:
+        if not matches:
             raise ProjectFormatError(
                 "embedded source locator archive does not contain the expected source blob"
             )
@@ -1256,7 +1261,10 @@ def _open_artifact_session_source(
 
     with open_fingerprinted_file(locator) as (source_stream, source_fingerprint):
         if (
-            source_fingerprint.identity_scope != expected_identity_scope
+            (
+                expected_identity_scope is not None
+                and source_fingerprint.identity_scope != expected_identity_scope
+            )
             or source_fingerprint.sha256 != expected_sha256
             or source_fingerprint.size_bytes != expected_size_bytes
         ):
@@ -1269,7 +1277,7 @@ def _open_artifact_session_source(
 
 
 def _visual_attributes_match(expected: object, observed: object) -> bool:
-    """Verify that primary bytes reproduce texture and UV runtime attributes."""
+    """Verify that the source closure reproduces texture and UV attributes."""
 
     import numpy as np  # noqa: PLC0415
 
@@ -1293,12 +1301,12 @@ def save_artifact_session_project(
     *,
     meta: dict[str, Any] | None = None,
 ) -> str:
-    """Atomically save an artifact session with its verified primary source.
+    """Atomically save an artifact session with its verified source closure.
 
-    The external path is only a locator. Its currently opened descriptor is
-    fingerprinted, checked against ``SourceAsset``, and copied directly into a
-    content-addressed ZIP_STORED member. The staged package is reopened through
-    the production package reader before the destination is replaced.
+    External and archive paths are runtime locators only. Every unique content
+    descriptor is checked against ``SourceAsset`` or the import manifest and
+    copied into a content-addressed ZIP_STORED member. The staged package is
+    reopened through the production reader before the destination is replaced.
     """
 
     # Late import keeps the manifest-only storage API independent of trimesh
@@ -1341,10 +1349,56 @@ def save_artifact_session_project(
         raise ProjectSerializationError(
             "embedded session projects currently require exactly one source asset"
         )
-    source_member = source_blob_member(source_asset.sha256)
-    if source_asset.size_bytes > MAX_SOURCE_MEMBER_BYTES:
+    runtime_resources = {
+        (resource.entry.logical_path, resource.entry.sha256): resource
+        for resource in session.source_mesh.source_resources
+    }
+    source_plans_by_member: dict[
+        str,
+        tuple[str, str, int, str | None],
+    ] = {}
+    for entry in source_bundle.entries:
+        if entry.size_bytes > MAX_SOURCE_MEMBER_BYTES:
+            raise ProjectSerializationError(
+                f"source exceeds the {MAX_SOURCE_MEMBER_BYTES}-byte embedded-source limit"
+            )
+        if (
+            entry.role == PRIMARY_SOURCE_ASSET_ROLE
+            and entry.source_asset_id == source_asset.id
+        ):
+            locator = session.resolved_source_path
+            identity_scope: str | None = source_asset.identity_scope
+        else:
+            resource = runtime_resources.get((entry.logical_path, entry.sha256))
+            if resource is None:
+                raise ProjectSerializationError(
+                    "session has no verified runtime locator for source dependency "
+                    f"{entry.logical_path!r}"
+                )
+            expected_entry = SourceManifestEntry(
+                logical_path=entry.logical_path,
+                media_type=entry.media_type,
+                role=entry.role,
+                sha256=entry.sha256,
+                size_bytes=entry.size_bytes,
+            )
+            if resource.entry != expected_entry:
+                raise ProjectSerializationError(
+                    "runtime source dependency does not match the durable source manifest"
+                )
+            locator = resource.locator
+            identity_scope = None
+        existing = source_plans_by_member.get(entry.member)
+        plan = (locator, entry.sha256, entry.size_bytes, identity_scope)
+        if existing is None or identity_scope is not None:
+            source_plans_by_member[entry.member] = plan
+        elif existing[1:3] != plan[1:3]:
+            raise ProjectSerializationError(
+                "content-addressed source member has conflicting identities"
+            )
+    if sum(plan[2] for plan in source_plans_by_member.values()) > MAX_TOTAL_SOURCE_BYTES:
         raise ProjectSerializationError(
-            f"source exceeds the {MAX_SOURCE_MEMBER_BYTES}-byte embedded-source limit"
+            "embedded source closure exceeds the total source-byte safety limit"
         )
 
     envelope: dict[str, Any] = {
@@ -1369,7 +1423,10 @@ def save_artifact_session_project(
     checksum_files = {
         MANIFEST_NAME: hashlib.sha256(manifest_bytes).hexdigest(),
         SOURCE_INDEX_NAME: hashlib.sha256(source_index_bytes).hexdigest(),
-        source_member: source_asset.sha256,
+        **{
+            member: plan[1]
+            for member, plan in sorted(source_plans_by_member.items())
+        },
     }
     checksums_bytes = _strict_json_dumps(
         {"algorithm": "sha256", "files": checksum_files},
@@ -1383,26 +1440,35 @@ def save_artifact_session_project(
     temp_path: Path | None = None
     raw_fd: int | None = None
     committed = False
+    external_source_identities: list[tuple[int, int]] = []
     stage = "source_open"
     try:
         stage = "source_verification"
-        with _open_artifact_session_source(
-            locator=session.resolved_source_path,
-            source_member=source_member,
-            expected_identity_scope=source_asset.identity_scope,
-            expected_sha256=source_asset.sha256,
-            expected_size_bytes=source_asset.size_bytes,
-        ) as (
-            source_stream,
-            external_source_identity,
-        ):
-            if external_source_identity is not None and _path_matches_file_identity(
-                out_path,
-                external_source_identity,
+        with ExitStack() as source_stack:
+            opened_blobs: list[tuple[str, BinaryIO, str, int]] = []
+            for member, plan in sorted(source_plans_by_member.items()):
+                locator, expected_sha256, expected_size_bytes, identity_scope = plan
+                source_stream, external_identity = source_stack.enter_context(
+                    _open_artifact_session_source(
+                        locator=locator,
+                        source_member=member,
+                        expected_identity_scope=identity_scope,
+                        expected_sha256=expected_sha256,
+                        expected_size_bytes=expected_size_bytes,
+                    )
+                )
+                opened_blobs.append(
+                    (member, source_stream, expected_sha256, expected_size_bytes)
+                )
+                if external_identity is not None:
+                    external_source_identities.append(external_identity)
+            if any(
+                _path_matches_file_identity(out_path, identity)
+                for identity in external_source_identities
             ):
                 raise ProjectSaveError(
                     "prepare",
-                    "project destination resolves to the external source file",
+                    "project destination resolves to an external source resource",
                     retryable=False,
                 )
 
@@ -1422,10 +1488,7 @@ def save_artifact_session_project(
                     handle,
                     manifest_bytes=manifest_bytes,
                     source_index_bytes=source_index_bytes,
-                    source_member=source_member,
-                    source_stream=source_stream,
-                    expected_source_sha256=source_asset.sha256,
-                    expected_source_size_bytes=source_asset.size_bytes,
+                    source_blobs=tuple(opened_blobs),
                     checksums_bytes=checksums_bytes,
                 )
                 stage = "temp_fsync"
@@ -1452,7 +1515,7 @@ def save_artifact_session_project(
             ):
                 raise ProjectFormatError(
                     "Staged embedded source did not reproduce source UV/texture attributes; "
-                    "linked sidecar resources are not yet portable"
+                    "sidecar source closure is incomplete"
                 )
 
             # Keep this label active while open_fingerprinted_file performs its
@@ -1461,13 +1524,13 @@ def save_artifact_session_project(
 
         stage = "replace"
         assert temp_path is not None
-        if external_source_identity is not None and _path_matches_file_identity(
-            out_path,
-            external_source_identity,
+        if any(
+            _path_matches_file_identity(out_path, identity)
+            for identity in external_source_identities
         ):
             raise ProjectSaveError(
                 "replace",
-                "project destination changed to resolve to the external source file",
+                "project destination changed to resolve to an external source resource",
                 retryable=False,
             )
         os.replace(temp_path, out_path)
@@ -1663,7 +1726,7 @@ def _load_artifact_project_package_zip(path: Path) -> ArtifactProjectPackage:
 
 
 def load_artifact_project_package(path: str | Path) -> ArtifactProjectPackage:
-    """Load an artifact document and validate any embedded primary source."""
+    """Load an artifact document and validate any embedded source bundle."""
 
     in_path = Path(path)
     if not in_path.exists():
@@ -1696,7 +1759,7 @@ def load_artifact_project(path: str | Path) -> ArtifactDocument:
 def _materialize_artifact_project_package(
     package: ArtifactProjectPackage,
 ) -> ArtifactSession:
-    """Parse and bind the embedded primary source from a validated package."""
+    """Parse and bind an embedded source closure from a validated package."""
 
     from .artifact_session import (  # noqa: PLC0415
         ArtifactSession,
@@ -1716,6 +1779,7 @@ def _materialize_artifact_project_package(
         entry
         for entry in source_bundle.entries
         if entry.source_asset_id == source_bundle.primary_source_asset_id
+        and entry.role == PRIMARY_SOURCE_ASSET_ROLE
     ]
     if len(primary_entries) != 1:
         # SourceBundleIndex already enforces this; retain a defensive public
@@ -1755,6 +1819,30 @@ def _materialize_artifact_project_package(
         # mesh loader independently re-verifies the expected blob hash/size.
         _preflight_zip_directory(package.archive_path)
         with zipfile.ZipFile(package.archive_path, "r") as zf:
+            def dependency_loader(
+                dependency: SourceManifestEntry,
+            ) -> tuple[bytes, str]:
+                matches = [
+                    candidate
+                    for candidate in source_bundle.entries
+                    if candidate.logical_path == dependency.logical_path
+                    and candidate.sha256 == dependency.sha256
+                    and candidate.size_bytes == dependency.size_bytes
+                    and candidate.role == dependency.role
+                ]
+                if len(matches) != 1:
+                    raise ProjectFormatError(
+                        "embedded source bundle does not contain exactly one "
+                        f"manifest dependency {dependency.logical_path!r}"
+                    )
+                candidate = matches[0]
+                with zf.open(candidate.member, "r") as dependency_stream:
+                    payload = dependency_stream.read()
+                return (
+                    payload,
+                    f"{package.archive_path}!/{candidate.member}",
+                )
+
             with zf.open(entry.member, "r") as source_stream:
                 source_mesh = MeshLoader(default_unit="mm").load_verified_stream(
                     cast(BinaryIO, source_stream),
@@ -1764,7 +1852,35 @@ def _materialize_artifact_project_package(
                     expected_size_bytes=entry.size_bytes,
                     original_name=entry.logical_path,
                     import_recipe=geometry.import_recipe,
+                    dependency_loader=(
+                        dependency_loader
+                        if import_execution.source_manifest is not None
+                        else None
+                    ),
+                    primary_locator=f"{package.archive_path}!/{entry.member}",
                 )
+        resource_index = {
+            (resource.entry.logical_path, resource.entry.sha256): resource
+            for resource in source_mesh.source_resources
+        }
+        for bundled in source_bundle.entries:
+            resource_entry = SourceManifestEntry(
+                logical_path=bundled.logical_path,
+                media_type=bundled.media_type,
+                role=bundled.role,
+                sha256=bundled.sha256,
+                size_bytes=bundled.size_bytes,
+            )
+            resource_index.setdefault(
+                (resource_entry.logical_path, resource_entry.sha256),
+                ResolvedSourceResource(
+                    entry=resource_entry,
+                    locator=f"{package.archive_path}!/{bundled.member}",
+                ),
+            )
+        source_mesh.source_resources = tuple(
+            resource_index[key] for key in sorted(resource_index)
+        )
         session = ArtifactSession.bind_loaded_document(
             document,
             source_mesh,

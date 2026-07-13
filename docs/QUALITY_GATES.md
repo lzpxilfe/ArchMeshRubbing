@@ -25,7 +25,7 @@ python -m pytest -q
 
 - Ruff는 전체 트리를 검사한다.
 - pytest는 pytest 함수와 `unittest.TestCase`를 모두 수집한다. 별도의 `unittest discover`는 하위 호환성 확인용이며 CI의 권위 수집기가 아니다.
-- `pyright-m0.json`은 persistence·source·unit·matrix 경계에 더해 M0-6의 `artifact_document`, `geometry_identity`, `artifact_scene_adapter`, `artifact_session`, core cooperative cancellation, Qt/OpenGL-free `artifact_workbench`·`artifact_workflow_progress`·`artifact_measurements`·`artifact_exports`, `src/gui/opengl_context.py`의 명시적 surface 계약, actual-driver CLI와 actual context를 열지 않는 helper/support tests, Qt/OpenGL-free render-coordinate algebra인 `src/gui/render_coordinates.py`, known-record registry, RFC 8785 canonical JSON, vector record/export, Cutline, fixed-grid Outline/topology, Digital Rubbing record/extractor, canonical GA8 PNG와 offline rubbing export 및 해당 테스트를 포함하는 M0 신뢰 커널 범위다. 독립 프로세스 왕복·offline vector/rubbing package 테스트도 목록에 포함한다. wrapper 명령은 활성 Python interpreter를 Pyright에 명시하므로 Windows·macOS·Linux에서 같은 방식으로 dependency를 해석한다.
+- `pyright-m0.json`은 persistence·source identity·source manifest/bundle·unit·matrix 경계에 더해 M0-6의 `artifact_document`, `geometry_identity`, `artifact_scene_adapter`, `artifact_session`, core cooperative cancellation, Qt/OpenGL-free `artifact_workbench`·`artifact_workflow_progress`·`artifact_measurements`·`artifact_exports`, `src/gui/opengl_context.py`의 명시적 surface 계약, actual-driver CLI와 actual context를 열지 않는 helper/support tests, Qt/OpenGL-free render-coordinate algebra인 `src/gui/render_coordinates.py`, known-record registry, RFC 8785 canonical JSON, vector record/export, Cutline, fixed-grid Outline/topology, Digital Rubbing record/extractor, canonical GA8 PNG와 offline rubbing export 및 해당 테스트를 포함하는 M0 신뢰 커널 범위다. 독립 프로세스 source-closure 왕복·offline vector/rubbing package 테스트도 목록에 포함한다. wrapper 명령은 활성 Python interpreter를 Pyright에 명시하므로 Windows·macOS·Linux에서 같은 방식으로 dependency를 해석한다.
 
 `opengl-driver-smoke` job은 일반 pytest와 분리한다. Ubuntu 24.04에서 24-bit Xvfb 화면, native `xcb`, Mesa llvmpipe를 사용하고 `continue-on-error`나 context 실패 skip 없이 다음 명령에 해당하는 검사를 실행한다.
 
@@ -48,6 +48,7 @@ python -m pytest -q \
   tests/test_build_manifest.py \
   tests/test_build_native.py \
   tests/test_source_identity.py \
+  tests/test_source_manifest.py \
   tests/test_mesh_import_recipe.py \
   tests/test_mesh_external_dependencies.py \
   tests/test_mesh_verified_stream.py \
@@ -90,7 +91,8 @@ python -m pytest -q \
 - versioned canonical JSON golden fixture와 Draft 2020-12 `ArtifactDocument 1.0` schema 검증
 - raw source `(identity_scope, SHA-256, size)`와 saved parser format 재검증
 - exact-key mesh import recipe, Trimesh·NumPy·Pillow parser-subset digest와 전체 lock provenance 분리, GUI ticket부터 embedded reopen까지 동일 receipt 실행
-- OBJ MTL, PLY `TextureFile`, GLB 외부 image/buffer URI의 Open 단계 거부와 self-contained GLB 허용; 파일 정보 경로도 동일 deny resolver 사용
+- self-contained v1 `deny_external`과 OBJ→MTL→texture, PLY `TextureFile`, glTF/GLB external buffer의 v2 `closed_manifest`; logical-path 정규화, remote/absolute/traversal/symlink 탈출·미선언/미사용/변조 resource 거부
+- content-addressed source bundle v1/v2 schema, 동일 content alias, checksum을 다시 쓴 변조 package 거부, 외부 source closure 삭제 뒤 `.amr` relocation·reopen·archive-to-archive resave
 - versioned geometry framing, signed-zero normalization, order/winding-sensitive geometry SHA-256
 - source를 mutate·recenter하지 않는 deterministic world-mm projection과 stale snapshot 거부
 - `>= 1e9 mm` offset의 0.125/1 mm feature에서 float64 origin subtraction 뒤 relative float32 VBO encoding, pivot-aware model rebasing과 relative camera algebra
@@ -105,7 +107,7 @@ python -m pytest -q \
 - same-render DerivedRecord append의 `RecordBindingTransition`, exact snapshot capability 검증, live mesh/VBO/선택/cache 보존과 binding CAS rollback
 - tentative authority를 observer에 노출하지 않는 prepare/activate/finalize, 정상 rollback과 rollback·scene 복원·finalize 불확실 시 fatal save/measure/export 차단
 - scene 교체 뒤 cut-section/ROI worker identity·projection generation·selected object fencing, surface/visible-face worker의 target mesh·TRS·render-frame fencing과 오래된 finished callback의 다른 유물·새 worker 보호
-- 서로 다른 PID에서 source relocation·saved-parser reopen 후 source/geometry hash, Align matrix와 world vertex가 같은 durable artifact round-trip
+- 서로 다른 PID에서 self-contained PLY와 textured OBJ source closure를 삭제·relocation한 뒤 saved-parser reopen하여 primary/dependency/texture/geometry hash, Align matrix와 world vertex가 같은 durable artifact round-trip
 - RFC 8785 cross-language number golden과 vector payload/recipe semantic SHA-256
 - canonical-mm Cutline의 exact box·multi-component·Front/Right/oblique frame, face order/winding, ambiguity fail-closed
 - canonical-mm 6-view Outline의 fixed-grid projected-triangle union, concavity·hole·island 보존, face order/winding/duplicate 안정성
@@ -145,15 +147,17 @@ python -m pytest -q \
 | Python 3.12.13 macOS arm64 frozen self-test | 10/10 passed at code commit `898a8bfc144f` (unsigned, `source_tree=clean`, `native-self-test-local-smoke-898a8bfc144f-darwin.json`) |
 | GitHub Actions 3-OS frozen build + executable self-test | Ubuntu, Windows, macOS 모두 passed at commit `e4bf6dcac4b1`, run `29213279508` |
 
+2026-07-13 source-closure 후보는 로컬 macOS/Python 3.14.3 source tree에서 full pytest `660 passed, 128 subtests passed`, Ruff 통과, M0 Pyright `0 errors`, source self-test `11/11`을 기록했다. 이 로컬 결과는 권위 Python 3.12와 해당 commit의 Windows·macOS·Linux 원격 matrix가 끝나기 전까지 3-OS 통과 증거로 사용하지 않는다.
+
 ## 아직 차단하지 않는 검사
 
 전체 트리 Pyright는 아직 통과하지 않는다. CI에서는 이 결과를 `continue-on-error`로 보고하여 부채가 보이게 하되, M0 범위를 넘는 기존 오류 때문에 모든 변경을 막지는 않는다. 신뢰 커널 전환이 진행될 때마다 차단 범위를 넓힌다. 독립 프로세스 테스트의 worker program은 Python 문자열이므로 Pyright가 문자열 내부를 분석하지는 않지만, 차단 pytest가 두 문자열을 각각 새 interpreter에서 실제 실행한다.
 
-Windows·macOS·Linux persistence matrix에서는 프로젝트 저장, source/geometry identity, ArtifactDocument·scene adapter·session·application workbench와 record-derived workflow progress, ticketed Open과 explicit Align gate, RFC 8785/vector record/export/Cutline/Outline/topology/schema, Digital Rubbing record/extractor/canonical PNG/export/schema, 독립 프로세스 source 및 relocated vector/rubbing-package 왕복, render-coordinate algebra·relative VBO/native preview smoke, matrix golden, GUI 런처, MainWindow 생성, native source-of-truth binding, native Cutline/Outline/Rubbing command, 3/6/6 순차 gate와 reopen·Align 진행도 복원, session/version/epoch 및 projection-generation late-result 방어, legacy export 우회와 unported operation/save fail-closed, source mismatch ordering, scene-swap rollback과 fatal authority fallback 스모크를 실행한다. Linux quality job은 별도로 전체 테스트를 실행한다. commit `166103dcf0ea`의 run `29182584810`에서 세 persistence job과 quality job이 모두 통과했다. 이 matrix의 GUI 스모크는 `QT_QPA_PLATFORM=offscreen`을 사용하므로 CPU/document/scene transaction과 widget wiring만 검증하고 실제 OpenGL frame을 증명하지 않는다. 실제 source viewport frame은 별도 Linux Xvfb+xcb+llvmpipe job이 담당한다.
+Windows·macOS·Linux persistence matrix에서는 프로젝트 저장, source/geometry identity와 versioned source manifest/bundle, ArtifactDocument·scene adapter·session·application workbench와 record-derived workflow progress, ticketed Open과 explicit Align gate, RFC 8785/vector record/export/Cutline/Outline/topology/schema, Digital Rubbing record/extractor/canonical PNG/export/schema, 독립 프로세스 source closure 및 relocated vector/rubbing-package 왕복, render-coordinate algebra·relative VBO/native preview smoke, matrix golden, GUI 런처, MainWindow 생성, native source-of-truth binding, native Cutline/Outline/Rubbing command, 3/6/6 순차 gate와 reopen·Align 진행도 복원, session/version/epoch 및 projection-generation late-result 방어, legacy export 우회와 unported operation/save fail-closed, source mismatch ordering, scene-swap rollback과 fatal authority fallback 스모크를 실행한다. Linux quality job은 별도로 전체 테스트를 실행한다. commit `166103dcf0ea`의 run `29182584810`에서 세 persistence job과 quality job이 모두 통과했다. 이 matrix의 GUI 스모크는 `QT_QPA_PLATFORM=offscreen`을 사용하므로 CPU/document/scene transaction과 widget wiring만 검증하고 실제 OpenGL frame을 증명하지 않는다. 실제 source viewport frame은 별도 Linux Xvfb+xcb+llvmpipe job이 담당한다.
 
 별도 `package-smoke.yml`은 `main` push, pull request, 수동 실행에서 세 OS의 exact Python 3.12 build lock, immutable build manifest, PyInstaller spec과 frozen executable의 file-report self-test를 실행하도록 구성한다. `main` push는 패키지 입력 파일이 바뀐 경우에만 실행한다. 이 검사는 실제 `MainWindow`/QOpenGLWidget/OpenGL import, 6개 mesh parser, PNG codec과 canonical document/vector/rubbing을 포함하지만 offscreen 실제 GL context/render는 보장하지 않는다. 라이선스 게이트가 해결되기 전에는 artifact upload와 release 단계를 두지 않는다. commit `e4bf6dcac4b1`의 [run `29213279508`](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29213279508)에서 Ubuntu, Windows, macOS frozen build와 각 OS 실행 파일의 self-test/report 검증이 모두 첫 시도에 통과했다. 같은 commit의 [CI run `29213279510`](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29213279510)도 quality, 3-OS persistence와 Linux llvmpipe actual-GL을 모두 통과했다. 이 결과는 installer, 서명/notarization, frozen native-QPA actual-GL 또는 완전 차단망 기기 검증을 대신하지 않는다.
 
-AMR v2 `payload_type="artifact_document"` 1.0의 strict 저장·content-addressed 주 원본 embedding·production-loader staged reopen·checksum·원자 교체와 독립 프로세스 materialization은 현재 차단 게이트다. `tests/test_artifact_new_process_roundtrip.py`는 프로세스 A와 B의 PID가 다름을 확인하고, 프로세스 A가 `.amr`를 저장한 뒤 외부 PLY를 삭제한다. 프로세스 B는 `.amr`의 embedded source를 saved parser/unit으로 decode하며, 새로 계산한 source SHA-256·크기와 geometry SHA-256, active Align ID·matrix, parser/unit, world vertices가 같아야 통과한다.
+AMR v2 `payload_type="artifact_document"` 1.0의 strict 저장·content-addressed source closure embedding·production-loader staged reopen·checksum·원자 교체와 독립 프로세스 materialization은 현재 차단 게이트다. `tests/test_artifact_new_process_roundtrip.py`는 프로세스 A와 B의 PID가 다름을 확인하고, 프로세스 A가 `.amr`를 저장한 뒤 외부 PLY 또는 textured OBJ의 OBJ·MTL·PNG 전체를 삭제하고 package를 relocation한다. 프로세스 B는 `.amr`의 embedded source closure만 saved parser/unit으로 decode하며, 새로 계산한 primary/dependency SHA-256·크기와 texture/geometry SHA-256, active Align ID·matrix, parser/unit, world vertices가 같아야 통과한다.
 
 Native GUI의 한-artifact Open/Align commit/save/load는 `ArtifactWorkbench.snapshot.session.document`를 source of truth로 사용하며 MainWindow의 session field는 이행 중 compatibility mirror다. Open과 Align은 ticket/CAS/two-phase publication을 사용한다. Cutline/Outline/Digital Rubbing은 Qt-free `ArtifactMeasurementController`가 recipe/context와 record ID를 Workbench 단위로 예약하고 worker computation만 받은 뒤 current same-Align session에 rebase한다. append-only record publication은 live SceneObject의 document binding만 CAS하고 mesh/VBO를 재생성하지 않는다. `ArtifactExportController`는 vector/rubbing package의 생성·전체 검증·prepared capability 발급까지 worker에서 수행하고 GUI dispatcher의 final Workbench fence에서는 빠른 identity/fingerprint 확인과 rename만 실행한다. command handler는 단일 `TaskThread`를 사용하며 늦은 finished signal이 새 worker/dialog를 지우지 못한다. 재개방 기록은 자동 최신 fallback 없이 명시적으로 선택하고 request token으로 늦은 preview가 최신 선택을 지우지 못하게 한다. rollback 가능한 측정 게시 실패는 exact result를 재시도 queue에 보존한다. save 전 projection snapshot과 geometry를 재검증하며 active/보류 실측과 아직 `DerivedRecord`로 이식되지 않은 선택·기록면·평가 결과는 누락 저장하지 않고 fail closed한다. authority rollback·scene 복원·finalize가 불확실한 fatal 상태에서는 검증된 Open 전까지 저장·실측·내보내기를 모두 막고 task-local 오류가 재열기 배너를 덮지 못한다. 별도의 legacy destructive bake 이후 Save 성공은 native Align 복원 증거가 아니다. legacy runtime은 그런 vertex mutation을 `_amr_has_unpersisted_bake`로 표시하고 snapshot 저장을 차단한다.
 

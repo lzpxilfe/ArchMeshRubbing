@@ -11,7 +11,7 @@
 | `project.json` | 버전 envelope와 선택된 `legacy_ui_state` 또는 `artifact_document` payload |
 | `checksums.json` | `project.json` 및 향후 멤버의 SHA-256 목록 |
 | `sources/index.json` | ArtifactDocument와 정확히 결합된 canonical source inventory |
-| `sources/blobs/sha256/<digest>` | 검증된 주 원본 bytes. SHA-256 이름을 사용하고 `ZIP_STORED`로 기록 |
+| `sources/blobs/sha256/<digest>` | 검증된 주 원본과 parser dependency bytes. SHA-256 이름을 사용하고 `ZIP_STORED`로 기록 |
 
 AMR 파일은 확장자와 관계없이 일반 JSON으로 fallback하지 않는다. 개발·마이그레이션용 일반 JSON은 명시적인 `.json` 파일만 허용한다. 따라서 잘린 ZIP을 JSON으로 오인해 실행하지 않는다.
 
@@ -63,17 +63,24 @@ AMR v2 container는 payload 종류와 payload schema를 분리한다.
 
 ### Portable artifact source bundle
 
-`save_artifact_session_project()`는 정확히 한 `primary_mesh` SourceAsset을 `sources/index.json`과 content-addressed blob으로 저장한다. index는 RFC 8785 canonical JSON이며 `document_id`, canonical document SHA-256, primary SourceAsset ID, logical path, media type, blob SHA-256·크기를 닫힌 스키마로 결합한다. 저장 과정은 다음 순서로 fail-closed 동작한다.
+`save_artifact_session_project()`는 정확히 한 `primary_mesh` SourceAsset과 그 geometry import가 실제로 소비한 parser dependency closure를 `sources/index.json`과 content-addressed blob으로 저장한다. index는 RFC 8785 canonical JSON이며 `document_id`, canonical document SHA-256, primary SourceAsset ID, logical path, role, media type, blob SHA-256·크기를 닫힌 스키마로 결합한다.
 
-1. 외부 원본 또는 이미 열린 `.amr`의 source member를 descriptor stream으로 연다.
+- `source_bundle 1.0`은 외부 resource를 읽지 않은 기존 self-contained 문서의 주 파일 하나를 운반한다.
+- `source_bundle 2.0`은 `mesh_import_recipe 2.0` manifest의 주 파일과 MTL·texture·buffer 같은 `import_dependency`를 운반한다. 동일 bytes를 여러 logical path가 가리키면 index entry는 각각 남기되 content-addressed blob은 하나만 저장한다.
+- `ArtifactDocument.SourceAsset`은 계속 고고학적 권위 원본인 주 메쉬 하나를 식별한다. Dependency는 별도 SourceAsset으로 가장하지 않고 `GeometryRevision.import_recipe.source_manifest`의 parser input closure로 기록한다. v2 index의 dependency `source_asset_id` 필드는 하위 호환 필드명이며 값은 `sha256:<digest>` content ID다.
+- 여러 GeometryRevision이 있으면 저장 가능한 역사적 revision을 재현할 수 있도록 dependency manifest의 합집합을 운반한다. active geometry가 v2이면 그 주 logical path를, active가 v1이면 보존된 v2 manifest 중 결정적으로 선택한 주 logical path를 사용한다.
+
+저장 과정은 다음 순서로 fail-closed 동작한다.
+
+1. 외부 원본·dependency 또는 이미 열린 `.amr`의 source member를 검증된 descriptor stream으로 연다.
 2. 기대 SHA-256·크기를 확인하면서 같은 parent의 임시 ZIP으로 복사한다.
 3. 임시 package의 central directory, member 규칙, 전체 checksum과 source index를 production reader로 다시 검증한다.
-4. embedded source를 저장된 전체 closed import recipe/unit으로 실제 decode하고 document에 bind·materialize하여 source/geometry/Align projection과 parser receipt를 확인한다.
+4. embedded source closure를 저장된 전체 closed import recipe/unit과 manifest-only resolver로 실제 decode하고 document에 bind·materialize하여 source/dependency/geometry/Align projection과 parser receipt를 확인한다.
 5. source archive descriptor를 닫은 뒤에만 목적지를 원자 교체하고 directory fsync를 시도한다.
 
-native session 저장 대상은 `.amr` 확장자만 허용한다. 대상 경로가 외부 원본과 같은 path, symlink 또는 hardlink inode라면 임시 파일 생성 전과 교체 직전에 거부한다. 이미 embedded source에서 열린 session은 같은 `.amr` 위 저장과 Save As를 모두 지원한다. 기존 manifest-only artifact 문서는 계속 읽지만, embedded session materialization에는 외부 원본을 다시 선택해야 한다.
+native session 저장 대상은 `.amr` 확장자만 허용한다. 대상 경로가 외부 source resource와 같은 path, symlink 또는 hardlink inode라면 임시 파일 생성 전과 교체 직전에 거부한다. 이미 embedded source에서 열린 session은 같은 `.amr` 위 저장과 Save As를 모두 지원한다. 기존 source bundle이 없는 manifest-only artifact 문서는 계속 읽지만, session materialization에는 외부 주 원본을 다시 선택해야 한다.
 
-주 원본 blob은 최대 16 GiB이며 일반 member의 기존 256 MiB/총 512 MiB 제한과 분리한다. source blob은 압축 폭탄을 피하고 streaming hash를 가능하게 하기 위해 `ZIP_STORED`만 허용한다.
+한 source manifest와 v2 bundle index는 현재 최대 61개 entry이며, embedded source 전체 합계는 최대 16 GiB다. 일반 member의 기존 256 MiB/총 512 MiB 제한과 분리한다. source blob은 압축 폭탄을 피하고 streaming hash를 가능하게 하기 위해 `ZIP_STORED`만 허용한다. 이 한계보다 큰 multi-file scan은 아직 authoritative import/save 대상이 아니다.
 
 ## 외부 원본 식별
 
@@ -113,7 +120,7 @@ native session 저장 대상은 `.amr` 확장자만 허용한다. 대상 경로�
 - Windows의 path `stat`과 descriptor `fstat`은 `ctime` 의미가 다르므로 혼합 비교에서는 device/inode/size/mtime만 비교한다. 열린 descriptor의 전후 비교에서는 change time까지 유지해 같은 크기·mtime의 소비 중 변경을 계속 거부한다.
 - 저장 시 디스크 파일을 다시 hash하지 않는다. import 당시 geometry와 함께 보관한 immutable identity만 직렬화한다.
 
-Artifact payload를 다시 열 때 parser 선택과 실행 계약도 검증 대상이다. 신규 문서는 `schemas/mesh_import_recipe-1.0.0.schema.json`의 exact-key 계약을 `GeometryRevision.import_recipe`에 저장한다.
+Artifact payload를 다시 열 때 parser 선택과 실행 계약도 검증 대상이다. 신규 문서는 외부 resource 소비 여부에 따라 `schemas/mesh_import_recipe-1.0.0.schema.json` 또는 `schemas/mesh_import_recipe-2.0.0.schema.json`의 exact-key 계약을 `GeometryRevision.import_recipe`에 저장한다.
 
 ```text
 recipe_id/version
@@ -125,6 +132,17 @@ sanitizer=meshdata-v1
 dependency_policy=deny_external
 ```
 
+이 self-contained v1 recipe로 parse를 시작한 뒤 parser가 상대 resource를 실제로 읽으면 최종 receipt는 아래 필드를 추가한 v2로 확정된다.
+
+```text
+recipe_version=2.0.0
+dependency_policy=closed_manifest
+resolver_profile=relative-contained-v1
+source_manifest=(primary_mesh + import_dependency logical path/media type/SHA-256/size)
+```
+
+`source_manifest 1.0`은 primary 하나와 parser가 성공한 import 동안 실제로 읽은 dependency만 정렬된 상대 POSIX logical path, 고정 media type, SHA-256, 크기로 기록한다. host 절대 경로는 durable recipe에 들어가지 않는다. replay resolver는 선언된 stream만 정확히 한 번 이상 제공하고, HTTP/file URI, 절대·drive·UNC 경로, source root를 벗어나는 `..`와 symlink, 누락·미선언·변조·미사용 entry를 거부한다. Windows식 `\` reference는 root 안에서만 POSIX path로 정규화한다.
+
 `parser_runtime_sha256`은 정렬된 exact `numpy`, `pillow`, `trimesh` pin 문자열의 SHA-256이며 실제 geometry decode의 실행 gate다. `runtime_lock_sha256`은 전체 frozen 환경 provenance로 보존하지만 Qt 같은 무관한 pin 변경만으로 과거 geometry를 읽지 못하게 하지 않도록 parser 실행 gate로 사용하지 않는다. 알 수 없는 key, flag drift, loader/parser-subset version 불일치, 비정규화 format은 parse 전에 거부한다. 기존 배포가 만든 정확한 5-field recipe와 공식 2-field fixture만 명시적 legacy profile로 실행하며 임의 JSON을 parser option으로 해석하거나 immutable GeometryRevision을 자동 migration하지 않는다.
 
 Resolved source의 suffix 대신 검증된 recipe의 `format`을 사용하고, recipe 전체를 `ArtifactLoadTicket → MeshLoadThread → MeshLoader`로 그대로 전달한다. loader는 같은 열린 descriptor에서 raw byte fingerprint와 geometry를 얻는다. 이후 `ArtifactSession.bind_loaded_document()`는 다음을 모두 만족할 때만 문서와 mesh를 결합한다.
@@ -132,7 +150,8 @@ Resolved source의 suffix 대신 검증된 recipe의 `format`을 사용하고, r
 1. 새로 계산한 `identity_scope`, `sha256`, `size_bytes`가 `SourceAsset`과 일치한다.
 2. 실제 사용한 `MeshData.source_format`이 저장된 `import_recipe.format`과 일치한다.
 3. 실제 parser가 남긴 `MeshData.source_import_recipe`가 저장된 mapping과 key/value까지 정확히 일치한다.
-4. 저장된 `geometry_hash_scope`로 decode 결과를 다시 hash한 값이 `GeometryRevision.geometry_sha256`와 일치한다.
+4. v2이면 runtime source resource가 manifest의 모든 logical path·SHA-256·크기를 정확히 제공하고, replay resolver가 같은 dependency closure를 소비한다.
+5. 저장된 `geometry_hash_scope`로 decode 결과를 다시 hash한 값이 `GeometryRevision.geometry_sha256`와 일치한다.
 
 저장된 recipe가 없거나 지원 profile이 아니거나 다른 parser/receipt로 열렸거나 source/geometry digest가 다르면 materialization 전에 실패한다. 따라서 이름과 확장자가 바뀐 동일 파일은 복원할 수 있지만, 단지 suffix가 같다는 이유로 다른 바이트나 다른 decode 결과를 받아들이지 않는다.
 
@@ -144,15 +163,17 @@ Resolved source의 suffix 대신 검증된 recipe의 `format`을 사용하고, r
 | `legacy_unverified` | v1 기록과 현재 source의 관계를 사후에 증명할 수 없다. 현재 hash가 생겨도 기존 기록을 소급해 verified로 바꾸지 않는다. |
 | `generated_ephemeral` | 외부 원본 경로가 없는 런타임 생성 mesh다. 현재 v2만으로 새 프로세스에서 복원할 수 있다는 뜻이 아니다. |
 
-### M0-1 identity 범위 제한
+### M0-1 primary identity와 parser source closure
 
-`identity_scope=primary_file_bytes`는 **주 파일 하나의 바이트만** 포함한다.
+`identity_scope=primary_file_bytes`와 `SourceAsset`은 의도적으로 **주 파일 하나의 바이트만** 식별한다. 다음 linked resource는 주 유물 SourceAsset이 아니라 geometry를 재현하는 parser input이므로 v2 `source_manifest`의 `import_dependency`로 별도 식별한다.
 
 - OBJ의 MTL·텍스처
 - glTF의 외부 `.bin`·이미지
 - 기타 sidecar 또는 linked asset
 
-위 파일은 아직 identity와 portable package에 포함되지 않는다. 따라서 authoritative parser에는 filesystem/remote 자동 resolver 대신 기록형 deny resolver를 주입하며, OBJ `mtllib`, PLY `TextureFile`, glTF/GLB 외부 buffer/image URI 요청이 하나라도 있으면 parser가 내부 오류를 삼켜도 Open 단계에서 실패한다. `verified`는 self-contained 주 파일 바이트와 그 closed recipe decode 결과에만 적용된다. Linked asset 자체를 content-addressed graph로 보존하고 재생하는 dependency manifest/bundle resolver는 후속 버전 범위다.
+새 path import는 filesystem 전체를 parser에 노출하지 않는 recording resolver를 사용한다. source root 안의 상대 resource를 읽을 때 같은 stream을 hash·parse하고 최종 v2 manifest로 확정한다. 저장·재열기에는 filesystem 탐색 없이 manifest-only resolver와 content-addressed bundle만 사용한다. self-contained 입력은 기존 v1 `deny_external`로 남는다. 두 profile 모두 parser가 오류를 삼켜도 resolver가 관찰한 금지·누락·미사용 요청을 Open 단계에서 실패시킨다.
+
+따라서 `verified`는 “주 파일 hash 하나가 모든 파일을 대표한다”는 뜻이 아니다. v1은 self-contained 주 파일과 closed recipe, v2는 주 SourceAsset identity + manifest의 전체 resource identity + 같은 recipe decode 결과를 함께 검증했다는 뜻이다.
 
 ## ArtifactDocument 1.0 도메인 계약
 
@@ -274,13 +295,13 @@ M0-3에서 시작한 durable core와 현재 native GUI/application 경계는 다
 - vector/rubbing export는 exact work item/result capability를 별도로 예약한다. worker는 비싼 SVG 생성 또는 Rubbing recipe 재계산·receipt 비교, package 전체 검증을 수행하고 destination·parent·staging inode·member fingerprint에 묶인 prepared capability까지 만든다. final dispatcher는 current source session, render projection과 exact `READY + FRESH` record를 Workbench lock에서 다시 확인한 뒤 빠른 fingerprint 재확인과 atomic no-replace rename만 실행한다. 같은 Align의 append-only record 추가는 허용하고 Align/Open 완료는 destination을 만들지 않은 채 stale 처리한다. pending Open은 core에서 재시도 가능한 stage로 남지만 현재 GUI는 안전하게 정리하고 Open 완료 후 재실행을 안내한다.
 - `Open → Align commit → save → independent-process load → source rebind → materialize` 왕복을 별도 프로세스에서 검증한다.
 
-`tests/test_artifact_new_process_roundtrip.py`의 차단 게이트는 다음 순서를 실제로 수행한다.
+`tests/test_artifact_new_process_roundtrip.py`의 차단 게이트는 self-contained PLY와 MTL·PNG를 사용하는 textured OBJ에 대해 다음 순서를 실제로 수행한다.
 
-1. 프로세스 A가 PLY source를 같은 descriptor에서 hash·parse하고 cm metadata와 비자명한 pivot Align revision을 만든 뒤 embedded artifact package로 저장한다.
-2. 외부 PLY source를 삭제한다.
-3. 다른 PID의 프로세스 B가 `.amr`만 strict load하고 content-addressed source blob을 저장된 전체 parser/runtime receipt와 metadata unit으로 다시 연다.
-4. 프로세스 B가 embedded raw source SHA-256·크기, decode geometry SHA-256을 새로 계산하고 검증된 session에 bind한 뒤 world-mm geometry를 materialize한다.
-5. 두 프로세스의 source SHA-256·크기, geometry SHA-256, active Align ID·float64 matrix, 전체 import recipe·unit, world vertex를 비교한다.
+1. 프로세스 A가 source closure를 같은 descriptor/resolver stream에서 hash·parse하고 cm metadata와 비자명한 pivot Align revision을 만든 뒤 embedded artifact package로 저장한다.
+2. 외부 PLY 또는 OBJ·MTL·PNG가 있던 capture directory를 삭제하고 `.amr`를 다른 directory로 옮긴다.
+3. 다른 PID의 프로세스 B가 relocated `.amr`만 strict load하고 content-addressed source blob을 저장된 전체 parser/runtime receipt, source manifest와 metadata unit으로 다시 연다.
+4. 프로세스 B가 embedded raw primary/dependency SHA-256·크기, decode geometry SHA-256을 새로 계산하고 검증된 session에 bind한 뒤 world-mm geometry를 materialize한다.
+5. 두 프로세스의 source closure, geometry SHA-256, active Align ID·float64 matrix, 전체 import recipe·unit, world vertex와 texture array hash를 비교한다.
 
 이 게이트는 canonical CPU projection과 durable payload의 왕복 증거다. `load_artifact_project()` 자체가 외부 파일을 탐색하거나 parser를 실행하는 것은 아니며, source resolution과 saved-parser reopen은 session/GUI orchestration이 수행한다. native 한-artifact workflow가 document source of truth와 scene-swap rollback을 사용하더라도 실제 GPU driver가 그린 프레임의 정밀도·시각적 동일성까지 이 테스트가 증명하지는 않는다.
 
@@ -389,7 +410,7 @@ Finder/Explorer가 추가하는 `.DS_Store`, `Thumbs.db`, `desktop.ini`는 1 MiB
 - margin은 stroke width의 절반 이상이어야 하므로 zero-extent open Cutline과 두꺼운 stroke도 artboard 밖으로 잘리지 않는다.
 - plane frame을 보존한 2D points를 그리므로 Front/Right/oblique section을 world XY로 다시 투영하지 않는다.
 
-sidecar는 source file SHA-256/size/scope, geometry hash, confirmed unit/axis matrix, Align matrix, export-time active IDs, record recipe/hash/QC와 transitive dependency receipts를 포함한다. extension, asset ref, topology-map ref, 내부 import path처럼 로컬 경로·site note가 들어갈 수 있는 필드는 public provenance allowlist에서 제외한다.
+sidecar는 primary source file SHA-256/size/scope, v2 source manifest dependency의 logical path/SHA-256/size, geometry hash, confirmed unit/axis matrix, Align matrix, export-time active IDs, record recipe/hash/QC와 transitive record dependency receipts를 포함한다. extension, asset ref, topology-map ref, host locator처럼 로컬 경로·site note가 들어갈 수 있는 필드는 public provenance allowlist에서 제외한다.
 
 sidecar의 normative claim 전체(artifact descriptor 제외)는 RFC 8785 SHA-256으로 묶어 SVG metadata에 넣고, sidecar는 SVG exact-byte SHA-256을 가진다. 이 비순환 결합은 한 파일만 바뀐 손상을 검출한다. 원본 문서를 함께 줄 때 validator는 document manifest/record와도 대조한다. 문서 없이 relocation한 package도 독립 프로세스에서 payload/claim/SVG 구조와 hash를 offline 검증할 수 있다.
 
@@ -472,8 +493,8 @@ reader는 다음을 거부한다.
 - checksum 또는 CRC 불일치
 - 64개 초과 member
 - 64 MiB 초과 `project.json`
-- 256 MiB 초과 단일 member
-- 512 MiB 초과 총 비압축 크기
+- 256 MiB 초과 일반 단일 member 또는 일반 member 총 512 MiB
+- 16 GiB 초과 source blob 또는 content-addressed source blob 총합
 - 500:1 초과 압축 비율
 - 약 16.5 GiB 초과 물리 컨테이너 또는 8 MiB 초과 ZIP central directory
 
@@ -495,7 +516,8 @@ v1 import는 입력 파일을 수정하지 않는 순수·결정적·멱등 변�
 ## 아직 보장하지 않는 것
 
 - 두 개 이상의 artifact 또는 legacy object를 섞은 hybrid scene의 native document authority
-- 주 원본 밖의 MTL·texture·외부 buffer/image까지 포함하는 sidecar dependency manifest
+- 61개 manifest entry를 넘는 대규모 source closure의 순차 descriptor streaming과 확장된 package member budget
+- 여러 material/PBR 조합을 원본 scanner와 동일하게 재현하는 viewport rendering fidelity
 - legacy `legacy_ui_state`에서 `artifact_document`로 단위·geometry·Align을 추정하지 않는 보존적 migration
 - 여섯 개의 독립 Outline record를 원자적으로 계산·commit하고 한 bundle로 배포하는 multi-view package
 - 실제 GPU driver frame의 scene-swap 원자성 및 시각적 동일성

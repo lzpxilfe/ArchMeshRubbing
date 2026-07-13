@@ -45,8 +45,17 @@ from src.core.artifact_vector_record import (
     VectorRecordKind,
 )
 from src.core.mesh_loader import MeshData
-from src.core.mesh_import_recipe import current_mesh_import_recipe
+from src.core.mesh_import_recipe import (
+    current_mesh_import_recipe,
+    mesh_import_recipe_with_manifest,
+)
 from src.core.source_identity import SourceFingerprint
+from src.core.source_manifest import (
+    DEPENDENCY_RESOURCE_ROLE,
+    PRIMARY_RESOURCE_ROLE,
+    SourceManifest,
+    SourceManifestEntry,
+)
 
 
 STAMP = "2026-07-12T00:00:00Z"
@@ -215,6 +224,59 @@ class TestArtifactVectorExportScaleAndProvenance(unittest.TestCase):
             hashlib.sha256(bundle.sidecar_bytes).hexdigest(),
             bundle.sidecar_sha256,
         )
+
+    def test_closed_source_manifest_hashes_are_preserved_in_svg_provenance(self):
+        session = _committed_session()
+        manifest = SourceManifest(
+            primary_logical_path="유물 & 기록.ply",
+            entries=(
+                SourceManifestEntry(
+                    logical_path="유물 & 기록.ply",
+                    media_type="model/ply",
+                    role=PRIMARY_RESOURCE_ROLE,
+                    sha256="a" * 64,
+                    size_bytes=321,
+                ),
+                SourceManifestEntry(
+                    logical_path="texture.png",
+                    media_type="image/png",
+                    role=DEPENDENCY_RESOURCE_ROLE,
+                    sha256="b" * 64,
+                    size_bytes=456,
+                ),
+            ),
+        )
+        geometry = session.document.geometry_revisions[0]
+        geometry = replace(
+            geometry,
+            import_recipe=mesh_import_recipe_with_manifest(
+                current_mesh_import_recipe("ply"),
+                manifest,
+            ),
+        )
+        document = replace(session.document, geometry_revisions=(geometry,))
+
+        bundle = build_vector_export(document, "record:cutline-0")
+        sidecar = json.loads(bundle.sidecar_bytes)
+        public_manifest = sidecar["provenance"]["geometry_revision"][
+            "import_recipe"
+        ]["source_manifest"]
+
+        self.assertEqual(public_manifest, manifest.to_dict())
+        self.assertNotIn("/source", bundle.sidecar_bytes.decode("utf-8"))
+        validate_vector_export_bytes(bundle.svg_bytes, bundle.sidecar_bytes)
+
+        tampered = json.loads(bundle.sidecar_bytes)
+        entries = tampered["provenance"]["geometry_revision"]["import_recipe"][
+            "source_manifest"
+        ]["entries"]
+        primary = next(entry for entry in entries if entry["role"] == "primary_mesh")
+        primary["sha256"] = "c" * 64
+        with self.assertRaisesRegex(
+            ArtifactVectorExportError,
+            "manifest primary",
+        ):
+            vector_export.validate_public_export_provenance(tampered["provenance"])
 
     def test_known_metric_rectangle_converts_to_inches_exactly_once(self):
         session = _session()

@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:archmeshrubbing:schema:source-bundle:2.0.0",
+  "title": "ArchMeshRubbing Source Bundle Index 2.0.0",
+  "description": "Content-addressed primary and parser dependency bytes bound to one canonical ArtifactDocument snapshot.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "schema_version", "document_id", "document_sha256", "primary_source_asset_id", "entries"],
+  "properties": {
+    "format": {"const": "archmeshrubbing_source_bundle"},
+    "schema_version": {"const": "2.0.0"},
+    "document_id": {"$ref": "#/$defs/nonEmptyString"},
+    "document_sha256": {"$ref": "#/$defs/sha256"},
+    "primary_source_asset_id": {"$ref": "#/$defs/contentId"},
+    "entries": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 61,
+      "contains": {
+        "type": "object",
+        "required": ["role"],
+        "properties": {"role": {"const": "primary_mesh"}}
+      },
+      "minContains": 1,
+      "maxContains": 1,
+      "items": {"$ref": "#/$defs/entry"}
+    }
+  },
+  "$defs": {
+    "nonEmptyString": {"type": "string", "pattern": ".*\\S.*"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "contentId": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "logicalPath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^(?!/)(?![A-Za-z][A-Za-z0-9+.-]*:)(?!.*\\\\)(?!.*[\\u0000-\\u001f\\u007f])(?!.*(?:^|/)\\.\\.?($|/))(?!.*//).+$"
+    },
+    "blobMember": {"type": "string", "pattern": "^sources/blobs/sha256/[0-9a-f]{64}$"},
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_asset_id", "role", "logical_path", "media_type", "member", "sha256", "size_bytes"],
+      "properties": {
+        "source_asset_id": {"$ref": "#/$defs/contentId"},
+        "role": {"enum": ["primary_mesh", "import_dependency"]},
+        "logical_path": {"$ref": "#/$defs/logicalPath"},
+        "media_type": {"$ref": "#/$defs/nonEmptyString"},
+        "member": {"$ref": "#/$defs/blobMember"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "size_bytes": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, cast
+import shutil
 import json
 import os
 from pathlib import Path
@@ -11,6 +12,7 @@ import textwrap
 import unittest
 
 import numpy as np
+from PIL import Image
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -42,6 +44,7 @@ PLY_BYTES = textwrap.dedent(
 
 PROCESS_A = textwrap.dedent(
     """\
+    import hashlib
     import json
     import os
     from pathlib import Path
@@ -113,6 +116,19 @@ PROCESS_A = textwrap.dedent(
             "metadata_unit": metadata.unit,
             "parser_format": mesh.source_format,
             "import_recipe": mesh.source_import_recipe,
+            "source_resources": [
+                {
+                    "logical_path": resource.entry.logical_path,
+                    "sha256": resource.entry.sha256,
+                    "size_bytes": resource.entry.size_bytes,
+                }
+                for resource in mesh.source_resources
+            ],
+            "texture_sha256": (
+                hashlib.sha256(np.ascontiguousarray(mesh.texture).tobytes()).hexdigest()
+                if mesh.texture is not None
+                else None
+            ),
         },
         sys.stdout,
         sort_keys=True,
@@ -123,6 +139,7 @@ PROCESS_A = textwrap.dedent(
 
 PROCESS_B = textwrap.dedent(
     """\
+    import hashlib
     import json
     import os
     from pathlib import Path
@@ -130,6 +147,7 @@ PROCESS_B = textwrap.dedent(
 
     import numpy as np
 
+    from src.core.canonical_json import canonical_json_bytes
     from src.core.geometry_identity import mesh_geometry_sha256
     from src.core.project_file import load_artifact_session_project
 
@@ -181,8 +199,23 @@ PROCESS_B = textwrap.dedent(
             "parser_format": parser_format,
             "loaded_mesh_unit": mesh.unit,
             "loaded_mesh_parser_format": mesh.source_format,
-            "import_recipe": dict(geometry.import_recipe),
-            "loaded_mesh_import_recipe": mesh.source_import_recipe,
+            "import_recipe": json.loads(canonical_json_bytes(geometry.import_recipe)),
+            "loaded_mesh_import_recipe": json.loads(
+                canonical_json_bytes(mesh.source_import_recipe)
+            ),
+            "source_resources": [
+                {
+                    "logical_path": resource.entry.logical_path,
+                    "sha256": resource.entry.sha256,
+                    "size_bytes": resource.entry.size_bytes,
+                }
+                for resource in mesh.source_resources
+            ],
+            "texture_sha256": (
+                hashlib.sha256(np.ascontiguousarray(mesh.texture).tobytes()).hexdigest()
+                if mesh.texture is not None
+                else None
+            ),
         },
         sys.stdout,
         sort_keys=True,
@@ -295,6 +328,78 @@ class TestArtifactIndependentProcessRoundtrip(unittest.TestCase):
         self.assertEqual(
             process_b["import_recipe"]["dependency_policy"],
             "deny_external",
+        )
+
+    def test_textured_obj_closure_relocates_and_reopens_across_processes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory)
+            capture = workspace / "capture"
+            capture.mkdir()
+            source_path = capture / "painted-fragment.obj"
+            source_path.write_text(
+                textwrap.dedent(
+                    """\
+                    mtllib materials/fragment.mtl
+                    v 0 0 0
+                    v 1 0 0
+                    v 0 1 0
+                    vt 0 0
+                    vt 1 0
+                    vt 0 1
+                    usemtl painted
+                    f 1/1 2/2 3/3
+                    """
+                ),
+                encoding="utf-8",
+            )
+            materials = capture / "materials"
+            materials.mkdir()
+            (materials / "fragment.mtl").write_text(
+                "newmtl painted\nmap_Kd textures/fragment.png\n",
+                encoding="utf-8",
+            )
+            textures = capture / "textures"
+            textures.mkdir()
+            Image.new("RGB", (2, 2), color=(20, 40, 80)).save(
+                textures / "fragment.png"
+            )
+            original_project = workspace / "project" / "painted.amr"
+            original_project.parent.mkdir()
+
+            process_a = self._run_worker(PROCESS_A, source_path, original_project)
+            relocated_project = workspace / "relocated" / "portable-copy.amr"
+            relocated_project.parent.mkdir()
+            shutil.copy2(original_project, relocated_project)
+            shutil.rmtree(capture)
+            original_project.unlink()
+
+            process_b = self._run_worker(PROCESS_B, relocated_project)
+
+        self.assertNotEqual(process_a["pid"], process_b["pid"])
+        self.assertEqual(process_a["geometry_sha256"], process_b["geometry_sha256"])
+        self.assertEqual(process_a["world_vertices"], process_b["world_vertices"])
+        self.assertEqual(process_a["source_resources"], process_b["source_resources"])
+        self.assertEqual(
+            [item["logical_path"] for item in process_b["source_resources"]],
+            [
+                "materials/fragment.mtl",
+                "painted-fragment.obj",
+                "textures/fragment.png",
+            ],
+        )
+        self.assertEqual(process_a["texture_sha256"], process_b["texture_sha256"])
+        self.assertIsNotNone(process_b["texture_sha256"])
+        self.assertEqual(
+            process_b["import_recipe"]["dependency_policy"],
+            "closed_manifest",
+        )
+        self.assertEqual(
+            process_b["loaded_mesh_import_recipe"],
+            process_b["import_recipe"],
+        )
+        self.assertIn(
+            "portable-copy.amr!/sources/blobs/sha256/",
+            process_b["source_path"],
         )
 
 

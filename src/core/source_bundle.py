@@ -20,10 +20,17 @@ from .artifact_document import (
     ArtifactDocument,
 )
 from .canonical_json import canonical_json_bytes as _canonical_json_bytes
+from .mesh_import_recipe import MeshImportRecipeError, validate_mesh_import_recipe
+from .source_manifest import (
+    DEPENDENCY_RESOURCE_ROLE,
+    MAX_SOURCE_MANIFEST_ENTRIES,
+    SourceManifestEntry,
+)
 
 
 SOURCE_BUNDLE_FORMAT = "archmeshrubbing_source_bundle"
 SOURCE_BUNDLE_SCHEMA_VERSION = "1.0.0"
+SOURCE_BUNDLE_SCHEMA_VERSION_CLOSED_MANIFEST = "2.0.0"
 SOURCE_INDEX_NAME = "sources/index.json"
 SOURCE_BLOB_PREFIX = "sources/blobs/sha256/"
 
@@ -220,6 +227,7 @@ class SourceBundleIndex:
     document_sha256: str
     primary_source_asset_id: str
     entries: tuple[EmbeddedSourceEntry, ...]
+    schema_version: str = SOURCE_BUNDLE_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -240,6 +248,13 @@ class SourceBundleIndex:
                 field_name="primary_source_asset_id",
             ),
         )
+        if self.schema_version not in {
+            SOURCE_BUNDLE_SCHEMA_VERSION,
+            SOURCE_BUNDLE_SCHEMA_VERSION_CLOSED_MANIFEST,
+        }:
+            raise SourceBundleError(
+                f"unsupported source bundle schema version: {self.schema_version!r}"
+            )
 
         try:
             entries = tuple(self.entries)
@@ -247,6 +262,11 @@ class SourceBundleIndex:
             raise SourceBundleError("entries must be an iterable of source entries") from exc
         if not entries:
             raise SourceBundleError("entries must not be empty")
+        if len(entries) > MAX_SOURCE_MANIFEST_ENTRIES:
+            raise SourceBundleError(
+                "source bundle has too many entries "
+                f"({len(entries)} > {MAX_SOURCE_MANIFEST_ENTRIES})"
+            )
         if not all(isinstance(entry, EmbeddedSourceEntry) for entry in entries):
             raise SourceBundleError(
                 "entries must contain only EmbeddedSourceEntry values"
@@ -264,15 +284,34 @@ class SourceBundleIndex:
         )
         object.__setattr__(self, "entries", entries)
 
-        logical_paths = [entry.logical_path for entry in entries]
-        if len(set(logical_paths)) != len(logical_paths):
-            raise SourceBundleError("entries must have unique logical_path values")
-        members = [entry.member for entry in entries]
-        if len(set(members)) != len(members):
-            raise SourceBundleError("entries must have unique member values")
-        source_asset_ids = [entry.source_asset_id for entry in entries]
-        if len(set(source_asset_ids)) != len(source_asset_ids):
-            raise SourceBundleError("entries must have unique source_asset_id values")
+        if self.schema_version == SOURCE_BUNDLE_SCHEMA_VERSION:
+            logical_paths = [entry.logical_path for entry in entries]
+            if len(set(logical_paths)) != len(logical_paths):
+                raise SourceBundleError("entries must have unique logical_path values")
+            members = [entry.member for entry in entries]
+            if len(set(members)) != len(members):
+                raise SourceBundleError("entries must have unique member values")
+            source_asset_ids = [entry.source_asset_id for entry in entries]
+            if len(set(source_asset_ids)) != len(source_asset_ids):
+                raise SourceBundleError("entries must have unique source_asset_id values")
+        else:
+            if len(entries) < 2:
+                raise SourceBundleError(
+                    "v2 source bundle must include a primary and at least one dependency"
+                )
+            if any(
+                entry.role not in {
+                    PRIMARY_SOURCE_ASSET_ROLE,
+                    DEPENDENCY_RESOURCE_ROLE,
+                }
+                for entry in entries
+            ):
+                raise SourceBundleError("v2 source bundle contains an unsupported role")
+            aliases = [(entry.logical_path, entry.sha256) for entry in entries]
+            if len(set(aliases)) != len(aliases):
+                raise SourceBundleError(
+                    "v2 entries must have unique logical_path and sha256 pairs"
+                )
 
         primary_entries = [
             entry for entry in entries if entry.role == PRIMARY_SOURCE_ASSET_ROLE
@@ -286,7 +325,7 @@ class SourceBundleIndex:
 
     @classmethod
     def for_document(cls, document: ArtifactDocument) -> "SourceBundleIndex":
-        """Create the current one-source index for an authoritative document."""
+        """Create a transport index for every active parser input byte stream."""
 
         if not isinstance(document, ArtifactDocument):
             raise SourceBundleError("document must be an ArtifactDocument")
@@ -303,26 +342,120 @@ class SourceBundleIndex:
                 "document canonical_sha256 does not match its canonical bytes"
             )
 
-        entry = EmbeddedSourceEntry(
-            source_asset_id=source.id,
-            role=source.role,
-            logical_path=source.original_name,
-            media_type=source.media_type,
-            member=source_blob_member(source.sha256),
-            sha256=source.sha256,
-            size_bytes=source.size_bytes,
-        )
+        manifests = []
+        for geometry in document.geometry_revisions:
+            try:
+                execution = validate_mesh_import_recipe(
+                    geometry.import_recipe,
+                    allow_legacy=True,
+                    require_current_runtime=False,
+                )
+            except MeshImportRecipeError as exc:
+                raise SourceBundleError(
+                    f"geometry {geometry.id!r} has an invalid import recipe: {exc}"
+                ) from exc
+            if execution.source_manifest is not None:
+                primary = execution.source_manifest.primary_entry
+                if (
+                    primary.sha256 != source.sha256
+                    or primary.size_bytes != source.size_bytes
+                ):
+                    raise SourceBundleError(
+                        "import recipe primary entry does not match the ArtifactDocument "
+                        "SourceAsset"
+                    )
+                manifests.append(execution.source_manifest)
+
+        if manifests:
+            active_manifest = manifests[0]
+            metadata_id = document.active_source_metadata_revision_id
+            if metadata_id is not None:
+                active_geometry_id = document.source_metadata_revision_index[
+                    metadata_id
+                ].geometry_revision_id
+                active_geometry = document.geometry_revision_index[active_geometry_id]
+                try:
+                    active_execution = validate_mesh_import_recipe(
+                        active_geometry.import_recipe,
+                        allow_legacy=True,
+                        require_current_runtime=False,
+                    )
+                except MeshImportRecipeError as exc:
+                    raise SourceBundleError(str(exc)) from exc
+                if active_execution.source_manifest is not None:
+                    active_manifest = active_execution.source_manifest
+
+            manifest_entries: dict[tuple[str, str], SourceManifestEntry] = {}
+            content_sizes: dict[str, int] = {source.sha256: source.size_bytes}
+            for manifest in manifests:
+                for manifest_entry in manifest.entries:
+                    previous_size = content_sizes.get(manifest_entry.sha256)
+                    if (
+                        previous_size is not None
+                        and previous_size != manifest_entry.size_bytes
+                    ):
+                        raise SourceBundleError(
+                            "one content digest has conflicting source sizes"
+                        )
+                    content_sizes[manifest_entry.sha256] = manifest_entry.size_bytes
+                for dependency in manifest.dependency_entries:
+                    key = (dependency.logical_path, dependency.sha256)
+                    previous = manifest_entries.get(key)
+                    if previous is not None and previous != dependency:
+                        raise SourceBundleError(
+                            "source manifests contain conflicting dependency metadata"
+                        )
+                    manifest_entries[key] = dependency
+            primary = active_manifest.primary_entry
+            entries = [
+                EmbeddedSourceEntry(
+                    source_asset_id=source.id,
+                    role=source.role,
+                    logical_path=primary.logical_path,
+                    media_type=primary.media_type,
+                    member=source_blob_member(primary.sha256),
+                    sha256=primary.sha256,
+                    size_bytes=primary.size_bytes,
+                )
+            ]
+            entries.extend(
+                EmbeddedSourceEntry(
+                    source_asset_id=entry.content_id,
+                    role=entry.role,
+                    logical_path=entry.logical_path,
+                    media_type=entry.media_type,
+                    member=source_blob_member(entry.sha256),
+                    sha256=entry.sha256,
+                    size_bytes=entry.size_bytes,
+                )
+                for entry in manifest_entries.values()
+            )
+            schema_version = SOURCE_BUNDLE_SCHEMA_VERSION_CLOSED_MANIFEST
+        else:
+            entries = [
+                EmbeddedSourceEntry(
+                    source_asset_id=source.id,
+                    role=source.role,
+                    logical_path=source.original_name,
+                    media_type=source.media_type,
+                    member=source_blob_member(source.sha256),
+                    sha256=source.sha256,
+                    size_bytes=source.size_bytes,
+                )
+            ]
+            schema_version = SOURCE_BUNDLE_SCHEMA_VERSION
         return cls(
             document_id=document.document_id,
             document_sha256=calculated_document_sha256,
             primary_source_asset_id=source.id,
-            entries=(entry,),
+            entries=tuple(entries),
+            schema_version=schema_version,
         )
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "format": SOURCE_BUNDLE_FORMAT,
-            "schema_version": SOURCE_BUNDLE_SCHEMA_VERSION,
+            "schema_version": self.schema_version,
             "document_id": self.document_id,
             "document_sha256": self.document_sha256,
             "primary_source_asset_id": self.primary_source_asset_id,
@@ -341,7 +474,10 @@ class SourceBundleIndex:
         _exact_keys(data, _INDEX_KEYS, model_name="source_bundle_index")
         if data["format"] != SOURCE_BUNDLE_FORMAT:
             raise SourceBundleError(f"unsupported source bundle format: {data['format']!r}")
-        if data["schema_version"] != SOURCE_BUNDLE_SCHEMA_VERSION:
+        if data["schema_version"] not in {
+            SOURCE_BUNDLE_SCHEMA_VERSION,
+            SOURCE_BUNDLE_SCHEMA_VERSION_CLOSED_MANIFEST,
+        }:
             raise SourceBundleError(
                 "unsupported source bundle schema version: "
                 f"{data['schema_version']!r}"
@@ -369,6 +505,7 @@ class SourceBundleIndex:
                 field_name="primary_source_asset_id",
             ),
             entries=tuple(entries),
+            schema_version=str(data["schema_version"]),
         )
 
 
@@ -376,6 +513,7 @@ __all__ = [
     "SOURCE_BLOB_PREFIX",
     "SOURCE_BUNDLE_FORMAT",
     "SOURCE_BUNDLE_SCHEMA_VERSION",
+    "SOURCE_BUNDLE_SCHEMA_VERSION_CLOSED_MANIFEST",
     "SOURCE_INDEX_NAME",
     "EmbeddedSourceEntry",
     "SourceBundleError",

@@ -701,6 +701,7 @@ class MeshLoadThread(QThread):
         default_unit: str,
         source_format: str | None = None,
         import_recipe: Mapping[str, object] | None = None,
+        capture_dependencies: bool = False,
     ):
         super().__init__()
         self._filepath = str(filepath)
@@ -710,6 +711,7 @@ class MeshLoadThread(QThread):
         self._import_recipe = (
             dict(import_recipe) if isinstance(import_recipe, Mapping) else None
         )
+        self._capture_dependencies = bool(capture_dependencies)
 
     def run(self):
         try:
@@ -718,6 +720,7 @@ class MeshLoadThread(QThread):
                 self._filepath,
                 source_format=self._source_format,
                 import_recipe=self._import_recipe,
+                capture_dependencies=self._capture_dependencies,
             )
 
             if self._scale_factor != 1.0:
@@ -7972,6 +7975,11 @@ class MainWindow(QMainWindow):
             ),
             source_format=source_format,
             import_recipe=import_recipe,
+            capture_dependencies=(
+                artifact_ticket.capture_dependencies
+                if isinstance(artifact_ticket, ArtifactLoadTicket)
+                else import_recipe is None
+            ),
         )
         request_id = (
             artifact_ticket.id

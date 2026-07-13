@@ -43,6 +43,7 @@ from .artifact_vector_record import (
     append_vector_record_from_context,
 )
 from .geometry_identity import mesh_geometry_sha256
+from .canonical_json import canonical_json_bytes
 from .mesh_import_recipe import (
     MeshImportRecipeError,
     validate_mesh_import_recipe,
@@ -91,6 +92,7 @@ def immutable_source_mesh(mesh: MeshData) -> MeshData:
         source_identity=mesh.source_identity,
         source_format=mesh.source_format,
         source_import_recipe=mesh.source_import_recipe,
+        source_resources=mesh.source_resources,
     )
     # MeshData normalization may replace arrays, so freeze the final arrays.
     snapshot.vertices.setflags(write=False)
@@ -137,6 +139,43 @@ def _mesh_import_recipe(
             "source mesh parser format does not match its import receipt"
         )
     return dict(raw), execution.source_format
+
+
+def _validate_source_resources(
+    mesh: MeshData,
+    recipe: Mapping[str, object],
+) -> None:
+    """Bind runtime locators to every durable v2 source-manifest entry."""
+
+    try:
+        execution = validate_mesh_import_recipe(recipe, allow_legacy=True)
+    except MeshImportRecipeError as exc:
+        raise ArtifactSessionError(str(exc)) from exc
+    manifest = execution.source_manifest
+    if manifest is None:
+        return
+    fingerprint = mesh.source_identity
+    if fingerprint is None:
+        raise ArtifactSessionError("source mesh has no immutable source fingerprint")
+    primary = manifest.primary_entry
+    if (
+        primary.sha256 != fingerprint.sha256
+        or primary.size_bytes != fingerprint.size_bytes
+    ):
+        raise ArtifactSessionError(
+            "source fingerprint does not match import recipe source manifest"
+        )
+    observed = {
+        (resource.entry.logical_path, resource.entry.sha256): resource.entry
+        for resource in mesh.source_resources
+    }
+    expected = {
+        (entry.logical_path, entry.sha256): entry for entry in manifest.entries
+    }
+    if any(observed.get(key) != entry for key, entry in expected.items()):
+        raise ArtifactSessionError(
+            "runtime source resource locators do not match import recipe source manifest"
+        )
 
 
 def _matrix4x4_tuple(
@@ -191,10 +230,13 @@ class ArtifactSession:
                 self.source_mesh,
                 allow_legacy=True,
             )
-            if source_recipe != dict(active_geometry.import_recipe):
+            if canonical_json_bytes(source_recipe) != canonical_json_bytes(
+                active_geometry.import_recipe
+            ):
                 raise ArtifactSessionError(
                     "source mesh import receipt does not match GeometryRevision"
                 )
+            _validate_source_resources(self.source_mesh, source_recipe)
             from .artifact_record_validation import (  # noqa: PLC0415
                 validate_known_records,
             )
@@ -256,6 +298,7 @@ class ArtifactSession:
             raise ArtifactSessionError(
                 "source mesh parser format does not match its strict import recipe"
             )
+        _validate_source_resources(source, source_recipe)
         resolved_path = str(Path(resolved_source_path).expanduser().resolve(strict=False))
         timestamp = str(created_at or _utc_now())
         geometry_sha256 = mesh_geometry_sha256(source)

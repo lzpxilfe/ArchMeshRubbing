@@ -42,6 +42,7 @@ from src.core.artifact_session import ArtifactSession, ArtifactSessionError
 from src.core.mesh_import_recipe import (
     MeshImportRecipeError,
     current_mesh_import_recipe,
+    mesh_import_receipt_matches_base,
     validate_mesh_import_recipe,
 )
 from src.core.mesh_loader import MeshData, MeshLoader
@@ -50,7 +51,6 @@ from src.core.mesh_loader import MeshData, MeshLoader
 _LOGGER = logging.getLogger(__name__)
 _INITIAL_ALIGN_RECIPE = "initial_identity"
 _AXIS_KEYS = ("source_x", "source_y", "source_z")
-_EXTERNAL_GEOMETRY_SOURCE_FORMATS = frozenset({"gltf"})
 _KEEP_PROJECT_PATH = object()
 _T = TypeVar("_T")
 
@@ -113,12 +113,6 @@ def _authoritative_source_format(value: str, *, field_name: str) -> str:
     if f".{source_format}" not in MeshLoader.SUPPORTED_FORMATS:
         raise ArtifactWorkbenchError(
             f"unsupported authoritative source format: {source_format!r}"
-        )
-    if source_format in _EXTERNAL_GEOMETRY_SOURCE_FORMATS:
-        raise ArtifactWorkbenchError(
-            "authoritative .gltf import is disabled because external buffers are not "
-            "yet identity-bound; convert the artifact to self-contained GLB or use "
-            "PLY/OBJ/STL/OFF"
         )
     return source_format
 
@@ -239,6 +233,7 @@ class ArtifactLoadTicket:
     document_id: str | None = None
     metadata_revision_id: str | None = None
     align_revision_id: str | None = None
+    capture_dependencies: bool = False
 
     def __post_init__(self) -> None:
         # A ticket crosses the GUI/background-worker boundary.  Preserve the
@@ -714,6 +709,7 @@ class ArtifactWorkbench:
                 document_id=document_id,
                 metadata_revision_id=metadata_revision_id,
                 align_revision_id=align_revision_id,
+                capture_dependencies=True,
             )
             self._state = WorkflowSnapshot(
                 state_version=state.state_version + 1,
@@ -772,6 +768,7 @@ class ArtifactWorkbench:
                 document=document,
                 software_version=None,
                 operator=None,
+                capture_dependencies=False,
             )
             self._state = WorkflowSnapshot(
                 state_version=state.state_version + 1,
@@ -818,9 +815,18 @@ class ArtifactWorkbench:
             resolved_source_path or ticket.source_path,
             field_name="resolved_source_path",
         )
-        if not isinstance(mesh.source_import_recipe, Mapping) or dict(
-            mesh.source_import_recipe
-        ) != dict(ticket.import_recipe):
+        if not isinstance(mesh.source_import_recipe, Mapping):
+            raise ArtifactWorkbenchError("loaded source has no parser receipt")
+        if ticket.kind is _LoadKind.NEW_SOURCE:
+            receipt_matches = mesh_import_receipt_matches_base(
+                ticket.import_recipe,
+                mesh.source_import_recipe,
+            )
+        else:
+            receipt_matches = dict(mesh.source_import_recipe) == dict(
+                ticket.import_recipe
+            )
+        if not receipt_matches:
             raise ArtifactWorkbenchError(
                 "loaded source parser receipt does not match its Open ticket"
             )

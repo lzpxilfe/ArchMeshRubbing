@@ -14,11 +14,22 @@ from src.core.source_bundle import (
     SOURCE_BLOB_PREFIX,
     SOURCE_BUNDLE_FORMAT,
     SOURCE_BUNDLE_SCHEMA_VERSION,
+    SOURCE_BUNDLE_SCHEMA_VERSION_CLOSED_MANIFEST,
     SOURCE_INDEX_NAME,
     EmbeddedSourceEntry,
     SourceBundleError,
     SourceBundleIndex,
     source_blob_member,
+)
+from src.core.mesh_import_recipe import (
+    current_mesh_import_recipe,
+    mesh_import_recipe_with_manifest,
+)
+from src.core.source_manifest import (
+    DEPENDENCY_RESOURCE_ROLE,
+    PRIMARY_RESOURCE_ROLE,
+    SourceManifest,
+    SourceManifestEntry,
 )
 
 
@@ -123,6 +134,68 @@ class TestSourceBundle(unittest.TestCase):
         with self.assertRaisesRegex(AttributeError, "cannot assign"):
             index.document_id = "changed"  # type: ignore[misc]
 
+    def test_v2_document_index_carries_closed_dependencies_and_content_aliases(self):
+        document = _document(with_record=True)
+        manifest = SourceManifest(
+            primary_logical_path="artifact.ply",
+            entries=(
+                SourceManifestEntry(
+                    logical_path="artifact.ply",
+                    media_type="model/ply",
+                    role=PRIMARY_RESOURCE_ROLE,
+                    sha256=SOURCE_SHA,
+                    size_bytes=123,
+                ),
+                SourceManifestEntry(
+                    logical_path="textures/a.png",
+                    media_type="image/png",
+                    role=DEPENDENCY_RESOURCE_ROLE,
+                    sha256=OTHER_SHA,
+                    size_bytes=10,
+                ),
+                SourceManifestEntry(
+                    logical_path="textures/b.png",
+                    media_type="image/png",
+                    role=DEPENDENCY_RESOURCE_ROLE,
+                    sha256=OTHER_SHA,
+                    size_bytes=10,
+                ),
+            ),
+        )
+        recipe = mesh_import_recipe_with_manifest(
+            current_mesh_import_recipe("ply"),
+            manifest,
+        )
+        geometry = replace(document.geometry_revisions[0], import_recipe=recipe)
+        document = replace(document, geometry_revisions=(geometry,))
+
+        index = SourceBundleIndex.for_document(document)
+
+        self.assertEqual(
+            index.schema_version,
+            SOURCE_BUNDLE_SCHEMA_VERSION_CLOSED_MANIFEST,
+        )
+        self.assertEqual(len(index.entries), 3)
+        alias_members = [
+            entry.member
+            for entry in index.entries
+            if entry.sha256 == OTHER_SHA
+        ]
+        self.assertEqual(len(alias_members), 2)
+        self.assertEqual(len(set(alias_members)), 1)
+        schema = json.loads(
+            (ROOT / "schemas" / "source_bundle-2.0.0.schema.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        jsonschema = importlib.import_module("jsonschema")
+        jsonschema.Draft202012Validator.check_schema(schema)
+        jsonschema.Draft202012Validator(schema).validate(index.to_dict())
+        self.assertEqual(
+            SourceBundleIndex.from_dict(index.to_dict()),
+            index,
+        )
+
     def test_paths_reject_traversal_absolute_drive_unc_uri_and_backslash(self):
         invalid_paths = (
             "../artifact.ply",
@@ -143,6 +216,50 @@ class TestSourceBundle(unittest.TestCase):
 
         with self.assertRaises(SourceBundleError):
             replace(_entry(), member="sources/blobs/sha256/../escape")
+
+    def test_v2_index_enforces_the_portable_entry_budget(self):
+        primary = _entry()
+        dependencies = tuple(
+            _entry(
+                digest=f"{index:064x}",
+                role=DEPENDENCY_RESOURCE_ROLE,
+                logical_path=f"dependencies/{index}.ply",
+            )
+            for index in range(1, 62)
+        )
+        with self.assertRaisesRegex(SourceBundleError, "too many entries"):
+            SourceBundleIndex(
+                document_id="artifact:entry-budget",
+                document_sha256="c" * 64,
+                primary_source_asset_id=primary.source_asset_id,
+                entries=(primary, *dependencies),
+                schema_version=SOURCE_BUNDLE_SCHEMA_VERSION_CLOSED_MANIFEST,
+            )
+
+    def test_v2_index_requires_a_dependency_and_closed_roles(self):
+        primary = _entry()
+        with self.assertRaisesRegex(SourceBundleError, "at least one dependency"):
+            SourceBundleIndex(
+                document_id="artifact:v2-primary-only",
+                document_sha256="c" * 64,
+                primary_source_asset_id=primary.source_asset_id,
+                entries=(primary,),
+                schema_version=SOURCE_BUNDLE_SCHEMA_VERSION_CLOSED_MANIFEST,
+            )
+
+        unsupported = _entry(
+            digest=OTHER_SHA,
+            role="texture",
+            logical_path="texture.ply",
+        )
+        with self.assertRaisesRegex(SourceBundleError, "unsupported role"):
+            SourceBundleIndex(
+                document_id="artifact:v2-role",
+                document_sha256="c" * 64,
+                primary_source_asset_id=primary.source_asset_id,
+                entries=(primary, unsupported),
+                schema_version=SOURCE_BUNDLE_SCHEMA_VERSION_CLOSED_MANIFEST,
+            )
 
     def test_duplicate_paths_members_and_primary_mismatch_fail_closed(self):
         primary = _entry()

@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:archmeshrubbing:schema:mesh-import-recipe:2.0.0",
+  "title": "ArchMeshRubbing Mesh Import Recipe 2.0.0",
+  "description": "Closed parser runtime and content manifest for authoritative multi-file geometry decoding.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "recipe_id",
+    "recipe_version",
+    "format",
+    "loader",
+    "loader_version",
+    "parser_runtime_sha256",
+    "runtime_lock_sha256",
+    "force",
+    "process",
+    "maintain_order",
+    "scene_merge",
+    "sanitizer",
+    "dependency_policy",
+    "resolver_profile",
+    "source_manifest"
+  ],
+  "properties": {
+    "recipe_id": {"const": "org.archmeshrubbing.mesh-import.trimesh"},
+    "recipe_version": {"const": "2.0.0"},
+    "format": {"enum": ["obj", "ply", "stl", "off", "gltf", "glb"]},
+    "loader": {"const": "trimesh"},
+    "loader_version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+].*)?$"},
+    "parser_runtime_sha256": {"$ref": "#/$defs/sha256"},
+    "runtime_lock_sha256": {"$ref": "#/$defs/sha256"},
+    "force": {"const": "mesh"},
+    "process": {"const": false},
+    "maintain_order": {"const": true},
+    "scene_merge": {"const": "trimesh.util.concatenate/v1"},
+    "sanitizer": {"const": "meshdata-v1"},
+    "dependency_policy": {"const": "closed_manifest"},
+    "resolver_profile": {"const": "relative-contained-v1"},
+    "source_manifest": {"$ref": "#/$defs/sourceManifest"}
+  },
+  "$defs": {
+    "nonEmptyString": {"type": "string", "pattern": ".*\\S.*"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "logicalPath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^(?!/)(?![A-Za-z][A-Za-z0-9+.-]*:)(?!.*\\\\)(?!.*[\\u0000-\\u001f\\u007f])(?!.*(?:^|/)\\.\\.?($|/))(?!.*//).+$"
+    },
+    "sourceEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["logical_path", "media_type", "role", "sha256", "size_bytes"],
+      "properties": {
+        "logical_path": {"$ref": "#/$defs/logicalPath"},
+        "media_type": {"$ref": "#/$defs/nonEmptyString"},
+        "role": {"enum": ["primary_mesh", "import_dependency"]},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "size_bytes": {"type": "integer", "minimum": 0}
+      }
+    },
+    "sourceManifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["format", "schema_version", "resolver_profile", "primary_logical_path", "entries"],
+      "properties": {
+        "format": {"const": "archmeshrubbing_source_manifest"},
+        "schema_version": {"const": "1.0.0"},
+        "resolver_profile": {"const": "relative-contained-v1"},
+        "primary_logical_path": {"$ref": "#/$defs/logicalPath"},
+        "entries": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 61,
+          "contains": {
+            "type": "object",
+            "required": ["role"],
+            "properties": {"role": {"const": "primary_mesh"}}
+          },
+          "minContains": 1,
+          "maxContains": 1,
+          "items": {"$ref": "#/$defs/sourceEntry"}
+        }
+      }
+    }
+  }
+}

@@ -109,9 +109,15 @@ class TestVectorSchemas(unittest.TestCase):
                 encoding="utf-8"
             )
         )
+        import_recipe_v2_schema = json.loads(
+            (ROOT / "schemas/mesh_import_recipe-2.0.0.schema.json").read_text(
+                encoding="utf-8"
+            )
+        )
         jsonschema.Draft202012Validator.check_schema(payload_schema)
         jsonschema.Draft202012Validator.check_schema(export_schema)
         jsonschema.Draft202012Validator.check_schema(import_recipe_schema)
+        jsonschema.Draft202012Validator.check_schema(import_recipe_v2_schema)
         document, payload = _document_and_payload()
         payload_validator = jsonschema.Draft202012Validator(payload_schema)
         self.assertEqual(list(payload_validator.iter_errors(payload.to_dict())), [])
@@ -123,6 +129,10 @@ class TestVectorSchemas(unittest.TestCase):
         registry = registry.with_resource(
             import_recipe_schema["$id"],
             referencing.Resource.from_contents(import_recipe_schema),
+        )
+        registry = registry.with_resource(
+            import_recipe_v2_schema["$id"],
+            referencing.Resource.from_contents(import_recipe_v2_schema),
         )
         export_validator = jsonschema.Draft202012Validator(
             export_schema,

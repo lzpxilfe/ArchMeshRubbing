@@ -44,8 +44,17 @@ from src.core.canonical_png import (
     encode_canonical_ga8_png,
 )
 from src.core.mesh_loader import MeshData
-from src.core.mesh_import_recipe import current_mesh_import_recipe
+from src.core.mesh_import_recipe import (
+    current_mesh_import_recipe,
+    mesh_import_recipe_with_manifest,
+)
 from src.core.source_identity import SourceFingerprint
+from src.core.source_manifest import (
+    DEPENDENCY_RESOURCE_ROLE,
+    PRIMARY_RESOURCE_ROLE,
+    SourceManifest,
+    SourceManifestEntry,
+)
 
 
 STAMP = "2026-07-12T00:00:00Z"
@@ -163,6 +172,51 @@ class TestRubbingExport(unittest.TestCase):
             with self.assertRaises(ArtifactRubbingExportError) as raised:
                 publish_prepared_rubbing_package(prepared)
             self.assertTrue(raised.exception.committed)
+
+    def test_closed_source_manifest_hashes_are_preserved_in_png_provenance(self):
+        session, computation = _committed()
+        manifest = SourceManifest(
+            primary_logical_path="유물-탁본.ply",
+            entries=(
+                SourceManifestEntry(
+                    logical_path="유물-탁본.ply",
+                    media_type="model/ply",
+                    role=PRIMARY_RESOURCE_ROLE,
+                    sha256="9" * 64,
+                    size_bytes=987,
+                ),
+                SourceManifestEntry(
+                    logical_path="texture.png",
+                    media_type="image/png",
+                    role=DEPENDENCY_RESOURCE_ROLE,
+                    sha256="8" * 64,
+                    size_bytes=654,
+                ),
+            ),
+        )
+        geometry = session.document.geometry_revisions[0]
+        geometry = replace(
+            geometry,
+            import_recipe=mesh_import_recipe_with_manifest(
+                current_mesh_import_recipe("ply"),
+                manifest,
+            ),
+        )
+        document = replace(session.document, geometry_revisions=(geometry,))
+
+        bundle = build_rubbing_export(
+            document,
+            "record:rubbing:export",
+            computation.raster,
+        )
+        sidecar = _sidecar(bundle)
+        public_manifest = sidecar["provenance"]["geometry_revision"][
+            "import_recipe"
+        ]["source_manifest"]
+
+        self.assertEqual(public_manifest, manifest.to_dict())
+        self.assertNotIn(b"/private/lab/alice", bundle.sidecar_bytes)
+        validate_rubbing_export_bytes(bundle.png_bytes, bundle.sidecar_bytes)
 
     def test_public_publish_rejects_never_owned_staging(self):
         with tempfile.TemporaryDirectory() as temporary:

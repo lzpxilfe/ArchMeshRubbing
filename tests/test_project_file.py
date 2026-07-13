@@ -14,6 +14,7 @@ import warnings
 import zipfile
 
 import numpy as np
+from PIL import Image
 
 import src.core.project_file as project_file
 from src.core.artifact_document import ArtifactDocument
@@ -101,6 +102,92 @@ def _artifact_session_from_path(source_path: Path) -> ArtifactSession:
         metadata_revision_id="metadata:embedded-source",
         align_revision_id="align:identity",
     )
+
+
+def _write_textured_obj(directory: Path) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    source_path = directory / "fragment.obj"
+    source_path.write_text(
+        textwrap.dedent(
+            """\
+            mtllib material.mtl
+            v 0 0 0
+            v 1 0 0
+            v 0 1 0
+            vt 0 0
+            vt 1 0
+            vt 0 1
+            usemtl painted
+            f 1/1 2/2 3/3
+            """
+        ),
+        encoding="utf-8",
+    )
+    (directory / "material.mtl").write_text(
+        "newmtl painted\nmap_Kd texture.png\n",
+        encoding="utf-8",
+    )
+    Image.new("RGB", (2, 2), color=(12, 34, 56)).save(directory / "texture.png")
+    return source_path
+
+
+def _write_external_buffer_gltf(directory: Path) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    binary = struct.pack(
+        "<9f3H",
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0,
+        1,
+        2,
+    )
+    document = {
+        "asset": {"version": "2.0"},
+        "buffers": [{"byteLength": len(binary), "uri": "geometry.bin"}],
+        "bufferViews": [
+            {"buffer": 0, "byteOffset": 0, "byteLength": 36, "target": 34962},
+            {"buffer": 0, "byteOffset": 36, "byteLength": 6, "target": 34963},
+        ],
+        "accessors": [
+            {
+                "bufferView": 0,
+                "componentType": 5126,
+                "count": 3,
+                "type": "VEC3",
+                "max": [1, 1, 0],
+                "min": [0, 0, 0],
+            },
+            {
+                "bufferView": 1,
+                "componentType": 5123,
+                "count": 3,
+                "type": "SCALAR",
+                "max": [2],
+                "min": [0],
+            },
+        ],
+        "meshes": [
+            {
+                "primitives": [
+                    {"attributes": {"POSITION": 0}, "indices": 1, "mode": 4}
+                ]
+            }
+        ],
+        "nodes": [{"mesh": 0}],
+        "scenes": [{"nodes": [0]}],
+        "scene": 0,
+    }
+    source_path = directory / "fragment.gltf"
+    source_path.write_text(json.dumps(document), encoding="utf-8")
+    (directory / "geometry.bin").write_bytes(binary)
+    return source_path
 
 
 class TestProjectFile(unittest.TestCase):
@@ -1070,6 +1157,51 @@ class TestEmbeddedArtifactProject(unittest.TestCase):
             self.assertEqual(project_path.read_bytes(), previous)
             self.assertEqual(self._temp_artifacts(project_path), [])
 
+    def test_changed_captured_dependency_fails_before_destination_replace(self):
+        with tempfile.TemporaryDirectory() as td:
+            directory = Path(td)
+            source_dir = directory / "source"
+            source_path = _write_textured_obj(source_dir)
+            session = _artifact_session_from_path(source_path)
+            project_path = directory / "existing.amr"
+            previous = b"previous-destination"
+            project_path.write_bytes(previous)
+            Image.new("RGB", (2, 2), color=(255, 0, 0)).save(
+                source_dir / "texture.png"
+            )
+
+            with self.assertRaises(ProjectSaveError) as raised:
+                save_artifact_session_project(project_path, session)
+
+            self.assertEqual(raised.exception.stage, "source_verification")
+            self.assertFalse(raised.exception.committed)
+            self.assertEqual(project_path.read_bytes(), previous)
+            self.assertEqual(self._temp_artifacts(project_path), [])
+
+    def test_corrupt_dependency_blob_fails_closed_even_with_rewritten_checksums(self):
+        with tempfile.TemporaryDirectory() as td:
+            directory = Path(td)
+            source_path = _write_textured_obj(directory / "source")
+            session = _artifact_session_from_path(source_path)
+            project_path = directory / "base.amr"
+            save_artifact_session_project(project_path, session)
+            files = self._read_archive(project_path)
+            source_index = json.loads(files[SOURCE_INDEX_NAME])
+            dependency = next(
+                entry
+                for entry in source_index["entries"]
+                if entry["role"] == "import_dependency"
+            )
+            dependency_member = dependency["member"]
+            changed = bytearray(files[dependency_member])
+            changed[0] ^= 1
+            files[dependency_member] = bytes(changed)
+            corrupt_path = directory / "corrupt-dependency.amr"
+            self._rewrite_archive(corrupt_path, files)
+
+            with self.assertRaisesRegex(ProjectFormatError, "SHA-256"):
+                load_artifact_project_package(corrupt_path)
+
     def test_corrupt_missing_and_orphan_source_blobs_fail_closed(self):
         with tempfile.TemporaryDirectory() as td:
             directory = Path(td)
@@ -1165,6 +1297,100 @@ class TestEmbeddedArtifactProject(unittest.TestCase):
             self.assertEqual(same_path.document, restored.document)
             np.testing.assert_allclose(
                 same_path.materialize().mesh.vertices,
+                expected_vertices,
+                rtol=0.0,
+                atol=1e-12,
+            )
+
+    def test_obj_sidecar_closure_materializes_offline_and_resaves(self):
+        with tempfile.TemporaryDirectory() as td:
+            directory = Path(td)
+            source_dir = directory / "source"
+            source_dir.mkdir()
+            source_path = source_dir / "fragment.obj"
+            source_path.write_text(
+                textwrap.dedent(
+                    """\
+                    mtllib material.mtl
+                    v 0 0 0
+                    v 1 0 0
+                    v 0 1 0
+                    vt 0 0
+                    vt 1 0
+                    vt 0 1
+                    usemtl painted
+                    f 1/1 2/2 3/3
+                    """
+                ),
+                encoding="utf-8",
+            )
+            (source_dir / "material.mtl").write_text(
+                "newmtl painted\nmap_Kd texture.png\n",
+                encoding="utf-8",
+            )
+            Image.new("RGB", (2, 2), color=(12, 34, 56)).save(
+                source_dir / "texture.png"
+            )
+            session = _artifact_session_from_path(source_path)
+            self.assertEqual(
+                session.document.geometry_revisions[0].import_recipe[
+                    "dependency_policy"
+                ],
+                "closed_manifest",
+            )
+            expected_texture = np.asarray(session.source_mesh.texture).copy()
+            project_path = directory / "portable.amr"
+
+            save_artifact_session_project(project_path, session)
+            with zipfile.ZipFile(project_path, "r") as zf:
+                source_index = json.loads(zf.read(SOURCE_INDEX_NAME))
+                source_members = {
+                    name
+                    for name in zf.namelist()
+                    if name.startswith("sources/blobs/sha256/")
+                }
+            self.assertEqual(source_index["schema_version"], "2.0.0")
+            self.assertEqual(len(source_index["entries"]), 3)
+            self.assertEqual(len(source_members), 3)
+
+            source_path.unlink()
+            (source_dir / "material.mtl").unlink()
+            (source_dir / "texture.png").unlink()
+            restored = load_artifact_session_project(project_path)
+
+            self.assertEqual(restored.document, session.document)
+            np.testing.assert_array_equal(restored.source_mesh.texture, expected_texture)
+            self.assertEqual(len(restored.source_mesh.source_resources), 3)
+            resaved_path = directory / "portable-resaved.amr"
+            save_artifact_session_project(resaved_path, restored)
+            resaved = load_artifact_session_project(resaved_path)
+            self.assertEqual(resaved.document, restored.document)
+            np.testing.assert_array_equal(resaved.source_mesh.texture, expected_texture)
+
+    def test_gltf_external_buffer_materializes_offline(self):
+        with tempfile.TemporaryDirectory() as td:
+            directory = Path(td)
+            source_dir = directory / "source"
+            source_path = _write_external_buffer_gltf(source_dir)
+            session = _artifact_session_from_path(source_path)
+            expected_vertices = np.asarray(session.source_mesh.vertices).copy()
+            project_path = directory / "portable-gltf.amr"
+
+            save_artifact_session_project(project_path, session)
+            source_path.unlink()
+            (source_dir / "geometry.bin").unlink()
+            restored = load_artifact_session_project(project_path)
+
+            self.assertEqual(restored.document, session.document)
+            self.assertEqual(
+                restored.document.geometry_revisions[0].import_recipe[
+                    "dependency_policy"
+                ],
+                "closed_manifest",
+            )
+            self.assertEqual(len(restored.source_mesh.source_resources), 2)
+            np.testing.assert_allclose(
+                restored.source_mesh.vertices,
                 expected_vertices,
                 rtol=0.0,
                 atol=1e-12,

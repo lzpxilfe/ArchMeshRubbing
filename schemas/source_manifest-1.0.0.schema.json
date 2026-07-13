@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:archmeshrubbing:schema:source-manifest:1.0.0",
+  "title": "ArchMeshRubbing Source Manifest 1.0.0",
+  "description": "Closed logical-path and content inventory for every byte stream used by one authoritative mesh parse.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format",
+    "schema_version",
+    "resolver_profile",
+    "primary_logical_path",
+    "entries"
+  ],
+  "properties": {
+    "format": {"const": "archmeshrubbing_source_manifest"},
+    "schema_version": {"const": "1.0.0"},
+    "resolver_profile": {"const": "relative-contained-v1"},
+    "primary_logical_path": {"$ref": "#/$defs/logicalPath"},
+    "entries": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 61,
+      "contains": {
+        "type": "object",
+        "required": ["role"],
+        "properties": {"role": {"const": "primary_mesh"}}
+      },
+      "minContains": 1,
+      "maxContains": 1,
+      "items": {"$ref": "#/$defs/entry"}
+    }
+  },
+  "$defs": {
+    "nonEmptyString": {"type": "string", "pattern": ".*\\S.*"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "logicalPath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^(?!/)(?![A-Za-z][A-Za-z0-9+.-]*:)(?!.*\\\\)(?!.*[\\u0000-\\u001f\\u007f])(?!.*(?:^|/)\\.\\.?($|/))(?!.*//).+$"
+    },
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["logical_path", "media_type", "role", "sha256", "size_bytes"],
+      "properties": {
+        "logical_path": {"$ref": "#/$defs/logicalPath"},
+        "media_type": {"$ref": "#/$defs/nonEmptyString"},
+        "role": {"enum": ["primary_mesh", "import_dependency"]},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "size_bytes": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}

@@ -29,7 +29,7 @@ from src.core.mesh_import_recipe import (
     MeshImportRecipeError,
     current_mesh_import_recipe,
 )
-from src.core.mesh_loader import MeshData
+from src.core.mesh_loader import MeshData, MeshLoader
 from src.core.source_identity import SourceFingerprint
 
 
@@ -314,6 +314,39 @@ def test_loaded_source_must_match_ticketed_parser_receipt() -> None:
 
     assert workbench.snapshot.pending_load is ticket
     assert workbench.snapshot.session is None
+
+
+def test_new_import_accepts_manifest_finalized_from_ticketed_parser_base(
+    tmp_path: Path,
+) -> None:
+    source_path = tmp_path / "artifact.obj"
+    source_path.write_text(
+        "mtllib material.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "material.mtl").write_text(
+        "newmtl plain\nKd 0.5 0.5 0.5\n",
+        encoding="utf-8",
+    )
+    workbench = ArtifactWorkbench(id_factory=SequentialIds())
+    ticket = workbench.begin_new_import(
+        str(source_path),
+        _metadata(),
+        software_version="0.1.0",
+        operator="pytest",
+        created_at=STAMP,
+    )
+    mesh = MeshLoader(default_unit="mm").load(source_path, unit="cm")
+
+    transition = workbench.prepare_loaded_source(ticket, mesh)
+
+    assert ticket.capture_dependencies
+    assert ticket.import_recipe["dependency_policy"] == "deny_external"
+    geometry = transition.candidate_session.document.geometry_revisions[0]
+    assert geometry.import_recipe["dependency_policy"] == "closed_manifest"
+    assert geometry.import_recipe["source_manifest"]["entries"][0][
+        "logical_path"
+    ] == "artifact.obj"
 
 
 def test_reused_request_id_cannot_revive_a_cancelled_ticket() -> None:
@@ -1020,22 +1053,22 @@ def test_invalid_or_unconfirmed_metadata_is_rejected_before_state_changes() -> N
     assert workbench.snapshot is initial
 
 
-def test_external_buffer_gltf_is_rejected_before_open_state_changes() -> None:
+def test_gltf_new_import_uses_dependency_capture_ticket() -> None:
     workbench = ArtifactWorkbench(id_factory=SequentialIds())
-    initial = workbench.snapshot
 
-    with pytest.raises(ArtifactWorkbenchError, match="external buffers.*GLB"):
-        workbench.begin_new_import(
-            "/source/artifact.gltf",
-            _metadata(),
-            software_version="0.1.0",
-            operator="pytest",
-        )
+    ticket = workbench.begin_new_import(
+        "/source/artifact.gltf",
+        _metadata(),
+        software_version="0.1.0",
+        operator="pytest",
+    )
 
-    assert workbench.snapshot is initial
+    assert ticket.source_format == "gltf"
+    assert ticket.capture_dependencies
+    assert workbench.snapshot.pending_load is ticket
 
 
-def test_saved_gltf_recipe_is_rejected_before_project_reopen_state_changes() -> None:
+def test_saved_gltf_recipe_can_begin_closed_project_reopen() -> None:
     saved = _session(explicit_align=True)
     metadata_id = saved.document.active_source_metadata_revision_id
     assert metadata_id is not None
@@ -1050,16 +1083,15 @@ def test_saved_gltf_recipe_is_rejected_before_project_reopen_state_changes() -> 
         geometry_revisions=(gltf_geometry,),
     )
     workbench = ArtifactWorkbench(id_factory=SequentialIds())
-    initial = workbench.snapshot
+    ticket = workbench.begin_project_reopen(
+        document,
+        project_path="/projects/external-gltf.amr",
+        resolved_source_path="/source/artifact.gltf",
+    )
 
-    with pytest.raises(ArtifactWorkbenchError, match="external buffers.*GLB"):
-        workbench.begin_project_reopen(
-            document,
-            project_path="/projects/external-gltf.amr",
-            resolved_source_path="/source/artifact.gltf",
-        )
-
-    assert workbench.snapshot is initial
+    assert ticket.source_format == "gltf"
+    assert not ticket.capture_dependencies
+    assert workbench.snapshot.pending_load is ticket
 
 
 def test_application_workbench_has_no_qt_opengl_or_gui_imports() -> None:

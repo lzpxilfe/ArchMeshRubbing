@@ -7,18 +7,33 @@ Supports: OBJ, PLY, STL, OFF formats
 
 from dataclasses import dataclass, field
 import hashlib
+import os
+import stat
 import tempfile
 from pathlib import Path
-from typing import BinaryIO, Mapping, Optional, List, Union, cast
+from typing import BinaryIO, Callable, Mapping, Optional, List, Union, cast
 import logging
 import numpy as np
 
 from .logging_utils import log_once
 from .mesh_import_recipe import (
     current_mesh_import_recipe,
+    mesh_import_recipe_with_manifest,
     validate_mesh_import_recipe,
 )
 from .source_identity import SourceFingerprint, open_fingerprinted_file
+from .source_manifest import (
+    DEPENDENCY_RESOURCE_ROLE,
+    MAX_SOURCE_MANIFEST_ENTRIES,
+    PRIMARY_RESOURCE_ROLE,
+    ResolvedSourceResource,
+    SourceManifest,
+    SourceManifestEntry,
+    SourceManifestError,
+    canonical_logical_path,
+    fixed_media_type,
+    resolve_logical_reference,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -83,37 +98,356 @@ class _RecordingDenyResolver(Resolver):
         self._record(key)
         return False
 
+    def validate_after_load(self) -> None:
+        if self.requests:
+            raise ExternalMeshDependencyError(
+                "authoritative source requested external sidecar assets; "
+                "dependency_policy=deny_external"
+            )
+
+
+@dataclass(slots=True)
+class _CapturedResolverState:
+    root: Path
+    primary_logical_path: str
+    payloads: dict[str, bytes] = field(default_factory=dict)
+    resources: dict[str, ResolvedSourceResource] = field(default_factory=dict)
+    failures: list[str] = field(default_factory=list)
+
+
+def _read_resolved_resource(
+    root: Path,
+    logical_path: str,
+) -> tuple[bytes, str, SourceFingerprint]:
+    """Read one contained regular file and bind the returned bytes to its hash."""
+
+    candidate = root.joinpath(*logical_path.split("/"))
+    try:
+        resolved = candidate.resolve(strict=True)
+        resolved.relative_to(root)
+    except (FileNotFoundError, OSError, ValueError) as exc:
+        raise SourceManifestError(
+            f"dependency is missing or escapes the source root: {logical_path!r}"
+        ) from exc
+    if not resolved.is_file():
+        raise SourceManifestError(
+            f"dependency is not a regular file: {logical_path!r}"
+        )
+    with open_fingerprinted_file(resolved) as (stream, fingerprint):
+        try:
+            opened_target = resolved.resolve(strict=True)
+            opened_target.relative_to(root)
+        except (FileNotFoundError, OSError, ValueError) as exc:
+            raise SourceManifestError(
+                f"dependency escaped the source root while opening: {logical_path!r}"
+            ) from exc
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            raise SourceManifestError(
+                f"dependency is not an opened regular file: {logical_path!r}"
+            )
+        payload = stream.read()
+        if not isinstance(payload, bytes):
+            payload = bytes(payload)
+        if len(payload) != fingerprint.size_bytes:
+            raise SourceManifestError(
+                f"dependency size changed while reading: {logical_path!r}"
+            )
+    return payload, str(resolved), fingerprint
+
+
+class _CapturingDirectoryResolver(Resolver):
+    """Read only parser-requested files contained by the primary source root."""
+
+    def __init__(
+        self,
+        root: Path,
+        primary_logical_path: str,
+        *,
+        namespace: str = "",
+        state: _CapturedResolverState | None = None,
+    ) -> None:
+        resolved_root = root.resolve(strict=True)
+        if not resolved_root.is_dir():
+            raise SourceManifestError("source resolver root must be a directory")
+        self._state = state or _CapturedResolverState(
+            root=resolved_root,
+            primary_logical_path=canonical_logical_path(primary_logical_path),
+        )
+        self._namespace = namespace
+
+    @property
+    def resources(self) -> tuple[ResolvedSourceResource, ...]:
+        return tuple(
+            self._state.resources[path]
+            for path in sorted(self._state.resources)
+        )
+
+    def _logical_path(self, key: object) -> str:
+        return resolve_logical_reference(self._namespace, key)
+
+    def get(self, key: object) -> bytes:
+        try:
+            logical_path = self._logical_path(key)
+            if logical_path == self._state.primary_logical_path:
+                raise SourceManifestError(
+                    "a sidecar reference resolves to the primary mesh path"
+                )
+            cached = self._state.payloads.get(logical_path)
+            if cached is not None:
+                return cached
+            if len(self._state.resources) >= MAX_SOURCE_MANIFEST_ENTRIES - 1:
+                raise SourceManifestError(
+                    "source dependency closure exceeds the portable entry budget"
+                )
+            payload, locator, fingerprint = _read_resolved_resource(
+                self._state.root,
+                logical_path,
+            )
+            entry = SourceManifestEntry(
+                logical_path=logical_path,
+                media_type=fixed_media_type(logical_path),
+                role=DEPENDENCY_RESOURCE_ROLE,
+                sha256=fingerprint.sha256,
+                size_bytes=fingerprint.size_bytes,
+            )
+            self._state.payloads[logical_path] = payload
+            self._state.resources[logical_path] = ResolvedSourceResource(
+                entry=entry,
+                locator=locator,
+            )
+            return payload
+        except Exception as exc:
+            self._state.failures.append(str(exc))
+            raise FileNotFoundError(str(exc)) from exc
+
+    def write(self, name: str, data: object) -> None:
+        del data
+        self._state.failures.append(f"parser attempted resolver write: {name!r}")
+        raise PermissionError("authoritative source resolver is read-only")
+
+    def namespaced(self, namespace: str) -> "_CapturingDirectoryResolver":
+        try:
+            namespace_text = str(namespace).strip()
+            combined = (
+                self._namespace
+                if not namespace_text
+                else resolve_logical_reference(self._namespace, namespace_text)
+            )
+        except Exception as exc:
+            self._state.failures.append(str(exc))
+            raise
+        return _CapturingDirectoryResolver(
+            self._state.root,
+            self._state.primary_logical_path,
+            namespace=combined,
+            state=self._state,
+        )
+
+    def keys(self) -> tuple[str, ...]:
+        prefix = f"{self._namespace}/" if self._namespace else ""
+        return tuple(
+            path.removeprefix(prefix)
+            for path in sorted(self._state.payloads)
+            if path.startswith(prefix)
+        )
+
+    def __contains__(self, key: object) -> bool:
+        try:
+            self.get(key)
+        except FileNotFoundError:
+            return False
+        return True
+
+    def validate_after_load(self) -> None:
+        if self._state.failures:
+            raise ExternalMeshDependencyError(
+                "authoritative source requested an unsafe, missing, or unreadable "
+                "sidecar under resolver_profile=relative-contained-v1"
+            )
+
+
+ResourcePayloadLoader = Callable[[SourceManifestEntry], tuple[bytes, str]]
+
+
+@dataclass(slots=True)
+class _ClosedResolverState:
+    entries: dict[str, SourceManifestEntry]
+    loader: ResourcePayloadLoader
+    payloads: dict[str, bytes] = field(default_factory=dict)
+    resources: dict[str, ResolvedSourceResource] = field(default_factory=dict)
+    requested: set[str] = field(default_factory=set)
+    failures: list[str] = field(default_factory=list)
+
+
+class _ClosedManifestResolver(Resolver):
+    """Replay only the dependency bytes declared by a strict v2 receipt."""
+
+    def __init__(
+        self,
+        manifest: SourceManifest,
+        loader: ResourcePayloadLoader,
+        *,
+        namespace: str = "",
+        state: _ClosedResolverState | None = None,
+    ) -> None:
+        if not isinstance(manifest, SourceManifest):
+            raise SourceManifestError("closed resolver needs a SourceManifest")
+        self._manifest = manifest
+        self._namespace = namespace
+        self._state = state or _ClosedResolverState(
+            entries={entry.logical_path: entry for entry in manifest.dependency_entries},
+            loader=loader,
+        )
+
+    @property
+    def resources(self) -> tuple[ResolvedSourceResource, ...]:
+        return tuple(
+            self._state.resources[path]
+            for path in sorted(self._state.resources)
+        )
+
+    def get(self, key: object) -> bytes:
+        try:
+            logical_path = resolve_logical_reference(self._namespace, key)
+            entry = self._state.entries.get(logical_path)
+            if entry is None:
+                raise SourceManifestError(
+                    f"parser requested undeclared dependency: {logical_path!r}"
+                )
+            self._state.requested.add(logical_path)
+            cached = self._state.payloads.get(logical_path)
+            if cached is not None:
+                return cached
+            payload, locator = self._state.loader(entry)
+            if not isinstance(payload, bytes):
+                payload = bytes(payload)
+            observed_digest = hashlib.sha256(payload).hexdigest()
+            if len(payload) != entry.size_bytes or observed_digest != entry.sha256:
+                raise SourceManifestError(
+                    f"dependency bytes do not match the source manifest: {logical_path!r}"
+                )
+            self._state.payloads[logical_path] = payload
+            self._state.resources[logical_path] = ResolvedSourceResource(
+                entry=entry,
+                locator=locator,
+            )
+            return payload
+        except Exception as exc:
+            self._state.failures.append(str(exc))
+            raise FileNotFoundError(str(exc)) from exc
+
+    def write(self, name: str, data: object) -> None:
+        del data
+        self._state.failures.append(f"parser attempted resolver write: {name!r}")
+        raise PermissionError("authoritative source resolver is read-only")
+
+    def namespaced(self, namespace: str) -> "_ClosedManifestResolver":
+        try:
+            namespace_text = str(namespace).strip()
+            combined = (
+                self._namespace
+                if not namespace_text
+                else resolve_logical_reference(self._namespace, namespace_text)
+            )
+        except Exception as exc:
+            self._state.failures.append(str(exc))
+            raise
+        return _ClosedManifestResolver(
+            self._manifest,
+            self._state.loader,
+            namespace=combined,
+            state=self._state,
+        )
+
+    def keys(self) -> tuple[str, ...]:
+        prefix = f"{self._namespace}/" if self._namespace else ""
+        return tuple(
+            path.removeprefix(prefix)
+            for path in sorted(self._state.entries)
+            if path.startswith(prefix)
+        )
+
+    def __contains__(self, key: object) -> bool:
+        try:
+            self.get(key)
+        except FileNotFoundError:
+            return False
+        return True
+
+    def validate_after_load(self) -> None:
+        missing = sorted(set(self._state.entries) - self._state.requested)
+        if self._state.failures or missing:
+            raise ExternalMeshDependencyError(
+                "parser dependency requests do not exactly match the closed source manifest"
+            )
+
+
+def _primary_resource_entry(
+    fingerprint: SourceFingerprint,
+    logical_path: str,
+) -> SourceManifestEntry:
+    return SourceManifestEntry(
+        logical_path=logical_path,
+        media_type=fixed_media_type(logical_path),
+        role=PRIMARY_RESOURCE_ROLE,
+        sha256=fingerprint.sha256,
+        size_bytes=fingerprint.size_bytes,
+    )
+
+
+def _require_manifest_primary(
+    manifest: SourceManifest,
+    fingerprint: SourceFingerprint,
+) -> None:
+    primary = manifest.primary_entry
+    if (
+        primary.sha256 != fingerprint.sha256
+        or primary.size_bytes != fingerprint.size_bytes
+    ):
+        raise ExternalMeshDependencyError(
+            "primary source bytes do not match the closed source manifest"
+        )
+
+
+def _directory_payload_loader(root: Path) -> ResourcePayloadLoader:
+    resolved_root = root.resolve(strict=True)
+
+    def load(entry: SourceManifestEntry) -> tuple[bytes, str]:
+        payload, locator, _fingerprint = _read_resolved_resource(
+            resolved_root,
+            entry.logical_path,
+        )
+        return payload, locator
+
+    return load
+
 
 def _load_authoritative_trimesh(
     source_stream: BinaryIO,
     *,
     source_format: str,
+    resolver: Resolver | None = None,
 ) -> object:
-    """Execute the closed parser profile with an external-dependency deny gate."""
+    """Execute the closed parser profile with an explicit resolver boundary."""
 
-    resolver = _RecordingDenyResolver()
+    active_resolver = resolver or _RecordingDenyResolver()
     try:
         loaded = trimesh.load(
             source_stream,
             file_type=source_format,
-            resolver=resolver,
+            resolver=active_resolver,
             allow_remote=False,
             force="mesh",
             process=False,
             maintain_order=True,
         )
     except Exception as exc:
-        if resolver.requests:
-            raise ExternalMeshDependencyError(
-                "authoritative source requested external sidecar assets; "
-                "dependency_policy=deny_external"
-            ) from exc
+        try:
+            active_resolver.validate_after_load()  # type: ignore[attr-defined]
+        except ExternalMeshDependencyError as dependency_exc:
+            raise dependency_exc from exc
         raise
-    if resolver.requests:
-        raise ExternalMeshDependencyError(
-            "authoritative source requested external sidecar assets; "
-            "dependency_policy=deny_external"
-        )
+    active_resolver.validate_after_load()  # type: ignore[attr-defined]
     return loaded
 
 
@@ -141,7 +475,7 @@ class MeshData:
     unit: str = 'mm'
     filepath: Optional[Path] = None
     # Identity of the raw primary file before unit scaling, centering, or any
-    # other geometry mutation. Sidecars are intentionally outside M0-1 scope.
+    # other geometry mutation.
     source_identity: Optional[SourceFingerprint] = None
     # Parser recipe is separate from filename/extension hints so a byte-identical
     # relocated file can be renamed without changing how its bytes are decoded.
@@ -149,6 +483,9 @@ class MeshData:
     # Exact parser/runtime receipt used to create authoritative source geometry.
     # This is runtime provenance; the durable copy lives in GeometryRevision.
     source_import_recipe: Optional[Mapping[str, object]] = None
+    # Runtime locators for the primary and every manifest-bound dependency.
+    # Locators are never serialized into the ArtifactDocument.
+    source_resources: tuple[ResolvedSourceResource, ...] = ()
     
     # Computed properties cache
     _bounds: Optional[np.ndarray] = field(default=None, repr=False)
@@ -259,6 +596,25 @@ class MeshData:
             if not isinstance(self.source_import_recipe, Mapping):
                 raise TypeError("source_import_recipe must be a mapping or None")
             self.source_import_recipe = dict(self.source_import_recipe)
+        try:
+            resources = tuple(self.source_resources)
+        except TypeError as exc:
+            raise TypeError("source_resources must be iterable") from exc
+        if not all(isinstance(item, ResolvedSourceResource) for item in resources):
+            raise TypeError(
+                "source_resources must contain only ResolvedSourceResource values"
+            )
+        resource_keys = [
+            (item.entry.logical_path, item.entry.sha256) for item in resources
+        ]
+        if len(resource_keys) != len(set(resource_keys)):
+            raise ValueError("source_resources must not contain duplicate entries")
+        self.source_resources = tuple(
+            sorted(
+                resources,
+                key=lambda item: (item.entry.logical_path, item.entry.sha256),
+            )
+        )
     
     @property
     def n_vertices(self) -> int:
@@ -564,6 +920,7 @@ class MeshData:
             source_identity=self.source_identity,
             source_format=self.source_format,
             source_import_recipe=self.source_import_recipe,
+            source_resources=self.source_resources,
         )
     
     def to_trimesh(self) -> 'trimesh.Trimesh':
@@ -598,7 +955,8 @@ class MeshData:
                      unit: str = 'mm',
                      source_identity: Optional[SourceFingerprint] = None,
                      source_format: Optional[str] = None,
-                     source_import_recipe: Optional[Mapping[str, object]] = None) -> 'MeshData':
+                     source_import_recipe: Optional[Mapping[str, object]] = None,
+                     source_resources: tuple[ResolvedSourceResource, ...] = ()) -> 'MeshData':
         """trimesh 객체에서 생성"""
         # 텍스처 추출 시도
         texture = None
@@ -628,6 +986,7 @@ class MeshData:
             source_identity=source_identity,
             source_format=source_format,
             source_import_recipe=source_import_recipe,
+            source_resources=source_resources,
         )
     
     def extract_submesh(self, face_indices: np.ndarray) -> 'MeshData':
@@ -651,6 +1010,7 @@ class MeshData:
                 source_identity=self.source_identity,
                 source_format=self.source_format,
                 source_import_recipe=self.source_import_recipe,
+                source_resources=self.source_resources,
             )
 
         # 크래시 방지: 인덱스 범위 밖 제거
@@ -670,6 +1030,7 @@ class MeshData:
                 source_identity=self.source_identity,
                 source_format=self.source_format,
                 source_import_recipe=self.source_import_recipe,
+                source_resources=self.source_resources,
             )
 
         selected_faces = faces[face_indices]
@@ -722,6 +1083,7 @@ class MeshData:
             source_identity=self.source_identity,
             source_format=self.source_format,
             source_import_recipe=self.source_import_recipe,
+            source_resources=self.source_resources,
         )
 
 
@@ -776,6 +1138,7 @@ class MeshLoader:
         *,
         source_format: Optional[str] = None,
         import_recipe: Mapping[str, object] | None = None,
+        capture_dependencies: bool | None = None,
     ) -> MeshData:
         """
         메쉬 파일 로드
@@ -823,6 +1186,36 @@ class MeshLoader:
                 "import recipe format does not match requested parser format: "
                 f"{execution.source_format!r} != {file_type!r}"
             )
+        capture = import_recipe is None if capture_dependencies is None else bool(
+            capture_dependencies
+        )
+        if capture and execution.source_manifest is not None:
+            raise ValueError(
+                "dependency capture cannot replace an existing closed source manifest"
+            )
+
+        if execution.source_manifest is not None:
+            primary_logical_path = execution.source_manifest.primary_logical_path
+        else:
+            primary_logical_path = canonical_logical_path(
+                filepath.name,
+                field_name="primary source logical path",
+            )
+        resolver: Resolver
+        resolved_primary_path = filepath.resolve(strict=True)
+        resolver_root = resolved_primary_path.parent
+        if capture:
+            resolver = _CapturingDirectoryResolver(
+                resolver_root,
+                primary_logical_path,
+            )
+        elif execution.source_manifest is not None:
+            resolver = _ClosedManifestResolver(
+                execution.source_manifest,
+                _directory_payload_loader(resolver_root),
+            )
+        else:
+            resolver = _RecordingDenyResolver()
 
         # Hash and parse the exact same open descriptor. Reopening by path here
         # would allow a same-size/same-mtime replacement to pair one file's
@@ -835,7 +1228,32 @@ class MeshLoader:
             mesh = _load_authoritative_trimesh(
                 source_stream,
                 source_format=file_type,
+                resolver=resolver,
             )
+
+        primary_entry = _primary_resource_entry(
+            source_identity,
+            primary_logical_path,
+        )
+        primary_resource = ResolvedSourceResource(
+            entry=primary_entry,
+            locator=str(resolved_primary_path),
+        )
+        if isinstance(resolver, _CapturingDirectoryResolver):
+            manifest = SourceManifest(
+                primary_logical_path=primary_logical_path,
+                entries=(primary_entry, *(item.entry for item in resolver.resources)),
+            )
+            receipt = mesh_import_recipe_with_manifest(recipe, manifest)
+            source_resources = (primary_resource, *resolver.resources)
+        elif isinstance(resolver, _ClosedManifestResolver):
+            assert execution.source_manifest is not None
+            _require_manifest_primary(execution.source_manifest, source_identity)
+            receipt = dict(recipe)
+            source_resources = (primary_resource, *resolver.resources)
+        else:
+            receipt = dict(recipe)
+            source_resources = (primary_resource,)
         
         # Scene인 경우 단일 메쉬로 병합
         if isinstance(mesh, trimesh.Scene):
@@ -854,7 +1272,8 @@ class MeshLoader:
             unit=unit,
             source_identity=source_identity,
             source_format=file_type,
-            source_import_recipe=dict(recipe),
+            source_import_recipe=receipt,
+            source_resources=source_resources,
         )
         
         # 법선 계산 (없는 경우)
@@ -873,6 +1292,8 @@ class MeshLoader:
         expected_size_bytes: int,
         original_name: str,
         import_recipe: Mapping[str, object] | None = None,
+        dependency_loader: ResourcePayloadLoader | None = None,
+        primary_locator: str | None = None,
     ) -> MeshData:
         """Verify and load one primary mesh stream without trusting a path.
 
@@ -880,9 +1301,9 @@ class MeshLoader:
         spool which rolls over to a temporary file for larger sources.  The
         digest and length are checked before the parser sees any bytes, then
         the exact verified spool descriptor is rewound and passed to trimesh.
-        Only the primary file bytes are fingerprinted.  Any attempt to resolve
-        an external buffer, material, or texture is rejected by the same
-        ``dependency_policy=deny_external`` gate used for path-based imports.
+        The primary stream is verified before parsing. Strict v1 receipts deny
+        every sidecar; strict v2 receipts can resolve only manifest-declared
+        bytes supplied by ``dependency_loader``.
         """
         format_hint = str(source_format or "").strip().lower().removeprefix(".")
         parse_ext = f".{format_hint}" if format_hint else ""
@@ -911,6 +1332,18 @@ class MeshLoader:
                 "import recipe format does not match source_format: "
                 f"{execution.source_format!r} != {format_hint!r}"
             )
+        resolver: Resolver
+        if execution.source_manifest is not None:
+            if dependency_loader is None:
+                raise ValueError(
+                    "closed source manifest requires a dependency payload loader"
+                )
+            resolver = _ClosedManifestResolver(
+                execution.source_manifest,
+                dependency_loader,
+            )
+        else:
+            resolver = _RecordingDenyResolver()
 
         digest = hashlib.sha256()
         observed_size = 0
@@ -957,10 +1390,13 @@ class MeshLoader:
                 original_name=display_name,
                 format=format_hint,
             )
+            if execution.source_manifest is not None:
+                _require_manifest_primary(execution.source_manifest, source_identity)
             verified_stream.seek(0)
             mesh = _load_authoritative_trimesh(
                 cast(BinaryIO, verified_stream),
                 source_format=format_hint,
+                resolver=resolver,
             )
 
         display_path = Path(display_name)
@@ -973,6 +1409,23 @@ class MeshLoader:
         if not isinstance(mesh, trimesh.Trimesh):
             raise TypeError(f"Expected trimesh.Trimesh, got {type(mesh).__name__}")
 
+        primary_logical_path = (
+            execution.source_manifest.primary_logical_path
+            if execution.source_manifest is not None
+            else canonical_logical_path(
+                display_path.name,
+                field_name="primary source logical path",
+            )
+        )
+        primary_resource = ResolvedSourceResource(
+            entry=_primary_resource_entry(source_identity, primary_logical_path),
+            locator=str(primary_locator or display_name),
+        )
+        dependency_resources = (
+            resolver.resources
+            if isinstance(resolver, _ClosedManifestResolver)
+            else ()
+        )
         mesh_data = MeshData.from_trimesh(
             mesh,
             filepath=display_path,
@@ -980,6 +1433,7 @@ class MeshLoader:
             source_identity=source_identity,
             source_format=format_hint,
             source_import_recipe=dict(recipe),
+            source_resources=(primary_resource, *dependency_resources),
         )
         mesh_data.compute_normals(compute_vertex_normals=False)
         return mesh_data

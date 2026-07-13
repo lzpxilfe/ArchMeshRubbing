@@ -1,11 +1,12 @@
 """Closed, versioned execution contract for authoritative mesh imports.
 
-The source digest identifies bytes, while this recipe identifies how those
-bytes become the source-space vertices and triangles used by every later
-measurement.  New native documents always carry the strict v1 contract.
-Previously released five-field recipes and the official two-field document
-fixture remain executable only through explicit legacy profiles whose results
-are still checked by the geometry digest.
+The primary source digest identifies one file, while this recipe identifies how
+the complete parser input becomes the source-space vertices and triangles used
+by every later measurement. Self-contained imports retain strict v1; imports
+that actually consume relative sidecars finalize as strict v2 with a closed
+source manifest. Previously released five-field recipes and the official
+two-field document fixture remain executable only through explicit legacy
+profiles whose results are still checked by the geometry digest.
 """
 
 from __future__ import annotations
@@ -18,19 +19,27 @@ from typing import Any, Mapping
 
 from src.build_info import runtime_lock
 
+from .source_manifest import (
+    SOURCE_RESOLVER_PROFILE,
+    SourceManifest,
+    SourceManifestError,
+)
+
 
 MESH_IMPORT_RECIPE_ID = "org.archmeshrubbing.mesh-import.trimesh"
 MESH_IMPORT_RECIPE_VERSION = "1.0.0"
+MESH_IMPORT_RECIPE_VERSION_CLOSED_MANIFEST = "2.0.0"
 MESH_IMPORT_LOADER = "trimesh"
 MESH_IMPORT_FORCE = "mesh"
 MESH_IMPORT_SANITIZER = "meshdata-v1"
 MESH_IMPORT_SCENE_MERGE = "trimesh.util.concatenate/v1"
 MESH_IMPORT_DEPENDENCY_POLICY = "deny_external"
+MESH_IMPORT_CLOSED_MANIFEST_POLICY = "closed_manifest"
 
 SUPPORTED_SOURCE_FORMATS = frozenset({"obj", "ply", "stl", "off", "gltf", "glb"})
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-_STRICT_KEYS = frozenset(
+_STRICT_V1_KEYS = frozenset(
     {
         "recipe_id",
         "recipe_version",
@@ -45,6 +54,13 @@ _STRICT_KEYS = frozenset(
         "scene_merge",
         "sanitizer",
         "dependency_policy",
+    }
+)
+_STRICT_V2_KEYS = frozenset(
+    {
+        *_STRICT_V1_KEYS,
+        "resolver_profile",
+        "source_manifest",
     }
 )
 _LEGACY_FULL_KEYS = frozenset(
@@ -154,12 +170,26 @@ class MeshImportExecution:
     loader_version: str
     parser_runtime_sha256: str
     runtime_lock_sha256: str
+    dependency_policy: str = MESH_IMPORT_DEPENDENCY_POLICY
+    source_manifest: SourceManifest | None = None
     legacy_unversioned: bool = False
 
     def strict_recipe(self) -> dict[str, Any]:
-        return {
+        if self.source_manifest is None:
+            if self.dependency_policy != MESH_IMPORT_DEPENDENCY_POLICY:
+                raise MeshImportRecipeError(
+                    "a manifest-free execution must use dependency_policy=deny_external"
+                )
+            recipe_version = MESH_IMPORT_RECIPE_VERSION
+        else:
+            if self.dependency_policy != MESH_IMPORT_CLOSED_MANIFEST_POLICY:
+                raise MeshImportRecipeError(
+                    "a source manifest execution must use dependency_policy=closed_manifest"
+                )
+            recipe_version = MESH_IMPORT_RECIPE_VERSION_CLOSED_MANIFEST
+        recipe: dict[str, Any] = {
             "recipe_id": MESH_IMPORT_RECIPE_ID,
-            "recipe_version": MESH_IMPORT_RECIPE_VERSION,
+            "recipe_version": recipe_version,
             "format": self.source_format,
             "loader": MESH_IMPORT_LOADER,
             "loader_version": self.loader_version,
@@ -170,8 +200,12 @@ class MeshImportExecution:
             "maintain_order": True,
             "scene_merge": MESH_IMPORT_SCENE_MERGE,
             "sanitizer": MESH_IMPORT_SANITIZER,
-            "dependency_policy": MESH_IMPORT_DEPENDENCY_POLICY,
+            "dependency_policy": self.dependency_policy,
         }
+        if self.source_manifest is not None:
+            recipe["resolver_profile"] = SOURCE_RESOLVER_PROFILE
+            recipe["source_manifest"] = self.source_manifest.to_dict()
+        return recipe
 
 
 def current_mesh_import_recipe(source_format: str) -> dict[str, Any]:
@@ -186,6 +220,50 @@ def current_mesh_import_recipe(source_format: str) -> dict[str, Any]:
     ).strict_recipe()
 
 
+def mesh_import_recipe_with_manifest(
+    base_recipe: Mapping[str, object],
+    manifest: SourceManifest,
+) -> dict[str, Any]:
+    """Finalize a new import receipt after recording its exact sidecar closure."""
+
+    if not isinstance(manifest, SourceManifest):
+        raise MeshImportRecipeError("manifest must be a SourceManifest")
+    execution = validate_mesh_import_recipe(
+        base_recipe,
+        allow_legacy=False,
+    )
+    if execution.source_manifest is not None:
+        raise MeshImportRecipeError("base recipe must not already contain a source manifest")
+    if not manifest.dependency_entries:
+        return dict(base_recipe)
+    recipe = dict(base_recipe)
+    recipe["recipe_version"] = MESH_IMPORT_RECIPE_VERSION_CLOSED_MANIFEST
+    recipe["dependency_policy"] = MESH_IMPORT_CLOSED_MANIFEST_POLICY
+    recipe["resolver_profile"] = SOURCE_RESOLVER_PROFILE
+    recipe["source_manifest"] = manifest.to_dict()
+    validate_mesh_import_recipe(recipe, allow_legacy=False)
+    return recipe
+
+
+def mesh_import_receipt_matches_base(
+    base_recipe: Mapping[str, object],
+    receipt: Mapping[str, object],
+) -> bool:
+    """Return whether a captured receipt executed the ticket's parser profile."""
+
+    try:
+        base = validate_mesh_import_recipe(base_recipe, allow_legacy=False)
+        observed = validate_mesh_import_recipe(receipt, allow_legacy=False)
+    except MeshImportRecipeError:
+        return False
+    if base.source_manifest is not None:
+        return dict(base_recipe) == dict(receipt)
+    shared_fields = _STRICT_V1_KEYS - {"recipe_version", "dependency_policy"}
+    return all(base_recipe.get(key) == receipt.get(key) for key in shared_fields) and (
+        base.source_format == observed.source_format
+    )
+
+
 def validate_mesh_import_recipe(
     value: Mapping[str, object],
     *,
@@ -194,12 +272,12 @@ def validate_mesh_import_recipe(
 ) -> MeshImportExecution:
     """Validate one executable strict or explicitly supported legacy recipe.
 
-    Strict v1 recipes must match the installed parser version and the digest
-    of the parser-relevant runtime subset.  The full lock digest is retained
-    as build provenance but deliberately is not an execution gate: unrelated
-    GUI/runtime pins must not make authoritative geometry unreadable.  Legacy
-    recipes can describe only the exact profiles emitted before v1; arbitrary
-    mappings are never treated as executable instructions.
+    Strict v1 and v2 recipes must match the installed parser version and the
+    digest of the parser-relevant runtime subset. The full lock digest is
+    retained as build provenance but deliberately is not an execution gate:
+    unrelated GUI/runtime pins must not make authoritative geometry unreadable.
+    Legacy recipes can describe only the exact profiles emitted before v1;
+    arbitrary mappings are never treated as executable instructions.
     """
 
     if not isinstance(value, Mapping):
@@ -237,16 +315,40 @@ def validate_mesh_import_recipe(
             legacy_unversioned=True,
         )
 
-    _exact_keys(value, _STRICT_KEYS, profile="strict v1")
+    recipe_version = value.get("recipe_version")
+    if recipe_version == MESH_IMPORT_RECIPE_VERSION:
+        _exact_keys(value, _STRICT_V1_KEYS, profile="strict v1")
+        dependency_policy = MESH_IMPORT_DEPENDENCY_POLICY
+        source_manifest = None
+    elif recipe_version == MESH_IMPORT_RECIPE_VERSION_CLOSED_MANIFEST:
+        _exact_keys(value, _STRICT_V2_KEYS, profile="strict v2")
+        dependency_policy = MESH_IMPORT_CLOSED_MANIFEST_POLICY
+        if value.get("resolver_profile") != SOURCE_RESOLVER_PROFILE:
+            raise MeshImportRecipeError(
+                "unsupported import_recipe.resolver_profile: "
+                f"{value.get('resolver_profile')!r}"
+            )
+        raw_manifest = value.get("source_manifest")
+        if not isinstance(raw_manifest, Mapping):
+            raise MeshImportRecipeError("import_recipe.source_manifest must be an object")
+        try:
+            source_manifest = SourceManifest.from_dict(raw_manifest)
+        except SourceManifestError as exc:
+            raise MeshImportRecipeError(
+                f"invalid import_recipe.source_manifest: {exc}"
+            ) from exc
+    else:
+        raise MeshImportRecipeError(
+            f"unsupported import_recipe.recipe_version: {recipe_version!r}"
+        )
     source_format = _stored_source_format(value.get("format"))
     expected_scalars = {
         "recipe_id": MESH_IMPORT_RECIPE_ID,
-        "recipe_version": MESH_IMPORT_RECIPE_VERSION,
         "loader": MESH_IMPORT_LOADER,
         "force": MESH_IMPORT_FORCE,
         "scene_merge": MESH_IMPORT_SCENE_MERGE,
         "sanitizer": MESH_IMPORT_SANITIZER,
-        "dependency_policy": MESH_IMPORT_DEPENDENCY_POLICY,
+        "dependency_policy": dependency_policy,
     }
     for field_name, expected in expected_scalars.items():
         if value.get(field_name) != expected:
@@ -310,20 +412,26 @@ def validate_mesh_import_recipe(
         loader_version=loader_version,
         parser_runtime_sha256=parser_runtime_sha256,
         runtime_lock_sha256=lock_sha256,
+        dependency_policy=dependency_policy,
+        source_manifest=source_manifest,
     )
 
 
 __all__ = [
     "MESH_IMPORT_FORCE",
     "MESH_IMPORT_DEPENDENCY_POLICY",
+    "MESH_IMPORT_CLOSED_MANIFEST_POLICY",
     "MESH_IMPORT_LOADER",
     "MESH_IMPORT_RECIPE_ID",
     "MESH_IMPORT_RECIPE_VERSION",
+    "MESH_IMPORT_RECIPE_VERSION_CLOSED_MANIFEST",
     "MESH_IMPORT_SANITIZER",
     "MESH_IMPORT_SCENE_MERGE",
     "MeshImportExecution",
     "MeshImportRecipeError",
     "SUPPORTED_SOURCE_FORMATS",
     "current_mesh_import_recipe",
+    "mesh_import_receipt_matches_base",
+    "mesh_import_recipe_with_manifest",
     "validate_mesh_import_recipe",
 ]

@@ -12,7 +12,15 @@ from src.core.mesh_import_recipe import (
     MESH_IMPORT_RECIPE_VERSION,
     MeshImportRecipeError,
     current_mesh_import_recipe,
+    mesh_import_receipt_matches_base,
+    mesh_import_recipe_with_manifest,
     validate_mesh_import_recipe,
+)
+from src.core.source_manifest import (
+    DEPENDENCY_RESOURCE_ROLE,
+    PRIMARY_RESOURCE_ROLE,
+    SourceManifest,
+    SourceManifestEntry,
 )
 
 
@@ -155,3 +163,66 @@ def test_full_runtime_lock_is_provenance_not_an_unrelated_execution_gate() -> No
     execution = validate_mesh_import_recipe(recipe, allow_legacy=False)
 
     assert execution.runtime_lock_sha256 == "a" * 64
+
+
+def test_closed_manifest_recipe_is_schema_valid_and_matches_capture_base() -> None:
+    base = current_mesh_import_recipe("obj")
+    manifest = SourceManifest(
+        primary_logical_path="scan.obj",
+        entries=(
+            SourceManifestEntry(
+                logical_path="scan.obj",
+                media_type="model/obj",
+                role=PRIMARY_RESOURCE_ROLE,
+                sha256="a" * 64,
+                size_bytes=10,
+            ),
+            SourceManifestEntry(
+                logical_path="material.mtl",
+                media_type="model/mtl",
+                role=DEPENDENCY_RESOURCE_ROLE,
+                sha256="b" * 64,
+                size_bytes=20,
+            ),
+        ),
+    )
+
+    receipt = mesh_import_recipe_with_manifest(base, manifest)
+    schema = json.loads(
+        (
+            Path(__file__).resolve().parents[1]
+            / "schemas"
+            / "mesh_import_recipe-2.0.0.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    Draft202012Validator.check_schema(schema)
+    Draft202012Validator(schema).validate(receipt)
+    execution = validate_mesh_import_recipe(receipt, allow_legacy=False)
+
+    assert receipt["recipe_version"] == "2.0.0"
+    assert receipt["dependency_policy"] == "closed_manifest"
+    assert execution.source_manifest == manifest
+    assert execution.strict_recipe() == receipt
+    assert mesh_import_receipt_matches_base(base, receipt)
+
+    changed_base = dict(base)
+    changed_base["format"] = "ply"
+    assert not mesh_import_receipt_matches_base(changed_base, receipt)
+
+
+def test_manifest_builder_keeps_v1_for_a_self_contained_primary() -> None:
+    base = current_mesh_import_recipe("ply")
+    manifest = SourceManifest(
+        primary_logical_path="scan.ply",
+        entries=(
+            SourceManifestEntry(
+                logical_path="scan.ply",
+                media_type="model/ply",
+                role=PRIMARY_RESOURCE_ROLE,
+                sha256="a" * 64,
+                size_bytes=10,
+            ),
+        ),
+    )
+
+    assert mesh_import_recipe_with_manifest(base, manifest) == base
