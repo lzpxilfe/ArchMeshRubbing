@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 import shutil
 import textwrap
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -125,6 +125,26 @@ def test_discovery_fails_closed_instead_of_truncating_candidate_overflow(
 
     assert raised.value.stage == "discovery"
     assert "too many" in str(raised.value)
+
+
+def test_discovery_uses_path_stat_instead_of_windows_direntry_identity_cache(
+    tmp_path: Path,
+) -> None:
+    candidate_path = tmp_path / ".field.amr.abcdefgh.tmp"
+    candidate_path.write_bytes(b"candidate")
+    entry = Mock()
+    entry.name = candidate_path.name
+    scan = Mock()
+    scan.__enter__ = Mock(return_value=iter((entry,)))
+    scan.__exit__ = Mock(return_value=False)
+
+    with patch("src.core.project_recovery.os.scandir", return_value=scan):
+        found = discover_interrupted_project_saves(tmp_path)
+
+    assert len(found) == 1
+    assert found[0].candidate_path == str(candidate_path)
+    assert found[0].inode == candidate_path.stat(follow_symlinks=False).st_ino
+    entry.stat.assert_not_called()
 
 
 def test_recovery_materializes_embedded_source_and_never_touches_existing_files(

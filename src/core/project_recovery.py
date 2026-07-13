@@ -126,8 +126,13 @@ def discover_interrupted_project_saves(
                 intended = _candidate_destination(folder, entry.name)
                 if intended is None:
                     continue
+                candidate_path = folder / entry.name
                 try:
-                    identity = entry.stat(follow_symlinks=False)
+                    # Windows DirEntry.stat() may expose zero placeholder
+                    # st_dev/st_ino values from directory-enumeration metadata,
+                    # while a later os.stat() returns the real file identity.
+                    # Use the same path-based syscall as every recovery fence.
+                    identity = candidate_path.stat(follow_symlinks=False)
                 except OSError:
                     # A racing or unreadable entry is not safe to offer.
                     continue
@@ -135,7 +140,7 @@ def discover_interrupted_project_saves(
                     continue
                 candidates.append(
                     InterruptedProjectSave(
-                        candidate_path=str(folder / entry.name),
+                        candidate_path=str(candidate_path),
                         intended_destination=str(intended),
                         size_bytes=int(identity.st_size),
                         modified_time_ns=int(identity.st_mtime_ns),
