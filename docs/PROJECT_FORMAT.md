@@ -544,7 +544,7 @@ depth pick·screen projection·ray·Ctrl drag은 해당 depth buffer를 그린 m
 - 저장된 record·QC·selection
 - SVG/3D export의 world 좌표
 
-현재 게이트는 pure coordinate algebra, mocked relative VBO/overlay submission, frame-bound project/unproject/depth-pick 수명주기, absolute float64 face 계산, source/scene materialization 불변과 document canonical hash 비직렬화를 검증한다. 별도 `src.gui.opengl_driver_smoke`는 native QPA의 실제 `Viewport3D` widget FBO에서 `[1e9,-2e9,3e9] mm` 장면, relative VBO, 두 depth component, gap 예상 지점의 background와 overlay 예상 위치의 green pixel, 0.125 mm depth-pick 복원을 원근·정사영으로 검증한다. 로컬 macOS Apple M4와 source CI의 Ubuntu xcb + Mesa llvmpipe 결과는 통과했다. Windows/macOS CI native QPA, frozen executable, 대표 하드웨어 GPU와 compositor presentation은 아직 별도 게이트다.
+현재 게이트는 pure coordinate algebra, mocked relative VBO/overlay submission, frame-bound project/unproject/depth-pick 수명주기, absolute float64 face 계산, source/scene materialization 불변과 document canonical hash 비직렬화를 검증한다. 별도 `src.gui.opengl_driver_smoke`는 native QPA의 실제 `Viewport3D` widget FBO에서 `[1e9,-2e9,3e9] mm` 장면, relative VBO, 두 depth component, gap 예상 지점의 background와 overlay 예상 위치의 green pixel, 0.125 mm depth-pick 복원을 원근·정사영으로 검증한다. Windows 대상 commit `b12d4874a4a8`의 source CI와 frozen executable은 qwindows+bundled llvmpipe gate를 통과했다. 대표 Windows 하드웨어 GPU와 compositor 최종 presentation은 아직 별도 게이트이며, macOS·Linux 결과는 현재 지원 판정에 사용하지 않는다.
 
 ### Legacy destructive bake 임시 안전 조건
 
