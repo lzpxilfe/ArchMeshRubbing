@@ -92,6 +92,7 @@ jobs:
           python -m pytest -q
           tests/test_project_file.py
           tests/test_build_info.py
+          tests/test_build_provenance.py
           tests/test_build_native.py
           tests/test_portable_archive.py
           tests/test_source_archive.py

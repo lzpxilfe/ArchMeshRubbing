@@ -1,0 +1,253 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:archmeshrubbing:schema:build-provenance:1.0.0",
+  "title": "ArchMeshRubbing unsigned build provenance 1.0.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "artifacts",
+    "authentication",
+    "builder",
+    "format",
+    "schema_version",
+    "source_commit",
+    "source_tree"
+  ],
+  "properties": {
+    "artifacts": {"$ref": "#/$defs/artifacts"},
+    "authentication": {
+      "const": {"kind": "none", "signature_present": false}
+    },
+    "builder": {"$ref": "#/$defs/builder"},
+    "format": {"const": "org.archmeshrubbing.build-provenance"},
+    "schema_version": {"const": "1.0.0"},
+    "source_commit": {"$ref": "#/$defs/gitObject"},
+    "source_tree": {"$ref": "#/$defs/gitObject"}
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "gitObject": {
+      "type": "string",
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+    },
+    "positiveId": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]{0,31}$"
+    },
+    "safeText": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "gitRef": {
+      "type": "string",
+      "minLength": 7,
+      "maxLength": 1024,
+      "pattern": "^refs/(?:heads|tags|pull)/[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "externalFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["file", "sha256", "size"],
+      "properties": {
+        "file": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^/\\\\]+$"
+        },
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "size": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 17179869184
+        }
+      }
+    },
+    "payloadFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "size"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "size": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8589934592
+        }
+      }
+    },
+    "portable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "archive",
+        "file_count",
+        "manifest",
+        "payload_sha256",
+        "payload_size"
+      ],
+      "properties": {
+        "archive": {"$ref": "#/$defs/externalFile"},
+        "file_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000
+        },
+        "manifest": {
+          "allOf": [
+            {"$ref": "#/$defs/externalFile"},
+            {"properties": {"size": {"maximum": 67108864}}}
+          ]
+        },
+        "payload_sha256": {"$ref": "#/$defs/sha256"},
+        "payload_size": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8589934592
+        }
+      }
+    },
+    "releaseEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["index", "payload_sha256", "schema_version"],
+      "properties": {
+        "index": {
+          "allOf": [
+            {"$ref": "#/$defs/payloadFile"},
+            {
+              "properties": {
+                "path": {"const": "release-evidence/release-evidence.json"},
+                "size": {"maximum": 262144}
+              }
+            }
+          ]
+        },
+        "payload_sha256": {"$ref": "#/$defs/sha256"},
+        "schema_version": {"const": "1.1.0"}
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "archive",
+        "file_count",
+        "sidecar",
+        "source_sha256",
+        "source_size"
+      ],
+      "properties": {
+        "archive": {
+          "allOf": [
+            {"$ref": "#/$defs/payloadFile"},
+            {
+              "properties": {
+                "path": {"const": "source/ArchMeshRubbing-source.zip"},
+                "size": {"maximum": 335544320}
+              }
+            }
+          ]
+        },
+        "file_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20000
+        },
+        "sidecar": {
+          "allOf": [
+            {"$ref": "#/$defs/payloadFile"},
+            {
+              "properties": {
+                "path": {"const": "source/ArchMeshRubbing-source.json"},
+                "size": {"maximum": 33554432}
+              }
+            }
+          ]
+        },
+        "source_sha256": {"$ref": "#/$defs/sha256"},
+        "source_size": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 268435456
+        }
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["portable", "release_evidence", "source"],
+      "properties": {
+        "portable": {"$ref": "#/$defs/portable"},
+        "release_evidence": {"$ref": "#/$defs/releaseEvidence"},
+        "source": {"$ref": "#/$defs/source"}
+      }
+    },
+    "builder": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "checkout_sha",
+        "event_name",
+        "job",
+        "provider",
+        "ref",
+        "ref_protected",
+        "repository",
+        "repository_id",
+        "repository_owner_id",
+        "run_attempt",
+        "run_id",
+        "run_url",
+        "runner_arch",
+        "runner_environment",
+        "runner_name",
+        "runner_os",
+        "server_url",
+        "workflow_ref",
+        "workflow_sha"
+      ],
+      "properties": {
+        "checkout_sha": {"$ref": "#/$defs/gitObject"},
+        "event_name": {
+          "enum": ["pull_request", "push", "workflow_dispatch"]
+        },
+        "job": {"const": "portable-package-smoke"},
+        "provider": {"const": "github-actions"},
+        "ref": {"$ref": "#/$defs/gitRef"},
+        "ref_protected": {"type": "boolean"},
+        "repository": {"const": "lzpxilfe/ArchMeshRubbing"},
+        "repository_id": {"$ref": "#/$defs/positiveId"},
+        "repository_owner_id": {"$ref": "#/$defs/positiveId"},
+        "run_attempt": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        },
+        "run_id": {"$ref": "#/$defs/positiveId"},
+        "run_url": {
+          "type": "string",
+          "pattern": "^https://github\\.com/lzpxilfe/ArchMeshRubbing/actions/runs/[1-9][0-9]{0,31}$"
+        },
+        "runner_arch": {"const": "X64"},
+        "runner_environment": {"const": "github-hosted"},
+        "runner_name": {"$ref": "#/$defs/safeText"},
+        "runner_os": {"const": "Windows"},
+        "server_url": {"const": "https://github.com"},
+        "workflow_ref": {
+          "type": "string",
+          "minLength": 75,
+          "maxLength": 256,
+          "pattern": "^lzpxilfe/ArchMeshRubbing/\\.github/workflows/package-smoke\\.yml@refs/(?:heads|tags|pull)/[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "workflow_sha": {"$ref": "#/$defs/gitObject"}
+      }
+    }
+  }
+}

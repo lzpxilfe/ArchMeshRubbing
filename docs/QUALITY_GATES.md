@@ -46,6 +46,7 @@ python -m pytest -q \
   tests/test_project_file.py \
   tests/test_build_info.py \
   tests/test_build_manifest.py \
+  tests/test_build_provenance.py \
   tests/test_release_evidence.py \
   tests/test_build_native.py \
   tests/test_source_archive.py \
@@ -132,6 +133,7 @@ python -m pytest -q \
 - `.amr-unwrap` canonical binary/flat OBJ/physical-mm SVG/provenance sidecar의 byte 결정성, four-member tamper 거부, offline 검증, no-overwrite atomic publish와 destination race 정리
 - versioned tile unwrap receipt/export Draft 2020-12 schema와 axis·fallback·privacy closed contract
 - exact Git commit/tree의 regular blob만 허용하는 결정적 corresponding-source ZIP, 내부 manifest·외부 sidecar·Git blob ID·SHA-256·라이선스 결합과 저장소 삭제 뒤 offline 검증
+- portable/source/evidence exact hash와 실제 payload file set, GitHub repository/workflow/run attempt/Windows X64 hosted-runner identity를 결합하는 canonical unsigned provenance, 한글 추출본 offline 재검증, closed `authentication=none` 계약과 변조·source mismatch 거부
 - vector/rubbing worker의 hidden same-parent staging·전체 검증·prepared inode/fingerprint capability, 빠른 final Workbench record-authority fence, same-Align append 허용, Align/Open stale 정리와 pending Open GUI 취소 정책
 - 고정 길이 staging UUID 충돌·quarantine/foreign inode 보존, exact result/prepared capability 위조·사전 목적지 이동·destination race 차단, post-rename 실제/미지원 directory-fsync `committed` 내구성 경고
 - Qt-free Cutline/Outline/Digital Rubbing/기와 전개 work item, exact result capability, same-Align 병렬 rebase, Workbench 공유 record reservation, Align/Open stale·취소·rollback 방어와 pending Open 게시 재시도
@@ -169,7 +171,7 @@ Windows workflow smoke에서는 프로젝트 저장, source/geometry identity와
 
 같은 Windows job의 다음 단계는 `QT_QPA_PLATFORM=windows`, `QT_OPENGL=software`로 실제 `QOpenGLWidget` context를 열고 `src.gui.opengl_driver_smoke` report를 검증한다. Qt wheel에 포함된 `opengl32sw.dll`을 강제하고 PyOpenGL의 GL/WGL dispatch도 같은 DLL에 결합한다. 이렇게 해야 Qt의 software context와 시스템 `opengl32.dll`을 섞어 호출하지 않는다. qwindows/context/768×768 FBO/VBO/pixel/depth/pick 경계를 실행하며, 이는 software OpenGL 실제-frame 증거이지 대표 GPU 또는 compositor 최종 presentation 인증은 아니다.
 
-별도 `package-smoke.yml`은 `main` push, pull request, 수동 실행에서 Windows x64/CPython 3.12의 hash-locked binary wheel set, immutable build manifest, PyInstaller spec과 frozen executable의 file-report self-test를 실행한다. PyInstaller 뒤 exact Git commit/tree/blob의 corresponding-source ZIP을 payload에 넣고, 실제 payload 전체 파일의 path/size/SHA-256 manifest, runtime 10개를 exact wheel SHA-256에 묶은 SPDX 2.3 SBOM, wheel 메타데이터와 라이선스 원문에서 만든 machine/human NOTICE를 생성한다. evidence index가 이 네 문서를 묶고 `release_evidence`와 `source_archive`를 포함한 14-check가 frozen 및 portable payload에서 모두 다시 계산된다. complete-workflow check는 작은 PLY를 실제 application authority로 열고 3/6/6 record를 만든 뒤 completed `.amr`를 외부 원본 없이 재열어 1:1 SVG/PNG를 재현·이동·offline 검증한다. 이어 같은 frozen executable의 `--opengl-driver-smoke-report`를 native qwindows/software OpenGL로 실행한다. 그 뒤 표준 라이브러리로 portable ZIP과 canonical sidecar를 만들고 모든 entry·release evidence·source archive를 검증한 뒤 `문화유산 기록` 한글 경로에 원자적으로 추출한다. 추출 실행 파일은 outbound 차단 상태의 14-check와 actual-frame을 다시 통과하고 디렉터리 삭제 뒤 잔여물이 없어야 한다. 라이선스 게이트가 해결되기 전에는 artifact upload와 release 단계를 두지 않는다.
+별도 `package-smoke.yml`은 `main` push, pull request, 수동 실행에서 Windows x64/CPython 3.12의 hash-locked binary wheel set, immutable build manifest, PyInstaller spec과 frozen executable의 file-report self-test를 실행한다. PyInstaller 뒤 exact Git commit/tree/blob의 corresponding-source ZIP을 payload에 넣고, 실제 payload 전체 파일의 path/size/SHA-256 manifest, runtime 10개를 exact wheel SHA-256에 묶은 SPDX 2.3 SBOM, wheel 메타데이터와 라이선스 원문에서 만든 machine/human NOTICE를 생성한다. evidence index가 이 네 문서를 묶고 `release_evidence`와 `source_archive`를 포함한 14-check가 frozen 및 portable payload에서 모두 다시 계산된다. complete-workflow check는 작은 PLY를 실제 application authority로 열고 3/6/6 record를 만든 뒤 completed `.amr`를 외부 원본 없이 재열어 1:1 SVG/PNG를 재현·이동·offline 검증한다. 이어 같은 frozen executable의 `--opengl-driver-smoke-report`를 native qwindows/software OpenGL로 실행한다. 그 뒤 표준 라이브러리로 portable ZIP과 canonical sidecar를 만들고 모든 entry·release evidence·source archive를 검증하며, 외부 unsigned provenance에 이 artifact들과 GitHub workflow/run/runner identity를 결합한다. `문화유산 기록` 한글 경로 추출본도 같은 provenance와 일치해야 한다. 추출 실행 파일은 outbound 차단 상태의 14-check와 actual-frame을 다시 통과하고 디렉터리 삭제 뒤 잔여물이 없어야 한다. provenance는 `authentication=none`인 무결성 기록이며 서명된 출처 인증이 아니다. 라이선스·서명 게이트가 해결되기 전에는 artifact upload와 release 단계를 두지 않는다.
 
 과거 [진단 run 29254942224](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29254942224)은 비 ASCII installer 경로에서 software OpenGL context 생성에 실패했다. 이 실패를 성공으로 재분류하지 않고, 현재 portable gate가 한글 payload·report 경로의 offline workflow와 software OpenGL을 모두 차단 조건으로 직접 재검증하도록 승격했다. 대표 하드웨어 GPU/driver의 비 ASCII 경로는 여전히 실제 pilot 범위다.
 

@@ -456,6 +456,7 @@ def _check_resources() -> str:
         "mesh_import_recipe-2.0.0.schema.json",
         "portable_archive_manifest-1.0.0.schema.json",
         "source_archive-1.0.0.schema.json",
+        "build_provenance-1.0.0.schema.json",
     )
     for name in required_schemas:
         if not resource_path("schemas", name).is_file():

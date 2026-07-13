@@ -22,6 +22,7 @@ on:
       - "third_party_licenses/**"
       - "tools/build_portable_archive.py"
       - "tools/build_source_archive.py"
+      - "tools/generate_build_provenance.py"
       - "tools/generate_build_info.py"
       - "tools/generate_release_evidence.py"
   pull_request:
@@ -43,6 +44,7 @@ on:
       - "third_party_licenses/**"
       - "tools/build_portable_archive.py"
       - "tools/build_source_archive.py"
+      - "tools/generate_build_provenance.py"
       - "tools/generate_build_info.py"
       - "tools/generate_release_evidence.py"
   workflow_dispatch:
@@ -221,6 +223,35 @@ jobs:
           "AMR_PORTABLE_ARCHIVE=$archive" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "AMR_PORTABLE_MANIFEST=$manifest" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
+      - name: Generate and verify unsigned build provenance
+        shell: pwsh
+        run: |
+          $provenance = "$env:AMR_PORTABLE_ARCHIVE.provenance.json"
+          python tools/generate_build_provenance.py generate `
+            --archive $env:AMR_PORTABLE_ARCHIVE `
+            --manifest $env:AMR_PORTABLE_MANIFEST `
+            --payload "dist\ArchMeshRubbing" `
+            --output $provenance
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unsigned build provenance generation failed"
+          }
+          python tools/generate_build_provenance.py verify `
+            --provenance $provenance `
+            --archive $env:AMR_PORTABLE_ARCHIVE `
+            --manifest $env:AMR_PORTABLE_MANIFEST `
+            --payload "dist\ArchMeshRubbing"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unsigned build provenance verification failed"
+          }
+          $record = Get-Content $provenance -Raw | ConvertFrom-Json
+          if ($record.authentication.kind -ne "none" -or $record.authentication.signature_present) {
+            throw "Build provenance must remain explicitly unsigned"
+          }
+          if ($record.source_commit -ne "${{ github.sha }}") {
+            throw "Build provenance source commit does not match the workflow"
+          }
+          "AMR_BUILD_PROVENANCE=$provenance" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Verify and extract portable archive into Korean path
         shell: pwsh
         run: |
@@ -246,6 +277,14 @@ jobs:
             --sidecar $sourceSidecar
           if ($LASTEXITCODE -ne 0) {
             throw "Extracted corresponding-source verification failed"
+          }
+          python tools/generate_build_provenance.py verify `
+            --provenance $env:AMR_BUILD_PROVENANCE `
+            --archive $env:AMR_PORTABLE_ARCHIVE `
+            --manifest $env:AMR_PORTABLE_MANIFEST `
+            --payload $portableDir
+          if ($LASTEXITCODE -ne 0) {
+            throw "Extracted payload provenance verification failed"
           }
           $portableExe = Join-Path $portableDir "ArchMeshRubbing.exe"
           if (-not (Test-Path $portableExe -PathType Leaf)) {
@@ -363,6 +402,14 @@ jobs:
             --manifest $env:AMR_PORTABLE_MANIFEST
           if ($LASTEXITCODE -ne 0) {
             throw "Portable archive changed during runtime checks"
+          }
+          python tools/generate_build_provenance.py verify `
+            --provenance $env:AMR_BUILD_PROVENANCE `
+            --archive $env:AMR_PORTABLE_ARCHIVE `
+            --manifest $env:AMR_PORTABLE_MANIFEST `
+            --payload $env:AMR_PORTABLE_DIR
+          if ($LASTEXITCODE -ne 0) {
+            throw "Build provenance changed during runtime checks"
           }
           Remove-Item -LiteralPath $env:AMR_PORTABLE_DIR -Recurse -Force
           if (Test-Path $env:AMR_PORTABLE_DIR) {

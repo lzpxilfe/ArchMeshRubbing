@@ -12,8 +12,10 @@
 - `ArchMeshRubbing.spec`: 첫 안정판 대상인 Windows onedir build. Linux onedir와 macOS `.app` 분기는 source 호환용이며 현재 릴리스 게이트가 아니다.
 - `src/portable_archive.py`, `tools/build_portable_archive.py`: ZIP 생성, sidecar 검증, 안전한 원자적 추출
 - `src/source_archive.py`, `tools/build_source_archive.py`: Git object 기반 corresponding-source ZIP/sidecar 생성과 Git 없이 offline 검증
+- `src/build_provenance.py`, `tools/generate_build_provenance.py`: portable/source/evidence와 GitHub Actions invocation·runner identity를 묶는 외부 unsigned provenance 생성·offline 검증
 - `schemas/portable_archive_manifest-1.0.0.schema.json`: portable sidecar의 machine-readable 계약
 - `schemas/source_archive-1.0.0.schema.json`: source ZIP 외부 sidecar와 내부 manifest의 machine-readable 계약
+- `schemas/build_provenance-1.0.0.schema.json`: unsigned build-provenance record의 closed machine-readable 계약
 - `build/generated/build_info.json`: version, channel, commit, runtime lock과 Windows wheel lock SHA-256
 
 일반 source 실행은 플랫폼 중립 version lock을 사용한다. 제품 대상 Windows frozen job은 평탄화된 hash lock만 설치하며 sdist와 검토되지 않은 wheel을 거부한다. 현재 lock은 Windows x64/CPython 3.12 한 대상의 증거이며 다른 OS 지원을 뜻하지 않는다.
@@ -56,7 +58,7 @@ python tools/build_portable_archive.py verify `
 
 1. embedded build manifest와 runtime/wheel lock hash
 2. 정확한 runtime distribution 버전과 Shapely/GEOS 조합
-3. 아이콘, runtime/wheel lock, license policy, 14개 JSON schema
+3. 아이콘, runtime/wheel lock, license policy, 15개 JSON schema
 4. frozen/portable payload의 전체 파일 SHA-256 manifest, SPDX 2.3 SBOM, 제3자 NOTICE를 실제 bytes에서 재계산
 5. exact Git commit/tree/blob·SHA-256·LICENSE에 결합된 corresponding-source ZIP과 sidecar
 6. offscreen Qt application
@@ -92,8 +94,9 @@ python -m src.gui.opengl_driver_smoke ^
 - Windows frozen executable의 file-based 14-check와 native-QPA software OpenGL 검사
 - commit epoch를 고정 timestamp로 사용해 portable ZIP과 canonical sidecar 생성
 - ZIP exact hash/size, 모든 entry path/size/SHA-256, release-evidence index와 source commit 재검증
+- portable ZIP·manifest, source ZIP·sidecar, release-evidence index, checkout/workflow SHA와 GitHub run·hosted Windows X64 runner identity를 외부 canonical unsigned provenance에 결합·재검증
 - `문화유산 기록\ArchMeshRubbing` 한글 경로에 검증 후 원자적으로 추출
-- 추출본 release evidence와 corresponding-source archive를 다시 계산하고 executable에 outbound deny firewall rule과 실패 proxy 적용
+- 추출본 release evidence, corresponding-source archive와 provenance를 다시 계산하고 executable에 outbound deny firewall rule과 실패 proxy 적용
 - 한글 경로의 실행 파일과 report 경로에서 14-check complete workflow와 native `qwindows` actual-frame 재실행
 - 실행 뒤 ZIP을 다시 검증하고 추출 디렉터리와 firewall rule 제거
 
@@ -114,6 +117,33 @@ python tools/build_source_archive.py build `
 python tools/build_source_archive.py verify `
   --archive dist\ArchMeshRubbing\source\ArchMeshRubbing-source.zip `
   --sidecar dist\ArchMeshRubbing\source\ArchMeshRubbing-source.json
+```
+
+### Unsigned build-provenance 계약
+
+`<portable>.provenance.json`은 portable ZIP 바깥에 둔다. 그래야 provenance가 portable ZIP hash를 가리키면서 자기 자신을 다시 ZIP에 넣는 순환 참조를 만들지 않는다. 생성기는 먼저 portable ZIP·manifest를 전부 검증하고 실제 `dist/ArchMeshRubbing`의 모든 file path/size/SHA-256가 manifest와 같은지 비교한다. 이어 release evidence를 payload bytes에서 재생성 검증하고, source ZIP의 raw commit object와 재구성 tree/blob을 검증한 뒤 다음을 하나의 canonical JSON에 결합한다.
+
+- portable ZIP·manifest exact SHA-256/size와 payload file-set hash
+- source ZIP·sidecar exact SHA-256/size, source commit/tree와 source file-set hash
+- release-evidence index SHA-256와 evidence payload hash
+- GitHub repository·owner numeric ID, checkout SHA, workflow ref/SHA, event/ref/protection, run ID/attempt/URL, job ID
+- GitHub-hosted Windows X64 runner environment·name
+
+generator는 GitHub가 제공하는 [`GITHUB_*`와 `RUNNER_*` default environment variable](https://docs.github.com/en/actions/reference/workflows-and-actions/variables)만 읽고, repository/workflow/job/Windows X64 hosted-runner 경계를 벗어나면 실패한다. `run_id + run_attempt + job`은 실행 문맥을 특정하지만 공식 문서의 주의대로 `RUNNER_NAME` 자체는 고유하다고 가정하지 않는다.
+
+이 파일은 의도적으로 `{"kind":"none","signature_present":false}`를 강제한다. 따라서 현재 verifier가 증명하는 것은 네 파일군의 상호 무결성과 기록된 실행 문맥의 형식·일관성이다. 누구든 파일 전체를 다시 쓸 수 있으므로 GitHub나 프로젝트가 그 기록을 인증했다는 의미는 아니다. workflow는 `id-token`, `attestations: write`, `actions/attest`, artifact upload를 사용하지 않는다. 공개 배포 전 별도 서명·신뢰 anchor 정책이 이 provenance와 portable/source checksum을 인증해야 한다.
+
+```powershell
+python tools/generate_build_provenance.py generate `
+  --archive $env:AMR_PORTABLE_ARCHIVE `
+  --manifest $env:AMR_PORTABLE_MANIFEST `
+  --payload dist\ArchMeshRubbing `
+  --output "$env:AMR_PORTABLE_ARCHIVE.provenance.json"
+python tools/generate_build_provenance.py verify `
+  --provenance "$env:AMR_PORTABLE_ARCHIVE.provenance.json" `
+  --archive $env:AMR_PORTABLE_ARCHIVE `
+  --manifest $env:AMR_PORTABLE_MANIFEST `
+  --payload dist\ArchMeshRubbing
 ```
 
 ### Portable archive 계약
@@ -166,7 +196,6 @@ evidence는 ZIP 생성 전, frozen 실행 전, 한글 경로 추출 뒤에 모�
 - 생성된 SPDX/NOTICE의 라이선스 호환성·고지 내용에 대한 최종 사람 검토
 - 대표 Windows 하드웨어 GPU/driver와 compositor pilot
 - large mesh, low-memory, 완전 격리된 offline machine pilot
-- 검증된 source archive digest와 runner identity를 함께 묶는 상위 build provenance
-- 공개 ZIP·sidecar·source archive를 묶는 checksum/signature 게시 규칙
+- unsigned provenance와 공개 ZIP·sidecar·source archive를 인증하는 checksum/signature·trust-anchor 게시 규칙
 
-hash-locked frozen payload, 검증형 portable ZIP, exact corresponding-source archive, 한글 경로 offline/actual-frame/삭제 gate의 코드 경계는 구현됐다. 그래도 프로젝트/GUI 라이선스 결론, 서명, source archive와 runner identity를 묶는 상위 provenance, 대표 하드웨어·실물 대용량 pilot과 공개 릴리스는 아직 차단한다. macOS·Linux 배포는 첫 Windows 안정판 이후 별도 범위다.
+hash-locked frozen payload, 검증형 portable ZIP, exact corresponding-source archive, source/evidence/runner를 묶는 unsigned provenance, 한글 경로 offline/actual-frame/삭제 gate의 코드 경계는 구현됐다. 그래도 프로젝트/GUI 라이선스 결론, provenance·배포물의 서명과 신뢰 anchor, 대표 하드웨어·실물 대용량 pilot과 공개 릴리스는 아직 차단한다. macOS·Linux 배포는 첫 Windows 안정판 이후 별도 범위다.

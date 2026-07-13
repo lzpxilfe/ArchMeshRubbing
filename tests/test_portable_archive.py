@@ -231,6 +231,10 @@ def test_windows_package_workflow_is_portable_offline_and_installer_independent(
     assert "tools/build_portable_archive.py build" in workflow
     assert "tools/build_portable_archive.py verify" in workflow
     assert "tools/build_portable_archive.py extract" in workflow
+    assert "tools/generate_build_provenance.py generate" in workflow
+    assert "tools/generate_build_provenance.py verify" in workflow
+    assert "AMR_BUILD_PROVENANCE" in workflow
+    assert "Build provenance must remain explicitly unsigned" in workflow
     assert "문화유산 기록\\ArchMeshRubbing" in workflow
     assert "New-NetFirewallRule" in workflow
     assert "--self-test-report" in workflow
@@ -238,6 +242,9 @@ def test_windows_package_workflow_is_portable_offline_and_installer_independent(
     assert "WaitForExit(120000)" in workflow
     assert 'Portable archive ${archiveName}:' in workflow
     assert "actions/upload-artifact" not in workflow
+    assert "actions/attest" not in workflow
+    assert "id-token:" not in workflow
+    assert "attestations:" not in workflow
     assert "ISCC" not in workflow
     assert "Inno Setup" not in workflow
     assert not (ROOT / "installer" / "ArchMeshRubbing.iss").exists()
