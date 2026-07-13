@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import base64
+from collections.abc import Callable
 import importlib
 import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 from zipfile import ZipFile
 
@@ -21,6 +23,17 @@ from src.source_archive import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _remove_read_only(
+    function: Callable[..., object],
+    path: str,
+    _error: BaseException,
+) -> None:
+    """Let Windows remove immutable loose Git objects in the test fixture."""
+
+    os.chmod(path, os.stat(path, follow_symlinks=False).st_mode | stat.S_IWRITE)
+    function(path)
 
 
 def _git(
@@ -135,7 +148,7 @@ def test_source_archive_is_deterministic_commit_exact_and_offline(
             b'print("committed source")\n'
         )
 
-    shutil.rmtree(repository)
+    shutil.rmtree(repository, onexc=_remove_read_only)
     assert verify_source_archive(first_archive, first_sidecar) == first
 
 
