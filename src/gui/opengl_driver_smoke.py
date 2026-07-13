@@ -30,6 +30,7 @@ REPORT_SCHEMA = "archmeshrubbing.opengl_driver_smoke"
 REPORT_SCHEMA_VERSION = 1
 ROOT = Path(__file__).resolve().parents[2]
 PROBE_WIDGET_SIZE = (768, 768)
+WINDOWS_PROBE_POSITION = (-10_000, -10_000)
 PROBE_BASE_WORLD_MM = np.array(
     [1_000_000_000.0, -2_000_000_000.0, 3_000_000_000.0],
     dtype=np.float64,
@@ -91,6 +92,32 @@ class _CheckRecorder:
             pass
         if not ok:
             raise DriverSmokeFailure(f"actual OpenGL check failed: {check_id}")
+
+
+def configure_probe_window(
+    viewport: Any,
+    *,
+    platform_name: str,
+    qt: Any,
+) -> str:
+    """Keep the probe unobtrusive without suppressing its Windows surface."""
+
+    if str(platform_name).casefold() == "windows":
+        # QOpenGLWidget creates its context/FBO as part of a shown top-level
+        # window.  WA_DontShowOnScreen prevents that normal qwindows lifecycle
+        # and has terminated the process inside Qt's software-GL setup.  A
+        # native tool window positioned far outside the desktop exercises the
+        # same lifecycle as the application without taking focus.
+        viewport.setWindowFlag(qt.WindowType.Tool, True)
+        viewport.setAttribute(
+            qt.WidgetAttribute.WA_ShowWithoutActivating,
+            True,
+        )
+        viewport.move(*WINDOWS_PROBE_POSITION)
+        return "offscreen-positioned-native-tool-window"
+
+    viewport.setAttribute(qt.WidgetAttribute.WA_DontShowOnScreen, True)
+    return "dont-show-on-screen"
 
 
 def probe_geometry() -> tuple[NDArray[np.float64], NDArray[np.int32]]:
@@ -814,7 +841,21 @@ def run_driver_smoke(
             {"update_behavior": viewport.updateBehavior().name},
         )
         viewport.frameSwapped.connect(lambda: frame_swaps.append(time.monotonic()))
-        viewport.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+        surface_policy = configure_probe_window(
+            viewport,
+            platform_name=actual_platform,
+            qt=Qt,
+        )
+        recorder.require(
+            "qt.probe_surface_policy",
+            surface_policy
+            == (
+                "offscreen-positioned-native-tool-window"
+                if actual_platform == "windows"
+                else "dont-show-on-screen"
+            ),
+            {"policy": surface_policy},
+        )
         viewport.resize(*PROBE_WIDGET_SIZE)
         viewport.show()
         _wait_for_context(app, viewport, context_timeout_s)
@@ -897,6 +938,7 @@ def run_driver_smoke(
             "depth_bits": depth_bits,
             "default_fbo": default_fbo,
             "device_pixel_ratio": float(viewport.devicePixelRatioF()),
+            "probe_surface_policy": surface_policy,
             "software_renderer": any(
                 token in renderer.casefold()
                 for token in ("llvmpipe", "softpipe", "software", "swiftshader")
@@ -976,10 +1018,10 @@ def run_driver_smoke(
             "scene.source_vertices_unchanged_after_render",
             np.array_equal(mesh.vertices, source_snapshot),
         )
-        # WA_DontShowOnScreen keeps this diagnostic invisible on a developer's
-        # desktop, so Qt may not emit the compositor-level frameSwapped signal.
-        # The published frame serial plus actual widget FBO readback above are
-        # the blocking paintGL evidence.
+        # The diagnostic may not emit a compositor-level frameSwapped signal
+        # when it uses WA_DontShowOnScreen or a far-off-desktop Windows tool
+        # window.  The published frame serial plus actual widget FBO readback
+        # above are the blocking paintGL evidence.
         report["context"]["frame_swap_count"] = len(frame_swaps)
     except Exception as exc:
         caught = exc

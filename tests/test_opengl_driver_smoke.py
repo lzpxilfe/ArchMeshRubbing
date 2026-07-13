@@ -20,12 +20,71 @@ from src.gui.opengl_driver_smoke import (
     PROBE_BASE_WORLD_MM,
     PROBE_GAP_WIDTH_MM,
     PROBE_STEP_HEIGHT_MM,
+    WINDOWS_PROBE_POSITION,
+    configure_probe_window,
     connected_component_sizes,
     probe_geometry,
     write_report,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+class _FakeQt:
+    class WindowType:
+        Tool = "tool"
+
+    class WidgetAttribute:
+        WA_DontShowOnScreen = "dont-show"
+        WA_ShowWithoutActivating = "show-without-activating"
+
+
+class _FakeViewport:
+    def __init__(self) -> None:
+        self.window_flags: list[tuple[object, bool]] = []
+        self.attributes: list[tuple[object, bool]] = []
+        self.positions: list[tuple[int, int]] = []
+
+    def setWindowFlag(self, flag: object, enabled: bool) -> None:
+        self.window_flags.append((flag, enabled))
+
+    def setAttribute(self, attribute: object, enabled: bool) -> None:
+        self.attributes.append((attribute, enabled))
+
+    def move(self, x: int, y: int) -> None:
+        self.positions.append((x, y))
+
+
+def test_windows_probe_uses_positioned_native_tool_window() -> None:
+    viewport = _FakeViewport()
+
+    policy = configure_probe_window(
+        viewport,
+        platform_name="windows",
+        qt=_FakeQt,
+    )
+
+    assert policy == "offscreen-positioned-native-tool-window"
+    assert viewport.window_flags == [(_FakeQt.WindowType.Tool, True)]
+    assert viewport.attributes == [
+        (_FakeQt.WidgetAttribute.WA_ShowWithoutActivating, True)
+    ]
+    assert viewport.positions == [WINDOWS_PROBE_POSITION]
+
+
+def test_non_windows_probe_remains_hidden() -> None:
+    viewport = _FakeViewport()
+
+    policy = configure_probe_window(
+        viewport,
+        platform_name="cocoa",
+        qt=_FakeQt,
+    )
+
+    assert policy == "dont-show-on-screen"
+    assert viewport.window_flags == []
+    assert viewport.attributes == [(_FakeQt.WidgetAttribute.WA_DontShowOnScreen, True)]
+    assert viewport.positions == []
 
 
 def test_compatibility_surface_format_matches_fixed_function_viewport() -> None:
