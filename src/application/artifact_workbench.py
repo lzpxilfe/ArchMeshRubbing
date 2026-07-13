@@ -504,6 +504,64 @@ class ArtifactWorkbench:
                 raise ArtifactWorkbenchError("artifact authority is not stable for save")
             return session
 
+    def adopt_saved_project_path(
+        self,
+        captured_session: ArtifactSession,
+        project_path: str,
+        *,
+        expected_state_version: int,
+        expected_authority_epoch: int,
+    ) -> WorkflowSnapshot:
+        """Adopt a completed Save destination only for its captured authority.
+
+        Project serialization happens before this fast compare-and-swap.  A
+        successful path change advances the state version so a transition
+        prepared against the former locator cannot silently restore it.  The
+        authority epoch stays unchanged because the immutable document and
+        render projection do not change.
+        """
+
+        if not isinstance(captured_session, ArtifactSession):
+            raise ArtifactWorkbenchError(
+                "captured_session must be an ArtifactSession"
+            )
+        if type(expected_state_version) is not int or expected_state_version < 0:
+            raise ArtifactWorkbenchError(
+                "expected_state_version must be a non-negative integer"
+            )
+        if type(expected_authority_epoch) is not int or expected_authority_epoch < 0:
+            raise ArtifactWorkbenchError(
+                "expected_authority_epoch must be a non-negative integer"
+            )
+        normalized_project = _normalized_path(
+            project_path,
+            field_name="project_path",
+        )
+        with self._lock:
+            state = self._require_command_slot()
+            if (
+                state.session is not captured_session
+                or state.state_version != expected_state_version
+                or state.authority_epoch != expected_authority_epoch
+            ):
+                raise StaleWorkflowOperationError(
+                    "saved project path belongs to stale artifact authority"
+                )
+            if not state.can_save:
+                raise ArtifactWorkbenchError(
+                    "artifact authority is not stable for saved-path adoption"
+                )
+            if state.project_path == normalized_project:
+                return state
+            self._state = replace(
+                state,
+                state_version=state.state_version + 1,
+                project_path=normalized_project,
+            )
+            changed = self._state
+        self._notify(changed)
+        return changed
+
     @staticmethod
     def _require_export_document_ancestor(
         captured: ArtifactSession,

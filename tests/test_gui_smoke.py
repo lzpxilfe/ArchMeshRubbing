@@ -16,7 +16,7 @@ import pytest
 from PyQt6.QtCore import QCoreApplication, QEvent, QStandardPaths, Qt
 from PyQt6.QtGui import QKeyEvent
 from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QApplication, QMessageBox, QPushButton
+from PyQt6.QtWidgets import QApplication, QFileDialog, QMessageBox, QPushButton
 
 from app_interactive import (
     MainWindow,
@@ -52,6 +52,7 @@ from src.application.artifact_workbench import (
     ConfirmedSourceMetadata,
     ProjectionTransition,
     RecordBindingTransition,
+    StaleWorkflowOperationError,
     WorkflowBusyError,
     WorkflowStage,
     WorkflowTransitionKind,
@@ -94,6 +95,7 @@ from src.core.project_file import (
     EmbeddedSourceRequiredError,
     MIGRATION_MARKER_NAME,
     ProjectFormatError,
+    ProjectSaveError,
     ProjectSerializationError,
 )
 from src.core.mesh_loader import MeshData
@@ -849,6 +851,76 @@ def test_cancelled_task_dialog_resists_escape_and_close_until_worker_finishes() 
         app.processEvents()
 
 
+def test_locked_non_cancelable_task_dialog_stays_until_worker_finishes() -> None:
+    class FakeSignal:
+        def __init__(self) -> None:
+            self.callbacks = []
+
+        def connect(self, callback) -> None:
+            self.callbacks.append(callback)
+
+        def emit(self, *args) -> None:
+            for callback in tuple(self.callbacks):
+                callback(*args)
+
+    class FakeThread:
+        def __init__(self) -> None:
+            self.done = FakeSignal()
+            self.failed = FakeSignal()
+            self.finished = FakeSignal()
+            self.running = False
+            self.deleted = False
+
+        def isRunning(self) -> bool:
+            return self.running
+
+        def start(self) -> None:
+            self.running = True
+
+        def deleteLater(self) -> None:
+            self.deleted = True
+
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    window = MainWindow()
+    thread = FakeThread()
+    done = Mock()
+    try:
+        assert window._start_task(
+            title="locked",
+            label="saving",
+            thread=thread,  # type: ignore[arg-type]
+            on_done=done,
+            lock_dialog_until_finished=True,
+        )
+        dialog = window._task_dialog
+        assert dialog is not None and dialog.isVisible()
+        assert dialog.findChild(QPushButton) is None
+
+        QTest.keyClick(dialog, Qt.Key.Key_Escape)
+        app.processEvents()
+        assert dialog.isVisible()
+        assert not dialog.close()
+        app.processEvents()
+        assert dialog.isVisible()
+
+        thread.running = False
+        thread.done.emit("saved")
+        app.processEvents()
+        done.assert_called_once_with("saved")
+        assert not dialog.isVisible()
+
+        thread.finished.emit()
+        assert thread.deleted
+        assert window._task_thread is None
+        assert window._task_dialog is None
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
 def test_shutdown_active_task_cancels_joins_and_fences_late_callbacks() -> None:
     class FakeSignal:
         def __init__(self) -> None:
@@ -971,6 +1043,65 @@ def test_shutdown_active_task_cancels_joins_and_fences_late_callbacks() -> None:
         thread.finished.emit()
         done.assert_not_called()
         failed.assert_not_called()
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_shutdown_non_cancelable_task_still_requires_bounded_join() -> None:
+    class FakeSignal:
+        def __init__(self) -> None:
+            self.disconnected = False
+
+        def disconnect(self) -> None:
+            self.disconnected = True
+
+    class FakeThread:
+        def __init__(self) -> None:
+            self.done = FakeSignal()
+            self.failed = FakeSignal()
+            self.finished = FakeSignal()
+            self.running = True
+            self.interruption_requested = False
+            self.wait_calls: list[int] = []
+            self.deleted = False
+
+        def isRunning(self) -> bool:
+            return self.running
+
+        def requestInterruption(self) -> None:
+            self.interruption_requested = True
+
+        def wait(self, timeout_ms: int) -> bool:
+            self.wait_calls.append(timeout_ms)
+            self.running = False
+            return True
+
+        def deleteLater(self) -> None:
+            self.deleted = True
+
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    window = MainWindow()
+    thread = FakeThread()
+    close_dialog = Mock()
+    window._task_thread = thread  # type: ignore[assignment]
+    window._task_cancel_request = None
+    window._task_close_dialog = close_dialog
+    try:
+        assert window._shutdown_active_task_worker()
+
+        assert thread.interruption_requested
+        assert thread.wait_calls == [TASK_SHUTDOWN_WAIT_MS]
+        assert thread.done.disconnected
+        assert thread.failed.disconnected
+        assert thread.finished.disconnected
+        assert thread.deleted
+        close_dialog.assert_called_once_with()
+        assert window._task_thread is None
+        assert window._task_close_dialog is None
     finally:
         window.deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
@@ -1661,6 +1792,277 @@ def test_native_project_save_never_serializes_legacy_ui_state() -> None:
         window.deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         app.processEvents()
+
+
+def test_native_project_save_defers_materialization_writer_and_git_probe() -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    session = _artifact_session()
+    obj = _projected_scene_object(session)
+    window = MainWindow()
+    window._artifact_session = session
+    window._current_project_path = "/tmp/native-worker-save.amr"
+    window.current_mesh = obj.mesh
+    window.viewport.objects = [obj]
+    window.viewport.selected_index = 0
+    original_materialize = ArtifactSession.materialize
+    materialization_allowed = False
+    materialization_calls: list[ArtifactSession] = []
+
+    def guarded_materialize(current: ArtifactSession):
+        if not materialization_allowed:
+            raise AssertionError("native Save materialized on the GUI thread")
+        materialization_calls.append(current)
+        return original_materialize(current)
+
+    try:
+        with (
+            patch.object(window, "_start_task", return_value=True) as start_task,
+            patch.object(ArtifactSession, "materialize", new=guarded_materialize),
+            patch(
+                "app_interactive.save_amr_artifact_session_project",
+                return_value="/tmp/native-worker-save.amr",
+            ) as save_native,
+            patch(
+                "app_interactive._safe_git_info",
+                return_value=("abc123", False),
+            ) as git_info,
+            patch.object(QMessageBox, "warning") as warning,
+            patch.object(QMessageBox, "critical") as critical,
+        ):
+            window.save_project()
+            assert start_task.call_count == 1
+            assert materialization_calls == []
+            save_native.assert_not_called()
+            git_info.assert_not_called()
+
+            callbacks = start_task.call_args.kwargs
+            assert callbacks["lock_dialog_until_finished"] is True
+            thread = callbacks["thread"]
+            assert isinstance(thread, TaskThread)
+            assert thread._task_name == "save_native_project"
+            materialization_allowed = True
+            result = thread._fn()
+            callbacks["on_done"](result)
+
+        warning.assert_not_called()
+        critical.assert_not_called()
+        assert materialization_calls == [session]
+        git_info.assert_called_once()
+        save_native.assert_called_once()
+        assert save_native.call_args.kwargs["meta"]["git"] == "abc123"
+        assert window._current_project_path == "/tmp/native-worker-save.amr"
+        assert (
+            window._artifact_workbench_controller().snapshot.project_path
+            == str(Path("/tmp/native-worker-save.amr").resolve(strict=False))
+        )
+        assert "프로젝트 저장:" in window.status_info.text()
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_native_project_save_as_adopts_path_through_workbench_cas() -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    session = _artifact_session()
+    obj = _projected_scene_object(session)
+    window = MainWindow()
+    window._artifact_session = session
+    window._current_project_path = "/tmp/native-before-save-as.amr"
+    window._project_requires_save_as = True
+    window._legacy_project_path = "/tmp/legacy-v1.amr"
+    window.current_mesh = obj.mesh
+    window.viewport.objects = [obj]
+    window.viewport.selected_index = 0
+    try:
+        with (
+            patch.object(window, "_start_task", return_value=True) as start_task,
+            patch.object(
+                QFileDialog,
+                "getSaveFileName",
+                return_value=("/tmp/native-after-save-as.amr", ""),
+            ),
+            patch(
+                "app_interactive.save_amr_artifact_session_project",
+                return_value="/tmp/native-after-save-as.amr",
+            ),
+            patch("app_interactive._safe_git_info", return_value=("abc123", False)),
+            patch.object(QMessageBox, "warning") as warning,
+            patch.object(QMessageBox, "critical") as critical,
+        ):
+            window.save_project_as()
+            callbacks = start_task.call_args.kwargs
+            result = callbacks["thread"]._fn()
+            callbacks["on_done"](result)
+
+        warning.assert_not_called()
+        critical.assert_not_called()
+        assert window._current_project_path == "/tmp/native-after-save-as.amr"
+        assert not window._project_requires_save_as
+        assert window._legacy_project_path is None
+        assert (
+            window._artifact_workbench_controller().snapshot.project_path
+            == str(Path("/tmp/native-after-save-as.amr").resolve(strict=False))
+        )
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_native_project_save_preserves_gui_path_when_final_cas_rejects() -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    session = _artifact_session()
+    obj = _projected_scene_object(session)
+    window = MainWindow()
+    window._artifact_session = session
+    window._current_project_path = "/tmp/native-before-race.amr"
+    window._project_requires_save_as = True
+    window.current_mesh = obj.mesh
+    window.viewport.objects = [obj]
+    window.viewport.selected_index = 0
+    controller = window._artifact_workbench_controller()
+    try:
+        with (
+            patch.object(window, "_start_task", return_value=True) as start_task,
+            patch(
+                "app_interactive.save_amr_artifact_session_project",
+                return_value="/tmp/native-raced-save.amr",
+            ),
+            patch("app_interactive._safe_git_info", return_value=("abc123", False)),
+            patch.object(QMessageBox, "warning") as warning,
+        ):
+            assert window._start_native_project_save(
+                "/tmp/native-raced-save.amr"
+            )
+            callbacks = start_task.call_args.kwargs
+            result = callbacks["thread"]._fn()
+            with patch.object(
+                controller,
+                "adopt_saved_project_path",
+                side_effect=StaleWorkflowOperationError("raced at final CAS"),
+            ):
+                callbacks["on_done"](result)
+
+        warning.assert_called_once()
+        assert "경로를 채택하기 직전" in warning.call_args.args[2]
+        assert window._current_project_path == "/tmp/native-before-race.amr"
+        assert window._project_requires_save_as
+        assert "다시 저장 필요" in window.status_info.text()
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_native_project_save_does_not_adopt_path_after_authority_change() -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    session = _artifact_box_session()
+    obj = _projected_scene_object(session)
+    window = MainWindow()
+    window._artifact_session = session
+    window._current_project_path = "/tmp/current-before-save.amr"
+    window._project_requires_save_as = True
+    window.current_mesh = obj.mesh
+    window.viewport.objects = [obj]
+    window.viewport.selected_index = 0
+    try:
+        with (
+            patch.object(window, "_start_task", return_value=True) as start_task,
+            patch(
+                "app_interactive.save_amr_artifact_session_project",
+                return_value="/tmp/captured-snapshot.amr",
+            ),
+            patch("app_interactive._safe_git_info", return_value=("abc123", False)),
+            patch.object(QMessageBox, "warning") as warning,
+        ):
+            assert window._start_native_project_save(
+                "/tmp/captured-snapshot.amr"
+            )
+            callbacks = start_task.call_args.kwargs
+            result = callbacks["thread"]._fn()
+
+            controller = window._artifact_workbench_controller()
+            transition = controller.prepare_align_commit(
+                translation_mm=(1.0, 0.0, 0.0),
+                rotation_deg=(0.0, 0.0, 0.0),
+                scale=1.0,
+                pivot_mm=(0.0, 0.0, 0.0),
+                operator="pytest",
+                created_at="2026-07-14T00:00:00Z",
+                revision_id="align:changed-during-save",
+            )
+            assert transition is not None
+            activation = controller.activate_projection(transition)
+            controller.finalize_projection(activation)
+            window._artifact_session = transition.candidate_session
+
+            callbacks["on_done"](result)
+
+        warning.assert_called_once()
+        assert "현재 작업을 다시 저장" in warning.call_args.args[2]
+        assert window._current_project_path == "/tmp/current-before-save.amr"
+        assert window._project_requires_save_as
+        assert "다시 저장 필요" in window.status_info.text()
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_native_project_save_worker_returns_committed_durability_warning() -> None:
+    session = _artifact_session()
+    preflight = Mock()
+    error = ProjectSaveError(
+        "directory_fsync",
+        "directory fsync unsupported",
+        committed=True,
+    )
+
+    with patch(
+        "app_interactive.save_amr_artifact_session_project",
+        side_effect=error,
+    ), patch("app_interactive._safe_git_info", return_value=(None, False)):
+        result = MainWindow._write_native_project_snapshot(
+            "/tmp/committed-save.amr",
+            session,
+            {"app": "test"},
+            preflight,
+        )
+
+    preflight.assert_called_once_with()
+    assert result.destination == "/tmp/committed-save.amr"
+    assert result.durability_warning == "directory fsync unsupported"
+
+
+def test_native_project_save_worker_never_writes_after_preflight_failure() -> None:
+    session = _artifact_session()
+
+    def fail_preflight() -> None:
+        raise ProjectSerializationError("live geometry mismatch")
+
+    with (
+        patch("app_interactive.save_amr_artifact_session_project") as save_native,
+        patch("app_interactive._safe_git_info") as git_info,
+    ):
+        with pytest.raises(ProjectSerializationError, match="geometry mismatch"):
+            MainWindow._write_native_project_snapshot(
+                "/tmp/rejected-save.amr",
+                session,
+                {"app": "test"},
+                fail_preflight,
+            )
+
+    save_native.assert_not_called()
+    git_info.assert_not_called()
 
 
 def test_native_align_commit_creates_revision_without_destructive_bake() -> None:

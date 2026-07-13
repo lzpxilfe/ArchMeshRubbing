@@ -13,6 +13,7 @@ import time
 import hashlib
 import os
 import unicodedata
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -1022,6 +1023,12 @@ class _TaskDialogCloseGuard(QObject):
                 event.accept()
                 return True
         return super().eventFilter(watched, event)
+
+
+@dataclass(frozen=True, slots=True)
+class _NativeProjectSaveResult:
+    destination: str
+    durability_warning: str | None = None
 
 
 def get_icon_path():
@@ -4943,14 +4950,14 @@ class MainWindow(QMainWindow):
             a0.ignore()
             try:
                 self.status_info.setText(
-                    "종료 보류 | 실행 중 작업의 안전한 취소를 기다리는 중"
+                    "종료 보류 | 실행 중 작업의 안전한 종료를 기다리는 중"
                 )
             except Exception:
                 pass
             QMessageBox.warning(
                 self,
                 "종료 보류",
-                "실행 중 작업이 아직 안전한 계산 경계에서 끝나지 않았습니다.\n"
+                "실행 중 작업이 아직 안전하게 끝나지 않았습니다.\n"
                 "작업 종료가 표시된 뒤 다시 종료하세요.",
             )
             return
@@ -4975,7 +4982,7 @@ class MainWindow(QMainWindow):
         return bool(joined)
 
     def _shutdown_active_task_worker(self) -> bool:
-        """Revoke task authority, cooperatively cancel, and join before teardown.
+        """Revoke authority, cancel when supported, and join before teardown.
 
         The task's completion callbacks stay connected while waiting so a timed-out
         close attempt can safely return to the live window.  Once the worker has
@@ -6609,7 +6616,11 @@ class MainWindow(QMainWindow):
         if not getattr(self, "_current_project_path", None):
             self.save_project_as()
             return
-        self._write_project(str(self._current_project_path))
+        destination = str(self._current_project_path)
+        if isinstance(getattr(self, "_artifact_session", None), ArtifactSession):
+            self._start_native_project_save(destination)
+            return
+        self._write_project(destination)
 
     def save_project_as(self) -> None:
         if bool(getattr(self, "_artifact_load_active", False)) or bool(
@@ -6649,8 +6660,244 @@ class MainWindow(QMainWindow):
         if not str(filepath).lower().endswith(".amr"):
             filepath = str(filepath) + ".amr"
 
+        if isinstance(getattr(self, "_artifact_session", None), ArtifactSession):
+            self._start_native_project_save(filepath)
+            return
         if self._write_project(filepath):
             self._current_project_path = str(filepath)
+
+    @staticmethod
+    def _write_native_project_snapshot(
+        filepath: str,
+        session: ArtifactSession,
+        meta: Mapping[str, Any],
+        preflight: Callable[[], None],
+    ) -> _NativeProjectSaveResult:
+        """Validate and persist one immutable native snapshot on a worker."""
+
+        preflight()
+        worker_meta = dict(meta)
+        sha, dirty = _safe_git_info(str(Path(basedir)))
+        worker_meta["git"] = (
+            f"{sha}{'*' if dirty else ''}" if sha else "unknown"
+        )
+        try:
+            destination = save_amr_artifact_session_project(
+                filepath,
+                session,
+                meta=worker_meta,
+            )
+        except ProjectSaveError as exc:
+            if not exc.committed:
+                raise
+            return _NativeProjectSaveResult(
+                destination=str(filepath),
+                durability_warning=str(exc),
+            )
+        return _NativeProjectSaveResult(destination=str(destination))
+
+    def _start_native_project_save(self, filepath: str) -> bool:
+        """Start a native project save without blocking the Qt event loop."""
+
+        if bool(getattr(self, "_artifact_load_active", False)) or bool(
+            getattr(self, "_project_load_active", False)
+        ) or bool(
+            getattr(self, "_project_load_failed", False)
+        ) or bool(
+            getattr(self, "_artifact_authority_faulted", False)
+        ):
+            QMessageBox.warning(
+                self,
+                "프로젝트 저장 차단",
+                "검증 중이거나 권위가 불확실한 프로젝트는 저장할 수 없습니다.",
+            )
+            return False
+
+        session = getattr(self, "_artifact_session", None)
+        if not isinstance(session, ArtifactSession):
+            return False
+        destination = str(filepath)
+        legacy_path = str(getattr(self, "_legacy_project_path", "") or "").strip()
+        if bool(getattr(self, "_project_requires_save_as", False)) and legacy_path:
+            if _same_filesystem_target(destination, legacy_path):
+                QMessageBox.warning(
+                    self,
+                    "구버전 프로젝트 보존",
+                    "AMR v1 원본은 덮어쓸 수 없습니다. 다른 파일 이름을 선택하세요.",
+                )
+                return False
+
+        try:
+            controller = self._artifact_workbench_controller()
+            controller.require_stable_session(session)
+            preflight = self._capture_native_scene_preflight(session)
+            snapshot = controller.snapshot
+            if snapshot.session is not session or snapshot.tentative:
+                raise ArtifactWorkbenchError(
+                    "native save snapshot does not own stable project authority"
+                )
+            current_project_path = getattr(self, "_current_project_path", None)
+            normalized_current_path = (
+                str(Path(str(current_project_path)).expanduser().resolve(strict=False))
+                if current_project_path is not None
+                else None
+            )
+            if snapshot.project_path != normalized_current_path:
+                raise ArtifactWorkbenchError(
+                    "GUI and Workbench project paths do not share one authority"
+                )
+            meta = {
+                "app": APP_NAME,
+                "version": APP_VERSION,
+            }
+        except Exception as exc:
+            self.status_info.setText("프로젝트 저장 준비 실패 | 기존 파일 유지")
+            QMessageBox.warning(
+                self,
+                "프로젝트 저장 준비 실패",
+                f"{type(exc).__name__}: {exc}",
+            )
+            return False
+
+        base_state_version = snapshot.state_version
+        base_authority_epoch = snapshot.authority_epoch
+        base_project_path = getattr(self, "_current_project_path", None)
+        base_requires_save_as = bool(
+            getattr(self, "_project_requires_save_as", False)
+        )
+        base_legacy_path = getattr(self, "_legacy_project_path", None)
+
+        def authority_is_current() -> bool:
+            current = controller.snapshot
+            return bool(
+                not current.tentative
+                and current.pending_load is None
+                and current.session is session
+                and getattr(self, "_artifact_session", None) is session
+                and current.state_version == base_state_version
+                and current.authority_epoch == base_authority_epoch
+                and getattr(self, "_current_project_path", None) == base_project_path
+                and bool(getattr(self, "_project_requires_save_as", False))
+                == base_requires_save_as
+                and getattr(self, "_legacy_project_path", None) == base_legacy_path
+                and not bool(getattr(self, "_project_load_failed", False))
+                and not bool(getattr(self, "_artifact_authority_faulted", False))
+            )
+
+        def report_snapshot_only(
+            value: _NativeProjectSaveResult,
+            *,
+            reason: str,
+        ) -> None:
+            detail = (
+                "저장 작업이 캡처한 snapshot은 파일에 기록됐지만 "
+                f"{reason} 현재 작업을 다시 저장하세요."
+            )
+            if value.durability_warning:
+                detail += (
+                    "\n\n또한 디렉터리 동기화를 확인하지 못했습니다:\n"
+                    f"{value.durability_warning}"
+                )
+            self.status_info.setText(
+                "이전 snapshot 저장됨 | 현재 문서는 다시 저장 필요"
+            )
+            QMessageBox.warning(
+                self,
+                "프로젝트 snapshot 저장됨",
+                detail,
+            )
+
+        def on_done(value: object) -> None:
+            if not isinstance(value, _NativeProjectSaveResult):
+                raise ProjectSerializationError(
+                    "native project save worker returned an invalid result"
+                )
+            if not authority_is_current():
+                report_snapshot_only(
+                    value,
+                    reason="그 사이 현재 문서 권위가 변경됐습니다.",
+                )
+                return
+
+            try:
+                controller.adopt_saved_project_path(
+                    session,
+                    value.destination,
+                    expected_state_version=base_state_version,
+                    expected_authority_epoch=base_authority_epoch,
+                )
+            except ArtifactWorkbenchError:
+                _LOGGER.warning(
+                    "Native project save path adoption was rejected",
+                    exc_info=True,
+                )
+                report_snapshot_only(
+                    value,
+                    reason=(
+                        "경로를 채택하기 직전에 현재 문서 권위가 변경됐습니다."
+                    ),
+                )
+                return
+
+            # Keep the user's selected spelling for the shell while the
+            # Workbench owns the normalized authority locator.
+            self._current_project_path = value.destination
+            self._project_requires_save_as = False
+            self._legacy_project_path = None
+            if value.durability_warning:
+                QMessageBox.warning(
+                    self,
+                    "저장 내구성 경고",
+                    "프로젝트 파일은 원자적으로 교체되었지만 디렉터리 동기화에 "
+                    "실패했습니다. 파일은 다시 열 수 있으나 직후 시스템 장애에 대한 "
+                    "내구성은 확정할 수 없습니다.\n\n"
+                    f"{value.durability_warning}",
+                )
+                self.status_info.setText(
+                    "프로젝트 저장됨 | crash durability 미확정"
+                )
+                return
+            self.status_info.setText(
+                f"프로젝트 저장: {Path(value.destination).name}"
+            )
+
+        def on_failed(message: str) -> None:
+            self.status_info.setText("프로젝트 저장 실패 | 기존 파일 유지")
+            QMessageBox.critical(
+                self,
+                "프로젝트 저장 실패",
+                self._format_error_message(
+                    "프로젝트 snapshot 저장 중 오류가 발생했습니다:",
+                    message,
+                ),
+            )
+
+        try:
+            started = self._start_task(
+                title="프로젝트 저장",
+                label="원본·문서·Align을 검증하고 AMR 패키지를 저장하는 중...",
+                thread=TaskThread(
+                    "save_native_project",
+                    lambda: MainWindow._write_native_project_snapshot(
+                        destination,
+                        session,
+                        meta,
+                        preflight,
+                    ),
+                ),
+                on_done=on_done,
+                on_failed=on_failed,
+                lock_dialog_until_finished=True,
+            )
+        except Exception as exc:
+            self.status_info.setText("프로젝트 저장 작업 시작 실패")
+            QMessageBox.critical(
+                self,
+                "프로젝트 저장 실패",
+                f"{type(exc).__name__}: {exc}",
+            )
+            return False
+        return bool(started)
 
     def _write_project(self, filepath: str) -> bool:
         if bool(getattr(self, "_artifact_load_active", False)) or bool(
@@ -9351,6 +9598,7 @@ class MainWindow(QMainWindow):
         on_failed: Callable[[str], None] | None = None,
         on_cancel_requested: Callable[[], None] | None = None,
         on_shutdown_joined: Callable[[], None] | None = None,
+        lock_dialog_until_finished: bool = False,
     ) -> bool:
         if bool(getattr(self, "_application_closing", False)):
             return False
@@ -9381,6 +9629,7 @@ class MainWindow(QMainWindow):
         self._task_dialog = dlg
         self._task_thread = thread
         dialog_close_guard = _TaskDialogCloseGuard()
+        dialog_close_guard.waiting_for_worker = bool(lock_dialog_until_finished)
         try:
             dlg.installEventFilter(dialog_close_guard)
         except Exception:

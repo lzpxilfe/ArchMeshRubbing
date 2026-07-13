@@ -153,6 +153,72 @@ def test_initial_state_is_headless_empty_and_not_measurement_ready() -> None:
     assert not snapshot.can_measure
 
 
+def test_saved_project_path_adoption_is_an_authority_checked_cas() -> None:
+    session = _session(explicit_align=True)
+    workbench = ArtifactWorkbench(
+        session=session,
+        project_path="/projects/before.amr",
+        id_factory=SequentialIds(),
+    )
+    observed = []
+    workbench.subscribe(observed.append)
+    captured = workbench.snapshot
+
+    adopted = workbench.adopt_saved_project_path(
+        session,
+        "/projects/after.amr",
+        expected_state_version=captured.state_version,
+        expected_authority_epoch=captured.authority_epoch,
+    )
+
+    assert adopted.session is session
+    assert adopted.project_path == _resolved("/projects/after.amr")
+    assert adopted.state_version == captured.state_version + 1
+    assert adopted.authority_epoch == captured.authority_epoch
+    assert observed == [captured, adopted]
+
+    with pytest.raises(StaleWorkflowOperationError, match="stale artifact authority"):
+        workbench.adopt_saved_project_path(
+            session,
+            "/projects/stale.amr",
+            expected_state_version=captured.state_version,
+            expected_authority_epoch=captured.authority_epoch,
+        )
+    assert workbench.snapshot is adopted
+
+
+def test_saved_project_path_noop_still_requires_exact_authority() -> None:
+    session = _session(explicit_align=True)
+    workbench = ArtifactWorkbench(
+        session=session,
+        project_path="/projects/live.amr",
+        id_factory=SequentialIds(),
+    )
+    captured = workbench.snapshot
+
+    unchanged = workbench.adopt_saved_project_path(
+        session,
+        "/projects/live.amr",
+        expected_state_version=captured.state_version,
+        expected_authority_epoch=captured.authority_epoch,
+    )
+
+    assert unchanged is captured
+
+    replacement = _session(explicit_align=True)
+    workbench.synchronize_legacy_session(
+        replacement,
+        project_path="/projects/live.amr",
+    )
+    with pytest.raises(StaleWorkflowOperationError, match="stale artifact authority"):
+        workbench.adopt_saved_project_path(
+            session,
+            "/projects/live.amr",
+            expected_state_version=captured.state_version,
+            expected_authority_epoch=captured.authority_epoch,
+        )
+
+
 def test_new_import_is_ticketed_and_publishes_only_after_finalize() -> None:
     ids = SequentialIds()
     workbench = ArtifactWorkbench(id_factory=ids)
