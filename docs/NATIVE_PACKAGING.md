@@ -1,6 +1,6 @@
 # Native Packaging and Release Gates
 
-이 문서는 로컬 unsigned 앱과 CI smoke artifact를 만드는 절차를 설명한다. 현재 절차는 설치, 서명, notarization, 업로드 또는 공개 배포를 수행하지 않는다.
+이 문서는 로컬 unsigned 앱과 CI 전용 unsigned Windows installer를 만드는 절차를 설명한다. CI는 installer를 격리 설치·검증·제거하지만 서명, artifact 업로드 또는 공개 배포는 수행하지 않는다.
 
 ## 지원 빌드 기준
 
@@ -8,6 +8,7 @@
 - `requirements/runtime-py312.lock`: 정확한 런타임 버전
 - `requirements/build-py312.lock`: 정확한 PyInstaller toolchain 버전
 - `ArchMeshRubbing.spec`: 첫 안정판 대상인 Windows onedir build. 기존 Linux onedir와 macOS `.app` 분기는 source 호환용으로 남지만 현재 릴리스 게이트가 아니다.
+- `installer/ArchMeshRubbing.iss`: stable AppId를 가진 per-user Windows installer 정의. CI에서만 unsigned 검증 산출물을 만들며 파일 연결·자동 실행·바탕화면 바로가기를 추가하지 않는다.
 - `build/generated/build_info.json`: version, channel, commit, runtime lock SHA-256
 
 lock은 버전을 고정하지만 아직 OS별 wheel SHA-256까지 고정한 공급망 lock은 아니다. 공개 릴리스 전에는 wheelhouse/hash lock 또는 동등한 provenance가 추가로 필요하다.
@@ -71,8 +72,14 @@ python -m src.gui.opengl_driver_smoke ^
 - Windows frozen executable의 file-based 12-check self-test
 - report의 전체 check 성공 확인
 - source와 frozen executable 각각의 Windows native-QPA software OpenGL report 및 전체 check 성공 확인
+- Inno Setup 6 compiler version·SHA-256, source commit과 installer SHA-256·크기·unsigned 상태 기록
+- 격리된 per-user 경로에 무인 설치하고 frozen onedir의 모든 payload를 byte-for-byte SHA-256 비교
+- 설치된 실행 파일에 outbound deny firewall rule과 실패 proxy를 적용한 12-check complete workflow
+- 설치본 native `qwindows` software OpenGL actual-frame 검사, 무인 제거, 설치 디렉터리·Start Menu shortcut 잔여물 검사
 
-`package-smoke.yml`에는 frozen executable artifact upload나 release 단계가 없다. 현재 제품 판정은 Windows job 하나만 사용한다. commit `b12d4874a4a8`의 [run `29251668029`](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29251668029)은 unsigned frozen 실행 증거이며 공개 설치 파일을 제공한다는 뜻은 아니다. 과거 세 OS 결과는 역사적 이식성 기록으로만 남긴다.
+`package-smoke.yml`에는 frozen executable·installer artifact upload나 release 단계가 없다. 현재 제품 판정은 Windows job 하나만 사용한다. commit `19558f324deb`의 [run `29255341573`](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29255341573)은 Inno Setup 6.7.1로 만든 62,312,936-byte unsigned installer의 SHA-256과 compiler SHA-256을 기록하고, 465개 payload 전수 비교, outbound 차단 12-check workflow, 설치본 actual-frame 66/66, 제거를 통과했다. 이는 내부 패키지 역학의 증거이며 공개 설치 파일을 제공한다는 뜻은 아니다. 과거 세 OS 결과는 역사적 이식성 기록으로만 남긴다.
+
+격리된 ASCII per-user 경로는 위 전체 gate를 통과했다. 별도 [비 ASCII 경로 진단 run `29254942224`](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29254942224)은 설치·payload 비교·outbound 차단·12-check offline workflow까지 통과했지만 bundled software OpenGL context 생성에 실패했다. 따라서 비 ASCII 설치 경로의 native rendering은 아직 지원 완료로 판정하지 않고 실제 Windows pilot 항목으로 남긴다.
 
 `package-smoke.yml`의 12-check self-test는 offscreen이지만 바로 뒤의 별도 frozen driver smoke는 native `qwindows`에서 실제 OpenGL context와 framebuffer를 사용한다. 다만 Qt의 Mesa software DLL을 강제하므로 대표 Windows 하드웨어 GPU/driver 또는 compositor 최종 표시 인증으로 표현해서는 안 된다.
 
@@ -88,16 +95,21 @@ python -m src.gui.opengl_driver_smoke ^
 
 따라서 모든 권리자의 동의에 따른 재허가, 적절한 상용 라이선스와 추가 허가, 또는 GUI 경계 교체 같은 전략을 결정하기 전에는 PyQt6 포함 바이너리를 공개하지 않는다. 이는 법률 자문이 아니라 보수적인 릴리스 게이트다.
 
+CI runner의 Inno Setup 6.7.1 compiler는 `Non-commercial use only`를 출력한다. 공식 안내도 상업적 맥락에서 이 도구로 이익을 얻거나 CI에서 compiler를 호출한다면 commercial license 구매를 기대한다고 명시한다. 현재 CI 산출물은 업로드하지 않는다. 향후 공개·상업 배포 전에는 사용 맥락을 확인해 Inno license를 확보하거나 호환되는 installer toolchain으로 교체한다.
+
+- [Inno Setup 6.7 revision history](https://jrsoftware.org/files/is6-whatsnew.htm)
+- [Inno Setup commercial license policy](https://jrsoftware.org/isorder.php)
+
 ### 배포 신뢰
 
 공개 릴리스에는 추가로 아래가 필요하다.
 
 - Windows Authenticode
 - 실제 포함 파일 기준 SBOM과 제3자 NOTICE/license bundle
-- Windows 설치/제거/파일 연결 smoke
+- 파일 연결을 추가할 경우 해당 Windows 설치/제거 smoke
 - 대표 Windows 하드웨어 GPU/driver와 compositor pilot
 - large mesh, low-memory, non-ASCII path, offline machine pilot
 - clean source tree 또는 source archive digest를 포함하는 build provenance
 - 공개 산출물 하나를 선택하는 패키징 규칙과 checksum/signature
 
-macOS·Linux 배포, signing과 installer는 첫 Windows 안정판 이후 별도 범위로 둔다.
+Windows installer의 내부 설치·실행·제거 역학은 검증됐지만 라이선스·서명·고지·공급망 provenance와 공개 릴리스는 아직 차단한다. macOS·Linux 배포는 첫 Windows 안정판 이후 별도 범위로 둔다.

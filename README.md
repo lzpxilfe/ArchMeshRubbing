@@ -77,7 +77,7 @@ Align 확정 뒤에도 모든 기능이 한꺼번에 열리지는 않습니다. 
 - export 중 같은 Align에 무관한 record가 추가돼도 안전하게 게시하지만 Align/Open 완료로 권위가 바뀌면 destination을 만들지 않고 자신이 소유한 staging만 정리함
 - scene publication의 rollback·scene 복원·finalize 자체가 불확실하면 fatal authority 상태로 전환해 검증된 Open 전까지 저장·실측·내보내기를 차단
 
-Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 `SurfaceVisualizer`/flatten 기반 PNG·SVG를 측정 산출물로 내보내는 우회 경로를 차단합니다. 검증된 Cutline/Outline record는 `.amr-vector`, Digital Rubbing record는 `.amr-rubbing`으로 내보냅니다. 과거 세 OS 결과는 이식성의 역사적 증거로만 보존합니다. 현재 완료 판정은 Windows만 사용하며, commit `b12d4874a4a8`의 [source CI](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29251668123)와 [frozen package smoke](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29251668029)가 각각 native `qwindows` actual-frame gate를 통과했습니다. 공개 installer와 서명은 아직 별도 과제입니다.
+Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 `SurfaceVisualizer`/flatten 기반 PNG·SVG를 측정 산출물로 내보내는 우회 경로를 차단합니다. 검증된 Cutline/Outline record는 `.amr-vector`, Digital Rubbing record는 `.amr-rubbing`으로 내보냅니다. 과거 세 OS 결과는 이식성의 역사적 증거로만 보존합니다. 현재 완료 판정은 Windows만 사용하며, commit `b12d4874a4a8`의 [source CI](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29251668123)와 [frozen package smoke](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29251668029)가 각각 native `qwindows` actual-frame gate를 통과했습니다. commit `19558f324deb`의 [installed-package run](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29255341573)은 unsigned installer 빌드, per-user 설치, 465개 payload 전수 해시 비교, outbound 차단 상태의 12-check offline workflow와 actual-frame 66/66, 무인 제거를 통과했습니다. 다만 CI installer는 업로드하지 않으며 공개 배포·서명을 뜻하지 않습니다.
 
 ### 1. 기와형 메쉬용 기본 추천 펼침
 
@@ -217,7 +217,7 @@ Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 `Surfac
 
 ## ⚡ Quick Start
 
-현재 Quick Start는 Windows source checkout 실행 절차입니다. Windows frozen build와 오프라인 self-test·actual-frame 검증은 통과했지만, 서명된 설치 파일은 아직 제공하지 않습니다. 첫 공개 안정판 전에는 installer·서명·설치 후 재검증이 남아 있습니다.
+현재 Quick Start는 Windows source checkout 실행 절차입니다. Windows frozen build와 CI 내부 unsigned installer의 설치·오프라인 self-test·actual-frame·제거 검증은 통과했지만, 다운로드 가능한 서명 설치 파일은 아직 제공하지 않습니다. 첫 공개 안정판 전에는 라이선스 결정, Authenticode, SBOM/NOTICE와 공급망 provenance, 대표 하드웨어·실물 pilot이 남아 있습니다.
 
 ### Windows
 
@@ -266,7 +266,7 @@ python -m pip install -r requirements/build-py312.lock
 python tools/build_native.py
 ```
 
-이 명령은 기존 산출물을 기본적으로 덮어쓰지 않고, 빌드 뒤 실제 frozen executable의 offline self-test를 실행합니다. 현재 공개 바이너리는 만들지 않습니다. 패키지 CI는 Windows 하나만 차단 대상으로 사용하며 frozen executable의 native-QPA software OpenGL report도 검사합니다. 라이선스 결정, Authenticode, installer와 대표 Windows GPU pilot은 여전히 남아 있습니다. 자세한 절차와 차단 게이트는 [docs/NATIVE_PACKAGING.md](docs/NATIVE_PACKAGING.md)를 참고하세요.
+이 명령은 기존 산출물을 기본적으로 덮어쓰지 않고, 빌드 뒤 실제 frozen executable의 offline self-test를 실행합니다. 현재 공개 바이너리는 만들지 않습니다. 패키지 CI는 Windows 하나만 차단 대상으로 사용하며 unsigned installer를 격리 설치한 뒤 payload 해시, outbound 차단 상태의 complete workflow, native-QPA software OpenGL과 제거까지 검사합니다. 라이선스 결정, Authenticode, SBOM/NOTICE·공급망 provenance와 대표 Windows GPU·실물 pilot은 여전히 남아 있습니다. 자세한 절차와 차단 게이트는 [docs/NATIVE_PACKAGING.md](docs/NATIVE_PACKAGING.md)를 참고하세요.
 
 ---
 
@@ -367,7 +367,8 @@ python main.py --project mesh.obj planview.png
 - 대좌표 render-origin 이식: relative VBO·camera/model rebasing·world overlay 제출과 frame-bound depth picking/drag 계약 구현
 - 2026-07-13 Windows 기준 commit `b12d4874a4a8`: [source CI run 29251668123](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29251668123)에서 full pytest `670 passed, 128 subtests`, Ruff, M0 Pyright `0 errors`, Windows workflow `573 passed, 3 skipped, 118 subtests`와 qwindows+llvmpipe actual-frame `66/66` 통과
 - 같은 commit의 [frozen package run 29251668029](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29251668029)에서 12-check offline self-test와 frozen executable qwindows+llvmpipe actual-frame gate 통과
-- 다음 단계: 라이선스 결정, Authenticode·installer, 대표 Windows GPU·대용량 실제 유물 pilot. macOS·Linux 배포 확대는 첫 안정판 이후 별도 범위
+- commit `19558f324deb`의 [installed-package run 29255341573](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29255341573)에서 Inno Setup 6.7.1 unsigned installer, 465개 설치 payload byte-for-byte 검증, outbound 차단 12-check workflow, 설치본 actual-frame `66/66`, 무인 제거·잔여물 검사를 통과. artifact upload/release는 없음
+- 다음 단계: 라이선스 결정, Authenticode, SBOM/NOTICE·hash-locked 공급망 provenance, 대표 Windows GPU·대용량 실제 유물·비 ASCII 경로 pilot. macOS·Linux 배포 확대는 첫 안정판 이후 별도 범위
 
 ---
 
