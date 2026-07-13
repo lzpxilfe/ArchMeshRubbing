@@ -1,1 +1,2 @@
 /tests/fixtures/projects/*.json text eol=lf
+/requirements/*.lock text eol=lf

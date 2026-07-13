@@ -49,7 +49,9 @@ def test_current_recipe_is_closed_schema_valid_and_runtime_bound() -> None:
     assert recipe["parser_runtime_sha256"] == (
         "930cc48cbc94f91c867ebb79e2976c589f7135cd8642e6565c04a44110efddef"
     )
-    assert len(str(recipe["runtime_lock_sha256"])) == 64
+    assert recipe["runtime_lock_sha256"] == (
+        "d460c6f403b0c7b2aea3bf30d5f63c06b85c76ef7d7317989b66461db3754400"
+    )
 
     schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
     Draft202012Validator.check_schema(schema)
