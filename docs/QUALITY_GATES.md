@@ -163,7 +163,7 @@ python -m pytest -q \
 
 2026-07-13 source-closure 기준 commit `6898f98d2fb3`은 Python 3.12 원격 CI에서 full pytest `660 passed, 128 subtests passed`, Ruff, M0 Pyright, Windows persistence와 Windows frozen executable self-test를 통과했다. 이후 첫 안정판의 플랫폼 완료 판정은 Windows job만 사용한다.
 
-현재 Windows 기준 commit `b12d4874a4a8`은 [source CI run 29251668123](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29251668123)에서 full pytest `670 passed, 128 subtests passed`, Ruff, M0 Pyright `0 errors`, Windows workflow와 qwindows+llvmpipe actual-frame `66/66`을 통과했다. [frozen package run 29251668029](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29251668029)도 당시 complete-workflow self-test와 같은 actual-frame gate를 통과했다. complete-workflow check는 Open→Align→3/6/6→completed AMR offline reopen→1:1 SVG/PNG 재현을 한 번에 검증한다. 과거 commit `19558f324deb`의 installer run은 역사적 내부 검증이며 현재 배포 gate는 compiler 비종속 portable ZIP으로 교체했다.
+현재 Windows 코드 기준 commit `d4c7d94037be`는 [source CI run 29279156637](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29279156637)에서 full pytest `753 passed, 128 subtests passed`, Ruff, M0 Pyright `0 errors`, Windows workflow `651 passed, 5 skipped, 118 subtests passed`와 qwindows+llvmpipe actual-frame `66/66`을 통과했다. [portable package run 29279156712](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29279156712)도 frozen·한글 경로 portable 실행 파일의 14-check complete-workflow self-test, actual-frame `66/66`, 추출본·방화벽 규칙 정리를 모두 통과했다. complete-workflow check는 Open→Align→3/6/6→completed AMR offline reopen→1:1 SVG/PNG 재현을 한 번에 검증한다. 과거 commit `19558f324deb`의 installer run은 역사적 내부 검증이며 현재 배포 gate는 compiler 비종속 portable ZIP으로 교체했다.
 
 ## 아직 차단하지 않는 검사
 
