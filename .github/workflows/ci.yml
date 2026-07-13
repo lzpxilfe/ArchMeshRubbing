@@ -129,7 +129,9 @@ jobs:
 
       - name: Windows software OpenGL native-QPA smoke
         env:
+          PYTHONUNBUFFERED: "1"
           QT_QPA_PLATFORM: windows
+          QT_LOGGING_RULES: "qt.qpa.gl=true"
           QT_OPENGL: software
         run: >-
           python -m src.gui.opengl_driver_smoke

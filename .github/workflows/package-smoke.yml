@@ -103,6 +103,7 @@ jobs:
         shell: pwsh
         env:
           QT_QPA_PLATFORM: windows
+          QT_LOGGING_RULES: "qt.qpa.gl=true"
           QT_OPENGL: software
         run: |
           $process = Start-Process `
@@ -111,6 +112,9 @@ jobs:
             -Wait `
             -PassThru
           if ($process.ExitCode -ne 0) {
+            if (Test-Path "build\frozen-windows-opengl-driver-smoke.json") {
+              Get-Content "build\frozen-windows-opengl-driver-smoke.json"
+            }
             throw "Frozen OpenGL smoke exited with code $($process.ExitCode)"
           }
 

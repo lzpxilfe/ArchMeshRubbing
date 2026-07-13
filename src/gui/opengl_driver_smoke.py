@@ -77,6 +77,18 @@ class _CheckRecorder:
         if detail:
             entry.update(_json_value(detail))
         self._checks.append(entry)
+        # Native driver failures can terminate the process below Python's
+        # exception boundary.  Emit each completed checkpoint immediately so
+        # CI still records the last proven boundary before a hard crash.
+        try:
+            print(
+                "OPENGL_SMOKE_CHECK "
+                + json.dumps(entry, allow_nan=False, sort_keys=True),
+                file=sys.stderr,
+                flush=True,
+            )
+        except Exception:
+            pass
         if not ok:
             raise DriverSmokeFailure(f"actual OpenGL check failed: {check_id}")
 
