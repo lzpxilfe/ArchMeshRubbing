@@ -49,8 +49,8 @@ def test_installer_copies_only_frozen_payload_and_adds_no_runtime_actions() -> N
         'Source: "{#SourceDir}\\*"; DestDir: "{app}"; '
         "Flags: ignoreversion recursesubdirs createallsubdirs" in script
     )
-    assert "LicenseFile={#SourceDir}\\LICENSE" in script
-    assert "AppReadmeFile={app}\\README.md" in script
+    assert "LicenseFile={#SourceDir}\\_internal\\LICENSE" in script
+    assert "AppReadmeFile={app}\\_internal\\README.md" in script
     assert "[Run]" not in script
     assert "[UninstallRun]" not in script
     assert "[Registry]" not in script
