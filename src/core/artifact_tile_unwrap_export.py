@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclass_field
 import hashlib
 import json
 import os
 from pathlib import Path
 import stat
 import tempfile
+from threading import RLock
 from typing import Any, Mapping
+import uuid
 from xml.sax.saxutils import escape
 
 import numpy as np
@@ -78,6 +80,11 @@ _PACKAGE_NAMES = frozenset(
         TILE_UNWRAP_EXPORT_SIDECAR_NAME,
     }
 )
+_TILE_UNWRAP_STAGING_PREFIX = ".amru-stage-"
+_TILE_UNWRAP_QUARANTINE_PREFIX = ".amru-discard-"
+_STAGING_OWNERS_LOCK = RLock()
+_STAGING_OWNERS: dict[str, "_OwnedTileUnwrapStaging"] = {}
+_PREPARED_PUBLICATIONS: dict[object, "PreparedTileUnwrapPublication"] = {}
 
 
 class ArtifactTileUnwrapExportError(ValueError):
@@ -100,6 +107,42 @@ class TileUnwrapExportBundle:
 class TileUnwrapExportPublication:
     destination: Path
     durability_confirmed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _OwnedTileUnwrapStaging:
+    path: Path
+    destination: Path
+    device: int
+    inode: int
+    parent_device: int
+    parent_inode: int
+    staging_directory_fsync_confirmed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _TileUnwrapEntryFingerprint:
+    name: str
+    device: int
+    inode: int
+    mode: int
+    size: int
+    mtime_ns: int
+    ctime_ns: int
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class PreparedTileUnwrapPublication:
+    """Opaque exact authority to publish one validated unwrap staging inode."""
+
+    staging_directory: Path
+    destination: Path
+    _owned: _OwnedTileUnwrapStaging = dataclass_field(repr=False)
+    _fingerprint: tuple[_TileUnwrapEntryFingerprint, ...] = dataclass_field(
+        repr=False
+    )
+    _staging_directory_fsync_confirmed: bool = dataclass_field(repr=False)
+    _nonce: object = dataclass_field(repr=False, compare=False)
 
 
 def _sha256_bytes(value: bytes) -> str:
@@ -793,6 +836,119 @@ def _destination_path(directory: str | os.PathLike[str]) -> Path:
     return destination
 
 
+def _staging_registry_key(path: Path) -> str:
+    return os.path.abspath(os.fspath(path))
+
+
+def _path_exists_without_following(path: Path) -> bool:
+    try:
+        path.stat(follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def _require_current_parent(staging: _OwnedTileUnwrapStaging) -> None:
+    try:
+        current = staging.path.parent.stat(follow_symlinks=False)
+    except OSError as exc:
+        raise ArtifactTileUnwrapExportError(
+            f"cannot inspect tile unwrap export parent: {exc}"
+        ) from exc
+    if (
+        not stat.S_ISDIR(current.st_mode)
+        or current.st_dev != staging.parent_device
+        or current.st_ino != staging.parent_inode
+    ):
+        raise ArtifactTileUnwrapExportError(
+            "tile unwrap export parent identity changed"
+        )
+
+
+def _require_owned_staging_identity(staging: _OwnedTileUnwrapStaging) -> None:
+    try:
+        current = staging.path.stat(follow_symlinks=False)
+    except OSError as exc:
+        raise ArtifactTileUnwrapExportError(
+            f"cannot inspect tile unwrap export staging: {exc}"
+        ) from exc
+    if (
+        not stat.S_ISDIR(current.st_mode)
+        or current.st_dev != staging.device
+        or current.st_ino != staging.inode
+    ):
+        raise ArtifactTileUnwrapExportError(
+            "tile unwrap export staging identity changed; path was preserved"
+        )
+
+
+def _capture_tile_unwrap_package_fingerprint(
+    directory: Path,
+) -> tuple[_TileUnwrapEntryFingerprint, ...]:
+    try:
+        entries = {entry.name: entry for entry in directory.iterdir()}
+    except OSError as exc:
+        raise ArtifactTileUnwrapExportError(
+            f"cannot inspect tile unwrap staging package: {exc}"
+        ) from exc
+    if set(entries) != _PACKAGE_NAMES:
+        raise ArtifactTileUnwrapExportError(
+            "tile unwrap staging package has unexpected entries"
+        )
+    fingerprints: list[_TileUnwrapEntryFingerprint] = []
+    for name in sorted(entries):
+        try:
+            identity = entries[name].stat(follow_symlinks=False)
+        except OSError as exc:
+            raise ArtifactTileUnwrapExportError(
+                f"cannot inspect tile unwrap staging entry {name!r}: {exc}"
+            ) from exc
+        if not stat.S_ISREG(identity.st_mode):
+            raise ArtifactTileUnwrapExportError(
+                f"tile unwrap staging entry {name!r} is not a regular file"
+            )
+        fingerprints.append(
+            _TileUnwrapEntryFingerprint(
+                name=name,
+                device=identity.st_dev,
+                inode=identity.st_ino,
+                mode=identity.st_mode,
+                size=identity.st_size,
+                mtime_ns=identity.st_mtime_ns,
+                ctime_ns=identity.st_ctime_ns,
+            )
+        )
+    return tuple(fingerprints)
+
+
+def _invalidate_tile_unwrap_prepared_locked(
+    staging: _OwnedTileUnwrapStaging,
+) -> None:
+    for nonce, prepared in tuple(_PREPARED_PUBLICATIONS.items()):
+        if prepared._owned is staging:
+            _PREPARED_PUBLICATIONS.pop(nonce, None)
+
+
+def _raise_if_owned_destination_is_visible(
+    staging: _OwnedTileUnwrapStaging,
+) -> None:
+    try:
+        current = staging.destination.stat(follow_symlinks=False)
+    except OSError:
+        return
+    if (
+        stat.S_ISDIR(current.st_mode)
+        and current.st_dev == staging.device
+        and current.st_ino == staging.inode
+    ):
+        raise ArtifactTileUnwrapExportError(
+            "tile unwrap staging is already visible at its destination",
+            committed=True,
+        )
+
+
 def _cleanup_owned_stage(path: Path, *, device: int, inode: int) -> None:
     try:
         current = path.stat(follow_symlinks=False)
@@ -826,24 +982,24 @@ def _cleanup_owned_stage(path: Path, *, device: int, inode: int) -> None:
     path.rmdir()
 
 
-def export_tile_unwrap_package(
+def stage_tile_unwrap_package(
     directory: str | os.PathLike[str],
     document: ArtifactDocument,
     record_id: str,
     unwrap: TileUnwrapMesh,
-) -> TileUnwrapExportPublication:
-    """Build, verify, and atomically publish one no-overwrite directory."""
+) -> Path:
+    """Build and verify a hidden same-parent package without publishing it."""
 
     destination = _destination_path(directory)
     bundle = build_tile_unwrap_export(document, record_id, unwrap)
     stage = Path(
         tempfile.mkdtemp(
-            prefix=f".{destination.name}.staging-",
+            prefix=_TILE_UNWRAP_STAGING_PREFIX,
             dir=destination.parent,
         )
     )
     identity = stage.stat(follow_symlinks=False)
-    published = False
+    parent_identity = destination.parent.stat(follow_symlinks=False)
     try:
         for name, payload in (
             (TILE_UNWRAP_EXPORT_PAYLOAD_NAME, bundle.payload_bytes),
@@ -858,32 +1014,266 @@ def export_tile_unwrap_package(
                     f"cannot write tile unwrap package: {exc}"
                 ) from exc
         validate_tile_unwrap_export_package(stage, document=document)
+        staging_fsync_confirmed = fsync_export_directory(stage)
         current = stage.stat(follow_symlinks=False)
         if current.st_dev != identity.st_dev or current.st_ino != identity.st_ino:
             raise ArtifactTileUnwrapExportError("tile unwrap staging identity changed")
-        try:
-            publish_export_directory_noreplace(stage, destination)
-        except ArtifactVectorExportError as exc:
-            raise ArtifactTileUnwrapExportError(str(exc)) from exc
-        published = True
-        durability = fsync_export_directory(destination.parent)
-        return TileUnwrapExportPublication(
+        owned = _OwnedTileUnwrapStaging(
+            path=stage,
             destination=destination,
-            durability_confirmed=durability,
+            device=identity.st_dev,
+            inode=identity.st_ino,
+            parent_device=parent_identity.st_dev,
+            parent_inode=parent_identity.st_ino,
+            staging_directory_fsync_confirmed=staging_fsync_confirmed,
         )
-    except Exception as exc:
-        if not published:
-            try:
-                _cleanup_owned_stage(
-                    stage,
-                    device=identity.st_dev,
-                    inode=identity.st_ino,
+        key = _staging_registry_key(stage)
+        with _STAGING_OWNERS_LOCK:
+            if key in _STAGING_OWNERS:
+                raise ArtifactTileUnwrapExportError(
+                    "tile unwrap staging registry collision"
                 )
-            except ArtifactTileUnwrapExportError as cleanup_exc:
-                raise cleanup_exc from exc
+            _STAGING_OWNERS[key] = owned
+        return stage
+    except Exception as exc:
+        try:
+            _cleanup_owned_stage(
+                stage,
+                device=identity.st_dev,
+                inode=identity.st_ino,
+            )
+        except ArtifactTileUnwrapExportError as cleanup_exc:
+            raise cleanup_exc from exc
         if isinstance(exc, ArtifactTileUnwrapExportError):
             raise
-        raise ArtifactTileUnwrapExportError(str(exc), committed=published) from exc
+        raise ArtifactTileUnwrapExportError(str(exc)) from exc
+
+
+def prepare_staged_tile_unwrap_publication(
+    staging_directory: str | os.PathLike[str],
+    directory: str | os.PathLike[str],
+    *,
+    document: ArtifactDocument | None = None,
+) -> PreparedTileUnwrapPublication:
+    stage = Path(os.path.abspath(os.fspath(Path(staging_directory).expanduser())))
+    destination = Path(os.path.abspath(os.fspath(Path(directory).expanduser())))
+    key = _staging_registry_key(stage)
+    with _STAGING_OWNERS_LOCK:
+        owned = _STAGING_OWNERS.get(key)
+        if owned is None or owned.destination != destination:
+            raise ArtifactTileUnwrapExportError(
+                "tile unwrap staging is not owned for this destination"
+            )
+        _require_current_parent(owned)
+        _require_owned_staging_identity(owned)
+        if _path_exists_without_following(destination):
+            _raise_if_owned_destination_is_visible(owned)
+            raise ArtifactTileUnwrapExportError("export destination already exists")
+        validate_tile_unwrap_export_package(stage, document=document)
+        fingerprint = _capture_tile_unwrap_package_fingerprint(stage)
+        nonce = object()
+        prepared = PreparedTileUnwrapPublication(
+            staging_directory=stage,
+            destination=destination,
+            _owned=owned,
+            _fingerprint=fingerprint,
+            _staging_directory_fsync_confirmed=(
+                owned.staging_directory_fsync_confirmed
+            ),
+            _nonce=nonce,
+        )
+        _PREPARED_PUBLICATIONS[nonce] = prepared
+        return prepared
+
+
+def discard_staged_tile_unwrap_package(
+    staging_directory: str | os.PathLike[str],
+    directory: str | os.PathLike[str],
+) -> bool:
+    stage = Path(os.path.abspath(os.fspath(Path(staging_directory).expanduser())))
+    destination = Path(os.path.abspath(os.fspath(Path(directory).expanduser())))
+    key = _staging_registry_key(stage)
+    with _STAGING_OWNERS_LOCK:
+        owned = _STAGING_OWNERS.get(key)
+        if owned is None or owned.destination != destination:
+            return False
+        _require_current_parent(owned)
+        try:
+            _require_owned_staging_identity(owned)
+        except ArtifactTileUnwrapExportError:
+            _raise_if_owned_destination_is_visible(owned)
+            raise
+        quarantine = destination.parent / (
+            f"{_TILE_UNWRAP_QUARANTINE_PREFIX}{uuid.uuid4().hex}"
+        )
+        try:
+            publish_export_directory_noreplace(stage, quarantine)
+        except ArtifactVectorExportError as exc:
+            _raise_if_owned_destination_is_visible(owned)
+            raise ArtifactTileUnwrapExportError(
+                f"cannot quarantine tile unwrap staging: {exc}"
+            ) from exc
+        try:
+            quarantined = quarantine.stat(follow_symlinks=False)
+        except OSError as exc:
+            raise ArtifactTileUnwrapExportError(
+                f"cannot verify quarantined tile unwrap staging: {exc}"
+            ) from exc
+        if (
+            not stat.S_ISDIR(quarantined.st_mode)
+            or quarantined.st_dev != owned.device
+            or quarantined.st_ino != owned.inode
+        ):
+            raise ArtifactTileUnwrapExportError(
+                "quarantined tile unwrap staging identity changed; path was preserved"
+            )
+        _STAGING_OWNERS.pop(key, None)
+        _invalidate_tile_unwrap_prepared_locked(owned)
+    _cleanup_owned_stage(quarantine, device=owned.device, inode=owned.inode)
+    return True
+
+
+def discard_prepared_tile_unwrap_package(
+    prepared: PreparedTileUnwrapPublication,
+) -> bool:
+    if not isinstance(prepared, PreparedTileUnwrapPublication):
+        raise ArtifactTileUnwrapExportError(
+            "prepared publication must be a PreparedTileUnwrapPublication"
+        )
+    with _STAGING_OWNERS_LOCK:
+        if _PREPARED_PUBLICATIONS.get(prepared._nonce) is not prepared:
+            _raise_if_owned_destination_is_visible(prepared._owned)
+            raise ArtifactTileUnwrapExportError(
+                "prepared tile unwrap publication capability is invalid or consumed"
+            )
+    return discard_staged_tile_unwrap_package(
+        prepared.staging_directory,
+        prepared.destination,
+    )
+
+
+def publish_prepared_tile_unwrap_package(
+    prepared: PreparedTileUnwrapPublication,
+) -> Path:
+    """Fast final commit for an exact, fully validated unwrap capability."""
+
+    if not isinstance(prepared, PreparedTileUnwrapPublication):
+        raise ArtifactTileUnwrapExportError(
+            "prepared publication must be a PreparedTileUnwrapPublication"
+        )
+    owned = prepared._owned
+    key = _staging_registry_key(prepared.staging_directory)
+    with _STAGING_OWNERS_LOCK:
+        if _PREPARED_PUBLICATIONS.get(prepared._nonce) is not prepared:
+            _raise_if_owned_destination_is_visible(owned)
+            raise ArtifactTileUnwrapExportError(
+                "prepared tile unwrap publication capability is invalid or consumed"
+            )
+        if _STAGING_OWNERS.get(key) is not owned:
+            _raise_if_owned_destination_is_visible(owned)
+            raise ArtifactTileUnwrapExportError(
+                "tile unwrap staging authority is no longer current"
+            )
+        _require_current_parent(owned)
+        _require_owned_staging_identity(owned)
+        if _path_exists_without_following(prepared.destination):
+            _raise_if_owned_destination_is_visible(owned)
+            raise ArtifactTileUnwrapExportError("export destination already exists")
+        if (
+            _capture_tile_unwrap_package_fingerprint(prepared.staging_directory)
+            != prepared._fingerprint
+        ):
+            raise ArtifactTileUnwrapExportError(
+                "tile unwrap staging package changed after preparation"
+            )
+        try:
+            publish_export_directory_noreplace(
+                prepared.staging_directory,
+                prepared.destination,
+            )
+        except ArtifactVectorExportError as exc:
+            raise ArtifactTileUnwrapExportError(str(exc)) from exc
+        try:
+            published_identity = prepared.destination.stat(follow_symlinks=False)
+        except OSError as exc:
+            raise ArtifactTileUnwrapExportError(
+                "tile unwrap export was renamed, but destination identity could "
+                f"not be verified: {exc}",
+                committed=True,
+            ) from exc
+        if (
+            not stat.S_ISDIR(published_identity.st_mode)
+            or published_identity.st_dev != owned.device
+            or published_identity.st_ino != owned.inode
+        ):
+            raise ArtifactTileUnwrapExportError(
+                "tile unwrap export destination is not the authorized staging inode",
+                committed=True,
+            )
+        _STAGING_OWNERS.pop(key, None)
+        _invalidate_tile_unwrap_prepared_locked(owned)
+    try:
+        parent_fsync_confirmed = fsync_export_directory(
+            prepared.destination.parent
+        )
+    except OSError as exc:
+        raise ArtifactTileUnwrapExportError(
+            "tile unwrap export was published, but directory fsync failed; "
+            f"crash durability is uncertain: {exc}",
+            committed=True,
+        ) from exc
+    if (
+        not prepared._staging_directory_fsync_confirmed
+        or not parent_fsync_confirmed
+    ):
+        raise ArtifactTileUnwrapExportError(
+            "tile unwrap export was published, but directory fsync is unsupported; "
+            "crash durability is uncertain",
+            committed=True,
+        )
+    return prepared.destination
+
+
+def export_tile_unwrap_package(
+    directory: str | os.PathLike[str],
+    document: ArtifactDocument,
+    record_id: str,
+    unwrap: TileUnwrapMesh,
+) -> TileUnwrapExportPublication:
+    """Build, verify, and atomically publish one no-overwrite directory."""
+
+    stage = stage_tile_unwrap_package(directory, document, record_id, unwrap)
+    prepared: PreparedTileUnwrapPublication | None = None
+    try:
+        prepared = prepare_staged_tile_unwrap_publication(
+            stage,
+            directory,
+            document=document,
+        )
+        destination = publish_prepared_tile_unwrap_package(prepared)
+        return TileUnwrapExportPublication(
+            destination=destination,
+            durability_confirmed=True,
+        )
+    except ArtifactTileUnwrapExportError as exc:
+        if exc.committed:
+            destination = Path(
+                os.path.abspath(os.fspath(Path(directory).expanduser()))
+            )
+            validate_tile_unwrap_export_package(destination, document=document)
+            return TileUnwrapExportPublication(
+                destination=destination,
+                durability_confirmed=False,
+            )
+        if not exc.committed:
+            try:
+                if prepared is not None:
+                    discard_prepared_tile_unwrap_package(prepared)
+                else:
+                    discard_staged_tile_unwrap_package(stage, directory)
+            except ArtifactTileUnwrapExportError as cleanup_exc:
+                raise cleanup_exc from exc
+        raise
 
 
 __all__ = [
@@ -900,8 +1290,14 @@ __all__ = [
     "TILE_UNWRAP_EXPORT_SVG_NAME",
     "TileUnwrapExportBundle",
     "TileUnwrapExportPublication",
+    "PreparedTileUnwrapPublication",
     "build_tile_unwrap_export",
+    "discard_prepared_tile_unwrap_package",
+    "discard_staged_tile_unwrap_package",
     "export_tile_unwrap_package",
+    "prepare_staged_tile_unwrap_publication",
+    "publish_prepared_tile_unwrap_package",
+    "stage_tile_unwrap_package",
     "validate_tile_unwrap_export_bytes",
     "validate_tile_unwrap_export_package",
 ]

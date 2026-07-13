@@ -52,6 +52,24 @@ from src.core.artifact_rubbing_record import (
 )
 from src.core.artifact_scene_adapter import ArtifactProjectionSnapshot
 from src.core.artifact_session import ArtifactSession
+from src.core.artifact_tile_unwrap_export import (
+    PreparedTileUnwrapPublication,
+    TILE_UNWRAP_EXPORT_DIRECTORY_SUFFIX,
+    discard_prepared_tile_unwrap_package,
+    discard_staged_tile_unwrap_package,
+    prepare_staged_tile_unwrap_publication,
+    publish_prepared_tile_unwrap_package,
+    stage_tile_unwrap_package,
+    validate_tile_unwrap_export_package,
+)
+from src.core.artifact_tile_unwrap_extractor import (
+    compute_artifact_tile_unwrap_from_recipe,
+    require_current_tile_unwrap_computation,
+)
+from src.core.artifact_tile_unwrap_record import (
+    TILE_UNWRAP_RECORD_TYPE,
+    tile_unwrap_receipt_from_record,
+)
 from src.core.artifact_vector_export import (
     PreparedVectorPublication,
     VECTOR_EXPORT_DIRECTORY_SUFFIX,
@@ -75,7 +93,11 @@ from .artifact_workbench import (
 
 DEFAULT_EXPORT_RUBBING_MEMORY_BUDGET_BYTES = 1024 * 1024 * 1024
 _LOGGER = logging.getLogger(__name__)
-PreparedExportPublication = PreparedVectorPublication | PreparedRubbingPublication
+PreparedExportPublication = (
+    PreparedVectorPublication
+    | PreparedRubbingPublication
+    | PreparedTileUnwrapPublication
+)
 
 
 class ArtifactExportError(ArtifactWorkbenchError):
@@ -97,6 +119,7 @@ class StaleExportOperationError(StaleWorkflowOperationError):
 class ArtifactExportKind(str, Enum):
     VECTOR = "vector"
     DIGITAL_RUBBING = "digital_rubbing"
+    TILE_UNWRAP = "tile_unwrap"
 
 
 class ArtifactExportState(str, Enum):
@@ -130,11 +153,11 @@ def _destination_path(
         path = Path(os.path.abspath(os.fspath(Path(value).expanduser())))
     except (OSError, TypeError, ValueError) as exc:
         raise ArtifactExportError(f"export destination is invalid: {exc}") from exc
-    suffix = (
-        VECTOR_EXPORT_DIRECTORY_SUFFIX
-        if kind is ArtifactExportKind.VECTOR
-        else RUBBING_EXPORT_DIRECTORY_SUFFIX
-    )
+    suffix = {
+        ArtifactExportKind.VECTOR: VECTOR_EXPORT_DIRECTORY_SUFFIX,
+        ArtifactExportKind.DIGITAL_RUBBING: RUBBING_EXPORT_DIRECTORY_SUFFIX,
+        ArtifactExportKind.TILE_UNWRAP: TILE_UNWRAP_EXPORT_DIRECTORY_SUFFIX,
+    }[kind]
     if not path.name.endswith(suffix):
         raise ArtifactExportError(f"export destination must end with {suffix}")
     if path.exists() or path.is_symlink():
@@ -145,6 +168,8 @@ def _destination_path(
 def _record_kind(record: DerivedRecord) -> ArtifactExportKind:
     if record.type == RUBBING_RECORD_TYPE:
         return ArtifactExportKind.DIGITAL_RUBBING
+    if record.type == TILE_UNWRAP_RECORD_TYPE:
+        return ArtifactExportKind.TILE_UNWRAP
     if record.type in {kind.record_type for kind in VectorRecordKind}:
         return ArtifactExportKind.VECTOR
     raise ArtifactExportError("record type is not exportable by the artifact workbench")
@@ -226,7 +251,7 @@ class ArtifactExportWorkItem:
                 )
         elif self.vector_options is not None:
             raise ArtifactExportError(
-                "Digital Rubbing exports cannot carry vector SVG options"
+                "non-vector exports cannot carry vector SVG options"
             )
         for field_name, value in (
             ("base_state_version", self.base_state_version),
@@ -271,6 +296,13 @@ class ArtifactExportResult:
             ):
                 raise ArtifactExportError(
                     "rubbing result requires a PreparedRubbingPublication"
+                )
+            if self.kind is ArtifactExportKind.TILE_UNWRAP and not isinstance(
+                self.prepared_publication,
+                PreparedTileUnwrapPublication,
+            ):
+                raise ArtifactExportError(
+                    "tile unwrap result requires a PreparedTileUnwrapPublication"
                 )
 
 
@@ -515,6 +547,17 @@ class ArtifactExportController:
             record_id,
         )
 
+    def begin_tile_unwrap(
+        self,
+        destination: str | os.PathLike[str],
+        record_id: str,
+    ) -> ArtifactExportWorkItem:
+        return self._begin(
+            ArtifactExportKind.TILE_UNWRAP,
+            destination,
+            record_id,
+        )
+
     @staticmethod
     def _capture_staging_identity(path: Path) -> _StagingIdentity:
         try:
@@ -536,6 +579,26 @@ class ArtifactExportController:
                 session.document,
                 record.id,
                 options=work_item.vector_options,
+            )
+
+        if work_item.kind is ArtifactExportKind.TILE_UNWRAP:
+            computation = compute_artifact_tile_unwrap_from_recipe(
+                session,
+                record.recipe,
+            )
+            require_current_tile_unwrap_computation(session, computation)
+            receipt = tile_unwrap_receipt_from_record(record)
+            if computation.unwrap.receipt(
+                selection_sha256=str(receipt["selection_sha256"])
+            ) != receipt:
+                raise ArtifactExportError(
+                    "recomputed tile unwrap does not match its durable receipt"
+                )
+            return stage_tile_unwrap_package(
+                work_item.destination,
+                session.document,
+                record.id,
+                computation.unwrap,
             )
 
         snapshot = work_item.projection_snapshot
@@ -593,8 +656,14 @@ class ArtifactExportController:
             discarded = discard_prepared_vector_package(prepared)
         elif isinstance(prepared, PreparedRubbingPublication):
             discarded = discard_prepared_rubbing_package(prepared)
+        elif isinstance(prepared, PreparedTileUnwrapPublication):
+            discarded = discard_prepared_tile_unwrap_package(prepared)
         elif work_item.kind is ArtifactExportKind.VECTOR:
             discarded = discard_staged_vector_package(
+                result.staging_directory, work_item.destination
+            )
+        elif work_item.kind is ArtifactExportKind.TILE_UNWRAP:
+            discarded = discard_staged_tile_unwrap_package(
                 result.staging_directory, work_item.destination
             )
         else:
@@ -618,6 +687,12 @@ class ArtifactExportController:
                 work_item.destination,
                 document=work_item.captured_session.document,
             )
+        if work_item.kind is ArtifactExportKind.TILE_UNWRAP:
+            return prepare_staged_tile_unwrap_publication(
+                staging_directory,
+                work_item.destination,
+                document=work_item.captured_session.document,
+            )
         return prepare_staged_rubbing_publication(
             staging_directory,
             work_item.destination,
@@ -630,6 +705,8 @@ class ArtifactExportController:
     ) -> Path:
         if isinstance(prepared, PreparedVectorPublication):
             return publish_prepared_vector_package(prepared)
+        if isinstance(prepared, PreparedTileUnwrapPublication):
+            return publish_prepared_tile_unwrap_package(prepared)
         return publish_prepared_rubbing_package(prepared)
 
     def execute(self, work_item: ArtifactExportWorkItem) -> ArtifactExportResult:
@@ -793,6 +870,11 @@ class ArtifactExportController:
         try:
             if runtime.work_item.kind is ArtifactExportKind.VECTOR:
                 validate_vector_export_package(
+                    runtime.work_item.destination,
+                    document=runtime.work_item.captured_session.document,
+                )
+            elif runtime.work_item.kind is ArtifactExportKind.TILE_UNWRAP:
+                validate_tile_unwrap_export_package(
                     runtime.work_item.destination,
                     document=runtime.work_item.captured_session.document,
                 )

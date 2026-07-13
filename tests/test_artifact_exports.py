@@ -10,6 +10,7 @@ import pytest
 
 import src.application.artifact_exports as artifact_exports
 import src.core.artifact_rubbing_export as rubbing_export
+import src.core.artifact_tile_unwrap_export as tile_unwrap_export
 import src.core.artifact_vector_export as vector_export
 from src.application.artifact_exports import (
     ArtifactExportController,
@@ -30,6 +31,11 @@ from src.core.artifact_rubbing_extractor import (
     compute_artifact_rubbing,
 )
 from src.core.artifact_session import ArtifactSession
+from src.core.artifact_tile_unwrap_export import validate_tile_unwrap_export_package
+from src.core.artifact_tile_unwrap_extractor import (
+    commit_artifact_tile_unwrap,
+    compute_artifact_tile_unwrap,
+)
 from src.core.artifact_vector_export import (
     ArtifactVectorExportError,
     publish_prepared_vector_package,
@@ -43,6 +49,7 @@ from src.core.artifact_vector_record import PlanarFrame
 from src.core.mesh_import_recipe import current_mesh_import_recipe
 from src.core.mesh_loader import MeshData
 from src.core.source_identity import SourceFingerprint
+from src.core.tile_synthetic import generate_synthetic_tile, synthetic_tile_spec_from_preset
 
 
 STAMP = "2026-07-12T00:00:00Z"
@@ -56,6 +63,10 @@ def _confirmed_export_directory_fsync():
         return_value=True,
     ), patch.object(
         rubbing_export,
+        "fsync_export_directory",
+        return_value=True,
+    ), patch.object(
+        tile_unwrap_export,
         "fsync_export_directory",
         return_value=True,
     ):
@@ -187,6 +198,61 @@ def _rubbing_session() -> ArtifactSession:
     )
 
 
+def _tile_unwrap_session() -> ArtifactSession:
+    synthetic = generate_synthetic_tile(
+        synthetic_tile_spec_from_preset("sugkiwa_quarter", seed=31)
+    )
+    mesh = MeshData(
+        vertices=np.asarray(synthetic.mesh.vertices, dtype=np.float64),
+        faces=np.asarray(synthetic.mesh.faces, dtype=np.int32),
+        unit="mm",
+        filepath=Path("/source/tile.ply"),
+        source_identity=SourceFingerprint(
+            sha256="b" * 64,
+            size_bytes=654_321,
+            mtime_ns=1,
+            original_name="tile.ply",
+            format="ply",
+        ),
+        source_format="ply",
+        source_import_recipe=current_mesh_import_recipe("ply"),
+    )
+    session = ArtifactSession.create_from_source(
+        mesh,
+        resolved_source_path="/source/tile.ply",
+        unit="mm",
+        axes={"source_x": "+X", "source_y": "+Y", "source_z": "+Z"},
+        handedness="right",
+        software_version="0.7-test",
+        operator="pytest",
+        created_at=STAMP,
+        document_id="artifact:tile-export-controller",
+        metadata_revision_id="metadata:tile",
+        align_revision_id="align:tile-initial",
+    ).commit_preview(
+        translation_mm=(0.0, 0.0, 0.0),
+        rotation_deg=(0.0, 0.0, 0.0),
+        scale=1.0,
+        pivot_mm=(0.0, 0.0, 0.0),
+        operator="pytest",
+        created_at=STAMP,
+        revision_id="align:tile-confirmed",
+    )
+    computation = compute_artifact_tile_unwrap(
+        session,
+        longitudinal_axis="y",
+        record_view="top",
+        n_sections=24,
+    )
+    return commit_artifact_tile_unwrap(
+        session,
+        computation,
+        record_id="record:tile:export",
+        created_at=STAMP,
+        operator="pytest",
+    )
+
+
 def _append_unrelated_record(workbench: ArtifactWorkbench) -> ArtifactSession:
     session = workbench.snapshot.session
     assert session is not None
@@ -250,6 +316,54 @@ def test_vector_worker_stages_only_then_final_authority_publishes(tmp_path: Path
     assert not result.staging_directory.exists()
     validate_vector_export_package(destination, document=session.document)
     assert controller.summary(item).state is ArtifactExportState.COMPLETED
+
+
+def test_tile_unwrap_worker_recomputes_stages_then_final_authority_publishes(
+    tmp_path: Path,
+) -> None:
+    session = _tile_unwrap_session()
+    workbench = ArtifactWorkbench(session=session)
+    controller = ArtifactExportController(workbench, id_factory=SequentialIds())
+    destination = tmp_path / "tile.amr-unwrap"
+
+    item = controller.begin_tile_unwrap(destination, "record:tile:export")
+    result = controller.execute(item)
+
+    assert not destination.exists()
+    assert result.staging_directory.is_dir()
+    validate_tile_unwrap_export_package(
+        result.staging_directory,
+        document=session.document,
+    )
+    assert controller.summary(item).state is ArtifactExportState.STAGED
+
+    publication = controller.publish_result(item, result)
+
+    assert publication.destination == destination
+    assert publication.durability_confirmed is True
+    assert destination.is_dir()
+    assert not result.staging_directory.exists()
+    validate_tile_unwrap_export_package(destination, document=session.document)
+    assert controller.summary(item).state is ArtifactExportState.COMPLETED
+
+
+def test_tile_unwrap_align_race_revokes_and_cleans_owned_staging(
+    tmp_path: Path,
+) -> None:
+    session = _tile_unwrap_session()
+    workbench = ArtifactWorkbench(session=session)
+    controller = ArtifactExportController(workbench, id_factory=SequentialIds())
+    destination = tmp_path / "stale-tile.amr-unwrap"
+    item = controller.begin_tile_unwrap(destination, "record:tile:export")
+    result = controller.execute(item)
+
+    _change_align(workbench)
+
+    with pytest.raises(StaleExportOperationError):
+        controller.publish_result(item, result)
+    assert not result.staging_directory.exists()
+    assert not destination.exists()
+    assert controller.summary(item).state is ArtifactExportState.STALE
 
 
 def test_begin_rejects_a_broken_destination_symlink_without_following_it(

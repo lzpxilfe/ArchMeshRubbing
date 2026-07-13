@@ -70,6 +70,15 @@ from src.core.artifact_rubbing_extractor import (
     compute_artifact_rubbing,
 )
 from src.core.artifact_rubbing_record import rubbing_receipt_from_record
+from src.core.artifact_tile_unwrap_export import (
+    ArtifactTileUnwrapExportError,
+    validate_tile_unwrap_export_package,
+)
+from src.core.artifact_tile_unwrap_extractor import ArtifactTileUnwrapError
+from src.core.artifact_tile_unwrap_record import (
+    TILE_UNWRAP_RECORD_TYPE,
+    tile_unwrap_receipt_from_record,
+)
 from src.core.artifact_vector_export import validate_vector_export_package
 from src.core.artifact_outline_extractor import compute_artifact_outline
 from src.core.artifact_vector_extractor import (
@@ -88,6 +97,7 @@ from src.core.project_file import (
 from src.core.mesh_loader import MeshData
 from src.core.source_identity import SourceFingerprint, SourceVerificationStatus
 from src.core.tile_form_model import TileInterpretationState
+from src.core.tile_synthetic import generate_synthetic_tile, synthetic_tile_spec_from_preset
 from src.gui.viewport_3d import SceneObject, Viewport3D
 
 
@@ -234,6 +244,42 @@ def _artifact_box_session_with_outlines() -> ArtifactSession:
     return session
 
 
+def _artifact_tile_session() -> ArtifactSession:
+    synthetic = generate_synthetic_tile(
+        synthetic_tile_spec_from_preset("sugkiwa_quarter", seed=43)
+    )
+    payload = b"gui-native-synthetic-tile"
+    mesh = MeshData(
+        vertices=np.asarray(synthetic.mesh.vertices, dtype=np.float64),
+        faces=np.asarray(synthetic.mesh.faces, dtype=np.int32),
+        unit="mm",
+        source_identity=_fingerprint(payload, name="tile.ply"),
+        source_format="ply",
+        source_import_recipe=current_mesh_import_recipe("ply"),
+    )
+    return ArtifactSession.create_from_source(
+        mesh,
+        resolved_source_path="/source/tile.ply",
+        unit="mm",
+        axes={"source_x": "+X", "source_y": "+Y", "source_z": "+Z"},
+        handedness="right",
+        software_version="test",
+        operator="pytest",
+        created_at="2026-07-11T00:00:00Z",
+        document_id="artifact:gui-tile",
+        metadata_revision_id="metadata:gui-tile",
+        align_revision_id="align:gui-tile-baseline",
+    ).commit_preview(
+        translation_mm=(0.0, 0.0, 0.0),
+        rotation_deg=(0.0, 0.0, 0.0),
+        scale=1.0,
+        pivot_mm=(0.0, 0.0, 0.0),
+        operator="pytest",
+        created_at="2026-07-11T00:00:01Z",
+        revision_id="align:gui-tile",
+    )
+
+
 def _projected_scene_object(session: ArtifactSession) -> SceneObject:
     projection = session.materialize()
     obj = SceneObject(projection.mesh, "native artifact")
@@ -305,6 +351,35 @@ def test_main_window_constructs_offscreen() -> None:
     finally:
         # Avoid MainWindow.closeEvent(), which intentionally asks the user to
         # confirm application exit and would block an offscreen test runner.
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_main_workflow_exposes_authoritative_measurement_and_tile_shortcut() -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    window = MainWindow()
+    requested: list[tuple[str, object]] = []
+    try:
+        panel = window.workflow_panel
+        assert panel.btn_authoritative_measurements.text() == (
+            "검증된 실측 · 기와 전개 열기"
+        )
+        assert not panel.btn_authoritative_measurements.isEnabled()
+        panel.btn_authoritative_measurements.setEnabled(True)
+        panel.workflowRequested.connect(
+            lambda action, data: requested.append((action, data))
+        )
+
+        QTest.mouseClick(
+            panel.btn_authoritative_measurements,
+            Qt.MouseButton.LeftButton,
+        )
+
+        assert requested[-1] == ("show_section_tools", None)
+    finally:
         window.deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         app.processEvents()
@@ -1359,6 +1434,7 @@ def test_initial_identity_requires_explicit_align_before_measurement() -> None:
         assert not window.section_panel.btn_native_cutline.isEnabled()
         assert not window.section_panel.btn_native_outline.isEnabled()
         assert not window.section_panel.btn_native_rubbing.isEnabled()
+        assert not window.section_panel.btn_native_tile_unwrap.isEnabled()
         assert window.section_panel.btn_native_cutline.text().endswith("(0/3)")
         assert window.section_panel.btn_native_outline.text().endswith("(0/6)")
         assert window.section_panel.btn_native_rubbing.text().endswith("(0/6)")
@@ -1397,6 +1473,7 @@ def test_initial_identity_requires_explicit_align_before_measurement() -> None:
         assert window.section_panel.btn_native_cutline.isEnabled()
         assert not window.section_panel.btn_native_outline.isEnabled()
         assert not window.section_panel.btn_native_rubbing.isEnabled()
+        assert window.section_panel.btn_native_tile_unwrap.isEnabled()
         assert window.section_panel.btn_native_cutline.text().endswith("(0/3)")
         assert window.section_panel.btn_native_outline.text().endswith("(0/6)")
         assert window.section_panel.btn_native_rubbing.text().endswith("(0/6)")
@@ -2309,6 +2386,137 @@ def test_native_outline_command_commits_verified_record_and_closed_preview() -> 
         np.testing.assert_array_equal(
             session.source_mesh.vertices,
             _artifact_box_session().source_mesh.vertices,
+        )
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_native_tile_unwrap_ui_requires_explicit_axis_view_and_selection() -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    session = _artifact_tile_session()
+    obj = _projected_scene_object(session)
+    window = MainWindow()
+    window._artifact_session = session
+    window.viewport.objects = [obj]
+    window.viewport.selected_index = 0
+    window.current_mesh = obj.mesh
+    try:
+        window._sync_native_cutline_controls(reset_offset=True)
+        panel = window.section_panel
+        assert [
+            panel.combo_native_tile_axis.itemData(index)
+            for index in range(panel.combo_native_tile_axis.count())
+        ] == ["x", "y", "z"]
+        assert panel.combo_native_tile_axis.currentData() == "y"
+        assert [
+            panel.combo_native_tile_record_view.itemData(index)
+            for index in range(panel.combo_native_tile_record_view.count())
+        ] == ["top", "bottom"]
+        assert panel.spin_native_tile_sections.value() == 32
+        assert panel.spin_native_tile_sections.minimum() == 12
+        assert panel.spin_native_tile_sections.suffix() == " 구간"
+        assert panel.combo_native_tile_target.currentData() == "all"
+        assert panel.btn_native_tile_unwrap.isEnabled()
+        assert not panel.btn_native_tile_unwrap_export.isEnabled()
+
+        panel.combo_native_tile_target.setCurrentIndex(
+            panel.combo_native_tile_target.findData("selected")
+        )
+        with pytest.raises(ArtifactTileUnwrapExportError):
+            window._export_native_tile_unwrap_record(
+                Path("/tmp/no-record.amr-unwrap")
+            )
+        with pytest.raises(ArtifactTileUnwrapError, match="face를 선택"):
+            window._native_tile_unwrap_options_from_panel()
+
+        obj.selected_faces = {5, 1, 3}
+        window.on_face_selection_count_changed(3)
+        options = window._native_tile_unwrap_options_from_panel()
+        assert options == {
+            "longitudinal_axis": "y",
+            "record_view": "top",
+            "selected_face_indices": (1, 3, 5),
+            "n_sections": 32,
+        }
+        assert "현재 선택 3면" in panel.label_native_tile_selection.text()
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_native_tile_unwrap_command_previews_and_exports_recomputed_record(
+    tmp_path: Path,
+) -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    session = _artifact_tile_session()
+    obj = _projected_scene_object(session)
+    window = MainWindow()
+    window._artifact_session = session
+    window._current_project_path = "/tmp/gui-tile.amr"
+    window.current_filepath = session.resolved_source_path
+    window.current_mesh = obj.mesh
+    window.viewport.objects = [obj]
+    window.viewport.selected_index = 0
+    captured: dict[str, object] = {}
+    try:
+        with (
+            patch.object(
+                window,
+                "_publish_artifact_session_projection",
+                side_effect=_capture_measurement_publication(window, captured),
+            ),
+            patch.object(window, "_sync_native_cutline_controls"),
+        ):
+            record_id = window._compute_and_commit_native_tile_unwrap(
+                longitudinal_axis="y",
+                record_view="top",
+                n_sections=24,
+                record_id="record:gui-tile-unwrap",
+                created_at="2026-07-11T00:00:02Z",
+                operator="pytest",
+            )
+
+        assert record_id == "record:gui-tile-unwrap"
+        committed = captured["session"]
+        assert isinstance(committed, ArtifactSession)
+        record = committed.document.record_index[record_id]
+        receipt = tile_unwrap_receipt_from_record(record)
+        assert record.type == TILE_UNWRAP_RECORD_TYPE
+        assert record.recipe["longitudinal_axis"] == "y"
+        assert record.recipe["record_view"] == "top"
+        assert record.recipe["n_sections"] == 24
+        assert record.qc["foldover_face_count"] == 0
+        assert receipt["unwrap_sha256"] in record.geometry_ref
+        assert captured["kwargs"]["status_text"].startswith(
+            "Top 기와 전개 기록 | 길이축 Y"
+        )
+        assert window._native_tile_unwrap_preview_record_id == record_id
+        assert window.section_panel.label_native_tile_unwrap_preview.pixmap() is not None
+        assert "foldover 0" in window.section_panel.label_native_tile_unwrap_info.text()
+
+        recomputed = window._recompute_native_tile_unwrap_record(committed, record)
+        assert recomputed.receipt(
+            selection_sha256=receipt["selection_sha256"]
+        ) == receipt
+        package = window._export_native_tile_unwrap_record(
+            tmp_path / "gui-tile.amr-unwrap",
+            record_id=record_id,
+        )
+        verified = validate_tile_unwrap_export_package(
+            package,
+            document=committed.document,
+        )
+        assert verified["geometry"]["unwrap_sha256"] == receipt["unwrap_sha256"]
+        np.testing.assert_array_equal(
+            session.source_mesh.vertices,
+            _artifact_tile_session().source_mesh.vertices,
         )
     finally:
         window.deleteLater()

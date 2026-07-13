@@ -42,7 +42,7 @@ from PyQt6.QtCore import (
 from PyQt6.QtCore import QSettings
 from PyQt6.QtGui import QAction, QIcon, QKeySequence, QPixmap, QShortcut
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 import io
 
 _LOGGER = logging.getLogger(__name__)
@@ -319,6 +319,21 @@ from src.core.artifact_rubbing_record import (  # noqa: E402
 from src.core.artifact_rubbing_export import (  # noqa: E402
     ArtifactRubbingExportError,
     RUBBING_EXPORT_DIRECTORY_SUFFIX,
+)
+from src.core.artifact_tile_unwrap_export import (  # noqa: E402
+    ArtifactTileUnwrapExportError,
+    TILE_UNWRAP_EXPORT_DIRECTORY_SUFFIX,
+)
+from src.core.artifact_tile_unwrap_extractor import (  # noqa: E402
+    ArtifactTileUnwrapComputation,
+    ArtifactTileUnwrapError,
+    TileUnwrapMesh,
+    compute_artifact_tile_unwrap_from_recipe,
+    require_current_tile_unwrap_computation,
+)
+from src.core.artifact_tile_unwrap_record import (  # noqa: E402
+    TILE_UNWRAP_RECORD_TYPE,
+    tile_unwrap_receipt_from_record,
 )
 from src.core.artifact_vector_export import (  # noqa: E402
     ArtifactVectorExportError,
@@ -1721,6 +1736,20 @@ class WorkflowPanel(QWidget):
         self.btn_interpret_next.setEnabled(False)
         interpret_layout.addWidget(self.btn_interpret_next)
 
+        self.btn_authoritative_measurements = QPushButton(
+            "검증된 실측 · 기와 전개 열기"
+        )
+        set_pixel_icon(self.btn_authoritative_measurements, "flatten")
+        self.btn_authoritative_measurements.setToolTip(
+            "ArtifactDocument의 Cutline·Outline·Digital Rubbing·기와 전개 record와 "
+            "1:1 검증 export 패널을 엽니다."
+        )
+        self.btn_authoritative_measurements.clicked.connect(
+            lambda: self.workflowRequested.emit("show_section_tools", None)
+        )
+        self.btn_authoritative_measurements.setEnabled(False)
+        interpret_layout.addWidget(self.btn_authoritative_measurements)
+
         btn_drawing_svg = QPushButton("실측용 SVG 저장")
         set_pixel_icon(btn_drawing_svg, "export")
         btn_drawing_svg.clicked.connect(lambda: self.workflowRequested.emit("export_flat_svg", None))
@@ -1798,6 +1827,7 @@ class WorkflowPanel(QWidget):
             self.progress_interpret.setValue(0)
             self.btn_interpret_next.setText("다음 실측 단계 실행")
             self.btn_interpret_next.setEnabled(False)
+            self.btn_authoritative_measurements.setEnabled(False)
             return
 
         self.label_object_summary.setText(
@@ -1836,6 +1866,7 @@ class WorkflowPanel(QWidget):
         next_label = next_label.replace("다음 단계:", "다음 실측 단계:")
         self.btn_interpret_next.setText(next_label)
         self.btn_interpret_next.setEnabled(bool(wizard_next_enabled))
+        self.btn_authoritative_measurements.setEnabled(True)
         self.label_next_summary.setText(
             str(wizard_summary or "다음 단계: 실측용 도면을 정리하고 탁본 기록면을 준비하세요.")
         )
@@ -3829,6 +3860,9 @@ class SectionPanel(QWidget):
     nativeRubbingRequested = pyqtSignal()
     nativeRubbingRecordSelected = pyqtSignal(str)
     nativeRubbingExportRequested = pyqtSignal()
+    nativeTileUnwrapRequested = pyqtSignal()
+    nativeTileUnwrapRecordSelected = pyqtSignal(str)
+    nativeTileUnwrapExportRequested = pyqtSignal()
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -3873,7 +3907,7 @@ class SectionPanel(QWidget):
         self.graph_y.setVisible(False)
         line.setVisible(False)
 
-        native_group = QGroupBox("검증된 단면 · ArtifactDocument")
+        native_group = QGroupBox("검증된 실측 · ArtifactDocument")
         native_group.setStyleSheet(
             """
             QPushButton[workflowComplete="true"] {
@@ -4098,6 +4132,101 @@ class SectionPanel(QWidget):
             "color: #4a5568; font-size: 10px;"
         )
         native_layout.addWidget(self.label_native_rubbing_info)
+
+        tile_line = QFrame()
+        tile_line.setFrameShape(QFrame.Shape.HLine)
+        tile_line.setFrameShadow(QFrame.Shadow.Sunken)
+        native_layout.addWidget(tile_line)
+        tile_title = QLabel("기와 기록면 전개 · 원본 보존형 1:1 좌표")
+        tile_title.setStyleSheet("font-weight: bold;")
+        native_layout.addWidget(tile_title)
+        tile_form = QFormLayout()
+        self.combo_native_tile_target = QComboBox()
+        self.combo_native_tile_target.addItem("전체 메쉬", "all")
+        self.combo_native_tile_target.addItem("현재 선택 면", "selected")
+        self.combo_native_tile_target.setToolTip(
+            "현재 선택 면을 고르면 선택 face ID가 recipe와 selection hash에 고정됩니다."
+        )
+        tile_form.addRow("기록 영역", self.combo_native_tile_target)
+        self.combo_native_tile_axis = QComboBox()
+        self.combo_native_tile_axis.addItem("X축", "x")
+        self.combo_native_tile_axis.addItem("Y축", "y")
+        self.combo_native_tile_axis.addItem("Z축", "z")
+        self.combo_native_tile_axis.setCurrentIndex(1)
+        self.combo_native_tile_axis.setToolTip(
+            "자동 추정 없이 정렬된 canonical X/Y/Z 중 기와 길이축을 명시합니다."
+        )
+        tile_form.addRow("길이축", self.combo_native_tile_axis)
+        self.combo_native_tile_record_view = QComboBox()
+        self.combo_native_tile_record_view.addItem("상면", "top")
+        self.combo_native_tile_record_view.addItem("하면", "bottom")
+        tile_form.addRow("기록면", self.combo_native_tile_record_view)
+        self.spin_native_tile_sections = QSpinBox()
+        self.spin_native_tile_sections.setRange(12, 512)
+        self.spin_native_tile_sections.setValue(32)
+        self.spin_native_tile_sections.setSuffix(" 구간")
+        self.spin_native_tile_sections.setToolTip(
+            "길이축을 따라 가변 반지름 단면을 적합할 구간 수입니다. 값은 recipe에 기록됩니다."
+        )
+        tile_form.addRow("단면 수", self.spin_native_tile_sections)
+        native_layout.addLayout(tile_form)
+        self.label_native_tile_selection = QLabel("현재 선택 0면 · 전체 사용 가능")
+        self.label_native_tile_selection.setStyleSheet(
+            "color: #4a5568; font-size: 10px;"
+        )
+        native_layout.addWidget(self.label_native_tile_selection)
+        self.btn_native_tile_unwrap = QPushButton("기와 전개 계산 · 기록")
+        set_pixel_icon(self.btn_native_tile_unwrap, "flatten")
+        self.btn_native_tile_unwrap.setToolTip(
+            "원본 canonical-mm 메쉬에서 variable-radius sectionwise 전개를 계산하고 "
+            "선택·축·기록면·왜곡·foldover QC와 함께 기록합니다."
+        )
+        self.btn_native_tile_unwrap.clicked.connect(
+            self.nativeTileUnwrapRequested.emit
+        )
+        native_layout.addWidget(self.btn_native_tile_unwrap)
+        self.combo_native_tile_unwrap_record = QComboBox()
+        self.combo_native_tile_unwrap_record.addItem(
+            "READY + FRESH 기와 전개 기록을 선택하세요", None
+        )
+        self.combo_native_tile_unwrap_record.setToolTip(
+            "저장된 전개 record를 recipe로 재계산해 미리보기·QC·1:1 export에 사용합니다."
+        )
+        self.combo_native_tile_unwrap_record.currentIndexChanged.connect(
+            lambda _index: self.nativeTileUnwrapRecordSelected.emit(
+                str(self.combo_native_tile_unwrap_record.currentData() or "")
+            )
+        )
+        native_layout.addWidget(self.combo_native_tile_unwrap_record)
+        self.btn_native_tile_unwrap_export = QPushButton(
+            "선택한 검증 전개 1:1 OBJ · SVG 패키지 내보내기"
+        )
+        set_pixel_icon(self.btn_native_tile_unwrap_export, "export")
+        self.btn_native_tile_unwrap_export.clicked.connect(
+            self.nativeTileUnwrapExportRequested.emit
+        )
+        native_layout.addWidget(self.btn_native_tile_unwrap_export)
+        self.label_native_tile_unwrap_preview = QLabel(
+            "전개 미리보기는 여기에 표시됩니다.\n"
+            "화면 이미지는 측정 권위가 아니며 µm 좌표 record를 다시 계산합니다."
+        )
+        self.label_native_tile_unwrap_preview.setAlignment(
+            Qt.AlignmentFlag.AlignCenter
+        )
+        self.label_native_tile_unwrap_preview.setWordWrap(True)
+        self.label_native_tile_unwrap_preview.setMinimumHeight(160)
+        self.label_native_tile_unwrap_preview.setStyleSheet(
+            "background: #f7fafc; border: 1px solid #cbd5e0; color: #4a5568;"
+        )
+        native_layout.addWidget(self.label_native_tile_unwrap_preview)
+        self.label_native_tile_unwrap_info = QLabel(
+            "READY + FRESH 기와 전개 기록 없음"
+        )
+        self.label_native_tile_unwrap_info.setWordWrap(True)
+        self.label_native_tile_unwrap_info.setStyleSheet(
+            "color: #4a5568; font-size: 10px;"
+        )
+        native_layout.addWidget(self.label_native_tile_unwrap_info)
         native_note = QLabel(
             "초록 선은 기록 payload에서 다시 만든 화면 투영입니다. "
             "Cutline과 6면 Outline은 원본에서 다시 계산되며 화면 픽셀을 측정값으로 쓰지 않습니다."
@@ -4359,6 +4488,12 @@ class MainWindow(QMainWindow):
         self._native_rubbing_preview_pending_record_id: str | None = None
         self._native_rubbing_preview_pending_record: Any | None = None
         self._native_rubbing_preview_pending_token: object | None = None
+        self._native_tile_unwrap_preview_record_id: str | None = None
+        self._native_tile_unwrap_preview_document_id: str | None = None
+        self._native_tile_unwrap_preview_geometry_ref: str | None = None
+        self._native_tile_unwrap_preview_pending_record_id: str | None = None
+        self._native_tile_unwrap_preview_pending_record: Any | None = None
+        self._native_tile_unwrap_preview_pending_token: object | None = None
         self._artifact_load_active: bool = False
         self._artifact_pending_document: ArtifactDocument | None = None
         self._artifact_pending_project_path: str | None = None
@@ -4527,7 +4662,7 @@ class MainWindow(QMainWindow):
         self.measure_dock.setWidget(self.measure_panel)
 
         # 6) 단면/2D 지정 도구 (슬라이싱 + 십자선 + 라인 + ROI)
-        self.section_dock = QDockWidget("보조 · 실측 단면/외곽", self)
+        self.section_dock = QDockWidget("검증된 실측 · 전개", self)
         self.section_dock.setObjectName("dock_section")
         section_scroll = QScrollArea()
         section_scroll.setWidgetResizable(True)
@@ -4579,6 +4714,15 @@ class MainWindow(QMainWindow):
         )
         self.section_panel.nativeRubbingExportRequested.connect(
             self.on_native_rubbing_export_requested
+        )
+        self.section_panel.nativeTileUnwrapRequested.connect(
+            self.on_native_tile_unwrap_requested
+        )
+        self.section_panel.nativeTileUnwrapRecordSelected.connect(
+            self.on_native_tile_unwrap_record_selected
+        )
+        self.section_panel.nativeTileUnwrapExportRequested.connect(
+            self.on_native_tile_unwrap_export_requested
         )
 
         self.viewport.lineProfileUpdated.connect(self.section_panel.update_line_profile)
@@ -9259,6 +9403,16 @@ class MainWindow(QMainWindow):
             self.selection_panel.update_selection_count(int(count))
         except Exception:
             pass
+        try:
+            panel = getattr(self, "section_panel", None)
+            obj = getattr(self.viewport, "selected_obj", None)
+            total = int(getattr(getattr(obj, "mesh", None), "n_faces", 0) or 0)
+            if panel is not None and hasattr(panel, "label_native_tile_selection"):
+                panel.label_native_tile_selection.setText(
+                    f"현재 선택 {int(count):,}면 · 전체 {total:,}면"
+                )
+        except Exception:
+            pass
         self._sync_tile_panel()
         self._sync_workflow_panel()
 
@@ -11926,7 +12080,7 @@ class MainWindow(QMainWindow):
                 pass
             try:
                 self.status_info.setText(
-                    "단면/2D 지정 도구로 이동: 실시간 단면(3D)과 2D 단면선/ROI를 여기서 함께 제어합니다."
+                    "검증된 실측·기와 전개 패널을 열었습니다. native 문서는 record 기반 명령과 1:1 export를 사용합니다."
                 )
             except Exception:
                 pass
@@ -14986,6 +15140,33 @@ class MainWindow(QMainWindow):
                 return record
         return None
 
+    @staticmethod
+    def _native_tile_unwrap_record_is_exportable(session, record) -> bool:
+        return bool(
+            isinstance(session, ArtifactSession)
+            and getattr(record, "type", None) == TILE_UNWRAP_RECORD_TYPE
+            and str(record.lifecycle_status.value) == "ready"
+            and session.document.record_freshness(record.id).value == "fresh"
+        )
+
+    def _current_native_tile_unwrap_record(self):
+        session = getattr(self, "_artifact_session", None)
+        if not isinstance(session, ArtifactSession):
+            return None
+        preview_id = getattr(self, "_native_tile_unwrap_preview_record_id", None)
+        if (
+            isinstance(preview_id, str)
+            and self._native_tile_unwrap_preview_document_id
+            == session.document.document_id
+        ):
+            record = session.document.record_index.get(preview_id)
+            if record is not None and self._native_tile_unwrap_record_is_exportable(
+                session,
+                record,
+            ):
+                return record
+        return None
+
     def _clear_native_vector_preview(self) -> None:
         self._native_vector_preview_document_id = None
         self.viewport.set_native_vector_preview(None)
@@ -15006,6 +15187,25 @@ class MainWindow(QMainWindow):
             "프로젝트를 다시 연 경우 export 또는 재계산으로 픽셀을 검증합니다."
         )
         panel.label_native_rubbing_info.setText("READY + FRESH 탁본 기록 없음")
+
+    def _clear_native_tile_unwrap_preview(self) -> None:
+        self._native_tile_unwrap_preview_record_id = None
+        self._native_tile_unwrap_preview_document_id = None
+        self._native_tile_unwrap_preview_geometry_ref = None
+        self._native_tile_unwrap_preview_pending_record_id = None
+        self._native_tile_unwrap_preview_pending_record = None
+        self._native_tile_unwrap_preview_pending_token = None
+        panel = getattr(self, "section_panel", None)
+        if panel is None or not hasattr(panel, "label_native_tile_unwrap_preview"):
+            return
+        panel.label_native_tile_unwrap_preview.clear()
+        panel.label_native_tile_unwrap_preview.setText(
+            "READY + FRESH 기와 전개를 계산하면 미리보기가 표시됩니다.\n"
+            "미리보기는 비권위이며 export 때 record recipe를 다시 계산합니다."
+        )
+        panel.label_native_tile_unwrap_info.setText(
+            "READY + FRESH 기와 전개 기록 없음"
+        )
 
     def _preview_native_rubbing(
         self,
@@ -15045,6 +15245,86 @@ class MainWindow(QMainWindow):
         self._native_rubbing_preview_pending_record = None
         self._native_rubbing_preview_pending_token = None
 
+    def _preview_native_tile_unwrap(
+        self,
+        session: ArtifactSession,
+        record_id: str,
+        unwrap: TileUnwrapMesh,
+    ) -> None:
+        record = session.document.record_index.get(record_id)
+        if record is None or not self._native_tile_unwrap_record_is_exportable(
+            session,
+            record,
+        ):
+            raise ArtifactTileUnwrapError(
+                "native tile unwrap preview requires a READY + FRESH record"
+            )
+        receipt = tile_unwrap_receipt_from_record(record)
+        if unwrap.receipt(
+            selection_sha256=str(receipt["selection_sha256"])
+        ) != receipt:
+            raise ArtifactTileUnwrapError(
+                "native tile unwrap preview does not match its record receipt"
+            )
+
+        width_px, height_px, margin_px = 420, 260, 12
+        image = Image.new("RGBA", (width_px, height_px), (247, 250, 252, 255))
+        draw = ImageDraw.Draw(image)
+        uv = np.asarray(unwrap.uv_um, dtype=np.float64)
+        minimum = np.min(uv, axis=0)
+        maximum = np.max(uv, axis=0)
+        span = np.maximum(maximum - minimum, 1.0)
+        scale = min(
+            (width_px - 2 * margin_px) / float(span[0]),
+            (height_px - 2 * margin_px) / float(span[1]),
+        )
+
+        def point(index: int) -> tuple[float, float]:
+            normalized = (uv[index] - minimum) * scale
+            return (
+                margin_px + float(normalized[0]),
+                height_px - margin_px - float(normalized[1]),
+            )
+
+        faces = np.asarray(unwrap.faces, dtype=np.int64)
+        if faces.shape[0] > 5_000:
+            face_ids = np.linspace(
+                0,
+                faces.shape[0] - 1,
+                num=5_000,
+                dtype=np.int64,
+            )
+            faces = faces[face_ids]
+        for a, b, c in faces:
+            triangle = [point(int(a)), point(int(b)), point(int(c))]
+            draw.line(triangle + [triangle[0]], fill=(45, 94, 120, 115), width=1)
+        pixmap = self._pixmap_from_pil_image(image)
+        self.section_panel.label_native_tile_unwrap_preview.setPixmap(pixmap)
+
+        width_mm = int(receipt["width_mm_exact"]["numerator"]) / int(
+            receipt["width_mm_exact"]["denominator"]
+        )
+        height_mm = int(receipt["height_mm_exact"]["numerator"]) / int(
+            receipt["height_mm_exact"]["denominator"]
+        )
+        qc = record.qc
+        distortion_percent = int(qc.get("distortion_p95_millionths", 0)) / 10_000.0
+        self.section_panel.label_native_tile_unwrap_info.setText(
+            f"{str(record.recipe['record_view']).title()} · 길이축 "
+            f"{str(record.recipe['longitudinal_axis']).upper()} · "
+            f"선택 {int(qc.get('selected_face_count', 0)):,}면 · "
+            f"{width_mm:g}×{height_mm:g} mm · "
+            f"section {int(qc.get('section_count', 0))} · "
+            f"foldover {int(qc.get('foldover_face_count', 0))} · "
+            f"왜곡 p95 {distortion_percent:.3f}%"
+        )
+        self._native_tile_unwrap_preview_record_id = record.id
+        self._native_tile_unwrap_preview_document_id = session.document.document_id
+        self._native_tile_unwrap_preview_geometry_ref = record.geometry_ref
+        self._native_tile_unwrap_preview_pending_record_id = None
+        self._native_tile_unwrap_preview_pending_record = None
+        self._native_tile_unwrap_preview_pending_token = None
+
     def _preview_native_vector_record(
         self,
         session: ArtifactSession,
@@ -15068,13 +15348,14 @@ class MainWindow(QMainWindow):
             "vector.cutline.v1": "Cutline",
             "vector.outline.v1": "Outline",
             RUBBING_RECORD_TYPE: "Digital Rubbing",
+            TILE_UNWRAP_RECORD_TYPE: "Tile Unwrap",
         }.get(record_type, record_type or "Record")
         recipe = getattr(record, "recipe", {})
-        view = (
-            str(recipe.get("view", "")).strip().title()
-            if isinstance(recipe, Mapping)
-            else ""
-        )
+        view = ""
+        if isinstance(recipe, Mapping):
+            view = str(
+                recipe.get("view", recipe.get("record_view", ""))
+            ).strip().title()
         details = " · ".join(part for part in (kind, view) if part)
         return f"{details} · {record.id} · {record.created_at}"
 
@@ -15110,13 +15391,19 @@ class MainWindow(QMainWindow):
             return
         vector_records: list[Any] = []
         rubbing_records: list[Any] = []
+        tile_unwrap_records: list[Any] = []
         selected_vector_id: str | None = None
         selected_rubbing_id: str | None = None
+        selected_tile_unwrap_id: str | None = None
         if isinstance(session, ArtifactSession):
             vector_record = self._current_native_vector_record()
             rubbing_record = self._current_native_rubbing_record()
+            tile_unwrap_record = self._current_native_tile_unwrap_record()
             selected_vector_id = vector_record.id if vector_record is not None else None
             selected_rubbing_id = rubbing_record.id if rubbing_record is not None else None
+            selected_tile_unwrap_id = (
+                tile_unwrap_record.id if tile_unwrap_record is not None else None
+            )
             if selected_rubbing_id is None:
                 pending_id = getattr(
                     self,
@@ -15148,12 +15435,48 @@ class MainWindow(QMainWindow):
                     )
                 ):
                     selected_rubbing_id = pending_id
+            if selected_tile_unwrap_id is None:
+                pending_id = getattr(
+                    self,
+                    "_native_tile_unwrap_preview_pending_record_id",
+                    None,
+                )
+                pending_record = getattr(
+                    self,
+                    "_native_tile_unwrap_preview_pending_record",
+                    None,
+                )
+                pending_token = getattr(
+                    self,
+                    "_native_tile_unwrap_preview_pending_token",
+                    None,
+                )
+                current_pending = (
+                    session.document.record_index.get(pending_id)
+                    if isinstance(pending_id, str)
+                    else None
+                )
+                if (
+                    pending_token is not None
+                    and current_pending is not None
+                    and current_pending == pending_record
+                    and self._native_tile_unwrap_record_is_exportable(
+                        session,
+                        current_pending,
+                    )
+                ):
+                    selected_tile_unwrap_id = pending_id
             for record in session.document.records:
                 try:
                     if self._native_vector_record_is_exportable(session, record):
                         vector_records.append(record)
                     elif self._native_rubbing_record_is_exportable(session, record):
                         rubbing_records.append(record)
+                    elif self._native_tile_unwrap_record_is_exportable(
+                        session,
+                        record,
+                    ):
+                        tile_unwrap_records.append(record)
                 except Exception:
                     continue
         self._replace_native_record_choices(
@@ -15167,6 +15490,12 @@ class MainWindow(QMainWindow):
             placeholder="READY + FRESH 탁본 기록을 명시적으로 선택",
             records=rubbing_records,
             selected_id=selected_rubbing_id,
+        )
+        self._replace_native_record_choices(
+            panel.combo_native_tile_unwrap_record,
+            placeholder="READY + FRESH 기와 전개 기록을 명시적으로 선택",
+            records=tile_unwrap_records,
+            selected_id=selected_tile_unwrap_id,
         )
 
     @staticmethod
@@ -15367,6 +15696,180 @@ class MainWindow(QMainWindow):
             self._reset_native_record_choice(panel.combo_native_rubbing_record)
             panel.btn_native_rubbing_export.setEnabled(False)
 
+    def on_native_tile_unwrap_record_selected(self, record_id: str) -> None:
+        panel = self.section_panel
+        if not record_id:
+            self._clear_native_tile_unwrap_preview()
+            panel.btn_native_tile_unwrap_export.setEnabled(False)
+            self.status_info.setText("기와 전개 기록 선택을 해제했습니다.")
+            return
+        session = getattr(self, "_artifact_session", None)
+        record = (
+            session.document.record_index.get(record_id)
+            if isinstance(session, ArtifactSession)
+            else None
+        )
+        if (
+            not self._native_measurement_ready()
+            or record is None
+            or not self._native_tile_unwrap_record_is_exportable(session, record)
+        ):
+            self._clear_native_tile_unwrap_preview()
+            self._reset_native_record_choice(panel.combo_native_tile_unwrap_record)
+            panel.btn_native_tile_unwrap_export.setEnabled(False)
+            self.status_info.setText(
+                "선택한 기와 전개 기록은 READY + FRESH 상태가 아닙니다."
+            )
+            return
+        if self._artifact_measurement_controller().active_summaries:
+            self._clear_native_tile_unwrap_preview()
+            self._reset_native_record_choice(panel.combo_native_tile_unwrap_record)
+            panel.btn_native_tile_unwrap_export.setEnabled(False)
+            self.status_info.setText(
+                "진행·보류 중인 실측 결과를 먼저 완료하거나 해제하세요."
+            )
+            return
+        try:
+            captured_snapshot = session.projection_snapshot()
+        except Exception as exc:
+            self._clear_native_tile_unwrap_preview()
+            self._reset_native_record_choice(panel.combo_native_tile_unwrap_record)
+            panel.btn_native_tile_unwrap_export.setEnabled(False)
+            self.status_info.setText(f"기와 전개 기록 권위 확인 실패: {exc}")
+            return
+
+        self._clear_native_tile_unwrap_preview()
+        preview_token = object()
+        self._native_tile_unwrap_preview_pending_record_id = record_id
+        self._native_tile_unwrap_preview_pending_record = record
+        self._native_tile_unwrap_preview_pending_token = preview_token
+        panel.btn_native_tile_unwrap_export.setEnabled(False)
+
+        def owns_preview_request() -> bool:
+            return (
+                getattr(self, "_native_tile_unwrap_preview_pending_token", None)
+                is preview_token
+            )
+
+        def current_record_if_authoritative():
+            if not owns_preview_request():
+                return None
+            current = getattr(self, "_artifact_session", None)
+            if not isinstance(current, ArtifactSession):
+                return None
+            try:
+                if (
+                    current.source_mesh is not session.source_mesh
+                    or not current.projection_snapshot().has_same_render_projection(
+                        captured_snapshot
+                    )
+                    or str(
+                        panel.combo_native_tile_unwrap_record.currentData() or ""
+                    )
+                    != record_id
+                ):
+                    return None
+                current_record = current.document.record_index.get(record_id)
+                if (
+                    current_record != record
+                    or not self._native_tile_unwrap_record_is_exportable(
+                        current,
+                        current_record,
+                    )
+                ):
+                    return None
+            except Exception:
+                return None
+            return current, current_record
+
+        def on_done(result: object) -> None:
+            if not owns_preview_request():
+                return
+            if self._restore_artifact_authority_fault_status():
+                return
+            authoritative = current_record_if_authoritative()
+            if not isinstance(result, TileUnwrapMesh) or authoritative is None:
+                self._clear_native_tile_unwrap_preview()
+                self._reset_native_record_choice(
+                    panel.combo_native_tile_unwrap_record
+                )
+                panel.btn_native_tile_unwrap_export.setEnabled(False)
+                self.status_info.setText(
+                    "늦은 기와 전개 미리보기 폐기 | 현재 문서 유지"
+                )
+                return
+            current, current_record = authoritative
+            try:
+                self._preview_native_tile_unwrap(
+                    current,
+                    current_record.id,
+                    result,
+                )
+            except Exception as exc:
+                self._clear_native_tile_unwrap_preview()
+                self._reset_native_record_choice(
+                    panel.combo_native_tile_unwrap_record
+                )
+                panel.btn_native_tile_unwrap_export.setEnabled(False)
+                self.status_info.setText(f"기와 전개 미리보기 실패: {exc}")
+                return
+            panel.btn_native_tile_unwrap_export.setEnabled(True)
+            self.status_info.setText(f"기와 전개 기록 선택: {current_record.id}")
+
+        def on_failed(message: str) -> None:
+            if not owns_preview_request():
+                return
+            if self._restore_artifact_authority_fault_status():
+                return
+            if (
+                str(panel.combo_native_tile_unwrap_record.currentData() or "")
+                != record_id
+            ):
+                return
+            self._clear_native_tile_unwrap_preview()
+            self._reset_native_record_choice(panel.combo_native_tile_unwrap_record)
+            panel.btn_native_tile_unwrap_export.setEnabled(False)
+            self.status_info.setText("기와 전개 기록 재계산 실패")
+            QMessageBox.warning(
+                self,
+                "기와 전개 기록 미리보기 실패",
+                self._format_error_message("기와 전개 재계산 중 오류:", message),
+            )
+
+        self.status_info.setText("기와 전개 기록 미리보기 재계산 중...")
+        try:
+            started = self._start_task(
+                title="기와 전개 기록 미리보기",
+                label="저장된 recipe로 µm 전개 좌표를 재검증하는 중...",
+                thread=TaskThread(
+                    "native_tile_unwrap_record_preview",
+                    lambda: MainWindow._recompute_native_tile_unwrap_record(
+                        session,
+                        record,
+                    ),
+                ),
+                on_done=on_done,
+                on_failed=on_failed,
+            )
+        except Exception as exc:
+            if not owns_preview_request():
+                return
+            self._clear_native_tile_unwrap_preview()
+            self._reset_native_record_choice(panel.combo_native_tile_unwrap_record)
+            panel.btn_native_tile_unwrap_export.setEnabled(False)
+            if not self._restore_artifact_authority_fault_status():
+                self.status_info.setText("기와 전개 미리보기 시작 실패")
+                QMessageBox.warning(
+                    self,
+                    "기와 전개 미리보기 실패",
+                    f"{type(exc).__name__}: {exc}",
+                )
+            return
+        if not started and owns_preview_request():
+            self._clear_native_tile_unwrap_preview()
+            self._reset_native_record_choice(panel.combo_native_tile_unwrap_record)
+            panel.btn_native_tile_unwrap_export.setEnabled(False)
+
     def _sync_native_cutline_controls(self, *, reset_offset: bool) -> None:
         panel = getattr(self, "section_panel", None)
         if panel is None or not hasattr(panel, "native_group"):
@@ -15378,21 +15881,30 @@ class MainWindow(QMainWindow):
         panel.legacy_roi_group.setEnabled(not native)
         if not native:
             panel.apply_native_workflow_progress(ArtifactWorkflowProgress.empty())
+            panel.btn_native_tile_unwrap.setEnabled(False)
             panel.btn_native_vector_export.setEnabled(False)
             panel.btn_native_rubbing_export.setEnabled(False)
+            panel.btn_native_tile_unwrap_export.setEnabled(False)
             self._clear_native_vector_preview()
             self._clear_native_rubbing_preview()
+            self._clear_native_tile_unwrap_preview()
             self._refresh_native_record_selectors(None)
             return
         if not self._native_measurement_ready():
             panel.apply_native_workflow_progress(ArtifactWorkflowProgress.empty())
+            panel.btn_native_tile_unwrap.setEnabled(False)
             panel.btn_native_vector_export.setEnabled(False)
             panel.btn_native_rubbing_export.setEnabled(False)
+            panel.btn_native_tile_unwrap_export.setEnabled(False)
             self._clear_native_vector_preview()
             self._clear_native_rubbing_preview()
+            self._clear_native_tile_unwrap_preview()
             self._refresh_native_record_selectors(None)
             panel.label_native_rubbing_info.setText(
-                "정치 확정 후 Cutline · Outline · Digital Rubbing을 사용할 수 있습니다."
+                "정위치 확정 후 Cutline · Outline · Digital Rubbing · 기와 전개를 사용할 수 있습니다."
+            )
+            panel.label_native_tile_unwrap_info.setText(
+                "정위치 확정 후 기록면·장축을 명시해 기와 전개를 사용할 수 있습니다."
             )
             return
         session = self._artifact_session
@@ -15413,6 +15925,12 @@ class MainWindow(QMainWindow):
             align_ready=True,
         )
         panel.apply_native_workflow_progress(workflow_progress)
+        panel.btn_native_tile_unwrap.setEnabled(True)
+        selected_count = len(getattr(live_obj, "selected_faces", set()) or set())
+        panel.label_native_tile_selection.setText(
+            f"현재 선택 {selected_count:,}면 · 전체 "
+            f"{int(session.source_mesh.faces.shape[0]):,}면"
+        )
         bounds = np.asarray(live_mesh.bounds, dtype=np.float64)
         view = str(panel.combo_native_cutline_view.currentData() or "top")
         axis = _NATIVE_CUTLINE_AXIS_INDEX.get(view, 2)
@@ -15439,9 +15957,18 @@ class MainWindow(QMainWindow):
             getattr(self, "_native_rubbing_preview_record_id", None), str
         ):
             self._clear_native_rubbing_preview()
+        current_tile_unwrap = self._current_native_tile_unwrap_record()
+        if current_tile_unwrap is None and isinstance(
+            getattr(self, "_native_tile_unwrap_preview_record_id", None),
+            str,
+        ):
+            self._clear_native_tile_unwrap_preview()
         self._refresh_native_record_selectors(session)
         panel.btn_native_vector_export.setEnabled(current_vector is not None)
         panel.btn_native_rubbing_export.setEnabled(current_rubbing is not None)
+        panel.btn_native_tile_unwrap_export.setEnabled(
+            current_tile_unwrap is not None
+        )
         preview_id = getattr(self, "_native_rubbing_preview_record_id", None)
         if not isinstance(preview_id, str):
             pending_preview_id = getattr(
@@ -15470,6 +15997,41 @@ class MainWindow(QMainWindow):
                 or not self._native_rubbing_record_is_exportable(session, preview_record)
             ):
                 self._clear_native_rubbing_preview()
+        tile_preview_id = getattr(
+            self,
+            "_native_tile_unwrap_preview_record_id",
+            None,
+        )
+        if not isinstance(tile_preview_id, str):
+            pending_tile_preview_id = getattr(
+                self,
+                "_native_tile_unwrap_preview_pending_record_id",
+                None,
+            )
+            pending_tile_preview_token = getattr(
+                self,
+                "_native_tile_unwrap_preview_pending_token",
+                None,
+            )
+            if current_tile_unwrap is None and (
+                not isinstance(pending_tile_preview_id, str)
+                or pending_tile_preview_token is None
+            ):
+                self._clear_native_tile_unwrap_preview()
+        else:
+            tile_preview_record = session.document.record_index.get(tile_preview_id)
+            if (
+                self._native_tile_unwrap_preview_document_id
+                != session.document.document_id
+                or tile_preview_record is None
+                or self._native_tile_unwrap_preview_geometry_ref
+                != getattr(tile_preview_record, "geometry_ref", None)
+                or not self._native_tile_unwrap_record_is_exportable(
+                    session,
+                    tile_preview_record,
+                )
+            ):
+                self._clear_native_tile_unwrap_preview()
 
     def on_native_cutline_view_changed(self, _view: str) -> None:
         try:
@@ -15524,12 +16086,24 @@ class MainWindow(QMainWindow):
                 f"{int(computation.qc.get('hole_count', 0))}개 구멍 | "
                 f"grid {float(recipe['precision_grid_mm']):g} mm"
             )
-        else:
+        elif work_item.kind is MeasurementOperationKind.DIGITAL_RUBBING:
             assert isinstance(computation, ArtifactRubbingComputation)
             status_text = (
                 f"{str(computation.recipe['view']).title()} Digital Rubbing 기록 | "
                 f"{computation.raster.width_pixels}×{computation.raster.height_pixels} px · "
                 f"ink {int(computation.qc.get('inked_pixel_count', 0))} px"
+            )
+        elif work_item.kind is MeasurementOperationKind.TILE_UNWRAP:
+            assert isinstance(computation, ArtifactTileUnwrapComputation)
+            status_text = (
+                f"{str(computation.recipe['record_view']).title()} 기와 전개 기록 | "
+                f"길이축 {str(computation.recipe['longitudinal_axis']).upper()} · "
+                f"{int(computation.qc.get('selected_face_count', 0)):,}면 · "
+                f"foldover {int(computation.qc.get('foldover_face_count', 0))}"
+            )
+        else:  # pragma: no cover - closed enum guard
+            raise ArtifactWorkbenchError(
+                f"unsupported native measurement kind: {work_item.kind.value}"
             )
 
         measurement_controller = self._artifact_measurement_controller()
@@ -15582,6 +16156,12 @@ class MainWindow(QMainWindow):
                 publication.session,
                 publication.record_id,
                 computation.raster,
+            )
+        elif isinstance(computation, ArtifactTileUnwrapComputation):
+            self._preview_native_tile_unwrap(
+                publication.session,
+                publication.record_id,
+                computation.unwrap,
             )
         else:
             self._preview_native_vector_record(
@@ -16619,6 +17199,364 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(
                     self,
                     "Digital Rubbing 내보내기 정리 실패",
+                    cleanup_error,
+                )
+
+    def _native_tile_unwrap_options_from_panel(self) -> dict[str, Any]:
+        panel = self.section_panel
+        target = str(panel.combo_native_tile_target.currentData() or "all")
+        selected_face_indices: tuple[int, ...] | None = None
+        if target == "selected":
+            obj = self.viewport.selected_obj
+            selected = sorted(
+                int(value)
+                for value in (getattr(obj, "selected_faces", set()) or set())
+            )
+            if not selected:
+                raise ArtifactTileUnwrapError(
+                    "현재 선택 면을 사용하려면 하나 이상의 face를 선택하세요"
+                )
+            selected_face_indices = tuple(selected)
+        elif target != "all":
+            raise ArtifactTileUnwrapError("기와 전개 기록 영역이 올바르지 않습니다")
+        return {
+            "longitudinal_axis": str(
+                panel.combo_native_tile_axis.currentData() or "y"
+            ),
+            "record_view": str(
+                panel.combo_native_tile_record_view.currentData() or "top"
+            ),
+            "selected_face_indices": selected_face_indices,
+            "n_sections": int(panel.spin_native_tile_sections.value()),
+        }
+
+    def _compute_and_commit_native_tile_unwrap(
+        self,
+        *,
+        longitudinal_axis: str,
+        record_view: str,
+        selected_face_indices: tuple[int, ...] | None = None,
+        n_sections: int = 32,
+        record_id: str | None = None,
+        created_at: str | None = None,
+        operator: str = "local-user",
+    ) -> str:
+        obj = self.viewport.selected_obj
+        session = self._require_native_measurement_session(obj)
+        self._validate_native_scene_for_save(session)
+        new_record_id = (
+            f"record:tile-unwrap:{record_view}:{uuid.uuid4()}"
+            if record_id is None
+            else record_id
+        )
+        controller = self._artifact_measurement_controller()
+        work_item = controller.begin_tile_unwrap(
+            longitudinal_axis=longitudinal_axis,
+            record_view=record_view,
+            selected_face_indices=selected_face_indices,
+            n_sections=n_sections,
+            record_id=new_record_id,
+            created_at=(self._utc_seconds_now() if created_at is None else created_at),
+            operator=operator,
+        )
+        result = controller.execute(work_item)
+        return self._publish_native_measurement_result(work_item, result)
+
+    def on_native_tile_unwrap_requested(self) -> None:
+        try:
+            obj = self.viewport.selected_obj
+            session = self._require_native_measurement_session(obj)
+            self._validate_native_scene_for_save(session)
+            options = self._native_tile_unwrap_options_from_panel()
+            record_id = (
+                f"record:tile-unwrap:{options['record_view']}:{uuid.uuid4()}"
+            )
+            controller = self._artifact_measurement_controller()
+            work_item = controller.begin_tile_unwrap(
+                **options,
+                record_id=record_id,
+                created_at=self._utc_seconds_now(),
+                operator="local-user",
+            )
+        except Exception as exc:
+            self.status_info.setText("기와 전개 준비 실패 | 기존 문서 유지")
+            QMessageBox.warning(
+                self,
+                "기와 전개 준비 실패",
+                f"{type(exc).__name__}: {exc}",
+            )
+            return
+
+        def on_done(result: object) -> None:
+            if self._native_measurement_callback_is_terminal(
+                controller,
+                work_item,
+                label="기와 전개",
+            ):
+                return
+            try:
+                if not isinstance(result, ArtifactMeasurementResult):
+                    raise ArtifactWorkbenchError(
+                        "tile unwrap worker result is invalid"
+                    )
+                self._publish_native_measurement_result(work_item, result)
+            except Exception as exc:
+                if self._report_artifact_authority_callback_failure(
+                    context="기와 전개 결과 게시 중 권위 확인 실패",
+                    detail=f"{type(exc).__name__}: {exc}",
+                ):
+                    return
+                pending = self._native_measurement_publication_is_pending(work_item)
+                self.status_info.setText(
+                    "기와 전개 결과 게시 보류 | 재시도 버튼 사용"
+                    if pending
+                    else "늦은 기와 전개 결과 폐기 | 현재 문서 유지"
+                )
+                QMessageBox.warning(
+                    self,
+                    "기와 전개 결과 게시 보류" if pending else "기와 전개 결과 폐기",
+                    f"{type(exc).__name__}: {exc}",
+                )
+
+        def on_failed(message: str) -> None:
+            if self._report_artifact_authority_callback_failure(
+                context="기와 전개 worker 종료 콜백",
+                detail=str(message),
+            ):
+                return
+            if self._native_measurement_callback_is_terminal(
+                controller,
+                work_item,
+                label="기와 전개",
+            ):
+                return
+            self.status_info.setText("기와 전개 계산 실패 | 기존 문서 유지")
+            QMessageBox.warning(
+                self,
+                "기와 전개 계산 실패",
+                self._format_error_message("기와 전개 계산 중 오류:", message),
+            )
+
+        self.status_info.setText("기와 전개 계산 중 · canonical mm 단면 적합...")
+        started = self._start_task(
+            title="기와 기록면 전개",
+            label="선택·축·기록면을 고정한 µm 전개 좌표 계산 중...",
+            thread=TaskThread(
+                "native_tile_unwrap",
+                lambda: controller.execute(work_item),
+            ),
+            on_done=on_done,
+            on_failed=on_failed,
+            on_cancel_requested=lambda: self._request_native_measurement_cancel(
+                controller,
+                work_item,
+                label="기와 전개",
+            ),
+        )
+        if not started:
+            controller.cancel(work_item, reason="task_not_started")
+
+    @staticmethod
+    def _recompute_native_tile_unwrap_record(
+        session: ArtifactSession,
+        record,
+    ) -> TileUnwrapMesh:
+        if not MainWindow._native_tile_unwrap_record_is_exportable(session, record):
+            raise ArtifactTileUnwrapExportError(
+                "no READY + FRESH tile unwrap record to export"
+            )
+        computation = compute_artifact_tile_unwrap_from_recipe(
+            session,
+            record.recipe,
+        )
+        require_current_tile_unwrap_computation(session, computation)
+        receipt = tile_unwrap_receipt_from_record(record)
+        if computation.unwrap.receipt(
+            selection_sha256=str(receipt["selection_sha256"])
+        ) != receipt:
+            raise ArtifactTileUnwrapExportError(
+                "recomputed tile unwrap does not match its durable receipt"
+            )
+        return computation.unwrap
+
+    def _export_native_tile_unwrap_record(
+        self,
+        destination: str | os.PathLike[str],
+        *,
+        record_id: str | None = None,
+    ) -> Path:
+        session = getattr(self, "_artifact_session", None)
+        if not isinstance(session, ArtifactSession):
+            raise ArtifactTileUnwrapExportError(
+                "no active ArtifactDocument session"
+            )
+        try:
+            self._artifact_workbench_controller().require_stable_session(
+                session,
+                measurement=True,
+            )
+        except ArtifactWorkbenchError as exc:
+            raise ArtifactTileUnwrapExportError(str(exc)) from exc
+        record = (
+            session.document.record_index.get(record_id)
+            if record_id is not None
+            else self._current_native_tile_unwrap_record()
+        )
+        if record is None or not self._native_tile_unwrap_record_is_exportable(
+            session,
+            record,
+        ):
+            raise ArtifactTileUnwrapExportError(
+                "no READY + FRESH tile unwrap record to export"
+            )
+        controller = self._artifact_export_controller()
+        work_item: ArtifactExportWorkItem | None = None
+        result: ArtifactExportResult | None = None
+        try:
+            work_item = controller.begin_tile_unwrap(destination, record.id)
+            result = controller.execute(work_item)
+            return controller.publish_result(work_item, result).destination
+        except WorkflowBusyError as exc:
+            if work_item is not None and result is not None:
+                controller.discard_result(
+                    work_item,
+                    result,
+                    reason="synchronous export blocked by pending Open",
+                )
+            raise ArtifactTileUnwrapExportError(str(exc)) from exc
+        except ArtifactExportError as exc:
+            raise ArtifactTileUnwrapExportError(str(exc)) from exc
+
+    def on_native_tile_unwrap_export_requested(self) -> None:
+        session = getattr(self, "_artifact_session", None)
+        record = self._current_native_tile_unwrap_record()
+        if not isinstance(session, ArtifactSession) or record is None:
+            self.status_info.setText(
+                "내보낼 READY + FRESH 기와 전개 기록이 없습니다."
+            )
+            return
+        try:
+            self._artifact_workbench_controller().require_stable_session(
+                session,
+                measurement=True,
+            )
+        except ArtifactWorkbenchError as exc:
+            self.status_info.setText(f"기와 전개 내보내기 차단: {exc}")
+            return
+        source_path = Path(str(self.current_filepath or "artifact"))
+        default_path = source_path.with_name(
+            f"{source_path.stem}-tile-unwrap{TILE_UNWRAP_EXPORT_DIRECTORY_SUFFIX}"
+        )
+        selected, _filter = QFileDialog.getSaveFileName(
+            self,
+            "1:1 기와 전개 패키지 저장",
+            str(default_path),
+            "ArchMeshRubbing Tile Unwrap Package (*.amr-unwrap)",
+        )
+        if not selected:
+            return
+        if not selected.endswith(TILE_UNWRAP_EXPORT_DIRECTORY_SUFFIX):
+            selected += TILE_UNWRAP_EXPORT_DIRECTORY_SUFFIX
+        try:
+            controller = self._artifact_export_controller()
+            work_item = controller.begin_tile_unwrap(selected, record.id)
+        except Exception as exc:
+            self.status_info.setText("기와 전개 내보내기 준비 실패")
+            QMessageBox.warning(
+                self,
+                "기와 전개 내보내기 실패",
+                f"{type(exc).__name__}: {exc}",
+            )
+            return
+
+        def on_done(value: object) -> None:
+            try:
+                if self._artifact_export_controller() is not controller:
+                    raise ArtifactExportError(
+                        "tile unwrap export controller authority was replaced"
+                    )
+                if not isinstance(value, ArtifactExportResult):
+                    raise ArtifactExportError(
+                        "tile unwrap export worker result is invalid"
+                    )
+                publication = controller.publish_result(work_item, value)
+            except Exception as exc:
+                cleanup_error = self._cancel_native_export_if_staged(
+                    controller,
+                    work_item,
+                    reason="invalid or rejected tile unwrap export callback",
+                )
+                detail = f"{type(exc).__name__}: {exc}" + (
+                    f"\n임시 패키지 정리 확인 실패: {cleanup_error}"
+                    if cleanup_error
+                    else ""
+                )
+                if self._report_artifact_authority_callback_failure(
+                    context="기와 전개 패키지 게시 콜백 실패",
+                    detail=detail,
+                ):
+                    return
+                self.status_info.setText("기와 전개 패키지 저장 실패")
+                QMessageBox.warning(
+                    self,
+                    "기와 전개 내보내기 실패",
+                    detail,
+                )
+                return
+            self._report_native_export_publication(
+                publication,
+                artifact_label="기와 OBJ/SVG",
+            )
+
+        def on_failed(message: str) -> None:
+            if self._report_artifact_authority_callback_failure(
+                context="기와 전개 export worker 종료 콜백",
+                detail=str(message),
+            ):
+                return
+            self.status_info.setText("기와 전개 패키지 저장 실패")
+            QMessageBox.warning(
+                self,
+                "기와 전개 내보내기 실패",
+                self._format_error_message("패키지 생성 중 오류:", message),
+            )
+
+        try:
+            started = self._start_task(
+                title="기와 전개 내보내기",
+                label="record recipe 재계산 및 1:1 OBJ·SVG 검증 중...",
+                thread=TaskThread(
+                    "export_native_tile_unwrap",
+                    lambda: controller.execute(work_item),
+                ),
+                on_done=on_done,
+                on_failed=on_failed,
+            )
+        except Exception as exc:
+            cleanup_error = self._cancel_unstarted_native_export(
+                controller,
+                work_item,
+                reason="task_start_failed",
+            )
+            detail = f"{type(exc).__name__}: {exc}" + (
+                f"\n내보내기 예약 해제 확인 실패: {cleanup_error}"
+                if cleanup_error
+                else ""
+            )
+            self.status_info.setText("기와 전개 패키지 작업 시작 실패")
+            QMessageBox.warning(self, "기와 전개 내보내기 실패", detail)
+            return
+        if not started:
+            cleanup_error = self._cancel_unstarted_native_export(
+                controller,
+                work_item,
+                reason="task_not_started",
+            )
+            if cleanup_error:
+                self.status_info.setText("기와 전개 예약 해제 확인 실패")
+                QMessageBox.warning(
+                    self,
+                    "기와 전개 내보내기 정리 실패",
                     cleanup_error,
                 )
 

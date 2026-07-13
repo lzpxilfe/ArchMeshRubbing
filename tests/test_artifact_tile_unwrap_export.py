@@ -27,7 +27,11 @@ from src.core.artifact_tile_unwrap_export import (
     ArtifactTileUnwrapExportError,
     TILE_UNWRAP_EXPORT_SIDECAR_NAME,
     build_tile_unwrap_export,
+    discard_prepared_tile_unwrap_package,
     export_tile_unwrap_package,
+    prepare_staged_tile_unwrap_publication,
+    publish_prepared_tile_unwrap_package,
+    stage_tile_unwrap_package,
     validate_tile_unwrap_export_bytes,
     validate_tile_unwrap_export_package,
 )
@@ -49,6 +53,12 @@ from src.core.tile_synthetic import (
 
 STAMP = "2026-07-13T00:00:00Z"
 ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture(autouse=True)
+def _confirmed_tile_unwrap_directory_fsync():
+    with patch.object(tile_export, "fsync_export_directory", return_value=True):
+        yield
 
 
 class _SequentialIds:
@@ -311,6 +321,67 @@ def test_package_publishes_without_overwrite_and_verifies_offline(
             "record:tile-export",
             computation.unwrap,
         )
+
+
+def test_staged_package_is_hidden_until_exact_prepared_capability_publishes(
+    tmp_path: Path,
+) -> None:
+    session, computation = _recorded()
+    destination = tmp_path / "staged.amr-unwrap"
+
+    stage = stage_tile_unwrap_package(
+        destination,
+        session.document,
+        "record:tile-export",
+        computation.unwrap,
+    )
+
+    assert stage.is_dir()
+    assert not destination.exists()
+    validate_tile_unwrap_export_package(stage, document=session.document)
+    prepared = prepare_staged_tile_unwrap_publication(
+        stage,
+        destination,
+        document=session.document,
+    )
+    published = publish_prepared_tile_unwrap_package(prepared)
+
+    assert published == destination
+    assert destination.is_dir()
+    assert not stage.exists()
+    validate_tile_unwrap_export_package(destination, document=session.document)
+    with pytest.raises(
+        ArtifactTileUnwrapExportError,
+        match="already visible|invalid or consumed",
+    ):
+        publish_prepared_tile_unwrap_package(prepared)
+
+
+def test_prepared_package_rejects_tamper_and_owned_stage_can_be_discarded(
+    tmp_path: Path,
+) -> None:
+    session, computation = _recorded()
+    destination = tmp_path / "tamper.amr-unwrap"
+    stage = stage_tile_unwrap_package(
+        destination,
+        session.document,
+        "record:tile-export",
+        computation.unwrap,
+    )
+    prepared = prepare_staged_tile_unwrap_publication(
+        stage,
+        destination,
+        document=session.document,
+    )
+    sidecar = stage / TILE_UNWRAP_EXPORT_SIDECAR_NAME
+    sidecar.write_bytes(sidecar.read_bytes() + b"\n")
+
+    with pytest.raises(ArtifactTileUnwrapExportError, match="changed after preparation"):
+        publish_prepared_tile_unwrap_package(prepared)
+
+    assert discard_prepared_tile_unwrap_package(prepared) is True
+    assert not stage.exists()
+    assert not destination.exists()
 
 
 def test_relocated_package_validates_in_independent_offline_process(

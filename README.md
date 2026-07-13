@@ -39,7 +39,7 @@ ArchMeshRubbing은 반대로, 고고학 연구자가 익숙한 질문에서 출�
 5. `6면 Digital Rubbing 계산·기록`
 6. `READY + FRESH 기록에서 1:1 SVG/PNG package export`
 
-Open 직후 만들어지는 `recipe.kind="initial_identity"` Align은 canonical materialization을 위한 기준점이지 연구자의 정위치 확정이 아닙니다. 사용자가 변화량이 0인 경우까지 포함해 첫 Align을 명시적으로 확정하기 전에는 workflow가 `ALIGN_REQUIRED`에 머물며 Cutline/Outline/Digital Rubbing과 vector/rubbing export가 비활성화됩니다. 첫 확정은 immutable child Align revision을 남기고 `MEASUREMENT_READY`로 전환하며, parent activation으로 초기 기준점에 돌아가면 다시 측정이 잠깁니다.
+Open 직후 만들어지는 `recipe.kind="initial_identity"` Align은 canonical materialization을 위한 기준점이지 연구자의 정위치 확정이 아닙니다. 사용자가 변화량이 0인 경우까지 포함해 첫 Align을 명시적으로 확정하기 전에는 workflow가 `ALIGN_REQUIRED`에 머물며 Cutline/Outline/Digital Rubbing/기와 전개와 vector/rubbing/tile-unwrap export가 비활성화됩니다. 첫 확정은 immutable child Align revision을 남기고 `MEASUREMENT_READY`로 전환하며, parent activation으로 초기 기준점에 돌아가면 다시 측정이 잠깁니다.
 
 Align 확정 뒤에도 모든 기능이 한꺼번에 열리지는 않습니다. 현재 활성 Align의 고유한 `READY + FRESH` 기록을 기준으로 `Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6` 순서로 다음 단계가 열리고, 완료 버튼은 초록색으로 바뀝니다. application command도 같은 gate를 강제하며, 각 Outline은 Cutline 3면을, 각 Digital Rubbing은 dependency-valid Outline 6면을 직접 참조합니다. 이 선행 record coverage가 없으면 READY 기록도 완료 증거로 세지 않습니다. 같은 방향을 여러 번 기록해도 한 면으로 계산합니다. Align을 바꾸면 기존 기록은 삭제하지 않고 stale로 제외하며, 이전 Align을 다시 활성화하거나 프로젝트를 재열면 문서의 record graph에서 진행도를 그대로 복원합니다.
 
@@ -72,7 +72,7 @@ Align 확정 뒤에도 모든 기능이 한꺼번에 열리지는 않습니다. 
 - vector/rubbing/tile-unwrap package는 원본 mesh와 GUI가 없어도 이동 후 별도 프로세스에서 offline 검증 가능
 - Qt/OpenGL과 분리된 `ArtifactWorkbench`가 ticketed Open, 명시적 Align readiness, `state_version`/`authority_epoch` 기반 publication을 소유
 - native DerivedRecord worker는 시작 session과 projection을, viewport의 cut-section/ROI/surface-selection worker는 worker identity·target mesh/TRS·render frame을 확인하여 늦은 결과가 현재 문서·overlay·다른 유물·새 worker를 덮지 못하게 함
-- Cutline·Outline·Digital Rubbing worker는 공통 취소 Event를 계산 내부의 deterministic chunk 경계까지 전달하며, 사용자는 진행 창에서 강제 스레드 종료 없이 취소를 요청할 수 있음
+- Cutline·Outline·Digital Rubbing·기와 전개 worker는 공통 취소 Event를 계산 내부의 deterministic chunk 경계까지 전달하며, 사용자는 진행 창에서 강제 스레드 종료 없이 취소를 요청할 수 있음
 - DerivedRecord 추가는 같은 render projection의 문서 binding만 compare-and-swap하며 live mesh·VBO·카메라·선택·preview cache를 다시 만들지 않음
 - 대좌표 장면은 CPU·문서의 절대 float64 world-mm 좌표를 유지하면서, 객체별 VBO origin을 float64에서 먼저 빼 relative `GL_FLOAT`로 업로드하고 live scene의 안정적인 render origin에 camera·model transform을 rebase함
 - 두 origin은 viewport 전용 transient 상태이며 ArtifactDocument·record·QC·hash·export에 기록하지 않음. mesh·cutline·ROI·pick·gizmo 등 활성 world overlay를 render-relative로 제출하고 CPU face 계산은 absolute float64를 유지함
@@ -92,7 +92,8 @@ Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 임의 
 - sectionwise 계산이 cylinder/area 등으로 fallback하면 정식 결과로 위장하지 않고 실패
 - 결과 좌표를 1 µm 정수 격자로 고정하고 모든 삼각형의 collapse·방향 뒤집힘과 mean/p95 distortion gate를 검사
 - application shell의 `begin_tile_unwrap()`가 immutable work item, 취소, stale Align 차단, same-Align record publication을 기존 실측과 같은 방식으로 처리
-- desktop 패널 연결 전에도 headless core/API에서 record 생성과 `.amr-unwrap` 독립 검증이 가능하며, 기존 자유 flatten UI의 결과는 계속 legacy 검토용으로 구분
+- 메인 `4축 작업 흐름`의 전용 바로가기에서 native desktop 패널을 열고, 전체/현재 face 선택, canonical `X/Y/Z` 장축, Top/Bottom 기록면, section 수를 명시해 계산·취소·record 재선택·QC 미리보기·1:1 export까지 같은 Workbench 권위로 실행
+- 재열기 뒤 선택한 `READY + FRESH` record는 저장 recipe로 전개 좌표를 다시 계산해 receipt와 대조한 뒤에만 미리보기와 export를 허용하며, 기존 자유 flatten UI의 결과는 계속 legacy 검토용으로 구분
 
 ### 2. 기와형 메쉬용 기본 추천 펼침
 
@@ -158,10 +159,10 @@ Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 임의 
 - [`src/application/artifact_workbench.py`](src/application/artifact_workbench.py): 한 artifact의 session/project path, 단일 pending Open, workflow readiness와 projection publication authority
 - [`src/application/artifact_workflow_progress.py`](src/application/artifact_workflow_progress.py): 검증된 session의 `READY + FRESH` view coverage에서 Cutline 3면·Outline 6면·Digital Rubbing 6면 진행도와 순차 gate를 재구성
 - [`src/application/artifact_measurements.py`](src/application/artifact_measurements.py): Cutline/Outline/Digital Rubbing/기와 전개의 immutable work item, Workbench 공유 예약·메모리 admission, cooperative cancellation, exact result capability와 same-Align rebase
-- [`src/application/artifact_exports.py`](src/application/artifact_exports.py): vector/rubbing export의 exact capability, worker staging, 안전한 정리와 final-authority publication
+- [`src/application/artifact_exports.py`](src/application/artifact_exports.py): vector/rubbing/tile-unwrap export의 exact capability, worker staging, 안전한 정리와 final-authority publication
 - Open/new import/project reopen과 Align commit/parent activation은 ticket과 compare-and-swap 검증을 거쳐 `prepare → activate → finalize`되며, scene swap 실패는 이전 authority로 rollback
 - Cutline/Outline/Digital Rubbing/기와 전개는 application shell에서 파라미터만 캡처하고 단일 worker에서 계산합니다. worker는 문서를 변경하지 않으며, 완료 결과는 예약된 record ID와 일회성 result capability를 검증한 뒤 현재의 같은 Align session에 rebase합니다. record append publication은 GPU 장면을 교체하지 않습니다. 재개방한 기록은 READY + FRESH 목록에서 명시적으로 선택하고, 일시적인 Open/scene 충돌로 게시하지 못한 측정 결과는 새 ID를 만들지 않고 재시도합니다.
-- vector/rubbing export는 비싼 생성·탁본 재계산을 worker에서 staging까지만 수행합니다. 최종 no-replace rename은 현재 권위를 다시 검증한 뒤 실행하며, 목적지 경합에서는 기존 승자를 보존합니다. rename 뒤 directory `fsync`가 실패하거나 Windows처럼 지원 여부를 확인할 수 없으면 저장 완료와 crash durability 미확정을 구분해 경고합니다.
+- vector/rubbing/tile-unwrap export는 비싼 생성·record recipe 재계산을 worker에서 staging까지만 수행합니다. 최종 no-replace rename은 현재 권위를 다시 검증한 뒤 실행하며, 목적지 경합에서는 기존 승자를 보존합니다. rename 뒤 directory `fsync`가 실패하거나 Windows처럼 지원 여부를 확인할 수 없으면 저장 완료와 crash durability 미확정을 구분해 경고합니다.
 
 ### Artifact trust core
 
@@ -373,6 +374,7 @@ python main.py --project mesh.obj planview.png
 - 원본 hash·명시적 단위·immutable Align revision 기반 `ArtifactDocument`
 - canonical-mm Cutline과 6면 fixed-grid Outline
 - recipe·QC·receipt가 있는 6면 Digital Rubbing과 1:1 `.amr-rubbing` export
+- 전체/선택 face·명시적 장축·Top/Bottom·section/QC를 한 화면에서 기록하고 재열어 검증하는 native 기와 전개와 1:1 `.amr-unwrap` export
 - `.amr-vector`/`.amr-rubbing`의 이동 가능한 offline 검증
 - 주 원본과 실제 parser dependency bytes를 포함한 content-addressed `.amr` 저장, 원본 디렉터리 삭제 뒤 독립 프로세스 reopen·relocation·archive-to-archive 재저장
 - self-contained v1 `deny_external`과 multi-file v2 `closed_manifest` mesh import recipe, parser-runtime subset identity, 경로 탈출·변조·미선언 resource deny gate와 동일 receipt의 독립 프로세스 재실행

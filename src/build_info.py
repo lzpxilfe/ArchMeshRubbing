@@ -574,6 +574,36 @@ def _check_gui_stack() -> str:
     try:
         if not isinstance(window.viewport, Viewport3D):
             raise RuntimeError("MainWindow did not construct the native 3D viewport")
+        panel = getattr(window, "section_panel", None)
+        required_tile_controls = (
+            "combo_native_tile_target",
+            "combo_native_tile_axis",
+            "combo_native_tile_record_view",
+            "spin_native_tile_sections",
+            "btn_native_tile_unwrap",
+            "combo_native_tile_unwrap_record",
+            "btn_native_tile_unwrap_export",
+            "label_native_tile_unwrap_preview",
+            "label_native_tile_unwrap_info",
+        )
+        missing = [
+            name
+            for name in required_tile_controls
+            if panel is None or not hasattr(panel, name)
+        ]
+        if missing:
+            raise RuntimeError(
+                "MainWindow is missing native tile unwrap controls: "
+                + ", ".join(missing)
+            )
+        workflow_panel = getattr(window, "workflow_panel", None)
+        if workflow_panel is None or not hasattr(
+            workflow_panel,
+            "btn_authoritative_measurements",
+        ):
+            raise RuntimeError(
+                "MainWindow is missing the authoritative measurement shortcut"
+            )
         app.processEvents()
     finally:
         # Do not call close(): the user-facing closeEvent asks for confirmation
@@ -581,7 +611,10 @@ def _check_gui_stack() -> str:
         # non-interactive and avoids mutating user preferences.
         window.deleteLater()
         app.processEvents()
-    return "MainWindow, QOpenGLWidget, OpenGL.GL, and OpenGL.GLU constructed"
+    return (
+        "MainWindow, native tile unwrap panel, QOpenGLWidget, OpenGL.GL, "
+        "and OpenGL.GLU constructed"
+    )
 
 
 def _check_mesh_parsers() -> str:

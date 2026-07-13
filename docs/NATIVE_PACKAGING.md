@@ -62,7 +62,7 @@ python tools/build_portable_archive.py verify `
 4. frozen/portable payload의 전체 파일 SHA-256 manifest, SPDX 2.3 SBOM, 제3자 NOTICE를 실제 bytes에서 재계산
 5. exact Git commit/tree/blob·SHA-256·LICENSE에 결합된 corresponding-source ZIP과 sidecar
 6. offscreen Qt application
-7. 실제 `MainWindow`, `QOpenGLWidget`, OpenGL.GL/GLU import와 생성
+7. 실제 `MainWindow`, native 기와 전개의 전체/선택 face·X/Y/Z·Top/Bottom·section·record/export controls, `QOpenGLWidget`, OpenGL.GL/GLU import와 생성
 8. OBJ, PLY, STL, OFF, glTF, GLB를 closed import recipe와 외부 dependency deny resolver로 여는 production parser 경로
 9. Pillow PNG encode/decode
 10. canonical `ArtifactDocument` round-trip golden
