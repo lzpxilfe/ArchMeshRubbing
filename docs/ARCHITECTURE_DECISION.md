@@ -46,7 +46,7 @@ Source 경계도 같은 원칙을 따른다. `SourceAsset`은 고고학적 권�
 4. `Workflow panels`: command를 호출하고 record 상태를 표시하되 계산·저장을 직접 수행하지 않는다.
 5. `Persistence/export`: GUI와 독립된 코어 API만 사용한다.
 
-Viewport adapter의 대좌표 표시 경계는 권위 geometry를 recenter하지 않고 두 transient origin으로 분리한다. 객체별 `O`는 relative float32 VBO encoding에만, scene별 `R`은 camera/model render frame에만 사용한다. 두 값은 document/session/record/export authority 밖에 있으며 same-render record append에서도 scene/VBO와 함께 유지된다. main mesh·native vector preview·cutline·ROI·pick·gizmo 등 활성 world overlay는 CPU float64에서 `R`을 뺀 뒤 GPU에 제출한다. depth pick·screen projection·Ctrl drag은 해당 depth frame의 modelview·projection·viewport·`R`과 visibility·ROI·X-ray·object TRS/geometry revision을 read-only frame authority로 함께 게시한다. 상태가 먼저 바뀌고 repaint가 뒤따라오는 구간은 stale frame으로 fail closed한다. 실제 `Viewport3D` source path의 survey-scale VBO/pixel/depth/pick은 로컬 macOS native driver와 source CI의 Linux Xvfb+xcb+Mesa llvmpipe에서 검증했다. Windows·macOS CI native QPA, frozen executable, 대표 GPU와 scene-swap 프레임 원자성은 남아 있으므로 renderer 교체가 완료된 것으로 판정하지 않는다.
+Viewport adapter의 대좌표 표시 경계는 권위 geometry를 recenter하지 않고 두 transient origin으로 분리한다. 객체별 `O`는 relative float32 VBO encoding에만, scene별 `R`은 camera/model render frame에만 사용한다. 두 값은 document/session/record/export authority 밖에 있으며 same-render record append에서도 scene/VBO와 함께 유지된다. main mesh·native vector preview·cutline·ROI·pick·gizmo 등 활성 world overlay는 CPU float64에서 `R`을 뺀 뒤 GPU에 제출한다. depth pick·screen projection·Ctrl drag은 해당 depth frame의 modelview·projection·viewport·`R`과 visibility·ROI·X-ray·object TRS/geometry revision을 read-only frame authority로 함께 게시한다. 상태가 먼저 바뀌고 repaint가 뒤따라오는 구간은 stale frame으로 fail closed한다. 실제 `Viewport3D` source path의 survey-scale VBO/pixel/depth/pick은 과거 macOS native driver와 Linux Xvfb+xcb+Mesa llvmpipe에서 검증했다. 첫 안정판에는 Windows native QPA, Windows frozen executable, 대표 GPU와 scene-swap 프레임 원자성 증거가 남아 있으므로 renderer 교체가 완료된 것으로 판정하지 않는다.
 
 GUI 버튼의 초록색 완료 표시는 위젯 내부 boolean이 아니라 `READY + FRESH` record에서 파생해야 한다. Align이 바뀌면 후속 기록을 물리적으로 삭제하기보다 immutable history에 남기고 stale로 판정하여 현재 산출물로 사용하지 못하게 한다. 이 결정은 `src/application/artifact_workflow_progress.py`의 Qt/OpenGL-free 모델과 Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6 gate로 구현했다. application command도 같은 순서를 강제하며 Outline record는 Cutline 3면, Digital Rubbing record는 dependency-valid Outline 6면을 직접 의존해야 완료 증거가 된다. 프로젝트 재열기와 이전 Align 재활성화도 별도 UI 상태 없이 같은 record graph에서 진행도를 복원한다.
 
@@ -60,20 +60,20 @@ DerivedRecord session update는 기존 source/metadata/Align/record를 바꿀 �
 
 ## 이행 순서
 
-1. 현재 신뢰 코어와 포맷을 고정하고 golden/스키마/3-OS CI를 차단 게이트로 유지한다.
+1. 현재 신뢰 코어와 포맷을 고정하고 golden/스키마/Windows CI를 차단 게이트로 유지한다.
 2. application shell package를 만들고 Open → 단위 확인 → Align을 먼저 이식한다. 이 단계는 완료됐으며 기존 GUI field는 이행 중 compatibility mirror로만 남긴다.
 3. Cutline, 6-view Outline, Digital Rubbing을 command 단위로 옮긴다. immutable work item, worker computation, same-Align rebase와 VBO-free exact record publication까지 이식 완료했다.
 4. vector/rubbing export를 worker staging과 final Workbench authority publication으로 분리한다. 이 단계는 이식 완료했으며 실제 대형 package에서 lock hold 시간과 취소 지연을 후속 측정한다.
 5. 각 단계가 새 record/export로 완전히 연결되면 대응 legacy 측정 진입점을 제거한다.
 6. 실제 유물 pilot과 대용량/GPU precision 검증 후 legacy 기와 검토 기능의 유지·플러그인화·제거를 결정한다.
-7. 라이선스, 서명, 3-OS frozen smoke가 해결된 뒤에만 공개 바이너리를 만든다.
+7. 라이선스, Authenticode, Windows frozen smoke가 해결된 뒤에만 공개 바이너리를 만든다.
 
 ## 완료 기준
 
 - native workflow에서 source vertex를 직접 변경하는 코드가 없다.
 - 모든 1:1 SVG/PNG가 `READY + FRESH` record와 provenance에서만 생성된다.
 - GUI 없이 동일 document와 source로 같은 canonical hash를 재현한다.
-- Windows·macOS·Linux frozen CI와 실제 OpenGL smoke가 통과한다.
+- Windows frozen CI와 Windows native-QPA/실제 OpenGL smoke가 통과한다.
 - 대표 유물군 pilot에서 단위·정렬·선 정밀도·탁본 판독 결과를 고고학자가 검수한다.
 - 공개 배포 전 프로젝트와 GUI toolkit의 라이선스가 호환되고 제3자 고지가 완성된다.
 

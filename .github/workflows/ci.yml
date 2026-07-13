@@ -62,124 +62,12 @@ jobs:
           --pythonpath "$(python -c 'import sys; print(sys.executable)')"
           -p pyrightconfig.json
 
-  opengl-driver-smoke:
-    name: OpenGL driver precision smoke (Mesa llvmpipe)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    env:
-      QT_QPA_PLATFORM: xcb
-      QT_OPENGL: desktop
-      QT_XCB_GL_INTEGRATION: xcb_glx
-      LIBGL_ALWAYS_SOFTWARE: "1"
-      GALLIUM_DRIVER: llvmpipe
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: requirements/runtime-py312.lock
-
-      - name: Install X11 and Mesa compatibility runtime
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes \
-            libfontconfig1 \
-            libfreetype6 \
-            libdbus-1-3 \
-            libegl1 \
-            libgl1-mesa-dri \
-            libglib2.0-0t64 \
-            libglu1-mesa \
-            libglx-mesa0 \
-            libice6 \
-            libopengl0 \
-            libsm6 \
-            libx11-6 \
-            libx11-xcb1 \
-            libxcb1 \
-            libxcb-cursor0 \
-            libxcb-glx0 \
-            libxcb-icccm4 \
-            libxcb-image0 \
-            libxcb-keysyms1 \
-            libxcb-randr0 \
-            libxcb-render-util0 \
-            libxcb-shape0 \
-            libxcb-shm0 \
-            libxcb-sync1 \
-            libxcb-util1 \
-            libxcb-xinerama0 \
-            libxcb-xkb1 \
-            libxcb-xfixes0 \
-            libxext6 \
-            libxfixes3 \
-            libxi6 \
-            libxkbcommon-x11-0 \
-            libxrender1 \
-            mesa-utils \
-            xauth \
-            xvfb
-
-      - name: Install runtime lock
-        run: |
-          python -m pip install -U pip
-          python -m pip install -r requirements.txt
-
-      - name: Verify Qt xcb plugin dependency closure
-        run: |
-          plugin="$(python -c 'from PyQt6.QtCore import QLibraryInfo; print(QLibraryInfo.path(QLibraryInfo.LibraryPath.PluginsPath))')/platforms/libqxcb.so"
-          test -f "$plugin"
-          ldd "$plugin"
-          if ldd "$plugin" | grep -F "not found"; then
-            exit 1
-          fi
-
-      - name: Actual Mesa renderer, VBO, pixel, depth, and pick smoke
-        run: |
-          xvfb-run -a \
-            -s "-screen 0 1280x1024x24 +extension GLX +render -noreset" \
-            sh -eu -c '
-              glxinfo -B
-              python -m src.gui.opengl_driver_smoke \
-                --qt-platform xcb \
-                --report build/opengl-driver-smoke.json
-            '
-
-      - name: Validate driver evidence report
-        run: >-
-          python -c "import json,pathlib;
-          p=pathlib.Path('build/opengl-driver-smoke.json');
-          d=json.loads(p.read_text(encoding='utf-8'));
-          assert d.get('ok') is True, json.dumps(d,ensure_ascii=False,indent=2);
-          c=d.get('context') or {};
-          assert c.get('qt_platform') == 'xcb', c;
-          assert 'llvmpipe' in str(c.get('renderer','')).casefold(), c;
-          assert len(d.get('render_modes') or []) == 2, d;
-          print('Actual OpenGL precision smoke passed:', c.get('renderer'))"
-
-      - name: Preserve OpenGL evidence report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: opengl-driver-smoke-${{ github.run_id }}-${{ github.run_attempt }}
-          path: build/opengl-driver-smoke.json
-          if-no-files-found: warn
-          retention-days: 14
-
-  persistence-smoke:
-    name: Persistence smoke (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+  windows-workflow-smoke:
+    name: Windows offline workflow smoke
+    runs-on: windows-latest
     timeout-minutes: 20
     env:
       QT_QPA_PLATFORM: offscreen
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -194,24 +82,12 @@ jobs:
             requirements/runtime-py312.lock
             requirements-dev.txt
 
-      - name: Install Linux Qt import runtime
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes \
-            libegl1 \
-            libgl1 \
-            libglu1-mesa \
-            libopengl0 \
-            libxkbcommon-x11-0 \
-            libxcb-cursor0
-
       - name: Install
         run: |
           python -m pip install -U pip
           python -m pip install -r requirements.txt -r requirements-dev.txt
 
-      - name: Persistence, artifact, matrix, identity, and GUI smoke
+      - name: Persistence, artifact, identity, workflow, and GUI smoke
         run: >-
           python -m pytest -q
           tests/test_project_file.py
@@ -229,6 +105,7 @@ jobs:
           tests/test_artifact_session.py
           tests/test_artifact_workbench.py
           tests/test_artifact_workflow_progress.py
+          tests/test_artifact_workflow_self_test.py
           tests/test_artifact_exports.py
           tests/test_artifact_measurements.py
           tests/test_artifact_new_process_roundtrip.py

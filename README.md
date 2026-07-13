@@ -8,6 +8,8 @@ ArchMeshRubbing은 스캔한 문화유산 3D 메쉬를 원본 보존형 연구 �
 `Open → 단위·축 확인 → Align → Cutline/Outline → Digital Rubbing → 1:1 SVG/PNG export`
 흐름으로 기록하고 다시 검증하는 오프라인 오픈소스 워크벤치를 목표로 합니다. 기와형 메쉬의 기록면 전개 기능은 이 기반 위에 남아 있는 전문 워크플로우입니다.
 
+첫 공개 안정판의 필수 데스크톱 대상은 **Windows**입니다. macOS·Linux용 source 호환 코드는 보존하지만, 이번 안정판의 완료 조건과 패키지 CI에는 포함하지 않습니다.
+
 ---
 
 ## ✨ 왜 이 도구인가요?
@@ -215,18 +217,7 @@ Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 `Surfac
 
 ## ⚡ Quick Start
 
-현재 Quick Start는 source checkout 실행 절차입니다. 서명된 Windows·macOS·Linux 설치 파일은 아직 제공하지 않으며, 첫 공개 안정판 전에 OS별 frozen build·설치·실행 검증을 별도 게이트로 통과해야 합니다.
-
-### macOS / Linux
-
-```bash
-python3.12 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-pip install -r requirements-optional.txt
-python app_interactive.py
-```
+현재 Quick Start는 Windows source checkout 실행 절차입니다. 서명된 Windows 설치 파일은 아직 제공하지 않으며, 첫 공개 안정판 전에 Windows frozen build·설치·오프라인 실행 검증을 통과해야 합니다.
 
 ### Windows
 
@@ -258,13 +249,7 @@ python -c "import subprocess,sys; raise SystemExit(subprocess.call([sys.executab
 python -m pytest -q
 ```
 
-CI/persistence의 일반 `QT_QPA_PLATFORM=offscreen` suite는 실제 QOpenGLWidget context를 생성하거나 검증하지 않습니다. macOS에서 native driver smoke를 별도 프로세스로 실행하려면 다음 명령을 사용합니다. `--report`는 기존 파일을 덮어쓰지 않으므로 매 실행마다 존재하지 않는 새 경로를 지정하세요. Linux의 Xvfb+Mesa 명령과 판정 범위는 [docs/QUALITY_GATES.md](docs/QUALITY_GATES.md)에 있습니다.
-
-```bash
-python -m src.gui.opengl_driver_smoke \
-  --qt-platform cocoa \
-  --report build/opengl-driver-smoke.json
-```
+일반 `QT_QPA_PLATFORM=offscreen` suite는 실제 QOpenGLWidget context를 생성하거나 검증하지 않습니다. CI는 빠른 Linux quality job과 제품 대상인 Windows workflow job으로 나뉘며, Windows native-QPA/실제 GPU 검증은 아직 첫 안정판 차단 항목입니다. 과거 macOS·Linux driver 증거와 정확한 판정 범위는 [docs/QUALITY_GATES.md](docs/QUALITY_GATES.md)에 기록합니다.
 
 `pyright-m0.json`은 현재 M0 신뢰 커널 범위의 차단 게이트입니다. 전체 트리 타입 검사는 아직 부채를 보고하는 단계이며, 통과를 뜻하지 않습니다. 재현 환경, 게이트 범위, GUI 스모크 테스트의 한계는 [docs/QUALITY_GATES.md](docs/QUALITY_GATES.md)에 기록합니다.
 
@@ -281,7 +266,7 @@ python -m pip install -r requirements/build-py312.lock
 python tools/build_native.py
 ```
 
-이 명령은 기존 산출물을 기본적으로 덮어쓰지 않고, 빌드 뒤 실제 frozen executable의 offline self-test를 실행합니다. 현재 공개 바이너리는 만들지 않습니다. 3-OS frozen build/self-test는 원격 CI에서 통과했지만, 저장소의 GPLv2-only 표기와 bundled PyQt6의 GPL-3.0-only 라이선스 결정, 서명·notarization·installer·frozen native-GL 검증이 남아 있습니다. 자세한 절차와 차단 게이트는 [docs/NATIVE_PACKAGING.md](docs/NATIVE_PACKAGING.md)를 참고하세요.
+이 명령은 기존 산출물을 기본적으로 덮어쓰지 않고, 빌드 뒤 실제 frozen executable의 offline self-test를 실행합니다. 현재 공개 바이너리는 만들지 않습니다. 패키지 CI는 Windows 하나만 차단 대상으로 사용하며, 라이선스 결정, Authenticode, installer, Windows frozen native-GL 검증이 남아 있습니다. 자세한 절차와 차단 게이트는 [docs/NATIVE_PACKAGING.md](docs/NATIVE_PACKAGING.md)를 참고하세요.
 
 ---
 
@@ -378,12 +363,14 @@ python main.py --project mesh.obj planview.png
 - Cutline/Outline/Digital Rubbing command와 worker 수명주기를 Qt/OpenGL-free application shell로 이식
 - DerivedRecord의 VBO-free binding rebind와 SVG/PNG worker staging → final-authority publication 이식
 - dependency-valid `READY + FRESH` record graph와 application command에서 Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6 순차 gate·초록 완료 표시·재열기/Align 복원 구현
+- packaged self-test가 실제 application authority를 통해 Open → explicit Align → Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6을 수행하고, 외부 PLY 삭제 뒤 embedded `.amr`를 재열어 이동된 1:1 SVG/PNG package의 원본 SHA-256·recipe·QC를 offline 재검증
 - Cutline 면·경로, Outline fixed-grid/union/topology, Digital Rubbing raster/relief 내부의 안전 경계까지 사용자 cooperative cancellation 연결
 - 대좌표 render-origin 이식: relative VBO·camera/model rebasing·world overlay 제출과 frame-bound depth picking/drag 계약 구현
 - 실제 OpenGL driver smoke 구현: code commit `f25b424d6936`의 clean source tree, Python 3.12.13/macOS Apple M4에서 61개 context/FBO/VBO/pixel/depth/pick 조건 통과, 0.125 mm 높이차를 원근 `0.124783 mm`, 정사영 `0.124998 mm`로 복원. report는 commit/tree 상태·runtime lock·dependency version·UTC 시각을 기록함
 - source checkout CI 검증: commit `166103dcf0ea`의 run `29182584810`에서 quality `572 passed`, macOS/Ubuntu persistence 각 `501 passed`, Windows persistence `498 passed + 3 platform-specific skips`, Linux llvmpipe actual-GL `61/61` 통과
-- 2026-07-13 source-closure 후보의 로컬 macOS/Python 3.14.3 검증: full pytest `660 passed, 128 subtests`, Ruff 통과, M0 Pyright `0 errors`, source self-test `11/11` (권위 Python 3.12·3-OS 증거는 해당 commit의 원격 CI 완료 뒤에만 확정)
-- 다음 단계: 다중 material/PBR 렌더링 충실도와 61-entry 초과 source streaming 확장, Windows·macOS native QPA와 3-OS frozen actual-GL 확대, 라이선스 결정, 대표 GPU·대용량 실제 유물 pilot 진행
+- 2026-07-13 source-closure 기준 commit `6898f98d2fb3`의 Python 3.12 원격 CI: full pytest `660 passed, 128 subtests`, Ruff, M0 Pyright, Windows persistence와 Windows frozen executable self-test 통과
+- 현재 complete-workflow 후보의 로컬 검증: full pytest `662 passed, 128 subtests`, Ruff, M0 Pyright `0 errors`, source self-test `12/12`; Windows frozen 판정은 이 변경의 원격 CI 결과로만 확정
+- 다음 단계: Windows native QPA/frozen actual-GL, 라이선스 결정, Authenticode·installer, 대표 GPU·대용량 실제 유물 pilot. macOS·Linux 배포 확대는 첫 안정판 이후 별도 범위
 
 ---
 

@@ -1,6 +1,6 @@
 # Quality Gates
 
-이 문서는 ArchMeshRubbing의 현재 개발 기준선과 CI가 실제로 보장하는 범위를 기록한다. 장기적으로는 전체 코드베이스에 대한 타입 게이트와 Windows·macOS·Linux 전체 플랫폼 테스트를 목표로 하지만, 현재 게이트를 그 수준으로 과장하지 않는다.
+이 문서는 ArchMeshRubbing의 현재 개발 기준선과 CI가 실제로 보장하는 범위를 기록한다. 첫 공개 안정판의 제품 대상은 Windows 하나다. Linux quality job은 빠른 정적 검사와 전체 pytest 수집을 위한 구현 환경일 뿐 Linux 배포 지원 약속이 아니며, macOS·Linux 패키징은 현재 완료 조건에서 제외한다.
 
 ## 재현 환경
 
@@ -15,7 +15,7 @@ python -m pip install -r requirements.txt -r requirements-dev.txt
 
 ## 차단 게이트
 
-Pull request에서 다음 code-quality 검사와 별도의 actual-OpenGL job이 모두 통과해야 한다.
+Pull request에서 다음 code-quality 검사와 Windows offline workflow smoke가 모두 통과해야 한다.
 
 ```bash
 python -m ruff check .
@@ -25,9 +25,9 @@ python -m pytest -q
 
 - Ruff는 전체 트리를 검사한다.
 - pytest는 pytest 함수와 `unittest.TestCase`를 모두 수집한다. 별도의 `unittest discover`는 하위 호환성 확인용이며 CI의 권위 수집기가 아니다.
-- `pyright-m0.json`은 persistence·source identity·source manifest/bundle·unit·matrix 경계에 더해 M0-6의 `artifact_document`, `geometry_identity`, `artifact_scene_adapter`, `artifact_session`, core cooperative cancellation, Qt/OpenGL-free `artifact_workbench`·`artifact_workflow_progress`·`artifact_measurements`·`artifact_exports`, `src/gui/opengl_context.py`의 명시적 surface 계약, actual-driver CLI와 actual context를 열지 않는 helper/support tests, Qt/OpenGL-free render-coordinate algebra인 `src/gui/render_coordinates.py`, known-record registry, RFC 8785 canonical JSON, vector record/export, Cutline, fixed-grid Outline/topology, Digital Rubbing record/extractor, canonical GA8 PNG와 offline rubbing export 및 해당 테스트를 포함하는 M0 신뢰 커널 범위다. 독립 프로세스 source-closure 왕복·offline vector/rubbing package 테스트도 목록에 포함한다. wrapper 명령은 활성 Python interpreter를 Pyright에 명시하므로 Windows·macOS·Linux에서 같은 방식으로 dependency를 해석한다.
+- `pyright-m0.json`은 persistence·source identity·source manifest/bundle·unit·matrix 경계에 더해 M0-6의 `artifact_document`, `geometry_identity`, `artifact_scene_adapter`, `artifact_session`, core cooperative cancellation, Qt/OpenGL-free `artifact_workbench`·`artifact_workflow_progress`·`artifact_measurements`·`artifact_exports`·complete workflow self-test, `src/gui/opengl_context.py`의 명시적 surface 계약, actual-driver CLI와 actual context를 열지 않는 helper/support tests, Qt/OpenGL-free render-coordinate algebra인 `src/gui/render_coordinates.py`, known-record registry, RFC 8785 canonical JSON, vector record/export, Cutline, fixed-grid Outline/topology, Digital Rubbing record/extractor, canonical GA8 PNG와 offline rubbing export 및 해당 테스트를 포함하는 M0 신뢰 커널 범위다. 독립 프로세스 source-closure 왕복·offline vector/rubbing package 테스트도 목록에 포함한다. wrapper 명령은 활성 Python interpreter를 Pyright에 명시해 Windows CI의 dependency를 정확히 해석한다.
 
-`opengl-driver-smoke` job은 일반 pytest와 분리한다. Ubuntu 24.04에서 24-bit Xvfb 화면, native `xcb`, Mesa llvmpipe를 사용하고 `continue-on-error`나 context 실패 skip 없이 다음 명령에 해당하는 검사를 실행한다.
+과거 `opengl-driver-smoke`는 Ubuntu 24.04의 24-bit Xvfb, native `xcb`, Mesa llvmpipe로 다음 명령에 해당하는 검사를 통과했다.
 
 ```bash
 xvfb-run -a \
@@ -37,7 +37,7 @@ xvfb-run -a \
   --report build/opengl-driver-smoke.json
 ```
 
-이 job은 실제 OpenGL context/FBO/VBO/pixel/depth readback을 사용하지만 Mesa software rasterizer 검증이다. 대표 하드웨어 GPU 인증이라고 표현하지 않는다. code commit `166103dcf0ea`의 [GitHub Actions run 29182584810](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29182584810)에서 xcb + llvmpipe actual-GL report의 61개 조건이 통과했다.
+이 결과는 실제 OpenGL context/FBO/VBO/pixel/depth readback을 사용했지만 Linux Mesa software rasterizer의 과거 증거다. 현재 Windows 안정판 차단 job이 아니며 대표 하드웨어 GPU 인증이라고 표현하지 않는다. code commit `166103dcf0ea`의 [GitHub Actions run 29182584810](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29182584810)에서 61개 조건이 통과했다.
 
 M0-6 native artifact 신뢰 경계를 빠르게 재검증할 때는 다음 focused suite를 사용한다. 이 명령은 full pytest를 대체하지 않는다.
 
@@ -59,6 +59,7 @@ python -m pytest -q \
   tests/test_artifact_session.py \
   tests/test_artifact_workbench.py \
   tests/test_artifact_workflow_progress.py \
+  tests/test_artifact_workflow_self_test.py \
   tests/test_artifact_exports.py \
   tests/test_artifact_measurements.py \
   tests/test_artifact_new_process_roundtrip.py \
@@ -147,15 +148,17 @@ python -m pytest -q \
 | Python 3.12.13 macOS arm64 frozen self-test | 10/10 passed at code commit `898a8bfc144f` (unsigned, `source_tree=clean`, `native-self-test-local-smoke-898a8bfc144f-darwin.json`) |
 | GitHub Actions 3-OS frozen build + executable self-test | Ubuntu, Windows, macOS 모두 passed at commit `e4bf6dcac4b1`, run `29213279508` |
 
-2026-07-13 source-closure 후보는 로컬 macOS/Python 3.14.3 source tree에서 full pytest `660 passed, 128 subtests passed`, Ruff 통과, M0 Pyright `0 errors`, source self-test `11/11`을 기록했다. 이 로컬 결과는 권위 Python 3.12와 해당 commit의 Windows·macOS·Linux 원격 matrix가 끝나기 전까지 3-OS 통과 증거로 사용하지 않는다.
+2026-07-13 source-closure 기준 commit `6898f98d2fb3`은 Python 3.12 원격 CI에서 full pytest `660 passed, 128 subtests passed`, Ruff, M0 Pyright, Windows persistence와 Windows frozen executable self-test를 통과했다. 이후 첫 안정판의 플랫폼 완료 판정은 Windows job만 사용한다.
+
+현재 complete-workflow 후보는 로컬 source tree에서 full pytest `662 passed, 128 subtests passed`, Ruff, M0 Pyright `0 errors`, source self-test `12/12`을 통과했다. 새 check는 Open→Align→3/6/6→completed AMR offline reopen→1:1 SVG/PNG 재현을 한 번에 검증한다. Windows frozen 증거는 이 변경의 원격 package smoke가 통과한 뒤에만 확정한다.
 
 ## 아직 차단하지 않는 검사
 
 전체 트리 Pyright는 아직 통과하지 않는다. CI에서는 이 결과를 `continue-on-error`로 보고하여 부채가 보이게 하되, M0 범위를 넘는 기존 오류 때문에 모든 변경을 막지는 않는다. 신뢰 커널 전환이 진행될 때마다 차단 범위를 넓힌다. 독립 프로세스 테스트의 worker program은 Python 문자열이므로 Pyright가 문자열 내부를 분석하지는 않지만, 차단 pytest가 두 문자열을 각각 새 interpreter에서 실제 실행한다.
 
-Windows·macOS·Linux persistence matrix에서는 프로젝트 저장, source/geometry identity와 versioned source manifest/bundle, ArtifactDocument·scene adapter·session·application workbench와 record-derived workflow progress, ticketed Open과 explicit Align gate, RFC 8785/vector record/export/Cutline/Outline/topology/schema, Digital Rubbing record/extractor/canonical PNG/export/schema, 독립 프로세스 source closure 및 relocated vector/rubbing-package 왕복, render-coordinate algebra·relative VBO/native preview smoke, matrix golden, GUI 런처, MainWindow 생성, native source-of-truth binding, native Cutline/Outline/Rubbing command, 3/6/6 순차 gate와 reopen·Align 진행도 복원, session/version/epoch 및 projection-generation late-result 방어, legacy export 우회와 unported operation/save fail-closed, source mismatch ordering, scene-swap rollback과 fatal authority fallback 스모크를 실행한다. Linux quality job은 별도로 전체 테스트를 실행한다. commit `166103dcf0ea`의 run `29182584810`에서 세 persistence job과 quality job이 모두 통과했다. 이 matrix의 GUI 스모크는 `QT_QPA_PLATFORM=offscreen`을 사용하므로 CPU/document/scene transaction과 widget wiring만 검증하고 실제 OpenGL frame을 증명하지 않는다. 실제 source viewport frame은 별도 Linux Xvfb+xcb+llvmpipe job이 담당한다.
+Windows workflow smoke에서는 프로젝트 저장, source/geometry identity와 versioned source manifest/bundle, ArtifactDocument·scene adapter·session·application workbench와 record-derived workflow progress, ticketed Open과 explicit Align gate, RFC 8785/vector record/export/Cutline/Outline/topology/schema, Digital Rubbing record/extractor/canonical PNG/export/schema, 독립 프로세스 source closure 및 relocated vector/rubbing-package 왕복, render-coordinate algebra·relative VBO/native preview smoke, matrix golden, GUI 런처, MainWindow 생성, native source-of-truth binding, native Cutline/Outline/Rubbing command, 3/6/6 순차 gate와 completed `.amr` offline reopen, session/version/epoch 및 late-result 방어, legacy export 우회와 fail-closed 경계를 실행한다. Linux quality job은 별도로 전체 테스트와 Ruff·M0 Pyright를 빠르게 실행한다. Windows GUI 스모크는 `QT_QPA_PLATFORM=offscreen`이므로 CPU/document/scene transaction과 widget wiring을 검증하지만 실제 OpenGL frame을 증명하지 않는다.
 
-별도 `package-smoke.yml`은 `main` push, pull request, 수동 실행에서 세 OS의 exact Python 3.12 build lock, immutable build manifest, PyInstaller spec과 frozen executable의 file-report self-test를 실행하도록 구성한다. `main` push는 패키지 입력 파일이 바뀐 경우에만 실행한다. 이 검사는 실제 `MainWindow`/QOpenGLWidget/OpenGL import, 6개 mesh parser, PNG codec과 canonical document/vector/rubbing을 포함하지만 offscreen 실제 GL context/render는 보장하지 않는다. 라이선스 게이트가 해결되기 전에는 artifact upload와 release 단계를 두지 않는다. commit `e4bf6dcac4b1`의 [run `29213279508`](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29213279508)에서 Ubuntu, Windows, macOS frozen build와 각 OS 실행 파일의 self-test/report 검증이 모두 첫 시도에 통과했다. 같은 commit의 [CI run `29213279510`](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29213279510)도 quality, 3-OS persistence와 Linux llvmpipe actual-GL을 모두 통과했다. 이 결과는 installer, 서명/notarization, frozen native-QPA actual-GL 또는 완전 차단망 기기 검증을 대신하지 않는다.
+별도 `package-smoke.yml`은 `main` push, pull request, 수동 실행에서 Windows의 exact Python 3.12 build lock, immutable build manifest, PyInstaller spec과 frozen executable의 file-report self-test를 실행한다. 새 12번째 check는 작은 PLY를 실제 application authority로 열고 3/6/6 record를 만든 뒤 completed `.amr`를 외부 원본 없이 재열어 1:1 SVG/PNG를 재현·이동·offline 검증한다. 이 검사는 실제 `MainWindow`/QOpenGLWidget/OpenGL import도 포함하지만 offscreen 실제 GL context/render는 보장하지 않는다. 라이선스 게이트가 해결되기 전에는 artifact upload와 release 단계를 두지 않는다. 과거 세 OS 통과 기록은 역사적 증거로 남기되 현재 완료 판정에는 Windows 결과만 사용한다.
 
 AMR v2 `payload_type="artifact_document"` 1.0의 strict 저장·content-addressed source closure embedding·production-loader staged reopen·checksum·원자 교체와 독립 프로세스 materialization은 현재 차단 게이트다. `tests/test_artifact_new_process_roundtrip.py`는 프로세스 A와 B의 PID가 다름을 확인하고, 프로세스 A가 `.amr`를 저장한 뒤 외부 PLY 또는 textured OBJ의 OBJ·MTL·PNG 전체를 삭제하고 package를 relocation한다. 프로세스 B는 `.amr`의 embedded source closure만 saved parser/unit으로 decode하며, 새로 계산한 primary/dependency SHA-256·크기와 texture/geometry SHA-256, active Align ID·matrix, parser/unit, world vertices가 같아야 통과한다.
 
@@ -165,7 +168,7 @@ Native measurement 취소는 `QThread.terminate()`를 사용하지 않는다. �
 
 ### 대좌표 render-origin: 실제 source driver 게이트 추가
 
-현재 차단 suite는 absolute float64 world-mm document/mesh 불변, `>= 1e9 mm` offset의 mm/sub-mm feature, CPU float64 subtraction 뒤 객체별 relative float32 VBO payload, 안정적인 scene origin에 대한 camera/model affine rebasing, 활성 world overlay의 relative 제출, absolute float64 CPU face 계산과 render origin 비직렬화를 검증한다. 또한 exact modelview·projection·viewport·scene origin과 depth-affecting scene signature를 같이 게시한 frame authority의 project/unproject/ray, depth pick·Ctrl drag 수명주기, 변환·resize·scene rollback·repaint 전 상태 변경 후 stale frame 거부를 검증한다. pure coordinate helper와 해당 테스트는 M0 Pyright에, mocked OpenGL upload·overlay·interaction 테스트는 명시 3-OS persistence suite에 포함한다.
+현재 차단 suite는 absolute float64 world-mm document/mesh 불변, `>= 1e9 mm` offset의 mm/sub-mm feature, CPU float64 subtraction 뒤 객체별 relative float32 VBO payload, 안정적인 scene origin에 대한 camera/model affine rebasing, 활성 world overlay의 relative 제출, absolute float64 CPU face 계산과 render origin 비직렬화를 검증한다. 또한 exact modelview·projection·viewport·scene origin과 depth-affecting scene signature를 같이 게시한 frame authority의 project/unproject/ray, depth pick·Ctrl drag 수명주기, 변환·resize·scene rollback·repaint 전 상태 변경 후 stale frame 거부를 검증한다. pure coordinate helper와 해당 테스트는 M0 Pyright에, mocked OpenGL upload·overlay·interaction 테스트는 Windows workflow smoke에 포함한다.
 
 `src/gui/opengl_driver_smoke.py`는 OpenGL 2.1 compatibility·24-bit depth를 QApplication 전에 요청하고 native QPA에서 `WA_DontShowOnScreen`인 실제 `Viewport3D` widget FBO를 렌더·readback한다. compositor의 최종 on-screen presentation을 검증하는 테스트는 아니다. `[1e9, -2e9, 3e9] mm` 기준점에 0.25 mm 간격으로 분리된 두 판과 0.125 mm 높이차, 0.25 mm native vector overlay를 만든다. 실제 production `add_mesh_object → update_vbo → paintGL → RenderFrameSnapshot → glReadPixels → pick_point_on_mesh_info`를 통과하며 다음을 fail closed로 확인한다.
 
@@ -181,4 +184,4 @@ Native measurement 취소는 `QThread.terminate()`를 사용하지 않는다. �
 
 - 검사를 삭제하거나 `continue-on-error`로 바꾸는 것은 별도 근거와 리뷰가 필요하다.
 - fallback, sampling, 단위 추정, 원본 불일치를 성공으로 숨기는 테스트를 추가하지 않는다.
-- 플랫폼 매트릭스가 원격 CI에서 실제로 통과하기 전에는 “3개 OS 검증 완료”라고 표현하지 않는다.
+- Windows 원격 CI가 실제로 통과하기 전에는 “Windows 안정판 검증 완료”라고 표현하지 않는다. macOS·Linux 과거 통과 기록을 현재 배포 지원으로 표현하지 않는다.

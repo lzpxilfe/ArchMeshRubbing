@@ -44,17 +44,12 @@ concurrency:
 
 jobs:
   frozen-package-smoke:
-    name: Frozen package smoke (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    name: Frozen package smoke (Windows)
+    runs-on: windows-latest
     timeout-minutes: 45
     env:
       QT_QPA_PLATFORM: offscreen
       LIBGL_ALWAYS_SOFTWARE: "1"
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -67,18 +62,6 @@ jobs:
           cache-dependency-path: |
             requirements/build-py312.lock
             requirements/runtime-py312.lock
-
-      - name: Install Linux graphics runtime
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes \
-            libegl1 \
-            libgl1 \
-            libglu1-mesa \
-            libopengl0 \
-            libxkbcommon-x11-0 \
-            libxcb-cursor0
 
       - name: Install frozen-build lock
         run: python -m pip install --requirement requirements/build-py312.lock
@@ -93,20 +76,7 @@ jobs:
       - name: Build frozen application
         run: python -m PyInstaller --clean --noconfirm ArchMeshRubbing.spec
 
-      - name: Run frozen self-test (Linux)
-        if: runner.os == 'Linux'
-        run: >-
-          dist/ArchMeshRubbing/ArchMeshRubbing
-          --self-test-report build/frozen-self-test.json
-
-      - name: Run frozen self-test (macOS bundle)
-        if: runner.os == 'macOS'
-        run: >-
-          dist/ArchMeshRubbing.app/Contents/MacOS/ArchMeshRubbing
-          --self-test-report build/frozen-self-test.json
-
       - name: Run frozen self-test (Windows)
-        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $process = Start-Process `

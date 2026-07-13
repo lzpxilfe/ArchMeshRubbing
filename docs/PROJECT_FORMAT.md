@@ -387,7 +387,7 @@ GUI의 native Top/Front/Right 명령은 각각 XY/Z, XZ/Y, YZ/X의 right-handed 
 - 최종 Polygon/MultiPolygon의 exterior, hole, disconnected island를 모두 보존한다. Shapely의 ring 순서와 orientation은 신뢰하지 않고 정수 lattice에서 exact-collinear point만 제거한 뒤 exterior CCW, hole CW, 최소 시작점, component/hole 순서와 production ID를 자체 canonicalize한다.
 - `artifact_outline_topology.py`는 ring simple/nonzero, hole의 단일 exterior 소유, boundary contact, hole 간 overlap/touch, exterior 간 overlap/nesting/touch, 최종 Polygon/MultiPolygon validity를 repair 없이 검증한다. 이 검사는 append와 load 모두에서 payload-derived QC로 다시 수행된다.
 - production algorithm을 주장하는 record는 recipe 전체, six-view frame, grid 좌표, collinear 제거, component/hole ID까지 재검증한다. `vector.outline.v1` 자체는 열린 생태계를 위해 다른 algorithm recipe도 허용하지만 동일한 공통 topology 검증은 반드시 통과해야 한다.
-- 권위 계산 backend는 현재 `shapely==2.1.2`와 GEOS `3.13.1` 조합으로 고정한다. 다른 조합은 새 algorithm version과 3-OS golden 없이 같은 recipe를 주장할 수 없다.
+- 권위 계산 backend는 현재 `shapely==2.1.2`와 GEOS `3.13.1` 조합으로 고정한다. 다른 조합은 새 algorithm version과 Windows golden 없이 같은 recipe를 주장할 수 없다.
 
 GUI는 한 번에 한 view의 `vector.outline.v1` record를 만든다. 여섯 view는 서로 다른 `PlanarFrame`을 가지므로 여섯 개의 독립 record다. 저장된 `READY + FRESH` payload를 다시 읽어 초록 exterior/hole/island overlay와 1:1 SVG를 만들며, 기존 ROI convex hull과 screenshot/OpenCV 단일/6-view export는 native 문서에서 방어적으로 차단한다. 여섯 record를 하나의 새 bundle로 묶는 multi-view package는 별도 포맷 과제다.
 
@@ -521,7 +521,7 @@ v1 import는 입력 파일을 수정하지 않는 순수·결정적·멱등 변�
 - legacy `legacy_ui_state`에서 `artifact_document`로 단위·geometry·Align을 추정하지 않는 보존적 migration
 - 여섯 개의 독립 Outline record를 원자적으로 계산·commit하고 한 bundle로 배포하는 multi-view package
 - 실제 GPU driver frame의 scene-swap 원자성 및 시각적 동일성
-- Windows·Linux·macOS와 frozen executable 전체에서 검증한 `>= 1e9 mm` 장면의 millimeter 이하 visual/depth-picking 정밀도
+- Windows native-QPA와 frozen executable에서 검증한 `>= 1e9 mm` 장면의 millimeter 이하 visual/depth-picking 정밀도
 - autosave와 crash recovery discovery
 - 전자서명 또는 provenance authority 인증
 

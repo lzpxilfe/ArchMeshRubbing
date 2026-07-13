@@ -812,6 +812,16 @@ def _check_artifact_embedded_project_roundtrip() -> str:
         )
 
 
+def _check_artifact_complete_workflow() -> str:
+    """Run the complete public workflow and offline export reproduction."""
+
+    from src.application.artifact_workflow_self_test import (
+        run_artifact_workflow_self_test,
+    )
+
+    return run_artifact_workflow_self_test().detail()
+
+
 def _run_check(name: str, check: Callable[[], str]) -> SelfTestCheck:
     try:
         return SelfTestCheck(name=name, ok=True, detail=str(check()))
@@ -844,6 +854,10 @@ def run_self_test() -> dict[str, object]:
         _run_check(
             "artifact_embedded_project_roundtrip",
             _check_artifact_embedded_project_roundtrip,
+        ),
+        _run_check(
+            "artifact_complete_workflow_offline",
+            _check_artifact_complete_workflow,
         ),
     )
     return {

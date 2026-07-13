@@ -46,7 +46,7 @@ def test_version_and_diagnostics_use_the_source_package_version() -> None:
     assert json.loads(build_info.diagnostics_json()) == diagnostics
 
 
-def test_self_test_passes_with_offline_embedded_project_roundtrip() -> None:
+def test_self_test_passes_with_complete_offline_artifact_workflow() -> None:
     report = build_info.run_self_test()
 
     assert report["ok"] is True, report
@@ -64,10 +64,14 @@ def test_self_test_passes_with_offline_embedded_project_roundtrip() -> None:
         "artifact_vector_canonical",
         "artifact_rubbing_canonical",
         "artifact_embedded_project_roundtrip",
+        "artifact_complete_workflow_offline",
     }
     assert all(item["ok"] is True for item in checks.values())
     assert checks["artifact_embedded_project_roundtrip"]["detail"].endswith(
         "align=align:self-test-explicit, vertices=5"
+    )
+    assert checks["artifact_complete_workflow_offline"]["detail"].startswith(
+        "workflow=Open>Align>Cutline 3/3>Outline 6/6>Rubbing 6/6, records=15"
     )
     diagnostics = cast(dict[str, object], report["diagnostics"])
     assert diagnostics["application"] == {
