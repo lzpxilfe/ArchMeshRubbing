@@ -246,9 +246,10 @@ def test_committed_windows_lock_is_flattened_exact_and_hash_checked() -> None:
         key: (name, version) for key, (name, version, _sha256) in wheels.items()
     } == build_pins
 
-    policy = json.loads(
-        (ROOT / "requirements" / "runtime-license-policy.json").read_text("utf-8")
-    )
+    policy_path = ROOT / "requirements" / "runtime-license-policy.json"
+    policy_bytes = policy_path.read_bytes()
+    policy = json.loads(policy_bytes.decode("utf-8"))
+    assert policy_bytes in {canonical_json_bytes(policy), canonical_json_bytes(policy) + b"\n"}
     fallback = policy["packages"]["pyopengl"]["fallback_license_files"][0]
     fallback_bytes = (ROOT / fallback["path"]).read_bytes()
     assert hashlib.sha256(fallback_bytes).hexdigest() == fallback["sha256"]
