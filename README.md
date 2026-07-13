@@ -413,6 +413,7 @@ python main.py --project mesh.obj planview.png
 - `--field-pilot-review-template`, `--field-pilot`, `--verify-field-pilot`이 project/survey materialization, Windows graphics receipt, 고고학자 review, machine/performance를 closed canonical report로 묶으며, 실제 review나 driver 근거가 없으면 packaged self-test에서도 `artifact-pass-human-driver-pending`으로만 남김
 - `--opengl-driver-smoke-report`가 source와 frozen Windows 실행 파일에서 native `qwindows` context를 열고 Qt·PyOpenGL을 bundled `opengl32sw.dll` 하나에 결합한 뒤, 768×768 FBO에서 `>= 1e9 mm` 장면의 relative VBO, color/depth readback, 0.125 mm depth pick을 원근·정사영으로 검증
 - Windows x64/CPython 3.12 build wheel 17개를 exact SHA-256으로 잠그고 sdist를 거부하며, frozen/portable payload의 모든 파일 hash와 runtime 10개의 SPDX 2.3 SBOM·라이선스 원문 NOTICE를 실행 파일 self-test에서 재검증
+- canonical public-release policy가 GPL-2.0-only `LICENSE` 원문 SHA-256과 PyQt6 6.11.0 wheel의 `GPL-3.0-only` 메타데이터를 함께 검증하고, rights-holder authorization이 기록되지 않은 schema 1.0.0에서는 공개 바이너리 배포를 구조적으로 차단
 - live worktree가 아니라 exact Git commit의 object database에서 100644/100755 regular blob 전체를 읽어 결정적 corresponding-source ZIP을 만들고, commit/tree/blob ID·SHA-256·GPL-2.0-only LICENSE·portable path를 frozen/portable 14번째 offline self-test에서 재검증
 - portable ZIP·manifest, exact-source ZIP·sidecar, release-evidence index와 GitHub repository/workflow SHA/run attempt/Windows X64 hosted-runner 변수를 외부 canonical provenance 하나에 결합하고, 실제 payload 전체와 한글 추출본을 network 없이 재검증. `authentication=none`을 closed contract로 강제해 서명된 attestation으로 오인하지 않음
 - Cutline 면·경로, Outline fixed-grid/union/topology, Digital Rubbing raster/relief 내부의 안전 경계까지 사용자 cooperative cancellation 연결
@@ -423,7 +424,7 @@ python main.py --project mesh.obj planview.png
 - 2026-07-14 중단 저장 복구 기준 commit `546d106c6ccf`: [source CI run 29282751462](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29282751462)에서 full pytest `777 passed, 128 subtests`, Ruff, M0 Pyright `0 errors`, Windows workflow `675 passed, 5 skipped, 118 subtests`와 qwindows+llvmpipe actual-frame `66/66` 통과. Windows `DirEntry`의 placeholder file identity까지 회귀 테스트로 고정함
 - 같은 복구 commit의 [portable package run 29282751606](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29282751606)에서 frozen·한글 경로 portable 실행 파일이 `recovery=verified-create-new`를 포함한 14-check offline self-test, outbound deny, public verification receipt, qwindows+llvmpipe actual-frame `66/66`, archive/provenance 재검증과 추출본·방화벽 규칙 정리를 통과
 - installer compiler 없이 표준 라이브러리만으로 deterministic portable ZIP과 canonical sidecar를 만들고, 경로 탈출·Windows 예약명·대소문자 충돌·symlink·변조를 fail-closed 검증한 뒤 기존 destination을 덮어쓰지 않는 원자적 추출 구현
-- 다음 단계: 라이선스 결정, unsigned provenance와 portable/source 배포물을 인증할 서명·신뢰 anchor 정책, 구현된 파일럿 계약을 사용한 대표 Windows GPU·대용량 실제 유물·저메모리·완전 격리 offline 현장 증거 수집. macOS·Linux 배포 확대는 첫 안정판 이후 별도 범위
+- 다음 단계: 모든 코드 권리자의 명시적 라이선스 결정, unsigned provenance와 portable/source 배포물을 인증할 서명·신뢰 anchor 정책, 구현된 파일럿 계약을 사용한 대표 Windows GPU·대용량 실제 유물·저메모리·완전 격리 offline 현장 증거 수집. macOS·Linux 배포 확대는 첫 안정판 이후 별도 범위
 
 ---
 
@@ -431,7 +432,9 @@ python main.py --project mesh.obj planview.png
 
 GNU General Public License v2.0 (GPLv2)
 
-현재 문구는 `or later`를 포함하지 않습니다. PyQt6를 포함한 공개 바이너리 배포는 [native packaging license gate](docs/NATIVE_PACKAGING.md#라이선스)가 해결될 때까지 보류합니다.
+현재 문구는 `or later`를 포함하지 않습니다. `requirements/public-release-policy.json`은 정확한 `LICENSE` bytes와 PyQt6 wheel 메타데이터를 묶고 공개 바이너리 상태를 `blocked`로 고정합니다. 권리자 확인 없이 저장소 라이선스를 임의로 바꾸지 않으며, PyQt6를 포함한 공개 바이너리 배포는 [native packaging license gate](docs/NATIVE_PACKAGING.md#라이선스)가 해결될 때까지 보류합니다.
+
+현재 상태는 `python tools/check_public_release_policy.py status`로 검증할 수 있습니다. 실제 공개 파이프라인용 `require-public` 검사는 지금은 의도적으로 실패합니다.
 
 ## Citation
 

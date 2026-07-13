@@ -436,11 +436,41 @@ def _check_resources() -> str:
     lock_path, _pins, _sha256 = runtime_lock()
     wheel_lock_path, _wheel_pins, _wheel_sha256 = windows_wheel_lock()
     policy_path = resource_path("requirements", "runtime-license-policy.json")
+    public_policy_path = resource_path(
+        "requirements", "public-release-policy.json"
+    )
     fallback_path = resource_path(
         "third_party_licenses", "PyOpenGL-3.1.10-LICENSE.txt"
     )
-    if not policy_path.is_file() or not fallback_path.is_file():
+    if (
+        not policy_path.is_file()
+        or not public_policy_path.is_file()
+        or not fallback_path.is_file()
+    ):
         raise RuntimeError("runtime license policy or reviewed fallback is missing")
+    from src.public_release_policy import (
+        PublicReleasePolicyError,
+        load_public_release_policy,
+        verify_project_license,
+        verify_runtime_license_observations,
+    )
+
+    try:
+        public_policy, _public_policy_raw = load_public_release_policy(
+            public_policy_path
+        )
+        verify_project_license(public_policy, resource_path("LICENSE"))
+        observed_licenses: dict[str, tuple[str, str | None]] = {}
+        for item in public_policy.runtime_license_observations:
+            metadata = importlib.metadata.metadata(item.canonical_name)
+            expression = metadata.get("License-Expression")
+            observed_licenses[item.canonical_name] = (
+                str(metadata.get("Version") or ""),
+                str(expression).strip() if expression else None,
+            )
+        verify_runtime_license_observations(public_policy, observed_licenses)
+    except (PublicReleasePolicyError, importlib.metadata.PackageNotFoundError) as exc:
+        raise RuntimeError(f"public release policy failed: {exc}") from exc
     required_schemas = (
         "artifact_document-1.0.0.schema.json",
         "vector_payload-1.0.0.schema.json",
@@ -467,9 +497,10 @@ def _check_resources() -> str:
         if not resource_path("schemas", name).is_file():
             raise RuntimeError(f"packaged schema is missing: {name}")
     return (
-        f"app icon, runtime lock, hashed wheel lock, license policy, and "
+        f"app icon, runtime lock, hashed wheel lock, fail-closed release policy, and "
         f"{len(required_schemas)} schemas present "
-        f"({lock_path.name}, {wheel_lock_path.name})"
+        f"({lock_path.name}, {wheel_lock_path.name}; "
+        f"public-binary={public_policy.decision})"
     )
 
 

@@ -9,6 +9,7 @@
 - `requirements/build-py312.lock`: 정확한 PyInstaller toolchain 버전
 - `requirements/windows-py312-x64-hashed.lock`: Windows x64/CPython 3.12 런타임·빌드 wheel 17개와 각 SHA-256. `--require-hashes --only-binary=:all:`로 설치한다.
 - `requirements/runtime-license-policy.json`, `third_party_licenses/`: wheel에 라이선스 원문이 없는 예외의 검토된 출처·원문 SHA-256
+- `requirements/public-release-policy.json`, `src/public_release_policy.py`: 프로젝트 `LICENSE` exact SHA-256, PyQt6 wheel `License-Expression`, rights-holder authorization 상태와 공개 바이너리 결정을 묶는 fail-closed 계약
 - `ArchMeshRubbing.spec`: 첫 안정판 대상인 Windows onedir build. Linux onedir와 macOS `.app` 분기는 source 호환용이며 현재 릴리스 게이트가 아니다.
 - `src/portable_archive.py`, `tools/build_portable_archive.py`: ZIP 생성, sidecar 검증, 안전한 원자적 추출
 - `src/source_archive.py`, `tools/build_source_archive.py`: Git object 기반 corresponding-source ZIP/sidecar 생성과 Git 없이 offline 검증
@@ -60,7 +61,7 @@ python tools/build_portable_archive.py verify `
 
 1. embedded build manifest와 runtime/wheel lock hash
 2. 정확한 runtime distribution 버전과 Shapely/GEOS 조합
-3. 아이콘, runtime/wheel lock, license policy, 20개 JSON schema
+3. 아이콘, runtime/wheel lock, license evidence policy, fail-closed public-release policy, 20개 JSON schema
 4. frozen/portable payload의 전체 파일 SHA-256 manifest, SPDX 2.3 SBOM, 제3자 NOTICE를 실제 bytes에서 재계산
 5. exact Git commit/tree/blob·SHA-256·LICENSE에 결합된 corresponding-source ZIP과 sidecar
 6. offscreen Qt application
@@ -90,6 +91,7 @@ python -m src.gui.opengl_driver_smoke ^
 `.github/workflows/package-smoke.yml`은 `main` push, pull request, 수동 실행에서 Windows 한 환경에 대해 다음을 요구한다.
 
 - Python 3.12와 hash-locked Windows wheel 17개만 설치하고 dependency closure 검사
+- public-release policy와 실제 `LICENSE`/설치된 PyQt6 metadata를 대조하고 `blocked` 상태 강제
 - commit/runtime lock/wheel lock에 결합된 manifest와 PyInstaller onedir 생성
 - live worktree가 아닌 exact commit의 Git object에서 corresponding-source ZIP과 canonical sidecar 생성
 - payload 전체 파일 manifest, SPDX 2.3 JSON SBOM, machine/human NOTICE 생성·재검증
@@ -167,9 +169,9 @@ sidecar 자체는 RFC 독립적인 sorted compact UTF-8 JSON exact bytes이며, 
 
 `release-evidence/`에는 다음 다섯 파일만 허용한다.
 
-- `payload-manifest.json`: evidence 디렉터리만 제외한 모든 앱 payload의 정규화 경로·크기·SHA-256. portable payload에는 installer가 추가한 예외 파일이 없으므로 root 파일도 빠짐없이 검사한다.
+- `payload-manifest.json`: evidence 디렉터리만 제외한 모든 앱 payload의 정규화 경로·크기·SHA-256. portable payload에는 installer가 추가한 예외 파일이 없으므로 root 파일도 빠짐없이 검사하며 public-release policy path/hash/decision도 build descriptor에 기록한다.
 - `sbom.spdx.json`: `filesAnalyzed=false`인 앱과 실제 포함 runtime distribution 10개, 각 Windows wheel SHA-256, `CONTAINS` 관계를 기록한 SPDX 2.3 JSON
-- `third-party-notices.json`: wheel METADATA와 license evidence path/hash의 machine-readable 결합
+- `third-party-notices.json`: wheel METADATA와 license evidence path/hash, public-release policy path/hash/decision의 machine-readable 결합
 - `THIRD_PARTY_NOTICES.md`: 위 license evidence 원문 전체. PyOpenGL 3.1.10 wheel에 빠진 본문은 같은 버전의 PyPI sdist 경로와 archive/file SHA-256을 정책에 고정해 보완한다.
 - `release-evidence.json`: 앞 네 문서의 path·size·SHA-256과 payload root hash를 묶는 index
 
@@ -181,13 +183,29 @@ evidence는 ZIP 생성 전, frozen 실행 전, 한글 경로 추출 뒤에 모�
 
 ### 라이선스
 
-현재 저장소 파일은 `GPLv2`로 표기되고 `or later`를 명시하지 않는다. bundled `PyQt6 6.11.0` 메타데이터는 `GPL-3.0-only`다. GNU는 GPLv2-only와 GPLv3의 결합이 호환되지 않는다고 설명하고 Riverbank는 무료 PyQt가 GPLv3이라고 명시한다.
+현재 저장소 파일은 `GPLv2`로 표기되고 `or later`를 명시하지 않는다. bundled `PyQt6 6.11.0` wheel 메타데이터는 `GPL-3.0-only`다. GNU는 GPLv2-only와 GPLv3의 결합이 호환되지 않는다고 설명하고 Riverbank는 무료 PyQt가 GPLv3이라고 명시한다.
 
-- [GNU GPL compatibility FAQ](https://www.gnu.org/licenses/gpl-faq.html.en#v2v3Compatibility)
+- [GNU GPL compatibility FAQ](https://www.gnu.org/licenses/gpl-faq.en.html#v2v3Compatibility)
+- [PyPI PyQt6 6.11.0 metadata](https://pypi.org/project/PyQt6/6.11.0/)
 - [Riverbank PyQt licensing](https://www.riverbankcomputing.com/software/pyqt/intro/)
 - [Qt open-source licensing](https://doc.qt.io/qt-6/licensing.html)
 
-따라서 모든 권리자의 동의에 따른 재허가, 적절한 상용 라이선스와 추가 허가, 또는 GUI 경계 교체 같은 전략을 결정하기 전에는 PyQt6 포함 바이너리를 공개하지 않는다. 이는 법률 자문이 아니라 보수적인 릴리스 게이트다.
+`requirements/public-release-policy.json`은 이 검토 상태를 canonical JSON으로 기록한다. schema 1.0.0은 다음을 함께 강제한다.
+
+- 프로젝트 표현식 `GPL-2.0-only`와 현재 `LICENSE` exact SHA-256
+- `PyQt6==6.11.0`의 실제 wheel `License-Expression=GPL-3.0-only`
+- `rights_holder_authorization=not-recorded`, `decision=blocked`
+- 검토 날짜와 위 공식 출처 URL
+
+parser 자체가 schema 1.0.0의 `allowed` 값을 거부하므로 정책 JSON 한 단어만 바꿔 공개 배포를 열 수 없다. 이 파일은 PyInstaller payload에 포함되고 payload manifest, SPDX comment, machine/human NOTICE, portable manifest와 provenance hash chain에 들어간다. frozen self-test와 Windows package workflow도 실제 payload bytes에서 다시 검증한다.
+
+```bat
+python tools/check_public_release_policy.py status
+python tools/check_public_release_policy.py assert-blocked
+python tools/check_public_release_policy.py require-public
+```
+
+앞의 두 명령은 현재 정책과 설치된 runtime이 일치하면 성공한다. `require-public`은 현재 종료 코드 2로 실패하는 것이 정상이다. 모든 권리자의 동의에 따른 재허가, 적절한 상용 라이선스와 추가 허가, 또는 GUI 경계 교체 같은 전략을 결정한 뒤에만 새 schema와 코드 검토를 거쳐 열 수 있다. 이는 법률 자문이 아니라 보수적인 릴리스 게이트다.
 
 과거 CI가 사용한 Inno Setup 6.7.1의 `Non-commercial use only` compiler 경로는 제거했다. portable ZIP은 Python 표준 라이브러리만 사용하므로 installer compiler 구매·계정·서버가 빌드 전제에 남지 않는다. 과거 installer run은 역사적 내부 검증일 뿐 현재 배포 계약이 아니다.
 

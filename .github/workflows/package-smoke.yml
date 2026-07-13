@@ -15,6 +15,7 @@ on:
       - "requirements/build-py312.lock"
       - "requirements/runtime-py312.lock"
       - "requirements/runtime-license-policy.json"
+      - "requirements/public-release-policy.json"
       - "requirements/windows-py312-x64-hashed.lock"
       - "resources/**"
       - "schemas/**"
@@ -25,6 +26,7 @@ on:
       - "tools/generate_build_provenance.py"
       - "tools/generate_build_info.py"
       - "tools/generate_release_evidence.py"
+      - "tools/check_public_release_policy.py"
   pull_request:
     paths:
       - ".gitattributes"
@@ -37,6 +39,7 @@ on:
       - "requirements/build-py312.lock"
       - "requirements/runtime-py312.lock"
       - "requirements/runtime-license-policy.json"
+      - "requirements/public-release-policy.json"
       - "requirements/windows-py312-x64-hashed.lock"
       - "resources/**"
       - "schemas/**"
@@ -47,6 +50,7 @@ on:
       - "tools/generate_build_provenance.py"
       - "tools/generate_build_info.py"
       - "tools/generate_release_evidence.py"
+      - "tools/check_public_release_policy.py"
   workflow_dispatch:
 
 permissions:
@@ -87,6 +91,9 @@ jobs:
 
       - name: Validate installed dependency closure
         run: python -m pip check
+
+      - name: Enforce fail-closed public release policy
+        run: python tools/check_public_release_policy.py assert-blocked
 
       - name: Generate immutable build manifest
         run: >-

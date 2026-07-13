@@ -31,6 +31,8 @@ def _write(path: Path, payload: bytes) -> Path:
 
 def _synthetic_payload(root: Path) -> Path:
     payload = root / "payload"
+    project_license = b"Synthetic GPL-2.0-only project license\n"
+    _write(payload / "_internal" / "LICENSE", project_license)
     runtime_lock = _write(
         payload / "_internal" / "requirements" / "runtime-py312.lock",
         b"Alpha==1.0\nBeta==2.0\n",
@@ -70,6 +72,38 @@ def _synthetic_payload(root: Path) -> Path:
     _write(
         payload / "_internal" / "requirements" / "runtime-license-policy.json",
         canonical_json_bytes(policy),
+    )
+    public_policy = {
+        "artifact_scope": "windows-x64-pyinstaller-portable",
+        "decision": "blocked",
+        "legal_advice": False,
+        "project_license": {
+            "expression": "GPL-2.0-only",
+            "path": "LICENSE",
+            "sha256": hashlib.sha256(project_license).hexdigest(),
+        },
+        "reason_code": "synthetic-license-review-pending",
+        "reviewed_on": "2026-07-13",
+        "rights_holder_authorization": "not-recorded",
+        "runtime_license_observations": [
+            {
+                "canonical_name": "alpha",
+                "evidence_field": "License-Expression",
+                "license_expression": "MIT",
+                "version": "1.0",
+            }
+        ],
+        "schema_version": "1.0.0",
+        "sources": [
+            {
+                "label": "Synthetic source",
+                "url": "https://example.invalid/license-policy",
+            }
+        ],
+    }
+    _write(
+        payload / "_internal" / "requirements" / "public-release-policy.json",
+        canonical_json_bytes(public_policy),
     )
     manifest = {
         "channel": "ci-smoke",
@@ -151,11 +185,14 @@ def test_release_evidence_is_deterministic_and_derived_from_payload() -> None:
         notices = json.loads(
             (evidence_a / "third-party-notices.json").read_text("utf-8")
         )
+        assert notices["public_binary_distribution"] == "blocked"
+        assert len(notices["public_release_policy_sha256"]) == 64
         beta = next(item for item in notices["packages"] if item["canonical_name"] == "beta")
         assert beta["license_evidence"][0]["origin"] == "reviewed-source-fallback"
         markdown = (evidence_a / "THIRD_PARTY_NOTICES.md").read_text("utf-8")
         assert "Alpha license text" in markdown
         assert "Beta reviewed license text" in markdown
+        assert "Public binary distribution: `blocked`" in markdown
 
 
 def test_release_evidence_detects_payload_and_evidence_tampering() -> None:

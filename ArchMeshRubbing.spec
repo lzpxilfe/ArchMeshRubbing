@@ -13,6 +13,7 @@ BUILD_INFO = ROOT / "build" / "generated" / "build_info.json"
 RUNTIME_LOCK = ROOT / "requirements" / "runtime-py312.lock"
 WINDOWS_WHEEL_LOCK = ROOT / "requirements" / "windows-py312-x64-hashed.lock"
 RUNTIME_LICENSE_POLICY = ROOT / "requirements" / "runtime-license-policy.json"
+PUBLIC_RELEASE_POLICY = ROOT / "requirements" / "public-release-policy.json"
 
 if not BUILD_INFO.is_file():
     raise SystemExit(
@@ -37,6 +38,7 @@ datas = [
     (str(RUNTIME_LOCK), "requirements"),
     (str(WINDOWS_WHEEL_LOCK), "requirements"),
     (str(RUNTIME_LICENSE_POLICY), "requirements"),
+    (str(PUBLIC_RELEASE_POLICY), "requirements"),
     (str(ROOT / "third_party_licenses"), "third_party_licenses"),
     (str(ROOT / "LICENSE"), "."),
     (str(ROOT / "README.md"), "."),
@@ -64,6 +66,7 @@ hiddenimports = sorted(
             "OpenGL.GLU",
             "OpenGL.platform",
             "PyQt6.QtOpenGLWidgets",
+            "src.public_release_policy",
             "src.release_evidence",
             "src.source_archive",
         ]

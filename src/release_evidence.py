@@ -20,8 +20,16 @@ import re
 import shutil
 from typing import Any
 
+from src.public_release_policy import (
+    PublicReleasePolicy,
+    PublicReleasePolicyError,
+    load_public_release_policy,
+    verify_project_license,
+    verify_runtime_license_observations,
+)
 
-EVIDENCE_SCHEMA_VERSION = "1.1.0"
+
+EVIDENCE_SCHEMA_VERSION = "1.2.0"
 BUILD_MANIFEST_SCHEMA_VERSION = "1.2.0"
 EVIDENCE_DIRECTORY_NAME = "release-evidence"
 EVIDENCE_FILES = (
@@ -79,6 +87,9 @@ class BuildContext:
     license_policy_path: str
     license_policy_sha256: str
     license_policy: dict[str, Any]
+    public_release_policy_path: str
+    public_release_policy_sha256: str
+    public_release_policy: PublicReleasePolicy
 
 
 def canonical_json_bytes(value: object) -> bytes:
@@ -321,6 +332,11 @@ def _load_build_context(payload_root: Path) -> BuildContext:
         ("requirements", "runtime-license-policy.json"),
         label="runtime license policy",
     )
+    public_policy_path = _find_unique_file(
+        payload_root,
+        ("requirements", "public-release-policy.json"),
+        label="public release policy",
+    )
     manifest, manifest_raw = _load_canonical_json(
         manifest_path, label="frozen build manifest"
     )
@@ -367,6 +383,22 @@ def _load_build_context(payload_root: Path) -> BuildContext:
             )
 
     policy, policy_raw = _load_license_policy(policy_path)
+    try:
+        public_policy, public_policy_raw = load_public_release_policy(
+            public_policy_path
+        )
+        project_license_path = public_policy_path.parent.parent.joinpath(
+            *Path(public_policy.project_license.path).parts
+        )
+        try:
+            project_license_path.relative_to(payload_root)
+        except ValueError as exc:
+            raise PublicReleasePolicyError(
+                "project license path escaped the payload"
+            ) from exc
+        verify_project_license(public_policy, project_license_path)
+    except PublicReleasePolicyError as exc:
+        raise ReleaseEvidenceError(str(exc)) from exc
     return BuildContext(
         version=manifest["version"],
         channel=manifest["channel"],
@@ -382,6 +414,11 @@ def _load_build_context(payload_root: Path) -> BuildContext:
         license_policy_path=_payload_relative(payload_root, policy_path),
         license_policy_sha256=_sha256_bytes(policy_raw),
         license_policy=policy,
+        public_release_policy_path=_payload_relative(
+            payload_root, public_policy_path
+        ),
+        public_release_policy_sha256=_sha256_bytes(public_policy_raw),
+        public_release_policy=public_policy,
     )
 
 
@@ -596,6 +633,23 @@ def _collect_runtime_packages(
         raise ReleaseEvidenceError(
             "runtime license policy contains unused fallbacks: " + ", ".join(stale_policy)
         )
+    try:
+        verify_runtime_license_observations(
+            context.public_release_policy,
+            {
+                str(package["canonical_name"]): (
+                    str(package["version"]),
+                    (
+                        str(package["license_expression"])
+                        if package["license_expression"] is not None
+                        else None
+                    ),
+                )
+                for package in packages
+            },
+        )
+    except PublicReleasePolicyError as exc:
+        raise ReleaseEvidenceError(str(exc)) from exc
     return packages, license_texts
 
 
@@ -616,7 +670,12 @@ def _payload_manifest(
     context: BuildContext,
     files: list[dict[str, object]],
 ) -> dict[str, object]:
-    total_size = sum(int(item["size"]) for item in files)
+    total_size = 0
+    for item in files:
+        size = item.get("size")
+        if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+            raise ReleaseEvidenceError("payload file size is invalid")
+        total_size += size
     payload_sha256 = _sha256_bytes(canonical_json_bytes(files))
     return {
         "application": {"name": "ArchMeshRubbing", "version": context.version},
@@ -626,6 +685,9 @@ def _payload_manifest(
             "channel": context.channel,
             "license_policy_path": context.license_policy_path,
             "license_policy_sha256": context.license_policy_sha256,
+            "public_binary_distribution": context.public_release_policy.decision,
+            "public_release_policy_path": context.public_release_policy_path,
+            "public_release_policy_sha256": context.public_release_policy_sha256,
             "runtime_lock_path": context.runtime_lock_path,
             "runtime_lock_sha256": context.runtime_lock_sha256,
             "source_commit": context.commit,
@@ -661,8 +723,9 @@ def _spdx_document(
             "SPDXID": root_id,
             "comment": (
                 "File-level SHA-256 evidence is in payload-manifest.json. "
-                "Public binary distribution remains blocked pending license "
-                "compatibility review."
+                "Public binary distribution is blocked by the embedded, "
+                "fail-closed release policy ("
+                f"{context.public_release_policy.reason_code})."
             ),
             "copyrightText": "NOASSERTION",
             "downloadLocation": (
@@ -671,7 +734,7 @@ def _spdx_document(
             ),
             "filesAnalyzed": False,
             "licenseConcluded": "NOASSERTION",
-            "licenseDeclared": "GPL-2.0-only",
+            "licenseDeclared": context.public_release_policy.project_license.expression,
             "name": "ArchMeshRubbing",
             "supplier": "NOASSERTION",
             "versionInfo": context.version,
@@ -763,6 +826,9 @@ def _notices_document(
         "created": created_at,
         "license_policy_sha256": context.license_policy_sha256,
         "packages": packages,
+        "public_binary_distribution": context.public_release_policy.decision,
+        "public_release_policy_path": context.public_release_policy_path,
+        "public_release_policy_sha256": context.public_release_policy_sha256,
         "schema_version": EVIDENCE_SCHEMA_VERSION,
         "source_commit": context.commit,
         "windows_wheel_lock_sha256": context.wheel_lock_sha256,
@@ -780,11 +846,14 @@ def _notices_markdown(
         "",
         f"Source commit: `{context.commit}`  ",
         f"Windows wheel lock SHA-256: `{context.wheel_lock_sha256}`",
+        f"Public release policy SHA-256: `{context.public_release_policy_sha256}`  ",
+        f"Public binary distribution: `{context.public_release_policy.decision}` "
+        f"(`{context.public_release_policy.reason_code}`)",
         "",
         "This file is mechanically generated from the metadata and license texts",
         "inside the frozen payload. It records evidence; it is not legal advice.",
-        "Public binary distribution remains disabled until the repository and",
-        "runtime license compatibility decision is complete.",
+        "No rights-holder authorization is recorded in policy schema 1.0.0, so",
+        "public binary distribution remains disabled.",
         "",
     ]
     for package in packages:
@@ -804,11 +873,23 @@ def _notices_markdown(
                 + ("yes" if package["legacy_license_present"] else "no"),
             ]
         )
-        classifiers = package["license_classifiers"]
+        classifier_value = package["license_classifiers"]
+        if not isinstance(classifier_value, list):
+            raise ReleaseEvidenceError("package license classifiers are invalid")
+        classifiers = [
+            value for value in classifier_value if isinstance(value, str)
+        ]
+        if len(classifiers) != len(classifier_value):
+            raise ReleaseEvidenceError("package license classifier is not text")
         if classifiers:
             lines.append("- License classifiers: " + "; ".join(classifiers))
         lines.append("")
-        for evidence in package["license_evidence"]:
+        evidence_items = package["license_evidence"]
+        if not isinstance(evidence_items, list):
+            raise ReleaseEvidenceError("package license evidence is invalid")
+        for evidence in evidence_items:
+            if not isinstance(evidence, dict):
+                raise ReleaseEvidenceError("package license evidence item is invalid")
             path = str(evidence["path"])
             lines.extend(
                 [

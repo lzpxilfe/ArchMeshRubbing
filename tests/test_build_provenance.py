@@ -83,6 +83,8 @@ def _write(path: Path, payload: bytes) -> Path:
 
 def _payload(root: Path, repository: Path, commit: str) -> Path:
     payload = root / "payload"
+    project_license = (repository / "LICENSE").read_bytes()
+    _write(payload / "_internal" / "LICENSE", project_license)
     runtime_lock = _write(
         payload / "_internal" / "requirements" / "runtime-py312.lock",
         b"Alpha==1.0\n",
@@ -102,6 +104,40 @@ def _payload(root: Path, repository: Path, commit: str) -> Path:
     _write(
         payload / "_internal" / "requirements" / "runtime-license-policy.json",
         policy,
+    )
+    public_policy = canonical_json_bytes(
+        {
+            "artifact_scope": "windows-x64-pyinstaller-portable",
+            "decision": "blocked",
+            "legal_advice": False,
+            "project_license": {
+                "expression": "GPL-2.0-only",
+                "path": "LICENSE",
+                "sha256": hashlib.sha256(project_license).hexdigest(),
+            },
+            "reason_code": "synthetic-license-review-pending",
+            "reviewed_on": "2026-07-01",
+            "rights_holder_authorization": "not-recorded",
+            "runtime_license_observations": [
+                {
+                    "canonical_name": "alpha",
+                    "evidence_field": "License-Expression",
+                    "license_expression": "MIT",
+                    "version": "1.0",
+                }
+            ],
+            "schema_version": "1.0.0",
+            "sources": [
+                {
+                    "label": "Synthetic source",
+                    "url": "https://example.invalid/license-policy",
+                }
+            ],
+        }
+    )
+    _write(
+        payload / "_internal" / "requirements" / "public-release-policy.json",
+        public_policy,
     )
     build_info = {
         "channel": "ci-smoke",
