@@ -9,6 +9,7 @@ scaling so Windows font or theme changes cannot alter their appearance.
 from __future__ import annotations
 
 from collections.abc import Iterable
+from functools import lru_cache
 from typing import Any
 
 from PyQt6.QtCore import QSize, Qt
@@ -549,7 +550,6 @@ def _add_mode_pixmaps(icon: QIcon, name: str, mode: QIcon.Mode) -> None:
     image = _render_image(name, disabled=mode == QIcon.Mode.Disabled)
     pixmap = QPixmap.fromImage(image)
     icon.addPixmap(pixmap, mode, QIcon.State.Off)
-    icon.addPixmap(pixmap, mode, QIcon.State.On)
 
     high_dpi = pixmap.scaled(
         PIXEL_ICON_SIZE * 2,
@@ -559,18 +559,27 @@ def _add_mode_pixmaps(icon: QIcon, name: str, mode: QIcon.Mode) -> None:
     )
     high_dpi.setDevicePixelRatio(2.0)
     icon.addPixmap(high_dpi, mode, QIcon.State.Off)
-    icon.addPixmap(high_dpi, mode, QIcon.State.On)
 
 
-def pixel_icon(name: str) -> QIcon:
-    """Build one theme-independent QIcon from authored pixels."""
+@lru_cache(maxsize=None)
+def _pixel_icon_template(name: str) -> QIcon:
+    """Build and retain one immutable, theme-independent icon template."""
 
     icon = QIcon()
     _add_mode_pixmaps(icon, name, QIcon.Mode.Normal)
-    _add_mode_pixmaps(icon, name, QIcon.Mode.Active)
-    _add_mode_pixmaps(icon, name, QIcon.Mode.Selected)
     _add_mode_pixmaps(icon, name, QIcon.Mode.Disabled)
     return icon
+
+
+def pixel_icon(name: str) -> QIcon:
+    """Return a cheap shared-data copy of a cached pixel-icon template.
+
+    Qt falls back from Active/Selected to Normal and from On to Off, so storing
+    duplicate pixmaps for those states only increases GUI construction cost.
+    Returning a QIcon copy prevents callers from mutating the cached template.
+    """
+
+    return QIcon(_pixel_icon_template(name))
 
 
 def set_pixel_icon(target: Any, name: str, *, size: int = PIXEL_ICON_SIZE) -> None:

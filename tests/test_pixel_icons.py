@@ -7,6 +7,7 @@ import re
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtCore import QSize
+from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication, QPushButton
 
 from src.gui.pixel_icons import (
@@ -63,8 +64,15 @@ def test_pixel_icons_render_without_font_or_theme_glyphs() -> None:
     for name in available_pixel_icons():
         icon = pixel_icon(name)
         assert not icon.isNull()
+        assert icon.cacheKey() == pixel_icon(name).cacheKey()
         pixmap = icon.pixmap(QSize(PIXEL_ICON_SIZE, PIXEL_ICON_SIZE))
         assert not pixmap.isNull()
+        active = icon.pixmap(
+            QSize(PIXEL_ICON_SIZE, PIXEL_ICON_SIZE),
+            QIcon.Mode.Active,
+            QIcon.State.On,
+        )
+        assert not active.isNull()
         image = pixmap.toImage()
         opaque = sum(
             1
