@@ -40,6 +40,7 @@ from src.application.artifact_workflow_progress import (
 )
 from src.core.artifact_rubbing_export import validate_rubbing_export_package
 from src.core.artifact_session import ArtifactSession
+from src.core.artifact_verification import build_artifact_verification_report
 from src.core.artifact_vector_export import validate_vector_export_package
 from src.core.artifact_vector_record import PlanarFrame
 from src.core.mesh_loader import MeshLoader
@@ -173,6 +174,16 @@ def _require_mapping(value: object, *, label: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise RuntimeError(f"{label} is not an object")
     return value
+
+
+def _verification_evidence(
+    report: Mapping[str, Any],
+    *,
+    artifact_kind: str,
+) -> Mapping[str, Any]:
+    if report.get("ok") is not True or report.get("artifact_kind") != artifact_kind:
+        raise RuntimeError(f"unified offline verification failed: {report.get('error')!r}")
+    return _require_mapping(report.get("evidence"), label="verification evidence")
 
 
 def _validate_export_evidence(
@@ -359,6 +370,16 @@ def _run_in_directory(directory: Path) -> ArtifactWorkflowSelfTestResult:
     restored_counts = _assert_progress_complete(restored)
     if restored_counts != counts:
         raise RuntimeError("offline AMR reopen changed workflow progress")
+    project_evidence = _verification_evidence(
+        build_artifact_verification_report(project_path),
+        artifact_kind="project",
+    )
+    if (
+        project_evidence.get("document_sha256")
+        != restored.document.canonical_sha256
+        or project_evidence.get("embedded_source_materialized") is not True
+    ):
+        raise RuntimeError("unified AMR verification lost embedded-source authority")
 
     offline_workbench = ArtifactWorkbench(
         session=restored,
@@ -376,6 +397,19 @@ def _run_in_directory(directory: Path) -> ArtifactWorkflowSelfTestResult:
     relocated_vector = directory / "relocated-cutline-top.amr-vector"
     vector_destination.rename(relocated_vector)
     vector_bundle = validate_vector_export_package(relocated_vector)
+    vector_evidence = _verification_evidence(
+        build_artifact_verification_report(
+            relocated_vector,
+            against_project=project_path,
+        ),
+        artifact_kind="vector_export",
+    )
+    if (
+        vector_evidence.get("bound_project_document_sha256")
+        != restored.document.canonical_sha256
+        or vector_evidence.get("svg_sha256") != vector_bundle.svg_sha256
+    ):
+        raise RuntimeError("unified vector verification lost project binding")
     _validate_export_evidence(
         vector_bundle.sidecar_bytes,
         session=restored,
@@ -391,6 +425,19 @@ def _run_in_directory(directory: Path) -> ArtifactWorkflowSelfTestResult:
     relocated_rubbing = directory / "relocated-rubbing-top.amr-rubbing"
     rubbing_destination.rename(relocated_rubbing)
     rubbing_bundle = validate_rubbing_export_package(relocated_rubbing)
+    rubbing_evidence = _verification_evidence(
+        build_artifact_verification_report(
+            relocated_rubbing,
+            against_project=project_path,
+        ),
+        artifact_kind="rubbing_export",
+    )
+    if (
+        rubbing_evidence.get("bound_project_document_sha256")
+        != restored.document.canonical_sha256
+        or rubbing_evidence.get("png_sha256") != rubbing_bundle.png_sha256
+    ):
+        raise RuntimeError("unified rubbing verification lost project binding")
     _validate_export_evidence(
         rubbing_bundle.sidecar_bytes,
         session=restored,

@@ -1,0 +1,369 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:archmeshrubbing:schema:offline-verification-report:1.0.0",
+  "title": "ArchMeshRubbing Offline Verification Report 1.0.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "artifact_kind",
+    "authority",
+    "format",
+    "input_name",
+    "ok",
+    "schema_version"
+  ],
+  "properties": {
+    "artifact_kind": {
+      "enum": [
+        "project",
+        "vector_export",
+        "rubbing_export",
+        "tile_unwrap_export",
+        "unknown"
+      ]
+    },
+    "authority": {
+      "enum": ["self_contained", "matched_project"]
+    },
+    "error": {"$ref": "#/$defs/error"},
+    "evidence": {"type": "object"},
+    "format": {"const": "archmeshrubbing_offline_verification"},
+    "input_name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^[^/\\\\\\u0000-\\u001f\\u007f]+$"
+    },
+    "ok": {"type": "boolean"},
+    "schema_version": {"const": "1.0.0"}
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "artifact_kind": {"const": "project"},
+        "authority": {"const": "self_contained"},
+        "evidence": {"$ref": "#/$defs/projectEvidence"},
+        "ok": {"const": true}
+      },
+      "required": ["evidence"],
+      "not": {"required": ["error"]}
+    },
+    {
+      "properties": {
+        "artifact_kind": {"const": "vector_export"},
+        "evidence": {"$ref": "#/$defs/vectorEvidence"},
+        "ok": {"const": true}
+      },
+      "required": ["evidence"],
+      "not": {"required": ["error"]}
+    },
+    {
+      "properties": {
+        "artifact_kind": {"const": "rubbing_export"},
+        "evidence": {"$ref": "#/$defs/rubbingEvidence"},
+        "ok": {"const": true}
+      },
+      "required": ["evidence"],
+      "not": {"required": ["error"]}
+    },
+    {
+      "properties": {
+        "artifact_kind": {"const": "tile_unwrap_export"},
+        "evidence": {"$ref": "#/$defs/tileUnwrapEvidence"},
+        "ok": {"const": true}
+      },
+      "required": ["evidence"],
+      "not": {"required": ["error"]}
+    },
+    {
+      "properties": {"ok": {"const": false}},
+      "required": ["error"],
+      "not": {"required": ["evidence"]}
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "nonEmptyString": {
+      "type": "string",
+      "minLength": 1
+    },
+    "nullableSha256": {
+      "anyOf": [
+        {"$ref": "#/$defs/sha256"},
+        {"type": "null"}
+      ]
+    },
+    "matrix4x4": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": {
+        "type": "array",
+        "minItems": 4,
+        "maxItems": 4,
+        "items": {"type": "number"}
+      }
+    },
+    "claimObject": {
+      "type": "object"
+    },
+    "counter": {
+      "type": "object",
+      "propertyNames": {"type": "string", "minLength": 1},
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 1
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        }
+      }
+    },
+    "exportClaims": {
+      "type": "object",
+      "required": [
+        "bound_project_document_sha256",
+        "presentation",
+        "provenance",
+        "qc",
+        "recipe"
+      ],
+      "properties": {
+        "bound_project_document_sha256": {"$ref": "#/$defs/nullableSha256"},
+        "presentation": {"$ref": "#/$defs/claimObject"},
+        "provenance": {"$ref": "#/$defs/claimObject"},
+        "qc": {"$ref": "#/$defs/claimObject"},
+        "recipe": {"$ref": "#/$defs/claimObject"}
+      }
+    },
+    "vectorEvidence": {
+      "allOf": [
+        {"$ref": "#/$defs/exportClaims"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "bound_project_document_sha256",
+            "height_mm",
+            "presentation",
+            "provenance",
+            "qc",
+            "recipe",
+            "sidecar_sha256",
+            "svg_sha256",
+            "vector_payload_sha256",
+            "width_mm"
+          ],
+          "properties": {
+            "bound_project_document_sha256": {"$ref": "#/$defs/nullableSha256"},
+            "height_mm": {"type": "number", "exclusiveMinimum": 0},
+            "presentation": {"$ref": "#/$defs/claimObject"},
+            "provenance": {"$ref": "#/$defs/claimObject"},
+            "qc": {"$ref": "#/$defs/claimObject"},
+            "recipe": {"$ref": "#/$defs/claimObject"},
+            "sidecar_sha256": {"$ref": "#/$defs/sha256"},
+            "svg_sha256": {"$ref": "#/$defs/sha256"},
+            "vector_payload_sha256": {"$ref": "#/$defs/sha256"},
+            "width_mm": {"type": "number", "exclusiveMinimum": 0}
+          }
+        }
+      ]
+    },
+    "rubbingEvidence": {
+      "allOf": [
+        {"$ref": "#/$defs/exportClaims"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "bound_project_document_sha256",
+            "height_pixels",
+            "pixels_per_meter",
+            "png_sha256",
+            "presentation",
+            "provenance",
+            "qc",
+            "raster_sha256",
+            "raw_pixel_sha256",
+            "recipe",
+            "sidecar_sha256",
+            "width_pixels"
+          ],
+          "properties": {
+            "bound_project_document_sha256": {"$ref": "#/$defs/nullableSha256"},
+            "height_pixels": {"type": "integer", "minimum": 1},
+            "pixels_per_meter": {"type": "integer", "minimum": 1},
+            "png_sha256": {"$ref": "#/$defs/sha256"},
+            "presentation": {"$ref": "#/$defs/claimObject"},
+            "provenance": {"$ref": "#/$defs/claimObject"},
+            "qc": {"$ref": "#/$defs/claimObject"},
+            "raster_sha256": {"$ref": "#/$defs/sha256"},
+            "raw_pixel_sha256": {"$ref": "#/$defs/sha256"},
+            "recipe": {"$ref": "#/$defs/claimObject"},
+            "sidecar_sha256": {"$ref": "#/$defs/sha256"},
+            "width_pixels": {"type": "integer", "minimum": 1}
+          }
+        }
+      ]
+    },
+    "tileUnwrapEvidence": {
+      "allOf": [
+        {"$ref": "#/$defs/exportClaims"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "artifacts",
+            "bound_project_document_sha256",
+            "claims_sha256",
+            "geometry",
+            "presentation",
+            "provenance",
+            "qc",
+            "recipe",
+            "sidecar_sha256"
+          ],
+          "properties": {
+            "artifacts": {"$ref": "#/$defs/claimObject"},
+            "bound_project_document_sha256": {"$ref": "#/$defs/nullableSha256"},
+            "claims_sha256": {"$ref": "#/$defs/sha256"},
+            "geometry": {"$ref": "#/$defs/claimObject"},
+            "presentation": {"$ref": "#/$defs/claimObject"},
+            "provenance": {"$ref": "#/$defs/claimObject"},
+            "qc": {"$ref": "#/$defs/claimObject"},
+            "recipe": {"$ref": "#/$defs/claimObject"},
+            "sidecar_sha256": {"$ref": "#/$defs/sha256"}
+          }
+        }
+      ]
+    },
+    "projectEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "active_canonical_matrix",
+        "align",
+        "document_id",
+        "document_schema_version",
+        "document_sha256",
+        "embedded_source_materialized",
+        "geometry",
+        "records",
+        "software_version",
+        "source",
+        "source_metadata"
+      ],
+      "properties": {
+        "active_canonical_matrix": {"$ref": "#/$defs/matrix4x4"},
+        "align": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "matrix4x4", "qc", "recipe"],
+          "properties": {
+            "id": {"$ref": "#/$defs/nonEmptyString"},
+            "matrix4x4": {"$ref": "#/$defs/matrix4x4"},
+            "qc": {"$ref": "#/$defs/claimObject"},
+            "recipe": {"$ref": "#/$defs/claimObject"}
+          }
+        },
+        "document_id": {"$ref": "#/$defs/nonEmptyString"},
+        "document_schema_version": {"$ref": "#/$defs/nonEmptyString"},
+        "document_sha256": {"$ref": "#/$defs/sha256"},
+        "embedded_source_materialized": {"const": true},
+        "geometry": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "face_count",
+            "geometry_hash_scope",
+            "geometry_revision_id",
+            "geometry_sha256",
+            "import_recipe",
+            "qc",
+            "vertex_count"
+          ],
+          "properties": {
+            "face_count": {"type": "integer", "minimum": 0},
+            "geometry_hash_scope": {"$ref": "#/$defs/nonEmptyString"},
+            "geometry_revision_id": {"$ref": "#/$defs/nonEmptyString"},
+            "geometry_sha256": {"$ref": "#/$defs/sha256"},
+            "import_recipe": {"$ref": "#/$defs/claimObject"},
+            "qc": {"$ref": "#/$defs/claimObject"},
+            "vertex_count": {"type": "integer", "minimum": 0}
+          }
+        },
+        "records": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["count", "freshness", "lifecycle", "types"],
+          "properties": {
+            "count": {"type": "integer", "minimum": 0},
+            "freshness": {"$ref": "#/$defs/counter"},
+            "lifecycle": {"$ref": "#/$defs/counter"},
+            "types": {"$ref": "#/$defs/counter"}
+          }
+        },
+        "software_version": {"$ref": "#/$defs/nonEmptyString"},
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "identity_scope",
+            "media_type",
+            "original_name",
+            "sha256",
+            "size_bytes"
+          ],
+          "properties": {
+            "identity_scope": {"$ref": "#/$defs/nonEmptyString"},
+            "media_type": {"$ref": "#/$defs/nonEmptyString"},
+            "original_name": {"$ref": "#/$defs/nonEmptyString"},
+            "sha256": {"$ref": "#/$defs/sha256"},
+            "size_bytes": {"type": "integer", "minimum": 0}
+          }
+        },
+        "source_metadata": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "axes",
+            "confirmation_status",
+            "handedness",
+            "id",
+            "source_to_canonical_mm",
+            "unit"
+          ],
+          "properties": {
+            "axes": {
+              "type": "object",
+              "minProperties": 3,
+              "maxProperties": 3,
+              "additionalProperties": {"type": "string"}
+            },
+            "confirmation_status": {"$ref": "#/$defs/nonEmptyString"},
+            "handedness": {"$ref": "#/$defs/nonEmptyString"},
+            "id": {"$ref": "#/$defs/nonEmptyString"},
+            "source_to_canonical_mm": {"$ref": "#/$defs/matrix4x4"},
+            "unit": {"$ref": "#/$defs/nonEmptyString"}
+          }
+        }
+      }
+    }
+  }
+}

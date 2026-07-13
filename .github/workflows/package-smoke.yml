@@ -355,6 +355,34 @@ jobs:
             throw "Portable self-test omitted corresponding-source verification"
           }
 
+          $verificationReport = Join-Path $reportDir.FullName "받은-자료-검증.json"
+          $missingArtifact = Join-Path $reportDir.FullName "존재하지-않음.amr"
+          $verify = Start-Process `
+            -FilePath $env:AMR_PORTABLE_EXE `
+            -ArgumentList "--verify-artifact", "`"$missingArtifact`"", "--report", "`"$verificationReport`"" `
+            -PassThru
+          if (-not $verify.WaitForExit(120000)) {
+            Stop-Process -Id $verify.Id -Force -ErrorAction SilentlyContinue
+            throw "Portable artifact verifier exceeded 120 seconds"
+          }
+          if ($verify.ExitCode -ne 1) {
+            throw "Missing artifact verification must fail with exit code 1; got $($verify.ExitCode)"
+          }
+          $verificationRaw = Get-Content $verificationReport -Raw
+          $verification = $verificationRaw | ConvertFrom-Json
+          if (
+            $verification.ok -or
+            $verification.format -ne "archmeshrubbing_offline_verification" -or
+            $verification.schema_version -ne "1.0.0" -or
+            $verification.error.code -ne "input_missing"
+          ) {
+            Get-Content $verificationReport
+            throw "Portable artifact verifier did not emit its closed failure receipt"
+          }
+          if ($verificationRaw.Contains($env:RUNNER_TEMP)) {
+            throw "Portable verification receipt leaked an absolute input path"
+          }
+
       - name: Run portable Windows native-QPA OpenGL smoke from Korean path
         shell: pwsh
         env:

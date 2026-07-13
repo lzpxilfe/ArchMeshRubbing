@@ -180,6 +180,7 @@ Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 임의 
 - [`src/core/artifact_vector_export.py`](src/core/artifact_vector_export.py): `.amr-vector` 1:1 SVG package
 - [`src/core/artifact_rubbing_export.py`](src/core/artifact_rubbing_export.py): `.amr-rubbing` canonical PNG package
 - [`src/core/artifact_tile_unwrap_export.py`](src/core/artifact_tile_unwrap_export.py): `.amr-unwrap` binary/OBJ/SVG/provenance package와 offline verifier
+- [`src/core/artifact_verification.py`](src/core/artifact_verification.py): `.amr`, `.amr-vector`, `.amr-rubbing`, `.amr-unwrap`를 자동 판별하고 설치본에서도 같은 검증 영수증을 만드는 통합 offline verifier
 - [`src/core/project_file.py`](src/core/project_file.py): strict AMR v2 저장·로딩과 원자 교체
 
 ### Renderer precision boundary
@@ -300,6 +301,8 @@ python tools/build_native.py
 python main.py --help
 python main.py mesh.obj
 python main.py --open-project sample.amr
+python main.py --verify-artifact sample.amr --report project-verification.json
+python main.py --verify-artifact measured.amr-vector --against-project sample.amr --report vector-verification.json
 python main.py --info mesh.obj
 python main.py --flatten mesh.obj unwrap.png
 python main.py --review mesh.obj review.png
@@ -307,6 +310,10 @@ python main.py --generate-synthetic sugkiwa_quarter 7 synthetic_tile.obj
 python main.py --benchmark-synthetic ./benchmarks 1,2,3
 python main.py --project mesh.obj planview.png
 ```
+
+`--verify-artifact`는 네트워크, 계정, 라이선스 서버, GUI 없이 받은 자료를 검증한다. `.amr`는 내장 원본을 saved parser로 다시 열고 source/geometry/metadata/Align을 실제로 재물질화해야 성공한다. 세 export package는 exact member bytes, 1:1 scale, recipe, QC, provenance를 각각의 기존 엄격한 validator로 검사한다. `--against-project`를 함께 주면 그 `.amr`도 완전히 재개방한 뒤 export의 `READY + FRESH` record와 document SHA-256까지 일치해야 한다.
+
+결과는 versioned closed JSON인 [`schemas/offline_verification_report-1.0.0.schema.json`](schemas/offline_verification_report-1.0.0.schema.json) 계약을 따른다. 성공 receipt에는 절대 입력 경로와 실행 시각을 기록하지 않으므로 검증에 성공한 같은 자료와 같은 authority mode는 같은 JSON 값을 만든다. `--report`는 기존 파일을 덮어쓰지 않는다. 검증 성공은 종료 코드 `0`, 자료 검증 실패는 `1`, 잘못된 옵션이나 report 저장 실패는 `2`다. `--report`를 생략하면 source/console 실행에서는 JSON 한 줄을 표준출력으로 보낸다.
 
 `--flatten`, `--review`는 빠른 전체 경로용입니다.
 상면/하면 기록면을 유도형으로 준비하려면 GUI 사용을 권장합니다.

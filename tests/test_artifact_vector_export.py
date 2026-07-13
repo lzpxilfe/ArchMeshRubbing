@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 import errno
 import hashlib
+import importlib
 import json
 import os
 from pathlib import Path
@@ -44,7 +45,7 @@ from src.core.artifact_vector_record import (
     VectorPath,
     VectorRecordKind,
 )
-from src.core.mesh_loader import MeshData
+from src.core.mesh_loader import MeshData, MeshLoader
 from src.core.mesh_import_recipe import (
     current_mesh_import_recipe,
     mesh_import_recipe_with_manifest,
@@ -56,6 +57,8 @@ from src.core.source_manifest import (
     SourceManifest,
     SourceManifestEntry,
 )
+from src.core.artifact_verification import build_artifact_verification_report
+from src.core.project_file import save_artifact_session_project
 
 
 STAMP = "2026-07-12T00:00:00Z"
@@ -742,6 +745,141 @@ class TestArtifactVectorExportPackage(unittest.TestCase):
         )
         self._confirmed_directory_fsync.start()
         self.addCleanup(self._confirmed_directory_fsync.stop)
+
+    def test_unified_offline_report_carries_validated_vector_evidence(self):
+        session = _committed_session()
+        with tempfile.TemporaryDirectory() as temporary:
+            package = export_vector_package(
+                Path(temporary) / "measured.amr-vector",
+                session.document,
+                "record:cutline-0",
+            )
+            report = build_artifact_verification_report(package)
+
+            self.assertTrue(report["ok"])
+            self.assertEqual(report["artifact_kind"], "vector_export")
+            self.assertEqual(report["authority"], "self_contained")
+            evidence = report["evidence"]
+            self.assertIsInstance(evidence, dict)
+            assert isinstance(evidence, dict)
+            verified = validate_vector_export_package(package)
+            sidecar = json.loads(verified.sidecar_bytes)
+            self.assertEqual(evidence["svg_sha256"], verified.svg_sha256)
+            self.assertEqual(
+                evidence["vector_payload_sha256"],
+                verified.vector_payload_sha256,
+            )
+            self.assertEqual(evidence["recipe"], sidecar["recipe"])
+            self.assertEqual(evidence["qc"], sidecar["qc"])
+            self.assertEqual(evidence["provenance"], sidecar["provenance"])
+            self.assertIsNone(evidence["bound_project_document_sha256"])
+            self.assertNotIn(str(Path(temporary)), json.dumps(report))
+
+            jsonschema = importlib.import_module("jsonschema")
+            schema = json.loads(
+                (
+                    Path(__file__).resolve().parents[1]
+                    / "schemas/offline_verification_report-1.0.0.schema.json"
+                ).read_text(encoding="utf-8")
+            )
+            validator = jsonschema.Draft202012Validator(schema)
+            self.assertEqual(list(validator.iter_errors(report)), [])
+
+            (package / VECTOR_EXPORT_SVG_NAME).write_bytes(b"tampered")
+            failure = build_artifact_verification_report(package)
+            self.assertFalse(failure["ok"])
+            self.assertEqual(failure["artifact_kind"], "vector_export")
+
+    def test_unified_report_binds_only_the_exact_authority_project(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source_path = root / "source.ply"
+            source_path.write_text(
+                "\n".join(
+                    (
+                        "ply",
+                        "format ascii 1.0",
+                        "element vertex 3",
+                        "property float x",
+                        "property float y",
+                        "property float z",
+                        "element face 1",
+                        "property list uchar int vertex_indices",
+                        "end_header",
+                        "0 0 0",
+                        "2 0 0",
+                        "0 3 0",
+                        "3 0 1 2",
+                        "",
+                    )
+                ),
+                encoding="ascii",
+            )
+            mesh = MeshLoader(default_unit="mm").load(source_path, unit="mm")
+            session = ArtifactSession.create_from_source(
+                mesh,
+                resolved_source_path=str(source_path),
+                unit="mm",
+                axes={"source_x": "+X", "source_y": "+Y", "source_z": "+Z"},
+                handedness="right",
+                software_version="verification-test",
+                operator="tester",
+                created_at=STAMP,
+                document_id="artifact:verification-match",
+                metadata_revision_id="metadata:verification-match",
+                align_revision_id="align:verification-match",
+            )
+            context = session.capture_vector_operation(recipe=RECIPE)
+            committed = session.commit_vector_record(
+                context=context,
+                payload=_payload(),
+                recipe=RECIPE,
+                record_id="record:verification-match",
+                created_at=STAMP,
+                operator="tester",
+            )
+            package = export_vector_package(
+                root / "matched.amr-vector",
+                committed.document,
+                "record:verification-match",
+            )
+            matched_project = root / "matched.amr"
+            save_artifact_session_project(matched_project, committed)
+
+            matched = build_artifact_verification_report(
+                package,
+                against_project=matched_project,
+            )
+            self.assertTrue(matched["ok"])
+            evidence = matched["evidence"]
+            assert isinstance(evidence, dict)
+            self.assertEqual(
+                evidence["bound_project_document_sha256"],
+                committed.document.canonical_sha256,
+            )
+
+            other = ArtifactSession.create_from_source(
+                mesh,
+                resolved_source_path=str(source_path),
+                unit="mm",
+                axes={"source_x": "+X", "source_y": "+Y", "source_z": "+Z"},
+                handedness="right",
+                software_version="verification-test",
+                operator="tester",
+                created_at=STAMP,
+                document_id="artifact:verification-other",
+                metadata_revision_id="metadata:verification-other",
+                align_revision_id="align:verification-other",
+            )
+            other_project = root / "other.amr"
+            save_artifact_session_project(other_project, other)
+            mismatch = build_artifact_verification_report(
+                package,
+                against_project=other_project,
+            )
+            self.assertFalse(mismatch["ok"])
+            self.assertEqual(mismatch["artifact_kind"], "vector_export")
+            self.assertEqual(mismatch["authority"], "matched_project")
 
     def test_prepared_capability_is_exact_destination_bound_and_single_use(self):
         document = _committed_session().document

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 import errno
 import hashlib
+import importlib
 import json
 import os
 from pathlib import Path
@@ -55,6 +56,7 @@ from src.core.source_manifest import (
     SourceManifest,
     SourceManifestEntry,
 )
+from src.core.artifact_verification import build_artifact_verification_report
 
 
 STAMP = "2026-07-12T00:00:00Z"
@@ -637,6 +639,38 @@ class TestRubbingExport(unittest.TestCase):
             receipt = json.loads(completed.stdout)
             self.assertEqual(receipt["raster"], computation.raster.raster_sha256)
             self.assertEqual(receipt["ppm"], 10_000)
+
+            report = build_artifact_verification_report(relocated)
+            self.assertTrue(report["ok"])
+            self.assertEqual(report["artifact_kind"], "rubbing_export")
+            evidence = report["evidence"]
+            self.assertIsInstance(evidence, dict)
+            assert isinstance(evidence, dict)
+            sidecar = _sidecar(
+                build_rubbing_export(
+                    session.document,
+                    "record:rubbing:export",
+                    computation.raster,
+                )
+            )
+            self.assertEqual(evidence["raster_sha256"], verified.raster_sha256)
+            self.assertEqual(evidence["raw_pixel_sha256"], verified.raw_pixel_sha256)
+            self.assertEqual(evidence["pixels_per_meter"], 10_000)
+            self.assertEqual(evidence["recipe"], sidecar["recipe"])
+            self.assertEqual(evidence["qc"], sidecar["qc"])
+            self.assertEqual(evidence["provenance"], sidecar["provenance"])
+
+            jsonschema = importlib.import_module("jsonschema")
+            schema = json.loads(
+                (
+                    Path(__file__).resolve().parents[1]
+                    / "schemas/offline_verification_report-1.0.0.schema.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                list(jsonschema.Draft202012Validator(schema).iter_errors(report)),
+                [],
+            )
 
     def test_png_pixel_phys_and_sidecar_claim_tampering_are_detected(self):
         session, computation = _committed()

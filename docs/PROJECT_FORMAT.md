@@ -512,6 +512,24 @@ sidecar의 artifact descriptor를 제외한 normative claim 전체를 RFC 8785 S
 
 writer는 vector package와 같은 same-parent staging, prepared inode/fingerprint capability, file/directory `fsync`, self-validation, OS별 atomic no-replace publish를 사용한다. staging 이름은 배타적으로 예약하고 충돌한 foreign directory를 재사용·삭제하지 않는다. application cleanup도 등록한 device/inode가 그대로일 때만 수행한다. 기존 목적지, 추가 member와 symlink는 거부하며 `.DS_Store`, `Thumbs.db`, `desktop.ini`만 vector와 같은 1 MiB 제한으로 무시한다. final rename 뒤 실제 또는 미지원 directory `fsync`는 destination이 이미 게시된 `committed=true` 오류이며 GUI는 저장 완료와 crash durability 미확정을 구분한다. 이 package의 hash도 무결성 값이며 제작자 전자서명은 아니다.
 
+## 통합 offline verification receipt
+
+설치된 실행 파일과 source checkout은 같은 공개 명령을 사용한다.
+
+```text
+ArchMeshRubbing.exe --verify-artifact PATH [--against-project PROJECT.amr] [--report REPORT.json]
+```
+
+`src/core/artifact_verification.py`는 입력 이름이나 디렉터리 suffix를 신뢰하지 않고 exact sidecar marker로 `.amr-vector`, `.amr-rubbing`, `.amr-unwrap`를 판별한다. 심볼릭 링크, 두 종류 marker가 섞인 디렉터리, 알 수 없는 regular file은 format validator에 들어가기 전에 거부한다. 판별 뒤에는 위 각 절의 기존 validator를 그대로 호출하므로 통합 명령이 scale·recipe·QC·provenance 규칙을 별도로 느슨하게 재구현하지 않는다.
+
+`.amr` 성공은 manifest와 checksum만 읽었다는 뜻이 아니다. `load_artifact_session_project()`가 embedded source closure를 saved parser/import recipe로 다시 읽고 source byte SHA-256, geometry SHA-256, metadata/Align matrix, known records를 검증하고 canonical scene을 materialize해야 한다. 따라서 호환 목적으로 읽을 수 있는 manifest-only artifact project는 이 완전 offline receipt에서는 실패한다.
+
+export package는 기본적으로 package 내부 public provenance에 대해 self-contained 검증한다. `--against-project`를 주면 해당 `.amr`를 먼저 위와 같은 완전한 방식으로 재개방하고, export validator에 그 exact `ArtifactDocument`를 넘긴다. record ID, `READY + FRESH`, payload/receipt, recipe, QC, dependency closure, source/document/revision provenance 중 하나라도 다르면 성공 receipt가 나오지 않는다. project 입력 자체에는 `--against-project`를 적용하지 않는다.
+
+성공 receipt는 artifact 종류별 exact-byte hash와 validated presentation, recipe, QC, provenance를 담는다. project receipt는 document/source/geometry hash, active metadata·Align과 canonical matrix, materialized vertex/face count, record 상태 집계를 담는다. 입력의 basename만 기록하며 절대 input/project path와 실행 시각은 넣지 않는다. 동일 bytes와 동일 authority mode의 report JSON 값은 결정적이다. machine-readable closed 계약은 `schemas/offline_verification_report-1.0.0.schema.json`이다.
+
+`--report`는 `write_json_report()`의 create-new 경계를 사용해 기존 영수증을 덮어쓰지 않는다. 성공은 exit `0`, 검증 실패는 `1`, 명령 형식이나 report 저장 실패는 `2`다. `--report`가 없을 때만 compact sorted JSON 한 줄을 stdout으로 보낸다. 이 receipt의 SHA-256들은 무결성·재현 증거이지 제작자 인증 서명이나 신뢰 anchor가 아니다.
+
 ## 원자적 저장 절차
 
 `save_project()`와 `save_artifact_project()`는 다음 순서로 동작한다. artifact API는 쓰기 전에 public representation을 `ArtifactDocument.from_dict()`로 다시 검증하고 canonical bytes가 원본 문서와 같은지도 확인한다.

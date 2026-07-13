@@ -260,3 +260,128 @@ def test_native_opengl_report_cli_selects_the_windows_qpa() -> None:
 def test_native_opengl_report_cli_rejects_missing_path() -> None:
     with patch("sys.argv", ["ArchMeshRubbing", "--opengl-driver-smoke-report"]):
         assert main.run_cli() == 2
+
+
+def test_offline_artifact_verification_cli_is_machine_readable() -> None:
+    success = {
+        "artifact_kind": "vector_export",
+        "authority": "matched_project",
+        "format": "archmeshrubbing_offline_verification",
+        "input_name": "cutline.amr-vector",
+        "ok": True,
+        "schema_version": "1.0.0",
+        "evidence": {"svg_sha256": "a" * 64},
+    }
+    output = io.StringIO()
+    with (
+        patch(
+            "src.core.artifact_verification.build_artifact_verification_report",
+            return_value=success,
+        ) as verify,
+        patch("src.core.logging_utils.setup_logging") as setup_logging,
+        patch(
+            "sys.argv",
+            [
+                "ArchMeshRubbing.exe",
+                "--verify-artifact",
+                "cutline.amr-vector",
+                "--against-project",
+                "record.amr",
+            ],
+        ),
+        redirect_stdout(output),
+    ):
+        assert main.run_cli() == 0
+
+    assert json.loads(output.getvalue()) == success
+    verify.assert_called_once_with(
+        "cutline.amr-vector",
+        against_project="record.amr",
+    )
+    setup_logging.assert_not_called()
+
+    failure = {**success, "ok": False, "evidence": None}
+    output = io.StringIO()
+    with (
+        patch(
+            "src.core.artifact_verification.build_artifact_verification_report",
+            return_value=failure,
+        ),
+        patch(
+            "sys.argv",
+            ["ArchMeshRubbing.exe", "--verify-artifact", "broken.amr-vector"],
+        ),
+        redirect_stdout(output),
+    ):
+        assert main.run_cli() == 1
+    assert json.loads(output.getvalue()) == failure
+
+    with tempfile.TemporaryDirectory() as temporary:
+        destination = Path(temporary) / "검증-영수증.json"
+        with (
+            patch(
+                "src.core.artifact_verification.build_artifact_verification_report",
+                return_value=success,
+            ),
+            patch(
+                "sys.argv",
+                [
+                    "ArchMeshRubbing.exe",
+                    "--verify-artifact",
+                    "cutline.amr-vector",
+                    "--report",
+                    str(destination),
+                    "--against-project",
+                    "record.amr",
+                ],
+            ),
+        ):
+            assert main.run_cli() == 0
+        assert json.loads(destination.read_text(encoding="utf-8")) == success
+
+        with (
+            patch(
+                "src.core.artifact_verification.build_artifact_verification_report",
+                return_value=success,
+            ),
+            patch(
+                "sys.argv",
+                [
+                    "ArchMeshRubbing.exe",
+                    "--verify-artifact",
+                    "cutline.amr-vector",
+                    "--report",
+                    str(destination),
+                ],
+            ),
+        ):
+            assert main.run_cli() == 2
+
+
+def test_offline_artifact_verification_cli_rejects_malformed_arguments() -> None:
+    with patch("sys.argv", ["ArchMeshRubbing.exe", "--verify-artifact"]):
+        assert main.run_cli() == 2
+    with patch(
+        "sys.argv",
+        [
+            "ArchMeshRubbing.exe",
+            "--verify-artifact",
+            "artifact.amr-vector",
+            "--wrong-option",
+            "project.amr",
+        ],
+    ):
+        assert main.run_cli() == 2
+    with patch(
+        "sys.argv",
+        [
+            "ArchMeshRubbing.exe",
+            "--verify-artifact",
+            "artifact.amr-vector",
+            "--report",
+            "one.json",
+            "--report",
+            "two.json",
+        ],
+    ):
+        assert main.run_cli() == 2

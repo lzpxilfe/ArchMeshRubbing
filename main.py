@@ -59,6 +59,47 @@ def run_cli() -> int | None:
             except Exception:
                 return 2
             return 0 if bool(report.get("ok")) else 1
+        if release_command == "--verify-artifact":
+            if len(sys.argv) < 3:
+                return 2
+            artifact_path = sys.argv[2]
+            authority_project: str | None = None
+            report_path: str | None = None
+            option_values = {
+                "--against-project": "authority",
+                "--report": "report",
+            }
+            index = 3
+            while index < len(sys.argv):
+                option = sys.argv[index]
+                if option not in option_values or index + 1 >= len(sys.argv):
+                    return 2
+                value = sys.argv[index + 1]
+                if option_values[option] == "authority":
+                    if authority_project is not None:
+                        return 2
+                    authority_project = value
+                else:
+                    if report_path is not None:
+                        return 2
+                    report_path = value
+                index += 2
+            from src.core.artifact_verification import (
+                build_artifact_verification_report,
+            )
+
+            report = build_artifact_verification_report(
+                artifact_path,
+                against_project=authority_project,
+            )
+            if report_path is None:
+                print(build_info.diagnostics_json(report))
+            else:
+                try:
+                    build_info.write_json_report(report_path, report)
+                except Exception:
+                    return 2
+            return 0 if bool(report.get("ok")) else 1
         if release_command == "--opengl-driver-smoke-report":
             if len(sys.argv) != 3:
                 return 2
@@ -171,6 +212,9 @@ def print_help():
     print("  python main.py --diagnostics-json        # Print machine-readable runtime diagnostics")
     print("  python main.py --self-test               # Run offline, read-only packaged-app checks")
     print("  python main.py --self-test-report PATH   # Write a no-overwrite packaged-app report")
+    print("  python main.py --verify-artifact PATH    # Verify an AMR or export package offline")
+    print("  python main.py --verify-artifact PATH --against-project PROJECT.amr")
+    print("  python main.py --verify-artifact PATH --report REPORT.json")
     print("  python main.py --opengl-driver-smoke-report PATH  # Verify a native OpenGL frame")
     print("  python main.py <mesh_file>              # Launch GUI and open mesh")
     print("  python main.py --info <mesh_file>       # Show file info")

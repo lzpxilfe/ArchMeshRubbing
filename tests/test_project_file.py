@@ -2,6 +2,7 @@ import copy
 from dataclasses import replace
 import errno
 import hashlib
+import importlib
 import json
 import stat
 import struct
@@ -19,6 +20,7 @@ from PIL import Image
 import src.core.project_file as project_file
 from src.core.artifact_document import ArtifactDocument
 from src.core.artifact_session import ArtifactSession
+from src.core.artifact_verification import build_artifact_verification_report
 from src.core.mesh_loader import MeshLoader
 from src.core.project_file import (
     ARTIFACT_PAYLOAD_SCHEMA_VERSION,
@@ -1003,6 +1005,60 @@ class TestEmbeddedArtifactProject(unittest.TestCase):
                 package.source_bundle,
                 SourceBundleIndex.for_document(session.document),
             )
+
+    def test_unified_offline_report_materializes_embedded_project_source(self):
+        with tempfile.TemporaryDirectory() as td:
+            directory = Path(td)
+            source_path = directory / "source" / "유물.ply"
+            source_path.parent.mkdir()
+            source_path.write_bytes(TEST_PLY_BYTES)
+            session = _artifact_session_from_path(source_path)
+            project_path = directory / "record.amr"
+            save_artifact_session_project(project_path, session)
+            source_path.unlink()
+
+            report = build_artifact_verification_report(project_path)
+            repeated = build_artifact_verification_report(project_path)
+
+            self.assertEqual(report, repeated)
+            self.assertTrue(report["ok"])
+            self.assertEqual(report["artifact_kind"], "project")
+            self.assertEqual(report["authority"], "self_contained")
+            evidence = report["evidence"]
+            self.assertIsInstance(evidence, dict)
+            assert isinstance(evidence, dict)
+            self.assertTrue(evidence["embedded_source_materialized"])
+            self.assertEqual(
+                evidence["document_sha256"],
+                session.document.canonical_sha256,
+            )
+            self.assertEqual(
+                evidence["source"]["sha256"],
+                hashlib.sha256(TEST_PLY_BYTES).hexdigest(),
+            )
+            self.assertEqual(evidence["geometry"]["vertex_count"], 4)
+            self.assertEqual(evidence["geometry"]["face_count"], 4)
+            serialized = json.dumps(report, ensure_ascii=False)
+            self.assertNotIn(str(directory), serialized)
+
+            jsonschema = importlib.import_module("jsonschema")
+            schema = json.loads(
+                (
+                    Path(__file__).resolve().parents[1]
+                    / "schemas/offline_verification_report-1.0.0.schema.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                list(jsonschema.Draft202012Validator(schema).iter_errors(report)),
+                [],
+            )
+
+            manifest_only = directory / "manifest-only.amr"
+            save_artifact_project(manifest_only, session.document)
+            failure = build_artifact_verification_report(manifest_only)
+            self.assertFalse(failure["ok"])
+            self.assertEqual(failure["artifact_kind"], "project")
+            self.assertEqual(failure["error"]["code"], "verification_failed")
 
     def test_manifest_only_artifact_remains_compatible_but_session_load_is_typed(self):
         artifact = _artifact_document()

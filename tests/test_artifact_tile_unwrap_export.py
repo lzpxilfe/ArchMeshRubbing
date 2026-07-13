@@ -45,6 +45,7 @@ from src.core.artifact_tile_unwrap_record import tile_unwrap_receipt_from_record
 from src.core.mesh_import_recipe import current_mesh_import_recipe
 from src.core.mesh_loader import MeshData
 from src.core.source_identity import SourceFingerprint
+from src.core.artifact_verification import build_artifact_verification_report
 from src.core.tile_synthetic import (
     generate_synthetic_tile,
     synthetic_tile_spec_from_preset,
@@ -314,6 +315,24 @@ def test_package_publishes_without_overwrite_and_verifies_offline(
     }
     validate_tile_unwrap_export_package(destination)
     validate_tile_unwrap_export_package(destination, document=session.document)
+    report = build_artifact_verification_report(destination)
+    assert report["ok"] is True
+    assert report["artifact_kind"] == "tile_unwrap_export"
+    evidence = report["evidence"]
+    assert isinstance(evidence, dict)
+    sidecar = validate_tile_unwrap_export_package(destination)
+    assert evidence["claims_sha256"] == sidecar["claims_sha256"]
+    assert evidence["artifacts"] == sidecar["artifacts"]
+    assert evidence["geometry"] == sidecar["geometry"]
+    assert evidence["recipe"] == sidecar["recipe"]
+    assert evidence["qc"] == sidecar["qc"]
+    schema = json.loads(
+        (ROOT / "schemas/offline_verification_report-1.0.0.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    jsonschema = importlib.import_module("jsonschema")
+    assert list(jsonschema.Draft202012Validator(schema).iter_errors(report)) == []
     with pytest.raises(ArtifactTileUnwrapExportError, match="already exists"):
         export_tile_unwrap_package(
             destination,
