@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import numpy as np
 import pytest
@@ -14,7 +16,9 @@ from PyQt6.QtGui import QSurfaceFormat
 from src.gui.opengl_context import (
     OPENGL_MINIMUM_DEPTH_BITS,
     OPENGL_MINIMUM_VERSION,
+    _bind_pyopengl_windows_dll,
     compatibility_surface_format,
+    install_windows_software_pyopengl_bridge,
 )
 from src.gui.opengl_driver_smoke import (
     PROBE_BASE_WORLD_MM,
@@ -26,6 +30,7 @@ from src.gui.opengl_driver_smoke import (
     probe_geometry,
     write_report,
 )
+from src.gui.viewport_3d import gluLookAt, gluPerspective
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -85,6 +90,74 @@ def test_non_windows_probe_remains_hidden() -> None:
     assert viewport.window_flags == []
     assert viewport.attributes == [(_FakeQt.WidgetAttribute.WA_DontShowOnScreen, True)]
     assert viewport.positions == []
+
+
+def test_windows_software_bridge_is_noop_outside_windows() -> None:
+    environment = {"QT_OPENGL": "software"}
+
+    with patch("src.gui.opengl_context.sys.platform", "linux"):
+        installed = install_windows_software_pyopengl_bridge(
+            environ=environment,
+        )
+
+    assert installed is None
+    assert "QT_OPENGL_DLL" not in environment
+
+
+def test_pyopengl_bridge_rebinds_context_and_extension_dispatch() -> None:
+    get_current_context = Mock()
+    get_extension_procedure = Mock()
+    dll = SimpleNamespace(
+        wglGetCurrentContext=get_current_context,
+        wglGetProcAddress=get_extension_procedure,
+    )
+    platform = SimpleNamespace()
+    gl_platform = SimpleNamespace(PLATFORM=platform)
+    function_type = object()
+
+    with patch(
+        "src.gui.opengl_context.ctypes.WINFUNCTYPE",
+        function_type,
+        create=True,
+    ):
+        _bind_pyopengl_windows_dll(gl_platform, dll)
+
+    assert dll.FunctionType is function_type
+    assert platform.GL is dll
+    assert platform.OpenGL is dll
+    assert platform.WGL is dll
+    assert platform.GetCurrentContext is get_current_context
+    assert platform.CurrentContextIsValid is get_current_context
+    assert platform.getExtensionProcedure is get_extension_procedure
+    assert gl_platform.GetCurrentContext is get_current_context
+    assert gl_platform.CurrentContextIsValid is get_current_context
+    assert gl_platform.getExtensionProcedure is get_extension_procedure
+
+
+def test_python_perspective_matches_glu_matrix_contract() -> None:
+    with patch("src.gui.viewport_3d.glMultMatrixd") as multiply:
+        gluPerspective(60.0, 2.0, 0.5, 100.0)
+
+    submitted = np.asarray(multiply.call_args.args[0], dtype=np.float64)
+    matrix = submitted.T
+    focal = 1.0 / np.tan(np.deg2rad(30.0))
+    expected = np.zeros((4, 4), dtype=np.float64)
+    expected[0, 0] = focal / 2.0
+    expected[1, 1] = focal
+    expected[2, 2] = (100.0 + 0.5) / (0.5 - 100.0)
+    expected[2, 3] = 2.0 * 100.0 * 0.5 / (0.5 - 100.0)
+    expected[3, 2] = -1.0
+    np.testing.assert_allclose(matrix, expected, rtol=0.0, atol=1e-15)
+
+
+def test_python_look_at_matches_glu_matrix_contract() -> None:
+    with patch("src.gui.viewport_3d.glMultMatrixd") as multiply:
+        gluLookAt(0.0, 0.0, 10.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0)
+
+    submitted = np.asarray(multiply.call_args.args[0], dtype=np.float64)
+    expected = np.eye(4, dtype=np.float64)
+    expected[2, 3] = -10.0
+    np.testing.assert_allclose(submitted.T, expected, rtol=0.0, atol=1e-15)
 
 
 def test_compatibility_surface_format_matches_fixed_function_viewport() -> None:

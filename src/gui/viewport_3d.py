@@ -122,7 +122,6 @@ from OpenGL.GL import (
     glVertexPointer,
     glViewport,
 )
-from OpenGL.GLU import gluLookAt, gluPerspective
 import ctypes
 
 from ..core.mesh_loader import MeshData
@@ -149,6 +148,90 @@ from .render_coordinates import (
     world_to_render_points,
     world_ray_from_window,
 )
+
+
+def gluPerspective(
+    field_of_view_y_degrees: float,
+    aspect: float,
+    clip_near: float,
+    clip_far: float,
+) -> None:
+    """Multiply the current matrix by the GLU perspective transform.
+
+    Keeping this small operation in Python avoids routing GLU through the
+    system ``opengl32.dll`` when Qt and PyOpenGL intentionally share Qt's
+    Windows software OpenGL implementation.
+    """
+
+    field_of_view = float(field_of_view_y_degrees)
+    aspect_value = float(aspect)
+    near_value = float(clip_near)
+    far_value = float(clip_far)
+    if (
+        not np.isfinite(
+            [field_of_view, aspect_value, near_value, far_value]
+        ).all()
+        or field_of_view <= 0.0
+        or field_of_view >= 180.0
+        or aspect_value <= 0.0
+        or near_value <= 0.0
+        or far_value <= near_value
+    ):
+        raise ValueError("invalid perspective projection parameters")
+
+    focal = 1.0 / np.tan(np.deg2rad(field_of_view) * 0.5)
+    projection = np.zeros((4, 4), dtype=np.float64)
+    projection[0, 0] = focal / aspect_value
+    projection[1, 1] = focal
+    projection[2, 2] = (far_value + near_value) / (near_value - far_value)
+    projection[2, 3] = (
+        2.0 * far_value * near_value / (near_value - far_value)
+    )
+    projection[3, 2] = -1.0
+    glMultMatrixd(np.ascontiguousarray(projection.T))
+
+
+def gluLookAt(
+    eye_x: float,
+    eye_y: float,
+    eye_z: float,
+    center_x: float,
+    center_y: float,
+    center_z: float,
+    up_x: float,
+    up_y: float,
+    up_z: float,
+) -> None:
+    """Multiply the current matrix by the GLU look-at transform."""
+
+    eye = np.asarray([eye_x, eye_y, eye_z], dtype=np.float64)
+    center = np.asarray([center_x, center_y, center_z], dtype=np.float64)
+    up = np.asarray([up_x, up_y, up_z], dtype=np.float64)
+    if not np.isfinite(np.concatenate((eye, center, up))).all():
+        raise ValueError("look-at parameters must be finite")
+
+    forward = center - eye
+    forward_length = float(np.linalg.norm(forward))
+    up_length = float(np.linalg.norm(up))
+    if forward_length <= 1e-15 or up_length <= 1e-15:
+        raise ValueError("look-at direction and up vector must be non-zero")
+    forward /= forward_length
+    up /= up_length
+    side = np.cross(forward, up)
+    side_length = float(np.linalg.norm(side))
+    if side_length <= 1e-15:
+        raise ValueError("look-at direction and up vector must not be parallel")
+    side /= side_length
+    true_up = np.cross(side, forward)
+
+    view = np.eye(4, dtype=np.float64)
+    view[0, :3] = side
+    view[1, :3] = true_up
+    view[2, :3] = -forward
+    view[0, 3] = -float(np.dot(side, eye))
+    view[1, 3] = -float(np.dot(true_up, eye))
+    view[2, 3] = float(np.dot(forward, eye))
+    glMultMatrixd(np.ascontiguousarray(view.T))
 
 _LOGGER = logging.getLogger(__name__)
 ORTHO_VIEW_SCALE_DEFAULT = 1.15

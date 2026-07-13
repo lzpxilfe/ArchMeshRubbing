@@ -227,6 +227,12 @@ try:
 except Exception:
     pass
 
+from src.gui.opengl_context import (  # noqa: E402
+    install_windows_software_pyopengl_bridge,
+)
+
+install_windows_software_pyopengl_bridge()
+
 from src.gui.viewport_3d import Viewport3D  # noqa: E402
 from src.core.mesh_loader import MeshLoader  # noqa: E402
 from src.core.profile_exporter import ProfileExporter  # noqa: E402

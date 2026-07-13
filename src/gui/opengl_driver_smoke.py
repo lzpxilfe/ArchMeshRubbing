@@ -772,7 +772,7 @@ def run_driver_smoke(
     if qt_platform:
         os.environ["QT_QPA_PLATFORM"] = str(qt_platform)
 
-    from OpenGL import GL
+    recorder = _CheckRecorder(report)
     from PyQt6.QtCore import QCoreApplication, QEvent, Qt
     from PyQt6.QtGui import QGuiApplication, QOpenGLContext
     from PyQt6.QtOpenGLWidgets import QOpenGLWidget
@@ -783,7 +783,22 @@ def run_driver_smoke(
         OPENGL_MINIMUM_DEPTH_BITS,
         OPENGL_MINIMUM_VERSION,
         install_compatibility_surface_format,
+        install_windows_software_pyopengl_bridge,
     )
+
+    pyopengl_gl_dll = install_windows_software_pyopengl_bridge()
+    if (
+        sys.platform == "win32"
+        and str(os.environ.get("QT_OPENGL", "")).casefold() == "software"
+    ):
+        recorder.require(
+            "process.qt_pyopengl_same_software_dll",
+            bool(pyopengl_gl_dll),
+            {"dll": pyopengl_gl_dll},
+        )
+
+    from OpenGL import GL
+
     from src.gui.viewport_3d import Viewport3D
 
     class _PrecisionSmokeViewport(Viewport3D):
@@ -808,7 +823,6 @@ def run_driver_smoke(
         def draw_surface_runtime_hud(self) -> None:
             return
 
-    recorder = _CheckRecorder(report)
     viewport = None
     app = None
     caught: Exception | None = None
@@ -939,6 +953,7 @@ def run_driver_smoke(
             "default_fbo": default_fbo,
             "device_pixel_ratio": float(viewport.devicePixelRatioF()),
             "probe_surface_policy": surface_policy,
+            "pyopengl_gl_dll": pyopengl_gl_dll,
             "software_renderer": any(
                 token in renderer.casefold()
                 for token in ("llvmpipe", "softpipe", "software", "swiftshader")
