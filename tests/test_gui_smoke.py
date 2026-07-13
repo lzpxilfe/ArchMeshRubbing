@@ -1330,7 +1330,7 @@ def test_native_align_commit_creates_revision_without_destructive_bake() -> None
         assert kwargs == {
             "project_path": "/tmp/native.amr",
             "fit_camera": False,
-            "status_text": "✅ 정치 확정 | 새 Align revision 생성",
+            "status_text": "정치 확정 | 새 Align revision 생성",
         }
         np.testing.assert_array_equal(
             session.materialize().mesh.vertices,
@@ -1518,7 +1518,7 @@ def test_native_cutline_command_commits_record_previews_and_exports_offline() ->
             "project_path": "/tmp/gui-box.amr",
             "fit_camera": False,
             "expected_new_record_ids": ("record:gui-cutline",),
-            "status_text": "✅ Top Cutline 기록 | 1개 경로 | canonical mm",
+            "status_text": "Top Cutline 기록 | 1개 경로 | canonical mm",
         }
         preview.assert_called_once()
         assert preview.call_args.kwargs["record_id"] == record_id
@@ -2298,7 +2298,7 @@ def test_native_outline_command_commits_verified_record_and_closed_preview() -> 
             "fit_camera": False,
             "expected_new_record_ids": ("record:gui-outline",),
             "status_text": (
-                "✅ Right Outline 기록 | 1개 성분 · 0개 구멍 | grid 0.01 mm"
+                "Right Outline 기록 | 1개 성분 · 0개 구멍 | grid 0.01 mm"
             ),
         }
         preview.assert_called_once()
@@ -2415,7 +2415,7 @@ def test_native_rubbing_command_commits_previews_and_recomputes_offline_export()
             "project_path": "/tmp/gui-rubbing.amr",
             "fit_camera": False,
             "expected_new_record_ids": ("record:gui-rubbing",),
-            "status_text": "✅ Top Digital Rubbing 기록 | 40×40 px · ink 0 px",
+            "status_text": "Top Digital Rubbing 기록 | 40×40 px · ink 0 px",
         }
         preview.assert_called_once()
         assert preview.call_args.args[1] == record_id

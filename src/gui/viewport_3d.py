@@ -12775,14 +12775,14 @@ class Viewport3D(QOpenGLWidget):
         """Select faces that are visible in the current camera view."""
         obj = self.selected_obj
         if obj is None or getattr(obj, "mesh", None) is None:
-            self.status_info = "👁️ 현재 시점 가시면: 먼저 메쉬를 선택해 주세요."
+            self.status_info = "현재 시점 가시면: 먼저 메쉬를 선택해 주세요."
             self.update()
             return
 
         thr = getattr(self, "_visible_face_select_thread", None)
         try:
             if thr is not None and thr.isRunning():
-                self.status_info = "👁️ 현재 시점 가시면 선택 계산 중..."
+                self.status_info = "현재 시점 가시면 선택 계산 중..."
                 self.update()
                 return
         except Exception:
@@ -12797,7 +12797,7 @@ class Viewport3D(QOpenGLWidget):
             mv = frame.modelview_render
             proj = frame.projection
         except Exception as e:
-            self.status_info = f"👁️ 현재 시점 가시면 계산 준비 실패: {e}"
+            self.status_info = f"현재 시점 가시면 계산 준비 실패: {e}"
             self.update()
             return
 
@@ -12856,7 +12856,7 @@ class Viewport3D(QOpenGLWidget):
         )
 
         self._visible_face_select_modifiers = modifiers
-        self.status_info = "👁️ 현재 시점 가시면 계산 중..."
+        self.status_info = "현재 시점 가시면 계산 중..."
         self.update()
 
         try:
@@ -12887,7 +12887,7 @@ class Viewport3D(QOpenGLWidget):
             thr2.start()
         except Exception as e:
             self._visible_face_select_thread = None
-            self.status_info = f"👁️ 현재 시점 가시면 계산 시작 실패: {e}"
+            self.status_info = f"현재 시점 가시면 계산 시작 실패: {e}"
             self.update()
 
     def start_surface_magnetic_lasso(self) -> None:
@@ -13911,7 +13911,7 @@ class Viewport3D(QOpenGLWidget):
         if self.sender() is not getattr(self, "_visible_face_select_thread", None):
             return
         self._visible_face_select_thread = None
-        self.status_info = f"👁️ 현재 시점 가시면 선택 실패: {msg}"
+        self.status_info = f"현재 시점 가시면 선택 실패: {msg}"
         self.update()
 
     def _on_visible_face_select_computed(self, result: object) -> None:
@@ -13922,7 +13922,7 @@ class Viewport3D(QOpenGLWidget):
 
         obj = self._surface_worker_current_target(worker)
         if obj is None:
-            self.status_info = "👁️ 현재 시점 가시면: 오래된 계산 결과를 무시했습니다."
+            self.status_info = "현재 시점 가시면: 오래된 계산 결과를 무시했습니다."
             self.update()
             return
 
@@ -13986,7 +13986,7 @@ class Viewport3D(QOpenGLWidget):
             trunc_info = ""
 
         op = "제거" if remove else ("추가" if add else "교체")
-        msg = f"👁️ 현재 시점 가시면: {op} {selected_n:,} faces{trunc_info}"
+        msg = f"현재 시점 가시면: {op} {selected_n:,} faces{trunc_info}"
         if cand_n:
             msg += f" (후보 {cand_n:,})"
         self.status_info = msg

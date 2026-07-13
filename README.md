@@ -1,4 +1,4 @@
-# 🏺 ArchMeshRubbing
+# ArchMeshRubbing
 
 > `Archaeology-first mesh recording tool`
 >
@@ -12,7 +12,7 @@ ArchMeshRubbing은 스캔한 문화유산 3D 메쉬를 원본 보존형 연구 �
 
 ---
 
-## ✨ 왜 이 도구인가요?
+## 왜 이 도구인가요?
 
 일반적인 3D 툴은 UV, seam, material 같은 CG 용어와 작업 흐름에 익숙할 때 강합니다.
 
@@ -26,7 +26,7 @@ ArchMeshRubbing은 반대로, 고고학 연구자가 익숙한 질문에서 출�
 
 ---
 
-## 🧭 핵심 사용자 흐름
+## 핵심 사용자 흐름
 
 새 native 흐름은 아래 6단계를 기준으로 설계되어 있습니다.
 
@@ -45,7 +45,7 @@ Align 확정 뒤에도 모든 기능이 한꺼번에 열리지는 않습니다. 
 
 ---
 
-## 🪄 이번 구현에서 강화된 핵심 기능
+## 이번 구현에서 강화된 핵심 기능
 
 ### 0. 원본 보존형 ArtifactDocument + 검증 Cutline/Outline/Digital Rubbing
 
@@ -121,7 +121,7 @@ Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 `Surfac
 
 ---
 
-## 🧱 현재 flatten 모드 정리
+## 현재 flatten 모드 정리
 
 | 사용자용 이름 | 내부 키 | 언제 추천하나 | 특징 |
 |---|---|---|---|
@@ -133,7 +133,7 @@ Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 `Surfac
 
 ---
 
-## 🧠 제품 구조와 코어 구조
+## 제품 구조와 코어 구조
 
 새 측정 경로는 GUI와 분리된 headless 신뢰 코어를 사용합니다.
 
@@ -191,7 +191,7 @@ Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 `Surfac
 
 ---
 
-## 🖼️ 주요 산출물
+## 주요 산출물
 
 ### 기록면 전개
 
@@ -215,7 +215,7 @@ Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 `Surfac
 
 ---
 
-## ⚡ Quick Start
+## Quick Start
 
 현재 Quick Start는 Windows source checkout 실행 절차입니다. Windows frozen build와 CI 내부 unsigned installer의 설치·오프라인 self-test·actual-frame·제거 검증은 통과했지만, 다운로드 가능한 서명 설치 파일은 아직 제공하지 않습니다. Windows wheel hash lock과 실제 payload 기반 SPDX/NOTICE 경계는 저장소에 포함합니다. 첫 공개 안정판 전에는 라이선스 결정, Authenticode, 상위 build provenance, 대표 하드웨어·실물 pilot이 남아 있습니다.
 
@@ -238,7 +238,7 @@ python main.py --gui
 
 ---
 
-## 🧪 개발 품질 게이트
+## 개발 품질 게이트
 
 개발·CI 환경은 런타임 의존성과 함께 `requirements-dev.txt`를 설치합니다.
 
@@ -270,7 +270,7 @@ python tools/build_native.py
 
 ---
 
-## 🖥️ CLI 예시
+## CLI 예시
 
 ```bash
 python main.py --help
@@ -290,7 +290,7 @@ python main.py --project mesh.obj planview.png
 
 ---
 
-## 📦 지원 포맷
+## 지원 포맷
 
 원본 hash와 재현 가능한 geometry identity를 함께 보존하는 native 작업 문서의 권위 원본은 다음 포맷을 지원합니다.
 
@@ -304,7 +304,7 @@ python main.py --project mesh.obj planview.png
 
 ---
 
-## 📚 구현 참고 레퍼런스
+## 구현 참고 레퍼런스
 
 이번 기능 구현은 “논문을 그대로 복제”했다기보다, **기하 처리 알고리즘 + 고고학 기록 시각화 관점 + 실사용 안정화 휴리스틱**을 조합한 형태입니다.
 
@@ -331,7 +331,7 @@ python main.py --project mesh.obj planview.png
 
 ---
 
-## 🧭 프로젝트 철학
+## 프로젝트 철학
 
 이 프로젝트는 메쉬를 단순한 “렌더링 대상”으로 보지 않습니다.
 
@@ -346,7 +346,7 @@ python main.py --project mesh.obj planview.png
 
 ---
 
-## 📌 현재 상태
+## 현재 상태
 
 현재 버전은 특히 아래에 집중하고 있습니다.
 
@@ -366,6 +366,7 @@ python main.py --project mesh.obj planview.png
 - Windows x64/CPython 3.12 build wheel 17개를 exact SHA-256으로 잠그고 sdist를 거부하며, frozen/설치 payload의 모든 파일 hash와 runtime 10개의 SPDX 2.3 SBOM·라이선스 원문 NOTICE를 실행 파일 self-test에서 재검증
 - Cutline 면·경로, Outline fixed-grid/union/topology, Digital Rubbing raster/relief 내부의 안전 경계까지 사용자 cooperative cancellation 연결
 - 대좌표 render-origin 이식: relative VBO·camera/model rebasing·world overlay 제출과 frame-bound depth picking/drag 계약 구현
+- 버튼 아이콘은 이모지·운영체제 폰트 대신 직접 그린 16×16 픽셀 그리드와 정수배 고해상도 변형을 사용해 플랫폼별 모양 차이를 제거
 - 2026-07-13 Windows 기준 commit `b12d4874a4a8`: [source CI run 29251668123](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29251668123)에서 full pytest `670 passed, 128 subtests`, Ruff, M0 Pyright `0 errors`, Windows workflow `573 passed, 3 skipped, 118 subtests`와 qwindows+llvmpipe actual-frame `66/66` 통과
 - 같은 commit의 [frozen package run 29251668029](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29251668029)에서 12-check offline self-test와 frozen executable qwindows+llvmpipe actual-frame gate 통과
 - commit `19558f324deb`의 [installed-package run 29255341573](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29255341573)에서 Inno Setup 6.7.1 unsigned installer, 465개 설치 payload byte-for-byte 검증, outbound 차단 12-check workflow, 설치본 actual-frame `66/66`, 무인 제거·잔여물 검사를 통과. artifact upload/release는 없음
@@ -373,7 +374,7 @@ python main.py --project mesh.obj planview.png
 
 ---
 
-## 📄 License
+## License
 
 GNU General Public License v2.0 (GPLv2)
 

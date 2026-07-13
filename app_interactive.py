@@ -373,6 +373,7 @@ from src.core.source_identity import (  # noqa: E402
 )
 from src.core.runtime_defaults import DEFAULTS as RUNTIME_DEFAULTS  # noqa: E402
 from src.gui.profile_graph_widget import ProfileGraphWidget  # noqa: E402
+from src.gui.pixel_icons import pixel_icon, set_pixel_icon  # noqa: E402
 from src.core.alignment_utils import (  # noqa: E402
     compute_minimax_center_shift,
     compute_nonpenetration_lift,
@@ -412,7 +413,7 @@ from src.core.flatten_policy import recommend_flatten_mode  # noqa: E402
 DEFAULT_EXPORT_DPI = RUNTIME_DEFAULTS.export_dpi
 
 _ARTIFACT_AUTHORITY_REOPEN_STATUS = (
-    "⛔ 문서 권위 복원 실패 | 저장·실측·내보내기 차단, "
+    "문서 권위 복원 실패 | 저장·실측·내보내기 차단, "
     "검증된 원본을 다시 여세요"
 )
 
@@ -1037,7 +1038,7 @@ class HelpWidget(QTextEdit):
     
     def set_default_help(self):
         self.setHtml("""
-            <h3 style="margin:0; color:#2c5282;">🧭 기본 흐름</h3>
+            <h3 style="margin:0; color:#2c5282;">기본 흐름</h3>
             <p style="font-size:11px;">
             <b>1. 정위치</b> → <b>2. 실측용 도면</b> → <b>3. 탁본</b> → <b>4. 제원측정</b><br><br>
             메쉬 체계에서는 정위치, 단면, 외곽, 제원측정을 다루고, 기록면 체계에서는 탁본과 기록면 도면을 만듭니다.<br><br>
@@ -1049,7 +1050,7 @@ class HelpWidget(QTextEdit):
 
     def set_transform_help(self):
         self.setHtml("""
-            <h3 style="margin:0; color:#2c5282;">📐 정위치 (Positioning)</h3>
+            <h3 style="margin:0; color:#2c5282;">정위치 (Positioning)</h3>
             <p style="font-size:11px;">
             기와를 정확한 위치에 배치합니다.<br>
             <b>이동:</b> X, Y, Z 좌표를 직접 입력<br>
@@ -1061,7 +1062,7 @@ class HelpWidget(QTextEdit):
     
     def set_flatten_help(self):
         self.setHtml("""
-            <h3 style="margin:0; color:#2c5282;">🗺️ 기록면 전개 설정</h3>
+            <h3 style="margin:0; color:#2c5282;">기록면 전개 설정</h3>
             <p style="font-size:11px;">
             이 단계는 삼각형 면을 따로 터뜨리는 것이 아니라, 기록할 표면을 연속된 좌표계로 전개하기 위한 설정입니다.<br>
             <b>기록면 미리보기:</b> 전개 결과를 연속 탁본 이미지로 바로 확인<br><br>
@@ -1072,7 +1073,7 @@ class HelpWidget(QTextEdit):
     
     def set_scene_help(self):
         self.setHtml("""
-            <h3 style="margin:0; color:#2c5282;">🌲 레이어 트리 (Layer)</h3>
+            <h3 style="margin:0; color:#2c5282;">레이어 트리 (Layer)</h3>
             <p style="font-size:11px;">
             현재 작업 중인 객체 목록입니다.<br>
             <b>클릭:</b> 객체 선택 및 기즈모 활성화<br>
@@ -1083,18 +1084,18 @@ class HelpWidget(QTextEdit):
     
     def set_selection_help(self):
         self.setHtml("""
-            <h3 style="margin:0; color:#2c5282;">✋ 기록할 표면 선택</h3>
+            <h3 style="margin:0; color:#2c5282;">기록할 표면 선택</h3>
             <p style="font-size:11px;">
             먼저 기록할 표면 패치를 고르는 도구입니다.<br>
             권장 흐름은 <b>표준 시점 버튼 → 가시면 선택 → 현재 선택으로 전개/탁본 저장</b> 입니다.<br><br>
 
-            <b>👁️ 가시면 선택</b><br>
+            <b>가시면 선택</b><br>
             - <b>현재 시점 가시면</b>: 지금 카메라에서 실제로 보이는 면만 선택<br>
             - <b>상면/하면/정면/후면/좌측/우측</b>: 표준 시점으로 맞춘 뒤 그 시점의 가시면 선택<br><br>
 
             외면/내면/미구 라벨링은 기본 흐름이 아니라 <b>연구용 표면 라벨링</b>입니다. 필요한 경우에만 별도로 펼쳐 사용하세요.<br><br>
 
-            <b>🧲 경계(면적+자석)</b><br>
+            <b>경계(면적+자석)</b><br>
             - <b>좌클릭:</b> 점 추가(자석 스냅) / <b>드래그:</b> 카메라 회전<br>
             - <b>첫 점 근처 클릭</b> 또는 <b>우클릭/Enter</b>: 확정<br>
             - <b>Backspace</b>: 되돌리기 / <b>Alt</b>: 제거 모드<br>
@@ -1104,7 +1105,7 @@ class HelpWidget(QTextEdit):
 
     def set_tile_help(self):
         self.setHtml("""
-            <h3 style="margin:0; color:#2c5282;">🏺 실측용 도면 / 기와 제작 추정</h3>
+            <h3 style="margin:0; color:#2c5282;">실측용 도면 / 기와 제작 추정</h3>
             <p style="font-size:11px;">
             기와를 단순 곡면이 아니라 제작 과정을 가진 유물로 읽어 실측용 도면을 만들기 위한 단계입니다.<br>
             <b>기본 실측 흐름:</b> 유형/분할 가설 → 길이축 힌트 → 대표 단면 후보 → 와통 피팅<br>
@@ -1117,7 +1118,7 @@ class HelpWidget(QTextEdit):
 
     def set_workflow_help(self):
         self.setHtml("""
-            <h3 style="margin:0; color:#2c5282;">🧭 작업 흐름</h3>
+            <h3 style="margin:0; color:#2c5282;">작업 흐름</h3>
             <p style="font-size:11px;">
             기본 화면은 고고학 실무의 핵심 4축만 남겼습니다.<br>
             <b>1. 정위치</b> → 유물을 도면 기준에 맞게 두고 시점을 정합니다.<br>
@@ -1369,6 +1370,7 @@ class ScenePanel(QWidget):
     layerMoveRequested = pyqtSignal(int, int, float, float)  # object_idx, layer_idx, dx, dy
     layerOffsetResetRequested = pyqtSignal(int, int)  # object_idx, layer_idx
     layerSelected = pyqtSignal(int, int)  # object_idx, layer_idx
+    _VISIBILITY_ROLE = int(Qt.ItemDataRole.UserRole) + 1
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1393,19 +1395,18 @@ class ScenePanel(QWidget):
         self.tree.clear()
         for i, obj in enumerate(objects):
             # 메쉬 노드
-            mesh_item = QTreeWidgetItem([
-                obj.name,
-                "👁️" if obj.visible else "👓",
-                f"{len(obj.mesh.faces):,}"
-            ])
+            mesh_item = QTreeWidgetItem([obj.name, "", f"{len(obj.mesh.faces):,}"])
             mesh_item.setData(0, Qt.ItemDataRole.UserRole, ("mesh", i))
+            self._set_visibility_state(mesh_item, bool(obj.visible))
             self.tree.addTopLevelItem(mesh_item)
             
             # 부착된 원호들
             for j, arc in enumerate(obj.fitted_arcs):
                 arc_item = QTreeWidgetItem(mesh_item)
                 arc_item.setText(0, f"원호 #{j+1}")
-                arc_item.setText(1, "📏")
+                arc_item.setText(1, "")
+                arc_item.setIcon(1, pixel_icon("measure"))
+                arc_item.setToolTip(1, "곡률 원호")
                 r_mm = mesh_units_to_mm(float(getattr(arc, "radius", 0.0)), getattr(obj.mesh, "unit", None))
                 arc_item.setText(2, f"R={r_mm:.1f}mm")
                 arc_item.setData(0, Qt.ItemDataRole.UserRole, ("arc", i, j))
@@ -1417,7 +1418,7 @@ class ScenePanel(QWidget):
                 layer_item.setText(0, name)
 
                 visible = bool(layer.get("visible", True))
-                layer_item.setText(1, "👁️" if visible else "👓")
+                self._set_visibility_state(layer_item, visible)
 
                 pts = layer.get("points", []) or []
                 kind = str(layer.get("kind", "")).strip()
@@ -1434,6 +1435,12 @@ class ScenePanel(QWidget):
             if i == selected_index:
                 self.tree.setCurrentItem(mesh_item)
         self.tree.blockSignals(False)
+
+    def _set_visibility_state(self, item: QTreeWidgetItem, visible: bool) -> None:
+        item.setText(1, "")
+        item.setData(1, self._VISIBILITY_ROLE, bool(visible))
+        item.setIcon(1, pixel_icon("visible" if visible else "hidden"))
+        item.setToolTip(1, "표시 중" if visible else "숨김")
                 
     def on_item_clicked(self, item, column):
         data = item.data(0, Qt.ItemDataRole.UserRole)
@@ -1443,8 +1450,8 @@ class ScenePanel(QWidget):
         if data[0] == "mesh":
             index = data[1]
             if column == 1: # 가시성 토글
-                visible = item.text(1) == "👓"
-                item.setText(1, "👁️" if visible else "👓")
+                visible = not bool(item.data(1, self._VISIBILITY_ROLE))
+                self._set_visibility_state(item, visible)
                 self.visibilityChanged.emit(index, visible)
             else:
                 self.selectionChanged.emit(index)
@@ -1452,8 +1459,8 @@ class ScenePanel(QWidget):
             obj_idx = int(data[1])
             layer_idx = int(data[2])
             if column == 1:
-                visible = item.text(1) == "👓"
-                item.setText(1, "👁️" if visible else "👓")
+                visible = not bool(item.data(1, self._VISIBILITY_ROLE))
+                self._set_visibility_state(item, visible)
                 self.layerVisibilityChanged.emit(obj_idx, layer_idx, visible)
             else:
                 self.selectionChanged.emit(obj_idx)
@@ -1470,7 +1477,7 @@ class ScenePanel(QWidget):
 
         if data[0] == "arc":
             menu = QMenu(self) # 원인: 부모 위젯 지정
-            delete_action = menu.addAction("🗑️ 원호 삭제")
+            delete_action = menu.addAction(pixel_icon("delete"), "원호 삭제")
             action = menu.exec(self.tree.mapToGlobal(pos))
             if action == delete_action:
                 self.arcDeleted.emit(data[1], data[2])
@@ -1482,7 +1489,7 @@ class ScenePanel(QWidget):
             move_down = menu.addAction("아래로 5cm")
             reset_offset = menu.addAction("오프셋 초기화")
             menu.addSeparator()
-            delete_action = menu.addAction("🗑️ 레이어 삭제")
+            delete_action = menu.addAction(pixel_icon("delete"), "레이어 삭제")
             action = menu.exec(self.tree.mapToGlobal(pos))
             if action == move_left:
                 self.layerMoveRequested.emit(int(data[1]), int(data[2]), -5.0, 0.0)
@@ -1503,12 +1510,12 @@ class TransformToolbar(QToolBar):
     def __init__(self, viewport: Viewport3D, parent=None):
         super().__init__("정치 도구", parent)
         self.viewport = viewport
-        self.setIconSize(QSize(24, 24))
+        self.setIconSize(QSize(16, 16))
         self.init_ui()
 
     def init_ui(self):
         # 이동 (cm)
-        self.addWidget(QLabel(" 📍 이동: "))
+        self.addWidget(QLabel("이동: "))
         self.trans_x = self._create_spin(-10000, 10000, "X", step=0.1)
         self.trans_y = self._create_spin(-10000, 10000, "Y", step=0.1)
         self.trans_z = self._create_spin(-10000, 10000, "Z", step=0.1)
@@ -1519,7 +1526,7 @@ class TransformToolbar(QToolBar):
         self.addSeparator()
         
         # 회전 (deg)
-        self.addWidget(QLabel(" 🔄 회전: "))
+        self.addWidget(QLabel("회전: "))
         self.rot_x = self._create_spin(-360, 360, "Rx", step=1.0)
         self.rot_y = self._create_spin(-360, 360, "Ry", step=1.0)
         self.rot_z = self._create_spin(-360, 360, "Rz", step=1.0)
@@ -1530,7 +1537,7 @@ class TransformToolbar(QToolBar):
         self.addSeparator()
         
         # 배율
-        self.addWidget(QLabel(" 🔍 배율: "))
+        self.addWidget(QLabel("배율: "))
         self.scale_spin = QDoubleSpinBox()
         self.scale_spin.setRange(0.01, 100.0)
         self.scale_spin.setValue(1.0)
@@ -1541,29 +1548,35 @@ class TransformToolbar(QToolBar):
         self.addSeparator()
         
         # 버튼들
-        self.btn_bake = QPushButton("📌 정치 확정")
+        self.btn_bake = QPushButton("정치 확정")
+        set_pixel_icon(self.btn_bake, "align")
         self.btn_bake.setToolTip("현재 변환을 메쉬에 영구 적용하고 위치를 고정합니다")
         self.btn_bake.setStyleSheet("QPushButton { font-weight: bold; padding: 2px 10px; }")
         self.addWidget(self.btn_bake)
 
-        self.btn_fixed = QPushButton("🔒 고정상태로")
+        self.btn_fixed = QPushButton("고정상태로")
+        set_pixel_icon(self.btn_fixed, "lock")
         self.btn_fixed.setToolTip("정치 확정(Bake) 이후의 고정 상태로 되돌립니다 (실수로 이동/회전했을 때)")
         self.btn_fixed.setEnabled(False)
         self.addWidget(self.btn_fixed)
         
-        self.btn_reset = QPushButton("🔄 초기화")
+        self.btn_reset = QPushButton("초기화")
+        set_pixel_icon(self.btn_reset, "reset")
         self.addWidget(self.btn_reset)
 
-        self.btn_fit_ground = QPushButton("⬆ 바닥면 맞춤")
+        self.btn_fit_ground = QPushButton("바닥면 맞춤")
+        set_pixel_icon(self.btn_fit_ground, "ground")
         self.btn_fit_ground.setToolTip("현재 자세를 유지한 채 메쉬 최저점을 XY 바닥(Z=0)에 맞춥니다.")
         self.addWidget(self.btn_fit_ground)
         
-        self.btn_flat = QPushButton("🌓 Flat Shading")
+        self.btn_flat = QPushButton("Flat Shading")
+        set_pixel_icon(self.btn_flat, "flat")
         self.btn_flat.setCheckable(True)
         self.btn_flat.setToolTip("명암 없이 메쉬를 밝게 봅니다 (회전 시 어두워짐 방지)")
         self.addWidget(self.btn_flat)
 
-        self.btn_xray = QPushButton("🩻 X-Ray")
+        self.btn_xray = QPushButton("X-Ray")
+        set_pixel_icon(self.btn_xray, "xray")
         self.btn_xray.setCheckable(True)
         self.btn_xray.setToolTip("선택된 메쉬를 X-Ray(투명)로 표시합니다 (선택 객체만).")
         self.addWidget(self.btn_xray)
@@ -1600,7 +1613,7 @@ class TransformPanel(QWidget):
 
         hint = QLabel(
             "정치/바닥 정렬은 상단 툴바를 사용하세요.\n"
-            "✏️ 바닥 면 그리기: 상단 툴바 버튼 → 메쉬 클릭으로 점 추가 → Enter로 확정"
+            "바닥 면 그리기: 상단 툴바 버튼 → 메쉬 클릭으로 점 추가 → Enter로 확정"
         )
         hint.setStyleSheet("color: #718096; font-size: 10px;")
         hint.setWordWrap(True)
@@ -1669,12 +1682,15 @@ class WorkflowPanel(QWidget):
         align_group.setStyleSheet("QGroupBox { font-weight: bold; }")
         align_layout = QVBoxLayout(align_group)
         btn_open_mesh = QPushButton("메쉬 열기")
+        set_pixel_icon(btn_open_mesh, "open_mesh")
         btn_open_mesh.clicked.connect(lambda: self.workflowRequested.emit("open_mesh", None))
         align_layout.addWidget(btn_open_mesh)
         btn_open_project = QPushButton("프로젝트 열기")
+        set_pixel_icon(btn_open_project, "open_project")
         btn_open_project.clicked.connect(lambda: self.workflowRequested.emit("open_project", None))
         align_layout.addWidget(btn_open_project)
         btn_fit = QPushButton("메쉬에 맞춤")
+        set_pixel_icon(btn_fit, "fit")
         btn_fit.clicked.connect(lambda: self.workflowRequested.emit("fit_view", None))
         align_layout.addWidget(btn_fit)
         view_grid = QGridLayout()
@@ -1684,6 +1700,7 @@ class WorkflowPanel(QWidget):
         ]
         for idx, (label, key) in enumerate(views):
             btn = QPushButton(label)
+            set_pixel_icon(btn, f"view_{key}")
             btn.clicked.connect(
                 lambda _checked=False, view_key=key: self.workflowRequested.emit("canonical_view", {"view": view_key})
             )
@@ -1699,15 +1716,18 @@ class WorkflowPanel(QWidget):
         self.progress_interpret.setValue(0)
         interpret_layout.addWidget(self.progress_interpret)
         self.btn_interpret_next = QPushButton("다음 실측 단계 실행")
+        set_pixel_icon(self.btn_interpret_next, "details")
         self.btn_interpret_next.clicked.connect(lambda: self.workflowRequested.emit("run_interpretation_next", None))
         self.btn_interpret_next.setEnabled(False)
         interpret_layout.addWidget(self.btn_interpret_next)
 
         btn_drawing_svg = QPushButton("실측용 SVG 저장")
+        set_pixel_icon(btn_drawing_svg, "export")
         btn_drawing_svg.clicked.connect(lambda: self.workflowRequested.emit("export_flat_svg", None))
         interpret_layout.addWidget(btn_drawing_svg)
 
         btn_drawing_package = QPushButton("6방향 도면 패키지 저장")
+        set_pixel_icon(btn_drawing_package, "save")
         btn_drawing_package.clicked.connect(lambda: self.workflowRequested.emit("export_profile_package", None))
         interpret_layout.addWidget(btn_drawing_package)
         layout.addWidget(interpret_group)
@@ -1716,19 +1736,23 @@ class WorkflowPanel(QWidget):
         record_group.setStyleSheet("QGroupBox { font-weight: bold; }")
         record_layout = QVBoxLayout(record_group)
         btn_record_top = QPushButton("상면 기록 준비")
+        set_pixel_icon(btn_record_top, "record_top")
         btn_record_top.clicked.connect(
             lambda: self.workflowRequested.emit("prepare_record_surface", {"view": "top"})
         )
         record_layout.addWidget(btn_record_top)
         btn_record_bottom = QPushButton("하면 기록 준비")
+        set_pixel_icon(btn_record_bottom, "record_bottom")
         btn_record_bottom.clicked.connect(
             lambda: self.workflowRequested.emit("prepare_record_surface", {"view": "bottom"})
         )
         record_layout.addWidget(btn_record_bottom)
         btn_preview = QPushButton("기록면 미리보기")
+        set_pixel_icon(btn_preview, "preview")
         btn_preview.clicked.connect(lambda: self.workflowRequested.emit("preview_recording_surface", None))
         record_layout.addWidget(btn_preview)
         btn_export_review = QPushButton("기록면 검토 시트 저장")
+        set_pixel_icon(btn_export_review, "export")
         btn_export_review.clicked.connect(lambda: self.workflowRequested.emit("export_review_sheet", None))
         record_layout.addWidget(btn_export_review)
         layout.addWidget(record_group)
@@ -1737,11 +1761,13 @@ class WorkflowPanel(QWidget):
         measure_group.setStyleSheet("QGroupBox { font-weight: bold; }")
         measure_layout = QVBoxLayout(measure_group)
         btn_measure = QPushButton("제원측정 도구 열기")
+        set_pixel_icon(btn_measure, "measure")
         btn_measure.clicked.connect(lambda: self.workflowRequested.emit("show_measure_tools", None))
         measure_layout.addWidget(btn_measure)
         layout.addWidget(measure_group)
 
         btn_advanced = QPushButton("세부 패널 열기")
+        set_pixel_icon(btn_advanced, "details")
         btn_advanced.clicked.connect(lambda: self.workflowRequested.emit("show_advanced_panels", None))
         layout.addWidget(btn_advanced)
 
@@ -1852,7 +1878,7 @@ class FlattenPanel(QWidget):
         layout.addWidget(compact_note)
         
         # 곡률 설정
-        curve_group = QGroupBox("📐 곡률 설정")
+        curve_group = QGroupBox("곡률 설정")
         curve_group.setStyleSheet("QGroupBox { font-weight: bold; }")
         curve_layout = QFormLayout(curve_group)
         
@@ -1870,16 +1896,19 @@ class FlattenPanel(QWidget):
         
         # 곡률 측정 버튼 추가
         measure_layout = QHBoxLayout()
-        self.btn_measure = QPushButton("📏 곡률 측정")
+        self.btn_measure = QPushButton("곡률 측정")
+        set_pixel_icon(self.btn_measure, "measure")
         self.btn_measure.setCheckable(True)
         self.btn_measure.setToolTip("Shift+클릭으로 메쉬 위에 점을 3개 이상 찍으면 곡률을 계산합니다")
         measure_layout.addWidget(self.btn_measure)
         
-        self.btn_fit_arc = QPushButton("🔄 원호 피팅")
+        self.btn_fit_arc = QPushButton("원호 피팅")
+        set_pixel_icon(self.btn_fit_arc, "cutline")
         self.btn_fit_arc.setToolTip("찍은 점들로 원호를 피팅하고 반지름을 계산합니다")
         measure_layout.addWidget(self.btn_fit_arc)
         
-        self.btn_clear_points = QPushButton("🗑️")
+        self.btn_clear_points = QPushButton("")
+        set_pixel_icon(self.btn_clear_points, "delete")
         self.btn_clear_points.setToolTip("찍은 점 초기화")
         self.btn_clear_points.setFixedWidth(40)
         measure_layout.addWidget(self.btn_clear_points)
@@ -1892,7 +1921,8 @@ class FlattenPanel(QWidget):
         arc_layout.addWidget(arc_label)
         arc_layout.addStretch()
         
-        self.btn_clear_arcs = QPushButton("🗑️ 모든 원호 삭제")
+        self.btn_clear_arcs = QPushButton("모든 원호 삭제")
+        set_pixel_icon(self.btn_clear_arcs, "delete")
         self.btn_clear_arcs.setToolTip("선택된 객체의 모든 원호 삭제")
         arc_layout.addWidget(self.btn_clear_arcs)
         curve_layout.addRow(arc_layout)
@@ -1901,7 +1931,7 @@ class FlattenPanel(QWidget):
         self.curve_group = curve_group
         
         # 기록면 전개 방법
-        method_group = QGroupBox("🗺️ 기록면 전개 방법")
+        method_group = QGroupBox("기록면 전개 방법")
         method_group.setStyleSheet("QGroupBox { font-weight: bold; }")
         method_layout = QVBoxLayout(method_group)
         
@@ -1946,7 +1976,7 @@ class FlattenPanel(QWidget):
         layout.addWidget(method_group)
         
         # 고급 옵션
-        adv_group = QGroupBox("⚙️ 고급 옵션")
+        adv_group = QGroupBox("고급 옵션")
         adv_group.setStyleSheet("QGroupBox { font-weight: bold; }")
         adv_layout = QVBoxLayout(adv_group)
         
@@ -1970,14 +2000,14 @@ class FlattenPanel(QWidget):
         self.advanced_options_group = adv_group
 
         # 고급 표면 라벨링 (외면/내면/미구)
-        surface_group = QGroupBox("🏷️ 고급 표면 라벨링 (외면/내면/미구)")
+        surface_group = QGroupBox("고급 표면 라벨링 (외면/내면/미구)")
         surface_group.setStyleSheet("QGroupBox { font-weight: bold; }")
         surface_layout = QVBoxLayout(surface_group)
 
         target_row = QHBoxLayout()
         target_row.addWidget(QLabel("대상:"))
         self.combo_surface_target = QComboBox()
-        self.combo_surface_target.addItems(["🌞 외면", "🌙 내면", "🧩 미구"])
+        self.combo_surface_target.addItems(["외면", "내면", "미구"])
         self.combo_surface_target.setToolTip("라벨링할 표면 그룹 선택")
         self.combo_surface_target.currentIndexChanged.connect(
             lambda _i: self.selectionRequested.emit("surface_target", self.current_surface_target())
@@ -1986,7 +2016,8 @@ class FlattenPanel(QWidget):
         surface_layout.addLayout(target_row)
 
         tool_row = QHBoxLayout()
-        self.btn_surface_boundary = QPushButton("🧲 경계(면적+자석)")
+        self.btn_surface_boundary = QPushButton("경계(면적+자석)")
+        set_pixel_icon(self.btn_surface_boundary, "outline")
         self.btn_surface_boundary.setToolTip(
             "면적(점-올가미) + 자석(경계 스냅)을 하나로 합친 도구입니다.\n"
             "좌클릭=점 추가(자석 스냅), 드래그=카메라 회전/시점, 우클릭/Enter=확정,\n"
@@ -2006,14 +2037,16 @@ class FlattenPanel(QWidget):
         surface_layout.addWidget(self.label_surface_assignment)
 
         action_row = QHBoxLayout()
-        btn_clear_target = QPushButton("🗑️ 현재 비우기")
+        btn_clear_target = QPushButton("현재 비우기")
+        set_pixel_icon(btn_clear_target, "delete")
         btn_clear_target.setToolTip("현재 대상(외/내/미구) 지정 면을 모두 비웁니다.")
         btn_clear_target.clicked.connect(
             lambda: self.selectionRequested.emit("surface_clear_target", self.current_surface_target())
         )
         action_row.addWidget(btn_clear_target)
 
-        btn_clear_all = QPushButton("🧼 전체 초기화")
+        btn_clear_all = QPushButton("전체 초기화")
+        set_pixel_icon(btn_clear_all, "reset")
         btn_clear_all.setToolTip("외면/내면/미구 지정을 모두 초기화합니다.")
         btn_clear_all.clicked.connect(lambda: self.selectionRequested.emit("surface_clear_all", None))
         action_row.addWidget(btn_clear_all)
@@ -2038,7 +2071,8 @@ class FlattenPanel(QWidget):
         layout.addWidget(self.btn_toggle_experimental_tools)
         
         # 실행 버튼
-        self.btn_flatten = QPushButton("🚀 기록면 전개 실행")
+        self.btn_flatten = QPushButton("기록면 전개 실행")
+        set_pixel_icon(self.btn_flatten, "flatten")
         self.btn_flatten.setStyleSheet("""
             QPushButton {
                 background-color: #38a169;
@@ -2054,7 +2088,8 @@ class FlattenPanel(QWidget):
         self.btn_flatten.clicked.connect(self.on_flatten_clicked)
         layout.addWidget(self.btn_flatten)
 
-        self.btn_preview = QPushButton("🖼️ 기록면 미리보기")
+        self.btn_preview = QPushButton("기록면 미리보기")
+        set_pixel_icon(self.btn_preview, "preview")
         self.btn_preview.setToolTip(
             "현재 설정과 대상을 기준으로 기록면 전개 결과를 연속 이미지로 미리 봅니다.\n"
             "기본 미리보기는 와이어프레임이 아닌 탁본형 이미지입니다."
@@ -2180,14 +2215,15 @@ class SelectionPanel(QWidget):
         layout.setSpacing(10)
         
         # 선택 도구
-        tool_group = QGroupBox("🖱️ 선택 도구")
+        tool_group = QGroupBox("선택 도구")
         tool_group.setStyleSheet("QGroupBox { font-weight: bold; }")
         tool_layout = QVBoxLayout(tool_group)
         
         # 버튼 그룹 (상호 배타적)
         self.tool_button_group = QButtonGroup(self)
         
-        self.btn_click = QPushButton("👆 클릭 선택")
+        self.btn_click = QPushButton("클릭 선택")
+        set_pixel_icon(self.btn_click, "selection")
         self.btn_click.setCheckable(True)
         self.btn_click.setChecked(True)
         self.btn_click.setToolTip("Shift+클릭으로 면 선택")
@@ -2195,7 +2231,8 @@ class SelectionPanel(QWidget):
         self.tool_button_group.addButton(self.btn_click, 0)
         tool_layout.addWidget(self.btn_click)
         
-        self.btn_brush = QPushButton("🖌️ 브러시 선택")
+        self.btn_brush = QPushButton("브러시 선택")
+        set_pixel_icon(self.btn_brush, "selection")
         self.btn_brush.setCheckable(True)
         self.btn_brush.setToolTip("드래그로 여러 면 선택")
         self.btn_brush.clicked.connect(lambda: self.selectionChanged.emit("tool", {"tool": "brush"}))
@@ -2212,7 +2249,8 @@ class SelectionPanel(QWidget):
         brush_layout.addWidget(self.spin_brush)
         tool_layout.addLayout(brush_layout)
         
-        self.btn_lasso = QPushButton("⭕ 올가미 선택")
+        self.btn_lasso = QPushButton("올가미 선택")
+        set_pixel_icon(self.btn_lasso, "outline")
         self.btn_lasso.setCheckable(True)
         self.btn_lasso.setToolTip("자유형 영역으로 선택")
         self.btn_lasso.clicked.connect(lambda: self.selectionChanged.emit("tool", {"tool": "lasso"}))
@@ -2229,11 +2267,12 @@ class SelectionPanel(QWidget):
         layout.addWidget(tool_group)
         
         # 고급 자동 라벨링
-        auto_group = QGroupBox("🤖 고급 표면 라벨링")
+        auto_group = QGroupBox("고급 표면 라벨링")
         auto_group.setStyleSheet("QGroupBox { font-weight: bold; }")
         auto_layout = QVBoxLayout(auto_group)
         
-        btn_auto_surface = QPushButton("📊 외면/내면 자동 라벨링")
+        btn_auto_surface = QPushButton("외면/내면 자동 라벨링")
+        set_pixel_icon(btn_auto_surface, "details")
         btn_auto_surface.setToolTip(
             "외면/내면을 자동 추정해 현재 메쉬에 라벨로 저장합니다.\n"
             "권장 기본 흐름은 아니며, 외면/내면 구분이 꼭 필요할 때만 사용하세요.\n"
@@ -2242,7 +2281,8 @@ class SelectionPanel(QWidget):
         btn_auto_surface.clicked.connect(lambda: self.selectionChanged.emit('auto_surface', None))
         auto_layout.addWidget(btn_auto_surface)
         
-        btn_auto_edge = QPushButton("📏 미구 자동 감지")
+        btn_auto_edge = QPushButton("미구 자동 감지")
+        set_pixel_icon(btn_auto_edge, "measure")
         btn_auto_edge.setToolTip(
             "미구(계단/경계) 영역을 자동으로 찾아 미구로 지정합니다.\n"
             "- 클릭: (가능하면) 원통 기반 미구, 아니면 Y축(기본) 강조 감지\n"
@@ -2256,35 +2296,38 @@ class SelectionPanel(QWidget):
         self.auto_group = auto_group
         
         # 선택 편집
-        edit_group = QGroupBox("✏️ 선택 편집")
+        edit_group = QGroupBox("선택 편집")
         edit_group.setStyleSheet("QGroupBox { font-weight: bold; }")
         edit_layout = QVBoxLayout(edit_group)
         
         btn_row = QHBoxLayout()
-        btn_grow = QPushButton("➕ 확장")
+        btn_grow = QPushButton("확장")
         btn_grow.setToolTip("선택 영역을 인접 면으로 확장")
         btn_grow.clicked.connect(lambda: self.selectionChanged.emit('grow', None))
         btn_row.addWidget(btn_grow)
         
-        btn_shrink = QPushButton("➖ 축소")
+        btn_shrink = QPushButton("축소")
         btn_shrink.setToolTip("선택 영역 가장자리 제거")
         btn_shrink.clicked.connect(lambda: self.selectionChanged.emit('shrink', None))
         btn_row.addWidget(btn_shrink)
         edit_layout.addLayout(btn_row)
         
         btn_row2 = QHBoxLayout()
-        btn_invert = QPushButton("🔄 반전")
+        btn_invert = QPushButton("반전")
+        set_pixel_icon(btn_invert, "reset")
         btn_invert.setToolTip("선택/비선택 반전")
         btn_invert.clicked.connect(lambda: self.selectionChanged.emit('invert', None))
         btn_row2.addWidget(btn_invert)
         
-        btn_clear = QPushButton("🗑️ 해제")
+        btn_clear = QPushButton("해제")
+        set_pixel_icon(btn_clear, "delete")
         btn_clear.setToolTip("모든 선택 해제")
         btn_clear.clicked.connect(lambda: self.selectionChanged.emit('clear', None))
         btn_row2.addWidget(btn_clear)
         edit_layout.addLayout(btn_row2)
 
-        btn_visible = QPushButton("👁️ 현재 시점 가시면")
+        btn_visible = QPushButton("현재 시점 가시면")
+        set_pixel_icon(btn_visible, "visible")
         btn_visible.setToolTip(
             "현재 카메라에서 실제로 보이는 면만 선택 영역으로 가져옵니다.\n"
             "클릭=교체, Shift/Ctrl=추가, Alt=제거"
@@ -2320,21 +2363,21 @@ class SelectionPanel(QWidget):
         layout.addWidget(edit_group)
         
         # 선택 영역 지정
-        assign_group = QGroupBox("🏷️ 영역 지정")
+        assign_group = QGroupBox("영역 지정")
         assign_group.setStyleSheet("QGroupBox { font-weight: bold; }")
         assign_layout = QVBoxLayout(assign_group)
         
-        btn_outer = QPushButton("🌞 선택 → 외면")
+        btn_outer = QPushButton("선택 → 외면")
         btn_outer.setStyleSheet("background-color: #ebf8ff; color: #2b6cb0;")
         btn_outer.clicked.connect(lambda: self.selectionChanged.emit('assign_outer', None))
         assign_layout.addWidget(btn_outer)
         
-        btn_inner = QPushButton("🌙 선택 → 내면")
+        btn_inner = QPushButton("선택 → 내면")
         btn_inner.setStyleSheet("background-color: #faf5ff; color: #6b46c1;")
         btn_inner.clicked.connect(lambda: self.selectionChanged.emit('assign_inner', None))
         assign_layout.addWidget(btn_inner)
         
-        btn_migu = QPushButton("📐 선택 → 미구")
+        btn_migu = QPushButton("선택 → 미구")
         btn_migu.setStyleSheet("background-color: #fffaf0; color: #c05621;")
         btn_migu.clicked.connect(lambda: self.selectionChanged.emit('assign_migu', None))
         assign_layout.addWidget(btn_migu)
@@ -2411,7 +2454,7 @@ class TileInterpretationPanel(QWidget):
         essential_note.setStyleSheet("font-size: 11px; color: #4a5568;")
         layout.addWidget(essential_note)
 
-        hypo_group = QGroupBox("🏺 제작 가설")
+        hypo_group = QGroupBox("제작 가설")
         hypo_group.setStyleSheet("QGroupBox { font-weight: bold; }")
         hypo_layout = QFormLayout(hypo_group)
 
@@ -2435,7 +2478,7 @@ class TileInterpretationPanel(QWidget):
 
         layout.addWidget(hypo_group)
 
-        axis_group = QGroupBox("📏 길이축 힌트")
+        axis_group = QGroupBox("길이축 힌트")
         axis_group.setStyleSheet("QGroupBox { font-weight: bold; }")
         axis_layout = QVBoxLayout(axis_group)
 
@@ -2465,7 +2508,7 @@ class TileInterpretationPanel(QWidget):
         axis_btn_row.addWidget(btn_axis_selected)
         axis_detail_layout.addLayout(axis_btn_row)
 
-        btn_axis_clear = QPushButton("🗑️ 길이축 힌트 초기화")
+        btn_axis_clear = QPushButton("길이축 힌트 초기화")
         btn_axis_clear.clicked.connect(lambda: self.interpretationChanged.emit("clear_axis", None))
         axis_detail_layout.addWidget(btn_axis_clear)
         axis_layout.addWidget(axis_detail_widget)
@@ -2473,7 +2516,7 @@ class TileInterpretationPanel(QWidget):
 
         layout.addWidget(axis_group)
 
-        section_group = QGroupBox("🧭 대표 단면 후보")
+        section_group = QGroupBox("대표 단면 후보")
         section_group.setStyleSheet("QGroupBox { font-weight: bold; }")
         section_layout = QVBoxLayout(section_group)
 
@@ -2530,7 +2573,7 @@ class TileInterpretationPanel(QWidget):
         accept_row.addWidget(btn_section_accept_middle)
         section_detail_layout.addLayout(accept_row)
 
-        btn_section_clear = QPushButton("🗑️ 단면 후보 초기화")
+        btn_section_clear = QPushButton("단면 후보 초기화")
         btn_section_clear.clicked.connect(lambda: self.interpretationChanged.emit("clear_sections", None))
         section_detail_layout.addWidget(btn_section_clear)
         section_layout.addWidget(section_detail_widget)
@@ -2538,7 +2581,7 @@ class TileInterpretationPanel(QWidget):
 
         layout.addWidget(section_group)
 
-        fit_group = QGroupBox("🪵 와통 초벌 피팅")
+        fit_group = QGroupBox("와통 초벌 피팅")
         fit_group.setStyleSheet("QGroupBox { font-weight: bold; }")
         fit_layout = QVBoxLayout(fit_group)
 
@@ -2566,7 +2609,7 @@ class TileInterpretationPanel(QWidget):
         )
         fit_detail_layout.addWidget(btn_fit_mesh)
 
-        btn_fit_clear = QPushButton("🗑️ 피팅 결과 초기화")
+        btn_fit_clear = QPushButton("피팅 결과 초기화")
         btn_fit_clear.clicked.connect(lambda: self.interpretationChanged.emit("clear_mandrel_fit", None))
         fit_detail_layout.addWidget(btn_fit_clear)
         fit_layout.addWidget(fit_detail_widget)
@@ -2582,7 +2625,7 @@ class TileInterpretationPanel(QWidget):
         self.btn_toggle_interpret_detail_tools.toggled.connect(self._set_interpret_detail_tools_visible)
         layout.addWidget(self.btn_toggle_interpret_detail_tools)
 
-        record_group = QGroupBox("🧾 탁본 기록면 보조")
+        record_group = QGroupBox("탁본 기록면 보조")
         record_group.setStyleSheet("QGroupBox { font-weight: bold; }")
         record_layout = QVBoxLayout(record_group)
 
@@ -2605,7 +2648,7 @@ class TileInterpretationPanel(QWidget):
         )
         record_layout.addWidget(btn_record_bottom)
 
-        btn_record_clear = QPushButton("🗑️ 기록면 준비 해제")
+        btn_record_clear = QPushButton("기록면 준비 해제")
         btn_record_clear.clicked.connect(lambda: self.interpretationChanged.emit("clear_record_surface", None))
         record_layout.addWidget(btn_record_clear)
 
@@ -2619,7 +2662,7 @@ class TileInterpretationPanel(QWidget):
         layout.addWidget(record_group)
         self.record_group = record_group
 
-        slot_group = QGroupBox("💾 작업 슬롯")
+        slot_group = QGroupBox("작업 슬롯")
         slot_group.setStyleSheet("QGroupBox { font-weight: bold; }")
         slot_layout = QVBoxLayout(slot_group)
 
@@ -2662,12 +2705,12 @@ class TileInterpretationPanel(QWidget):
             self._slot_load_buttons[slot_index] = btn_load_slot
             self._slot_info_labels[slot_index] = info_label
 
-        btn_clear_slots = QPushButton("🗑️ 작업 슬롯 모두 비우기")
+        btn_clear_slots = QPushButton("작업 슬롯 모두 비우기")
         btn_clear_slots.clicked.connect(lambda: self.interpretationChanged.emit("clear_slots", None))
         slot_layout.addWidget(btn_clear_slots)
         self.btn_clear_slots = btn_clear_slots
 
-        btn_export_slots = QPushButton("📦 저장 슬롯 검토 시트 묶음 저장")
+        btn_export_slots = QPushButton("저장 슬롯 검토 시트 묶음 저장")
         btn_export_slots.setToolTip("저장된 슬롯별로 기록면 검토 시트를 한 번에 생성합니다.")
         btn_export_slots.clicked.connect(
             lambda: self.interpretationChanged.emit("export_saved_slots_review", None)
@@ -2678,7 +2721,7 @@ class TileInterpretationPanel(QWidget):
         layout.addWidget(slot_group)
         self.slot_group = slot_group
 
-        wizard_group = QGroupBox("🪄 기와 실측 위저드")
+        wizard_group = QGroupBox("기와 실측 위저드")
         wizard_group.setStyleSheet("QGroupBox { font-weight: bold; }")
         wizard_layout = QVBoxLayout(wizard_group)
 
@@ -2703,7 +2746,7 @@ class TileInterpretationPanel(QWidget):
         layout.addWidget(wizard_group)
         self.wizard_group = wizard_group
 
-        synth_group = QGroupBox("🧪 합성 데이터 / 정답 평가")
+        synth_group = QGroupBox("합성 데이터 / 정답 평가")
         synth_group.setStyleSheet("QGroupBox { font-weight: bold; }")
         synth_layout = QVBoxLayout(synth_group)
 
@@ -3055,7 +3098,7 @@ class PropertiesPanel(QWidget):
         layout.setContentsMargins(5, 5, 5, 5)
         
         # 파일 정보
-        file_group = QGroupBox("📁 파일 정보")
+        file_group = QGroupBox("파일 정보")
         file_group.setStyleSheet("QGroupBox { font-weight: bold; }")
         file_layout = QFormLayout(file_group)
         
@@ -3066,7 +3109,7 @@ class PropertiesPanel(QWidget):
         layout.addWidget(file_group)
         
         # 메쉬 정보
-        mesh_group = QGroupBox("🔷 메쉬 정보")
+        mesh_group = QGroupBox("메쉬 정보")
         mesh_group.setStyleSheet("QGroupBox { font-weight: bold; }")
         mesh_layout = QFormLayout(mesh_group)
         
@@ -3085,7 +3128,7 @@ class PropertiesPanel(QWidget):
         layout.addWidget(mesh_group)
         
         # 영역 정보
-        region_group = QGroupBox("🗂️ 영역 정보")
+        region_group = QGroupBox("영역 정보")
         region_group.setStyleSheet("QGroupBox { font-weight: bold; }")
         region_layout = QFormLayout(region_group)
         
@@ -3198,7 +3241,7 @@ class SlicingPanel(QWidget):
         layout = QVBoxLayout(self)
         
         # 1. 활성화 스위치
-        self.group = QGroupBox("📏 메쉬 단면 슬라이싱")
+        self.group = QGroupBox("메쉬 단면 슬라이싱")
         self.group.setCheckable(True)
         self.group.setChecked(False)
         self.group.toggled.connect(self.on_toggled)
@@ -3232,7 +3275,8 @@ class SlicingPanel(QWidget):
         self.combo_presets.setToolTip("저장한 단면(클립) 높이 프리셋을 불러옵니다.")
         preset_layout.addWidget(self.combo_presets, 1)
 
-        self.btn_preset_add = QPushButton("➕ 저장")
+        self.btn_preset_add = QPushButton("저장")
+        set_pixel_icon(self.btn_preset_add, "save")
         self.btn_preset_add.setToolTip("현재 높이(Z)를 프리셋으로 저장합니다.")
         self.btn_preset_add.clicked.connect(self._on_preset_add_clicked)
         preset_layout.addWidget(self.btn_preset_add)
@@ -3243,6 +3287,7 @@ class SlicingPanel(QWidget):
         preset_layout.addWidget(self.btn_preset_apply)
 
         self.btn_preset_delete = QPushButton("삭제")
+        set_pixel_icon(self.btn_preset_delete, "delete")
         self.btn_preset_delete.setToolTip("선택한 프리셋을 삭제합니다.")
         self.btn_preset_delete.clicked.connect(self._on_preset_delete_clicked)
         preset_layout.addWidget(self.btn_preset_delete)
@@ -3252,18 +3297,21 @@ class SlicingPanel(QWidget):
         
         # 3. 버튼들
         btn_layout = QHBoxLayout()
-        self.btn_export = QPushButton("💾 단면 SVG 내보내기")
+        self.btn_export = QPushButton("단면 SVG 내보내기")
+        set_pixel_icon(self.btn_export, "export")
         self.btn_export.setStyleSheet("background-color: #ebf8ff; font-weight: bold;")
         self.btn_export.clicked.connect(self.on_export_clicked)
         btn_layout.addWidget(self.btn_export)
 
-        self.btn_capture = QPushButton("📸 현재 단면 촬영")
+        self.btn_capture = QPushButton("현재 단면 촬영")
+        set_pixel_icon(self.btn_capture, "camera")
         self.btn_capture.setStyleSheet("background-color: #fff7ed; font-weight: bold;")
         self.btn_capture.setToolTip("현재 보이는 메쉬 단면을 레이어로 바로 저장합니다.")
         self.btn_capture.clicked.connect(self.on_capture_clicked)
         btn_layout.addWidget(self.btn_capture)
 
-        self.btn_save_layers = QPushButton("🗂️ 레이어로 저장")
+        self.btn_save_layers = QPushButton("레이어로 저장")
+        set_pixel_icon(self.btn_save_layers, "save")
         self.btn_save_layers.setToolTip("현재 단면 결과(슬라이스/가이드/ROI)를 레이어로 스냅샷 저장합니다.")
         self.btn_save_layers.clicked.connect(self.saveLayersRequested.emit)
         btn_layout.addWidget(self.btn_save_layers)
@@ -3441,7 +3489,7 @@ class ExportPanel(QWidget):
         intro.setStyleSheet("font-size: 11px; color: #4a5568;")
         layout.addWidget(intro)
 
-        img_group = QGroupBox("🧾 기본 출력 설정")
+        img_group = QGroupBox("기본 출력 설정")
         img_group.setStyleSheet("QGroupBox { font-weight: bold; }")
         img_layout = QFormLayout(img_group)
 
@@ -3473,7 +3521,7 @@ class ExportPanel(QWidget):
         img_layout.addRow("기록면 렌더:", self.combo_review_render_mode)
 
         self.combo_rubbing_target = QComboBox()
-        self.combo_rubbing_target.addItems(["전체 메쉬", "✨ 현재 선택"])
+        self.combo_rubbing_target.addItems(["전체 메쉬", "현재 선택"])
         self.combo_rubbing_target.setToolTip(
             "기본 도면 생성에서 사용할 대상을 고릅니다.\n"
             "기본 흐름은 '현재 선택' 또는 기와 모드의 상면/하면 기록 준비 결과를 사용하는 것입니다."
@@ -3482,7 +3530,8 @@ class ExportPanel(QWidget):
 
         layout.addWidget(img_group)
 
-        btn_export_review_sheet = QPushButton("📤 기록면 검토 시트 저장")
+        btn_export_review_sheet = QPushButton("기록면 검토 시트 저장")
+        set_pixel_icon(btn_export_review_sheet, "export")
         btn_export_review_sheet.setToolTip(
             "연속 탁본형 기록면 + 외곽 확인 이미지를 한 장의 검토 시트로 저장합니다.\n"
             "미리보기와 같은 철학의 출력물을 파일로 남길 때 사용합니다."
@@ -3505,6 +3554,7 @@ class ExportPanel(QWidget):
         layout.addWidget(btn_export_review_sheet)
 
         btn_export_flat_svg = QPushButton("기록면 전개 SVG 저장")
+        set_pixel_icon(btn_export_flat_svg, "export")
         btn_export_flat_svg.setToolTip(
             "전개 결과의 외곽선을 실측 SVG로 저장합니다.\n"
             "기본 출력은 연속 표면의 외곽선만 포함하며, 와이어프레임은 넣지 않습니다."
@@ -3514,7 +3564,7 @@ class ExportPanel(QWidget):
         )
         layout.addWidget(btn_export_flat_svg)
 
-        profile_group = QGroupBox("📦 6방향 도면 패키지")
+        profile_group = QGroupBox("6방향 도면 패키지")
         profile_group.setStyleSheet("QGroupBox { font-weight: bold; color: #2b6cb0; }")
         profile_layout = QVBoxLayout(profile_group)
 
@@ -3533,7 +3583,7 @@ class ExportPanel(QWidget):
         profile_layout.addLayout(opt_row)
 
         feature_row = QHBoxLayout()
-        self.check_profile_feature_lines = QCheckBox("✨ 샤프 엣지(능선) 라인 포함")
+        self.check_profile_feature_lines = QCheckBox("샤프 엣지(능선) 라인 포함")
         self.check_profile_feature_lines.setChecked(False)
         self.check_profile_feature_lines.hide()
         feature_row.addWidget(self.check_profile_feature_lines, 1)
@@ -3552,7 +3602,8 @@ class ExportPanel(QWidget):
         feature_row.addWidget(self.spin_profile_feature_angle)
         profile_layout.addLayout(feature_row)
 
-        btn_export_pkg = QPushButton("📦 6방향 패키지 내보내기")
+        btn_export_pkg = QPushButton("6방향 패키지 내보내기")
+        set_pixel_icon(btn_export_pkg, "export")
         btn_export_pkg.setToolTip("Top/Bottom/Front/Back/Left/Right를 한 폴더에 '뷰별 하위 폴더'로 저장합니다")
         btn_export_pkg.clicked.connect(lambda: self.exportRequested.emit({"type": "profile_2d_package"}))
         profile_layout.addWidget(btn_export_pkg)
@@ -3625,7 +3676,8 @@ class MeasurePanel(QWidget):
         hint.setWordWrap(True)
         layout.addWidget(hint)
 
-        self.btn_measure_mode = QPushButton("📏 측정 모드 시작")
+        self.btn_measure_mode = QPushButton("측정 모드 시작")
+        set_pixel_icon(self.btn_measure_mode, "measure")
         self.btn_measure_mode.setCheckable(True)
         self.btn_measure_mode.setStyleSheet(
             "QPushButton:checked { background-color: #38a169; color: white; font-weight: bold; }"
@@ -3646,19 +3698,22 @@ class MeasurePanel(QWidget):
         mode_layout.addRow("", self.label_point_count)
 
         btn_row = QHBoxLayout()
-        self.btn_fit_circle = QPushButton("⭕ 지름 계산")
+        self.btn_fit_circle = QPushButton("지름 계산")
+        set_pixel_icon(self.btn_fit_circle, "measure")
         self.btn_fit_circle.setToolTip("선택된 포인트(3점 이상)로 원을 맞추고 지름을 계산합니다.")
         self.btn_fit_circle.clicked.connect(self.fitCircleRequested.emit)
         self.btn_fit_circle.setEnabled(False)
         btn_row.addWidget(self.btn_fit_circle)
 
-        self.btn_clear_points = QPushButton("🧹 포인트 초기화")
+        self.btn_clear_points = QPushButton("포인트 초기화")
+        set_pixel_icon(self.btn_clear_points, "reset")
         self.btn_clear_points.clicked.connect(self.clearPointsRequested.emit)
         btn_row.addWidget(self.btn_clear_points)
         btn_row.addStretch(1)
         mode_layout.addRow(btn_row)
 
-        self.btn_compute_volume = QPushButton("📦 부피/면적 계산")
+        self.btn_compute_volume = QPushButton("부피/면적 계산")
+        set_pixel_icon(self.btn_compute_volume, "measure")
         self.btn_compute_volume.setToolTip("선택된 메쉬의 표면적/부피를 계산합니다. (부피는 watertight 메쉬에서만 신뢰)")
         self.btn_compute_volume.clicked.connect(self.computeVolumeRequested.emit)
         mode_layout.addRow(self.btn_compute_volume)
@@ -3676,11 +3731,13 @@ class MeasurePanel(QWidget):
         result_layout.addWidget(self.text_results)
 
         result_btn_row = QHBoxLayout()
-        self.btn_copy = QPushButton("📋 복사")
+        self.btn_copy = QPushButton("복사")
+        set_pixel_icon(self.btn_copy, "copy")
         self.btn_copy.clicked.connect(self.copyResultsRequested.emit)
         result_btn_row.addWidget(self.btn_copy)
 
-        self.btn_clear_results = QPushButton("🗑️ 지우기")
+        self.btn_clear_results = QPushButton("지우기")
+        set_pixel_icon(self.btn_clear_results, "delete")
         self.btn_clear_results.clicked.connect(self.clearResultsRequested.emit)
         result_btn_row.addWidget(self.btn_clear_results)
 
@@ -3734,13 +3791,13 @@ class MeasurePanel(QWidget):
             except Exception:
                 pass
         try:
-            self.btn_measure_mode.setText("📏 측정 모드 중지" if checked else "📏 측정 모드 시작")
+            self.btn_measure_mode.setText("측정 모드 중지" if checked else "측정 모드 시작")
         except Exception:
             pass
 
     def _on_measure_toggled(self, checked: bool):
         try:
-            self.btn_measure_mode.setText("📏 측정 모드 중지" if checked else "📏 측정 모드 시작")
+            self.btn_measure_mode.setText("측정 모드 중지" if checked else "측정 모드 시작")
         except Exception:
             pass
         self.measureModeToggled.emit(bool(checked))
@@ -3781,7 +3838,8 @@ class SectionPanel(QWidget):
         layout = QVBoxLayout(self)
         
         # 1. 활성화 버튼
-        self.btn_toggle = QPushButton("🎯 십자선 단면 모드 시작")
+        self.btn_toggle = QPushButton("십자선 단면 모드 시작")
+        set_pixel_icon(self.btn_toggle, "cutline")
         self.btn_toggle.setCheckable(True)
         self.btn_toggle.setStyleSheet("""
             QPushButton:checked {
@@ -3849,6 +3907,7 @@ class SectionPanel(QWidget):
         native_form.addRow("평면 위치", self.spin_native_cutline_offset)
         native_layout.addLayout(native_form)
         self.btn_native_cutline = QPushButton("단면 계산 · 기록")
+        set_pixel_icon(self.btn_native_cutline, "cutline")
         self.btn_native_cutline.setToolTip(
             "원본에서 canonical-mm 단면을 다시 계산하고 recipe·QC와 함께 기록합니다."
         )
@@ -3881,6 +3940,7 @@ class SectionPanel(QWidget):
         native_outline_form.addRow("외곽 정밀도", self.spin_native_outline_grid)
         native_layout.addLayout(native_outline_form)
         self.btn_native_outline = QPushButton("외곽 계산 · 기록")
+        set_pixel_icon(self.btn_native_outline, "outline")
         self.btn_native_outline.setToolTip(
             "전체 삼각형을 canonical-mm 평면에 투영하고 오목부·구멍·분리 성분을 "
             "보존한 Outline record를 만듭니다."
@@ -3888,6 +3948,7 @@ class SectionPanel(QWidget):
         self.btn_native_outline.clicked.connect(self.nativeOutlineRequested.emit)
         native_layout.addWidget(self.btn_native_outline)
         self.btn_native_measurement_retry = QPushButton("보류 결과 게시 재시도")
+        set_pixel_icon(self.btn_native_measurement_retry, "reset")
         self.btn_native_measurement_retry.setEnabled(False)
         self.btn_native_measurement_retry.setToolTip(
             "Open 또는 scene 전환 때문에 계산 완료 결과를 아직 게시하지 못한 경우, "
@@ -3912,6 +3973,7 @@ class SectionPanel(QWidget):
         )
         native_layout.addWidget(self.combo_native_vector_record)
         self.btn_native_vector_export = QPushButton("선택한 검증 벡터 1:1 SVG 내보내기")
+        set_pixel_icon(self.btn_native_vector_export, "export")
         self.btn_native_vector_export.clicked.connect(self.nativeVectorExportRequested.emit)
         native_layout.addWidget(self.btn_native_vector_export)
 
@@ -3991,6 +4053,7 @@ class SectionPanel(QWidget):
         native_layout.addLayout(native_rubbing_form)
 
         self.btn_native_rubbing = QPushButton("탁본 계산 · 기록")
+        set_pixel_icon(self.btn_native_rubbing, "rubbing")
         self.btn_native_rubbing.setToolTip(
             "현재 source·단위·Align에서 CPU로 다시 계산하고 recipe·QC·raster receipt를 기록합니다."
         )
@@ -4013,6 +4076,7 @@ class SectionPanel(QWidget):
         self.btn_native_rubbing_export = QPushButton(
             "선택한 검증 탁본 1:1 PNG 패키지 내보내기"
         )
+        set_pixel_icon(self.btn_native_rubbing_export, "export")
         self.btn_native_rubbing_export.clicked.connect(
             self.nativeRubbingExportRequested.emit
         )
@@ -4047,11 +4111,12 @@ class SectionPanel(QWidget):
         layout.addWidget(native_group)
 
         # 4. 2D 단면선(2개) - 상면에서 가로/세로(꺾임 가능) 가이드 라인
-        line_group = QGroupBox("✏️ 2D 단면선 지정 (상면, 2개)")
+        line_group = QGroupBox("2D 단면선 지정 (상면, 2개)")
         self.legacy_line_group = line_group
         line_layout = QVBoxLayout(line_group)
 
-        self.btn_line = QPushButton("✏️ 단면선 그리기 시작")
+        self.btn_line = QPushButton("단면선 그리기 시작")
+        set_pixel_icon(self.btn_line, "cutline")
         self.btn_line.setCheckable(True)
         self.btn_line.setStyleSheet(
             "QPushButton:checked { background-color: #ed8936; "
@@ -4067,13 +4132,15 @@ class SectionPanel(QWidget):
         self.combo_cutline.currentIndexChanged.connect(self.cutLineActiveChanged.emit)
         sel_row.addWidget(self.combo_cutline, 1)
 
-        self.btn_cutline_clear = QPushButton("🧹 현재 선 지우기")
+        self.btn_cutline_clear = QPushButton("현재 선 지우기")
+        set_pixel_icon(self.btn_cutline_clear, "delete")
         self.btn_cutline_clear.clicked.connect(
             lambda: self.cutLineClearRequested.emit(int(self.combo_cutline.currentIndex()))
         )
         sel_row.addWidget(self.btn_cutline_clear)
 
-        self.btn_cutline_clear_all = QPushButton("🧹 모두 지우기")
+        self.btn_cutline_clear_all = QPushButton("모두 지우기")
+        set_pixel_icon(self.btn_cutline_clear_all, "delete")
         self.btn_cutline_clear_all.clicked.connect(self.cutLinesClearAllRequested.emit)
         sel_row.addWidget(self.btn_cutline_clear_all)
         line_layout.addLayout(sel_row)
@@ -4090,6 +4157,7 @@ class SectionPanel(QWidget):
         line_layout.addWidget(line_help)
 
         self.btn_save_section_layers = QPushButton("단면을 레이어로 저장")
+        set_pixel_icon(self.btn_save_section_layers, "save")
         self.btn_save_section_layers.setToolTip("현재 단면선/단면 결과를 레이어로 스냅샷 저장합니다.")
         self.btn_save_section_layers.clicked.connect(self.saveSectionLayersRequested.emit)
         line_layout.addWidget(self.btn_save_section_layers)
@@ -4102,17 +4170,19 @@ class SectionPanel(QWidget):
         layout.addWidget(line2)
         
         # 5. 2D ROI 영역 지정 (상면 투영)
-        roi_group = QGroupBox("✂️ 2D 영역 지정 (상면 Cropping)")
+        roi_group = QGroupBox("2D 영역 지정 (상면 Cropping)")
         self.legacy_roi_group = roi_group
         roi_layout = QVBoxLayout(roi_group)
         
-        self.btn_roi = QPushButton("📐 영역 지정 모드 시작")
+        self.btn_roi = QPushButton("영역 지정 모드 시작")
+        set_pixel_icon(self.btn_roi, "selection")
         self.btn_roi.setCheckable(True)
         self.btn_roi.setStyleSheet("QPushButton:checked { background-color: #4299e1; color: white; }")
         self.btn_roi.toggled.connect(self.on_roi_toggled)
         roi_layout.addWidget(self.btn_roi)
         
-        self.btn_silhouette = QPushButton("✅ 영역 확정 및 외곽 추출")
+        self.btn_silhouette = QPushButton("영역 확정 및 외곽 추출")
+        set_pixel_icon(self.btn_silhouette, "outline")
         self.btn_silhouette.setEnabled(False)
         self.btn_silhouette.clicked.connect(self.silhouetteRequested.emit)
         roi_layout.addWidget(self.btn_silhouette)
@@ -4165,24 +4235,24 @@ class SectionPanel(QWidget):
 
     def on_btn_toggled(self, checked):
         if checked:
-            self.btn_toggle.setText("🎯 십자선 단면 모드 중지")
+            self.btn_toggle.setText("십자선 단면 모드 중지")
         else:
-            self.btn_toggle.setText("🎯 십자선 단면 모드 시작")
+            self.btn_toggle.setText("십자선 단면 모드 시작")
         self.crosshairToggled.emit(checked)
 
     def on_line_toggled(self, checked):
         if checked:
-            self.btn_line.setText("✏️ 단면선 그리기 중지")
+            self.btn_line.setText("단면선 그리기 중지")
         else:
-            self.btn_line.setText("✏️ 단면선 그리기 시작")
+            self.btn_line.setText("단면선 그리기 시작")
         self.lineSectionToggled.emit(checked)
         
     def on_roi_toggled(self, checked):
         if checked:
-            self.btn_roi.setText("📐 영역 지정 모드 중지")
+            self.btn_roi.setText("영역 지정 모드 중지")
             self.btn_silhouette.setEnabled(True)
         else:
-            self.btn_roi.setText("📐 영역 지정 모드 시작")
+            self.btn_roi.setText("영역 지정 모드 시작")
             self.btn_silhouette.setEnabled(False)
         self.roiToggled.emit(checked)
         
@@ -4347,7 +4417,7 @@ class MainWindow(QMainWindow):
         # 도움말 위젯 (오버레이처럼 작동하도록 뷰포트 위에 띄우거나 하단에 배치 가능)
         # 일단은 뷰포트 하단에 고정
         self.help_widget = HelpWidget()
-        self.help_dock = QDockWidget("❓ 도움말", self)
+        self.help_dock = QDockWidget("도움말", self)
         self.help_dock.setObjectName("dock_help")
         self.help_dock.setWidget(self.help_widget)
         try:
@@ -4361,7 +4431,7 @@ class MainWindow(QMainWindow):
             self._help_dock_last_floating = True
         self.action_toggle_help_panel = self.help_dock.toggleViewAction()
         if self.action_toggle_help_panel is None:
-            self.action_toggle_help_panel = QAction("❓ 도움말", self)
+            self.action_toggle_help_panel = QAction("도움말", self)
             self.action_toggle_help_panel.setCheckable(True)
             self.action_toggle_help_panel.toggled.connect(self._on_help_panel_toggled)
             try:
@@ -4369,12 +4439,13 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         else:
-            self.action_toggle_help_panel.setText("❓ 도움말")
+            self.action_toggle_help_panel.setText("도움말")
             self.action_toggle_help_panel.setToolTip("도움말 창 표시/숨김")
             try:
                 self.action_toggle_help_panel.toggled.connect(self._on_help_panel_toggled)
             except Exception:
                 pass
+        set_pixel_icon(self.action_toggle_help_panel, "help")
 
         # 도킹 위젯 설정
         self.setDockOptions(
@@ -4385,13 +4456,13 @@ class MainWindow(QMainWindow):
         self.setDockNestingEnabled(True)
 
         # 1) 상단 정보(파일/메쉬)
-        self.info_dock = QDockWidget("📄 파일/메쉬 정보", self)
+        self.info_dock = QDockWidget("파일/메쉬 정보", self)
         self.info_dock.setObjectName("dock_info")
         self.props_panel = InfoBarWidget()
         self.info_dock.setWidget(self.props_panel)
 
         # 1.5) 기본 작업 흐름
-        self.workflow_dock = QDockWidget("🧭 4축 작업 흐름", self)
+        self.workflow_dock = QDockWidget("4축 작업 흐름", self)
         self.workflow_dock.setObjectName("dock_workflow")
         self.workflow_panel = WorkflowPanel(self.help_widget)
         self.workflow_panel.workflowRequested.connect(self.on_workflow_action)
@@ -4522,7 +4593,7 @@ class MainWindow(QMainWindow):
         self.section_dock.setWidget(section_scroll)
 
         # 7) 레이어
-        self.scene_dock = QDockWidget("🌲 레이어", self)
+        self.scene_dock = QDockWidget("레이어", self)
         self.scene_dock.setObjectName("dock_scene")
         self.scene_panel = ScenePanel()
         self.scene_panel.selectionChanged.connect(self.viewport.select_object)
@@ -4867,7 +4938,7 @@ class MainWindow(QMainWindow):
         )
         try:
             self.viewport.status_info = message
-            self.status_info.setText(f"⛔ {action_name} 차단 | 원본 projection 유지")
+            self.status_info.setText(f"{action_name} 차단 | 원본 projection 유지")
             self.viewport.update()
         except Exception:
             pass
@@ -4980,7 +5051,7 @@ class MainWindow(QMainWindow):
             pass
         self.viewport.picking_mode = 'floor_brush'
         self.viewport.brush_selected_faces.clear()
-        self.viewport.status_info = "🖌️ 바닥이 될 영역을 마우스 왼쪽 버튼으로 드래그하듯이 그리세요..."
+        self.viewport.status_info = "바닥이 될 영역을 마우스 왼쪽 버튼으로 드래그하듯이 그리세요..."
         self.viewport.update()
 
     def on_align_to_brush_selected(self):
@@ -5129,10 +5200,10 @@ class MainWindow(QMainWindow):
         self.viewport.picking_mode = 'none'
         if np.isfinite(z_residual):
             self.viewport.status_info = (
-                f"✅ 브러시 바닥 정렬 완료 ({count}개 면 / 선택점 Z잔차 ±{z_residual:.4f})"
+                f"브러시 바닥 정렬 완료 ({count}개 면 / 선택점 Z잔차 ±{z_residual:.4f})"
             )
         else:
-            self.viewport.status_info = f"✅ 브러시 바닥 정렬 완료 ({count}개 면)"
+            self.viewport.status_info = f"브러시 바닥 정렬 완료 ({count}개 면)"
         self.viewport.update()
         self.viewport.meshTransformChanged.emit()
 
@@ -5242,7 +5313,7 @@ class MainWindow(QMainWindow):
         if len(vertices) != 3:
             return
         self.viewport.floor_picks = [v.copy() for v in vertices]
-        self.viewport.status_info = "✅ 면 선택됨. Enter를 누르면 정렬됩니다."
+        self.viewport.status_info = "면 선택됨. Enter를 누르면 정렬됩니다."
         self.viewport.update()
 
     def on_floor_point_picked(self, point):
@@ -5261,9 +5332,9 @@ class MainWindow(QMainWindow):
         count = len(self.viewport.floor_picks)
         
         if count < 3:
-            self.viewport.status_info = f"📍 바닥면 점 찍기 (현재 {count}개 선택됨, 더 찍어주세요)..."
+            self.viewport.status_info = f"바닥면 점 찍기 (현재 {count}개 선택됨, 더 찍어주세요)..."
         else:
-            self.viewport.status_info = f"✅ 점 {count}개 선택됨. 계속 추가하거나 Enter로 확정하세요."
+            self.viewport.status_info = f"점 {count}개 선택됨. 계속 추가하거나 Enter로 확정하세요."
         
         self.viewport.update()
 
@@ -5278,7 +5349,7 @@ class MainWindow(QMainWindow):
         points = np.asarray(self.viewport.floor_picks, dtype=np.float64).reshape(-1, 3)
         points = points[np.all(np.isfinite(points), axis=1)]
         if len(points) < 3:
-            self.viewport.status_info = "❌ 점이 부족합니다. 더 찍어주세요."
+            self.viewport.status_info = "점이 부족합니다. 더 찍어주세요."
             self.viewport.update()
             return
             
@@ -5288,7 +5359,7 @@ class MainWindow(QMainWindow):
         # 2) 선택한 점 전체를 반영한 least-squares 평면을 추정한다.
         plane = fit_plane_normal(points, robust=False)
         if plane is None:
-            self.viewport.status_info = "❌ 선택 점이 거의 일직선입니다. 점을 다시 찍어주세요."
+            self.viewport.status_info = "선택 점이 거의 일직선입니다. 점을 다시 찍어주세요."
             self.viewport.update()
             return
         normal, centroid = plane
@@ -5364,10 +5435,10 @@ class MainWindow(QMainWindow):
         self.sync_transform_panel()
         if np.isfinite(z_residual):
             self.viewport.status_info = (
-                f"✅ 바닥 정렬 완료 (점 {len(points)}개 / 선택점 Z잔차 ±{z_residual:.4f})"
+                f"바닥 정렬 완료 (점 {len(points)}개 / 선택점 Z잔차 ±{z_residual:.4f})"
             )
         else:
-            self.viewport.status_info = f"✅ 바닥 정렬 완료 (점 {len(points)}개 기반)"
+            self.viewport.status_info = f"바닥 정렬 완료 (점 {len(points)}개 기반)"
         self.viewport.update()
         
         self.viewport.floor_picks = []
@@ -5383,7 +5454,7 @@ class MainWindow(QMainWindow):
                 del obj.fitted_arcs[arc_idx]
                 self.scene_panel.update_list(self.viewport.objects, self.viewport.selected_index)
                 self.viewport.update()
-                self.status_info.setText(f"🗑️ 원호 #{arc_idx+1} 삭제됨")
+                self.status_info.setText(f"원호 #{arc_idx+1} 삭제됨")
     
     def on_layer_visibility_changed(self, obj_idx: int, layer_idx: int, visible: bool):
         try:
@@ -5436,24 +5507,28 @@ class MainWindow(QMainWindow):
         if file_menu is None:
             return
         
-        action_open = QAction("📂 열기(&O)", self)
+        action_open = QAction("열기(&O)", self)
+        set_pixel_icon(action_open, "open_mesh")
         action_open.setShortcut(QKeySequence.StandardKey.Open)
         action_open.triggered.connect(self.open_file)
         file_menu.addAction(action_open)
 
-        action_open_project = QAction("📁 프로젝트 열기…", self)
+        action_open_project = QAction("프로젝트 열기…", self)
+        set_pixel_icon(action_open_project, "open_project")
         action_open_project.setShortcut(QKeySequence("Ctrl+Shift+O"))
         action_open_project.triggered.connect(self.open_project)
         file_menu.addAction(action_open_project)
 
         file_menu.addSeparator()
 
-        action_save_project = QAction("💾 프로젝트 저장", self)
+        action_save_project = QAction("프로젝트 저장", self)
+        set_pixel_icon(action_save_project, "save")
         action_save_project.setShortcut(QKeySequence.StandardKey.Save)
         action_save_project.triggered.connect(self.save_project)
         file_menu.addAction(action_save_project)
 
-        action_save_project_as = QAction("💾 프로젝트 다른 이름 저장…", self)
+        action_save_project_as = QAction("프로젝트 다른 이름 저장…", self)
+        set_pixel_icon(action_save_project_as, "save")
         action_save_project_as.setShortcut(QKeySequence.StandardKey.SaveAs)
         action_save_project_as.triggered.connect(self.save_project_as)
         file_menu.addAction(action_save_project_as)
@@ -5470,12 +5545,14 @@ class MainWindow(QMainWindow):
         if view_menu is None:
             return
         
-        action_reset_view = QAction("🔄 뷰 초기화(&R)", self)
+        action_reset_view = QAction("뷰 초기화(&R)", self)
+        set_pixel_icon(action_reset_view, "reset")
         action_reset_view.setShortcut("R")
         action_reset_view.triggered.connect(self.reset_view)
         view_menu.addAction(action_reset_view)
         
-        action_fit = QAction("🎯 메쉬에 맞춤(&F)", self)
+        action_fit = QAction("메쉬에 맞춤(&F)", self)
+        set_pixel_icon(action_fit, "fit")
         action_fit.setShortcut("F")
         action_fit.triggered.connect(self.fit_view)
         view_menu.addAction(action_fit)
@@ -5483,32 +5560,38 @@ class MainWindow(QMainWindow):
         view_menu.addSeparator()
         
         # 6방향 뷰
-        action_front = QAction("1️⃣ 정면 뷰", self)
+        action_front = QAction("1 정면 뷰", self)
+        set_pixel_icon(action_front, "view_front")
         action_front.setShortcut("1")
         action_front.triggered.connect(lambda: self._set_canonical_view("front"))
         view_menu.addAction(action_front)
         
-        action_back = QAction("2️⃣ 후면 뷰", self)
+        action_back = QAction("2 후면 뷰", self)
+        set_pixel_icon(action_back, "view_back")
         action_back.setShortcut("2")
         action_back.triggered.connect(lambda: self._set_canonical_view("back"))
         view_menu.addAction(action_back)
         
-        action_right = QAction("3️⃣ 우측면 뷰", self)
+        action_right = QAction("3 우측면 뷰", self)
+        set_pixel_icon(action_right, "view_right")
         action_right.setShortcut("3")
         action_right.triggered.connect(lambda: self._set_canonical_view("right"))
         view_menu.addAction(action_right)
         
-        action_left = QAction("4️⃣ 좌측면 뷰", self)
+        action_left = QAction("4 좌측면 뷰", self)
+        set_pixel_icon(action_left, "view_left")
         action_left.setShortcut("4")
         action_left.triggered.connect(lambda: self._set_canonical_view("left"))
         view_menu.addAction(action_left)
         
-        action_top = QAction("5️⃣ 상면 뷰", self)
+        action_top = QAction("5 상면 뷰", self)
+        set_pixel_icon(action_top, "view_top")
         action_top.setShortcut("5")
         action_top.triggered.connect(lambda: self._set_canonical_view("top"))
         view_menu.addAction(action_top)
         
-        action_bottom = QAction("6️⃣ 하면 뷰", self)
+        action_bottom = QAction("6 하면 뷰", self)
+        set_pixel_icon(action_bottom, "view_bottom")
         action_bottom.setShortcut("6")
         action_bottom.triggered.connect(lambda: self._set_canonical_view("bottom"))
         view_menu.addAction(action_bottom)
@@ -5552,7 +5635,8 @@ class MainWindow(QMainWindow):
         # 도움말 메뉴
         help_menu = menubar.addMenu("도움말(&H)")
         if help_menu is not None:
-            action_about = QAction("ℹ️ 정보(&A)", self)
+            action_about = QAction("정보(&A)", self)
+            set_pixel_icon(action_about, "help")
             action_about.triggered.connect(self.show_about)
             help_menu.addAction(action_about)
 
@@ -5601,20 +5685,23 @@ class MainWindow(QMainWindow):
         toolbar = QToolBar("메인 툴바")
         toolbar.setObjectName("toolbar_main")
         toolbar.setMovable(False)
-        toolbar.setIconSize(QSize(24, 24))
+        toolbar.setIconSize(QSize(16, 16))
         self.addToolBar(toolbar)
 
-        action_open = QAction("📂 열기", self)
+        action_open = QAction("열기", self)
+        set_pixel_icon(action_open, "open_mesh")
         action_open.triggered.connect(self.open_file)
         toolbar.addAction(action_open)
 
-        action_open_project = QAction("📁 프로젝트", self)
+        action_open_project = QAction("프로젝트", self)
+        set_pixel_icon(action_open_project, "open_project")
         action_open_project.triggered.connect(self.open_project)
         toolbar.addAction(action_open_project)
 
         toolbar.addSeparator()
 
-        action_fit = QAction("🔍 뷰 맞춤", self)
+        action_fit = QAction("뷰 맞춤", self)
+        set_pixel_icon(action_fit, "fit")
         action_fit.setToolTip("메쉬가 화면에 꽉 차도록 카메라 조정")
         action_fit.triggered.connect(self.fit_view)
         toolbar.addAction(action_fit)
@@ -5623,31 +5710,37 @@ class MainWindow(QMainWindow):
         
         # 6방향 뷰 버튼
         action_front = QAction("정면", self)
+        set_pixel_icon(action_front, "view_front")
         action_front.setToolTip("정면 뷰 (1)")
         action_front.triggered.connect(lambda: self._set_canonical_view("front"))
         toolbar.addAction(action_front)
         
         action_back = QAction("후면", self)
+        set_pixel_icon(action_back, "view_back")
         action_back.setToolTip("후면 뷰 (2)")
         action_back.triggered.connect(lambda: self._set_canonical_view("back"))
         toolbar.addAction(action_back)
         
         action_right = QAction("우측", self)
+        set_pixel_icon(action_right, "view_right")
         action_right.setToolTip("우측면 뷰 (3)")
         action_right.triggered.connect(lambda: self._set_canonical_view("right"))
         toolbar.addAction(action_right)
         
         action_left = QAction("좌측", self)
+        set_pixel_icon(action_left, "view_left")
         action_left.setToolTip("좌측면 뷰 (4)")
         action_left.triggered.connect(lambda: self._set_canonical_view("left"))
         toolbar.addAction(action_left)
         
         action_top = QAction("상면", self)
+        set_pixel_icon(action_top, "view_top")
         action_top.setToolTip("상면 뷰 (5)")
         action_top.triggered.connect(lambda: self._set_canonical_view("top"))
         toolbar.addAction(action_top)
         
         action_bottom = QAction("하면", self)
+        set_pixel_icon(action_bottom, "view_bottom")
         action_bottom.setToolTip("하면 뷰 (6)")
         action_bottom.triggered.connect(lambda: self._set_canonical_view("bottom"))
         toolbar.addAction(action_bottom)
@@ -5655,22 +5748,26 @@ class MainWindow(QMainWindow):
         toolbar.addSeparator()
 
         action_record_top = QAction("상면 기록", self)
+        set_pixel_icon(action_record_top, "record_top")
         action_record_top.triggered.connect(
             lambda: self.on_tile_interpretation_action("prepare_record_surface", {"view": "top"})
         )
         toolbar.addAction(action_record_top)
 
         action_record_bottom = QAction("하면 기록", self)
+        set_pixel_icon(action_record_bottom, "record_bottom")
         action_record_bottom.triggered.connect(
             lambda: self.on_tile_interpretation_action("prepare_record_surface", {"view": "bottom"})
         )
         toolbar.addAction(action_record_bottom)
 
         action_preview = QAction("미리보기", self)
+        set_pixel_icon(action_preview, "preview")
         action_preview.triggered.connect(self.on_flatten_preview_requested)
         toolbar.addAction(action_preview)
 
         action_review = QAction("검토 시트", self)
+        set_pixel_icon(action_review, "export")
         action_review.triggered.connect(
             lambda: self.on_export_requested({"type": "review_sheet", "target": "selected"})
         )
@@ -5680,7 +5777,7 @@ class MainWindow(QMainWindow):
         self.statusbar = QStatusBar()
         self.setStatusBar(self.statusbar)
         
-        self.status_info = QLabel("📂 파일을 열거나 드래그하세요")
+        self.status_info = QLabel("파일을 열거나 드래그하세요")
         self.status_mesh = QLabel("") # 메쉬 정보 (정점, 면)
         self.status_grid = QLabel("격자: -")
         self.status_unit = QLabel("단위: -")
@@ -5804,7 +5901,7 @@ class MainWindow(QMainWindow):
         self._artifact_pending_source_metadata = None
         self._artifact_load_ticket = None
         self.status_info.setText(
-            f"📁 프로젝트 패키지 검증 중: {Path(filepath).name}"
+            f"프로젝트 패키지 검증 중: {Path(filepath).name}"
         )
         load_thread.done.connect(
             lambda result, owner=load_thread, rid=request_id, path=str(filepath): (
@@ -5938,7 +6035,7 @@ class MainWindow(QMainWindow):
 
     def _on_project_open_failure(self, message: str) -> None:
         self._clear_artifact_pending_load(cancel_workbench=True)
-        self.status_info.setText("❌ 프로젝트 패키지 검증 실패 | 기존 scene 유지")
+        self.status_info.setText("프로젝트 패키지 검증 실패 | 기존 scene 유지")
         QMessageBox.critical(
             self,
             "오류",
@@ -6002,7 +6099,7 @@ class MainWindow(QMainWindow):
         self._project_load_queue = [o for o in objects if isinstance(o, dict)]
         self._project_load_current = None
 
-        self.status_info.setText(f"📁 프로젝트 로딩 중: {Path(filepath).name}")
+        self.status_info.setText(f"프로젝트 로딩 중: {Path(filepath).name}")
         self._start_next_project_object_load()
 
     def _clear_artifact_pending_load(self, *, cancel_workbench: bool = True) -> None:
@@ -6154,7 +6251,7 @@ class MainWindow(QMainWindow):
                 project_path=str(project_path),
                 fit_camera=True,
                 status_text=(
-                    f"✅ 내장 원본 프로젝트 로딩 완료: {Path(project_path).name} "
+                    f"내장 원본 프로젝트 로딩 완료: {Path(project_path).name} "
                     "| package·source·geometry·Align 검증됨"
                 ),
                 workflow_transition=transition,
@@ -6170,7 +6267,7 @@ class MainWindow(QMainWindow):
                     _LOGGER.debug("Embedded Project Open failure was stale", exc_info=True)
             self._clear_artifact_pending_load(cancel_workbench=False)
             self.status_info.setText(
-                "❌ 내장 원본 프로젝트 staging 실패 | 기존 scene 유지"
+                "내장 원본 프로젝트 staging 실패 | 기존 scene 유지"
             )
             QMessageBox.critical(
                 self,
@@ -6343,7 +6440,7 @@ class MainWindow(QMainWindow):
                 save_amr_project(filepath, state, meta=meta)
             self._project_requires_save_as = False
             self._legacy_project_path = None
-            self.status_info.setText(f"✅ 프로젝트 저장: {Path(filepath).name}")
+            self.status_info.setText(f"프로젝트 저장: {Path(filepath).name}")
             return True
         except ProjectSaveError as e:
             if e.committed:
@@ -6356,14 +6453,14 @@ class MainWindow(QMainWindow):
                     "실패했습니다. 파일은 다시 열 수 있으나 직후 시스템 장애에 대한 "
                     f"내구성은 확정할 수 없습니다.\n\n{e}",
                 )
-                self.status_info.setText("⚠️ 프로젝트 저장됨 | crash durability 미확정")
+                self.status_info.setText("프로젝트 저장됨 | crash durability 미확정")
                 return True
             QMessageBox.critical(self, "오류", f"프로젝트 저장 실패:\n{e}")
-            self.status_info.setText("❌ 프로젝트 저장 실패")
+            self.status_info.setText("프로젝트 저장 실패")
             return False
         except Exception as e:
             QMessageBox.critical(self, "오류", f"프로젝트 저장 실패:\n{type(e).__name__}: {e}")
-            self.status_info.setText("❌ 프로젝트 저장 실패")
+            self.status_info.setText("프로젝트 저장 실패")
             return False
 
     def _validate_native_scene_for_save(self, session: ArtifactSession) -> None:
@@ -6895,7 +6992,7 @@ class MainWindow(QMainWindow):
         self._project_load_state = None
         self._project_load_from_legacy = False
         self._discard_project_staging_and_restore_context()
-        self.status_info.setText(f"❌ 원본 검증 실패: {verification.status.value}")
+        self.status_info.setText(f"원본 검증 실패: {verification.status.value}")
         if verification.status is SourceVerificationStatus.MISSING:
             QMessageBox.warning(self, "원본 파일 없음", message)
         else:
@@ -7349,7 +7446,7 @@ class MainWindow(QMainWindow):
             self._project_load_state = None
             self._project_load_from_legacy = False
             self._discard_project_staging_and_restore_context()
-            self.status_info.setText("❌ 프로젝트 staging 불완전 | 기존 scene 유지")
+            self.status_info.setText("프로젝트 staging 불완전 | 기존 scene 유지")
             QMessageBox.critical(
                 self,
                 "프로젝트 로딩 실패",
@@ -7371,7 +7468,7 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             _LOGGER.exception("Failed snapshotting live scene before project swap")
             self._discard_project_staging_and_restore_context()
-            self.status_info.setText("❌ 기존 scene snapshot 실패 | 기존 scene 유지")
+            self.status_info.setText("기존 scene snapshot 실패 | 기존 scene 유지")
             QMessageBox.critical(
                 self,
                 "프로젝트 scene 교체 실패",
@@ -7446,7 +7543,7 @@ class MainWindow(QMainWindow):
 
             self._discard_project_staging_and_restore_context()
             if restore_error is None:
-                self.status_info.setText("❌ project scene 교체 실패 | 기존 scene 복원")
+                self.status_info.setText("project scene 교체 실패 | 기존 scene 복원")
                 detail = "기존 scene을 복원했으며 현재 프로젝트는 계속 저장할 수 있습니다."
             else:
                 self._project_load_failed = True
@@ -7454,7 +7551,7 @@ class MainWindow(QMainWindow):
                 self._project_requires_save_as = False
                 self._legacy_project_path = None
                 self._project_has_legacy_bindings = False
-                self.status_info.setText("❌ project scene 복원 실패 | 저장 차단")
+                self.status_info.setText("project scene 복원 실패 | 저장 차단")
                 detail = (
                     "기존 scene 복원까지 실패해 부분 상태 저장을 차단했습니다."
                     f"\n복원 오류: {type(restore_error).__name__}: {restore_error}"
@@ -7497,11 +7594,11 @@ class MainWindow(QMainWindow):
         try:
             if loaded_from_legacy or has_legacy_bindings:
                 self.status_info.setText(
-                    "⚠️ 프로젝트 로딩 완료 | 원본 SHA 기록, 구버전 기록 연결은 미검증"
+                    "프로젝트 로딩 완료 | 원본 SHA 기록, 구버전 기록 연결은 미검증"
                     + (" | 첫 저장은 새 v2 파일" if loaded_from_legacy else "")
                 )
             else:
-                self.status_info.setText("✅ 프로젝트 로딩 완료 | 원본 SHA-256 검증됨")
+                self.status_info.setText("프로젝트 로딩 완료 | 원본 SHA-256 검증됨")
         except Exception:
             pass
 
@@ -7663,7 +7760,7 @@ class MainWindow(QMainWindow):
                 self.section_panel.btn_roi.blockSignals(True)
                 self.section_panel.btn_roi.setChecked(bool(getattr(vp, "roi_enabled", False)))
                 self.section_panel.btn_roi.setText(
-                    "📐 영역 지정 모드 중지" if bool(getattr(vp, "roi_enabled", False)) else "📐 영역 지정 모드 시작"
+                    "영역 지정 모드 중지" if bool(getattr(vp, "roi_enabled", False)) else "영역 지정 모드 시작"
                 )
                 self.section_panel.btn_silhouette.setEnabled(bool(getattr(vp, "roi_enabled", False)))
             except Exception:
@@ -7810,7 +7907,7 @@ class MainWindow(QMainWindow):
             self.section_panel.btn_toggle.blockSignals(True)
             self.section_panel.btn_toggle.setChecked(cross_enabled)
             self.section_panel.btn_toggle.setText(
-                "🎯 십자선 단면 모드 중지" if cross_enabled else "🎯 십자선 단면 모드 시작"
+                "십자선 단면 모드 중지" if cross_enabled else "십자선 단면 모드 시작"
             )
         except Exception:
             pass
@@ -7824,7 +7921,7 @@ class MainWindow(QMainWindow):
             self.section_panel.btn_roi.blockSignals(True)
             self.section_panel.btn_roi.setChecked(roi_enabled)
             self.section_panel.btn_roi.setText(
-                "🗺 영역 지정 모드 중지" if roi_enabled else "🗺 영역 지정 모드 시작"
+                "영역 지정 모드 중지" if roi_enabled else "영역 지정 모드 시작"
             )
             self.section_panel.btn_silhouette.setEnabled(roi_enabled)
         except Exception:
@@ -7929,7 +8026,7 @@ class MainWindow(QMainWindow):
                 "ArtifactDocument는 한 문서당 하나의 검증된 원본만 소유합니다. "
                 "새 원본은 파일 열기로 별도 문서로 여세요.",
             )
-            self.status_info.setText("⛔ legacy 메쉬 추가 차단 | native 문서 유지")
+            self.status_info.setText("legacy 메쉬 추가 차단 | native 문서 유지")
             return False
         self._start_async_load(filepath, scale_factor)
         return True
@@ -8521,13 +8618,13 @@ class MainWindow(QMainWindow):
                 session = transition.candidate_session
                 if artifact_ticket.document is not None:
                     status = (
-                        f"✅ ArtifactDocument 로딩 완료: "
+                        f"ArtifactDocument 로딩 완료: "
                         f"{Path(pending_project_path or '').name} "
                         "| source·geometry·Align 검증됨"
                     )
                 else:
                     status = (
-                        f"✅ 원본 등록 완료: {Path(filepath).name} | canonical mm | "
+                        f"원본 등록 완료: {Path(filepath).name} | canonical mm | "
                         "다음: 정치 preview 후 정치 확정"
                     )
             elif pending_document is not None:
@@ -8537,7 +8634,7 @@ class MainWindow(QMainWindow):
                     resolved_source_path=str(filepath),
                 )
                 status = (
-                    f"✅ ArtifactDocument 로딩 완료: {Path(pending_project_path or '').name} "
+                    f"ArtifactDocument 로딩 완료: {Path(pending_project_path or '').name} "
                     "| source·geometry·Align 검증됨"
                 )
             elif isinstance(pending_metadata, dict):
@@ -8551,7 +8648,7 @@ class MainWindow(QMainWindow):
                     operator="local-user",
                 )
                 status = (
-                    f"✅ 원본 등록 완료: {Path(filepath).name} | canonical mm | "
+                    f"원본 등록 완료: {Path(filepath).name} | canonical mm | "
                     "다음: 정치 preview 후 정치 확정"
                 )
             else:
@@ -8574,7 +8671,7 @@ class MainWindow(QMainWindow):
                 except (ArtifactWorkbenchError, StaleWorkflowOperationError):
                     _LOGGER.debug("Artifact Open failure was stale", exc_info=True)
             self._clear_artifact_pending_load(cancel_workbench=False)
-            self.status_info.setText("❌ ArtifactDocument staging 실패 | 기존 scene 유지")
+            self.status_info.setText("ArtifactDocument staging 실패 | 기존 scene 유지")
             QMessageBox.critical(
                 self,
                 "ArtifactDocument 로딩 실패",
@@ -8668,7 +8765,7 @@ class MainWindow(QMainWindow):
                     "검증되지 않은 legacy 메쉬 로드가 native ArtifactDocument 장면에 "
                     "도달해 적용하지 않았습니다.",
                 )
-                self.status_info.setText("⛔ hybrid scene 차단 | native 문서 유지")
+                self.status_info.setText("hybrid scene 차단 | native 문서 유지")
                 return
 
             self.current_mesh = mesh_data
@@ -10846,7 +10943,7 @@ class MainWindow(QMainWindow):
                 )
                 self.label_synthetic_suite_summary.setText(summary)
                 self.status_info.setText(
-                    f"✅ synthetic benchmark suite {report.case_count}건 저장 완료"
+                    f"synthetic benchmark suite {report.case_count}건 저장 완료"
                 )
                 fail_text = (
                     "\n실패 케이스는 label 또는 summary 파일을 확인하세요."
@@ -10868,7 +10965,7 @@ class MainWindow(QMainWindow):
                 )
 
             def on_failed_export_synthetic_suite(message: str):
-                self.status_info.setText("❌ synthetic benchmark suite 저장 실패")
+                self.status_info.setText("synthetic benchmark suite 저장 실패")
                 QMessageBox.critical(
                     self,
                     "오류",
@@ -11262,17 +11359,17 @@ class MainWindow(QMainWindow):
                     count = len(paths)
                     if count <= 0:
                         QMessageBox.information(self, "완료", "저장된 슬롯 검토 시트를 생성하지 않았습니다.")
-                        self.status_info.setText("ℹ️ 저장된 슬롯 검토 시트 없음")
+                        self.status_info.setText("저장된 슬롯 검토 시트 없음")
                         return
                     QMessageBox.information(
                         self,
                         "완료",
                         f"저장된 슬롯 검토 시트 {count}개를 저장했습니다.\n\n폴더: {output_dir}",
                     )
-                    self.status_info.setText(f"✅ 슬롯 검토 시트 {count}개 저장 완료")
+                    self.status_info.setText(f"슬롯 검토 시트 {count}개 저장 완료")
 
                 def on_failed_export_saved_slots(message: str):
-                    self.status_info.setText("❌ 슬롯 검토 시트 저장 실패")
+                    self.status_info.setText("슬롯 검토 시트 저장 실패")
                     QMessageBox.critical(
                         self,
                         "오류",
@@ -11523,7 +11620,7 @@ class MainWindow(QMainWindow):
                     candidate,
                     project_path=self._current_project_path,
                     fit_camera=False,
-                    status_text="✅ 정치 확정 | 새 Align revision 생성",
+                    status_text="정치 확정 | 새 Align revision 생성",
                     workflow_transition=transition,
                 )
             except Exception as exc:
@@ -11558,7 +11655,7 @@ class MainWindow(QMainWindow):
             )
             if has_preview:
                 self.reset_transform()
-                self.status_info.setText("↶ 정치 preview 취소 | 확정 revision 유지")
+                self.status_info.setText("정치 preview 취소 | 확정 revision 유지")
                 return
             controller = self._artifact_workbench_controller()
             transition = controller.prepare_activate_parent_align()
@@ -11567,7 +11664,7 @@ class MainWindow(QMainWindow):
                 candidate,
                 project_path=self._current_project_path,
                 fit_camera=False,
-                status_text="↶ 이전 Align revision 활성화",
+                status_text="이전 Align revision 활성화",
                 workflow_transition=transition,
             )
         except (ArtifactSessionError, ArtifactWorkbenchError) as exc:
@@ -11607,7 +11704,7 @@ class MainWindow(QMainWindow):
             return
         self.viewport.update()
         try:
-            self.status_info.setText("🩻 X-Ray 모드: 선택된 메쉬를 투명 표시" if enabled else "🩻 X-Ray 모드 종료")
+            self.status_info.setText("X-Ray 모드: 선택된 메쉬를 투명 표시" if enabled else "X-Ray 모드 종료")
         except Exception:
             pass
 
@@ -11667,7 +11764,7 @@ class MainWindow(QMainWindow):
         obj.translation = np.array([0.0, 0.0, 0.0], dtype=np.float64)
         self.viewport.update_vbo(obj)
         self.sync_transform_panel()
-        self.viewport.status_info = "✅ 기준평면 맞추기 완료 (최저점 Z=0)"
+        self.viewport.status_info = "기준평면 맞추기 완료 (최저점 Z=0)"
         self.viewport.update()
         self.viewport.meshTransformChanged.emit()
 
@@ -11763,7 +11860,7 @@ class MainWindow(QMainWindow):
             if target not in {"outer", "inner", "migu"}:
                 target = "outer"
             self.viewport._surface_paint_target = target
-            self.viewport.status_info = f"✋ 표면 지정 대상: {target} (경계(면적+자석)로 시작)"
+            self.viewport.status_info = f"표면 지정 대상: {target} (경계(면적+자석)로 시작)"
             self.viewport.update()
             return
 
@@ -11807,7 +11904,7 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
                 self.viewport.status_info = (
-                    f"🧲 경계(면적+자석) [{target}]: 좌클릭=점 추가(자석 스냅), 드래그=회전/시점, "
+                    f"경계(면적+자석) [{target}]: 좌클릭=점 추가(자석 스냅), 드래그=회전/시점, "
                     f"우클릭/Enter=확정, Backspace=되돌리기, Shift/Ctrl=완드 정제, Alt=제거, [ / ]=반경, "
                     f"실시간 단면은 '단면/2D 지정 도구' 탭에서 ON 후 Ctrl+휠/[, .]/C 사용 (ESC=종료)"
                 )
@@ -11940,11 +12037,11 @@ class MainWindow(QMainWindow):
                 pass
             if enabled:
                 self.viewport.status_info = (
-                    f"🧭 실시간 단면 모드 ON (Z={z_next:.2f}cm): "
+                    f"실시간 단면 모드 ON (Z={z_next:.2f}cm): "
                     "Ctrl+휠/[, .]=스캔, C=촬영"
                 )
             else:
-                self.viewport.status_info = "🧭 실시간 단면 모드 OFF"
+                self.viewport.status_info = "실시간 단면 모드 OFF"
             try:
                 self.viewport.setFocus()
             except Exception:
@@ -12153,7 +12250,7 @@ class MainWindow(QMainWindow):
                     pass
 
                 self.viewport.status_info = (
-                    f"🤝 수동 보조 분리({mode_txt}/{method}, {mode}, {mapping}): "
+                    f"수동 보조 분리({mode_txt}/{method}, {mode}, {mapping}): "
                     f"outer +{add_o:,}, inner +{add_i:,}, 미확정 {unresolved:,}{unresolved_suffix} "
                     f"({assist_total_ms:.1f}ms)"
                 )
@@ -12251,7 +12348,7 @@ class MainWindow(QMainWindow):
                     method_used = f"{method_used} + {supplemental_desc}"
 
                 self.viewport.status_info = (
-                    f"✅ 표면 라벨 자동 적용({method_used}): outer {len(obj.outer_face_indices):,} / inner {len(obj.inner_face_indices):,} / migu {len(obj.migu_face_indices):,} (현재 메쉬에 저장됨)"
+                    f"표면 라벨 자동 적용({method_used}): outer {len(obj.outer_face_indices):,} / inner {len(obj.inner_face_indices):,} / migu {len(obj.migu_face_indices):,} (현재 메쉬에 저장됨)"
                 )
                 try:
                     self.viewport._emit_surface_assignment_changed(obj)
@@ -12442,7 +12539,7 @@ class MainWindow(QMainWindow):
                     pass
 
                 self.viewport.status_info = (
-                    f"✅ 미구 자동 감지({mode_desc}): migu {len(obj.migu_face_indices):,} faces "
+                    f"미구 자동 감지({mode_desc}): migu {len(obj.migu_face_indices):,} faces "
                     f"(Shift=경계, Ctrl=축전환, Alt=내/외면 자동보강)"
                 )
                 try:
@@ -12709,7 +12806,7 @@ class MainWindow(QMainWindow):
             return {"key": key, "flattened": flattened}
 
         status_target = f" ({target_label})" if surface_target != "all" else ""
-        self.status_info.setText(f"🗺️ 기록면 전개 중{status_target}{strategy_suffix}...")
+        self.status_info.setText(f"기록면 전개 중{status_target}{strategy_suffix}...")
         self._start_task(
             title="기록면 전개",
             label=f"기록면 전개 중{status_target}{strategy_suffix}...",
@@ -12730,7 +12827,7 @@ class MainWindow(QMainWindow):
             flattened = None
 
         if flattened is None:
-            self.status_info.setText("❌ 기록면 전개 실패")
+            self.status_info.setText("기록면 전개 실패")
             QMessageBox.critical(self, "오류", self._format_error_message("기록면 전개 실패:", "Recording-surface unwrap result is empty."))
             return
 
@@ -12747,7 +12844,9 @@ class MainWindow(QMainWindow):
         dim_ratio_after_f = _safe_float_or_none(dim_ratio_after)
         guard_scale_f = _safe_float_or_none(guard_scale)
 
-        status_prefix = "⚠️ 기록면 전개 완료" if size_warning else "✅ 기록면 전개 완료"
+        status_prefix = (
+            "기록면 전개 완료 · 크기 경고" if size_warning else "기록면 전개 완료"
+        )
         self.status_info.setText(
             f"{status_prefix}: {flattened.width:.2f} x {flattened.height:.2f} {flattened.original_mesh.unit} "
             f"(왜곡 평균 {flattened.mean_distortion:.1%})"
@@ -12785,7 +12884,7 @@ class MainWindow(QMainWindow):
         )
 
     def _on_flatten_task_failed(self, message: str):
-        self.status_info.setText("❌ 기록면 전개 실패")
+        self.status_info.setText("기록면 전개 실패")
         QMessageBox.critical(self, "오류", self._format_error_message("기록면 전개 중 오류 발생:", message))
 
     @staticmethod
@@ -12942,7 +13041,7 @@ class MainWindow(QMainWindow):
             "아닙니다. 검증된 Cutline/Outline record를 만든 뒤 '최근 검증 벡터 1:1 SVG "
             "내보내기'를 사용하세요."
         )
-        self.status_info.setText("⛔ legacy 화면 SVG 차단 | 검증 벡터 내보내기 사용")
+        self.status_info.setText("legacy 화면 SVG 차단 | 검증 벡터 내보내기 사용")
         QMessageBox.warning(self, "검증되지 않은 내보내기 차단", message)
         return True
 
@@ -12961,7 +13060,7 @@ class MainWindow(QMainWindow):
             "'최근 검증 탁본 1:1 PNG 패키지 내보내기'를 사용하세요."
         )
         self.status_info.setText(
-            "⛔ legacy 탁본/펼침 출력 차단 | 검증 Digital Rubbing 사용"
+            "legacy 탁본/펼침 출력 차단 | 검증 Digital Rubbing 사용"
         )
         QMessageBox.warning(self, "검증되지 않은 탁본 출력 차단", message)
         return True
@@ -13131,10 +13230,10 @@ class MainWindow(QMainWindow):
                     if flat is not None:
                         self._flattened_cache[key] = flat
                 QMessageBox.information(self, "완료", f"기록면 검토 시트가 저장되었습니다:\n{filepath}")
-                self.status_info.setText(f"✅ 저장 완료: {Path(filepath).name}")
+                self.status_info.setText(f"저장 완료: {Path(filepath).name}")
 
             def on_failed(message: str):
-                self.status_info.setText("❌ 저장 실패")
+                self.status_info.setText("저장 실패")
                 QMessageBox.critical(self, "오류", self._format_error_message("기록면 검토 시트 저장 중 오류 발생:", message))
 
             self._start_task(
@@ -13202,10 +13301,10 @@ class MainWindow(QMainWindow):
                     if flat is not None:
                         self._flattened_cache[key] = flat
                 QMessageBox.information(self, "완료", f"기록면 전개 SVG가 저장되었습니다:\n{filepath}")
-                self.status_info.setText(f"✅ 저장 완료: {Path(filepath).name}")
+                self.status_info.setText(f"저장 완료: {Path(filepath).name}")
 
             def on_failed(message: str):
-                self.status_info.setText("❌ 저장 실패")
+                self.status_info.setText("저장 실패")
                 QMessageBox.critical(self, "오류", self._format_error_message("SVG 저장 중 오류 발생:", message))
 
             self._start_task(
@@ -13360,7 +13459,7 @@ class MainWindow(QMainWindow):
         except Exception as e:
             import traceback
             traceback.print_exc()
-            self.status_info.setText("❌ 저장 실패")
+            self.status_info.setText("저장 실패")
             QMessageBox.critical(self, "오류", f"도면 저장 중 오류 발생:\n{str(e)}")
         finally:
             # 카메라 복원
@@ -13703,7 +13802,7 @@ class MainWindow(QMainWindow):
 
         self._cleanup_profile_package_export()
         QMessageBox.information(self, "완료", f"2D 도면 패키지가 저장되었습니다:\n{package_dir}")
-        self.status_info.setText(f"✅ 패키지 저장 완료: {package_dir.name}")
+        self.status_info.setText(f"패키지 저장 완료: {package_dir.name}")
 
     def _abort_profile_package_export(self, view: str, message: str):
         package_dir = None
@@ -13721,7 +13820,7 @@ class MainWindow(QMainWindow):
             "오류",
             self._format_error_message(f"패키지 내보내기 실패 ({view}):", f"{message}{hint}"),
         )
-        self.status_info.setText("❌ 패키지 내보내기 실패")
+        self.status_info.setText("패키지 내보내기 실패")
 
     def _cleanup_profile_package_export(self):
         dlg = getattr(self, "_profile_package_export_dialog", None)
@@ -13760,7 +13859,7 @@ class MainWindow(QMainWindow):
 
         self.reset_transform()
         self.fit_view()
-        self.status_info.setText("🔄 변환 초기화 + 뷰 맞춤 완료")
+        self.status_info.setText("변환 초기화 + 뷰 맞춤 완료")
     
     def bake_and_center(self):
         """정치: 현재 회전을 메쉬 버텍스에 영구 적용하고 변환 리셋"""
@@ -13807,14 +13906,14 @@ class MainWindow(QMainWindow):
         
         self.sync_transform_panel()
         self.viewport.update()
-        self.status_info.setText("✅ 정치 완료 - 회전이 메쉬에 적용됨")
+        self.status_info.setText("정치 완료 - 회전이 메쉬에 적용됨")
     
     def return_to_origin(self):
         """카메라를 원점으로 이동"""
         self.viewport.camera.center = np.array([0.0, 0.0, 0.0])
         self.viewport.camera.pan_offset = np.array([0.0, 0.0, 0.0])
         self.viewport.update()
-        self.status_info.setText("🏠 카메라 원점 복귀")
+        self.status_info.setText("카메라 원점 복귀")
             
     def reset_view(self):
         self.viewport._front_back_ortho_enabled = False
@@ -14022,9 +14121,9 @@ class MainWindow(QMainWindow):
         self.viewport.curvature_pick_mode = enabled
         self.viewport.picking_mode = 'curvature' if enabled else 'none'
         if enabled:
-            self.status_info.setText("📏 곡률 측정 모드: 메쉬 위를 클릭하여 점을 찍으세요")
+            self.status_info.setText("곡률 측정 모드: 메쉬 위를 클릭하여 점을 찍으세요")
         else:
-            self.status_info.setText("📏 곡률 측정 모드 종료")
+            self.status_info.setText("곡률 측정 모드 종료")
     
     def fit_curvature_arc(self):
         """찍은 点들로 원호 피팅 (월드 좌표계 고정)"""
@@ -14072,13 +14171,13 @@ class MainWindow(QMainWindow):
         self.scene_panel.update_list(self.viewport.objects, self.viewport.selected_index)
         arc_count = len(obj.fitted_arcs)
         self.status_info.setText(
-            f"✅ 원호 #{arc_count} 생성됨 (월드 고정): 반지름 = {radius_mm:.1f} mm"
+            f"원호 #{arc_count} 생성됨 (월드 고정): 반지름 = {radius_mm:.1f} mm"
         )
     
     def clear_curvature_points(self):
         """곡률 측정용 점 초기화"""
         self.viewport.clear_curvature_picks()
-        self.status_info.setText("🗑️ 측정 점 초기화됨")
+        self.status_info.setText("측정 점 초기화됨")
     
     def clear_all_arcs(self):
         """선택된 객체의 모든 원호 삭제"""
@@ -14088,7 +14187,7 @@ class MainWindow(QMainWindow):
             obj.fitted_arcs = []
             self.scene_panel.update_list(self.viewport.objects, self.viewport.selected_index)
             self.viewport.update()
-            self.status_info.setText(f"🗑️ {count}개 원호 삭제됨")
+            self.status_info.setText(f"{count}개 원호 삭제됨")
     
     def _disable_measure_mode(self) -> None:
         panel = getattr(self, "measure_panel", None)
@@ -14176,7 +14275,7 @@ class MainWindow(QMainWindow):
                 pass
 
             self.viewport.picking_mode = \"measure\"
-            self.status_info.setText(\"📏 치수 측정 모드: Shift+클릭으로 점을 찍으세요.\")
+            self.status_info.setText(\"치수 측정 모드: Shift+클릭으로 점을 찍으세요.\")
         else:
             try:
                 if self.viewport.picking_mode == \"measure\":
@@ -14191,7 +14290,7 @@ class MainWindow(QMainWindow):
                 self.measure_panel.set_points_count(0)
             except Exception:
                 pass
-            self.status_info.setText(\"📏 치수 측정 모드 종료\")
+            self.status_info.setText(\"치수 측정 모드 종료\")
 
         self.viewport.update()
 
@@ -14204,9 +14303,9 @@ class MainWindow(QMainWindow):
             pass
 
         if str(mode) == \"diameter\":
-            self.status_info.setText(\"📏 지름 모드: 점 3개 이상 선택 후 '지름 계산'.\")
+            self.status_info.setText(\"지름 모드: 점 3개 이상 선택 후 '지름 계산'.\")
         else:
-            self.status_info.setText(\"📏 거리 모드: 점 2개 선택하면 자동 계산.\")
+            self.status_info.setText(\"거리 모드: 점 2개 선택하면 자동 계산.\")
 
     def on_measure_point_picked(self, _point: np.ndarray) -> None:
         panel = getattr(self, \"measure_panel\", None)
@@ -14240,7 +14339,7 @@ class MainWindow(QMainWindow):
         dist_mm = dist_cm * 10.0
         msg = f\"거리: {dist_cm:.2f} cm ({dist_mm:.1f} mm)\"
         panel.append_result(msg)
-        self.status_info.setText(f\"📏 {msg}\")
+        self.status_info.setText(f\"{msg}\")
 
         try:
             self.viewport.clear_measure_picks()
@@ -14283,7 +14382,7 @@ class MainWindow(QMainWindow):
         diameter_mm = diameter_cm * 10.0
         msg = f\"지름: {diameter_cm:.2f} cm ({diameter_mm:.1f} mm)\"
         panel.append_result(msg)
-        self.status_info.setText(f\"📏 {msg}\")
+        self.status_info.setText(f\"{msg}\")
 
         try:
             self.viewport.clear_measure_picks()
@@ -14297,7 +14396,7 @@ class MainWindow(QMainWindow):
             self.viewport.clear_measure_picks()
             self.measure_panel.set_points_count(0)
             self.viewport.update()
-            self.status_info.setText(\"🧹 측정 포인트 초기화\")
+            self.status_info.setText(\"측정 포인트 초기화\")
         except Exception:
             pass
 
@@ -14312,14 +14411,14 @@ class MainWindow(QMainWindow):
 
         try:
             QApplication.clipboard().setText(text)
-            self.status_info.setText(\"📋 측정 결과 복사됨\")
+            self.status_info.setText(\"측정 결과 복사됨\")
         except Exception:
             pass
 
     def clear_measure_results(self) -> None:
         try:
             self.measure_panel.clear_results()
-            self.status_info.setText(\"🗑️ 측정 결과 지움\")
+            self.status_info.setText(\"측정 결과 지움\")
         except Exception:
             pass
 
@@ -14388,7 +14487,7 @@ class MainWindow(QMainWindow):
                 pass
 
             self.viewport.picking_mode = "measure"
-            self.status_info.setText("📏 치수 측정 모드: Shift+클릭으로 점을 찍으세요.")
+            self.status_info.setText("치수 측정 모드: Shift+클릭으로 점을 찍으세요.")
         else:
             try:
                 if self.viewport.picking_mode == "measure":
@@ -14400,7 +14499,7 @@ class MainWindow(QMainWindow):
                 self.measure_panel.set_points_count(0)
             except Exception:
                 pass
-            self.status_info.setText("📏 치수 측정 모드 종료")
+            self.status_info.setText("치수 측정 모드 종료")
 
         self.viewport.update()
 
@@ -14413,9 +14512,9 @@ class MainWindow(QMainWindow):
             pass
 
         if str(mode) == "diameter":
-            self.status_info.setText("📏 지름 모드: 점 3개 이상 선택 후 '지름 계산'.")
+            self.status_info.setText("지름 모드: 점 3개 이상 선택 후 '지름 계산'.")
         else:
-            self.status_info.setText("📏 거리 모드: 점 2개 선택하면 자동 계산.")
+            self.status_info.setText("거리 모드: 점 2개 선택하면 자동 계산.")
 
     def on_measure_point_picked(self, _point: np.ndarray) -> None:
         panel = getattr(self, "measure_panel", None)
@@ -14449,7 +14548,7 @@ class MainWindow(QMainWindow):
         dist_mm = dist_cm * 10.0
         msg = f"거리: {dist_cm:.2f} cm ({dist_mm:.1f} mm)"
         panel.append_result(msg)
-        self.status_info.setText(f"📏 {msg}")
+        self.status_info.setText(f"{msg}")
 
         try:
             self.viewport.clear_measure_picks()
@@ -14491,7 +14590,7 @@ class MainWindow(QMainWindow):
         diameter_mm = mesh_units_to_mm(float(arc.radius) * 2.0, unit)
         msg = f"지름: {diameter_mm:.1f} mm"
         panel.append_result(msg)
-        self.status_info.setText(f"📏 {msg}")
+        self.status_info.setText(f"{msg}")
 
         try:
             self.viewport.clear_measure_picks()
@@ -14505,7 +14604,7 @@ class MainWindow(QMainWindow):
             self.viewport.clear_measure_picks()
             self.measure_panel.set_points_count(0)
             self.viewport.update()
-            self.status_info.setText("🧹 측정 포인트 초기화")
+            self.status_info.setText("측정 포인트 초기화")
         except Exception:
             pass
 
@@ -14524,14 +14623,14 @@ class MainWindow(QMainWindow):
                 cb.setText(text)
             label = getattr(self, "status_info", None)
             if label is not None:
-                label.setText("📋 측정 결과 복사됨")
+                label.setText("측정 결과 복사됨")
         except Exception:
             pass
 
     def clear_measure_results(self) -> None:
         try:
             self.measure_panel.clear_results()
-            self.status_info.setText("🗑️ 측정 결과 지움")
+            self.status_info.setText("측정 결과 지움")
         except Exception:
             pass
 
@@ -14659,14 +14758,14 @@ class MainWindow(QMainWindow):
                     )
 
             try:
-                self.status_info.setText("📦 부피/면적 계산 완료")
+                self.status_info.setText("부피/면적 계산 완료")
             except Exception:
                 pass
 
         def on_failed(message: str) -> None:
             QMessageBox.critical(self, "오류", self._format_error_message("부피/면적 계산 실패:", message))
             try:
-                self.status_info.setText("❌ 부피/면적 계산 실패")
+                self.status_info.setText("부피/면적 계산 실패")
             except Exception:
                 pass
 
@@ -14686,7 +14785,7 @@ class MainWindow(QMainWindow):
                 self.section_panel.btn_roi.setChecked(False)
             finally:
                 self.section_panel.btn_roi.blockSignals(False)
-            self.status_info.setText("⛔ 화면 ROI는 측정값이 아닙니다 | 검증된 외곽 도구 사용")
+            self.status_info.setText("화면 ROI는 측정값이 아닙니다 | 검증된 외곽 도구 사용")
             return
         if enabled:
             try:
@@ -14781,7 +14880,7 @@ class MainWindow(QMainWindow):
         """추출된 외곽선 처리 핸들러"""
         if not points:
             return
-        self.status_info.setText(f"✅ {len(points)}개의 점으로 외곽선 추출 완료")
+        self.status_info.setText(f"{len(points)}개의 점으로 외곽선 추출 완료")
         try:
             _LOGGER.info("Extracted silhouette: %s points", len(points))
         except Exception:
@@ -14794,7 +14893,7 @@ class MainWindow(QMainWindow):
                 "보존하지 못합니다. 위의 '외곽 계산 · 기록'에서 6면 방향과 mm 정밀도를 "
                 "선택해 검증된 Outline을 만드세요."
             )
-            self.status_info.setText("⛔ 화면 외곽선 차단 | 검증된 Outline 도구 사용")
+            self.status_info.setText("화면 외곽선 차단 | 검증된 Outline 도구 사용")
             QMessageBox.warning(self, "화면 외곽선은 검토용", message)
             return
         self.viewport.extract_roi_silhouette()
@@ -15099,7 +15198,7 @@ class MainWindow(QMainWindow):
             self._clear_native_vector_preview()
             self._reset_native_record_choice(panel.combo_native_vector_record)
             panel.btn_native_vector_export.setEnabled(False)
-            self.status_info.setText("⛔ 선택한 벡터 기록은 READY + FRESH 상태가 아닙니다.")
+            self.status_info.setText("선택한 벡터 기록은 READY + FRESH 상태가 아닙니다.")
             return
         try:
             self._preview_native_vector_record(session, record.id)
@@ -15107,10 +15206,10 @@ class MainWindow(QMainWindow):
             self._clear_native_vector_preview()
             self._reset_native_record_choice(panel.combo_native_vector_record)
             panel.btn_native_vector_export.setEnabled(False)
-            self.status_info.setText(f"❌ 벡터 기록 미리보기 실패: {exc}")
+            self.status_info.setText(f"벡터 기록 미리보기 실패: {exc}")
             return
         panel.btn_native_vector_export.setEnabled(True)
-        self.status_info.setText(f"✅ 벡터 기록 선택: {record.id}")
+        self.status_info.setText(f"벡터 기록 선택: {record.id}")
 
     def on_native_rubbing_record_selected(self, record_id: str) -> None:
         panel = self.section_panel
@@ -15133,14 +15232,14 @@ class MainWindow(QMainWindow):
             self._clear_native_rubbing_preview()
             self._reset_native_record_choice(panel.combo_native_rubbing_record)
             panel.btn_native_rubbing_export.setEnabled(False)
-            self.status_info.setText("⛔ 선택한 탁본 기록은 READY + FRESH 상태가 아닙니다.")
+            self.status_info.setText("선택한 탁본 기록은 READY + FRESH 상태가 아닙니다.")
             return
         if self._artifact_measurement_controller().active_summaries:
             self._clear_native_rubbing_preview()
             self._reset_native_record_choice(panel.combo_native_rubbing_record)
             panel.btn_native_rubbing_export.setEnabled(False)
             self.status_info.setText(
-                "⛔ 진행·보류 중인 실측 결과를 먼저 완료하거나 해제하세요."
+                "진행·보류 중인 실측 결과를 먼저 완료하거나 해제하세요."
             )
             return
         try:
@@ -15149,7 +15248,7 @@ class MainWindow(QMainWindow):
             self._clear_native_rubbing_preview()
             self._reset_native_record_choice(panel.combo_native_rubbing_record)
             panel.btn_native_rubbing_export.setEnabled(False)
-            self.status_info.setText(f"❌ 탁본 기록 권위 확인 실패: {exc}")
+            self.status_info.setText(f"탁본 기록 권위 확인 실패: {exc}")
             return
 
         self._clear_native_rubbing_preview()
@@ -15205,7 +15304,7 @@ class MainWindow(QMainWindow):
                 self._reset_native_record_choice(panel.combo_native_rubbing_record)
                 panel.btn_native_rubbing_export.setEnabled(False)
                 self.status_info.setText(
-                    "⛔ 늦은 탁본 기록 미리보기 폐기 | 현재 문서 유지"
+                    "늦은 탁본 기록 미리보기 폐기 | 현재 문서 유지"
                 )
                 return
             current, current_record = authoritative
@@ -15215,10 +15314,10 @@ class MainWindow(QMainWindow):
                 self._clear_native_rubbing_preview()
                 self._reset_native_record_choice(panel.combo_native_rubbing_record)
                 panel.btn_native_rubbing_export.setEnabled(False)
-                self.status_info.setText(f"❌ 탁본 기록 미리보기 실패: {exc}")
+                self.status_info.setText(f"탁본 기록 미리보기 실패: {exc}")
                 return
             panel.btn_native_rubbing_export.setEnabled(True)
-            self.status_info.setText(f"✅ 탁본 기록 선택: {current_record.id}")
+            self.status_info.setText(f"탁본 기록 선택: {current_record.id}")
 
         def on_failed(message: str) -> None:
             if not owns_preview_request():
@@ -15230,7 +15329,7 @@ class MainWindow(QMainWindow):
             self._clear_native_rubbing_preview()
             self._reset_native_record_choice(panel.combo_native_rubbing_record)
             panel.btn_native_rubbing_export.setEnabled(False)
-            self.status_info.setText("❌ 탁본 기록 재계산 실패")
+            self.status_info.setText("탁본 기록 재계산 실패")
             QMessageBox.warning(
                 self,
                 "탁본 기록 미리보기 실패",
@@ -15256,7 +15355,7 @@ class MainWindow(QMainWindow):
             self._reset_native_record_choice(panel.combo_native_rubbing_record)
             panel.btn_native_rubbing_export.setEnabled(False)
             if not self._restore_artifact_authority_fault_status():
-                self.status_info.setText("❌ 탁본 기록 미리보기 시작 실패")
+                self.status_info.setText("탁본 기록 미리보기 시작 실패")
                 QMessageBox.warning(
                     self,
                     "탁본 기록 미리보기 실패",
@@ -15376,7 +15475,7 @@ class MainWindow(QMainWindow):
         try:
             self._sync_native_cutline_controls(reset_offset=True)
         except Exception as exc:
-            self.status_info.setText(f"❌ native 단면 범위 갱신 실패: {exc}")
+            self.status_info.setText(f"native 단면 범위 갱신 실패: {exc}")
 
     @staticmethod
     def _utc_seconds_now() -> str:
@@ -15414,13 +15513,13 @@ class MainWindow(QMainWindow):
                 (1, 0, 0): "Right",
             }.get(normal, "Cutline")
             status_text = (
-                f"✅ {view_label} Cutline 기록 | "
+                f"{view_label} Cutline 기록 | "
                 f"{len(computation.payload.paths)}개 경로 | canonical mm"
             )
         elif work_item.kind is MeasurementOperationKind.OUTLINE:
             assert isinstance(computation, ArtifactVectorComputation)
             status_text = (
-                f"✅ {str(recipe['view']).title()} Outline 기록 | "
+                f"{str(recipe['view']).title()} Outline 기록 | "
                 f"{int(computation.qc.get('component_count', 0))}개 성분 · "
                 f"{int(computation.qc.get('hole_count', 0))}개 구멍 | "
                 f"grid {float(recipe['precision_grid_mm']):g} mm"
@@ -15428,7 +15527,7 @@ class MainWindow(QMainWindow):
         else:
             assert isinstance(computation, ArtifactRubbingComputation)
             status_text = (
-                f"✅ {str(computation.recipe['view']).title()} Digital Rubbing 기록 | "
+                f"{str(computation.recipe['view']).title()} Digital Rubbing 기록 | "
                 f"{computation.raster.width_pixels}×{computation.raster.height_pixels} px · "
                 f"ink {int(computation.qc.get('inked_pixel_count', 0))} px"
             )
@@ -15531,7 +15630,7 @@ class MainWindow(QMainWindow):
             MeasurementOperationState.CANCELLED,
         }:
             self.status_info.setText(
-                f"⏹ {label} 취소 요청됨 · 안전한 계산 경계까지 기다리는 중"
+                f"{label} 취소 요청됨 · 안전한 계산 경계까지 기다리는 중"
             )
 
     def _native_measurement_callback_is_terminal(
@@ -15547,12 +15646,12 @@ class MainWindow(QMainWindow):
             return False
         if state is MeasurementOperationState.CANCELLED:
             self._pending_native_measurement_publications.pop(work_item.id, None)
-            self.status_info.setText(f"⏹ {label} 취소됨 | 기록을 만들지 않았습니다.")
+            self.status_info.setText(f"{label} 취소됨 | 기록을 만들지 않았습니다.")
             return True
         if state is MeasurementOperationState.STALE:
             self._pending_native_measurement_publications.pop(work_item.id, None)
             self.status_info.setText(
-                f"⛔ {label} 결과 폐기 | 계산 중 문서·Align이 변경됐습니다."
+                f"{label} 결과 폐기 | 계산 중 문서·Align이 변경됐습니다."
             )
             return True
         return False
@@ -15605,7 +15704,7 @@ class MainWindow(QMainWindow):
                     f"{type(exc).__name__}: {exc}",
                 )
             else:
-                self.status_info.setText("⛔ 실측 결과 게시 권위 상실")
+                self.status_info.setText("실측 결과 게시 권위 상실")
                 QMessageBox.warning(
                     self,
                     "실측 결과 게시 실패",
@@ -15655,7 +15754,7 @@ class MainWindow(QMainWindow):
                 operator="local-user",
             )
         except Exception as exc:
-            self.status_info.setText("❌ 검증 단면 준비 실패 | 기존 문서 유지")
+            self.status_info.setText("검증 단면 준비 실패 | 기존 문서 유지")
             QMessageBox.warning(
                 self,
                 "Cutline 준비 실패",
@@ -15684,7 +15783,7 @@ class MainWindow(QMainWindow):
                 self.status_info.setText(
                     "⏸ Cutline 결과 게시 보류 | 재시도 버튼 사용"
                     if pending
-                    else "⛔ Cutline 결과 폐기 | 현재 문서 유지"
+                    else "Cutline 결과 폐기 | 현재 문서 유지"
                 )
                 QMessageBox.warning(
                     self,
@@ -15704,7 +15803,7 @@ class MainWindow(QMainWindow):
                 label="Cutline",
             ):
                 return
-            self.status_info.setText("❌ 검증 단면 계산 실패 | 기존 문서 유지")
+            self.status_info.setText("검증 단면 계산 실패 | 기존 문서 유지")
             QMessageBox.warning(
                 self,
                 "Cutline 계산 실패",
@@ -15779,7 +15878,7 @@ class MainWindow(QMainWindow):
                 operator="local-user",
             )
         except Exception as exc:
-            self.status_info.setText("❌ 검증 외곽 준비 실패 | 기존 문서 유지")
+            self.status_info.setText("검증 외곽 준비 실패 | 기존 문서 유지")
             QMessageBox.warning(
                 self,
                 "Outline 준비 실패",
@@ -15809,7 +15908,7 @@ class MainWindow(QMainWindow):
                 self.status_info.setText(
                     "⏸ Outline 결과 게시 보류 | 재시도 버튼 사용"
                     if pending
-                    else "⛔ Outline 결과 폐기 | 현재 문서 유지"
+                    else "Outline 결과 폐기 | 현재 문서 유지"
                 )
                 QMessageBox.warning(
                     self,
@@ -15829,7 +15928,7 @@ class MainWindow(QMainWindow):
                 label="Outline",
             ):
                 return
-            self.status_info.setText("❌ 검증 외곽 계산 실패 | 기존 문서 유지")
+            self.status_info.setText("검증 외곽 계산 실패 | 기존 문서 유지")
             QMessageBox.warning(
                 self,
                 "Outline 계산 실패",
@@ -15897,14 +15996,14 @@ class MainWindow(QMainWindow):
         destination = publication.destination
         if publication.durability_confirmed:
             self.status_info.setText(
-                f"✅ 1:1 {artifact_label} + provenance 저장: {destination.name}"
+                f"1:1 {artifact_label} + provenance 저장: {destination.name}"
             )
             return
         warning = publication.warning_message or (
             "패키지는 원자적으로 게시됐지만 crash durability를 확인하지 못했습니다."
         )
         self.status_info.setText(
-            f"⚠️ {artifact_label} 패키지 저장됨 | crash durability 미확정"
+            f"{artifact_label} 패키지 저장됨 | crash durability 미확정"
         )
         QMessageBox.warning(
             self,
@@ -15966,7 +16065,7 @@ class MainWindow(QMainWindow):
                 measurement=True,
             )
         except ArtifactWorkbenchError as exc:
-            self.status_info.setText(f"⛔ 벡터 내보내기 차단: {exc}")
+            self.status_info.setText(f"벡터 내보내기 차단: {exc}")
             return
         record = self._current_native_vector_record()
         if record is None:
@@ -15990,7 +16089,7 @@ class MainWindow(QMainWindow):
             controller = self._artifact_export_controller()
             work_item = controller.begin_vector(selected, record.id)
         except Exception as exc:
-            self.status_info.setText("❌ 벡터 패키지 준비 실패")
+            self.status_info.setText("벡터 패키지 준비 실패")
             QMessageBox.warning(
                 self,
                 "벡터 내보내기 실패",
@@ -16024,7 +16123,7 @@ class MainWindow(QMainWindow):
                 ):
                     return
                 self.status_info.setText(
-                    "⛔ 벡터 게시 취소 | Open 완료 후 다시 내보내세요"
+                    "벡터 게시 취소 | Open 완료 후 다시 내보내세요"
                 )
                 QMessageBox.warning(
                     self,
@@ -16048,7 +16147,7 @@ class MainWindow(QMainWindow):
                     detail=detail,
                 ):
                     return
-                self.status_info.setText("❌ 벡터 패키지 저장 실패")
+                self.status_info.setText("벡터 패키지 저장 실패")
                 QMessageBox.warning(
                     self,
                     "벡터 내보내기 실패",
@@ -16068,7 +16167,7 @@ class MainWindow(QMainWindow):
                 detail=str(message),
             ):
                 return
-            self.status_info.setText("❌ 벡터 패키지 생성 실패")
+            self.status_info.setText("벡터 패키지 생성 실패")
             QMessageBox.warning(
                 self,
                 "벡터 내보내기 실패",
@@ -16102,7 +16201,7 @@ class MainWindow(QMainWindow):
                 detail=detail,
             ):
                 return
-            self.status_info.setText("❌ 벡터 패키지 작업 시작 실패")
+            self.status_info.setText("벡터 패키지 작업 시작 실패")
             QMessageBox.warning(self, "벡터 내보내기 실패", detail)
             return
         if not started:
@@ -16117,7 +16216,7 @@ class MainWindow(QMainWindow):
                     detail=f"내보내기 예약 해제 확인 실패: {cleanup_error}",
                 ):
                     return
-                self.status_info.setText("❌ 벡터 내보내기 예약 해제 확인 실패")
+                self.status_info.setText("벡터 내보내기 예약 해제 확인 실패")
                 QMessageBox.warning(
                     self,
                     "벡터 내보내기 정리 실패",
@@ -16192,7 +16291,7 @@ class MainWindow(QMainWindow):
                 operator="local-user",
             )
         except Exception as exc:
-            self.status_info.setText("❌ Digital Rubbing 준비 실패 | 기존 문서 유지")
+            self.status_info.setText("Digital Rubbing 준비 실패 | 기존 문서 유지")
             QMessageBox.warning(
                 self,
                 "Digital Rubbing 준비 실패",
@@ -16226,7 +16325,7 @@ class MainWindow(QMainWindow):
                 self.status_info.setText(
                     "⏸ Digital Rubbing 결과 게시 보류 | 재시도 버튼 사용"
                     if pending
-                    else "⛔ 늦은 Digital Rubbing 결과 폐기 | 현재 문서 유지"
+                    else "늦은 Digital Rubbing 결과 폐기 | 현재 문서 유지"
                 )
                 QMessageBox.warning(
                     self,
@@ -16250,7 +16349,7 @@ class MainWindow(QMainWindow):
                 label="Digital Rubbing",
             ):
                 return
-            self.status_info.setText("❌ Digital Rubbing 계산 실패 | 기존 문서 유지")
+            self.status_info.setText("Digital Rubbing 계산 실패 | 기존 문서 유지")
             QMessageBox.warning(
                 self,
                 "Digital Rubbing 계산 실패",
@@ -16358,7 +16457,7 @@ class MainWindow(QMainWindow):
             return
         if self._artifact_measurement_controller().active_summaries:
             self.status_info.setText(
-                "⛔ 진행·보류 중인 실측 결과가 raster 예산을 사용하고 있습니다."
+                "진행·보류 중인 실측 결과가 raster 예산을 사용하고 있습니다."
             )
             return
         try:
@@ -16367,7 +16466,7 @@ class MainWindow(QMainWindow):
                 measurement=True,
             )
         except ArtifactWorkbenchError as exc:
-            self.status_info.setText(f"⛔ Digital Rubbing 내보내기 차단: {exc}")
+            self.status_info.setText(f"Digital Rubbing 내보내기 차단: {exc}")
             return
         source_path = Path(str(self.current_filepath or "artifact"))
         default_path = source_path.with_name(
@@ -16387,7 +16486,7 @@ class MainWindow(QMainWindow):
             controller = self._artifact_export_controller()
             work_item = controller.begin_rubbing(selected, record.id)
         except Exception as exc:
-            self.status_info.setText("❌ Digital Rubbing 내보내기 준비 실패")
+            self.status_info.setText("Digital Rubbing 내보내기 준비 실패")
             QMessageBox.warning(
                 self,
                 "Digital Rubbing 내보내기 실패",
@@ -16421,7 +16520,7 @@ class MainWindow(QMainWindow):
                 ):
                     return
                 self.status_info.setText(
-                    "⛔ 탁본 게시 취소 | Open 완료 후 다시 내보내세요"
+                    "탁본 게시 취소 | Open 완료 후 다시 내보내세요"
                 )
                 QMessageBox.warning(
                     self,
@@ -16445,7 +16544,7 @@ class MainWindow(QMainWindow):
                     detail=detail,
                 ):
                     return
-                self.status_info.setText("❌ Digital Rubbing 패키지 저장 실패")
+                self.status_info.setText("Digital Rubbing 패키지 저장 실패")
                 QMessageBox.warning(
                     self,
                     "Digital Rubbing 내보내기 실패",
@@ -16465,7 +16564,7 @@ class MainWindow(QMainWindow):
                 detail=str(message),
             ):
                 return
-            self.status_info.setText("❌ Digital Rubbing 패키지 저장 실패")
+            self.status_info.setText("Digital Rubbing 패키지 저장 실패")
             QMessageBox.warning(
                 self,
                 "Digital Rubbing 내보내기 실패",
@@ -16499,7 +16598,7 @@ class MainWindow(QMainWindow):
                 detail=detail,
             ):
                 return
-            self.status_info.setText("❌ Digital Rubbing 패키지 작업 시작 실패")
+            self.status_info.setText("Digital Rubbing 패키지 작업 시작 실패")
             QMessageBox.warning(self, "Digital Rubbing 내보내기 실패", detail)
             return
         if not started:
@@ -16515,7 +16614,7 @@ class MainWindow(QMainWindow):
                 ):
                     return
                 self.status_info.setText(
-                    "❌ Digital Rubbing 내보내기 예약 해제 확인 실패"
+                    "Digital Rubbing 내보내기 예약 해제 확인 실패"
                 )
                 QMessageBox.warning(
                     self,
@@ -16569,7 +16668,7 @@ class MainWindow(QMainWindow):
                 self.section_panel.btn_line.setChecked(False)
             finally:
                 self.section_panel.btn_line.blockSignals(False)
-            self.status_info.setText("⛔ 화면용 legacy 단면선 차단 | 검증된 단면 사용")
+            self.status_info.setText("화면용 legacy 단면선 차단 | 검증된 단면 사용")
             return
         if enabled:
             try:
@@ -16618,7 +16717,7 @@ class MainWindow(QMainWindow):
             self.section_panel.btn_line.blockSignals(True)
             self.section_panel.btn_line.setChecked(bool(enabled))
             self.section_panel.btn_line.setText(
-                "✏️ 단면선 그리기 중지" if bool(enabled) else "✏️ 단면선 그리기 시작"
+                "단면선 그리기 중지" if bool(enabled) else "단면선 그리기 시작"
             )
         except Exception:
             pass
@@ -16662,7 +16761,7 @@ class MainWindow(QMainWindow):
         """현재 단면/가이드 결과를 레이어로 저장(스냅샷)."""
         if self._native_artifact_mode():
             self.status_info.setText(
-                "⛔ legacy 단면 레이어 차단 | 위의 '단면 계산 · 기록'을 사용하세요"
+                "legacy 단면 레이어 차단 | 위의 '단면 계산 · 기록'을 사용하세요"
             )
             return
         try:
@@ -16736,7 +16835,7 @@ class MainWindow(QMainWindow):
         self._sync_cutline_button_state(False)
         if self._native_artifact_mode():
             self.status_info.setText(
-                "⛔ 화면용 Cutline 자동 저장 안 함 | 검증된 단면 명령을 사용하세요"
+                "화면용 Cutline 자동 저장 안 함 | 검증된 단면 명령을 사용하세요"
             )
             return
         try:

@@ -59,9 +59,9 @@ This command runs multiple seeds across presets and saves per-case review sheets
 
 ## GUI Workflow / GUI 사용법
 
-기와 해석 패널의 `🧪 합성 데이터 / 정답 평가` 그룹에서 다음을 사용할 수 있습니다.
+기와 해석 패널의 `합성 데이터 / 정답 평가` 그룹에서 다음을 사용할 수 있습니다.
 
-Inside the tile interpretation panel, open `🧪 합성 데이터 / 정답 평가`:
+Inside the tile interpretation panel, open `합성 데이터 / 정답 평가`:
 
 1. `합성 기와 생성`
    현재 preset과 seed로 synthetic tile 1개를 장면에 추가합니다.
