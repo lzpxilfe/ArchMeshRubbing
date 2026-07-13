@@ -22,6 +22,19 @@ _WINDOWS_SOFTWARE_GL_DLL: Any | None = None
 _WINDOWS_SOFTWARE_GL_DIRECTORY: Any | None = None
 
 
+def _windows_software_gl_dll_path() -> Path:
+    from PyQt6.QtCore import QLibraryInfo
+
+    return (
+        Path(
+            QLibraryInfo.path(
+                QLibraryInfo.LibraryPath.BinariesPath,
+            )
+        )
+        / "opengl32sw.dll"
+    ).resolve()
+
+
 def _bind_pyopengl_windows_dll(gl_platform: Any, dll: Any) -> None:
     """Point PyOpenGL's Win32 dispatch at the same DLL selected by Qt."""
 
@@ -79,19 +92,9 @@ def install_windows_software_pyopengl_bridge(
             "Windows software OpenGL bridge must be installed before QApplication"
         )
 
-    from PyQt6.QtCore import QLibraryInfo
-
-    dll_path = (
-        Path(
-            QLibraryInfo.path(
-                QLibraryInfo.LibraryPath.BinariesPath,
-            )
-        )
-        / "opengl32sw.dll"
-    ).resolve()
+    dll_path = _windows_software_gl_dll_path()
     if not dll_path.is_file():
         raise RuntimeError(f"Qt software OpenGL DLL is missing: {dll_path}")
-    target_environ["QT_OPENGL_DLL"] = str(dll_path)
 
     if _WINDOWS_SOFTWARE_GL_DLL is None:
         add_dll_directory = getattr(os, "add_dll_directory", None)
@@ -102,6 +105,14 @@ def install_windows_software_pyopengl_bridge(
             raise RuntimeError("ctypes.WinDLL is unavailable")
         _WINDOWS_SOFTWARE_GL_DIRECTORY = add_dll_directory(str(dll_path.parent))
         _WINDOWS_SOFTWARE_GL_DLL = win_dll(str(dll_path))
+
+    # qwindows reads QT_OPENGL_DLL as a QByteArray and passes it to
+    # LoadLibraryA.  An absolute path containing Korean or other non-ANSI
+    # characters therefore cannot be selected reliably.  The exact DLL is
+    # already loaded above through ctypes' wide-character loader; asking Qt
+    # for its ASCII basename makes the Windows loaded-module lookup return
+    # that same module without sacrificing Unicode installation paths.
+    target_environ["QT_OPENGL_DLL"] = dll_path.name
 
     from OpenGL import platform as gl_platform
 

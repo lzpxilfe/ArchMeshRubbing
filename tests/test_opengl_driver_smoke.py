@@ -103,6 +103,47 @@ def test_windows_software_bridge_is_noop_outside_windows() -> None:
     assert "QT_OPENGL_DLL" not in environment
 
 
+def test_windows_software_bridge_uses_ascii_selector_for_unicode_install(
+    tmp_path: Path,
+) -> None:
+    runtime = tmp_path / "한글 런타임" / "opengl32sw.dll"
+    runtime.parent.mkdir()
+    runtime.write_bytes(b"software OpenGL")
+    environment = {"QT_OPENGL": "software"}
+    fake_dll = object()
+    directory_cookie = object()
+
+    with (
+        patch("src.gui.opengl_context.sys.platform", "win32"),
+        patch("src.gui.opengl_context.QGuiApplication.instance", return_value=None),
+        patch(
+            "src.gui.opengl_context._windows_software_gl_dll_path",
+            return_value=runtime,
+        ),
+        patch(
+            "src.gui.opengl_context.os.add_dll_directory",
+            return_value=directory_cookie,
+            create=True,
+        ) as add_dll_directory,
+        patch(
+            "src.gui.opengl_context.ctypes.WinDLL",
+            return_value=fake_dll,
+            create=True,
+        ) as win_dll,
+        patch("src.gui.opengl_context._bind_pyopengl_windows_dll") as bind,
+        patch("src.gui.opengl_context._WINDOWS_SOFTWARE_GL_DLL", None),
+        patch("src.gui.opengl_context._WINDOWS_SOFTWARE_GL_DIRECTORY", None),
+    ):
+        selected = install_windows_software_pyopengl_bridge(environ=environment)
+
+    assert selected == str(runtime)
+    assert environment["QT_OPENGL_DLL"] == "opengl32sw.dll"
+    assert environment["QT_OPENGL_DLL"].isascii()
+    add_dll_directory.assert_called_once_with(str(runtime.parent))
+    win_dll.assert_called_once_with(str(runtime))
+    assert bind.call_args.args[1] is fake_dll
+
+
 def test_pyopengl_bridge_rebinds_context_and_extension_dispatch() -> None:
     get_current_context = Mock()
     get_extension_procedure = Mock()
