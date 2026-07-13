@@ -25,6 +25,10 @@ from src.core.artifact_vector_extractor import (
     compute_artifact_cutline,
 )
 from src.core.artifact_vector_record import PlanarFrame
+from src.core.mesh_import_recipe import (
+    MeshImportRecipeError,
+    current_mesh_import_recipe,
+)
 from src.core.mesh_loader import MeshData
 from src.core.source_identity import SourceFingerprint
 
@@ -67,6 +71,7 @@ def _mesh(
             format="ply",
         ),
         source_format=source_format,
+        source_import_recipe=current_mesh_import_recipe(source_format),
     )
 
 
@@ -167,6 +172,9 @@ def test_new_import_is_ticketed_and_publishes_only_after_finalize() -> None:
     )
     assert workbench.snapshot.phase is WorkflowPhase.IMPORTING
     assert workbench.snapshot.session is None
+    assert dict(ticket.import_recipe) == current_mesh_import_recipe("ply")
+    with pytest.raises(TypeError):
+        ticket.import_recipe["format"] = "obj"  # type: ignore[index]
 
     transition = workbench.prepare_loaded_source(ticket, _mesh())
     assert workbench.snapshot.session is None
@@ -187,6 +195,27 @@ def test_new_import_is_ticketed_and_publishes_only_after_finalize() -> None:
     assert events[-1] is ready
     assert ready.session is not None
     np.testing.assert_array_equal(_mesh().vertices, ready.session.source_mesh.vertices)
+
+
+def test_new_import_rejects_parser_runtime_failure_without_state_change() -> None:
+    workbench = ArtifactWorkbench(id_factory=SequentialIds())
+    initial = workbench.snapshot
+
+    with (
+        patch(
+            "src.application.artifact_workbench.current_mesh_import_recipe",
+            side_effect=MeshImportRecipeError("runtime lock drift"),
+        ),
+        pytest.raises(ArtifactWorkbenchError, match="parser runtime.*lock drift"),
+    ):
+        workbench.begin_new_import(
+            "/source/artifact.ply",
+            _metadata(),
+            software_version="0.1.0",
+            operator="pytest",
+        )
+
+    assert workbench.snapshot is initial
 
 
 def test_zero_delta_align_is_a_durable_explicit_confirmation() -> None:
@@ -267,6 +296,26 @@ def test_busy_begin_and_stale_results_are_atomic() -> None:
     assert workbench.snapshot.pending_load is second
 
 
+def test_loaded_source_must_match_ticketed_parser_receipt() -> None:
+    workbench = ArtifactWorkbench(id_factory=SequentialIds())
+    ticket = workbench.begin_new_import(
+        "/source/artifact.ply",
+        _metadata(),
+        software_version="0.1.0",
+        operator="pytest",
+    )
+    mesh = _mesh()
+    receipt = dict(mesh.source_import_recipe or {})
+    receipt["runtime_lock_sha256"] = "b" * 64
+    mesh.source_import_recipe = receipt
+
+    with pytest.raises(ArtifactWorkbenchError, match="parser receipt.*Open ticket"):
+        workbench.prepare_loaded_source(ticket, mesh)
+
+    assert workbench.snapshot.pending_load is ticket
+    assert workbench.snapshot.session is None
+
+
 def test_reused_request_id_cannot_revive_a_cancelled_ticket() -> None:
     workbench = ArtifactWorkbench(id_factory=SequentialIds())
     first = workbench.begin_new_import(
@@ -328,6 +377,11 @@ def test_project_reopen_accepts_relocated_identical_source_and_saved_parser() ->
         request_id="open:project",
     )
     assert ticket.source_format == "ply"
+    metadata_id = saved.document.active_source_metadata_revision_id
+    assert metadata_id is not None
+    metadata = saved.document.source_metadata_revision_index[metadata_id]
+    geometry = saved.document.geometry_revision_index[metadata.geometry_revision_id]
+    assert dict(ticket.import_recipe) == dict(geometry.import_recipe)
     transition = workbench.prepare_loaded_source(
         ticket,
         _mesh(),
@@ -976,6 +1030,33 @@ def test_external_buffer_gltf_is_rejected_before_open_state_changes() -> None:
             _metadata(),
             software_version="0.1.0",
             operator="pytest",
+        )
+
+    assert workbench.snapshot is initial
+
+
+def test_saved_gltf_recipe_is_rejected_before_project_reopen_state_changes() -> None:
+    saved = _session(explicit_align=True)
+    metadata_id = saved.document.active_source_metadata_revision_id
+    assert metadata_id is not None
+    metadata = saved.document.source_metadata_revision_index[metadata_id]
+    geometry = saved.document.geometry_revision_index[metadata.geometry_revision_id]
+    gltf_geometry = replace(
+        geometry,
+        import_recipe=current_mesh_import_recipe("gltf"),
+    )
+    document = replace(
+        saved.document,
+        geometry_revisions=(gltf_geometry,),
+    )
+    workbench = ArtifactWorkbench(id_factory=SequentialIds())
+    initial = workbench.snapshot
+
+    with pytest.raises(ArtifactWorkbenchError, match="external buffers.*GLB"):
+        workbench.begin_project_reopen(
+            document,
+            project_path="/projects/external-gltf.amr",
+            resolved_source_path="/source/artifact.gltf",
         )
 
     assert workbench.snapshot is initial

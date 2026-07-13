@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import QApplication, QMessageBox, QPushButton
 
 from app_interactive import (
     MainWindow,
+    MeshLoadThread,
     TaskThread,
     UnitSelectionDialog,
     _load_project_open_candidate,
@@ -77,6 +78,7 @@ from src.core.artifact_vector_extractor import (
     extract_cutline_geometry,
 )
 from src.core.artifact_vector_record import PlanarFrame
+from src.core.mesh_import_recipe import current_mesh_import_recipe
 from src.core.project_file import (
     EmbeddedSourceRequiredError,
     MIGRATION_MARKER_NAME,
@@ -110,6 +112,7 @@ def _artifact_session() -> ArtifactSession:
         unit="cm",
         source_identity=_fingerprint(payload),
         source_format="ply",
+        source_import_recipe=current_mesh_import_recipe("ply"),
     )
     session = ArtifactSession.create_from_source(
         mesh,
@@ -165,6 +168,7 @@ def _artifact_box_session() -> ArtifactSession:
         unit="cm",
         source_identity=_fingerprint(payload, name="box.ply"),
         source_format="ply",
+        source_import_recipe=current_mesh_import_recipe("ply"),
     )
     session = ArtifactSession.create_from_source(
         mesh,
@@ -283,6 +287,7 @@ def _reloaded_source_mesh(
         unit=str(source.unit),
         source_identity=fingerprint or source.source_identity,
         source_format=str(source.source_format),
+        source_import_recipe=source.source_import_recipe,
     )
 
 
@@ -301,6 +306,42 @@ def test_main_window_constructs_offscreen() -> None:
         # Avoid MainWindow.closeEvent(), which intentionally asks the user to
         # confirm application exit and would block an offscreen test runner.
         window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_mesh_load_thread_passes_exact_import_recipe_to_loader() -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    recipe = current_mesh_import_recipe("ply")
+    loader = Mock()
+    loader.load.return_value = SimpleNamespace(
+        vertices=np.zeros((0, 3), dtype=np.float64),
+        face_normals=np.zeros((0, 3), dtype=np.float64),
+        n_faces=0,
+        _bounds=None,
+        _centroid=None,
+        _surface_area=None,
+    )
+    thread = MeshLoadThread(
+        "/source/artifact.ply",
+        1.0,
+        "mm",
+        source_format="ply",
+        import_recipe=recipe,
+    )
+    try:
+        with patch("app_interactive.MeshLoader", return_value=loader):
+            thread.run()
+
+        loader.load.assert_called_once_with(
+            "/source/artifact.ply",
+            source_format="ply",
+            import_recipe=recipe,
+        )
+    finally:
+        thread.deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         app.processEvents()
 
@@ -3562,9 +3603,15 @@ def test_failed_worker_start_rolls_back_ticketed_artifact_open() -> None:
         "confirmation_status": "confirmed",
     }
     try:
-        with patch.object(window, "_start_async_load", return_value=False):
+        with patch.object(
+            window,
+            "_start_async_load",
+            return_value=False,
+        ) as start_load:
             window._start_artifact_source_import("/source/artifact.ply", metadata)
 
+        ticket = start_load.call_args.kwargs["artifact_ticket"]
+        assert start_load.call_args.kwargs["import_recipe"] == ticket.import_recipe
         assert not window._artifact_load_active
         assert window._artifact_load_ticket is None
         assert window._artifact_pending_source_metadata is None
@@ -3937,6 +3984,11 @@ def test_manifest_only_project_open_keeps_external_source_picker_path() -> None:
 
         resolve_source.assert_called_once()
         start_load.assert_called_once()
+        ticket = start_load.call_args.kwargs["artifact_ticket"]
+        assert start_load.call_args.kwargs["import_recipe"] == ticket.import_recipe
+        assert dict(ticket.import_recipe) == dict(
+            session.source_mesh.source_import_recipe or {}
+        )
         assert window._artifact_load_active
         assert window._artifact_pending_document == session.document
         assert window._artifact_pending_project_path == "/projects/manifest-only.amr"

@@ -700,12 +700,16 @@ class MeshLoadThread(QThread):
         scale_factor: float,
         default_unit: str,
         source_format: str | None = None,
+        import_recipe: Mapping[str, object] | None = None,
     ):
         super().__init__()
         self._filepath = str(filepath)
         self._scale_factor = float(scale_factor)
         self._default_unit = str(default_unit)
         self._source_format = str(source_format or "").strip().lower() or None
+        self._import_recipe = (
+            dict(import_recipe) if isinstance(import_recipe, Mapping) else None
+        )
 
     def run(self):
         try:
@@ -713,6 +717,7 @@ class MeshLoadThread(QThread):
             mesh_data = loader.load(
                 self._filepath,
                 source_format=self._source_format,
+                import_recipe=self._import_recipe,
             )
 
             if self._scale_factor != 1.0:
@@ -6061,6 +6066,7 @@ class MainWindow(QMainWindow):
             filepath,
             1.0,
             source_format=ticket.source_format,
+            import_recipe=ticket.import_recipe,
             source_unit=ticket.source_unit,
             artifact_ticket=ticket,
         )
@@ -6216,6 +6222,7 @@ class MainWindow(QMainWindow):
             ticket.source_path,
             1.0,
             source_format=ticket.source_format,
+            import_recipe=ticket.import_recipe,
             source_unit=ticket.source_unit,
             artifact_ticket=ticket,
         )
@@ -7924,6 +7931,7 @@ class MainWindow(QMainWindow):
         scale_factor: float,
         *,
         source_format: str | None = None,
+        import_recipe: Mapping[str, object] | None = None,
         source_unit: str | None = None,
         artifact_ticket: ArtifactLoadTicket | None = None,
     ) -> bool:
@@ -7931,6 +7939,13 @@ class MainWindow(QMainWindow):
         if thread is not None and thread.isRunning():
             QMessageBox.information(self, "로딩 중", "이미 다른 메쉬를 로딩 중입니다.")
             return False
+
+        # The Open ticket is the authority for native imports.  Even an
+        # internal caller which accidentally supplies a different mapping
+        # cannot change the parser execution contract after ticket issuance.
+        if isinstance(artifact_ticket, ArtifactLoadTicket):
+            source_format = artifact_ticket.source_format
+            import_recipe = artifact_ticket.import_recipe
 
         name = Path(filepath).name
         self.status_info.setText(f"로딩 중: {name}")
@@ -7956,6 +7971,7 @@ class MainWindow(QMainWindow):
                 or getattr(self.mesh_loader, "default_unit", DEFAULT_MESH_UNIT)
             ),
             source_format=source_format,
+            import_recipe=import_recipe,
         )
         request_id = (
             artifact_ticket.id

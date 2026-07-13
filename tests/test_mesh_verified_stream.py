@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 
 from src.core.mesh_loader import MeshLoader
+from src.core.mesh_import_recipe import current_mesh_import_recipe
 
 
 PLY_BYTES = b"""ply
@@ -78,6 +79,7 @@ def test_load_verified_stream_loads_ply_and_records_observed_identity() -> None:
     assert mesh.unit == "mm"
     assert mesh.filepath == Path("scan.ply")
     assert mesh.source_format == "ply"
+    assert mesh.source_import_recipe == current_mesh_import_recipe("ply")
     assert mesh.source_identity is not None
     assert mesh.source_identity.sha256 == hashlib.sha256(PLY_BYTES).hexdigest()
     assert mesh.source_identity.size_bytes == len(PLY_BYTES)

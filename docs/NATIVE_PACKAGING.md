@@ -35,10 +35,10 @@ Windows에서는 활성화 명령만 `.venv\Scripts\activate`로 바꾼다. 기�
 
 1. embedded build manifest와 runtime lock hash
 2. 정확한 runtime distribution 버전과 Shapely/GEOS 조합
-3. 아이콘, lock, 6개 JSON schema
+3. 아이콘, lock, 7개 JSON schema
 4. offscreen Qt application
 5. 실제 `MainWindow`, `QOpenGLWidget`, OpenGL.GL/GLU import와 생성
-6. OBJ, PLY, STL, OFF, glTF, GLB in-memory parser
+6. OBJ, PLY, STL, OFF, glTF, GLB를 closed import recipe와 외부 dependency deny resolver로 여는 production parser 경로
 7. Pillow PNG encode/decode
 8. canonical `ArtifactDocument` round-trip golden
 9. canonical Cutline golden

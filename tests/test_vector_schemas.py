@@ -19,6 +19,7 @@ from src.core.artifact_vector_record import (
     VectorRecordKind,
 )
 from src.core.mesh_loader import MeshData
+from src.core.mesh_import_recipe import current_mesh_import_recipe
 from src.core.source_identity import SourceFingerprint
 
 
@@ -38,6 +39,7 @@ def _document_and_payload() -> tuple[ArtifactDocument, VectorGeometryPayload]:
             format="ply",
         ),
         source_format="ply",
+        source_import_recipe=current_mesh_import_recipe("ply"),
     )
     session = ArtifactSession.create_from_source(
         mesh,
@@ -102,8 +104,14 @@ class TestVectorSchemas(unittest.TestCase):
                 encoding="utf-8"
             )
         )
+        import_recipe_schema = json.loads(
+            (ROOT / "schemas/mesh_import_recipe-1.0.0.schema.json").read_text(
+                encoding="utf-8"
+            )
+        )
         jsonschema.Draft202012Validator.check_schema(payload_schema)
         jsonschema.Draft202012Validator.check_schema(export_schema)
+        jsonschema.Draft202012Validator.check_schema(import_recipe_schema)
         document, payload = _document_and_payload()
         payload_validator = jsonschema.Draft202012Validator(payload_schema)
         self.assertEqual(list(payload_validator.iter_errors(payload.to_dict())), [])
@@ -111,6 +119,10 @@ class TestVectorSchemas(unittest.TestCase):
         registry = referencing.Registry().with_resource(
             payload_schema["$id"],
             referencing.Resource.from_contents(payload_schema),
+        )
+        registry = registry.with_resource(
+            import_recipe_schema["$id"],
+            referencing.Resource.from_contents(import_recipe_schema),
         )
         export_validator = jsonschema.Draft202012Validator(
             export_schema,
@@ -120,9 +132,21 @@ class TestVectorSchemas(unittest.TestCase):
             build_vector_export(document, "record:schema-test").sidecar_bytes
         )
         self.assertEqual(list(export_validator.iter_errors(sidecar)), [])
+        self.assertEqual(
+            sidecar["provenance"]["geometry_revision"]["import_recipe"],
+            document.geometry_revisions[0].to_dict()["import_recipe"],
+        )
 
         sidecar["provenance"].pop("dependency_closure")
         self.assertTrue(list(export_validator.iter_errors(sidecar)))
+
+        tampered = json.loads(
+            build_vector_export(document, "record:schema-test").sidecar_bytes
+        )
+        tampered["provenance"]["geometry_revision"]["import_recipe"][
+            "dependency_policy"
+        ] = "allow_external"
+        self.assertTrue(list(export_validator.iter_errors(tampered)))
 
     def test_outline_role_constraints_are_machine_readable(self):
         jsonschema = importlib.import_module("jsonschema")

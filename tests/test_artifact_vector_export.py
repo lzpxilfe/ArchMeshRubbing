@@ -45,6 +45,7 @@ from src.core.artifact_vector_record import (
     VectorRecordKind,
 )
 from src.core.mesh_loader import MeshData
+from src.core.mesh_import_recipe import current_mesh_import_recipe
 from src.core.source_identity import SourceFingerprint
 
 
@@ -89,6 +90,7 @@ def _session() -> ArtifactSession:
             format="ply",
         ),
         source_format="ply",
+        source_import_recipe=current_mesh_import_recipe("ply"),
     )
     return ArtifactSession.create_from_source(
         mesh,
@@ -188,6 +190,17 @@ class TestArtifactVectorExportScaleAndProvenance(unittest.TestCase):
         self.assertEqual(sidecar["provenance"]["source_assets"][0]["sha256"], "a" * 64)
         self.assertEqual(sidecar["provenance"]["source_assets"][0]["original_name"], "유물 & 기록.ply")
         self.assertNotIn("asset_ref", sidecar["provenance"]["source_assets"][0])
+        public_import_recipe = sidecar["provenance"]["geometry_revision"][
+            "import_recipe"
+        ]
+        self.assertEqual(
+            public_import_recipe,
+            session.document.geometry_revisions[0].to_dict()["import_recipe"],
+        )
+        self.assertEqual(public_import_recipe["recipe_version"], "1.0.0")
+        self.assertEqual(public_import_recipe["dependency_policy"], "deny_external")
+        self.assertRegex(public_import_recipe["parser_runtime_sha256"], r"^[0-9a-f]{64}$")
+        self.assertRegex(public_import_recipe["runtime_lock_sha256"], r"^[0-9a-f]{64}$")
         metadata = sidecar["provenance"]["source_metadata_revision"]
         self.assertEqual(metadata["unit"], "cm")
         self.assertEqual(metadata["source_to_canonical_mm"][0][0], 10.0)
@@ -251,11 +264,11 @@ class TestArtifactVectorExportScaleAndProvenance(unittest.TestCase):
         self.assertEqual(first.sidecar_sha256, second.sidecar_sha256)
         self.assertEqual(
             first.svg_sha256,
-            "2c5b670d7fdb70f42917b8166cf8c5c63aad0b84792487b714f58c9293162bc9",
+            "e7d3ff863f680bcc2916a5d701ebdabc19f3b027c76d2bce8de63a0a349142f7",
         )
         self.assertEqual(
             first.sidecar_sha256,
-            "48f48218c06ce1bfe6d2aff644c30874bb00b7aa7f46d53090ed66531b69b02b",
+            "a3a20cd32fb59c5566228ef94aafa381716e33fd87e8c29d76355e91693e82d6",
         )
 
     def test_multiple_cutline_components_survive_without_world_xy_collapse(self):
@@ -498,6 +511,19 @@ class TestArtifactVectorExportFailClosed(unittest.TestCase):
         sidecar = json.loads(bundle.sidecar_bytes)
         sidecar["provenance"]["document"]["active_align_revision_id"] = "align:forged"
         with self.assertRaisesRegex(ArtifactVectorExportError, "active Align"):
+            validate_vector_export_bytes(bundle.svg_bytes, _canonical_json(sidecar))
+
+    def test_public_import_recipe_tampering_is_rejected_offline(self):
+        bundle = build_vector_export(_committed_session().document, "record:cutline-0")
+        sidecar = json.loads(bundle.sidecar_bytes)
+        sidecar["provenance"]["geometry_revision"]["import_recipe"][
+            "dependency_policy"
+        ] = "allow_external"
+
+        with self.assertRaisesRegex(
+            ArtifactVectorExportError,
+            "dependency_policy",
+        ):
             validate_vector_export_bytes(bundle.svg_bytes, _canonical_json(sidecar))
 
     def test_unconfirmed_source_metadata_cannot_support_a_scale_claim(self):

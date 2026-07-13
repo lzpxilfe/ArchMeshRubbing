@@ -1733,11 +1733,21 @@ def _materialize_artifact_project_package(
         )
     metadata = document.source_metadata_revision_index[active_metadata_id]
     geometry = document.geometry_revision_index[metadata.geometry_revision_id]
-    parser_format = str(geometry.import_recipe.get("format", "") or "").strip()
-    if not parser_format:
-        raise ProjectFormatError(
-            "ArtifactDocument geometry import recipe has no parser format"
+    from .mesh_import_recipe import (  # noqa: PLC0415
+        MeshImportRecipeError,
+        validate_mesh_import_recipe,
+    )
+
+    try:
+        import_execution = validate_mesh_import_recipe(
+            geometry.import_recipe,
+            allow_legacy=True,
         )
+    except MeshImportRecipeError as exc:
+        raise ProjectFormatError(
+            f"ArtifactDocument geometry import recipe is not executable: {exc}"
+        ) from exc
+    parser_format = import_execution.source_format
 
     try:
         # The archive path may have changed after package validation. Reapply
@@ -1753,6 +1763,7 @@ def _materialize_artifact_project_package(
                     expected_sha256=entry.sha256,
                     expected_size_bytes=entry.size_bytes,
                     original_name=entry.logical_path,
+                    import_recipe=geometry.import_recipe,
                 )
         session = ArtifactSession.bind_loaded_document(
             document,

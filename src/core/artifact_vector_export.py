@@ -49,6 +49,10 @@ from .artifact_vector_record import (
     validate_vector_recipe,
     vector_payload_from_record,
 )
+from .mesh_import_recipe import (
+    MeshImportRecipeError,
+    validate_mesh_import_recipe,
+)
 from .source_identity import PRIMARY_FILE_IDENTITY_SCOPE
 
 
@@ -83,7 +87,21 @@ _PUBLIC_ALIGN_RECIPE_KEYS = frozenset(
 )
 _PUBLIC_ALIGN_QC_KEYS = frozenset({"proper_rigid", "rigid"})
 _PUBLIC_GEOMETRY_RECIPE_KEYS = frozenset(
-    {"format", "loader", "maintain_order", "process", "sanitizer"}
+    {
+        "dependency_policy",
+        "force",
+        "format",
+        "loader",
+        "loader_version",
+        "maintain_order",
+        "parser_runtime_sha256",
+        "process",
+        "recipe_id",
+        "recipe_version",
+        "runtime_lock_sha256",
+        "sanitizer",
+        "scene_merge",
+    }
 )
 _PUBLIC_GEOMETRY_QC_KEYS = frozenset(
     {"face_count", "finite_vertices", "vertex_count"}
@@ -422,6 +440,33 @@ def _public_mapping(value: Mapping[str, Any], allowed_keys: frozenset[str]) -> d
     }
 
 
+def _public_mesh_import_recipe(
+    value: Mapping[str, Any],
+    *,
+    require_current_runtime: bool,
+) -> dict[str, Any]:
+    """Return the complete path-free executable parser contract.
+
+    Strict recipes contain runtime identity and dependency-policy fields which
+    are necessary to reproduce the source geometry.  Unknown document-only
+    extensions remain private, while every recognized recipe field is kept and
+    the resulting closed contract is validated before it enters provenance.
+    """
+
+    public = _public_mapping(value, _PUBLIC_GEOMETRY_RECIPE_KEYS)
+    try:
+        validate_mesh_import_recipe(
+            public,
+            allow_legacy=True,
+            require_current_runtime=require_current_runtime,
+        )
+    except MeshImportRecipeError as exc:
+        raise ArtifactVectorExportError(
+            f"invalid public mesh import recipe: {exc}"
+        ) from exc
+    return public
+
+
 def _public_align_revision(document: ArtifactDocument, record: DerivedRecord) -> dict[str, Any]:
     align = document.align_revision_index[record.align_revision_id]
     data = align.to_dict()
@@ -463,9 +508,9 @@ def _public_geometry_revision(document: ArtifactDocument, record: DerivedRecord)
         "geometry_hash_scope": data["geometry_hash_scope"],
         "geometry_sha256": data["geometry_sha256"],
         "id": data["id"],
-        "import_recipe": _public_mapping(
+        "import_recipe": _public_mesh_import_recipe(
             data["import_recipe"],
-            _PUBLIC_GEOMETRY_RECIPE_KEYS,
+            require_current_runtime=True,
         ),
         "operator": data["operator"],
         "qc": _public_mapping(data["qc"], _PUBLIC_GEOMETRY_QC_KEYS),
@@ -1069,6 +1114,14 @@ def _validate_provenance_shape(value: object) -> Mapping[str, Any]:
         )
     except ArtifactDocumentError as exc:
         raise ArtifactVectorExportError(f"invalid revision provenance: {exc}") from exc
+    public_import_recipe = _public_mesh_import_recipe(
+        geometry.import_recipe,
+        require_current_runtime=False,
+    )
+    if dict(geometry.import_recipe) != public_import_recipe:
+        raise ArtifactVectorExportError(
+            "provenance geometry import_recipe contains non-public fields"
+        )
     try:
         metadata.require_confirmed_matrix()
     except ArtifactDocumentError as exc:

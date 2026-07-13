@@ -44,6 +44,7 @@ from src.core.canonical_png import (
     encode_canonical_ga8_png,
 )
 from src.core.mesh_loader import MeshData
+from src.core.mesh_import_recipe import current_mesh_import_recipe
 from src.core.source_identity import SourceFingerprint
 
 
@@ -78,6 +79,7 @@ def _session() -> ArtifactSession:
             format="ply",
         ),
         source_format="ply",
+        source_import_recipe=current_mesh_import_recipe("ply"),
     )
     return ArtifactSession.create_from_source(
         mesh,
@@ -522,11 +524,11 @@ class TestRubbingExport(unittest.TestCase):
         self.assertEqual(bundle.pixels_per_meter, 10_000)
         self.assertEqual(
             bundle.png_sha256,
-            "278f6e795c4386f61eedffe43c05441ec1812555f50fa1e8b00b5c2af89b93a3",
+            "8c639b6226252501eff6f97d9e9b572ab86d0108563efb5c625682f7e7df9c0b",
         )
         self.assertEqual(
             bundle.sidecar_sha256,
-            "36748f68e5e1e22dcf7738273a8d56d71d06c5874a547bffe324a9a7c186c594",
+            "1afd1355a9da006a623099a8cd7610f8c00c484ec822e40deb13fc16391d84d5",
         )
         pixels, ppm, metadata = decode_canonical_ga8_png(bundle.png_bytes)
         np.testing.assert_array_equal(pixels, computation.raster.pixels)
@@ -537,6 +539,15 @@ class TestRubbingExport(unittest.TestCase):
             sidecar["presentation"]["pixel_pitch_mm_exact"],
             {"denominator": 10_000, "numerator": 1000},
         )
+        public_import_recipe = sidecar["provenance"]["geometry_revision"][
+            "import_recipe"
+        ]
+        self.assertEqual(
+            public_import_recipe,
+            session.document.geometry_revisions[0].to_dict()["import_recipe"],
+        )
+        self.assertEqual(public_import_recipe["recipe_version"], "1.0.0")
+        self.assertEqual(public_import_recipe["dependency_policy"], "deny_external")
         self.assertNotIn(b"/private/lab/alice", bundle.sidecar_bytes)
         self.assertNotIn(b"secret-scan", bundle.png_bytes)
 
@@ -614,6 +625,27 @@ class TestRubbingExport(unittest.TestCase):
         sidecar = _sidecar(bundle)
         sidecar["privacy"]["annotations_embedded_in_primary_png"] = True
         with self.assertRaisesRegex(ArtifactRubbingExportError, "privacy|metadata"):
+            validate_rubbing_export_bytes(
+                bundle.png_bytes,
+                canonical_json_bytes(sidecar),
+            )
+
+    def test_public_import_recipe_tampering_is_rejected_offline(self):
+        session, computation = _committed()
+        bundle = build_rubbing_export(
+            session.document,
+            "record:rubbing:export",
+            computation.raster,
+        )
+        sidecar = _sidecar(bundle)
+        sidecar["provenance"]["geometry_revision"]["import_recipe"][
+            "dependency_policy"
+        ] = "allow_external"
+
+        with self.assertRaisesRegex(
+            ArtifactRubbingExportError,
+            "dependency_policy",
+        ):
             validate_rubbing_export_bytes(
                 bundle.png_bytes,
                 canonical_json_bytes(sidecar),

@@ -18,6 +18,7 @@ from src.core.artifact_rubbing_extractor import (
 from src.core.artifact_rubbing_record import validate_rubbing_receipt
 from src.core.artifact_session import ArtifactSession
 from src.core.mesh_loader import MeshData
+from src.core.mesh_import_recipe import current_mesh_import_recipe
 from src.core.source_identity import SourceFingerprint
 
 
@@ -59,6 +60,7 @@ def _generated_receipt_and_sidecar() -> tuple[dict[str, object], dict[str, objec
             format="ply",
         ),
         source_format="ply",
+        source_import_recipe=current_mesh_import_recipe("ply"),
     )
     session = ArtifactSession.create_from_source(
         mesh,
@@ -109,12 +111,20 @@ class TestRubbingSchemas(unittest.TestCase):
         referencing = importlib.import_module("referencing")
         cls.receipt_schema = _load_schema("rubbing_receipt-1.0.0.schema.json")
         cls.export_schema = _load_schema("rubbing_export-1.0.0.schema.json")
+        cls.import_recipe_schema = _load_schema(
+            "mesh_import_recipe-1.0.0.schema.json"
+        )
         jsonschema.Draft202012Validator.check_schema(cls.receipt_schema)
         jsonschema.Draft202012Validator.check_schema(cls.export_schema)
+        jsonschema.Draft202012Validator.check_schema(cls.import_recipe_schema)
         cls.receipt_validator = jsonschema.Draft202012Validator(cls.receipt_schema)
         registry = referencing.Registry().with_resource(
             cls.receipt_schema["$id"],
             referencing.Resource.from_contents(cls.receipt_schema),
+        )
+        registry = registry.with_resource(
+            cls.import_recipe_schema["$id"],
+            referencing.Resource.from_contents(cls.import_recipe_schema),
         )
         cls.export_validator = jsonschema.Draft202012Validator(
             cls.export_schema,
@@ -132,6 +142,14 @@ class TestRubbingSchemas(unittest.TestCase):
     def test_generated_receipt_and_export_sidecar_validate(self) -> None:
         self.assert_schema_valid(self.receipt_validator, self.receipt)
         self.assert_schema_valid(self.export_validator, self.sidecar)
+        provenance = self.sidecar["provenance"]
+        assert isinstance(provenance, dict)
+        geometry = provenance["geometry_revision"]
+        assert isinstance(geometry, dict)
+        import_recipe = geometry["import_recipe"]
+        assert isinstance(import_recipe, dict)
+        self.assertEqual(import_recipe["recipe_version"], "1.0.0")
+        self.assertEqual(import_recipe["dependency_policy"], "deny_external")
 
         pixels = np.array([[[255, 255]]], dtype=np.uint8)
         for view in OutlineView:
@@ -235,6 +253,16 @@ class TestRubbingSchemas(unittest.TestCase):
         assert isinstance(align_recipe, dict)
         align_recipe["source_path"] = "/private/schema/scan.ply"
         cases.append(("public_align_extra", public_align_extra))
+
+        import_recipe_tampered = copy.deepcopy(self.sidecar)
+        provenance = import_recipe_tampered["provenance"]
+        assert isinstance(provenance, dict)
+        geometry = provenance["geometry_revision"]
+        assert isinstance(geometry, dict)
+        import_recipe = geometry["import_recipe"]
+        assert isinstance(import_recipe, dict)
+        import_recipe["runtime_lock_sha256"] = "not-a-sha256"
+        cases.append(("import_recipe_tampered", import_recipe_tampered))
 
         for label, value in cases:
             with self.subTest(label=label):

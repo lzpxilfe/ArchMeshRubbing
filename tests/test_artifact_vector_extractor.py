@@ -21,6 +21,7 @@ from src.core.artifact_vector_extractor import (
     require_current_computation,
 )
 from src.core.artifact_vector_record import PlanarFrame
+from src.core.mesh_import_recipe import current_mesh_import_recipe
 from src.core.mesh_loader import MeshData
 from src.core.source_identity import SourceFingerprint
 
@@ -65,6 +66,7 @@ def _session_cm_box() -> ArtifactSession:
             format="ply",
         ),
         source_format="ply",
+        source_import_recipe=current_mesh_import_recipe("ply"),
     )
     return ArtifactSession.create_from_source(
         mesh,

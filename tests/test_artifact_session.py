@@ -6,7 +6,12 @@ import unittest
 
 import numpy as np
 
+from src.core.artifact_document import ArtifactDocument
 from src.core.artifact_session import ArtifactSession, ArtifactSessionError
+from src.core.mesh_import_recipe import (
+    MESH_IMPORT_RECIPE_ID,
+    current_mesh_import_recipe,
+)
 from src.core.mesh_loader import MeshData
 from src.core.project_file import load_artifact_project, save_artifact_project
 from src.core.source_identity import SourceFingerprint
@@ -33,6 +38,7 @@ def _mesh() -> MeshData:
             format="ply",
         ),
         source_format="ply",
+        source_import_recipe=current_mesh_import_recipe("ply"),
     )
 
 
@@ -53,6 +59,60 @@ def _session() -> ArtifactSession:
 
 
 class TestArtifactSession(unittest.TestCase):
+    def test_new_session_records_closed_parser_and_runtime_recipe(self):
+        session = _session()
+        geometry = session.document.geometry_revisions[0]
+        recipe = dict(geometry.import_recipe)
+
+        self.assertEqual(
+            recipe["recipe_id"],
+            MESH_IMPORT_RECIPE_ID,
+        )
+        self.assertEqual(recipe["recipe_version"], "1.0.0")
+        self.assertEqual(recipe["loader"], "trimesh")
+        self.assertEqual(recipe["loader_version"], "4.11.5")
+        self.assertEqual(len(recipe["runtime_lock_sha256"]), 64)
+        self.assertIs(recipe["process"], False)
+        self.assertIs(recipe["maintain_order"], True)
+        self.assertEqual(recipe["force"], "mesh")
+
+    def test_rebind_accepts_exact_legacy_profile_but_rejects_recipe_drift(self):
+        session = _session()
+        legacy_data = session.document.to_dict()
+        legacy_data["geometry_revisions"][0]["import_recipe"] = {
+            "format": "ply",
+            "loader": "trimesh",
+            "maintain_order": True,
+            "process": False,
+            "sanitizer": "meshdata-v1",
+        }
+        legacy_document = ArtifactDocument.from_dict(legacy_data)
+        legacy_mesh = _mesh()
+        legacy_mesh.source_import_recipe = dict(
+            legacy_data["geometry_revisions"][0]["import_recipe"]
+        )
+        rebound = ArtifactSession.bind_loaded_document(
+            legacy_document,
+            legacy_mesh,
+            resolved_source_path="/relocated/artifact.ply",
+        )
+        self.assertEqual(rebound.document, legacy_document)
+
+        for field, value, message in (
+            ("loader_version", "0.0.0", "Trimesh version"),
+            ("parser_runtime_sha256", "0" * 64, "parser-runtime"),
+            ("process", True, "process"),
+        ):
+            changed = session.document.to_dict()
+            changed["geometry_revisions"][0]["import_recipe"][field] = value
+            changed_document = ArtifactDocument.from_dict(changed)
+            with self.assertRaisesRegex(ArtifactSessionError, message):
+                ArtifactSession.bind_loaded_document(
+                    changed_document,
+                    _mesh(),
+                    resolved_source_path="/relocated/artifact.ply",
+                )
+
     def test_document_identity_does_not_depend_on_native_source_location(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:archmeshrubbing:schema:mesh-import-recipe:1.0.0",
+  "title": "ArchMeshRubbing Mesh Import Recipe 1.0.0",
+  "description": "Closed parser and runtime identity for authoritative source geometry decoding.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "recipe_id",
+    "recipe_version",
+    "format",
+    "loader",
+    "loader_version",
+    "parser_runtime_sha256",
+    "runtime_lock_sha256",
+    "force",
+    "process",
+    "maintain_order",
+    "scene_merge",
+    "sanitizer",
+    "dependency_policy"
+  ],
+  "properties": {
+    "recipe_id": {"const": "org.archmeshrubbing.mesh-import.trimesh"},
+    "recipe_version": {"const": "1.0.0"},
+    "format": {
+      "enum": ["obj", "ply", "stl", "off", "gltf", "glb"]
+    },
+    "loader": {"const": "trimesh"},
+    "loader_version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+].*)?$"
+    },
+    "parser_runtime_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "runtime_lock_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "force": {"const": "mesh"},
+    "process": {"const": false},
+    "maintain_order": {"const": true},
+    "scene_merge": {"const": "trimesh.util.concatenate/v1"},
+    "sanitizer": {"const": "meshdata-v1"},
+    "dependency_policy": {"const": "deny_external"}
+  }
+}

@@ -16,6 +16,7 @@ from enum import Enum
 import logging
 from pathlib import Path
 from threading import RLock
+from types import MappingProxyType
 from typing import TypeAlias, TypeVar
 import uuid
 
@@ -38,6 +39,11 @@ from src.core.artifact_scene_adapter import (
     ArtifactSceneProjection,
 )
 from src.core.artifact_session import ArtifactSession, ArtifactSessionError
+from src.core.mesh_import_recipe import (
+    MeshImportRecipeError,
+    current_mesh_import_recipe,
+    validate_mesh_import_recipe,
+)
 from src.core.mesh_loader import MeshData, MeshLoader
 
 
@@ -222,6 +228,7 @@ class ArtifactLoadTicket:
     kind: _LoadKind
     source_path: str
     source_format: str
+    import_recipe: Mapping[str, object]
     source_unit: str
     project_path: str | None
     metadata: ConfirmedSourceMetadata | None
@@ -232,6 +239,16 @@ class ArtifactLoadTicket:
     document_id: str | None = None
     metadata_revision_id: str | None = None
     align_revision_id: str | None = None
+
+    def __post_init__(self) -> None:
+        # A ticket crosses the GUI/background-worker boundary.  Preserve the
+        # exact validated parser receipt and prevent either side from mutating
+        # its execution contract while the source bytes are being parsed.
+        object.__setattr__(
+            self,
+            "import_recipe",
+            MappingProxyType(dict(self.import_recipe)),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -669,6 +686,12 @@ class ArtifactWorkbench:
             Path(resolved).suffix.lower().removeprefix("."),
             field_name="source_format",
         )
+        try:
+            import_recipe = current_mesh_import_recipe(source_format)
+        except MeshImportRecipeError as exc:
+            raise ArtifactWorkbenchError(
+                f"mesh parser runtime is not executable: {exc}"
+            ) from exc
         with self._lock:
             state = self._require_open_slot()
             ticket = ArtifactLoadTicket(
@@ -677,6 +700,7 @@ class ArtifactWorkbench:
                 kind=_LoadKind.NEW_SOURCE,
                 source_path=resolved,
                 source_format=source_format,
+                import_recipe=import_recipe,
                 source_unit=confirmed.unit,
                 project_path=None,
                 metadata=confirmed,
@@ -715,8 +739,17 @@ class ArtifactWorkbench:
         if not isinstance(document, ArtifactDocument):
             raise ArtifactWorkbenchError("document must be an ArtifactDocument")
         _source_asset, geometry, metadata = _document_source_context(document)
+        try:
+            execution = validate_mesh_import_recipe(
+                geometry.import_recipe,
+                allow_legacy=True,
+            )
+        except MeshImportRecipeError as exc:
+            raise ArtifactWorkbenchError(
+                f"ArtifactDocument parser recipe is not executable: {exc}"
+            ) from exc
         source_format = _authoritative_source_format(
-            str(geometry.import_recipe.get("format", "") or ""),
+            execution.source_format,
             field_name="ArtifactDocument parser format",
         )
         if metadata.confirmation_status is not MetadataConfirmationStatus.CONFIRMED:
@@ -732,6 +765,7 @@ class ArtifactWorkbench:
                     field_name="resolved_source_path",
                 ),
                 source_format=source_format,
+                import_recipe=geometry.import_recipe,
                 source_unit=str(metadata.unit),
                 project_path=_normalized_path(project_path, field_name="project_path"),
                 metadata=None,
@@ -784,6 +818,12 @@ class ArtifactWorkbench:
             resolved_source_path or ticket.source_path,
             field_name="resolved_source_path",
         )
+        if not isinstance(mesh.source_import_recipe, Mapping) or dict(
+            mesh.source_import_recipe
+        ) != dict(ticket.import_recipe):
+            raise ArtifactWorkbenchError(
+                "loaded source parser receipt does not match its Open ticket"
+            )
         try:
             if ticket.kind is _LoadKind.NEW_SOURCE:
                 metadata = ticket.metadata

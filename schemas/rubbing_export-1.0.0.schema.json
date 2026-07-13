@@ -53,6 +53,34 @@
       "uniqueItems": true,
       "items": {"$ref": "#/$defs/nonEmptyString"}
     },
+    "legacyFullImportRecipe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["format", "loader", "maintain_order", "process", "sanitizer"],
+      "properties": {
+        "format": {"enum": ["obj", "ply", "stl", "off", "gltf", "glb"]},
+        "loader": {"const": "trimesh"},
+        "maintain_order": {"const": true},
+        "process": {"const": false},
+        "sanitizer": {"const": "meshdata-v1"}
+      }
+    },
+    "legacyDocumentImportRecipe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["format", "process"],
+      "properties": {
+        "format": {"enum": ["obj", "ply", "stl", "off", "gltf", "glb"]},
+        "process": {"const": false}
+      }
+    },
+    "meshImportRecipe": {
+      "oneOf": [
+        {"$ref": "urn:archmeshrubbing:schema:mesh-import-recipe:1.0.0"},
+        {"$ref": "#/$defs/legacyFullImportRecipe"},
+        {"$ref": "#/$defs/legacyDocumentImportRecipe"}
+      ]
+    },
     "matrix4x4": {
       "type": "array",
       "minItems": 4,
@@ -331,17 +359,7 @@
         },
         "geometry_sha256": {"$ref": "#/$defs/sha256"},
         "id": {"$ref": "#/$defs/nonEmptyString"},
-        "import_recipe": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "format": {},
-            "loader": {},
-            "maintain_order": {},
-            "process": {},
-            "sanitizer": {}
-          }
-        },
+        "import_recipe": {"$ref": "#/$defs/meshImportRecipe"},
         "operator": {"$ref": "#/$defs/nonEmptyString"},
         "qc": {
           "type": "object",

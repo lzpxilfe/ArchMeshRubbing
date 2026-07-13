@@ -68,7 +68,7 @@ AMR v2 container는 payload 종류와 payload schema를 분리한다.
 1. 외부 원본 또는 이미 열린 `.amr`의 source member를 descriptor stream으로 연다.
 2. 기대 SHA-256·크기를 확인하면서 같은 parent의 임시 ZIP으로 복사한다.
 3. 임시 package의 central directory, member 규칙, 전체 checksum과 source index를 production reader로 다시 검증한다.
-4. embedded source를 saved parser/unit으로 실제 decode하고 document에 bind·materialize하여 source/geometry/Align projection과 UV/texture 재현 여부를 확인한다.
+4. embedded source를 저장된 전체 closed import recipe/unit으로 실제 decode하고 document에 bind·materialize하여 source/geometry/Align projection과 parser receipt를 확인한다.
 5. source archive descriptor를 닫은 뒤에만 목적지를 원자 교체하고 directory fsync를 시도한다.
 
 native session 저장 대상은 `.amr` 확장자만 허용한다. 대상 경로가 외부 원본과 같은 path, symlink 또는 hardlink inode라면 임시 파일 생성 전과 교체 직전에 거부한다. 이미 embedded source에서 열린 session은 같은 `.amr` 위 저장과 Save As를 모두 지원한다. 기존 manifest-only artifact 문서는 계속 읽지만, embedded session materialization에는 외부 원본을 다시 선택해야 한다.
@@ -107,19 +107,34 @@ native session 저장 대상은 `.amr` 확장자만 허용한다. 대상 경로�
 - `path`, `mtime_ns`, `original_name`, `format`은 탐색·표시용 hint다.
 - 새 ArtifactDocument의 `SourceAsset.asset_ref`는 `external:<original_name>`인 상대 locator다. 현재 세션의 native 절대경로는 `ArtifactSession.resolved_source_path`에만 유지하므로 drive/root가 달라도 같은 source·recipe·revision은 같은 canonical document와 export hash를 만든다. 기존 `external:<absolute-path>` 문서도 계속 읽으며, 상대 locator가 프로젝트 옆에서 해결되지 않으면 source picker로 검증 파일을 다시 지정한다.
 - 경로와 이름이 달라도 SHA-256과 크기가 같으면 `relocated=true`인 verified 결과로 열 수 있다.
-- `parse_format`은 파일명이 바뀐 동일 원본도 처음과 같은 parser로 해석하기 위한 import recipe다. 후보 파일의 suffix와 별도로 보존한다.
+- `parse_format`은 legacy UI state의 parser hint다. Native ArtifactDocument에서는 아래의 닫힌 `GeometryRevision.import_recipe` 전체가 권위 실행 계약이며 후보 파일의 suffix보다 우선한다.
 - 같은 크기라도 SHA-256이 다르면 mismatch이며 face ID, cutline, 기록면 데이터 등을 replacement mesh에 적용하지 않는다.
 - hash와 mesh parser는 동일한 열린 file descriptor를 사용한다. 경로를 다시 열어 다른 파일의 geometry에 이전 hash를 붙이지 않는다.
 - Windows의 path `stat`과 descriptor `fstat`은 `ctime` 의미가 다르므로 혼합 비교에서는 device/inode/size/mtime만 비교한다. 열린 descriptor의 전후 비교에서는 change time까지 유지해 같은 크기·mtime의 소비 중 변경을 계속 거부한다.
 - 저장 시 디스크 파일을 다시 hash하지 않는다. import 당시 geometry와 함께 보관한 immutable identity만 직렬화한다.
 
-Artifact payload를 다시 열 때 parser 선택도 검증 대상이다. `GeometryRevision.import_recipe.format`에 최초 parser format을 저장하고, resolved source의 현재 suffix보다 이 값을 우선해 `MeshLoader.load(..., source_format=saved_format)`로 decode한다. loader는 같은 열린 descriptor에서 raw byte fingerprint와 geometry를 얻는다. 이후 `ArtifactSession.bind_loaded_document()`는 다음을 모두 만족할 때만 문서와 mesh를 결합한다.
+Artifact payload를 다시 열 때 parser 선택과 실행 계약도 검증 대상이다. 신규 문서는 `schemas/mesh_import_recipe-1.0.0.schema.json`의 exact-key 계약을 `GeometryRevision.import_recipe`에 저장한다.
+
+```text
+recipe_id/version
+format, loader, loader_version
+parser_runtime_sha256, runtime_lock_sha256
+force=mesh, process=false, maintain_order=true
+scene_merge=trimesh.util.concatenate/v1
+sanitizer=meshdata-v1
+dependency_policy=deny_external
+```
+
+`parser_runtime_sha256`은 정렬된 exact `numpy`, `pillow`, `trimesh` pin 문자열의 SHA-256이며 실제 geometry decode의 실행 gate다. `runtime_lock_sha256`은 전체 frozen 환경 provenance로 보존하지만 Qt 같은 무관한 pin 변경만으로 과거 geometry를 읽지 못하게 하지 않도록 parser 실행 gate로 사용하지 않는다. 알 수 없는 key, flag drift, loader/parser-subset version 불일치, 비정규화 format은 parse 전에 거부한다. 기존 배포가 만든 정확한 5-field recipe와 공식 2-field fixture만 명시적 legacy profile로 실행하며 임의 JSON을 parser option으로 해석하거나 immutable GeometryRevision을 자동 migration하지 않는다.
+
+Resolved source의 suffix 대신 검증된 recipe의 `format`을 사용하고, recipe 전체를 `ArtifactLoadTicket → MeshLoadThread → MeshLoader`로 그대로 전달한다. loader는 같은 열린 descriptor에서 raw byte fingerprint와 geometry를 얻는다. 이후 `ArtifactSession.bind_loaded_document()`는 다음을 모두 만족할 때만 문서와 mesh를 결합한다.
 
 1. 새로 계산한 `identity_scope`, `sha256`, `size_bytes`가 `SourceAsset`과 일치한다.
 2. 실제 사용한 `MeshData.source_format`이 저장된 `import_recipe.format`과 일치한다.
-3. 저장된 `geometry_hash_scope`로 decode 결과를 다시 hash한 값이 `GeometryRevision.geometry_sha256`와 일치한다.
+3. 실제 parser가 남긴 `MeshData.source_import_recipe`가 저장된 mapping과 key/value까지 정확히 일치한다.
+4. 저장된 `geometry_hash_scope`로 decode 결과를 다시 hash한 값이 `GeometryRevision.geometry_sha256`와 일치한다.
 
-저장된 parser format이 없거나 다른 parser로 열렸거나 source/geometry digest가 다르면 materialization 전에 실패한다. 따라서 이름과 확장자가 바뀐 동일 파일은 복원할 수 있지만, 단지 suffix가 같다는 이유로 다른 바이트나 다른 decode 결과를 받아들이지 않는다.
+저장된 recipe가 없거나 지원 profile이 아니거나 다른 parser/receipt로 열렸거나 source/geometry digest가 다르면 materialization 전에 실패한다. 따라서 이름과 확장자가 바뀐 동일 파일은 복원할 수 있지만, 단지 suffix가 같다는 이유로 다른 바이트나 다른 decode 결과를 받아들이지 않는다.
 
 `binding_status`의 현재 값:
 
@@ -137,7 +152,7 @@ Artifact payload를 다시 열 때 parser 선택도 검증 대상이다. `Geomet
 - glTF의 외부 `.bin`·이미지
 - 기타 sidecar 또는 linked asset
 
-위 파일은 아직 identity와 portable package에 포함되지 않는다. 따라서 현재 `verified`는 “주 파일 바이트가 일치한다”는 뜻이며, 모든 렌더링 의존 asset이나 전체 geometry package가 완전하다는 뜻이 아니다. 저장 전 실제 embedded parse가 원래 session의 UV/texture를 재현하지 못하면 저장을 실패시켜 조용한 유실을 막지만, linked asset 자체를 보존하는 sidecar manifest는 후속 버전 범위다.
+위 파일은 아직 identity와 portable package에 포함되지 않는다. 따라서 authoritative parser에는 filesystem/remote 자동 resolver 대신 기록형 deny resolver를 주입하며, OBJ `mtllib`, PLY `TextureFile`, glTF/GLB 외부 buffer/image URI 요청이 하나라도 있으면 parser가 내부 오류를 삼켜도 Open 단계에서 실패한다. `verified`는 self-contained 주 파일 바이트와 그 closed recipe decode 결과에만 적용된다. Linked asset 자체를 content-addressed graph로 보존하고 재생하는 dependency manifest/bundle resolver는 후속 버전 범위다.
 
 ## ArtifactDocument 1.0 도메인 계약
 
@@ -263,9 +278,9 @@ M0-3에서 시작한 durable core와 현재 native GUI/application 경계는 다
 
 1. 프로세스 A가 PLY source를 같은 descriptor에서 hash·parse하고 cm metadata와 비자명한 pivot Align revision을 만든 뒤 embedded artifact package로 저장한다.
 2. 외부 PLY source를 삭제한다.
-3. 다른 PID의 프로세스 B가 `.amr`만 strict load하고 content-addressed source blob을 저장된 parser format과 metadata unit으로 다시 연다.
+3. 다른 PID의 프로세스 B가 `.amr`만 strict load하고 content-addressed source blob을 저장된 전체 parser/runtime receipt와 metadata unit으로 다시 연다.
 4. 프로세스 B가 embedded raw source SHA-256·크기, decode geometry SHA-256을 새로 계산하고 검증된 session에 bind한 뒤 world-mm geometry를 materialize한다.
-5. 두 프로세스의 source SHA-256·크기, geometry SHA-256, active Align ID·float64 matrix, parser format·unit, world vertex를 비교한다.
+5. 두 프로세스의 source SHA-256·크기, geometry SHA-256, active Align ID·float64 matrix, 전체 import recipe·unit, world vertex를 비교한다.
 
 이 게이트는 canonical CPU projection과 durable payload의 왕복 증거다. `load_artifact_project()` 자체가 외부 파일을 탐색하거나 parser를 실행하는 것은 아니며, source resolution과 saved-parser reopen은 session/GUI orchestration이 수행한다. native 한-artifact workflow가 document source of truth와 scene-swap rollback을 사용하더라도 실제 GPU driver가 그린 프레임의 정밀도·시각적 동일성까지 이 테스트가 증명하지는 않는다.
 

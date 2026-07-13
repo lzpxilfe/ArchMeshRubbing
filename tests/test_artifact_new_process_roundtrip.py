@@ -112,6 +112,7 @@ PROCESS_A = textwrap.dedent(
             ).tolist(),
             "metadata_unit": metadata.unit,
             "parser_format": mesh.source_format,
+            "import_recipe": mesh.source_import_recipe,
         },
         sys.stdout,
         sort_keys=True,
@@ -180,6 +181,8 @@ PROCESS_B = textwrap.dedent(
             "parser_format": parser_format,
             "loaded_mesh_unit": mesh.unit,
             "loaded_mesh_parser_format": mesh.source_format,
+            "import_recipe": dict(geometry.import_recipe),
+            "loaded_mesh_import_recipe": mesh.source_import_recipe,
         },
         sys.stdout,
         sort_keys=True,
@@ -284,6 +287,15 @@ class TestArtifactIndependentProcessRoundtrip(unittest.TestCase):
         self.assertEqual(process_b["parser_format"], "ply")
         self.assertEqual(process_b["loaded_mesh_unit"], SOURCE_UNIT)
         self.assertEqual(process_b["loaded_mesh_parser_format"], "ply")
+        self.assertEqual(process_a["import_recipe"], process_b["import_recipe"])
+        self.assertEqual(
+            process_b["loaded_mesh_import_recipe"],
+            process_b["import_recipe"],
+        )
+        self.assertEqual(
+            process_b["import_recipe"]["dependency_policy"],
+            "deny_external",
+        )
 
 
 if __name__ == "__main__":

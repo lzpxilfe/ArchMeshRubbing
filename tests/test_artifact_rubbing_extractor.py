@@ -29,6 +29,7 @@ from src.core.artifact_rubbing_record import (
     rubbing_receipt_from_record,
 )
 from src.core.artifact_session import ArtifactSession
+from src.core.mesh_import_recipe import current_mesh_import_recipe
 from src.core.mesh_loader import MeshData
 from src.core.project_file import load_artifact_project, save_artifact_project
 from src.core.source_identity import SourceFingerprint
@@ -132,6 +133,7 @@ def _session(
             format="ply",
         ),
         source_format="ply",
+        source_import_recipe=current_mesh_import_recipe("ply"),
     )
     return ArtifactSession.create_from_source(
         mesh,

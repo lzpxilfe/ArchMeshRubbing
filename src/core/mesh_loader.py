@@ -9,11 +9,15 @@ from dataclasses import dataclass, field
 import hashlib
 import tempfile
 from pathlib import Path
-from typing import BinaryIO, Optional, List, Union
+from typing import BinaryIO, Mapping, Optional, List, Union, cast
 import logging
 import numpy as np
 
 from .logging_utils import log_once
+from .mesh_import_recipe import (
+    current_mesh_import_recipe,
+    validate_mesh_import_recipe,
+)
 from .source_identity import SourceFingerprint, open_fingerprinted_file
 
 _LOGGER = logging.getLogger(__name__)
@@ -23,8 +27,94 @@ _VERIFIED_STREAM_SPOOL_LIMIT = 8 * _VERIFIED_STREAM_CHUNK_SIZE
 
 try:
     import trimesh
+    from trimesh.resolvers import Resolver
 except ImportError:
     raise ImportError("trimesh is required. Install with: pip install trimesh")
+
+
+class ExternalMeshDependencyError(ValueError):
+    """An authoritative primary mesh attempted to resolve another asset."""
+
+
+class _RecordingDenyResolver(Resolver):
+    """Prevent Trimesh from constructing an unbounded filesystem resolver."""
+
+    def __init__(
+        self,
+        namespace: str = "",
+        requests: list[str] | None = None,
+    ) -> None:
+        self._namespace = str(namespace)
+        self._requests = requests if requests is not None else []
+
+    @property
+    def requests(self) -> tuple[str, ...]:
+        return tuple(self._requests)
+
+    def _record(self, key: object) -> None:
+        text = str(key)
+        if self._namespace:
+            text = f"{self._namespace}/{text}"
+        self._requests.append(text)
+
+    def get(self, key: object) -> bytes:
+        self._record(key)
+        raise FileNotFoundError(
+            "external mesh dependencies are denied for authoritative imports"
+        )
+
+    def write(self, name: str, data: object) -> None:
+        del data
+        self._record(name)
+        raise PermissionError(
+            "authoritative import resolver is read-only and denies dependencies"
+        )
+
+    def namespaced(self, namespace: str) -> "_RecordingDenyResolver":
+        prefix = "/".join(
+            part for part in (self._namespace, str(namespace)) if part
+        )
+        return _RecordingDenyResolver(prefix, self._requests)
+
+    def keys(self) -> tuple[str, ...]:
+        return ()
+
+    def __contains__(self, key: object) -> bool:
+        self._record(key)
+        return False
+
+
+def _load_authoritative_trimesh(
+    source_stream: BinaryIO,
+    *,
+    source_format: str,
+) -> object:
+    """Execute the closed parser profile with an external-dependency deny gate."""
+
+    resolver = _RecordingDenyResolver()
+    try:
+        loaded = trimesh.load(
+            source_stream,
+            file_type=source_format,
+            resolver=resolver,
+            allow_remote=False,
+            force="mesh",
+            process=False,
+            maintain_order=True,
+        )
+    except Exception as exc:
+        if resolver.requests:
+            raise ExternalMeshDependencyError(
+                "authoritative source requested external sidecar assets; "
+                "dependency_policy=deny_external"
+            ) from exc
+        raise
+    if resolver.requests:
+        raise ExternalMeshDependencyError(
+            "authoritative source requested external sidecar assets; "
+            "dependency_policy=deny_external"
+        )
+    return loaded
 
 
 @dataclass
@@ -56,6 +146,9 @@ class MeshData:
     # Parser recipe is separate from filename/extension hints so a byte-identical
     # relocated file can be renamed without changing how its bytes are decoded.
     source_format: Optional[str] = None
+    # Exact parser/runtime receipt used to create authoritative source geometry.
+    # This is runtime provenance; the durable copy lives in GeometryRevision.
+    source_import_recipe: Optional[Mapping[str, object]] = None
     
     # Computed properties cache
     _bounds: Optional[np.ndarray] = field(default=None, repr=False)
@@ -162,6 +255,10 @@ class MeshData:
             self.face_normals = np.asarray(self.face_normals, dtype=np.float32)
         if self.uv_coords is not None:
             self.uv_coords = np.asarray(self.uv_coords, dtype=np.float64)
+        if self.source_import_recipe is not None:
+            if not isinstance(self.source_import_recipe, Mapping):
+                raise TypeError("source_import_recipe must be a mapping or None")
+            self.source_import_recipe = dict(self.source_import_recipe)
     
     @property
     def n_vertices(self) -> int:
@@ -466,6 +563,7 @@ class MeshData:
             filepath=self.filepath,
             source_identity=self.source_identity,
             source_format=self.source_format,
+            source_import_recipe=self.source_import_recipe,
         )
     
     def to_trimesh(self) -> 'trimesh.Trimesh':
@@ -499,7 +597,8 @@ class MeshData:
                      filepath: Optional[Path] = None,
                      unit: str = 'mm',
                      source_identity: Optional[SourceFingerprint] = None,
-                     source_format: Optional[str] = None) -> 'MeshData':
+                     source_format: Optional[str] = None,
+                     source_import_recipe: Optional[Mapping[str, object]] = None) -> 'MeshData':
         """trimesh 객체에서 생성"""
         # 텍스처 추출 시도
         texture = None
@@ -528,6 +627,7 @@ class MeshData:
             filepath=filepath,
             source_identity=source_identity,
             source_format=source_format,
+            source_import_recipe=source_import_recipe,
         )
     
     def extract_submesh(self, face_indices: np.ndarray) -> 'MeshData':
@@ -550,6 +650,7 @@ class MeshData:
                 filepath=self.filepath,
                 source_identity=self.source_identity,
                 source_format=self.source_format,
+                source_import_recipe=self.source_import_recipe,
             )
 
         # 크래시 방지: 인덱스 범위 밖 제거
@@ -568,6 +669,7 @@ class MeshData:
                 filepath=self.filepath,
                 source_identity=self.source_identity,
                 source_format=self.source_format,
+                source_import_recipe=self.source_import_recipe,
             )
 
         selected_faces = faces[face_indices]
@@ -619,6 +721,7 @@ class MeshData:
             filepath=self.filepath,
             source_identity=self.source_identity,
             source_format=self.source_format,
+            source_import_recipe=self.source_import_recipe,
         )
 
 
@@ -672,6 +775,7 @@ class MeshLoader:
         unit: Optional[str] = None,
         *,
         source_format: Optional[str] = None,
+        import_recipe: Mapping[str, object] | None = None,
     ) -> MeshData:
         """
         메쉬 파일 로드
@@ -682,6 +786,8 @@ class MeshLoader:
             source_format: relocated project source의 원래 parser 형식 hint.
                 파일 이름은 identity가 아니므로 suffix가 바뀌어도 저장된
                 primary format으로 동일 바이트를 파싱할 수 있습니다.
+            import_recipe: 저장된 closed parser recipe. 생략하면 현재 runtime의
+                strict recipe를 생성해 신규 import에 사용합니다.
             
         Returns:
             MeshData: 로드된 메쉬 데이터
@@ -705,30 +811,31 @@ class MeshLoader:
             )
 
         unit = unit or self.default_unit
+        file_type = parse_ext.removeprefix('.')
+        recipe = (
+            current_mesh_import_recipe(file_type)
+            if import_recipe is None
+            else import_recipe
+        )
+        execution = validate_mesh_import_recipe(recipe, allow_legacy=True)
+        if execution.source_format != file_type:
+            raise ValueError(
+                "import recipe format does not match requested parser format: "
+                f"{execution.source_format!r} != {file_type!r}"
+            )
 
         # Hash and parse the exact same open descriptor. Reopening by path here
         # would allow a same-size/same-mtime replacement to pair one file's
         # hash with another file's geometry. This work runs in MeshLoadThread
         # for the GUI, so large-file hashing never blocks the UI thread.
         with open_fingerprinted_file(filepath) as (source_stream, source_identity):
-            file_type = parse_ext.removeprefix('.')
-            try:
-                # 대용량 메쉬 로드 성능: 불필요한 후처리(process) 비활성화
-                mesh = trimesh.load(
-                    source_stream,
-                    file_type=file_type,
-                    force='mesh',
-                    process=False,
-                    maintain_order=True,
-                )
-            except TypeError:
-                # 구버전 trimesh 호환
-                source_stream.seek(0)
-                mesh = trimesh.load(
-                    source_stream,
-                    file_type=file_type,
-                    force='mesh',
-                )
+            # These keyword values are the executable strict/legacy profile
+            # validated above. There is no compatibility fallback which could
+            # silently execute different parser flags.
+            mesh = _load_authoritative_trimesh(
+                source_stream,
+                source_format=file_type,
+            )
         
         # Scene인 경우 단일 메쉬로 병합
         if isinstance(mesh, trimesh.Scene):
@@ -747,6 +854,7 @@ class MeshLoader:
             unit=unit,
             source_identity=source_identity,
             source_format=file_type,
+            source_import_recipe=dict(recipe),
         )
         
         # 법선 계산 (없는 경우)
@@ -764,6 +872,7 @@ class MeshLoader:
         expected_sha256: str,
         expected_size_bytes: int,
         original_name: str,
+        import_recipe: Mapping[str, object] | None = None,
     ) -> MeshData:
         """Verify and load one primary mesh stream without trusting a path.
 
@@ -771,8 +880,9 @@ class MeshLoader:
         spool which rolls over to a temporary file for larger sources.  The
         digest and length are checked before the parser sees any bytes, then
         the exact verified spool descriptor is rewound and passed to trimesh.
-        Only the primary file bytes are fingerprinted; formats which can refer
-        to sidecars do not gain any stronger identity guarantee here.
+        Only the primary file bytes are fingerprinted.  Any attempt to resolve
+        an external buffer, material, or texture is rejected by the same
+        ``dependency_policy=deny_external`` gate used for path-based imports.
         """
         format_hint = str(source_format or "").strip().lower().removeprefix(".")
         parse_ext = f".{format_hint}" if format_hint else ""
@@ -790,6 +900,17 @@ class MeshLoader:
             original_name=display_name,
             format=format_hint,
         )
+        recipe = (
+            current_mesh_import_recipe(format_hint)
+            if import_recipe is None
+            else import_recipe
+        )
+        execution = validate_mesh_import_recipe(recipe, allow_legacy=True)
+        if execution.source_format != format_hint:
+            raise ValueError(
+                "import recipe format does not match source_format: "
+                f"{execution.source_format!r} != {format_hint!r}"
+            )
 
         digest = hashlib.sha256()
         observed_size = 0
@@ -837,22 +958,10 @@ class MeshLoader:
                 format=format_hint,
             )
             verified_stream.seek(0)
-            try:
-                mesh = trimesh.load(
-                    verified_stream,
-                    file_type=format_hint,
-                    force='mesh',
-                    process=False,
-                    maintain_order=True,
-                )
-            except TypeError:
-                # 구버전 trimesh 호환. The same verified descriptor is reused.
-                verified_stream.seek(0)
-                mesh = trimesh.load(
-                    verified_stream,
-                    file_type=format_hint,
-                    force='mesh',
-                )
+            mesh = _load_authoritative_trimesh(
+                cast(BinaryIO, verified_stream),
+                source_format=format_hint,
+            )
 
         display_path = Path(display_name)
         if isinstance(mesh, trimesh.Scene):
@@ -870,6 +979,7 @@ class MeshLoader:
             unit=unit,
             source_identity=source_identity,
             source_format=format_hint,
+            source_import_recipe=dict(recipe),
         )
         mesh_data.compute_normals(compute_vertex_normals=False)
         return mesh_data
@@ -913,28 +1023,14 @@ class MeshLoader:
             'file_size_mb': round(file_size / (1024 * 1024), 2),
         }
         
-        # 가능하면 정점/면 수도 빠르게 파악
+        # Geometry metadata must use the same authoritative parser gate as an
+        # actual Open.  Calling ``trimesh.load(path)`` here would auto-create a
+        # filesystem resolver and could read untracked MTL/image/buffer files.
         try:
-            try:
-                mesh = trimesh.load(str(filepath), force='mesh', process=False, maintain_order=True)
-            except TypeError:
-                mesh = trimesh.load(str(filepath), force='mesh')
-            if isinstance(mesh, trimesh.Scene):
-                meshes = [g for g in mesh.geometry.values() if isinstance(g, trimesh.Trimesh)]
-                total_verts = sum(m.vertices.shape[0] for m in meshes)
-                total_faces = sum(m.faces.shape[0] for m in meshes)
-            elif isinstance(mesh, trimesh.Trimesh):
-                total_verts = mesh.vertices.shape[0]
-                total_faces = mesh.faces.shape[0]
-            else:
-                total_verts = 0
-                total_faces = 0
-
-            info['n_vertices'] = total_verts
-            info['n_faces'] = total_faces
-            visual = getattr(mesh, "visual", None)
-            uv = getattr(visual, "uv", None) if visual is not None else None
-            info['has_texture'] = uv is not None
+            mesh = self.load(filepath)
+            info['n_vertices'] = mesh.n_vertices
+            info['n_faces'] = mesh.n_faces
+            info['has_texture'] = mesh.has_texture
             
         except Exception as e:
             info['error'] = str(e)

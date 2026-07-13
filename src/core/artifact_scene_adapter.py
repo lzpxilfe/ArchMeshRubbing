@@ -381,6 +381,7 @@ class ArtifactSceneAdapter:
             filepath=source_mesh.filepath,
             source_identity=source_mesh.source_identity,
             source_format=source_mesh.source_format,
+            source_import_recipe=source_mesh.source_import_recipe,
         )
         return ArtifactSceneProjection(mesh=world_mesh, snapshot=snapshot)
 

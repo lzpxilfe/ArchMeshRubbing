@@ -48,6 +48,9 @@ python -m pytest -q \
   tests/test_build_manifest.py \
   tests/test_build_native.py \
   tests/test_source_identity.py \
+  tests/test_mesh_import_recipe.py \
+  tests/test_mesh_external_dependencies.py \
+  tests/test_mesh_verified_stream.py \
   tests/test_alignment_utils.py \
   tests/test_artifact_document.py \
   tests/test_geometry_identity.py \
@@ -86,6 +89,8 @@ python -m pytest -q \
 - Align/metadata 전환에 따른 record freshness와 background operation context 고정
 - versioned canonical JSON golden fixture와 Draft 2020-12 `ArtifactDocument 1.0` schema 검증
 - raw source `(identity_scope, SHA-256, size)`와 saved parser format 재검증
+- exact-key mesh import recipe, Trimesh·NumPy·Pillow parser-subset digest와 전체 lock provenance 분리, GUI ticket부터 embedded reopen까지 동일 receipt 실행
+- OBJ MTL, PLY `TextureFile`, GLB 외부 image/buffer URI의 Open 단계 거부와 self-contained GLB 허용; 파일 정보 경로도 동일 deny resolver 사용
 - versioned geometry framing, signed-zero normalization, order/winding-sensitive geometry SHA-256
 - source를 mutate·recenter하지 않는 deterministic world-mm projection과 stale snapshot 거부
 - `>= 1e9 mm` offset의 0.125/1 mm feature에서 float64 origin subtraction 뒤 relative float32 VBO encoding, pivot-aware model rebasing과 relative camera algebra

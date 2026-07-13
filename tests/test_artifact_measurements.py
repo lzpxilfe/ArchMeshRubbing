@@ -50,6 +50,7 @@ from src.core.artifact_vector_extractor import (
     compute_artifact_cutline,
 )
 from src.core.artifact_vector_record import PlanarFrame
+from src.core.mesh_import_recipe import current_mesh_import_recipe
 from src.core.mesh_loader import MeshData
 from src.core.source_identity import SourceFingerprint
 
@@ -111,6 +112,7 @@ def _box_mesh() -> MeshData:
             format="ply",
         ),
         source_format="ply",
+        source_import_recipe=current_mesh_import_recipe("ply"),
     )
 
 

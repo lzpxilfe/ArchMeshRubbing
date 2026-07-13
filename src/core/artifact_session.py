@@ -43,6 +43,10 @@ from .artifact_vector_record import (
     append_vector_record_from_context,
 )
 from .geometry_identity import mesh_geometry_sha256
+from .mesh_import_recipe import (
+    MeshImportRecipeError,
+    validate_mesh_import_recipe,
+)
 from .mesh_loader import MeshData
 
 
@@ -86,6 +90,7 @@ def immutable_source_mesh(mesh: MeshData) -> MeshData:
         filepath=Path(mesh.filepath) if mesh.filepath is not None else None,
         source_identity=mesh.source_identity,
         source_format=mesh.source_format,
+        source_import_recipe=mesh.source_import_recipe,
     )
     # MeshData normalization may replace arrays, so freeze the final arrays.
     snapshot.vertices.setflags(write=False)
@@ -110,6 +115,28 @@ def _media_type(source_format: str | None) -> str:
         "gltf": "model/gltf+json",
         "glb": "model/gltf-binary",
     }.get(str(source_format or "").lower(), "application/octet-stream")
+
+
+def _mesh_import_recipe(
+    mesh: MeshData,
+    *,
+    allow_legacy: bool,
+) -> tuple[dict[str, object], str]:
+    raw = mesh.source_import_recipe
+    if raw is None:
+        raise ArtifactSessionError(
+            "source mesh has no verified parser/runtime import receipt"
+        )
+    try:
+        execution = validate_mesh_import_recipe(raw, allow_legacy=allow_legacy)
+    except MeshImportRecipeError as exc:
+        raise ArtifactSessionError(str(exc)) from exc
+    actual_format = str(mesh.source_format or "").strip().lower().removeprefix(".")
+    if actual_format != execution.source_format:
+        raise ArtifactSessionError(
+            "source mesh parser format does not match its import receipt"
+        )
+    return dict(raw), execution.source_format
 
 
 def _matrix4x4_tuple(
@@ -145,6 +172,29 @@ class ArtifactSession:
         object.__setattr__(self, "resolved_source_path", resolved)
         self._require_unchanged_source_geometry()
         try:
+            active_metadata_id = self.document.active_source_metadata_revision_id
+            if active_metadata_id is None:
+                raise ArtifactSessionError(
+                    "ArtifactDocument has no active source metadata revision"
+                )
+            active_metadata = self.document.source_metadata_revision_index[
+                active_metadata_id
+            ]
+            active_geometry = self.document.geometry_revision_index[
+                active_metadata.geometry_revision_id
+            ]
+            validate_mesh_import_recipe(
+                active_geometry.import_recipe,
+                allow_legacy=True,
+            )
+            source_recipe, _source_format = _mesh_import_recipe(
+                self.source_mesh,
+                allow_legacy=True,
+            )
+            if source_recipe != dict(active_geometry.import_recipe):
+                raise ArtifactSessionError(
+                    "source mesh import receipt does not match GeometryRevision"
+                )
             from .artifact_record_validation import (  # noqa: PLC0415
                 validate_known_records,
             )
@@ -157,7 +207,7 @@ class ArtifactSession:
                 self.source_mesh,
                 snapshot,
             )
-        except (ArtifactVectorRecordError, ValueError) as exc:
+        except (ArtifactVectorRecordError, MeshImportRecipeError, ValueError) as exc:
             raise ArtifactSessionError(str(exc)) from exc
 
     def _require_unchanged_source_geometry(self) -> None:
@@ -198,6 +248,14 @@ class ArtifactSession:
             raise ArtifactSessionError(
                 "source mesh has no parser format for deterministic reopen"
             )
+        source_recipe, recipe_format = _mesh_import_recipe(
+            source,
+            allow_legacy=False,
+        )
+        if recipe_format != source_format:
+            raise ArtifactSessionError(
+                "source mesh parser format does not match its strict import recipe"
+            )
         resolved_path = str(Path(resolved_source_path).expanduser().resolve(strict=False))
         timestamp = str(created_at or _utc_now())
         geometry_sha256 = mesh_geometry_sha256(source)
@@ -214,13 +272,7 @@ class ArtifactSession:
             source_asset_ids=(source_asset.id,),
             geometry_sha256=geometry_sha256,
             geometry_hash_scope=GEOMETRY_HASH_SCOPE_V1,
-            import_recipe={
-                "format": source_format,
-                "loader": "trimesh",
-                "maintain_order": True,
-                "process": False,
-                "sanitizer": "meshdata-v1",
-            },
+            import_recipe=source_recipe,
             topology_map_ref=None,
             qc={
                 "face_count": int(source.faces.shape[0]),
@@ -309,7 +361,22 @@ class ArtifactSession:
             raise ArtifactSessionError(
                 "loaded source bytes do not match the ArtifactDocument source identity"
             )
-        saved_format = str(geometry.import_recipe.get("format", "") or "").strip().lower()
+        try:
+            execution = validate_mesh_import_recipe(
+                geometry.import_recipe,
+                allow_legacy=True,
+            )
+        except MeshImportRecipeError as exc:
+            raise ArtifactSessionError(str(exc)) from exc
+        saved_format = execution.source_format
+        source_recipe, _source_recipe_format = _mesh_import_recipe(
+            source,
+            allow_legacy=True,
+        )
+        if source_recipe != dict(geometry.import_recipe):
+            raise ArtifactSessionError(
+                "loaded source import receipt does not match the ArtifactDocument recipe"
+            )
         actual_format = str(source.source_format or "").strip().lower().removeprefix(".")
         if not saved_format or actual_format != saved_format:
             raise ArtifactSessionError(

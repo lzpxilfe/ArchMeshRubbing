@@ -408,6 +408,7 @@ def _check_resources() -> str:
         "rubbing_receipt-1.0.0.schema.json",
         "rubbing_export-1.0.0.schema.json",
         "source_bundle-1.0.0.schema.json",
+        "mesh_import_recipe-1.0.0.schema.json",
     )
     for name in required_schemas:
         if not resource_path("schemas", name).is_file():
@@ -478,11 +479,14 @@ def _check_gui_stack() -> str:
 
 
 def _check_mesh_parsers() -> str:
-    """Exercise every advertised input parser using tiny in-memory meshes."""
+    """Exercise every advertised parser through the authoritative load gate."""
 
     import numpy as np
     import trimesh
     from trimesh.exchange.gltf import export_gltf
+
+    from src.core.mesh_import_recipe import current_mesh_import_recipe
+    from src.core.mesh_loader import MeshLoader
 
     source = trimesh.Trimesh(
         vertices=np.array(
@@ -519,17 +523,19 @@ def _check_mesh_parsers() -> str:
 
     parsed: list[str] = []
     for file_type in ("obj", "ply", "stl", "off", "gltf", "glb"):
-        loaded = trimesh.load(
+        payload = encoded[file_type]
+        loaded = MeshLoader(default_unit="mm").load_verified_stream(
             io.BytesIO(encoded[file_type]),
-            file_type=file_type,
-            force="mesh",
-            process=False,
+            unit="mm",
+            source_format=file_type,
+            expected_sha256=hashlib.sha256(payload).hexdigest(),
+            expected_size_bytes=len(payload),
+            original_name=f"self-test.{file_type}",
+            import_recipe=current_mesh_import_recipe(file_type),
         )
-        if not isinstance(loaded, trimesh.Trimesh):
-            raise RuntimeError(
-                f"{file_type} parser returned {type(loaded).__name__}, not Trimesh"
-            )
-        if len(loaded.vertices) < 4 or len(loaded.faces) < 4:
+        if loaded.source_import_recipe != current_mesh_import_recipe(file_type):
+            raise RuntimeError(f"{file_type} parser lost its import receipt")
+        if loaded.n_vertices < 4 or loaded.n_faces < 4:
             raise RuntimeError(f"{file_type} parser lost the fixture geometry")
         parsed.append(file_type)
     return "parsed=" + ",".join(parsed)
@@ -764,6 +770,11 @@ def _check_artifact_embedded_project_roundtrip() -> str:
             raise RuntimeError("embedded reopen changed source vertices")
         if not np.array_equal(session.source_mesh.faces, restored.source_mesh.faces):
             raise RuntimeError("embedded reopen changed source faces")
+        if (
+            restored.source_mesh.source_import_recipe
+            != session.source_mesh.source_import_recipe
+        ):
+            raise RuntimeError("embedded reopen changed the parser/runtime receipt")
 
         if restored.verified_geometry != session.verified_geometry:
             raise RuntimeError("embedded reopen changed verified geometry identity")
