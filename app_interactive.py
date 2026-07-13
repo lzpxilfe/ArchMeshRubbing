@@ -236,7 +236,7 @@ from src.gui.opengl_context import (  # noqa: E402
 install_windows_software_pyopengl_bridge()
 
 from src.gui.viewport_3d import Viewport3D  # noqa: E402
-from src.core.mesh_loader import MeshLoader  # noqa: E402
+from src.core.mesh_loader import MeshData, MeshLoader  # noqa: E402
 from src.core.profile_exporter import ProfileExporter  # noqa: E402
 from src.core.project_file import (  # noqa: E402
     EmbeddedSourceRequiredError,
@@ -1029,6 +1029,23 @@ class _TaskDialogCloseGuard(QObject):
 class _NativeProjectSaveResult:
     destination: str
     durability_warning: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _NativeAlignSceneCapture:
+    scene_object: Any
+    session: ArtifactSession
+    binding: ArtifactProjectionSnapshot
+    mesh: MeshData
+    translation_mm: tuple[float, float, float]
+    rotation_deg: tuple[float, float, float]
+    scale: float
+    pivot_mm: tuple[float, float, float]
+    project_path: str | None
+    project_requires_save_as: bool
+    legacy_project_path: str | None
+    state_version: int
+    authority_epoch: int
 
 
 def get_icon_path():
@@ -12167,6 +12184,371 @@ class MainWindow(QMainWindow):
         self.viewport.update()
         self.viewport.meshTransformChanged.emit()
 
+    def _capture_native_align_scene(
+        self,
+        obj: Any,
+    ) -> tuple[ArtifactWorkbench, _NativeAlignSceneCapture]:
+        """Capture a cheap GUI guard; the worker performs full mesh proof."""
+
+        if bool(getattr(self, "_artifact_authority_faulted", False)):
+            raise ArtifactSessionError(
+                "artifact authority is faulted; reopen a verified source or project"
+            )
+        session = getattr(self, "_artifact_session", None)
+        if not isinstance(session, ArtifactSession):
+            raise ArtifactSessionError("no active ArtifactDocument session")
+        objects = list(getattr(self.viewport, "objects", []) or [])
+        if len(objects) != 1 or objects[0] is not obj:
+            raise ArtifactSessionError(
+                "native ArtifactDocument must own exactly one projected object"
+            )
+        binding = getattr(obj, "_amr_artifact_projection_snapshot", None)
+        if not isinstance(binding, ArtifactProjectionSnapshot):
+            raise ArtifactSessionError("native projection has no document binding")
+        mesh = getattr(obj, "mesh", None)
+        if not isinstance(mesh, MeshData):
+            raise ArtifactSessionError("native projection has no MeshData")
+
+        controller = self._artifact_workbench_controller()
+        controller.require_stable_session(session)
+        state = controller.snapshot
+        if state.session is not session:
+            raise StaleWorkflowOperationError(
+                "native Align capture does not own Workbench authority"
+            )
+
+        document = session.document
+        verified = session.verified_geometry
+        expected_identity = (
+            document.document_id,
+            document.schema_version,
+            verified.source_asset_id,
+            verified.geometry_revision_id,
+            document.active_source_metadata_revision_id,
+            document.active_align_revision_id,
+            verified.geometry_sha256,
+            verified.geometry_hash_scope,
+        )
+        observed_identity = (
+            binding.document_id,
+            binding.document_schema_version,
+            binding.source_asset_id,
+            binding.geometry_revision_id,
+            binding.source_metadata_revision_id,
+            binding.align_revision_id,
+            binding.geometry_sha256,
+            binding.geometry_hash_scope,
+        )
+        if observed_identity != expected_identity:
+            raise ArtifactSessionError(
+                "native scene render binding is stale for the active session"
+            )
+        try:
+            active_matrix = np.asarray(
+                document.active_canonical_matrix(),
+                dtype=np.float64,
+            )
+        except Exception as exc:
+            raise ArtifactSessionError(
+                f"active Align matrix is invalid: {exc}"
+            ) from exc
+        if not np.array_equal(active_matrix, binding.matrix):
+            raise ArtifactSessionError(
+                "native scene matrix is stale for the active Align revision"
+            )
+
+        def finite_triplet(value: object, *, label: str) -> tuple[float, float, float]:
+            try:
+                array = np.asarray(value, dtype=np.float64).reshape(-1)
+            except (TypeError, ValueError) as exc:
+                raise ArtifactSessionError(f"{label} must be a finite 3-vector") from exc
+            if array.shape != (3,) or not np.isfinite(array).all():
+                raise ArtifactSessionError(f"{label} must be a finite 3-vector")
+            return (float(array[0]), float(array[1]), float(array[2]))
+
+        pivot_value = getattr(obj, "_amr_preview_pivot_mm", None)
+        if pivot_value is None:
+            raise ArtifactSessionError("native Align preview has no canonical pivot")
+        translation = finite_triplet(obj.translation, label="Align translation")
+        rotation = finite_triplet(obj.rotation, label="Align rotation")
+        pivot = finite_triplet(pivot_value, label="Align pivot")
+        scale = float(obj.scale)
+        if not np.isfinite(scale):
+            raise ArtifactSessionError("Align scale must be finite")
+
+        return controller, _NativeAlignSceneCapture(
+            scene_object=obj,
+            session=session,
+            binding=binding,
+            mesh=mesh,
+            translation_mm=translation,
+            rotation_deg=rotation,
+            scale=scale,
+            pivot_mm=pivot,
+            project_path=getattr(self, "_current_project_path", None),
+            project_requires_save_as=bool(
+                getattr(self, "_project_requires_save_as", False)
+            ),
+            legacy_project_path=getattr(self, "_legacy_project_path", None),
+            state_version=state.state_version,
+            authority_epoch=state.authority_epoch,
+        )
+
+    def _native_align_capture_is_current(
+        self,
+        controller: ArtifactWorkbench,
+        capture: _NativeAlignSceneCapture,
+    ) -> bool:
+        """Recheck only captured identities and three small preview vectors."""
+
+        try:
+            state = controller.snapshot
+            objects = list(getattr(self.viewport, "objects", []) or [])
+            obj = capture.scene_object
+            pivot = np.asarray(
+                getattr(obj, "_amr_preview_pivot_mm", None),
+                dtype=np.float64,
+            ).reshape(-1)
+            translation = np.asarray(obj.translation, dtype=np.float64).reshape(-1)
+            rotation = np.asarray(obj.rotation, dtype=np.float64).reshape(-1)
+            return bool(
+                state.session is capture.session
+                and state.state_version == capture.state_version
+                and state.authority_epoch == capture.authority_epoch
+                and state.pending_load is None
+                and not state.tentative
+                and not state.faulted
+                and getattr(self, "_artifact_session", None) is capture.session
+                and len(objects) == 1
+                and objects[0] is obj
+                and getattr(self.viewport, "selected_obj", None) is obj
+                and getattr(obj, "mesh", None) is capture.mesh
+                and getattr(obj, "_amr_artifact_projection_snapshot", None)
+                == capture.binding
+                and translation.shape == (3,)
+                and rotation.shape == (3,)
+                and pivot.shape == (3,)
+                and np.array_equal(
+                    translation,
+                    np.asarray(capture.translation_mm, dtype=np.float64),
+                )
+                and np.array_equal(
+                    rotation,
+                    np.asarray(capture.rotation_deg, dtype=np.float64),
+                )
+                and np.array_equal(
+                    pivot,
+                    np.asarray(capture.pivot_mm, dtype=np.float64),
+                )
+                and float(obj.scale) == capture.scale
+                and getattr(self, "_current_project_path", None)
+                == capture.project_path
+                and bool(getattr(self, "_project_requires_save_as", False))
+                == capture.project_requires_save_as
+                and getattr(self, "_legacy_project_path", None)
+                == capture.legacy_project_path
+                and not bool(getattr(self, "_project_load_failed", False))
+                and not bool(getattr(self, "_artifact_authority_faulted", False))
+            )
+        except Exception:
+            return False
+
+    def _discard_native_align_result(self, *, action: str) -> None:
+        self.status_info.setText(
+            f"{action} 결과 폐기 | preview 또는 문서 권위가 변경됐습니다."
+        )
+        QMessageBox.warning(
+            self,
+            f"{action} 결과 폐기",
+            "Align 준비 중 preview·선택 객체·문서 권위 중 하나가 변경되어 "
+            "계산 결과를 현재 장면에 적용하지 않았습니다. 현재 상태에서 다시 실행하세요.",
+        )
+
+    def _start_native_align_commit(self, obj: Any) -> bool:
+        try:
+            controller, capture = self._capture_native_align_scene(obj)
+        except Exception as exc:
+            self.status_info.setText("정치 확정 준비 실패 | 기존 preview 유지")
+            QMessageBox.critical(
+                self,
+                "정치 확정 실패",
+                f"{type(exc).__name__}: {exc}",
+            )
+            return False
+
+        def on_done(value: object) -> None:
+            if not self._native_align_capture_is_current(controller, capture):
+                self._discard_native_align_result(action="정치 확정")
+                return
+            if value is None:
+                self.status_info.setText(
+                    "정치 preview 변경이 없어 현재 revision을 유지합니다"
+                )
+                return
+            if not isinstance(value, ProjectionTransition) or (
+                value.kind is not WorkflowTransitionKind.ALIGN_COMMIT
+                or value.expected_session is not capture.session
+                or value.base_state_version != capture.state_version
+                or value.base_authority_epoch != capture.authority_epoch
+            ):
+                raise ArtifactWorkbenchError(
+                    "Align worker returned a transition for different authority"
+                )
+            try:
+                self._publish_artifact_session_projection(
+                    value.candidate_session,
+                    project_path=capture.project_path,
+                    fit_camera=False,
+                    status_text="정치 확정 | 새 Align revision 생성",
+                    workflow_transition=value,
+                )
+            except Exception as exc:
+                if self._report_artifact_authority_callback_failure(
+                    context="Align revision 게시 중 권위 확인 실패",
+                    detail=f"{type(exc).__name__}: {exc}",
+                ):
+                    return
+                QMessageBox.critical(
+                    self,
+                    "정치 확정 실패",
+                    "Align revision과 장면을 원자적으로 교체하지 못해 기존 preview를 "
+                    f"유지했습니다.\n\n{type(exc).__name__}: {exc}",
+                )
+
+        def on_failed(message: str) -> None:
+            if not self._native_align_capture_is_current(controller, capture):
+                self.status_info.setText(
+                    "정치 확정 결과 폐기 | 준비 중 문서 권위가 변경됐습니다."
+                )
+                return
+            self.status_info.setText("정치 확정 실패 | 기존 preview 유지")
+            QMessageBox.critical(
+                self,
+                "정치 확정 실패",
+                self._format_error_message(
+                    "Align revision 준비 중 오류가 발생했습니다:",
+                    message,
+                ),
+            )
+
+        try:
+            return bool(
+                self._start_task(
+                    title="정치 확정",
+                    label="원본 geometry를 검증하고 Align revision을 준비하는 중...",
+                    thread=TaskThread(
+                        "prepare_native_align_commit",
+                        lambda: controller.prepare_align_commit(
+                            translation_mm=capture.translation_mm,
+                            rotation_deg=capture.rotation_deg,
+                            scale=capture.scale,
+                            pivot_mm=capture.pivot_mm,
+                            operator="local-user",
+                        ),
+                    ),
+                    on_done=on_done,
+                    on_failed=on_failed,
+                    lock_dialog_until_finished=True,
+                )
+            )
+        except Exception as exc:
+            self.status_info.setText("정치 확정 작업 시작 실패")
+            QMessageBox.critical(
+                self,
+                "정치 확정 실패",
+                f"{type(exc).__name__}: {exc}",
+            )
+            return False
+
+    def _start_native_parent_align_activation(
+        self,
+        controller: ArtifactWorkbench,
+        capture: _NativeAlignSceneCapture,
+    ) -> bool:
+        active_id = capture.session.document.active_align_revision_id
+        parent_id = (
+            capture.session.document.align_revision_index[active_id].parent_id
+            if active_id is not None
+            else None
+        )
+        if parent_id is None:
+            self.status_info.setText(
+                "Undo할 이전 Align revision이 없습니다: active revision has no parent"
+            )
+            return False
+
+        def on_done(value: object) -> None:
+            if not self._native_align_capture_is_current(controller, capture):
+                self._discard_native_align_result(action="Align Undo")
+                return
+            if not isinstance(value, ProjectionTransition) or (
+                value.kind is not WorkflowTransitionKind.ALIGN_ACTIVATE_PARENT
+                or value.expected_session is not capture.session
+                or value.base_state_version != capture.state_version
+                or value.base_authority_epoch != capture.authority_epoch
+            ):
+                raise ArtifactWorkbenchError(
+                    "Align Undo worker returned a transition for different authority"
+                )
+            try:
+                self._publish_artifact_session_projection(
+                    value.candidate_session,
+                    project_path=capture.project_path,
+                    fit_camera=False,
+                    status_text="이전 Align revision 활성화",
+                    workflow_transition=value,
+                )
+            except Exception as exc:
+                if self._report_artifact_authority_callback_failure(
+                    context="이전 Align revision 게시 중 권위 확인 실패",
+                    detail=f"{type(exc).__name__}: {exc}",
+                ):
+                    return
+                QMessageBox.critical(
+                    self,
+                    "Align Undo 실패",
+                    f"기존 revision을 유지했습니다.\n\n{type(exc).__name__}: {exc}",
+                )
+
+        def on_failed(message: str) -> None:
+            if not self._native_align_capture_is_current(controller, capture):
+                self.status_info.setText(
+                    "Align Undo 결과 폐기 | 준비 중 문서 권위가 변경됐습니다."
+                )
+                return
+            self.status_info.setText("Align Undo 실패 | 기존 revision 유지")
+            QMessageBox.critical(
+                self,
+                "Align Undo 실패",
+                self._format_error_message(
+                    "이전 Align revision 준비 중 오류가 발생했습니다:",
+                    message,
+                ),
+            )
+
+        try:
+            return bool(
+                self._start_task(
+                    title="이전 Align 활성화",
+                    label="원본 geometry를 검증하고 이전 Align revision을 준비하는 중...",
+                    thread=TaskThread(
+                        "prepare_native_parent_align",
+                        controller.prepare_activate_parent_align,
+                    ),
+                    on_done=on_done,
+                    on_failed=on_failed,
+                    lock_dialog_until_finished=True,
+                )
+            )
+        except Exception as exc:
+            self.status_info.setText("Align Undo 작업 시작 실패")
+            QMessageBox.critical(
+                self,
+                "Align Undo 실패",
+                f"{type(exc).__name__}: {exc}",
+            )
+            return False
+
     def on_bake_all_clicked(self):
         """현재 변환을 메쉬에 영구 정착 (정치 신청)"""
         obj = self.viewport.selected_obj
@@ -12174,38 +12556,7 @@ class MainWindow(QMainWindow):
             return
 
         if self._native_artifact_mode():
-            try:
-                self._require_native_projection_session(obj)
-                controller = self._artifact_workbench_controller()
-                pivot = np.asarray(
-                    getattr(obj, "_amr_preview_pivot_mm", obj.mesh.centroid),
-                    dtype=np.float64,
-                ).reshape(3)
-                transition = controller.prepare_align_commit(
-                    translation_mm=np.asarray(obj.translation, dtype=np.float64),
-                    rotation_deg=np.asarray(obj.rotation, dtype=np.float64),
-                    scale=float(obj.scale),
-                    pivot_mm=pivot,
-                    operator="local-user",
-                )
-                if transition is None:
-                    self.status_info.setText("정치 preview 변경이 없어 현재 revision을 유지합니다")
-                    return
-                candidate = transition.candidate_session
-                self._publish_artifact_session_projection(
-                    candidate,
-                    project_path=self._current_project_path,
-                    fit_camera=False,
-                    status_text="정치 확정 | 새 Align revision 생성",
-                    workflow_transition=transition,
-                )
-            except Exception as exc:
-                QMessageBox.critical(
-                    self,
-                    "정치 확정 실패",
-                    "Align revision과 장면을 원자적으로 교체하지 못해 기존 preview를 "
-                    f"유지했습니다.\n\n{type(exc).__name__}: {exc}",
-                )
+            self._start_native_align_commit(obj)
             return
 
         self.viewport.bake_object_transform(obj)
@@ -12223,25 +12574,29 @@ class MainWindow(QMainWindow):
         if obj is None:
             return
         try:
-            self._require_native_projection_session(obj)
+            controller, capture = self._capture_native_align_scene(obj)
             has_preview = (
-                not np.allclose(obj.translation, [0.0, 0.0, 0.0], rtol=0.0, atol=1e-12)
-                or not np.allclose(obj.rotation, [0.0, 0.0, 0.0], rtol=0.0, atol=1e-12)
-                or not np.isclose(float(obj.scale), 1.0, rtol=0.0, atol=1e-12)
+                not np.allclose(
+                    capture.translation_mm,
+                    [0.0, 0.0, 0.0],
+                    rtol=0.0,
+                    atol=1e-12,
+                )
+                or not np.allclose(
+                    capture.rotation_deg,
+                    [0.0, 0.0, 0.0],
+                    rtol=0.0,
+                    atol=1e-12,
+                )
+                or not np.isclose(capture.scale, 1.0, rtol=0.0, atol=1e-12)
             )
             if has_preview:
                 self.reset_transform()
                 self.status_info.setText("정치 preview 취소 | 확정 revision 유지")
                 return
-            controller = self._artifact_workbench_controller()
-            transition = controller.prepare_activate_parent_align()
-            candidate = transition.candidate_session
-            self._publish_artifact_session_projection(
-                candidate,
-                project_path=self._current_project_path,
-                fit_camera=False,
-                status_text="이전 Align revision 활성화",
-                workflow_transition=transition,
+            self._start_native_parent_align_activation(
+                controller,
+                capture,
             )
         except (ArtifactSessionError, ArtifactWorkbenchError) as exc:
             self.status_info.setText(f"Undo할 이전 Align revision이 없습니다: {exc}")

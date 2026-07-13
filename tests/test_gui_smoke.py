@@ -18,6 +18,7 @@ from PyQt6.QtGui import QKeyEvent
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication, QFileDialog, QMessageBox, QPushButton
 
+import src.core.artifact_session as artifact_session_module
 from app_interactive import (
     MainWindow,
     MeshLoadThread,
@@ -2085,12 +2086,22 @@ def test_native_align_commit_creates_revision_without_destructive_bake() -> None
             captured["kwargs"] = kwargs
 
         with (
-            patch.object(window, "_publish_artifact_session_projection", side_effect=capture),
+            patch.object(window, "_start_task", return_value=True) as start_task,
             patch.object(window.viewport, "bake_object_transform") as destructive_bake,
         ):
             window.on_bake_all_clicked()
+        callbacks = start_task.call_args.kwargs
+        transition_result = callbacks["thread"]._fn()
+        with patch.object(
+            window,
+            "_publish_artifact_session_projection",
+            side_effect=capture,
+        ):
+            callbacks["on_done"](transition_result)
 
         destructive_bake.assert_not_called()
+        assert callbacks["lock_dialog_until_finished"] is True
+        assert callbacks["thread"]._task_name == "prepare_native_align_commit"
         candidate = captured["session"]
         assert isinstance(candidate, ArtifactSession)
         assert candidate.document.active_align_revision_id != session.document.active_align_revision_id
@@ -2113,6 +2124,242 @@ def test_native_align_commit_creates_revision_without_destructive_bake() -> None
             session.materialize().mesh.vertices,
             _artifact_session().materialize().mesh.vertices,
         )
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_native_align_commit_defers_source_hash_and_materialization_to_worker() -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    session = _artifact_session()
+    obj = _projected_scene_object(session)
+    obj.translation = np.array([5.0, -2.0, 1.0], dtype=np.float64)
+    window = MainWindow()
+    window._artifact_session = session
+    window.viewport.objects = [obj]
+    window.viewport.selected_index = 0
+    controller = window._artifact_workbench_controller()
+    assert controller.snapshot.session is session
+    original_hash = artifact_session_module.mesh_geometry_sha256
+    original_materialize = ArtifactSession.materialize
+    worker_allowed = False
+    hash_calls: list[MeshData] = []
+    materialization_calls: list[ArtifactSession] = []
+
+    def guarded_hash(*args, **kwargs):
+        if not worker_allowed:
+            raise AssertionError("native Align hashed source geometry on the GUI thread")
+        hash_calls.append(args[0])
+        return original_hash(*args, **kwargs)
+
+    def guarded_materialize(current: ArtifactSession):
+        if not worker_allowed:
+            raise AssertionError("native Align materialized on the GUI thread")
+        materialization_calls.append(current)
+        return original_materialize(current)
+
+    try:
+        with (
+            patch.object(window, "_start_task", return_value=True) as start_task,
+            patch.object(
+                artifact_session_module,
+                "mesh_geometry_sha256",
+                new=guarded_hash,
+            ),
+            patch.object(
+                ArtifactSession,
+                "materialize",
+                new=guarded_materialize,
+            ),
+        ):
+            window.on_bake_all_clicked()
+            assert hash_calls == []
+            assert materialization_calls == []
+
+            callbacks = start_task.call_args.kwargs
+            thread = callbacks["thread"]
+            assert isinstance(thread, TaskThread)
+            assert thread._task_name == "prepare_native_align_commit"
+            assert callbacks["lock_dialog_until_finished"] is True
+            worker_allowed = True
+            transition = thread._fn()
+
+        assert isinstance(transition, ProjectionTransition)
+        assert hash_calls
+        assert materialization_calls == [transition.candidate_session]
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_native_parent_align_defers_source_hash_and_materialization_to_worker() -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    initial = _artifact_session()
+    committed = initial.commit_preview(
+        translation_mm=(4.0, 0.0, 0.0),
+        rotation_deg=(0.0, 0.0, 15.0),
+        scale=1.0,
+        pivot_mm=(10.0, 20.0, 30.0),
+        operator="pytest",
+        created_at="2026-07-14T00:00:01Z",
+        revision_id="align:worker-parent",
+    )
+    obj = _projected_scene_object(committed)
+    window = MainWindow()
+    window._artifact_session = committed
+    window.viewport.objects = [obj]
+    window.viewport.selected_index = 0
+    controller = window._artifact_workbench_controller()
+    assert controller.snapshot.session is committed
+    original_hash = artifact_session_module.mesh_geometry_sha256
+    original_materialize = ArtifactSession.materialize
+    worker_allowed = False
+    hash_calls: list[MeshData] = []
+    materialization_calls: list[ArtifactSession] = []
+
+    def guarded_hash(*args, **kwargs):
+        if not worker_allowed:
+            raise AssertionError("native Align Undo hashed source geometry on the GUI thread")
+        hash_calls.append(args[0])
+        return original_hash(*args, **kwargs)
+
+    def guarded_materialize(current: ArtifactSession):
+        if not worker_allowed:
+            raise AssertionError("native Align Undo materialized on the GUI thread")
+        materialization_calls.append(current)
+        return original_materialize(current)
+
+    try:
+        with (
+            patch.object(window, "_start_task", return_value=True) as start_task,
+            patch.object(
+                artifact_session_module,
+                "mesh_geometry_sha256",
+                new=guarded_hash,
+            ),
+            patch.object(
+                ArtifactSession,
+                "materialize",
+                new=guarded_materialize,
+            ),
+        ):
+            window.undo_last_action()
+            assert hash_calls == []
+            assert materialization_calls == []
+
+            callbacks = start_task.call_args.kwargs
+            thread = callbacks["thread"]
+            assert isinstance(thread, TaskThread)
+            assert thread._task_name == "prepare_native_parent_align"
+            assert callbacks["lock_dialog_until_finished"] is True
+            worker_allowed = True
+            transition = thread._fn()
+
+        assert isinstance(transition, ProjectionTransition)
+        assert hash_calls
+        assert materialization_calls == [transition.candidate_session]
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_native_align_commit_discards_worker_result_after_preview_change() -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    session = _artifact_session()
+    obj = _projected_scene_object(session)
+    obj.translation = np.array([5.0, -2.0, 1.0], dtype=np.float64)
+    window = MainWindow()
+    window._artifact_session = session
+    window.viewport.objects = [obj]
+    window.viewport.selected_index = 0
+    try:
+        with patch.object(
+            window,
+            "_start_task",
+            return_value=True,
+        ) as start_task:
+            window.on_bake_all_clicked()
+        callbacks = start_task.call_args.kwargs
+        transition = callbacks["thread"]._fn()
+        obj.translation = np.array([6.0, -2.0, 1.0], dtype=np.float64)
+
+        with (
+            patch.object(window, "_publish_artifact_session_projection") as publish,
+            patch.object(QMessageBox, "warning") as warning,
+        ):
+            callbacks["on_done"](transition)
+
+        publish.assert_not_called()
+        warning.assert_called_once()
+        assert window._artifact_session is session
+        assert "결과 폐기" in window.status_info.text()
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_native_parent_align_discards_worker_result_after_authority_change() -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    initial = _artifact_session()
+    committed = initial.commit_preview(
+        translation_mm=(4.0, 0.0, 0.0),
+        rotation_deg=(0.0, 0.0, 15.0),
+        scale=1.0,
+        pivot_mm=(10.0, 20.0, 30.0),
+        operator="pytest",
+        created_at="2026-07-14T00:00:01Z",
+        revision_id="align:stale-parent",
+    )
+    obj = _projected_scene_object(committed)
+    window = MainWindow()
+    window._artifact_session = committed
+    window._current_project_path = "/tmp/align-before-worker.amr"
+    window.viewport.objects = [obj]
+    window.viewport.selected_index = 0
+    controller = window._artifact_workbench_controller()
+    try:
+        with patch.object(
+            window,
+            "_start_task",
+            return_value=True,
+        ) as start_task:
+            window.undo_last_action()
+        callbacks = start_task.call_args.kwargs
+        transition = callbacks["thread"]._fn()
+        captured_state = controller.snapshot
+        controller.adopt_saved_project_path(
+            committed,
+            "/tmp/align-authority-changed.amr",
+            expected_state_version=captured_state.state_version,
+            expected_authority_epoch=captured_state.authority_epoch,
+        )
+
+        with (
+            patch.object(window, "_publish_artifact_session_projection") as publish,
+            patch.object(QMessageBox, "warning") as warning,
+        ):
+            callbacks["on_done"](transition)
+
+        publish.assert_not_called()
+        warning.assert_called_once()
+        assert window._artifact_session is committed
+        assert (
+            window._artifact_session.document.active_align_revision_id
+            == "align:stale-parent"
+        )
+        assert "결과 폐기" in window.status_info.text()
     finally:
         window.deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
@@ -2149,10 +2396,18 @@ def test_initial_identity_requires_explicit_align_before_measurement() -> None:
 
         with patch.object(
             window,
+            "_start_task",
+            return_value=True,
+        ) as start_task:
+            window.on_bake_all_clicked()
+        callbacks = start_task.call_args.kwargs
+        transition_result = callbacks["thread"]._fn()
+        with patch.object(
+            window,
             "_publish_artifact_session_projection",
             side_effect=capture,
         ):
-            window.on_bake_all_clicked()
+            callbacks["on_done"](transition_result)
 
         confirmed = captured["session"]
         transition = captured["transition"]
@@ -4085,10 +4340,18 @@ def test_native_undo_cancels_preview_then_activates_parent_revision() -> None:
 
         with patch.object(
             window,
+            "_start_task",
+            return_value=True,
+        ) as start_task:
+            window.undo_last_action()
+        callbacks = start_task.call_args.kwargs
+        transition_result = callbacks["thread"]._fn()
+        with patch.object(
+            window,
             "_publish_artifact_session_projection",
             side_effect=capture,
         ):
-            window.undo_last_action()
+            callbacks["on_done"](transition_result)
         restored = captured["session"]
         assert restored.document.active_align_revision_id == initial.document.active_align_revision_id
     finally:
