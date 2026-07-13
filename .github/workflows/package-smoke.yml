@@ -47,9 +47,9 @@ concurrency:
 jobs:
   frozen-package-smoke:
     name: Frozen package smoke (Windows)
-    # windows-latest moved to Server 2025, whose hosted image no longer ships
-    # Inno Setup. Pin the installer verification environment explicitly.
-    runs-on: windows-2022
+    # The current hosted Windows image carries Inno Setup 6. The build step
+    # still discovers and verifies the compiler instead of assuming its path.
+    runs-on: windows-latest
     timeout-minutes: 60
     env:
       QT_QPA_PLATFORM: offscreen
