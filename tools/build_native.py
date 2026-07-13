@@ -72,6 +72,7 @@ class NativeBuildResult:
 
     layout: ArtifactLayout
     manifest: Path
+    source_archive: Path | None
     release_evidence: Path | None
     self_test_report: Path | None
     self_test: Mapping[str, object] | None
@@ -454,13 +455,34 @@ def build_native(
         platform_name=platform_name,
     )
     evidence_path: Path | None = None
+    source_archive_path: Path | None = None
     if platform_name == "win32":
+        from src.source_archive import (
+            SOURCE_ARCHIVE_DIRECTORY,
+            SOURCE_ARCHIVE_FILENAME,
+            SOURCE_ARCHIVE_SIDECAR_FILENAME,
+            SourceArchiveError,
+            build_source_archive,
+        )
         from src.release_evidence import (
             EVIDENCE_DIRECTORY_NAME,
             ReleaseEvidenceError,
             generate_release_evidence,
         )
 
+        source_directory = built_layout.onedir / SOURCE_ARCHIVE_DIRECTORY
+        source_archive_path = source_directory / SOURCE_ARCHIVE_FILENAME
+        try:
+            build_source_archive(
+                root,
+                source_archive_path,
+                source_directory / SOURCE_ARCHIVE_SIDECAR_FILENAME,
+                commit=resolved_commit,
+            )
+        except SourceArchiveError as exc:
+            raise NativeBuildError(
+                f"corresponding-source generation failed: {exc}"
+            ) from exc
         evidence_path = built_layout.onedir / EVIDENCE_DIRECTORY_NAME
         try:
             generate_release_evidence(
@@ -483,6 +505,7 @@ def build_native(
     return NativeBuildResult(
         layout=built_layout,
         manifest=manifest_path,
+        source_archive=source_archive_path,
         release_evidence=evidence_path,
         self_test_report=report_path,
         self_test=self_test,
@@ -544,6 +567,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if result.layout.app_bundle is not None:
         print(f"macOS app bundle: {result.layout.app_bundle}")
     print(f"Embedded build manifest: {result.manifest}")
+    if result.source_archive is not None:
+        print(f"Verified corresponding source: {result.source_archive}")
     if result.release_evidence is not None:
         print(f"Verified release evidence: {result.release_evidence}")
     if result.self_test_report is not None:

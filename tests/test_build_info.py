@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
 
+import pytest
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import main
@@ -60,6 +62,7 @@ def test_self_test_passes_with_complete_offline_artifact_workflow() -> None:
         "required_runtime",
         "resources",
         "release_evidence",
+        "source_archive",
         "qt_offscreen",
         "gui_stack",
         "mesh_parsers",
@@ -120,6 +123,61 @@ def test_self_test_reports_a_failed_check_instead_of_raising() -> None:
         "ok": False,
         "detail": "RuntimeError: resource intentionally unavailable",
     }
+
+
+def test_frozen_source_archive_is_clean_commit_bound() -> None:
+    from src.source_archive import SourceArchiveResult
+
+    with tempfile.TemporaryDirectory() as temporary:
+        payload = Path(temporary)
+        source = payload / "source"
+        source.mkdir()
+        archive = source / "ArchMeshRubbing-source.zip"
+        sidecar = source / "ArchMeshRubbing-source.json"
+        archive.write_bytes(b"archive")
+        sidecar.write_bytes(b"sidecar")
+        commit = "a" * 40
+        result = SourceArchiveResult(
+            archive_sha256="b" * 64,
+            archive_size=7,
+            file_count=10,
+            source_sha256="c" * 64,
+            source_size=100,
+            source_commit=commit,
+            source_tree="d" * 40,
+            root_directory=f"ArchMeshRubbing-source-{commit[:12]}",
+        )
+        metadata = {
+            "channel": "ci-smoke",
+            "commit": commit,
+            "dependency_lock_sha256": "e" * 64,
+            "manifest_present": True,
+            "source_tree": "clean",
+            "windows_wheel_lock_sha256": "f" * 64,
+        }
+        with (
+            patch.object(build_info.sys, "frozen", True, create=True),
+            patch.object(build_info.sys, "platform", "win32"),
+            patch.object(build_info.sys, "executable", str(payload / "app.exe")),
+            patch.object(build_info, "build_metadata", return_value=metadata),
+            patch(
+                "src.source_archive.verify_source_archive",
+                return_value=result,
+            ) as verify,
+        ):
+            detail = build_info._check_source_archive()
+
+        assert detail == result.detail()
+        verify.assert_called_once_with(archive.resolve(), sidecar.resolve())
+
+        dirty = {**metadata, "source_tree": "dirty"}
+        with (
+            patch.object(build_info.sys, "frozen", True, create=True),
+            patch.object(build_info.sys, "platform", "win32"),
+            patch.object(build_info, "build_metadata", return_value=dirty),
+            pytest.raises(RuntimeError, match="not clean"),
+        ):
+            build_info._check_source_archive()
 
 
 def test_release_cli_commands_are_machine_readable_and_return_status() -> None:

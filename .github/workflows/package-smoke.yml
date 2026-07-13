@@ -21,6 +21,7 @@ on:
       - "src/**"
       - "third_party_licenses/**"
       - "tools/build_portable_archive.py"
+      - "tools/build_source_archive.py"
       - "tools/generate_build_info.py"
       - "tools/generate_release_evidence.py"
   pull_request:
@@ -41,6 +42,7 @@ on:
       - "src/**"
       - "third_party_licenses/**"
       - "tools/build_portable_archive.py"
+      - "tools/build_source_archive.py"
       - "tools/generate_build_info.py"
       - "tools/generate_release_evidence.py"
   workflow_dispatch:
@@ -94,6 +96,14 @@ jobs:
       - name: Build frozen application
         run: python -m PyInstaller --clean --noconfirm ArchMeshRubbing.spec
 
+      - name: Build exact corresponding-source archive
+        run: >-
+          python tools/build_source_archive.py build
+          --repository .
+          --commit "${{ github.sha }}"
+          --archive "dist\ArchMeshRubbing\source\ArchMeshRubbing-source.zip"
+          --sidecar "dist\ArchMeshRubbing\source\ArchMeshRubbing-source.json"
+
       - name: Generate payload manifest, SPDX SBOM, and notices
         shell: pwsh
         run: |
@@ -132,9 +142,10 @@ jobs:
           d=json.loads(p.read_text(encoding='utf-8'));
           assert d.get('ok') is True, json.dumps(d, ensure_ascii=False, indent=2);
           checks=d.get('checks') or [];
-          assert len(checks) == 13 and all(c.get('ok') is True for c in checks), d;
+          assert len(checks) == 14 and all(c.get('ok') is True for c in checks), d;
           assert any(c.get('name') == 'artifact_complete_workflow_offline' for c in checks), d;
           assert any(c.get('name') == 'release_evidence' for c in checks), d;
+          assert any(c.get('name') == 'source_archive' for c in checks), d;
           print('Frozen self-test passed:', p)"
 
       - name: Run frozen Windows native-QPA OpenGL smoke
@@ -228,6 +239,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "Extracted release evidence verification failed"
           }
+          $sourceArchive = Join-Path $portableDir "source\ArchMeshRubbing-source.zip"
+          $sourceSidecar = Join-Path $portableDir "source\ArchMeshRubbing-source.json"
+          python tools/build_source_archive.py verify `
+            --archive $sourceArchive `
+            --sidecar $sourceSidecar
+          if ($LASTEXITCODE -ne 0) {
+            throw "Extracted corresponding-source verification failed"
+          }
           $portableExe = Join-Path $portableDir "ArchMeshRubbing.exe"
           if (-not (Test-Path $portableExe -PathType Leaf)) {
             throw "Portable executable is missing: $portableExe"
@@ -280,9 +299,9 @@ jobs:
             throw "Portable self-test exited with code $($process.ExitCode)"
           }
           $data = Get-Content $report -Raw | ConvertFrom-Json
-          if (-not $data.ok -or $data.checks.Count -ne 13) {
+          if (-not $data.ok -or $data.checks.Count -ne 14) {
             Get-Content $report
-            throw "Portable self-test did not pass all 13 checks"
+            throw "Portable self-test did not pass all 14 checks"
           }
           foreach ($check in $data.checks) {
             if (-not $check.ok) { throw "Portable self-test check failed: $($check.name)" }
@@ -292,6 +311,9 @@ jobs:
           }
           if (-not ($data.checks.name -contains "release_evidence")) {
             throw "Portable self-test omitted release evidence verification"
+          }
+          if (-not ($data.checks.name -contains "source_archive")) {
+            throw "Portable self-test omitted corresponding-source verification"
           }
 
       - name: Run portable Windows native-QPA OpenGL smoke from Korean path

@@ -237,7 +237,7 @@ Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 임의 
 
 ## Quick Start
 
-현재 Quick Start는 Windows source checkout 실행 절차입니다. 다운로드 가능한 서명 바이너리는 아직 제공하지 않습니다. Windows wheel hash lock, 실제 payload 기반 SPDX/NOTICE, compiler 비종속 portable ZIP 생성·검증 코드는 저장소에 포함합니다. 첫 공개 안정판 전에는 프로젝트/GUI 라이선스 결정, Authenticode 또는 검토된 대체 서명 정책, 상위 build provenance, 대표 하드웨어·실물 pilot이 남아 있습니다.
+현재 Quick Start는 Windows source checkout 실행 절차입니다. 다운로드 가능한 서명 바이너리는 아직 제공하지 않습니다. Windows wheel hash lock, 실제 payload 기반 SPDX/NOTICE, exact Git commit의 corresponding-source ZIP, compiler 비종속 portable ZIP 생성·검증 코드는 저장소에 포함합니다. 첫 공개 안정판 전에는 프로젝트/GUI 라이선스 결정, Authenticode 또는 검토된 대체 서명 정책, runner identity를 포함한 상위 build provenance, 대표 하드웨어·실물 pilot이 남아 있습니다.
 
 ### Windows
 
@@ -286,7 +286,7 @@ python -m pip install --require-hashes --only-binary=:all: -r requirements/windo
 python tools/build_native.py
 ```
 
-이 명령은 기존 산출물을 기본적으로 덮어쓰지 않고, 빌드 뒤 실제 frozen executable의 offline self-test를 실행합니다. Windows build는 payload 전체 SHA-256 manifest, SPDX 2.3 SBOM과 제3자 NOTICE도 생성·재검증합니다. 현재 공개 바이너리는 만들지 않습니다. 패키지 CI는 Windows 하나만 차단 대상으로 사용하며 portable ZIP의 전체 entry를 검증한 뒤 한글 경로에 원자적으로 추출하고, 같은 evidence와 outbound 차단 complete workflow, native-QPA software OpenGL, 삭제를 검사합니다. 라이선스 결정, 서명, source archive/runner를 포함한 상위 provenance와 대표 Windows GPU·실물 pilot은 여전히 남아 있습니다. 자세한 절차와 차단 게이트는 [docs/NATIVE_PACKAGING.md](docs/NATIVE_PACKAGING.md)를 참고하세요.
+이 명령은 기존 산출물을 기본적으로 덮어쓰지 않고, 빌드 뒤 실제 frozen executable의 offline self-test를 실행합니다. Windows build는 payload 전체 SHA-256 manifest, SPDX 2.3 SBOM·제3자 NOTICE와 정확한 Git commit/tree/blob을 담은 corresponding-source ZIP을 생성·재검증합니다. 현재 공개 바이너리는 만들지 않습니다. 패키지 CI는 Windows 하나만 차단 대상으로 사용하며 portable ZIP의 전체 entry를 검증한 뒤 한글 경로에 원자적으로 추출하고, 같은 evidence·source archive와 outbound 차단 complete workflow, native-QPA software OpenGL, 삭제를 검사합니다. 라이선스 결정, 서명, runner identity를 포함한 상위 provenance와 대표 Windows GPU·실물 pilot은 여전히 남아 있습니다. 자세한 절차와 차단 게이트는 [docs/NATIVE_PACKAGING.md](docs/NATIVE_PACKAGING.md)를 참고하세요.
 
 ---
 
@@ -384,13 +384,14 @@ python main.py --project mesh.obj planview.png
 - packaged self-test가 실제 application authority를 통해 Open → explicit Align → Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6을 수행하고, 외부 PLY 삭제 뒤 embedded `.amr`를 재열어 이동된 1:1 SVG/PNG package의 원본 SHA-256·recipe·QC를 offline 재검증
 - `--opengl-driver-smoke-report`가 source와 frozen Windows 실행 파일에서 native `qwindows` context를 열고 Qt·PyOpenGL을 bundled `opengl32sw.dll` 하나에 결합한 뒤, 768×768 FBO에서 `>= 1e9 mm` 장면의 relative VBO, color/depth readback, 0.125 mm depth pick을 원근·정사영으로 검증
 - Windows x64/CPython 3.12 build wheel 17개를 exact SHA-256으로 잠그고 sdist를 거부하며, frozen/portable payload의 모든 파일 hash와 runtime 10개의 SPDX 2.3 SBOM·라이선스 원문 NOTICE를 실행 파일 self-test에서 재검증
+- live worktree가 아니라 exact Git commit의 object database에서 100644/100755 regular blob 전체를 읽어 결정적 corresponding-source ZIP을 만들고, commit/tree/blob ID·SHA-256·GPL-2.0-only LICENSE·portable path를 frozen/portable 14번째 offline self-test에서 재검증
 - Cutline 면·경로, Outline fixed-grid/union/topology, Digital Rubbing raster/relief 내부의 안전 경계까지 사용자 cooperative cancellation 연결
 - 대좌표 render-origin 이식: relative VBO·camera/model rebasing·world overlay 제출과 frame-bound depth picking/drag 계약 구현
 - 버튼 아이콘은 이모지·운영체제 폰트 대신 직접 그린 16×16 픽셀 그리드와 정수배 고해상도 변형을 사용해 플랫폼별 모양 차이를 제거
 - 2026-07-13 Windows 기준 commit `b12d4874a4a8`: [source CI run 29251668123](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29251668123)에서 full pytest `670 passed, 128 subtests`, Ruff, M0 Pyright `0 errors`, Windows workflow `573 passed, 3 skipped, 118 subtests`와 qwindows+llvmpipe actual-frame `66/66` 통과
 - 같은 commit의 [frozen package run 29251668029](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29251668029)에서 12-check offline self-test와 frozen executable qwindows+llvmpipe actual-frame gate 통과
 - installer compiler 없이 표준 라이브러리만으로 deterministic portable ZIP과 canonical sidecar를 만들고, 경로 탈출·Windows 예약명·대소문자 충돌·symlink·변조를 fail-closed 검증한 뒤 기존 destination을 덮어쓰지 않는 원자적 추출 구현
-- 다음 단계: 라이선스 결정, 서명 정책, source archive·runner까지 묶는 상위 build provenance, 대표 Windows GPU·대용량 실제 유물·저메모리·완전 격리 offline pilot. macOS·Linux 배포 확대는 첫 안정판 이후 별도 범위
+- 다음 단계: 라이선스 결정, 서명 정책, source archive와 runner identity를 함께 증명하는 상위 build provenance, 대표 Windows GPU·대용량 실제 유물·저메모리·완전 격리 offline pilot. macOS·Linux 배포 확대는 첫 안정판 이후 별도 범위
 
 ---
 

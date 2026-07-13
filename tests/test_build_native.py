@@ -175,6 +175,86 @@ def test_build_invokes_current_python_locates_app_and_runs_file_self_test() -> N
         assert manifest["source_tree"] == "dirty"
 
 
+def test_windows_build_bundles_exact_source_before_release_evidence() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary).resolve()
+        requirements = root / "requirements"
+        requirements.mkdir()
+        for name in (
+            "runtime-py312.lock",
+            "build-py312.lock",
+            "windows-py312-x64-hashed.lock",
+        ):
+            (requirements / name).write_text("demo==1\n", encoding="utf-8")
+        spec = root / "ArchMeshRubbing.spec"
+        spec.write_text("# spec\n", encoding="utf-8")
+        layout = build_native.artifact_layout(root / "dist", platform_name="win32")
+        commit = "c" * 40
+        events: list[str] = []
+
+        def fake_pyinstaller(command: list[str], **_kwargs: object) -> None:
+            assert command[-1] == str(spec)
+            layout.onedir.mkdir(parents=True)
+            layout.executable.write_bytes(b"launcher")
+
+        def fake_source(
+            repository: Path,
+            archive: Path,
+            sidecar: Path,
+            *,
+            commit: str,
+        ) -> None:
+            assert repository == root
+            assert commit == "c" * 40
+            archive.parent.mkdir(parents=True)
+            archive.write_bytes(b"source archive")
+            sidecar.write_bytes(b"{}")
+            events.append("source")
+
+        def fake_evidence(
+            payload: Path,
+            output: Path,
+            *,
+            created_at: str,
+        ) -> None:
+            assert payload == layout.onedir
+            assert created_at == "2026-07-01T00:00:00Z"
+            assert (payload / "source" / "ArchMeshRubbing-source.zip").is_file()
+            output.mkdir()
+            events.append("evidence")
+
+        with (
+            patch.object(build_native, "validate_build_environment"),
+            patch.object(build_native.subprocess, "run", side_effect=fake_pyinstaller),
+            patch.object(
+                build_native,
+                "resolve_commit_timestamp",
+                return_value="2026-07-01T00:00:00Z",
+            ),
+            patch(
+                "src.source_archive.build_source_archive",
+                side_effect=fake_source,
+            ),
+            patch(
+                "src.release_evidence.generate_release_evidence",
+                side_effect=fake_evidence,
+            ),
+        ):
+            result = build_native.build_native(
+                root=root,
+                platform_name="win32",
+                channel="ci-smoke",
+                commit=commit,
+                source_tree="clean",
+                skip_self_test=True,
+            )
+
+        assert events == ["source", "evidence"]
+        assert result.source_archive == (
+            layout.onedir / "source" / "ArchMeshRubbing-source.zip"
+        )
+
+
 def test_self_test_uses_report_file_and_rejects_reported_failure() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)

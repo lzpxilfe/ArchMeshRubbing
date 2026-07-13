@@ -447,12 +447,15 @@ def _check_resources() -> str:
         "vector_export-1.0.0.schema.json",
         "rubbing_receipt-1.0.0.schema.json",
         "rubbing_export-1.0.0.schema.json",
+        "tile_unwrap_receipt-1.0.0.schema.json",
+        "tile_unwrap_export-1.0.0.schema.json",
         "source_bundle-1.0.0.schema.json",
         "source_bundle-2.0.0.schema.json",
         "source_manifest-1.0.0.schema.json",
         "mesh_import_recipe-1.0.0.schema.json",
         "mesh_import_recipe-2.0.0.schema.json",
         "portable_archive_manifest-1.0.0.schema.json",
+        "source_archive-1.0.0.schema.json",
     )
     for name in required_schemas:
         if not resource_path("schemas", name).is_file():
@@ -475,6 +478,47 @@ def _check_release_evidence() -> str:
 
     payload_root = Path(sys.executable).resolve().parent
     return verify_release_evidence(payload_root).detail()
+
+
+def _check_source_archive() -> str:
+    """Verify bundled corresponding source against the frozen build commit."""
+
+    if not bool(getattr(sys, "frozen", False)):
+        return "source build; corresponding source is generated after freezing"
+    if sys.platform != "win32":
+        return "non-Windows frozen build; bundled source archive is not required"
+    metadata = build_metadata()
+    if metadata["source_tree"] != "clean":
+        raise RuntimeError(
+            "frozen build is not clean and cannot claim exact corresponding source"
+        )
+    from src.source_archive import (
+        SOURCE_ARCHIVE_DIRECTORY,
+        SOURCE_ARCHIVE_FILENAME,
+        SOURCE_ARCHIVE_SIDECAR_FILENAME,
+        verify_source_archive,
+    )
+
+    payload_root = Path(sys.executable).resolve().parent
+    source_directory = payload_root / SOURCE_ARCHIVE_DIRECTORY
+    if source_directory.is_symlink() or not source_directory.is_dir():
+        raise RuntimeError("bundled corresponding-source directory is missing")
+    try:
+        observed = {path.name for path in source_directory.iterdir()}
+    except OSError as exc:
+        raise RuntimeError("bundled corresponding-source directory is unreadable") from exc
+    expected = {SOURCE_ARCHIVE_FILENAME, SOURCE_ARCHIVE_SIDECAR_FILENAME}
+    if observed != expected:
+        raise RuntimeError("bundled corresponding-source file set is invalid")
+    result = verify_source_archive(
+        source_directory / SOURCE_ARCHIVE_FILENAME,
+        source_directory / SOURCE_ARCHIVE_SIDECAR_FILENAME,
+    )
+    if result.source_commit != metadata["commit"]:
+        raise RuntimeError(
+            "bundled corresponding source does not match the frozen build commit"
+        )
+    return result.detail()
 
 
 def _check_qt_offscreen() -> str:
@@ -903,6 +947,7 @@ def run_self_test() -> dict[str, object]:
         _run_check("required_runtime", _check_required_runtime),
         _run_check("resources", _check_resources),
         _run_check("release_evidence", _check_release_evidence),
+        _run_check("source_archive", _check_source_archive),
         _run_check("qt_offscreen", _check_qt_offscreen),
         _run_check("gui_stack", _check_gui_stack),
         _run_check("mesh_parsers", _check_mesh_parsers),

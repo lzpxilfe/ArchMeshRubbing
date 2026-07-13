@@ -94,6 +94,7 @@ jobs:
           tests/test_build_info.py
           tests/test_build_native.py
           tests/test_portable_archive.py
+          tests/test_source_archive.py
           tests/test_build_manifest.py
           tests/test_release_evidence.py
           tests/test_source_identity.py
@@ -119,6 +120,8 @@ jobs:
           tests/test_artifact_outline_topology.py
           tests/test_artifact_rubbing_extractor.py
           tests/test_artifact_rubbing_export.py
+          tests/test_artifact_tile_unwrap.py
+          tests/test_artifact_tile_unwrap_export.py
           tests/test_canonical_png.py
           tests/test_vector_schemas.py
           tests/test_rubbing_schemas.py

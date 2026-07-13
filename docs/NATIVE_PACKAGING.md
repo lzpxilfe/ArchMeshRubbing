@@ -1,6 +1,6 @@
 # Native Packaging and Release Gates
 
-이 문서는 Windows frozen 앱과 검증형 portable ZIP을 만드는 절차를 설명한다. 첫 안정판의 패키지 경로는 설치 프로그램 compiler, 계정, 라이선스 서버를 요구하지 않는다. CI는 ZIP을 한글 경로에 검증·추출해 실제 실행한 뒤 삭제하지만, 서명, artifact 업로드 또는 공개 배포는 아직 수행하지 않는다.
+이 문서는 Windows frozen 앱과 검증형 portable ZIP을 만드는 절차를 설명한다. 첫 안정판의 패키지 경로는 설치 프로그램 compiler, 계정, 라이선스 서버를 요구하지 않는다. CI는 exact Git commit의 corresponding source를 ZIP에 포함하고 한글 경로에 검증·추출해 실제 실행한 뒤 삭제하지만, 서명, artifact 업로드 또는 공개 배포는 아직 수행하지 않는다.
 
 ## 지원 빌드 기준
 
@@ -11,7 +11,9 @@
 - `requirements/runtime-license-policy.json`, `third_party_licenses/`: wheel에 라이선스 원문이 없는 예외의 검토된 출처·원문 SHA-256
 - `ArchMeshRubbing.spec`: 첫 안정판 대상인 Windows onedir build. Linux onedir와 macOS `.app` 분기는 source 호환용이며 현재 릴리스 게이트가 아니다.
 - `src/portable_archive.py`, `tools/build_portable_archive.py`: ZIP 생성, sidecar 검증, 안전한 원자적 추출
+- `src/source_archive.py`, `tools/build_source_archive.py`: Git object 기반 corresponding-source ZIP/sidecar 생성과 Git 없이 offline 검증
 - `schemas/portable_archive_manifest-1.0.0.schema.json`: portable sidecar의 machine-readable 계약
+- `schemas/source_archive-1.0.0.schema.json`: source ZIP 외부 sidecar와 내부 manifest의 machine-readable 계약
 - `build/generated/build_info.json`: version, channel, commit, runtime lock과 Windows wheel lock SHA-256
 
 일반 source 실행은 플랫폼 중립 version lock을 사용한다. 제품 대상 Windows frozen job은 평탄화된 hash lock만 설치하며 sdist와 검토되지 않은 wheel을 거부한다. 현재 lock은 Windows x64/CPython 3.12 한 대상의 증거이며 다른 OS 지원을 뜻하지 않는다.
@@ -54,17 +56,18 @@ python tools/build_portable_archive.py verify `
 
 1. embedded build manifest와 runtime/wheel lock hash
 2. 정확한 runtime distribution 버전과 Shapely/GEOS 조합
-3. 아이콘, runtime/wheel lock, license policy, 11개 JSON schema
+3. 아이콘, runtime/wheel lock, license policy, 14개 JSON schema
 4. frozen/portable payload의 전체 파일 SHA-256 manifest, SPDX 2.3 SBOM, 제3자 NOTICE를 실제 bytes에서 재계산
-5. offscreen Qt application
-6. 실제 `MainWindow`, `QOpenGLWidget`, OpenGL.GL/GLU import와 생성
-7. OBJ, PLY, STL, OFF, glTF, GLB를 closed import recipe와 외부 dependency deny resolver로 여는 production parser 경로
-8. Pillow PNG encode/decode
-9. canonical `ArtifactDocument` round-trip golden
-10. canonical Cutline golden
-11. canonical Digital Rubbing golden
-12. 실제 PLY → 단위/Align session → embedded `.amr` 저장 → 외부 원본 삭제 → source/geometry/Align/world vertex 재검증
-13. 실제 application authority의 Open → explicit Align → Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6 → completed `.amr` offline reopen → 이동된 1:1 SVG/PNG의 원본 SHA-256·recipe·QC 재검증
+5. exact Git commit/tree/blob·SHA-256·LICENSE에 결합된 corresponding-source ZIP과 sidecar
+6. offscreen Qt application
+7. 실제 `MainWindow`, `QOpenGLWidget`, OpenGL.GL/GLU import와 생성
+8. OBJ, PLY, STL, OFF, glTF, GLB를 closed import recipe와 외부 dependency deny resolver로 여는 production parser 경로
+9. Pillow PNG encode/decode
+10. canonical `ArtifactDocument` round-trip golden
+11. canonical Cutline golden
+12. canonical Digital Rubbing golden
+13. 실제 PLY → 단위/Align session → embedded `.amr` 저장 → 외부 원본 삭제 → source/geometry/Align/world vertex 재검증
+14. 실제 application authority의 Open → explicit Align → Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6 → completed `.amr` offline reopen → 이동된 1:1 SVG/PNG의 원본 SHA-256·recipe·QC 재검증
 
 Offscreen `QOpenGLWidget` 생성은 module/plugin 누락을 잡지만 실제 frame 정확성을 증명하지 않는다. Windows CI는 이어서 `QT_QPA_PLATFORM=windows`, `QT_OPENGL=software`로 native `qwindows`와 bundled `opengl32sw.dll`을 사용해 `src.gui.opengl_driver_smoke`를 실행한다. PyOpenGL의 GL/WGL dispatch도 같은 DLL에 결합해 Qt software context와 시스템 `opengl32.dll`이 섞이지 않게 한다. report는 768×768 실제 widget FBO, VBO, pixel/depth/pick과 두 투영 모드를 모두 검사한다.
 
@@ -84,16 +87,34 @@ python -m src.gui.opengl_driver_smoke ^
 
 - Python 3.12와 hash-locked Windows wheel 17개만 설치하고 dependency closure 검사
 - commit/runtime lock/wheel lock에 결합된 manifest와 PyInstaller onedir 생성
+- live worktree가 아닌 exact commit의 Git object에서 corresponding-source ZIP과 canonical sidecar 생성
 - payload 전체 파일 manifest, SPDX 2.3 JSON SBOM, machine/human NOTICE 생성·재검증
-- Windows frozen executable의 file-based 13-check와 native-QPA software OpenGL 검사
+- Windows frozen executable의 file-based 14-check와 native-QPA software OpenGL 검사
 - commit epoch를 고정 timestamp로 사용해 portable ZIP과 canonical sidecar 생성
 - ZIP exact hash/size, 모든 entry path/size/SHA-256, release-evidence index와 source commit 재검증
 - `문화유산 기록\ArchMeshRubbing` 한글 경로에 검증 후 원자적으로 추출
-- 추출본 release evidence를 다시 계산하고 executable에 outbound deny firewall rule과 실패 proxy 적용
-- 한글 경로의 실행 파일과 report 경로에서 13-check complete workflow와 native `qwindows` actual-frame 재실행
+- 추출본 release evidence와 corresponding-source archive를 다시 계산하고 executable에 outbound deny firewall rule과 실패 proxy 적용
+- 한글 경로의 실행 파일과 report 경로에서 14-check complete workflow와 native `qwindows` actual-frame 재실행
 - 실행 뒤 ZIP을 다시 검증하고 추출 디렉터리와 firewall rule 제거
 
 각 실행 파일 단계는 120초의 명시적 상한을 가진다. timeout을 성공으로 바꾸거나 GUI hang을 숨기지 않는다. workflow에는 ZIP·실행 파일 artifact upload나 release 단계가 없다. 라이선스 게이트가 해결되기 전에는 CI 밖으로 바이너리를 게시하지 않는다.
+
+### Corresponding-source 계약
+
+`source/ArchMeshRubbing-source.zip`은 live worktree 복사본이 아니다. 생성기는 지정한 full commit의 Git object database에서 tree와 blob을 직접 읽고 100644/100755 regular file만 받는다. symlink·submodule·비 UTF-8/비 NFC·Windows 예약명·대소문자 충돌을 거부하고, 각 파일의 Git blob ID·SHA-256·크기·mode를 `SOURCE-MANIFEST.json`에 기록한다. 외부 `ArchMeshRubbing-source.json`은 ZIP exact hash/size와 source commit/tree/file-set hash를 결합한다.
+
+ZIP은 압축 library heuristic에 의존하지 않는 `ZIP_STORED`, commit epoch, 고정 metadata와 정렬된 경로를 사용한다. verifier는 Git이나 원래 저장소 없이도 보존된 raw commit object의 ID와 tree header를 검증하고, file record 전체에서 중첩 Git tree ID를 재구성한 뒤, GPL-2.0-only `LICENSE`, 모든 blob ID와 SHA-256을 다시 계산한다. release evidence와 portable manifest가 이 두 source 파일의 bytes도 함께 hash하므로 실행 payload와 함께 이동한 뒤에도 독립 검증할 수 있다. clean build가 아니면 frozen self-test는 이 archive를 정확한 corresponding source라고 인정하지 않는다.
+
+```powershell
+python tools/build_source_archive.py build `
+  --repository . `
+  --commit ((& git rev-parse HEAD).Trim()) `
+  --archive dist\ArchMeshRubbing\source\ArchMeshRubbing-source.zip `
+  --sidecar dist\ArchMeshRubbing\source\ArchMeshRubbing-source.json
+python tools/build_source_archive.py verify `
+  --archive dist\ArchMeshRubbing\source\ArchMeshRubbing-source.zip `
+  --sidecar dist\ArchMeshRubbing\source\ArchMeshRubbing-source.json
+```
 
 ### Portable archive 계약
 
@@ -145,7 +166,7 @@ evidence는 ZIP 생성 전, frozen 실행 전, 한글 경로 추출 뒤에 모�
 - 생성된 SPDX/NOTICE의 라이선스 호환성·고지 내용에 대한 최종 사람 검토
 - 대표 Windows 하드웨어 GPU/driver와 compositor pilot
 - large mesh, low-memory, 완전 격리된 offline machine pilot
-- clean source archive digest와 runner identity까지 포함하는 상위 build provenance
+- 검증된 source archive digest와 runner identity를 함께 묶는 상위 build provenance
 - 공개 ZIP·sidecar·source archive를 묶는 checksum/signature 게시 규칙
 
-hash-locked frozen payload, 검증형 portable ZIP, 한글 경로 offline/actual-frame/삭제 gate의 코드 경계는 구현됐다. 그래도 프로젝트/GUI 라이선스 결론, 서명, source archive·runner provenance, 대표 하드웨어·실물 대용량 pilot과 공개 릴리스는 아직 차단한다. macOS·Linux 배포는 첫 Windows 안정판 이후 별도 범위다.
+hash-locked frozen payload, 검증형 portable ZIP, exact corresponding-source archive, 한글 경로 offline/actual-frame/삭제 gate의 코드 경계는 구현됐다. 그래도 프로젝트/GUI 라이선스 결론, 서명, source archive와 runner identity를 묶는 상위 provenance, 대표 하드웨어·실물 대용량 pilot과 공개 릴리스는 아직 차단한다. macOS·Linux 배포는 첫 Windows 안정판 이후 별도 범위다.

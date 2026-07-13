@@ -65,6 +65,7 @@ hiddenimports = sorted(
             "OpenGL.platform",
             "PyQt6.QtOpenGLWidgets",
             "src.release_evidence",
+            "src.source_archive",
         ]
         + collect_submodules("src.application")
         + collect_submodules("src.core")
