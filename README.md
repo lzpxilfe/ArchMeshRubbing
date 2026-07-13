@@ -54,6 +54,7 @@ Align 확정 뒤에도 모든 기능이 한꺼번에 열리지는 않습니다. 
 - 원본 file SHA-256, decode geometry SHA-256, 확인된 단위·축, immutable Align revision을 분리해 저장
 - 새 문서는 원본의 절대 경로를 canonical 문서에 넣지 않고 `external:<original_name>` locator만 저장함. 실제 OS 경로는 현재 session에만 유지하고, linked resource는 정규화된 상대 POSIX 논리 경로만 기록하므로 같은 source closure·recipe의 문서와 SVG/PNG hash가 drive/root 위치에 따라 달라지지 않음
 - native `.amr` 저장은 `ArtifactDocument`와 함께 검증된 주 원본 및 파서가 실제로 읽은 MTL·텍스처·buffer bytes를 SHA-256 content-addressed blob으로 포함함. 외부 파일을 삭제하거나 프로젝트를 다른 컴퓨터로 옮겨도 `.amr` 하나에서 saved parser·단위·Align·geometry hash와 전체 dependency hash를 다시 검증해 열 수 있고, 열린 archive를 Save/Save As로 다시 저장할 수 있음
+- `파일 → 중단된 프로젝트 저장 복구…`는 사용자가 고른 폴더에서 writer의 exact `.<destination>.XXXXXXXX.tmp` 이름을 가진 regular file만 후보로 제시함. 후보 inode·크기·수정시각을 고정해 별도 staging으로 복사하고 내장 원본·문서·Align을 production loader로 완전 물질화한 뒤, 존재하지 않는 새 `.amr`에 no-overwrite 게시함. 후보·기존 프로젝트는 성공해도 자동 삭제하거나 변경하지 않으며 현재 장면도 사용자의 별도 확인 없이 교체하지 않음
 - 기존 manifest-only `.amr`와 self-contained `mesh-import-recipe 1.0`은 계속 읽음. 새 import에서 외부 resource를 읽지 않으면 v1 `deny_external`, 실제 상대 resource를 읽으면 `mesh-import-recipe 2.0`의 `closed_manifest`와 `relative-contained-v1` resolver로 확정함
 - v2 resolver는 manifest에 선언된 exact logical path·SHA-256·크기의 byte stream만 재생함. HTTP/file URI, 절대·drive·UNC 경로, source root 탈출, symlink 탈출, 누락·추가·변경·미사용 dependency는 fail closed로 거부함
 - Open → Align commit → Cutline record가 항상 source-space 원본에서 canonical millimeter로 다시 계산됨
@@ -165,6 +166,7 @@ Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 임의 
 - Cutline/Outline/Digital Rubbing/기와 전개는 application shell에서 파라미터와 가벼운 scene guard만 캡처하고 단일 worker에서 계산합니다. canonical scene materialization·vertex/face 일치 검사와 Digital Rubbing의 해상도별 전체 peak-memory 추정도 controller 실행 수명주기 안의 worker preflight에서 수행하므로 GUI event loop를 막지 않습니다. Rubbing 시작 시에는 원본 geometry·UV·texture 복사를 포함한 보수적 최소 예약을 먼저 잡고, 전체 추정이 예산을 넘으면 계산 전에 fail closed합니다. worker는 문서를 변경하지 않으며, 완료 결과는 예약된 record ID와 일회성 result capability를 검증한 뒤 현재의 같은 Align session에 rebase합니다. record append publication은 GPU 장면을 교체하지 않습니다. 기와의 ‘현재 선택 면’은 exact face-range recipe로 고정하며, 성공적으로 게시될 때 사용자가 선택을 바꾸지 않은 경우에만 소비합니다. 재개방한 기록은 READY + FRESH 목록에서 명시적으로 선택하고, 일시적인 Open/scene 충돌로 게시하지 못한 측정 결과는 새 ID를 만들지 않고 재시도합니다.
 - vector/rubbing/tile-unwrap export는 비싼 생성·record recipe 재계산을 worker에서 staging까지만 수행합니다. 최종 no-replace rename은 현재 권위를 다시 검증한 뒤 실행하며, 목적지 경합에서는 기존 승자를 보존합니다. rename 뒤 directory `fsync`가 실패하거나 Windows처럼 지원 여부를 확인할 수 없으면 저장 완료와 crash durability 미확정을 구분해 경고합니다.
 - native Save/Save As는 immutable session snapshot과 경량 scene guard만 GUI에서 캡처합니다. Git build metadata 조회, 원본 closure 재해시, ZIP64 작성·fsync, production reader 재개방, source/Align 재물질화는 잠긴 진행 대화상자의 worker에서 수행합니다. 완료 시 session·state version·authority epoch·기존 project path가 모두 그대로일 때만 결과 경로를 현재 프로젝트로 채택합니다. 중간에 권위가 바뀌면 파일은 유효한 과거 snapshot으로 명시하되 현재 문서가 저장됐다고 표시하지 않습니다.
+- 중단 저장 복구는 자동 시작 스캔이나 임시본 정리를 하지 않습니다. 사용자가 범위를 폴더 하나로 지정하고 후보·새 목적지를 각각 확인한 뒤 잠긴 worker에서 descriptor copy, file `fsync`, embedded-session materialization과 atomic create-new publish를 수행합니다. 성공 뒤에도 복구본 열기는 별도 확인이며, 실패·목적지 경합·후보 identity 변경에서는 live scene과 모든 기존 경로를 유지합니다.
 - 창 종료는 active authoritative 측정·내보내기의 record/publication 권위를 먼저 회수하고 강제 thread termination 없이 최대 30초 join을 기다립니다. native Align 준비나 project save처럼 내부 해시·materialization·파일 호출을 선점할 수 없는 task도 같은 bounded join을 통과해야 합니다. worker 종료와 export staging의 안전한 terminal 상태를 증명하지 못하면 창을 닫지 않으며, 검증된 join 뒤에만 task signal과 identity를 제거해 늦은 결과 게시를 차단합니다.
 
 ### Artifact trust core
@@ -172,6 +174,7 @@ Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 임의 
 - [`src/core/artifact_cancellation.py`](src/core/artifact_cancellation.py): GUI와 무관한 cooperative cancellation probe·고유 종료 신호
 - [`src/core/artifact_document.py`](src/core/artifact_document.py): source·metadata·Align·DerivedRecord revision graph
 - [`src/core/artifact_session.py`](src/core/artifact_session.py): 검증 source와 immutable document의 materialization 경계
+- [`src/core/project_recovery.py`](src/core/project_recovery.py): 비정상 종료 save-temp의 bounded discovery, identity-pinned copy, 완전 offline materialization과 no-overwrite 복구 게시
 - [`src/core/artifact_vector_extractor.py`](src/core/artifact_vector_extractor.py): canonical-mm Cutline
 - [`src/core/artifact_outline_extractor.py`](src/core/artifact_outline_extractor.py): fixed-grid 6면 Outline
 - [`src/core/artifact_rubbing_extractor.py`](src/core/artifact_rubbing_extractor.py): deterministic 6면 Digital Rubbing raster

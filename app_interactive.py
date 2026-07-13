@@ -26,7 +26,7 @@ from PyQt6.QtWidgets import (
     QSlider, QSpinBox, QStatusBar, QToolBar, QFrame,
     QMessageBox, QTextEdit, QProgressBar, QComboBox,
     QCheckBox, QScrollArea, QSizePolicy, QButtonGroup, QDialog, QLineEdit,
-    QGridLayout, QProgressDialog, QMenu
+    QGridLayout, QProgressDialog, QMenu, QInputDialog
 )
 from PyQt6.QtCore import (
     Qt,
@@ -250,6 +250,13 @@ from src.core.project_file import (  # noqa: E402
     load_project as load_amr_project,
     save_artifact_session_project as save_amr_artifact_session_project,
     save_project as save_amr_project,
+)
+from src.core.project_recovery import (  # noqa: E402
+    InterruptedProjectSave,
+    ProjectRecoveryError,
+    ProjectRecoveryResult,
+    discover_interrupted_project_saves as discover_amr_interrupted_saves,
+    recover_interrupted_project_save as recover_amr_interrupted_save,
 )
 from src.core.artifact_document import ArtifactDocument  # noqa: E402
 from src.core.artifact_scene_adapter import (  # noqa: E402
@@ -5790,6 +5797,13 @@ class MainWindow(QMainWindow):
         action_open_project.triggered.connect(self.open_project)
         file_menu.addAction(action_open_project)
 
+        action_recover_project = QAction("중단된 프로젝트 저장 복구…", self)
+        set_pixel_icon(action_recover_project, "recover")
+        action_recover_project.triggered.connect(
+            self.recover_interrupted_project_save
+        )
+        file_menu.addAction(action_recover_project)
+
         file_menu.addSeparator()
 
         action_save_project = QAction("프로젝트 저장", self)
@@ -6137,6 +6151,262 @@ class MainWindow(QMainWindow):
         if not filepath:
             return
         self.open_project_path(filepath)
+
+    @staticmethod
+    def _recovery_candidate_label(
+        candidate: InterruptedProjectSave,
+        index: int,
+    ) -> str:
+        def safe_name(value: str) -> str:
+            name = Path(value).name
+            cleaned = "".join(
+                character if character.isprintable() else "_"
+                for character in name
+            )
+            return cleaned[:96] or "unnamed"
+
+        try:
+            modified = datetime.fromtimestamp(
+                candidate.modified_time_ns / 1_000_000_000
+            ).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+        except (OSError, OverflowError, ValueError):
+            modified = "시간 확인 불가"
+        if candidate.size_bytes >= 1024 * 1024:
+            size = f"{candidate.size_bytes / (1024 * 1024):.1f} MiB"
+        elif candidate.size_bytes >= 1024:
+            size = f"{candidate.size_bytes / 1024:.1f} KiB"
+        else:
+            size = f"{candidate.size_bytes} B"
+        return (
+            f"{index + 1}. {safe_name(candidate.intended_destination)} | "
+            f"{size} | {modified} | {safe_name(candidate.candidate_path)}"
+        )
+
+    @staticmethod
+    def _default_recovery_destination(candidate: InterruptedProjectSave) -> str:
+        intended = Path(candidate.intended_destination)
+        base = intended.with_name(f"{intended.stem}-recovered.amr")
+        if not base.exists() and not base.is_symlink():
+            return str(base)
+        for index in range(2, 1000):
+            alternate = intended.with_name(
+                f"{intended.stem}-recovered-{index}.amr"
+            )
+            if not alternate.exists() and not alternate.is_symlink():
+                return str(alternate)
+        return str(
+            intended.with_name(
+                f"{intended.stem}-recovered-{uuid.uuid4().hex[:8]}.amr"
+            )
+        )
+
+    def recover_interrupted_project_save(self) -> None:
+        """Explicitly recover one verified native save temp to a new AMR."""
+
+        project_thread = getattr(self, "_project_open_thread", None)
+        mesh_thread = getattr(self, "_mesh_load_thread", None)
+        task_thread = getattr(self, "_task_thread", None)
+        workers_busy = False
+        for thread in (project_thread, mesh_thread, task_thread):
+            try:
+                workers_busy = workers_busy or bool(
+                    thread is not None and thread.isRunning()
+                )
+            except Exception:
+                workers_busy = True
+        if (
+            workers_busy
+            or bool(getattr(self, "_artifact_load_active", False))
+            or bool(getattr(self, "_project_load_active", False))
+        ):
+            QMessageBox.information(
+                self,
+                "작업 중",
+                "현재 검증·저장 작업이 끝난 뒤 중단 저장 복구를 시작하세요.",
+            )
+            return
+
+        start_directory = ""
+        for raw_path in (
+            getattr(self, "_current_project_path", None),
+            getattr(self, "current_filepath", None),
+        ):
+            if raw_path:
+                try:
+                    start_directory = str(Path(str(raw_path)).expanduser().parent)
+                    break
+                except (OSError, ValueError):
+                    continue
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "중단된 프로젝트 저장이 남은 폴더 선택",
+            start_directory,
+        )
+        if not folder:
+            return
+        try:
+            candidates = discover_amr_interrupted_saves(folder)
+        except (ProjectRecoveryError, OSError, ValueError) as exc:
+            QMessageBox.critical(
+                self,
+                "복구 후보 검색 실패",
+                f"선택한 폴더를 안전하게 검사할 수 없습니다.\n\n{exc}",
+            )
+            return
+        if not candidates:
+            QMessageBox.information(
+                self,
+                "복구 후보 없음",
+                "이 폴더에는 ArchMeshRubbing 저장 이름과 정확히 일치하는 "
+                "중단 임시본이 없습니다. 일반 파일과 심볼릭 링크는 후보로 "
+                "간주하지 않았습니다.",
+            )
+            return
+
+        labels = tuple(
+            self._recovery_candidate_label(candidate, index)
+            for index, candidate in enumerate(candidates)
+        )
+        selected_label, accepted = QInputDialog.getItem(
+            self,
+            "복구 후보 선택",
+            "아직 유효하다고 판정하지 않은 후보입니다. 완전 검증할 항목을 선택하세요.",
+            labels,
+            0,
+            False,
+        )
+        if not accepted:
+            return
+        try:
+            selected_index = labels.index(str(selected_label))
+        except ValueError:
+            QMessageBox.critical(
+                self,
+                "복구 후보 선택 실패",
+                "선택한 후보를 현재 검색 결과와 결합할 수 없습니다.",
+            )
+            return
+        candidate = candidates[selected_index]
+
+        output, _ = QFileDialog.getSaveFileName(
+            self,
+            "검증된 복구본을 새 파일로 저장",
+            self._default_recovery_destination(candidate),
+            "ArchMeshRubbing Project (*.amr);;All Files (*)",
+        )
+        if not output:
+            return
+        if not output.lower().endswith(".amr"):
+            output += ".amr"
+        output_path = Path(output)
+        if output_path.exists() or output_path.is_symlink():
+            QMessageBox.warning(
+                self,
+                "덮어쓰기 차단",
+                "복구는 기존 파일을 덮어쓰지 않습니다. 존재하지 않는 새 .amr "
+                "파일 이름을 선택하세요.",
+            )
+            return
+
+        answer = QMessageBox.question(
+            self,
+            "중단 저장 검증 및 복구",
+            "다음 임시본을 별도 staging에 복사한 뒤 내장 원본·문서·Align을 "
+            "완전히 검증합니다. 검증된 경우에만 새 파일을 생성합니다.\n\n"
+            f"후보: {Path(candidate.candidate_path).name}\n"
+            f"원래 저장 대상: {Path(candidate.intended_destination).name}\n"
+            f"새 복구본: {output_path.name}\n\n"
+            "중단 임시본과 기존 프로젝트는 성공 후에도 자동 삭제하거나 "
+            "변경하지 않습니다. 계속할까요?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._start_interrupted_project_recovery(candidate, str(output_path))
+
+    def _start_interrupted_project_recovery(
+        self,
+        candidate: InterruptedProjectSave,
+        output: str,
+    ) -> bool:
+        def on_done(value: object) -> None:
+            if not isinstance(value, ProjectRecoveryResult):
+                raise ProjectRecoveryError(
+                    "result",
+                    "Project recovery worker returned an invalid result",
+                )
+            self._finish_interrupted_project_recovery(value)
+
+        def on_failed(message: str) -> None:
+            self.status_info.setText(
+                "프로젝트 복구 실패 | 후보·기존 파일 유지"
+            )
+            QMessageBox.critical(
+                self,
+                "프로젝트 복구 실패",
+                self._format_error_message(
+                    "중단 임시본을 검증하거나 새 복구본으로 게시하지 못했습니다. "
+                    "후보와 기존 파일은 유지했습니다:",
+                    message,
+                ),
+            )
+
+        try:
+            return bool(
+                self._start_task(
+                    title="중단된 프로젝트 저장 복구",
+                    label=(
+                        "임시본을 복사하고 내장 원본·문서·Align을 완전 검증하는 중..."
+                    ),
+                    thread=TaskThread(
+                        "recover_interrupted_project_save",
+                        lambda: recover_amr_interrupted_save(candidate, output),
+                    ),
+                    on_done=on_done,
+                    on_failed=on_failed,
+                    lock_dialog_until_finished=True,
+                )
+            )
+        except Exception as exc:
+            self.status_info.setText("프로젝트 복구 작업 시작 실패")
+            QMessageBox.critical(
+                self,
+                "프로젝트 복구 실패",
+                f"{type(exc).__name__}: {exc}",
+            )
+            return False
+
+    def _finish_interrupted_project_recovery(
+        self,
+        result: ProjectRecoveryResult,
+    ) -> None:
+        self.status_info.setText(
+            f"검증된 프로젝트 복구본 생성: {Path(result.destination).name}"
+        )
+        detail = (
+            "내장 원본·문서·Align을 완전 검증한 새 프로젝트를 생성했습니다.\n\n"
+            f"파일: {result.destination}\n"
+            f"문서 ID: {result.document_id}\n"
+            f"파일 SHA-256: {result.project_sha256}\n\n"
+            "중단 임시본과 기존 프로젝트는 그대로 유지했습니다. "
+            "복구본을 지금 열까요?"
+        )
+        if result.durability_warning:
+            detail = (
+                "복구본은 검증되어 생성됐지만 디렉터리 동기화를 확인하지 "
+                "못했습니다. 즉시 다른 저장장치에도 복사하는 편이 안전합니다.\n\n"
+                f"{result.durability_warning}\n\n{detail}"
+            )
+        answer = QMessageBox.question(
+            self,
+            "프로젝트 복구 완료",
+            detail,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self.open_project_path(result.destination)
 
     def open_project_path(self, filepath: str) -> None:
         """Open a project file (.amr) from a known path (no file dialog)."""

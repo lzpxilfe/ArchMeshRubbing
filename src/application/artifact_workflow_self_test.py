@@ -48,6 +48,10 @@ from src.core.project_file import (
     load_artifact_session_project,
     save_artifact_session_project,
 )
+from src.core.project_recovery import (
+    discover_interrupted_project_saves,
+    recover_interrupted_project_save,
+)
 
 
 _STAMP = "2026-07-13T00:00:00Z"
@@ -118,7 +122,8 @@ class ArtifactWorkflowSelfTestResult:
             f"Outline {self.outline_count}/6>Rubbing {self.rubbing_count}/6, "
             f"records={self.record_count}, source={self.source_sha256[:12]}, "
             f"document={self.document_sha256[:12]}, "
-            f"svg={self.svg_sha256[:12]}, png={self.png_sha256[:12]}"
+            f"svg={self.svg_sha256[:12]}, png={self.png_sha256[:12]}, "
+            "recovery=verified-create-new"
         )
 
 
@@ -361,17 +366,29 @@ def _run_in_directory(directory: Path) -> ArtifactWorkflowSelfTestResult:
         raise RuntimeError("Digital Rubbing 6-view progress does not match records")
 
     save_artifact_session_project(project_path, current)
+    original_project_bytes = project_path.read_bytes()
+    interrupted_path = directory / f".{project_path.name}.recover1.tmp"
+    interrupted_path.write_bytes(original_project_bytes)
+    candidates = discover_interrupted_project_saves(directory)
+    if len(candidates) != 1 or Path(candidates[0].candidate_path) != interrupted_path:
+        raise RuntimeError("interrupted-save discovery did not bind the expected AMR")
     source_path.unlink()
     if source_path.exists():
         raise RuntimeError("external fixture source could not be removed")
-    restored = load_artifact_session_project(project_path)
+    recovered_path = directory / "workflow-fixture-recovered.amr"
+    recovery = recover_interrupted_project_save(candidates[0], recovered_path)
+    if recovery.durability_warning is not None:
+        raise RuntimeError("recovery self-test could not confirm directory durability")
+    if not interrupted_path.exists() or project_path.read_bytes() != original_project_bytes:
+        raise RuntimeError("recovery modified its candidate or existing project")
+    restored = load_artifact_session_project(recovered_path)
     if restored.document.canonical_json_bytes() != current.document.canonical_json_bytes():
         raise RuntimeError("offline AMR reopen changed the completed ArtifactDocument")
     restored_counts = _assert_progress_complete(restored)
     if restored_counts != counts:
         raise RuntimeError("offline AMR reopen changed workflow progress")
     project_evidence = _verification_evidence(
-        build_artifact_verification_report(project_path),
+        build_artifact_verification_report(recovered_path),
         artifact_kind="project",
     )
     if (
@@ -383,7 +400,7 @@ def _run_in_directory(directory: Path) -> ArtifactWorkflowSelfTestResult:
 
     offline_workbench = ArtifactWorkbench(
         session=restored,
-        project_path=str(project_path),
+        project_path=str(recovered_path),
         id_factory=ids,
     )
     if not offline_workbench.snapshot.can_measure:
@@ -400,7 +417,7 @@ def _run_in_directory(directory: Path) -> ArtifactWorkflowSelfTestResult:
     vector_evidence = _verification_evidence(
         build_artifact_verification_report(
             relocated_vector,
-            against_project=project_path,
+            against_project=recovered_path,
         ),
         artifact_kind="vector_export",
     )
@@ -428,7 +445,7 @@ def _run_in_directory(directory: Path) -> ArtifactWorkflowSelfTestResult:
     rubbing_evidence = _verification_evidence(
         build_artifact_verification_report(
             relocated_rubbing,
-            against_project=project_path,
+            against_project=recovered_path,
         ),
         artifact_kind="rubbing_export",
     )

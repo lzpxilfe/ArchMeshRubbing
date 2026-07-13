@@ -16,7 +16,13 @@ import pytest
 from PyQt6.QtCore import QCoreApplication, QEvent, QStandardPaths, Qt
 from PyQt6.QtGui import QKeyEvent
 from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QApplication, QFileDialog, QMessageBox, QPushButton
+from PyQt6.QtWidgets import (
+    QApplication,
+    QFileDialog,
+    QInputDialog,
+    QMessageBox,
+    QPushButton,
+)
 
 import src.core.artifact_session as artifact_session_module
 from app_interactive import (
@@ -98,6 +104,10 @@ from src.core.project_file import (
     ProjectFormatError,
     ProjectSaveError,
     ProjectSerializationError,
+)
+from src.core.project_recovery import (
+    InterruptedProjectSave,
+    ProjectRecoveryResult,
 )
 from src.core.mesh_loader import MeshData
 from src.core.source_identity import SourceFingerprint, SourceVerificationStatus
@@ -5154,6 +5164,175 @@ def test_verified_project_source_is_staged_without_touching_live_scene() -> None
         assert window.current_filepath == "live-scene-source"
         assert len(window._project_staged_objects) == 1
         assert window._project_staged_objects[0][0] is mesh
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_interrupted_project_recovery_menu_selects_candidate_and_new_destination(
+    tmp_path: Path,
+) -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    candidate_path = tmp_path / ".field.amr.abcdefgh.tmp"
+    candidate = InterruptedProjectSave(
+        candidate_path=str(candidate_path),
+        intended_destination=str(tmp_path / "field.amr"),
+        size_bytes=4096,
+        modified_time_ns=1_720_000_000_000_000_000,
+        device=1,
+        inode=2,
+    )
+    recovered = tmp_path / "field-recovered.amr"
+    window = MainWindow()
+    try:
+        file_menu = next(
+            action.menu()
+            for action in window.menuBar().actions()
+            if action.text().startswith("파일")
+        )
+        assert file_menu is not None
+        recovery_action = next(
+            action
+            for action in file_menu.actions()
+            if action.text() == "중단된 프로젝트 저장 복구…"
+        )
+        assert recovery_action.property("pixelIconName") == "recover"
+        assert not recovery_action.icon().isNull()
+
+        def select_first(*args):
+            labels = args[3]
+            return labels[0], True
+
+        with (
+            patch.object(
+                QFileDialog,
+                "getExistingDirectory",
+                return_value=str(tmp_path),
+            ),
+            patch(
+                "app_interactive.discover_amr_interrupted_saves",
+                return_value=(candidate,),
+            ) as discover,
+            patch.object(QInputDialog, "getItem", side_effect=select_first),
+            patch.object(
+                QFileDialog,
+                "getSaveFileName",
+                return_value=(str(recovered), ""),
+            ),
+            patch.object(
+                QMessageBox,
+                "question",
+                return_value=QMessageBox.StandardButton.Yes,
+            ) as confirm,
+            patch.object(
+                window,
+                "_start_interrupted_project_recovery",
+                return_value=True,
+            ) as start,
+        ):
+            window.recover_interrupted_project_save()
+
+        discover.assert_called_once_with(str(tmp_path))
+        confirm.assert_called_once()
+        start.assert_called_once_with(candidate, str(recovered))
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_interrupted_project_recovery_uses_locked_worker_and_preserves_failure_text(
+    tmp_path: Path,
+) -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    candidate = InterruptedProjectSave(
+        candidate_path=str(tmp_path / ".field.amr.abcdefgh.tmp"),
+        intended_destination=str(tmp_path / "field.amr"),
+        size_bytes=1024,
+        modified_time_ns=1,
+        device=1,
+        inode=2,
+    )
+    recovered = str(tmp_path / "recovered.amr")
+    result = ProjectRecoveryResult(
+        destination=recovered,
+        candidate_path=candidate.candidate_path,
+        document_id="artifact:recovered",
+        project_sha256="a" * 64,
+        size_bytes=1024,
+    )
+    window = MainWindow()
+    try:
+        with (
+            patch.object(window, "_start_task", return_value=True) as start_task,
+            patch.object(window, "_finish_interrupted_project_recovery") as finish,
+            patch(
+                "app_interactive.recover_amr_interrupted_save",
+                return_value=result,
+            ) as recover,
+        ):
+            assert window._start_interrupted_project_recovery(candidate, recovered)
+            kwargs = start_task.call_args.kwargs
+            assert kwargs["lock_dialog_until_finished"] is True
+            worker = kwargs["thread"]
+            assert isinstance(worker, TaskThread)
+            assert worker._fn() == result
+            recover.assert_called_once_with(candidate, recovered)
+            kwargs["on_done"](result)
+            finish.assert_called_once_with(result)
+
+            with patch.object(QMessageBox, "critical") as critical:
+                kwargs["on_failed"]("ProjectRecoveryError: invalid candidate")
+            critical.assert_called_once()
+            assert "후보·기존 파일 유지" in window.status_info.text()
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_finished_project_recovery_does_not_replace_scene_without_confirmation(
+    tmp_path: Path,
+) -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    result = ProjectRecoveryResult(
+        destination=str(tmp_path / "recovered.amr"),
+        candidate_path=str(tmp_path / ".field.amr.abcdefgh.tmp"),
+        document_id="artifact:recovered",
+        project_sha256="b" * 64,
+        size_bytes=2048,
+    )
+    window = MainWindow()
+    try:
+        with (
+            patch.object(
+                QMessageBox,
+                "question",
+                return_value=QMessageBox.StandardButton.No,
+            ),
+            patch.object(window, "open_project_path") as open_project,
+        ):
+            window._finish_interrupted_project_recovery(result)
+        open_project.assert_not_called()
+        assert "복구본 생성" in window.status_info.text()
+
+        with (
+            patch.object(
+                QMessageBox,
+                "question",
+                return_value=QMessageBox.StandardButton.Yes,
+            ),
+            patch.object(window, "open_project_path") as open_project,
+        ):
+            window._finish_interrupted_project_recovery(result)
+        open_project.assert_called_once_with(result.destination)
     finally:
         window.deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)

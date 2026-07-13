@@ -37,6 +37,7 @@ def test_pixel_icon_catalog_is_fixed_grid_and_complete_for_core_workflow() -> No
     required = {
         "open_mesh",
         "open_project",
+        "recover",
         "save",
         "align",
         "cutline",

@@ -91,6 +91,7 @@ jobs:
         run: >-
           python -m pytest -q
           tests/test_project_file.py
+          tests/test_project_recovery.py
           tests/test_build_info.py
           tests/test_build_provenance.py
           tests/test_build_native.py

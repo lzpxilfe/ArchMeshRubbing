@@ -541,7 +541,22 @@ export package는 기본적으로 package 내부 public provenance에 대해 sel
 5. 검증된 임시 파일을 `os.replace`로 한 번에 목적 경로에 교체한다.
 6. 지원되는 파일시스템에서는 디렉터리도 `fsync`한다.
 
-write, file `fsync`, 재검증, replace 중 어느 단계에서 실패해도 기존 목적 파일의 바이트는 유지되고 해당 임시 파일은 정리된다. 플랫폼·파일시스템이 directory `fsync`를 지원하지 않는 오류는 명시된 errno에 한해 무시한다. replace 후 실제 I/O 오류가 발생하면 파일은 이미 교체됐지만 crash durability가 불확실한 `committed=true` typed error로 보고한다. 디렉터리 생성 자체와 crash 후 남을 수 있는 고아 임시 파일의 recovery UI는 후속 recovery slice 범위다.
+write, file `fsync`, 재검증, replace 중 어느 단계에서 실패해도 기존 목적 파일의 바이트는 유지되고 해당 임시 파일은 정리된다. 플랫폼·파일시스템이 directory `fsync`를 지원하지 않는 오류는 명시된 errno에 한해 무시한다. replace 후 실제 I/O 오류가 발생하면 파일은 이미 교체됐지만 crash durability가 불확실한 `committed=true` typed error로 보고한다. 프로세스·전원 중단으로 `finally`가 실행되지 못한 경우에만 같은 parent에 임시본이 남을 수 있으며, 아래 수동 복구 경계가 이를 다룬다.
+
+## 비정상 종료 저장 임시본 복구
+
+복구는 시작 시 background scan이나 자동 정리로 실행하지 않는다. 사용자가 GUI에서 폴더 하나를 명시적으로 고르면 `discover_interrupted_project_saves()`가 그 폴더의 regular, non-symlink entry 중 writer의 exact `.<destination>.XXXXXXXX.tmp` 이름만 최대 64개까지 최신순으로 제시한다. `XXXXXXXX`는 Python `mkstemp()`가 만드는 8자의 소문자·숫자·underscore token이고, filename에서 도출한 intended destination은 `.amr`여야 한다. discovery는 후보의 유효성을 주장하지 않으며 device/inode, 크기와 수정시각을 고정할 뿐이다.
+
+사용자가 후보와 **존재하지 않는 새 `.amr` 목적지**를 각각 확인한 뒤에만 다음 복구가 worker에서 실행된다.
+
+1. 후보 filename과 intended destination 결합, regular-file identity·크기·수정시각을 다시 확인한다.
+2. `O_NOFOLLOW`를 사용할 수 있는 플랫폼에서는 이를 포함해 후보 descriptor를 열고, 발견 시 identity와 같은 descriptor인지 확인한다.
+3. 새 목적지 parent의 `.<new-destination>.XXXXXXXX.tmp` staging으로 descriptor bytes를 bounded streaming copy하고 file `fsync`한다. copy 전후 descriptor와 candidate path identity가 같아야 한다.
+4. staging을 `load_artifact_session_project()`로 완전 재개방한다. 즉 checksum·source index만 읽는 것이 아니라 embedded source closure를 saved parser로 decode하고 source/geometry SHA-256, 단위, Align과 canonical projection까지 물질화해야 한다. manifest-only artifact, legacy payload, 깨진 ZIP과 불완전 source closure는 실패한다.
+5. 검증된 staging inode를 같은 filesystem에서 Linux `renameat2(RENAME_NOREPLACE)`, macOS `renamex_np(RENAME_EXCL)`, Windows non-replacing rename으로 새 목적지에 publish한다. 이 create-new 연산은 목적지가 이미 있거나 경합 중 생기면 실패하며 기존 승자를 덮어쓰지 않는다.
+6. published path가 검증 staging과 같은 inode인지 확인하고 directory `fsync`를 시도한다. 실제 sync 오류는 파일 생성 성공과 crash durability 미확정을 함께 보고한다.
+
+복구 성공·실패와 무관하게 발견한 중단 임시본과 원래 intended destination은 수정·이동·삭제하지 않는다. publication 후 현재 GUI scene도 자동으로 교체하지 않으며 사용자가 복구본 열기를 다시 확인해야 한다. 복구 도중 다시 중단되면 새 목적지 parent에 같은 writer-compatible temp가 남을 수 있어 같은 절차로 재검증할 수 있다.
 
 ## 엄격한 로딩과 안전 한도
 
@@ -582,7 +597,7 @@ v1 import는 입력 파일을 수정하지 않는 순수·결정적·멱등 변�
 - 여섯 개의 독립 Outline record를 원자적으로 계산·commit하고 한 bundle로 배포하는 multi-view package
 - 실제 GPU driver frame의 scene-swap 원자성 및 시각적 동일성
 - Windows native-QPA와 frozen executable에서 검증한 `>= 1e9 mm` 장면의 millimeter 이하 visual/depth-picking 정밀도
-- autosave와 crash recovery discovery
+- autosave, 시작 시 자동 crash-recovery scan·자동 후보 삭제
 - 전자서명 또는 provenance authority 인증
 
 현재 native GUI는 source와 새 scene object를 기존 live scene과 분리해 load·검증하고, 준비된 projection을 검증한 다음 `ArtifactWorkbench` authority와 scene을 two-phase로 교체한다. missing, parse failure, hash mismatch, VBO 준비 또는 swap 실패 시 staging만 폐기하고 이전 scene·session·저장 경로를 복원한다. scene 교체는 projection generation을 증가시키고 이전 cut-section/ROI worker authority를 분리한다. 해당 callback은 current worker identity, generation과 selected object가 모두 일치할 때만 overlay를 갱신하며, 오래된 finished callback은 새 worker pointer를 지울 수 없다. surface/visible-face callback은 target object·mesh·TRS·render-frame 계약을 추가로 확인해 A 유물의 face ID를 B 유물에 적용하지 않는다. rollback·scene 복원·finalize가 불확실하면 fatal state가 모든 저장·실측·내보내기를 차단한다. offscreen smoke는 이 transaction, worker fencing과 rollback 순서를 검증하지만 실제 GPU driver가 표시한 프레임 사이에 부분 장면이 전혀 노출되지 않는지까지 측정하지 않는다.
