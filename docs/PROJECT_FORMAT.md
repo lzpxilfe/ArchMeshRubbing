@@ -4,12 +4,14 @@
 
 ## 컨테이너
 
-`.amr`는 ZIP 컨테이너이며 다음 두 파일을 반드시 포함한다.
+`.amr`는 ZIP 컨테이너다. 모든 v2 문서는 앞의 두 파일을 포함하고, native portable artifact session은 뒤의 두 항목까지 포함한다.
 
 | 멤버 | 역할 |
 |---|---|
 | `project.json` | 버전 envelope와 선택된 `legacy_ui_state` 또는 `artifact_document` payload |
 | `checksums.json` | `project.json` 및 향후 멤버의 SHA-256 목록 |
+| `sources/index.json` | ArtifactDocument와 정확히 결합된 canonical source inventory |
+| `sources/blobs/sha256/<digest>` | 검증된 주 원본 bytes. SHA-256 이름을 사용하고 `ZIP_STORED`로 기록 |
 
 AMR 파일은 확장자와 관계없이 일반 JSON으로 fallback하지 않는다. 개발·마이그레이션용 일반 JSON은 명시적인 `.json` 파일만 허용한다. 따라서 잘린 ZIP을 JSON으로 오인해 실행하지 않는다.
 
@@ -58,6 +60,20 @@ AMR v2 container는 payload 종류와 payload schema를 분리한다.
 ```
 
 체크섬은 파일 손상이나 변조를 탐지하기 위한 무결성 값이다. 공개키 서명이나 신뢰 기관의 인증이 아니므로 제작자·진본성·작성 시점을 증명한다고 표현해서는 안 된다.
+
+### Portable artifact source bundle
+
+`save_artifact_session_project()`는 정확히 한 `primary_mesh` SourceAsset을 `sources/index.json`과 content-addressed blob으로 저장한다. index는 RFC 8785 canonical JSON이며 `document_id`, canonical document SHA-256, primary SourceAsset ID, logical path, media type, blob SHA-256·크기를 닫힌 스키마로 결합한다. 저장 과정은 다음 순서로 fail-closed 동작한다.
+
+1. 외부 원본 또는 이미 열린 `.amr`의 source member를 descriptor stream으로 연다.
+2. 기대 SHA-256·크기를 확인하면서 같은 parent의 임시 ZIP으로 복사한다.
+3. 임시 package의 central directory, member 규칙, 전체 checksum과 source index를 production reader로 다시 검증한다.
+4. embedded source를 saved parser/unit으로 실제 decode하고 document에 bind·materialize하여 source/geometry/Align projection과 UV/texture 재현 여부를 확인한다.
+5. source archive descriptor를 닫은 뒤에만 목적지를 원자 교체하고 directory fsync를 시도한다.
+
+native session 저장 대상은 `.amr` 확장자만 허용한다. 대상 경로가 외부 원본과 같은 path, symlink 또는 hardlink inode라면 임시 파일 생성 전과 교체 직전에 거부한다. 이미 embedded source에서 열린 session은 같은 `.amr` 위 저장과 Save As를 모두 지원한다. 기존 manifest-only artifact 문서는 계속 읽지만, embedded session materialization에는 외부 원본을 다시 선택해야 한다.
+
+주 원본 blob은 최대 16 GiB이며 일반 member의 기존 256 MiB/총 512 MiB 제한과 분리한다. source blob은 압축 폭탄을 피하고 streaming hash를 가능하게 하기 위해 `ZIP_STORED`만 허용한다.
 
 ## 외부 원본 식별
 
@@ -121,7 +137,7 @@ Artifact payload를 다시 열 때 parser 선택도 검증 대상이다. `Geomet
 - glTF의 외부 `.bin`·이미지
 - 기타 sidecar 또는 linked asset
 
-위 파일은 아직 identity와 portable package에 포함되지 않는다. 따라서 이 단계의 `verified`는 “주 파일 바이트가 일치한다”는 뜻이며, 모든 렌더링 의존 asset이나 전체 geometry package가 완전하다는 뜻이 아니다. embedded asset과 sidecar manifest는 후속 버전 범위다.
+위 파일은 아직 identity와 portable package에 포함되지 않는다. 따라서 현재 `verified`는 “주 파일 바이트가 일치한다”는 뜻이며, 모든 렌더링 의존 asset이나 전체 geometry package가 완전하다는 뜻이 아니다. 저장 전 실제 embedded parse가 원래 session의 UV/texture를 재현하지 못하면 저장을 실패시켜 조용한 유실을 막지만, linked asset 자체를 보존하는 sidecar manifest는 후속 버전 범위다.
 
 ## ArtifactDocument 1.0 도메인 계약
 
@@ -236,7 +252,7 @@ M0-3에서 시작한 durable core와 현재 native GUI/application 경계는 다
 - `ArtifactSession`이 원본 source-space mesh의 immutable snapshot, source byte identity, geometry identity와 document를 하나의 검증된 context로 묶는다.
 - headless `ArtifactSceneAdapter`가 항상 immutable source에서 시작해 active `Align @ SourceMetadata`를 적용한 새 float64 world-mm `MeshData`를 만든다. source vertex를 mutate하거나 centroid로 recenter하지 않고, document/revision/hash/matrix snapshot이 바뀐 늦은 결과를 거부한다.
 - native application은 정확히 한 artifact를 다루며 `ArtifactWorkbench.snapshot.session.document`를 source of truth로 둔다. MainWindow의 session field는 이행 중 compatibility mirror다. 사용자 Open은 단위·축·handedness 확인 후 ticketed load로 들어가고, `initial_identity` baseline에서는 `ALIGN_REQUIRED`에 머문다. 이동·회전은 preview일 뿐이며 첫 정위치 확정은 변화량이 0이어도 proper-rigid child Align revision을 append한 뒤 immutable source에서 장면을 다시 materialize한다. parent activation으로 baseline에 돌아가면 측정·내보내기가 다시 잠긴다. scale은 metadata 영역이므로 native Align preview에서 차단한다.
-- artifact project reopen은 외부 source를 saved parser/unit으로 CPU staging에서 다시 검증한다. 현재 AMR v2는 source hash/size와 external locator만 저장하고 원본 bytes는 포함하지 않으므로, 외부 원본 없이 `.amr` 하나만으로 reopen하는 embedded-source package는 아직 P0 과제다. `ArtifactWorkbench`는 한 pending Open ticket과 `state_version`/`authority_epoch`를 검증하고, candidate projection을 준비한 뒤 scene notification 동안에만 tentative authority로 활성화한다. scene swap 성공 후 finalize하고, 실패하면 이전 session·scene·project path로 rollback한다. observer는 finalize 전 candidate를 보지 않는다.
+- artifact project reopen은 embedded source가 있으면 별도 picker 없이 background worker에서 package와 source bytes를 검증하고 saved parser/unit으로 CPU staging한다. manifest-only 문서만 외부 source resolver를 사용한다. corrupt embedded package를 external/legacy 경로로 fallback하지 않는다. `ArtifactWorkbench`는 한 pending Open ticket과 `state_version`/`authority_epoch`를 검증하고, candidate projection을 준비한 뒤 scene notification 동안에만 tentative authority로 활성화한다. scene swap 성공 후 finalize하고, 실패하면 이전 session·scene·project path로 rollback한다. observer는 finalize 전 candidate를 보지 않는다.
 - rollback·scene 복원·finalize 자체가 실패해 application authority와 live scene의 일치를 증명할 수 없으면 fatal authority 상태로 전환한다. 이 상태에서는 ordinary Save target을 해제하고 저장·실측·내보내기를 모두 거부하며, 검증된 새 Open만 정상 authority를 회복한다.
 - artifact save는 active document만 쓰기 전에 정확히 한 projection, current snapshot, identity preview, source에서 재현한 vertices/faces 일치, destructive bake 부재를 확인한다. `ALIGN_REQUIRED` document 자체는 보존할 수 있지만 Cutline/Outline/Digital Rubbing 계산과 vector/rubbing export는 명시적 Align 전까지 차단한다. 아직 `DerivedRecord`로 승격되지 않은 cutline·선택·기록면·평가 등의 결과가 하나라도 있으면 누락한 채 저장하지 않고 fail closed한다.
 - Cutline/Outline/Digital Rubbing은 application layer가 canonical recipe, projection context, exact record ID와 result capability를 소유한다. worker는 session을 commit하지 않고 computation만 반환하며, 완료 시 captured document가 current document의 immutable ancestor이고 active source/metadata/Align/matrix가 같을 때만 current session에 rebase하여 expected record ID 하나를 publish한다. DerivedRecord append는 `RecordBindingTransition`으로 live object의 immutable document snapshot만 CAS하고 기존 mesh/VBO/scene selection을 보존한다. Align/Open finalize 뒤 늦은 결과는 되살아나지 않는다. pending Open이나 rollback 가능한 binding 준비 실패는 계산 결과와 예약 ID를 보존해 명시적으로 재시도하며, 그동안 저장과 새 실측을 차단한다. Rubbing은 Workbench 공유 누적 peak-memory budget, 대형 UV/texture 복사 비용의 사전 산정과 실행 exactly-once를 적용한다.
@@ -245,10 +261,10 @@ M0-3에서 시작한 durable core와 현재 native GUI/application 경계는 다
 
 `tests/test_artifact_new_process_roundtrip.py`의 차단 게이트는 다음 순서를 실제로 수행한다.
 
-1. 프로세스 A가 PLY source를 같은 descriptor에서 hash·parse하고 cm metadata와 비자명한 pivot Align revision을 만든 뒤 artifact payload로 저장한다.
-2. source를 다른 경로로 옮기고 suffix를 `.raw-scan`으로 바꾼다.
-3. 다른 PID의 프로세스 B가 artifact payload를 strict load하고 저장된 parser format과 metadata unit으로 source를 다시 연다.
-4. 프로세스 B가 raw source SHA-256·크기, decode geometry SHA-256을 새로 계산하고 검증된 session에 bind한 뒤 world-mm geometry를 materialize한다.
+1. 프로세스 A가 PLY source를 같은 descriptor에서 hash·parse하고 cm metadata와 비자명한 pivot Align revision을 만든 뒤 embedded artifact package로 저장한다.
+2. 외부 PLY source를 삭제한다.
+3. 다른 PID의 프로세스 B가 `.amr`만 strict load하고 content-addressed source blob을 저장된 parser format과 metadata unit으로 다시 연다.
+4. 프로세스 B가 embedded raw source SHA-256·크기, decode geometry SHA-256을 새로 계산하고 검증된 session에 bind한 뒤 world-mm geometry를 materialize한다.
 5. 두 프로세스의 source SHA-256·크기, geometry SHA-256, active Align ID·float64 matrix, parser format·unit, world vertex를 비교한다.
 
 이 게이트는 canonical CPU projection과 durable payload의 왕복 증거다. `load_artifact_project()` 자체가 외부 파일을 탐색하거나 parser를 실행하는 것은 아니며, source resolution과 saved-parser reopen은 session/GUI orchestration이 수행한다. native 한-artifact workflow가 document source of truth와 scene-swap rollback을 사용하더라도 실제 GPU driver가 그린 프레임의 정밀도·시각적 동일성까지 이 테스트가 증명하지는 않는다.
@@ -444,9 +460,9 @@ reader는 다음을 거부한다.
 - 256 MiB 초과 단일 member
 - 512 MiB 초과 총 비압축 크기
 - 500:1 초과 압축 비율
-- 약 520 MiB 초과 물리 컨테이너 또는 8 MiB 초과 ZIP central directory
+- 약 16.5 GiB 초과 물리 컨테이너 또는 8 MiB 초과 ZIP central directory
 
-reader는 `ZipFile`을 만들기 전에 EOCD/ZIP64 entry count와 central-directory 크기를 먼저 검사한다. 따라서 수백만 개의 빈 member를 사용해 64-member 한도 검사 전에 대량의 `ZipInfo`를 할당시키는 입력도 거부한다.
+reader는 `ZipFile`을 만들기 전에 EOCD/ZIP64와 bounded central-directory record를 직접 대조한다. EOCD entry count를 작게 위조해도 실제 record가 64개를 넘으면 `ZipInfo`를 만들기 전에 거부한다.
 
 지원 버전보다 새로운 container major 또는 payload major는 실행 가능한 state로 반환하지 않는다. envelope의 제한된 scalar 정보만 가진 typed read-only inspection error를 제공한다.
 
@@ -464,7 +480,7 @@ v1 import는 입력 파일을 수정하지 않는 순수·결정적·멱등 변�
 ## 아직 보장하지 않는 것
 
 - 두 개 이상의 artifact 또는 legacy object를 섞은 hybrid scene의 native document authority
-- embedded mesh·sidecar를 포함한 portable project
+- 주 원본 밖의 MTL·texture·외부 buffer/image까지 포함하는 sidecar dependency manifest
 - legacy `legacy_ui_state`에서 `artifact_document`로 단위·geometry·Align을 추정하지 않는 보존적 migration
 - 여섯 개의 독립 Outline record를 원자적으로 계산·commit하고 한 bundle로 배포하는 multi-view package
 - 실제 GPU driver frame의 scene-swap 원자성 및 시각적 동일성

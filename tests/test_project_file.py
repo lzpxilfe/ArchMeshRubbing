@@ -3,15 +3,22 @@ from dataclasses import replace
 import errno
 import hashlib
 import json
+import stat
+import struct
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 from unittest import mock
 import warnings
 import zipfile
 
+import numpy as np
+
 import src.core.project_file as project_file
 from src.core.artifact_document import ArtifactDocument
+from src.core.artifact_session import ArtifactSession
+from src.core.mesh_loader import MeshLoader
 from src.core.project_file import (
     ARTIFACT_PAYLOAD_SCHEMA_VERSION,
     ARTIFACT_PAYLOAD_TYPE,
@@ -23,17 +30,23 @@ from src.core.project_file import (
     PAYLOAD_TYPE,
     PROJECT_FORMAT,
     PROJECT_VERSION,
+    ArtifactProjectPackage,
+    EmbeddedSourceRequiredError,
     ProjectFormatError,
     ProjectSaveError,
     ProjectSerializationError,
     UnsupportedPayloadError,
     UnsupportedProjectVersionError,
     load_artifact_project,
+    load_artifact_project_package,
+    load_artifact_session_project,
     load_project,
     migrate_project_document,
     save_artifact_project,
+    save_artifact_session_project,
     save_project,
 )
+from src.core.source_bundle import SOURCE_INDEX_NAME, SourceBundleIndex, source_blob_member
 from src.core.source_identity import SourceFingerprint
 
 
@@ -47,6 +60,47 @@ ARTIFACT_GOLDEN_PATH = (
 
 def _artifact_document() -> ArtifactDocument:
     return ArtifactDocument.from_json_bytes(ARTIFACT_GOLDEN_PATH.read_bytes())
+
+
+TEST_PLY_BYTES = textwrap.dedent(
+    """\
+    ply
+    format ascii 1.0
+    comment embedded artifact project fixture
+    element vertex 4
+    property float x
+    property float y
+    property float z
+    element face 4
+    property list uchar int vertex_indices
+    end_header
+    0 0 0
+    1 0 0
+    0 1 0
+    0 0 1
+    3 0 2 1
+    3 0 1 3
+    3 1 2 3
+    3 2 0 3
+    """
+).encode("ascii")
+
+
+def _artifact_session_from_path(source_path: Path) -> ArtifactSession:
+    mesh = MeshLoader(default_unit="mm").load(source_path, unit="cm")
+    return ArtifactSession.create_from_source(
+        mesh,
+        resolved_source_path=str(source_path),
+        unit="cm",
+        axes={"source_x": "+X", "source_y": "+Y", "source_z": "+Z"},
+        handedness="right",
+        software_version="0.1.0-test",
+        operator="embedded-project-test",
+        created_at="2026-07-13T00:00:00Z",
+        document_id="artifact:embedded-project-test",
+        metadata_revision_id="metadata:embedded-source",
+        align_revision_id="align:identity",
+    )
 
 
 class TestProjectFile(unittest.TestCase):
@@ -767,3 +821,408 @@ class TestProjectFileV2(unittest.TestCase):
             self.assertEqual(raised.exception.stage, "directory_fsync")
             self.assertTrue(raised.exception.committed)
             self.assertEqual(load_project(path)["state"], {"after": True})
+
+
+class TestEmbeddedArtifactProject(unittest.TestCase):
+    @staticmethod
+    def _temp_artifacts(destination: Path) -> list[Path]:
+        return list(destination.parent.glob(f".{destination.name}.*.tmp"))
+
+    @staticmethod
+    def _read_archive(path: Path) -> dict[str, bytes]:
+        with zipfile.ZipFile(path, "r") as zf:
+            return {name: zf.read(name) for name in zf.namelist()}
+
+    @staticmethod
+    def _rewrite_archive(path: Path, files: dict[str, bytes]) -> None:
+        payloads = dict(files)
+        payloads.pop(CHECKSUMS_NAME, None)
+        checksums = {
+            "algorithm": "sha256",
+            "files": {
+                name: hashlib.sha256(payload).hexdigest()
+                for name, payload in payloads.items()
+            },
+        }
+        with zipfile.ZipFile(path, "w", allowZip64=True) as zf:
+            for name, payload in payloads.items():
+                compress_type = (
+                    zipfile.ZIP_STORED
+                    if name.startswith("sources/blobs/sha256/")
+                    else zipfile.ZIP_DEFLATED
+                )
+                zf.writestr(name, payload, compress_type=compress_type)
+            zf.writestr(
+                CHECKSUMS_NAME,
+                json.dumps(
+                    checksums,
+                    ensure_ascii=False,
+                    allow_nan=False,
+                    sort_keys=True,
+                    indent=2,
+                ).encode("utf-8")
+                + b"\n",
+                compress_type=zipfile.ZIP_DEFLATED,
+            )
+
+    def test_session_package_has_exact_four_members_and_closed_checksums(self):
+        with tempfile.TemporaryDirectory() as td:
+            directory = Path(td)
+            source_path = directory / "source" / "fragment.ply"
+            source_path.parent.mkdir()
+            source_path.write_bytes(TEST_PLY_BYTES)
+            session = _artifact_session_from_path(source_path)
+            project_path = directory / "artifact.amr"
+
+            save_artifact_session_project(project_path, session)
+            source_asset = session.document.source_assets[0]
+            blob_member = source_blob_member(source_asset.sha256)
+            with zipfile.ZipFile(project_path, "r") as zf:
+                infos = {info.filename: info for info in zf.infolist()}
+                checksums = json.loads(zf.read(CHECKSUMS_NAME))
+                manifest = json.loads(zf.read(MANIFEST_NAME))
+                source_index_bytes = zf.read(SOURCE_INDEX_NAME)
+                blob_bytes = zf.read(blob_member)
+
+            self.assertEqual(
+                set(infos),
+                {MANIFEST_NAME, CHECKSUMS_NAME, SOURCE_INDEX_NAME, blob_member},
+            )
+            self.assertEqual(
+                set(checksums["files"]),
+                {MANIFEST_NAME, SOURCE_INDEX_NAME, blob_member},
+            )
+            self.assertEqual(infos[SOURCE_INDEX_NAME].compress_type, zipfile.ZIP_DEFLATED)
+            self.assertEqual(infos[blob_member].compress_type, zipfile.ZIP_STORED)
+            self.assertEqual(blob_bytes, TEST_PLY_BYTES)
+            self.assertEqual(manifest["state"], session.document.to_dict())
+            self.assertEqual(
+                checksums["files"][blob_member],
+                hashlib.sha256(TEST_PLY_BYTES).hexdigest(),
+            )
+            self.assertEqual(
+                checksums["files"][SOURCE_INDEX_NAME],
+                hashlib.sha256(source_index_bytes).hexdigest(),
+            )
+
+            package = load_artifact_project_package(project_path)
+            self.assertIsInstance(package, ArtifactProjectPackage)
+            self.assertEqual(package.document, session.document)
+            self.assertEqual(
+                package.document.canonical_json_bytes(),
+                session.document.canonical_json_bytes(),
+            )
+            self.assertEqual(
+                package.source_bundle,
+                SourceBundleIndex.for_document(session.document),
+            )
+
+    def test_manifest_only_artifact_remains_compatible_but_session_load_is_typed(self):
+        artifact = _artifact_document()
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "manifest-only.amr"
+            save_artifact_project(path, artifact)
+            package = load_artifact_project_package(path)
+
+            self.assertEqual(package.document, artifact)
+            self.assertIsNone(package.source_bundle)
+            self.assertEqual(load_artifact_project(path), artifact)
+            with self.assertRaises(EmbeddedSourceRequiredError):
+                load_artifact_session_project(path)
+
+    def test_save_rejects_changed_external_source_without_touching_destination(self):
+        with tempfile.TemporaryDirectory() as td:
+            directory = Path(td)
+            source_path = directory / "fragment.ply"
+            source_path.write_bytes(TEST_PLY_BYTES)
+            session = _artifact_session_from_path(source_path)
+            project_path = directory / "existing.amr"
+            save_artifact_session_project(project_path, session)
+            previous = project_path.read_bytes()
+
+            changed = bytearray(TEST_PLY_BYTES)
+            changed[-2] = ord("2") if changed[-2] != ord("2") else ord("3")
+            source_path.write_bytes(bytes(changed))
+            with self.assertRaises(ProjectSaveError) as raised:
+                save_artifact_session_project(project_path, session)
+
+            self.assertEqual(raised.exception.stage, "source_verification")
+            self.assertFalse(raised.exception.committed)
+            self.assertEqual(project_path.read_bytes(), previous)
+            self.assertEqual(self._temp_artifacts(project_path), [])
+
+    def test_staged_package_validation_failure_is_atomic(self):
+        with tempfile.TemporaryDirectory() as td:
+            directory = Path(td)
+            source_path = directory / "fragment.ply"
+            source_path.write_bytes(TEST_PLY_BYTES)
+            session = _artifact_session_from_path(source_path)
+            project_path = directory / "existing.amr"
+            save_artifact_session_project(project_path, session)
+            previous = project_path.read_bytes()
+
+            with mock.patch.object(
+                project_file,
+                "load_artifact_project_package",
+                side_effect=ProjectFormatError("injected package validation failure"),
+            ):
+                with self.assertRaises(ProjectSaveError) as raised:
+                    save_artifact_session_project(project_path, session)
+
+            self.assertEqual(raised.exception.stage, "validation")
+            self.assertFalse(raised.exception.committed)
+            self.assertEqual(project_path.read_bytes(), previous)
+            self.assertEqual(self._temp_artifacts(project_path), [])
+
+    def test_staged_offline_materialization_failure_is_atomic(self):
+        with tempfile.TemporaryDirectory() as td:
+            directory = Path(td)
+            source_path = directory / "fragment.ply"
+            source_path.write_bytes(TEST_PLY_BYTES)
+            session = _artifact_session_from_path(source_path)
+            project_path = directory / "existing.amr"
+            save_artifact_session_project(project_path, session)
+            previous = project_path.read_bytes()
+
+            with mock.patch.object(
+                project_file,
+                "_materialize_artifact_project_package",
+                side_effect=ProjectFormatError(
+                    "injected embedded parser/materialization failure"
+                ),
+            ):
+                with self.assertRaises(ProjectSaveError) as raised:
+                    save_artifact_session_project(project_path, session)
+
+            self.assertEqual(raised.exception.stage, "validation")
+            self.assertFalse(raised.exception.committed)
+            self.assertEqual(project_path.read_bytes(), previous)
+            self.assertEqual(self._temp_artifacts(project_path), [])
+
+    def test_mutated_session_geometry_is_rejected_before_temp_creation(self):
+        with tempfile.TemporaryDirectory() as td:
+            directory = Path(td)
+            source_path = directory / "fragment.ply"
+            source_path.write_bytes(TEST_PLY_BYTES)
+            session = _artifact_session_from_path(source_path)
+            project_path = directory / "existing.amr"
+            previous = b"previous-destination"
+            project_path.write_bytes(previous)
+
+            changed_vertices = np.asarray(session.source_mesh.vertices).copy()
+            changed_vertices[0, 0] += 1.0
+            session.source_mesh.vertices = changed_vertices
+            with self.assertRaisesRegex(
+                ProjectSerializationError,
+                "source/document binding",
+            ):
+                save_artifact_session_project(project_path, session)
+
+            self.assertEqual(project_path.read_bytes(), previous)
+            self.assertEqual(self._temp_artifacts(project_path), [])
+
+    def test_save_requires_amr_and_never_replaces_external_source_alias(self):
+        with tempfile.TemporaryDirectory() as td:
+            directory = Path(td)
+            source_path = directory / "fragment.ply"
+            source_path.write_bytes(TEST_PLY_BYTES)
+            session = _artifact_session_from_path(source_path)
+
+            with self.assertRaisesRegex(ProjectSaveError, r"require an \.amr") as raised:
+                save_artifact_session_project(source_path, session)
+            self.assertEqual(raised.exception.stage, "prepare")
+            self.assertFalse(raised.exception.retryable)
+            self.assertEqual(source_path.read_bytes(), TEST_PLY_BYTES)
+
+            alias_path = directory / "source-alias.amr"
+            try:
+                alias_path.hardlink_to(source_path)
+            except OSError as exc:
+                self.skipTest(f"hard links unavailable: {exc}")
+            with self.assertRaisesRegex(ProjectSaveError, "external source") as raised:
+                save_artifact_session_project(alias_path, session)
+            self.assertEqual(raised.exception.stage, "prepare")
+            self.assertFalse(raised.exception.retryable)
+            self.assertEqual(alias_path.read_bytes(), TEST_PLY_BYTES)
+            self.assertEqual(source_path.read_bytes(), TEST_PLY_BYTES)
+            self.assertEqual(self._temp_artifacts(alias_path), [])
+
+    def test_visual_sidecar_loss_fails_before_destination_replace(self):
+        with tempfile.TemporaryDirectory() as td:
+            directory = Path(td)
+            source_path = directory / "fragment.ply"
+            source_path.write_bytes(TEST_PLY_BYTES)
+            session = _artifact_session_from_path(source_path)
+            session.source_mesh.uv_coords = np.zeros(
+                (session.source_mesh.vertices.shape[0], 2),
+                dtype=np.float64,
+            )
+            session.source_mesh.texture = np.zeros((2, 2, 3), dtype=np.uint8)
+            project_path = directory / "existing.amr"
+            previous = b"previous-destination"
+            project_path.write_bytes(previous)
+
+            with self.assertRaisesRegex(ProjectSaveError, "sidecar") as raised:
+                save_artifact_session_project(project_path, session)
+
+            self.assertEqual(raised.exception.stage, "validation")
+            self.assertFalse(raised.exception.committed)
+            self.assertEqual(project_path.read_bytes(), previous)
+            self.assertEqual(self._temp_artifacts(project_path), [])
+
+    def test_corrupt_missing_and_orphan_source_blobs_fail_closed(self):
+        with tempfile.TemporaryDirectory() as td:
+            directory = Path(td)
+            source_path = directory / "fragment.ply"
+            source_path.write_bytes(TEST_PLY_BYTES)
+            session = _artifact_session_from_path(source_path)
+            source_asset = session.document.source_assets[0]
+            blob_member = source_blob_member(source_asset.sha256)
+
+            base_path = directory / "base.amr"
+            save_artifact_session_project(base_path, session)
+            original_files = self._read_archive(base_path)
+
+            corrupt_path = directory / "corrupt.amr"
+            corrupt_files = dict(original_files)
+            corrupt_blob = bytearray(corrupt_files[blob_member])
+            corrupt_blob[-2] ^= 1
+            corrupt_files[blob_member] = bytes(corrupt_blob)
+            self._rewrite_archive(corrupt_path, corrupt_files)
+            with self.assertRaisesRegex(ProjectFormatError, "SHA-256"):
+                load_artifact_project_package(corrupt_path)
+
+            missing_path = directory / "missing.amr"
+            missing_files = dict(original_files)
+            missing_files.pop(blob_member)
+            self._rewrite_archive(missing_path, missing_files)
+            with self.assertRaisesRegex(ProjectFormatError, "missing blob"):
+                load_artifact_project_package(missing_path)
+
+            orphan_bytes = b"orphan-source-bytes"
+            orphan_member = source_blob_member(hashlib.sha256(orphan_bytes).hexdigest())
+            orphan_path = directory / "orphan.amr"
+            orphan_files = dict(original_files)
+            orphan_files[orphan_member] = orphan_bytes
+            self._rewrite_archive(orphan_path, orphan_files)
+            with self.assertRaisesRegex(ProjectFormatError, "orphan blob"):
+                load_artifact_project_package(orphan_path)
+
+    def test_session_materializes_after_external_source_is_deleted(self):
+        with tempfile.TemporaryDirectory() as td:
+            directory = Path(td)
+            source_path = directory / "fragment.ply"
+            source_path.write_bytes(TEST_PLY_BYTES)
+            original = _artifact_session_from_path(source_path).commit_preview(
+                translation_mm=(3.0, -2.0, 1.0),
+                rotation_deg=(10.0, 20.0, 30.0),
+                scale=1.0,
+                operator="embedded-project-test",
+                created_at="2026-07-13T00:00:01Z",
+                revision_id="align:nontrivial",
+            )
+            expected_vertices = np.asarray(
+                original.materialize().mesh.vertices,
+                dtype=np.float64,
+            ).copy()
+            project_path = directory / "offline.amr"
+            save_artifact_session_project(project_path, original)
+            source_path.unlink()
+
+            with mock.patch.object(
+                project_file,
+                "_read_zip_member",
+                wraps=project_file._read_zip_member,
+            ) as read_member:
+                restored = load_artifact_session_project(project_path)
+
+            self.assertFalse(source_path.exists())
+            self.assertEqual(restored.document, original.document)
+            self.assertIn("!/sources/blobs/sha256/", restored.resolved_source_path)
+            np.testing.assert_allclose(
+                restored.materialize().mesh.vertices,
+                expected_vertices,
+                rtol=0.0,
+                atol=1e-12,
+            )
+            blob_member = source_blob_member(original.document.source_assets[0].sha256)
+            self.assertNotIn(blob_member, [call.args[1] for call in read_member.call_args_list])
+
+            resave_path = directory / "resave.amr"
+            save_artifact_session_project(resave_path, restored)
+            resaved = load_artifact_session_project(resave_path)
+            self.assertEqual(resaved.document, restored.document)
+            self.assertEqual(
+                resaved.document.source_assets,
+                restored.document.source_assets,
+            )
+
+            # Save must also work over the archive that currently owns the
+            # embedded source. The old archive is closed before os.replace so
+            # this remains valid on Windows.
+            save_artifact_session_project(resave_path, resaved)
+            same_path = load_artifact_session_project(resave_path)
+            self.assertEqual(same_path.document, restored.document)
+            np.testing.assert_allclose(
+                same_path.materialize().mesh.vertices,
+                expected_vertices,
+                rtol=0.0,
+                atol=1e-12,
+            )
+
+    def test_preflight_counts_real_central_directory_records(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "forged-count.amr"
+            with zipfile.ZipFile(path, "w") as zf:
+                for index in range(project_file.MAX_ZIP_MEMBERS + 1):
+                    zf.writestr(f"entry-{index:03d}", b"")
+
+            forged = bytearray(path.read_bytes())
+            eocd = forged.rfind(b"PK\x05\x06")
+            self.assertGreaterEqual(eocd, 0)
+            struct.pack_into("<H", forged, eocd + 8, 1)
+            struct.pack_into("<H", forged, eocd + 10, 1)
+            path.write_bytes(forged)
+
+            with mock.patch.object(
+                project_file.zipfile,
+                "ZipFile",
+                side_effect=AssertionError("ZipFile must not be constructed"),
+            ):
+                with self.assertRaisesRegex(ProjectFormatError, "too many members"):
+                    load_project(path)
+
+    def test_source_blob_has_a_separate_large_file_budget(self):
+        manifest = zipfile.ZipInfo(MANIFEST_NAME)
+        manifest.file_size = 1
+        manifest.compress_size = 1
+        manifest.compress_type = zipfile.ZIP_STORED
+        checksums = zipfile.ZipInfo(CHECKSUMS_NAME)
+        checksums.file_size = 1
+        checksums.compress_size = 1
+        checksums.compress_type = zipfile.ZIP_STORED
+        digest = "a" * 64
+        source = zipfile.ZipInfo(source_blob_member(digest))
+        source.file_size = project_file.MAX_MEMBER_BYTES + 1
+        source.compress_size = source.file_size
+        source.compress_type = zipfile.ZIP_STORED
+
+        members = project_file._validate_zip_infos([manifest, checksums, source])
+
+        self.assertIn(source.filename, members)
+        self.assertLess(source.file_size, project_file.MAX_SOURCE_MEMBER_BYTES)
+
+    def test_non_regular_unix_zip_member_is_rejected(self):
+        manifest = zipfile.ZipInfo(MANIFEST_NAME)
+        manifest.file_size = 1
+        manifest.compress_size = 1
+        manifest.compress_type = zipfile.ZIP_STORED
+        source = zipfile.ZipInfo(source_blob_member("a" * 64))
+        source.file_size = 1
+        source.compress_size = 1
+        source.compress_type = zipfile.ZIP_STORED
+        source.create_system = 3
+        source.external_attr = (stat.S_IFLNK | 0o777) << 16
+
+        with self.assertRaisesRegex(ProjectFormatError, "Non-regular Unix"):
+            project_file._validate_zip_infos([manifest, source])

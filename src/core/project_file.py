@@ -13,6 +13,8 @@ also changing scene materialisation.
 from __future__ import annotations
 
 import copy
+from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import errno
 import hashlib
@@ -22,9 +24,10 @@ import math
 import os
 from pathlib import Path, PurePosixPath
 import re
+import stat
 import struct
 import tempfile
-from typing import Any, BinaryIO, NoReturn
+from typing import TYPE_CHECKING, Any, BinaryIO, Iterator, NoReturn, cast
 import zipfile
 
 from .artifact_document import (
@@ -36,6 +39,16 @@ from .artifact_vector_record import (
     ArtifactVectorRecordError,
 )
 from .artifact_record_validation import ArtifactKnownRecordError, validate_known_records
+from .source_bundle import (
+    SOURCE_INDEX_NAME,
+    SourceBundleError,
+    SourceBundleIndex,
+    source_blob_member,
+)
+from .source_identity import SourceChangedError, open_fingerprinted_file
+
+if TYPE_CHECKING:
+    from .artifact_session import ArtifactSession
 
 
 PROJECT_FORMAT = "archmeshrubbing_project"
@@ -62,11 +75,21 @@ _LEGACY_MIGRATION_MARKER = {
 MAX_ZIP_MEMBERS = 64
 MAX_MANIFEST_BYTES = 64 * 1024 * 1024
 MAX_CHECKSUMS_BYTES = 1024 * 1024
+MAX_SOURCE_INDEX_BYTES = 1024 * 1024
 MAX_MEMBER_BYTES = 256 * 1024 * 1024
 MAX_TOTAL_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
+# Primary scans are commonly much larger than JSON/derived payloads. Keep the
+# original defensive limits for ordinary members, while giving content-
+# addressed, ZIP_STORED source blobs an explicit first-release budget.
+MAX_SOURCE_MEMBER_BYTES = 16 * 1024 * 1024 * 1024
+MAX_TOTAL_SOURCE_BYTES = 16 * 1024 * 1024 * 1024
 MAX_COMPRESSION_RATIO = 500.0
-MAX_PROJECT_FILE_BYTES = 520 * 1024 * 1024
 MAX_CENTRAL_DIRECTORY_BYTES = 8 * 1024 * 1024
+MAX_PROJECT_FILE_BYTES = (
+    MAX_TOTAL_SOURCE_BYTES
+    + MAX_TOTAL_UNCOMPRESSED_BYTES
+    + MAX_CENTRAL_DIRECTORY_BYTES
+)
 _COPY_CHUNK_BYTES = 1024 * 1024
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _SEMVER_RE = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:[-+].*)?$")
@@ -145,6 +168,29 @@ class UnsupportedPayloadError(ProjectFormatError):
         self.newer = bool(newer)
         self.read_only_inspection = True
         self.inspection = dict(inspection or {})
+
+
+class EmbeddedSourceRequiredError(ProjectFormatError):
+    """A session reopen was requested from a manifest-only project."""
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactProjectPackage:
+    """Validated artifact document plus optional embedded-source inventory."""
+
+    document: ArtifactDocument
+    archive_path: Path
+    source_bundle: SourceBundleIndex | None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.document, ArtifactDocument):
+            raise TypeError("document must be an ArtifactDocument")
+        object.__setattr__(self, "archive_path", Path(self.archive_path))
+        if self.source_bundle is not None and not isinstance(
+            self.source_bundle,
+            SourceBundleIndex,
+        ):
+            raise TypeError("source_bundle must be a SourceBundleIndex or None")
 
 
 def _utc_now_iso() -> str:
@@ -440,6 +486,20 @@ def _validate_member_name(name: str) -> None:
         raise ProjectFormatError(f"Unsafe ZIP member name: {name!r}")
 
 
+def _source_digest_from_member(name: str) -> str | None:
+    prefix = "sources/blobs/sha256/"
+    if not name.startswith(prefix):
+        return None
+    digest = name.removeprefix(prefix)
+    try:
+        expected = source_blob_member(digest)
+    except SourceBundleError as exc:
+        raise ProjectFormatError(f"Invalid source blob member name: {name!r}") from exc
+    if expected != name:
+        raise ProjectFormatError(f"Invalid source blob member name: {name!r}")
+    return digest
+
+
 def _preflight_zip_directory(path: Path) -> None:
     """Bound entry count before ``zipfile`` allocates every ``ZipInfo``.
 
@@ -534,6 +594,44 @@ def _preflight_zip_directory(path: Path) -> None:
         if cd_offset < 0 or cd_size < 0 or cd_offset + cd_size > absolute_eocd:
             raise ProjectFormatError("Invalid ZIP central-directory bounds")
 
+        stream.seek(cd_offset)
+        central_directory = stream.read(cd_size)
+        if len(central_directory) != cd_size:
+            raise ProjectFormatError("Truncated ZIP central directory")
+
+        # Do not trust the EOCD entry count: an attacker can lower it while
+        # leaving thousands of real records for ZipFile to allocate. Parse the
+        # already bounded central directory before constructing ZipFile.
+        cursor = 0
+        actual_entries = 0
+        while cursor < len(central_directory):
+            if len(central_directory) - cursor < 46:
+                raise ProjectFormatError("Truncated ZIP central-directory record")
+            if central_directory[cursor : cursor + 4] != b"PK\x01\x02":
+                raise ProjectFormatError("Invalid ZIP central-directory record signature")
+            filename_length, extra_length, comment_length = struct.unpack_from(
+                "<3H",
+                central_directory,
+                cursor + 28,
+            )
+            record_size = 46 + filename_length + extra_length + comment_length
+            if record_size > len(central_directory) - cursor:
+                raise ProjectFormatError("Truncated ZIP central-directory record")
+            actual_entries += 1
+            if actual_entries > MAX_ZIP_MEMBERS:
+                raise ProjectFormatError(
+                    f"Project ZIP has too many members ({actual_entries} > {MAX_ZIP_MEMBERS})"
+                )
+            cursor += record_size
+
+        if cursor != len(central_directory):
+            raise ProjectFormatError("Invalid ZIP central-directory bounds")
+        if actual_entries != entries_total:
+            raise ProjectFormatError(
+                "ZIP central-directory entry count does not match EOCD "
+                f"({actual_entries} != {entries_total})"
+            )
+
 
 def _validate_zip_infos(infos: list[zipfile.ZipInfo]) -> dict[str, zipfile.ZipInfo]:
     if len(infos) > MAX_ZIP_MEMBERS:
@@ -543,26 +641,60 @@ def _validate_zip_infos(infos: list[zipfile.ZipInfo]) -> dict[str, zipfile.ZipIn
 
     by_name: dict[str, zipfile.ZipInfo] = {}
     total_size = 0
+    total_source_size = 0
     for info in infos:
         _validate_member_name(info.filename)
         if info.filename in by_name:
             raise ProjectFormatError(f"Duplicate ZIP member: {info.filename!r}")
         if info.is_dir():
             raise ProjectFormatError(f"Directory ZIP members are not supported: {info.filename!r}")
+        if info.create_system == 3:
+            unix_mode = (int(info.external_attr) >> 16) & 0xFFFF
+            unix_kind = stat.S_IFMT(unix_mode)
+            if unix_kind not in (0, stat.S_IFREG):
+                raise ProjectFormatError(
+                    "Non-regular Unix ZIP members are not supported: "
+                    f"{info.filename!r}"
+                )
         if info.flag_bits & 0x1:
             raise ProjectFormatError(f"Encrypted ZIP member is not supported: {info.filename!r}")
         if info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
             raise ProjectFormatError(
                 f"Unsupported ZIP compression for {info.filename!r}: {info.compress_type}"
             )
-        if info.file_size < 0 or info.file_size > MAX_MEMBER_BYTES:
+        source_digest = _source_digest_from_member(info.filename)
+        if (
+            info.filename.startswith("sources/")
+            and info.filename != SOURCE_INDEX_NAME
+            and source_digest is None
+        ):
             raise ProjectFormatError(
-                f"ZIP member is too large: {info.filename!r} ({info.file_size} bytes)"
+                f"Unsupported member in reserved sources namespace: {info.filename!r}"
             )
-
-        total_size += info.file_size
-        if total_size > MAX_TOTAL_UNCOMPRESSED_BYTES:
-            raise ProjectFormatError("Project ZIP uncompressed size exceeds the safety limit")
+        if source_digest is not None:
+            if info.compress_type != zipfile.ZIP_STORED:
+                raise ProjectFormatError(
+                    f"Source blob must use ZIP_STORED compression: {info.filename!r}"
+                )
+            if info.file_size < 0 or info.file_size > MAX_SOURCE_MEMBER_BYTES:
+                raise ProjectFormatError(
+                    f"Source blob is too large: {info.filename!r} ({info.file_size} bytes)"
+                )
+            total_source_size += info.file_size
+            if total_source_size > MAX_TOTAL_SOURCE_BYTES:
+                raise ProjectFormatError(
+                    "Project ZIP embedded source size exceeds the safety limit"
+                )
+        else:
+            if info.file_size < 0 or info.file_size > MAX_MEMBER_BYTES:
+                raise ProjectFormatError(
+                    f"ZIP member is too large: {info.filename!r} ({info.file_size} bytes)"
+                )
+            total_size += info.file_size
+            if total_size > MAX_TOTAL_UNCOMPRESSED_BYTES:
+                raise ProjectFormatError(
+                    "Project ZIP uncompressed non-source size exceeds the safety limit"
+                )
 
         if info.file_size:
             if info.compress_size <= 0:
@@ -588,10 +720,22 @@ def _validate_zip_infos(infos: list[zipfile.ZipInfo]) -> dict[str, zipfile.ZipIn
         raise ProjectFormatError(
             f"{CHECKSUMS_NAME} exceeds the {MAX_CHECKSUMS_BYTES}-byte safety limit"
         )
+    source_index_info = by_name.get(SOURCE_INDEX_NAME)
+    if (
+        source_index_info is not None
+        and source_index_info.file_size > MAX_SOURCE_INDEX_BYTES
+    ):
+        raise ProjectFormatError(
+            f"{SOURCE_INDEX_NAME} exceeds the {MAX_SOURCE_INDEX_BYTES}-byte safety limit"
+        )
     return by_name
 
 
 def _read_zip_member(zf: zipfile.ZipFile, name: str) -> bytes:
+    if _source_digest_from_member(name) is not None:
+        raise ProjectFormatError(
+            f"Source blob members must be consumed as bounded streams: {name!r}"
+        )
     try:
         with zf.open(name, "r") as source:
             chunks: list[bytes] = []
@@ -626,7 +770,7 @@ def _hash_zip_member(zf: zipfile.ZipFile, name: str) -> str:
 def _validate_v2_checksums(
     zf: zipfile.ZipFile,
     members: dict[str, zipfile.ZipInfo],
-) -> None:
+) -> dict[str, str]:
     if CHECKSUMS_NAME not in members:
         raise ProjectFormatError(f"Missing {CHECKSUMS_NAME} in AMR v2 project file")
 
@@ -648,6 +792,7 @@ def _validate_v2_checksums(
             f"Invalid {CHECKSUMS_NAME}: file list does not match ZIP members"
         )
 
+    validated_files: dict[str, str] = {}
     for name in sorted(expected_names):
         expected_digest = files.get(name)
         if not isinstance(expected_digest, str) or _SHA256_RE.fullmatch(expected_digest) is None:
@@ -657,6 +802,8 @@ def _validate_v2_checksums(
         actual_digest = _hash_zip_member(zf, name)
         if not hmac.compare_digest(actual_digest, expected_digest):
             raise ProjectFormatError(f"Checksum mismatch for ZIP member {name!r}")
+        validated_files[name] = expected_digest
+    return validated_files
 
 
 def _normalize_loaded_document(
@@ -960,6 +1107,17 @@ def save_artifact_project(
 ) -> str:
     """Atomically save one authoritative ``ArtifactDocument`` AMR v2 payload."""
 
+    validated = _validated_artifact_document(document)
+    return _save_payload_project(
+        path,
+        validated.to_dict(),
+        payload_type=ARTIFACT_PAYLOAD_TYPE,
+        payload_schema_version=ARTIFACT_PAYLOAD_SCHEMA_VERSION,
+        meta=meta,
+    )
+
+
+def _validated_artifact_document(document: ArtifactDocument) -> ArtifactDocument:
     if not isinstance(document, ArtifactDocument):
         raise ProjectSerializationError("document must be an ArtifactDocument")
     try:
@@ -973,13 +1131,390 @@ def save_artifact_project(
         raise ProjectSerializationError(
             "ArtifactDocument canonical serialization changed during validation"
         )
-    return _save_payload_project(
-        path,
-        validated.to_dict(),
-        payload_type=ARTIFACT_PAYLOAD_TYPE,
-        payload_schema_version=ARTIFACT_PAYLOAD_SCHEMA_VERSION,
-        meta=meta,
+    return validated
+
+
+def _write_embedded_artifact_archive(
+    handle: BinaryIO,
+    *,
+    manifest_bytes: bytes,
+    source_index_bytes: bytes,
+    source_member: str,
+    source_stream: BinaryIO,
+    expected_source_sha256: str,
+    expected_source_size_bytes: int,
+    checksums_bytes: bytes,
+) -> None:
+    """Stream one verified primary source into an AMR ZIP64 archive."""
+
+    with zipfile.ZipFile(handle, "w", allowZip64=True) as zf:
+        zf.writestr(
+            MANIFEST_NAME,
+            manifest_bytes,
+            compress_type=zipfile.ZIP_DEFLATED,
+        )
+        zf.writestr(
+            SOURCE_INDEX_NAME,
+            source_index_bytes,
+            compress_type=zipfile.ZIP_DEFLATED,
+        )
+
+        source_info = zipfile.ZipInfo(source_member)
+        source_info.compress_type = zipfile.ZIP_STORED
+        source_info.file_size = expected_source_size_bytes
+        digest = hashlib.sha256()
+        copied = 0
+        with zf.open(source_info, "w", force_zip64=True) as destination:
+            while True:
+                chunk = source_stream.read(_COPY_CHUNK_BYTES)
+                if not chunk:
+                    break
+                copied += len(chunk)
+                if copied > expected_source_size_bytes:
+                    raise SourceChangedError(
+                        "Source grew while it was being embedded in the project"
+                    )
+                digest.update(chunk)
+                destination.write(chunk)
+        if copied != expected_source_size_bytes:
+            raise SourceChangedError(
+                "Source size changed while it was being embedded in the project"
+            )
+        if not hmac.compare_digest(digest.hexdigest(), expected_source_sha256):
+            raise SourceChangedError(
+                "Source SHA-256 changed while it was being embedded in the project"
+            )
+
+        zf.writestr(
+            CHECKSUMS_NAME,
+            checksums_bytes,
+            compress_type=zipfile.ZIP_DEFLATED,
+        )
+
+
+def _path_matches_file_identity(path: Path, identity: tuple[int, int]) -> bool:
+    """Return whether ``path`` currently resolves to a captured file object."""
+
+    try:
+        observed = path.stat()
+    except FileNotFoundError:
+        return False
+    return (int(observed.st_dev), int(observed.st_ino)) == identity
+
+
+@contextmanager
+def _open_artifact_session_source(
+    *,
+    locator: str,
+    source_member: str,
+    expected_identity_scope: str,
+    expected_sha256: str,
+    expected_size_bytes: int,
+) -> Iterator[tuple[BinaryIO, tuple[int, int] | None]]:
+    """Open either an external source or a validated embedded source member.
+
+    The archive and member descriptors remain open through staged package
+    validation. The caller therefore can close them before atomically replacing
+    the same archive on Windows.
+    """
+
+    embedded_namespace = "!/sources/blobs/sha256/"
+    expected_suffix = f"!/{source_member}"
+    if embedded_namespace in locator:
+        if not locator.endswith(expected_suffix):
+            raise ProjectFormatError(
+                "embedded source locator does not match the ArtifactDocument source identity"
+            )
+        archive_text = locator[: -len(expected_suffix)]
+        if not archive_text:
+            raise ProjectFormatError("embedded source locator has no archive path")
+        archive_path = Path(archive_text)
+        package = load_artifact_project_package(archive_path)
+        bundle = package.source_bundle
+        if bundle is None:
+            raise EmbeddedSourceRequiredError(
+                "embedded source locator archive has no source bundle"
+            )
+        matches = [
+            entry
+            for entry in bundle.entries
+            if entry.member == source_member
+            and entry.sha256 == expected_sha256
+            and entry.size_bytes == expected_size_bytes
+            and entry.source_asset_id == f"sha256:{expected_sha256}"
+        ]
+        if len(matches) != 1:
+            raise ProjectFormatError(
+                "embedded source locator archive does not contain the expected source blob"
+            )
+
+        _preflight_zip_directory(archive_path)
+        with zipfile.ZipFile(archive_path, "r") as source_archive:
+            with source_archive.open(source_member, "r") as source_stream:
+                yield cast(BinaryIO, source_stream), None
+        return
+
+    with open_fingerprinted_file(locator) as (source_stream, source_fingerprint):
+        if (
+            source_fingerprint.identity_scope != expected_identity_scope
+            or source_fingerprint.sha256 != expected_sha256
+            or source_fingerprint.size_bytes != expected_size_bytes
+        ):
+            raise ProjectFormatError(
+                "current external source bytes do not match the ArtifactDocument "
+                "SourceAsset identity"
+            )
+        source_stat = os.fstat(source_stream.fileno())
+        yield source_stream, (int(source_stat.st_dev), int(source_stat.st_ino))
+
+
+def _visual_attributes_match(expected: object, observed: object) -> bool:
+    """Verify that primary bytes reproduce texture and UV runtime attributes."""
+
+    import numpy as np  # noqa: PLC0415
+
+    for attribute in ("uv_coords", "texture"):
+        expected_value = getattr(expected, attribute, None)
+        observed_value = getattr(observed, attribute, None)
+        if (expected_value is None) != (observed_value is None):
+            return False
+        if expected_value is not None and not np.array_equal(
+            np.asarray(expected_value),
+            np.asarray(observed_value),
+            equal_nan=True,
+        ):
+            return False
+    return True
+
+
+def save_artifact_session_project(
+    path: str | Path,
+    session: ArtifactSession,
+    *,
+    meta: dict[str, Any] | None = None,
+) -> str:
+    """Atomically save an artifact session with its verified primary source.
+
+    The external path is only a locator. Its currently opened descriptor is
+    fingerprinted, checked against ``SourceAsset``, and copied directly into a
+    content-addressed ZIP_STORED member. The staged package is reopened through
+    the production package reader before the destination is replaced.
+    """
+
+    # Late import keeps the manifest-only storage API independent of trimesh
+    # until callers explicitly request session packaging/materialisation.
+    from .artifact_session import ArtifactSession  # noqa: PLC0415
+
+    if not isinstance(session, ArtifactSession):
+        raise ProjectSerializationError("session must be an ArtifactSession")
+    if meta is not None and not isinstance(meta, dict):
+        raise ProjectSerializationError("Project metadata must be a JSON object")
+
+    out_path = Path(path)
+    if out_path.suffix.lower() != ".amr":
+        raise ProjectSaveError(
+            "prepare",
+            "embedded artifact sessions require an .amr ZIP destination",
+            retryable=False,
+        )
+
+    try:
+        expected_projection_snapshot = session.projection_snapshot()
+    except ValueError as exc:
+        raise ProjectSerializationError(
+            f"Invalid artifact session source/document binding: {exc}"
+        ) from exc
+
+    validated = _validated_artifact_document(session.document)
+    try:
+        source_bundle = SourceBundleIndex.for_document(validated)
+    except (SourceBundleError, ValueError) as exc:
+        raise ProjectSerializationError(f"Invalid embedded source inventory: {exc}") from exc
+
+    source_asset_id = session.verified_geometry.source_asset_id
+    source_asset = validated.source_asset_index.get(source_asset_id)
+    if source_asset is None:
+        raise ProjectSerializationError(
+            "session verified source asset is missing from its ArtifactDocument"
+        )
+    if len(validated.source_assets) != 1:
+        raise ProjectSerializationError(
+            "embedded session projects currently require exactly one source asset"
+        )
+    source_member = source_blob_member(source_asset.sha256)
+    if source_asset.size_bytes > MAX_SOURCE_MEMBER_BYTES:
+        raise ProjectSerializationError(
+            f"source exceeds the {MAX_SOURCE_MEMBER_BYTES}-byte embedded-source limit"
+        )
+
+    envelope: dict[str, Any] = {
+        "format": PROJECT_FORMAT,
+        "version": PROJECT_VERSION,
+        "payload_type": ARTIFACT_PAYLOAD_TYPE,
+        "payload_schema_version": ARTIFACT_PAYLOAD_SCHEMA_VERSION,
+        "saved_at": _utc_now_iso(),
+        "meta": dict(meta or {}),
+        "state": validated.to_dict(),
+    }
+    manifest_bytes = _strict_json_dumps(envelope, label=MANIFEST_NAME)
+    if len(manifest_bytes) > MAX_MANIFEST_BYTES:
+        raise ProjectSerializationError(
+            f"{MANIFEST_NAME} exceeds the {MAX_MANIFEST_BYTES}-byte safety limit"
+        )
+    source_index_bytes = source_bundle.canonical_json_bytes()
+    if len(source_index_bytes) > MAX_SOURCE_INDEX_BYTES:
+        raise ProjectSerializationError(
+            f"{SOURCE_INDEX_NAME} exceeds the {MAX_SOURCE_INDEX_BYTES}-byte safety limit"
+        )
+    checksum_files = {
+        MANIFEST_NAME: hashlib.sha256(manifest_bytes).hexdigest(),
+        SOURCE_INDEX_NAME: hashlib.sha256(source_index_bytes).hexdigest(),
+        source_member: source_asset.sha256,
+    }
+    checksums_bytes = _strict_json_dumps(
+        {"algorithm": "sha256", "files": checksum_files},
+        label=CHECKSUMS_NAME,
     )
+    if len(checksums_bytes) > MAX_CHECKSUMS_BYTES:
+        raise ProjectSerializationError(
+            f"{CHECKSUMS_NAME} exceeds the {MAX_CHECKSUMS_BYTES}-byte safety limit"
+        )
+
+    temp_path: Path | None = None
+    raw_fd: int | None = None
+    committed = False
+    stage = "source_open"
+    try:
+        stage = "source_verification"
+        with _open_artifact_session_source(
+            locator=session.resolved_source_path,
+            source_member=source_member,
+            expected_identity_scope=source_asset.identity_scope,
+            expected_sha256=source_asset.sha256,
+            expected_size_bytes=source_asset.size_bytes,
+        ) as (
+            source_stream,
+            external_source_identity,
+        ):
+            if external_source_identity is not None and _path_matches_file_identity(
+                out_path,
+                external_source_identity,
+            ):
+                raise ProjectSaveError(
+                    "prepare",
+                    "project destination resolves to the external source file",
+                    retryable=False,
+                )
+
+            stage = "prepare"
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            raw_fd, raw_temp_path = tempfile.mkstemp(
+                prefix=f".{out_path.name}.",
+                suffix=".tmp",
+                dir=str(out_path.parent),
+            )
+            temp_path = Path(raw_temp_path)
+
+            stage = "temp_write"
+            with os.fdopen(raw_fd, "w+b") as handle:
+                raw_fd = None
+                _write_embedded_artifact_archive(
+                    handle,
+                    manifest_bytes=manifest_bytes,
+                    source_index_bytes=source_index_bytes,
+                    source_member=source_member,
+                    source_stream=source_stream,
+                    expected_source_sha256=source_asset.sha256,
+                    expected_source_size_bytes=source_asset.size_bytes,
+                    checksums_bytes=checksums_bytes,
+                )
+                stage = "temp_fsync"
+                _flush_and_fsync(handle)
+
+            stage = "validation"
+            package = load_artifact_project_package(temp_path)
+            if package.document.canonical_json_bytes() != validated.canonical_json_bytes():
+                raise ProjectFormatError(
+                    "Staged package validation changed the ArtifactDocument"
+                )
+            if package.source_bundle != source_bundle:
+                raise ProjectFormatError(
+                    "Staged package validation changed the source bundle index"
+                )
+            staged_session = _materialize_artifact_project_package(package)
+            if staged_session.projection_snapshot() != expected_projection_snapshot:
+                raise ProjectFormatError(
+                    "Staged embedded source did not reproduce the saved artifact projection"
+                )
+            if not _visual_attributes_match(
+                session.source_mesh,
+                staged_session.source_mesh,
+            ):
+                raise ProjectFormatError(
+                    "Staged embedded source did not reproduce source UV/texture attributes; "
+                    "linked sidecar resources are not yet portable"
+                )
+
+            # Keep this label active while open_fingerprinted_file performs its
+            # final descriptor/path checks on context-manager exit.
+            stage = "source_verification"
+
+        stage = "replace"
+        assert temp_path is not None
+        if external_source_identity is not None and _path_matches_file_identity(
+            out_path,
+            external_source_identity,
+        ):
+            raise ProjectSaveError(
+                "replace",
+                "project destination changed to resolve to the external source file",
+                retryable=False,
+            )
+        os.replace(temp_path, out_path)
+        committed = True
+        stage = "directory_fsync"
+        try:
+            _best_effort_fsync_directory(out_path.parent)
+        except OSError as exc:
+            raise ProjectSaveError(
+                stage,
+                "Project file was atomically replaced, but directory fsync failed; "
+                f"crash durability is uncertain: {exc}",
+                retryable=True,
+                committed=True,
+            ) from exc
+        return str(out_path)
+    except ProjectSerializationError:
+        raise
+    except ProjectSaveError:
+        raise
+    except Exception as exc:
+        raise ProjectSaveError(
+            stage,
+            f"Embedded artifact project save failed during {stage}: {exc}",
+            retryable=stage
+            in {
+                "source_open",
+                "source_verification",
+                "prepare",
+                "temp_write",
+                "temp_fsync",
+                "validation",
+                "replace",
+            },
+            committed=committed,
+        ) from exc
+    finally:
+        if raw_fd is not None:
+            try:
+                os.close(raw_fd)
+            except OSError:
+                pass
+        if temp_path is not None and not committed:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def load_project(path: str | Path) -> dict[str, Any]:
@@ -998,13 +1533,137 @@ def load_project(path: str | Path) -> dict[str, Any]:
     return _load_zip_document(in_path)
 
 
-def load_artifact_project(path: str | Path) -> ArtifactDocument:
-    """Load and validate an authoritative ``artifact_document`` AMR v2 payload.
+def _artifact_from_envelope(envelope: dict[str, Any]) -> ArtifactDocument:
+    state = envelope.get("state")
+    if not isinstance(state, dict):
+        raise ProjectFormatError("Invalid ArtifactDocument payload state")
+    try:
+        artifact = ArtifactDocument.from_dict(state)
+        validate_known_records(artifact)
+        return artifact
+    except (
+        ArtifactDocumentError,
+        ArtifactVectorRecordError,
+        ArtifactKnownRecordError,
+    ) as exc:
+        raise ProjectFormatError(f"Invalid ArtifactDocument payload: {exc}") from exc
 
-    Legacy UI payloads are deliberately not migrated here. Callers must choose
-    the legacy or artifact API explicitly so no unit, geometry, Align, or record
-    identity is ever invented during storage loading.
-    """
+
+def _load_artifact_project_package_zip(path: Path) -> ArtifactProjectPackage:
+    """Validate one artifact archive and its optional embedded source index."""
+
+    _preflight_zip_directory(path)
+    try:
+        with zipfile.ZipFile(path, "r") as zf:
+            members = _validate_zip_infos(zf.infolist())
+            manifest_bytes = _read_zip_member(zf, MANIFEST_NAME)
+            raw_envelope = _strict_json_loads(manifest_bytes, label=MANIFEST_NAME)
+            if not isinstance(raw_envelope, dict):
+                raise ProjectFormatError(
+                    "Invalid project document (expected JSON object)"
+                )
+            version = _require_envelope_identity(raw_envelope)
+            _reject_runtime_marker_from_durable_document(raw_envelope)
+            if version != PROJECT_VERSION:
+                raise UnsupportedPayloadError(
+                    raw_envelope.get("payload_type"),
+                    raw_envelope.get("payload_schema_version"),
+                    inspection=_inspection_from_document(raw_envelope),
+                )
+
+            checksums = _validate_v2_checksums(zf, members)
+            envelope = _normalize_loaded_document(
+                raw_envelope,
+                expected_payload_type=ARTIFACT_PAYLOAD_TYPE,
+                expected_schema_version=ARTIFACT_PAYLOAD_SCHEMA_VERSION,
+            )
+            artifact = _artifact_from_envelope(envelope)
+
+            source_member_names = {
+                name
+                for name in members
+                if _source_digest_from_member(name) is not None
+            }
+            if SOURCE_INDEX_NAME not in members:
+                if source_member_names:
+                    raise ProjectFormatError(
+                        "Embedded source blob exists without sources/index.json"
+                    )
+                return ArtifactProjectPackage(
+                    document=artifact,
+                    archive_path=path,
+                    source_bundle=None,
+                )
+
+            source_index_bytes = _read_zip_member(zf, SOURCE_INDEX_NAME)
+            source_index_data = _strict_json_loads(
+                source_index_bytes,
+                label=SOURCE_INDEX_NAME,
+            )
+            if not isinstance(source_index_data, dict):
+                raise ProjectFormatError(
+                    f"Invalid {SOURCE_INDEX_NAME}: expected JSON object"
+                )
+            try:
+                source_bundle = SourceBundleIndex.from_dict(source_index_data)
+                expected_bundle = SourceBundleIndex.for_document(artifact)
+            except (SourceBundleError, ValueError) as exc:
+                raise ProjectFormatError(
+                    f"Invalid embedded source bundle: {exc}"
+                ) from exc
+            if source_bundle.canonical_json_bytes() != source_index_bytes:
+                raise ProjectFormatError(
+                    f"{SOURCE_INDEX_NAME} is not canonical JSON"
+                )
+            if source_bundle != expected_bundle:
+                raise ProjectFormatError(
+                    "Embedded source index does not match the ArtifactDocument snapshot"
+                )
+
+            indexed_members = {entry.member for entry in source_bundle.entries}
+            missing_members = sorted(indexed_members - source_member_names)
+            orphan_members = sorted(source_member_names - indexed_members)
+            if missing_members:
+                raise ProjectFormatError(
+                    "Embedded source index references missing blob members: "
+                    + ", ".join(missing_members)
+                )
+            if orphan_members:
+                raise ProjectFormatError(
+                    "Embedded source archive contains orphan blob members: "
+                    + ", ".join(orphan_members)
+                )
+
+            for entry in source_bundle.entries:
+                info = members[entry.member]
+                if info.file_size != entry.size_bytes:
+                    raise ProjectFormatError(
+                        f"Embedded source size does not match index: {entry.member!r}"
+                    )
+                checksum = checksums.get(entry.member)
+                if checksum is None or not hmac.compare_digest(
+                    checksum,
+                    entry.sha256,
+                ):
+                    raise ProjectFormatError(
+                        f"Embedded source SHA-256 does not match index: {entry.member!r}"
+                    )
+
+            return ArtifactProjectPackage(
+                document=artifact,
+                archive_path=path,
+                source_bundle=source_bundle,
+            )
+    except (UnsupportedProjectVersionError, UnsupportedPayloadError):
+        raise
+    except ProjectFormatError:
+        raise
+    except (zipfile.BadZipFile, OSError, EOFError) as exc:
+        raise ProjectFormatError(f"Invalid AMR ZIP container: {exc}") from exc
+
+
+def load_artifact_project_package(path: str | Path) -> ArtifactProjectPackage:
+    """Load an artifact document and validate any embedded primary source."""
 
     in_path = Path(path)
     if not in_path.exists():
@@ -1015,20 +1674,114 @@ def load_artifact_project(path: str | Path) -> ArtifactDocument:
             expected_payload_type=ARTIFACT_PAYLOAD_TYPE,
             expected_schema_version=ARTIFACT_PAYLOAD_SCHEMA_VERSION,
         )
-    else:
-        envelope = _load_zip_document(
-            in_path,
-            expected_payload_type=ARTIFACT_PAYLOAD_TYPE,
-            expected_schema_version=ARTIFACT_PAYLOAD_SCHEMA_VERSION,
+        return ArtifactProjectPackage(
+            document=_artifact_from_envelope(envelope),
+            archive_path=in_path,
+            source_bundle=None,
         )
-    state = envelope.get("state")
-    if not isinstance(state, dict):
-        # The envelope validator already enforces this. Keep the public return
-        # boundary defensive if internal loading changes later.
-        raise ProjectFormatError("Invalid ArtifactDocument payload state")
+    return _load_artifact_project_package_zip(in_path)
+
+
+def load_artifact_project(path: str | Path) -> ArtifactDocument:
+    """Load and validate an authoritative ``artifact_document`` AMR v2 payload.
+
+    Legacy UI payloads are deliberately not migrated here. Callers must choose
+    the legacy or artifact API explicitly so no unit, geometry, Align, or record
+    identity is ever invented during storage loading.
+    """
+
+    return load_artifact_project_package(path).document
+
+
+def _materialize_artifact_project_package(
+    package: ArtifactProjectPackage,
+) -> ArtifactSession:
+    """Parse and bind the embedded primary source from a validated package."""
+
+    from .artifact_session import (  # noqa: PLC0415
+        ArtifactSession,
+        ArtifactSessionError,
+    )
+    from .mesh_loader import MeshLoader  # noqa: PLC0415
+
+    if not isinstance(package, ArtifactProjectPackage):
+        raise TypeError("package must be an ArtifactProjectPackage")
+    source_bundle = package.source_bundle
+    if source_bundle is None:
+        raise EmbeddedSourceRequiredError(
+            "Artifact project has no embedded source bundle; session materialization "
+            "requires sources/index.json and its primary blob"
+        )
+    primary_entries = [
+        entry
+        for entry in source_bundle.entries
+        if entry.source_asset_id == source_bundle.primary_source_asset_id
+    ]
+    if len(primary_entries) != 1:
+        # SourceBundleIndex already enforces this; retain a defensive public
+        # boundary if the model evolves independently.
+        raise ProjectFormatError(
+            "Embedded source bundle does not identify exactly one primary source"
+        )
+    entry = primary_entries[0]
+
+    document = package.document
+    active_metadata_id = document.active_source_metadata_revision_id
+    if active_metadata_id is None:
+        raise ProjectFormatError(
+            "ArtifactDocument has no active source metadata revision"
+        )
+    metadata = document.source_metadata_revision_index[active_metadata_id]
+    geometry = document.geometry_revision_index[metadata.geometry_revision_id]
+    parser_format = str(geometry.import_recipe.get("format", "") or "").strip()
+    if not parser_format:
+        raise ProjectFormatError(
+            "ArtifactDocument geometry import recipe has no parser format"
+        )
+
     try:
-        artifact = ArtifactDocument.from_dict(state)
-        validate_known_records(artifact)
-        return artifact
-    except (ArtifactDocumentError, ArtifactVectorRecordError, ArtifactKnownRecordError) as exc:
-        raise ProjectFormatError(f"Invalid ArtifactDocument payload: {exc}") from exc
+        # The archive path may have changed after package validation. Reapply
+        # the central-directory bound before the second, stream-only open; the
+        # mesh loader independently re-verifies the expected blob hash/size.
+        _preflight_zip_directory(package.archive_path)
+        with zipfile.ZipFile(package.archive_path, "r") as zf:
+            with zf.open(entry.member, "r") as source_stream:
+                source_mesh = MeshLoader(default_unit="mm").load_verified_stream(
+                    cast(BinaryIO, source_stream),
+                    unit=metadata.unit,
+                    source_format=parser_format,
+                    expected_sha256=entry.sha256,
+                    expected_size_bytes=entry.size_bytes,
+                    original_name=entry.logical_path,
+                )
+        session = ArtifactSession.bind_loaded_document(
+            document,
+            source_mesh,
+            resolved_source_path=f"{package.archive_path}!/{entry.member}",
+        )
+        # A successful load means the exact source can reproduce the active
+        # unit/Align projection, not merely that its container checksums pass.
+        session.materialize()
+        return session
+    except ProjectFormatError:
+        raise
+    except (
+        ArtifactSessionError,
+        KeyError,
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+        zipfile.BadZipFile,
+    ) as exc:
+        raise ProjectFormatError(
+            f"Unable to materialize embedded artifact session: {exc}"
+        ) from exc
+
+
+def load_artifact_session_project(path: str | Path) -> ArtifactSession:
+    """Reconstruct and materialize a session solely from an embedded AMR."""
+
+    return _materialize_artifact_project_package(
+        load_artifact_project_package(path)
+    )

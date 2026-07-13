@@ -52,7 +52,7 @@ PROCESS_A = textwrap.dedent(
     from src.core.artifact_session import ArtifactSession
     from src.core.geometry_identity import mesh_geometry_sha256
     from src.core.mesh_loader import MeshLoader
-    from src.core.project_file import save_artifact_project
+    from src.core.project_file import save_artifact_session_project
 
 
     source_path = Path(sys.argv[1]).resolve()
@@ -89,7 +89,7 @@ PROCESS_A = textwrap.dedent(
     if computed_geometry_hash != session.verified_geometry.geometry_sha256:
         raise RuntimeError("session geometry identity was not computed from decoded geometry")
 
-    save_artifact_project(project_path, session.document)
+    save_artifact_session_project(project_path, session)
     projection = session.materialize()
     active_metadata_id = session.document.active_source_metadata_revision_id
     active_align_id = session.document.active_align_revision_id
@@ -129,15 +129,13 @@ PROCESS_B = textwrap.dedent(
 
     import numpy as np
 
-    from src.core.artifact_session import ArtifactSession
     from src.core.geometry_identity import mesh_geometry_sha256
-    from src.core.mesh_loader import MeshLoader
-    from src.core.project_file import load_artifact_project
+    from src.core.project_file import load_artifact_session_project
 
 
     project_path = Path(sys.argv[1]).resolve()
-    relocated_source_path = Path(sys.argv[2]).resolve()
-    document = load_artifact_project(project_path)
+    rebound = load_artifact_session_project(project_path)
+    document = rebound.document
 
     active_metadata_id = document.active_source_metadata_revision_id
     active_align_id = document.active_align_revision_id
@@ -149,26 +147,18 @@ PROCESS_B = textwrap.dedent(
     if not isinstance(parser_format, str) or not parser_format:
         raise RuntimeError("saved parser format is missing")
 
-    # Deliberately re-open and re-hash the relocated source. The geometry digest
-    # below comes from the newly decoded mesh, never from GeometryRevision.
-    mesh = MeshLoader(default_unit="mm").load(
-        relocated_source_path,
-        unit=metadata.unit,
-        source_format=parser_format,
-    )
+    # The original external path is absent. The geometry digest below comes
+    # from the independently verified embedded source stream, never from the
+    # saved GeometryRevision value.
+    mesh = rebound.source_mesh
     source_identity = mesh.source_identity
     if source_identity is None:
-        raise RuntimeError("relocated source fingerprint was not captured")
+        raise RuntimeError("embedded source fingerprint was not captured")
     computed_geometry_hash = mesh_geometry_sha256(
         mesh,
         scope=geometry.geometry_hash_scope,
     )
 
-    rebound = ArtifactSession.bind_loaded_document(
-        document,
-        mesh,
-        resolved_source_path=str(relocated_source_path),
-    )
     if computed_geometry_hash != rebound.verified_geometry.geometry_sha256:
         raise RuntimeError("rebound session did not retain independently computed identity")
     projection = rebound.materialize()
@@ -177,7 +167,7 @@ PROCESS_B = textwrap.dedent(
     json.dump(
         {
             "pid": os.getpid(),
-            "source_path": str(relocated_source_path),
+            "source_path": rebound.resolved_source_path,
             "source_sha256": source_identity.sha256,
             "source_size_bytes": source_identity.size_bytes,
             "geometry_sha256": computed_geometry_hash,
@@ -236,7 +226,7 @@ class TestArtifactIndependentProcessRoundtrip(unittest.TestCase):
             )
         return cast(dict[str, Any], payload)
 
-    def test_open_align_save_relocate_reopen_materialize_across_processes(self) -> None:
+    def test_open_align_save_delete_source_reopen_materialize_across_processes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             workspace = Path(temporary_directory)
             source_path = workspace / "capture" / "excavated-fragment.ply"
@@ -247,25 +237,16 @@ class TestArtifactIndependentProcessRoundtrip(unittest.TestCase):
 
             process_a = self._run_worker(PROCESS_A, source_path, project_path)
 
-            relocated_source_path = (
-                workspace / "archive" / "renamed" / "fragment.raw-scan"
-            )
-            relocated_source_path.parent.mkdir(parents=True)
-            source_path.replace(relocated_source_path)
+            source_path.unlink()
             self.assertFalse(source_path.exists())
             self.assertTrue(project_path.is_file())
-            self.assertEqual(relocated_source_path.read_bytes(), PLY_BYTES)
 
-            process_b = self._run_worker(
-                PROCESS_B,
-                project_path,
-                relocated_source_path,
-            )
+            process_b = self._run_worker(PROCESS_B, project_path)
 
         self.assertNotEqual(process_a["pid"], process_b["pid"])
         self.assertNotEqual(process_a["source_path"], process_b["source_path"])
         self.assertTrue(str(process_a["source_path"]).endswith(".ply"))
-        self.assertTrue(str(process_b["source_path"]).endswith(".raw-scan"))
+        self.assertIn(".amr!/sources/blobs/sha256/", process_b["source_path"])
 
         self.assertEqual(process_a["source_sha256"], process_b["source_sha256"])
         self.assertEqual(

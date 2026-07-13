@@ -49,7 +49,8 @@ Align 확정 뒤에도 모든 기능이 한꺼번에 열리지는 않습니다. 
 
 - 원본 file SHA-256, decode geometry SHA-256, 확인된 단위·축, immutable Align revision을 분리해 저장
 - 새 문서는 원본의 절대 경로를 canonical manifest에 넣지 않고 `external:<original_name>` locator만 저장함. 실제 OS 경로는 현재 session에만 유지하므로 같은 원본·recipe의 문서와 SVG/PNG hash가 drive/root 위치에 따라 달라지지 않음
-- 현재 `.amr` v2는 원본 hash와 외부 locator를 보존하지만 원본 file bytes 자체는 아직 포함하지 않음. 원본 파일이 없어도 프로젝트 하나로 재검증할 수 있는 content-addressed embedded-source package는 공개 안정판의 남은 P0 과제
+- native `.amr` 저장은 `ArtifactDocument`와 함께 검증된 주 원본 file bytes를 SHA-256 content-addressed blob으로 포함함. 외부 원본을 삭제하거나 프로젝트를 다른 컴퓨터로 옮겨도 `.amr` 하나에서 saved parser·단위·Align·geometry hash를 다시 검증해 열 수 있고, 열린 archive를 Save/Save As로 다시 저장할 수 있음
+- 기존 manifest-only `.amr`는 계속 읽되 원본 선택이 필요함. OBJ MTL·텍스처, glTF 외부 buffer/image 같은 sidecar는 아직 bundle에 포함하지 않으며, 주 원본만으로 UV/texture를 재현하지 못하는 저장은 조용히 유실하지 않고 실패함
 - Open → Align commit → Cutline record가 항상 source-space 원본에서 canonical millimeter로 다시 계산됨
 - Top/Front/Right 단면을 명시적 right-handed plane frame으로 기록
 - 화면용 단면 tape나 world XY 투영을 SVG 원본으로 사용하지 않음
@@ -367,6 +368,7 @@ python main.py --project mesh.obj planview.png
 - canonical-mm Cutline과 6면 fixed-grid Outline
 - recipe·QC·receipt가 있는 6면 Digital Rubbing과 1:1 `.amr-rubbing` export
 - `.amr-vector`/`.amr-rubbing`의 이동 가능한 offline 검증
+- 주 원본 bytes를 포함한 content-addressed `.amr` 저장, 원본 삭제 뒤 독립 프로세스 reopen, archive-to-archive 재저장
 - 기와형 메쉬 기본 추천 펼침과 synthetic benchmark는 legacy 전문 기능으로 유지
 - code commit `898a8bfc144f` 기준 Python 3.12 macOS arm64 frozen 앱의 10-check offline self-test 통과
 - commit `e4bf6dcac4b1`의 원격 CI에서 Ubuntu·Windows·macOS frozen build와 각 실행 파일 self-test 모두 통과
@@ -378,7 +380,7 @@ python main.py --project mesh.obj planview.png
 - 대좌표 render-origin 이식: relative VBO·camera/model rebasing·world overlay 제출과 frame-bound depth picking/drag 계약 구현
 - 실제 OpenGL driver smoke 구현: code commit `f25b424d6936`의 clean source tree, Python 3.12.13/macOS Apple M4에서 61개 context/FBO/VBO/pixel/depth/pick 조건 통과, 0.125 mm 높이차를 원근 `0.124783 mm`, 정사영 `0.124998 mm`로 복원. report는 commit/tree 상태·runtime lock·dependency version·UTC 시각을 기록함
 - source checkout CI 검증: commit `166103dcf0ea`의 run `29182584810`에서 quality `572 passed`, macOS/Ubuntu persistence 각 `501 passed`, Windows persistence `498 passed + 3 platform-specific skips`, Linux llvmpipe actual-GL `61/61` 통과
-- 다음 단계: `.amr` embedded-source 원본 보존, Windows·macOS native QPA와 3-OS frozen actual-GL 확대, 종료 중 worker 정리와 동기 preflight 분리, 라이선스 결정, 대표 GPU·대용량 실제 유물 pilot 진행
+- 다음 단계: sidecar dependency manifest, closed parser recipe/runtime identity, Windows·macOS native QPA와 3-OS frozen actual-GL 확대, 라이선스 결정, 대표 GPU·대용량 실제 유물 pilot 진행
 
 ---
 

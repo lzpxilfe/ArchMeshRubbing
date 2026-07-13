@@ -19,6 +19,7 @@ from pathlib import Path
 import platform
 import re
 import sys
+import tempfile
 from typing import Any, Callable
 
 from src import __version__
@@ -406,6 +407,7 @@ def _check_resources() -> str:
         "vector_export-1.0.0.schema.json",
         "rubbing_receipt-1.0.0.schema.json",
         "rubbing_export-1.0.0.schema.json",
+        "source_bundle-1.0.0.schema.json",
     )
     for name in required_schemas:
         if not resource_path("schemas", name).is_file():
@@ -669,6 +671,133 @@ def _check_artifact_rubbing() -> str:
     return f"sha256={raster.raster_sha256}"
 
 
+def _check_artifact_embedded_project_roundtrip() -> str:
+    """Prove that an AMR carries enough source data for an offline reopen."""
+
+    import numpy as np
+
+    from src.core.artifact_session import ArtifactSession
+    from src.core.mesh_loader import MeshLoader
+    from src.core.project_file import (
+        load_artifact_session_project,
+        save_artifact_session_project,
+    )
+
+    ply_bytes = (
+        b"ply\n"
+        b"format ascii 1.0\n"
+        b"comment frozen offline self-test fixture\n"
+        b"element vertex 5\n"
+        b"property float x\n"
+        b"property float y\n"
+        b"property float z\n"
+        b"element face 4\n"
+        b"property list uchar int vertex_indices\n"
+        b"end_header\n"
+        b"1.25 -2.5 0.75\n"
+        b"4.5 -1.25 1.5\n"
+        b"3.75 2.0 2.25\n"
+        b"-0.5 1.5 -1.0\n"
+        b"2.0 0.25 4.0\n"
+        b"3 0 1 4\n"
+        b"3 1 2 4\n"
+        b"3 2 3 4\n"
+        b"3 3 0 4\n"
+    )
+
+    with tempfile.TemporaryDirectory(prefix="archmeshrubbing-self-test-") as temporary:
+        directory = Path(temporary)
+        source_path = directory / "self-test-primary.ply"
+        project_path = directory / "self-test-project.amr"
+        source_path.write_bytes(ply_bytes)
+
+        source_mesh = MeshLoader(default_unit="mm").load(source_path, unit="cm")
+        session = ArtifactSession.create_from_source(
+            source_mesh,
+            resolved_source_path=str(source_path),
+            unit="cm",
+            axes={"source_x": "+X", "source_y": "+Y", "source_z": "+Z"},
+            handedness="right",
+            software_version="self-test/1",
+            operator="frozen-self-test",
+            created_at="2026-01-01T00:00:00Z",
+            document_id="artifact:frozen-offline-self-test",
+            metadata_revision_id="metadata:self-test-cm",
+            align_revision_id="align:self-test-identity",
+        )
+        session = session.commit_preview(
+            translation_mm=(13.25, -7.5, 4.75),
+            rotation_deg=(17.0, -23.0, 61.0),
+            scale=1.0,
+            pivot_mm=(12.5, -5.0, 7.5),
+            operator="frozen-self-test",
+            created_at="2026-01-01T00:00:01Z",
+            revision_id="align:self-test-explicit",
+        )
+        before_projection = session.materialize()
+        save_artifact_session_project(project_path, session)
+
+        source_path.unlink()
+        if source_path.exists():
+            raise RuntimeError("external source deletion did not take effect")
+        restored = load_artifact_session_project(project_path)
+        after_projection = restored.materialize()
+
+        if (
+            restored.document.canonical_json_bytes()
+            != session.document.canonical_json_bytes()
+        ):
+            raise RuntimeError("embedded reopen changed the ArtifactDocument")
+
+        source_identity = session.source_mesh.source_identity
+        restored_identity = restored.source_mesh.source_identity
+        if source_identity is None or restored_identity is None:
+            raise RuntimeError("embedded reopen lost primary source identity")
+        if (
+            not source_identity.content_matches(restored_identity)
+            or source_identity.identity_scope != restored_identity.identity_scope
+            or source_identity.original_name != restored_identity.original_name
+            or source_identity.format != restored_identity.format
+        ):
+            raise RuntimeError("embedded reopen changed primary source identity")
+        if not np.array_equal(session.source_mesh.vertices, restored.source_mesh.vertices):
+            raise RuntimeError("embedded reopen changed source vertices")
+        if not np.array_equal(session.source_mesh.faces, restored.source_mesh.faces):
+            raise RuntimeError("embedded reopen changed source faces")
+
+        if restored.verified_geometry != session.verified_geometry:
+            raise RuntimeError("embedded reopen changed verified geometry identity")
+        geometry_id = session.verified_geometry.geometry_revision_id
+        if (
+            restored.document.geometry_revision_index[geometry_id]
+            != session.document.geometry_revision_index[geometry_id]
+        ):
+            raise RuntimeError("embedded reopen changed the geometry revision")
+
+        align_id = session.document.active_align_revision_id
+        if align_id != "align:self-test-explicit":
+            raise RuntimeError("self-test did not create an explicit Align revision")
+        if restored.document.active_align_revision_id != align_id:
+            raise RuntimeError("embedded reopen changed the active Align revision")
+        if (
+            restored.document.align_revision_index[align_id]
+            != session.document.align_revision_index[align_id]
+        ):
+            raise RuntimeError("embedded reopen changed the active Align data")
+
+        before_vertices = np.asarray(before_projection.mesh.vertices, dtype=np.float64)
+        after_vertices = np.asarray(after_projection.mesh.vertices, dtype=np.float64)
+        if not np.array_equal(after_vertices, before_vertices):
+            raise RuntimeError("embedded reopen changed materialized vertices")
+
+        source_short = source_identity.sha256[:12]
+        geometry_short = session.verified_geometry.geometry_sha256[:12]
+        return (
+            f"source={source_short}, geometry={geometry_short}, "
+            f"align={align_id}, vertices={before_vertices.shape[0]}"
+        )
+
+
 def _run_check(name: str, check: Callable[[], str]) -> SelfTestCheck:
     try:
         return SelfTestCheck(name=name, ok=True, detail=str(check()))
@@ -681,10 +810,10 @@ def _run_check(name: str, check: Callable[[], str]) -> SelfTestCheck:
 
 
 def run_self_test() -> dict[str, object]:
-    """Run deterministic, offline, read-only health checks.
+    """Run deterministic, offline health checks.
 
-    The checks do not create or overwrite project, mesh, vector, or raster
-    files.  Every scientific check operates on tiny in-memory fixtures.
+    Scientific checks use tiny in-memory fixtures.  The embedded-project check
+    writes only inside an automatically removed temporary directory.
     """
 
     checks = (
@@ -698,6 +827,10 @@ def run_self_test() -> dict[str, object]:
         _run_check("artifact_document_canonical", _check_artifact_document),
         _run_check("artifact_vector_canonical", _check_artifact_vector),
         _run_check("artifact_rubbing_canonical", _check_artifact_rubbing),
+        _run_check(
+            "artifact_embedded_project_roundtrip",
+            _check_artifact_embedded_project_roundtrip,
+        ),
     )
     return {
         "schema_version": BUILD_INFO_SCHEMA_VERSION,

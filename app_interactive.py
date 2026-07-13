@@ -231,15 +231,16 @@ from src.gui.viewport_3d import Viewport3D  # noqa: E402
 from src.core.mesh_loader import MeshLoader  # noqa: E402
 from src.core.profile_exporter import ProfileExporter  # noqa: E402
 from src.core.project_file import (  # noqa: E402
-    ARTIFACT_PAYLOAD_TYPE,
+    EmbeddedSourceRequiredError,
     MIGRATION_MARKER_NAME,
     ProjectFormatError,
     ProjectSaveError,
     ProjectSerializationError,
     UnsupportedPayloadError,
-    load_artifact_project as load_amr_artifact_project,
+    load_artifact_project_package as load_amr_artifact_project_package,
+    load_artifact_session_project as load_amr_artifact_session_project,
     load_project as load_amr_project,
-    save_artifact_project as save_amr_artifact_project,
+    save_artifact_session_project as save_amr_artifact_session_project,
     save_project as save_amr_project,
 )
 from src.core.artifact_document import ArtifactDocument  # noqa: E402
@@ -925,6 +926,48 @@ class TaskThread(QThread):
         except Exception as e:
             _LOGGER.exception("Task failed: %s", self._task_name)
             self.failed.emit(f"{type(e).__name__}: {e}")
+
+
+def _load_project_open_candidate(filepath: str) -> dict[str, Any]:
+    """Validate and materialize one Project Open candidate off the GUI thread.
+
+    Native packages are attempted first so an invalid embedded bundle fails
+    closed instead of being reinterpreted as a legacy project.  A typed
+    manifest-only result is the sole native path that may later ask the user
+    to resolve an external source.
+    """
+
+    try:
+        package = load_amr_artifact_project_package(filepath)
+    except UnsupportedPayloadError as exc:
+        if exc.payload_type != "legacy_ui_state":
+            raise
+        return {
+            "kind": "legacy",
+            "document": load_amr_project(filepath),
+        }
+
+    try:
+        session = load_amr_artifact_session_project(filepath)
+    except EmbeddedSourceRequiredError:
+        if package.source_bundle is not None:
+            raise ProjectFormatError(
+                "Embedded source bundle was validated but could not be materialized"
+            )
+        return {
+            "kind": "artifact_manifest_only",
+            "document": package.document,
+        }
+
+    if session.document != package.document:
+        raise ProjectFormatError(
+            "Embedded session materialization changed the ArtifactDocument"
+        )
+    return {
+        "kind": "artifact_embedded",
+        "document": package.document,
+        "session": session,
+    }
 
 
 class _TaskDialogCloseGuard(QObject):
@@ -4166,6 +4209,9 @@ class MainWindow(QMainWindow):
 
         self._mesh_load_dialog: QProgressDialog | None = None
         self._mesh_load_thread: MeshLoadThread | None = None
+        self._project_open_thread: TaskThread | None = None
+        self._project_open_request_id: str | None = None
+        self._project_open_base_authority_epoch: int | None = None
         self._profile_export_dialog: QProgressDialog | None = None
         self._profile_export_thread: ProfileExportThread | None = None
         self._task_dialog: QProgressDialog | None = None
@@ -4656,8 +4702,38 @@ class MainWindow(QMainWindow):
         if reply != QMessageBox.StandardButton.Yes:
             a0.ignore()
             return
+        self._shutdown_project_open_worker()
         self._save_ui_state()
         super().closeEvent(a0)
+
+    def _shutdown_project_open_worker(self) -> None:
+        """Fence callbacks and join package inspection before window teardown."""
+
+        thread = getattr(self, "_project_open_thread", None)
+        if thread is None:
+            return
+        self._project_open_thread = None
+        self._project_open_request_id = None
+        self._project_open_base_authority_epoch = None
+        self._clear_artifact_pending_load(cancel_workbench=True)
+        for signal_name in ("done", "failed", "finished"):
+            try:
+                getattr(thread, signal_name).disconnect()
+            except Exception:
+                pass
+        try:
+            thread.requestInterruption()
+        except Exception:
+            pass
+        try:
+            if thread.isRunning():
+                thread.wait()
+        except Exception:
+            _LOGGER.debug("Project Open worker shutdown wait failed", exc_info=True)
+        try:
+            thread.deleteLater()
+        except Exception:
+            pass
 
     def _native_artifact_mode(self) -> bool:
         return isinstance(getattr(self, "_artifact_session", None), ArtifactSession)
@@ -5685,10 +5761,12 @@ class MainWindow(QMainWindow):
         if not filepath:
             return
         thread = getattr(self, "_mesh_load_thread", None)
+        project_thread = getattr(self, "_project_open_thread", None)
         if (
             bool(getattr(self, "_artifact_load_active", False))
             or bool(getattr(self, "_project_load_active", False))
             or (thread is not None and thread.isRunning())
+            or (project_thread is not None and project_thread.isRunning())
         ):
             QMessageBox.information(
                 self,
@@ -5697,15 +5775,169 @@ class MainWindow(QMainWindow):
             )
             return
 
-        try:
-            try:
-                doc = load_amr_project(filepath)
-            except UnsupportedPayloadError as payload_error:
-                if payload_error.payload_type != ARTIFACT_PAYLOAD_TYPE:
-                    raise
-                artifact_document = load_amr_artifact_project(filepath)
-                self._start_artifact_project_load(artifact_document, filepath)
+        request_id = f"project-open:{uuid.uuid4()}"
+        load_thread = TaskThread(
+            "project-open",
+            lambda path=str(filepath): _load_project_open_candidate(path),
+        )
+        controller = self._artifact_workbench_controller()
+        self._project_open_thread = load_thread
+        self._project_open_request_id = request_id
+        self._project_open_base_authority_epoch = controller.snapshot.authority_epoch
+        self._artifact_load_active = True
+        self._artifact_pending_document = None
+        self._artifact_pending_project_path = str(filepath)
+        self._artifact_pending_source_metadata = None
+        self._artifact_load_ticket = None
+        self.status_info.setText(
+            f"📁 프로젝트 패키지 검증 중: {Path(filepath).name}"
+        )
+        load_thread.done.connect(
+            lambda result, owner=load_thread, rid=request_id, path=str(filepath): (
+                self._dispatch_project_open_success(owner, rid, path, result)
+            )
+        )
+        load_thread.failed.connect(
+            lambda message, owner=load_thread, rid=request_id: (
+                self._dispatch_project_open_failure(owner, rid, message)
+            )
+        )
+        load_thread.finished.connect(
+            lambda owner=load_thread, rid=request_id: (
+                self._dispatch_project_open_finished(owner, rid)
+            )
+        )
+        load_thread.start()
+
+    def _project_open_result_is_current(
+        self,
+        owner: QThread,
+        request_id: str,
+    ) -> bool:
+        if not self._project_open_worker_is_current(owner, request_id):
+            return False
+        controller = getattr(self, "_artifact_workbench", None)
+        base_epoch = getattr(self, "_project_open_base_authority_epoch", None)
+        return (
+            isinstance(controller, ArtifactWorkbench)
+            and isinstance(base_epoch, int)
+            and controller.snapshot.authority_epoch == base_epoch
+        )
+
+    def _project_open_worker_is_current(
+        self,
+        owner: QThread,
+        request_id: str,
+    ) -> bool:
+        return (
+            owner is getattr(self, "_project_open_thread", None)
+            and request_id == getattr(self, "_project_open_request_id", None)
+        )
+
+    def _dispatch_project_open_success(
+        self,
+        owner: QThread,
+        request_id: str,
+        filepath: str,
+        result: object,
+    ) -> None:
+        if not self._project_open_result_is_current(owner, request_id):
+            _LOGGER.info("Discarded stale project-open success: %s", request_id)
+            if self._project_open_worker_is_current(owner, request_id):
+                self._clear_artifact_pending_load(cancel_workbench=True)
+                self.status_info.setText(
+                    "Project Open 결과 폐기 | 더 최신 문서 권위 유지"
+                )
+            return
+        if not isinstance(result, dict):
+            self._on_project_open_failure("invalid Project Open worker result")
+            return
+
+        kind = str(result.get("kind", ""))
+        if kind == "artifact_embedded":
+            session = result.get("session")
+            document = result.get("document")
+            if not isinstance(session, ArtifactSession) or not isinstance(
+                document,
+                ArtifactDocument,
+            ):
+                self._on_project_open_failure(
+                    "embedded Project Open worker returned invalid native state"
+                )
                 return
+            self._finish_embedded_artifact_project_open(
+                session,
+                document=document,
+                project_path=filepath,
+                request_id=request_id,
+            )
+            return
+
+        # Package inspection is complete. The manifest-only and legacy paths
+        # now continue through their existing GUI-thread source-resolution
+        # adapters; neither path hashes or parses a large embedded source here.
+        self._clear_artifact_pending_load(cancel_workbench=False)
+        document = result.get("document")
+        if kind == "artifact_manifest_only" and isinstance(
+            document,
+            ArtifactDocument,
+        ):
+            self._start_artifact_project_load(document, filepath)
+            return
+        if kind == "legacy" and isinstance(document, dict):
+            self._start_legacy_project_load(document, filepath)
+            return
+        self._on_project_open_failure("unknown Project Open worker result")
+
+    def _dispatch_project_open_failure(
+        self,
+        owner: QThread,
+        request_id: str,
+        message: str,
+    ) -> None:
+        if not self._project_open_result_is_current(owner, request_id):
+            _LOGGER.info("Discarded stale project-open failure: %s", request_id)
+            if self._project_open_worker_is_current(owner, request_id):
+                self._clear_artifact_pending_load(cancel_workbench=True)
+            return
+        self._on_project_open_failure(message)
+
+    def _dispatch_project_open_finished(
+        self,
+        owner: QThread,
+        request_id: str,
+    ) -> None:
+        if not self._project_open_worker_is_current(owner, request_id):
+            try:
+                owner.deleteLater()
+            except Exception:
+                pass
+            _LOGGER.info("Ignored stale project-open finished signal: %s", request_id)
+            return
+        try:
+            owner.deleteLater()
+        except Exception:
+            pass
+        self._project_open_thread = None
+        self._project_open_request_id = None
+        self._project_open_base_authority_epoch = None
+
+    def _on_project_open_failure(self, message: str) -> None:
+        self._clear_artifact_pending_load(cancel_workbench=True)
+        self.status_info.setText("❌ 프로젝트 패키지 검증 실패 | 기존 scene 유지")
+        QMessageBox.critical(
+            self,
+            "오류",
+            "프로젝트를 열 수 없습니다. 기존 작업은 유지했습니다."
+            f"\n\n{message}",
+        )
+
+    def _start_legacy_project_load(
+        self,
+        doc: dict[str, Any],
+        filepath: str,
+    ) -> None:
+        try:
             state = doc.get("state", {})
             migration = doc.get(MIGRATION_MARKER_NAME, {})
             migrated_from_v1 = bool(
@@ -5719,11 +5951,8 @@ class MainWindow(QMainWindow):
                 state,
                 migrated_from_v1=migrated_from_v1,
             )
-        except (OSError, ProjectFormatError) as e:
-            QMessageBox.critical(self, "오류", f"프로젝트를 열 수 없습니다:\n{e}")
-            return
-        except Exception as e:
-            QMessageBox.critical(self, "오류", f"프로젝트 열기 중 오류 발생:\n{type(e).__name__}: {e}")
+        except (ProjectFormatError, ValueError) as exc:
+            self._on_project_open_failure(str(exc))
             return
 
         objects = state.get("objects", [])
@@ -5872,6 +6101,68 @@ class MainWindow(QMainWindow):
             "3D Files (*.obj *.ply *.stl *.off *.gltf *.glb);;All Files (*)",
         )
         return str(selected) if selected else None
+
+    def _finish_embedded_artifact_project_open(
+        self,
+        session: ArtifactSession,
+        *,
+        document: ArtifactDocument,
+        project_path: str,
+        request_id: str,
+    ) -> None:
+        """Publish a worker-materialized embedded package through Workbench."""
+
+        ticket: ArtifactLoadTicket | None = None
+        try:
+            if session.document != document:
+                raise ArtifactSessionError(
+                    "embedded worker session does not match its validated document"
+                )
+            controller = self._artifact_workbench_controller()
+            ticket = controller.begin_project_reopen(
+                document,
+                project_path=project_path,
+                resolved_source_path=session.resolved_source_path,
+                request_id=request_id,
+            )
+            self._artifact_load_ticket = ticket
+            self._artifact_pending_document = document
+            self._artifact_pending_project_path = str(project_path)
+            transition = controller.prepare_loaded_source(
+                ticket,
+                session.source_mesh,
+                resolved_source_path=session.resolved_source_path,
+            )
+            candidate = transition.candidate_session
+            self._publish_artifact_session_projection(
+                candidate,
+                project_path=str(project_path),
+                fit_camera=True,
+                status_text=(
+                    f"✅ 내장 원본 프로젝트 로딩 완료: {Path(project_path).name} "
+                    "| package·source·geometry·Align 검증됨"
+                ),
+                workflow_transition=transition,
+            )
+            self._clear_artifact_pending_load(cancel_workbench=False)
+        except Exception as exc:
+            if isinstance(ticket, ArtifactLoadTicket):
+                try:
+                    controller = self._artifact_workbench_controller()
+                    if controller.snapshot.pending_load is ticket:
+                        controller.fail_load(ticket, exc)
+                except (ArtifactWorkbenchError, StaleWorkflowOperationError):
+                    _LOGGER.debug("Embedded Project Open failure was stale", exc_info=True)
+            self._clear_artifact_pending_load(cancel_workbench=False)
+            self.status_info.setText(
+                "❌ 내장 원본 프로젝트 staging 실패 | 기존 scene 유지"
+            )
+            QMessageBox.critical(
+                self,
+                "ArtifactDocument 로딩 실패",
+                "내장 원본·geometry·장면 검증 중 실패하여 기존 작업을 유지했습니다."
+                f"\n\n{type(exc).__name__}: {exc}",
+            )
 
     def _start_artifact_project_load(
         self,
@@ -6030,7 +6321,7 @@ class MainWindow(QMainWindow):
             if isinstance(session, ArtifactSession):
                 self._artifact_workbench_controller().require_stable_session(session)
                 self._validate_native_scene_for_save(session)
-                save_amr_artifact_project(filepath, session.document, meta=meta)
+                save_amr_artifact_session_project(filepath, session, meta=meta)
             else:
                 state = self._collect_project_state()
                 save_amr_project(filepath, state, meta=meta)

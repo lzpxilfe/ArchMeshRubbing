@@ -6,8 +6,10 @@ Supports: OBJ, PLY, STL, OFF formats
 """
 
 from dataclasses import dataclass, field
+import hashlib
+import tempfile
 from pathlib import Path
-from typing import Optional, List, Union
+from typing import BinaryIO, Optional, List, Union
 import logging
 import numpy as np
 
@@ -15,6 +17,9 @@ from .logging_utils import log_once
 from .source_identity import SourceFingerprint, open_fingerprinted_file
 
 _LOGGER = logging.getLogger(__name__)
+
+_VERIFIED_STREAM_CHUNK_SIZE = 1024 * 1024
+_VERIFIED_STREAM_SPOOL_LIMIT = 8 * _VERIFIED_STREAM_CHUNK_SIZE
 
 try:
     import trimesh
@@ -748,6 +753,125 @@ class MeshLoader:
         # 로딩 시점에는 face normals만 계산 (vertex normals는 필요 시점에 계산)
         mesh_data.compute_normals(compute_vertex_normals=False)
         
+        return mesh_data
+
+    def load_verified_stream(
+        self,
+        source_stream: BinaryIO,
+        *,
+        unit: str,
+        source_format: str,
+        expected_sha256: str,
+        expected_size_bytes: int,
+        original_name: str,
+    ) -> MeshData:
+        """Verify and load one primary mesh stream without trusting a path.
+
+        The incoming bytes are copied incrementally into a bounded in-memory
+        spool which rolls over to a temporary file for larger sources.  The
+        digest and length are checked before the parser sees any bytes, then
+        the exact verified spool descriptor is rewound and passed to trimesh.
+        Only the primary file bytes are fingerprinted; formats which can refer
+        to sidecars do not gain any stronger identity guarantee here.
+        """
+        format_hint = str(source_format or "").strip().lower().removeprefix(".")
+        parse_ext = f".{format_hint}" if format_hint else ""
+        if parse_ext not in self.SUPPORTED_FORMATS:
+            raise ValueError(
+                f"Unsupported format: {parse_ext}\n"
+                f"Supported formats: {list(self.SUPPORTED_FORMATS.keys())}"
+            )
+
+        display_name = str(original_name)
+        expected_identity = SourceFingerprint(
+            sha256=expected_sha256,
+            size_bytes=expected_size_bytes,
+            mtime_ns=0,
+            original_name=display_name,
+            format=format_hint,
+        )
+
+        digest = hashlib.sha256()
+        observed_size = 0
+        with tempfile.SpooledTemporaryFile(
+            max_size=_VERIFIED_STREAM_SPOOL_LIMIT,
+            mode="w+b",
+        ) as verified_stream:
+            while True:
+                chunk = source_stream.read(_VERIFIED_STREAM_CHUNK_SIZE)
+                if not isinstance(chunk, (bytes, bytearray, memoryview)):
+                    raise TypeError("source_stream.read() must return bytes")
+                if not chunk:
+                    break
+                if len(chunk) > _VERIFIED_STREAM_CHUNK_SIZE:
+                    raise ValueError("source_stream returned a chunk larger than 1 MiB")
+                next_size = observed_size + len(chunk)
+                if next_size > expected_identity.size_bytes:
+                    raise ValueError(
+                        "Source size mismatch before mesh parsing: "
+                        f"expected {expected_identity.size_bytes}, observed at least {next_size}"
+                    )
+                digest.update(chunk)
+                written = verified_stream.write(chunk)
+                if written != len(chunk):
+                    raise OSError("failed to spool the complete source stream")
+                observed_size = next_size
+
+            observed_sha256 = digest.hexdigest()
+            if observed_size != expected_identity.size_bytes:
+                raise ValueError(
+                    "Source size mismatch before mesh parsing: "
+                    f"expected {expected_identity.size_bytes}, observed {observed_size}"
+                )
+            if observed_sha256 != expected_identity.sha256:
+                raise ValueError(
+                    "Source SHA-256 mismatch before mesh parsing: "
+                    f"expected {expected_identity.sha256}, observed {observed_sha256}"
+                )
+
+            source_identity = SourceFingerprint(
+                sha256=observed_sha256,
+                size_bytes=observed_size,
+                mtime_ns=0,
+                original_name=display_name,
+                format=format_hint,
+            )
+            verified_stream.seek(0)
+            try:
+                mesh = trimesh.load(
+                    verified_stream,
+                    file_type=format_hint,
+                    force='mesh',
+                    process=False,
+                    maintain_order=True,
+                )
+            except TypeError:
+                # 구버전 trimesh 호환. The same verified descriptor is reused.
+                verified_stream.seek(0)
+                mesh = trimesh.load(
+                    verified_stream,
+                    file_type=format_hint,
+                    force='mesh',
+                )
+
+        display_path = Path(display_name)
+        if isinstance(mesh, trimesh.Scene):
+            meshes = [g for g in mesh.geometry.values() if isinstance(g, trimesh.Trimesh)]
+            if len(meshes) == 0:
+                raise ValueError(f"No valid mesh found in: {display_path}")
+            mesh = trimesh.util.concatenate(meshes)
+
+        if not isinstance(mesh, trimesh.Trimesh):
+            raise TypeError(f"Expected trimesh.Trimesh, got {type(mesh).__name__}")
+
+        mesh_data = MeshData.from_trimesh(
+            mesh,
+            filepath=display_path,
+            unit=unit,
+            source_identity=source_identity,
+            source_format=format_hint,
+        )
+        mesh_data.compute_normals(compute_vertex_normals=False)
         return mesh_data
     
     def load_multiple(self, filepaths: List[Union[str, Path]], 

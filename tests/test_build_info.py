@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import ExitStack, redirect_stdout
+from contextlib import redirect_stdout
 import io
 import re
 import tempfile
@@ -46,20 +46,8 @@ def test_version_and_diagnostics_use_the_source_package_version() -> None:
     assert json.loads(build_info.diagnostics_json()) == diagnostics
 
 
-def test_self_test_passes_without_using_filesystem_mutation_apis() -> None:
-    forbidden = ("write_bytes", "write_text", "unlink", "rename", "replace")
-    with ExitStack() as stack:
-        for method_name in forbidden:
-            stack.enter_context(
-                patch.object(
-                    Path,
-                    method_name,
-                    side_effect=AssertionError(
-                        f"self-test must not call Path.{method_name}"
-                    ),
-                )
-            )
-        report = build_info.run_self_test()
+def test_self_test_passes_with_offline_embedded_project_roundtrip() -> None:
+    report = build_info.run_self_test()
 
     assert report["ok"] is True, report
     report_checks = cast(list[dict[str, Any]], report["checks"])
@@ -75,8 +63,12 @@ def test_self_test_passes_without_using_filesystem_mutation_apis() -> None:
         "artifact_document_canonical",
         "artifact_vector_canonical",
         "artifact_rubbing_canonical",
+        "artifact_embedded_project_roundtrip",
     }
     assert all(item["ok"] is True for item in checks.values())
+    assert checks["artifact_embedded_project_roundtrip"]["detail"].endswith(
+        "align=align:self-test-explicit, vertices=5"
+    )
     diagnostics = cast(dict[str, object], report["diagnostics"])
     assert diagnostics["application"] == {
         "name": "ArchMeshRubbing",

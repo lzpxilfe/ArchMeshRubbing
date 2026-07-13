@@ -22,6 +22,7 @@ from app_interactive import (
     MainWindow,
     TaskThread,
     UnitSelectionDialog,
+    _load_project_open_candidate,
     _native_cutline_frame,
     _mesh_source_payload,
     _validate_project_source_declarations,
@@ -77,11 +78,10 @@ from src.core.artifact_vector_extractor import (
 )
 from src.core.artifact_vector_record import PlanarFrame
 from src.core.project_file import (
-    ARTIFACT_PAYLOAD_TYPE,
+    EmbeddedSourceRequiredError,
     MIGRATION_MARKER_NAME,
     ProjectFormatError,
     ProjectSerializationError,
-    UnsupportedPayloadError,
 )
 from src.core.mesh_loader import MeshData
 from src.core.source_identity import SourceFingerprint, SourceVerificationStatus
@@ -1221,7 +1221,7 @@ def test_native_project_save_never_serializes_legacy_ui_state() -> None:
     document_sha_before = session.document.canonical_sha256
     try:
         with (
-            patch("app_interactive.save_amr_artifact_project") as save_native,
+            patch("app_interactive.save_amr_artifact_session_project") as save_native,
             patch.object(
                 window,
                 "_collect_project_state",
@@ -1235,7 +1235,7 @@ def test_native_project_save_never_serializes_legacy_ui_state() -> None:
         save_native.assert_called_once()
         assert save_native.call_args.args[:2] == (
             "/tmp/native-artifact.amr",
-            session.document,
+            session,
         )
         assert session.document.canonical_json_bytes() == canonical_before
         assert session.document.canonical_sha256 == document_sha_before
@@ -3759,13 +3759,27 @@ def test_project_open_preserves_scene_on_invalid_container_and_forces_v1_save_as
         app = QApplication([])
 
     window = MainWindow()
+    sentinel = object()
+    window.current_mesh = sentinel
     try:
-        with (
-            patch("app_interactive.load_amr_project", side_effect=ProjectFormatError("corrupt")),
-            patch.object(window.viewport, "clear_scene") as clear_scene,
-            patch("app_interactive.QMessageBox.critical"),
-        ):
-            window.open_project_path("corrupt.amr")
+        owner = Mock()
+        window._project_open_thread = owner
+        window._project_open_request_id = "project-open:corrupt"
+        window._project_open_base_authority_epoch = (
+            window._artifact_workbench.snapshot.authority_epoch
+        )
+        window._artifact_load_active = True
+        with patch("app_interactive.QMessageBox.critical"):
+            window._dispatch_project_open_failure(
+                owner,
+                "project-open:corrupt",
+                "ProjectFormatError: corrupt",
+            )
+        assert window.current_mesh is sentinel
+        assert not window._artifact_load_active
+
+        with patch.object(window.viewport, "clear_scene") as clear_scene:
+            pass
         clear_scene.assert_not_called()
 
         legacy_doc = {
@@ -3792,11 +3806,10 @@ def test_project_open_preserves_scene_on_invalid_container_and_forces_v1_save_as
             },
         }
         with (
-            patch("app_interactive.load_amr_project", return_value=legacy_doc),
             patch.object(window.viewport, "clear_scene"),
             patch.object(window, "_start_next_project_object_load") as start_load,
         ):
-            window.open_project_path("/projects/legacy.amr")
+            window._start_legacy_project_load(legacy_doc, "/projects/legacy.amr")
 
         start_load.assert_called_once()
         assert window._current_project_path is None
@@ -3828,32 +3841,208 @@ def test_project_open_preserves_scene_on_invalid_container_and_forces_v1_save_as
         app.processEvents()
 
 
-def test_project_open_dispatches_artifact_payload_to_native_loader() -> None:
+def test_embedded_project_open_uses_worker_session_without_source_picker() -> None:
     app = QApplication.instance()
     if app is None:
         app = QApplication([])
-    document = _artifact_session().document
+    session = _artifact_session()
     window = MainWindow()
+    owner = Mock()
+    window._project_open_thread = owner
+    window._project_open_request_id = "project-open:embedded"
+    window._project_open_base_authority_epoch = (
+        window._artifact_workbench.snapshot.authority_epoch
+    )
+    window._artifact_load_active = True
+    captured: dict[str, object] = {}
+    try:
+        def capture(candidate, **kwargs):
+            captured["session"] = candidate
+            captured["kwargs"] = kwargs
+
+        with (
+            patch.object(window, "_resolve_artifact_source_path") as resolve_source,
+            patch.object(
+                window,
+                "_publish_artifact_session_projection",
+                side_effect=capture,
+            ) as publish,
+        ):
+            window._dispatch_project_open_success(
+                owner,
+                "project-open:embedded",
+                "/projects/native.amr",
+                {
+                    "kind": "artifact_embedded",
+                    "document": session.document,
+                    "session": session,
+                },
+            )
+
+        resolve_source.assert_not_called()
+        publish.assert_called_once()
+        candidate = captured["session"]
+        assert isinstance(candidate, ArtifactSession)
+        assert candidate.document == session.document
+        assert (
+            candidate.source_mesh.source_identity.sha256
+            == session.source_mesh.source_identity.sha256
+        )
+        kwargs = captured["kwargs"]
+        assert kwargs["project_path"] == "/projects/native.amr"
+        transition = kwargs["workflow_transition"]
+        assert isinstance(transition, ProjectionTransition)
+        assert transition.kind is WorkflowTransitionKind.REOPEN_PROJECT
+        assert not window._artifact_load_active
+    finally:
+        ticket = window._artifact_workbench.snapshot.pending_load
+        if ticket is not None:
+            window._artifact_workbench.cancel_load(ticket)
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_manifest_only_project_open_keeps_external_source_picker_path() -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    session = _artifact_session()
+    window = MainWindow()
+    owner = Mock()
+    window._project_open_thread = owner
+    window._project_open_request_id = "project-open:manifest"
+    window._project_open_base_authority_epoch = (
+        window._artifact_workbench.snapshot.authority_epoch
+    )
+    window._artifact_load_active = True
     try:
         with (
-            patch(
-                "app_interactive.load_amr_project",
-                side_effect=UnsupportedPayloadError(
-                    ARTIFACT_PAYLOAD_TYPE,
-                    "1.0.0",
-                ),
-            ),
-            patch(
-                "app_interactive.load_amr_artifact_project",
-                return_value=document,
-            ) as load_native,
-            patch.object(window, "_start_artifact_project_load") as start_native,
+            patch.object(
+                window,
+                "_resolve_artifact_source_path",
+                return_value="/resolved/artifact.ply",
+            ) as resolve_source,
+            patch.object(window, "_start_async_load", return_value=True) as start_load,
         ):
-            window.open_project_path("/projects/native.amr")
+            window._dispatch_project_open_success(
+                owner,
+                "project-open:manifest",
+                "/projects/manifest-only.amr",
+                {
+                    "kind": "artifact_manifest_only",
+                    "document": session.document,
+                },
+            )
 
-        load_native.assert_called_once_with("/projects/native.amr")
-        start_native.assert_called_once_with(document, "/projects/native.amr")
+        resolve_source.assert_called_once()
+        start_load.assert_called_once()
+        assert window._artifact_load_active
+        assert window._artifact_pending_document == session.document
+        assert window._artifact_pending_project_path == "/projects/manifest-only.amr"
     finally:
+        window._clear_artifact_pending_load(cancel_workbench=True)
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_corrupt_embedded_package_has_no_external_or_legacy_fallback() -> None:
+    with (
+        patch(
+            "app_interactive.load_amr_artifact_project_package",
+            side_effect=ProjectFormatError("corrupt embedded source"),
+        ),
+        patch("app_interactive.load_amr_artifact_session_project") as load_session,
+        patch("app_interactive.load_amr_project") as load_legacy,
+    ):
+        with pytest.raises(ProjectFormatError, match="corrupt embedded source"):
+            _load_project_open_candidate("/projects/corrupt.amr")
+
+    load_session.assert_not_called()
+    load_legacy.assert_not_called()
+
+
+def test_manifest_only_worker_result_is_selected_by_typed_session_error() -> None:
+    document = _artifact_session().document
+    package = SimpleNamespace(document=document, source_bundle=None)
+    with (
+        patch(
+            "app_interactive.load_amr_artifact_project_package",
+            return_value=package,
+        ),
+        patch(
+            "app_interactive.load_amr_artifact_session_project",
+            side_effect=EmbeddedSourceRequiredError("manifest only"),
+        ),
+        patch("app_interactive.load_amr_project") as load_legacy,
+    ):
+        result = _load_project_open_candidate("/projects/manifest-only.amr")
+
+    assert result == {
+        "kind": "artifact_manifest_only",
+        "document": document,
+    }
+    load_legacy.assert_not_called()
+
+
+def test_stale_project_open_worker_cannot_replace_newer_authority() -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    session = _artifact_session()
+    window = MainWindow()
+    old_owner = Mock()
+    new_owner = Mock()
+    window._project_open_thread = new_owner
+    window._project_open_request_id = "project-open:new"
+    window._project_open_base_authority_epoch = (
+        window._artifact_workbench.snapshot.authority_epoch
+    )
+    try:
+        with patch.object(window, "_finish_embedded_artifact_project_open") as publish:
+            window._dispatch_project_open_success(
+                old_owner,
+                "project-open:old",
+                "/projects/old.amr",
+                {
+                    "kind": "artifact_embedded",
+                    "document": session.document,
+                    "session": session,
+                },
+            )
+        publish.assert_not_called()
+        assert window._project_open_thread is new_owner
+        assert window._project_open_request_id == "project-open:new"
+
+        window._dispatch_project_open_finished(old_owner, "project-open:old")
+        old_owner.deleteLater.assert_called_once()
+        assert window._project_open_thread is new_owner
+
+        window._artifact_load_active = True
+        window._artifact_session = session
+        window._artifact_workbench.synchronize_legacy_session(
+            session,
+            project_path=None,
+        )
+        with patch.object(window, "_finish_embedded_artifact_project_open") as publish:
+            window._dispatch_project_open_success(
+                new_owner,
+                "project-open:new",
+                "/projects/new-but-now-stale.amr",
+                {
+                    "kind": "artifact_embedded",
+                    "document": session.document,
+                    "session": session,
+                },
+            )
+        publish.assert_not_called()
+        assert not window._artifact_load_active
+        assert window._artifact_workbench.snapshot.session is session
+    finally:
+        window._project_open_thread = None
+        window._project_open_request_id = None
+        window._project_open_base_authority_epoch = None
         window.deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         app.processEvents()

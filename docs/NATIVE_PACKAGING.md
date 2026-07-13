@@ -35,7 +35,7 @@ Windows에서는 활성화 명령만 `.venv\Scripts\activate`로 바꾼다. 기�
 
 1. embedded build manifest와 runtime lock hash
 2. 정확한 runtime distribution 버전과 Shapely/GEOS 조합
-3. 아이콘, lock, 5개 JSON schema
+3. 아이콘, lock, 6개 JSON schema
 4. offscreen Qt application
 5. 실제 `MainWindow`, `QOpenGLWidget`, OpenGL.GL/GLU import와 생성
 6. OBJ, PLY, STL, OFF, glTF, GLB in-memory parser
@@ -43,6 +43,7 @@ Windows에서는 활성화 명령만 `.venv\Scripts\activate`로 바꾼다. 기�
 8. canonical `ArtifactDocument` round-trip golden
 9. canonical Cutline golden
 10. canonical Digital Rubbing golden
+11. 실제 PLY → 단위/Align session → embedded `.amr` 저장 → 외부 원본 삭제 → source/geometry/Align/world vertex 재검증
 
 Offscreen에서 `QOpenGLWidget`을 생성하는 검사는 module/plugin 누락을 잡지만 실제 GPU context와 frame 정확성을 증명하지 않는다. Source checkout에는 native QPA에서 실제 `Viewport3D`의 context/FBO/VBO/pixel/depth/pick을 실행하는 `src.gui.opengl_driver_smoke`가 추가됐고, Linux CI는 Xvfb+xcb+Mesa llvmpipe를 별도 차단 job으로 구성한다. 이 검사는 아직 frozen executable self-test나 대표 하드웨어 GPU 인증이 아니다.
 
