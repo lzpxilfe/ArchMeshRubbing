@@ -4,6 +4,7 @@
     "main.py",
     "src/build_info.py",
     "tools/build_native.py",
+    "tools/build_portable_archive.py",
     "tools/generate_build_info.py",
     "src/application/__init__.py",
     "src/application/artifact_exports.py",
@@ -35,6 +36,7 @@
     "src/core/artifact_rubbing_record.py",
     "src/core/artifact_rubbing_export.py",
     "src/core/canonical_png.py",
+    "src/portable_archive.py",
     "src/gui/opengl_context.py",
     "src/gui/opengl_driver_smoke.py",
     "src/gui/render_coordinates.py",
@@ -72,7 +74,7 @@
     "tests/test_rubbing_schemas.py",
     "tests/test_render_coordinates.py",
     "tests/test_opengl_driver_smoke.py",
-    "tests/test_windows_installer.py"
+    "tests/test_portable_archive.py"
   ],
   "exclude": [
     "**/__pycache__",

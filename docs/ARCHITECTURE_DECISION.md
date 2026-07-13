@@ -17,7 +17,7 @@ ArchMeshRubbing을 전면 재작성하지 않는다. 검증 가능한 headless �
 - `app_interactive.py`는 약 16,800줄, `src/gui/viewport_3d.py`는 약 15,600줄이며 각각 수백 개 메서드와 많은 광범위 예외 처리를 포함한다. UI, 상태, 렌더링, 작업 실행, 저장 정책이 서로 강하게 얽혀 있어 이 두 파일을 계속 확장하는 비용은 높다.
 - 반면 primary source identity, versioned parser source closure, 명시적 단위, immutable Align revision, canonical JSON/PNG, Cutline, Outline, Digital Rubbing, offline export는 GUI와 분리된 코어와 버전 스키마를 가진다.
 - Windows 대상 commit `b12d4874a4a8`의 source CI에서 전체 `670 passed, 128 subtests passed`, M0 Pyright `0 errors`, Ruff와 Windows workflow·native actual-frame gate가 통과해 현재 계약을 보호한다.
-- 같은 commit의 unsigned Windows frozen 앱은 12-check offline complete workflow와 qwindows+llvmpipe actual-frame gate를 통과했다. 당시 결과만으로는 installer 증거가 아니었고, 이후 commit `19558f324deb`에서 ASCII per-user 설치·offline/actual-frame·제거 gate까지 통과했다. 두 결과 모두 서명·대표 하드웨어 GPU 또는 공개 배포 증거는 아니다.
+- 같은 commit의 unsigned Windows frozen 앱은 당시 offline complete workflow와 qwindows+llvmpipe actual-frame gate를 통과했다. 이후 installer 실험도 내부 설치·제거를 통과했지만 상용 compiler 정책 때문에 현재 배포 계약에서 제거했다. 두 결과 모두 서명·대표 하드웨어 GPU 또는 공개 배포 증거는 아니다.
 
 전면 재작성은 이 검증 자산과 오래 축적된 기와 처리 알고리즘까지 동시에 다시 만들게 한다. 반대로 기존 GUI에 기능을 계속 덧붙이면 mutable scene 상태와 권위 기록이 다시 섞인다. 따라서 코어는 보존하고 셸은 교체하는 경계가 가장 안전하다.
 
@@ -30,7 +30,7 @@ ArchMeshRubbing을 전면 재작성하지 않는다. 검증 가능한 headless �
 | RFC 8785 JSON, canonical PNG, versioned schemas | mutable `legacy_ui_state`와 암묵적 작업 완료 상태 |
 | `.amr`, `.amr-vector`, `.amr-rubbing` 검증·원자 저장 | screenshot/OpenCV/convex-hull을 실측 산출물로 쓰는 우회 경로 |
 | 테스트 fixture, golden hash, offline validator | destructive bake와 저장 가능한 원본 변형 |
-| 기와형 flatten 알고리즘과 검토용 legacy 기능 | 플랫폼별 수동 빌드·바로가기 스크립트 |
+| 기와형 flatten 알고리즘과 검토용 legacy 기능 | 플랫폼별 수동 빌드·바로가기·상용 installer compiler 의존 |
 
 Legacy 기능은 즉시 삭제하지 않는다. 연구 검토용이면 명확히 `legacy review`로 표시하고, 1:1 측정 결과처럼 보이지 않게 분리한다. 새 포맷으로 안전하게 승격할 수 없는 상태는 추정 변환하지 않고 fail closed한다.
 
@@ -66,7 +66,7 @@ DerivedRecord session update는 기존 source/metadata/Align/record를 바꿀 �
 4. vector/rubbing export를 worker staging과 final Workbench authority publication으로 분리한다. 이 단계는 이식 완료했으며 실제 대형 package에서 lock hold 시간과 취소 지연을 후속 측정한다.
 5. 각 단계가 새 record/export로 완전히 연결되면 대응 legacy 측정 진입점을 제거한다.
 6. 실제 유물 pilot과 대용량/GPU precision 검증 후 legacy 기와 검토 기능의 유지·플러그인화·제거를 결정한다.
-7. unsigned installer의 설치 후 offline/actual-frame/제거 재검증에 더해 Windows wheel hash lock, 실제 payload manifest, SPDX/NOTICE 생성·설치본 재검증을 유지한다. 라이선스 결론, Authenticode, 상위 build provenance와 대표 Windows pilot이 해결된 뒤에만 공개 바이너리를 만든다.
+7. Windows wheel hash lock, 실제 payload manifest, SPDX/NOTICE와 검증형 portable ZIP을 유지한다. ZIP은 한글 경로에 추출해 outbound 차단 complete workflow·actual-frame·삭제를 다시 통과해야 한다. 라이선스 결론, 서명 정책, 상위 build provenance와 대표 Windows pilot이 해결된 뒤에만 공개 바이너리를 만든다.
 
 ## 완료 기준
 
@@ -74,7 +74,7 @@ DerivedRecord session update는 기존 source/metadata/Align/record를 바꿀 �
 - 모든 1:1 SVG/PNG가 `READY + FRESH` record와 provenance에서만 생성된다.
 - GUI 없이 동일 document와 source로 같은 canonical hash를 재현한다.
 - Windows frozen CI와 Windows native-QPA/실제 OpenGL smoke가 통과한다. (commit `b12d4874a4a8`에서 충족)
-- Windows unsigned installer의 payload 전수 비교, outbound 차단 complete workflow, 설치본 actual-frame과 제거가 통과한다. (commit `19558f324deb`에서 ASCII per-user 경로 충족; 비 ASCII 경로는 미충족)
+- Windows portable ZIP의 모든 entry와 release evidence를 검증하고, 비 ASCII 경로 추출본에서 outbound 차단 complete workflow·actual-frame·삭제가 통과한다.
 - 대표 유물군 pilot에서 단위·정렬·선 정밀도·탁본 판독 결과를 고고학자가 검수한다.
 - 공개 배포 전 프로젝트와 GUI toolkit의 라이선스가 호환되고 제3자 고지가 완성된다.
 

@@ -1,4 +1,4 @@
-name: Frozen package smoke
+name: Windows portable package smoke
 
 on:
   push:
@@ -8,7 +8,6 @@ on:
       - ".gitattributes"
       - ".github/workflows/package-smoke.yml"
       - "ArchMeshRubbing.spec"
-      - "installer/**"
       - "LICENSE"
       - "README.md"
       - "main.py"
@@ -21,6 +20,7 @@ on:
       - "schemas/**"
       - "src/**"
       - "third_party_licenses/**"
+      - "tools/build_portable_archive.py"
       - "tools/generate_build_info.py"
       - "tools/generate_release_evidence.py"
   pull_request:
@@ -28,7 +28,6 @@ on:
       - ".gitattributes"
       - ".github/workflows/package-smoke.yml"
       - "ArchMeshRubbing.spec"
-      - "installer/**"
       - "LICENSE"
       - "README.md"
       - "main.py"
@@ -41,6 +40,7 @@ on:
       - "schemas/**"
       - "src/**"
       - "third_party_licenses/**"
+      - "tools/build_portable_archive.py"
       - "tools/generate_build_info.py"
       - "tools/generate_release_evidence.py"
   workflow_dispatch:
@@ -49,16 +49,14 @@ permissions:
   contents: read
 
 concurrency:
-  group: frozen-package-smoke-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: windows-portable-smoke-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
-  frozen-package-smoke:
-    name: Frozen package smoke (Windows)
-    # The current hosted Windows image carries Inno Setup 6. The build step
-    # still discovers and verifies the compiler instead of assuming its path.
+  portable-package-smoke:
+    name: Portable package smoke (Windows)
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 45
     env:
       QT_QPA_PLATFORM: offscreen
       LIBGL_ALWAYS_SOFTWARE: "1"
@@ -118,8 +116,11 @@ jobs:
           $process = Start-Process `
             -FilePath "dist\ArchMeshRubbing\ArchMeshRubbing.exe" `
             -ArgumentList "--self-test-report", "build\frozen-self-test.json" `
-            -Wait `
             -PassThru
+          if (-not $process.WaitForExit(120000)) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            throw "Frozen self-test exceeded 120 seconds"
+          }
           if ($process.ExitCode -ne 0) {
             throw "Frozen self-test exited with code $($process.ExitCode)"
           }
@@ -146,8 +147,11 @@ jobs:
           $process = Start-Process `
             -FilePath "dist\ArchMeshRubbing\ArchMeshRubbing.exe" `
             -ArgumentList "--opengl-driver-smoke-report", "build\frozen-windows-opengl-driver-smoke.json" `
-            -Wait `
             -PassThru
+          if (-not $process.WaitForExit(120000)) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            throw "Frozen OpenGL smoke exceeded 120 seconds"
+          }
           if ($process.ExitCode -ne 0) {
             if (Test-Path "build\frozen-windows-opengl-driver-smoke.json") {
               Get-Content "build\frozen-windows-opengl-driver-smoke.json"
@@ -168,176 +172,77 @@ jobs:
           assert d.get('checks') and all(x.get('ok') is True for x in d['checks']), d;
           print('Frozen Windows native-QPA OpenGL smoke passed:', c.get('renderer'))"
 
-      - name: Build unsigned Windows installer
+      - name: Build and verify deterministic portable archive
         shell: pwsh
         run: |
           $buildInfo = Get-Content "build\generated\build_info.json" -Raw | ConvertFrom-Json
-          $sourceDir = (Resolve-Path "dist\ArchMeshRubbing").Path
-          $outputDir = (New-Item -ItemType Directory -Path "build\installer" -Force).FullName
-          $isccCandidates = @(
-            @(
-              "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
-              "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
-              (Get-Command "ISCC.exe" -ErrorAction SilentlyContinue).Source
-            ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
-          )
-          if ($isccCandidates.Count -eq 0) {
-            throw "Inno Setup compiler was not found on the Windows runner"
+          $epochText = (& git show -s --format=%ct "${{ github.sha }}").Trim()
+          if ($epochText -notmatch '^\d+$') {
+            throw "Could not read source commit epoch"
           }
-          $iscc = $isccCandidates[0]
-          $versionInfo = (Get-Item $iscc).VersionInfo
-          $compilerVersion = @(
-            $versionInfo.ProductVersion
-            $versionInfo.FileVersion
-          ) | Where-Object { $_ -match '^6\.' } | Select-Object -First 1
-          if (-not $compilerVersion) {
-            # The hosted image's ISCC.exe currently exposes 0.0.0.0 in its
-            # Win32 version resource. Chocolatey is the image's authoritative
-            # installed-package inventory and provides machine-readable output.
-            $packageRows = @(& choco list innosetup --exact --limit-output 2>$null)
-            if ($LASTEXITCODE -ne 0) {
-              throw "Could not query the installed Inno Setup package version"
-            }
-            $packageRow = $packageRows |
-              Where-Object { $_ -match '^innosetup\|6\.' } |
-              Select-Object -First 1
-            if ($packageRow) {
-              $compilerVersion = ($packageRow -split '\|', 2)[1]
-            }
-          }
-          if (-not $compilerVersion -or -not $compilerVersion.StartsWith("6.")) {
-            throw "Inno Setup 6 is required; package/version metadata did not identify it"
-          }
-          $compilerHash = (Get-FileHash -Algorithm SHA256 $iscc).Hash.ToLowerInvariant()
-          Write-Host "Using Inno Setup $compilerVersion from $iscc"
-
-          & $iscc `
-            "/DAppVersion=$($buildInfo.version)" `
-            "/DSourceDir=$sourceDir" `
-            "/DOutputDir=$outputDir" `
-            "/DSourceCommit=$($buildInfo.commit)" `
-            "installer\ArchMeshRubbing.iss"
+          $outputDir = New-Item -ItemType Directory -Path "build\portable" -Force
+          $archiveName = "ArchMeshRubbing-$($buildInfo.version)-Windows-x64-portable.zip"
+          $archive = Join-Path $outputDir.FullName $archiveName
+          $manifest = "$archive.manifest.json"
+          python tools/build_portable_archive.py build `
+            --payload "dist\ArchMeshRubbing" `
+            --archive $archive `
+            --manifest $manifest `
+            --source-date-epoch ([int64]$epochText)
           if ($LASTEXITCODE -ne 0) {
-            throw "Inno Setup compiler exited with code $LASTEXITCODE"
+            throw "Portable archive build failed"
           }
-
-          $expectedName = "ArchMeshRubbing-$($buildInfo.version)-Windows-x64-unsigned.exe"
-          $installer = Join-Path $outputDir $expectedName
-          if (-not (Test-Path $installer -PathType Leaf)) {
-            throw "Expected installer was not created: $installer"
+          python tools/build_portable_archive.py verify `
+            --archive $archive `
+            --manifest $manifest
+          if ($LASTEXITCODE -ne 0) {
+            throw "Portable archive verification failed"
           }
-          $unexpected = @(Get-ChildItem $outputDir -File | Where-Object { $_.Name -ne $expectedName })
-          if ($unexpected.Count -ne 0) {
-            throw "Unexpected installer outputs: $($unexpected.Name -join ', ')"
+          $portable = Get-Content $manifest -Raw | ConvertFrom-Json
+          if ($portable.release_evidence.source_commit -ne "${{ github.sha }}") {
+            throw "Portable archive source commit does not match the workflow"
           }
-
-          $signature = Get-AuthenticodeSignature $installer
+          $signature = Get-AuthenticodeSignature "dist\ArchMeshRubbing\ArchMeshRubbing.exe"
           if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::NotSigned) {
-            throw "CI installer must remain unsigned; status was $($signature.Status)"
+            throw "CI executable must remain unsigned; status was $($signature.Status)"
           }
-          $hash = Get-FileHash -Algorithm SHA256 $installer
-          $releaseEvidencePath = "dist\ArchMeshRubbing\release-evidence\release-evidence.json"
-          $releaseEvidence = Get-Content $releaseEvidencePath -Raw | ConvertFrom-Json
-          $evidence = [ordered]@{
-            schema_version = "1"
-            app_version = $buildInfo.version
-            source_commit = $buildInfo.commit
-            build_manifest_sha256 = (Get-FileHash -Algorithm SHA256 "build\generated\build_info.json").Hash.ToLowerInvariant()
-            windows_wheel_lock_sha256 = $buildInfo.windows_wheel_lock_sha256
-            release_evidence_sha256 = (Get-FileHash -Algorithm SHA256 $releaseEvidencePath).Hash.ToLowerInvariant()
-            payload_sha256 = $releaseEvidence.payload_sha256
-            installer_name = $expectedName
-            installer_sha256 = $hash.Hash.ToLowerInvariant()
-            installer_size = (Get-Item $installer).Length
-            authenticode_status = $signature.Status.ToString()
-            compiler_product_version = $compilerVersion
-            compiler_sha256 = $compilerHash
-            runner_image = $env:ImageOS
-            runner_image_version = $env:ImageVersion
-          }
-          $evidence | ConvertTo-Json -Depth 3 | Set-Content -Encoding utf8NoBOM "build\installer-build.json"
-          Get-Content "build\installer-build.json"
-          "AMR_INSTALLER=$installer" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Portable archive $archiveName: $($portable.archive.sha256), $($portable.payload.file_count) files"
+          "AMR_PORTABLE_ARCHIVE=$archive" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "AMR_PORTABLE_MANIFEST=$manifest" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Install into isolated per-user path
+      - name: Verify and extract portable archive into Korean path
         shell: pwsh
         run: |
-          $installDir = Join-Path $env:RUNNER_TEMP "ArchMeshRubbing install verification"
-          $installLog = Join-Path $env:RUNNER_TEMP "archmeshrubbing-install.log"
-          if (Test-Path $installDir) {
-            throw "Refusing to reuse installer smoke path: $installDir"
+          $portableDir = Join-Path $env:RUNNER_TEMP "문화유산 기록\ArchMeshRubbing"
+          if (Test-Path $portableDir) {
+            throw "Refusing to reuse portable smoke path: $portableDir"
           }
-          $arguments = @(
-            "/SP-",
-            "/VERYSILENT",
-            "/SUPPRESSMSGBOXES",
-            "/NORESTART",
-            "/DIR=`"$installDir`"",
-            "/LOG=`"$installLog`""
-          )
-          $process = Start-Process `
-            -FilePath $env:AMR_INSTALLER `
-            -ArgumentList $arguments `
-            -Wait `
-            -PassThru
-          if ($process.ExitCode -ne 0) {
-            if (Test-Path $installLog) { Get-Content $installLog }
-            throw "Installer exited with code $($process.ExitCode)"
+          python tools/build_portable_archive.py extract `
+            --archive $env:AMR_PORTABLE_ARCHIVE `
+            --manifest $env:AMR_PORTABLE_MANIFEST `
+            --destination $portableDir
+          if ($LASTEXITCODE -ne 0) {
+            throw "Portable archive extraction failed"
           }
+          python tools/generate_release_evidence.py verify --payload $portableDir
+          if ($LASTEXITCODE -ne 0) {
+            throw "Extracted release evidence verification failed"
+          }
+          $portableExe = Join-Path $portableDir "ArchMeshRubbing.exe"
+          if (-not (Test-Path $portableExe -PathType Leaf)) {
+            throw "Portable executable is missing: $portableExe"
+          }
+          "AMR_PORTABLE_DIR=$portableDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "AMR_PORTABLE_EXE=$portableExe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-          $installedExe = Join-Path $installDir "ArchMeshRubbing.exe"
-          if (-not (Test-Path $installedExe -PathType Leaf)) {
-            Get-Content $installLog
-            throw "Installed executable is missing: $installedExe"
-          }
-          $shortcut = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\ArchMeshRubbing\ArchMeshRubbing.lnk"
-          if (-not (Test-Path $shortcut -PathType Leaf)) {
-            throw "Per-user Start Menu shortcut is missing: $shortcut"
-          }
-
-          $sourceRoot = (Resolve-Path "dist\ArchMeshRubbing").Path
-          $payload = @(Get-ChildItem $sourceRoot -Recurse -File)
-          foreach ($source in $payload) {
-            $relative = [IO.Path]::GetRelativePath($sourceRoot, $source.FullName)
-            $installed = Join-Path $installDir $relative
-            if (-not (Test-Path $installed -PathType Leaf)) {
-              throw "Installed payload is missing: $relative"
-            }
-            $sourceHash = (Get-FileHash -Algorithm SHA256 $source.FullName).Hash
-            $installedHash = (Get-FileHash -Algorithm SHA256 $installed).Hash
-            if ($sourceHash -ne $installedHash) {
-              throw "Installed payload hash mismatch: $relative"
-            }
-          }
-          $payloadNames = @{}
-          foreach ($source in $payload) {
-            $payloadNames[[IO.Path]::GetRelativePath($sourceRoot, $source.FullName)] = $true
-          }
-          $unexpected = @(
-            Get-ChildItem $installDir -Recurse -File | Where-Object {
-              $relative = [IO.Path]::GetRelativePath($installDir, $_.FullName)
-              -not $payloadNames.ContainsKey($relative) -and
-                $relative -notmatch '^unins\d{3}\.(dat|exe|msg)$'
-            }
-          )
-          if ($unexpected.Count -ne 0) {
-            throw "Unexpected installed files: $($unexpected.FullName -join ', ')"
-          }
-          Write-Host "Verified $($payload.Count) installed payload files byte-for-byte."
-
-          "AMR_INSTALL_DIR=$installDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "AMR_INSTALLED_EXE=$installedExe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "AMR_INSTALL_LOG=$installLog" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "AMR_SHORTCUT=$shortcut" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-      - name: Enforce installed executable offline boundary
+      - name: Enforce portable executable offline boundary
         shell: pwsh
         run: |
           $ruleName = "ArchMeshRubbing CI offline $env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
           New-NetFirewallRule `
             -DisplayName $ruleName `
             -Direction Outbound `
-            -Program $env:AMR_INSTALLED_EXE `
+            -Program $env:AMR_PORTABLE_EXE `
             -Action Block `
             -Profile Any | Out-Null
           "AMR_FIREWALL_RULE=$ruleName" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
@@ -346,12 +251,12 @@ jobs:
           if ($rule.Enabled.ToString() -ne "True" -or $rule.Action.ToString() -ne "Block") {
             throw "Outbound deny rule is not enabled"
           }
-          if ([IO.Path]::GetFullPath($application.Program) -ne [IO.Path]::GetFullPath($env:AMR_INSTALLED_EXE)) {
+          if ([IO.Path]::GetFullPath($application.Program) -ne [IO.Path]::GetFullPath($env:AMR_PORTABLE_EXE)) {
             throw "Outbound deny rule targets the wrong executable: $($application.Program)"
           }
           Write-Host "Outbound network blocked for $($application.Program)"
 
-      - name: Run installed offline workflow self-test
+      - name: Run portable offline workflow self-test from Korean path
         shell: pwsh
         env:
           QT_QPA_PLATFORM: offscreen
@@ -360,33 +265,36 @@ jobs:
           ALL_PROXY: http://127.0.0.1:9
           NO_PROXY: ""
         run: |
-          $report = Join-Path $env:RUNNER_TEMP "installed-self-test.json"
+          $reportDir = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP "유물 결과") -Force
+          $report = Join-Path $reportDir.FullName "오프라인-자체검증.json"
           $process = Start-Process `
-            -FilePath $env:AMR_INSTALLED_EXE `
+            -FilePath $env:AMR_PORTABLE_EXE `
             -ArgumentList "--self-test-report", "`"$report`"" `
-            -Wait `
             -PassThru
+          if (-not $process.WaitForExit(120000)) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            throw "Portable self-test exceeded 120 seconds"
+          }
           if ($process.ExitCode -ne 0) {
             if (Test-Path $report) { Get-Content $report }
-            throw "Installed self-test exited with code $($process.ExitCode)"
+            throw "Portable self-test exited with code $($process.ExitCode)"
           }
           $data = Get-Content $report -Raw | ConvertFrom-Json
           if (-not $data.ok -or $data.checks.Count -ne 13) {
             Get-Content $report
-            throw "Installed self-test did not pass all 13 checks"
+            throw "Portable self-test did not pass all 13 checks"
           }
           foreach ($check in $data.checks) {
-            if (-not $check.ok) { throw "Installed self-test check failed: $($check.name)" }
+            if (-not $check.ok) { throw "Portable self-test check failed: $($check.name)" }
           }
           if (-not ($data.checks.name -contains "artifact_complete_workflow_offline")) {
-            throw "Installed self-test omitted the complete offline workflow"
+            throw "Portable self-test omitted the complete offline workflow"
           }
           if (-not ($data.checks.name -contains "release_evidence")) {
-            throw "Installed self-test omitted release evidence verification"
+            throw "Portable self-test omitted release evidence verification"
           }
-          "AMR_INSTALLED_SELF_TEST=$report" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Run installed Windows native-QPA OpenGL smoke
+      - name: Run portable Windows native-QPA OpenGL smoke from Korean path
         shell: pwsh
         env:
           QT_QPA_PLATFORM: windows
@@ -397,65 +305,48 @@ jobs:
           ALL_PROXY: http://127.0.0.1:9
           NO_PROXY: ""
         run: |
-          $report = Join-Path $env:RUNNER_TEMP "installed-windows-opengl-driver-smoke.json"
+          $reportDir = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP "유물 결과") -Force
+          $report = Join-Path $reportDir.FullName "윈도우-화면검증.json"
           $process = Start-Process `
-            -FilePath $env:AMR_INSTALLED_EXE `
+            -FilePath $env:AMR_PORTABLE_EXE `
             -ArgumentList "--opengl-driver-smoke-report", "`"$report`"" `
-            -Wait `
             -PassThru
+          if (-not $process.WaitForExit(120000)) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            throw "Portable OpenGL smoke exceeded 120 seconds"
+          }
           if ($process.ExitCode -ne 0) {
             if (Test-Path $report) { Get-Content $report }
-            throw "Installed OpenGL smoke exited with code $($process.ExitCode)"
+            throw "Portable OpenGL smoke exited with code $($process.ExitCode)"
           }
           $data = Get-Content $report -Raw | ConvertFrom-Json
           $context = $data.context
           if (-not $data.ok -or $context.qt_platform -ne "windows" -or -not $context.software_renderer) {
             Get-Content $report
-            throw "Installed OpenGL smoke did not use the required Windows software context"
+            throw "Portable OpenGL smoke did not use the required Windows software context"
           }
           if ($data.render_modes.Count -ne 2) {
-            throw "Installed OpenGL smoke omitted a projection mode"
+            throw "Portable OpenGL smoke omitted a projection mode"
           }
           foreach ($check in $data.checks) {
-            if (-not $check.ok) { throw "Installed OpenGL check failed: $($check.name)" }
+            if (-not $check.ok) { throw "Portable OpenGL check failed: $($check.name)" }
           }
-          Write-Host "Installed actual-frame checks passed: $($data.checks.Count)"
-          "AMR_INSTALLED_OPENGL=$report" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Portable actual-frame checks passed: $($data.checks.Count)"
 
-      - name: Uninstall and verify cleanup
+      - name: Remove portable payload and verify cleanup
         shell: pwsh
         run: |
-          $uninstallers = @(Get-ChildItem $env:AMR_INSTALL_DIR -File -Filter "unins*.exe")
-          if ($uninstallers.Count -ne 1) {
-            throw "Expected exactly one uninstaller, found $($uninstallers.Count)"
+          python tools/build_portable_archive.py verify `
+            --archive $env:AMR_PORTABLE_ARCHIVE `
+            --manifest $env:AMR_PORTABLE_MANIFEST
+          if ($LASTEXITCODE -ne 0) {
+            throw "Portable archive changed during runtime checks"
           }
-          $uninstallLog = Join-Path $env:RUNNER_TEMP "archmeshrubbing-uninstall.log"
-          $arguments = @(
-            "/VERYSILENT",
-            "/SUPPRESSMSGBOXES",
-            "/NORESTART",
-            "/LOG=`"$uninstallLog`""
-          )
-          $process = Start-Process `
-            -FilePath $uninstallers[0].FullName `
-            -ArgumentList $arguments `
-            -Wait `
-            -PassThru
-          if ($process.ExitCode -ne 0) {
-            if (Test-Path $uninstallLog) { Get-Content $uninstallLog }
-            throw "Uninstaller exited with code $($process.ExitCode)"
+          Remove-Item -LiteralPath $env:AMR_PORTABLE_DIR -Recurse -Force
+          if (Test-Path $env:AMR_PORTABLE_DIR) {
+            throw "Portable directory remains after deletion"
           }
-          for ($attempt = 0; $attempt -lt 40 -and (Test-Path $env:AMR_INSTALL_DIR); $attempt++) {
-            Start-Sleep -Milliseconds 250
-          }
-          if (Test-Path $env:AMR_INSTALL_DIR) {
-            Get-ChildItem $env:AMR_INSTALL_DIR -Recurse -Force
-            throw "Installer directory remains after uninstall"
-          }
-          if (Test-Path $env:AMR_SHORTCUT) {
-            throw "Start Menu shortcut remains after uninstall"
-          }
-          Write-Host "Per-user install and uninstall cleanup passed."
+          Write-Host "Portable extraction and cleanup passed."
 
       - name: Remove offline rule and residual smoke files
         if: always()
@@ -465,15 +356,8 @@ jobs:
             Get-NetFirewallRule -DisplayName $env:AMR_FIREWALL_RULE -ErrorAction SilentlyContinue |
               Remove-NetFirewallRule -ErrorAction SilentlyContinue
           }
-          if ($env:AMR_INSTALL_DIR -and (Test-Path $env:AMR_INSTALL_DIR)) {
-            $uninstaller = Get-ChildItem $env:AMR_INSTALL_DIR -File -Filter "unins*.exe" -ErrorAction SilentlyContinue |
-              Select-Object -First 1
-            if ($uninstaller) {
-              Start-Process `
-                -FilePath $uninstaller.FullName `
-                -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" `
-                -Wait
-            }
+          if ($env:AMR_PORTABLE_DIR -and (Test-Path $env:AMR_PORTABLE_DIR)) {
+            Remove-Item -LiteralPath $env:AMR_PORTABLE_DIR -Recurse -Force -ErrorAction SilentlyContinue
           }
 
       # Deliberately no artifact upload or release step. Public binary

@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:archmeshrubbing:schema:portable-archive-manifest:1.0.0",
+  "title": "ArchMeshRubbing portable archive manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "archive",
+    "compression",
+    "entries",
+    "format",
+    "payload",
+    "release_evidence",
+    "root_directory",
+    "schema_version",
+    "source_date_epoch"
+  ],
+  "properties": {
+    "archive": {"$ref": "#/$defs/archive"},
+    "compression": {
+      "const": {"algorithm": "deflate", "level": 9}
+    },
+    "entries": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100000,
+      "items": {"$ref": "#/$defs/file"}
+    },
+    "format": {"const": "org.archmeshrubbing.portable-archive"},
+    "payload": {"$ref": "#/$defs/payload"},
+    "release_evidence": {"$ref": "#/$defs/releaseEvidence"},
+    "root_directory": {"const": "ArchMeshRubbing"},
+    "schema_version": {"const": "1.0.0"},
+    "source_date_epoch": {"type": "integer", "minimum": 315532800, "maximum": 4354819199}
+  },
+  "$defs": {
+    "archive": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["file", "sha256", "size"],
+      "properties": {
+        "file": {"type": "string", "minLength": 1},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "size": {"type": "integer", "minimum": 1}
+      }
+    },
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "size"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "size": {"type": "integer", "minimum": 0}
+      }
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["file_count", "sha256", "size"],
+      "properties": {
+        "file_count": {"type": "integer", "minimum": 1, "maximum": 100000},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "size": {"type": "integer", "minimum": 1, "maximum": 8589934592}
+      }
+    },
+    "releaseEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "source_commit"],
+      "properties": {
+        "path": {"const": "release-evidence/release-evidence.json"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "source_commit": {"type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"}
+      }
+    },
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

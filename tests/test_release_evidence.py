@@ -135,7 +135,9 @@ def test_release_evidence_is_deterministic_and_derived_from_payload() -> None:
         assert result_a.package_count == 2
         assert verify_release_evidence(payload_a) == result_a
         (payload_a / "unins000.exe").write_bytes(b"installer-managed\n")
-        (payload_a / "unins000.dat").write_bytes(b"installer-managed\n")
+        with pytest.raises(ReleaseEvidenceError, match="payload manifest"):
+            verify_release_evidence(payload_a)
+        (payload_a / "unins000.exe").unlink()
         assert verify_release_evidence(payload_a) == result_a
         evidence_a = payload_a / EVIDENCE_DIRECTORY_NAME
         evidence_b = payload_b / EVIDENCE_DIRECTORY_NAME

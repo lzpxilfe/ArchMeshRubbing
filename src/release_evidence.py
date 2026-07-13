@@ -21,7 +21,7 @@ import shutil
 from typing import Any
 
 
-EVIDENCE_SCHEMA_VERSION = "1.0.0"
+EVIDENCE_SCHEMA_VERSION = "1.1.0"
 BUILD_MANIFEST_SCHEMA_VERSION = "1.2.0"
 EVIDENCE_DIRECTORY_NAME = "release-evidence"
 EVIDENCE_FILES = (
@@ -34,7 +34,6 @@ EVIDENCE_FILES = (
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _COMMIT_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _CHANNEL_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,31}$")
-_INSTALLER_MANAGED_RE = re.compile(r"^unins[0-9]{3}\.(?:dat|exe|msg)$")
 _PIN_RE = re.compile(
     r"^(?P<name>[A-Za-z0-9][A-Za-z0-9_.-]*)==(?P<version>[^;\s]+)$"
 )
@@ -386,22 +385,12 @@ def _load_build_context(payload_root: Path) -> BuildContext:
     )
 
 
-def _payload_file_records(
-    payload_root: Path,
-    *,
-    allow_installer_managed: bool = False,
-) -> list[dict[str, object]]:
+def _payload_file_records(payload_root: Path) -> list[dict[str, object]]:
     records: list[dict[str, object]] = []
     seen_casefold: set[str] = set()
     for path in payload_root.rglob("*"):
         relative = path.relative_to(payload_root)
         if relative.parts and relative.parts[0] == EVIDENCE_DIRECTORY_NAME:
-            continue
-        if (
-            allow_installer_managed
-            and len(relative.parts) == 1
-            and _INSTALLER_MANAGED_RE.fullmatch(relative.name) is not None
-        ):
             continue
         if path.is_symlink():
             raise ReleaseEvidenceError(
@@ -644,11 +633,6 @@ def _payload_manifest(
             "windows_wheel_lock_sha256": context.wheel_lock_sha256,
         },
         "evidence_directory_excluded": EVIDENCE_DIRECTORY_NAME,
-        "installed_files_excluded": [
-            "uninsNNN.dat",
-            "uninsNNN.exe",
-            "uninsNNN.msg",
-        ],
         "file_count": len(files),
         "files": files,
         "payload_sha256": payload_sha256,
@@ -1005,7 +989,7 @@ def verify_release_evidence(
     manifest, _manifest_raw = _load_canonical_json(
         output / "payload-manifest.json", label="payload manifest"
     )
-    files = _payload_file_records(root, allow_installer_managed=True)
+    files = _payload_file_records(root)
     expected_manifest = _payload_manifest(context, files)
     if manifest != expected_manifest:
         raise ReleaseEvidenceError("payload manifest does not match actual payload bytes")
