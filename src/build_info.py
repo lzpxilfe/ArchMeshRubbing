@@ -28,7 +28,7 @@ from src import __version__
 APP_NAME = "ArchMeshRubbing"
 APP_VERSION = __version__
 DISTRIBUTION_NAME = "ArchMeshRubbing"
-BUILD_INFO_SCHEMA_VERSION = "1.1.0"
+BUILD_INFO_SCHEMA_VERSION = "1.2.0"
 
 # These values are deliberately immutable module constants.  A later native
 # build step may replace them in the staged source tree before freezing; they
@@ -37,6 +37,10 @@ BUILD_CHANNEL = "source"
 BUILD_COMMIT = "unknown"
 BUILD_LOCK_SHA256 = "unknown"
 RUNTIME_LOCK_PARTS = ("requirements", "runtime-py312.lock")
+WINDOWS_WHEEL_LOCK_PARTS = (
+    "requirements",
+    "windows-py312-x64-hashed.lock",
+)
 FROZEN_BUILD_MANIFEST_PARTS = ("resources", "build_info.json")
 
 _EXPECTED_DOCUMENT_SHA256 = (
@@ -171,10 +175,31 @@ def runtime_lock() -> tuple[Path, dict[str, tuple[str, str]], str]:
     return path, pins, hashlib.sha256(payload).hexdigest()
 
 
+def windows_wheel_lock() -> tuple[Path, dict[str, tuple[str, str, str]], str]:
+    """Load the exact, hash-checked Windows x64/Python 3.12 wheel set."""
+
+    from src.release_evidence import ReleaseEvidenceError, parse_hashed_lock
+
+    path = resource_path(*WINDOWS_WHEEL_LOCK_PARTS)
+    try:
+        pins, payload = parse_hashed_lock(path)
+    except ReleaseEvidenceError as exc:
+        raise RuntimeError(str(exc)) from exc
+    _runtime_path, runtime_pins, _runtime_sha256 = runtime_lock()
+    for key, (name, version) in runtime_pins.items():
+        wheel_pin = pins.get(key)
+        if wheel_pin is None or wheel_pin[1] != version:
+            raise RuntimeError(
+                f"Windows wheel lock does not match runtime pin {name}=={version}"
+            )
+    return path, pins, hashlib.sha256(payload).hexdigest()
+
+
 def build_metadata() -> dict[str, object]:
     """Return validated immutable metadata embedded by the native build."""
 
     _lock_path, _pins, observed_lock_sha256 = runtime_lock()
+    _wheel_path, _wheel_pins, observed_wheel_lock_sha256 = windows_wheel_lock()
     manifest_path = resource_path(*FROZEN_BUILD_MANIFEST_PARTS)
     if not manifest_path.is_file():
         return {
@@ -183,6 +208,7 @@ def build_metadata() -> dict[str, object]:
             "dependency_lock_sha256": observed_lock_sha256,
             "manifest_present": False,
             "source_tree": "unknown",
+            "windows_wheel_lock_sha256": observed_wheel_lock_sha256,
         }
     try:
         raw = manifest_path.read_bytes()
@@ -201,11 +227,13 @@ def build_metadata() -> dict[str, object]:
         "schema_version",
         "source_tree",
         "version",
+        "windows_wheel_lock_sha256",
     }:
         raise RuntimeError("frozen build manifest fields are invalid")
     channel = value["channel"]
     commit = value["commit"]
     lock_sha256 = value["dependency_lock_sha256"]
+    wheel_lock_sha256 = value["windows_wheel_lock_sha256"]
     source_tree = value["source_tree"]
     if value["schema_version"] != BUILD_INFO_SCHEMA_VERSION:
         raise RuntimeError("frozen build manifest schema is unsupported")
@@ -217,6 +245,8 @@ def build_metadata() -> dict[str, object]:
         raise RuntimeError("frozen build commit is invalid")
     if lock_sha256 != observed_lock_sha256:
         raise RuntimeError("frozen build dependency lock hash does not match its bytes")
+    if wheel_lock_sha256 != observed_wheel_lock_sha256:
+        raise RuntimeError("frozen build Windows wheel lock hash does not match its bytes")
     if not isinstance(source_tree, str) or source_tree not in {
         "clean",
         "dirty",
@@ -229,6 +259,7 @@ def build_metadata() -> dict[str, object]:
         "dependency_lock_sha256": lock_sha256,
         "manifest_present": True,
         "source_tree": source_tree,
+        "windows_wheel_lock_sha256": wheel_lock_sha256,
     }
 
 
@@ -263,6 +294,7 @@ def collect_diagnostics() -> dict[str, object]:
             "dependency_lock_sha256": "invalid",
             "manifest_present": False,
             "source_tree": "invalid",
+            "windows_wheel_lock_sha256": "invalid",
         }
         metadata_error = str(exc)
     build = {
@@ -388,7 +420,8 @@ def _check_build_identity() -> str:
     return (
         f"channel={metadata['channel']}, commit={metadata['commit']}, "
         f"source_tree={metadata['source_tree']}, "
-        f"lock={metadata['dependency_lock_sha256']}"
+        f"lock={metadata['dependency_lock_sha256']}, "
+        f"wheel_lock={metadata['windows_wheel_lock_sha256']}"
     )
 
 
@@ -401,6 +434,13 @@ def _check_resources() -> str:
     if signature != b"\x89PNG\r\n\x1a\n":
         raise RuntimeError("resources/icons/app_icon.png is not a valid PNG resource")
     lock_path, _pins, _sha256 = runtime_lock()
+    wheel_lock_path, _wheel_pins, _wheel_sha256 = windows_wheel_lock()
+    policy_path = resource_path("requirements", "runtime-license-policy.json")
+    fallback_path = resource_path(
+        "third_party_licenses", "PyOpenGL-3.1.10-LICENSE.txt"
+    )
+    if not policy_path.is_file() or not fallback_path.is_file():
+        raise RuntimeError("runtime license policy or reviewed fallback is missing")
     required_schemas = (
         "artifact_document-1.0.0.schema.json",
         "vector_payload-1.0.0.schema.json",
@@ -416,7 +456,24 @@ def _check_resources() -> str:
     for name in required_schemas:
         if not resource_path("schemas", name).is_file():
             raise RuntimeError(f"packaged schema is missing: {name}")
-    return f"app icon, runtime lock, and {len(required_schemas)} schemas present ({lock_path.name})"
+    return (
+        f"app icon, runtime lock, hashed wheel lock, license policy, and "
+        f"{len(required_schemas)} schemas present "
+        f"({lock_path.name}, {wheel_lock_path.name})"
+    )
+
+
+def _check_release_evidence() -> str:
+    """Verify the generated evidence from the installed/frozen payload."""
+
+    if not bool(getattr(sys, "frozen", False)):
+        return "source build; release evidence is generated after freezing"
+    if sys.platform != "win32":
+        return "non-Windows frozen build; Windows release evidence is not required"
+    from src.release_evidence import verify_release_evidence
+
+    payload_root = Path(sys.executable).resolve().parent
+    return verify_release_evidence(payload_root).detail()
 
 
 def _check_qt_offscreen() -> str:
@@ -844,6 +901,7 @@ def run_self_test() -> dict[str, object]:
         _run_check("build_identity", _check_build_identity),
         _run_check("required_runtime", _check_required_runtime),
         _run_check("resources", _check_resources),
+        _run_check("release_evidence", _check_release_evidence),
         _run_check("qt_offscreen", _check_qt_offscreen),
         _run_check("gui_stack", _check_gui_stack),
         _run_check("mesh_parsers", _check_mesh_parsers),

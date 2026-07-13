@@ -22,7 +22,7 @@ def test_version_and_diagnostics_use_the_source_package_version() -> None:
     assert build_info.version_text() == f"ArchMeshRubbing {src.__version__}"
 
     diagnostics = build_info.collect_diagnostics()
-    assert diagnostics["schema_version"] == "1.1.0"
+    assert diagnostics["schema_version"] == "1.2.0"
     assert diagnostics["application"] == {
         "name": "ArchMeshRubbing",
         "distribution": "ArchMeshRubbing",
@@ -33,6 +33,9 @@ def test_version_and_diagnostics_use_the_source_package_version() -> None:
     assert resources["app_icon_png"]["present"] is True
     build = cast(dict[str, object], diagnostics["build"])
     assert re.fullmatch(r"[0-9a-f]{64}", str(build["dependency_lock_sha256"]))
+    assert re.fullmatch(
+        r"[0-9a-f]{64}", str(build["windows_wheel_lock_sha256"])
+    )
     assert set(runtime) == {
         "numpy",
         "scipy",
@@ -56,6 +59,7 @@ def test_self_test_passes_with_complete_offline_artifact_workflow() -> None:
         "build_identity",
         "required_runtime",
         "resources",
+        "release_evidence",
         "qt_offscreen",
         "gui_stack",
         "mesh_parsers",
@@ -133,7 +137,7 @@ def test_release_cli_commands_are_machine_readable_and_return_status() -> None:
         setup_logging.assert_not_called()
 
     failure = {
-        "schema_version": "1.1.0",
+        "schema_version": "1.2.0",
         "application": {"name": "ArchMeshRubbing", "version": src.__version__},
         "ok": False,
         "checks": [],

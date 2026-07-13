@@ -23,19 +23,25 @@ def test_generated_manifest_binds_version_commit_channel_and_runtime_lock() -> N
         root = Path(temporary)
         lock = root / "runtime.lock"
         lock.write_bytes(b"numpy==2.4.3\n")
+        wheel_lock = root / "windows.lock"
+        wheel_lock.write_bytes(b"numpy==2.4.3 --hash=sha256:" + b"0" * 64 + b"\n")
         manifest = build_manifest(
             channel="ci-smoke",
             commit="a" * 40,
             lock_path=lock,
+            wheel_lock_path=wheel_lock,
             source_tree="dirty",
         )
         assert manifest == {
             "channel": "ci-smoke",
             "commit": "a" * 40,
             "dependency_lock_sha256": hashlib.sha256(lock.read_bytes()).hexdigest(),
-            "schema_version": "1.1.0",
+            "schema_version": "1.2.0",
             "source_tree": "dirty",
             "version": __version__,
+            "windows_wheel_lock_sha256": hashlib.sha256(
+                wheel_lock.read_bytes()
+            ).hexdigest(),
         }
 
         output = root / "resources" / "build_info.json"
@@ -49,6 +55,9 @@ def test_frozen_build_metadata_requires_and_validates_embedded_manifest() -> Non
         lock = root / "runtime-py312.lock"
         lock.write_bytes(b"pins\n")
         digest = hashlib.sha256(lock.read_bytes()).hexdigest()
+        wheel_lock = root / "windows.lock"
+        wheel_lock.write_bytes(b"wheel pins\n")
+        wheel_digest = hashlib.sha256(wheel_lock.read_bytes()).hexdigest()
         manifest_path = root / "build_info.json"
         manifest_path.write_text(
             json.dumps(
@@ -56,9 +65,10 @@ def test_frozen_build_metadata_requires_and_validates_embedded_manifest() -> Non
                     "channel": "ci-smoke",
                     "commit": "b" * 40,
                     "dependency_lock_sha256": digest,
-                    "schema_version": "1.1.0",
+                    "schema_version": "1.2.0",
                     "source_tree": "clean",
                     "version": __version__,
+                    "windows_wheel_lock_sha256": wheel_digest,
                 }
             ),
             encoding="utf-8",
@@ -75,6 +85,11 @@ def test_frozen_build_metadata_requires_and_validates_embedded_manifest() -> Non
                 "runtime_lock",
                 return_value=(lock, {}, digest),
             ),
+            patch.object(
+                build_info,
+                "windows_wheel_lock",
+                return_value=(wheel_lock, {}, wheel_digest),
+            ),
             patch.object(build_info, "resource_path", side_effect=resource_path),
             patch.object(build_info.sys, "frozen", True, create=True),
         ):
@@ -90,15 +105,28 @@ def test_invalid_build_manifest_inputs_and_lock_binding_fail_closed() -> None:
         root = Path(temporary)
         lock = root / "runtime.lock"
         lock.write_bytes(b"pins\n")
+        wheel_lock = root / "windows.lock"
+        wheel_lock.write_bytes(b"wheel pins\n")
         with pytest.raises(ValueError, match="channel"):
-            build_manifest(channel="Release Candidate", commit="a" * 40, lock_path=lock)
+            build_manifest(
+                channel="Release Candidate",
+                commit="a" * 40,
+                lock_path=lock,
+                wheel_lock_path=wheel_lock,
+            )
         with pytest.raises(ValueError, match="commit"):
-            build_manifest(channel="stable", commit="not-a-hash", lock_path=lock)
+            build_manifest(
+                channel="stable",
+                commit="not-a-hash",
+                lock_path=lock,
+                wheel_lock_path=wheel_lock,
+            )
         with pytest.raises(ValueError, match="source_tree"):
             build_manifest(
                 channel="stable",
                 commit="a" * 40,
                 lock_path=lock,
+                wheel_lock_path=wheel_lock,
                 source_tree="maybe",
             )
 
@@ -109,9 +137,12 @@ def test_invalid_build_manifest_inputs_and_lock_binding_fail_closed() -> None:
                     "channel": "stable",
                     "commit": "c" * 40,
                     "dependency_lock_sha256": "0" * 64,
-                    "schema_version": "1.1.0",
+                    "schema_version": "1.2.0",
                     "source_tree": "clean",
                     "version": __version__,
+                    "windows_wheel_lock_sha256": hashlib.sha256(
+                        wheel_lock.read_bytes()
+                    ).hexdigest(),
                 }
             ),
             encoding="utf-8",
@@ -122,6 +153,15 @@ def test_invalid_build_manifest_inputs_and_lock_binding_fail_closed() -> None:
                 build_info,
                 "runtime_lock",
                 return_value=(lock, {}, digest),
+            ),
+            patch.object(
+                build_info,
+                "windows_wheel_lock",
+                return_value=(
+                    wheel_lock,
+                    {},
+                    hashlib.sha256(wheel_lock.read_bytes()).hexdigest(),
+                ),
             ),
             patch.object(
                 build_info,

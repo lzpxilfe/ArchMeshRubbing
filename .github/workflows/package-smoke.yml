@@ -15,10 +15,14 @@ on:
       - "app_interactive.py"
       - "requirements/build-py312.lock"
       - "requirements/runtime-py312.lock"
+      - "requirements/runtime-license-policy.json"
+      - "requirements/windows-py312-x64-hashed.lock"
       - "resources/**"
       - "schemas/**"
       - "src/**"
+      - "third_party_licenses/**"
       - "tools/generate_build_info.py"
+      - "tools/generate_release_evidence.py"
   pull_request:
     paths:
       - ".gitattributes"
@@ -31,10 +35,14 @@ on:
       - "app_interactive.py"
       - "requirements/build-py312.lock"
       - "requirements/runtime-py312.lock"
+      - "requirements/runtime-license-policy.json"
+      - "requirements/windows-py312-x64-hashed.lock"
       - "resources/**"
       - "schemas/**"
       - "src/**"
+      - "third_party_licenses/**"
       - "tools/generate_build_info.py"
+      - "tools/generate_release_evidence.py"
   workflow_dispatch:
 
 permissions:
@@ -66,9 +74,17 @@ jobs:
           cache-dependency-path: |
             requirements/build-py312.lock
             requirements/runtime-py312.lock
+            requirements/windows-py312-x64-hashed.lock
 
-      - name: Install frozen-build lock
-        run: python -m pip install --requirement requirements/build-py312.lock
+      - name: Install hash-locked Windows wheel set
+        run: >-
+          python -m pip install
+          --require-hashes
+          --only-binary=:all:
+          --requirement requirements/windows-py312-x64-hashed.lock
+
+      - name: Validate installed dependency closure
+        run: python -m pip check
 
       - name: Generate immutable build manifest
         run: >-
@@ -79,6 +95,22 @@ jobs:
 
       - name: Build frozen application
         run: python -m PyInstaller --clean --noconfirm ArchMeshRubbing.spec
+
+      - name: Generate payload manifest, SPDX SBOM, and notices
+        shell: pwsh
+        run: |
+          $createdAt = (& git show -s --format=%cI "${{ github.sha }}").Trim()
+          if (-not $createdAt) {
+            throw "Could not read deterministic source commit timestamp"
+          }
+          python tools/generate_release_evidence.py generate `
+            --payload "dist\ArchMeshRubbing" `
+            --created-at $createdAt
+
+      - name: Re-verify release evidence from payload bytes
+        run: >-
+          python tools/generate_release_evidence.py verify
+          --payload dist/ArchMeshRubbing
 
       - name: Run frozen self-test (Windows)
         shell: pwsh
@@ -99,8 +131,9 @@ jobs:
           d=json.loads(p.read_text(encoding='utf-8'));
           assert d.get('ok') is True, json.dumps(d, ensure_ascii=False, indent=2);
           checks=d.get('checks') or [];
-          assert len(checks) == 12 and all(c.get('ok') is True for c in checks), d;
+          assert len(checks) == 13 and all(c.get('ok') is True for c in checks), d;
           assert any(c.get('name') == 'artifact_complete_workflow_offline' for c in checks), d;
+          assert any(c.get('name') == 'release_evidence' for c in checks), d;
           print('Frozen self-test passed:', p)"
 
       - name: Run frozen Windows native-QPA OpenGL smoke
@@ -203,11 +236,16 @@ jobs:
             throw "CI installer must remain unsigned; status was $($signature.Status)"
           }
           $hash = Get-FileHash -Algorithm SHA256 $installer
+          $releaseEvidencePath = "dist\ArchMeshRubbing\release-evidence\release-evidence.json"
+          $releaseEvidence = Get-Content $releaseEvidencePath -Raw | ConvertFrom-Json
           $evidence = [ordered]@{
             schema_version = "1"
             app_version = $buildInfo.version
             source_commit = $buildInfo.commit
             build_manifest_sha256 = (Get-FileHash -Algorithm SHA256 "build\generated\build_info.json").Hash.ToLowerInvariant()
+            windows_wheel_lock_sha256 = $buildInfo.windows_wheel_lock_sha256
+            release_evidence_sha256 = (Get-FileHash -Algorithm SHA256 $releaseEvidencePath).Hash.ToLowerInvariant()
+            payload_sha256 = $releaseEvidence.payload_sha256
             installer_name = $expectedName
             installer_sha256 = $hash.Hash.ToLowerInvariant()
             installer_size = (Get-Item $installer).Length
@@ -333,15 +371,18 @@ jobs:
             throw "Installed self-test exited with code $($process.ExitCode)"
           }
           $data = Get-Content $report -Raw | ConvertFrom-Json
-          if (-not $data.ok -or $data.checks.Count -ne 12) {
+          if (-not $data.ok -or $data.checks.Count -ne 13) {
             Get-Content $report
-            throw "Installed self-test did not pass all 12 checks"
+            throw "Installed self-test did not pass all 13 checks"
           }
           foreach ($check in $data.checks) {
             if (-not $check.ok) { throw "Installed self-test check failed: $($check.name)" }
           }
           if (-not ($data.checks.name -contains "artifact_complete_workflow_offline")) {
             throw "Installed self-test omitted the complete offline workflow"
+          }
+          if (-not ($data.checks.name -contains "release_evidence")) {
+            throw "Installed self-test omitted release evidence verification"
           }
           "AMR_INSTALLED_SELF_TEST=$report" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 

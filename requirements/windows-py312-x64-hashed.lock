@@ -1,0 +1,25 @@
+# Windows x64 / CPython 3.12 build resolution for the frozen application.
+# Each requirement admits exactly the named PyPI wheel whose SHA-256 follows.
+# Refresh intentionally; CI installs this file with --require-hashes and
+# --only-binary=:all: so an sdist or unreviewed wheel cannot enter the build.
+--require-hashes
+--only-binary=:all:
+
+numpy==2.4.3 --hash=sha256:65f3c2455188f09678355f5cae1f959a06b778bc66d535da07bf2ef20cd319d5
+scipy==1.17.1 --hash=sha256:41b71f4a3a4cab9d366cd9065b288efc4d4f3c0b37a91a8e0947fb5bd7f31d87
+trimesh==4.11.5 --hash=sha256:b225a94c8af79569f7167ca7eaaab4fd05c260da58a075599453d655835258ef
+Pillow==12.1.1 --hash=sha256:21329ec8c96c6e979cd0dfd29406c40c1d52521a90544463057d2aaa937d66a6
+rfc8785==0.1.4 --hash=sha256:520d690b448ecf0703691c76e1a34a24ddcd4fc5bc41d589cb7c58ec651bcd48
+shapely==2.1.2 --hash=sha256:743044b4cfb34f9a67205cee9279feaf60ba7d02e69febc2afc609047cb49179
+PyQt6==6.11.0 --hash=sha256:bd11b459c54dca068e988a42cf838303334f0d441b9d16d92ae6719fcb5ac6ba
+PyQt6-Qt6==6.11.1 --hash=sha256:7486c80512e823f2d3087e67f854f0556b345f4368040a853c8dc4d30fd3fe69
+PyQt6-sip==13.11.1 --hash=sha256:1d1c67179c1924b28e3d7f04585639e7a7c0946f62390efc6ccf2a6206e595d3
+PyOpenGL==3.1.10 --hash=sha256:794a943daced39300879e4e47bd94525280685f42dbb5a998d336cfff151d74f
+
+PyInstaller==6.21.0 --hash=sha256:7fae06c494ce0ebfe6bd3055c0e409def884f63af2e3705d06bd431ad9237fc7
+pyinstaller-hooks-contrib==2026.6 --hash=sha256:fd13b8ac126b35361175edacd41a0d97080b75dd5f4b594ecefefff969509dd3
+altgraph==0.17.5 --hash=sha256:f3a22400bce1b0c701683820ac4f3b159cd301acab067c51c653e06961600597
+packaging==26.2 --hash=sha256:5fc45236b9446107ff2415ce77c807cee2862cb6fac22b8a73826d0693b0980e
+setuptools==83.0.0 --hash=sha256:29b23c360f22f414dc7336bb39178cc7bcbf6021ed2733cde173f09dba19abb3
+pefile==2024.8.26 --hash=sha256:76f8b485dcd3b1bb8166f1128d395fa3d87af26360c2358fb75b80019b957c6f
+pywin32-ctypes==0.2.3 --hash=sha256:8a1513379d709975552d202d942d9837758905c8d01eb82b8bcc30918929e7b8

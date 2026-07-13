@@ -72,6 +72,7 @@ class NativeBuildResult:
 
     layout: ArtifactLayout
     manifest: Path
+    release_evidence: Path | None
     self_test_report: Path | None
     self_test: Mapping[str, object] | None
     command: tuple[str, ...]
@@ -252,6 +253,25 @@ def resolve_commit(root: Path = ROOT, supplied: str | None = None) -> str:
     return supplied
 
 
+def resolve_commit_timestamp(root: Path, commit: str) -> str:
+    """Read the immutable commit timestamp used for reproducible SPDX output."""
+
+    try:
+        completed = subprocess.run(
+            ["git", "show", "-s", "--format=%cI", commit],
+            cwd=root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise NativeBuildError("source commit timestamp could not be read") from exc
+    timestamp = completed.stdout.strip()
+    if not timestamp:
+        raise NativeBuildError("source commit timestamp is empty")
+    return timestamp
+
+
 def _existing_generated_outputs(
     layout: ArtifactLayout,
     *,
@@ -266,6 +286,7 @@ def _write_or_reuse_manifest(
     channel: str,
     commit: str,
     runtime_lock: Path,
+    wheel_lock: Path,
     manifest_path: Path,
     replace_existing: bool,
     source_tree: str,
@@ -277,6 +298,7 @@ def _write_or_reuse_manifest(
             channel=channel,
             commit=commit,
             lock_path=runtime_lock,
+            wheel_lock_path=wheel_lock,
             source_tree=source_tree,
         )
     except (OSError, ValueError) as exc:
@@ -379,12 +401,13 @@ def build_native(
     spec_path = root / "ArchMeshRubbing.spec"
     runtime_lock = root / "requirements" / "runtime-py312.lock"
     build_lock = root / "requirements" / "build-py312.lock"
+    wheel_lock = root / "requirements" / "windows-py312-x64-hashed.lock"
     manifest_path = root / "build" / "generated" / "build_info.json"
     dist_dir = root / "dist"
     work_dir = root / "build"
     layout = artifact_layout(dist_dir, platform_name=platform_name)
 
-    for required in (spec_path, runtime_lock, build_lock):
+    for required in (spec_path, runtime_lock, build_lock, wheel_lock):
         if not required.is_file():
             raise NativeBuildError(f"required native-build input is missing: {required}")
     validate_build_environment(
@@ -409,6 +432,7 @@ def build_native(
         channel=channel,
         commit=resolved_commit,
         runtime_lock=runtime_lock,
+        wheel_lock=wheel_lock,
         manifest_path=manifest_path,
         replace_existing=replace_existing,
         source_tree=source_tree,
@@ -429,6 +453,23 @@ def build_native(
         dist_dir,
         platform_name=platform_name,
     )
+    evidence_path: Path | None = None
+    if platform_name == "win32":
+        from src.release_evidence import (
+            EVIDENCE_DIRECTORY_NAME,
+            ReleaseEvidenceError,
+            generate_release_evidence,
+        )
+
+        evidence_path = built_layout.onedir / EVIDENCE_DIRECTORY_NAME
+        try:
+            generate_release_evidence(
+                built_layout.onedir,
+                evidence_path,
+                created_at=resolve_commit_timestamp(root, resolved_commit),
+            )
+        except ReleaseEvidenceError as exc:
+            raise NativeBuildError(f"release evidence generation failed: {exc}") from exc
     report_path: Path | None = None
     self_test: dict[str, object] | None = None
     if not skip_self_test:
@@ -442,6 +483,7 @@ def build_native(
     return NativeBuildResult(
         layout=built_layout,
         manifest=manifest_path,
+        release_evidence=evidence_path,
         self_test_report=report_path,
         self_test=self_test,
         command=tuple(command),
@@ -502,6 +544,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if result.layout.app_bundle is not None:
         print(f"macOS app bundle: {result.layout.app_bundle}")
     print(f"Embedded build manifest: {result.manifest}")
+    if result.release_evidence is not None:
+        print(f"Verified release evidence: {result.release_evidence}")
     if result.self_test_report is not None:
         print(f"Frozen self-test passed: {result.self_test_report}")
     else:

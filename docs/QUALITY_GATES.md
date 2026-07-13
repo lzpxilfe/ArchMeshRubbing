@@ -4,7 +4,7 @@
 
 ## 재현 환경
 
-CI의 기준 Python은 3.12이다. `requirements.txt`는 `requirements/runtime-py312.lock`을 포함하여 source와 frozen build가 같은 exact runtime resolution을 사용한다. 빌드 toolchain은 `requirements/build-py312.lock`, 검증 도구는 `requirements-dev.txt`에 고정한다. 권위 Outline overlay 조합은 `shapely==2.1.2`와 그 wheel의 GEOS `3.13.1`로 recipe와 runtime gate에 고정한다. lock은 아직 OS별 wheel hash lock은 아니다.
+CI의 기준 Python은 3.12이다. `requirements.txt`는 `requirements/runtime-py312.lock`을 포함하여 source와 frozen build가 같은 exact runtime resolution을 사용한다. 일반 개발 toolchain은 `requirements/build-py312.lock`, 검증 도구는 `requirements-dev.txt`에 고정한다. 제품 대상 Windows frozen job은 `requirements/windows-py312-x64-hashed.lock`의 정확한 wheel 17개만 `--require-hashes --only-binary=:all:`로 설치한다. 권위 Outline overlay 조합은 `shapely==2.1.2`와 Windows wheel의 GEOS `3.13.1`로 recipe와 runtime gate에 고정한다. 이 wheel lock은 Windows x64/CPython 3.12 전용이며 다른 OS 배포 증거가 아니다.
 
 ```bash
 python -m venv .venv
@@ -46,6 +46,7 @@ python -m pytest -q \
   tests/test_project_file.py \
   tests/test_build_info.py \
   tests/test_build_manifest.py \
+  tests/test_release_evidence.py \
   tests/test_build_native.py \
   tests/test_source_identity.py \
   tests/test_source_manifest.py \
@@ -160,7 +161,7 @@ Windows workflow smoke에서는 프로젝트 저장, source/geometry identity와
 
 같은 Windows job의 다음 단계는 `QT_QPA_PLATFORM=windows`, `QT_OPENGL=software`로 실제 `QOpenGLWidget` context를 열고 `src.gui.opengl_driver_smoke` report를 검증한다. Qt wheel에 포함된 `opengl32sw.dll`을 강제하고 PyOpenGL의 GL/WGL dispatch도 같은 DLL에 결합한다. 이렇게 해야 Qt의 software context와 시스템 `opengl32.dll`을 섞어 호출하지 않는다. qwindows/context/768×768 FBO/VBO/pixel/depth/pick 경계를 실행하며, 이는 software OpenGL 실제-frame 증거이지 대표 GPU 또는 compositor 최종 presentation 인증은 아니다.
 
-별도 `package-smoke.yml`은 `main` push, pull request, 수동 실행에서 Windows의 exact Python 3.12 build lock, immutable build manifest, PyInstaller spec과 frozen executable의 file-report self-test를 실행한다. 새 12번째 check는 작은 PLY를 실제 application authority로 열고 3/6/6 record를 만든 뒤 completed `.amr`를 외부 원본 없이 재열어 1:1 SVG/PNG를 재현·이동·offline 검증한다. 이어 같은 frozen executable의 `--opengl-driver-smoke-report`를 native qwindows/software OpenGL로 실행해 PyInstaller가 Qt platform plugin·`opengl32sw.dll`·PyOpenGL·viewport 경로를 함께 운반했는지 확인한다. 그 뒤 Inno Setup compiler와 installer identity를 해시로 기록하고, 격리된 per-user 경로에 설치해 465개 payload를 frozen onedir와 byte-for-byte 비교한다. 설치 실행 파일을 outbound firewall rule과 실패 proxy로 차단한 상태에서 12-check complete workflow와 native actual-frame을 다시 실행하고, 무인 제거 뒤 설치 디렉터리와 shortcut이 남지 않아야 통과한다. commit `19558f324deb`의 [package run 29255341573](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29255341573)에서 이 전체 gate가 통과했다. 라이선스 게이트가 해결되기 전에는 artifact upload와 release 단계를 두지 않는다. 과거 세 OS 통과 기록은 역사적 증거로 남기되 현재 완료 판정에는 Windows 결과만 사용한다.
+별도 `package-smoke.yml`은 `main` push, pull request, 수동 실행에서 Windows x64/CPython 3.12의 hash-locked binary wheel set, immutable build manifest, PyInstaller spec과 frozen executable의 file-report self-test를 실행한다. PyInstaller 뒤 실제 payload 전체 파일의 path/size/SHA-256 manifest, runtime 10개를 exact wheel SHA-256에 묶은 SPDX 2.3 SBOM, wheel 메타데이터와 라이선스 원문에서 만든 machine/human NOTICE를 payload 안에 생성한다. evidence index가 이 네 문서를 묶고, 13번째 `release_evidence` check가 frozen 및 설치 payload에서 모두 다시 계산한다. complete-workflow check는 작은 PLY를 실제 application authority로 열고 3/6/6 record를 만든 뒤 completed `.amr`를 외부 원본 없이 재열어 1:1 SVG/PNG를 재현·이동·offline 검증한다. 이어 같은 frozen executable의 `--opengl-driver-smoke-report`를 native qwindows/software OpenGL로 실행한다. 그 뒤 Inno Setup compiler와 installer identity를 해시로 기록하고 격리된 per-user 경로에 설치해 모든 payload를 frozen onedir와 byte-for-byte 비교하며, outbound 차단 상태의 13-check와 actual-frame, 무인 제거까지 요구한다. 라이선스 게이트가 해결되기 전에는 artifact upload와 release 단계를 두지 않는다. 과거 세 OS 통과 기록은 역사적 증거로 남기되 현재 완료 판정에는 Windows 결과만 사용한다.
 
 ASCII per-user 설치 경로는 차단 gate지만 비 ASCII 설치 경로는 아직 아니다. [진단 run 29254942224](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29254942224)은 비 ASCII 경로에서 설치·payload 비교·offline workflow까지 통과한 뒤 software OpenGL context 생성에 실패했다. 이를 성공으로 재분류하거나 timeout으로 숨기지 않으며 실제 Windows 호환성 pilot이 해결할 때까지 명시적 제한으로 유지한다.
 

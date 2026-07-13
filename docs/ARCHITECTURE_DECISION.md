@@ -66,7 +66,7 @@ DerivedRecord session update는 기존 source/metadata/Align/record를 바꿀 �
 4. vector/rubbing export를 worker staging과 final Workbench authority publication으로 분리한다. 이 단계는 이식 완료했으며 실제 대형 package에서 lock hold 시간과 취소 지연을 후속 측정한다.
 5. 각 단계가 새 record/export로 완전히 연결되면 대응 legacy 측정 진입점을 제거한다.
 6. 실제 유물 pilot과 대용량/GPU precision 검증 후 legacy 기와 검토 기능의 유지·플러그인화·제거를 결정한다.
-7. unsigned installer의 설치 후 offline/actual-frame/제거 재검증은 완료했다. 라이선스, Authenticode, SBOM/NOTICE, 공급망 provenance와 대표 Windows pilot이 해결된 뒤에만 공개 바이너리를 만든다.
+7. unsigned installer의 설치 후 offline/actual-frame/제거 재검증에 더해 Windows wheel hash lock, 실제 payload manifest, SPDX/NOTICE 생성·설치본 재검증을 유지한다. 라이선스 결론, Authenticode, 상위 build provenance와 대표 Windows pilot이 해결된 뒤에만 공개 바이너리를 만든다.
 
 ## 완료 기준
 

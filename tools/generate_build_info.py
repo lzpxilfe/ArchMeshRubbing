@@ -44,6 +44,7 @@ def build_manifest(
     channel: str,
     commit: str,
     lock_path: Path,
+    wheel_lock_path: Path,
     source_tree: str = "unknown",
 ) -> dict[str, str]:
     if _CHANNEL_RE.fullmatch(channel) is None:
@@ -55,6 +56,9 @@ def build_manifest(
     lock_bytes = lock_path.read_bytes()
     if not lock_bytes:
         raise ValueError("runtime lock must not be empty")
+    wheel_lock_bytes = wheel_lock_path.read_bytes()
+    if not wheel_lock_bytes:
+        raise ValueError("Windows wheel lock must not be empty")
     return {
         "channel": channel,
         "commit": commit,
@@ -62,6 +66,7 @@ def build_manifest(
         "schema_version": BUILD_INFO_SCHEMA_VERSION,
         "source_tree": source_tree,
         "version": __version__,
+        "windows_wheel_lock_sha256": hashlib.sha256(wheel_lock_bytes).hexdigest(),
     }
 
 
@@ -97,6 +102,11 @@ def main() -> int:
         type=Path,
         default=ROOT / "requirements" / "runtime-py312.lock",
     )
+    parser.add_argument(
+        "--wheel-lock",
+        type=Path,
+        default=ROOT / "requirements" / "windows-py312-x64-hashed.lock",
+    )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
         "--source-tree",
@@ -114,6 +124,7 @@ def main() -> int:
         channel=args.channel,
         commit=args.commit,
         lock_path=args.lock,
+        wheel_lock_path=args.wheel_lock,
         source_tree=source_tree,
     )
     write_manifest(args.output, manifest)

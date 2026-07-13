@@ -217,7 +217,7 @@ Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 `Surfac
 
 ## ⚡ Quick Start
 
-현재 Quick Start는 Windows source checkout 실행 절차입니다. Windows frozen build와 CI 내부 unsigned installer의 설치·오프라인 self-test·actual-frame·제거 검증은 통과했지만, 다운로드 가능한 서명 설치 파일은 아직 제공하지 않습니다. 첫 공개 안정판 전에는 라이선스 결정, Authenticode, SBOM/NOTICE와 공급망 provenance, 대표 하드웨어·실물 pilot이 남아 있습니다.
+현재 Quick Start는 Windows source checkout 실행 절차입니다. Windows frozen build와 CI 내부 unsigned installer의 설치·오프라인 self-test·actual-frame·제거 검증은 통과했지만, 다운로드 가능한 서명 설치 파일은 아직 제공하지 않습니다. Windows wheel hash lock과 실제 payload 기반 SPDX/NOTICE 경계는 저장소에 포함합니다. 첫 공개 안정판 전에는 라이선스 결정, Authenticode, 상위 build provenance, 대표 하드웨어·실물 pilot이 남아 있습니다.
 
 ### Windows
 
@@ -262,11 +262,11 @@ python -m pytest -q
 Python 3.12의 깨끗한 환경에서만 unsigned 로컬 앱을 만듭니다.
 
 ```bash
-python -m pip install -r requirements/build-py312.lock
+python -m pip install --require-hashes --only-binary=:all: -r requirements/windows-py312-x64-hashed.lock
 python tools/build_native.py
 ```
 
-이 명령은 기존 산출물을 기본적으로 덮어쓰지 않고, 빌드 뒤 실제 frozen executable의 offline self-test를 실행합니다. 현재 공개 바이너리는 만들지 않습니다. 패키지 CI는 Windows 하나만 차단 대상으로 사용하며 unsigned installer를 격리 설치한 뒤 payload 해시, outbound 차단 상태의 complete workflow, native-QPA software OpenGL과 제거까지 검사합니다. 라이선스 결정, Authenticode, SBOM/NOTICE·공급망 provenance와 대표 Windows GPU·실물 pilot은 여전히 남아 있습니다. 자세한 절차와 차단 게이트는 [docs/NATIVE_PACKAGING.md](docs/NATIVE_PACKAGING.md)를 참고하세요.
+이 명령은 기존 산출물을 기본적으로 덮어쓰지 않고, 빌드 뒤 실제 frozen executable의 offline self-test를 실행합니다. Windows build는 payload 전체 SHA-256 manifest, SPDX 2.3 SBOM과 제3자 NOTICE도 생성·재검증합니다. 현재 공개 바이너리는 만들지 않습니다. 패키지 CI는 Windows 하나만 차단 대상으로 사용하며 unsigned installer를 격리 설치한 뒤 같은 evidence, outbound 차단 상태의 complete workflow, native-QPA software OpenGL과 제거까지 검사합니다. 라이선스 결정, Authenticode, source archive/runner를 포함한 상위 provenance와 대표 Windows GPU·실물 pilot은 여전히 남아 있습니다. 자세한 절차와 차단 게이트는 [docs/NATIVE_PACKAGING.md](docs/NATIVE_PACKAGING.md)를 참고하세요.
 
 ---
 
@@ -363,12 +363,13 @@ python main.py --project mesh.obj planview.png
 - dependency-valid `READY + FRESH` record graph와 application command에서 Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6 순차 gate·초록 완료 표시·재열기/Align 복원 구현
 - packaged self-test가 실제 application authority를 통해 Open → explicit Align → Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6을 수행하고, 외부 PLY 삭제 뒤 embedded `.amr`를 재열어 이동된 1:1 SVG/PNG package의 원본 SHA-256·recipe·QC를 offline 재검증
 - `--opengl-driver-smoke-report`가 source와 frozen Windows 실행 파일에서 native `qwindows` context를 열고 Qt·PyOpenGL을 bundled `opengl32sw.dll` 하나에 결합한 뒤, 768×768 FBO에서 `>= 1e9 mm` 장면의 relative VBO, color/depth readback, 0.125 mm depth pick을 원근·정사영으로 검증
+- Windows x64/CPython 3.12 build wheel 17개를 exact SHA-256으로 잠그고 sdist를 거부하며, frozen/설치 payload의 모든 파일 hash와 runtime 10개의 SPDX 2.3 SBOM·라이선스 원문 NOTICE를 실행 파일 self-test에서 재검증
 - Cutline 면·경로, Outline fixed-grid/union/topology, Digital Rubbing raster/relief 내부의 안전 경계까지 사용자 cooperative cancellation 연결
 - 대좌표 render-origin 이식: relative VBO·camera/model rebasing·world overlay 제출과 frame-bound depth picking/drag 계약 구현
 - 2026-07-13 Windows 기준 commit `b12d4874a4a8`: [source CI run 29251668123](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29251668123)에서 full pytest `670 passed, 128 subtests`, Ruff, M0 Pyright `0 errors`, Windows workflow `573 passed, 3 skipped, 118 subtests`와 qwindows+llvmpipe actual-frame `66/66` 통과
 - 같은 commit의 [frozen package run 29251668029](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29251668029)에서 12-check offline self-test와 frozen executable qwindows+llvmpipe actual-frame gate 통과
 - commit `19558f324deb`의 [installed-package run 29255341573](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29255341573)에서 Inno Setup 6.7.1 unsigned installer, 465개 설치 payload byte-for-byte 검증, outbound 차단 12-check workflow, 설치본 actual-frame `66/66`, 무인 제거·잔여물 검사를 통과. artifact upload/release는 없음
-- 다음 단계: 라이선스 결정, Authenticode, SBOM/NOTICE·hash-locked 공급망 provenance, 대표 Windows GPU·대용량 실제 유물·비 ASCII 경로 pilot. macOS·Linux 배포 확대는 첫 안정판 이후 별도 범위
+- 다음 단계: 라이선스 결정, Authenticode, source archive·runner까지 묶는 상위 build provenance, 대표 Windows GPU·대용량 실제 유물·비 ASCII 경로 pilot. macOS·Linux 배포 확대는 첫 안정판 이후 별도 범위
 
 ---
 

@@ -92,6 +92,9 @@ def test_existing_outputs_fail_closed_without_deleting_or_running_build() -> Non
         (root / "requirements" / "build-py312.lock").write_text(
             "demo==1\n", encoding="utf-8"
         )
+        (root / "requirements" / "windows-py312-x64-hashed.lock").write_text(
+            "demo==1 --hash=sha256:" + "0" * 64 + "\n", encoding="utf-8"
+        )
         (root / "ArchMeshRubbing.spec").write_text("# spec\n", encoding="utf-8")
         existing = root / "dist" / "ArchMeshRubbing"
         existing.mkdir(parents=True)
@@ -121,6 +124,9 @@ def test_build_invokes_current_python_locates_app_and_runs_file_self_test() -> N
         runtime_lock.write_text("demo==1\n", encoding="utf-8")
         (requirements / "build-py312.lock").write_text(
             "demo==1\n", encoding="utf-8"
+        )
+        (requirements / "windows-py312-x64-hashed.lock").write_text(
+            "demo==1 --hash=sha256:" + "0" * 64 + "\n", encoding="utf-8"
         )
         spec = root / "ArchMeshRubbing.spec"
         spec.write_text("# spec\n", encoding="utf-8")
