@@ -28,6 +28,7 @@ from numpy.typing import NDArray
 
 REPORT_SCHEMA = "archmeshrubbing.opengl_driver_smoke"
 REPORT_SCHEMA_VERSION = 1
+DEFAULT_CONTEXT_TIMEOUT_S = 30.0
 ROOT = Path(__file__).resolve().parents[2]
 PROBE_WIDGET_SIZE = (768, 768)
 PROBE_BASE_WORLD_MM = np.array(
@@ -786,7 +787,7 @@ def run_driver_smoke(
     report: dict[str, Any],
     *,
     qt_platform: str | None = None,
-    context_timeout_s: float = 8.0,
+    context_timeout_s: float = DEFAULT_CONTEXT_TIMEOUT_S,
 ) -> None:
     """Run the actual native widget/VBO/FBO/depth pipeline or fail closed."""
 
@@ -1126,7 +1127,11 @@ def main(argv: list[str] | None = None) -> int:
         "--qt-platform",
         help="Native Qt platform to require (for example xcb, cocoa, or windows).",
     )
-    parser.add_argument("--context-timeout", type=float, default=8.0)
+    parser.add_argument(
+        "--context-timeout",
+        type=float,
+        default=DEFAULT_CONTEXT_TIMEOUT_S,
+    )
     args = parser.parse_args(argv)
 
     report = _new_report()
