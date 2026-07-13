@@ -46,7 +46,7 @@ python tools/build_native.py
 11. 실제 PLY → 단위/Align session → embedded `.amr` 저장 → 외부 원본 삭제 → source/geometry/Align/world vertex 재검증
 12. 실제 application authority의 Open → explicit Align → Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6 → completed `.amr` offline reopen → 이동된 1:1 SVG/PNG의 원본 SHA-256·recipe·QC 재검증
 
-Offscreen에서 `QOpenGLWidget`을 생성하는 검사는 module/plugin 누락을 잡지만 실제 GPU context와 frame 정확성을 증명하지 않는다. Source checkout에는 native QPA에서 실제 `Viewport3D`의 context/FBO/VBO/pixel/depth/pick을 실행하는 `src.gui.opengl_driver_smoke`가 있지만, 첫 안정판의 남은 차단 증거는 Windows native QPA와 Windows frozen executable에서 만들어야 한다.
+Offscreen에서 `QOpenGLWidget`을 생성하는 검사는 module/plugin 누락을 잡지만 실제 context와 frame 정확성을 증명하지 않는다. Windows CI는 이어서 `QT_QPA_PLATFORM=windows`, `QT_OPENGL=software`로 native `qwindows`와 bundled `opengl32sw.dll`을 사용해 `src.gui.opengl_driver_smoke`를 실행한다. frozen 실행 파일도 `--opengl-driver-smoke-report PATH`로 같은 source module을 실행한다. report는 실제 context/FBO/VBO/pixel/depth/pick과 두 투영 모드를 모두 검사한다.
 
 앱과 driver smoke는 QApplication 생성 전에 같은 OpenGL 2.1 compatibility·24-bit depth surface format을 요청한다. macOS 로컬 실행 예시는 다음과 같다. report는 기존 파일을 덮어쓰지 않으므로 존재하지 않는 새 경로를 사용한다.
 
@@ -70,10 +70,11 @@ python -m src.gui.opengl_driver_smoke \
 - PyInstaller build
 - Windows frozen executable의 file-based 12-check self-test
 - report의 전체 check 성공 확인
+- source와 frozen executable 각각의 Windows native-QPA software OpenGL report 및 전체 check 성공 확인
 
 `package-smoke.yml`에는 frozen executable artifact upload나 release 단계가 없다. 과거 commit `e4bf6dcac4b1`의 [run `29213279508`](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29213279508)에서 세 OS가 통과했지만, 현재 제품 판정은 Windows job 하나만 사용한다. 이는 unsigned CI smoke 증거이며 공개 설치 파일을 제공한다는 뜻은 아니다.
 
-`package-smoke.yml`의 frozen self-test는 offscreen이므로 Windows 실제 GPU 검증으로 표현해서는 안 된다. Windows native QPA와 frozen executable용 actual-GL 명령은 Qt/PyOpenGL DLL 경계와 runner 안정성을 확인한 뒤 별도 차단 게이트로 추가한다.
+`package-smoke.yml`의 12-check self-test는 offscreen이지만 바로 뒤의 별도 frozen driver smoke는 native `qwindows`에서 실제 OpenGL context와 framebuffer를 사용한다. 다만 Qt의 Mesa software DLL을 강제하므로 대표 Windows 하드웨어 GPU/driver 또는 compositor 최종 표시 인증으로 표현해서는 안 된다.
 
 ## 공개 배포 차단 게이트
 
@@ -94,7 +95,7 @@ python -m src.gui.opengl_driver_smoke \
 - Windows Authenticode
 - 실제 포함 파일 기준 SBOM과 제3자 NOTICE/license bundle
 - Windows 설치/제거/파일 연결 smoke
-- Windows frozen executable의 실제 OpenGL context/render smoke와 대표 GPU/driver pilot
+- 대표 Windows 하드웨어 GPU/driver와 compositor pilot
 - large mesh, low-memory, non-ASCII path, offline machine pilot
 - clean source tree 또는 source archive digest를 포함하는 build provenance
 - 공개 산출물 하나를 선택하는 패키징 규칙과 checksum/signature

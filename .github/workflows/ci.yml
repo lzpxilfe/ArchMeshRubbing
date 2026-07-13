@@ -126,3 +126,25 @@ jobs:
           tests/test_rotation_convention.py
           tests/test_app_gui_launcher.py
           tests/test_gui_smoke.py
+
+      - name: Windows software OpenGL native-QPA smoke
+        env:
+          QT_QPA_PLATFORM: windows
+          QT_OPENGL: software
+        run: >-
+          python -m src.gui.opengl_driver_smoke
+          --qt-platform windows
+          --report build/windows-opengl-driver-smoke.json
+
+      - name: Validate Windows OpenGL evidence report
+        run: >-
+          python -c "import json,pathlib;
+          p=pathlib.Path('build/windows-opengl-driver-smoke.json');
+          d=json.loads(p.read_text(encoding='utf-8'));
+          assert d.get('ok') is True, json.dumps(d,ensure_ascii=False,indent=2);
+          c=d.get('context') or {};
+          assert c.get('qt_platform') == 'windows', c;
+          assert c.get('software_renderer') is True, c;
+          assert len(d.get('render_modes') or []) == 2, d;
+          assert d.get('checks') and all(x.get('ok') is True for x in d['checks']), d;
+          print('Windows native-QPA OpenGL smoke passed:', c.get('renderer'))"

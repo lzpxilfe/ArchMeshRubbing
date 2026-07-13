@@ -249,7 +249,7 @@ python -c "import subprocess,sys; raise SystemExit(subprocess.call([sys.executab
 python -m pytest -q
 ```
 
-일반 `QT_QPA_PLATFORM=offscreen` suite는 실제 QOpenGLWidget context를 생성하거나 검증하지 않습니다. CI는 빠른 Linux quality job과 제품 대상인 Windows workflow job으로 나뉘며, Windows native-QPA/실제 GPU 검증은 아직 첫 안정판 차단 항목입니다. 과거 macOS·Linux driver 증거와 정확한 판정 범위는 [docs/QUALITY_GATES.md](docs/QUALITY_GATES.md)에 기록합니다.
+일반 `QT_QPA_PLATFORM=offscreen` suite는 실제 QOpenGLWidget context를 생성하거나 검증하지 않습니다. CI는 빠른 Linux quality job과 제품 대상인 Windows workflow job으로 나뉩니다. Windows job은 offscreen workflow 뒤 `qwindows` + Qt의 bundled `opengl32sw.dll`을 강제해 실제 widget FBO/VBO/pixel/depth/pick smoke를 별도 실행하고, Windows frozen executable도 같은 report CLI를 실행합니다. 이는 Windows software OpenGL 증거이며 대표 하드웨어 GPU 인증은 아닙니다. 자세한 판정 범위는 [docs/QUALITY_GATES.md](docs/QUALITY_GATES.md)에 기록합니다.
 
 `pyright-m0.json`은 현재 M0 신뢰 커널 범위의 차단 게이트입니다. 전체 트리 타입 검사는 아직 부채를 보고하는 단계이며, 통과를 뜻하지 않습니다. 재현 환경, 게이트 범위, GUI 스모크 테스트의 한계는 [docs/QUALITY_GATES.md](docs/QUALITY_GATES.md)에 기록합니다.
 
@@ -266,7 +266,7 @@ python -m pip install -r requirements/build-py312.lock
 python tools/build_native.py
 ```
 
-이 명령은 기존 산출물을 기본적으로 덮어쓰지 않고, 빌드 뒤 실제 frozen executable의 offline self-test를 실행합니다. 현재 공개 바이너리는 만들지 않습니다. 패키지 CI는 Windows 하나만 차단 대상으로 사용하며, 라이선스 결정, Authenticode, installer, Windows frozen native-GL 검증이 남아 있습니다. 자세한 절차와 차단 게이트는 [docs/NATIVE_PACKAGING.md](docs/NATIVE_PACKAGING.md)를 참고하세요.
+이 명령은 기존 산출물을 기본적으로 덮어쓰지 않고, 빌드 뒤 실제 frozen executable의 offline self-test를 실행합니다. 현재 공개 바이너리는 만들지 않습니다. 패키지 CI는 Windows 하나만 차단 대상으로 사용하며 frozen executable의 native-QPA software OpenGL report도 검사합니다. 라이선스 결정, Authenticode, installer와 대표 Windows GPU pilot은 여전히 남아 있습니다. 자세한 절차와 차단 게이트는 [docs/NATIVE_PACKAGING.md](docs/NATIVE_PACKAGING.md)를 참고하세요.
 
 ---
 
@@ -364,13 +364,14 @@ python main.py --project mesh.obj planview.png
 - DerivedRecord의 VBO-free binding rebind와 SVG/PNG worker staging → final-authority publication 이식
 - dependency-valid `READY + FRESH` record graph와 application command에서 Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6 순차 gate·초록 완료 표시·재열기/Align 복원 구현
 - packaged self-test가 실제 application authority를 통해 Open → explicit Align → Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6을 수행하고, 외부 PLY 삭제 뒤 embedded `.amr`를 재열어 이동된 1:1 SVG/PNG package의 원본 SHA-256·recipe·QC를 offline 재검증
+- `--opengl-driver-smoke-report`가 source와 frozen Windows 실행 파일에서 native `qwindows` context를 열고 `>= 1e9 mm` 장면의 relative VBO, FBO color/depth readback, 0.125 mm depth pick을 원근·정사영으로 검증
 - Cutline 면·경로, Outline fixed-grid/union/topology, Digital Rubbing raster/relief 내부의 안전 경계까지 사용자 cooperative cancellation 연결
 - 대좌표 render-origin 이식: relative VBO·camera/model rebasing·world overlay 제출과 frame-bound depth picking/drag 계약 구현
 - 실제 OpenGL driver smoke 구현: code commit `f25b424d6936`의 clean source tree, Python 3.12.13/macOS Apple M4에서 61개 context/FBO/VBO/pixel/depth/pick 조건 통과, 0.125 mm 높이차를 원근 `0.124783 mm`, 정사영 `0.124998 mm`로 복원. report는 commit/tree 상태·runtime lock·dependency version·UTC 시각을 기록함
 - source checkout CI 검증: commit `166103dcf0ea`의 run `29182584810`에서 quality `572 passed`, macOS/Ubuntu persistence 각 `501 passed`, Windows persistence `498 passed + 3 platform-specific skips`, Linux llvmpipe actual-GL `61/61` 통과
 - 2026-07-13 source-closure 기준 commit `6898f98d2fb3`의 Python 3.12 원격 CI: full pytest `660 passed, 128 subtests`, Ruff, M0 Pyright, Windows persistence와 Windows frozen executable self-test 통과
-- 현재 complete-workflow 후보의 로컬 검증: full pytest `662 passed, 128 subtests`, Ruff, M0 Pyright `0 errors`, source self-test `12/12`; Windows frozen 판정은 이 변경의 원격 CI 결과로만 확정
-- 다음 단계: Windows native QPA/frozen actual-GL, 라이선스 결정, Authenticode·installer, 대표 GPU·대용량 실제 유물 pilot. macOS·Linux 배포 확대는 첫 안정판 이후 별도 범위
+- 현재 Windows native-GL 후보의 로컬 검증: full pytest `664 passed, 128 subtests`, Ruff, M0 Pyright `0 errors`, source self-test `12/12`; Windows qwindows/frozen actual-frame 판정은 이 변경의 원격 CI 결과로만 확정
+- 다음 단계: 라이선스 결정, Authenticode·installer, 대표 Windows GPU·대용량 실제 유물 pilot. macOS·Linux 배포 확대는 첫 안정판 이후 별도 범위
 
 ---
 

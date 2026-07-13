@@ -174,3 +174,27 @@ def test_self_test_report_cli_writes_machine_json_without_overwrite() -> None:
             ["ArchMeshRubbing", "--self-test-report", str(destination)],
         ):
             assert main.run_cli() == 2
+
+
+def test_native_opengl_report_cli_selects_the_windows_qpa() -> None:
+    with (
+        patch.object(main.sys, "platform", "win32"),
+        patch(
+            "src.gui.opengl_driver_smoke.main",
+            return_value=0,
+        ) as driver_smoke,
+        patch(
+            "sys.argv",
+            ["ArchMeshRubbing.exe", "--opengl-driver-smoke-report", "gl.json"],
+        ),
+    ):
+        assert main.run_cli() == 0
+
+    driver_smoke.assert_called_once_with(
+        ["--report", "gl.json", "--qt-platform", "windows"]
+    )
+
+
+def test_native_opengl_report_cli_rejects_missing_path() -> None:
+    with patch("sys.argv", ["ArchMeshRubbing", "--opengl-driver-smoke-report"]):
+        assert main.run_cli() == 2

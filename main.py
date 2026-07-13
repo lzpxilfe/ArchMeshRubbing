@@ -59,6 +59,26 @@ def run_cli() -> int | None:
             except Exception:
                 return 2
             return 0 if bool(report.get("ok")) else 1
+        if release_command == "--opengl-driver-smoke-report":
+            if len(sys.argv) != 3:
+                return 2
+            qt_platform = {
+                "darwin": "cocoa",
+                "linux": "xcb",
+                "win32": "windows",
+            }.get(sys.platform)
+            if qt_platform is None:
+                return 2
+            from src.gui.opengl_driver_smoke import main as run_driver_smoke
+
+            return run_driver_smoke(
+                [
+                    "--report",
+                    sys.argv[2],
+                    "--qt-platform",
+                    qt_platform,
+                ]
+            )
 
     try:
         from src.core.logging_utils import setup_logging
@@ -151,6 +171,7 @@ def print_help():
     print("  python main.py --diagnostics-json        # Print machine-readable runtime diagnostics")
     print("  python main.py --self-test               # Run offline, read-only packaged-app checks")
     print("  python main.py --self-test-report PATH   # Write a no-overwrite packaged-app report")
+    print("  python main.py --opengl-driver-smoke-report PATH  # Verify a native OpenGL frame")
     print("  python main.py <mesh_file>              # Launch GUI and open mesh")
     print("  python main.py --info <mesh_file>       # Show file info")
     print("  python main.py --open-mesh <mesh_file>  # Launch GUI and open mesh")

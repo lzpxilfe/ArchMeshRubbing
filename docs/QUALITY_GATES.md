@@ -15,7 +15,7 @@ python -m pip install -r requirements.txt -r requirements-dev.txt
 
 ## 차단 게이트
 
-Pull request에서 다음 code-quality 검사와 Windows offline workflow smoke가 모두 통과해야 한다.
+Pull request에서 다음 code-quality 검사, Windows offline workflow smoke와 Windows native-QPA software OpenGL smoke가 모두 통과해야 한다.
 
 ```bash
 python -m ruff check .
@@ -150,7 +150,7 @@ python -m pytest -q \
 
 2026-07-13 source-closure 기준 commit `6898f98d2fb3`은 Python 3.12 원격 CI에서 full pytest `660 passed, 128 subtests passed`, Ruff, M0 Pyright, Windows persistence와 Windows frozen executable self-test를 통과했다. 이후 첫 안정판의 플랫폼 완료 판정은 Windows job만 사용한다.
 
-현재 complete-workflow 후보는 로컬 source tree에서 full pytest `662 passed, 128 subtests passed`, Ruff, M0 Pyright `0 errors`, source self-test `12/12`을 통과했다. 새 check는 Open→Align→3/6/6→completed AMR offline reopen→1:1 SVG/PNG 재현을 한 번에 검증한다. Windows frozen 증거는 이 변경의 원격 package smoke가 통과한 뒤에만 확정한다.
+현재 Windows native-GL 후보는 로컬 source tree에서 full pytest `664 passed, 128 subtests passed`, Ruff, M0 Pyright `0 errors`, source self-test `12/12`을 통과했다. 새 complete-workflow check는 Open→Align→3/6/6→completed AMR offline reopen→1:1 SVG/PNG 재현을 한 번에 검증한다. Windows qwindows와 frozen actual-frame 증거는 이 변경의 원격 CI가 통과한 뒤에만 확정한다.
 
 ## 아직 차단하지 않는 검사
 
@@ -158,7 +158,9 @@ python -m pytest -q \
 
 Windows workflow smoke에서는 프로젝트 저장, source/geometry identity와 versioned source manifest/bundle, ArtifactDocument·scene adapter·session·application workbench와 record-derived workflow progress, ticketed Open과 explicit Align gate, RFC 8785/vector record/export/Cutline/Outline/topology/schema, Digital Rubbing record/extractor/canonical PNG/export/schema, 독립 프로세스 source closure 및 relocated vector/rubbing-package 왕복, render-coordinate algebra·relative VBO/native preview smoke, matrix golden, GUI 런처, MainWindow 생성, native source-of-truth binding, native Cutline/Outline/Rubbing command, 3/6/6 순차 gate와 completed `.amr` offline reopen, session/version/epoch 및 late-result 방어, legacy export 우회와 fail-closed 경계를 실행한다. Linux quality job은 별도로 전체 테스트와 Ruff·M0 Pyright를 빠르게 실행한다. Windows GUI 스모크는 `QT_QPA_PLATFORM=offscreen`이므로 CPU/document/scene transaction과 widget wiring을 검증하지만 실제 OpenGL frame을 증명하지 않는다.
 
-별도 `package-smoke.yml`은 `main` push, pull request, 수동 실행에서 Windows의 exact Python 3.12 build lock, immutable build manifest, PyInstaller spec과 frozen executable의 file-report self-test를 실행한다. 새 12번째 check는 작은 PLY를 실제 application authority로 열고 3/6/6 record를 만든 뒤 completed `.amr`를 외부 원본 없이 재열어 1:1 SVG/PNG를 재현·이동·offline 검증한다. 이 검사는 실제 `MainWindow`/QOpenGLWidget/OpenGL import도 포함하지만 offscreen 실제 GL context/render는 보장하지 않는다. 라이선스 게이트가 해결되기 전에는 artifact upload와 release 단계를 두지 않는다. 과거 세 OS 통과 기록은 역사적 증거로 남기되 현재 완료 판정에는 Windows 결과만 사용한다.
+같은 Windows job의 다음 단계는 `QT_QPA_PLATFORM=windows`, `QT_OPENGL=software`로 실제 `QOpenGLWidget` context를 열고 `src.gui.opengl_driver_smoke` report를 검증한다. Qt wheel에 포함된 `opengl32sw.dll`을 강제하므로 GitHub runner의 임의 하드웨어 driver에 의존하지 않으면서 qwindows/context/FBO/VBO/pixel/depth/pick 경계를 실행한다. 이는 software OpenGL 실제-frame 증거이며 대표 GPU 또는 compositor 인증은 아니다.
+
+별도 `package-smoke.yml`은 `main` push, pull request, 수동 실행에서 Windows의 exact Python 3.12 build lock, immutable build manifest, PyInstaller spec과 frozen executable의 file-report self-test를 실행한다. 새 12번째 check는 작은 PLY를 실제 application authority로 열고 3/6/6 record를 만든 뒤 completed `.amr`를 외부 원본 없이 재열어 1:1 SVG/PNG를 재현·이동·offline 검증한다. 이어 같은 frozen executable의 `--opengl-driver-smoke-report`를 native qwindows/software OpenGL로 실행해 PyInstaller가 Qt platform plugin·`opengl32sw.dll`·PyOpenGL·viewport 경로를 함께 운반했는지 확인한다. 라이선스 게이트가 해결되기 전에는 artifact upload와 release 단계를 두지 않는다. 과거 세 OS 통과 기록은 역사적 증거로 남기되 현재 완료 판정에는 Windows 결과만 사용한다.
 
 AMR v2 `payload_type="artifact_document"` 1.0의 strict 저장·content-addressed source closure embedding·production-loader staged reopen·checksum·원자 교체와 독립 프로세스 materialization은 현재 차단 게이트다. `tests/test_artifact_new_process_roundtrip.py`는 프로세스 A와 B의 PID가 다름을 확인하고, 프로세스 A가 `.amr`를 저장한 뒤 외부 PLY 또는 textured OBJ의 OBJ·MTL·PNG 전체를 삭제하고 package를 relocation한다. 프로세스 B는 `.amr`의 embedded source closure만 saved parser/unit으로 decode하며, 새로 계산한 primary/dependency SHA-256·크기와 texture/geometry SHA-256, active Align ID·matrix, parser/unit, world vertices가 같아야 통과한다.
 
