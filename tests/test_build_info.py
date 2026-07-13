@@ -83,6 +83,9 @@ def test_self_test_passes_with_complete_offline_artifact_workflow() -> None:
     assert "exports=vector 9/9>rubbing 6/6" in checks[
         "artifact_complete_workflow_offline"
     ]["detail"]
+    assert "survey=verified-atomic-15" in checks[
+        "artifact_complete_workflow_offline"
+    ]["detail"]
     diagnostics = cast(dict[str, object], report["diagnostics"])
     assert diagnostics["application"] == {
         "name": "ArchMeshRubbing",

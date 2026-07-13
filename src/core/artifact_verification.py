@@ -26,6 +26,10 @@ from .artifact_rubbing_export import (
     validate_rubbing_export_package,
 )
 from .artifact_session import ArtifactSession
+from .artifact_survey_export import (
+    SURVEY_EXPORT_MANIFEST_NAME,
+    validate_survey_export_package,
+)
 from .artifact_tile_unwrap_export import (
     TILE_UNWRAP_EXPORT_SIDECAR_NAME,
     validate_tile_unwrap_export_package,
@@ -44,6 +48,7 @@ OFFLINE_VERIFICATION_SCHEMA_VERSION = "1.0.0"
 ARTIFACT_KIND_PROJECT = "project"
 ARTIFACT_KIND_VECTOR_EXPORT = "vector_export"
 ARTIFACT_KIND_RUBBING_EXPORT = "rubbing_export"
+ARTIFACT_KIND_SURVEY_EXPORT = "survey_export"
 ARTIFACT_KIND_TILE_UNWRAP_EXPORT = "tile_unwrap_export"
 ARTIFACT_KIND_UNKNOWN = "unknown"
 
@@ -53,6 +58,7 @@ AUTHORITY_MATCHED_PROJECT = "matched_project"
 _DIRECTORY_MARKERS = {
     VECTOR_EXPORT_SIDECAR_NAME: ARTIFACT_KIND_VECTOR_EXPORT,
     RUBBING_EXPORT_SIDECAR_NAME: ARTIFACT_KIND_RUBBING_EXPORT,
+    SURVEY_EXPORT_MANIFEST_NAME: ARTIFACT_KIND_SURVEY_EXPORT,
     TILE_UNWRAP_EXPORT_SIDECAR_NAME: ARTIFACT_KIND_TILE_UNWRAP_EXPORT,
 }
 _WINDOWS_ABSOLUTE_PATH_RE = re.compile(
@@ -307,6 +313,25 @@ def _verify_tile_unwrap(
     }
 
 
+def _verify_survey(
+    path: Path,
+    *,
+    document: ArtifactDocument | None,
+) -> dict[str, Any]:
+    bundle = validate_survey_export_package(path, document=document)
+    return {
+        "artifact_count": bundle.artifact_count,
+        "artifact_set_sha256": bundle.artifact_set_sha256,
+        "authority": bundle.manifest["authority"],
+        "bound_project_document_sha256": _bound_document_sha256(document),
+        "manifest_sha256": bundle.manifest_sha256,
+        "qc": bundle.manifest["qc"],
+        "rubbing_count": bundle.rubbing_count,
+        "vector_count": bundle.vector_count,
+        "workflow": bundle.manifest["workflow"],
+    }
+
+
 def _sorted_counter(values: list[str]) -> dict[str, int]:
     return dict(sorted(Counter(values).items()))
 
@@ -425,6 +450,8 @@ def build_artifact_verification_report(
                 evidence = _verify_rubbing(input_path, document=document)
             elif artifact_kind == ARTIFACT_KIND_TILE_UNWRAP_EXPORT:
                 evidence = _verify_tile_unwrap(input_path, document=document)
+            elif artifact_kind == ARTIFACT_KIND_SURVEY_EXPORT:
+                evidence = _verify_survey(input_path, document=document)
             else:  # pragma: no cover - closed detector result
                 raise RuntimeError("unsupported detected artifact kind")
         report = _report_base(
@@ -470,6 +497,7 @@ def build_artifact_verification_report(
 __all__ = [
     "ARTIFACT_KIND_PROJECT",
     "ARTIFACT_KIND_RUBBING_EXPORT",
+    "ARTIFACT_KIND_SURVEY_EXPORT",
     "ARTIFACT_KIND_TILE_UNWRAP_EXPORT",
     "ARTIFACT_KIND_UNKNOWN",
     "ARTIFACT_KIND_VECTOR_EXPORT",

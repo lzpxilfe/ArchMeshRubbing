@@ -19,7 +19,7 @@
 |---|---|---|---|
 | 기와 정렬·전개 | 기와 정렬, 원통 투영 이미지, 영역 선택 곡률 전개 UI가 표시됨 | native desktop의 전체/선택 face·X/Y/Z 장축·Top/Bottom·section/QC 패널, variable-radius sectionwise, `surface.tile_unwrap.v1`, 1 µm 좌표·왜곡/foldover gate, 권위 재검증 뒤 `.amr-unwrap` binary/OBJ/SVG/provenance | 계산·신뢰·desktop 연결은 차별화. 실물 암·수키와 pilot 전에는 종합 우위라고 표시하지 않음 |
 | 단위·정렬 이력 | 두 점 거리 scale 보정과 축 정렬 UI가 표시됨 | source bytes와 decode geometry의 별도 hash, 확인 단위/축, immutable proper-rigid Align revision, stale history 복원 | ArchMeshRubbing 우위. 실제 사용자 오류율 비교는 필요 |
-| 1:1 결과 근거 | SVG drawing/OBJ export 메뉴가 표시됨 | exact-mm SVG/PNG/unwrap, recipe/QC/dependency closure, canonical payload hash, offline verifier | ArchMeshRubbing 우위. Illustrator 왕복 실물 출력 pilot 필요 |
+| 1:1 결과 근거 | SVG drawing/OBJ export 메뉴가 표시됨 | exact-mm SVG/PNG/unwrap, recipe/QC/dependency closure, canonical payload hash, offline verifier, 완료 3/6/6을 15개 자식과 aggregate manifest로 한 번에 게시하는 `.amr-survey` | ArchMeshRubbing 우위. Illustrator 왕복 실물 출력 pilot 필요 |
 | 절단·단면 | 직선/교차/경사 절단, clipping, quadrant, 단면선 추출 UI가 표시됨 | 검증 Cutline과 단면/clip 기반 legacy 도구가 있으나 조각 생성·통합 편집 UX는 부족 | ARIA UI가 앞섬. non-destructive fragment record와 recall clip 필요 |
 | 조각 관리·복원 | 절단 뒤 자동 분리, piece/line list, pottery restoration UI가 표시됨 | surface separation과 기록면 선택 코어는 있으나 native fragment document workflow가 없음 | ARIA 공개 기능 우세. 원본 보존형 fragment revision이 P1 |
 | RTI | 광원 방향·preset·specular/ambient·고대비·확대 UI가 표시됨 | 동등한 native RTI 모듈 없음 | 명확한 격차. 공개 RTI 원리 기반 독립 구현과 reproducible light recipe가 P1 |
@@ -40,6 +40,7 @@
 - 완료: 메인 작업 흐름 바로가기에서 열 수 있는 native desktop `기와 전개` command/panel을 연결했다.
 - 완료: 기록면 전체/현재 face selection, 장축 `X/Y/Z`, Top/Bottom, section 수와 QC를 한 화면에서 검토한다.
 - 완료: 선택한 `READY + FRESH` record를 recipe로 재계산하고 exact receipt를 확인한 뒤에만 `.amr-unwrap`으로 내보내며 기존 자유 flatten export와 구분한다.
+- 완료: Cutline 3/3·Outline 6/6·Digital Rubbing 6/6을 한 버튼으로 `.amr-survey`에 원자 게시하고 이동 후 exact project와 offline 재검증한다.
 - 공개 가능한 암키와·수키와 scan set을 마련해 폭/길이/단면 arc 오차, foldover, 처리시간을 기록한다.
 - SVG를 Illustrator/Inkscape로 열어 physical size를 실물 자와 대조한다.
 

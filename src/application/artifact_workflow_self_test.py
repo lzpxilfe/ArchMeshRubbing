@@ -21,6 +21,7 @@ import tempfile
 from typing import Any, Mapping
 
 from src.application.artifact_exports import ArtifactExportController
+from src.application.artifact_survey_exports import ArtifactSurveyExportController
 from src.application.artifact_measurements import (
     ArtifactMeasurementController,
     ArtifactMeasurementWorkItem,
@@ -40,6 +41,7 @@ from src.application.artifact_workflow_progress import (
 )
 from src.core.artifact_rubbing_export import validate_rubbing_export_package
 from src.core.artifact_session import ArtifactSession
+from src.core.artifact_survey_export import validate_survey_export_package
 from src.core.artifact_verification import build_artifact_verification_report
 from src.core.artifact_vector_export import validate_vector_export_package
 from src.core.artifact_vector_record import PlanarFrame
@@ -113,6 +115,8 @@ class ArtifactWorkflowSelfTestResult:
     rubbing_export_count: int
     vector_set_sha256: str
     rubbing_set_sha256: str
+    survey_manifest_sha256: str
+    survey_artifact_set_sha256: str
     svg_sha256: str
     png_sha256: str
 
@@ -131,6 +135,9 @@ class ArtifactWorkflowSelfTestResult:
             f"rubbing {self.rubbing_export_count}/6, "
             f"vector_set={self.vector_set_sha256[:12]}, "
             f"rubbing_set={self.rubbing_set_sha256[:12]}, "
+            f"survey_manifest={self.survey_manifest_sha256[:12]}, "
+            f"survey_set={self.survey_artifact_set_sha256[:12]}, "
+            "survey=verified-atomic-15, "
             "recovery=verified-create-new"
         )
 
@@ -342,6 +349,52 @@ def _export_and_verify_rubbing(
         "png_sha256": bundle.png_sha256,
         "sidecar_sha256": bundle.sidecar_sha256,
         "pixels_per_meter": str(bundle.pixels_per_meter),
+    }
+
+
+def _export_and_verify_survey(
+    exports: ArtifactSurveyExportController,
+    *,
+    directory: Path,
+    project_path: Path,
+    session: ArtifactSession,
+) -> dict[str, str]:
+    destination = directory / "complete-workflow.amr-survey"
+    work_item = exports.begin(destination)
+    result = exports.execute(work_item)
+    publication = exports.publish_result(work_item, result)
+    if (
+        publication.destination != destination
+        or len(publication.record_ids) != 15
+        or not publication.durability_confirmed
+    ):
+        raise RuntimeError("complete survey publication receipt is invalid")
+
+    relocated = directory / "relocated-complete-workflow.amr-survey"
+    destination.rename(relocated)
+    bundle = validate_survey_export_package(
+        relocated,
+        document=session.document,
+    )
+    evidence = _verification_evidence(
+        build_artifact_verification_report(
+            relocated,
+            against_project=project_path,
+        ),
+        artifact_kind="survey_export",
+    )
+    if (
+        bundle.artifact_count != 15
+        or (bundle.vector_count, bundle.rubbing_count) != (9, 6)
+        or evidence.get("bound_project_document_sha256")
+        != session.document.canonical_sha256
+        or evidence.get("manifest_sha256") != bundle.manifest_sha256
+        or evidence.get("artifact_set_sha256") != bundle.artifact_set_sha256
+    ):
+        raise RuntimeError("unified survey verification lost 3/6/6 project authority")
+    return {
+        "manifest_sha256": bundle.manifest_sha256,
+        "artifact_set_sha256": bundle.artifact_set_sha256,
     }
 
 
@@ -577,6 +630,13 @@ def _run_in_directory(directory: Path) -> ArtifactWorkflowSelfTestResult:
     ):
         raise RuntimeError("complete workflow did not export each rubbing record once")
 
+    survey_receipt = _export_and_verify_survey(
+        ArtifactSurveyExportController(offline_workbench, id_factory=ids),
+        directory=directory,
+        project_path=recovered_path,
+        session=restored,
+    )
+
     top_cutline = next(
         receipt
         for receipt in vector_receipts
@@ -600,6 +660,8 @@ def _run_in_directory(directory: Path) -> ArtifactWorkflowSelfTestResult:
         rubbing_export_count=len(rubbing_receipts),
         vector_set_sha256=_receipt_set_sha256(vector_receipts),
         rubbing_set_sha256=_receipt_set_sha256(rubbing_receipts),
+        survey_manifest_sha256=survey_receipt["manifest_sha256"],
+        survey_artifact_set_sha256=survey_receipt["artifact_set_sha256"],
         svg_sha256=top_cutline["svg_sha256"],
         png_sha256=top_rubbing["png_sha256"],
     )

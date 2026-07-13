@@ -16,7 +16,7 @@
 - `schemas/portable_archive_manifest-1.0.0.schema.json`: portable sidecar의 machine-readable 계약
 - `schemas/source_archive-1.0.0.schema.json`: source ZIP 외부 sidecar와 내부 manifest의 machine-readable 계약
 - `schemas/build_provenance-1.0.0.schema.json`: unsigned build-provenance record의 closed machine-readable 계약
-- `schemas/offline_verification_report-1.0.0.schema.json`: 받은 `.amr`와 세 export package의 통합 offline verification receipt 계약
+- `schemas/offline_verification_report-1.0.0.schema.json`: 받은 `.amr`와 네 export package의 통합 offline verification receipt 계약
 - `build/generated/build_info.json`: version, channel, commit, runtime lock과 Windows wheel lock SHA-256
 
 일반 source 실행은 플랫폼 중립 version lock을 사용한다. 제품 대상 Windows frozen job은 평탄화된 hash lock만 설치하며 sdist와 검토되지 않은 wheel을 거부한다. 현재 lock은 Windows x64/CPython 3.12 한 대상의 증거이며 다른 OS 지원을 뜻하지 않는다.
@@ -59,18 +59,18 @@ python tools/build_portable_archive.py verify `
 
 1. embedded build manifest와 runtime/wheel lock hash
 2. 정확한 runtime distribution 버전과 Shapely/GEOS 조합
-3. 아이콘, runtime/wheel lock, license policy, 16개 JSON schema
+3. 아이콘, runtime/wheel lock, license policy, 17개 JSON schema
 4. frozen/portable payload의 전체 파일 SHA-256 manifest, SPDX 2.3 SBOM, 제3자 NOTICE를 실제 bytes에서 재계산
 5. exact Git commit/tree/blob·SHA-256·LICENSE에 결합된 corresponding-source ZIP과 sidecar
 6. offscreen Qt application
-7. 실제 `MainWindow`, native 기와 전개의 전체/선택 face·X/Y/Z·Top/Bottom·section·record/export controls, `QOpenGLWidget`, OpenGL.GL/GLU import와 생성
+7. 실제 `MainWindow`, 완료 실측 15개 원자 묶음 버튼, native 기와 전개의 전체/선택 face·X/Y/Z·Top/Bottom·section·record/export controls, `QOpenGLWidget`, OpenGL.GL/GLU import와 생성
 8. OBJ, PLY, STL, OFF, glTF, GLB를 closed import recipe와 외부 dependency deny resolver로 여는 production parser 경로
 9. Pillow PNG encode/decode
 10. canonical `ArtifactDocument` round-trip golden
 11. canonical Cutline golden
 12. canonical Digital Rubbing golden
 13. 실제 PLY → 단위/Align session → embedded `.amr` 저장 → 외부 원본 삭제 → source/geometry/Align/world vertex 재검증
-14. 실제 application authority의 Open → explicit Align → Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6 → completed `.amr` offline reopen → 이동된 1:1 SVG/PNG의 원본 SHA-256·recipe·QC 재검증. 이 check는 통합 verifier로 `.amr` embedded source materialization receipt를 만들고 SVG/PNG를 exact project에 다시 결합한다.
+14. 실제 application authority의 Open → explicit Align → Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6 → completed `.amr` offline reopen → 이동된 1:1 SVG/PNG와 원자적 `.amr-survey`의 원본 SHA-256·recipe·QC·aggregate hash 재검증. 이 check는 통합 verifier로 `.amr` embedded source materialization receipt를 만들고 개별 산출물과 15개 묶음을 exact project에 다시 결합한다.
 
 Offscreen `QOpenGLWidget` 생성은 module/plugin 누락을 잡지만 실제 frame 정확성을 증명하지 않는다. Windows CI는 이어서 `QT_QPA_PLATFORM=windows`, `QT_OPENGL=software`로 native `qwindows`와 bundled `opengl32sw.dll`을 사용해 `src.gui.opengl_driver_smoke`를 실행한다. PyOpenGL의 GL/WGL dispatch도 같은 DLL에 결합해 Qt software context와 시스템 `opengl32.dll`이 섞이지 않게 한다. report는 768×768 실제 widget FBO, VBO, pixel/depth/pick과 두 투영 모드를 모두 검사한다.
 

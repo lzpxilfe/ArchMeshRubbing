@@ -112,6 +112,7 @@ jobs:
           tests/test_artifact_workflow_progress.py
           tests/test_artifact_workflow_self_test.py
           tests/test_artifact_exports.py
+          tests/test_artifact_survey_export.py
           tests/test_artifact_measurements.py
           tests/test_artifact_new_process_roundtrip.py
           tests/test_canonical_json.py

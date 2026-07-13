@@ -299,6 +299,12 @@ from src.application.artifact_exports import (  # noqa: E402
     ArtifactExportState,
     ArtifactExportWorkItem,
 )
+from src.application.artifact_survey_exports import (  # noqa: E402
+    ArtifactSurveyExportController,
+    ArtifactSurveyExportPublication,
+    ArtifactSurveyExportResult,
+    ArtifactSurveyExportWorkItem,
+)
 from src.core.artifact_vector_extractor import (  # noqa: E402
     ArtifactVectorComputation,
     ArtifactVectorExtractionError,
@@ -329,6 +335,9 @@ from src.core.artifact_rubbing_export import (  # noqa: E402
     ArtifactRubbingExportError,
     RUBBING_EXPORT_DIRECTORY_SUFFIX,
 )
+from src.core.artifact_survey_export import (  # noqa: E402
+    SURVEY_EXPORT_DIRECTORY_SUFFIX,
+)
 from src.core.artifact_tile_unwrap_export import (  # noqa: E402
     ArtifactTileUnwrapExportError,
     TILE_UNWRAP_EXPORT_DIRECTORY_SUFFIX,
@@ -357,6 +366,9 @@ from src.core.artifact_vector_record import (  # noqa: E402
 
 
 _NATIVE_CUTLINE_AXIS_INDEX = {"top": 2, "front": 1, "right": 0}
+_NativeExportController = ArtifactExportController | ArtifactSurveyExportController
+_NativeExportWorkItem = ArtifactExportWorkItem | ArtifactSurveyExportWorkItem
+_NativeExportPublication = ArtifactExportPublication | ArtifactSurveyExportPublication
 
 
 def _native_cutline_frame(view: str, offset_mm: float) -> PlanarFrame:
@@ -3893,6 +3905,7 @@ class SectionPanel(QWidget):
     nativeRubbingRequested = pyqtSignal()
     nativeRubbingRecordSelected = pyqtSignal(str)
     nativeRubbingExportRequested = pyqtSignal()
+    nativeSurveyExportRequested = pyqtSignal()
     nativeTileUnwrapRequested = pyqtSignal()
     nativeTileUnwrapRecordSelected = pyqtSignal(str)
     nativeTileUnwrapExportRequested = pyqtSignal()
@@ -4166,6 +4179,23 @@ class SectionPanel(QWidget):
         )
         native_layout.addWidget(self.label_native_rubbing_info)
 
+        survey_line = QFrame()
+        survey_line.setFrameShape(QFrame.Shape.HLine)
+        survey_line.setFrameShadow(QFrame.Shadow.Sunken)
+        native_layout.addWidget(survey_line)
+        self.btn_native_survey_export = QPushButton(
+            "완료 실측 15개 원자 묶음 내보내기"
+        )
+        set_pixel_icon(self.btn_native_survey_export, "export")
+        self.btn_native_survey_export.setToolTip(
+            "Top·Front·Right Cutline 3개, 6면 Outline 6개, 6면 Digital Rubbing "
+            "6개를 하나의 검증 가능한 .amr-survey 디렉터리로 원자 게시합니다."
+        )
+        self.btn_native_survey_export.clicked.connect(
+            self.nativeSurveyExportRequested.emit
+        )
+        native_layout.addWidget(self.btn_native_survey_export)
+
         tile_line = QFrame()
         tile_line.setFrameShape(QFrame.Shape.HLine)
         tile_line.setFrameShadow(QFrame.Shadow.Sunken)
@@ -4394,6 +4424,15 @@ class SectionPanel(QWidget):
             "탁본 계산 · 기록",
             progress.rubbing,
         )
+        self.btn_native_survey_export.setEnabled(progress.rubbing.complete)
+        self.btn_native_survey_export.setProperty(
+            "workflowComplete",
+            progress.rubbing.complete,
+        )
+        survey_style = self.btn_native_survey_export.style()
+        survey_style.unpolish(self.btn_native_survey_export)
+        survey_style.polish(self.btn_native_survey_export)
+        self.btn_native_survey_export.update()
 
     def on_btn_toggled(self, checked):
         if checked:
@@ -4508,6 +4547,10 @@ class MainWindow(QMainWindow):
             self._artifact_workbench
         )
         self._artifact_exports = ArtifactExportController(
+            self._artifact_workbench,
+            rubbing_memory_budget_bytes=DEFAULT_RUBBING_MEMORY_BUDGET_BYTES,
+        )
+        self._artifact_survey_exports = ArtifactSurveyExportController(
             self._artifact_workbench,
             rubbing_memory_budget_bytes=DEFAULT_RUBBING_MEMORY_BUDGET_BYTES,
         )
@@ -4751,6 +4794,9 @@ class MainWindow(QMainWindow):
         )
         self.section_panel.nativeRubbingExportRequested.connect(
             self.on_native_rubbing_export_requested
+        )
+        self.section_panel.nativeSurveyExportRequested.connect(
+            self.on_native_survey_export_requested
         )
         self.section_panel.nativeTileUnwrapRequested.connect(
             self.on_native_tile_unwrap_requested
@@ -5152,6 +5198,22 @@ class MainWindow(QMainWindow):
                 rubbing_memory_budget_bytes=DEFAULT_RUBBING_MEMORY_BUDGET_BYTES,
             )
             self._artifact_exports = controller
+        return controller
+
+    def _artifact_survey_export_controller(self) -> ArtifactSurveyExportController:
+        """Return the Qt-free complete-survey atomic export controller."""
+
+        workbench = self._artifact_workbench_controller()
+        controller = getattr(self, "_artifact_survey_exports", None)
+        if (
+            not isinstance(controller, ArtifactSurveyExportController)
+            or controller.workbench is not workbench
+        ):
+            controller = ArtifactSurveyExportController(
+                workbench,
+                rubbing_memory_budget_bytes=DEFAULT_RUBBING_MEMORY_BUDGET_BYTES,
+            )
+            self._artifact_survey_exports = controller
         return controller
 
     def _native_workflow_stage(self) -> WorkflowStage:
@@ -17652,8 +17714,8 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _cancel_native_export_if_staged(
-        controller: ArtifactExportController,
-        work_item: ArtifactExportWorkItem,
+        controller: _NativeExportController,
+        work_item: _NativeExportWorkItem,
         *,
         reason: str,
     ) -> str | None:
@@ -17668,8 +17730,8 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _cancel_unstarted_native_export(
-        controller: ArtifactExportController,
-        work_item: ArtifactExportWorkItem,
+        controller: _NativeExportController,
+        work_item: _NativeExportWorkItem,
         *,
         reason: str,
     ) -> str | None:
@@ -17683,8 +17745,8 @@ class MainWindow(QMainWindow):
 
     def _request_native_export_cancel(
         self,
-        controller: ArtifactExportController,
-        work_item: ArtifactExportWorkItem,
+        controller: _NativeExportController,
+        work_item: _NativeExportWorkItem,
         *,
         label: str,
     ) -> None:
@@ -17721,8 +17783,8 @@ class MainWindow(QMainWindow):
 
     def _native_export_callback_is_cancelled(
         self,
-        controller: ArtifactExportController,
-        work_item: ArtifactExportWorkItem,
+        controller: _NativeExportController,
+        work_item: _NativeExportWorkItem,
         *,
         label: str,
     ) -> bool:
@@ -17744,8 +17806,8 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _verify_native_export_shutdown(
-        controller: ArtifactExportController,
-        work_item: ArtifactExportWorkItem,
+        controller: _NativeExportController,
+        work_item: _NativeExportWorkItem,
     ) -> None:
         summary = controller.summary(work_item)
         if summary.state in {
@@ -17762,7 +17824,7 @@ class MainWindow(QMainWindow):
 
     def _report_native_export_publication(
         self,
-        publication: ArtifactExportPublication,
+        publication: _NativeExportPublication,
         *,
         artifact_label: str,
     ) -> None:
@@ -18435,6 +18497,205 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(
                     self,
                     "Digital Rubbing 내보내기 정리 실패",
+                    cleanup_error,
+                )
+
+    def on_native_survey_export_requested(self) -> None:
+        """Publish the completed 3/6/6 workflow as one atomic directory."""
+
+        session = getattr(self, "_artifact_session", None)
+        if not isinstance(session, ArtifactSession):
+            self.status_info.setText("내보낼 ArtifactDocument가 없습니다.")
+            return
+        if self._artifact_measurement_controller().active_summaries:
+            self.status_info.setText(
+                "진행·보류 중인 실측 결과가 있어 완료 실측 묶음을 만들 수 없습니다."
+            )
+            return
+        progress = self._native_record_workflow_progress()
+        if not progress.rubbing.complete:
+            self.status_info.setText(
+                "완료 실측 묶음은 Cutline 3/3 · Outline 6/6 · 탁본 6/6이 필요합니다."
+            )
+            return
+        try:
+            self._artifact_workbench_controller().require_stable_session(
+                session,
+                measurement=True,
+            )
+        except ArtifactWorkbenchError as exc:
+            self.status_info.setText(f"완료 실측 묶음 내보내기 차단: {exc}")
+            return
+
+        source_path = Path(str(self.current_filepath or "artifact"))
+        default_path = source_path.with_name(
+            f"{source_path.stem}-complete{SURVEY_EXPORT_DIRECTORY_SUFFIX}"
+        )
+        selected, _filter = QFileDialog.getSaveFileName(
+            self,
+            "완료 실측 15개 원자 묶음 저장",
+            str(default_path),
+            "ArchMeshRubbing Survey Package (*.amr-survey)",
+        )
+        if not selected:
+            return
+        if not selected.endswith(SURVEY_EXPORT_DIRECTORY_SUFFIX):
+            selected += SURVEY_EXPORT_DIRECTORY_SUFFIX
+        try:
+            controller = self._artifact_survey_export_controller()
+            work_item = controller.begin(selected)
+        except Exception as exc:
+            self.status_info.setText("완료 실측 묶음 준비 실패")
+            QMessageBox.warning(
+                self,
+                "완료 실측 묶음 내보내기 실패",
+                f"{type(exc).__name__}: {exc}",
+            )
+            return
+
+        def on_done(value: object) -> None:
+            try:
+                if self._artifact_survey_export_controller() is not controller:
+                    raise ArtifactExportError(
+                        "complete-survey export controller authority was replaced"
+                    )
+                if not isinstance(value, ArtifactSurveyExportResult):
+                    raise ArtifactExportError(
+                        "complete-survey export worker result is invalid"
+                    )
+                publication = controller.publish_result(work_item, value)
+            except WorkflowBusyError as exc:
+                cleanup_message = ""
+                try:
+                    if isinstance(value, ArtifactSurveyExportResult):
+                        controller.discard_result(
+                            work_item,
+                            value,
+                            reason="pending Open blocked final survey publication",
+                        )
+                except Exception as cleanup_exc:
+                    cleanup_message = f"\n임시 묶음 정리 확인 실패: {cleanup_exc}"
+                detail = f"{type(exc).__name__}: {exc}{cleanup_message}"
+                if self._report_artifact_authority_callback_failure(
+                    context="완료 실측 묶음 최종 게시 중 권위 확인 실패",
+                    detail=detail,
+                ):
+                    return
+                self.status_info.setText(
+                    "완료 실측 묶음 게시 취소 | Open 완료 후 다시 내보내세요"
+                )
+                QMessageBox.warning(
+                    self,
+                    "완료 실측 묶음 게시 취소",
+                    detail,
+                )
+                return
+            except Exception as exc:
+                cleanup_error = self._cancel_native_export_if_staged(
+                    controller,
+                    work_item,
+                    reason="invalid or rejected complete-survey export callback",
+                )
+                detail = f"{type(exc).__name__}: {exc}" + (
+                    f"\n임시 묶음 정리 확인 실패: {cleanup_error}"
+                    if cleanup_error
+                    else ""
+                )
+                if self._report_artifact_authority_callback_failure(
+                    context="완료 실측 묶음 게시 콜백 실패",
+                    detail=detail,
+                ):
+                    return
+                self.status_info.setText("완료 실측 묶음 저장 실패")
+                QMessageBox.warning(
+                    self,
+                    "완료 실측 묶음 내보내기 실패",
+                    detail,
+                )
+                return
+            self._report_native_export_publication(
+                publication,
+                artifact_label="완료 실측 15개",
+            )
+
+        def on_failed(message: str) -> None:
+            if self._native_export_callback_is_cancelled(
+                controller,
+                work_item,
+                label="완료 실측 묶음 내보내기",
+            ):
+                return
+            if self._report_artifact_authority_callback_failure(
+                context="완료 실측 묶음 worker 종료 콜백",
+                detail=str(message),
+            ):
+                return
+            self.status_info.setText("완료 실측 묶음 생성 실패")
+            QMessageBox.warning(
+                self,
+                "완료 실측 묶음 내보내기 실패",
+                self._format_error_message("묶음 생성 중 오류가 발생했습니다:", message),
+            )
+
+        try:
+            started = self._start_task(
+                title="완료 실측 묶음 내보내기",
+                label="3/6/6 기록 재현 · 15개 자식 검증 · 원자 게시 준비 중...",
+                thread=TaskThread(
+                    "export_native_complete_survey",
+                    lambda: controller.execute(work_item),
+                ),
+                on_done=on_done,
+                on_failed=on_failed,
+                on_cancel_requested=lambda: self._request_native_export_cancel(
+                    controller,
+                    work_item,
+                    label="완료 실측 묶음 내보내기",
+                ),
+                on_shutdown_joined=lambda: self._verify_native_export_shutdown(
+                    controller,
+                    work_item,
+                ),
+            )
+        except Exception as exc:
+            cleanup_error = self._cancel_unstarted_native_export(
+                controller,
+                work_item,
+                reason="task_start_failed",
+            )
+            detail = f"{type(exc).__name__}: {exc}" + (
+                f"\n내보내기 예약 해제 확인 실패: {cleanup_error}"
+                if cleanup_error
+                else ""
+            )
+            if self._report_artifact_authority_callback_failure(
+                context="완료 실측 묶음 worker 시작 실패",
+                detail=detail,
+            ):
+                return
+            self.status_info.setText("완료 실측 묶음 작업 시작 실패")
+            QMessageBox.warning(
+                self,
+                "완료 실측 묶음 내보내기 실패",
+                detail,
+            )
+            return
+        if not started:
+            cleanup_error = self._cancel_unstarted_native_export(
+                controller,
+                work_item,
+                reason="task_not_started",
+            )
+            if cleanup_error:
+                if self._report_artifact_authority_callback_failure(
+                    context="완료 실측 묶음 worker 미시작",
+                    detail=f"내보내기 예약 해제 확인 실패: {cleanup_error}",
+                ):
+                    return
+                self.status_info.setText("완료 실측 묶음 예약 해제 확인 실패")
+                QMessageBox.warning(
+                    self,
+                    "완료 실측 묶음 정리 실패",
                     cleanup_error,
                 )
 

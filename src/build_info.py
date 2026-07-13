@@ -447,6 +447,7 @@ def _check_resources() -> str:
         "vector_export-1.0.0.schema.json",
         "rubbing_receipt-1.0.0.schema.json",
         "rubbing_export-1.0.0.schema.json",
+        "survey_export-1.0.0.schema.json",
         "tile_unwrap_receipt-1.0.0.schema.json",
         "tile_unwrap_export-1.0.0.schema.json",
         "offline_verification_report-1.0.0.schema.json",
@@ -577,6 +578,7 @@ def _check_gui_stack() -> str:
             raise RuntimeError("MainWindow did not construct the native 3D viewport")
         panel = getattr(window, "section_panel", None)
         required_tile_controls = (
+            "btn_native_survey_export",
             "combo_native_tile_target",
             "combo_native_tile_axis",
             "combo_native_tile_record_view",
@@ -613,7 +615,8 @@ def _check_gui_stack() -> str:
         window.deleteLater()
         app.processEvents()
     return (
-        "MainWindow, native tile unwrap panel, QOpenGLWidget, OpenGL.GL, "
+        "MainWindow, atomic survey export, native tile unwrap panel, "
+        "QOpenGLWidget, OpenGL.GL, "
         "and OpenGL.GLU constructed"
     )
 

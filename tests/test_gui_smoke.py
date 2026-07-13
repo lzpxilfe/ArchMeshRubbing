@@ -80,6 +80,7 @@ from src.core.artifact_rubbing_extractor import (
     compute_artifact_rubbing,
 )
 from src.core.artifact_rubbing_record import rubbing_receipt_from_record
+from src.core.artifact_survey_export import validate_survey_export_package
 from src.core.artifact_tile_unwrap_export import (
     ArtifactTileUnwrapExportError,
     validate_tile_unwrap_export_package,
@@ -255,6 +256,35 @@ def _artifact_box_session_with_outlines() -> ArtifactSession:
             created_at="2026-07-11T00:00:02Z",
             operator="pytest",
             depends_on_record_ids=cutline_ids,
+        )
+    return session
+
+
+def _artifact_box_completed_session() -> ArtifactSession:
+    session = _artifact_box_session_with_outlines()
+    outline_ids = workflow_step_record_ids(
+        session,
+        ArtifactWorkflowStep.OUTLINE,
+    )
+    for view in REQUIRED_SIX_VIEWS:
+        computation = compute_artifact_rubbing(
+            session,
+            view,
+            pixels_per_mm=2,
+            margin_um=0,
+            reference_radius_um=500,
+            depth_quantization_um=10,
+            black_point_um=100,
+            ink_strength_percent=100,
+            relief_polarity="bidirectional",
+        )
+        session = commit_artifact_rubbing(
+            session,
+            computation,
+            record_id=f"record:gui-prerequisite:rubbing:{view}",
+            created_at="2026-07-11T00:00:03Z",
+            operator="pytest",
+            depends_on_record_ids=outline_ids,
         )
     return session
 
@@ -476,6 +506,8 @@ def test_native_workflow_buttons_show_record_counts_and_green_completion() -> No
             assert button.isEnabled()
             assert button.text().endswith(suffix)
             assert button.property("workflowComplete") is True
+        assert panel.btn_native_survey_export.isEnabled()
+        assert panel.btn_native_survey_export.property("workflowComplete") is True
 
         panel.apply_native_workflow_progress(ArtifactWorkflowProgress.empty())
         for button in (
@@ -485,6 +517,8 @@ def test_native_workflow_buttons_show_record_counts_and_green_completion() -> No
         ):
             assert not button.isEnabled()
             assert button.property("workflowComplete") is False
+        assert not panel.btn_native_survey_export.isEnabled()
+        assert panel.btn_native_survey_export.property("workflowComplete") is False
     finally:
         window.deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
@@ -4040,6 +4074,71 @@ def test_native_rubbing_export_worker_stages_before_gui_final_publish(
             is ArtifactExportState.COMPLETED
         )
         assert "PNG" in window.status_info.text()
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_native_complete_survey_button_stages_then_atomically_publishes(
+    tmp_path: Path,
+) -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    session = _artifact_box_completed_session()
+    obj = _projected_scene_object(session)
+    window = MainWindow()
+    window._artifact_session = session
+    window.viewport.objects = [obj]
+    window.viewport.selected_index = 0
+    window.current_mesh = obj.mesh
+    window.current_filepath = session.resolved_source_path
+    destination = tmp_path / "gui-complete.amr-survey"
+    try:
+        window._sync_native_cutline_controls(reset_offset=True)
+        assert window.section_panel.btn_native_survey_export.isEnabled()
+        with (
+            patch(
+                "app_interactive.QFileDialog.getSaveFileName",
+                return_value=(str(destination), ""),
+            ),
+            patch.object(window, "_start_task", return_value=True) as start_task,
+        ):
+            window.on_native_survey_export_requested()
+
+        thread = start_task.call_args.kwargs["thread"]
+        assert isinstance(thread, TaskThread)
+        assert thread._task_name == "export_native_complete_survey"
+        with patch(
+            "src.core.artifact_survey_export.fsync_export_directory",
+            return_value=True,
+        ):
+            result = thread._fn()
+            assert not destination.exists()
+            assert result.staging_directory.is_dir()
+            staged = validate_survey_export_package(
+                result.staging_directory,
+                document=session.document,
+            )
+            assert staged.artifact_count == 15
+
+            with patch.object(QMessageBox, "warning") as warning:
+                start_task.call_args.kwargs["on_done"](result)
+        warning.assert_not_called()
+        verified = validate_survey_export_package(
+            destination,
+            document=session.document,
+        )
+        assert (verified.vector_count, verified.rubbing_count) == (9, 6)
+        assert not result.staging_directory.exists()
+        assert (
+            window._artifact_survey_export_controller()
+            .summary(result.operation_id)
+            .state
+            is ArtifactExportState.COMPLETED
+        )
+        assert "15개" in window.status_info.text()
     finally:
         window.deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)

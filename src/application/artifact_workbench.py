@@ -615,6 +615,32 @@ class ArtifactWorkbench:
         only the final same-filesystem no-replace rename.
         """
 
+        return self.publish_records_effect_if_current(
+            captured_session,
+            captured_snapshot,
+            expected_records=(expected_record,),
+            publish=publish,
+            expected_record_ids=(record_id,),
+        )
+
+    def publish_records_effect_if_current(
+        self,
+        captured_session: ArtifactSession,
+        captured_snapshot: ArtifactProjectionSnapshot,
+        *,
+        expected_records: tuple[DerivedRecord, ...],
+        publish: Callable[[], _T],
+        expected_record_ids: tuple[str, ...] | None = None,
+    ) -> _T:
+        """Linearize one external publish against several immutable records.
+
+        Complete-survey publication uses this boundary after all fifteen child
+        packages have already been built and validated.  Append-only records
+        may appear meanwhile, but every captured record and the render
+        projection must remain exactly current until the parent-directory
+        rename completes.
+        """
+
         if not isinstance(captured_session, ArtifactSession):
             raise ArtifactWorkbenchError("captured_session must be an ArtifactSession")
         if not isinstance(captured_snapshot, ArtifactProjectionSnapshot):
@@ -625,16 +651,32 @@ class ArtifactWorkbench:
             raise StaleWorkflowOperationError(
                 "captured export session no longer matches its snapshot"
             )
-        record_key = _required_text(record_id, field_name="record ID")
-        if not isinstance(expected_record, DerivedRecord):
-            raise ArtifactWorkbenchError("expected_record must be a DerivedRecord")
-        if (
-            expected_record.id != record_key
-            or captured_session.document.record_index.get(record_key) != expected_record
-        ):
+        records = tuple(expected_records)
+        if not records or any(not isinstance(record, DerivedRecord) for record in records):
             raise ArtifactWorkbenchError(
-                "expected export record does not match the captured document"
+                "expected_records must contain DerivedRecord values"
             )
+        record_keys = (
+            tuple(record.id for record in records)
+            if expected_record_ids is None
+            else tuple(
+                _required_text(record_id, field_name="record ID")
+                for record_id in expected_record_ids
+            )
+        )
+        if len(record_keys) != len(records) or len(set(record_keys)) != len(record_keys):
+            raise ArtifactWorkbenchError(
+                "expected export record IDs must be unique and match the records"
+            )
+        for record_key, expected_record in zip(record_keys, records, strict=True):
+            if (
+                expected_record.id != record_key
+                or captured_session.document.record_index.get(record_key)
+                != expected_record
+            ):
+                raise ArtifactWorkbenchError(
+                    "expected export record does not match the captured document"
+                )
         if not callable(publish):
             raise ArtifactWorkbenchError("export publisher must be callable")
 
@@ -657,19 +699,24 @@ class ArtifactWorkbench:
                 raise StaleWorkflowOperationError(
                     "export projection authority changed after staging began"
                 )
-            current_record = current.document.record_index.get(record_key)
-            if current_record is None or current_record != expected_record:
-                raise StaleWorkflowOperationError(
-                    "export record changed after staging began"
-                )
-            if (
-                current_record.lifecycle_status is not RecordLifecycleStatus.READY
-                or current.document.record_freshness(record_key)
-                is not RecordFreshness.FRESH
+            for record_key, expected_record in zip(
+                record_keys,
+                records,
+                strict=True,
             ):
-                raise StaleWorkflowOperationError(
-                    "export record is no longer READY + FRESH"
-                )
+                current_record = current.document.record_index.get(record_key)
+                if current_record is None or current_record != expected_record:
+                    raise StaleWorkflowOperationError(
+                        "export record changed after staging began"
+                    )
+                if (
+                    current_record.lifecycle_status is not RecordLifecycleStatus.READY
+                    or current.document.record_freshness(record_key)
+                    is not RecordFreshness.FRESH
+                ):
+                    raise StaleWorkflowOperationError(
+                        "export record is no longer READY + FRESH"
+                    )
 
             with self._lock:
                 if self._state is not observed:

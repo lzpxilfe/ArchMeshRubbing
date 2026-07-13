@@ -291,9 +291,9 @@ M0-3에서 시작한 durable core와 현재 native GUI/application 경계는 다
 - Align commit과 parent activation은 GUI에서 immutable session, exact scene binding, preview TRS/pivot와 Workbench version만 캡처한다. source geometry hash 검증, candidate session 생성과 canonical materialization은 application-modal locked worker에서 수행한다. 완료 시 object/mesh/binding/preview, session/state version/authority epoch와 project path가 capture와 모두 같아야만 GUI thread의 VBO 준비·two-phase scene publication으로 넘어간다. 변경된 late result는 document나 scene을 수정하지 않고 폐기한다.
 - artifact project reopen은 embedded source가 있으면 별도 picker 없이 background worker에서 package와 source bytes를 검증하고 saved parser/unit으로 CPU staging한다. manifest-only 문서만 외부 source resolver를 사용한다. corrupt embedded package를 external/legacy 경로로 fallback하지 않는다. `ArtifactWorkbench`는 한 pending Open ticket과 `state_version`/`authority_epoch`를 검증하고, candidate projection을 준비한 뒤 scene notification 동안에만 tentative authority로 활성화한다. scene swap 성공 후 finalize하고, 실패하면 이전 session·scene·project path로 rollback한다. observer는 finalize 전 candidate를 보지 않는다.
 - rollback·scene 복원·finalize 자체가 실패해 application authority와 live scene의 일치를 증명할 수 없으면 fatal authority 상태로 전환한다. 이 상태에서는 ordinary Save target을 해제하고 저장·실측·내보내기를 모두 거부하며, 검증된 새 Open만 정상 authority를 회복한다.
-- artifact save는 active document만 쓰기 전에 정확히 한 projection, current snapshot, identity preview, source에서 재현한 vertices/faces 일치, destructive bake 부재를 확인한다. desktop은 immutable session과 Workbench state/authority version, 기존 project path를 캡처하고 이 geometry 비교부터 source closure 재검증·ZIP64/fsync·staged package 재개방/materialization까지 worker에서 실행한다. atomic writer 완료 뒤 캡처 권위가 달라졌으면 만들어진 파일은 과거 snapshot으로 보고하며 현재 project path와 Save As/migration 상태를 갱신하지 않는다. 경로 채택은 Workbench의 exact session/state/epoch CAS이며 성공 시 path-only state version만 전진한다. `ALIGN_REQUIRED` document 자체는 보존할 수 있지만 Cutline/Outline/Digital Rubbing/기와 전개 계산과 vector/rubbing/tile-unwrap export는 명시적 Align 전까지 차단한다. 아직 `DerivedRecord`로 승격되지 않은 cutline·선택·기록면·평가 등의 결과가 하나라도 있으면 누락한 채 저장하지 않고 fail closed한다.
+- artifact save는 active document만 쓰기 전에 정확히 한 projection, current snapshot, identity preview, source에서 재현한 vertices/faces 일치, destructive bake 부재를 확인한다. desktop은 immutable session과 Workbench state/authority version, 기존 project path를 캡처하고 이 geometry 비교부터 source closure 재검증·ZIP64/fsync·staged package 재개방/materialization까지 worker에서 실행한다. atomic writer 완료 뒤 캡처 권위가 달라졌으면 만들어진 파일은 과거 snapshot으로 보고하며 현재 project path와 Save As/migration 상태를 갱신하지 않는다. 경로 채택은 Workbench의 exact session/state/epoch CAS이며 성공 시 path-only state version만 전진한다. `ALIGN_REQUIRED` document 자체는 보존할 수 있지만 Cutline/Outline/Digital Rubbing/기와 전개 계산과 vector/rubbing/survey/tile-unwrap export는 명시적 Align 전까지 차단한다. 아직 `DerivedRecord`로 승격되지 않은 cutline·선택·기록면·평가 등의 결과가 하나라도 있으면 누락한 채 저장하지 않고 fail closed한다.
 - Cutline/Outline/Digital Rubbing/기와 전개는 application layer가 canonical recipe, projection context, exact record ID와 result capability를 소유한다. GUI handler는 projection binding·TRS·transient mutation만 확인하고, canonical source materialization과 live vertex/face exact comparison은 controller 실행 경계의 worker preflight에서 수행한다. worker는 session을 commit하지 않고 computation만 반환하며, 완료 시 captured document가 current document의 immutable ancestor이고 active source/metadata/Align/matrix가 같을 때만 current session에 rebase하여 expected record ID 하나를 publish한다. DerivedRecord append는 `RecordBindingTransition`으로 live object의 immutable document snapshot만 CAS하고 기존 mesh/VBO를 보존한다. 일반 scene selection은 유지하되, 기와 ‘현재 선택 면’ recipe와 live selection이 게시 시점에도 정확히 같으면 record로 소비된 선택만 비운다. Align/Open finalize 뒤 늦은 결과는 되살아나지 않는다. pending Open이나 rollback 가능한 binding 준비 실패는 계산 결과와 예약 ID를 보존해 명시적으로 재시도하며, 그동안 저장과 새 실측을 차단한다. Rubbing begin은 geometry·UV·texture 복사를 포함한 최소 admission만 예약하고, worker가 해상도별 전체 peak-memory estimate를 계산해 공유 budget 안에서 원자 확장한다. preflight 실패·취소는 같은 terminal 상태 머신에서 예약을 해제하며 실행은 exactly-once다.
-- vector/rubbing/tile-unwrap export는 exact work item/result capability를 별도로 예약한다. worker는 비싼 SVG 생성, Rubbing 또는 tile-unwrap recipe 재계산·receipt 비교, package 전체 검증을 수행하고 destination·parent·staging inode·member fingerprint에 묶인 prepared capability까지 만든다. final dispatcher는 current source session, render projection과 exact `READY + FRESH` record를 Workbench lock에서 다시 확인한 뒤 빠른 fingerprint 재확인과 atomic no-replace rename만 실행한다. 같은 Align의 append-only record 추가는 허용하고 Align/Open 완료는 destination을 만들지 않은 채 stale 처리한다. pending Open은 core에서 재시도 가능한 stage로 남지만 현재 GUI는 안전하게 정리하고 Open 완료 후 재실행을 안내한다.
+- vector/rubbing/survey/tile-unwrap export는 exact work item/result capability를 별도로 예약한다. worker는 비싼 SVG 생성, Rubbing 또는 tile-unwrap recipe 재계산·receipt 비교, package 전체 검증을 수행하고 destination·parent·staging inode·member fingerprint에 묶인 prepared capability까지 만든다. survey export는 dependency-valid 3/6/6의 exact record 15개를 canonical 순서로 캡처하고 6개 raster를 다시 계산한 뒤 부모 tree 전체를 fingerprint한다. final dispatcher는 current source session, render projection과 캡처한 모든 `READY + FRESH` record를 Workbench lock에서 다시 확인한 뒤 빠른 fingerprint 재확인과 atomic no-replace rename만 실행한다. 같은 Align의 append-only record 추가는 허용하고 Align/Open 완료는 destination을 만들지 않은 채 stale 처리한다. pending Open은 core에서 재시도 가능한 stage로 남지만 현재 GUI는 안전하게 정리하고 Open 완료 후 재실행을 안내한다.
 - `Open → Align commit → save → independent-process load → source rebind → materialize` 왕복을 별도 프로세스에서 검증한다.
 
 `tests/test_artifact_new_process_roundtrip.py`의 차단 게이트는 self-contained PLY와 MTL·PNG를 사용하는 textured OBJ에 대해 다음 순서를 실제로 수행한다.
@@ -390,7 +390,7 @@ GUI의 native Top/Front/Right 명령은 각각 XY/Z, XZ/Y, YZ/X의 right-handed 
 - production algorithm을 주장하는 record는 recipe 전체, six-view frame, grid 좌표, collinear 제거, component/hole ID까지 재검증한다. `vector.outline.v1` 자체는 열린 생태계를 위해 다른 algorithm recipe도 허용하지만 동일한 공통 topology 검증은 반드시 통과해야 한다.
 - 권위 계산 backend는 현재 `shapely==2.1.2`와 GEOS `3.13.1` 조합으로 고정한다. 다른 조합은 새 algorithm version과 Windows golden 없이 같은 recipe를 주장할 수 없다.
 
-GUI는 한 번에 한 view의 `vector.outline.v1` record를 만든다. 여섯 view는 서로 다른 `PlanarFrame`을 가지므로 여섯 개의 독립 record다. 저장된 `READY + FRESH` payload를 다시 읽어 초록 exterior/hole/island overlay와 1:1 SVG를 만들며, 기존 ROI convex hull과 screenshot/OpenCV 단일/6-view export는 native 문서에서 방어적으로 차단한다. 여섯 record를 하나의 새 bundle로 묶는 multi-view package는 별도 포맷 과제다.
+GUI는 한 번에 한 view의 `vector.outline.v1` record를 만든다. 여섯 view는 서로 다른 `PlanarFrame`을 가지므로 여섯 개의 독립 record다. 저장된 `READY + FRESH` payload를 다시 읽어 초록 exterior/hole/island overlay와 1:1 SVG를 만들며, 기존 ROI convex hull과 screenshot/OpenCV 단일/6-view export는 native 문서에서 방어적으로 차단한다. 계산·record commit은 view별로 유지하지만 완료된 3/6/6 배포는 아래 `.amr-survey`가 한 번의 부모-directory 원자 게시로 묶는다.
 
 ## 1:1 vector export package
 
@@ -512,6 +512,23 @@ sidecar의 artifact descriptor를 제외한 normative claim 전체를 RFC 8785 S
 
 writer는 vector package와 같은 same-parent staging, prepared inode/fingerprint capability, file/directory `fsync`, self-validation, OS별 atomic no-replace publish를 사용한다. staging 이름은 배타적으로 예약하고 충돌한 foreign directory를 재사용·삭제하지 않는다. application cleanup도 등록한 device/inode가 그대로일 때만 수행한다. 기존 목적지, 추가 member와 symlink는 거부하며 `.DS_Store`, `Thumbs.db`, `desktop.ini`만 vector와 같은 1 MiB 제한으로 무시한다. final rename 뒤 실제 또는 미지원 directory `fsync`는 destination이 이미 게시된 `committed=true` 오류이며 GUI는 저장 완료와 crash durability 미확정을 구분한다. 이 package의 hash도 무결성 값이며 제작자 전자서명은 아니다.
 
+## 완료 3/6/6 원자 묶음 `.amr-survey`
+
+`*.amr-survey`는 새 알고리즘 결과를 만드는 포맷이 아니라, 한 active Align 아래에서 dependency-valid `READY + FRESH`인 Cutline 3면, Outline 6면, Digital Rubbing 6면의 기존 권위 package를 한 번에 전달하는 non-overwriting directory다. GUI의 `완료 실측 15개 원자 묶음 내보내기`는 세 단계가 모두 완료된 경우에만 활성화된다.
+
+부모 directory에는 정확히 다음 16개 normative entry가 있다.
+
+- `cutline-{top,front,right}.amr-vector/` 3개
+- `outline-{top,bottom,front,back,right,left}.amr-vector/` 6개
+- `rubbing-{top,bottom,front,back,right,left}.amr-rubbing/` 6개
+- `survey.amr-survey.json` canonical aggregate manifest 1개
+
+각 자식은 기존 vector/rubbing validator를 그대로 통과해야 한다. 부모 manifest는 15개 entry를 위 canonical 순서로 고정하고 step/view/record ID, child directory, primary·sidecar 파일 이름·크기·SHA-256, physical scale을 기록한다. `artifact_set_sha256`은 이 entry 배열의 RFC 8785 SHA-256이다. 공통 authority는 document ID/canonical SHA-256, source metadata·geometry·active Align revision, 모든 source asset SHA-256·크기를 결합하며 `qc.coverage_complete=true`, `vector_count=9`, `rubbing_count=6`, `artifact_count=15`를 요구한다. machine-readable closed contract는 `schemas/survey_export-1.0.0.schema.json`이다.
+
+writer는 같은 parent의 숨은 staging root에 15개 자식을 생성하며, Rubbing 6개는 각 record recipe로 다시 계산해 durable receipt와 비교한다. 모든 자식과 canonical manifest를 재검증하고 전체 tree의 closed entry set, regular-file 상태, device/inode/size/time fingerprint와 parent/destination identity를 일회성 prepared capability에 묶는다. GUI callback은 캡처한 source/render projection과 15개 exact record가 모두 현재 `READY + FRESH`인지 Workbench lock에서 한 번에 확인한 뒤 부모 directory를 atomic no-replace rename한다. 따라서 외부에서 보이는 결과는 15개가 모두 있는 package 하나이거나 아무것도 없는 상태다. 취소·stale Align·Open 전환·목적지 경합에서는 소유가 증명된 staging만 격리·정리하며 foreign path를 삭제하지 않는다. 이 원자성은 **완료된 결과의 배포**에 대한 것이고, 15개 record의 계산과 commit 자체가 하나의 트랜잭션이라는 뜻은 아니다.
+
+이 manifest hash도 전자서명이 아니다. 독립 validator는 이동된 package를 원본 mesh 없이 검증할 수 있고, exact `.amr`를 함께 주면 15개 record와 document authority까지 모두 대조한다.
+
 ## 통합 offline verification receipt
 
 설치된 실행 파일과 source checkout은 같은 공개 명령을 사용한다.
@@ -520,7 +537,7 @@ writer는 vector package와 같은 same-parent staging, prepared inode/fingerpri
 ArchMeshRubbing.exe --verify-artifact PATH [--against-project PROJECT.amr] [--report REPORT.json]
 ```
 
-`src/core/artifact_verification.py`는 입력 이름이나 디렉터리 suffix를 신뢰하지 않고 exact sidecar marker로 `.amr-vector`, `.amr-rubbing`, `.amr-unwrap`를 판별한다. 심볼릭 링크, 두 종류 marker가 섞인 디렉터리, 알 수 없는 regular file은 format validator에 들어가기 전에 거부한다. 판별 뒤에는 위 각 절의 기존 validator를 그대로 호출하므로 통합 명령이 scale·recipe·QC·provenance 규칙을 별도로 느슨하게 재구현하지 않는다.
+`src/core/artifact_verification.py`는 입력 이름이나 디렉터리 suffix를 신뢰하지 않고 exact sidecar marker로 `.amr-vector`, `.amr-rubbing`, `.amr-survey`, `.amr-unwrap`를 판별한다. 심볼릭 링크, 두 종류 marker가 섞인 디렉터리, 알 수 없는 regular file은 format validator에 들어가기 전에 거부한다. 판별 뒤에는 위 각 절의 기존 validator를 그대로 호출하므로 통합 명령이 scale·recipe·QC·provenance 규칙을 별도로 느슨하게 재구현하지 않는다.
 
 `.amr` 성공은 manifest와 checksum만 읽었다는 뜻이 아니다. `load_artifact_session_project()`가 embedded source closure를 saved parser/import recipe로 다시 읽고 source byte SHA-256, geometry SHA-256, metadata/Align matrix, known records를 검증하고 canonical scene을 materialize해야 한다. 따라서 호환 목적으로 읽을 수 있는 manifest-only artifact project는 이 완전 offline receipt에서는 실패한다.
 
@@ -594,7 +611,7 @@ v1 import는 입력 파일을 수정하지 않는 순수·결정적·멱등 변�
 - 61개 manifest entry를 넘는 대규모 source closure의 순차 descriptor streaming과 확장된 package member budget
 - 여러 material/PBR 조합을 원본 scanner와 동일하게 재현하는 viewport rendering fidelity
 - legacy `legacy_ui_state`에서 `artifact_document`로 단위·geometry·Align을 추정하지 않는 보존적 migration
-- 여섯 개의 독립 Outline record를 원자적으로 계산·commit하고 한 bundle로 배포하는 multi-view package
+- 3/6/6 record를 하나의 computation/commit 트랜잭션으로 만드는 기능. 완료된 15개 결과의 배포 원자성은 `.amr-survey`로 보장하지만 각 view 계산·record append는 독립 작업이다.
 - 실제 GPU driver frame의 scene-swap 원자성 및 시각적 동일성
 - Windows native-QPA와 frozen executable에서 검증한 `>= 1e9 mm` 장면의 millimeter 이하 visual/depth-picking 정밀도
 - autosave, 시작 시 자동 crash-recovery scan·자동 후보 삭제

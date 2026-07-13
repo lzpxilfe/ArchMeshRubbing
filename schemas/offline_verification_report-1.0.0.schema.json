@@ -18,6 +18,7 @@
         "project",
         "vector_export",
         "rubbing_export",
+        "survey_export",
         "tile_unwrap_export",
         "unknown"
       ]
@@ -61,6 +62,15 @@
       "properties": {
         "artifact_kind": {"const": "rubbing_export"},
         "evidence": {"$ref": "#/$defs/rubbingEvidence"},
+        "ok": {"const": true}
+      },
+      "required": ["evidence"],
+      "not": {"required": ["error"]}
+    },
+    {
+      "properties": {
+        "artifact_kind": {"const": "survey_export"},
+        "evidence": {"$ref": "#/$defs/surveyEvidence"},
         "ok": {"const": true}
       },
       "required": ["evidence"],
@@ -252,6 +262,32 @@
           }
         }
       ]
+    },
+    "surveyEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifact_count",
+        "artifact_set_sha256",
+        "authority",
+        "bound_project_document_sha256",
+        "manifest_sha256",
+        "qc",
+        "rubbing_count",
+        "vector_count",
+        "workflow"
+      ],
+      "properties": {
+        "artifact_count": {"const": 15},
+        "artifact_set_sha256": {"$ref": "#/$defs/sha256"},
+        "authority": {"$ref": "#/$defs/claimObject"},
+        "bound_project_document_sha256": {"$ref": "#/$defs/nullableSha256"},
+        "manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "qc": {"$ref": "#/$defs/claimObject"},
+        "rubbing_count": {"const": 6},
+        "vector_count": {"const": 9},
+        "workflow": {"$ref": "#/$defs/claimObject"}
+      }
     },
     "projectEvidence": {
       "type": "object",

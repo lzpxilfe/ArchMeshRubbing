@@ -1,0 +1,149 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:archmeshrubbing:schema:survey-export:1.0.0",
+  "title": "ArchMeshRubbing Complete Survey Export Manifest 1.0.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "artifact_set_sha256",
+    "artifacts",
+    "authority",
+    "format",
+    "privacy",
+    "qc",
+    "schema_version",
+    "workflow"
+  ],
+  "properties": {
+    "artifact_set_sha256": {"$ref": "#/$defs/sha256"},
+    "artifacts": {
+      "type": "array",
+      "minItems": 15,
+      "maxItems": 15,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/artifact"}
+    },
+    "authority": {"$ref": "#/$defs/authority"},
+    "format": {"const": "archmeshrubbing_survey_export"},
+    "privacy": {
+      "const": {
+        "absolute_source_path_embedded": false,
+        "external_resources": false
+      }
+    },
+    "qc": {
+      "const": {
+        "artifact_count": 15,
+        "coverage_complete": true,
+        "rubbing_count": 6,
+        "vector_count": 9
+      }
+    },
+    "schema_version": {"const": "1.0.0"},
+    "workflow": {
+      "const": {
+        "cutline_views": ["top", "front", "right"],
+        "outline_views": ["top", "bottom", "front", "back", "right", "left"],
+        "rubbing_views": ["top", "bottom", "front", "back", "right", "left"]
+      }
+    }
+  },
+  "$defs": {
+    "nonEmptyString": {"type": "string", "pattern": ".*\\S.*"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "sourceAsset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "sha256", "size_bytes"],
+      "properties": {
+        "id": {"$ref": "#/$defs/nonEmptyString"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "size_bytes": {"type": "integer", "minimum": 0}
+      }
+    },
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "active_align_revision_id",
+        "active_source_metadata_revision_id",
+        "document_id",
+        "document_manifest_sha256",
+        "geometry_revision_id",
+        "source_assets"
+      ],
+      "properties": {
+        "active_align_revision_id": {"$ref": "#/$defs/nonEmptyString"},
+        "active_source_metadata_revision_id": {"$ref": "#/$defs/nonEmptyString"},
+        "document_id": {"$ref": "#/$defs/nonEmptyString"},
+        "document_manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "geometry_revision_id": {"$ref": "#/$defs/nonEmptyString"},
+        "source_assets": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 61,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/sourceAsset"}
+        }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifact_kind",
+        "directory",
+        "physical_scale",
+        "primary_file",
+        "primary_sha256",
+        "primary_size_bytes",
+        "record_id",
+        "sidecar_file",
+        "sidecar_sha256",
+        "sidecar_size_bytes",
+        "step",
+        "view"
+      ],
+      "properties": {
+        "artifact_kind": {"enum": ["vector_export", "rubbing_export"]},
+        "directory": {
+          "type": "string",
+          "pattern": "^(cutline|outline|rubbing)-(top|bottom|front|back|right|left)\\.amr-(vector|rubbing)$"
+        },
+        "physical_scale": {"enum": ["1:1", "1:1_planar_sampling"]},
+        "primary_file": {"enum": ["artifact.svg", "artifact.png"]},
+        "primary_sha256": {"$ref": "#/$defs/sha256"},
+        "primary_size_bytes": {"type": "integer", "minimum": 1},
+        "record_id": {"$ref": "#/$defs/nonEmptyString"},
+        "sidecar_file": {
+          "enum": ["artifact.amr-vector.json", "artifact.amr-rubbing.json"]
+        },
+        "sidecar_sha256": {"$ref": "#/$defs/sha256"},
+        "sidecar_size_bytes": {"type": "integer", "minimum": 1},
+        "step": {"enum": ["cutline", "outline", "rubbing"]},
+        "view": {"enum": ["top", "bottom", "front", "back", "right", "left"]}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"artifact_kind": {"const": "vector_export"}}},
+          "then": {
+            "properties": {
+              "physical_scale": {"const": "1:1"},
+              "primary_file": {"const": "artifact.svg"},
+              "sidecar_file": {"const": "artifact.amr-vector.json"},
+              "step": {"enum": ["cutline", "outline"]}
+            }
+          },
+          "else": {
+            "properties": {
+              "physical_scale": {"const": "1:1_planar_sampling"},
+              "primary_file": {"const": "artifact.png"},
+              "sidecar_file": {"const": "artifact.amr-rubbing.json"},
+              "step": {"const": "rubbing"}
+            }
+          }
+        }
+      ]
+    }
+  }
+}

@@ -39,7 +39,7 @@ ArchMeshRubbing은 반대로, 고고학 연구자가 익숙한 질문에서 출�
 5. `6면 Digital Rubbing 계산·기록`
 6. `READY + FRESH 기록에서 1:1 SVG/PNG package export`
 
-Open 직후 만들어지는 `recipe.kind="initial_identity"` Align은 canonical materialization을 위한 기준점이지 연구자의 정위치 확정이 아닙니다. 사용자가 변화량이 0인 경우까지 포함해 첫 Align을 명시적으로 확정하기 전에는 workflow가 `ALIGN_REQUIRED`에 머물며 Cutline/Outline/Digital Rubbing/기와 전개와 vector/rubbing/tile-unwrap export가 비활성화됩니다. 첫 확정은 immutable child Align revision을 남기고 `MEASUREMENT_READY`로 전환하며, parent activation으로 초기 기준점에 돌아가면 다시 측정이 잠깁니다.
+Open 직후 만들어지는 `recipe.kind="initial_identity"` Align은 canonical materialization을 위한 기준점이지 연구자의 정위치 확정이 아닙니다. 사용자가 변화량이 0인 경우까지 포함해 첫 Align을 명시적으로 확정하기 전에는 workflow가 `ALIGN_REQUIRED`에 머물며 Cutline/Outline/Digital Rubbing/기와 전개와 vector/rubbing/survey/tile-unwrap export가 비활성화됩니다. 첫 확정은 immutable child Align revision을 남기고 `MEASUREMENT_READY`로 전환하며, parent activation으로 초기 기준점에 돌아가면 다시 측정이 잠깁니다.
 
 Align 확정 뒤에도 모든 기능이 한꺼번에 열리지는 않습니다. 현재 활성 Align의 고유한 `READY + FRESH` 기록을 기준으로 `Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6` 순서로 다음 단계가 열리고, 완료 버튼은 초록색으로 바뀝니다. application command도 같은 gate를 강제하며, 각 Outline은 Cutline 3면을, 각 Digital Rubbing은 dependency-valid Outline 6면을 직접 참조합니다. 이 선행 record coverage가 없으면 READY 기록도 완료 증거로 세지 않습니다. 같은 방향을 여러 번 기록해도 한 면으로 계산합니다. Align을 바꾸면 기존 기록은 삭제하지 않고 stale로 제외하며, 이전 Align을 다시 활성화하거나 프로젝트를 재열면 문서의 record graph에서 진행도를 그대로 복원합니다.
 
@@ -67,10 +67,11 @@ Align 확정 뒤에도 모든 기능이 한꺼번에 열리지는 않습니다. 
 - `READY + FRESH` 기록만 `*.amr-vector/`의 1:1 `artifact.svg` + provenance sidecar로 내보내며, 공개 provenance에 주 원본과 dependency의 논리 경로·SHA-256·크기를 포함함
 - Digital Rubbing은 6면 canonical frame, 정수 pixels/mm·µm recipe, front-depth raster와 QC를 `raster.digital_rubbing.v1` record로 보존
 - canonical GA8 PNG는 고정 chunk/DEFLATE bytes와 exact `pHYs`를 사용하며, `*.amr-rubbing/`에 provenance sidecar와 함께 저장
+- Cutline 3면·Outline 6면·Digital Rubbing 6면이 모두 완료되면 `완료 실측 15개 원자 묶음 내보내기` 버튼이 활성화되고, 기존 9개 `.amr-vector`와 6개 `.amr-rubbing`을 canonical manifest에 결합한 이동 가능한 `*.amr-survey/` 하나로 no-overwrite 게시
 - 기와 기록면 전개는 명시적 canonical 장축(`X/Y/Z`), Top/Bottom 기록면, 원본 face-range selection을 recipe로 고정하고 sectionwise 알고리즘의 자동 fallback·1 µm 격자 collapse·orientation foldover·품질 기준 초과를 정식 record에서 거부
 - 통과한 결과는 `surface.tile_unwrap.v1` receipt로 보존하며 canonical binary 전체 SHA-256, 원본 vertex/face correspondence, exact µm bounds, section fit와 distortion QC를 서로 대조
 - `*.amr-unwrap/`은 canonical binary, 평면 OBJ, 실제 mm `width`/`height`/`viewBox`를 갖는 1:1 경계 SVG, 공개 provenance sidecar를 한 묶음으로 no-overwrite 게시
-- vector/rubbing/tile-unwrap package는 원본 mesh와 GUI가 없어도 이동 후 별도 프로세스에서 offline 검증 가능
+- vector/rubbing/survey/tile-unwrap package는 원본 mesh와 GUI가 없어도 이동 후 별도 프로세스에서 offline 검증 가능
 - Qt/OpenGL과 분리된 `ArtifactWorkbench`가 ticketed Open, 명시적 Align readiness, `state_version`/`authority_epoch` 기반 publication을 소유
 - native DerivedRecord worker는 시작 session과 projection을, viewport의 cut-section/ROI/surface-selection worker는 worker identity·target mesh/TRS·render frame을 확인하여 늦은 결과가 현재 문서·overlay·다른 유물·새 worker를 덮지 못하게 함
 - Cutline·Outline·Digital Rubbing·기와 전개 worker는 공통 취소 Event를 계산 내부의 deterministic chunk 경계까지 전달하며, 사용자는 진행 창에서 강제 스레드 종료 없이 취소를 요청할 수 있음
@@ -83,7 +84,7 @@ Align 확정 뒤에도 모든 기능이 한꺼번에 열리지는 않습니다. 
 - export 중 같은 Align에 무관한 record가 추가돼도 안전하게 게시하지만 Align/Open 완료로 권위가 바뀌면 destination을 만들지 않고 자신이 소유한 staging만 정리함
 - scene publication의 rollback·scene 복원·finalize 자체가 불확실하면 fatal authority 상태로 전환해 검증된 Open 전까지 저장·실측·내보내기를 차단
 
-Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 임의 `SurfaceVisualizer`/flatten PNG·SVG를 측정 산출물로 내보내는 우회 경로를 차단합니다. 검증된 Cutline/Outline record는 `.amr-vector`, Digital Rubbing record는 `.amr-rubbing`, 엄격한 기와 전개 record는 `.amr-unwrap`으로 내보냅니다. 과거 세 OS 결과는 이식성의 역사적 증거로만 보존하고 현재 완료 판정은 Windows만 사용합니다. 패키지 gate는 상용 installer compiler 대신 검증형 portable ZIP을 만들고, 한글 경로에 안전하게 추출한 실행 파일을 네트워크 차단 상태에서 complete workflow와 native `qwindows` actual-frame까지 다시 실행하도록 구성합니다. CI 산출물은 업로드하지 않으며 공개 배포·서명을 뜻하지 않습니다.
+Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 임의 `SurfaceVisualizer`/flatten PNG·SVG를 측정 산출물로 내보내는 우회 경로를 차단합니다. 검증된 Cutline/Outline record는 `.amr-vector`, Digital Rubbing record는 `.amr-rubbing`, 완료 3/6/6 세트는 `.amr-survey`, 엄격한 기와 전개 record는 `.amr-unwrap`으로 내보냅니다. 과거 세 OS 결과는 이식성의 역사적 증거로만 보존하고 현재 완료 판정은 Windows만 사용합니다. 패키지 gate는 상용 installer compiler 대신 검증형 portable ZIP을 만들고, 한글 경로에 안전하게 추출한 실행 파일을 네트워크 차단 상태에서 complete workflow와 native `qwindows` actual-frame까지 다시 실행하도록 구성합니다. CI 산출물은 업로드하지 않으며 공개 배포·서명을 뜻하지 않습니다.
 
 ### 1. 정식 기와 기록면 전개
 
@@ -130,6 +131,7 @@ Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 임의 
 
 - `*.amr-vector/`: 검증 Cutline/Outline 1:1 SVG + provenance
 - `*.amr-rubbing/`: 검증 Digital Rubbing 1:1 PNG + provenance
+- `*.amr-survey/`: 완료된 3/6/6의 15개 자식 package + canonical aggregate manifest
 - `*.amr-unwrap/`: 검증 기와 기록면 canonical binary + 1:1 SVG + flat OBJ + provenance
 - `flattened 좌표`
 - `기록면 전개 SVG` (legacy 검토용)
@@ -161,10 +163,11 @@ Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 임의 
 - [`src/application/artifact_workflow_progress.py`](src/application/artifact_workflow_progress.py): 검증된 session의 `READY + FRESH` view coverage에서 Cutline 3면·Outline 6면·Digital Rubbing 6면 진행도와 순차 gate를 재구성
 - [`src/application/artifact_measurements.py`](src/application/artifact_measurements.py): Cutline/Outline/Digital Rubbing/기와 전개의 immutable work item, Workbench 공유 예약·메모리 admission, cooperative cancellation, exact result capability와 same-Align rebase
 - [`src/application/artifact_exports.py`](src/application/artifact_exports.py): vector/rubbing/tile-unwrap export의 exact capability, worker staging, 안전한 정리와 final-authority publication
+- [`src/application/artifact_survey_exports.py`](src/application/artifact_survey_exports.py): 완료 15-record selection, 6개 raster 메모리 preflight, hidden aggregate staging과 모든 record를 한 번에 재확인하는 final-authority publication
 - Open/new import/project reopen과 Align commit/parent activation은 ticket과 compare-and-swap 검증을 거쳐 `prepare → activate → finalize`되며, scene swap 실패는 이전 authority로 rollback
 - Align commit/parent activation은 GUI에서 현재 session·scene binding·preview 값만 캡처합니다. 원본 geometry 재해시, candidate session 구성과 canonical materialization은 닫힘이 잠긴 worker에서 준비하고, 완료 시 같은 객체·mesh·binding·preview와 Workbench session/state/epoch/project path인지 다시 확인합니다. 하나라도 바뀌면 결과를 폐기하며, OpenGL context가 필요한 VBO 준비와 two-phase scene publication만 GUI thread에서 수행합니다.
 - Cutline/Outline/Digital Rubbing/기와 전개는 application shell에서 파라미터와 가벼운 scene guard만 캡처하고 단일 worker에서 계산합니다. canonical scene materialization·vertex/face 일치 검사와 Digital Rubbing의 해상도별 전체 peak-memory 추정도 controller 실행 수명주기 안의 worker preflight에서 수행하므로 GUI event loop를 막지 않습니다. Rubbing 시작 시에는 원본 geometry·UV·texture 복사를 포함한 보수적 최소 예약을 먼저 잡고, 전체 추정이 예산을 넘으면 계산 전에 fail closed합니다. worker는 문서를 변경하지 않으며, 완료 결과는 예약된 record ID와 일회성 result capability를 검증한 뒤 현재의 같은 Align session에 rebase합니다. record append publication은 GPU 장면을 교체하지 않습니다. 기와의 ‘현재 선택 면’은 exact face-range recipe로 고정하며, 성공적으로 게시될 때 사용자가 선택을 바꾸지 않은 경우에만 소비합니다. 재개방한 기록은 READY + FRESH 목록에서 명시적으로 선택하고, 일시적인 Open/scene 충돌로 게시하지 못한 측정 결과는 새 ID를 만들지 않고 재시도합니다.
-- vector/rubbing/tile-unwrap export는 비싼 생성·record recipe 재계산을 worker에서 staging까지만 수행합니다. 최종 no-replace rename은 현재 권위를 다시 검증한 뒤 실행하며, 목적지 경합에서는 기존 승자를 보존합니다. rename 뒤 directory `fsync`가 실패하거나 Windows처럼 지원 여부를 확인할 수 없으면 저장 완료와 crash durability 미확정을 구분해 경고합니다.
+- vector/rubbing/survey/tile-unwrap export는 비싼 생성·record recipe 재계산을 worker에서 staging까지만 수행합니다. `.amr-survey`는 15개 exact record와 동일 projection을 한 번에 fence합니다. 최종 no-replace rename은 현재 권위를 다시 검증한 뒤 실행하며, 목적지 경합에서는 기존 승자를 보존합니다. rename 뒤 directory `fsync`가 실패하거나 Windows처럼 지원 여부를 확인할 수 없으면 저장 완료와 crash durability 미확정을 구분해 경고합니다.
 - native Save/Save As는 immutable session snapshot과 경량 scene guard만 GUI에서 캡처합니다. Git build metadata 조회, 원본 closure 재해시, ZIP64 작성·fsync, production reader 재개방, source/Align 재물질화는 잠긴 진행 대화상자의 worker에서 수행합니다. 완료 시 session·state version·authority epoch·기존 project path가 모두 그대로일 때만 결과 경로를 현재 프로젝트로 채택합니다. 중간에 권위가 바뀌면 파일은 유효한 과거 snapshot으로 명시하되 현재 문서가 저장됐다고 표시하지 않습니다.
 - 중단 저장 복구는 자동 시작 스캔이나 임시본 정리를 하지 않습니다. 사용자가 범위를 폴더 하나로 지정하고 후보·새 목적지를 각각 확인한 뒤 잠긴 worker에서 descriptor copy, file `fsync`, embedded-session materialization과 atomic create-new publish를 수행합니다. 성공 뒤에도 복구본 열기는 별도 확인이며, 실패·목적지 경합·후보 identity 변경에서는 live scene과 모든 기존 경로를 유지합니다.
 - 창 종료는 active authoritative 측정·내보내기의 record/publication 권위를 먼저 회수하고 강제 thread termination 없이 최대 30초 join을 기다립니다. native Align 준비나 project save처럼 내부 해시·materialization·파일 호출을 선점할 수 없는 task도 같은 bounded join을 통과해야 합니다. worker 종료와 export staging의 안전한 terminal 상태를 증명하지 못하면 창을 닫지 않으며, 검증된 join 뒤에만 task signal과 identity를 제거해 늦은 결과 게시를 차단합니다.
@@ -182,8 +185,9 @@ Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 임의 
 - [`src/core/artifact_tile_unwrap_record.py`](src/core/artifact_tile_unwrap_record.py): `surface.tile_unwrap.v1` receipt·recipe·QC 검증
 - [`src/core/artifact_vector_export.py`](src/core/artifact_vector_export.py): `.amr-vector` 1:1 SVG package
 - [`src/core/artifact_rubbing_export.py`](src/core/artifact_rubbing_export.py): `.amr-rubbing` canonical PNG package
+- [`src/core/artifact_survey_export.py`](src/core/artifact_survey_export.py): 완료 3/6/6을 15개 자식 package와 canonical manifest로 묶는 `.amr-survey` 원자 게시·검증
 - [`src/core/artifact_tile_unwrap_export.py`](src/core/artifact_tile_unwrap_export.py): `.amr-unwrap` binary/OBJ/SVG/provenance package와 offline verifier
-- [`src/core/artifact_verification.py`](src/core/artifact_verification.py): `.amr`, `.amr-vector`, `.amr-rubbing`, `.amr-unwrap`를 자동 판별하고 설치본에서도 같은 검증 영수증을 만드는 통합 offline verifier
+- [`src/core/artifact_verification.py`](src/core/artifact_verification.py): `.amr`, `.amr-vector`, `.amr-rubbing`, `.amr-survey`, `.amr-unwrap`를 자동 판별하고 설치본에서도 같은 검증 영수증을 만드는 통합 offline verifier
 - [`src/core/project_file.py`](src/core/project_file.py): strict AMR v2 저장·로딩과 원자 교체
 
 ### Renderer precision boundary
@@ -239,7 +243,7 @@ Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 임의 
 - review sheet
 - 6방향 도면 패키지
 
-자유 flatten 전개·review sheet·기존 6방향 도면은 현재 **검토용 legacy 산출물**입니다. 1:1 측정 산출물로 검증되는 경로는 ArtifactDocument record에서 생성한 `.amr-vector` SVG, `.amr-rubbing` PNG, 그리고 엄격한 sectionwise 계약을 통과한 `.amr-unwrap` 기와 전개입니다.
+자유 flatten 전개·review sheet·기존 6방향 도면은 현재 **검토용 legacy 산출물**입니다. 1:1 측정 산출물로 검증되는 경로는 ArtifactDocument record에서 생성한 `.amr-vector` SVG, `.amr-rubbing` PNG, 완료 세트의 `.amr-survey`, 그리고 엄격한 sectionwise 계약을 통과한 `.amr-unwrap` 기와 전개입니다.
 
 ---
 
@@ -306,6 +310,7 @@ python main.py mesh.obj
 python main.py --open-project sample.amr
 python main.py --verify-artifact sample.amr --report project-verification.json
 python main.py --verify-artifact measured.amr-vector --against-project sample.amr --report vector-verification.json
+python main.py --verify-artifact completed.amr-survey --against-project sample.amr --report survey-verification.json
 python main.py --info mesh.obj
 python main.py --flatten mesh.obj unwrap.png
 python main.py --review mesh.obj review.png
@@ -314,7 +319,7 @@ python main.py --benchmark-synthetic ./benchmarks 1,2,3
 python main.py --project mesh.obj planview.png
 ```
 
-`--verify-artifact`는 네트워크, 계정, 라이선스 서버, GUI 없이 받은 자료를 검증한다. `.amr`는 내장 원본을 saved parser로 다시 열고 source/geometry/metadata/Align을 실제로 재물질화해야 성공한다. 세 export package는 exact member bytes, 1:1 scale, recipe, QC, provenance를 각각의 기존 엄격한 validator로 검사한다. `--against-project`를 함께 주면 그 `.amr`도 완전히 재개방한 뒤 export의 `READY + FRESH` record와 document SHA-256까지 일치해야 한다.
+`--verify-artifact`는 네트워크, 계정, 라이선스 서버, GUI 없이 받은 자료를 검증한다. `.amr`는 내장 원본을 saved parser로 다시 열고 source/geometry/metadata/Align을 실제로 재물질화해야 성공한다. 네 export package는 exact member bytes, 1:1 scale, recipe, QC, provenance를 각각의 기존 엄격한 validator로 검사하고, `.amr-survey`는 15개 자식 package와 aggregate manifest를 다시 대조한다. `--against-project`를 함께 주면 그 `.amr`도 완전히 재개방한 뒤 export의 `READY + FRESH` record와 document SHA-256까지 일치해야 한다.
 
 결과는 versioned closed JSON인 [`schemas/offline_verification_report-1.0.0.schema.json`](schemas/offline_verification_report-1.0.0.schema.json) 계약을 따른다. 성공 receipt에는 절대 입력 경로와 실행 시각을 기록하지 않으므로 검증에 성공한 같은 자료와 같은 authority mode는 같은 JSON 값을 만든다. `--report`는 기존 파일을 덮어쓰지 않는다. 검증 성공은 종료 코드 `0`, 자료 검증 실패는 `1`, 잘못된 옵션이나 report 저장 실패는 `2`다. `--report`를 생략하면 source/console 실행에서는 JSON 한 줄을 표준출력으로 보낸다.
 
@@ -387,8 +392,9 @@ python main.py --project mesh.obj planview.png
 - 원본 hash·명시적 단위·immutable Align revision 기반 `ArtifactDocument`
 - canonical-mm Cutline과 6면 fixed-grid Outline
 - recipe·QC·receipt가 있는 6면 Digital Rubbing과 1:1 `.amr-rubbing` export
+- 완료 3/6/6을 한 버튼으로 15개 자식·canonical manifest에 결합하는 원자적 `.amr-survey` export
 - 전체/선택 face·명시적 장축·Top/Bottom·section/QC를 한 화면에서 기록하고 재열어 검증하는 native 기와 전개와 1:1 `.amr-unwrap` export
-- `.amr`, `.amr-vector`, `.amr-rubbing`, `.amr-unwrap`의 자동 판별·이동 가능한 offline 검증과 exact project 결합 receipt
+- `.amr`, `.amr-vector`, `.amr-rubbing`, `.amr-survey`, `.amr-unwrap`의 자동 판별·이동 가능한 offline 검증과 exact project 결합 receipt
 - 주 원본과 실제 parser dependency bytes를 포함한 content-addressed `.amr` 저장, 원본 디렉터리 삭제 뒤 독립 프로세스 reopen·relocation·archive-to-archive 재저장
 - self-contained v1 `deny_external`과 multi-file v2 `closed_manifest` mesh import recipe, parser-runtime subset identity, 경로 탈출·변조·미선언 resource deny gate와 동일 receipt의 독립 프로세스 재실행
 - 기와형 메쉬 기본 추천 펼침과 synthetic benchmark는 legacy 전문 기능으로 유지
@@ -396,7 +402,7 @@ python main.py --project mesh.obj planview.png
 - Cutline/Outline/Digital Rubbing command와 worker 수명주기를 Qt/OpenGL-free application shell로 이식
 - DerivedRecord의 VBO-free binding rebind와 SVG/PNG worker staging → final-authority publication 이식
 - dependency-valid `READY + FRESH` record graph와 application command에서 Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6 순차 gate·초록 완료 표시·재열기/Align 복원 구현
-- packaged self-test가 실제 application authority를 통해 Open → explicit Align → Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6을 수행하고, 외부 PLY 삭제 뒤 embedded `.amr`를 재열어 Cutline/Outline 1:1 SVG 9개와 Digital Rubbing 1:1 PNG 6개를 모두 내보내고 이동한 뒤 원본 SHA-256·recipe·QC와 exact-project 결합을 통합 verifier로 offline 재검증
+- packaged self-test가 실제 application authority를 통해 Open → explicit Align → Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6을 수행하고, 외부 PLY 삭제 뒤 embedded `.amr`를 재열어 SVG 9개·PNG 6개와 원자적 `.amr-survey`를 각각 이동한 뒤 원본 SHA-256·recipe·QC·aggregate hash와 exact-project 결합을 통합 verifier로 offline 재검증
 - `--opengl-driver-smoke-report`가 source와 frozen Windows 실행 파일에서 native `qwindows` context를 열고 Qt·PyOpenGL을 bundled `opengl32sw.dll` 하나에 결합한 뒤, 768×768 FBO에서 `>= 1e9 mm` 장면의 relative VBO, color/depth readback, 0.125 mm depth pick을 원근·정사영으로 검증
 - Windows x64/CPython 3.12 build wheel 17개를 exact SHA-256으로 잠그고 sdist를 거부하며, frozen/portable payload의 모든 파일 hash와 runtime 10개의 SPDX 2.3 SBOM·라이선스 원문 NOTICE를 실행 파일 self-test에서 재검증
 - live worktree가 아니라 exact Git commit의 object database에서 100644/100755 regular blob 전체를 읽어 결정적 corresponding-source ZIP을 만들고, commit/tree/blob ID·SHA-256·GPL-2.0-only LICENSE·portable path를 frozen/portable 14번째 offline self-test에서 재검증
