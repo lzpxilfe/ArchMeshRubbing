@@ -154,7 +154,10 @@ def test_portable_archive_rejects_windows_unsafe_payload_names(
 ) -> None:
     payload = _payload(tmp_path / "payload")
     for relative in relative_paths:
-        (payload / relative).write_bytes(b"unsafe\n")
+        candidate = payload / relative
+        candidate.write_bytes(b"unsafe\n")
+        if candidate.name not in {entry.name for entry in candidate.parent.iterdir()}:
+            pytest.skip("test filesystem normalized the unsafe filename")
     if len(relative_paths) == 2 and (payload / relative_paths[0]).samefile(
         payload / relative_paths[1]
     ):
@@ -233,6 +236,7 @@ def test_windows_package_workflow_is_portable_offline_and_installer_independent(
     assert "--self-test-report" in workflow
     assert "--opengl-driver-smoke-report" in workflow
     assert "WaitForExit(120000)" in workflow
+    assert 'Portable archive ${archiveName}:' in workflow
     assert "actions/upload-artifact" not in workflow
     assert "ISCC" not in workflow
     assert "Inno Setup" not in workflow

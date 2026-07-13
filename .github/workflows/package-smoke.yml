@@ -206,7 +206,7 @@ jobs:
           if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::NotSigned) {
             throw "CI executable must remain unsigned; status was $($signature.Status)"
           }
-          Write-Host "Portable archive $archiveName: $($portable.archive.sha256), $($portable.payload.file_count) files"
+          Write-Host "Portable archive ${archiveName}: $($portable.archive.sha256), $($portable.payload.file_count) files"
           "AMR_PORTABLE_ARCHIVE=$archive" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "AMR_PORTABLE_MANIFEST=$manifest" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
