@@ -24,6 +24,13 @@ def test_complete_workflow_self_test_has_deterministic_offline_receipts() -> Non
         6,
     )
     assert result.record_count == 15
+    assert (result.vector_export_count, result.rubbing_export_count) == (9, 6)
+    assert result.vector_set_sha256 == (
+        "180db90e564ebb0483fe43d167d08f970468da17cffa3f9870d4dba6655faba8"
+    )
+    assert result.rubbing_set_sha256 == (
+        "849a66fa9b79ebbe4520a5acfc5feec29c7fc2cfa3c25d610ca07e1fac10cce5"
+    )
     assert result.svg_sha256 == (
         "aaf2c7c1136242074fbc2862894c821673646687c55cea36f1f6e3408c569d23"
     )

@@ -80,6 +80,9 @@ def test_self_test_passes_with_complete_offline_artifact_workflow() -> None:
     assert checks["artifact_complete_workflow_offline"]["detail"].startswith(
         "workflow=Open>Align>Cutline 3/3>Outline 6/6>Rubbing 6/6, records=15"
     )
+    assert "exports=vector 9/9>rubbing 6/6" in checks[
+        "artifact_complete_workflow_offline"
+    ]["detail"]
     diagnostics = cast(dict[str, object], report["diagnostics"])
     assert diagnostics["application"] == {
         "name": "ArchMeshRubbing",

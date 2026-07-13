@@ -396,7 +396,7 @@ python main.py --project mesh.obj planview.png
 - Cutline/Outline/Digital Rubbing command와 worker 수명주기를 Qt/OpenGL-free application shell로 이식
 - DerivedRecord의 VBO-free binding rebind와 SVG/PNG worker staging → final-authority publication 이식
 - dependency-valid `READY + FRESH` record graph와 application command에서 Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6 순차 gate·초록 완료 표시·재열기/Align 복원 구현
-- packaged self-test가 실제 application authority를 통해 Open → explicit Align → Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6을 수행하고, 외부 PLY 삭제 뒤 embedded `.amr`를 재열어 이동된 1:1 SVG/PNG package의 원본 SHA-256·recipe·QC와 exact-project 결합을 통합 verifier로 offline 재검증
+- packaged self-test가 실제 application authority를 통해 Open → explicit Align → Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6을 수행하고, 외부 PLY 삭제 뒤 embedded `.amr`를 재열어 Cutline/Outline 1:1 SVG 9개와 Digital Rubbing 1:1 PNG 6개를 모두 내보내고 이동한 뒤 원본 SHA-256·recipe·QC와 exact-project 결합을 통합 verifier로 offline 재검증
 - `--opengl-driver-smoke-report`가 source와 frozen Windows 실행 파일에서 native `qwindows` context를 열고 Qt·PyOpenGL을 bundled `opengl32sw.dll` 하나에 결합한 뒤, 768×768 FBO에서 `>= 1e9 mm` 장면의 relative VBO, color/depth readback, 0.125 mm depth pick을 원근·정사영으로 검증
 - Windows x64/CPython 3.12 build wheel 17개를 exact SHA-256으로 잠그고 sdist를 거부하며, frozen/portable payload의 모든 파일 hash와 runtime 10개의 SPDX 2.3 SBOM·라이선스 원문 NOTICE를 실행 파일 self-test에서 재검증
 - live worktree가 아니라 exact Git commit의 object database에서 100644/100755 regular blob 전체를 읽어 결정적 corresponding-source ZIP을 만들고, commit/tree/blob ID·SHA-256·GPL-2.0-only LICENSE·portable path를 frozen/portable 14번째 offline self-test에서 재검증

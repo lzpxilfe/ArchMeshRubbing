@@ -4,8 +4,8 @@ The native package self-test uses this module to prove more than importability:
 one tiny source is opened through the application authority boundary, explicitly
 aligned, measured through the required 3/6/6 sequence, embedded in an AMR, and
 reopened after the external source has been removed.  The reopened session then
-reproduces relocatable 1:1 SVG and PNG packages through the same export
-controllers used by the GUI.
+reproduces every authoritative Cutline/Outline 1:1 SVG and Digital Rubbing 1:1
+PNG package through the same export controllers used by the GUI.
 
 The fixture is intentionally tiny and the module imports neither Qt nor OpenGL,
 so the check remains deterministic and suitable for an offline Windows build.
@@ -109,6 +109,10 @@ class ArtifactWorkflowSelfTestResult:
     cutline_count: int
     outline_count: int
     rubbing_count: int
+    vector_export_count: int
+    rubbing_export_count: int
+    vector_set_sha256: str
+    rubbing_set_sha256: str
     svg_sha256: str
     png_sha256: str
 
@@ -123,6 +127,10 @@ class ArtifactWorkflowSelfTestResult:
             f"records={self.record_count}, source={self.source_sha256[:12]}, "
             f"document={self.document_sha256[:12]}, "
             f"svg={self.svg_sha256[:12]}, png={self.png_sha256[:12]}, "
+            f"exports=vector {self.vector_export_count}/9>"
+            f"rubbing {self.rubbing_export_count}/6, "
+            f"vector_set={self.vector_set_sha256[:12]}, "
+            f"rubbing_set={self.rubbing_set_sha256[:12]}, "
             "recovery=verified-create-new"
         )
 
@@ -220,6 +228,121 @@ def _validate_export_evidence(
     scale = _require_mapping(qc.get("scale"), label="export scale QC")
     if scale.get("physical_scale") != physical_scale:
         raise RuntimeError("export sidecar does not carry the required 1:1 scale claim")
+
+
+def _receipt_set_sha256(receipts: list[dict[str, str]]) -> str:
+    payload = json.dumps(
+        receipts,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _export_and_verify_vector(
+    exports: ArtifactExportController,
+    *,
+    directory: Path,
+    project_path: Path,
+    session: ArtifactSession,
+    source_sha256: str,
+    step: str,
+    view: str,
+    record_id: str,
+) -> dict[str, str]:
+    destination = directory / f"{step}-{view}.amr-vector"
+    work_item = exports.begin_vector(destination, record_id)
+    result = exports.execute(work_item)
+    exports.publish_result(work_item, result)
+
+    relocated = directory / f"relocated-{destination.name}"
+    destination.rename(relocated)
+    bundle = validate_vector_export_package(
+        relocated,
+        document=session.document,
+    )
+    evidence = _verification_evidence(
+        build_artifact_verification_report(
+            relocated,
+            against_project=project_path,
+        ),
+        artifact_kind="vector_export",
+    )
+    if (
+        evidence.get("bound_project_document_sha256")
+        != session.document.canonical_sha256
+        or evidence.get("svg_sha256") != bundle.svg_sha256
+    ):
+        raise RuntimeError("unified vector verification lost project binding")
+    _validate_export_evidence(
+        bundle.sidecar_bytes,
+        session=session,
+        record_id=record_id,
+        source_sha256=source_sha256,
+        physical_scale="1:1",
+    )
+    return {
+        "step": step,
+        "view": view,
+        "record_id": record_id,
+        "svg_sha256": bundle.svg_sha256,
+        "sidecar_sha256": bundle.sidecar_sha256,
+    }
+
+
+def _export_and_verify_rubbing(
+    exports: ArtifactExportController,
+    *,
+    directory: Path,
+    project_path: Path,
+    session: ArtifactSession,
+    source_sha256: str,
+    view: str,
+    record_id: str,
+) -> dict[str, str]:
+    destination = directory / f"rubbing-{view}.amr-rubbing"
+    work_item = exports.begin_rubbing(destination, record_id)
+    result = exports.execute(work_item)
+    exports.publish_result(work_item, result)
+
+    relocated = directory / f"relocated-{destination.name}"
+    destination.rename(relocated)
+    bundle = validate_rubbing_export_package(
+        relocated,
+        document=session.document,
+    )
+    evidence = _verification_evidence(
+        build_artifact_verification_report(
+            relocated,
+            against_project=project_path,
+        ),
+        artifact_kind="rubbing_export",
+    )
+    if (
+        evidence.get("bound_project_document_sha256")
+        != session.document.canonical_sha256
+        or evidence.get("png_sha256") != bundle.png_sha256
+    ):
+        raise RuntimeError("unified rubbing verification lost project binding")
+    _validate_export_evidence(
+        bundle.sidecar_bytes,
+        session=session,
+        record_id=record_id,
+        source_sha256=source_sha256,
+        physical_scale="1:1_planar_sampling",
+    )
+    if bundle.pixels_per_meter != 2_000:
+        raise RuntimeError("Digital Rubbing export changed its 2 px/mm sampling scale")
+    return {
+        "step": "rubbing",
+        "view": view,
+        "record_id": record_id,
+        "png_sha256": bundle.png_sha256,
+        "sidecar_sha256": bundle.sidecar_sha256,
+        "pixels_per_meter": str(bundle.pixels_per_meter),
+    }
 
 
 def _assert_progress_complete(session: ArtifactSession) -> tuple[int, int, int]:
@@ -407,63 +530,61 @@ def _run_in_directory(directory: Path) -> ArtifactWorkflowSelfTestResult:
         raise RuntimeError("offline AMR reopen lost explicit Align authority")
     exports = ArtifactExportController(offline_workbench, id_factory=ids)
 
-    vector_destination = directory / "cutline-top.amr-vector"
-    vector_item = exports.begin_vector(vector_destination, cutline_ids[0])
-    vector_result = exports.execute(vector_item)
-    exports.publish_result(vector_item, vector_result)
-    relocated_vector = directory / "relocated-cutline-top.amr-vector"
-    vector_destination.rename(relocated_vector)
-    vector_bundle = validate_vector_export_package(relocated_vector)
-    vector_evidence = _verification_evidence(
-        build_artifact_verification_report(
-            relocated_vector,
-            against_project=recovered_path,
-        ),
-        artifact_kind="vector_export",
-    )
-    if (
-        vector_evidence.get("bound_project_document_sha256")
-        != restored.document.canonical_sha256
-        or vector_evidence.get("svg_sha256") != vector_bundle.svg_sha256
-    ):
-        raise RuntimeError("unified vector verification lost project binding")
-    _validate_export_evidence(
-        vector_bundle.sidecar_bytes,
-        session=restored,
-        record_id=cutline_ids[0],
-        source_sha256=source_sha256,
-        physical_scale="1:1",
-    )
+    vector_receipts = [
+        _export_and_verify_vector(
+            exports,
+            directory=directory,
+            project_path=recovered_path,
+            session=restored,
+            source_sha256=source_sha256,
+            step=step,
+            view=view,
+            record_id=record_id,
+        )
+        for step, views, record_ids in (
+            ("cutline", REQUIRED_CUTLINE_VIEWS, cutline_ids),
+            ("outline", REQUIRED_SIX_VIEWS, outline_ids),
+        )
+        for view, record_id in zip(views, record_ids, strict=True)
+    ]
+    expected_vector_views = [
+        *(("cutline", view) for view in REQUIRED_CUTLINE_VIEWS),
+        *(("outline", view) for view in REQUIRED_SIX_VIEWS),
+    ]
+    if [
+        (receipt["step"], receipt["view"]) for receipt in vector_receipts
+    ] != expected_vector_views or len(
+        {receipt["record_id"] for receipt in vector_receipts}
+    ) != len(expected_vector_views):
+        raise RuntimeError("complete workflow did not export each vector record once")
 
-    rubbing_destination = directory / "rubbing-top.amr-rubbing"
-    rubbing_item = exports.begin_rubbing(rubbing_destination, rubbing_ids[0])
-    rubbing_result = exports.execute(rubbing_item)
-    exports.publish_result(rubbing_item, rubbing_result)
-    relocated_rubbing = directory / "relocated-rubbing-top.amr-rubbing"
-    rubbing_destination.rename(relocated_rubbing)
-    rubbing_bundle = validate_rubbing_export_package(relocated_rubbing)
-    rubbing_evidence = _verification_evidence(
-        build_artifact_verification_report(
-            relocated_rubbing,
-            against_project=recovered_path,
-        ),
-        artifact_kind="rubbing_export",
-    )
-    if (
-        rubbing_evidence.get("bound_project_document_sha256")
-        != restored.document.canonical_sha256
-        or rubbing_evidence.get("png_sha256") != rubbing_bundle.png_sha256
+    rubbing_receipts = [
+        _export_and_verify_rubbing(
+            exports,
+            directory=directory,
+            project_path=recovered_path,
+            session=restored,
+            source_sha256=source_sha256,
+            view=view,
+            record_id=record_id,
+        )
+        for view, record_id in zip(REQUIRED_SIX_VIEWS, rubbing_ids, strict=True)
+    ]
+    if [receipt["view"] for receipt in rubbing_receipts] != list(
+        REQUIRED_SIX_VIEWS
+    ) or len({receipt["record_id"] for receipt in rubbing_receipts}) != len(
+        REQUIRED_SIX_VIEWS
     ):
-        raise RuntimeError("unified rubbing verification lost project binding")
-    _validate_export_evidence(
-        rubbing_bundle.sidecar_bytes,
-        session=restored,
-        record_id=rubbing_ids[0],
-        source_sha256=source_sha256,
-        physical_scale="1:1_planar_sampling",
+        raise RuntimeError("complete workflow did not export each rubbing record once")
+
+    top_cutline = next(
+        receipt
+        for receipt in vector_receipts
+        if receipt["step"] == "cutline" and receipt["view"] == "top"
     )
-    if rubbing_bundle.pixels_per_meter != 2_000:
-        raise RuntimeError("Digital Rubbing export changed its 2 px/mm sampling scale")
+    top_rubbing = next(
+        receipt for receipt in rubbing_receipts if receipt["view"] == "top"
+    )
 
     align_id = restored.document.active_align_revision_id
     if align_id != "align:workflow-self-test-explicit":
@@ -475,8 +596,12 @@ def _run_in_directory(directory: Path) -> ArtifactWorkflowSelfTestResult:
         cutline_count=counts[0],
         outline_count=counts[1],
         rubbing_count=counts[2],
-        svg_sha256=vector_bundle.svg_sha256,
-        png_sha256=rubbing_bundle.png_sha256,
+        vector_export_count=len(vector_receipts),
+        rubbing_export_count=len(rubbing_receipts),
+        vector_set_sha256=_receipt_set_sha256(vector_receipts),
+        rubbing_set_sha256=_receipt_set_sha256(rubbing_receipts),
+        svg_sha256=top_cutline["svg_sha256"],
+        png_sha256=top_rubbing["png_sha256"],
     )
 
 

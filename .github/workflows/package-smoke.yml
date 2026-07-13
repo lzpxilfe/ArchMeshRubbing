@@ -145,7 +145,9 @@ jobs:
           assert d.get('ok') is True, json.dumps(d, ensure_ascii=False, indent=2);
           checks=d.get('checks') or [];
           assert len(checks) == 14 and all(c.get('ok') is True for c in checks), d;
-          assert any(c.get('name') == 'artifact_complete_workflow_offline' for c in checks), d;
+          workflow=next((c for c in checks if c.get('name') == 'artifact_complete_workflow_offline'), None);
+          assert workflow is not None, d;
+          assert 'exports=vector 9/9>rubbing 6/6' in str(workflow.get('detail') or ''), workflow;
           assert any(c.get('name') == 'release_evidence' for c in checks), d;
           assert any(c.get('name') == 'source_archive' for c in checks), d;
           print('Frozen self-test passed:', p)"
@@ -345,8 +347,12 @@ jobs:
           foreach ($check in $data.checks) {
             if (-not $check.ok) { throw "Portable self-test check failed: $($check.name)" }
           }
-          if (-not ($data.checks.name -contains "artifact_complete_workflow_offline")) {
+          $workflowCheck = $data.checks | Where-Object { $_.name -eq "artifact_complete_workflow_offline" }
+          if ($null -eq $workflowCheck) {
             throw "Portable self-test omitted the complete offline workflow"
+          }
+          if (-not ([string]$workflowCheck.detail).Contains("exports=vector 9/9>rubbing 6/6")) {
+            throw "Portable self-test did not verify all 9 vector and 6 rubbing exports"
           }
           if (-not ($data.checks.name -contains "release_evidence")) {
             throw "Portable self-test omitted release evidence verification"
