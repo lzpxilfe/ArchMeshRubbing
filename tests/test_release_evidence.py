@@ -49,7 +49,7 @@ def _synthetic_payload(root: Path) -> Path:
     )
     fallback = b"Beta reviewed license text\n"
     fallback_path = "third_party_licenses/Beta-2.0-LICENSE.txt"
-    _write(payload / fallback_path, fallback)
+    _write(payload / "_internal" / fallback_path, fallback)
     policy = {
         "packages": {
             "beta": {
@@ -184,8 +184,8 @@ def test_release_evidence_detects_payload_and_evidence_tampering() -> None:
 def test_release_evidence_rejects_missing_license_and_unexpected_metadata() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         payload = _synthetic_payload(Path(temporary))
-        (payload / "third_party_licenses" / "Beta-2.0-LICENSE.txt").unlink()
-        with pytest.raises(ReleaseEvidenceError, match="fallback is missing"):
+        (payload / "_internal" / "third_party_licenses" / "Beta-2.0-LICENSE.txt").unlink()
+        with pytest.raises(ReleaseEvidenceError, match="exactly one reviewed license fallback"):
             generate_release_evidence(
                 payload,
                 payload / EVIDENCE_DIRECTORY_NAME,

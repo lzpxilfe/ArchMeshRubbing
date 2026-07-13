@@ -545,21 +545,23 @@ def _collect_runtime_packages(
                 )
             used_policy.add(key)
             for fallback in fallback_policy["fallback_license_files"]:
-                relative = str(fallback["path"])
-                path = payload_root.joinpath(*Path(relative).parts)
-                if path.is_symlink() or not path.is_file():
-                    raise ReleaseEvidenceError(
-                        f"reviewed license fallback is missing: {relative}"
-                    )
+                policy_relative = str(fallback["path"])
+                path = _find_unique_file(
+                    payload_root,
+                    tuple(Path(policy_relative).parts),
+                    label=f"reviewed license fallback {policy_relative}",
+                )
                 raw, text = _decode_license_text(path)
                 if _sha256_bytes(raw) != fallback["sha256"]:
                     raise ReleaseEvidenceError(
-                        f"reviewed license fallback hash mismatch: {relative}"
+                        f"reviewed license fallback hash mismatch: {policy_relative}"
                     )
+                payload_relative = _payload_relative(payload_root, path)
                 evidence.append(
                     {
                         "origin": "reviewed-source-fallback",
-                        "path": relative,
+                        "path": payload_relative,
+                        "policy_path": policy_relative,
                         "sha256": fallback["sha256"],
                         "size": len(raw),
                         "source_archive": fallback["source_archive"],
@@ -569,7 +571,7 @@ def _collect_runtime_packages(
                         "source_path": fallback["source_path"],
                     }
                 )
-                license_texts[relative] = text
+                license_texts[payload_relative] = text
 
         expression = message.get("License-Expression")
         license_expression = str(expression).strip() if expression else None
