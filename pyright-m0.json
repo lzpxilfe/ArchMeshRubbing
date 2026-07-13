@@ -71,7 +71,8 @@
     "tests/test_vector_schemas.py",
     "tests/test_rubbing_schemas.py",
     "tests/test_render_coordinates.py",
-    "tests/test_opengl_driver_smoke.py"
+    "tests/test_opengl_driver_smoke.py",
+    "tests/test_windows_installer.py"
   ],
   "exclude": [
     "**/__pycache__",

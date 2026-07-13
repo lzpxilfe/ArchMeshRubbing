@@ -8,6 +8,7 @@ on:
       - ".gitattributes"
       - ".github/workflows/package-smoke.yml"
       - "ArchMeshRubbing.spec"
+      - "installer/**"
       - "LICENSE"
       - "README.md"
       - "main.py"
@@ -23,6 +24,7 @@ on:
       - ".gitattributes"
       - ".github/workflows/package-smoke.yml"
       - "ArchMeshRubbing.spec"
+      - "installer/**"
       - "LICENSE"
       - "README.md"
       - "main.py"
@@ -45,8 +47,10 @@ concurrency:
 jobs:
   frozen-package-smoke:
     name: Frozen package smoke (Windows)
-    runs-on: windows-latest
-    timeout-minutes: 45
+    # windows-latest moved to Server 2025, whose hosted image no longer ships
+    # Inno Setup. Pin the installer verification environment explicitly.
+    runs-on: windows-2022
+    timeout-minutes: 60
     env:
       QT_QPA_PLATFORM: offscreen
       LIBGL_ALWAYS_SOFTWARE: "1"
@@ -130,6 +134,285 @@ jobs:
           assert len(d.get('render_modes') or []) == 2, d;
           assert d.get('checks') and all(x.get('ok') is True for x in d['checks']), d;
           print('Frozen Windows native-QPA OpenGL smoke passed:', c.get('renderer'))"
+
+      - name: Build unsigned Windows installer
+        shell: pwsh
+        run: |
+          $buildInfo = Get-Content "build\generated\build_info.json" -Raw | ConvertFrom-Json
+          $sourceDir = (Resolve-Path "dist\ArchMeshRubbing").Path
+          $outputDir = (New-Item -ItemType Directory -Path "build\installer" -Force).FullName
+          $isccCandidates = @(
+            @(
+              "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+              "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
+              (Get-Command "ISCC.exe" -ErrorAction SilentlyContinue).Source
+            ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
+          )
+          if ($isccCandidates.Count -eq 0) {
+            throw "Inno Setup compiler was not found on the pinned Windows runner"
+          }
+          $iscc = $isccCandidates[0]
+          $compilerVersion = (Get-Item $iscc).VersionInfo.ProductVersion
+          if (-not $compilerVersion.StartsWith("6.")) {
+            throw "Inno Setup 6 is required, found $compilerVersion"
+          }
+          Write-Host "Using Inno Setup $compilerVersion from $iscc"
+
+          & $iscc `
+            "/DAppVersion=$($buildInfo.version)" `
+            "/DSourceDir=$sourceDir" `
+            "/DOutputDir=$outputDir" `
+            "/DSourceCommit=$($buildInfo.commit)" `
+            "installer\ArchMeshRubbing.iss"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Inno Setup compiler exited with code $LASTEXITCODE"
+          }
+
+          $expectedName = "ArchMeshRubbing-$($buildInfo.version)-Windows-x64-unsigned.exe"
+          $installer = Join-Path $outputDir $expectedName
+          if (-not (Test-Path $installer -PathType Leaf)) {
+            throw "Expected installer was not created: $installer"
+          }
+          $unexpected = @(Get-ChildItem $outputDir -File | Where-Object { $_.Name -ne $expectedName })
+          if ($unexpected.Count -ne 0) {
+            throw "Unexpected installer outputs: $($unexpected.Name -join ', ')"
+          }
+
+          $signature = Get-AuthenticodeSignature $installer
+          if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::NotSigned) {
+            throw "CI installer must remain unsigned; status was $($signature.Status)"
+          }
+          $hash = Get-FileHash -Algorithm SHA256 $installer
+          $evidence = [ordered]@{
+            schema_version = "1"
+            app_version = $buildInfo.version
+            source_commit = $buildInfo.commit
+            build_manifest_sha256 = (Get-FileHash -Algorithm SHA256 "build\generated\build_info.json").Hash.ToLowerInvariant()
+            installer_name = $expectedName
+            installer_sha256 = $hash.Hash.ToLowerInvariant()
+            installer_size = (Get-Item $installer).Length
+            authenticode_status = $signature.Status.ToString()
+            compiler_product_version = $compilerVersion
+            runner_image = $env:ImageOS
+            runner_image_version = $env:ImageVersion
+          }
+          $evidence | ConvertTo-Json -Depth 3 | Set-Content -Encoding utf8NoBOM "build\installer-build.json"
+          Get-Content "build\installer-build.json"
+          "AMR_INSTALLER=$installer" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Install into isolated non-ASCII user path
+        shell: pwsh
+        run: |
+          $installDir = Join-Path $env:RUNNER_TEMP "ArchMeshRubbing 설치 검증"
+          $installLog = Join-Path $env:RUNNER_TEMP "archmeshrubbing-install.log"
+          if (Test-Path $installDir) {
+            throw "Refusing to reuse installer smoke path: $installDir"
+          }
+          $arguments = @(
+            "/SP-",
+            "/VERYSILENT",
+            "/SUPPRESSMSGBOXES",
+            "/NORESTART",
+            "/DIR=`"$installDir`"",
+            "/LOG=`"$installLog`""
+          )
+          $process = Start-Process `
+            -FilePath $env:AMR_INSTALLER `
+            -ArgumentList $arguments `
+            -Wait `
+            -PassThru
+          if ($process.ExitCode -ne 0) {
+            if (Test-Path $installLog) { Get-Content $installLog }
+            throw "Installer exited with code $($process.ExitCode)"
+          }
+
+          $installedExe = Join-Path $installDir "ArchMeshRubbing.exe"
+          if (-not (Test-Path $installedExe -PathType Leaf)) {
+            Get-Content $installLog
+            throw "Installed executable is missing: $installedExe"
+          }
+          $shortcut = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\ArchMeshRubbing\ArchMeshRubbing.lnk"
+          if (-not (Test-Path $shortcut -PathType Leaf)) {
+            throw "Per-user Start Menu shortcut is missing: $shortcut"
+          }
+
+          $sourceRoot = (Resolve-Path "dist\ArchMeshRubbing").Path
+          $payload = @(Get-ChildItem $sourceRoot -Recurse -File)
+          foreach ($source in $payload) {
+            $relative = [IO.Path]::GetRelativePath($sourceRoot, $source.FullName)
+            $installed = Join-Path $installDir $relative
+            if (-not (Test-Path $installed -PathType Leaf)) {
+              throw "Installed payload is missing: $relative"
+            }
+            $sourceHash = (Get-FileHash -Algorithm SHA256 $source.FullName).Hash
+            $installedHash = (Get-FileHash -Algorithm SHA256 $installed).Hash
+            if ($sourceHash -ne $installedHash) {
+              throw "Installed payload hash mismatch: $relative"
+            }
+          }
+          $payloadNames = @{}
+          foreach ($source in $payload) {
+            $payloadNames[[IO.Path]::GetRelativePath($sourceRoot, $source.FullName)] = $true
+          }
+          $unexpected = @(
+            Get-ChildItem $installDir -Recurse -File | Where-Object {
+              $relative = [IO.Path]::GetRelativePath($installDir, $_.FullName)
+              -not $payloadNames.ContainsKey($relative) -and
+                $relative -notmatch '^unins\d{3}\.(dat|exe|msg)$'
+            }
+          )
+          if ($unexpected.Count -ne 0) {
+            throw "Unexpected installed files: $($unexpected.FullName -join ', ')"
+          }
+          Write-Host "Verified $($payload.Count) installed payload files byte-for-byte."
+
+          "AMR_INSTALL_DIR=$installDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "AMR_INSTALLED_EXE=$installedExe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "AMR_INSTALL_LOG=$installLog" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "AMR_SHORTCUT=$shortcut" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Enforce installed executable offline boundary
+        shell: pwsh
+        run: |
+          $ruleName = "ArchMeshRubbing CI offline $env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          New-NetFirewallRule `
+            -DisplayName $ruleName `
+            -Direction Outbound `
+            -Program $env:AMR_INSTALLED_EXE `
+            -Action Block `
+            -Profile Any | Out-Null
+          "AMR_FIREWALL_RULE=$ruleName" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $rule = Get-NetFirewallRule -DisplayName $ruleName
+          $application = $rule | Get-NetFirewallApplicationFilter
+          if ($rule.Enabled.ToString() -ne "True" -or $rule.Action.ToString() -ne "Block") {
+            throw "Outbound deny rule is not enabled"
+          }
+          if ([IO.Path]::GetFullPath($application.Program) -ne [IO.Path]::GetFullPath($env:AMR_INSTALLED_EXE)) {
+            throw "Outbound deny rule targets the wrong executable: $($application.Program)"
+          }
+          Write-Host "Outbound network blocked for $($application.Program)"
+
+      - name: Run installed offline workflow self-test
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+          HTTP_PROXY: http://127.0.0.1:9
+          HTTPS_PROXY: http://127.0.0.1:9
+          ALL_PROXY: http://127.0.0.1:9
+          NO_PROXY: ""
+        run: |
+          $report = Join-Path $env:RUNNER_TEMP "installed-self-test.json"
+          $process = Start-Process `
+            -FilePath $env:AMR_INSTALLED_EXE `
+            -ArgumentList "--self-test-report", "`"$report`"" `
+            -Wait `
+            -PassThru
+          if ($process.ExitCode -ne 0) {
+            if (Test-Path $report) { Get-Content $report }
+            throw "Installed self-test exited with code $($process.ExitCode)"
+          }
+          $data = Get-Content $report -Raw | ConvertFrom-Json
+          if (-not $data.ok -or $data.checks.Count -ne 12) {
+            Get-Content $report
+            throw "Installed self-test did not pass all 12 checks"
+          }
+          foreach ($check in $data.checks) {
+            if (-not $check.ok) { throw "Installed self-test check failed: $($check.name)" }
+          }
+          if (-not ($data.checks.name -contains "artifact_complete_workflow_offline")) {
+            throw "Installed self-test omitted the complete offline workflow"
+          }
+          "AMR_INSTALLED_SELF_TEST=$report" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Run installed Windows native-QPA OpenGL smoke
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: windows
+          QT_LOGGING_RULES: "qt.qpa.gl=true"
+          QT_OPENGL: software
+          HTTP_PROXY: http://127.0.0.1:9
+          HTTPS_PROXY: http://127.0.0.1:9
+          ALL_PROXY: http://127.0.0.1:9
+          NO_PROXY: ""
+        run: |
+          $report = Join-Path $env:RUNNER_TEMP "installed-windows-opengl-driver-smoke.json"
+          $process = Start-Process `
+            -FilePath $env:AMR_INSTALLED_EXE `
+            -ArgumentList "--opengl-driver-smoke-report", "`"$report`"" `
+            -Wait `
+            -PassThru
+          if ($process.ExitCode -ne 0) {
+            if (Test-Path $report) { Get-Content $report }
+            throw "Installed OpenGL smoke exited with code $($process.ExitCode)"
+          }
+          $data = Get-Content $report -Raw | ConvertFrom-Json
+          $context = $data.context
+          if (-not $data.ok -or $context.qt_platform -ne "windows" -or -not $context.software_renderer) {
+            Get-Content $report
+            throw "Installed OpenGL smoke did not use the required Windows software context"
+          }
+          if ($data.render_modes.Count -ne 2) {
+            throw "Installed OpenGL smoke omitted a projection mode"
+          }
+          foreach ($check in $data.checks) {
+            if (-not $check.ok) { throw "Installed OpenGL check failed: $($check.name)" }
+          }
+          Write-Host "Installed actual-frame checks passed: $($data.checks.Count)"
+          "AMR_INSTALLED_OPENGL=$report" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Uninstall and verify cleanup
+        shell: pwsh
+        run: |
+          $uninstallers = @(Get-ChildItem $env:AMR_INSTALL_DIR -File -Filter "unins*.exe")
+          if ($uninstallers.Count -ne 1) {
+            throw "Expected exactly one uninstaller, found $($uninstallers.Count)"
+          }
+          $uninstallLog = Join-Path $env:RUNNER_TEMP "archmeshrubbing-uninstall.log"
+          $arguments = @(
+            "/VERYSILENT",
+            "/SUPPRESSMSGBOXES",
+            "/NORESTART",
+            "/LOG=`"$uninstallLog`""
+          )
+          $process = Start-Process `
+            -FilePath $uninstallers[0].FullName `
+            -ArgumentList $arguments `
+            -Wait `
+            -PassThru
+          if ($process.ExitCode -ne 0) {
+            if (Test-Path $uninstallLog) { Get-Content $uninstallLog }
+            throw "Uninstaller exited with code $($process.ExitCode)"
+          }
+          for ($attempt = 0; $attempt -lt 40 -and (Test-Path $env:AMR_INSTALL_DIR); $attempt++) {
+            Start-Sleep -Milliseconds 250
+          }
+          if (Test-Path $env:AMR_INSTALL_DIR) {
+            Get-ChildItem $env:AMR_INSTALL_DIR -Recurse -Force
+            throw "Installer directory remains after uninstall"
+          }
+          if (Test-Path $env:AMR_SHORTCUT) {
+            throw "Start Menu shortcut remains after uninstall"
+          }
+          Write-Host "Per-user install and uninstall cleanup passed."
+
+      - name: Remove offline rule and residual smoke files
+        if: always()
+        shell: pwsh
+        run: |
+          if ($env:AMR_FIREWALL_RULE) {
+            Get-NetFirewallRule -DisplayName $env:AMR_FIREWALL_RULE -ErrorAction SilentlyContinue |
+              Remove-NetFirewallRule -ErrorAction SilentlyContinue
+          }
+          if ($env:AMR_INSTALL_DIR -and (Test-Path $env:AMR_INSTALL_DIR)) {
+            $uninstaller = Get-ChildItem $env:AMR_INSTALL_DIR -File -Filter "unins*.exe" -ErrorAction SilentlyContinue |
+              Select-Object -First 1
+            if ($uninstaller) {
+              Start-Process `
+                -FilePath $uninstaller.FullName `
+                -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" `
+                -Wait
+            }
+          }
 
       # Deliberately no artifact upload or release step. Public binary
       # distribution remains disabled until the repository license gate is
