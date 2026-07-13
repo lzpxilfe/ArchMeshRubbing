@@ -82,7 +82,7 @@ python -m src.gui.opengl_driver_smoke ^
   --report build/opengl-driver-smoke.json
 ```
 
-2026-07-13 Windows 대상 commit `b12d4874a4a8`의 [source CI run 29251668123](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29251668123)은 qwindows+llvmpipe actual-frame 66/66을, [frozen package run 29251668029](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29251668029)은 당시 complete-workflow self-test와 frozen actual-frame gate를 통과했다. 과거 macOS/Linux source 결과는 이식성 기록일 뿐 첫 안정판 지원 판정에 사용하지 않는다.
+2026-07-14 통합 verifier 기능 기준 commit `4a21666e7f7b`의 [source CI run 29280873586](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29280873586)은 qwindows+llvmpipe actual-frame 66/66을, [frozen package run 29280874076](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29280874076)은 frozen·한글 경로 14-check complete workflow, outbound deny 상태 public verification receipt, actual-frame 66/66과 cleanup gate를 통과했다. 과거 macOS/Linux source 결과는 이식성 기록일 뿐 첫 안정판 지원 판정에 사용하지 않는다.
 
 ## Windows portable CI
 

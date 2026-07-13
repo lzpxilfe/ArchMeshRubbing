@@ -385,7 +385,7 @@ python main.py --project mesh.obj planview.png
 - canonical-mm Cutline과 6면 fixed-grid Outline
 - recipe·QC·receipt가 있는 6면 Digital Rubbing과 1:1 `.amr-rubbing` export
 - 전체/선택 face·명시적 장축·Top/Bottom·section/QC를 한 화면에서 기록하고 재열어 검증하는 native 기와 전개와 1:1 `.amr-unwrap` export
-- `.amr-vector`/`.amr-rubbing`의 이동 가능한 offline 검증
+- `.amr`, `.amr-vector`, `.amr-rubbing`, `.amr-unwrap`의 자동 판별·이동 가능한 offline 검증과 exact project 결합 receipt
 - 주 원본과 실제 parser dependency bytes를 포함한 content-addressed `.amr` 저장, 원본 디렉터리 삭제 뒤 독립 프로세스 reopen·relocation·archive-to-archive 재저장
 - self-contained v1 `deny_external`과 multi-file v2 `closed_manifest` mesh import recipe, parser-runtime subset identity, 경로 탈출·변조·미선언 resource deny gate와 동일 receipt의 독립 프로세스 재실행
 - 기와형 메쉬 기본 추천 펼침과 synthetic benchmark는 legacy 전문 기능으로 유지
@@ -393,7 +393,7 @@ python main.py --project mesh.obj planview.png
 - Cutline/Outline/Digital Rubbing command와 worker 수명주기를 Qt/OpenGL-free application shell로 이식
 - DerivedRecord의 VBO-free binding rebind와 SVG/PNG worker staging → final-authority publication 이식
 - dependency-valid `READY + FRESH` record graph와 application command에서 Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6 순차 gate·초록 완료 표시·재열기/Align 복원 구현
-- packaged self-test가 실제 application authority를 통해 Open → explicit Align → Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6을 수행하고, 외부 PLY 삭제 뒤 embedded `.amr`를 재열어 이동된 1:1 SVG/PNG package의 원본 SHA-256·recipe·QC를 offline 재검증
+- packaged self-test가 실제 application authority를 통해 Open → explicit Align → Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6을 수행하고, 외부 PLY 삭제 뒤 embedded `.amr`를 재열어 이동된 1:1 SVG/PNG package의 원본 SHA-256·recipe·QC와 exact-project 결합을 통합 verifier로 offline 재검증
 - `--opengl-driver-smoke-report`가 source와 frozen Windows 실행 파일에서 native `qwindows` context를 열고 Qt·PyOpenGL을 bundled `opengl32sw.dll` 하나에 결합한 뒤, 768×768 FBO에서 `>= 1e9 mm` 장면의 relative VBO, color/depth readback, 0.125 mm depth pick을 원근·정사영으로 검증
 - Windows x64/CPython 3.12 build wheel 17개를 exact SHA-256으로 잠그고 sdist를 거부하며, frozen/portable payload의 모든 파일 hash와 runtime 10개의 SPDX 2.3 SBOM·라이선스 원문 NOTICE를 실행 파일 self-test에서 재검증
 - live worktree가 아니라 exact Git commit의 object database에서 100644/100755 regular blob 전체를 읽어 결정적 corresponding-source ZIP을 만들고, commit/tree/blob ID·SHA-256·GPL-2.0-only LICENSE·portable path를 frozen/portable 14번째 offline self-test에서 재검증
@@ -401,8 +401,8 @@ python main.py --project mesh.obj planview.png
 - Cutline 면·경로, Outline fixed-grid/union/topology, Digital Rubbing raster/relief 내부의 안전 경계까지 사용자 cooperative cancellation 연결
 - 대좌표 render-origin 이식: relative VBO·camera/model rebasing·world overlay 제출과 frame-bound depth picking/drag 계약 구현
 - 버튼 아이콘은 이모지·운영체제 폰트 대신 직접 그린 16×16 픽셀 그리드와 정수배 고해상도 변형을 사용해 플랫폼별 모양 차이를 제거
-- 2026-07-14 Windows 코드 기준 commit `d4c7d94037be`: [source CI run 29279156637](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29279156637)에서 full pytest `753 passed, 128 subtests`, Ruff, M0 Pyright `0 errors`, Windows workflow `651 passed, 5 skipped, 118 subtests`와 qwindows+llvmpipe actual-frame `66/66` 통과
-- 같은 코드 commit의 [portable package run 29279156712](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29279156712)에서 frozen·한글 경로 portable 실행 파일의 14-check offline self-test, qwindows+llvmpipe actual-frame `66/66`, 추출본 삭제·방화벽 규칙 정리까지 통과
+- 2026-07-14 통합 verifier 기능 기준 commit `4a21666e7f7b`: [source CI run 29280873586](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29280873586)에서 full pytest `763 passed, 128 subtests`, Ruff, M0 Pyright `0 errors`, Windows workflow `661 passed, 5 skipped, 118 subtests`와 qwindows+llvmpipe actual-frame `66/66` 통과
+- 같은 기능 commit의 [portable package run 29280874076](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29280874076)에서 frozen·한글 경로 portable 실행 파일의 14-check offline self-test, outbound deny 상태의 public verification receipt, qwindows+llvmpipe actual-frame `66/66`, 추출본 삭제·방화벽 규칙 정리까지 통과
 - installer compiler 없이 표준 라이브러리만으로 deterministic portable ZIP과 canonical sidecar를 만들고, 경로 탈출·Windows 예약명·대소문자 충돌·symlink·변조를 fail-closed 검증한 뒤 기존 destination을 덮어쓰지 않는 원자적 추출 구현
 - 다음 단계: 라이선스 결정, unsigned provenance와 portable/source 배포물을 인증할 서명·신뢰 anchor 정책, 대표 Windows GPU·대용량 실제 유물·저메모리·완전 격리 offline pilot. macOS·Linux 배포 확대는 첫 안정판 이후 별도 범위
 
