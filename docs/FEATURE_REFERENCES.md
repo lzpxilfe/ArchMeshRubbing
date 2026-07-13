@@ -25,7 +25,9 @@
 | LSCM 기반 초기 전개 | least-squares conformal parameterization | `[R2]` | paper | `src/core/flatten_models_arap.py` |
 | 면적 기반 전개 | Tutte/LSCM blend + global scale normalization | `[R2]`, `[R3]` | paper + heuristic | `src/core/flattener.py`, `src/core/flatten_models_arap.py` |
 | 원통 추적 전개 | axis candidate scoring + circle-fit center + seam unwrap | `[R6]` | paper + heuristic | `src/core/flatten_models_cylindrical.py` |
-| sectionwise 펼침 | longitudinal axis + repeated cross-sections + local circular fits | `[R4]`, `[R6]` | paper + heuristic | `src/core/flatten_models_sectionwise.py` |
+| sectionwise 펼침 | longitudinal axis + repeated cross-sections + local circular fits | `[R4]`, `[R6]` | paper + heuristic | `src/core/flatten_models_sectionwise.py`, `src/core/artifact_tile_unwrap_extractor.py` |
+| 정식 기와 전개 record | explicit canonical axis + exact face selection + 1 µm quantization + no-fallback quality gate | `[R4]`, `[R6]` | paper + heuristic | `src/core/artifact_tile_unwrap_extractor.py`, `src/core/artifact_tile_unwrap_record.py` |
+| 검증형 기와 전개 export | content-addressed canonical binary + flat OBJ + physical-mm SVG + public provenance | - | deterministic engineering contract | `src/core/artifact_tile_unwrap_export.py` |
 | 기와 추천 정책 | tile confidence + 장축비 + 단면 반복성 + 단면/와통 힌트 반영 | - | heuristic | `src/core/flatten_policy.py` |
 | sectionwise fallback | distortion/section quality gate 후 대체 mode 연결 | - | heuristic | `src/core/flatten_models_sectionwise.py`, `src/core/flattener.py` |
 | flatten size stabilization | pathological scale ratio guard + metadata | - | heuristic | `src/core/flatten_utils.py` |
@@ -35,7 +37,7 @@
 | 기록면 선택/분리 | visibility/depth/topology propagation + labeling | `[R5]`, `[R7]` | paper + heuristic | `src/core/surface_separator.py` |
 | rubbing-like 판독 시각화 | normal/curvature/height derived enhancement + contrast/strength control | `[A1]`, `[A2]`, `[A3]`, `[L2]` | inspiration + library + heuristic | `src/core/surface_visualizer.py` |
 | 기록면 검토 시트 | flattened output + preview composition | `[A2]`, `[A4]` | inspiration + heuristic | `src/core/recording_surface_review.py`, `src/core/rubbing_sheet_exporter.py` |
-| SVG 산출물 | flattened geometry export for report/drawing workflows | - | heuristic | `src/core/flattened_svg_exporter.py` |
+| Legacy SVG 산출물 | permissive flattened geometry export for review workflows | - | heuristic | `src/core/flattened_svg_exporter.py` |
 
 ---
 

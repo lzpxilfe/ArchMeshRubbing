@@ -1,0 +1,582 @@
+"""Immutable, content-addressed roof-tile unwrap receipts."""
+
+from __future__ import annotations
+
+import re
+from typing import Any, Mapping, Sequence
+
+from .artifact_document import (
+    ArtifactDocument,
+    ArtifactDocumentError,
+    DerivedRecord,
+    OperationContext,
+    RecordLifecycleStatus,
+)
+from .artifact_tile_unwrap_extractor import (
+    MAX_TILE_UNWRAP_COORDINATE_UM,
+    MAX_TILE_UNWRAP_FACES,
+    MAX_TILE_UNWRAP_VERTICES,
+    TILE_UNWRAP_COORDINATE_QUANTUM_UM,
+    TILE_UNWRAP_COORDINATE_SPACE,
+    TILE_UNWRAP_GEOMETRY_REF_PREFIX,
+    TILE_UNWRAP_HASH_SCOPE,
+    TILE_UNWRAP_OUTPUT_SCHEMA_VERSION,
+    ArtifactTileUnwrapError,
+    TileUnwrapMesh,
+    validate_tile_unwrap_recipe,
+)
+from .canonical_json import canonical_json_bytes, canonical_json_sha256
+
+
+TILE_UNWRAP_RECORD_TYPE = "surface.tile_unwrap.v1"
+TILE_UNWRAP_RECEIPT_EXTENSION_KEY = "org.archmeshrubbing:tile-unwrap-v1"
+TILE_UNWRAP_RECEIPT_MEDIA_TYPE = (
+    "application/vnd.archmeshrubbing.tile-unwrap-receipt+json"
+)
+MAX_TILE_UNWRAP_RECEIPT_BYTES = 64 * 1024
+
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_QC_FIELDS = {
+    "degenerate_uv_face_count",
+    "distortion_max_millionths",
+    "distortion_mean_millionths",
+    "distortion_median_millionths",
+    "distortion_p95_millionths",
+    "face_count",
+    "foldover_face_count",
+    "height_um",
+    "negative_orientation_face_count",
+    "positive_orientation_face_count",
+    "section_centerline_length_um",
+    "section_count",
+    "section_fit_valid_count",
+    "section_mean_radius_um",
+    "section_mean_span_microdegrees",
+    "selected_face_count",
+    "selection_sha256",
+    "unwrap_sha256",
+    "vertex_count",
+    "width_um",
+}
+
+
+class ArtifactTileUnwrapRecordError(ValueError):
+    """A durable tile-unwrapping record violates its public contract."""
+
+
+def _exact_keys(
+    value: object,
+    expected: set[str],
+    *,
+    name: str,
+) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ArtifactTileUnwrapRecordError(f"{name} must be an object")
+    observed = set(value)
+    missing = sorted(expected - observed)
+    unknown = sorted(observed - expected)
+    if missing:
+        raise ArtifactTileUnwrapRecordError(
+            f"{name} is missing fields: {', '.join(missing)}"
+        )
+    if unknown:
+        raise ArtifactTileUnwrapRecordError(
+            f"{name} has unknown fields: {', '.join(unknown)}"
+        )
+    return value
+
+
+def _strict_int(
+    value: object,
+    *,
+    name: str,
+    minimum: int,
+    maximum: int,
+) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ArtifactTileUnwrapRecordError(f"{name} must be an integer")
+    if value < minimum or value > maximum:
+        raise ArtifactTileUnwrapRecordError(
+            f"{name} must be in the inclusive range {minimum}..{maximum}"
+        )
+    return value
+
+
+def _sha256(value: object, *, name: str) -> str:
+    if not isinstance(value, str) or _SHA256_RE.fullmatch(value) is None:
+        raise ArtifactTileUnwrapRecordError(f"{name} must be a lowercase SHA-256")
+    return value
+
+
+def _dimension(
+    value: object,
+    *,
+    name: str,
+    expected_um: int,
+) -> dict[str, int]:
+    rational = _exact_keys(
+        value,
+        {"denominator", "numerator"},
+        name=name,
+    )
+    denominator = _strict_int(
+        rational["denominator"],
+        name=f"{name}.denominator",
+        minimum=1000,
+        maximum=1000,
+    )
+    numerator = _strict_int(
+        rational["numerator"],
+        name=f"{name}.numerator",
+        minimum=1,
+        maximum=MAX_TILE_UNWRAP_COORDINATE_UM,
+    )
+    if numerator != expected_um:
+        raise ArtifactTileUnwrapRecordError(f"{name} does not match bounds_um")
+    return {"denominator": denominator, "numerator": numerator}
+
+
+def validate_tile_unwrap_receipt(value: object) -> dict[str, Any]:
+    receipt = _exact_keys(
+        value,
+        {
+            "axis",
+            "bounds_um",
+            "component_sha256",
+            "coordinate_quantum_um",
+            "coordinate_space",
+            "face_count",
+            "hash_scope",
+            "height_mm_exact",
+            "record_view",
+            "schema_version",
+            "selection_sha256",
+            "source_face_count",
+            "source_vertex_count",
+            "unwrap_sha256",
+            "vertex_count",
+            "width_mm_exact",
+        },
+        name="tile unwrap receipt",
+    )
+    literal_fields = {
+        "coordinate_quantum_um": TILE_UNWRAP_COORDINATE_QUANTUM_UM,
+        "coordinate_space": TILE_UNWRAP_COORDINATE_SPACE,
+        "hash_scope": TILE_UNWRAP_HASH_SCOPE,
+        "schema_version": TILE_UNWRAP_OUTPUT_SCHEMA_VERSION,
+    }
+    for key, expected in literal_fields.items():
+        if receipt[key] != expected:
+            raise ArtifactTileUnwrapRecordError(
+                f"tile unwrap receipt field {key!r} is invalid"
+            )
+    axis = receipt["axis"]
+    if axis not in {"x", "y", "z"}:
+        raise ArtifactTileUnwrapRecordError("tile unwrap receipt axis is invalid")
+    record_view = receipt["record_view"]
+    if record_view not in {"top", "bottom"}:
+        raise ArtifactTileUnwrapRecordError(
+            "tile unwrap receipt record_view is invalid"
+        )
+    vertex_count = _strict_int(
+        receipt["vertex_count"],
+        name="vertex_count",
+        minimum=3,
+        maximum=MAX_TILE_UNWRAP_VERTICES,
+    )
+    face_count = _strict_int(
+        receipt["face_count"],
+        name="face_count",
+        minimum=1,
+        maximum=MAX_TILE_UNWRAP_FACES,
+    )
+    source_vertex_count = _strict_int(
+        receipt["source_vertex_count"],
+        name="source_vertex_count",
+        minimum=3,
+        maximum=MAX_TILE_UNWRAP_VERTICES,
+    )
+    source_face_count = _strict_int(
+        receipt["source_face_count"],
+        name="source_face_count",
+        minimum=1,
+        maximum=MAX_TILE_UNWRAP_FACES,
+    )
+    if source_vertex_count != vertex_count or source_face_count != face_count:
+        raise ArtifactTileUnwrapRecordError(
+            "tile unwrap receipt correspondence counts are inconsistent"
+        )
+    bounds = _exact_keys(
+        receipt["bounds_um"],
+        {"maximum_u", "maximum_v", "minimum_u", "minimum_v"},
+        name="bounds_um",
+    )
+    minimum_u = _strict_int(
+        bounds["minimum_u"], name="bounds_um.minimum_u", minimum=0, maximum=0
+    )
+    minimum_v = _strict_int(
+        bounds["minimum_v"], name="bounds_um.minimum_v", minimum=0, maximum=0
+    )
+    maximum_u = _strict_int(
+        bounds["maximum_u"],
+        name="bounds_um.maximum_u",
+        minimum=1,
+        maximum=MAX_TILE_UNWRAP_COORDINATE_UM,
+    )
+    maximum_v = _strict_int(
+        bounds["maximum_v"],
+        name="bounds_um.maximum_v",
+        minimum=1,
+        maximum=MAX_TILE_UNWRAP_COORDINATE_UM,
+    )
+    component_hashes = _exact_keys(
+        receipt["component_sha256"],
+        {
+            "faces_i32le",
+            "source_face_indices_i64le",
+            "source_vertex_indices_i64le",
+            "uv_um_i64le",
+        },
+        name="component_sha256",
+    )
+    canonical_components = {
+        key: _sha256(component_hashes[key], name=f"component_sha256.{key}")
+        for key in sorted(component_hashes)
+    }
+    selection_sha = _sha256(receipt["selection_sha256"], name="selection_sha256")
+    unwrap_sha = _sha256(receipt["unwrap_sha256"], name="unwrap_sha256")
+    width = maximum_u - minimum_u
+    height = maximum_v - minimum_v
+    width_exact = _dimension(
+        receipt["width_mm_exact"], name="width_mm_exact", expected_um=width
+    )
+    height_exact = _dimension(
+        receipt["height_mm_exact"], name="height_mm_exact", expected_um=height
+    )
+    return {
+        **literal_fields,
+        "axis": axis,
+        "bounds_um": {
+            "maximum_u": maximum_u,
+            "maximum_v": maximum_v,
+            "minimum_u": minimum_u,
+            "minimum_v": minimum_v,
+        },
+        "component_sha256": canonical_components,
+        "face_count": face_count,
+        "height_mm_exact": height_exact,
+        "record_view": record_view,
+        "selection_sha256": selection_sha,
+        "source_face_count": source_face_count,
+        "source_vertex_count": source_vertex_count,
+        "unwrap_sha256": unwrap_sha,
+        "vertex_count": vertex_count,
+        "width_mm_exact": width_exact,
+    }
+
+
+def _validate_qc_against_receipt(
+    qc: Mapping[str, Any],
+    receipt: Mapping[str, Any],
+) -> dict[str, Any]:
+    value = _exact_keys(qc, _QC_FIELDS, name="tile unwrap QC")
+    expected = {
+        "face_count": receipt["face_count"],
+        "height_um": receipt["height_mm_exact"]["numerator"],
+        "selected_face_count": receipt["source_face_count"],
+        "selection_sha256": receipt["selection_sha256"],
+        "unwrap_sha256": receipt["unwrap_sha256"],
+        "vertex_count": receipt["vertex_count"],
+        "width_um": receipt["width_mm_exact"]["numerator"],
+    }
+    for key, expected_value in expected.items():
+        if value[key] != expected_value:
+            raise ArtifactTileUnwrapRecordError(
+                f"tile unwrap QC field {key!r} does not match its receipt"
+            )
+    face_count = int(receipt["face_count"])
+    degenerate = _strict_int(
+        value["degenerate_uv_face_count"],
+        name="qc.degenerate_uv_face_count",
+        minimum=0,
+        maximum=face_count,
+    )
+    foldovers = _strict_int(
+        value["foldover_face_count"],
+        name="qc.foldover_face_count",
+        minimum=0,
+        maximum=face_count,
+    )
+    positive = _strict_int(
+        value["positive_orientation_face_count"],
+        name="qc.positive_orientation_face_count",
+        minimum=0,
+        maximum=face_count,
+    )
+    negative = _strict_int(
+        value["negative_orientation_face_count"],
+        name="qc.negative_orientation_face_count",
+        minimum=0,
+        maximum=face_count,
+    )
+    if degenerate + positive + negative != face_count:
+        raise ArtifactTileUnwrapRecordError(
+            "tile unwrap orientation QC is inconsistent"
+        )
+    if degenerate != 0 or foldovers != 0 or min(positive, negative) != 0:
+        raise ArtifactTileUnwrapRecordError(
+            "authoritative tile unwrap cannot contain collapsed or folded faces"
+        )
+    distortion_fields = (
+        "distortion_max_millionths",
+        "distortion_mean_millionths",
+        "distortion_median_millionths",
+        "distortion_p95_millionths",
+    )
+    distortion = {
+        key: _strict_int(value[key], name=f"qc.{key}", minimum=0, maximum=1_000_000)
+        for key in distortion_fields
+    }
+    if distortion["distortion_mean_millionths"] > 550_000:
+        raise ArtifactTileUnwrapRecordError("tile unwrap mean distortion exceeds gate")
+    if distortion["distortion_p95_millionths"] > 820_000:
+        raise ArtifactTileUnwrapRecordError("tile unwrap p95 distortion exceeds gate")
+    if (
+        distortion["distortion_median_millionths"]
+        > distortion["distortion_max_millionths"]
+        or distortion["distortion_p95_millionths"]
+        > distortion["distortion_max_millionths"]
+        or distortion["distortion_mean_millionths"]
+        > distortion["distortion_max_millionths"]
+        or distortion["distortion_median_millionths"]
+        > distortion["distortion_p95_millionths"]
+    ):
+        raise ArtifactTileUnwrapRecordError("tile unwrap distortion QC is inconsistent")
+    section_count = _strict_int(
+        value["section_count"], name="qc.section_count", minimum=12, maximum=96
+    )
+    valid_count = _strict_int(
+        value["section_fit_valid_count"],
+        name="qc.section_fit_valid_count",
+        minimum=4,
+        maximum=section_count,
+    )
+    if valid_count < max(4, int(section_count * 0.35)):
+        raise ArtifactTileUnwrapRecordError("tile unwrap section fit is too sparse")
+    _strict_int(
+        value["section_centerline_length_um"],
+        name="qc.section_centerline_length_um",
+        minimum=1,
+        maximum=MAX_TILE_UNWRAP_COORDINATE_UM,
+    )
+    _strict_int(
+        value["section_mean_radius_um"],
+        name="qc.section_mean_radius_um",
+        minimum=1,
+        maximum=MAX_TILE_UNWRAP_COORDINATE_UM,
+    )
+    _strict_int(
+        value["section_mean_span_microdegrees"],
+        name="qc.section_mean_span_microdegrees",
+        minimum=20_000_000,
+        maximum=360_000_000,
+    )
+    return dict(value)
+
+
+def validate_tile_unwrap_qc(
+    value: Mapping[str, Any],
+    receipt: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate the closed QC shape against a validated public receipt."""
+
+    validated_receipt = validate_tile_unwrap_receipt(receipt)
+    return _validate_qc_against_receipt(value, validated_receipt)
+
+
+def append_tile_unwrap_record_from_context(
+    document: ArtifactDocument,
+    *,
+    context: OperationContext,
+    unwrap: TileUnwrapMesh,
+    recipe: Mapping[str, Any],
+    record_id: str,
+    created_at: str,
+    operator: str,
+    depends_on_record_ids: Sequence[str] = (),
+    qc: Mapping[str, Any],
+) -> ArtifactDocument:
+    if not isinstance(document, ArtifactDocument):
+        raise ArtifactTileUnwrapRecordError("document must be an ArtifactDocument")
+    if not isinstance(context, OperationContext):
+        raise ArtifactTileUnwrapRecordError("context must be an OperationContext")
+    if not isinstance(unwrap, TileUnwrapMesh):
+        raise ArtifactTileUnwrapRecordError("unwrap must be a TileUnwrapMesh")
+    try:
+        validated_recipe = validate_tile_unwrap_recipe(recipe)
+    except ArtifactTileUnwrapError as exc:
+        raise ArtifactTileUnwrapRecordError(str(exc)) from exc
+    selection = validated_recipe["selection"]
+    assert isinstance(selection, Mapping)
+    selection_sha = str(selection["selection_sha256"])
+    if context.selection_hash != selection_sha:
+        raise ArtifactTileUnwrapRecordError(
+            "tile unwrap context selection does not match recipe"
+        )
+    receipt = validate_tile_unwrap_receipt(
+        unwrap.receipt(selection_sha256=selection_sha)
+    )
+    if receipt["axis"] != validated_recipe["longitudinal_axis"]:
+        raise ArtifactTileUnwrapRecordError(
+            "tile unwrap receipt axis differs from recipe"
+        )
+    if receipt["record_view"] != validated_recipe["record_view"]:
+        raise ArtifactTileUnwrapRecordError(
+            "tile unwrap receipt record_view differs from recipe"
+        )
+    if receipt["source_face_count"] != selection["selected_face_count"]:
+        raise ArtifactTileUnwrapRecordError(
+            "tile unwrap receipt selection count differs from recipe"
+        )
+    validated_qc = _validate_qc_against_receipt(qc, receipt)
+    if validated_qc["section_count"] != validated_recipe["n_sections"]:
+        raise ArtifactTileUnwrapRecordError(
+            "tile unwrap section QC differs from recipe"
+        )
+    receipt_bytes = canonical_json_bytes(receipt)
+    if len(receipt_bytes) > MAX_TILE_UNWRAP_RECEIPT_BYTES:
+        raise ArtifactTileUnwrapRecordError("tile unwrap receipt exceeds size limit")
+    extensions = {
+        TILE_UNWRAP_RECEIPT_EXTENSION_KEY: {
+            "media_type": TILE_UNWRAP_RECEIPT_MEDIA_TYPE,
+            "receipt": receipt,
+            "receipt_byte_length": len(receipt_bytes),
+            "receipt_sha256": canonical_json_sha256(receipt),
+            "schema_version": TILE_UNWRAP_OUTPUT_SCHEMA_VERSION,
+        }
+    }
+    try:
+        return document.append_record_from_context(
+            context=context,
+            id=record_id,
+            type=TILE_UNWRAP_RECORD_TYPE,
+            geometry_ref=f"{TILE_UNWRAP_GEOMETRY_REF_PREFIX}{receipt['unwrap_sha256']}",
+            recipe=validated_recipe,
+            qc=validated_qc,
+            lifecycle_status=RecordLifecycleStatus.READY,
+            created_at=created_at,
+            operator=operator,
+            depends_on_record_ids=depends_on_record_ids,
+            extensions=extensions,
+        )
+    except ArtifactDocumentError as exc:
+        raise ArtifactTileUnwrapRecordError(str(exc)) from exc
+
+
+def tile_unwrap_receipt_from_record(record: DerivedRecord) -> dict[str, Any]:
+    if not isinstance(record, DerivedRecord):
+        raise ArtifactTileUnwrapRecordError("record must be a DerivedRecord")
+    if record.type != TILE_UNWRAP_RECORD_TYPE:
+        raise ArtifactTileUnwrapRecordError("record is not a tile unwrap record")
+    descriptor = _exact_keys(
+        record.extensions.get(TILE_UNWRAP_RECEIPT_EXTENSION_KEY),
+        {
+            "media_type",
+            "receipt",
+            "receipt_byte_length",
+            "receipt_sha256",
+            "schema_version",
+        },
+        name="tile unwrap descriptor",
+    )
+    if descriptor["media_type"] != TILE_UNWRAP_RECEIPT_MEDIA_TYPE:
+        raise ArtifactTileUnwrapRecordError("tile unwrap media type is invalid")
+    if descriptor["schema_version"] != TILE_UNWRAP_OUTPUT_SCHEMA_VERSION:
+        raise ArtifactTileUnwrapRecordError("tile unwrap descriptor schema is invalid")
+    receipt = validate_tile_unwrap_receipt(descriptor["receipt"])
+    receipt_bytes = canonical_json_bytes(receipt)
+    if descriptor["receipt_byte_length"] != len(receipt_bytes):
+        raise ArtifactTileUnwrapRecordError(
+            "tile unwrap receipt byte length is invalid"
+        )
+    if descriptor["receipt_sha256"] != canonical_json_sha256(receipt):
+        raise ArtifactTileUnwrapRecordError("tile unwrap receipt SHA-256 is invalid")
+    if record.geometry_ref != (
+        f"{TILE_UNWRAP_GEOMETRY_REF_PREFIX}{receipt['unwrap_sha256']}"
+    ):
+        raise ArtifactTileUnwrapRecordError(
+            "tile unwrap geometry_ref does not match receipt"
+        )
+    try:
+        recipe = validate_tile_unwrap_recipe(record.recipe)
+    except ArtifactTileUnwrapError as exc:
+        raise ArtifactTileUnwrapRecordError(str(exc)) from exc
+    selection = recipe["selection"]
+    assert isinstance(selection, Mapping)
+    if receipt["axis"] != recipe["longitudinal_axis"]:
+        raise ArtifactTileUnwrapRecordError("tile unwrap record axis mismatch")
+    if receipt["record_view"] != recipe["record_view"]:
+        raise ArtifactTileUnwrapRecordError("tile unwrap record view mismatch")
+    if receipt["selection_sha256"] != selection["selection_sha256"]:
+        raise ArtifactTileUnwrapRecordError("tile unwrap selection digest mismatch")
+    if receipt["source_face_count"] != selection["selected_face_count"]:
+        raise ArtifactTileUnwrapRecordError("tile unwrap selection count mismatch")
+    if record.selection_hash != selection["selection_sha256"]:
+        raise ArtifactTileUnwrapRecordError(
+            "tile unwrap record selection_hash mismatch"
+        )
+    record_qc = record.to_dict()["qc"]
+    assert isinstance(record_qc, dict)
+    validated_qc = _validate_qc_against_receipt(record_qc, receipt)
+    if validated_qc["section_count"] != recipe["n_sections"]:
+        raise ArtifactTileUnwrapRecordError(
+            "tile unwrap section QC differs from recipe"
+        )
+    return receipt
+
+
+def validate_tile_unwrap_records(document: ArtifactDocument) -> None:
+    if not isinstance(document, ArtifactDocument):
+        raise ArtifactTileUnwrapRecordError("document must be an ArtifactDocument")
+    for record in document.records:
+        if record.type == TILE_UNWRAP_RECORD_TYPE:
+            receipt = tile_unwrap_receipt_from_record(record)
+            recipe = validate_tile_unwrap_recipe(record.recipe)
+            selection = recipe["selection"]
+            assert isinstance(selection, Mapping)
+            geometry = document.geometry_revision_index[record.geometry_revision_id]
+            geometry_qc = geometry.qc
+            face_count = _strict_int(
+                geometry_qc.get("face_count"),
+                name="geometry.qc.face_count",
+                minimum=1,
+                maximum=MAX_TILE_UNWRAP_FACES,
+            )
+            vertex_count = _strict_int(
+                geometry_qc.get("vertex_count"),
+                name="geometry.qc.vertex_count",
+                minimum=3,
+                maximum=MAX_TILE_UNWRAP_VERTICES,
+            )
+            if selection["total_face_count"] != face_count:
+                raise ArtifactTileUnwrapRecordError(
+                    "tile unwrap selection does not match source geometry face count"
+                )
+            if receipt["source_vertex_count"] > vertex_count:
+                raise ArtifactTileUnwrapRecordError(
+                    "tile unwrap correspondence exceeds source geometry vertex count"
+                )
+
+
+__all__ = [
+    "ArtifactTileUnwrapRecordError",
+    "MAX_TILE_UNWRAP_RECEIPT_BYTES",
+    "TILE_UNWRAP_RECEIPT_EXTENSION_KEY",
+    "TILE_UNWRAP_RECEIPT_MEDIA_TYPE",
+    "TILE_UNWRAP_RECORD_TYPE",
+    "append_tile_unwrap_record_from_context",
+    "tile_unwrap_receipt_from_record",
+    "validate_tile_unwrap_qc",
+    "validate_tile_unwrap_receipt",
+    "validate_tile_unwrap_records",
+]

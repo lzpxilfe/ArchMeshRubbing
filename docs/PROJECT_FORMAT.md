@@ -200,7 +200,7 @@ ArtifactDocument
 | `GeometryRevision` | 결정적 import 결과의 별도 geometry hash·hash scope, source asset ID, import recipe, topology-map reference, QC |
 | `SourceMetadataRevision` | geometry의 단위·축 매핑·handedness와 `source_to_canonical_mm`; parent revision |
 | `AlignRevision` | confirmed metadata 위에 적용할 proper rigid 4×4 행렬, parent revision, recipe, QC |
-| `DerivedRecord` | geometry/Align revision에 묶인 cutline·outline·rubbing 등의 payload reference, recipe/hash, selection hash, dependency, QC, lifecycle |
+| `DerivedRecord` | geometry/Align revision에 묶인 cutline·outline·rubbing·tile unwrap 등의 payload reference, recipe/hash, selection hash, dependency, QC, lifecycle |
 
 SourceAsset hash와 GeometryRevision hash는 같은 개념이 아니다. 전자는 정확한 입력 바이트, 후자는 decode·triangulation·sanitize 등 import recipe를 거친 geometry identity다. 1.0의 geometry hash scope는 `positions-f64le+triangles-i32le/v1`로 명시하여 바이트 인코딩과 topology 범위를 hash와 함께 고정한다. 대형 vertex·face·point 배열은 manifest JSON에 직접 넣지 않고 reference로 연결한다.
 
@@ -290,8 +290,8 @@ M0-3에서 시작한 durable core와 현재 native GUI/application 경계는 다
 - native application은 정확히 한 artifact를 다루며 `ArtifactWorkbench.snapshot.session.document`를 source of truth로 둔다. MainWindow의 session field는 이행 중 compatibility mirror다. 사용자 Open은 단위·축·handedness 확인 후 ticketed load로 들어가고, `initial_identity` baseline에서는 `ALIGN_REQUIRED`에 머문다. 이동·회전은 preview일 뿐이며 첫 정위치 확정은 변화량이 0이어도 proper-rigid child Align revision을 append한 뒤 immutable source에서 장면을 다시 materialize한다. parent activation으로 baseline에 돌아가면 측정·내보내기가 다시 잠긴다. scale은 metadata 영역이므로 native Align preview에서 차단한다.
 - artifact project reopen은 embedded source가 있으면 별도 picker 없이 background worker에서 package와 source bytes를 검증하고 saved parser/unit으로 CPU staging한다. manifest-only 문서만 외부 source resolver를 사용한다. corrupt embedded package를 external/legacy 경로로 fallback하지 않는다. `ArtifactWorkbench`는 한 pending Open ticket과 `state_version`/`authority_epoch`를 검증하고, candidate projection을 준비한 뒤 scene notification 동안에만 tentative authority로 활성화한다. scene swap 성공 후 finalize하고, 실패하면 이전 session·scene·project path로 rollback한다. observer는 finalize 전 candidate를 보지 않는다.
 - rollback·scene 복원·finalize 자체가 실패해 application authority와 live scene의 일치를 증명할 수 없으면 fatal authority 상태로 전환한다. 이 상태에서는 ordinary Save target을 해제하고 저장·실측·내보내기를 모두 거부하며, 검증된 새 Open만 정상 authority를 회복한다.
-- artifact save는 active document만 쓰기 전에 정확히 한 projection, current snapshot, identity preview, source에서 재현한 vertices/faces 일치, destructive bake 부재를 확인한다. `ALIGN_REQUIRED` document 자체는 보존할 수 있지만 Cutline/Outline/Digital Rubbing 계산과 vector/rubbing export는 명시적 Align 전까지 차단한다. 아직 `DerivedRecord`로 승격되지 않은 cutline·선택·기록면·평가 등의 결과가 하나라도 있으면 누락한 채 저장하지 않고 fail closed한다.
-- Cutline/Outline/Digital Rubbing은 application layer가 canonical recipe, projection context, exact record ID와 result capability를 소유한다. worker는 session을 commit하지 않고 computation만 반환하며, 완료 시 captured document가 current document의 immutable ancestor이고 active source/metadata/Align/matrix가 같을 때만 current session에 rebase하여 expected record ID 하나를 publish한다. DerivedRecord append는 `RecordBindingTransition`으로 live object의 immutable document snapshot만 CAS하고 기존 mesh/VBO/scene selection을 보존한다. Align/Open finalize 뒤 늦은 결과는 되살아나지 않는다. pending Open이나 rollback 가능한 binding 준비 실패는 계산 결과와 예약 ID를 보존해 명시적으로 재시도하며, 그동안 저장과 새 실측을 차단한다. Rubbing은 Workbench 공유 누적 peak-memory budget, 대형 UV/texture 복사 비용의 사전 산정과 실행 exactly-once를 적용한다.
+- artifact save는 active document만 쓰기 전에 정확히 한 projection, current snapshot, identity preview, source에서 재현한 vertices/faces 일치, destructive bake 부재를 확인한다. `ALIGN_REQUIRED` document 자체는 보존할 수 있지만 Cutline/Outline/Digital Rubbing/기와 전개 계산과 vector/rubbing/tile-unwrap export는 명시적 Align 전까지 차단한다. 아직 `DerivedRecord`로 승격되지 않은 cutline·선택·기록면·평가 등의 결과가 하나라도 있으면 누락한 채 저장하지 않고 fail closed한다.
+- Cutline/Outline/Digital Rubbing/기와 전개는 application layer가 canonical recipe, projection context, exact record ID와 result capability를 소유한다. worker는 session을 commit하지 않고 computation만 반환하며, 완료 시 captured document가 current document의 immutable ancestor이고 active source/metadata/Align/matrix가 같을 때만 current session에 rebase하여 expected record ID 하나를 publish한다. DerivedRecord append는 `RecordBindingTransition`으로 live object의 immutable document snapshot만 CAS하고 기존 mesh/VBO/scene selection을 보존한다. Align/Open finalize 뒤 늦은 결과는 되살아나지 않는다. pending Open이나 rollback 가능한 binding 준비 실패는 계산 결과와 예약 ID를 보존해 명시적으로 재시도하며, 그동안 저장과 새 실측을 차단한다. Rubbing은 Workbench 공유 누적 peak-memory budget, 대형 UV/texture 복사 비용의 사전 산정과 실행 exactly-once를 적용한다.
 - vector/rubbing export는 exact work item/result capability를 별도로 예약한다. worker는 비싼 SVG 생성 또는 Rubbing recipe 재계산·receipt 비교, package 전체 검증을 수행하고 destination·parent·staging inode·member fingerprint에 묶인 prepared capability까지 만든다. final dispatcher는 current source session, render projection과 exact `READY + FRESH` record를 Workbench lock에서 다시 확인한 뒤 빠른 fingerprint 재확인과 atomic no-replace rename만 실행한다. 같은 Align의 append-only record 추가는 허용하고 Align/Open 완료는 destination을 만들지 않은 채 stale 처리한다. pending Open은 core에서 재시도 가능한 stage로 남지만 현재 GUI는 안전하게 정리하고 Open 완료 후 재실행을 안내한다.
 - `Open → Align commit → save → independent-process load → source rebind → materialize` 왕복을 별도 프로세스에서 검증한다.
 
@@ -415,6 +415,47 @@ sidecar는 primary source file SHA-256/size/scope, v2 source manifest dependency
 sidecar의 normative claim 전체(artifact descriptor 제외)는 RFC 8785 SHA-256으로 묶어 SVG metadata에 넣고, sidecar는 SVG exact-byte SHA-256을 가진다. 이 비순환 결합은 한 파일만 바뀐 손상을 검출한다. 원본 문서를 함께 줄 때 validator는 document manifest/record와도 대조한다. 문서 없이 relocation한 package도 독립 프로세스에서 payload/claim/SVG 구조와 hash를 offline 검증할 수 있다.
 
 이 hash들은 무결성 값이지 디지털 서명이 아니다. 누군가 sidecar와 SVG를 모두 다시 만들고 모든 hash를 갱신하는 공격에 대한 제작자 진위 증명은 별도의 서명 규약이 필요하다. 기존 screenshot/flatten PNG·DPI export는 1:1 측정 증거로 승격하지 않으며 review image로만 취급한다. 아래 canonical Digital Rubbing PNG만 별도의 raster 계약을 가진다.
+
+## Authoritative tile unwrap record와 `.amr-unwrap`
+
+자유 flatten UI는 축 추정, smoothing, fallback을 허용하므로 검토에는 유용하지만 측정 record의 입력 계약으로 사용하지 않는다. `artifact_tile_unwrap_extractor.py`는 확정 Align의 canonical-mm mesh에서 별도의 엄격한 recipe를 실행한다.
+
+```text
+DerivedRecord(type=surface.tile_unwrap.v1)
+├── geometry_ref: urn:archmeshrubbing:tile-unwrap:sha256:<payload digest>
+├── selection_hash: canonical source-face range selection digest
+├── recipe
+│   ├── explicit longitudinal_axis: x | y | z
+│   ├── record_view: top | bottom
+│   ├── n_sections: 12..96
+│   ├── coordinate_quantum_um: 1
+│   └── fallback_policy: reject
+├── qc: section fit + integer distortion millionths + foldover/collapse counts
+└── extensions[org.archmeshrubbing:tile-unwrap-v1]
+    └── bounded receipt + receipt SHA-256
+```
+
+- selection은 정렬·중복 제거·최대 병합한 `[start, end_exclusive]` face range로 recipe에 남긴다. output은 local vertex/face와 canonical source vertex/face row의 대응을 모두 보존한다.
+- sectionwise 내부 계산이 cylinder fallback을 사용했거나 section fit이 희박하거나 mean/p95 distortion gate를 넘으면 READY record를 만들지 않는다.
+- UV는 1 µm 정수 격자로 양자화한다. 삼각형 하나라도 격자에서 붕괴하거나 전체 지배 방향과 반대 orientation을 가지면 실패한다.
+- canonical binary는 RFC 8785 header와 `uv int64le`, `faces int32le`, source vertex/face indices를 domain-separated length-prefix framing으로 묶는다. 파일 전체 SHA-256이 receipt의 `unwrap_sha256` 및 `geometry_ref`와 같다.
+- Top과 Bottom은 단순 표시 toggle이 아니라 recipe와 payload hash가 다른 독립 해석 결과다.
+- 동일 recipe 재계산은 receipt 전체와 binary bytes가 같아야 한다. Align을 바꾼 과거 record는 삭제하지 않고 `stale_alignment`로 남긴다.
+
+`*.amr-unwrap`은 정확히 네 regular file을 갖는 non-overwriting directory package다.
+
+| normative member | 역할 |
+|---|---|
+| `artifact.amr-unwrap.bin` | 독립 parser가 다시 읽을 수 있는 authoritative quantized mesh와 source-row correspondence |
+| `artifact.obj` | millimeter 단위의 평면 삼각 mesh derivative |
+| `artifact.svg` | single-incident-face boundary로 만든 실제 mm `width`/`height`/`viewBox` 1:1 derivative |
+| `artifact.amr-unwrap.json` | receipt, recipe, QC, source/document/revision provenance와 세 artifact의 exact-byte hash |
+
+sidecar의 artifact descriptor를 제외한 claim을 RFC 8785 SHA-256으로 묶어 SVG metadata에도 저장하므로 한 member의 독립 손상을 검출한다. validator는 binary를 parse해 receipt를 다시 만들고 OBJ/SVG exact bytes를 재렌더하며, sidecar claim·artifact hash·privacy·READY/FRESH provenance를 대조한다. 원본 document 없이도 package 내부 무결성과 physical scale을 offline 검증할 수 있고, document를 함께 주면 exact record와 manifest까지 비교한다.
+
+writer는 같은 parent의 숨은 staging directory에서 네 파일을 모두 쓰고 자체 검증한 뒤 atomic no-replace rename한다. 기존 destination을 덮지 않으며 destination race의 승자를 보존한다. 현재 tile package writer는 소유 staging의 device/inode, closed member set과 regular-file 상태를 확인할 수 있을 때만 실패 정리를 수행한다. 이 hash도 제작자 서명은 아니며, desktop의 full prepared-capability export controller 연결은 별도 UI 통합 단계다.
+
+machine-readable 계약은 record receipt의 `schemas/tile_unwrap_receipt-1.0.0.schema.json`과 export sidecar의 `schemas/tile_unwrap_export-1.0.0.schema.json`이다. 두 schema는 axis 추정값, fallback 허용값, 사설 경로와 계약 밖 필드를 거부한다.
 
 ## M0-6 Digital Rubbing record와 1:1 PNG package
 

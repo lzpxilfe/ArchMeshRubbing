@@ -5,10 +5,12 @@
 > 3D 메쉬를 일반 CG 자산처럼 다루지 않고, **기록면(recording surface)** 과 **판독 가능한 산출물** 중심으로 다루는 고고학 연구용 데스크톱 도구입니다.
 
 ArchMeshRubbing은 스캔한 문화유산 3D 메쉬를 원본 보존형 연구 자료로 불러와,
-`Open → 단위·축 확인 → Align → Cutline/Outline → Digital Rubbing → 1:1 SVG/PNG export`
-흐름으로 기록하고 다시 검증하는 오프라인 오픈소스 워크벤치를 목표로 합니다. 기와형 메쉬의 기록면 전개 기능은 이 기반 위에 남아 있는 전문 워크플로우입니다.
+`Open → 단위·축 확인 → Align → Cutline/Outline·기와 기록면 전개 → Digital Rubbing → 1:1 export`
+흐름으로 기록하고 다시 검증하는 오프라인 오픈소스 워크벤치를 목표로 합니다. 기와형 메쉬의 기록면 전개도 이제 같은 원본·Align·record 신뢰 경계 안에서 계산할 수 있습니다.
 
 첫 공개 안정판의 필수 데스크톱 대상은 **Windows**입니다. macOS·Linux용 source 호환 코드는 보존하지만, 이번 안정판의 완료 조건과 패키지 CI에는 포함하지 않습니다.
+
+공개 경쟁 기능과 현재 격차를 과장 없이 추적하는 기준은 [`docs/COMPETITIVE_GAP_ANALYSIS.md`](docs/COMPETITIVE_GAP_ANALYSIS.md)에 기록합니다.
 
 ---
 
@@ -64,7 +66,10 @@ Align 확정 뒤에도 모든 기능이 한꺼번에 열리지는 않습니다. 
 - `READY + FRESH` 기록만 `*.amr-vector/`의 1:1 `artifact.svg` + provenance sidecar로 내보내며, 공개 provenance에 주 원본과 dependency의 논리 경로·SHA-256·크기를 포함함
 - Digital Rubbing은 6면 canonical frame, 정수 pixels/mm·µm recipe, front-depth raster와 QC를 `raster.digital_rubbing.v1` record로 보존
 - canonical GA8 PNG는 고정 chunk/DEFLATE bytes와 exact `pHYs`를 사용하며, `*.amr-rubbing/`에 provenance sidecar와 함께 저장
-- vector/rubbing package는 원본 mesh와 GUI가 없어도 이동 후 별도 프로세스에서 offline 검증 가능
+- 기와 기록면 전개는 명시적 canonical 장축(`X/Y/Z`), Top/Bottom 기록면, 원본 face-range selection을 recipe로 고정하고 sectionwise 알고리즘의 자동 fallback·1 µm 격자 collapse·orientation foldover·품질 기준 초과를 정식 record에서 거부
+- 통과한 결과는 `surface.tile_unwrap.v1` receipt로 보존하며 canonical binary 전체 SHA-256, 원본 vertex/face correspondence, exact µm bounds, section fit와 distortion QC를 서로 대조
+- `*.amr-unwrap/`은 canonical binary, 평면 OBJ, 실제 mm `width`/`height`/`viewBox`를 갖는 1:1 경계 SVG, 공개 provenance sidecar를 한 묶음으로 no-overwrite 게시
+- vector/rubbing/tile-unwrap package는 원본 mesh와 GUI가 없어도 이동 후 별도 프로세스에서 offline 검증 가능
 - Qt/OpenGL과 분리된 `ArtifactWorkbench`가 ticketed Open, 명시적 Align readiness, `state_version`/`authority_epoch` 기반 publication을 소유
 - native DerivedRecord worker는 시작 session과 projection을, viewport의 cut-section/ROI/surface-selection worker는 worker identity·target mesh/TRS·render frame을 확인하여 늦은 결과가 현재 문서·overlay·다른 유물·새 worker를 덮지 못하게 함
 - Cutline·Outline·Digital Rubbing worker는 공통 취소 Event를 계산 내부의 deterministic chunk 경계까지 전달하며, 사용자는 진행 창에서 강제 스레드 종료 없이 취소를 요청할 수 있음
@@ -77,9 +82,19 @@ Align 확정 뒤에도 모든 기능이 한꺼번에 열리지는 않습니다. 
 - export 중 같은 Align에 무관한 record가 추가돼도 안전하게 게시하지만 Align/Open 완료로 권위가 바뀌면 destination을 만들지 않고 자신이 소유한 staging만 정리함
 - scene publication의 rollback·scene 복원·finalize 자체가 불확실하면 fatal authority 상태로 전환해 검증된 Open 전까지 저장·실측·내보내기를 차단
 
-Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 `SurfaceVisualizer`/flatten 기반 PNG·SVG를 측정 산출물로 내보내는 우회 경로를 차단합니다. 검증된 Cutline/Outline record는 `.amr-vector`, Digital Rubbing record는 `.amr-rubbing`으로 내보냅니다. 과거 세 OS 결과는 이식성의 역사적 증거로만 보존하고 현재 완료 판정은 Windows만 사용합니다. 패키지 gate는 상용 installer compiler 대신 검증형 portable ZIP을 만들고, 한글 경로에 안전하게 추출한 실행 파일을 네트워크 차단 상태에서 complete workflow와 native `qwindows` actual-frame까지 다시 실행하도록 구성합니다. CI 산출물은 업로드하지 않으며 공개 배포·서명을 뜻하지 않습니다.
+Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 임의 `SurfaceVisualizer`/flatten PNG·SVG를 측정 산출물로 내보내는 우회 경로를 차단합니다. 검증된 Cutline/Outline record는 `.amr-vector`, Digital Rubbing record는 `.amr-rubbing`, 엄격한 기와 전개 record는 `.amr-unwrap`으로 내보냅니다. 과거 세 OS 결과는 이식성의 역사적 증거로만 보존하고 현재 완료 판정은 Windows만 사용합니다. 패키지 gate는 상용 installer compiler 대신 검증형 portable ZIP을 만들고, 한글 경로에 안전하게 추출한 실행 파일을 네트워크 차단 상태에서 complete workflow와 native `qwindows` actual-frame까지 다시 실행하도록 구성합니다. CI 산출물은 업로드하지 않으며 공개 배포·서명을 뜻하지 않습니다.
 
-### 1. 기와형 메쉬용 기본 추천 펼침
+### 1. 정식 기와 기록면 전개
+
+- Align이 확정된 canonical millimeter geometry에서만 계산
+- 자동 장축 추정 대신 기록자가 `X/Y/Z` 장축을 명시해 해석을 recipe에 남김
+- 선택 기록면을 정렬·병합된 원본 face 범위와 selection SHA-256으로 보존
+- sectionwise 계산이 cylinder/area 등으로 fallback하면 정식 결과로 위장하지 않고 실패
+- 결과 좌표를 1 µm 정수 격자로 고정하고 모든 삼각형의 collapse·방향 뒤집힘과 mean/p95 distortion gate를 검사
+- application shell의 `begin_tile_unwrap()`가 immutable work item, 취소, stale Align 차단, same-Align record publication을 기존 실측과 같은 방식으로 처리
+- desktop 패널 연결 전에도 headless core/API에서 record 생성과 `.amr-unwrap` 독립 검증이 가능하며, 기존 자유 flatten UI의 결과는 계속 legacy 검토용으로 구분
+
+### 2. 기와형 메쉬용 기본 추천 펼침
 
 - 길이 방향이 뚜렷하고 곡면 단면이 반복되는 메쉬에서는 기본 추천을 `sectionwise flatten`으로 설정
 - UI에서는 내부 알고리즘명이 아니라 **`기와 추천 펼침`** 으로 표기
@@ -91,7 +106,7 @@ Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 `Surfac
   - `곡면 추적 펼침`
   - `각도 보존 펼침`
 
-### 2. 장축 기반 펼치기 + 수동 보정 흐름
+### 3. 장축 기반 펼치기 + 수동 보정 흐름
 
 - 장축 자동 추정
 - 사용자의 수동 축 보정 반영
@@ -99,7 +114,7 @@ Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 `Surfac
 - sectionwise 품질이 부족하면 fallback 경로 제공
   - `sectionwise → area → cylinder → arap`
 
-### 3. Legacy rubbing-like 판독 시각화
+### 4. Legacy rubbing-like 판독 시각화
 
 예쁜 렌더보다 **문양/흔적 판독성**을 우선하는 기존 검토 경로입니다. 이 결과는 연구 검토 이미지이며, 위 `raster.digital_rubbing.v1`의 재현 가능한 1:1 PNG와 구분합니다.
 
@@ -109,10 +124,11 @@ Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 `Surfac
 - `contrast`, `strength` 조절 가능
 - 논문/보고서용 PNG 저장 가능
 
-### 4. 연구 산출물 중심 export
+### 5. 연구 산출물 중심 export
 
 - `*.amr-vector/`: 검증 Cutline/Outline 1:1 SVG + provenance
 - `*.amr-rubbing/`: 검증 Digital Rubbing 1:1 PNG + provenance
+- `*.amr-unwrap/`: 검증 기와 기록면 canonical binary + 1:1 SVG + flat OBJ + provenance
 - `flattened 좌표`
 - `기록면 전개 SVG` (legacy 검토용)
 - `rubbing PNG` (legacy 검토용)
@@ -141,10 +157,10 @@ Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 `Surfac
 
 - [`src/application/artifact_workbench.py`](src/application/artifact_workbench.py): 한 artifact의 session/project path, 단일 pending Open, workflow readiness와 projection publication authority
 - [`src/application/artifact_workflow_progress.py`](src/application/artifact_workflow_progress.py): 검증된 session의 `READY + FRESH` view coverage에서 Cutline 3면·Outline 6면·Digital Rubbing 6면 진행도와 순차 gate를 재구성
-- [`src/application/artifact_measurements.py`](src/application/artifact_measurements.py): Cutline/Outline/Digital Rubbing의 immutable work item, Workbench 공유 예약·메모리 admission, cooperative cancellation, exact result capability와 same-Align rebase
+- [`src/application/artifact_measurements.py`](src/application/artifact_measurements.py): Cutline/Outline/Digital Rubbing/기와 전개의 immutable work item, Workbench 공유 예약·메모리 admission, cooperative cancellation, exact result capability와 same-Align rebase
 - [`src/application/artifact_exports.py`](src/application/artifact_exports.py): vector/rubbing export의 exact capability, worker staging, 안전한 정리와 final-authority publication
 - Open/new import/project reopen과 Align commit/parent activation은 ticket과 compare-and-swap 검증을 거쳐 `prepare → activate → finalize`되며, scene swap 실패는 이전 authority로 rollback
-- Cutline/Outline/Digital Rubbing은 GUI에서 파라미터만 캡처하고 단일 worker에서 계산합니다. worker는 문서를 변경하지 않으며, 완료 결과는 예약된 record ID와 일회성 result capability를 검증한 뒤 현재의 같은 Align session에 rebase합니다. record append publication은 GPU 장면을 교체하지 않습니다. 재개방한 기록은 READY + FRESH 목록에서 명시적으로 선택하고, 일시적인 Open/scene 충돌로 게시하지 못한 측정 결과는 새 ID를 만들지 않고 재시도합니다.
+- Cutline/Outline/Digital Rubbing/기와 전개는 application shell에서 파라미터만 캡처하고 단일 worker에서 계산합니다. worker는 문서를 변경하지 않으며, 완료 결과는 예약된 record ID와 일회성 result capability를 검증한 뒤 현재의 같은 Align session에 rebase합니다. record append publication은 GPU 장면을 교체하지 않습니다. 재개방한 기록은 READY + FRESH 목록에서 명시적으로 선택하고, 일시적인 Open/scene 충돌로 게시하지 못한 측정 결과는 새 ID를 만들지 않고 재시도합니다.
 - vector/rubbing export는 비싼 생성·탁본 재계산을 worker에서 staging까지만 수행합니다. 최종 no-replace rename은 현재 권위를 다시 검증한 뒤 실행하며, 목적지 경합에서는 기존 승자를 보존합니다. rename 뒤 directory `fsync`가 실패하거나 Windows처럼 지원 여부를 확인할 수 없으면 저장 완료와 crash durability 미확정을 구분해 경고합니다.
 
 ### Artifact trust core
@@ -155,8 +171,11 @@ Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 `Surfac
 - [`src/core/artifact_vector_extractor.py`](src/core/artifact_vector_extractor.py): canonical-mm Cutline
 - [`src/core/artifact_outline_extractor.py`](src/core/artifact_outline_extractor.py): fixed-grid 6면 Outline
 - [`src/core/artifact_rubbing_extractor.py`](src/core/artifact_rubbing_extractor.py): deterministic 6면 Digital Rubbing raster
+- [`src/core/artifact_tile_unwrap_extractor.py`](src/core/artifact_tile_unwrap_extractor.py): 명시적 장축·face selection·1 µm 격자의 authoritative sectionwise 기와 전개
+- [`src/core/artifact_tile_unwrap_record.py`](src/core/artifact_tile_unwrap_record.py): `surface.tile_unwrap.v1` receipt·recipe·QC 검증
 - [`src/core/artifact_vector_export.py`](src/core/artifact_vector_export.py): `.amr-vector` 1:1 SVG package
 - [`src/core/artifact_rubbing_export.py`](src/core/artifact_rubbing_export.py): `.amr-rubbing` canonical PNG package
+- [`src/core/artifact_tile_unwrap_export.py`](src/core/artifact_tile_unwrap_export.py): `.amr-unwrap` binary/OBJ/SVG/provenance package와 offline verifier
 - [`src/core/project_file.py`](src/core/project_file.py): strict AMR v2 저장·로딩과 원자 교체
 
 ### Renderer precision boundary
@@ -197,6 +216,7 @@ Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 `Surfac
 
 - OBJ/PLY/STL/GLTF 메쉬에서 기록면을 펼친 2D 결과 생성
 - 기와형 메쉬는 기본적으로 `기와 추천 펼침` 우선
+- 정식 기와 경로는 `surface.tile_unwrap.v1` record와 `.amr-unwrap` package로 exact selection·단위·왜곡·해시를 보존
 
 ### 디지털 탁본
 
@@ -211,7 +231,7 @@ Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 `Surfac
 - review sheet
 - 6방향 도면 패키지
 
-위 전개·review sheet·기존 6방향 도면은 현재 **검토용 legacy 산출물**입니다. 1:1 측정 산출물로 검증되는 새 경로는 ArtifactDocument record에서 생성한 `.amr-vector` SVG와 `.amr-rubbing` PNG입니다.
+자유 flatten 전개·review sheet·기존 6방향 도면은 현재 **검토용 legacy 산출물**입니다. 1:1 측정 산출물로 검증되는 경로는 ArtifactDocument record에서 생성한 `.amr-vector` SVG, `.amr-rubbing` PNG, 그리고 엄격한 sectionwise 계약을 통과한 `.amr-unwrap` 기와 전개입니다.
 
 ---
 

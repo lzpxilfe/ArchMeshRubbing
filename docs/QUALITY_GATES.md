@@ -25,7 +25,7 @@ python -m pytest -q
 
 - Ruff는 전체 트리를 검사한다.
 - pytest는 pytest 함수와 `unittest.TestCase`를 모두 수집한다. 별도의 `unittest discover`는 하위 호환성 확인용이며 CI의 권위 수집기가 아니다.
-- `pyright-m0.json`은 persistence·source identity·source manifest/bundle·unit·matrix 경계에 더해 M0-6의 `artifact_document`, `geometry_identity`, `artifact_scene_adapter`, `artifact_session`, core cooperative cancellation, Qt/OpenGL-free `artifact_workbench`·`artifact_workflow_progress`·`artifact_measurements`·`artifact_exports`·complete workflow self-test, `src/gui/opengl_context.py`의 명시적 surface 계약, actual-driver CLI와 actual context를 열지 않는 helper/support tests, Qt/OpenGL-free render-coordinate algebra인 `src/gui/render_coordinates.py`, known-record registry, RFC 8785 canonical JSON, vector record/export, Cutline, fixed-grid Outline/topology, Digital Rubbing record/extractor, canonical GA8 PNG와 offline rubbing export 및 해당 테스트를 포함하는 M0 신뢰 커널 범위다. 독립 프로세스 source-closure 왕복·offline vector/rubbing package 테스트도 목록에 포함한다. wrapper 명령은 활성 Python interpreter를 Pyright에 명시해 Windows CI의 dependency를 정확히 해석한다.
+- `pyright-m0.json`은 persistence·source identity·source manifest/bundle·unit·matrix 경계에 더해 M0-6의 `artifact_document`, `geometry_identity`, `artifact_scene_adapter`, `artifact_session`, core cooperative cancellation, Qt/OpenGL-free `artifact_workbench`·`artifact_workflow_progress`·`artifact_measurements`·`artifact_exports`·complete workflow self-test, `src/gui/opengl_context.py`의 명시적 surface 계약, actual-driver CLI와 actual context를 열지 않는 helper/support tests, Qt/OpenGL-free render-coordinate algebra인 `src/gui/render_coordinates.py`, known-record registry, RFC 8785 canonical JSON, vector record/export, Cutline, fixed-grid Outline/topology, Digital Rubbing record/extractor, canonical GA8 PNG, authoritative tile unwrap record/export 및 해당 테스트를 포함하는 M0 신뢰 커널 범위다. 독립 프로세스 source-closure 왕복과 offline vector/rubbing/tile-unwrap package 테스트도 목록에 포함한다. wrapper 명령은 활성 Python interpreter를 Pyright에 명시해 Windows CI의 dependency를 정확히 해석한다.
 
 과거 `opengl-driver-smoke`는 Ubuntu 24.04의 24-bit Xvfb, native `xcb`, Mesa llvmpipe로 다음 명령에 해당하는 검사를 통과했다.
 
@@ -72,6 +72,8 @@ python -m pytest -q \
   tests/test_artifact_outline_topology.py \
   tests/test_artifact_rubbing_extractor.py \
   tests/test_artifact_rubbing_export.py \
+  tests/test_artifact_tile_unwrap.py \
+  tests/test_artifact_tile_unwrap_export.py \
   tests/test_canonical_png.py \
   tests/test_vector_schemas.py \
   tests/test_rubbing_schemas.py \
@@ -124,9 +126,13 @@ python -m pytest -q \
 - face order·winding·duplicate, hole, large survey offset, resource limit 및 Align 전환 후 late Digital Rubbing 결과 거부
 - canonical GA8 PNG의 고정 chunk/DEFLATE bytes, exact `pHYs`, RFC 8785 iTXt metadata, pixel/CRC/chunk/scale tamper 거부
 - `READY + FRESH + recomputed raster`만 허용하는 `.amr-rubbing` 1:1 PNG package, relocation 후 독립 PID offline 검증, no-replace publish와 privacy allowlist
+- 명시적 canonical 장축과 source face-range selection을 고정하고 자동 fallback, 1 µm grid collapse, foldover, section-fit/mean/p95 distortion gate 실패를 READY record로 승격하지 않는 `surface.tile_unwrap.v1`
+- 동일 recipe 재계산과 canonical binary round-trip, source vertex/face correspondence, exact µm bounds·component hash·전체 payload SHA-256, Top/Bottom 구분과 Align stale 보존
+- `.amr-unwrap` canonical binary/flat OBJ/physical-mm SVG/provenance sidecar의 byte 결정성, four-member tamper 거부, offline 검증, no-overwrite atomic publish와 destination race 정리
+- versioned tile unwrap receipt/export Draft 2020-12 schema와 axis·fallback·privacy closed contract
 - vector/rubbing worker의 hidden same-parent staging·전체 검증·prepared inode/fingerprint capability, 빠른 final Workbench record-authority fence, same-Align append 허용, Align/Open stale 정리와 pending Open GUI 취소 정책
 - 고정 길이 staging UUID 충돌·quarantine/foreign inode 보존, exact result/prepared capability 위조·사전 목적지 이동·destination race 차단, post-rename 실제/미지원 directory-fsync `committed` 내구성 경고
-- Qt-free Cutline/Outline/Digital Rubbing work item, exact result capability, same-Align 병렬 rebase, Workbench 공유 record reservation, Align/Open stale·취소·rollback 방어와 pending Open 게시 재시도
+- Qt-free Cutline/Outline/Digital Rubbing/기와 전개 work item, exact result capability, same-Align 병렬 rebase, Workbench 공유 record reservation, Align/Open stale·취소·rollback 방어와 pending Open 게시 재시도
 - core 고유 `RuntimeError` 취소 신호, 세 extractor 내부의 bounded polling과 대형 NumPy 단계·최종 결과 fence, false-probe payload/raster/QC 동일성, controller의 `FAILED > STALE > CANCELLED` 경합 우선순위·`CANCELLING → CANCELLED` slot 보존, GUI one-shot 취소 요청·대기 창 수명·무경고 종료
 - Digital Rubbing 누적 peak-memory admission, UV/texture materialize 복사비의 무복사 사전 차단, controller별 한도 우회 방어, 실행 exactly-once, 취소 worker 종료 전 slot 보존
 - 재개방 프로젝트의 READY + FRESH vector/rubbing 명시 선택, background recipe 재계산과 완료 시 document/Align/record 재검증, active raster 예산 중첩 차단, 일시 게시 실패 재시도 queue와 보류 중 저장 차단

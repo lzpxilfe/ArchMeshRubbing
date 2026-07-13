@@ -1,4 +1,4 @@
-"""Qt-free lifecycle for authoritative Cutline, Outline, and Digital Rubbing.
+"""Qt-free lifecycle for authoritative measurements and surface unwrapping.
 
 The GUI may collect parameters and dispatch :func:`execute_measurement_work_item`
 to a worker, but it does not own recipe capture, record IDs, stale-result policy,
@@ -49,6 +49,15 @@ from src.core.artifact_rubbing_extractor import (
 )
 from src.core.artifact_scene_adapter import ArtifactProjectionSnapshot
 from src.core.artifact_session import ArtifactSession, ArtifactSessionError
+from src.core.artifact_tile_unwrap_extractor import (
+    ArtifactTileUnwrapComputation,
+    ArtifactTileUnwrapError,
+    commit_artifact_tile_unwrap,
+    extract_tile_unwrap,
+    tile_unwrap_computation_matches_active_projection,
+    tile_unwrap_recipe,
+    validate_tile_unwrap_recipe,
+)
 from src.core.artifact_vector_extractor import (
     ArtifactVectorComputation,
     commit_vector_computation,
@@ -100,6 +109,7 @@ class MeasurementOperationKind(str, Enum):
     CUTLINE = "cutline"
     OUTLINE = "outline"
     DIGITAL_RUBBING = "digital_rubbing"
+    TILE_UNWRAP = "tile_unwrap"
 
 
 class MeasurementOperationState(str, Enum):
@@ -120,15 +130,17 @@ _TERMINAL_STATE_PRIORITY = {
 
 
 MeasurementComputation: TypeAlias = (
-    ArtifactVectorComputation | ArtifactRubbingComputation
+    ArtifactVectorComputation
+    | ArtifactRubbingComputation
+    | ArtifactTileUnwrapComputation
 )
 CancellationProbe: TypeAlias = Callable[[], bool]
 MeasurementPublisher: TypeAlias = Callable[[RecordBindingTransition], None]
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace(
-        "+00:00", "Z"
+    return (
+        datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     )
 
 
@@ -188,6 +200,8 @@ def _operation_kind_for_computation(
 ) -> MeasurementOperationKind:
     if isinstance(computation, ArtifactRubbingComputation):
         return MeasurementOperationKind.DIGITAL_RUBBING
+    if isinstance(computation, ArtifactTileUnwrapComputation):
+        return MeasurementOperationKind.TILE_UNWRAP
     if isinstance(computation, ArtifactVectorComputation):
         kind = VectorRecordKind(computation.payload.kind)
         if kind is VectorRecordKind.CUTLINE:
@@ -216,14 +230,18 @@ class ArtifactMeasurementWorkItem:
     resource_estimate: DigitalRubbingResourceEstimate | None = None
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "id", _required_text(self.id, field_name="operation ID"))
+        object.__setattr__(
+            self, "id", _required_text(self.id, field_name="operation ID")
+        )
         object.__setattr__(
             self,
             "kind",
             MeasurementOperationKind(self.kind),
         )
         if not isinstance(self.captured_session, ArtifactSession):
-            raise ArtifactMeasurementError("captured_session must be an ArtifactSession")
+            raise ArtifactMeasurementError(
+                "captured_session must be an ArtifactSession"
+            )
         if not isinstance(self.context, OperationContext):
             raise ArtifactMeasurementError("context must be an OperationContext")
         if not isinstance(self.projection_snapshot, ArtifactProjectionSnapshot):
@@ -291,7 +309,7 @@ class ArtifactMeasurementWorkItem:
                 )
         elif self.resource_estimate is not None:
             raise ArtifactMeasurementError(
-                "vector work items cannot carry a raster resource estimate"
+                "non-raster work items cannot carry a raster resource estimate"
             )
 
     @property
@@ -461,6 +479,24 @@ def execute_measurement_work_item(
             payload=geometry.payload,
             recipe=recipe,
             qc=geometry.qc,
+        )
+    elif work_item.kind is MeasurementOperationKind.TILE_UNWRAP:
+        try:
+            unwrap, qc = extract_tile_unwrap(
+                projection.mesh,
+                recipe,
+                cancellation_probe=cancellation_probe,
+            )
+        except ArtifactComputationCancelledError as exc:
+            raise MeasurementCancelledError(str(exc)) from exc
+        except ArtifactTileUnwrapError as exc:
+            raise ArtifactMeasurementError(str(exc)) from exc
+        computation = ArtifactTileUnwrapComputation(
+            context=work_item.context,
+            projection_snapshot=work_item.projection_snapshot,
+            unwrap=unwrap,
+            recipe=recipe,
+            qc=qc,
         )
     else:
         try:
@@ -662,8 +698,7 @@ class ArtifactMeasurementController:
             current = runtime.pending_terminal_state
             if (
                 current is None
-                or _TERMINAL_STATE_PRIORITY[state]
-                >= _TERMINAL_STATE_PRIORITY[current]
+                or _TERMINAL_STATE_PRIORITY[state] >= _TERMINAL_STATE_PRIORITY[current]
             ):
                 runtime.pending_terminal_state = state
                 runtime.pending_error = error
@@ -763,9 +798,7 @@ class ArtifactMeasurementController:
                     current_session.source_mesh
                     is not work_item.captured_session.source_mesh
                     or current_key
-                    != self._projection_authority_key(
-                        work_item.projection_snapshot
-                    )
+                    != self._projection_authority_key(work_item.projection_snapshot)
                 ):
                     self._request_terminal_locked(
                         runtime,
@@ -832,6 +865,19 @@ class ArtifactMeasurementController:
         if not isinstance(session, ArtifactSession):
             raise ArtifactMeasurementError("no active ArtifactDocument session")
         self._workbench.require_stable_session(session, measurement=True)
+        if kind is MeasurementOperationKind.TILE_UNWRAP:
+            try:
+                tile_recipe = validate_tile_unwrap_recipe(recipe)
+            except ArtifactTileUnwrapError as exc:
+                raise ArtifactMeasurementError(str(exc)) from exc
+            selection = tile_recipe["selection"]
+            assert isinstance(selection, Mapping)
+            if int(selection["total_face_count"]) != int(
+                session.source_mesh.faces.shape[0]
+            ):
+                raise StaleMeasurementOperationError(
+                    "tile unwrap selection does not match the active source mesh"
+                )
         prerequisite_ids: tuple[str, ...] = ()
         if kind is MeasurementOperationKind.OUTLINE:
             prerequisite_ids = workflow_step_record_ids(
@@ -875,11 +921,14 @@ class ArtifactMeasurementController:
         )
         if len(set(requested_dependencies)) != len(requested_dependencies):
             raise ArtifactMeasurementError("dependency record IDs must be unique")
-        dependencies = (*prerequisite_ids, *(
-            dependency_id
-            for dependency_id in requested_dependencies
-            if dependency_id not in prerequisite_ids
-        ))
+        dependencies = (
+            *prerequisite_ids,
+            *(
+                dependency_id
+                for dependency_id in requested_dependencies
+                if dependency_id not in prerequisite_ids
+            ),
+        )
         for dependency_id in dependencies:
             dependency = session.document.record_index.get(dependency_id)
             if dependency is None:
@@ -934,15 +983,11 @@ class ArtifactMeasurementController:
                 minimum_estimated_bytes = (
                     RUBBING_ESTIMATE_FIXED_OVERHEAD_BYTES
                     + RUBBING_ESTIMATED_PEAK_BYTES_PER_PIXEL
-                    + source_geometry_bytes
-                    * RUBBING_ESTIMATE_GEOMETRY_MULTIPLIER
+                    + source_geometry_bytes * RUBBING_ESTIMATE_GEOMETRY_MULTIPLIER
                     + source_materialized_attribute_bytes
                     * RUBBING_ESTIMATE_MATERIALIZED_ATTRIBUTE_MULTIPLIER
                 )
-                if (
-                    reserved_bytes + minimum_estimated_bytes
-                    > effective_memory_budget
-                ):
+                if reserved_bytes + minimum_estimated_bytes > effective_memory_budget:
                     raise MeasurementResourceLimitError(
                         "Digital Rubbing minimum cumulative memory estimate exceeds "
                         "the configured budget before projection preflight"
@@ -1081,6 +1126,40 @@ class ArtifactMeasurementController:
             record_id=record_id,
             created_at=created_at,
             operator=operator,
+            depends_on_record_ids=depends_on_record_ids,
+        )
+
+    def begin_tile_unwrap(
+        self,
+        *,
+        longitudinal_axis: str,
+        record_view: str,
+        selected_face_indices: Sequence[int] | None = None,
+        n_sections: int = 32,
+        record_id: str | None = None,
+        created_at: str | None = None,
+        operator: str = "local-user",
+        depends_on_record_ids: Sequence[str] = (),
+    ) -> ArtifactMeasurementWorkItem:
+        session = self._workbench.snapshot.session
+        if not isinstance(session, ArtifactSession):
+            raise ArtifactMeasurementError("no active ArtifactDocument session")
+        recipe = tile_unwrap_recipe(
+            longitudinal_axis=longitudinal_axis,
+            record_view=record_view,
+            total_face_count=int(session.source_mesh.faces.shape[0]),
+            selected_face_indices=selected_face_indices,
+            n_sections=n_sections,
+        )
+        selection = recipe["selection"]
+        assert isinstance(selection, Mapping)
+        return self._begin(
+            kind=MeasurementOperationKind.TILE_UNWRAP,
+            recipe=recipe,
+            record_id=record_id,
+            created_at=created_at,
+            operator=operator,
+            selection_hash=str(selection["selection_sha256"]),
             depends_on_record_ids=depends_on_record_ids,
         )
 
@@ -1258,7 +1337,11 @@ class ArtifactMeasurementController:
             )
         for old_index, new_index, label in (
             (old.source_asset_index, new.source_asset_index, "source asset"),
-            (old.geometry_revision_index, new.geometry_revision_index, "geometry revision"),
+            (
+                old.geometry_revision_index,
+                new.geometry_revision_index,
+                "geometry revision",
+            ),
             (
                 old.source_metadata_revision_index,
                 new.source_metadata_revision_index,
@@ -1366,6 +1449,21 @@ class ArtifactMeasurementController:
                 operator=work_item.operator,
                 depends_on_record_ids=work_item.depends_on_record_ids,
             )
+        elif isinstance(computation, ArtifactTileUnwrapComputation):
+            if not tile_unwrap_computation_matches_active_projection(
+                current, computation
+            ):
+                raise StaleMeasurementOperationError(
+                    "tile unwrap result is stale for the active projection"
+                )
+            candidate = commit_artifact_tile_unwrap(
+                current,
+                computation,
+                record_id=work_item.record_id,
+                created_at=work_item.created_at,
+                operator=work_item.operator,
+                depends_on_record_ids=work_item.depends_on_record_ids,
+            )
         else:  # pragma: no cover - guarded by ArtifactMeasurementResult
             raise ArtifactMeasurementError("unsupported measurement computation")
 
@@ -1405,6 +1503,10 @@ class ArtifactMeasurementController:
             return computation_matches_active_projection(current, computation)
         if isinstance(computation, ArtifactRubbingComputation):
             return rubbing_computation_matches_active_projection(current, computation)
+        if isinstance(computation, ArtifactTileUnwrapComputation):
+            return tile_unwrap_computation_matches_active_projection(
+                current, computation
+            )
         return False
 
     def _candidate_was_published(
@@ -1425,7 +1527,10 @@ class ArtifactMeasurementController:
         ):
             return False
         expected = candidate.document.record_index.get(record_id)
-        return expected is not None and current.document.record_index.get(record_id) == expected
+        return (
+            expected is not None
+            and current.document.record_index.get(record_id) == expected
+        )
 
     def publish_result(
         self,
