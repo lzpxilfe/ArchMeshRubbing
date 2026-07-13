@@ -523,9 +523,17 @@ def _render_mode(
     )
     viewport.camera.pan_offset = np.zeros(3, dtype=np.float64)
     viewport.camera.distance = 8.0
-    viewport.update()
-    viewport.repaint()
-    _pump_events(app, attempts=8, delay_s=0.005)
+    # A qwindows top-level intentionally positioned outside the desktop can be
+    # treated as non-exposed, so update()/repaint() may be coalesced away.
+    # QOpenGLWidget.makeCurrent() binds the widget's real default FBO; invoke
+    # the production paintGL path there so this precision gate is independent
+    # of compositor exposure while still exercising the actual context/FBO.
+    viewport.makeCurrent()
+    try:
+        viewport.paintGL()
+    finally:
+        viewport.doneCurrent()
+    _pump_events(app, attempts=2)
 
     frame = viewport._current_render_frame_snapshot()
     recorder.require(
@@ -535,6 +543,7 @@ def _render_mode(
         {
             "previous_frame_serial": previous_frame_serial,
             "frame_serial": int(frame.frame_serial) if frame is not None else None,
+            "trigger": "explicit-widget-fbo-paint",
         },
     )
     if frame is None:
