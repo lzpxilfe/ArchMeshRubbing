@@ -21,6 +21,7 @@ from PyQt6.QtWidgets import QApplication, QMessageBox, QPushButton
 from app_interactive import (
     MainWindow,
     MeshLoadThread,
+    TASK_SHUTDOWN_WAIT_MS,
     TaskThread,
     UnitSelectionDialog,
     _load_project_open_candidate,
@@ -33,6 +34,7 @@ from src.application.artifact_exports import (
     ArtifactExportKind,
     ArtifactExportPublication,
     ArtifactExportState,
+    StaleExportOperationError,
 )
 from src.application.artifact_measurements import (
     MeasurementOperationState,
@@ -841,6 +843,304 @@ def test_cancelled_task_dialog_resists_escape_and_close_until_worker_finishes() 
         assert thread.deleted
         assert window._task_thread is None
         assert window._task_dialog is None
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_shutdown_active_task_cancels_joins_and_fences_late_callbacks() -> None:
+    class FakeSignal:
+        def __init__(self) -> None:
+            self.callbacks = []
+
+        def connect(self, callback) -> None:
+            self.callbacks.append(callback)
+
+        def disconnect(self) -> None:
+            self.callbacks.clear()
+
+        def emit(self, *args) -> None:
+            for callback in tuple(self.callbacks):
+                callback(*args)
+
+    class FakeThread:
+        def __init__(self) -> None:
+            self.done = FakeSignal()
+            self.failed = FakeSignal()
+            self.finished = FakeSignal()
+            self.running = False
+            self.interruption_requested = False
+            self.wait_calls: list[int] = []
+            self.deleted = False
+
+        def isRunning(self) -> bool:
+            return self.running
+
+        def start(self) -> None:
+            self.running = True
+
+        def requestInterruption(self) -> None:
+            self.interruption_requested = True
+
+        def wait(self, timeout_ms: int) -> bool:
+            self.wait_calls.append(timeout_ms)
+            self.running = False
+            return True
+
+        def deleteLater(self) -> None:
+            self.deleted = True
+
+    class FakeDialog:
+        instance = None
+
+        def __init__(self, label, cancel_text, *_args) -> None:
+            self.label = label
+            self.cancel_text = cancel_text
+            self.canceled = FakeSignal()
+            self.signals_blocked = False
+            self.closed = False
+            self.__class__.instance = self
+
+        def setWindowTitle(self, _value) -> None:
+            pass
+
+        def setWindowModality(self, _value) -> None:
+            pass
+
+        def setCancelButton(self, value) -> None:
+            self.cancel_text = value
+
+        def setMinimumDuration(self, _value) -> None:
+            pass
+
+        def setLabelText(self, value) -> None:
+            self.label = value
+
+        def show(self) -> None:
+            pass
+
+        def blockSignals(self, blocked: bool) -> bool:
+            previous = self.signals_blocked
+            self.signals_blocked = blocked
+            return previous
+
+        def close(self) -> None:
+            self.closed = True
+            if not self.signals_blocked:
+                self.canceled.emit()
+
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    window = MainWindow()
+    thread = FakeThread()
+    cancelled = Mock()
+    done = Mock()
+    failed = Mock()
+    try:
+        with (
+            patch("app_interactive.QProgressDialog", FakeDialog),
+            patch.object(window, "_status_task_begin"),
+            patch.object(window, "_status_task_end"),
+        ):
+            assert window._start_task(
+                title="authoritative export",
+                label="staging",
+                thread=thread,  # type: ignore[arg-type]
+                on_done=done,
+                on_failed=failed,
+                on_cancel_requested=cancelled,
+            )
+            assert window._shutdown_active_task_worker()
+
+        dialog = FakeDialog.instance
+        assert dialog is not None and dialog.closed
+        cancelled.assert_called_once_with()
+        assert thread.interruption_requested
+        assert thread.wait_calls == [TASK_SHUTDOWN_WAIT_MS]
+        assert thread.deleted
+        assert window._task_thread is None
+        assert window._task_dialog is None
+        assert window._task_cancel_request is None
+        assert window._task_close_dialog is None
+        assert window._task_shutdown_verify is None
+
+        thread.done.emit("late result")
+        thread.failed.emit("late failure")
+        thread.finished.emit()
+        done.assert_not_called()
+        failed.assert_not_called()
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_shutdown_timeout_keeps_task_owned_until_cooperative_exit() -> None:
+    class FakeSignal:
+        def __init__(self) -> None:
+            self.callbacks = []
+
+        def connect(self, callback) -> None:
+            self.callbacks.append(callback)
+
+        def disconnect(self) -> None:
+            self.callbacks.clear()
+
+    class FakeThread:
+        def __init__(self) -> None:
+            self.done = FakeSignal()
+            self.failed = FakeSignal()
+            self.finished = FakeSignal()
+            self.running = False
+            self.join_allowed = False
+
+        def isRunning(self) -> bool:
+            return self.running
+
+        def start(self) -> None:
+            self.running = True
+
+        def requestInterruption(self) -> None:
+            pass
+
+        def wait(self, _timeout_ms: int) -> bool:
+            if self.join_allowed:
+                self.running = False
+            return self.join_allowed
+
+        def deleteLater(self) -> None:
+            pass
+
+    class FakeDialog:
+        def __init__(self, *_args) -> None:
+            self.canceled = FakeSignal()
+            self.signals_blocked = False
+
+        def setWindowTitle(self, _value) -> None:
+            pass
+
+        def setWindowModality(self, _value) -> None:
+            pass
+
+        def setCancelButton(self, _value) -> None:
+            pass
+
+        def setMinimumDuration(self, _value) -> None:
+            pass
+
+        def setLabelText(self, _value) -> None:
+            pass
+
+        def show(self) -> None:
+            pass
+
+        def blockSignals(self, blocked: bool) -> bool:
+            previous = self.signals_blocked
+            self.signals_blocked = blocked
+            return previous
+
+        def close(self) -> None:
+            pass
+
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    window = MainWindow()
+    thread = FakeThread()
+    cancelled = Mock()
+    try:
+        with patch("app_interactive.QProgressDialog", FakeDialog):
+            assert window._start_task(
+                title="cooperative",
+                label="working",
+                thread=thread,  # type: ignore[arg-type]
+                on_done=Mock(),
+                on_cancel_requested=cancelled,
+            )
+        assert not window._shutdown_active_task_worker()
+        cancelled.assert_called_once_with()
+        assert window._task_thread is thread
+        assert window._task_dialog is not None
+
+        thread.join_allowed = True
+        assert window._shutdown_active_task_worker()
+        cancelled.assert_called_once_with()
+        assert window._task_thread is None
+        assert window._task_dialog is None
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_shutdown_refuses_to_hide_joined_export_cleanup_failure() -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    window = MainWindow()
+    thread = Mock()
+    thread.isRunning.return_value = False
+    thread.done = Mock()
+    thread.failed = Mock()
+    thread.finished = Mock()
+    cancel_request = Mock()
+    close_dialog = Mock()
+    shutdown_verify = Mock(side_effect=RuntimeError("staging cleanup unproven"))
+    window._task_thread = thread
+    window._task_cancel_request = cancel_request
+    window._task_close_dialog = close_dialog
+    window._task_shutdown_verify = shutdown_verify
+    try:
+        assert not window._shutdown_active_task_worker()
+        cancel_request.assert_called_once_with()
+        shutdown_verify.assert_called_once_with()
+        thread.done.disconnect.assert_not_called()
+        thread.failed.disconnect.assert_not_called()
+        thread.finished.disconnect.assert_not_called()
+        close_dialog.assert_not_called()
+        assert window._task_thread is thread
+        assert window._task_shutdown_verify is shutdown_verify
+    finally:
+        window._task_thread = None
+        window._task_cancel_request = None
+        window._task_close_dialog = None
+        window._task_shutdown_verify = None
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_close_event_refuses_teardown_while_task_join_is_unproven() -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    window = MainWindow()
+    event = Mock()
+    try:
+        with (
+            patch.object(
+                QMessageBox,
+                "question",
+                return_value=QMessageBox.StandardButton.Yes,
+            ),
+            patch.object(QMessageBox, "warning") as warning,
+            patch.object(
+                window,
+                "_shutdown_active_task_worker",
+                return_value=False,
+            ),
+            patch.object(window, "_shutdown_project_open_worker") as shutdown_open,
+            patch.object(window, "_save_ui_state") as save_state,
+        ):
+            window.closeEvent(event)
+
+        event.ignore.assert_called_once_with()
+        shutdown_open.assert_not_called()
+        save_state.assert_not_called()
+        warning.assert_called_once()
+        assert not window._application_closing
     finally:
         window.deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
@@ -2724,6 +3024,75 @@ def test_native_vector_export_worker_stages_before_gui_final_publish(
             is ArtifactExportState.COMPLETED
         )
         assert "SVG" in window.status_info.text()
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_native_vector_export_cancel_revokes_publication_before_worker_start(
+    tmp_path: Path,
+) -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    base = _artifact_box_session()
+    record_id = "record:gui-vector-export-cancel"
+    computation = compute_artifact_cutline(base, _native_cutline_frame("top", 0.0))
+    session = commit_vector_computation(
+        base,
+        computation,
+        record_id=record_id,
+        created_at="2026-07-11T00:00:07Z",
+        operator="pytest",
+    )
+    obj = _projected_scene_object(session)
+    window = MainWindow()
+    window._artifact_session = session
+    window.viewport.objects = [obj]
+    window.viewport.selected_index = 0
+    window.current_mesh = obj.mesh
+    window.current_filepath = session.resolved_source_path
+    window._preview_native_vector_record(session, record_id)
+    destination = tmp_path / "cancelled.amr-vector"
+    try:
+        with (
+            patch(
+                "app_interactive.QFileDialog.getSaveFileName",
+                return_value=(str(destination), ""),
+            ),
+            patch.object(window, "_start_task", return_value=True) as start_task,
+        ):
+            window.on_native_vector_export_requested()
+
+        controller = window._artifact_export_controller()
+        active = controller.active_summaries
+        assert len(active) == 1
+        operation_id = active[0].operation_id
+        cancel_request = start_task.call_args.kwargs["on_cancel_requested"]
+        assert callable(cancel_request)
+        cancel_request()
+
+        shutdown_verify = start_task.call_args.kwargs["on_shutdown_joined"]
+        assert callable(shutdown_verify)
+        shutdown_verify()
+
+        assert (
+            controller.summary(operation_id).state
+            is ArtifactExportState.CANCELLED
+        )
+        thread = start_task.call_args.kwargs["thread"]
+        with pytest.raises(StaleExportOperationError):
+            thread._fn()
+        assert not destination.exists()
+
+        with patch.object(QMessageBox, "warning") as warning:
+            start_task.call_args.kwargs["on_failed"](
+                "StaleExportOperationError: export operation capability is stale"
+            )
+        warning.assert_not_called()
+        assert "취소 완료" in window.status_info.text()
+        assert "게시하지 않음" in window.status_info.text()
     finally:
         window.deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)

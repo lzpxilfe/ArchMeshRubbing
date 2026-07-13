@@ -59,6 +59,7 @@ VIEW_DISTANCE_SCALE = 1.35
 VIEW_MIN_DIM = 10.0
 VIEW_ORTHO_SCALE_TOP_BOTTOM = 0.95
 VIEW_ORTHO_SCALE_SIDE = 1.05
+TASK_SHUTDOWN_WAIT_MS = 30_000
 FLOOR_ALIGN_AXIS_Z = 2
 FLOOR_OPTIMIZE_STEP_DEGREES = (1.2, 0.4, 0.15, 0.05)
 CANONICAL_VIEW_PRESETS: dict[str, tuple[float, float]] = {
@@ -4429,6 +4430,10 @@ class MainWindow(QMainWindow):
         self._profile_export_thread: ProfileExportThread | None = None
         self._task_dialog: QProgressDialog | None = None
         self._task_thread: TaskThread | None = None
+        self._task_cancel_request: Callable[[], None] | None = None
+        self._task_close_dialog: Callable[[], None] | None = None
+        self._task_shutdown_verify: Callable[[], None] | None = None
+        self._application_closing = False
 
         # 평면화(Flatten) 결과 캐시: (obj id + transform + options) -> FlattenedMesh
         self._flattened_cache = {}
@@ -4931,9 +4936,106 @@ class MainWindow(QMainWindow):
         if reply != QMessageBox.StandardButton.Yes:
             a0.ignore()
             return
+        self._application_closing = True
+        if not self._shutdown_active_task_worker():
+            self._application_closing = False
+            a0.ignore()
+            try:
+                self.status_info.setText(
+                    "종료 보류 | 실행 중 작업의 안전한 취소를 기다리는 중"
+                )
+            except Exception:
+                pass
+            QMessageBox.warning(
+                self,
+                "종료 보류",
+                "실행 중 작업이 아직 안전한 계산 경계에서 끝나지 않았습니다.\n"
+                "작업 종료가 표시된 뒤 다시 종료하세요.",
+            )
+            return
         self._shutdown_project_open_worker()
         self._save_ui_state()
         super().closeEvent(a0)
+
+    @staticmethod
+    def _wait_for_thread_shutdown(thread: object, timeout_ms: int) -> bool:
+        """Wait for one worker without ever force-terminating its QThread."""
+
+        try:
+            if not bool(thread.isRunning()):  # type: ignore[attr-defined]
+                return True
+        except Exception:
+            return False
+        try:
+            joined = thread.wait(int(timeout_ms))  # type: ignore[attr-defined]
+        except Exception:
+            _LOGGER.exception("Worker shutdown wait failed")
+            return False
+        return bool(joined)
+
+    def _shutdown_active_task_worker(self) -> bool:
+        """Revoke task authority, cooperatively cancel, and join before teardown.
+
+        The task's completion callbacks stay connected while waiting so a timed-out
+        close attempt can safely return to the live window.  Once the worker has
+        joined, callbacks are disconnected and the task identity is cleared before
+        any queued signal can publish a measurement or export into a closing app.
+        """
+
+        thread = getattr(self, "_task_thread", None)
+        if thread is None:
+            return True
+
+        cancel_request = getattr(self, "_task_cancel_request", None)
+        if callable(cancel_request):
+            try:
+                cancel_request()
+            except Exception:
+                _LOGGER.exception("Active task cancellation request failed")
+                return False
+        try:
+            thread.requestInterruption()
+        except Exception:
+            pass
+
+        if not self._wait_for_thread_shutdown(thread, TASK_SHUTDOWN_WAIT_MS):
+            return False
+
+        shutdown_verify = getattr(self, "_task_shutdown_verify", None)
+        if callable(shutdown_verify):
+            try:
+                shutdown_verify()
+            except Exception:
+                _LOGGER.exception(
+                    "Joined task did not reach a shutdown-safe terminal state"
+                )
+                return False
+
+        for signal_name in ("done", "failed", "finished"):
+            try:
+                getattr(thread, signal_name).disconnect()
+            except Exception:
+                pass
+
+        if getattr(self, "_task_thread", None) is thread:
+            self._task_thread = None
+            self._task_cancel_request = None
+            self._task_shutdown_verify = None
+            close_dialog = getattr(self, "_task_close_dialog", None)
+            self._task_close_dialog = None
+            if callable(close_dialog):
+                try:
+                    close_dialog()
+                except Exception:
+                    _LOGGER.debug(
+                        "Task dialog shutdown cleanup failed",
+                        exc_info=True,
+                    )
+        try:
+            thread.deleteLater()
+        except Exception:
+            pass
+        return True
 
     def _shutdown_project_open_worker(self) -> None:
         """Fence callbacks and join package inspection before window teardown."""
@@ -9214,7 +9316,10 @@ class MainWindow(QMainWindow):
         on_done: Callable[[Any], None],
         on_failed: Callable[[str], None] | None = None,
         on_cancel_requested: Callable[[], None] | None = None,
+        on_shutdown_joined: Callable[[], None] | None = None,
     ) -> bool:
+        if bool(getattr(self, "_application_closing", False)):
+            return False
         existing = getattr(self, "_task_thread", None)
         if existing is not None and existing.isRunning():
             QMessageBox.information(self, "작업 중", "이미 다른 작업이 진행 중입니다. 완료 후 다시 시도하세요.")
@@ -9288,6 +9393,9 @@ class MainWindow(QMainWindow):
                 pass
             if getattr(self, "_task_thread", None) is thread:
                 self._task_thread = None
+                self._task_cancel_request = None
+                self._task_close_dialog = None
+                self._task_shutdown_verify = None
 
         def _default_failed(message: str):
             QMessageBox.critical(self, "오류", self._format_error_message("작업 실패:", message))
@@ -9323,11 +9431,42 @@ class MainWindow(QMainWindow):
                     ),
                 )
 
-        thread.done.connect(lambda result: (_close_dialog(), _safe_invoke(on_done, result)))
-        thread.failed.connect(
-            lambda msg: (_close_dialog(), _safe_invoke(on_failed or _default_failed, msg))
+        def _callback_is_current() -> bool:
+            return (
+                getattr(self, "_task_thread", None) is thread
+                and not bool(getattr(self, "_application_closing", False))
+            )
+
+        def _handle_done(result: object) -> None:
+            if not _callback_is_current():
+                return
+            _close_dialog()
+            _safe_invoke(on_done, result)
+
+        def _handle_failed(message: str) -> None:
+            if not _callback_is_current():
+                return
+            _close_dialog()
+            _safe_invoke(on_failed or _default_failed, message)
+
+        def _handle_finished() -> None:
+            if getattr(self, "_task_thread", None) is not thread:
+                try:
+                    thread.deleteLater()
+                except Exception:
+                    pass
+                return
+            _close_dialog()
+            _cleanup_thread()
+
+        self._task_cancel_request = (
+            _request_cancel if on_cancel_requested is not None else None
         )
-        thread.finished.connect(lambda: (_close_dialog(), _cleanup_thread()))
+        self._task_close_dialog = _close_dialog
+        self._task_shutdown_verify = on_shutdown_joined
+        thread.done.connect(_handle_done)
+        thread.failed.connect(_handle_failed)
+        thread.finished.connect(_handle_finished)
         if on_cancel_requested is not None:
             dlg.canceled.connect(_request_cancel)
         try:
@@ -16213,6 +16352,23 @@ class MainWindow(QMainWindow):
                 f"{label} 취소 요청됨 · 안전한 계산 경계까지 기다리는 중"
             )
 
+    @staticmethod
+    def _verify_native_measurement_shutdown(
+        controller: ArtifactMeasurementController,
+        work_item: ArtifactMeasurementWorkItem,
+    ) -> None:
+        state = controller.summary(work_item).state
+        if state not in {
+            MeasurementOperationState.CANCELLED,
+            MeasurementOperationState.COMPLETED,
+            MeasurementOperationState.FAILED,
+            MeasurementOperationState.STALE,
+        }:
+            raise ArtifactWorkbenchError(
+                "joined measurement worker retained publication authority: "
+                f"{state.value}"
+            )
+
     def _native_measurement_callback_is_terminal(
         self,
         controller: ArtifactMeasurementController,
@@ -16274,7 +16430,7 @@ class MainWindow(QMainWindow):
                 return
             if self._native_measurement_publication_is_pending(work_item):
                 self.status_info.setText(
-                    "⏸ 실측 결과 게시 보류 | Open·scene 전환 완료 후 다시 시도"
+                    "실측 결과 게시 보류 | Open·scene 전환 완료 후 다시 시도"
                 )
                 QMessageBox.warning(
                     self,
@@ -16361,7 +16517,7 @@ class MainWindow(QMainWindow):
                     return
                 pending = self._native_measurement_publication_is_pending(work_item)
                 self.status_info.setText(
-                    "⏸ Cutline 결과 게시 보류 | 재시도 버튼 사용"
+                    "Cutline 결과 게시 보류 | 재시도 버튼 사용"
                     if pending
                     else "Cutline 결과 폐기 | 현재 문서 유지"
                 )
@@ -16401,6 +16557,10 @@ class MainWindow(QMainWindow):
                 controller,
                 work_item,
                 label="Cutline",
+            ),
+            on_shutdown_joined=lambda: self._verify_native_measurement_shutdown(
+                controller,
+                work_item,
             ),
         )
         if not started:
@@ -16486,7 +16646,7 @@ class MainWindow(QMainWindow):
                     return
                 pending = self._native_measurement_publication_is_pending(work_item)
                 self.status_info.setText(
-                    "⏸ Outline 결과 게시 보류 | 재시도 버튼 사용"
+                    "Outline 결과 게시 보류 | 재시도 버튼 사용"
                     if pending
                     else "Outline 결과 폐기 | 현재 문서 유지"
                 )
@@ -16527,6 +16687,10 @@ class MainWindow(QMainWindow):
                 work_item,
                 label="Outline",
             ),
+            on_shutdown_joined=lambda: self._verify_native_measurement_shutdown(
+                controller,
+                work_item,
+            ),
         )
         if not started:
             controller.cancel(work_item, reason="task_not_started")
@@ -16561,6 +16725,85 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             return str(exc)
         return None
+
+    def _request_native_export_cancel(
+        self,
+        controller: ArtifactExportController,
+        work_item: ArtifactExportWorkItem,
+        *,
+        label: str,
+    ) -> None:
+        """Revoke publication authority before waiting for export staging to exit."""
+
+        try:
+            state = controller.summary(work_item).state
+            if state in {
+                ArtifactExportState.CANCELLED,
+                ArtifactExportState.COMPLETED,
+                ArtifactExportState.FAILED,
+                ArtifactExportState.STALE,
+            }:
+                return
+            controller.cancel(work_item, reason="user_cancelled")
+        except ArtifactExportError:
+            try:
+                if controller.summary(work_item).state in {
+                    ArtifactExportState.CANCELLED,
+                    ArtifactExportState.COMPLETED,
+                    ArtifactExportState.FAILED,
+                    ArtifactExportState.STALE,
+                }:
+                    return
+            except Exception:
+                pass
+            raise
+        try:
+            self.status_info.setText(
+                f"{label} 취소 요청됨 | 임시 패키지 안전 정리 대기"
+            )
+        except Exception:
+            pass
+
+    def _native_export_callback_is_cancelled(
+        self,
+        controller: ArtifactExportController,
+        work_item: ArtifactExportWorkItem,
+        *,
+        label: str,
+    ) -> bool:
+        try:
+            cancelled = (
+                controller.summary(work_item).state
+                is ArtifactExportState.CANCELLED
+            )
+        except Exception:
+            return False
+        if cancelled:
+            try:
+                self.status_info.setText(
+                    f"{label} 취소 완료 | 목적지에 패키지를 게시하지 않음"
+                )
+            except Exception:
+                pass
+        return cancelled
+
+    @staticmethod
+    def _verify_native_export_shutdown(
+        controller: ArtifactExportController,
+        work_item: ArtifactExportWorkItem,
+    ) -> None:
+        summary = controller.summary(work_item)
+        if summary.state in {
+            ArtifactExportState.CANCELLED,
+            ArtifactExportState.COMPLETED,
+            ArtifactExportState.STALE,
+        }:
+            return
+        detail = f": {summary.message}" if summary.message else ""
+        raise ArtifactExportError(
+            "joined export worker did not prove safe staging cleanup "
+            f"({summary.state.value}){detail}"
+        )
 
     def _report_native_export_publication(
         self,
@@ -16742,6 +16985,12 @@ class MainWindow(QMainWindow):
             self._report_native_export_publication(publication, artifact_label="SVG")
 
         def on_failed(message: str) -> None:
+            if self._native_export_callback_is_cancelled(
+                controller,
+                work_item,
+                label="벡터 내보내기",
+            ):
+                return
             if self._report_artifact_authority_callback_failure(
                 context="SVG 패키지 worker 종료 콜백",
                 detail=str(message),
@@ -16764,6 +17013,15 @@ class MainWindow(QMainWindow):
                 ),
                 on_done=on_done,
                 on_failed=on_failed,
+                on_cancel_requested=lambda: self._request_native_export_cancel(
+                    controller,
+                    work_item,
+                    label="벡터 내보내기",
+                ),
+                on_shutdown_joined=lambda: self._verify_native_export_shutdown(
+                    controller,
+                    work_item,
+                ),
             )
         except Exception as exc:
             cleanup_error = self._cancel_unstarted_native_export(
@@ -16903,7 +17161,7 @@ class MainWindow(QMainWindow):
                     return
                 pending = self._native_measurement_publication_is_pending(work_item)
                 self.status_info.setText(
-                    "⏸ Digital Rubbing 결과 게시 보류 | 재시도 버튼 사용"
+                    "Digital Rubbing 결과 게시 보류 | 재시도 버튼 사용"
                     if pending
                     else "늦은 Digital Rubbing 결과 폐기 | 현재 문서 유지"
                 )
@@ -16947,6 +17205,10 @@ class MainWindow(QMainWindow):
                 controller,
                 work_item,
                 label="Digital Rubbing",
+            ),
+            on_shutdown_joined=lambda: self._verify_native_measurement_shutdown(
+                controller,
+                work_item,
             ),
         )
         if not started:
@@ -17139,6 +17401,12 @@ class MainWindow(QMainWindow):
             self._report_native_export_publication(publication, artifact_label="PNG")
 
         def on_failed(message: str) -> None:
+            if self._native_export_callback_is_cancelled(
+                controller,
+                work_item,
+                label="Digital Rubbing 내보내기",
+            ):
+                return
             if self._report_artifact_authority_callback_failure(
                 context="Digital Rubbing export worker 종료 콜백",
                 detail=str(message),
@@ -17161,6 +17429,15 @@ class MainWindow(QMainWindow):
                 ),
                 on_done=on_done,
                 on_failed=on_failed,
+                on_cancel_requested=lambda: self._request_native_export_cancel(
+                    controller,
+                    work_item,
+                    label="Digital Rubbing 내보내기",
+                ),
+                on_shutdown_joined=lambda: self._verify_native_export_shutdown(
+                    controller,
+                    work_item,
+                ),
             )
         except Exception as exc:
             cleanup_error = self._cancel_unstarted_native_export(
@@ -17352,6 +17629,10 @@ class MainWindow(QMainWindow):
                 work_item,
                 label="기와 전개",
             ),
+            on_shutdown_joined=lambda: self._verify_native_measurement_shutdown(
+                controller,
+                work_item,
+            ),
         )
         if not started:
             controller.cancel(work_item, reason="task_not_started")
@@ -17509,6 +17790,12 @@ class MainWindow(QMainWindow):
             )
 
         def on_failed(message: str) -> None:
+            if self._native_export_callback_is_cancelled(
+                controller,
+                work_item,
+                label="기와 전개 내보내기",
+            ):
+                return
             if self._report_artifact_authority_callback_failure(
                 context="기와 전개 export worker 종료 콜백",
                 detail=str(message),
@@ -17531,6 +17818,15 @@ class MainWindow(QMainWindow):
                 ),
                 on_done=on_done,
                 on_failed=on_failed,
+                on_cancel_requested=lambda: self._request_native_export_cancel(
+                    controller,
+                    work_item,
+                    label="기와 전개 내보내기",
+                ),
+                on_shutdown_joined=lambda: self._verify_native_export_shutdown(
+                    controller,
+                    work_item,
+                ),
             )
         except Exception as exc:
             cleanup_error = self._cancel_unstarted_native_export(

@@ -56,7 +56,7 @@ DerivedRecord session update는 기존 source/metadata/Align/record를 바꿀 �
 
 `ArtifactExportController`는 1:1 vector/rubbing/tile-unwrap package를 별도 authority effect로 취급한다. worker는 목적지와 같은 parent에 숨김 staging을 만들고 전체 package를 검증한 뒤 destination·parent·device/inode·entry fingerprint에 묶인 일회성 prepared capability를 반환한다. final dispatcher는 captured source·render projection·exact `READY + FRESH` record를 현재 Workbench에서 다시 확인한 뒤 빠른 fingerprint 재확인과 no-replace rename만 실행한다. 같은 Align의 append-only record 변경은 허용하지만 Align/Open 완료는 stale 처리한다. staging 삭제는 먼저 고유 quarantine으로 원자 이동하고 소유 inode를 확인한 뒤 수행하며, 목적지 경합의 승자나 교체된 foreign path는 보존한다. rename 뒤 실제 또는 미지원 directory `fsync`는 published-but-durability-uncertain 결과로 전달한다.
 
-측정 worker 취소는 강제 thread termination이 아니라 공통 Event와 core 고유 취소 예외를 사용한다. Event는 게시 권위를 즉시 회수하고 세 extractor의 deterministic chunk 경계에서 확인된다. 취소되지 않은 실행의 recipe·payload·raster·QC에는 probe가 관여하지 않는다. 단일 NumPy/GEOS 호출은 비선점 구간으로 남으며, 종료 시 worker join과 GUI-thread preflight 제거는 후속 셸 이행으로 관리한다.
+측정 worker 취소는 강제 thread termination이 아니라 공통 Event와 core 고유 취소 예외를 사용한다. Event는 게시 권위를 즉시 회수하고 세 extractor의 deterministic chunk 경계에서 확인된다. 취소되지 않은 실행의 recipe·payload·raster·QC에는 probe가 관여하지 않는다. 단일 NumPy/GEOS 호출은 비선점 구간으로 남는다. 창 종료는 현재 authoritative 측정·vector/rubbing/tile-unwrap export `TaskThread`의 one-shot cancel hook으로 record/publication 권위를 먼저 회수하고 최대 30초 동안 cooperative join을 기다린다. join을 증명하지 못하면 창 teardown을 거부하고 task·dialog 소유권을 유지한다. join 뒤에는 signal을 끊고 task identity를 지운 뒤에만 창을 해제하므로 늦은 result가 닫히는 문서에 게시되지 않는다. GUI-thread preflight 제거와 legacy mesh/profile/slice worker의 통합 수명주기는 후속 셸 이행으로 관리한다.
 
 ## 이행 순서
 

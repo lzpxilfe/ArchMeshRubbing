@@ -453,7 +453,7 @@ DerivedRecord(type=surface.tile_unwrap.v1)
 
 sidecar의 artifact descriptor를 제외한 claim을 RFC 8785 SHA-256으로 묶어 SVG metadata에도 저장하므로 한 member의 독립 손상을 검출한다. validator는 binary를 parse해 receipt를 다시 만들고 OBJ/SVG exact bytes를 재렌더하며, sidecar claim·artifact hash·privacy·READY/FRESH provenance를 대조한다. 원본 document 없이도 package 내부 무결성과 physical scale을 offline 검증할 수 있고, document를 함께 주면 exact record와 manifest까지 비교한다.
 
-writer는 같은 parent의 숨은 staging directory에서 네 파일을 모두 쓰고 자체 검증한 뒤 atomic no-replace rename한다. 기존 destination을 덮지 않으며 destination race의 승자를 보존한다. 현재 tile package writer는 소유 staging의 device/inode, closed member set과 regular-file 상태를 확인할 수 있을 때만 실패 정리를 수행한다. 이 hash도 제작자 서명은 아니며, desktop의 full prepared-capability export controller 연결은 별도 UI 통합 단계다.
+writer는 같은 parent의 숨은 staging directory에서 네 파일을 모두 쓰고 자체 검증한 뒤 atomic no-replace rename한다. 기존 destination을 덮지 않으며 destination race의 승자를 보존한다. 현재 tile package writer는 소유 staging의 device/inode, closed member set과 regular-file 상태를 확인할 수 있을 때만 실패 정리를 수행한다. 이 hash도 제작자 서명은 아니다. desktop은 선택한 `READY + FRESH` record의 recipe/receipt를 worker에서 재계산·검증하고 prepared capability를 받은 뒤 current Workbench 권위를 다시 확인해 게시한다. 사용자 취소나 앱 종료는 publication 권위를 먼저 회수하고 worker join 동안 owned staging 정리를 기다린다.
 
 machine-readable 계약은 record receipt의 `schemas/tile_unwrap_receipt-1.0.0.schema.json`과 export sidecar의 `schemas/tile_unwrap_export-1.0.0.schema.json`이다. 두 schema는 axis 추정값, fallback 허용값, 사설 경로와 계약 밖 필드를 거부한다.
 
