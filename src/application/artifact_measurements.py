@@ -28,6 +28,14 @@ from weakref import WeakKeyDictionary
 
 from src.core.artifact_cancellation import ArtifactComputationCancelledError
 from src.core.artifact_document import OperationContext, canonical_recipe_hash
+from src.core.artifact_geometry_metrics import (
+    ArtifactGeometryMetricsComputation,
+    ArtifactGeometryMetricsError,
+    commit_artifact_geometry_metrics,
+    extract_geometry_metrics,
+    geometry_metrics_computation_matches_active_projection,
+    geometry_metrics_recipe,
+)
 from src.core.artifact_outline_extractor import (
     OutlineView,
     extract_outline_geometry,
@@ -110,6 +118,7 @@ class MeasurementOperationKind(str, Enum):
     OUTLINE = "outline"
     DIGITAL_RUBBING = "digital_rubbing"
     TILE_UNWRAP = "tile_unwrap"
+    GEOMETRY_METRICS = "geometry_metrics"
 
 
 class MeasurementOperationState(str, Enum):
@@ -133,6 +142,7 @@ MeasurementComputation: TypeAlias = (
     ArtifactVectorComputation
     | ArtifactRubbingComputation
     | ArtifactTileUnwrapComputation
+    | ArtifactGeometryMetricsComputation
 )
 CancellationProbe: TypeAlias = Callable[[], bool]
 MeasurementPublisher: TypeAlias = Callable[[RecordBindingTransition], None]
@@ -198,6 +208,8 @@ def _recipe_float(recipe: Mapping[str, object], field_name: str) -> float:
 def _operation_kind_for_computation(
     computation: MeasurementComputation,
 ) -> MeasurementOperationKind:
+    if isinstance(computation, ArtifactGeometryMetricsComputation):
+        return MeasurementOperationKind.GEOMETRY_METRICS
     if isinstance(computation, ArtifactRubbingComputation):
         return MeasurementOperationKind.DIGITAL_RUBBING
     if isinstance(computation, ArtifactTileUnwrapComputation):
@@ -509,7 +521,26 @@ def execute_measurement_work_item(
             recipe=recipe,
             qc=qc,
         )
-    else:
+    elif work_item.kind is MeasurementOperationKind.GEOMETRY_METRICS:
+        try:
+            receipt, qc = extract_geometry_metrics(
+                projection.mesh.vertices,
+                projection.mesh.faces,
+                recipe,
+                cancellation_probe=cancellation_probe,
+            )
+        except ArtifactComputationCancelledError as exc:
+            raise MeasurementCancelledError(str(exc)) from exc
+        except ArtifactGeometryMetricsError as exc:
+            raise ArtifactMeasurementError(str(exc)) from exc
+        computation = ArtifactGeometryMetricsComputation(
+            context=work_item.context,
+            projection_snapshot=work_item.projection_snapshot,
+            receipt=receipt,
+            recipe=recipe,
+            qc=qc,
+        )
+    elif work_item.kind is MeasurementOperationKind.DIGITAL_RUBBING:
         try:
             raster, qc = extract_digital_rubbing(
                 projection.mesh.vertices,
@@ -525,6 +556,10 @@ def execute_measurement_work_item(
             raster=raster,
             recipe=recipe,
             qc=qc,
+        )
+    else:  # pragma: no cover - closed enum guard
+        raise ArtifactMeasurementError(
+            f"measurement kind {work_item.kind.value!r} is unsupported"
         )
 
     _raise_if_cancelled(cancellation_probe)
@@ -1186,6 +1221,27 @@ class ArtifactMeasurementController:
             depends_on_record_ids=depends_on_record_ids,
         )
 
+    def begin_geometry_metrics(
+        self,
+        *,
+        coordinate_grid_um: int = 1,
+        record_id: str | None = None,
+        created_at: str | None = None,
+        operator: str = "local-user",
+        depends_on_record_ids: Sequence[str] = (),
+    ) -> ArtifactMeasurementWorkItem:
+        """Reserve one whole-active-geometry area/volume record."""
+
+        recipe = geometry_metrics_recipe(coordinate_grid_um=coordinate_grid_um)
+        return self._begin(
+            kind=MeasurementOperationKind.GEOMETRY_METRICS,
+            recipe=recipe,
+            record_id=record_id,
+            created_at=created_at,
+            operator=operator,
+            depends_on_record_ids=depends_on_record_ids,
+        )
+
     def begin_rubbing(
         self,
         view: OutlineView | str,
@@ -1552,6 +1608,21 @@ class ArtifactMeasurementController:
                 operator=work_item.operator,
                 depends_on_record_ids=work_item.depends_on_record_ids,
             )
+        elif isinstance(computation, ArtifactGeometryMetricsComputation):
+            if not geometry_metrics_computation_matches_active_projection(
+                current, computation
+            ):
+                raise StaleMeasurementOperationError(
+                    "geometry metrics result is stale for the active projection"
+                )
+            candidate = commit_artifact_geometry_metrics(
+                current,
+                computation,
+                record_id=work_item.record_id,
+                created_at=work_item.created_at,
+                operator=work_item.operator,
+                depends_on_record_ids=work_item.depends_on_record_ids,
+            )
         else:  # pragma: no cover - guarded by ArtifactMeasurementResult
             raise ArtifactMeasurementError("unsupported measurement computation")
 
@@ -1593,6 +1664,10 @@ class ArtifactMeasurementController:
             return rubbing_computation_matches_active_projection(current, computation)
         if isinstance(computation, ArtifactTileUnwrapComputation):
             return tile_unwrap_computation_matches_active_projection(
+                current, computation
+            )
+        if isinstance(computation, ArtifactGeometryMetricsComputation):
+            return geometry_metrics_computation_matches_active_projection(
                 current, computation
             )
         return False

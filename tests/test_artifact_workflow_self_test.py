@@ -17,7 +17,7 @@ def test_complete_workflow_self_test_has_deterministic_offline_receipts() -> Non
         "60b5dca0fcef8346eea22a944ce0faa160e350cb97bd028b4a319c3e26883eb5"
     )
     assert result.document_sha256 == (
-        "f9f8e845843a2170751319c88be4d15abe66e327de6ef1bd074c75e997ea416a"
+        "8d40f937da122701942ddd453ce0d79a60a2e87a820e7d9631faf1f7aff04045"
     )
     assert result.align_revision_id == "align:workflow-self-test-explicit"
     assert (result.cutline_count, result.outline_count, result.rubbing_count) == (
@@ -25,27 +25,30 @@ def test_complete_workflow_self_test_has_deterministic_offline_receipts() -> Non
         6,
         6,
     )
-    assert result.record_count == 15
+    assert result.geometry_metrics_count == 1
+    assert result.record_count == 16
     assert (result.vector_export_count, result.rubbing_export_count) == (9, 6)
     assert result.vector_set_sha256 == (
-        "180db90e564ebb0483fe43d167d08f970468da17cffa3f9870d4dba6655faba8"
+        "11b6a4627a7998bf32b33d1e8db424942bf93753f1ad9eb7ecc16da8f64fcb8b"
     )
     assert result.rubbing_set_sha256 == (
-        "849a66fa9b79ebbe4520a5acfc5feec29c7fc2cfa3c25d610ca07e1fac10cce5"
+        "0544d4b594d947ae82407c37b68c18ca94af98c856c375dbe2ada1fe15bd77a8"
     )
     assert result.survey_manifest_sha256 == (
-        "bfa36ee1595405d4568f90cae54ca175954b75e6ca5d87364330b3532e260e10"
+        "c01c186f539b9cabdcab81bd4da2777aec247a166ebfebc32434445394d85796"
     )
     assert result.survey_artifact_set_sha256 == (
-        "5d607381f90a3f78f5211d47ea9507f3a55c1196eb3ab8d8c991ca1c077d08b1"
+        "9546d4070894be10c8881ff2e5c10ee708d7fd8a92b73e91e6800bf42fede8ae"
     )
     assert result.field_pilot_contract == "artifact-pass-human-driver-pending"
     assert result.svg_sha256 == (
-        "aaf2c7c1136242074fbc2862894c821673646687c55cea36f1f6e3408c569d23"
+        "e67be16ad9d7ee764369b883329220610b315737b97a92facfe1038bde049f48"
     )
     assert result.png_sha256 == (
-        "268ad9fc5910358a2a2882809c6928d9c9fd66685ed25bc2b182ccc211336e8d"
+        "f27f1050618db7f2e99cf25b0620ce6304a80dfc9702469d8f1e2410851af1f4"
     )
+    assert result.surface_area_mm2_decimal == "24.000000"
+    assert result.volume_mm3_decimal == "8.000000000"
 
 
 def test_complete_workflow_accepts_explicit_committed_directory_fsync_warning(
@@ -57,9 +60,9 @@ def test_complete_workflow_accepts_explicit_committed_directory_fsync_warning(
     ):
         result = run_artifact_workflow_self_test()
 
-    assert result.record_count == 15
+    assert result.record_count == 16
     assert result.survey_manifest_sha256 == (
-        "bfa36ee1595405d4568f90cae54ca175954b75e6ca5d87364330b3532e260e10"
+        "c01c186f539b9cabdcab81bd4da2777aec247a166ebfebc32434445394d85796"
     )
 
 

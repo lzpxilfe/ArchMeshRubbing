@@ -25,7 +25,7 @@
 | RTI | 광원 방향·preset·specular/ambient·고대비·확대 UI가 표시됨 | 동등한 native RTI 모듈 없음 | 명확한 격차. 공개 RTI 원리 기반 독립 구현과 reproducible light recipe가 P1 |
 | MSII | multi-scale integral invariant, radius/scale/sample, 여러 curvature mode와 preset UI가 표시됨 | curvature/feature 도구는 있으나 검증 MSII record가 없음 | 명확한 격차. 논문·GigaMesh 공개 자료 기반 독립 구현과 benchmark가 P1 |
 | Digital Rubbing | contrast, smoothing, offset, noise, inverse, cylindrical image extraction UI가 표시됨 | canonical six-view Digital Rubbing receipt, exact pixels/mm, deterministic GA8 PNG, provenance와 offline validation | 연구 재현성은 ArchMeshRubbing 우위. 판독 품질 blind test와 펼친 면 위 rubbing 결합은 필요 |
-| 측정·체적 | 거리 측정과 volume 분석 메뉴가 표시됨 | Cutline/Outline은 강하지만 native distance/volume record UX는 미완성 | ARIA 공개 기능 우세. watertight/uncertainty QC를 포함한 measurement record가 P1 |
+| 측정·체적 | 거리 측정과 volume 분석 메뉴가 표시됨 | native `measurement.geometry_metrics.v1`이 1 µm canonical-mm 격자, 고정 표면적, topology audit, exact-rational guarded volume을 Align-bound record로 저장하고 packaged offline self-test에서 24 mm²/8 mm³ 정답과 reopen을 검증함 | 검증 가능한 표면적·체적 기록은 ArchMeshRubbing 우위. 거리/지름은 durable triangle+barycentric anchor가 없어 아직 검토용이며 ARIA UI가 앞섬 |
 | project/history | project save/load UI가 표시됨 | content-addressed self-contained `.amr`, parser dependency closure, 외부 원본 삭제 뒤 독립 프로세스 reopen, immutable record graph | ArchMeshRubbing 우위 |
 | offline·라이선스 | 체험 제한과 PRO/구독 안내가 표시됨 | 오픈소스 지향, 계정·license server 없는 offline architecture, outbound 차단 Windows package gate | ArchMeshRubbing 방향 우위. 실제 공개 license 결정과 서명 배포 전에는 완료 아님 |
 | 언어 | 한국어·영어·중국어·일본어 선택 UI가 표시됨 | 주 UI가 한국어 중심 | ARIA 우세. 문자열 catalog와 번역 검증이 P2 |
@@ -42,13 +42,14 @@
 - 완료: 선택한 `READY + FRESH` record를 recipe로 재계산하고 exact receipt를 확인한 뒤에만 `.amr-unwrap`으로 내보내며 기존 자유 flatten export와 구분한다.
 - 완료: Cutline 3/3·Outline 6/6·Digital Rubbing 6/6을 한 버튼으로 `.amr-survey`에 원자 게시하고 이동 후 exact project와 offline 재검증한다.
 - 완료: 한 project/survey, 현재 Windows build의 native OpenGL report, 정량 scale과 10항목 고고학자 review를 canonical 단일 파일럿 report로 묶고 근거가 빠지면 `incomplete`로 남기는 공개 CLI·schema를 마련했다.
+- 완료: 전체 active geometry의 표면적과 topology-gated 체적을 `measurement.geometry_metrics.v1`로 원자 게시한다. 열린 메쉬·비다양체·방향 불일치·다중 조각은 convex-hull 값으로 숨기지 않고 체적을 unavailable로 남긴다.
 - 공개 가능한 암키와·수키와 scan set을 마련해 폭/길이/단면 arc 오차, foldover, 처리시간을 기록한다.
 - SVG를 Illustrator/Inkscape로 열어 physical size를 실물 자와 대조한다.
 
 ### P1: 공개 화면에서 확인된 기능 격차 닫기
 
 - non-destructive cutting/fragment revision, recall clip, piece list
-- distance/area/volume record와 watertight·uncertainty QC
+- triangle/barycentric anchor 기반 distance·diameter record와 pick uncertainty QC
 - RTI light recipe와 deterministic image export
 - MSII scale/radius recipe, 공개 합성 benchmark와 feature map record
 - 펼친 기와 좌표에서 Digital Rubbing/문양선을 재투영하는 결합 workflow

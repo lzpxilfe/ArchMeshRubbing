@@ -3217,15 +3217,18 @@ def test_native_measurement_handlers_defer_materialization_to_task_threads() -> 
     outline_item = object()
     rubbing_item = object()
     tile_item = object()
+    metrics_item = object()
     controller.begin_cutline.return_value = cutline_item
     controller.begin_outline.return_value = outline_item
     controller.begin_rubbing.return_value = rubbing_item
     controller.begin_tile_unwrap.return_value = tile_item
+    controller.begin_geometry_metrics.return_value = metrics_item
     worker_results = {
         id(cutline_item): "cutline-result",
         id(outline_item): "outline-result",
         id(rubbing_item): "rubbing-result",
         id(tile_item): "tile-result",
+        id(metrics_item): "metrics-result",
     }
 
     def execute_with_preflight(item, *, preflight):
@@ -3281,12 +3284,18 @@ def test_native_measurement_handlers_defer_materialization_to_task_threads() -> 
             assert isinstance(tile_thread, TaskThread)
             assert tile_thread._task_name == "native_tile_unwrap"
 
+            window.on_native_geometry_metrics_requested()
+            metrics_thread = start_task.call_args.kwargs["thread"]
+            assert isinstance(metrics_thread, TaskThread)
+            assert metrics_thread._task_name == "native_geometry_metrics"
+
             assert materialization_calls == []
             materialization_allowed = True
             assert cutline_thread._fn() == "cutline-result"
             assert outline_thread._fn() == "outline-result"
             assert rubbing_thread._fn() == "rubbing-result"
             assert tile_thread._fn() == "tile-result"
+            assert metrics_thread._fn() == "metrics-result"
 
         controller.execute.assert_has_calls(
             [
@@ -3294,9 +3303,59 @@ def test_native_measurement_handlers_defer_materialization_to_task_threads() -> 
                 call(outline_item, preflight=ANY),
                 call(rubbing_item, preflight=ANY),
                 call(tile_item, preflight=ANY),
+                call(metrics_item, preflight=ANY),
             ]
         )
-        assert materialization_calls == [session, session, session, session]
+        assert materialization_calls == [session, session, session, session, session]
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_native_geometry_metrics_publishes_record_without_scene_rebuild() -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    session = _artifact_box_session()
+    obj = _projected_scene_object(session)
+    window = MainWindow()
+    window._artifact_session = session
+    window.current_mesh = obj.mesh
+    window.viewport.objects = [obj]
+    window.viewport.selected_index = 0
+    controller = window._artifact_measurement_controller()
+    item = controller.begin_geometry_metrics(
+        coordinate_grid_um=1,
+        record_id="record:gui-geometry-metrics",
+        created_at="2026-07-11T00:00:04Z",
+        operator="pytest",
+    )
+    result = controller.execute(item)
+    captured: dict[str, object] = {}
+    try:
+        with (
+            patch.object(
+                window,
+                "_publish_artifact_session_projection",
+                side_effect=_capture_measurement_publication(window, captured),
+            ),
+            patch.object(window.viewport, "prepare_mesh_object") as prepare,
+            patch.object(window.viewport, "swap_prepared_scene") as swap,
+        ):
+            published_id = window._publish_native_measurement_result(item, result)
+
+        prepare.assert_not_called()
+        swap.assert_not_called()
+        assert published_id == item.record_id
+        committed = captured["session"]
+        assert isinstance(committed, ArtifactSession)
+        record = committed.document.record_index[item.record_id]
+        assert record.type == "measurement.geometry_metrics.v1"
+        results = window.measure_panel.results_text()
+        assert "표면적: 2400.000000 mm²" in results
+        assert "체적: 8000.000000000 mm³" in results
+        assert "grid=1 µm" in results
     finally:
         window.deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)

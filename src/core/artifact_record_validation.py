@@ -18,6 +18,10 @@ def validate_known_records(document: ArtifactDocument) -> None:
         ArtifactRubbingRecordError,
         validate_rubbing_records,
     )
+    from .artifact_geometry_metrics import (  # noqa: PLC0415
+        ArtifactGeometryMetricsError,
+        validate_geometry_metrics_records,
+    )
     from .artifact_tile_unwrap_record import (  # noqa: PLC0415
         ArtifactTileUnwrapRecordError,
         validate_tile_unwrap_records,
@@ -31,10 +35,12 @@ def validate_known_records(document: ArtifactDocument) -> None:
         validate_vector_records(document)
         validate_rubbing_records(document)
         validate_tile_unwrap_records(document)
+        validate_geometry_metrics_records(document)
     except (
         ArtifactVectorRecordError,
         ArtifactRubbingRecordError,
         ArtifactTileUnwrapRecordError,
+        ArtifactGeometryMetricsError,
     ) as exc:
         raise ArtifactKnownRecordError(str(exc)) from exc
 

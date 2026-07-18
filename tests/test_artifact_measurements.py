@@ -35,6 +35,10 @@ from src.application.artifact_workflow_progress import (
     workflow_step_record_ids,
 )
 from src.core.artifact_cancellation import ArtifactComputationCancelledError
+from src.core.artifact_geometry_metrics import (
+    ArtifactGeometryMetricsComputation,
+    geometry_metrics_receipt_from_record,
+)
 from src.core.artifact_outline_extractor import compute_artifact_outline
 from src.core.artifact_rubbing_extractor import (
     ArtifactRubbingComputation,
@@ -334,6 +338,38 @@ def test_cutline_executes_and_publishes_only_the_reserved_record_id() -> None:
         publication.session.document.record_freshness(publication.record_id).value
         == "fresh"
     )
+    assert controller.summary(item).state is MeasurementOperationState.COMPLETED
+
+
+def test_geometry_metrics_executes_and_publishes_guarded_exact_record() -> None:
+    session = _session()
+    workbench = ArtifactWorkbench(session=session, id_factory=SequentialIds())
+    controller = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
+    item = controller.begin_geometry_metrics(
+        coordinate_grid_um=1,
+        record_id="record:geometry-metrics:reserved",
+        created_at=STAMP,
+        operator="pytest",
+    )
+
+    assert item.kind is MeasurementOperationKind.GEOMETRY_METRICS
+    result = controller.execute(item)
+    assert isinstance(result.computation, ArtifactGeometryMetricsComputation)
+    receipt = result.computation.receipt_dict()
+    assert receipt["surface_area"]["decimal_mm2"] == "2400.000000"
+    assert receipt["volume"]["decimal_mm3"] == "8000.000000000"
+    assert receipt["volume"]["exact_rational_mm3"] == {
+        "denominator": "1",
+        "numerator": "8000",
+    }
+
+    publication = controller.publish_result(
+        item,
+        result,
+        _headless_publisher(workbench),
+    )
+    record = publication.session.document.record_index[publication.record_id]
+    assert geometry_metrics_receipt_from_record(record) == receipt
     assert controller.summary(item).state is MeasurementOperationState.COMPLETED
 
 

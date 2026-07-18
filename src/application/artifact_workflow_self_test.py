@@ -5,7 +5,8 @@ one tiny source is opened through the application authority boundary, explicitly
 aligned, measured through the required 3/6/6 sequence, embedded in an AMR, and
 reopened after the external source has been removed.  The reopened session then
 reproduces every authoritative Cutline/Outline 1:1 SVG and Digital Rubbing 1:1
-PNG package through the same export controllers used by the GUI.
+PNG package through the same export controllers used by the GUI.  It also
+publishes and revalidates one guarded geometry-metrics record.
 
 The fixture is intentionally tiny and the module imports neither Qt nor OpenGL,
 so the check remains deterministic and suitable for an offline Windows build.
@@ -40,6 +41,7 @@ from src.application.artifact_workflow_progress import (
     workflow_step_record_ids,
 )
 from src.core.artifact_rubbing_export import validate_rubbing_export_package
+from src.core.artifact_geometry_metrics import geometry_metrics_receipt_from_record
 from src.core.artifact_session import ArtifactSession
 from src.core.artifact_survey_export import validate_survey_export_package
 from src.core.artifact_verification import build_artifact_verification_report
@@ -115,6 +117,7 @@ class ArtifactWorkflowSelfTestResult:
     cutline_count: int
     outline_count: int
     rubbing_count: int
+    geometry_metrics_count: int
     vector_export_count: int
     rubbing_export_count: int
     vector_set_sha256: str
@@ -124,15 +127,23 @@ class ArtifactWorkflowSelfTestResult:
     field_pilot_contract: str
     svg_sha256: str
     png_sha256: str
+    surface_area_mm2_decimal: str
+    volume_mm3_decimal: str
 
     @property
     def record_count(self) -> int:
-        return self.cutline_count + self.outline_count + self.rubbing_count
+        return (
+            self.cutline_count
+            + self.outline_count
+            + self.rubbing_count
+            + self.geometry_metrics_count
+        )
 
     def detail(self) -> str:
         return (
             f"workflow=Open>Align>Cutline {self.cutline_count}/3>"
-            f"Outline {self.outline_count}/6>Rubbing {self.rubbing_count}/6, "
+            f"Outline {self.outline_count}/6>Rubbing {self.rubbing_count}/6>"
+            f"Metrics {self.geometry_metrics_count}/1, "
             f"records={self.record_count}, source={self.source_sha256[:12]}, "
             f"document={self.document_sha256[:12]}, "
             f"svg={self.svg_sha256[:12]}, png={self.png_sha256[:12]}, "
@@ -140,6 +151,8 @@ class ArtifactWorkflowSelfTestResult:
             f"rubbing {self.rubbing_export_count}/6, "
             f"vector_set={self.vector_set_sha256[:12]}, "
             f"rubbing_set={self.rubbing_set_sha256[:12]}, "
+            f"metrics=area {self.surface_area_mm2_decimal} mm2>"
+            f"volume {self.volume_mm3_decimal} mm3, "
             f"survey_manifest={self.survey_manifest_sha256[:12]}, "
             f"survey_set={self.survey_artifact_set_sha256[:12]}, "
             "survey=verified-atomic-15, "
@@ -492,6 +505,34 @@ def _run_in_directory(directory: Path) -> ArtifactWorkflowSelfTestResult:
         raise RuntimeError("explicit Align did not unlock measurement")
 
     measurements = ArtifactMeasurementController(workbench, id_factory=ids)
+    metrics_id = _measure_and_publish(
+        measurements,
+        measurements.begin_geometry_metrics(
+            coordinate_grid_um=1,
+            record_id="record:geometry-metrics:workflow-self-test",
+            created_at=_STAMP,
+            operator=_OPERATOR,
+        ),
+    )
+    metrics_session = workbench.snapshot.session
+    if not isinstance(metrics_session, ArtifactSession):
+        raise RuntimeError("geometry metrics publication lost the active session")
+    metrics_receipt = geometry_metrics_receipt_from_record(
+        metrics_session.document.record_index[metrics_id]
+    )
+    metrics_surface = _require_mapping(
+        metrics_receipt.get("surface_area"), label="geometry metrics surface area"
+    )
+    metrics_volume = _require_mapping(
+        metrics_receipt.get("volume"), label="geometry metrics volume"
+    )
+    if (
+        metrics_surface.get("decimal_mm2") != "24.000000"
+        or metrics_volume.get("status") != "available"
+        or metrics_volume.get("decimal_mm3") != "8.000000000"
+    ):
+        raise RuntimeError("geometry metrics receipt lost cube ground truth")
+
     cutline_ids: list[str] = []
     for view in REQUIRED_CUTLINE_VIEWS:
         item = measurements.begin_cutline(
@@ -578,6 +619,11 @@ def _run_in_directory(directory: Path) -> ArtifactWorkflowSelfTestResult:
     restored_counts = _assert_progress_complete(restored)
     if restored_counts != counts:
         raise RuntimeError("offline AMR reopen changed workflow progress")
+    restored_metrics = geometry_metrics_receipt_from_record(
+        restored.document.record_index[metrics_id]
+    )
+    if restored_metrics != metrics_receipt:
+        raise RuntimeError("offline AMR reopen changed geometry metrics")
     project_evidence = _verification_evidence(
         build_artifact_verification_report(recovered_path),
         artifact_kind="project",
@@ -692,6 +738,7 @@ def _run_in_directory(directory: Path) -> ArtifactWorkflowSelfTestResult:
         cutline_count=counts[0],
         outline_count=counts[1],
         rubbing_count=counts[2],
+        geometry_metrics_count=1,
         vector_export_count=len(vector_receipts),
         rubbing_export_count=len(rubbing_receipts),
         vector_set_sha256=_receipt_set_sha256(vector_receipts),
@@ -701,6 +748,8 @@ def _run_in_directory(directory: Path) -> ArtifactWorkflowSelfTestResult:
         field_pilot_contract="artifact-pass-human-driver-pending",
         svg_sha256=top_cutline["svg_sha256"],
         png_sha256=top_rubbing["png_sha256"],
+        surface_area_mm2_decimal=str(metrics_surface["decimal_mm2"]),
+        volume_mm3_decimal=str(metrics_volume["decimal_mm3"]),
     )
 
 

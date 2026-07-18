@@ -259,6 +259,9 @@ from src.core.project_recovery import (  # noqa: E402
     recover_interrupted_project_save as recover_amr_interrupted_save,
 )
 from src.core.artifact_document import ArtifactDocument  # noqa: E402
+from src.core.artifact_geometry_metrics import (  # noqa: E402
+    ArtifactGeometryMetricsComputation,
+)
 from src.core.artifact_scene_adapter import (  # noqa: E402
     ArtifactProjectionSnapshot,
 )
@@ -3745,8 +3748,8 @@ class MeasurePanel(QWidget):
         layout.setSpacing(10)
 
         hint = QLabel(
-            "Shift+클릭으로 메쉬 위에 점을 찍어 치수를 측정합니다.\n"
-            "거리=2점 선택 즉시 계산, 지름=3점 이상 선택 후 '지름 계산'을 누르세요."
+            "Shift+클릭 거리·지름은 현재 검토용입니다.\n"
+            "표면적·체적은 아래 버튼으로 원본·단위·Align·위상 QC가 결박된 기록을 만듭니다."
         )
         hint.setStyleSheet("color: #718096; font-size: 10px;")
         hint.setWordWrap(True)
@@ -3788,9 +3791,12 @@ class MeasurePanel(QWidget):
         btn_row.addStretch(1)
         mode_layout.addRow(btn_row)
 
-        self.btn_compute_volume = QPushButton("부피/면적 계산")
+        self.btn_compute_volume = QPushButton("검증 표면적·체적 계산 · 기록")
         set_pixel_icon(self.btn_compute_volume, "measure")
-        self.btn_compute_volume.setToolTip("선택된 메쉬의 표면적/부피를 계산합니다. (부피는 watertight 메쉬에서만 신뢰)")
+        self.btn_compute_volume.setToolTip(
+            "canonical mm 전체 메쉬를 1 µm 격자로 측정하고 위상 QC와 함께 기록합니다.\n"
+            "열린 메쉬·비다양체·방향 불일치·다중 조각이면 체적을 제공하지 않습니다."
+        )
         self.btn_compute_volume.clicked.connect(self.computeVolumeRequested.emit)
         mode_layout.addRow(self.btn_compute_volume)
 
@@ -15897,7 +15903,114 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def on_native_geometry_metrics_requested(self) -> None:
+        """Compute and publish one canonical-mm area/guarded-volume record."""
+
+        try:
+            obj = self.viewport.selected_obj
+            session = self._require_native_measurement_session(obj)
+            preflight = self._capture_native_scene_preflight(session)
+            controller = self._artifact_measurement_controller()
+            work_item = controller.begin_geometry_metrics(
+                coordinate_grid_um=1,
+                record_id=f"record:geometry-metrics:{uuid.uuid4()}",
+                created_at=self._utc_seconds_now(),
+                operator="local-user",
+            )
+        except Exception as exc:
+            self.status_info.setText("검증 제원 준비 실패 | 기존 문서 유지")
+            QMessageBox.warning(
+                self,
+                "검증 제원 준비 실패",
+                "원본·단위·Align이 확정된 native 문서가 필요합니다.\n\n"
+                f"{type(exc).__name__}: {exc}",
+            )
+            return
+
+        def on_done(result: object) -> None:
+            if self._native_measurement_callback_is_terminal(
+                controller,
+                work_item,
+                label="검증 제원",
+            ):
+                return
+            try:
+                if not isinstance(result, ArtifactMeasurementResult):
+                    raise ArtifactWorkbenchError(
+                        "geometry metrics worker result is invalid"
+                    )
+                self._publish_native_measurement_result(work_item, result)
+            except Exception as exc:
+                if self._report_artifact_authority_callback_failure(
+                    context="검증 제원 결과 게시 중 권위 확인 실패",
+                    detail=f"{type(exc).__name__}: {exc}",
+                ):
+                    return
+                pending = self._native_measurement_publication_is_pending(work_item)
+                self.status_info.setText(
+                    "검증 제원 결과 게시 보류 | 재시도 버튼 사용"
+                    if pending
+                    else "검증 제원 결과 폐기 | 현재 문서 유지"
+                )
+                QMessageBox.warning(
+                    self,
+                    "검증 제원 결과 게시 보류" if pending else "검증 제원 결과 폐기",
+                    f"{type(exc).__name__}: {exc}",
+                )
+
+        def on_failed(message: str) -> None:
+            if self._report_artifact_authority_callback_failure(
+                context="검증 제원 worker 종료 콜백",
+                detail=str(message),
+            ):
+                return
+            if self._native_measurement_callback_is_terminal(
+                controller,
+                work_item,
+                label="검증 제원",
+            ):
+                return
+            self.status_info.setText("검증 제원 계산 실패 | 기록을 만들지 않았습니다")
+            QMessageBox.warning(
+                self,
+                "검증 제원 계산 실패",
+                self._format_error_message(
+                    "표면적·체적 계산 중 오류가 발생했습니다:", message
+                ),
+            )
+
+        self.status_info.setText("검증 제원 계산 중 · canonical mm / 1 µm...")
+        started = self._start_task(
+            title="검증 제원",
+            label="표면적과 위상 검증 체적 계산 중...",
+            thread=TaskThread(
+                "native_geometry_metrics",
+                lambda: self._execute_native_measurement_with_preflight(
+                    preflight,
+                    controller,
+                    work_item,
+                ),
+            ),
+            on_done=on_done,
+            on_failed=on_failed,
+            on_cancel_requested=lambda: self._request_native_measurement_cancel(
+                controller,
+                work_item,
+                label="검증 제원",
+            ),
+            on_shutdown_joined=lambda: self._verify_native_measurement_shutdown(
+                controller,
+                work_item,
+            ),
+        )
+        if not started:
+            controller.cancel(work_item, reason="task_not_started")
+
     def compute_volume_stats(self) -> None:
+        if self._native_artifact_mode():
+            self.on_native_geometry_metrics_requested()
+            return
+
         panel = getattr(self, "measure_panel", None)
         if panel is None:
             return
@@ -17210,6 +17323,22 @@ class MainWindow(QMainWindow):
                 f"{int(computation.qc.get('selected_face_count', 0)):,}면 · "
                 f"foldover {int(computation.qc.get('foldover_face_count', 0))}"
             )
+        elif work_item.kind is MeasurementOperationKind.GEOMETRY_METRICS:
+            assert isinstance(computation, ArtifactGeometryMetricsComputation)
+            receipt = computation.receipt_dict()
+            surface = receipt["surface_area"]
+            volume = receipt["volume"]
+            assert isinstance(surface, dict)
+            assert isinstance(volume, dict)
+            volume_text = (
+                f"체적 {volume['decimal_mm3']} mm³"
+                if volume["status"] == "available"
+                else "체적 산출 보류(위상 QC)"
+            )
+            status_text = (
+                f"검증 제원 기록 | 표면적 {surface['decimal_mm2']} mm² · "
+                f"{volume_text}"
+            )
         else:  # pragma: no cover - closed enum guard
             raise ArtifactWorkbenchError(
                 f"unsupported native measurement kind: {work_item.kind.value}"
@@ -17295,10 +17424,53 @@ class MainWindow(QMainWindow):
                 publication.record_id,
                 computation.unwrap,
             )
-        else:
+        elif isinstance(computation, ArtifactVectorComputation):
             self._preview_native_vector_record(
                 publication.session,
                 publication.record_id,
+            )
+        elif isinstance(computation, ArtifactGeometryMetricsComputation):
+            receipt = computation.receipt_dict()
+            surface = receipt["surface_area"]
+            volume = receipt["volume"]
+            topology = receipt["topology"]
+            bounds = receipt["bounds_grid"]
+            assert isinstance(surface, dict)
+            assert isinstance(volume, dict)
+            assert isinstance(topology, dict)
+            assert isinstance(bounds, dict)
+            grid_um = int(receipt["coordinate_grid_um"])
+            minimum = np.asarray(bounds["minimum"], dtype=np.int64)
+            maximum = np.asarray(bounds["maximum"], dtype=np.int64)
+            extents_mm = (maximum - minimum).astype(np.float64) * grid_um / 1000.0
+            panel = getattr(self, "measure_panel", None)
+            if panel is not None:
+                panel.append_result(
+                    f"[검증 제원] record={publication.record_id} | grid={grid_um} µm"
+                )
+                panel.append_result(
+                    "- 크기: "
+                    f"{extents_mm[0]:.3f}×{extents_mm[1]:.3f}×{extents_mm[2]:.3f} mm"
+                )
+                panel.append_result(
+                    f"- 표면적: {surface['decimal_mm2']} mm²"
+                )
+                if volume["status"] == "available":
+                    panel.append_result(
+                        f"- 체적: {volume['decimal_mm3']} mm³ "
+                        f"(exact {volume['exact_rational_mm3']})"
+                    )
+                else:
+                    panel.append_result(
+                        "- 체적: 산출하지 않음 | "
+                        f"boundary={topology['boundary_edge_count']}, "
+                        f"non-manifold={topology['non_manifold_edge_count']}, "
+                        f"orientation={topology['orientation_mismatch_edge_count']}, "
+                        f"components={topology['connected_component_count']}"
+                    )
+        else:  # pragma: no cover - closed computation union
+            raise ArtifactWorkbenchError(
+                "published an unsupported native measurement computation"
             )
         self._sync_native_cutline_controls(reset_offset=False)
         return publication.record_id

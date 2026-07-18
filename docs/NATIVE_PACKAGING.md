@@ -72,7 +72,7 @@ python tools/build_portable_archive.py verify `
 11. canonical Cutline golden
 12. canonical Digital Rubbing golden
 13. 실제 PLY → 단위/Align session → embedded `.amr` 저장 → 외부 원본 삭제 → source/geometry/Align/world vertex 재검증
-14. 실제 application authority의 Open → explicit Align → Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6 → completed `.amr` offline reopen → 이동된 1:1 SVG/PNG와 원자적 `.amr-survey`의 원본 SHA-256·recipe·QC·aggregate hash 재검증. 이 check는 통합 verifier로 `.amr` embedded source materialization receipt를 만들고 개별 산출물과 15개 묶음을 exact project에 다시 결합한다. 이어 같은 pair로 field-pilot report를 만들되 실제 human/OpenGL 입력을 만들어내지 않고 `artifact-pass-human-driver-pending`인 fail-closed 상태를 요구한다.
+14. 실제 application authority의 Open → explicit Align → Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6 → 검증 제원 1/1 → completed `.amr` offline reopen → 이동된 1:1 SVG/PNG와 원자적 `.amr-survey`의 원본 SHA-256·recipe·QC·aggregate hash 재검증. 제원 record는 1 µm grid에서 cube 정답 24 mm²/8 mm³와 exact rational volume을 reopen 뒤 다시 확인한다. 이 check는 통합 verifier로 `.amr` embedded source materialization receipt를 만들고 개별 산출물과 15개 survey 묶음을 exact project에 다시 결합한다. 이어 같은 pair로 field-pilot report를 만들되 실제 human/OpenGL 입력을 만들어내지 않고 `artifact-pass-human-driver-pending`인 fail-closed 상태를 요구한다.
 
 Offscreen `QOpenGLWidget` 생성은 module/plugin 누락을 잡지만 실제 frame 정확성을 증명하지 않는다. Windows CI는 이어서 `QT_QPA_PLATFORM=windows`, `QT_OPENGL=software`로 native `qwindows`와 bundled `opengl32sw.dll`을 사용해 `src.gui.opengl_driver_smoke`를 실행한다. PyOpenGL의 GL/WGL dispatch도 같은 DLL에 결합해 Qt software context와 시스템 `opengl32.dll`이 섞이지 않게 한다. report는 768×768 실제 widget FBO, VBO, pixel/depth/pick과 두 투영 모드를 모두 검사한다.
 

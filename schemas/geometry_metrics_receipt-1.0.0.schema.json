@@ -1,0 +1,183 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:archmeshrubbing:schema:geometry-metrics-receipt:1.0.0",
+  "title": "ArchMeshRubbing Geometry Metrics Receipt 1.0.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "bounds_grid",
+    "coordinate_grid_um",
+    "coordinate_space",
+    "input_face_count",
+    "input_vertex_count",
+    "kind",
+    "measurement_basis",
+    "quantization",
+    "rounding_mode",
+    "schema_version",
+    "scope",
+    "surface_area",
+    "topology",
+    "volume"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0.0"},
+    "kind": {"const": "geometry_metrics"},
+    "coordinate_space": {"const": "canonical_aligned_mm/v1"},
+    "measurement_basis": {"const": "quantized_triangle_mesh/v1"},
+    "rounding_mode": {"const": "round_ties_to_even"},
+    "scope": {"const": "entire_active_geometry"},
+    "coordinate_grid_um": {"type": "integer", "minimum": 1, "maximum": 1000},
+    "input_vertex_count": {"type": "integer", "minimum": 3, "maximum": 5000000},
+    "input_face_count": {"type": "integer", "minimum": 1, "maximum": 2000000},
+    "bounds_grid": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["minimum", "maximum"],
+      "properties": {
+        "minimum": {"$ref": "#/$defs/gridVec3"},
+        "maximum": {"$ref": "#/$defs/gridVec3"}
+      }
+    },
+    "quantization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "changed_vertex_count",
+        "maximum_displacement_um",
+        "maximum_per_axis_error_um_exact"
+      ],
+      "properties": {
+        "changed_vertex_count": {"type": "integer", "minimum": 0, "maximum": 5000000},
+        "maximum_displacement_um": {"$ref": "#/$defs/decimal6"},
+        "maximum_per_axis_error_um_exact": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["numerator", "denominator"],
+          "properties": {
+            "numerator": {"type": "integer", "minimum": 1, "maximum": 1000},
+            "denominator": {"const": 2}
+          }
+        }
+      }
+    },
+    "surface_area": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "decimal_mm2", "decimal_places"],
+      "properties": {
+        "status": {"const": "available"},
+        "decimal_mm2": {"$ref": "#/$defs/decimal6"},
+        "decimal_places": {"const": 6}
+      }
+    },
+    "topology": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "boundary_edge_count",
+        "closed_edge_manifold",
+        "connected_component_count",
+        "consistently_oriented",
+        "degenerate_face_count",
+        "duplicate_face_count",
+        "edge_count",
+        "non_manifold_edge_count",
+        "orientation_mismatch_edge_count",
+        "referenced_vertex_count",
+        "unreferenced_vertex_count",
+        "zero_length_edge_count"
+      ],
+      "properties": {
+        "boundary_edge_count": {"type": "integer", "minimum": 0},
+        "closed_edge_manifold": {"type": "boolean"},
+        "connected_component_count": {"type": "integer", "minimum": 1},
+        "consistently_oriented": {"type": "boolean"},
+        "degenerate_face_count": {"type": "integer", "minimum": 0},
+        "duplicate_face_count": {"type": "integer", "minimum": 0},
+        "edge_count": {"type": "integer", "minimum": 1},
+        "non_manifold_edge_count": {"type": "integer", "minimum": 0},
+        "orientation_mismatch_edge_count": {"type": "integer", "minimum": 0},
+        "referenced_vertex_count": {"type": "integer", "minimum": 3},
+        "unreferenced_vertex_count": {"type": "integer", "minimum": 0},
+        "zero_length_edge_count": {"type": "integer", "minimum": 0}
+      }
+    },
+    "volume": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "policy",
+        "decimal_mm3",
+        "decimal_places",
+        "exact_rational_mm3",
+        "signed_six_grid_units3",
+        "winding"
+      ],
+      "properties": {
+        "status": {"enum": ["available", "unavailable_topology", "unavailable_zero"]},
+        "policy": {"const": "single_closed_consistently_oriented_edge_manifold_component/v1"},
+        "decimal_mm3": {
+          "anyOf": [{"$ref": "#/$defs/decimal9"}, {"type": "null"}]
+        },
+        "decimal_places": {"const": 9},
+        "exact_rational_mm3": {
+          "anyOf": [{"$ref": "#/$defs/positiveRational"}, {"type": "null"}]
+        },
+        "signed_six_grid_units3": {
+          "anyOf": [{"$ref": "#/$defs/signedIntegerString"}, {"type": "null"}]
+        },
+        "winding": {"enum": ["positive", "negative", "not_evaluated"]}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"status": {"const": "available"}}},
+          "then": {
+            "properties": {
+              "decimal_mm3": {"$ref": "#/$defs/decimal9"},
+              "exact_rational_mm3": {"$ref": "#/$defs/positiveRational"},
+              "signed_six_grid_units3": {"$ref": "#/$defs/signedNonZeroIntegerString"},
+              "winding": {"enum": ["positive", "negative"]}
+            }
+          },
+          "else": {
+            "properties": {
+              "decimal_mm3": {"type": "null"},
+              "exact_rational_mm3": {"type": "null"},
+              "signed_six_grid_units3": {"type": "null"},
+              "winding": {"const": "not_evaluated"}
+            }
+          }
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "gridVec3": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {
+        "type": "integer",
+        "minimum": -9007199254740991,
+        "maximum": 9007199254740991
+      }
+    },
+    "decimal6": {"type": "string", "pattern": "^(0|[1-9][0-9]*)\\.[0-9]{6}$"},
+    "decimal9": {"type": "string", "pattern": "^(0|[1-9][0-9]*)\\.[0-9]{9}$"},
+    "unsignedIntegerString": {"type": "string", "pattern": "^(0|[1-9][0-9]*)$"},
+    "signedIntegerString": {"type": "string", "pattern": "^(0|-?[1-9][0-9]*)$"},
+    "signedNonZeroIntegerString": {"type": "string", "pattern": "^-?[1-9][0-9]*$"},
+    "positiveIntegerString": {"type": "string", "pattern": "^[1-9][0-9]*$"},
+    "positiveRational": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["numerator", "denominator"],
+      "properties": {
+        "numerator": {"$ref": "#/$defs/positiveIntegerString"},
+        "denominator": {"$ref": "#/$defs/positiveIntegerString"}
+      }
+    }
+  }
+}

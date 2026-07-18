@@ -200,7 +200,7 @@ ArtifactDocument
 | `GeometryRevision` | 결정적 import 결과의 별도 geometry hash·hash scope, source asset ID, import recipe, topology-map reference, QC |
 | `SourceMetadataRevision` | geometry의 단위·축 매핑·handedness와 `source_to_canonical_mm`; parent revision |
 | `AlignRevision` | confirmed metadata 위에 적용할 proper rigid 4×4 행렬, parent revision, recipe, QC |
-| `DerivedRecord` | geometry/Align revision에 묶인 cutline·outline·rubbing·tile unwrap 등의 payload reference, recipe/hash, selection hash, dependency, QC, lifecycle |
+| `DerivedRecord` | geometry/Align revision에 묶인 cutline·outline·rubbing·tile unwrap·geometry metrics 등의 payload reference, recipe/hash, selection hash, dependency, QC, lifecycle |
 
 SourceAsset hash와 GeometryRevision hash는 같은 개념이 아니다. 전자는 정확한 입력 바이트, 후자는 decode·triangulation·sanitize 등 import recipe를 거친 geometry identity다. 1.0의 geometry hash scope는 `positions-f64le+triangles-i32le/v1`로 명시하여 바이트 인코딩과 topology 범위를 hash와 함께 고정한다. 대형 vertex·face·point 배열은 manifest JSON에 직접 넣지 않고 reference로 연결한다.
 
@@ -291,8 +291,8 @@ M0-3에서 시작한 durable core와 현재 native GUI/application 경계는 다
 - Align commit과 parent activation은 GUI에서 immutable session, exact scene binding, preview TRS/pivot와 Workbench version만 캡처한다. source geometry hash 검증, candidate session 생성과 canonical materialization은 application-modal locked worker에서 수행한다. 완료 시 object/mesh/binding/preview, session/state version/authority epoch와 project path가 capture와 모두 같아야만 GUI thread의 VBO 준비·two-phase scene publication으로 넘어간다. 변경된 late result는 document나 scene을 수정하지 않고 폐기한다.
 - artifact project reopen은 embedded source가 있으면 별도 picker 없이 background worker에서 package와 source bytes를 검증하고 saved parser/unit으로 CPU staging한다. manifest-only 문서만 외부 source resolver를 사용한다. corrupt embedded package를 external/legacy 경로로 fallback하지 않는다. `ArtifactWorkbench`는 한 pending Open ticket과 `state_version`/`authority_epoch`를 검증하고, candidate projection을 준비한 뒤 scene notification 동안에만 tentative authority로 활성화한다. scene swap 성공 후 finalize하고, 실패하면 이전 session·scene·project path로 rollback한다. observer는 finalize 전 candidate를 보지 않는다.
 - rollback·scene 복원·finalize 자체가 실패해 application authority와 live scene의 일치를 증명할 수 없으면 fatal authority 상태로 전환한다. 이 상태에서는 ordinary Save target을 해제하고 저장·실측·내보내기를 모두 거부하며, 검증된 새 Open만 정상 authority를 회복한다.
-- artifact save는 active document만 쓰기 전에 정확히 한 projection, current snapshot, identity preview, source에서 재현한 vertices/faces 일치, destructive bake 부재를 확인한다. desktop은 immutable session과 Workbench state/authority version, 기존 project path를 캡처하고 이 geometry 비교부터 source closure 재검증·ZIP64/fsync·staged package 재개방/materialization까지 worker에서 실행한다. atomic writer 완료 뒤 캡처 권위가 달라졌으면 만들어진 파일은 과거 snapshot으로 보고하며 현재 project path와 Save As/migration 상태를 갱신하지 않는다. 경로 채택은 Workbench의 exact session/state/epoch CAS이며 성공 시 path-only state version만 전진한다. `ALIGN_REQUIRED` document 자체는 보존할 수 있지만 Cutline/Outline/Digital Rubbing/기와 전개 계산과 vector/rubbing/survey/tile-unwrap export는 명시적 Align 전까지 차단한다. 아직 `DerivedRecord`로 승격되지 않은 cutline·선택·기록면·평가 등의 결과가 하나라도 있으면 누락한 채 저장하지 않고 fail closed한다.
-- Cutline/Outline/Digital Rubbing/기와 전개는 application layer가 canonical recipe, projection context, exact record ID와 result capability를 소유한다. GUI handler는 projection binding·TRS·transient mutation만 확인하고, canonical source materialization과 live vertex/face exact comparison은 controller 실행 경계의 worker preflight에서 수행한다. worker는 session을 commit하지 않고 computation만 반환하며, 완료 시 captured document가 current document의 immutable ancestor이고 active source/metadata/Align/matrix가 같을 때만 current session에 rebase하여 expected record ID 하나를 publish한다. DerivedRecord append는 `RecordBindingTransition`으로 live object의 immutable document snapshot만 CAS하고 기존 mesh/VBO를 보존한다. 일반 scene selection은 유지하되, 기와 ‘현재 선택 면’ recipe와 live selection이 게시 시점에도 정확히 같으면 record로 소비된 선택만 비운다. Align/Open finalize 뒤 늦은 결과는 되살아나지 않는다. pending Open이나 rollback 가능한 binding 준비 실패는 계산 결과와 예약 ID를 보존해 명시적으로 재시도하며, 그동안 저장과 새 실측을 차단한다. Rubbing begin은 geometry·UV·texture 복사를 포함한 최소 admission만 예약하고, worker가 해상도별 전체 peak-memory estimate를 계산해 공유 budget 안에서 원자 확장한다. preflight 실패·취소는 같은 terminal 상태 머신에서 예약을 해제하며 실행은 exactly-once다.
+- artifact save는 active document만 쓰기 전에 정확히 한 projection, current snapshot, identity preview, source에서 재현한 vertices/faces 일치, destructive bake 부재를 확인한다. desktop은 immutable session과 Workbench state/authority version, 기존 project path를 캡처하고 이 geometry 비교부터 source closure 재검증·ZIP64/fsync·staged package 재개방/materialization까지 worker에서 실행한다. atomic writer 완료 뒤 캡처 권위가 달라졌으면 만들어진 파일은 과거 snapshot으로 보고하며 현재 project path와 Save As/migration 상태를 갱신하지 않는다. 경로 채택은 Workbench의 exact session/state/epoch CAS이며 성공 시 path-only state version만 전진한다. `ALIGN_REQUIRED` document 자체는 보존할 수 있지만 Cutline/Outline/Digital Rubbing/기와 전개/검증 제원 계산과 vector/rubbing/survey/tile-unwrap export는 명시적 Align 전까지 차단한다. 아직 `DerivedRecord`로 승격되지 않은 cutline·선택·기록면·평가 등의 결과가 하나라도 있으면 누락한 채 저장하지 않고 fail closed한다.
+- Cutline/Outline/Digital Rubbing/기와 전개/검증 제원은 application layer가 canonical recipe, projection context, exact record ID와 result capability를 소유한다. GUI handler는 projection binding·TRS·transient mutation만 확인하고, canonical source materialization과 live vertex/face exact comparison은 controller 실행 경계의 worker preflight에서 수행한다. worker는 session을 commit하지 않고 computation만 반환하며, 완료 시 captured document가 current document의 immutable ancestor이고 active source/metadata/Align/matrix가 같을 때만 current session에 rebase하여 expected record ID 하나를 publish한다. DerivedRecord append는 `RecordBindingTransition`으로 live object의 immutable document snapshot만 CAS하고 기존 mesh/VBO를 보존한다. 일반 scene selection은 유지하되, 기와 ‘현재 선택 면’ recipe와 live selection이 게시 시점에도 정확히 같으면 record로 소비된 선택만 비운다. Align/Open finalize 뒤 늦은 결과는 되살아나지 않는다. pending Open이나 rollback 가능한 binding 준비 실패는 계산 결과와 예약 ID를 보존해 명시적으로 재시도하며, 그동안 저장과 새 실측을 차단한다. Rubbing begin은 geometry·UV·texture 복사를 포함한 최소 admission만 예약하고, worker가 해상도별 전체 peak-memory estimate를 계산해 공유 budget 안에서 원자 확장한다. preflight 실패·취소는 같은 terminal 상태 머신에서 예약을 해제하며 실행은 exactly-once다.
 - vector/rubbing/survey/tile-unwrap export는 exact work item/result capability를 별도로 예약한다. worker는 비싼 SVG 생성, Rubbing 또는 tile-unwrap recipe 재계산·receipt 비교, package 전체 검증을 수행하고 destination·parent·staging inode·member fingerprint에 묶인 prepared capability까지 만든다. survey export는 dependency-valid 3/6/6의 exact record 15개를 canonical 순서로 캡처하고 6개 raster를 다시 계산한 뒤 부모 tree 전체를 fingerprint한다. final dispatcher는 current source session, render projection과 캡처한 모든 `READY + FRESH` record를 Workbench lock에서 다시 확인한 뒤 빠른 fingerprint 재확인과 atomic no-replace rename만 실행한다. 같은 Align의 append-only record 추가는 허용하고 Align/Open 완료는 destination을 만들지 않은 채 stale 처리한다. pending Open은 core에서 재시도 가능한 stage로 남지만 현재 GUI는 안전하게 정리하고 Open 완료 후 재실행을 안내한다.
 - `Open → Align commit → save → independent-process load → source rebind → materialize` 왕복을 별도 프로세스에서 검증한다.
 
@@ -416,6 +416,34 @@ sidecar는 primary source file SHA-256/size/scope, v2 source manifest dependency
 sidecar의 normative claim 전체(artifact descriptor 제외)는 RFC 8785 SHA-256으로 묶어 SVG metadata에 넣고, sidecar는 SVG exact-byte SHA-256을 가진다. 이 비순환 결합은 한 파일만 바뀐 손상을 검출한다. 원본 문서를 함께 줄 때 validator는 document manifest/record와도 대조한다. 문서 없이 relocation한 package도 독립 프로세스에서 payload/claim/SVG 구조와 hash를 offline 검증할 수 있다.
 
 이 hash들은 무결성 값이지 디지털 서명이 아니다. 누군가 sidecar와 SVG를 모두 다시 만들고 모든 hash를 갱신하는 공격에 대한 제작자 진위 증명은 별도의 서명 규약이 필요하다. 기존 screenshot/flatten PNG·DPI export는 1:1 측정 증거로 승격하지 않으며 review image로만 취급한다. 아래 canonical Digital Rubbing PNG만 별도의 raster 계약을 가진다.
+
+## 검증 제원 `measurement.geometry_metrics.v1`
+
+native 제원 버튼은 mutable scene의 cache, object scale 또는 Trimesh 표시값을 저장하지 않는다. 활성 source/metadata/Align을 fresh canonical world millimeter로 materialize하고, `artifact_geometry_metrics.py`가 전체 triangle mesh를 명시적인 1 µm 격자에 ties-to-even으로 양자화한 뒤 receipt를 만든다. machine-readable 계약은 `schemas/geometry_metrics_receipt-1.0.0.schema.json`이다.
+
+```text
+DerivedRecord(type=measurement.geometry_metrics.v1)
+├── geometry_ref: urn:archmeshrubbing:geometry-metrics-receipt:sha256:<JCS digest>
+├── recipe
+│   ├── coordinate_space: canonical_aligned_mm/v1
+│   ├── coordinate_grid_um: 1
+│   ├── rounding_mode: round_ties_to_even
+│   └── volume_policy: single_closed_consistently_oriented_edge_manifold_component/v1
+└── receipt
+    ├── integer grid bounds와 최대 양자화 변위
+    ├── surface_area.decimal_mm2: 고정 6자리
+    ├── topology: boundary/non-manifold/orientation/duplicate/degenerate/component QC
+    └── volume
+        ├── decimal_mm3: 고정 9자리 presentation
+        └── exact_rational_mm3 + signed_six_grid_units3
+```
+
+- 표면적은 양자화된 모든 triangle의 면적을 고정 순서로 합산하며 빈 결과나 양의 면적이 없는 결과를 거부한다.
+- 체적은 boundary edge 0, non-manifold edge 0, orientation mismatch 0, duplicate/degenerate face 0인 단일 연결 component에서만 계산한다. 이 v1 조건은 full vertex-manifold 증명을 주장하지 않으므로 정책 이름에 `edge_manifold`를 명시한다.
+- 유효한 체적은 grid 정수 좌표에서 계산한 signed six-volume을 exact rational mm³로 약분해 보존한다. 9자리 decimal은 이 유리수에서 재계산하며 독립 권위 값이 아니다.
+- 열린 scan, 서로 분리된 조각, 방향이 뒤집힌 일부 face, 비다양체에서는 표면적과 topology QC는 기록하되 체적 field를 `unavailable_topology`로 닫는다. convex-hull 근사값이나 자동 repair 결과를 체적으로 대체하지 않는다.
+- receipt, byte length, RFC 8785 hash, geometry ref, recipe grid와 QC 복제값을 project load/save마다 known-record registry에서 다시 검증한다. 현재 독립 package export는 없으며 self-contained `.amr`가 이 record의 전달 단위다.
+- Shift+클릭 거리·지름은 아직 viewport pick의 durable triangle/barycentric anchor가 없으므로 검토용 UI로 남고 이 record type으로 승격하지 않는다.
 
 ## Authoritative tile unwrap record와 `.amr-unwrap`
 
