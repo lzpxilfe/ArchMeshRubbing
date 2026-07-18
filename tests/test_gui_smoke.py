@@ -527,7 +527,53 @@ def test_mesh_load_thread_passes_exact_import_recipe_to_loader() -> None:
             source_format="ply",
             import_recipe=recipe,
             capture_dependencies=True,
+            compute_face_normals=True,
         )
+    finally:
+        thread.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_authoritative_mesh_load_thread_skips_eager_geometry_caches() -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    recipe = current_mesh_import_recipe("ply")
+    mesh_data = SimpleNamespace(
+        vertices=np.zeros((3, 3), dtype=np.float64),
+        faces=np.array([[0, 1, 2]], dtype=np.int32),
+        face_normals=None,
+        n_faces=1,
+        _bounds=None,
+        _centroid=None,
+        _surface_area=None,
+        compute_normals=Mock(),
+    )
+    loader = Mock()
+    loader.load.return_value = mesh_data
+    thread = MeshLoadThread(
+        "/source/artifact.ply",
+        1.0,
+        "mm",
+        source_format="ply",
+        import_recipe=recipe,
+        capture_dependencies=True,
+        authoritative=True,
+    )
+    try:
+        with patch("app_interactive.MeshLoader", return_value=loader):
+            thread.run()
+
+        loader.load.assert_called_once_with(
+            "/source/artifact.ply",
+            source_format="ply",
+            import_recipe=recipe,
+            capture_dependencies=True,
+            compute_face_normals=False,
+        )
+        mesh_data.compute_normals.assert_not_called()
+        assert mesh_data._centroid is None
     finally:
         thread.deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)

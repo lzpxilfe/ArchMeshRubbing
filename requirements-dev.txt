@@ -1,5 +1,7 @@
-# Reproducible local/CI quality tooling. Runtime dependencies stay in
-# requirements.txt and are installed alongside this file.
+# Pinned top-level local/CI quality tooling. This file is not a transitive or
+# wheel-hashed release lock; runtime dependencies are installed alongside it
+# from requirements.txt. The Windows portable build uses the separate hashed
+# wheel closure.
 pytest==9.1.1
 pyright==1.1.411
 ruff==0.15.7

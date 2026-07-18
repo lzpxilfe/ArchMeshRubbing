@@ -134,6 +134,10 @@ def _validate_root_directory(value: object) -> str:
     if not isinstance(value, str) or "/" in value or "\\" in value:
         raise PortableArchiveError("portable root directory is invalid")
     _validate_component(value, label="portable root directory")
+    if value != PORTABLE_ARCHIVE_ROOT:
+        raise PortableArchiveError(
+            f"portable root directory must be {PORTABLE_ARCHIVE_ROOT!r}"
+        )
     return value
 
 
@@ -499,6 +503,11 @@ def _validated_manifest(path: Path, *, archive_name: str) -> dict[str, Any]:
     if not isinstance(evidence["source_commit"], str) or _COMMIT_RE.fullmatch(evidence["source_commit"]) is None:
         raise PortableArchiveError("portable source commit is invalid")
     entry_by_path = {str(entry["path"]): entry for entry in validated_entries}
+    launcher_entry = entry_by_path.get("ArchMeshRubbing.exe")
+    if launcher_entry is None or int(launcher_entry["size"]) <= 0:
+        raise PortableArchiveError(
+            "portable archive does not contain the Windows launcher"
+        )
     evidence_entry = entry_by_path.get(evidence_path)
     if evidence_entry is None or evidence_entry["sha256"] != evidence["sha256"]:
         raise PortableArchiveError("portable archive does not bind its release evidence")

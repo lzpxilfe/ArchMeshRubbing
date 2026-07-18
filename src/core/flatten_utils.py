@@ -364,15 +364,34 @@ def _robust_circle_fit_2d(x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, flo
 
     def _fit(x1: np.ndarray, y1: np.ndarray) -> tuple[np.ndarray, float] | None:
         try:
-            A = np.column_stack([2.0 * x1, 2.0 * y1, np.ones_like(x1)])
-            b = x1 * x1 + y1 * y1
-            sol, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
+            origin_x = float(np.mean(x1))
+            origin_y = float(np.mean(y1))
+            local_x = x1 - origin_x
+            local_y = y1 - origin_y
+            scale = float(
+                max(
+                    np.max(np.abs(local_x)),
+                    np.max(np.abs(local_y)),
+                )
+            )
+            if not np.isfinite(scale) or scale <= 1e-12:
+                return None
+            local_x = local_x / scale
+            local_y = local_y / scale
+            A = np.column_stack(
+                [2.0 * local_x, 2.0 * local_y, np.ones_like(local_x)]
+            )
+            rhs = local_x * local_x + local_y * local_y
+            sol, _, _, _ = np.linalg.lstsq(A, rhs, rcond=None)
             a, b0, c = [float(v) for v in sol]
             r2 = float(c + a * a + b0 * b0)
-            r = float(np.sqrt(max(r2, 0.0)))
+            r = float(np.sqrt(max(r2, 0.0)) * scale)
             if not np.isfinite(r) or r <= 1e-12:
                 return None
-            return np.array([a, b0], dtype=np.float64), r
+            return np.array(
+                [origin_x + (a * scale), origin_y + (b0 * scale)],
+                dtype=np.float64,
+            ), r
         except Exception:
             return None
 

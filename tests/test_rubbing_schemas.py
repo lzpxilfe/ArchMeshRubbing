@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib
 import json
 from pathlib import Path
@@ -110,7 +111,13 @@ class TestRubbingSchemas(unittest.TestCase):
         jsonschema = importlib.import_module("jsonschema")
         referencing = importlib.import_module("referencing")
         cls.receipt_schema = _load_schema("rubbing_receipt-1.0.0.schema.json")
-        cls.export_schema = _load_schema("rubbing_export-1.0.0.schema.json")
+        cls.export_schema = _load_schema("rubbing_export-1.1.0.schema.json")
+        cls.legacy_export_schema = _load_schema(
+            "rubbing_export-1.0.0.schema.json"
+        )
+        cls.mesh_admission_schema = _load_schema(
+            "mesh_admission_receipt-1.0.0.schema.json"
+        )
         cls.import_recipe_schema = _load_schema(
             "mesh_import_recipe-1.0.0.schema.json"
         )
@@ -119,12 +126,22 @@ class TestRubbingSchemas(unittest.TestCase):
         )
         jsonschema.Draft202012Validator.check_schema(cls.receipt_schema)
         jsonschema.Draft202012Validator.check_schema(cls.export_schema)
+        jsonschema.Draft202012Validator.check_schema(cls.legacy_export_schema)
+        jsonschema.Draft202012Validator.check_schema(cls.mesh_admission_schema)
         jsonschema.Draft202012Validator.check_schema(cls.import_recipe_schema)
         jsonschema.Draft202012Validator.check_schema(cls.import_recipe_v2_schema)
         cls.receipt_validator = jsonschema.Draft202012Validator(cls.receipt_schema)
         registry = referencing.Registry().with_resource(
             cls.receipt_schema["$id"],
             referencing.Resource.from_contents(cls.receipt_schema),
+        )
+        registry = registry.with_resource(
+            cls.legacy_export_schema["$id"],
+            referencing.Resource.from_contents(cls.legacy_export_schema),
+        )
+        registry = registry.with_resource(
+            cls.mesh_admission_schema["$id"],
+            referencing.Resource.from_contents(cls.mesh_admission_schema),
         )
         registry = registry.with_resource(
             cls.import_recipe_schema["$id"],
@@ -140,6 +157,13 @@ class TestRubbingSchemas(unittest.TestCase):
         )
         cls.receipt, cls.sidecar = _generated_receipt_and_sidecar()
 
+    def test_legacy_export_schema_remains_byte_exact(self) -> None:
+        payload = (ROOT / "schemas" / "rubbing_export-1.0.0.schema.json").read_bytes()
+        self.assertEqual(
+            hashlib.sha256(payload).hexdigest(),
+            "31cc5dd55a8ce2acce934fd7fdd3211093f58a80a7b5259d8d6f52f7cb50ac89",
+        )
+
     def assert_schema_valid(self, validator, value: object) -> None:
         errors = sorted(validator.iter_errors(value), key=lambda item: list(item.path))
         self.assertEqual([error.message for error in errors], [])
@@ -150,6 +174,7 @@ class TestRubbingSchemas(unittest.TestCase):
     def test_generated_receipt_and_export_sidecar_validate(self) -> None:
         self.assert_schema_valid(self.receipt_validator, self.receipt)
         self.assert_schema_valid(self.export_validator, self.sidecar)
+        self.assertEqual(self.sidecar["schema_version"], "1.1.0")
         provenance = self.sidecar["provenance"]
         assert isinstance(provenance, dict)
         geometry = provenance["geometry_revision"]
@@ -271,6 +296,36 @@ class TestRubbingSchemas(unittest.TestCase):
         assert isinstance(import_recipe, dict)
         import_recipe["runtime_lock_sha256"] = "not-a-sha256"
         cases.append(("import_recipe_tampered", import_recipe_tampered))
+
+        missing_admission = copy.deepcopy(self.sidecar)
+        provenance = missing_admission["provenance"]
+        assert isinstance(provenance, dict)
+        geometry = provenance["geometry_revision"]
+        assert isinstance(geometry, dict)
+        geometry_qc = geometry["qc"]
+        assert isinstance(geometry_qc, dict)
+        geometry_qc.pop("import_admission")
+        cases.append(("missing_admission", missing_admission))
+
+        legacy_align_qc = copy.deepcopy(self.sidecar)
+        provenance = legacy_align_qc["provenance"]
+        assert isinstance(provenance, dict)
+        align = provenance["align_revision"]
+        assert isinstance(align, dict)
+        align["qc"] = {"rigid": True}
+        cases.append(("legacy_align_qc", legacy_align_qc))
+
+        invalid_root = copy.deepcopy(self.sidecar)
+        provenance = invalid_root["provenance"]
+        assert isinstance(provenance, dict)
+        ancestry = provenance["align_ancestry"]
+        assert isinstance(ancestry, list)
+        root = ancestry[0]
+        assert isinstance(root, dict)
+        matrix = root["matrix4x4"]
+        assert isinstance(matrix, list)
+        matrix[0][3] = 1.0
+        cases.append(("invalid_align_root", invalid_root))
 
         for label, value in cases:
             with self.subTest(label=label):

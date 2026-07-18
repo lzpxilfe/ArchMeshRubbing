@@ -26,6 +26,7 @@ import stat
 from threading import Event, RLock
 import uuid
 
+from src.core.artifact_cancellation import CancellationProbe
 from src.core.artifact_document import (
     DerivedRecord,
     RecordFreshness,
@@ -570,7 +571,12 @@ class ArtifactExportController:
             raise ArtifactExportError("staged export package is not a real directory")
         return _StagingIdentity(device=identity.st_dev, inode=identity.st_ino)
 
-    def _stage(self, work_item: ArtifactExportWorkItem) -> Path:
+    def _stage(
+        self,
+        work_item: ArtifactExportWorkItem,
+        *,
+        cancellation_probe: CancellationProbe | None = None,
+    ) -> Path:
         session = work_item.captured_session
         record = work_item.expected_record
         if work_item.kind is ArtifactExportKind.VECTOR:
@@ -585,6 +591,7 @@ class ArtifactExportController:
             computation = compute_artifact_tile_unwrap_from_recipe(
                 session,
                 record.recipe,
+                cancellation_probe=cancellation_probe,
             )
             require_current_tile_unwrap_computation(session, computation)
             receipt = tile_unwrap_receipt_from_record(record)
@@ -729,7 +736,10 @@ class ArtifactExportController:
         prepared: PreparedExportPublication | None = None
         try:
             self._raise_if_cancelled(runtime)
-            staging = self._stage(work_item)
+            staging = self._stage(
+                work_item,
+                cancellation_probe=runtime.cancellation.is_set,
+            )
             cleanup_result = ArtifactExportResult(
                 operation_id=work_item.id,
                 kind=work_item.kind,

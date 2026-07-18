@@ -1,12 +1,15 @@
 # 현장 파일럿 증거 절차
 
-이 절차는 한 유물, 한 Windows 64-bit 컴퓨터, 한 ArchMeshRubbing 빌드에서 수행한 실측을 재검토 가능한 JSON 기록으로 묶는다. 결과는 대표 유물군 전체의 성능, 제품 출시 승인, 서명된 출처 증명이 아니다. 실제 고고학자의 판정 없이 `verified`가 될 수 없다.
+이 절차는 한 유물, 한 지원 대상 Windows x64 컴퓨터, 한 ArchMeshRubbing 빌드에서 수행한 실측을 재검토 가능한 JSON 기록으로 묶는다. 지원 대상은 Windows 10 version 1809(build 17763) 이상 x64와 Windows 11 x64이며, 최소 버전은 고정한 Qt 6.11의 [공식 지원 플랫폼](https://doc.qt.io/qt-6.11/supported-platforms.html)을 따른다. Windows client Workstation, native AMD64 host, 64-bit AMD64 process, CPython 3.12이고 Wine/Proton 호환 계층이 아님이 모두 확인돼야 `windows_runtime=pass`가 된다. 결과는 대표 유물군 전체의 성능, 제품 출시 승인, 서명된 출처 증명이 아니다. 실제 고고학자의 판정 없이 `verified`가 될 수 없다.
+
+GitHub-hosted Windows runner는 자동 회귀 증거일 뿐 현장 파일럿 컴퓨터가 아니다. 공개 전 Windows 10과 Windows 11의 실제 소비자용 PC에서 각각 이 절차를 수행해야 하며, 비 Windows 환경·호환 계층·Windows ARM64·32-bit·Server 결과는 지원 판정에 포함하지 않는다.
 
 ## 준비물
 
 - 완료된 self-contained `PROJECT.amr`
 - 같은 프로젝트의 `Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6`을 담은 `SURVEY.amr-survey`
 - 해당 Windows 빌드에서 생성한 native OpenGL driver-smoke report
+- Windows 10 version 1809 이상 x64 또는 Windows 11 x64를 실행하는 실제 대상 PC
 - 고고학자가 닫힌 항목을 직접 판정한 review JSON
 - 1:1 출력물을 확인할 자 또는 캘리퍼스와, 필요하면 Illustrator 등 실제 사용 프로그램
 
@@ -20,7 +23,7 @@
 ArchMeshRubbing.exe --opengl-driver-smoke-report windows-opengl.json
 ```
 
-source checkout이라면 `python main.py`로 같은 옵션을 실행할 수 있다. report는 native `qwindows` context, 24-bit 이상 depth buffer, 두 투영 모드, 실제 pixel/depth/pick 검사와 정리 성공을 포함해야 한다. 파일럿 CLI는 OpenGL report의 runtime lock SHA-256을 현재 실행 빌드와 대조하고, 양쪽 commit이 알려진 경우 commit도 같아야 통과시킨다.
+source checkout이라면 `python main.py`로 같은 옵션을 실행할 수 있다. OpenGL report v2는 native `qwindows` context, 24-bit 이상 depth buffer, 닫힌 전체 check ID 집합, perspective/top-orthographic 두 투영 receipt, 실제 pixel/depth/pick 검사와 정리 성공을 포함한다. 파일럿 CLI는 runtime lock SHA-256을 현재 실행 빌드와 대조한다. 현재 빌드 commit이 알려져 있으면 smoke commit도 `unknown`으로 낮출 수 없고 정확히 같아야 하며, frozen build manifest가 있으면 `source_tree`도 manifest와 같아야 한다. 또한 smoke process가 저장한 Windows version/product type·native/process architecture·Python·호환 계층 self-claim이 report를 조립하는 process의 claim과 정확히 같고 둘 다 지원 client 계약을 만족해야 한다. smoke는 최종 report보다 미래일 수 없고 24시간 안에 생성된 v2여야 하므로, 과거 v1·부분 JSON·오래된 재사용 report·Server runner report는 파일럿 근거가 되지 않는다.
 
 ## 2. 검토 양식 생성
 
@@ -71,9 +74,9 @@ ArchMeshRubbing.exe --field-pilot PROJECT.amr SURVEY.amr-survey ^
 
 - `.amr`의 embedded source, 단위·축, geometry, Align, record를 production loader로 재물질화
 - `.amr-survey`의 15개 자식 package, 9개 1:1 SVG, 6개 1:1 PNG, aggregate hash를 exact project와 재검증
-- OpenGL report의 Windows native context와 현재 빌드 결합 확인
+- OpenGL report v2의 닫힌 actual-frame receipt, 지원 Windows client runtime self-claim, 현재 파일럿 process·빌드·24시간 시간창 결합 확인
 - human review의 닫힌 필드와 정량 scale 판정 확인
-- OS·architecture·RAM·peak working set과 project/survey 검증 시간을 기록
+- 숫자형 Windows major/minor/build·product type, native/process architecture, Python 구현·버전, RAM·peak working set과 project/survey 검증 시간을 기록
 - canonical RFC 8785 JSON, semantic `pilot_sha256`, `authentication=none`을 갖는 report를 no-overwrite 원자 게시
 
 종료 코드는 `verified`일 때 `0`, 유효하지만 `failed` 또는 `incomplete`인 report를 게시했을 때 `1`, 옵션·입력 review·출력 게시 오류일 때 `2`다. `--review`나 `--opengl-report`를 생략해도 근거 부족을 숨기지 않는 `incomplete` report가 만들어지고 종료 코드 `1`을 반환한다.
@@ -83,9 +86,11 @@ ArchMeshRubbing.exe --field-pilot PROJECT.amr SURVEY.amr-survey ^
 - project와 exact-project survey 검증 `pass`
 - human review 열 항목 전부 `pass`
 - Windows native OpenGL report `pass`
-- report를 만든 프로세스가 Windows 64-bit
+- report를 만든 환경이 Windows 10 build 17763 이상 또는 Windows 11 client Workstation, native AMD64, 64-bit AMD64 process, CPython 3.12이며 Wine/Proton 호환 계층이 아닌 계약을 모두 충족
 
 하나라도 명시적으로 실패하면 `failed`, 아직 시험하지 않은 근거가 있으면 `incomplete`다.
+
+report 1.1은 저장된 숫자형 OS build와 Windows product type, `IsWow64Process2`로 확인한 native machine, Wine export 탐지 결과, process architecture/bitness와 Python 구현·버전으로 이 계약을 다시 계산한다. 값을 수집할 수 없거나 Windows Server·ARM64·32-bit·구버전 Windows·Wine/Proton·CPython 3.12 외 환경이면 `windows_runtime=not_target`이며 `verified`가 될 수 없다. OpenGL v2의 같은 runtime 필드도 별도로 저장해 report machine과 교차 검증하며, 구 OpenGL v1이나 이 근거가 없던 field-pilot report 1.0을 자동 승격하거나 추정 migration하지 않는다. 그래도 `verified` 한 건만으로 두 지원 운영체제 범위를 모두 충족했다고 판정하지 않으며, 릴리스 검토자는 Windows 10과 Windows 11 실제 PC 결과를 각각 보관해야 한다.
 
 ## 4. 받은 보고서 확인
 
@@ -98,11 +103,11 @@ ArchMeshRubbing.exe --verify-field-pilot field-pilot.json --report verification.
 구조 계약은 다음 세 파일에 고정한다.
 
 - [`field_pilot_review-1.0.0.schema.json`](../schemas/field_pilot_review-1.0.0.schema.json)
-- [`field_pilot_report-1.0.0.schema.json`](../schemas/field_pilot_report-1.0.0.schema.json)
+- [`field_pilot_report-1.1.0.schema.json`](../schemas/field_pilot_report-1.1.0.schema.json)
 - [`field_pilot_verification-1.0.0.schema.json`](../schemas/field_pilot_verification-1.0.0.schema.json)
 
 ## 개인정보와 공개 범위
 
 자동 수집 필드는 hostname, OS 사용자명, 절대 입력 경로를 저장하지 않는다. 입력 파일의 basename, 유물 label, reviewer ID, 자유 입력 `notes`, GPU vendor/renderer는 저장한다. 특히 `notes`는 프로그램이 내용을 익명화하지 않으므로 공개 전에 개인정보·소장 위치·미공개 유물 정보를 직접 제거해야 한다.
 
-report의 scope는 항상 `single_artifact_single_machine`, release claim은 항상 `single_pilot_only_not_release_approval`, authentication은 항상 `none`이다. 대표 암키와·수키와·토기·금속·거친 부식면, 대용량 mesh, 저메모리 PC와 실제 연구자 여러 명에 대한 반복 결과가 따로 쌓이기 전에는 경쟁 제품 전반보다 우월하다는 근거로 사용하지 않는다.
+report의 scope는 항상 `single_artifact_single_machine`, release claim은 항상 `single_pilot_only_not_release_approval`, authentication은 항상 `none`이다. runtime exact-match와 24시간 시간창은 다른 환경·명백한 과거 receipt의 실수 재사용을 막는 self-claim 교차 검사이지 물리 장비 신원 인증은 아니다. 누구나 unsigned JSON 전체를 다시 만들 수 있으므로 운영 절차와 별도 서명 없이 동일 컴퓨터를 암호학적으로 증명한다고 표현하지 않는다. 대표 암키와·수키와·토기·금속·거친 부식면, 대용량 mesh, 저메모리 PC와 실제 연구자 여러 명에 대한 반복 결과가 따로 쌓이기 전에는 경쟁 제품 전반보다 우월하다는 근거로 사용하지 않는다.

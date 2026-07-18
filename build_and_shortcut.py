@@ -1,4 +1,4 @@
-"""Compatibility entry point for the safe cross-platform native build tool.
+"""Compatibility entry point for the safe Windows x64 native build tool.
 
 The historical script deleted ``build/`` and ``dist/`` and created a Windows
 desktop shortcut automatically.  Those side effects are intentionally retired.

@@ -15,6 +15,8 @@ from src.application.artifact_workflow_self_test import _run_in_directory
 from src.core.canonical_json import canonical_json_bytes, canonical_json_sha256
 from src.core.field_pilot import (
     FIELD_PILOT_CHECKS,
+    OPENGL_PILOT_ALLOWED_CHECK_COUNTS,
+    OPENGL_PILOT_REQUIRED_CHECK_IDS,
     FieldPilotError,
     build_field_pilot_report,
     build_field_pilot_verification_report,
@@ -26,6 +28,10 @@ from src.core.field_pilot import (
     write_field_pilot_report,
     write_field_pilot_review_template,
 )
+from src.windows_runtime import (
+    is_supported_windows_client_runtime,
+    windows_client_runtime_failures,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,16 +39,24 @@ STAMP = "2026-07-14T00:00:00Z"
 
 
 def _machine(*, system: str) -> dict[str, Any]:
+    windows = system == "Windows"
     return {
-        "frozen": system == "Windows",
+        "frozen": windows,
         "logical_cpu_count": 8,
-        "machine": "AMD64" if system == "Windows" else "x86_64",
+        "machine": "AMD64" if windows else "x86_64",
         "peak_working_set_bytes": 256 * 1024 * 1024,
         "process_bits": 64,
+        "python_implementation": "CPython",
         "python_version": "3.12.10",
-        "release": "11" if system == "Windows" else "test-kernel",
+        "release": "11" if windows else "test-kernel",
         "system": system,
         "total_physical_memory_bytes": 16 * 1024 * 1024 * 1024,
+        "windows_build_number": 22_631 if windows else None,
+        "windows_compatibility_layer": "none" if windows else None,
+        "windows_major_version": 10 if windows else None,
+        "windows_minor_version": 0 if windows else None,
+        "windows_native_machine": "AMD64" if windows else None,
+        "windows_product_type": 1 if windows else None,
     }
 
 
@@ -85,31 +99,116 @@ def _write_json(path: Path, value: object) -> None:
     )
 
 
-def _passing_opengl_report() -> dict[str, Any]:
+def _runtime_claims(machine: dict[str, Any]) -> dict[str, Any]:
+    excluded = {
+        "frozen",
+        "logical_cpu_count",
+        "peak_working_set_bytes",
+        "total_physical_memory_bytes",
+    }
+    return {key: value for key, value in machine.items() if key not in excluded}
+
+
+def _render_mode_receipt(mode: str) -> dict[str, Any]:
+    projection = "orthographic" if mode == "top_orthographic" else "perspective"
+    return {
+        "component_sizes_px": [100, 100],
+        "frame_serial": 2 if mode == "top_orthographic" else 1,
+        "gap_pixel": [1, 1],
+        "max_pick_error_mm": 0.0,
+        "max_surface_anchor_residual_mm": 0.0,
+        "mode": mode,
+        "overlay_pixel": [2, 2],
+        "pick_height_delta_mm": 0.125,
+        "picked_world_mm": [[0.0, 0.0, 0.0], [0.0, 0.0, 0.125]],
+        "projection_kind": projection,
+        "render_origin_world_mm": [0.0, 0.0, 0.0],
+        "restored_height_delta_mm": 0.125,
+        "restored_world_mm": [[0.0, 0.0, 0.0], [0.0, 0.0, 0.125]],
+        "sample_depths": [0.25, 0.5],
+        "sample_pixels": [[3, 3], [4, 4]],
+        "sample_rgba": [[1, 2, 3, 255], [4, 5, 6, 255]],
+        "surface_anchor_distance_mm": 1.0,
+        "surface_anchor_expected_distance_mm": 1.0,
+        "surface_anchor_oracle_distance_mm": 1.0,
+        "surface_anchor_pixel_footprints_um": [1, 1],
+        "surface_anchor_world_mm": [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+        "surface_anchors": [{"face_index": 0}, {"face_index": 1}],
+        "viewport": [0, 0, 768, 768],
+    }
+
+
+def _passing_opengl_report(
+    *,
+    machine: dict[str, Any] | None = None,
+    tested_at_utc: str = STAMP,
+) -> dict[str, Any]:
     metadata = build_info.build_metadata()
+    runtime = _runtime_claims(machine or _machine(system="Windows"))
     return {
         "checks": [
-            {"id": "qt.native_platform", "ok": True},
-            {"id": "driver.depth_bits", "ok": True},
+            {"id": check_id, "ok": True}
+            for check_id in sorted(OPENGL_PILOT_REQUIRED_CHECK_IDS)
         ],
         "cleanup_errors": [],
         "context": {
+            "default_fbo": 1,
             "depth_bits": 24,
+            "device_pixel_ratio": 1.0,
+            "frame_swap_count": 1,
+            "probe_surface_policy": "shown-nonactivating-native-tool-window",
+            "pyopengl_gl_dll": "opengl32sw.dll",
             "qt_platform": "windows",
+            "qt_requested_platform": "windows",
             "renderer": "Mesa D3D12 test renderer",
             "software_renderer": True,
+            "surface_profile": "CompatibilityProfile",
+            "surface_version": [4, 1],
             "vendor": "Mesa",
             "version": "4.1 compatibility",
         },
+        "host": {
+            "machine": runtime["machine"],
+            "platform": "Windows-11-10.0.22631-SP0",
+            "python": runtime["python_version"],
+        },
         "ok": True,
-        "render_modes": [{"mode": "perspective"}, {"mode": "top_orthographic"}],
+        "qt_fbo_probe": {"depth": 0.375, "rgba": [32, 64, 128, 255], "status": 1},
+        "render_modes": [
+            _render_mode_receipt("perspective"),
+            _render_mode_receipt("top_orthographic"),
+        ],
+        "scene": {
+            "base_world_mm": [1.0e9, -2.0e9, 3.0e9],
+            "gap_width_mm": 0.25,
+            "max_abs_world_mm": 3.0e9,
+            "overlay_length_mm": 0.25,
+            "step_height_mm": 0.125,
+        },
         "schema": "archmeshrubbing.opengl_driver_smoke",
-        "schema_version": 1,
+        "schema_version": 2,
         "source": {
             "commit": metadata["commit"],
+            "distributions": {
+                "numpy": "2.4.3",
+                "PyOpenGL": "3.1.10",
+                "PyQt6": "6.11.0",
+                "PyQt6-Qt6": "6.11.0",
+            },
+            "github": {},
             "runtime_lock_sha256": metadata["dependency_lock_sha256"],
+            "source_tree": metadata["source_tree"],
         },
-        "tested_at_utc": STAMP,
+        "tested_at_utc": tested_at_utc,
+        "vbo": {
+            "id": 1,
+            "max_payload_error_mm": 0.0,
+            "origin_world_mm": [0.0, 0.0, 0.0],
+            "position_max_mm": [1.0, 1.0, 1.0],
+            "position_min_mm": [-1.0, -1.0, -1.0],
+            "vertex_count": 12,
+        },
+        "windows_runtime": runtime,
     }
 
 
@@ -279,10 +378,229 @@ def test_complete_windows_evidence_can_verify_one_pilot_only(
         "scope": "single_artifact_single_machine",
         "windows_runtime": "pass",
     }
-    assert report["opengl_driver"]["check_count"] == 2
+    assert report["opengl_driver"]["check_count"] == len(
+        OPENGL_PILOT_REQUIRED_CHECK_IDS
+    )
+    assert OPENGL_PILOT_ALLOWED_CHECK_COUNTS == frozenset({87, 88})
     assert report["opengl_driver"]["input_name"] == opengl_path.name
     assert report["review"]["reviewer_id"] == "archaeologist-01"
     assert validate_field_pilot_report(report) == report
+
+    tampered_runtime = json.loads(json.dumps(report))
+    tampered_runtime["opengl_driver"]["windows_runtime"]["release"] = "10"
+    _rehash_report(tampered_runtime)
+    with pytest.raises(FieldPilotError, match="differs from the field-pilot process"):
+        validate_field_pilot_report(tampered_runtime)
+
+    tampered_check_count = json.loads(json.dumps(report))
+    tampered_check_count["opengl_driver"]["check_count"] = 1
+    _rehash_report(tampered_check_count)
+    with pytest.raises(FieldPilotError, match="OpenGL descriptor is incomplete"):
+        validate_field_pilot_report(tampered_check_count)
+
+    server_machine = _machine(system="Windows")
+    server_machine["windows_product_type"] = 3
+    server_report = build_field_pilot_report(
+        project,
+        survey,
+        review=review_path,
+        opengl_report=opengl_path,
+        created_at_utc=STAMP,
+        machine_snapshot=server_machine,
+    )
+
+    assert server_report["outcome"]["artifact_verification"] == "pass"
+    assert server_report["outcome"]["human_review"] == "pass"
+    assert server_report["outcome"]["opengl_driver"] == "fail"
+    assert server_report["outcome"]["windows_runtime"] == "not_target"
+    assert server_report["outcome"]["pilot"] == "failed"
+
+
+def test_known_build_opengl_provenance_cannot_downgrade_or_contradict_manifest(
+    completed_artifacts: tuple[Path, Path],
+    incomplete_report: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    project, survey = completed_artifacts
+    project_digest = incomplete_report["project_verification"]["evidence"][
+        "document_sha256"
+    ]
+    survey_digest = incomplete_report["survey_verification"]["evidence"][
+        "artifact_set_sha256"
+    ]
+    review_path = tmp_path / "known-build-review.json"
+    _write_json(
+        review_path,
+        _passing_review(
+            project_document_sha256=project_digest,
+            survey_artifact_set_sha256=survey_digest,
+        ),
+    )
+    manifest = {
+        **build_info.build_metadata(),
+        "channel": "pilot",
+        "commit": "a" * 40,
+        "manifest_present": True,
+        "source_tree": "clean",
+    }
+    monkeypatch.setattr(build_info, "build_metadata", lambda: dict(manifest))
+
+    exact_path = tmp_path / "known-build-exact.json"
+    _write_json(exact_path, _passing_opengl_report())
+    exact = build_field_pilot_report(
+        project,
+        survey,
+        review=review_path,
+        opengl_report=exact_path,
+        created_at_utc=STAMP,
+        machine_snapshot=_machine(system="Windows"),
+    )
+
+    assert exact["outcome"]["pilot"] == "verified"
+    assert exact["opengl_driver"]["source_commit"] == manifest["commit"]
+    assert exact["opengl_driver"]["source_tree"] == manifest["source_tree"]
+
+    for field, value, error_text in (
+        ("commit", "unknown", "commit differs from this build"),
+        ("source_tree", "unknown", "source tree differs from this build manifest"),
+    ):
+        smoke = _passing_opengl_report()
+        smoke["source"][field] = value
+        smoke_path = tmp_path / f"known-build-{field}.json"
+        _write_json(smoke_path, smoke)
+        report = build_field_pilot_report(
+            project,
+            survey,
+            review=review_path,
+            opengl_report=smoke_path,
+            created_at_utc=STAMP,
+            machine_snapshot=_machine(system="Windows"),
+        )
+
+        assert report["outcome"]["opengl_driver"] == "fail"
+        assert report["outcome"]["pilot"] == "failed"
+        assert error_text in report["opengl_driver"]["error"]
+
+    for field in ("source_commit", "source_tree"):
+        tampered = json.loads(json.dumps(exact))
+        tampered["opengl_driver"][field] = "unknown"
+        _rehash_report(tampered)
+        with pytest.raises(FieldPilotError, match="differs from this build"):
+            validate_field_pilot_report(tampered)
+
+
+@pytest.mark.parametrize(
+    ("case", "error_text"),
+    [
+        ("minimal", "check set"),
+        ("legacy", "v2 did not pass"),
+        ("server", "not captured on a supported Windows client"),
+        ("arm64", "not captured on a supported Windows client"),
+        ("old_build", "not captured on a supported Windows client"),
+        ("other_runtime", "differs from the field-pilot process"),
+        ("stale", "older than the 24-hour pilot window"),
+        ("future", "later than the field-pilot report"),
+    ],
+)
+def test_opengl_receipt_cannot_promote_partial_unsupported_or_replayed_evidence(
+    case: str,
+    error_text: str,
+    completed_artifacts: tuple[Path, Path],
+    incomplete_report: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    project, survey = completed_artifacts
+    project_digest = incomplete_report["project_verification"]["evidence"][
+        "document_sha256"
+    ]
+    survey_digest = incomplete_report["survey_verification"]["evidence"][
+        "artifact_set_sha256"
+    ]
+    review_path = tmp_path / f"{case}-review.json"
+    opengl_path = tmp_path / f"{case}-opengl.json"
+    _write_json(
+        review_path,
+        _passing_review(
+            project_document_sha256=project_digest,
+            survey_artifact_set_sha256=survey_digest,
+        ),
+    )
+
+    smoke_machine = _machine(system="Windows")
+    if case == "server":
+        smoke_machine["windows_product_type"] = 3
+    elif case == "arm64":
+        smoke_machine["windows_native_machine"] = "ARM64"
+    elif case == "old_build":
+        smoke_machine["windows_build_number"] = 17_762
+    elif case == "other_runtime":
+        smoke_machine["release"] = "10"
+    tested_at = STAMP
+    if case == "stale":
+        tested_at = "2026-07-12T23:59:59Z"
+    elif case == "future":
+        tested_at = "2026-07-14T00:00:01Z"
+    smoke = _passing_opengl_report(
+        machine=smoke_machine,
+        tested_at_utc=tested_at,
+    )
+    if case == "minimal":
+        smoke["checks"] = smoke["checks"][:1]
+    elif case == "legacy":
+        smoke["schema_version"] = 1
+    _write_json(opengl_path, smoke)
+
+    report = build_field_pilot_report(
+        project,
+        survey,
+        review=review_path,
+        opengl_report=opengl_path,
+        created_at_utc=STAMP,
+        machine_snapshot=_machine(system="Windows"),
+    )
+
+    assert report["outcome"]["artifact_verification"] == "pass"
+    assert report["outcome"]["human_review"] == "pass"
+    assert report["outcome"]["opengl_driver"] == "fail"
+    assert report["outcome"]["pilot"] == "failed"
+    assert error_text in report["opengl_driver"]["error"]
+
+
+@pytest.mark.parametrize("build", [17_763, 22_000, 26_100])
+def test_supported_windows_client_contract_accepts_windows_10_and_11(
+    build: int,
+) -> None:
+    machine = _machine(system="Windows")
+    machine["windows_build_number"] = build
+
+    assert windows_client_runtime_failures(machine) == ()
+    assert is_supported_windows_client_runtime(machine) is True
+
+
+@pytest.mark.parametrize(
+    ("updates", "reason"),
+    [
+        ({"system": "Linux"}, "not-windows"),
+        ({"machine": "ARM64"}, "process-not-amd64"),
+        ({"process_bits": 32}, "process-not-64-bit"),
+        ({"python_implementation": "PyPy"}, "python-not-cpython"),
+        ({"python_version": "3.13.0"}, "python-not-3.12"),
+        ({"windows_build_number": 17_762}, "windows-version-unsupported"),
+        ({"windows_product_type": 3}, "windows-server-or-unknown"),
+        ({"windows_native_machine": "ARM64"}, "native-machine-not-amd64"),
+        ({"windows_compatibility_layer": "wine"}, "windows-compatibility-layer"),
+    ],
+)
+def test_windows_client_contract_rejects_every_unsupported_dimension(
+    updates: dict[str, object],
+    reason: str,
+) -> None:
+    machine = _machine(system="Windows")
+    machine.update(updates)
+
+    assert reason in windows_client_runtime_failures(machine)
+    assert is_supported_windows_client_runtime(machine) is False
 
 
 def test_review_bound_to_another_artifact_fails_the_pilot(
@@ -312,7 +630,7 @@ def test_report_and_verification_receipt_match_public_schemas(
 ) -> None:
     jsonschema = importlib.import_module("jsonschema")
     referencing = importlib.import_module("referencing")
-    report_schema = _schema("field_pilot_report-1.0.0.schema.json")
+    report_schema = _schema("field_pilot_report-1.1.0.schema.json")
     review_schema = _schema("field_pilot_review-1.0.0.schema.json")
     offline_schema = _schema("offline_verification_report-1.0.0.schema.json")
     receipt_schema = _schema("field_pilot_verification-1.0.0.schema.json")
@@ -340,6 +658,9 @@ def test_report_and_verification_receipt_match_public_schemas(
     )
 
     assert list(report_validator.iter_errors(incomplete_report)) == []
+    invalid_schema_count = json.loads(json.dumps(incomplete_report))
+    invalid_schema_count["opengl_driver"]["check_count"] = 1
+    assert list(report_validator.iter_errors(invalid_schema_count))
     assert list(receipt_validator.iter_errors(receipt)) == []
     assert list(receipt_validator.iter_errors(failed_receipt)) == []
     assert receipt["ok"] is True
@@ -347,6 +668,33 @@ def test_report_and_verification_receipt_match_public_schemas(
     assert receipt["evidence"]["pilot_sha256"] == incomplete_report["pilot_sha256"]
     assert failed_receipt["ok"] is False
     assert str(tmp_path) not in failed_receipt["error"]["message"]
+
+
+def test_legacy_report_without_supported_windows_claims_fails_closed(
+    incomplete_report: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    legacy = json.loads(json.dumps(incomplete_report))
+    legacy["schema_version"] = "1.0.0"
+    for key in (
+        "python_implementation",
+        "windows_build_number",
+        "windows_compatibility_layer",
+        "windows_major_version",
+        "windows_minor_version",
+        "windows_native_machine",
+        "windows_product_type",
+    ):
+        legacy["machine"].pop(key)
+    _rehash_report(legacy)
+    path = tmp_path / "legacy-pilot.json"
+    path.write_bytes(canonical_json_bytes(legacy) + b"\n")
+
+    receipt = build_field_pilot_verification_report(path)
+
+    assert receipt["ok"] is False
+    assert receipt["error"]["code"] == "verification_failed"
+    assert "schema version is invalid" in receipt["error"]["message"]
 
 
 def test_report_publication_is_canonical_atomic_and_no_overwrite(

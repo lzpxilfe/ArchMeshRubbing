@@ -248,6 +248,60 @@ def cutline_recipe(
     }
 
 
+def validate_cutline_record_contract(
+    payload: VectorGeometryPayload,
+    recipe: Mapping[str, Any],
+) -> None:
+    """Re-prove the complete production Cutline recipe and planar frame."""
+
+    if (
+        not isinstance(payload, VectorGeometryPayload)
+        or VectorRecordKind(payload.kind) is not VectorRecordKind.CUTLINE
+    ):
+        raise ArtifactVectorExtractionError(
+            "cutline record contract requires a cutline vector payload"
+        )
+    if not isinstance(recipe, Mapping):
+        raise ArtifactVectorExtractionError("cutline record recipe must be an object")
+    raw_frame = recipe.get("frame")
+    if not isinstance(raw_frame, Mapping):
+        raise ArtifactVectorExtractionError(
+            "cutline record recipe frame must be an object"
+        )
+    try:
+        frame = PlanarFrame.from_dict(raw_frame)
+    except ValueError as exc:
+        raise ArtifactVectorExtractionError(
+            f"cutline record recipe frame is invalid: {exc}"
+        ) from exc
+    classification = _finite_positive(
+        recipe.get("classification_tolerance_mm"),
+        field_name="classification_tolerance_mm",
+    )
+    stitch = _finite_positive(
+        recipe.get("stitch_tolerance_mm"),
+        field_name="stitch_tolerance_mm",
+    )
+    expected_recipe = cutline_recipe(
+        frame,
+        classification_tolerance_mm=classification,
+        stitch_tolerance_mm=stitch,
+    )
+    if canonical_recipe_hash(recipe) != canonical_recipe_hash(expected_recipe):
+        raise ArtifactVectorExtractionError(
+            "cutline record recipe does not match the production algorithm contract"
+        )
+    if payload.frame != frame:
+        raise ArtifactVectorExtractionError(
+            "cutline payload frame does not match its declared recipe"
+        )
+    for index, path in enumerate(payload.paths):
+        if path.id != f"cutline:path:{index:04d}":
+            raise ArtifactVectorExtractionError(
+                "cutline path IDs do not match canonical production order"
+            )
+
+
 def _validated_mesh_arrays(
     vertices: object,
     faces: object,
@@ -991,4 +1045,5 @@ __all__ = [
     "cutline_recipe",
     "extract_cutline_geometry",
     "require_current_computation",
+    "validate_cutline_record_contract",
 ]

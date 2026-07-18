@@ -25,10 +25,8 @@ import json
 import math
 import os
 from pathlib import Path
-import platform
 import re
 import stat
-import struct
 import sys
 import tempfile
 import time
@@ -46,6 +44,10 @@ from .artifact_verification import (
 )
 from .artifact_vector_export import fsync_export_directory
 from .canonical_json import canonical_json_bytes, canonical_json_sha256
+from src.windows_runtime import (
+    collect_windows_runtime_claims,
+    is_supported_windows_client_runtime,
+)
 
 
 FIELD_PILOT_REVIEW_FORMAT = "archmeshrubbing_field_pilot_review"
@@ -54,6 +56,7 @@ FIELD_PILOT_VERIFICATION_FORMAT = (
     "archmeshrubbing_field_pilot_verification"
 )
 FIELD_PILOT_SCHEMA_VERSION = "1.0.0"
+FIELD_PILOT_REPORT_SCHEMA_VERSION = "1.1.0"
 FIELD_PILOT_SCOPE = "single_artifact_single_machine"
 FIELD_PILOT_RELEASE_CLAIM = "single_pilot_only_not_release_approval"
 
@@ -84,6 +87,166 @@ REVIEW_STATUSES = frozenset(
 MAX_FIELD_PILOT_REVIEW_BYTES = 64 * 1024
 MAX_FIELD_PILOT_REPORT_BYTES = 16 * 1024 * 1024
 MAX_OPENGL_REPORT_BYTES = 32 * 1024 * 1024
+MAX_OPENGL_REPORT_AGE_SECONDS = 24 * 60 * 60
+
+_WINDOWS_RUNTIME_CLAIM_FIELDS = frozenset(
+    {
+        "machine",
+        "process_bits",
+        "python_implementation",
+        "python_version",
+        "release",
+        "system",
+        "windows_build_number",
+        "windows_compatibility_layer",
+        "windows_major_version",
+        "windows_minor_version",
+        "windows_native_machine",
+        "windows_product_type",
+    }
+)
+_OPENGL_SUCCESS_ROOT_FIELDS = frozenset(
+    {
+        "checks",
+        "cleanup_errors",
+        "context",
+        "host",
+        "ok",
+        "qt_fbo_probe",
+        "render_modes",
+        "scene",
+        "schema",
+        "schema_version",
+        "source",
+        "tested_at_utc",
+        "vbo",
+        "windows_runtime",
+    }
+)
+_OPENGL_CONTEXT_FIELDS = frozenset(
+    {
+        "default_fbo",
+        "depth_bits",
+        "device_pixel_ratio",
+        "frame_swap_count",
+        "probe_surface_policy",
+        "pyopengl_gl_dll",
+        "qt_platform",
+        "qt_requested_platform",
+        "renderer",
+        "software_renderer",
+        "surface_profile",
+        "surface_version",
+        "vendor",
+        "version",
+    }
+)
+_OPENGL_RENDER_MODE_FIELDS = frozenset(
+    {
+        "component_sizes_px",
+        "frame_serial",
+        "gap_pixel",
+        "max_pick_error_mm",
+        "max_surface_anchor_residual_mm",
+        "mode",
+        "overlay_pixel",
+        "pick_height_delta_mm",
+        "picked_world_mm",
+        "projection_kind",
+        "render_origin_world_mm",
+        "restored_height_delta_mm",
+        "restored_world_mm",
+        "sample_depths",
+        "sample_pixels",
+        "sample_rgba",
+        "surface_anchor_distance_mm",
+        "surface_anchor_expected_distance_mm",
+        "surface_anchor_oracle_distance_mm",
+        "surface_anchor_pixel_footprints_um",
+        "surface_anchor_world_mm",
+        "surface_anchors",
+        "viewport",
+    }
+)
+_OPENGL_STATIC_CHECK_IDS = frozenset(
+    {
+        "driver.compatibility_version",
+        "driver.depth_bits",
+        "driver.identity",
+        "process.fresh_qapplication",
+        "qt.depth_preserving_update_behavior",
+        "qt.native_platform",
+        "qt.probe_surface_policy",
+        "qt.widget_context_current",
+        "qt.widget_context_valid",
+        "qt.widget_default_fbo",
+        "qt.widget_probe_size",
+        "qt_fbo.bound",
+        "qt_fbo.color_readback",
+        "qt_fbo.complete",
+        "qt_fbo.depth_readback",
+        "qt_fbo.valid",
+        "scene.absolute_coordinate_scale",
+        "scene.selected_object",
+        "scene.source_vertices_unchanged_after_render",
+        "scene.source_vertices_unchanged_after_upload",
+        "scene.vbo_driver_object",
+        "scene.vbo_id",
+        "scene.vbo_relative_payload",
+    }
+)
+_OPENGL_OPTIONAL_CHECK_IDS = frozenset(
+    {"process.qt_pyopengl_same_software_dll"}
+)
+_OPENGL_MODE_CHECK_SUFFIXES = (
+    "fresh_frame_published",
+    "projection_kind",
+    "viewport_positive",
+    "viewport_matches_widget_pixels",
+    "snapshot_viewport_matches_driver",
+    "gl_error",
+    "two_visual_components",
+    "plate_depth_pixels",
+    "plate_color_pixels",
+    "gap_background_depth",
+    "gap_background_color",
+    "relative_overlay_pixel",
+    "surface_anchor_selected_object",
+    "submillimeter_depth_delta",
+    "anchor_pair_matches_ray_oracle_distance",
+    "anchor_pair_known_distance",
+)
+_OPENGL_INDEXED_CHECK_SUFFIXES = (
+    "pick_{index}_present",
+    "pick_{index}_same_frame",
+    "pick_{index}_ray_not_parallel",
+    "pick_{index}_plane_accuracy",
+    "anchor_{index}_global_source_face",
+    "anchor_{index}_fixed_barycentric_sum",
+    "anchor_{index}_depth_reconstruction",
+    "anchor_{index}_exact_pixel_only",
+)
+
+
+def _required_opengl_check_ids() -> frozenset[str]:
+    values = set(_OPENGL_STATIC_CHECK_IDS)
+    for mode in ("perspective", "top_orthographic"):
+        values.update(f"{mode}.{suffix}" for suffix in _OPENGL_MODE_CHECK_SUFFIXES)
+        for index in (0, 1):
+            values.update(
+                f"{mode}.{suffix.format(index=index)}"
+                for suffix in _OPENGL_INDEXED_CHECK_SUFFIXES
+            )
+    return frozenset(values)
+
+
+OPENGL_PILOT_REQUIRED_CHECK_IDS = _required_opengl_check_ids()
+OPENGL_PILOT_ALLOWED_CHECK_COUNTS = frozenset(
+    {
+        len(OPENGL_PILOT_REQUIRED_CHECK_IDS),
+        len(OPENGL_PILOT_REQUIRED_CHECK_IDS | _OPENGL_OPTIONAL_CHECK_IDS),
+    }
+)
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _COMMIT_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64}|unknown)$")
@@ -606,16 +769,13 @@ def field_pilot_machine_snapshot() -> dict[str, Any]:
     """Return a host summary that deliberately excludes identity and paths."""
 
     logical_cpus = os.cpu_count()
+    runtime_claims = collect_windows_runtime_claims()
     return {
         "frozen": bool(getattr(sys, "frozen", False)),
         "logical_cpu_count": logical_cpus if logical_cpus and logical_cpus > 0 else None,
-        "machine": (platform.machine() or "unknown")[:128],
         "peak_working_set_bytes": _peak_working_set_bytes(),
-        "process_bits": struct.calcsize("P") * 8,
-        "python_version": platform.python_version(),
-        "release": (platform.release() or "unknown")[:128],
-        "system": platform.system() or "unknown",
         "total_physical_memory_bytes": _total_physical_memory_bytes(),
+        **runtime_claims,
     }
 
 
@@ -628,10 +788,17 @@ def _validate_machine(value: object) -> dict[str, Any]:
             "machine",
             "peak_working_set_bytes",
             "process_bits",
+            "python_implementation",
             "python_version",
             "release",
             "system",
             "total_physical_memory_bytes",
+            "windows_build_number",
+            "windows_compatibility_layer",
+            "windows_major_version",
+            "windows_minor_version",
+            "windows_native_machine",
+            "windows_product_type",
         },
         label="field-pilot machine",
     )
@@ -640,6 +807,44 @@ def _validate_machine(value: object) -> dict[str, Any]:
     process_bits = root.get("process_bits")
     if process_bits not in {32, 64}:
         raise FieldPilotError("machine.process_bits must be 32 or 64")
+    python_version = _required_text(
+        root.get("python_version"),
+        label="python_version",
+        maximum=64,
+    )
+    if re.fullmatch(r"\d+\.\d+\.\d+", python_version) is None:
+        raise FieldPilotError("machine.python_version must be major.minor.patch")
+
+    windows_numbers: dict[str, int | None] = {}
+    for key in (
+        "windows_build_number",
+        "windows_major_version",
+        "windows_minor_version",
+        "windows_product_type",
+    ):
+        item = root.get(key)
+        if item is not None and (type(item) is not int or item < 0):
+            raise FieldPilotError(f"machine.{key} must be a non-negative integer or null")
+        windows_numbers[key] = item
+    if windows_numbers["windows_build_number"] == 0:
+        raise FieldPilotError("machine.windows_build_number must be positive or null")
+    product_type = windows_numbers["windows_product_type"]
+    if product_type is not None and product_type not in {1, 2, 3}:
+        raise FieldPilotError("machine.windows_product_type must be 1, 2, 3, or null")
+    native_machine = root.get("windows_native_machine")
+    if native_machine is not None:
+        native_machine = _required_text(
+            native_machine,
+            label="windows_native_machine",
+            maximum=32,
+        )
+    compatibility_layer = root.get("windows_compatibility_layer")
+    if compatibility_layer is not None:
+        compatibility_layer = _required_text(
+            compatibility_layer,
+            label="windows_compatibility_layer",
+            maximum=32,
+        )
     result = {
         "frozen": bool(root["frozen"]),
         "logical_cpu_count": _nullable_positive_int(
@@ -656,11 +861,12 @@ def _validate_machine(value: object) -> dict[str, Any]:
             label="peak_working_set_bytes",
         ),
         "process_bits": int(process_bits),
-        "python_version": _required_text(
-            root.get("python_version"),
-            label="python_version",
+        "python_implementation": _required_text(
+            root.get("python_implementation"),
+            label="python_implementation",
             maximum=64,
         ),
+        "python_version": python_version,
         "release": _required_text(
             root.get("release"),
             label="release",
@@ -675,8 +881,42 @@ def _validate_machine(value: object) -> dict[str, Any]:
             root.get("total_physical_memory_bytes"),
             label="total_physical_memory_bytes",
         ),
+        "windows_build_number": windows_numbers["windows_build_number"],
+        "windows_compatibility_layer": compatibility_layer,
+        "windows_major_version": windows_numbers["windows_major_version"],
+        "windows_minor_version": windows_numbers["windows_minor_version"],
+        "windows_native_machine": native_machine,
+        "windows_product_type": windows_numbers["windows_product_type"],
     }
     return result
+
+
+def _runtime_claims_from_machine(machine: Mapping[str, Any]) -> dict[str, Any]:
+    return {key: machine.get(key) for key in _WINDOWS_RUNTIME_CLAIM_FIELDS}
+
+
+def _validate_windows_runtime_claims(
+    value: object,
+    *,
+    label: str,
+) -> dict[str, Any]:
+    root = _exact_mapping(
+        value,
+        set(_WINDOWS_RUNTIME_CLAIM_FIELDS),
+        label=label,
+    )
+    # Reuse the public field-pilot machine rules so the live snapshot and the
+    # driver process cannot normalize the same claim in different ways.
+    validated = _validate_machine(
+        {
+            "frozen": False,
+            "logical_cpu_count": None,
+            "peak_working_set_bytes": None,
+            "total_physical_memory_bytes": None,
+            **dict(root),
+        }
+    )
+    return _runtime_claims_from_machine(validated)
 
 
 def _validate_build(value: object) -> dict[str, Any]:
@@ -731,8 +971,10 @@ def _not_provided_opengl() -> dict[str, Any]:
         "sha256": None,
         "size_bytes": None,
         "source_commit": None,
+        "source_tree": None,
         "status": "not_provided",
         "tested_at_utc": None,
+        "windows_runtime": None,
     }
 
 
@@ -746,9 +988,183 @@ def _failed_opengl(input_name: str, message: str) -> dict[str, Any]:
         "sha256": None,
         "size_bytes": None,
         "source_commit": None,
+        "source_tree": None,
         "status": "fail",
         "tested_at_utc": None,
+        "windows_runtime": None,
     }
+
+
+def _validate_driver_smoke_value(value: object) -> Mapping[str, Any]:
+    root = _exact_mapping(
+        value,
+        set(_OPENGL_SUCCESS_ROOT_FIELDS),
+        label="OpenGL driver-smoke report",
+    )
+    if (
+        root.get("schema") != "archmeshrubbing.opengl_driver_smoke"
+        or root.get("schema_version") != 2
+        or root.get("ok") is not True
+    ):
+        raise FieldPilotError("OpenGL driver-smoke v2 did not pass")
+    if root.get("cleanup_errors") != []:
+        raise FieldPilotError("OpenGL driver-smoke cleanup is not clean")
+
+    runtime = _validate_windows_runtime_claims(
+        root.get("windows_runtime"),
+        label="OpenGL driver-smoke Windows runtime",
+    )
+    host = _exact_mapping(
+        root.get("host"),
+        {"machine", "platform", "python"},
+        label="OpenGL driver-smoke host",
+    )
+    if (
+        host.get("machine") != runtime["machine"]
+        or host.get("python") != runtime["python_version"]
+        or not isinstance(host.get("platform"), str)
+        or not str(host["platform"]).startswith("Windows-")
+    ):
+        raise FieldPilotError("OpenGL driver-smoke host contradicts its runtime")
+
+    source = _exact_mapping(
+        root.get("source"),
+        {"commit", "distributions", "github", "runtime_lock_sha256", "source_tree"},
+        label="OpenGL driver-smoke source",
+    )
+    source_commit = source.get("commit")
+    runtime_lock = source.get("runtime_lock_sha256")
+    if not isinstance(source_commit, str) or _COMMIT_RE.fullmatch(source_commit) is None:
+        raise FieldPilotError("OpenGL driver-smoke source commit is invalid")
+    if not isinstance(runtime_lock, str) or _SHA256_RE.fullmatch(runtime_lock) is None:
+        raise FieldPilotError("OpenGL driver-smoke runtime lock is invalid")
+    if source.get("source_tree") not in {"clean", "dirty", "unknown"}:
+        raise FieldPilotError("OpenGL driver-smoke source tree is invalid")
+    distributions = _exact_mapping(
+        source.get("distributions"),
+        {"numpy", "PyOpenGL", "PyQt6", "PyQt6-Qt6"},
+        label="OpenGL driver-smoke distributions",
+    )
+    for name, version in distributions.items():
+        _required_text(
+            version,
+            label=f"OpenGL distribution {name}",
+            maximum=64,
+        )
+    github = source.get("github")
+    if not isinstance(github, Mapping) or not set(github).issubset(
+        {"run_attempt", "run_id", "workflow"}
+    ):
+        raise FieldPilotError("OpenGL driver-smoke GitHub context is invalid")
+    for key, item in github.items():
+        _required_text(item, label=f"OpenGL GitHub {key}", maximum=256)
+
+    context = _exact_mapping(
+        root.get("context"),
+        set(_OPENGL_CONTEXT_FIELDS),
+        label="OpenGL driver-smoke context",
+    )
+    if (
+        context.get("qt_platform") != "windows"
+        or context.get("qt_requested_platform") != "windows"
+    ):
+        raise FieldPilotError("OpenGL driver-smoke did not use explicit qwindows")
+    if type(context.get("software_renderer")) is not bool:
+        raise FieldPilotError("OpenGL software-renderer flag is invalid")
+    depth_bits = context.get("depth_bits")
+    if type(depth_bits) is not int or depth_bits < 24:
+        raise FieldPilotError("OpenGL driver-smoke depth buffer is below 24 bits")
+    for key in ("renderer", "surface_profile", "vendor", "version"):
+        _required_text(
+            context.get(key),
+            label=f"OpenGL {key}",
+            maximum=256,
+        )
+
+    _exact_mapping(
+        root.get("qt_fbo_probe"),
+        {"depth", "rgba", "status"},
+        label="OpenGL driver-smoke FBO probe",
+    )
+    _exact_mapping(
+        root.get("vbo"),
+        {
+            "id",
+            "max_payload_error_mm",
+            "origin_world_mm",
+            "position_max_mm",
+            "position_min_mm",
+            "vertex_count",
+        },
+        label="OpenGL driver-smoke VBO receipt",
+    )
+    _exact_mapping(
+        root.get("scene"),
+        {
+            "base_world_mm",
+            "gap_width_mm",
+            "max_abs_world_mm",
+            "overlay_length_mm",
+            "step_height_mm",
+        },
+        label="OpenGL driver-smoke scene receipt",
+    )
+
+    checks = root.get("checks")
+    if not isinstance(checks, list):
+        raise FieldPilotError("OpenGL driver-smoke checks are missing")
+    check_ids: set[str] = set()
+    for entry in checks:
+        if not isinstance(entry, Mapping) or entry.get("ok") is not True:
+            raise FieldPilotError("OpenGL driver-smoke contains a failed check")
+        check_id = entry.get("id")
+        if not isinstance(check_id, str) or check_id in check_ids:
+            raise FieldPilotError("OpenGL driver-smoke check IDs are invalid")
+        check_ids.add(check_id)
+    allowed_check_sets = {
+        OPENGL_PILOT_REQUIRED_CHECK_IDS,
+        OPENGL_PILOT_REQUIRED_CHECK_IDS | _OPENGL_OPTIONAL_CHECK_IDS,
+    }
+    if frozenset(check_ids) not in allowed_check_sets:
+        raise FieldPilotError("OpenGL driver-smoke check set is incomplete or unknown")
+
+    modes = root.get("render_modes")
+    if not isinstance(modes, list) or len(modes) != 2:
+        raise FieldPilotError("OpenGL driver-smoke omitted a projection mode")
+    expected_modes = (
+        ("perspective", "perspective"),
+        ("top_orthographic", "orthographic"),
+    )
+    for item, (mode, projection) in zip(modes, expected_modes, strict=True):
+        normalized = _exact_mapping(
+            item,
+            set(_OPENGL_RENDER_MODE_FIELDS),
+            label=f"OpenGL {mode} receipt",
+        )
+        if normalized.get("mode") != mode or normalized.get("projection_kind") != projection:
+            raise FieldPilotError("OpenGL driver-smoke projection receipt is invalid")
+        frame_serial = normalized.get("frame_serial")
+        if type(frame_serial) is not int or frame_serial <= 0:
+            raise FieldPilotError("OpenGL driver-smoke frame serial is invalid")
+    _validate_timestamp(root.get("tested_at_utc"), label="OpenGL tested_at_utc")
+    return root
+
+
+def _opengl_build_binding_failure(
+    *,
+    source_commit: str,
+    source_tree: str,
+    runtime_lock_sha256: str,
+    build: Mapping[str, Any],
+) -> str | None:
+    if runtime_lock_sha256 != build["dependency_lock_sha256"]:
+        return "OpenGL driver-smoke runtime lock differs from this build"
+    build_commit = build["commit"]
+    if build_commit != "unknown" and source_commit != build_commit:
+        return "OpenGL driver-smoke commit differs from this build"
+    if build["manifest_present"] and source_tree != build["source_tree"]:
+        return "OpenGL driver-smoke source tree differs from this build manifest"
+    return None
 
 
 def _load_opengl_descriptor(
@@ -765,28 +1181,11 @@ def _load_opengl_descriptor(
             maximum=MAX_OPENGL_REPORT_BYTES,
         )
         value = _strict_json(payload, label="OpenGL driver-smoke report")
-        if not isinstance(value, Mapping):
-            raise FieldPilotError("OpenGL driver-smoke report root is not an object")
-        if value.get("schema") != "archmeshrubbing.opengl_driver_smoke":
-            raise FieldPilotError("OpenGL driver-smoke schema is invalid")
-        if value.get("schema_version") != 1 or value.get("ok") is not True:
-            raise FieldPilotError("OpenGL driver-smoke did not pass")
-        checks = value.get("checks")
-        if not isinstance(checks, list) or not checks:
-            raise FieldPilotError("OpenGL driver-smoke has no checks")
-        check_ids: set[str] = set()
-        for entry in checks:
-            if not isinstance(entry, Mapping) or entry.get("ok") is not True:
-                raise FieldPilotError("OpenGL driver-smoke contains a failed check")
-            check_id = entry.get("id")
-            if not isinstance(check_id, str) or not check_id or check_id in check_ids:
-                raise FieldPilotError("OpenGL driver-smoke check IDs are invalid")
-            check_ids.add(check_id)
-        context = value.get("context")
-        if not isinstance(context, Mapping):
-            raise FieldPilotError("OpenGL driver-smoke context is missing")
-        if context.get("qt_platform") != "windows":
-            raise FieldPilotError("OpenGL driver-smoke did not use qwindows")
+        value = _validate_driver_smoke_value(value)
+        checks = value["checks"]
+        assert isinstance(checks, list)
+        context = value["context"]
+        assert isinstance(context, Mapping)
         vendor = _required_text(
             context.get("vendor"),
             label="OpenGL vendor",
@@ -807,34 +1206,26 @@ def _load_opengl_descriptor(
             raise FieldPilotError("OpenGL driver-smoke depth buffer is below 24 bits")
         if type(context.get("software_renderer")) is not bool:
             raise FieldPilotError("OpenGL software-renderer flag is invalid")
-        render_modes = value.get("render_modes")
-        if not isinstance(render_modes, list) or len(render_modes) != 2:
-            raise FieldPilotError("OpenGL driver-smoke omitted a projection mode")
-        cleanup_errors = value.get("cleanup_errors")
-        if not isinstance(cleanup_errors, list) or cleanup_errors:
-            raise FieldPilotError("OpenGL driver-smoke cleanup is not clean")
         tested_at = _validate_timestamp(
             value.get("tested_at_utc"),
             label="OpenGL tested_at_utc",
         )
-        source = value.get("source")
-        if not isinstance(source, Mapping):
-            raise FieldPilotError("OpenGL driver-smoke source receipt is missing")
-        source_commit = source.get("commit")
-        runtime_lock = source.get("runtime_lock_sha256")
-        if not isinstance(source_commit, str) or _COMMIT_RE.fullmatch(source_commit) is None:
-            raise FieldPilotError("OpenGL driver-smoke source commit is invalid")
-        if not isinstance(runtime_lock, str) or _SHA256_RE.fullmatch(runtime_lock) is None:
-            raise FieldPilotError("OpenGL driver-smoke runtime lock is invalid")
-        if runtime_lock != build["dependency_lock_sha256"]:
-            raise FieldPilotError("OpenGL driver-smoke runtime lock differs from this build")
-        build_commit = build["commit"]
-        if (
-            build_commit != "unknown"
-            and source_commit != "unknown"
-            and source_commit != build_commit
-        ):
-            raise FieldPilotError("OpenGL driver-smoke commit differs from this build")
+        source = value["source"]
+        assert isinstance(source, Mapping)
+        source_commit = source["commit"]
+        source_tree = source["source_tree"]
+        runtime_lock = source["runtime_lock_sha256"]
+        assert isinstance(source_commit, str)
+        assert isinstance(source_tree, str)
+        assert isinstance(runtime_lock, str)
+        binding_failure = _opengl_build_binding_failure(
+            source_commit=source_commit,
+            source_tree=source_tree,
+            runtime_lock_sha256=runtime_lock,
+            build=build,
+        )
+        if binding_failure is not None:
+            raise FieldPilotError(binding_failure)
         return {
             "check_count": len(checks),
             "context": {
@@ -851,8 +1242,13 @@ def _load_opengl_descriptor(
             "sha256": hashlib.sha256(payload).hexdigest(),
             "size_bytes": len(payload),
             "source_commit": source_commit,
+            "source_tree": source_tree,
             "status": REVIEW_STATUS_PASS,
             "tested_at_utc": tested_at,
+            "windows_runtime": _validate_windows_runtime_claims(
+                value["windows_runtime"],
+                label="OpenGL driver-smoke Windows runtime",
+            ),
         }
     except FieldPilotError as exc:
         return _failed_opengl(input_name, str(exc))
@@ -870,8 +1266,10 @@ def _validate_opengl_descriptor(value: object) -> dict[str, Any]:
             "sha256",
             "size_bytes",
             "source_commit",
+            "source_tree",
             "status",
             "tested_at_utc",
+            "windows_runtime",
         },
         label="field-pilot OpenGL descriptor",
     )
@@ -896,7 +1294,9 @@ def _validate_opengl_descriptor(value: object) -> dict[str, Any]:
                 "sha256",
                 "size_bytes",
                 "source_commit",
+                "source_tree",
                 "tested_at_utc",
+                "windows_runtime",
             )
         ):
             raise FieldPilotError("failed OpenGL descriptor carries partial evidence")
@@ -906,7 +1306,10 @@ def _validate_opengl_descriptor(value: object) -> dict[str, Any]:
             maximum=512,
         )
         return _failed_opengl(input_name, error)
-    if check_count <= 0 or root.get("error") is not None:
+    if (
+        check_count not in OPENGL_PILOT_ALLOWED_CHECK_COUNTS
+        or root.get("error") is not None
+    ):
         raise FieldPilotError("passing OpenGL descriptor is incomplete")
     for key in ("runtime_lock_sha256", "sha256"):
         digest = root.get(key)
@@ -915,12 +1318,19 @@ def _validate_opengl_descriptor(value: object) -> dict[str, Any]:
     source_commit = root.get("source_commit")
     if not isinstance(source_commit, str) or _COMMIT_RE.fullmatch(source_commit) is None:
         raise FieldPilotError("OpenGL descriptor source_commit is invalid")
+    source_tree = root.get("source_tree")
+    if source_tree not in {"clean", "dirty", "unknown"}:
+        raise FieldPilotError("OpenGL descriptor source_tree is invalid")
     size_bytes = root.get("size_bytes")
     if type(size_bytes) is not int or size_bytes <= 0:
         raise FieldPilotError("OpenGL descriptor size_bytes is invalid")
     tested_at = _validate_timestamp(
         root.get("tested_at_utc"),
         label="OpenGL tested_at_utc",
+    )
+    windows_runtime = _validate_windows_runtime_claims(
+        root.get("windows_runtime"),
+        label="field-pilot OpenGL Windows runtime",
     )
     context = _exact_mapping(
         root.get("context"),
@@ -964,8 +1374,10 @@ def _validate_opengl_descriptor(value: object) -> dict[str, Any]:
         "sha256": root["sha256"],
         "size_bytes": size_bytes,
         "source_commit": source_commit,
+        "source_tree": source_tree,
         "status": REVIEW_STATUS_PASS,
         "tested_at_utc": tested_at,
+        "windows_runtime": windows_runtime,
     }
 
 
@@ -1313,9 +1725,39 @@ def _verified_artifact_digests(
 def _windows_runtime_status(machine: Mapping[str, Any]) -> str:
     return (
         REVIEW_STATUS_PASS
-        if machine.get("system") == "Windows" and machine.get("process_bits") == 64
+        if is_supported_windows_client_runtime(machine)
         else "not_target"
     )
+
+
+def _opengl_binding_failure(
+    opengl: Mapping[str, Any],
+    *,
+    machine: Mapping[str, Any],
+    report_created_at_utc: str,
+) -> str | None:
+    if opengl.get("status") != REVIEW_STATUS_PASS:
+        return None
+    runtime = opengl.get("windows_runtime")
+    if not isinstance(runtime, Mapping):
+        return "OpenGL driver-smoke has no closed Windows runtime claims"
+    if not is_supported_windows_client_runtime(runtime):
+        return "OpenGL driver-smoke was not captured on a supported Windows client"
+    if dict(runtime) != _runtime_claims_from_machine(machine):
+        return "OpenGL driver-smoke runtime differs from the field-pilot process"
+    tested_at = opengl.get("tested_at_utc")
+    if not isinstance(tested_at, str):
+        return "OpenGL driver-smoke timestamp is missing"
+    tested = datetime.fromisoformat(tested_at.removesuffix("Z") + "+00:00")
+    created = datetime.fromisoformat(
+        report_created_at_utc.removesuffix("Z") + "+00:00"
+    )
+    age_seconds = int((created - tested).total_seconds())
+    if age_seconds < 0:
+        return "OpenGL driver-smoke timestamp is later than the field-pilot report"
+    if age_seconds > MAX_OPENGL_REPORT_AGE_SECONDS:
+        return "OpenGL driver-smoke is older than the 24-hour pilot window"
+    return None
 
 
 def _pilot_outcome(
@@ -1377,11 +1819,23 @@ def build_field_pilot_report(
         if machine_snapshot is None
         else machine_snapshot
     )
+    created_at = _validate_timestamp(
+        created_at_utc or _utc_now_seconds(),
+        label="created_at_utc",
+    )
     opengl = (
         _not_provided_opengl()
         if opengl_report is None
         else _load_opengl_descriptor(opengl_report, build=build)
     )
+    binding_failure = _opengl_binding_failure(
+        opengl,
+        machine=machine,
+        report_created_at_utc=created_at,
+    )
+    if binding_failure is not None:
+        assert opengl_name is not None
+        opengl = _failed_opengl(opengl_name, binding_failure)
 
     project_start = clock_ns()
     project_verification = build_artifact_verification_report(project)
@@ -1397,10 +1851,6 @@ def build_field_pilot_report(
     project_ms = _duration_ms(project_start, project_end)
     survey_ms = _duration_ms(survey_start, survey_end)
 
-    created_at = _validate_timestamp(
-        created_at_utc or _utc_now_seconds(),
-        label="created_at_utc",
-    )
     artifact_status = _artifact_verification_status(
         project_verification,
         survey_verification,
@@ -1463,7 +1913,7 @@ def build_field_pilot_report(
         "review": review_value,
         "review_input_sha256": review_input_sha256,
         "review_normalized_sha256": canonical_json_sha256(review_value),
-        "schema_version": FIELD_PILOT_SCHEMA_VERSION,
+        "schema_version": FIELD_PILOT_REPORT_SCHEMA_VERSION,
         "survey_verification": survey_verification,
     }
     payload["pilot_sha256"] = canonical_json_sha256(payload)
@@ -1515,7 +1965,7 @@ def validate_field_pilot_report(value: object) -> dict[str, Any]:
     )
     if root.get("format") != FIELD_PILOT_REPORT_FORMAT:
         raise FieldPilotError("field-pilot report format is invalid")
-    if root.get("schema_version") != FIELD_PILOT_SCHEMA_VERSION:
+    if root.get("schema_version") != FIELD_PILOT_REPORT_SCHEMA_VERSION:
         raise FieldPilotError("field-pilot report schema version is invalid")
     if root.get("release_claim") != FIELD_PILOT_RELEASE_CLAIM:
         raise FieldPilotError("field-pilot release claim is invalid")
@@ -1556,6 +2006,22 @@ def validate_field_pilot_report(value: object) -> dict[str, Any]:
     opengl = _validate_opengl_descriptor(root.get("opengl_driver"))
     if opengl_name != opengl.get("input_name"):
         raise FieldPilotError("OpenGL input name does not match its descriptor")
+    if opengl.get("status") == REVIEW_STATUS_PASS:
+        source_binding_failure = _opengl_build_binding_failure(
+            source_commit=str(opengl["source_commit"]),
+            source_tree=str(opengl["source_tree"]),
+            runtime_lock_sha256=str(opengl["runtime_lock_sha256"]),
+            build=build,
+        )
+        if source_binding_failure is not None:
+            raise FieldPilotError(source_binding_failure)
+    binding_failure = _opengl_binding_failure(
+        opengl,
+        machine=machine,
+        report_created_at_utc=created_at,
+    )
+    if binding_failure is not None:
+        raise FieldPilotError(binding_failure)
     review = validate_field_pilot_review(root.get("review"))
     review_input_sha256 = root.get("review_input_sha256")
     if review_name is None:
@@ -1848,10 +2314,14 @@ __all__ = [
     "FIELD_PILOT_CHECKS",
     "FIELD_PILOT_RELEASE_CLAIM",
     "FIELD_PILOT_REPORT_FORMAT",
+    "FIELD_PILOT_REPORT_SCHEMA_VERSION",
     "FIELD_PILOT_REVIEW_FORMAT",
     "FIELD_PILOT_SCHEMA_VERSION",
     "FIELD_PILOT_SCOPE",
     "FIELD_PILOT_VERIFICATION_FORMAT",
+    "MAX_OPENGL_REPORT_AGE_SECONDS",
+    "OPENGL_PILOT_ALLOWED_CHECK_COUNTS",
+    "OPENGL_PILOT_REQUIRED_CHECK_IDS",
     "FieldPilotError",
     "FieldPilotPublication",
     "build_field_pilot_report",

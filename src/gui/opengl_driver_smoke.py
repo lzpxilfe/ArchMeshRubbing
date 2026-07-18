@@ -1,9 +1,8 @@
-"""Real-driver precision smoke for the native QOpenGLWidget viewport.
+"""Windows native-driver precision smoke for the QOpenGLWidget viewport.
 
 This module is deliberately a standalone process, not an ordinary pytest.
 Qt's ``offscreen`` platform cannot create the QOpenGLWidget context used by
-the application.  Run it under a native window platform (for example
-``cocoa`` on macOS or ``xcb`` inside Xvfb on Linux).
+the application.  The supported packaged path runs under ``qwindows``.
 """
 
 from __future__ import annotations
@@ -28,7 +27,7 @@ from numpy.typing import NDArray
 
 
 REPORT_SCHEMA = "archmeshrubbing.opengl_driver_smoke"
-REPORT_SCHEMA_VERSION = 1
+REPORT_SCHEMA_VERSION = 2
 ROOT = Path(__file__).resolve().parents[2]
 PROBE_WIDGET_SIZE = (768, 768)
 PROBE_BASE_WORLD_MM = np.array(
@@ -1344,6 +1343,8 @@ def run_driver_smoke(
 
 
 def _new_report() -> dict[str, Any]:
+    from src.windows_runtime import collect_windows_runtime_claims
+
     return {
         "schema": REPORT_SCHEMA,
         "schema_version": REPORT_SCHEMA_VERSION,
@@ -1353,11 +1354,15 @@ def _new_report() -> dict[str, Any]:
             "python": sys.version.split()[0],
             "machine": platform.machine(),
         },
-        "tested_at_utc": datetime.now(timezone.utc).isoformat().replace(
-            "+00:00",
-            "Z",
-        ),
+        "tested_at_utc": datetime.now(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z"),
         "source": _source_provenance(),
+        # This is a closed, privacy-bounded runtime self-claim.  Field-pilot
+        # validation cross-binds it to the process that assembles the pilot;
+        # it is not a machine identity or an authenticated attestation.
+        "windows_runtime": collect_windows_runtime_claims(),
         "checks": [],
     }
 
@@ -1369,7 +1374,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--report", type=Path)
     parser.add_argument(
         "--qt-platform",
-        help="Native Qt platform to require (for example xcb, cocoa, or windows).",
+        help="Native Qt platform override; the supported packaged value is windows.",
     )
     parser.add_argument("--context-timeout", type=float, default=8.0)
     args = parser.parse_args(argv)

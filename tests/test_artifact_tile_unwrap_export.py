@@ -40,6 +40,7 @@ from src.core.artifact_tile_unwrap_extractor import (
     TileUnwrapMesh,
     commit_artifact_tile_unwrap,
     compute_artifact_tile_unwrap,
+    tile_unwrap_recipe,
 )
 from src.core.artifact_tile_unwrap_record import tile_unwrap_receipt_from_record
 from src.core.mesh_import_recipe import current_mesh_import_recipe
@@ -148,10 +149,189 @@ def test_bundle_is_deterministic_portable_and_exactly_one_to_one() -> None:
     assert first == second
     assert hashlib.sha256(first.payload_bytes).hexdigest() == receipt["unwrap_sha256"]
     assert b'physical_scale":"1:1"' in first.sidecar_bytes
-    assert b'width="126.478mm"' in first.svg_bytes
-    assert b'height="166.266mm"' in first.svg_bytes
+    assert b'width="120.034mm"' in first.svg_bytes
+    assert b'height="166.426mm"' in first.svg_bytes
     assert b"/private/scans" not in first.sidecar_bytes
     assert sidecar["presentation"]["boundary_loop_count"] == 1
+
+
+def test_export_validator_recomputes_payload_topology_claims() -> None:
+    session, computation = _recorded()
+    bundle = build_tile_unwrap_export(
+        session.document,
+        "record:tile-export",
+        computation.unwrap,
+    )
+    recomputed = tile_export.recompute_tile_unwrap_payload_qc(computation.unwrap)
+    recomputed["connected_component_count"] = 2
+
+    with patch.object(
+        tile_export,
+        "recompute_tile_unwrap_payload_qc",
+        return_value=recomputed,
+    ):
+        with pytest.raises(
+            ArtifactTileUnwrapExportError,
+            match="connected_component_count",
+        ):
+            validate_tile_unwrap_export_bytes(
+                bundle.payload_bytes,
+                bundle.obj_bytes,
+                bundle.svg_bytes,
+                bundle.sidecar_bytes,
+            )
+
+
+def test_current_export_requires_mesh_admission_with_rebound_claims() -> None:
+    session, computation = _recorded()
+    bundle = build_tile_unwrap_export(
+        session.document,
+        "record:tile-export",
+        computation.unwrap,
+    )
+    sidecar = json.loads(bundle.sidecar_bytes)
+    geometry_qc = sidecar["provenance"]["geometry_revision"]["qc"]
+    assert geometry_qc.pop("import_admission", None) is not None
+    sidecar["claims_sha256"] = tile_export.canonical_json_sha256(
+        tile_export._sidecar_claims(sidecar)
+    )
+    svg_bytes, _loop_count = tile_export._render_svg(
+        computation.unwrap,
+        sidecar["geometry"],
+        sidecar["provenance"],
+        sidecar_claims_sha256=sidecar["claims_sha256"],
+    )
+    sidecar["artifacts"]["outline"] = tile_export._artifact_descriptor(
+        name=tile_export.TILE_UNWRAP_EXPORT_SVG_NAME,
+        media_type=tile_export.TILE_UNWRAP_SVG_MEDIA_TYPE,
+        payload=svg_bytes,
+    )
+    sidecar_bytes = tile_export.canonical_json_bytes(sidecar) + b"\n"
+
+    with pytest.raises(
+        ArtifactTileUnwrapExportError,
+        match="missing fields: import_admission",
+    ):
+        validate_tile_unwrap_export_bytes(
+            bundle.payload_bytes,
+            bundle.obj_bytes,
+            svg_bytes,
+            sidecar_bytes,
+        )
+
+
+def test_current_align_ancestry_rejects_rebound_manual_matrix() -> None:
+    session, computation = _recorded()
+    bundle = build_tile_unwrap_export(
+        session.document,
+        "record:tile-export",
+        computation.unwrap,
+    )
+    sidecar = json.loads(bundle.sidecar_bytes)
+    ancestry = sidecar["provenance"]["align_ancestry"]
+    ancestry[-1]["matrix4x4"][0][3] += 1.0
+    sidecar["provenance"]["align_revision"] = copy.deepcopy(ancestry[-1])
+    sidecar["claims_sha256"] = tile_export.canonical_json_sha256(
+        tile_export._sidecar_claims(sidecar)
+    )
+    svg_bytes, _loop_count = tile_export._render_svg(
+        computation.unwrap,
+        sidecar["geometry"],
+        sidecar["provenance"],
+        sidecar_claims_sha256=sidecar["claims_sha256"],
+    )
+    sidecar["artifacts"]["outline"] = tile_export._artifact_descriptor(
+        name=tile_export.TILE_UNWRAP_EXPORT_SVG_NAME,
+        media_type=tile_export.TILE_UNWRAP_SVG_MEDIA_TYPE,
+        payload=svg_bytes,
+    )
+    sidecar_bytes = tile_export.canonical_json_bytes(sidecar) + b"\n"
+
+    with pytest.raises(
+        ArtifactTileUnwrapExportError,
+        match="delta recipe",
+    ):
+        validate_tile_unwrap_export_bytes(
+            bundle.payload_bytes,
+            bundle.obj_bytes,
+            svg_bytes,
+            sidecar_bytes,
+        )
+
+
+def test_offline_validator_rejects_rehashed_different_recipe_selection() -> None:
+    session, computation = _recorded()
+    bundle = build_tile_unwrap_export(
+        session.document,
+        "record:tile-export",
+        computation.unwrap,
+    )
+    sidecar = json.loads(bundle.sidecar_bytes)
+    original_recipe = sidecar["recipe"]
+    original_selection = original_recipe["selection"]
+    source_face_count = int(sidecar["geometry"]["source_face_count"])
+    different_recipe = tile_unwrap_recipe(
+        longitudinal_axis=str(original_recipe["longitudinal_axis"]),
+        record_view=str(original_recipe["record_view"]),
+        total_face_count=int(original_selection["total_face_count"]) + 1,
+        selected_face_indices=np.arange(1, source_face_count + 1, dtype=np.int64),
+        n_sections=int(original_recipe["n_sections"]),
+    )
+    different_selection = different_recipe["selection"]
+    different_selection_sha256 = str(different_selection["selection_sha256"])
+    assert different_selection_sha256 != original_selection["selection_sha256"]
+
+    payload_bytes = computation.unwrap.canonical_payload_bytes(
+        selection_sha256=different_selection_sha256
+    )
+    receipt = computation.unwrap.receipt(
+        selection_sha256=different_selection_sha256
+    )
+    sidecar["geometry"] = receipt
+    sidecar["recipe"] = different_recipe
+    record_qc = sidecar["qc"]["record"]
+    record_qc["selection_sha256"] = different_selection_sha256
+    record_qc["unwrap_sha256"] = receipt["unwrap_sha256"]
+    provenance_record = sidecar["provenance"]["record"]
+    provenance_record["geometry_ref"] = (
+        "urn:archmeshrubbing:tile-unwrap:sha256:"
+        f"{receipt['unwrap_sha256']}"
+    )
+    provenance_record["recipe_hash"] = tile_export.canonical_recipe_hash(
+        different_recipe
+    )
+    provenance_record["selection_hash"] = different_selection_sha256
+    sidecar["artifacts"]["canonical_payload"] = tile_export._artifact_descriptor(
+        name=tile_export.TILE_UNWRAP_EXPORT_PAYLOAD_NAME,
+        media_type=tile_export.TILE_UNWRAP_PAYLOAD_MEDIA_TYPE,
+        payload=payload_bytes,
+    )
+    sidecar["claims_sha256"] = tile_export.canonical_json_sha256(
+        tile_export._sidecar_claims(sidecar)
+    )
+    svg_bytes, _loop_count = tile_export._render_svg(
+        computation.unwrap,
+        receipt,
+        sidecar["provenance"],
+        sidecar_claims_sha256=sidecar["claims_sha256"],
+    )
+    sidecar["artifacts"]["outline"] = tile_export._artifact_descriptor(
+        name=tile_export.TILE_UNWRAP_EXPORT_SVG_NAME,
+        media_type=tile_export.TILE_UNWRAP_SVG_MEDIA_TYPE,
+        payload=svg_bytes,
+    )
+    sidecar_bytes = tile_export.canonical_json_bytes(sidecar) + b"\n"
+
+    with pytest.raises(
+        ArtifactTileUnwrapExportError,
+        match="payload source faces differ from recipe selection",
+    ):
+        validate_tile_unwrap_export_bytes(
+            payload_bytes,
+            bundle.obj_bytes,
+            svg_bytes,
+            sidecar_bytes,
+        )
 
 
 def test_application_controller_computes_commits_and_exports_tile_unwrap() -> None:
@@ -207,15 +387,19 @@ def test_generated_sidecar_matches_closed_public_json_schema() -> None:
         assert isinstance(value, dict)
         return value
 
-    export_schema = load_schema("tile_unwrap_export-1.0.0.schema.json")
-    receipt_schema = load_schema("tile_unwrap_receipt-1.0.0.schema.json")
-    rubbing_export_schema = load_schema("rubbing_export-1.0.0.schema.json")
+    export_schema = load_schema("tile_unwrap_export-1.1.0.schema.json")
+    receipt_schema = load_schema("tile_unwrap_receipt-1.1.0.schema.json")
+    rubbing_export_schema = load_schema("rubbing_export-1.1.0.schema.json")
+    legacy_rubbing_export_schema = load_schema("rubbing_export-1.0.0.schema.json")
+    mesh_admission_schema = load_schema("mesh_admission_receipt-1.0.0.schema.json")
     import_recipe_schema = load_schema("mesh_import_recipe-1.0.0.schema.json")
     import_recipe_v2_schema = load_schema("mesh_import_recipe-2.0.0.schema.json")
     for schema in (
         export_schema,
         receipt_schema,
         rubbing_export_schema,
+        legacy_rubbing_export_schema,
+        mesh_admission_schema,
         import_recipe_schema,
         import_recipe_v2_schema,
     ):
@@ -225,6 +409,8 @@ def test_generated_sidecar_matches_closed_public_json_schema() -> None:
     for schema in (
         receipt_schema,
         rubbing_export_schema,
+        legacy_rubbing_export_schema,
+        mesh_admission_schema,
         import_recipe_schema,
         import_recipe_v2_schema,
     ):
@@ -254,6 +440,73 @@ def test_generated_sidecar_matches_closed_public_json_schema() -> None:
     assert isinstance(recipe, dict)
     recipe["longitudinal_axis"] = "auto"
     assert list(validator.iter_errors(tampered))
+
+    inconsistent_row_shift = copy.deepcopy(sidecar)
+    qc = inconsistent_row_shift["qc"]
+    assert isinstance(qc, dict)
+    record_qc = qc["record"]
+    assert isinstance(record_qc, dict)
+    record_qc["section_row_shift_applied"] = False
+    record_qc["section_row_shift_max_um"] = 1
+    record_qc["section_row_shift_station_count"] = 1
+    assert list(validator.iter_errors(inconsistent_row_shift))
+
+    missing_admission = copy.deepcopy(sidecar)
+    provenance = missing_admission["provenance"]
+    assert isinstance(provenance, dict)
+    geometry = provenance["geometry_revision"]
+    assert isinstance(geometry, dict)
+    geometry_qc = geometry["qc"]
+    assert isinstance(geometry_qc, dict)
+    geometry_qc.pop("import_admission")
+    assert list(validator.iter_errors(missing_admission))
+
+    legacy_align_qc = copy.deepcopy(sidecar)
+    provenance = legacy_align_qc["provenance"]
+    assert isinstance(provenance, dict)
+    align = provenance["align_revision"]
+    assert isinstance(align, dict)
+    align["qc"] = {"rigid": True}
+    assert list(validator.iter_errors(legacy_align_qc))
+
+    invalid_root = copy.deepcopy(sidecar)
+    provenance = invalid_root["provenance"]
+    assert isinstance(provenance, dict)
+    ancestry = provenance["align_ancestry"]
+    assert isinstance(ancestry, list)
+    root_align = ancestry[0]
+    assert isinstance(root_align, dict)
+    root_align["matrix4x4"][0][3] = 1.0
+    assert list(validator.iter_errors(invalid_root))
+
+    receipt_validator = jsonschema.Draft202012Validator(receipt_schema)
+    oversized_receipt = copy.deepcopy(sidecar["geometry"])
+    assert isinstance(oversized_receipt, dict)
+    oversized_receipt["face_count"] = 250_001
+    oversized_receipt["source_face_count"] = 250_001
+    assert list(receipt_validator.iter_errors(oversized_receipt))
+
+
+@pytest.mark.parametrize(
+    ("name", "expected_sha256"),
+    [
+        (
+            "tile_unwrap_receipt-1.0.0.schema.json",
+            "fbd1b0d41b001e642f639194ed025c285b281501fea7ab1b205a19158f8fd173",
+        ),
+        (
+            "tile_unwrap_export-1.0.0.schema.json",
+            "1f3d4c0ddf95ba563ece6a7393b41a9ef18ec3d6f3d408acc24d011470dc0a9c",
+        ),
+    ],
+)
+def test_experimental_legacy_schema_files_remain_byte_exact(
+    name: str,
+    expected_sha256: str,
+) -> None:
+    schema_bytes = (ROOT / "schemas" / name).read_bytes()
+
+    assert hashlib.sha256(schema_bytes).hexdigest() == expected_sha256
 
 
 def test_canonical_payload_roundtrips_and_rejects_trailing_bytes() -> None:

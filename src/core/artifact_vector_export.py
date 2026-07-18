@@ -28,6 +28,11 @@ from xml.sax.saxutils import escape as xml_escape
 
 import numpy as np
 
+from .alignment_utils import (
+    MATRIX_ATOL,
+    compose_align_matrices,
+    scene_trs_matrix_about_pivot,
+)
 from .canonical_json import CanonicalJSONError, canonical_json_sha256
 from .artifact_document import (
     ARTIFACT_DOCUMENT_SCHEMA_VERSION,
@@ -46,6 +51,7 @@ from .artifact_vector_record import (
     ArtifactVectorRecordError,
     VectorGeometryPayload,
     VectorRecordKind,
+    validate_vector_payload_recipe_contract,
     validate_vector_recipe,
     vector_payload_from_record,
 )
@@ -53,11 +59,18 @@ from .mesh_import_recipe import (
     MeshImportRecipeError,
     validate_mesh_import_recipe,
 )
+from .mesh_admission import (
+    MeshAdmissionError,
+    decoded_admission_from_counts,
+    validate_mesh_admission_receipt,
+)
 from .source_identity import PRIMARY_FILE_IDENTITY_SCOPE
 
 
 VECTOR_EXPORT_FORMAT = "archmeshrubbing_vector_export"
-VECTOR_EXPORT_SCHEMA_VERSION = "1.0.0"
+_CURRENT_VECTOR_EXPORT_SCHEMA_VERSION = "1.1.0"
+VECTOR_EXPORT_SCHEMA_VERSION = _CURRENT_VECTOR_EXPORT_SCHEMA_VERSION
+SUPPORTED_VECTOR_EXPORT_SCHEMA_VERSIONS = frozenset({"1.0.0", "1.1.0"})
 VECTOR_EXPORT_DIRECTORY_SUFFIX = ".amr-vector"
 VECTOR_EXPORT_SVG_NAME = "artifact.svg"
 VECTOR_EXPORT_SIDECAR_NAME = "artifact.amr-vector.json"
@@ -106,8 +119,83 @@ _PUBLIC_GEOMETRY_RECIPE_KEYS = frozenset(
     }
 )
 _PUBLIC_GEOMETRY_QC_KEYS = frozenset(
+    {"face_count", "finite_vertices", "import_admission", "vertex_count"}
+)
+_LEGACY_PUBLIC_GEOMETRY_QC_KEYS = frozenset(
     {"face_count", "finite_vertices", "vertex_count"}
 )
+_VECTOR_PAYLOAD_QC_KEYS = frozenset(
+    {
+        "bounds_mm",
+        "closed_path_count",
+        "coordinate_space",
+        "finite",
+        "path_count",
+        "payload_sha256",
+        "point_count",
+        "total_length_mm",
+        "total_length_rounding_decimal_places",
+        "unit",
+    }
+)
+_CUTLINE_RECORD_QC_KEYS = frozenset(
+    {
+        "candidate_face_count",
+        "classification_tolerance_mm",
+        "collinear_point_removal_count",
+        "coplanar_face_count",
+        "duplicate_segment_count",
+        "input_face_count",
+        "input_vertex_count",
+        "intersected_face_count",
+        "max_endpoint_snap_mm",
+        "max_plane_residual_mm",
+        "non_manifold_junction_count",
+        "on_plane_edge_face_count",
+        "point_tangent_count",
+        "raw_segment_count",
+        "stitch_tolerance_mm",
+        "unique_segment_count",
+    }
+)
+_OUTLINE_RECORD_QC_KEYS = frozenset(
+    {
+        "all_projected_faces_included",
+        "backend_geos_version",
+        "backend_shapely_version",
+        "component_count",
+        "face_chunk_count",
+        "fixed_grid_triangle_count",
+        "grid_area_delta_mm2",
+        "grid_collapsed_triangle_count",
+        "grid_component_merge_count",
+        "grid_component_split_count",
+        "grid_origin_index_uv",
+        "grid_snap_axis_upper_bound_mm",
+        "grid_snap_error_contract",
+        "grid_snap_radial_upper_bound_squared_mm2",
+        "hole_count",
+        "input_face_count",
+        "input_vertex_count",
+        "outline_area_mm2",
+        "outline_collinear_point_removal_count",
+        "outline_perimeter_mm",
+        "outline_topology",
+        "output_grid_residual_max_mm",
+        "precision_grid_mm",
+        "projected_degenerate_triangle_count",
+        "projected_non_degenerate_triangle_count",
+        "sampling_applied",
+        "topology_valid",
+        "unsnapped_area_mm2",
+        "unsnapped_comparison_status",
+        "unsnapped_component_count",
+        "view",
+    }
+)
+_PRODUCTION_CUTLINE_ALGORITHM = "archmeshrubbing.triangle_plane_cutline"
+_PRODUCTION_OUTLINE_ALGORITHM = "archmeshrubbing.projected_triangle_union"
+_PRODUCTION_VECTOR_ALGORITHM_VERSION = "1.0.0"
 _IGNORABLE_OS_METADATA_NAMES = frozenset({".DS_Store", "Thumbs.db", "desktop.ini"})
 
 
@@ -442,6 +530,22 @@ def _public_mapping(value: Mapping[str, Any], allowed_keys: frozenset[str]) -> d
     }
 
 
+def _closed_public_mapping(
+    value: object,
+    allowed_keys: frozenset[str],
+    *,
+    model_name: str,
+) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ArtifactVectorExportError(f"{model_name} must be an object")
+    unknown = sorted(set(value) - set(allowed_keys))
+    if unknown:
+        raise ArtifactVectorExportError(
+            f"{model_name} has unknown fields: {', '.join(unknown)}"
+        )
+    return value
+
+
 def _public_mesh_import_recipe(
     value: Mapping[str, Any],
     *,
@@ -469,8 +573,7 @@ def _public_mesh_import_recipe(
     return public
 
 
-def _public_align_revision(document: ArtifactDocument, record: DerivedRecord) -> dict[str, Any]:
-    align = document.align_revision_index[record.align_revision_id]
+def _public_align_value(align: AlignRevision) -> dict[str, Any]:
     data = align.to_dict()
     return {
         "created_at": data["created_at"],
@@ -482,6 +585,43 @@ def _public_align_revision(document: ArtifactDocument, record: DerivedRecord) ->
         "recipe": _public_mapping(data["recipe"], _PUBLIC_ALIGN_RECIPE_KEYS),
         "source_metadata_revision_id": data["source_metadata_revision_id"],
     }
+
+
+def _public_align_revision(
+    document: ArtifactDocument,
+    record: DerivedRecord,
+) -> dict[str, Any]:
+    return _public_align_value(
+        document.align_revision_index[record.align_revision_id]
+    )
+
+
+def _public_align_ancestry(
+    document: ArtifactDocument,
+    record: DerivedRecord,
+) -> list[dict[str, Any]]:
+    """Return the exact root-to-active Align chain for offline recomputation."""
+
+    revisions = document.align_revision_index
+    current_id: str | None = record.align_revision_id
+    reverse_chain: list[AlignRevision] = []
+    seen: set[str] = set()
+    while current_id is not None:
+        if current_id in seen:
+            raise ArtifactVectorExportError("Align ancestry contains a cycle")
+        revision = revisions.get(current_id)
+        if revision is None:
+            raise ArtifactVectorExportError(
+                f"Align ancestry is missing revision {current_id!r}"
+            )
+        seen.add(current_id)
+        reverse_chain.append(revision)
+        if len(reverse_chain) > 4096:
+            raise ArtifactVectorExportError(
+                "Align ancestry exceeds the 4096-revision safety limit"
+            )
+        current_id = revision.parent_id
+    return [_public_align_value(item) for item in reversed(reverse_chain)]
 
 
 def _public_metadata_revision(document: ArtifactDocument, record: DerivedRecord) -> dict[str, Any]:
@@ -502,7 +642,12 @@ def _public_metadata_revision(document: ArtifactDocument, record: DerivedRecord)
     }
 
 
-def _public_geometry_revision(document: ArtifactDocument, record: DerivedRecord) -> dict[str, Any]:
+def _public_geometry_revision(
+    document: ArtifactDocument,
+    record: DerivedRecord,
+    *,
+    include_current_contract: bool,
+) -> dict[str, Any]:
     geometry = document.geometry_revision_index[record.geometry_revision_id]
     data = geometry.to_dict()
     return {
@@ -515,7 +660,14 @@ def _public_geometry_revision(document: ArtifactDocument, record: DerivedRecord)
             require_current_runtime=True,
         ),
         "operator": data["operator"],
-        "qc": _public_mapping(data["qc"], _PUBLIC_GEOMETRY_QC_KEYS),
+        "qc": _public_mapping(
+            data["qc"],
+            (
+                _PUBLIC_GEOMETRY_QC_KEYS
+                if include_current_contract
+                else _LEGACY_PUBLIC_GEOMETRY_QC_KEYS
+            ),
+        ),
         "source_asset_ids": data["source_asset_ids"],
     }
 
@@ -552,8 +704,13 @@ def _dependency_closure(document: ArtifactDocument, record: DerivedRecord) -> li
     return [_record_receipt(document, records[record_id]) for record_id in sorted(seen)]
 
 
-def _provenance(document: ArtifactDocument, record: DerivedRecord) -> dict[str, Any]:
-    return {
+def _provenance(
+    document: ArtifactDocument,
+    record: DerivedRecord,
+    *,
+    include_current_contract: bool,
+) -> dict[str, Any]:
+    provenance = {
         "align_revision": _public_align_revision(document, record),
         "dependency_closure": _dependency_closure(document, record),
         "document": {
@@ -566,7 +723,11 @@ def _provenance(document: ArtifactDocument, record: DerivedRecord) -> dict[str, 
             "schema_version": document.schema_version,
             "software_version": document.software_version,
         },
-        "geometry_revision": _public_geometry_revision(document, record),
+        "geometry_revision": _public_geometry_revision(
+            document,
+            record,
+            include_current_contract=include_current_contract,
+        ),
         "record": {
             "align_revision_id": record.align_revision_id,
             "created_at": record.created_at,
@@ -583,15 +744,24 @@ def _provenance(document: ArtifactDocument, record: DerivedRecord) -> dict[str, 
         "source_assets": _source_asset_provenance(document, record),
         "source_metadata_revision": _public_metadata_revision(document, record),
     }
+    if include_current_contract:
+        provenance["align_ancestry"] = _public_align_ancestry(document, record)
+    return provenance
 
 
 def build_public_export_provenance(
     document: ArtifactDocument,
     record: DerivedRecord,
+    *,
+    include_current_contract: bool = True,
 ) -> dict[str, Any]:
     """Build the shared, path-sanitized provenance shape for public exports."""
 
-    return _provenance(document, record)
+    return _provenance(
+        document,
+        record,
+        include_current_contract=include_current_contract,
+    )
 
 
 def _svg_metadata(
@@ -755,7 +925,13 @@ def build_vector_export(
     if not isinstance(render_options, VectorSVGOptions):
         raise ArtifactVectorExportError("options must be VectorSVGOptions")
     record, payload, record_qc = _require_exportable_record(document, record_id)
-    provenance = _provenance(document, record)
+    provenance = _provenance(
+        document,
+        record,
+        include_current_contract=(
+            VECTOR_EXPORT_SCHEMA_VERSION == _CURRENT_VECTOR_EXPORT_SCHEMA_VERSION
+        ),
+    )
     bounds = _payload_bounds(payload)
     width_mm, height_mm = _dimensions(bounds, render_options.margin_mm)
     sidecar: dict[str, Any] = {
@@ -972,18 +1148,63 @@ def _validate_dependency_closure(
         raise ArtifactVectorExportError("dependency closure contains unreachable receipts")
 
 
-def _validate_provenance_shape(value: object) -> Mapping[str, Any]:
-    provenance = _exact_keys(
+def _validated_public_align_revision(
+    value: object,
+    *,
+    model_name: str,
+) -> tuple[Mapping[str, Any], AlignRevision]:
+    align_value = _exact_keys(
         value,
         {
-            "align_revision",
-            "dependency_closure",
-            "document",
-            "geometry_revision",
-            "record",
-            "source_assets",
-            "source_metadata_revision",
+            "id",
+            "parent_id",
+            "source_metadata_revision_id",
+            "matrix4x4",
+            "recipe",
+            "qc",
+            "created_at",
+            "operator",
         },
+        model_name=model_name,
+    )
+    _closed_public_mapping(
+        align_value["recipe"],
+        _PUBLIC_ALIGN_RECIPE_KEYS,
+        model_name=f"{model_name}.recipe",
+    )
+    _closed_public_mapping(
+        align_value["qc"],
+        _PUBLIC_ALIGN_QC_KEYS,
+        model_name=f"{model_name}.qc",
+    )
+    try:
+        align = AlignRevision.from_dict(dict(align_value) | {"extensions": {}})
+    except ArtifactDocumentError as exc:
+        raise ArtifactVectorExportError(
+            f"invalid {model_name}: {exc}"
+        ) from exc
+    return align_value, align
+
+
+def _validate_provenance_shape(
+    value: object,
+    *,
+    require_current_contract: bool,
+) -> Mapping[str, Any]:
+    expected_keys = {
+        "align_revision",
+        "dependency_closure",
+        "document",
+        "geometry_revision",
+        "record",
+        "source_assets",
+        "source_metadata_revision",
+    }
+    if require_current_contract:
+        expected_keys.add("align_ancestry")
+    provenance = _exact_keys(
+        value,
+        expected_keys,
         model_name="provenance",
     )
     document = _exact_keys(
@@ -1060,24 +1281,30 @@ def _validate_provenance_shape(value: object) -> Mapping[str, Any]:
         raise ArtifactVectorExportError(
             "provenance record dependency IDs must be unique and sorted"
         )
+    _align_value, align = _validated_public_align_revision(
+        provenance["align_revision"],
+        model_name="provenance.align_revision",
+    )
+    geometry_value = _exact_keys(
+        provenance["geometry_revision"],
+        {
+            "id",
+            "source_asset_ids",
+            "geometry_sha256",
+            "geometry_hash_scope",
+            "import_recipe",
+            "qc",
+            "created_at",
+            "operator",
+        },
+        model_name="provenance.geometry_revision",
+    )
+    _closed_public_mapping(
+        geometry_value["qc"],
+        _PUBLIC_GEOMETRY_QC_KEYS,
+        model_name="provenance.geometry_revision.qc",
+    )
     try:
-        align = AlignRevision.from_dict(
-            dict(_exact_keys(
-                provenance["align_revision"],
-                {
-                    "id",
-                    "parent_id",
-                    "source_metadata_revision_id",
-                    "matrix4x4",
-                    "recipe",
-                    "qc",
-                    "created_at",
-                    "operator",
-                },
-                model_name="provenance.align_revision",
-            ))
-            | {"extensions": {}}
-        )
         metadata = SourceMetadataRevision.from_dict(
             dict(_exact_keys(
                 provenance["source_metadata_revision"],
@@ -1098,21 +1325,7 @@ def _validate_provenance_shape(value: object) -> Mapping[str, Any]:
             | {"extensions": {}}
         )
         geometry = GeometryRevision.from_dict(
-            dict(_exact_keys(
-                provenance["geometry_revision"],
-                {
-                    "id",
-                    "source_asset_ids",
-                    "geometry_sha256",
-                    "geometry_hash_scope",
-                    "import_recipe",
-                    "qc",
-                    "created_at",
-                    "operator",
-                },
-                model_name="provenance.geometry_revision",
-            ))
-            | {"topology_map_ref": None, "extensions": {}}
+            dict(geometry_value) | {"topology_map_ref": None, "extensions": {}}
         )
     except ArtifactDocumentError as exc:
         raise ArtifactVectorExportError(f"invalid revision provenance: {exc}") from exc
@@ -1124,6 +1337,19 @@ def _validate_provenance_shape(value: object) -> Mapping[str, Any]:
         raise ArtifactVectorExportError(
             "provenance geometry import_recipe contains non-public fields"
         )
+    admission = geometry.qc.get("import_admission")
+    if admission is not None:
+        try:
+            admission_receipt = validate_mesh_admission_receipt(admission)
+        except MeshAdmissionError as exc:
+            raise ArtifactVectorExportError(
+                f"invalid provenance mesh admission receipt: {exc}"
+            ) from exc
+        accepted = admission_receipt["accepted"]
+        if accepted["geometry_sha256"] != geometry.geometry_sha256:
+            raise ArtifactVectorExportError(
+                "provenance mesh admission does not match geometry SHA-256"
+            )
     try:
         metadata.require_confirmed_matrix()
     except ArtifactDocumentError as exc:
@@ -1231,15 +1457,696 @@ def _validate_provenance_shape(value: object) -> Mapping[str, Any]:
 
 
 def validate_public_export_provenance(value: object) -> Mapping[str, Any]:
-    """Validate the shared public provenance shape without an artifact type."""
+    """Validate either supported shared public provenance contract."""
 
-    return _validate_provenance_shape(value)
+    if isinstance(value, Mapping) and "align_ancestry" in value:
+        return validate_current_public_export_provenance(value)
+    return _validate_provenance_shape(value, require_current_contract=False)
+
+
+def validate_legacy_public_export_provenance(
+    value: object,
+) -> Mapping[str, Any]:
+    """Validate the immutable, exact public provenance shape used by 1.0."""
+
+    return _validate_provenance_shape(value, require_current_contract=False)
+
+
+def validate_current_public_export_provenance(
+    value: object,
+) -> Mapping[str, Any]:
+    """Validate the closed provenance contract used by current 1.1 exports."""
+
+    provenance = _validate_provenance_shape(value, require_current_contract=True)
+    _validate_current_vector_provenance(provenance)
+    return provenance
+
+
+def _strict_nonnegative_int(value: object, *, field_name: str) -> int:
+    if type(value) is not int or value < 0:
+        raise ArtifactVectorExportError(
+            f"{field_name} must be a non-negative integer"
+        )
+    return value
+
+
+def _strict_vec3(value: object, *, field_name: str) -> None:
+    if not isinstance(value, list) or len(value) != 3:
+        raise ArtifactVectorExportError(f"{field_name} must contain three numbers")
+    for index, item in enumerate(value):
+        _finite_number(item, field_name=f"{field_name}[{index}]")
+
+
+def _validate_current_vector_provenance(
+    provenance: Mapping[str, Any],
+) -> None:
+    active_align = provenance["align_revision"]
+    assert isinstance(active_align, Mapping)
+    ancestry = provenance["align_ancestry"]
+    if (
+        not isinstance(ancestry, list)
+        or not ancestry
+        or len(ancestry) > 4096
+    ):
+        raise ArtifactVectorExportError(
+            "provenance.align_ancestry must contain 1 to 4096 revisions"
+        )
+
+    parsed_chain: list[AlignRevision] = []
+    public_chain: list[Mapping[str, Any]] = []
+    seen_ids: set[str] = set()
+    for index, item in enumerate(ancestry):
+        model_name = f"provenance.align_ancestry[{index}]"
+        public, revision = _validated_public_align_revision(
+            item,
+            model_name=model_name,
+        )
+        if revision.id in seen_ids:
+            raise ArtifactVectorExportError(
+                "provenance Align ancestry revision IDs must be unique"
+            )
+        seen_ids.add(revision.id)
+        qc = _exact_keys(
+            public["qc"],
+            {"proper_rigid"},
+            model_name=f"{model_name}.qc",
+        )
+        if qc["proper_rigid"] is not True:
+            raise ArtifactVectorExportError(
+                f"{model_name}.qc.proper_rigid must be true"
+            )
+        recipe_value = public["recipe"]
+        assert isinstance(recipe_value, Mapping)
+        recipe_kind = recipe_value.get("kind")
+        if index == 0:
+            _exact_keys(
+                recipe_value,
+                {"kind"},
+                model_name=f"{model_name}.recipe",
+            )
+            if recipe_kind != "initial_identity":
+                raise ArtifactVectorExportError(
+                    "provenance Align ancestry must start at initial_identity"
+                )
+            if revision.parent_id is not None:
+                raise ArtifactVectorExportError(
+                    "initial Align ancestry revision must not have a parent"
+                )
+            if not np.array_equal(revision.matrix, np.eye(4, dtype=np.float64)):
+                raise ArtifactVectorExportError(
+                    "initial Align ancestry matrix must be identity"
+                )
+        else:
+            manual = _exact_keys(
+                recipe_value,
+                {
+                    "convention",
+                    "kind",
+                    "pivot_mm",
+                    "rotation_deg",
+                    "translation_mm",
+                },
+                model_name=f"{model_name}.recipe",
+            )
+            if recipe_kind != "manual_scene_trs_delta":
+                raise ArtifactVectorExportError(
+                    "non-root Align ancestry revisions must be manual deltas"
+                )
+            if manual["convention"] != "delta @ parent":
+                raise ArtifactVectorExportError(
+                    "manual Align ancestry convention is invalid"
+                )
+            parent = parsed_chain[-1]
+            if revision.parent_id != parent.id:
+                raise ArtifactVectorExportError(
+                    "provenance Align ancestry parent chain is not exact"
+                )
+            if (
+                revision.source_metadata_revision_id
+                != parent.source_metadata_revision_id
+            ):
+                raise ArtifactVectorExportError(
+                    "provenance Align ancestry changes source metadata"
+                )
+            for key in ("pivot_mm", "rotation_deg", "translation_mm"):
+                _strict_vec3(
+                    manual[key],
+                    field_name=f"{model_name}.recipe.{key}",
+                )
+            try:
+                delta = scene_trs_matrix_about_pivot(
+                    manual["translation_mm"],
+                    manual["rotation_deg"],
+                    1.0,
+                    manual["pivot_mm"],
+                )
+                recomputed = compose_align_matrices(delta, parent.matrix)
+            except (TypeError, ValueError) as exc:
+                raise ArtifactVectorExportError(
+                    f"cannot recompute {model_name}: {exc}"
+                ) from exc
+            if not np.allclose(
+                revision.matrix,
+                recomputed,
+                rtol=0.0,
+                atol=MATRIX_ATOL,
+            ):
+                raise ArtifactVectorExportError(
+                    "provenance Align ancestry matrix does not match its delta recipe"
+                )
+        public_chain.append(public)
+        parsed_chain.append(revision)
+
+    if dict(active_align) != dict(public_chain[-1]):
+        raise ArtifactVectorExportError(
+            "provenance.align_revision must exactly match the last Align ancestry entry"
+        )
+    active_revision = parsed_chain[-1]
+    document = provenance["document"]
+    record = provenance["record"]
+    metadata = provenance["source_metadata_revision"]
+    assert isinstance(document, Mapping)
+    assert isinstance(record, Mapping)
+    assert isinstance(metadata, Mapping)
+    if (
+        document["active_align_revision_id"] != active_revision.id
+        or record["align_revision_id"] != active_revision.id
+    ):
+        raise ArtifactVectorExportError(
+            "active/record Align IDs do not match the Align ancestry tip"
+        )
+    if active_revision.source_metadata_revision_id != metadata["id"]:
+        raise ArtifactVectorExportError(
+            "Align ancestry tip does not match source metadata provenance"
+        )
+
+    geometry = provenance["geometry_revision"]
+    assert isinstance(geometry, Mapping)
+    geometry_qc = _exact_keys(
+        geometry["qc"],
+        {"face_count", "finite_vertices", "import_admission", "vertex_count"},
+        model_name="provenance.geometry_revision.qc",
+    )
+    face_count = _strict_nonnegative_int(
+        geometry_qc["face_count"],
+        field_name="provenance.geometry_revision.qc.face_count",
+    )
+    vertex_count = _strict_nonnegative_int(
+        geometry_qc["vertex_count"],
+        field_name="provenance.geometry_revision.qc.vertex_count",
+    )
+    if geometry_qc["finite_vertices"] is not True:
+        raise ArtifactVectorExportError(
+            "provenance.geometry_revision.qc.finite_vertices must be true"
+        )
+    try:
+        admission = validate_mesh_admission_receipt(geometry_qc["import_admission"])
+    except MeshAdmissionError as exc:
+        raise ArtifactVectorExportError(
+            f"invalid provenance mesh admission receipt: {exc}"
+        ) from exc
+    accepted = admission["accepted"]
+    if face_count != accepted["triangle_count"]:
+        raise ArtifactVectorExportError(
+            "geometry face_count does not match mesh admission"
+        )
+    if vertex_count != accepted["vertex_count"]:
+        raise ArtifactVectorExportError(
+            "geometry vertex_count does not match mesh admission"
+        )
+    decoded = admission["decoded"]
+    try:
+        decoded_admission_from_counts(
+            vertex_count=decoded["vertex_count"],
+            triangle_count=decoded["triangle_count"],
+            array_bytes=decoded["array_bytes"],
+        )
+    except MeshAdmissionError as exc:
+        raise ArtifactVectorExportError(
+            f"invalid provenance decoded mesh admission: {exc}"
+        ) from exc
+    decoded_canonical_bytes = (
+        24 * decoded["vertex_count"] + 12 * decoded["triangle_count"]
+    )
+    accepted_canonical_bytes = (
+        24 * accepted["vertex_count"] + 12 * accepted["triangle_count"]
+    )
+    if decoded["array_bytes"] < max(
+        decoded_canonical_bytes,
+        accepted_canonical_bytes,
+    ):
+        raise ArtifactVectorExportError(
+            "mesh admission decoded bytes are below canonical decoded/accepted arrays"
+        )
+
+    try:
+        import_execution = validate_mesh_import_recipe(
+            geometry["import_recipe"],
+            allow_legacy=True,
+            require_current_runtime=False,
+        )
+    except MeshImportRecipeError as exc:
+        raise ArtifactVectorExportError(
+            f"invalid provenance mesh import recipe: {exc}"
+        ) from exc
+    if admission["source_format"] != import_execution.source_format:
+        raise ArtifactVectorExportError(
+            "mesh admission source_format does not match the import recipe"
+        )
+    assets = provenance["source_assets"]
+    assert isinstance(assets, list)
+    if len(assets) != 1:
+        raise ArtifactVectorExportError(
+            "current export provenance requires exactly one primary source asset"
+        )
+    primary_asset = assets[0]
+    assert isinstance(primary_asset, Mapping)
+    if admission["source_size_bytes"] != primary_asset["size_bytes"]:
+        raise ArtifactVectorExportError(
+            "mesh admission source_size_bytes does not match the primary source asset"
+        )
+
+
+def _validate_outline_topology_qc(value: object) -> None:
+    topology = _exact_keys(
+        value,
+        {
+            "area_mm2",
+            "bounds_mm",
+            "component_areas_mm2",
+            "component_count",
+            "component_exterior_path_ids",
+            "component_hole_counts",
+            "exterior_count",
+            "geometry_type",
+            "hole_assignments",
+            "hole_count",
+            "ring_count",
+            "topology_valid",
+            "validity_reason",
+        },
+        model_name="qc.record.outline_topology",
+    )
+    _finite_number(
+        topology["area_mm2"],
+        field_name="qc.record.outline_topology.area_mm2",
+        minimum=0.0,
+    )
+    bounds = topology["bounds_mm"]
+    if not isinstance(bounds, list) or len(bounds) != 4:
+        raise ArtifactVectorExportError(
+            "qc.record.outline_topology.bounds_mm must contain four numbers"
+        )
+    for index, item in enumerate(bounds):
+        _finite_number(
+            item,
+            field_name=f"qc.record.outline_topology.bounds_mm[{index}]",
+        )
+    component_areas = topology["component_areas_mm2"]
+    if not isinstance(component_areas, list):
+        raise ArtifactVectorExportError(
+            "qc.record.outline_topology.component_areas_mm2 must be an array"
+        )
+    for index, item in enumerate(component_areas):
+        _finite_number(
+            item,
+            field_name=(
+                f"qc.record.outline_topology.component_areas_mm2[{index}]"
+            ),
+            minimum=0.0,
+        )
+    for key in (
+        "component_count",
+        "exterior_count",
+        "hole_count",
+        "ring_count",
+    ):
+        _strict_nonnegative_int(
+            topology[key],
+            field_name=f"qc.record.outline_topology.{key}",
+        )
+    for key in ("component_exterior_path_ids", "component_hole_counts"):
+        if not isinstance(topology[key], list):
+            raise ArtifactVectorExportError(
+                f"qc.record.outline_topology.{key} must be an array"
+            )
+    for index, item in enumerate(topology["component_exterior_path_ids"]):
+        _required_string(
+            item,
+            field_name=(
+                "qc.record.outline_topology.component_exterior_path_ids"
+                f"[{index}]"
+            ),
+        )
+    for index, item in enumerate(topology["component_hole_counts"]):
+        _strict_nonnegative_int(
+            item,
+            field_name=(
+                f"qc.record.outline_topology.component_hole_counts[{index}]"
+            ),
+        )
+    assignments = topology["hole_assignments"]
+    if not isinstance(assignments, list):
+        raise ArtifactVectorExportError(
+            "qc.record.outline_topology.hole_assignments must be an array"
+        )
+    for index, item in enumerate(assignments):
+        assignment = _exact_keys(
+            item,
+            {"exterior_path_id", "hole_path_id"},
+            model_name=f"qc.record.outline_topology.hole_assignments[{index}]",
+        )
+        for key in ("exterior_path_id", "hole_path_id"):
+            _required_string(
+                assignment[key],
+                field_name=(
+                    f"qc.record.outline_topology.hole_assignments[{index}].{key}"
+                ),
+            )
+    if topology["geometry_type"] not in {"Polygon", "MultiPolygon"}:
+        raise ArtifactVectorExportError(
+            "qc.record.outline_topology.geometry_type is invalid"
+        )
+    if topology["topology_valid"] is not True:
+        raise ArtifactVectorExportError(
+            "qc.record.outline_topology.topology_valid must be true"
+        )
+    _required_string(
+        topology["validity_reason"],
+        field_name="qc.record.outline_topology.validity_reason",
+    )
+
+
+def _validate_current_record_qc(
+    value: object,
+    *,
+    payload: VectorGeometryPayload,
+    recipe: Mapping[str, Any],
+    provenance: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ArtifactVectorExportError("qc.record must be an object")
+    kind = VectorRecordKind(payload.kind)
+    optional_keys = (
+        _CUTLINE_RECORD_QC_KEYS
+        if kind is VectorRecordKind.CUTLINE
+        else _OUTLINE_RECORD_QC_KEYS
+    )
+    production_algorithm = (
+        _PRODUCTION_CUTLINE_ALGORITHM
+        if kind is VectorRecordKind.CUTLINE
+        else _PRODUCTION_OUTLINE_ALGORITHM
+    )
+    known_algorithms = {
+        _PRODUCTION_CUTLINE_ALGORITHM: VectorRecordKind.CUTLINE,
+        _PRODUCTION_OUTLINE_ALGORITHM: VectorRecordKind.OUTLINE,
+    }
+    algorithm = recipe.get("algorithm")
+    if algorithm in known_algorithms:
+        if known_algorithms[algorithm] is not kind:
+            raise ArtifactVectorExportError(
+                "production vector algorithm does not match the payload kind"
+            )
+        if recipe.get("algorithm_version") != _PRODUCTION_VECTOR_ALGORITHM_VERSION:
+            raise ArtifactVectorExportError(
+                "production vector algorithm version is unsupported"
+            )
+    is_production = (
+        algorithm == production_algorithm
+        and recipe.get("algorithm_version") == _PRODUCTION_VECTOR_ALGORITHM_VERSION
+    )
+    always_kind_keys = (
+        frozenset()
+        if kind is VectorRecordKind.CUTLINE
+        else frozenset({"outline_topology"})
+    )
+    allowed = _VECTOR_PAYLOAD_QC_KEYS | (
+        optional_keys if is_production else always_kind_keys
+    )
+    unknown = sorted(set(value) - set(allowed))
+    if unknown:
+        raise ArtifactVectorExportError(
+            f"qc.record has unknown {kind.value} fields: {', '.join(unknown)}"
+        )
+    required_kind_keys = optional_keys if is_production else always_kind_keys
+    missing = sorted(set(required_kind_keys) - set(value))
+    if missing:
+        raise ArtifactVectorExportError(
+            f"qc.record is missing {kind.value} fields: {', '.join(missing)}"
+        )
+
+    count_keys = {
+        "candidate_face_count",
+        "collinear_point_removal_count",
+        "component_count",
+        "coplanar_face_count",
+        "duplicate_segment_count",
+        "face_chunk_count",
+        "fixed_grid_triangle_count",
+        "grid_collapsed_triangle_count",
+        "hole_count",
+        "input_face_count",
+        "input_vertex_count",
+        "intersected_face_count",
+        "non_manifold_junction_count",
+        "on_plane_edge_face_count",
+        "outline_collinear_point_removal_count",
+        "point_tangent_count",
+        "projected_degenerate_triangle_count",
+        "projected_non_degenerate_triangle_count",
+        "raw_segment_count",
+        "unique_segment_count",
+    }
+    for key in sorted(count_keys & set(value)):
+        _strict_nonnegative_int(value[key], field_name=f"qc.record.{key}")
+    nullable_count_keys = {
+        "grid_component_merge_count",
+        "grid_component_split_count",
+        "unsnapped_component_count",
+    }
+    for key in sorted(nullable_count_keys & set(value)):
+        if value[key] is not None:
+            _strict_nonnegative_int(value[key], field_name=f"qc.record.{key}")
+    nonnegative_number_keys = {
+        "classification_tolerance_mm",
+        "grid_snap_axis_upper_bound_mm",
+        "grid_snap_radial_upper_bound_squared_mm2",
+        "max_endpoint_snap_mm",
+        "max_plane_residual_mm",
+        "outline_area_mm2",
+        "outline_perimeter_mm",
+        "output_grid_residual_max_mm",
+        "precision_grid_mm",
+        "stitch_tolerance_mm",
+        "unsnapped_area_mm2",
+    }
+    for key in sorted(nonnegative_number_keys & set(value)):
+        if value[key] is not None:
+            _finite_number(
+                value[key],
+                field_name=f"qc.record.{key}",
+                minimum=0.0,
+            )
+    if "grid_area_delta_mm2" in value and value["grid_area_delta_mm2"] is not None:
+        _finite_number(
+            value["grid_area_delta_mm2"],
+            field_name="qc.record.grid_area_delta_mm2",
+        )
+    expected_backend_versions = {
+        "backend_geos_version": "3.13.1",
+        "backend_shapely_version": "2.1.2",
+    }
+    for key, expected in expected_backend_versions.items():
+        if key in value and value[key] != expected:
+            raise ArtifactVectorExportError(f"qc.record.{key} is invalid")
+    if "all_projected_faces_included" in value:
+        if value["all_projected_faces_included"] is not True:
+            raise ArtifactVectorExportError(
+                "qc.record.all_projected_faces_included must be true"
+            )
+    if "sampling_applied" in value and value["sampling_applied"] is not False:
+        raise ArtifactVectorExportError("qc.record.sampling_applied must be false")
+    if "topology_valid" in value and value["topology_valid"] is not True:
+        raise ArtifactVectorExportError("qc.record.topology_valid must be true")
+    if "grid_snap_error_contract" in value and value[
+        "grid_snap_error_contract"
+    ] != "axis<=grid/2;radial<=grid/sqrt(2)":
+        raise ArtifactVectorExportError(
+            "qc.record.grid_snap_error_contract is invalid"
+        )
+    if "grid_origin_index_uv" in value:
+        grid_origin = value["grid_origin_index_uv"]
+        if (
+            not isinstance(grid_origin, list)
+            or len(grid_origin) != 2
+            or any(type(item) is not int for item in grid_origin)
+        ):
+            raise ArtifactVectorExportError(
+                "qc.record.grid_origin_index_uv must contain two integers"
+            )
+    if "view" in value and value["view"] not in {
+        "back",
+        "bottom",
+        "front",
+        "left",
+        "right",
+        "top",
+    }:
+        raise ArtifactVectorExportError("qc.record.view is invalid")
+    if "unsnapped_comparison_status" in value:
+        status = value["unsnapped_comparison_status"]
+        if status not in {"available", "unavailable_geos_union_failure"}:
+            raise ArtifactVectorExportError(
+                "qc.record.unsnapped_comparison_status is invalid"
+            )
+        nullable_fields = {
+            "grid_area_delta_mm2",
+            "grid_component_merge_count",
+            "grid_component_split_count",
+            "unsnapped_area_mm2",
+            "unsnapped_component_count",
+        }
+        for key in nullable_fields & set(value):
+            if status == "available" and value[key] is None:
+                raise ArtifactVectorExportError(
+                    f"qc.record.{key} must be available when raw comparison succeeds"
+                )
+            if status != "available" and value[key] is not None:
+                raise ArtifactVectorExportError(
+                    f"qc.record.{key} must be null when raw comparison is unavailable"
+                )
+    if "outline_topology" in value:
+        _validate_outline_topology_qc(value["outline_topology"])
+        from .artifact_outline_topology import (  # noqa: PLC0415
+            ArtifactOutlineTopologyError,
+            validate_outline_topology,
+        )
+
+        try:
+            expected_topology = validate_outline_topology(payload).to_dict()
+        except ArtifactOutlineTopologyError as exc:
+            raise ArtifactVectorExportError(
+                f"outline payload topology is invalid: {exc}"
+            ) from exc
+        if value["outline_topology"] != expected_topology:
+            raise ArtifactVectorExportError(
+                "qc.record.outline_topology does not match the vector payload"
+            )
+    if is_production:
+        geometry = provenance["geometry_revision"]
+        assert isinstance(geometry, Mapping)
+        geometry_qc = geometry["qc"]
+        assert isinstance(geometry_qc, Mapping)
+        try:
+            admission = validate_mesh_admission_receipt(
+                geometry_qc["import_admission"]
+            )
+        except (KeyError, MeshAdmissionError) as exc:
+            raise ArtifactVectorExportError(
+                f"invalid production QC mesh admission authority: {exc}"
+            ) from exc
+        accepted = admission["accepted"]
+        if value["input_face_count"] != accepted["triangle_count"]:
+            raise ArtifactVectorExportError(
+                "qc.record.input_face_count does not match mesh admission"
+            )
+        if value["input_vertex_count"] != accepted["vertex_count"]:
+            raise ArtifactVectorExportError(
+                "qc.record.input_vertex_count does not match mesh admission"
+            )
+        if kind is VectorRecordKind.CUTLINE:
+            for key in (
+                "classification_tolerance_mm",
+                "max_endpoint_snap_mm",
+                "max_plane_residual_mm",
+                "stitch_tolerance_mm",
+            ):
+                _finite_number(
+                    value[key],
+                    field_name=f"qc.record.{key}",
+                    minimum=0.0,
+                )
+            if (
+                value["classification_tolerance_mm"]
+                != recipe["classification_tolerance_mm"]
+            ):
+                raise ArtifactVectorExportError(
+                    "Cutline QC classification tolerance does not match recipe"
+                )
+            if value["stitch_tolerance_mm"] != recipe["stitch_tolerance_mm"]:
+                raise ArtifactVectorExportError(
+                    "Cutline QC stitch tolerance does not match recipe"
+                )
+            if (
+                value["max_plane_residual_mm"]
+                > value["classification_tolerance_mm"]
+            ):
+                raise ArtifactVectorExportError(
+                    "Cutline QC plane residual exceeds classification tolerance"
+                )
+            if value["max_endpoint_snap_mm"] > value["stitch_tolerance_mm"]:
+                raise ArtifactVectorExportError(
+                    "Cutline QC endpoint snap exceeds stitch tolerance"
+                )
+        else:
+            for key in (
+                "grid_snap_axis_upper_bound_mm",
+                "grid_snap_radial_upper_bound_squared_mm2",
+                "output_grid_residual_max_mm",
+                "precision_grid_mm",
+            ):
+                _finite_number(
+                    value[key],
+                    field_name=f"qc.record.{key}",
+                    minimum=0.0,
+                )
+            precision_grid = recipe["precision_grid_mm"]
+            if value["precision_grid_mm"] != precision_grid:
+                raise ArtifactVectorExportError(
+                    "Outline QC precision grid does not match recipe"
+                )
+            if value["view"] != recipe["view"]:
+                raise ArtifactVectorExportError(
+                    "Outline QC view does not match recipe"
+                )
+            backend = recipe["backend"]
+            if not isinstance(backend, Mapping):
+                raise ArtifactVectorExportError(
+                    "Outline recipe backend must be an object"
+                )
+            if value["backend_geos_version"] != backend["geos_version"]:
+                raise ArtifactVectorExportError(
+                    "Outline QC GEOS version does not match recipe"
+                )
+            if value["backend_shapely_version"] != backend["shapely_version"]:
+                raise ArtifactVectorExportError(
+                    "Outline QC Shapely version does not match recipe"
+                )
+            if value["grid_snap_axis_upper_bound_mm"] != precision_grid / 2.0:
+                raise ArtifactVectorExportError(
+                    "Outline QC axis snap bound does not match precision grid"
+                )
+            if (
+                value["grid_snap_radial_upper_bound_squared_mm2"]
+                != precision_grid * precision_grid / 2.0
+            ):
+                raise ArtifactVectorExportError(
+                    "Outline QC radial snap bound does not match precision grid"
+                )
+            if value["output_grid_residual_max_mm"] > precision_grid / 2.0:
+                raise ArtifactVectorExportError(
+                    "Outline QC output grid residual exceeds its grid contract"
+                )
+    return value
 
 
 def _validate_qc(
     value: object,
     *,
     payload: VectorGeometryPayload,
+    recipe: Mapping[str, Any],
+    provenance: Mapping[str, Any],
+    schema_version: str,
 ) -> Mapping[str, Any]:
     qc = _exact_keys(
         value,
@@ -1268,6 +2175,13 @@ def _validate_qc(
             raise ArtifactVectorExportError(
                 f"sidecar record QC field {key!r} does not match payload"
             )
+    if schema_version == _CURRENT_VECTOR_EXPORT_SCHEMA_VERSION:
+        _validate_current_record_qc(
+            record_qc,
+            payload=payload,
+            recipe=recipe,
+            provenance=provenance,
+        )
     scale = _exact_keys(
         qc["scale"],
         {"physical_scale", "unit", "viewbox_matches_physical_dimensions"},
@@ -1352,7 +2266,11 @@ def validate_vector_export_bytes(
     )
     if sidecar["format"] != VECTOR_EXPORT_FORMAT:
         raise ArtifactVectorExportError("vector export format is invalid")
-    if sidecar["schema_version"] != VECTOR_EXPORT_SCHEMA_VERSION:
+    schema_version = sidecar["schema_version"]
+    if (
+        not isinstance(schema_version, str)
+        or schema_version not in SUPPORTED_VECTOR_EXPORT_SCHEMA_VERSIONS
+    ):
         raise ArtifactVectorExportError("vector export schema version is invalid")
     artifact = _exact_keys(
         sidecar["artifact"],
@@ -1370,7 +2288,23 @@ def validate_vector_export_bytes(
         raise ArtifactVectorExportError("SVG SHA-256 does not match the sidecar")
 
     payload = _validated_sidecar_payload(sidecar)
-    provenance = _validate_provenance_shape(sidecar["provenance"])
+    provenance = _validate_provenance_shape(
+        sidecar["provenance"],
+        require_current_contract=(
+            schema_version == _CURRENT_VECTOR_EXPORT_SCHEMA_VERSION
+        ),
+    )
+    if schema_version == _CURRENT_VECTOR_EXPORT_SCHEMA_VERSION:
+        _validate_current_vector_provenance(provenance)
+    else:
+        legacy_geometry = provenance["geometry_revision"]
+        assert isinstance(legacy_geometry, Mapping)
+        legacy_geometry_qc = legacy_geometry["qc"]
+        assert isinstance(legacy_geometry_qc, Mapping)
+        if "import_admission" in legacy_geometry_qc:
+            raise ArtifactVectorExportError(
+                "legacy vector export schema 1.0.0 cannot contain import_admission"
+            )
     record_provenance = provenance["record"]
     assert isinstance(record_provenance, Mapping)
     if record_provenance["geometry_ref"] != payload.geometry_ref:
@@ -1387,6 +2321,8 @@ def validate_vector_export_bytes(
             recipe,
             expected_kind=VectorRecordKind(payload.kind),
         )
+        if schema_version == _CURRENT_VECTOR_EXPORT_SCHEMA_VERSION:
+            validate_vector_payload_recipe_contract(payload, recipe)
     except ArtifactVectorRecordError as exc:
         raise ArtifactVectorExportError(str(exc)) from exc
     try:
@@ -1395,7 +2331,13 @@ def validate_vector_export_bytes(
         raise ArtifactVectorExportError(str(exc)) from exc
     if record_provenance["recipe_hash"] != recipe_hash:
         raise ArtifactVectorExportError("recipe hash does not match the sidecar recipe")
-    _validate_qc(sidecar["qc"], payload=payload)
+    _validate_qc(
+        sidecar["qc"],
+        payload=payload,
+        recipe=recipe,
+        provenance=provenance,
+        schema_version=schema_version,
+    )
     claims_sha256 = _sidecar_claims_sha256(sidecar)
 
     options, presentation = _options_from_presentation(sidecar["presentation"])
@@ -1442,7 +2384,13 @@ def validate_vector_export_bytes(
         )
         if document_payload.sha256 != payload.sha256:
             raise ArtifactVectorExportError("export payload does not match the document record")
-        if provenance != _provenance(document, record):
+        if provenance != _provenance(
+            document,
+            record,
+            include_current_contract=(
+                schema_version == _CURRENT_VECTOR_EXPORT_SCHEMA_VERSION
+            ),
+        ):
             raise ArtifactVectorExportError("export provenance does not match the document")
         if dict(recipe) != record.to_dict()["recipe"]:
             raise ArtifactVectorExportError("export recipe does not match the document record")
@@ -2330,6 +3278,7 @@ __all__ = [
     "VECTOR_EXPORT_DIRECTORY_SUFFIX",
     "VECTOR_EXPORT_FORMAT",
     "VECTOR_EXPORT_SCHEMA_VERSION",
+    "SUPPORTED_VECTOR_EXPORT_SCHEMA_VERSIONS",
     "VECTOR_EXPORT_SIDECAR_MEDIA_TYPE",
     "VECTOR_EXPORT_SIDECAR_NAME",
     "VECTOR_EXPORT_SVG_MEDIA_TYPE",
@@ -2351,6 +3300,8 @@ __all__ = [
     "stage_vector_package",
     "validate_vector_export_bytes",
     "validate_vector_export_package",
+    "validate_current_public_export_provenance",
+    "validate_legacy_public_export_provenance",
     "validate_public_export_provenance",
     "write_new_export_file",
 ]

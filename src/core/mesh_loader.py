@@ -7,21 +7,41 @@ Supports: OBJ, PLY, STL, OFF formats
 
 from dataclasses import dataclass, field
 import hashlib
+import io
 import os
 import stat
 import tempfile
 from pathlib import Path
-from typing import BinaryIO, Callable, Mapping, Optional, List, Union, cast
+from typing import Any, BinaryIO, Callable, Mapping, Optional, List, Union, cast
 import logging
 import numpy as np
 
 from .logging_utils import log_once
+from .mesh_admission import (
+    MAX_MESH_DEPENDENCY_BYTES,
+    MAX_MESH_DEPENDENCY_TOTAL_BYTES,
+    MAX_MESH_SOURCE_BYTES,
+    MeshAdmissionError,
+    MeshSourcePreflight,
+    admitted_geometry_sha256,
+    build_mesh_admission_receipt,
+    decoded_admission_from_counts,
+    inspect_decoded_mesh,
+    preflight_mesh_source,
+    require_texture_budget,
+    require_windows_runtime_capacity,
+    validate_mesh_admission_receipt,
+)
 from .mesh_import_recipe import (
     current_mesh_import_recipe,
     mesh_import_recipe_with_manifest,
     validate_mesh_import_recipe,
 )
-from .source_identity import SourceFingerprint, open_fingerprinted_file
+from .source_identity import (
+    SourceChangedError,
+    SourceFingerprint,
+    open_fingerprinted_file,
+)
 from .source_manifest import (
     DEPENDENCY_RESOURCE_ROLE,
     MAX_SOURCE_MANIFEST_ENTRIES,
@@ -106,6 +126,156 @@ class _RecordingDenyResolver(Resolver):
             )
 
 
+class _VerifiedLengthStream:
+    """Seekable read-only view that cannot expose post-fingerprint growth."""
+
+    def __init__(self, stream: BinaryIO, length: int) -> None:
+        self._stream = stream
+        self._length = int(length)
+        if self._length < 0:
+            raise ValueError("verified stream length must be non-negative")
+        self.name = getattr(stream, "name", None)
+
+    @property
+    def closed(self) -> bool:
+        return bool(getattr(self._stream, "closed", False))
+
+    def readable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return True
+
+    def writable(self) -> bool:
+        return False
+
+    def tell(self) -> int:
+        return int(self._stream.tell())
+
+    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+        current = self.tell()
+        if whence == io.SEEK_SET:
+            target = int(offset)
+        elif whence == io.SEEK_CUR:
+            target = current + int(offset)
+        elif whence == io.SEEK_END:
+            target = self._length + int(offset)
+        else:
+            raise ValueError(f"unsupported seek whence: {whence}")
+        if target < 0 or target > self._length:
+            raise OSError("mesh parser attempted to seek outside verified source bytes")
+        return int(self._stream.seek(target, io.SEEK_SET))
+
+    def read(self, size: int = -1) -> bytes:
+        position = self.tell()
+        if position < 0 or position > self._length:
+            raise OSError("mesh parser stream position escaped verified source bytes")
+        remaining = self._length - position
+        requested = (
+            remaining
+            if size is None or int(size) < 0
+            else min(int(size), remaining)
+        )
+        payload = self._stream.read(requested)
+        if not isinstance(payload, (bytes, bytearray, memoryview)):
+            raise TypeError("mesh source stream must return bytes")
+        result = bytes(payload)
+        if len(result) > requested:
+            raise OSError("mesh source stream returned bytes past its verified length")
+        return result
+
+    def readline(self, size: int = -1) -> bytes:
+        position = self.tell()
+        if position < 0 or position > self._length:
+            raise OSError("mesh parser stream position escaped verified source bytes")
+        remaining = self._length - position
+        requested = (
+            remaining
+            if size is None or int(size) < 0
+            else min(int(size), remaining)
+        )
+        payload = self._stream.readline(requested)
+        if not isinstance(payload, (bytes, bytearray, memoryview)):
+            raise TypeError("mesh source stream must return bytes")
+        result = bytes(payload)
+        if len(result) > requested:
+            raise OSError("mesh source stream returned bytes past its verified length")
+        return result
+
+    def readinto(self, buffer: Any) -> int:
+        payload = self.read(len(buffer))
+        buffer[: len(payload)] = payload
+        return len(payload)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self) -> bytes:
+        line = self.readline()
+        if not line:
+            raise StopIteration
+        return line
+
+
+def _spool_verified_source(
+    source_stream: BinaryIO,
+    target_stream: BinaryIO,
+    *,
+    expected_sha256: str,
+    expected_size_bytes: int,
+    mismatch_error: type[Exception],
+) -> str:
+    """Copy one exact identity-bound snapshot before any parser sees bytes."""
+
+    digest = hashlib.sha256()
+    observed_size = 0
+    target_stream.seek(0)
+    target_stream.truncate(0)
+    while observed_size < expected_size_bytes:
+        read_size = min(
+            _VERIFIED_STREAM_CHUNK_SIZE,
+            expected_size_bytes - observed_size,
+        )
+        chunk = source_stream.read(read_size)
+        if not isinstance(chunk, (bytes, bytearray, memoryview)):
+            raise TypeError("source_stream.read() must return bytes")
+        if not chunk:
+            break
+        if len(chunk) > read_size:
+            raise ValueError("source_stream returned more bytes than requested")
+        payload = bytes(chunk)
+        digest.update(payload)
+        written = target_stream.write(payload)
+        if written != len(payload):
+            raise OSError("failed to spool the complete source stream")
+        observed_size += len(payload)
+
+    if observed_size != expected_size_bytes:
+        raise mismatch_error(
+            "Source size mismatch before mesh parsing: "
+            f"expected {expected_size_bytes}, observed {observed_size}"
+        )
+    sentinel = source_stream.read(1)
+    if not isinstance(sentinel, (bytes, bytearray, memoryview)):
+        raise TypeError("source_stream.read() must return bytes")
+    if sentinel:
+        raise mismatch_error(
+            "Source size mismatch before mesh parsing: "
+            f"expected {expected_size_bytes}, observed at least "
+            f"{expected_size_bytes + len(sentinel)}"
+        )
+
+    observed_sha256 = digest.hexdigest()
+    if observed_sha256 != expected_sha256:
+        raise mismatch_error(
+            "Source SHA-256 mismatch before mesh parsing: "
+            f"expected {expected_sha256}, observed {observed_sha256}"
+        )
+    target_stream.flush()
+    target_stream.seek(0)
+    return observed_sha256
+
+
 @dataclass(slots=True)
 class _CapturedResolverState:
     root: Path
@@ -113,11 +283,15 @@ class _CapturedResolverState:
     payloads: dict[str, bytes] = field(default_factory=dict)
     resources: dict[str, ResolvedSourceResource] = field(default_factory=dict)
     failures: list[str] = field(default_factory=list)
+    total_dependency_bytes: int = 0
+    expected_buffer_sizes: dict[str, int] = field(default_factory=dict)
 
 
 def _read_resolved_resource(
     root: Path,
     logical_path: str,
+    *,
+    max_size_bytes: int = MAX_MESH_DEPENDENCY_BYTES,
 ) -> tuple[bytes, str, SourceFingerprint]:
     """Read one contained regular file and bind the returned bytes to its hash."""
 
@@ -133,7 +307,10 @@ def _read_resolved_resource(
         raise SourceManifestError(
             f"dependency is not a regular file: {logical_path!r}"
         )
-    with open_fingerprinted_file(resolved) as (stream, fingerprint):
+    with open_fingerprinted_file(
+        resolved,
+        max_size_bytes=max_size_bytes,
+    ) as (stream, fingerprint):
         try:
             opened_target = resolved.resolve(strict=True)
             opened_target.relative_to(root)
@@ -145,12 +322,24 @@ def _read_resolved_resource(
             raise SourceManifestError(
                 f"dependency is not an opened regular file: {logical_path!r}"
             )
-        payload = stream.read()
+        if fingerprint.size_bytes > max_size_bytes:
+            raise SourceManifestError(
+                f"dependency exceeds its fixed byte budget: {logical_path!r}"
+            )
+        # The file may grow after the fingerprint pass but before this payload
+        # read.  Read only the verified length plus one sentinel byte so a
+        # concurrently growing sidecar cannot trigger an unbounded allocation.
+        payload = stream.read(fingerprint.size_bytes + 1)
         if not isinstance(payload, bytes):
             payload = bytes(payload)
         if len(payload) != fingerprint.size_bytes:
             raise SourceManifestError(
                 f"dependency size changed while reading: {logical_path!r}"
+            )
+        payload_sha256 = hashlib.sha256(payload).hexdigest()
+        if payload_sha256 != fingerprint.sha256:
+            raise SourceManifestError(
+                f"dependency content changed while reading: {logical_path!r}"
             )
     return payload, str(resolved), fingerprint
 
@@ -185,6 +374,21 @@ class _CapturingDirectoryResolver(Resolver):
     def _logical_path(self, key: object) -> str:
         return resolve_logical_reference(self._namespace, key)
 
+    def bind_expected_buffer_sizes(
+        self,
+        bindings: tuple[tuple[str, int], ...],
+    ) -> None:
+        if self._state.payloads or self._state.resources:
+            raise SourceManifestError(
+                "glTF buffer lengths must be bound before dependency reads"
+            )
+        expected = dict(bindings)
+        if self._state.primary_logical_path in expected:
+            raise SourceManifestError(
+                "an external glTF buffer resolves to the primary mesh path"
+            )
+        self._state.expected_buffer_sizes = expected
+
     def get(self, key: object) -> bytes:
         try:
             logical_path = self._logical_path(key)
@@ -199,10 +403,39 @@ class _CapturingDirectoryResolver(Resolver):
                 raise SourceManifestError(
                     "source dependency closure exceeds the portable entry budget"
                 )
+            remaining_bytes = (
+                MAX_MESH_DEPENDENCY_TOTAL_BYTES
+                - self._state.total_dependency_bytes
+            )
+            if remaining_bytes <= 0:
+                raise SourceManifestError(
+                    "source dependency closure exceeds the fixed decoded-byte budget"
+                )
+            expected_buffer_size = self._state.expected_buffer_sizes.get(logical_path)
+            resource_limit = min(
+                MAX_MESH_DEPENDENCY_BYTES,
+                remaining_bytes,
+            )
+            if expected_buffer_size is not None:
+                resource_limit = min(resource_limit, expected_buffer_size)
             payload, locator, fingerprint = _read_resolved_resource(
                 self._state.root,
                 logical_path,
+                max_size_bytes=resource_limit,
             )
+            if (
+                expected_buffer_size is not None
+                and fingerprint.size_bytes != expected_buffer_size
+            ):
+                raise SourceManifestError(
+                    f"external glTF buffer length differs from byteLength: "
+                    f"{logical_path!r}"
+                )
+            next_total = self._state.total_dependency_bytes + len(payload)
+            if next_total > MAX_MESH_DEPENDENCY_TOTAL_BYTES:
+                raise SourceManifestError(
+                    "source dependency closure exceeds the fixed decoded-byte budget"
+                )
             entry = SourceManifestEntry(
                 logical_path=logical_path,
                 media_type=fixed_media_type(logical_path),
@@ -215,6 +448,7 @@ class _CapturingDirectoryResolver(Resolver):
                 entry=entry,
                 locator=locator,
             )
+            self._state.total_dependency_bytes = next_total
             return payload
         except Exception as exc:
             self._state.failures.append(str(exc))
@@ -259,10 +493,14 @@ class _CapturingDirectoryResolver(Resolver):
         return True
 
     def validate_after_load(self) -> None:
-        if self._state.failures:
+        missing_buffers = sorted(
+            set(self._state.expected_buffer_sizes) - set(self._state.resources)
+        )
+        if self._state.failures or missing_buffers:
             raise ExternalMeshDependencyError(
                 "authoritative source requested an unsafe, missing, or unreadable "
-                "sidecar under resolver_profile=relative-contained-v1"
+                "sidecar, or did not resolve every declared external glTF buffer, "
+                "under resolver_profile=relative-contained-v1"
             )
 
 
@@ -277,6 +515,8 @@ class _ClosedResolverState:
     resources: dict[str, ResolvedSourceResource] = field(default_factory=dict)
     requested: set[str] = field(default_factory=set)
     failures: list[str] = field(default_factory=list)
+    total_dependency_bytes: int = 0
+    expected_buffer_sizes: dict[str, int] = field(default_factory=dict)
 
 
 class _ClosedManifestResolver(Resolver):
@@ -306,6 +546,28 @@ class _ClosedManifestResolver(Resolver):
             for path in sorted(self._state.resources)
         )
 
+    def bind_expected_buffer_sizes(
+        self,
+        bindings: tuple[tuple[str, int], ...],
+    ) -> None:
+        if self._state.payloads or self._state.requested:
+            raise SourceManifestError(
+                "glTF buffer lengths must be bound before dependency reads"
+            )
+        expected = dict(bindings)
+        for logical_path, byte_length in expected.items():
+            entry = self._state.entries.get(logical_path)
+            if entry is None:
+                raise SourceManifestError(
+                    f"closed manifest omits external glTF buffer: {logical_path!r}"
+                )
+            if entry.size_bytes != byte_length:
+                raise SourceManifestError(
+                    f"closed manifest glTF buffer length differs from byteLength: "
+                    f"{logical_path!r}"
+                )
+        self._state.expected_buffer_sizes = expected
+
     def get(self, key: object) -> bytes:
         try:
             logical_path = resolve_logical_reference(self._namespace, key)
@@ -318,6 +580,25 @@ class _ClosedManifestResolver(Resolver):
             cached = self._state.payloads.get(logical_path)
             if cached is not None:
                 return cached
+            if entry.size_bytes > MAX_MESH_DEPENDENCY_BYTES:
+                raise SourceManifestError(
+                    f"dependency exceeds the fixed per-resource byte budget: "
+                    f"{logical_path!r}"
+                )
+            expected_buffer_size = self._state.expected_buffer_sizes.get(logical_path)
+            if (
+                expected_buffer_size is not None
+                and entry.size_bytes != expected_buffer_size
+            ):
+                raise SourceManifestError(
+                    f"external glTF buffer length differs from byteLength: "
+                    f"{logical_path!r}"
+                )
+            next_total = self._state.total_dependency_bytes + entry.size_bytes
+            if next_total > MAX_MESH_DEPENDENCY_TOTAL_BYTES:
+                raise SourceManifestError(
+                    "source dependency closure exceeds the fixed decoded-byte budget"
+                )
             payload, locator = self._state.loader(entry)
             if not isinstance(payload, bytes):
                 payload = bytes(payload)
@@ -331,6 +612,7 @@ class _ClosedManifestResolver(Resolver):
                 entry=entry,
                 locator=locator,
             )
+            self._state.total_dependency_bytes = next_total
             return payload
         except Exception as exc:
             self._state.failures.append(str(exc))
@@ -376,7 +658,10 @@ class _ClosedManifestResolver(Resolver):
 
     def validate_after_load(self) -> None:
         missing = sorted(set(self._state.entries) - self._state.requested)
-        if self._state.failures or missing:
+        missing_buffers = sorted(
+            set(self._state.expected_buffer_sizes) - self._state.requested
+        )
+        if self._state.failures or missing or missing_buffers:
             raise ExternalMeshDependencyError(
                 "parser dependency requests do not exactly match the closed source manifest"
             )
@@ -416,10 +701,62 @@ def _directory_payload_loader(root: Path) -> ResourcePayloadLoader:
         payload, locator, _fingerprint = _read_resolved_resource(
             resolved_root,
             entry.logical_path,
+            max_size_bytes=max(1, entry.size_bytes),
         )
         return payload, locator
 
     return load
+
+
+def _bind_preflight_buffer_lengths(
+    resolver: Resolver,
+    preflight: MeshSourcePreflight,
+) -> None:
+    bindings = preflight.external_buffer_byte_lengths
+    if not bindings:
+        return
+    if not isinstance(
+        resolver,
+        (_CapturingDirectoryResolver, _ClosedManifestResolver),
+    ):
+        raise ExternalMeshDependencyError(
+            "external glTF buffers are denied; "
+            "dependency_policy=deny_external"
+        )
+    try:
+        resolver.bind_expected_buffer_sizes(bindings)
+        # Resolve and verify every declared external buffer before the parser
+        # enters native/NumPy allocation paths. Parser reads then hit only the
+        # exact, SHA-bound cache populated here.
+        for logical_path, _byte_length in bindings:
+            resolver.get(logical_path)
+    except FileNotFoundError as exc:
+        raise ExternalMeshDependencyError(
+            "external glTF buffer bytes do not match their declaration"
+        ) from exc
+    except SourceManifestError as exc:
+        raise ExternalMeshDependencyError(str(exc)) from exc
+
+
+def _preflight_authoritative_source(
+    source_stream: BinaryIO,
+    *,
+    source_format: str,
+    source_size_bytes: int,
+) -> MeshSourcePreflight:
+    try:
+        return preflight_mesh_source(
+            source_stream,
+            source_format=source_format,
+            source_size_bytes=source_size_bytes,
+        )
+    except MeshAdmissionError as exc:
+        if "external URI is unsafe" in str(exc):
+            raise ExternalMeshDependencyError(
+                "authoritative glTF requested an unsafe external buffer under "
+                "resolver_profile=relative-contained-v1"
+            ) from exc
+        raise
 
 
 def _load_authoritative_trimesh(
@@ -432,12 +769,16 @@ def _load_authoritative_trimesh(
 
     active_resolver = resolver or _RecordingDenyResolver()
     try:
-        loaded = trimesh.load(
+        # ``trimesh.load(force="mesh")`` calls ``Scene.to_mesh()`` internally
+        # and can allocate the merged arrays before ArchMeshRubbing sees the
+        # component counts.  Loading the Scene first and staging the identical
+        # force-mesh result below keeps the durable recipe semantics while
+        # placing the Windows admission gate before concatenation.
+        loaded = trimesh.load_scene(
             source_stream,
             file_type=source_format,
             resolver=active_resolver,
             allow_remote=False,
-            force="mesh",
             process=False,
             maintain_order=True,
         )
@@ -449,6 +790,82 @@ def _load_authoritative_trimesh(
         raise
     active_resolver.validate_after_load()  # type: ignore[attr-defined]
     return loaded
+
+
+def _admit_scene_before_concatenate(
+    meshes: list["trimesh.Trimesh"],
+) -> None:
+    """Reject an aggregate Scene before Trimesh allocates its merged copies."""
+
+    total_vertices = 0
+    total_triangles = 0
+    total_array_bytes = 0
+    for component in meshes:
+        visual = getattr(component, "visual", None)
+        uv = getattr(visual, "uv", None) if visual is not None else None
+        material = getattr(visual, "material", None) if visual is not None else None
+        image = getattr(material, "image", None) if material is not None else None
+        decoded = inspect_decoded_mesh(
+            component.vertices,
+            component.faces,
+            optional_arrays=(uv,),
+        )
+        total_vertices += decoded.vertex_count
+        total_triangles += decoded.triangle_count
+        total_array_bytes += decoded.array_bytes + require_texture_budget(image)
+        aggregate = decoded_admission_from_counts(
+            vertex_count=total_vertices,
+            triangle_count=total_triangles,
+            array_bytes=total_array_bytes,
+        )
+        require_windows_runtime_capacity(aggregate.estimated_peak_bytes)
+
+
+def _materialize_admitted_scene(scene: "trimesh.Scene") -> "trimesh.Trimesh":
+    """Bake Scene instances only after their aggregate Windows admission."""
+
+    mesh_instances: list[trimesh.Trimesh] = []
+    admitted_nodes: list[
+        tuple[str, str, trimesh.Trimesh, np.ndarray]
+    ] = []
+    for node_name in scene.graph.nodes_geometry:
+        transform, geometry_name = scene.graph[node_name]
+        component = scene.geometry.get(geometry_name)
+        if not isinstance(component, trimesh.Trimesh):
+            continue
+        matrix = np.asarray(transform, dtype=np.float64)
+        if matrix.shape != (4, 4) or not np.isfinite(matrix).all():
+            raise MeshAdmissionError(
+                "mesh Scene contains a non-finite or invalid instance transform"
+            )
+        mesh_instances.append(component)
+        admitted_nodes.append(
+            (str(node_name), str(geometry_name), component, matrix)
+        )
+    if not mesh_instances:
+        raise ValueError("No valid mesh found in decoded Scene")
+
+    # Count repeated graph instances, not merely unique geometry payloads.
+    _admit_scene_before_concatenate(mesh_instances)
+    dumped: list[trimesh.Trimesh] = []
+    for node_name, geometry_name, component, matrix in admitted_nodes:
+        # Do not call ``Scene.dump()`` here.  It copies PointCloud/Path nodes as
+        # well as meshes, so a mixed GLB could allocate unadmitted side
+        # geometry before the filter ran.  Reproduce its Trimesh branch only.
+        current = component.copy()
+        if not isinstance(current, trimesh.Trimesh):
+            raise MeshAdmissionError(
+                "mesh Scene instance copy changed the admitted geometry type"
+            )
+        current.apply_transform(matrix)
+        current.metadata["name"] = geometry_name
+        current.metadata["node"] = node_name
+        dumped.append(current)
+    # Recheck finite transformed coordinates before allocating a merged copy.
+    _admit_scene_before_concatenate(dumped)
+    if len(dumped) == 1:
+        return dumped[0]
+    return trimesh.util.concatenate(dumped)
 
 
 @dataclass
@@ -483,6 +900,9 @@ class MeshData:
     # Exact parser/runtime receipt used to create authoritative source geometry.
     # This is runtime provenance; the durable copy lives in GeometryRevision.
     source_import_recipe: Optional[Mapping[str, object]] = None
+    # Path-free bounded-import QC persisted into GeometryRevision for new
+    # authoritative documents.  Legacy/generated MeshData may omit it.
+    source_admission_receipt: Optional[Mapping[str, object]] = None
     # Runtime locators for the primary and every manifest-bound dependency.
     # Locators are never serialized into the ArtifactDocument.
     source_resources: tuple[ResolvedSourceResource, ...] = ()
@@ -552,30 +972,41 @@ class MeshData:
                 "MeshData.__post_init__ face index filtering failed",
                 exc_info=True,
             )
-        # 퇴화 면(무너진 삼각형/중복 정점 면) 제거.
+        # 퇴화 면(무너진 삼각형/중복 정점 면) 제거.  큰 스캔에서도 이
+        # 단계가 whole-mesh v0/v1/v2/cross 임시 배열을 동시에 만들지 않도록
+        # 결정적인 face chunk로 검사합니다.
         # 이 값들은 후속 분리/정규화 단계에서 수치 불안정을 키울 수 있어 명시적으로 제외합니다.
         try:
             if self.vertices.shape[0] > 0 and faces.shape[0] > 0:
                 f = np.asarray(faces, dtype=np.int32, copy=False)
-                v0 = self.vertices[f[:, 0]]
-                v1 = self.vertices[f[:, 1]]
-                v2 = self.vertices[f[:, 2]]
-                duplicate_vert = (f[:, 0] == f[:, 1]) | (f[:, 1] == f[:, 2]) | (f[:, 2] == f[:, 0])
-                area2 = np.cross(v1 - v0, v2 - v0)
-                area2 = np.sum(area2 * area2, axis=1)
-                degenerate = duplicate_vert | (area2 <= 0.0) | ~np.isfinite(area2)
-                if np.any(degenerate):
-                    keep = ~degenerate
-                    removed = int(faces.shape[0]) - int(np.count_nonzero(keep))
-                    if removed > 0:
-                        faces = f[keep]
-                        log_once(
-                            _LOGGER,
-                            "mesh_loader:post_init_prune_degenerate",
-                            logging.WARNING,
-                            "MeshData.__post_init__ removed %d degenerate faces",
-                            removed,
-                        )
+                keep = np.ones((int(f.shape[0]),), dtype=bool)
+                chunk_faces = 250_000
+                for start in range(0, int(f.shape[0]), chunk_faces):
+                    end = min(int(f.shape[0]), start + chunk_faces)
+                    face_chunk = f[start:end]
+                    v0 = self.vertices[face_chunk[:, 0]]
+                    v1 = self.vertices[face_chunk[:, 1]]
+                    v2 = self.vertices[face_chunk[:, 2]]
+                    duplicate_vert = (
+                        (face_chunk[:, 0] == face_chunk[:, 1])
+                        | (face_chunk[:, 1] == face_chunk[:, 2])
+                        | (face_chunk[:, 2] == face_chunk[:, 0])
+                    )
+                    area2 = np.cross(v1 - v0, v2 - v0)
+                    area2 = np.sum(area2 * area2, axis=1)
+                    keep[start:end] = ~(
+                        duplicate_vert | (area2 <= 0.0) | ~np.isfinite(area2)
+                    )
+                removed = int(f.shape[0]) - int(np.count_nonzero(keep))
+                if removed > 0:
+                    faces = f[keep]
+                    log_once(
+                        _LOGGER,
+                        "mesh_loader:post_init_prune_degenerate",
+                        logging.WARNING,
+                        "MeshData.__post_init__ removed %d degenerate faces",
+                        removed,
+                    )
         except Exception:
             log_once(
                 _LOGGER,
@@ -596,6 +1027,10 @@ class MeshData:
             if not isinstance(self.source_import_recipe, Mapping):
                 raise TypeError("source_import_recipe must be a mapping or None")
             self.source_import_recipe = dict(self.source_import_recipe)
+        if self.source_admission_receipt is not None:
+            self.source_admission_receipt = validate_mesh_admission_receipt(
+                self.source_admission_receipt
+            )
         try:
             resources = tuple(self.source_resources)
         except TypeError as exc:
@@ -920,6 +1355,7 @@ class MeshData:
             source_identity=self.source_identity,
             source_format=self.source_format,
             source_import_recipe=self.source_import_recipe,
+            source_admission_receipt=self.source_admission_receipt,
             source_resources=self.source_resources,
         )
     
@@ -956,7 +1392,8 @@ class MeshData:
                      source_identity: Optional[SourceFingerprint] = None,
                      source_format: Optional[str] = None,
                      source_import_recipe: Optional[Mapping[str, object]] = None,
-                     source_resources: tuple[ResolvedSourceResource, ...] = ()) -> 'MeshData':
+                     source_resources: tuple[ResolvedSourceResource, ...] = (),
+                     source_preflight: MeshSourcePreflight | None = None) -> 'MeshData':
         """trimesh 객체에서 생성"""
         # 텍스처 추출 시도
         texture = None
@@ -970,9 +1407,17 @@ class MeshData:
         material = getattr(visual, "material", None) if visual is not None else None
         image = getattr(material, "image", None) if material is not None else None
         if image is not None:
+            require_texture_budget(image)
             texture = np.array(image)
-        
-        return cls(
+            require_texture_budget(texture)
+
+        decoded = inspect_decoded_mesh(
+            mesh.vertices,
+            mesh.faces,
+            optional_arrays=(uv_coords, texture),
+        )
+        require_windows_runtime_capacity(decoded.estimated_peak_bytes)
+        result = cls(
             vertices=mesh.vertices,
             faces=mesh.faces,
             # NOTE: huge mesh(특히 STL)에서 vertex_normals 계산이 로딩 시간을 크게 증가시킵니다.
@@ -988,6 +1433,31 @@ class MeshData:
             source_import_recipe=source_import_recipe,
             source_resources=source_resources,
         )
+        if source_identity is not None:
+            normalized_format = str(source_format or source_identity.format).strip()
+            preflight = source_preflight or MeshSourcePreflight(
+                source_format=normalized_format,
+                source_size_bytes=source_identity.size_bytes,
+            )
+            if preflight.source_format != normalized_format.lower().removeprefix("."):
+                raise MeshAdmissionError(
+                    "source preflight format differs from the decoded parser format"
+                )
+            if preflight.source_size_bytes != source_identity.size_bytes:
+                raise MeshAdmissionError(
+                    "source preflight byte length differs from the verified source"
+                )
+            result.source_admission_receipt = build_mesh_admission_receipt(
+                preflight,
+                decoded,
+                accepted_vertex_count=result.n_vertices,
+                accepted_triangle_count=result.n_faces,
+                accepted_geometry_sha256=admitted_geometry_sha256(
+                    result.vertices,
+                    result.faces,
+                ),
+            )
+        return result
     
     def extract_submesh(self, face_indices: np.ndarray) -> 'MeshData':
         """선택된 면으로 서브메쉬 추출"""
@@ -1010,6 +1480,7 @@ class MeshData:
                 source_identity=self.source_identity,
                 source_format=self.source_format,
                 source_import_recipe=self.source_import_recipe,
+                source_admission_receipt=self.source_admission_receipt,
                 source_resources=self.source_resources,
             )
 
@@ -1030,6 +1501,7 @@ class MeshData:
                 source_identity=self.source_identity,
                 source_format=self.source_format,
                 source_import_recipe=self.source_import_recipe,
+                source_admission_receipt=self.source_admission_receipt,
                 source_resources=self.source_resources,
             )
 
@@ -1083,6 +1555,7 @@ class MeshData:
             source_identity=self.source_identity,
             source_format=self.source_format,
             source_import_recipe=self.source_import_recipe,
+            source_admission_receipt=self.source_admission_receipt,
             source_resources=self.source_resources,
         )
 
@@ -1139,6 +1612,7 @@ class MeshLoader:
         source_format: Optional[str] = None,
         import_recipe: Mapping[str, object] | None = None,
         capture_dependencies: bool | None = None,
+        compute_face_normals: bool = True,
     ) -> MeshData:
         """
         메쉬 파일 로드
@@ -1217,19 +1691,46 @@ class MeshLoader:
         else:
             resolver = _RecordingDenyResolver()
 
-        # Hash and parse the exact same open descriptor. Reopening by path here
-        # would allow a same-size/same-mtime replacement to pair one file's
-        # hash with another file's geometry. This work runs in MeshLoadThread
-        # for the GUI, so large-file hashing never blocks the UI thread.
-        with open_fingerprinted_file(filepath) as (source_stream, source_identity):
-            # These keyword values are the executable strict/legacy profile
-            # validated above. There is no compatibility fallback which could
-            # silently execute different parser flags.
-            mesh = _load_authoritative_trimesh(
-                source_stream,
-                source_format=file_type,
-                resolver=resolver,
-            )
+        # Hash one open descriptor, then copy it into a second SHA-verified
+        # snapshot before preflight or parsing.  The parser therefore cannot
+        # observe a same-length in-place rewrite after fingerprinting. This
+        # work runs in MeshLoadThread, so large-file I/O never blocks the UI.
+        with open_fingerprinted_file(
+            filepath,
+            max_size_bytes=MAX_MESH_SOURCE_BYTES,
+        ) as (source_stream, source_identity):
+            with tempfile.SpooledTemporaryFile(
+                max_size=_VERIFIED_STREAM_SPOOL_LIMIT,
+                mode="w+b",
+            ) as snapshot_stream:
+                _spool_verified_source(
+                    source_stream,
+                    cast(BinaryIO, snapshot_stream),
+                    expected_sha256=source_identity.sha256,
+                    expected_size_bytes=source_identity.size_bytes,
+                    mismatch_error=SourceChangedError,
+                )
+                verified_source_stream = cast(
+                    BinaryIO,
+                    _VerifiedLengthStream(
+                        cast(BinaryIO, snapshot_stream),
+                        source_identity.size_bytes,
+                    ),
+                )
+                source_preflight = _preflight_authoritative_source(
+                    verified_source_stream,
+                    source_format=file_type,
+                    source_size_bytes=source_identity.size_bytes,
+                )
+                _bind_preflight_buffer_lengths(resolver, source_preflight)
+                # These keyword values are the executable strict/legacy profile
+                # validated above. There is no compatibility fallback which could
+                # silently execute different parser flags.
+                mesh = _load_authoritative_trimesh(
+                    verified_source_stream,
+                    source_format=file_type,
+                    resolver=resolver,
+                )
 
         primary_entry = _primary_resource_entry(
             source_identity,
@@ -1257,10 +1758,7 @@ class MeshLoader:
         
         # Scene인 경우 단일 메쉬로 병합
         if isinstance(mesh, trimesh.Scene):
-            meshes = [g for g in mesh.geometry.values() if isinstance(g, trimesh.Trimesh)]
-            if len(meshes) == 0:
-                raise ValueError(f"No valid mesh found in: {filepath}")
-            mesh = trimesh.util.concatenate(meshes)
+            mesh = _materialize_admitted_scene(mesh)
 
         if not isinstance(mesh, trimesh.Trimesh):
             raise TypeError(f"Expected trimesh.Trimesh, got {type(mesh).__name__}")
@@ -1274,11 +1772,13 @@ class MeshLoader:
             source_format=file_type,
             source_import_recipe=receipt,
             source_resources=source_resources,
+            source_preflight=source_preflight,
         )
         
         # 법선 계산 (없는 경우)
         # 로딩 시점에는 face normals만 계산 (vertex normals는 필요 시점에 계산)
-        mesh_data.compute_normals(compute_vertex_normals=False)
+        if compute_face_normals:
+            mesh_data.compute_normals(compute_vertex_normals=False)
         
         return mesh_data
 
@@ -1294,6 +1794,7 @@ class MeshLoader:
         import_recipe: Mapping[str, object] | None = None,
         dependency_loader: ResourcePayloadLoader | None = None,
         primary_locator: str | None = None,
+        compute_face_normals: bool = True,
     ) -> MeshData:
         """Verify and load one primary mesh stream without trusting a path.
 
@@ -1321,6 +1822,14 @@ class MeshLoader:
             original_name=display_name,
             format=format_hint,
         )
+        if expected_identity.size_bytes < 1:
+            raise MeshAdmissionError("authoritative mesh source must not be empty")
+        if expected_identity.size_bytes > MAX_MESH_SOURCE_BYTES:
+            raise MeshAdmissionError(
+                f"mesh admission rejected source bytes: "
+                f"{expected_identity.size_bytes:,} exceeds the Windows workflow "
+                f"limit of {MAX_MESH_SOURCE_BYTES:,}"
+            )
         recipe = (
             current_mesh_import_recipe(format_hint)
             if import_recipe is None
@@ -1345,54 +1854,33 @@ class MeshLoader:
         else:
             resolver = _RecordingDenyResolver()
 
-        digest = hashlib.sha256()
-        observed_size = 0
         with tempfile.SpooledTemporaryFile(
             max_size=_VERIFIED_STREAM_SPOOL_LIMIT,
             mode="w+b",
         ) as verified_stream:
-            while True:
-                chunk = source_stream.read(_VERIFIED_STREAM_CHUNK_SIZE)
-                if not isinstance(chunk, (bytes, bytearray, memoryview)):
-                    raise TypeError("source_stream.read() must return bytes")
-                if not chunk:
-                    break
-                if len(chunk) > _VERIFIED_STREAM_CHUNK_SIZE:
-                    raise ValueError("source_stream returned a chunk larger than 1 MiB")
-                next_size = observed_size + len(chunk)
-                if next_size > expected_identity.size_bytes:
-                    raise ValueError(
-                        "Source size mismatch before mesh parsing: "
-                        f"expected {expected_identity.size_bytes}, observed at least {next_size}"
-                    )
-                digest.update(chunk)
-                written = verified_stream.write(chunk)
-                if written != len(chunk):
-                    raise OSError("failed to spool the complete source stream")
-                observed_size = next_size
-
-            observed_sha256 = digest.hexdigest()
-            if observed_size != expected_identity.size_bytes:
-                raise ValueError(
-                    "Source size mismatch before mesh parsing: "
-                    f"expected {expected_identity.size_bytes}, observed {observed_size}"
-                )
-            if observed_sha256 != expected_identity.sha256:
-                raise ValueError(
-                    "Source SHA-256 mismatch before mesh parsing: "
-                    f"expected {expected_identity.sha256}, observed {observed_sha256}"
-                )
+            observed_sha256 = _spool_verified_source(
+                source_stream,
+                cast(BinaryIO, verified_stream),
+                expected_sha256=expected_identity.sha256,
+                expected_size_bytes=expected_identity.size_bytes,
+                mismatch_error=ValueError,
+            )
 
             source_identity = SourceFingerprint(
                 sha256=observed_sha256,
-                size_bytes=observed_size,
+                size_bytes=expected_identity.size_bytes,
                 mtime_ns=0,
                 original_name=display_name,
                 format=format_hint,
             )
             if execution.source_manifest is not None:
                 _require_manifest_primary(execution.source_manifest, source_identity)
-            verified_stream.seek(0)
+            source_preflight = _preflight_authoritative_source(
+                cast(BinaryIO, verified_stream),
+                source_format=format_hint,
+                source_size_bytes=expected_identity.size_bytes,
+            )
+            _bind_preflight_buffer_lengths(resolver, source_preflight)
             mesh = _load_authoritative_trimesh(
                 cast(BinaryIO, verified_stream),
                 source_format=format_hint,
@@ -1401,10 +1889,7 @@ class MeshLoader:
 
         display_path = Path(display_name)
         if isinstance(mesh, trimesh.Scene):
-            meshes = [g for g in mesh.geometry.values() if isinstance(g, trimesh.Trimesh)]
-            if len(meshes) == 0:
-                raise ValueError(f"No valid mesh found in: {display_path}")
-            mesh = trimesh.util.concatenate(meshes)
+            mesh = _materialize_admitted_scene(mesh)
 
         if not isinstance(mesh, trimesh.Trimesh):
             raise TypeError(f"Expected trimesh.Trimesh, got {type(mesh).__name__}")
@@ -1434,8 +1919,10 @@ class MeshLoader:
             source_format=format_hint,
             source_import_recipe=dict(recipe),
             source_resources=(primary_resource, *dependency_resources),
+            source_preflight=source_preflight,
         )
-        mesh_data.compute_normals(compute_vertex_normals=False)
+        if compute_face_normals:
+            mesh_data.compute_normals(compute_vertex_normals=False)
         return mesh_data
     
     def load_multiple(self, filepaths: List[Union[str, Path]], 

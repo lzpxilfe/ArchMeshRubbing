@@ -39,7 +39,8 @@ from .artifact_vector_export import (
     fsync_export_directory,
     publish_export_directory_noreplace,
     read_bounded_export_file,
-    validate_public_export_provenance,
+    validate_current_public_export_provenance,
+    validate_legacy_public_export_provenance,
     write_new_export_file,
 )
 from .canonical_json import (
@@ -56,7 +57,9 @@ from .canonical_png import (
 
 
 RUBBING_EXPORT_FORMAT = "archmeshrubbing_rubbing_export"
-RUBBING_EXPORT_SCHEMA_VERSION = "1.0.0"
+_CURRENT_RUBBING_EXPORT_SCHEMA_VERSION = "1.1.0"
+RUBBING_EXPORT_SCHEMA_VERSION = _CURRENT_RUBBING_EXPORT_SCHEMA_VERSION
+SUPPORTED_RUBBING_EXPORT_SCHEMA_VERSIONS = frozenset({"1.0.0", "1.1.0"})
 RUBBING_EXPORT_DIRECTORY_SUFFIX = ".amr-rubbing"
 RUBBING_EXPORT_PNG_NAME = "artifact.png"
 RUBBING_EXPORT_SIDECAR_NAME = "artifact.amr-rubbing.json"
@@ -259,16 +262,29 @@ def _require_matching_raster(
 def _public_provenance(
     document: ArtifactDocument,
     record: DerivedRecord,
+    *,
+    include_current_contract: bool = True,
 ) -> dict[str, Any]:
     try:
-        return build_public_export_provenance(document, record)
+        return build_public_export_provenance(
+            document,
+            record,
+            include_current_contract=include_current_contract,
+        )
     except ArtifactVectorExportError as exc:
         raise ArtifactRubbingExportError(str(exc)) from exc
 
 
 def _validated_public_provenance(value: object) -> Mapping[str, Any]:
     try:
-        return validate_public_export_provenance(value)
+        return validate_legacy_public_export_provenance(value)
+    except ArtifactVectorExportError as exc:
+        raise ArtifactRubbingExportError(str(exc)) from exc
+
+
+def _validated_current_public_provenance(value: object) -> Mapping[str, Any]:
+    try:
+        return validate_current_public_export_provenance(value)
     except ArtifactVectorExportError as exc:
         raise ArtifactRubbingExportError(str(exc)) from exc
 
@@ -369,7 +385,14 @@ def build_rubbing_export(
 ) -> RubbingExportBundle:
     record, receipt, record_qc = _require_exportable_record(document, record_id)
     _require_matching_raster(raster, receipt)
-    provenance = _public_provenance(document, record)
+    provenance = _public_provenance(
+        document,
+        record,
+        include_current_contract=(
+            RUBBING_EXPORT_SCHEMA_VERSION
+            == _CURRENT_RUBBING_EXPORT_SCHEMA_VERSION
+        ),
+    )
     sidecar: dict[str, Any] = {
         "format": RUBBING_EXPORT_FORMAT,
         "presentation": _presentation(receipt),
@@ -486,7 +509,11 @@ def validate_rubbing_export_bytes(
     )
     if root["format"] != RUBBING_EXPORT_FORMAT:
         raise ArtifactRubbingExportError("rubbing export format is invalid")
-    if root["schema_version"] != RUBBING_EXPORT_SCHEMA_VERSION:
+    schema_version = root["schema_version"]
+    if (
+        not isinstance(schema_version, str)
+        or schema_version not in SUPPORTED_RUBBING_EXPORT_SCHEMA_VERSIONS
+    ):
         raise ArtifactRubbingExportError("rubbing export schema is invalid")
     artifact = _exact_keys(
         root["artifact"],
@@ -522,7 +549,22 @@ def validate_rubbing_export_bytes(
         raise ArtifactRubbingExportError("PNG pixels do not match raster receipt")
     if ppm != receipt["pixels_per_meter"]:
         raise ArtifactRubbingExportError("PNG pHYs does not match raster receipt")
-    provenance = _validated_public_provenance(root["provenance"])
+    provenance = (
+        _validated_current_public_provenance(root["provenance"])
+        if schema_version == _CURRENT_RUBBING_EXPORT_SCHEMA_VERSION
+        else _validated_public_provenance(root["provenance"])
+    )
+    geometry_provenance = provenance["geometry_revision"]
+    assert isinstance(geometry_provenance, Mapping)
+    geometry_qc = geometry_provenance["qc"]
+    assert isinstance(geometry_qc, Mapping)
+    if (
+        schema_version == "1.0.0"
+        and "import_admission" in geometry_qc
+    ):
+        raise ArtifactRubbingExportError(
+            "rubbing export 1.0.0 cannot contain mesh admission provenance"
+        )
     record_provenance = provenance["record"]
     assert isinstance(record_provenance, Mapping)
     if (
@@ -572,7 +614,13 @@ def validate_rubbing_export_bytes(
         )
         if document_receipt != receipt:
             raise ArtifactRubbingExportError("export receipt does not match document")
-        if provenance != _public_provenance(document, record):
+        if provenance != _public_provenance(
+            document,
+            record,
+            include_current_contract=(
+                schema_version == _CURRENT_RUBBING_EXPORT_SCHEMA_VERSION
+            ),
+        ):
             raise ArtifactRubbingExportError("export provenance does not match document")
         if recipe != record.to_dict()["recipe"]:
             raise ArtifactRubbingExportError("export recipe does not match document")
@@ -1366,6 +1414,7 @@ __all__ = [
     "RUBBING_EXPORT_PNG_MEDIA_TYPE",
     "RUBBING_EXPORT_PNG_NAME",
     "RUBBING_EXPORT_SCHEMA_VERSION",
+    "SUPPORTED_RUBBING_EXPORT_SCHEMA_VERSIONS",
     "RUBBING_EXPORT_SIDECAR_MEDIA_TYPE",
     "RUBBING_EXPORT_SIDECAR_NAME",
     "RubbingExportBundle",

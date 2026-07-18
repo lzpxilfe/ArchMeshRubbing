@@ -5,9 +5,17 @@ from contextlib import redirect_stdout
 from unittest.mock import patch
 
 import main
+from src.windows_runtime import UnsupportedWindowsRuntimeError
 
 
 class TestMainCLI(unittest.TestCase):
+    def test_gui_launch_rejects_unsupported_runtime_before_qt_import(self):
+        with patch(
+            "main.require_supported_windows_client_runtime",
+            side_effect=UnsupportedWindowsRuntimeError("unsupported-test-runtime"),
+        ), patch.dict("sys.modules", {"app_interactive": None}):
+            self.assertFalse(main.launch_gui())
+
     def test_run_cli_routes_review_command(self):
         with patch("main.review_mesh") as mock_review:
             with patch("sys.argv", ["main.py", "--review", "tile.obj", "review.png"]):

@@ -6,6 +6,11 @@ from typing import Any
 
 import numpy as np
 
+from .artifact_cancellation import (
+    CancellationProbe,
+    poll_cancellation,
+    raise_if_cancelled,
+)
 from .flatten_models_cylindrical import cylindrical_parameterization
 from .flatten_utils import (
     _angles_to_min_range,
@@ -19,6 +24,261 @@ from .flatten_utils import (
     _unwrap_angle_series,
 )
 from .mesh_loader import MeshData
+
+
+_ROW_SHIFT_SAMPLE_FACE_LIMIT = 100_000
+_ROW_SHIFT_GRID_STEPS = 65
+_ROW_SHIFT_REFINE_STEPS = 32
+
+
+def _row_shift_objective(
+    delta: float,
+    *,
+    du: np.ndarray,
+    dv: np.ndarray,
+    source_length: np.ndarray,
+    alpha: np.ndarray,
+) -> float:
+    target = np.hypot(du + (alpha * float(delta)), dv)
+    residual = target - source_length
+    value = float(np.mean(residual * residual)) if residual.size else float("inf")
+    return value if np.isfinite(value) else float("inf")
+
+
+def _bounded_row_shift(
+    *,
+    du: np.ndarray,
+    dv: np.ndarray,
+    source_length: np.ndarray,
+    alpha: np.ndarray,
+    cancellation_probe: CancellationProbe | None = None,
+) -> float:
+    """Find one deterministic per-section U translation increment."""
+
+    usable = (
+        np.isfinite(du)
+        & np.isfinite(dv)
+        & np.isfinite(source_length)
+        & np.isfinite(alpha)
+        & (source_length > 1e-12)
+        & (np.abs(alpha) > 1e-9)
+    )
+    if int(np.count_nonzero(usable)) < 4:
+        return 0.0
+    du = np.asarray(du[usable], dtype=np.float64)
+    dv = np.asarray(dv[usable], dtype=np.float64)
+    source_length = np.asarray(source_length[usable], dtype=np.float64)
+    alpha = np.asarray(alpha[usable], dtype=np.float64)
+
+    per_edge_bound = (
+        source_length + np.abs(du) + np.abs(dv)
+    ) / np.maximum(np.abs(alpha), 1e-9)
+    finite_bounds = per_edge_bound[np.isfinite(per_edge_bound)]
+    if finite_bounds.size == 0:
+        return 0.0
+    bound = float(np.quantile(finite_bounds, 0.95))
+    if not np.isfinite(bound) or bound <= 1e-9:
+        return 0.0
+    bound = min(bound, float(np.max(source_length)) * 4.0)
+
+    grid = np.linspace(-bound, bound, _ROW_SHIFT_GRID_STEPS, dtype=np.float64)
+    values_list: list[float] = []
+    for candidate_index, candidate in enumerate(grid):
+        poll_cancellation(cancellation_probe, candidate_index, interval=1)
+        values_list.append(
+            _row_shift_objective(
+                float(candidate),
+                du=du,
+                dv=dv,
+                source_length=source_length,
+                alpha=alpha,
+            )
+        )
+    values = np.asarray(values_list, dtype=np.float64)
+    best_index = int(np.argmin(values))
+    left = float(grid[max(0, best_index - 1)])
+    right = float(grid[min(grid.size - 1, best_index + 1)])
+    if right <= left:
+        return float(grid[best_index])
+
+    golden = (np.sqrt(5.0) - 1.0) * 0.5
+    x1 = right - golden * (right - left)
+    x2 = left + golden * (right - left)
+    f1 = _row_shift_objective(
+        x1,
+        du=du,
+        dv=dv,
+        source_length=source_length,
+        alpha=alpha,
+    )
+    f2 = _row_shift_objective(
+        x2,
+        du=du,
+        dv=dv,
+        source_length=source_length,
+        alpha=alpha,
+    )
+    for refine_index in range(_ROW_SHIFT_REFINE_STEPS):
+        poll_cancellation(cancellation_probe, refine_index, interval=1)
+        if f1 <= f2:
+            right = x2
+            x2 = x1
+            f2 = f1
+            x1 = right - golden * (right - left)
+            f1 = _row_shift_objective(
+                x1,
+                du=du,
+                dv=dv,
+                source_length=source_length,
+                alpha=alpha,
+            )
+        else:
+            left = x1
+            x1 = x2
+            f1 = f2
+            x2 = left + golden * (right - left)
+            f2 = _row_shift_objective(
+                x2,
+                du=du,
+                dv=dv,
+                source_length=source_length,
+                alpha=alpha,
+            )
+    return float(x1 if f1 <= f2 else x2)
+
+
+def _correct_section_row_shift(
+    *,
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    station: np.ndarray,
+    section_stations: np.ndarray,
+    u: np.ndarray,
+    v: np.ndarray,
+    cancellation_probe: CancellationProbe | None = None,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Recover longitudinal shear that a rotating/bending tile loses in U."""
+
+    info: dict[str, Any] = {
+        "section_row_shift_applied": False,
+        "section_row_shift_max_world": 0.0,
+        "section_row_shift_station_count": 0,
+    }
+    verts = np.asarray(vertices, dtype=np.float64)
+    tri = np.asarray(faces, dtype=np.int32)
+    stations = np.asarray(section_stations, dtype=np.float64).reshape(-1)
+    s = np.asarray(station, dtype=np.float64).reshape(-1)
+    base_u = np.asarray(u, dtype=np.float64).reshape(-1)
+    base_v = np.asarray(v, dtype=np.float64).reshape(-1)
+    if (
+        tri.ndim != 2
+        or tri.shape[0] == 0
+        or tri.shape[1] < 3
+        or stations.size < 4
+        or s.size != verts.shape[0]
+        or base_u.size != verts.shape[0]
+        or base_v.size != verts.shape[0]
+    ):
+        return base_u, info
+
+    raise_if_cancelled(cancellation_probe)
+    if tri.shape[0] > _ROW_SHIFT_SAMPLE_FACE_LIMIT:
+        sample_index = np.linspace(
+            0,
+            tri.shape[0] - 1,
+            _ROW_SHIFT_SAMPLE_FACE_LIMIT,
+            dtype=np.int64,
+        )
+        tri = tri[sample_index]
+    edges = np.concatenate(
+        (tri[:, (0, 1)], tri[:, (1, 2)], tri[:, (2, 0)]),
+        axis=0,
+    )
+    edges = np.sort(edges, axis=1)
+    edges = np.unique(edges, axis=0)
+    raise_if_cancelled(cancellation_probe)
+    edge_a = edges[:, 0]
+    edge_b = edges[:, 1]
+    ds = s[edge_b] - s[edge_a]
+    source_length = np.linalg.norm(verts[edge_b, :3] - verts[edge_a, :3], axis=1)
+    du = base_u[edge_b] - base_u[edge_a]
+    dv = base_v[edge_b] - base_v[edge_a]
+    midpoint = 0.5 * (s[edge_a] + s[edge_b])
+    finite_edge = (
+        np.isfinite(ds)
+        & np.isfinite(source_length)
+        & np.isfinite(du)
+        & np.isfinite(dv)
+        & np.isfinite(midpoint)
+        & (source_length > 1e-12)
+    )
+    if int(np.count_nonzero(finite_edge)) < 8:
+        return base_u, info
+    ds = ds[finite_edge]
+    source_length = source_length[finite_edge]
+    du = du[finite_edge]
+    dv = dv[finite_edge]
+    midpoint = midpoint[finite_edge]
+
+    shift = np.zeros(stations.size, dtype=np.float64)
+    valid_intervals = 0
+    for index in range(stations.size - 1):
+        poll_cancellation(cancellation_probe, index, interval=1)
+        left = float(stations[index])
+        right = float(stations[index + 1])
+        spacing = right - left
+        if not np.isfinite(spacing) or spacing <= 1e-12:
+            shift[index + 1] = shift[index]
+            continue
+        if index + 2 == stations.size:
+            in_interval = (midpoint >= left) & (midpoint <= right)
+        else:
+            in_interval = (midpoint >= left) & (midpoint < right)
+        # Circumferential edges in a scan are never perfectly coplanar.  Treat
+        # only edges with a meaningful longitudinal component as constraints;
+        # otherwise micron/sub-micron station noise creates a nearly flat
+        # objective whose bounded optimum can jump to an arbitrary endpoint.
+        in_interval &= (np.abs(ds) >= spacing * 0.05) & (
+            np.abs(ds) <= spacing * 2.5
+        )
+        if int(np.count_nonzero(in_interval)) < 4:
+            shift[index + 1] = shift[index]
+            continue
+        increment = _bounded_row_shift(
+            du=du[in_interval],
+            dv=dv[in_interval],
+            source_length=source_length[in_interval],
+            alpha=ds[in_interval] / spacing,
+            cancellation_probe=cancellation_probe,
+        )
+        shift[index + 1] = shift[index] + increment
+        valid_intervals += 1
+
+    if valid_intervals < max(3, int(0.25 * (stations.size - 1))):
+        return base_u, info
+    correction = np.interp(s, stations, shift)
+    candidate_u = base_u + correction
+    before_length = np.hypot(du, dv)
+    candidate_du = candidate_u[edge_b[finite_edge]] - candidate_u[edge_a[finite_edge]]
+    after_length = np.hypot(candidate_du, dv)
+    before_error = np.abs(before_length - source_length) / source_length
+    after_error = np.abs(after_length - source_length) / source_length
+    if (
+        not np.isfinite(candidate_u).all()
+        or float(np.mean(after_error)) >= float(np.mean(before_error))
+        or float(np.quantile(after_error, 0.95))
+        >= float(np.quantile(before_error, 0.95))
+    ):
+        return base_u, info
+
+    info.update(
+        {
+            "section_row_shift_applied": True,
+            "section_row_shift_max_world": float(np.max(shift) - np.min(shift)),
+            "section_row_shift_station_count": int(stations.size),
+        }
+    )
+    return candidate_u, info
 
 
 def _estimate_section_longitudinal_axis(
@@ -81,9 +341,12 @@ def sectionwise_quality_gate(
     dist = dict(distortion_summary or {})
     p95 = float(dist.get("p95", 0.0) or 0.0)
     mean = float(dist.get("mean", 0.0) or 0.0)
-    if p95 > 0.82:
+    maximum = float(dist.get("max", 0.0) or 0.0)
+    if maximum > 0.25:
+        return True, "section_distortion_max"
+    if p95 > 0.15:
         return True, "section_distortion_p95"
-    if mean > 0.55:
+    if mean > 0.075:
         return True, "section_distortion_mean"
     return False, ""
 
@@ -97,13 +360,16 @@ def sectionwise_cylindrical_parameterization(
     section_guides: list[dict[str, Any]] | None = None,
     record_view: str | None = None,
     return_meta: bool = False,
+    cancellation_probe: CancellationProbe | None = None,
 ) -> np.ndarray | tuple[np.ndarray, dict[str, Any]]:
     """Section-wise cylindrical unwrap for roof-tile like shapes."""
+    raise_if_cancelled(cancellation_probe)
     vertices = np.asarray(mesh.vertices, dtype=np.float64)
     if vertices.ndim != 2 or vertices.shape[0] == 0 or vertices.shape[1] < 3:
         return np.zeros((0, 2), dtype=np.float64)
 
     def _fallback(reason: str) -> np.ndarray | tuple[np.ndarray, dict[str, Any]]:
+        raise_if_cancelled(cancellation_probe)
         uv_res = cylindrical_parameterization(
             mesh,
             axis=axis,
@@ -111,6 +377,7 @@ def sectionwise_cylindrical_parameterization(
             cut_lines_world=cut_lines_world,
             return_meta=True,
         )
+        raise_if_cancelled(cancellation_probe)
         if isinstance(uv_res, tuple):
             uv0, meta0 = uv_res
         else:
@@ -172,8 +439,13 @@ def sectionwise_cylindrical_parameterization(
         return _fallback("degenerate_span")
 
     guides = _coerce_section_guides(section_guides)
+    guide_station_list: list[float] = []
+    for item in guides:
+        station_value = item.get("station")
+        if station_value is not None:
+            guide_station_list.append(float(station_value))
     guide_station_values = np.asarray(
-        [float(item["station"]) for item in guides if item.get("station", None) is not None],
+        guide_station_list,
         dtype=np.float64,
     ).reshape(-1)
     if guide_station_values.size > 0:
@@ -191,6 +463,7 @@ def sectionwise_cylindrical_parameterization(
         auto_sections = np.quantile(s_valid, np.linspace(0.0, 1.0, n_sections_val, dtype=np.float64))
     except Exception:
         auto_sections = np.linspace(s_min, s_max, n_sections_val, dtype=np.float64)
+    raise_if_cancelled(cancellation_probe)
 
     if guide_station_values.size >= 4:
         s_sections = guide_station_values
@@ -209,7 +482,7 @@ def sectionwise_cylindrical_parameterization(
     spacing = float(np.median(diffs)) if diffs.size else float(span / max(1, s_sections.size - 1))
     if not np.isfinite(spacing) or spacing <= 0.0:
         spacing = float(span / max(1, s_sections.size - 1))
-    section_window = float(max(spacing * 1.5, span / max(12.0, float(s_sections.size))))
+    section_window = float(max(spacing * 0.6, span / max(24.0, float(s_sections.size))))
 
     min_fit_points = int(max(16, min(96, int(vertices.shape[0] // max(4, s_sections.size)))))
     nearest_k = int(max(min_fit_points, min(192, max(24, int(vertices.shape[0] // max(2, s_sections.size))))))
@@ -224,7 +497,10 @@ def sectionwise_cylindrical_parameterization(
     guide_conf_at_sections = np.zeros((s_sections.size,), dtype=np.float64)
     guided_radius_source_count = 0
     if guides:
-        guide_stations = np.asarray([float(item["station"]) for item in guides], dtype=np.float64).reshape(-1)
+        guide_stations = np.asarray(
+            guide_station_list,
+            dtype=np.float64,
+        ).reshape(-1)
         guide_conf = np.asarray(
             [float(item.get("confidence", 0.0) or 0.0) for item in guides],
             dtype=np.float64,
@@ -242,21 +518,26 @@ def sectionwise_cylindrical_parameterization(
                     right=float(guide_conf[-1]),
                 )
 
-        guide_radii_raw = [
-            float(item["radius_world"])
-            for item in guides
-            if item.get("radius_world", None) is not None and np.isfinite(float(item["radius_world"]))
-        ]
-        if guide_radii_raw:
+        guide_radius_pairs: list[tuple[float, float]] = []
+        for item in guides:
+            station_value = item.get("station")
+            radius_value = item.get("radius_world")
+            if station_value is None or radius_value is None:
+                continue
+            radius_number = float(radius_value)
+            if np.isfinite(radius_number):
+                guide_radius_pairs.append(
+                    (float(station_value), radius_number)
+                )
+        if guide_radius_pairs:
             guide_radius_stations = np.asarray(
-                [
-                    float(item["station"])
-                    for item in guides
-                    if item.get("radius_world", None) is not None and np.isfinite(float(item["radius_world"]))
-                ],
+                [item[0] for item in guide_radius_pairs],
                 dtype=np.float64,
             ).reshape(-1)
-            guide_radius_values = np.asarray(guide_radii_raw, dtype=np.float64).reshape(-1)
+            guide_radius_values = np.asarray(
+                [item[1] for item in guide_radius_pairs],
+                dtype=np.float64,
+            ).reshape(-1)
             guided_radius_source_count = int(guide_radius_values.size)
             if guide_radius_values.size == 1:
                 guide_radius_at_sections[:] = float(guide_radius_values[0])
@@ -270,6 +551,7 @@ def sectionwise_cylindrical_parameterization(
                 )
 
     for i, s0 in enumerate(s_sections):
+        poll_cancellation(cancellation_probe, i, interval=1)
         dist = np.abs(s_valid - float(s0))
         local_idx = np.flatnonzero(dist <= section_window).astype(np.int32, copy=False)
         if local_idx.size < min_fit_points:
@@ -298,6 +580,7 @@ def sectionwise_cylindrical_parameterization(
         )
 
         fit = _robust_circle_fit_2d(x_sel, y_sel)
+        raise_if_cancelled(cancellation_probe)
         if fit is not None:
             center_xy, radius = fit
             cx[i] = float(center_xy[0])
@@ -333,6 +616,7 @@ def sectionwise_cylindrical_parameterization(
     cx = _smooth_finite_series(cx, passes=2)
     cy = _smooth_finite_series(cy, passes=2)
     r_sec = _smooth_finite_series(r_sec, passes=2)
+    raise_if_cancelled(cancellation_probe)
 
     mean_center = (float(np.mean(cx)) * b1) + (float(np.mean(cy)) * b2)
     seam_hint = _seam_hint_from_cut_lines(
@@ -346,6 +630,7 @@ def sectionwise_cylindrical_parameterization(
     seams = np.full((s_sections.size,), np.nan, dtype=np.float64)
     spans = np.full((s_sections.size,), np.nan, dtype=np.float64)
     for i, s0 in enumerate(s_sections):
+        poll_cancellation(cancellation_probe, i, interval=1)
         dist = np.abs(s_valid - float(s0))
         local_idx = np.flatnonzero(dist <= section_window).astype(np.int32, copy=False)
         if local_idx.size < max(8, min_fit_points // 2):
@@ -360,6 +645,7 @@ def sectionwise_cylindrical_parameterization(
             continue
         theta_loc = np.arctan2(y_valid[local_idx] - float(cy[i]), x_valid[local_idx] - float(cx[i]))
         _wrapped, seam_i, span_i = _angles_to_min_range(theta_loc, seam_hint=None)
+        raise_if_cancelled(cancellation_probe)
         seams[i] = float(seam_i)
         spans[i] = float(span_i)
 
@@ -395,6 +681,16 @@ def sectionwise_cylindrical_parameterization(
         r_local = np.where(finite_radius, r_local, radius_fill)
     u[finite] = theta_wrapped * r_local
     v_out[finite] = v[finite]
+    u, row_shift_meta = _correct_section_row_shift(
+        vertices=vertices[:, :3],
+        faces=np.asarray(mesh.faces, dtype=np.int32),
+        station=s_raw,
+        section_stations=s_sections,
+        u=u,
+        v=v_out,
+        cancellation_probe=cancellation_probe,
+    )
+    raise_if_cancelled(cancellation_probe)
 
     record_view_key = str(record_view or "").strip().lower()
     flip_u = record_view_key == "bottom"
@@ -436,6 +732,7 @@ def sectionwise_cylindrical_parameterization(
             "section_seam_hint": None if seam_hint is None else float(seam_hint),
             "section_record_view": record_view_key,
             "section_u_flipped": bool(flip_u),
+            **row_shift_meta,
         }
         return uv, meta
     return uv

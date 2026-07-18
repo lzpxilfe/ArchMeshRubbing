@@ -25,6 +25,8 @@ from src.gui.opengl_driver_smoke import (
     PROBE_BASE_WORLD_MM,
     PROBE_GAP_WIDTH_MM,
     PROBE_STEP_HEIGHT_MM,
+    REPORT_SCHEMA_VERSION,
+    _new_report,
     _source_provenance,
     configure_probe_window,
     connected_component_sizes,
@@ -35,6 +37,35 @@ from src.gui.opengl_driver_smoke import (
 from src.gui.viewport_3d import gluLookAt, gluPerspective
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_report_v2_records_closed_runtime_claims_without_rejecting_server_smoke() -> None:
+    server_claims = {
+        "machine": "AMD64",
+        "process_bits": 64,
+        "python_implementation": "CPython",
+        "python_version": "3.12.10",
+        "release": "2025Server",
+        "system": "Windows",
+        "windows_build_number": 26_100,
+        "windows_compatibility_layer": "none",
+        "windows_major_version": 10,
+        "windows_minor_version": 0,
+        "windows_native_machine": "AMD64",
+        "windows_product_type": 3,
+    }
+
+    with patch(
+        "src.windows_runtime.collect_windows_runtime_claims",
+        return_value=server_claims,
+    ):
+        report = _new_report()
+
+    assert REPORT_SCHEMA_VERSION == 2
+    assert report["schema_version"] == 2
+    assert report["windows_runtime"] == server_claims
+    assert report["ok"] is False
+    assert "." not in report["tested_at_utc"].split("T", 1)[1]
 
 
 def test_source_provenance_prefers_frozen_manifest_without_git() -> None:

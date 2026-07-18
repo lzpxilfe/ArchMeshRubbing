@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - ".gitattributes"
+      - ".gitignore"
       - ".github/workflows/package-smoke.yml"
       - "ArchMeshRubbing.spec"
       - "LICENSE"
@@ -22,6 +23,7 @@ on:
       - "src/**"
       - "third_party_licenses/**"
       - "tools/build_portable_archive.py"
+      - "tools/build_native.py"
       - "tools/build_source_archive.py"
       - "tools/generate_build_provenance.py"
       - "tools/generate_build_info.py"
@@ -30,6 +32,7 @@ on:
   pull_request:
     paths:
       - ".gitattributes"
+      - ".gitignore"
       - ".github/workflows/package-smoke.yml"
       - "ArchMeshRubbing.spec"
       - "LICENSE"
@@ -46,6 +49,7 @@ on:
       - "src/**"
       - "third_party_licenses/**"
       - "tools/build_portable_archive.py"
+      - "tools/build_native.py"
       - "tools/build_source_archive.py"
       - "tools/generate_build_provenance.py"
       - "tools/generate_build_info.py"
@@ -66,8 +70,8 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 45
     env:
+      PYTHONDONTWRITEBYTECODE: "1"
       QT_QPA_PLATFORM: offscreen
-      LIBGL_ALWAYS_SOFTWARE: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -95,34 +99,14 @@ jobs:
       - name: Enforce fail-closed public release policy
         run: python tools/check_public_release_policy.py assert-blocked
 
-      - name: Generate immutable build manifest
+      - name: Build frozen app, corresponding source, and release evidence
         run: >-
-          python tools/generate_build_info.py
+          python tools/build_native.py
           --channel ci-smoke
           --commit "${{ github.sha }}"
-          --output build/generated/build_info.json
-
-      - name: Build frozen application
-        run: python -m PyInstaller --clean --noconfirm ArchMeshRubbing.spec
-
-      - name: Build exact corresponding-source archive
-        run: >-
-          python tools/build_source_archive.py build
-          --repository .
-          --commit "${{ github.sha }}"
-          --archive "dist\ArchMeshRubbing\source\ArchMeshRubbing-source.zip"
-          --sidecar "dist\ArchMeshRubbing\source\ArchMeshRubbing-source.json"
-
-      - name: Generate payload manifest, SPDX SBOM, and notices
-        shell: pwsh
-        run: |
-          $createdAt = (& git show -s --format=%cI "${{ github.sha }}").Trim()
-          if (-not $createdAt) {
-            throw "Could not read deterministic source commit timestamp"
-          }
-          python tools/generate_release_evidence.py generate `
-            --payload "dist\ArchMeshRubbing" `
-            --created-at $createdAt
+          --replace-existing
+          --clean-cache
+          --skip-self-test
 
       - name: Re-verify release evidence from payload bytes
         run: >-
@@ -163,7 +147,8 @@ jobs:
           assert 'project_commit=windows-movefileex-write-through' in detail_tokens, workflow;
           assert 'recovery_commit=windows-movefileex-write-through-noreplace' in detail_tokens, workflow;
           assert 'surface=distance 1.000000 mm>diameter 1.000000 mm' in str(workflow.get('detail') or ''), workflow;
-          assert 'exports=vector 9/9>rubbing 6/6' in str(workflow.get('detail') or ''), workflow;
+          assert 'exports=vector 9/9>rubbing 6/6>unwrap 1/1' in str(workflow.get('detail') or ''), workflow;
+          assert 'unwrap=record 1/1>reopen 1/1>export 1/1>hash-match>row-shift ' in str(workflow.get('detail') or ''), workflow;
           assert 'survey=verified-atomic-15' in str(workflow.get('detail') or ''), workflow;
           assert 'pilot=artifact-pass-human-driver-pending' in str(workflow.get('detail') or ''), workflow;
           assert any(c.get('name') == 'release_evidence' for c in checks), d;
@@ -198,6 +183,11 @@ jobs:
           p=pathlib.Path('build/frozen-windows-opengl-driver-smoke.json');
           d=json.loads(p.read_text(encoding='utf-8'));
           assert d.get('ok') is True, json.dumps(d,ensure_ascii=False,indent=2);
+          assert d.get('schema_version') == 2, d;
+          r=d.get('windows_runtime') or {};
+          assert set(r) == {'machine','process_bits','python_implementation','python_version','release','system','windows_build_number','windows_compatibility_layer','windows_major_version','windows_minor_version','windows_native_machine','windows_product_type'}, r;
+          assert r.get('system') == 'Windows' and r.get('windows_native_machine') == 'AMD64', r;
+          assert r.get('process_bits') == 64 and r.get('python_implementation') == 'CPython' and str(r.get('python_version')).startswith('3.12.'), r;
           c=d.get('context') or {};
           assert c.get('qt_platform') == 'windows', c;
           assert c.get('software_renderer') is True, c;
@@ -388,8 +378,11 @@ jobs:
           if (-not ([string]$workflowCheck.detail).Contains("surface=distance 1.000000 mm>diameter 1.000000 mm")) {
             throw "Portable self-test did not verify surface distance and circle diameter"
           }
-          if (-not ([string]$workflowCheck.detail).Contains("exports=vector 9/9>rubbing 6/6")) {
-            throw "Portable self-test did not verify all 9 vector and 6 rubbing exports"
+          if (-not ([string]$workflowCheck.detail).Contains("exports=vector 9/9>rubbing 6/6>unwrap 1/1")) {
+            throw "Portable self-test did not verify all 9 vector, 6 rubbing, and 1 tile unwrap exports"
+          }
+          if (-not ([string]$workflowCheck.detail).Contains("unwrap=record 1/1>reopen 1/1>export 1/1>hash-match>row-shift ")) {
+            throw "Portable self-test did not reproduce the authoritative tile unwrap and exercise v1.1 row-shift"
           }
           if (-not ([string]$workflowCheck.detail).Contains("survey=verified-atomic-15")) {
             throw "Portable self-test did not verify the atomic 15-artifact survey package"
@@ -458,6 +451,28 @@ jobs:
             throw "Portable OpenGL smoke exited with code $($process.ExitCode)"
           }
           $data = Get-Content $report -Raw | ConvertFrom-Json
+          if ($data.schema_version -ne 2) {
+            throw "Portable OpenGL smoke did not emit report v2"
+          }
+          $runtimeNames = @($data.windows_runtime.PSObject.Properties.Name | Sort-Object)
+          $expectedRuntimeNames = @(
+            "machine", "process_bits", "python_implementation", "python_version",
+            "release", "system", "windows_build_number", "windows_compatibility_layer",
+            "windows_major_version", "windows_minor_version", "windows_native_machine",
+            "windows_product_type"
+          ) | Sort-Object
+          if ((Compare-Object $runtimeNames $expectedRuntimeNames).Count -ne 0) {
+            throw "Portable OpenGL smoke runtime claim is not closed"
+          }
+          if (
+            $data.windows_runtime.system -ne "Windows" -or
+            $data.windows_runtime.windows_native_machine -ne "AMD64" -or
+            $data.windows_runtime.process_bits -ne 64 -or
+            $data.windows_runtime.python_implementation -ne "CPython" -or
+            -not ([string]$data.windows_runtime.python_version).StartsWith("3.12.")
+          ) {
+            throw "Portable OpenGL smoke runtime claim is not Windows x64 CPython 3.12"
+          }
           $context = $data.context
           if (-not $data.ok -or $context.qt_platform -ne "windows" -or -not $context.software_renderer) {
             Get-Content $report

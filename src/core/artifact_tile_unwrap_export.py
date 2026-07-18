@@ -28,6 +28,8 @@ from .artifact_tile_unwrap_extractor import (
     MAX_TILE_UNWRAP_PAYLOAD_BYTES,
     ArtifactTileUnwrapError,
     TileUnwrapMesh,
+    recompute_tile_unwrap_payload_qc,
+    selection_face_indices,
     validate_tile_unwrap_recipe,
 )
 from .artifact_tile_unwrap_record import (
@@ -43,7 +45,7 @@ from .artifact_vector_export import (
     fsync_export_directory,
     publish_export_directory_noreplace,
     read_bounded_export_file,
-    validate_public_export_provenance,
+    validate_current_public_export_provenance,
     write_new_export_file,
 )
 from .canonical_json import (
@@ -54,7 +56,7 @@ from .canonical_json import (
 
 
 TILE_UNWRAP_EXPORT_FORMAT = "archmeshrubbing_tile_unwrap_export"
-TILE_UNWRAP_EXPORT_SCHEMA_VERSION = "1.0.0"
+TILE_UNWRAP_EXPORT_SCHEMA_VERSION = "1.1.0"
 TILE_UNWRAP_EXPORT_DIRECTORY_SUFFIX = ".amr-unwrap"
 TILE_UNWRAP_EXPORT_PAYLOAD_NAME = "artifact.amr-unwrap.bin"
 TILE_UNWRAP_EXPORT_OBJ_NAME = "artifact.obj"
@@ -632,13 +634,24 @@ def validate_tile_unwrap_export_bytes(
     try:
         receipt = validate_tile_unwrap_receipt(root["geometry"])
         recipe = validate_tile_unwrap_recipe(root["recipe"])
-        provenance = validate_public_export_provenance(root["provenance"])
+        provenance = validate_current_public_export_provenance(root["provenance"])
     except (
         ArtifactTileUnwrapRecordError,
         ArtifactTileUnwrapError,
         ArtifactVectorExportError,
     ) as exc:
         raise ArtifactTileUnwrapExportError(str(exc)) from exc
+    selection = recipe["selection"]
+    assert isinstance(selection, Mapping)
+    if receipt["selection_sha256"] != selection["selection_sha256"]:
+        raise ArtifactTileUnwrapExportError(
+            "tile unwrap receipt selection differs from recipe"
+        )
+    if receipt["source_face_count"] != selection["selected_face_count"]:
+        raise ArtifactTileUnwrapExportError(
+            "tile unwrap receipt selection count differs from recipe"
+        )
+    expected_source_face_indices = selection_face_indices(selection)
     try:
         unwrap, _header = TileUnwrapMesh.from_canonical_payload_bytes(
             payload_bytes,
@@ -651,6 +664,13 @@ def validate_tile_unwrap_export_bytes(
     if unwrap.receipt(selection_sha256=str(receipt["selection_sha256"])) != receipt:
         raise ArtifactTileUnwrapExportError(
             "tile unwrap payload does not reproduce its receipt"
+        )
+    if not np.array_equal(
+        np.asarray(unwrap.source_face_indices, dtype=np.int64),
+        expected_source_face_indices,
+    ):
+        raise ArtifactTileUnwrapExportError(
+            "tile unwrap payload source faces differ from recipe selection"
         )
     artifacts = _exact_keys(
         root["artifacts"],
@@ -727,6 +747,19 @@ def validate_tile_unwrap_export_bytes(
         validate_tile_unwrap_qc(qc["record"], receipt)
     except ArtifactTileUnwrapRecordError as exc:
         raise ArtifactTileUnwrapExportError(str(exc)) from exc
+    try:
+        recomputed_payload_qc = recompute_tile_unwrap_payload_qc(unwrap)
+    except ArtifactTileUnwrapError as exc:
+        raise ArtifactTileUnwrapExportError(
+            f"tile unwrap payload topology QC failed: {exc}"
+        ) from exc
+    record_qc = qc["record"]
+    assert isinstance(record_qc, Mapping)
+    for key, expected in recomputed_payload_qc.items():
+        if record_qc.get(key) != expected:
+            raise ArtifactTileUnwrapExportError(
+                f"tile unwrap payload recomputed QC differs at {key!r}"
+            )
     provenance_record = provenance["record"]
     assert isinstance(provenance_record, Mapping)
     if provenance_record["type"] != TILE_UNWRAP_RECORD_TYPE:

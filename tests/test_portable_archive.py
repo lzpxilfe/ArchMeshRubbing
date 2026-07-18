@@ -224,10 +224,55 @@ def test_portable_archive_requires_verified_release_evidence(tmp_path: Path) -> 
     assert not (tmp_path / "manifest.json").exists()
 
 
+def test_portable_contract_requires_fixed_root_and_windows_launcher(
+    tmp_path: Path,
+) -> None:
+    payload = _payload(tmp_path / "payload")
+    with (
+        patch("src.portable_archive.verify_release_evidence"),
+        pytest.raises(PortableArchiveError, match="root directory must be"),
+    ):
+        build_portable_archive(
+            payload,
+            tmp_path / "wrong-root.zip",
+            tmp_path / "wrong-root.json",
+            source_date_epoch=SOURCE_DATE_EPOCH,
+            root_directory="RenamedApplication",
+        )
+
+    archive, manifest = _build(payload, tmp_path / "output")
+    value = json.loads(manifest.read_text(encoding="utf-8"))
+    entries = [
+        entry
+        for entry in value["entries"]
+        if entry["path"] != "ArchMeshRubbing.exe"
+    ]
+    value["entries"] = entries
+    value["payload"] = {
+        "file_count": len(entries),
+        "sha256": hashlib.sha256(_canonical_json(entries)).hexdigest(),
+        "size": sum(entry["size"] for entry in entries),
+    }
+    manifest.write_bytes(_canonical_json(value))
+    with pytest.raises(PortableArchiveError, match="Windows launcher"):
+        verify_portable_archive(archive, manifest)
+
+
 def test_windows_package_workflow_is_portable_offline_and_installer_independent() -> None:
     workflow = (ROOT / ".github" / "workflows" / "package-smoke.yml").read_text(
         encoding="utf-8"
     )
+    quality_workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+    assert workflow.count("runs-on: windows-latest") == 1
+    assert quality_workflow.count("runs-on: windows-latest") == 2
+    for unsupported_runner in ("ubuntu-latest", "macos-latest"):
+        assert unsupported_runner not in workflow
+        assert unsupported_runner not in quality_workflow
+    assert "permissions:\n  contents: read" in workflow
+    assert "permissions:\n  contents: read" in quality_workflow
+    assert "LIBGL_ALWAYS_SOFTWARE" not in workflow
     assert "tools/build_portable_archive.py build" in workflow
     assert "tools/build_portable_archive.py verify" in workflow
     assert "tools/build_portable_archive.py extract" in workflow
@@ -238,6 +283,11 @@ def test_windows_package_workflow_is_portable_offline_and_installer_independent(
     assert "문화유산 기록\\ArchMeshRubbing" in workflow
     assert "New-NetFirewallRule" in workflow
     assert "--self-test-report" in workflow
+    assert "exports=vector 9/9>rubbing 6/6>unwrap 1/1" in workflow
+    assert (
+        "unwrap=record 1/1>reopen 1/1>export 1/1>hash-match>row-shift "
+        in workflow
+    )
     assert "--opengl-driver-smoke-report" in workflow
     assert "WaitForExit(120000)" in workflow
     assert 'Portable archive ${archiveName}:' in workflow

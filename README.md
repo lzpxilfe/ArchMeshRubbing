@@ -8,7 +8,16 @@ ArchMeshRubbing은 스캔한 문화유산 3D 메쉬를 원본 보존형 연구 �
 `Open → 단위·축 확인 → Align → Cutline/Outline·기와 기록면 전개 → Digital Rubbing → 1:1 export`
 흐름으로 기록하고 다시 검증하는 오프라인 오픈소스 워크벤치를 목표로 합니다. 기와형 메쉬의 기록면 전개도 이제 같은 원본·Align·record 신뢰 경계 안에서 계산할 수 있습니다.
 
-첫 공개 안정판의 필수 데스크톱 대상은 **Windows**입니다. macOS·Linux용 source 호환 코드는 보존하지만, 이번 안정판의 완료 조건과 패키지 CI에는 포함하지 않습니다.
+## 지원 계약
+
+ArchMeshRubbing의 제품·문서·배포·차단 CI 대상은 **Windows x64 하나**입니다.
+
+- Windows 10 version 1809 이상 x64
+- Windows 11 x64
+
+이 최소 운영체제 범위는 현재 고정한 Qt 6.11의 [공식 지원 플랫폼](https://doc.qt.io/qt-6.11/supported-platforms.html)을 따릅니다. source checkout은 Windows x64의 CPython 3.12만 지원합니다. 공개 배포 형식은 설치 프로그램이 아닌 검증형 onedir portable ZIP 하나를 목표로 하며, 서명된 공개 바이너리는 아직 제공하지 않습니다. GitHub-hosted Windows runner의 통과만으로 실제 Windows 10/11 PC를 검증했다고 간주하지 않고, 공개 전 두 대상 운영체제의 대표 PC 파일럿을 별도 수집합니다.
+
+Windows ARM64, 32-bit Windows, Windows Server를 최종 사용자 환경으로 쓰는 경우, macOS, Linux, WSL, Wine/Proton, installer·MSIX·Microsoft Store 패키지는 지원 대상도 현재 로드맵의 목표도 아닙니다. 코드에 남아 있는 비 Windows 분기와 backend는 내부 회귀 시험·참조 구현일 뿐 설치·사용·호환성 계약이 아닙니다.
 
 공개 경쟁 기능과 현재 격차를 과장 없이 추적하는 기준은 [`docs/COMPETITIVE_GAP_ANALYSIS.md`](docs/COMPETITIVE_GAP_ANALYSIS.md)에 기록합니다.
 실제 유물 한 점의 project·완료 survey·Windows graphics·고고학자 판정을 하나의 fail-closed 기록으로 묶는 절차는 [`docs/FIELD_PILOT.md`](docs/FIELD_PILOT.md)에 기록합니다. 절차와 CLI는 구현됐지만 대표 유물·현장 연구자의 실제 결과는 아직 수집하지 않았습니다.
@@ -44,7 +53,7 @@ Open 직후 만들어지는 `recipe.kind="initial_identity"` Align은 canonical 
 
 Align 확정 뒤에도 모든 기능이 한꺼번에 열리지는 않습니다. 현재 활성 Align의 고유한 `READY + FRESH` 기록을 기준으로 `Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6` 순서로 다음 단계가 열리고, 완료 버튼은 초록색으로 바뀝니다. application command도 같은 gate를 강제하며, 각 Outline은 Cutline 3면을, 각 Digital Rubbing은 dependency-valid Outline 6면을 직접 참조합니다. 이 선행 record coverage가 없으면 READY 기록도 완료 증거로 세지 않습니다. 같은 방향을 여러 번 기록해도 한 면으로 계산합니다. Align을 바꾸면 기존 기록은 삭제하지 않고 stale로 제외하며, 이전 Align을 다시 활성화하거나 프로젝트를 재열면 문서의 record graph에서 진행도를 그대로 복원합니다.
 
-Windows native 문서의 저장 표시는 최근에 파일을 쓴 시각이 아니라 **정확한 canonical document SHA-256 + 정규화한 `.amr` 경로** checkpoint에서 파생합니다. 새 원본 Open은 미저장으로 시작하고, 내장 원본과 문서를 끝까지 검증한 프로젝트 재열기만 저장됨으로 시작합니다. Align/record 추가로 문서 hash가 바뀌면 즉시 미저장이 되며 창 제목의 `*`와 상태 표시줄에 드러납니다. 미저장 상태에서 창 닫기·새 원본 Open·Project Open·드래그 앤 드롭을 시도하면 `Save / Discard / Cancel`을 고르며, Save를 고른 후속 동작은 캡처한 정확한 snapshot이 내구성까지 확정된 저장에 성공한 뒤에만 재개됩니다. Windows project writer는 production 재검증을 마친 같은 폴더 staging을 `MoveFileExW(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)`로 교체하며, Win32 호출 실패를 미저장 pre-commit 실패로 처리하고 더 약한 rename으로 우회하지 않습니다. POSIX의 `os.replace + directory fsync`는 과거 source 호환 경로일 뿐 macOS·Linux 완료 근거가 아닙니다.
+Windows native 문서의 저장 표시는 최근에 파일을 쓴 시각이 아니라 **정확한 canonical document SHA-256 + 정규화한 `.amr` 경로** checkpoint에서 파생합니다. 새 원본 Open은 미저장으로 시작하고, 내장 원본과 문서를 끝까지 검증한 프로젝트 재열기만 저장됨으로 시작합니다. Align/record 추가로 문서 hash가 바뀌면 즉시 미저장이 되며 창 제목의 `*`와 상태 표시줄에 드러납니다. 미저장 상태에서 창 닫기·새 원본 Open·Project Open·드래그 앤 드롭을 시도하면 `Save / Discard / Cancel`을 고르며, Save를 고른 후속 동작은 캡처한 정확한 snapshot이 내구성까지 확정된 저장에 성공한 뒤에만 재개됩니다. Windows project writer는 production 재검증을 마친 같은 폴더 staging을 `MoveFileExW(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)`로 교체하며, Win32 호출 실패를 미저장 pre-commit 실패로 처리하고 더 약한 rename으로 우회하지 않습니다. 코드에 남은 비 Windows 저장 fallback은 내부 회귀 시험용이며 제품 지원 계약에 포함되지 않습니다.
 
 처음 쓰는 사용자도 **5분 안에 첫 결과**를 얻는 것이 목표입니다.
 
@@ -55,8 +64,10 @@ Windows native 문서의 저장 표시는 최근에 파일을 쓴 시각이 아�
 ### 0. 원본 보존형 ArtifactDocument + 검증 Cutline/Outline/Digital Rubbing
 
 - 원본 file SHA-256, decode geometry SHA-256, 확인된 단위·축, immutable Align revision을 분리해 저장
+- Windows Open은 열린 regular-file descriptor에 4 GiB primary source cap을 hash 전에 적용하고, 그 bytes를 SHA-256으로 다시 확인한 bounded spool snapshot에서만 preflight와 parser를 실행한다. `trimesh`가 source 전체를 materialize하는 OBJ·OFF·ASCII PLY/STL은 별도 256 MiB text cap을 적용하고, binary PLY/STL·GLB는 4 GiB primary cap을 유지한다. OBJ·PLY·STL·OFF의 vertex/face/triangulation 선언과 glTF/GLB의 최대 16 MiB JSON, GLB JSON↔BIN 길이, buffer·모든 중복/겹침 bufferView slice·미사용 accessor·sparse·primitive·node instance 증폭을 parser 전에 bounded 검증한다. binary PLY는 잠긴 parser가 첫 행으로 고정 dtype을 만드는 특성에 맞춰 모든 binary list property의 행별 길이를 고정하고, `_ply_raw`로 보존되는 임의 element를 허용하지 않으며 정확히 vertex→face 구조, vertex property 최대 16개, face property 최대 8개, auxiliary typed data 128 MiB, 선언과 일치하는 payload 끝 및 보수적 parser footprint를 강제한다. decoded geometry는 5,000,000 vertices·2,000,000 triangles·2 GiB arrays·3 GiB 추정 peak, texture는 512 MiB, sidecar는 파일별 512 MiB·합계 1 GiB로 제한한다. sidecar는 fingerprint 뒤 bounded 재읽기 payload의 SHA-256도 같아야 parser cache와 manifest에 들어가며, 현재 Windows의 physical/commit 여유도 별도로 확인한다
+- glTF/GLB의 `data:` buffer는 parser와 동일한 lower-case `data:...;base64,` 형식만 허용하고 base64를 parser 전에 bounded decode해 `buffer.byteLength`와 정확히 대조한다. 외부 URI에 parser가 data URI로 오인할 수 있는 `base64,` 토큰이 있으면 선행 거부한다. 상대 로컬 `.bin` buffer도 declared length를 파일별 512 MiB·합계 1 GiB 안에서 먼저 열고 hash·길이를 검증한 뒤 parser에는 그 exact cache만 제공한다. GLB source와 모든 declared buffer, scene-instance canonical arrays를 함께 계산한 parser footprint도 같은 2 GiB array/3 GiB peak 프로파일을 통과해야 한다. admission 결과는 parser 선언과 PLY/glTF parser byte footprint, sanitizer 제거 면 수, accepted canonical geometry SHA-256과 고정 limit를 `GeometryRevision.qc.import_admission`에 남긴다. `.amr` 재개방과 SVG/PNG provenance에서는 현재 geometry뿐 아니라 source format·byte length와 UV/texture를 포함한 실제 accepted array byte 하한도 다시 대조한다. parser는 아직 Windows 격리 subprocess·Job Object 밖의 같은 프로세스에서 실행되므로 이 admission을 임의의 비신뢰 파일에 대한 보안 sandbox로 표현하지 않는다
 - 새 문서는 원본의 절대 경로를 canonical 문서에 넣지 않고 `external:<original_name>` locator만 저장함. 실제 OS 경로는 현재 session에만 유지하고, linked resource는 정규화된 상대 POSIX 논리 경로만 기록하므로 같은 source closure·recipe의 문서와 SVG/PNG hash가 drive/root 위치에 따라 달라지지 않음
-- native `.amr` 저장은 `ArtifactDocument`와 함께 검증된 주 원본 및 파서가 실제로 읽은 MTL·텍스처·buffer bytes를 SHA-256 content-addressed blob으로 포함함. 외부 파일을 삭제하거나 프로젝트를 다른 컴퓨터로 옮겨도 `.amr` 하나에서 saved parser·단위·Align·geometry hash와 전체 dependency hash를 다시 검증해 열 수 있고, 열린 archive를 Save/Save As로 다시 저장할 수 있음
+- native `.amr` 저장은 `ArtifactDocument`와 함께 검증된 주 원본 및 parser/preflight가 검증한 MTL·텍스처·buffer bytes를 SHA-256 content-addressed blob으로 포함함. 외부 파일을 삭제하거나 프로젝트를 다른 컴퓨터로 옮겨도 `.amr` 하나에서 saved parser·단위·Align·geometry hash와 전체 dependency hash를 다시 검증해 열 수 있고, 열린 archive를 Save/Save As로 다시 저장할 수 있음
 - `파일 → 중단된 프로젝트 저장 복구…`는 사용자가 고른 폴더에서 writer의 exact `.<destination>.XXXXXXXX.tmp` 이름을 가진 regular file만 후보로 제시함. 후보 inode·크기·수정시각을 고정해 별도 staging으로 복사하고 내장 원본·문서·Align을 production loader로 완전 물질화한 뒤, 존재하지 않는 새 `.amr`에 no-overwrite 게시함. 후보·기존 프로젝트는 성공해도 자동 삭제하거나 변경하지 않으며 현재 장면도 사용자의 별도 확인 없이 교체하지 않음
 - 기존 manifest-only `.amr`와 self-contained `mesh-import-recipe 1.0`은 계속 읽음. 새 import에서 외부 resource를 읽지 않으면 v1 `deny_external`, 실제 상대 resource를 읽으면 `mesh-import-recipe 2.0`의 `closed_manifest`와 `relative-contained-v1` resolver로 확정함
 - v2 resolver는 manifest에 선언된 exact logical path·SHA-256·크기의 byte stream만 재생함. HTTP/file URI, 절대·drive·UNC 경로, source root 탈출, symlink 탈출, 누락·추가·변경·미사용 dependency는 fail closed로 거부함
@@ -71,13 +82,13 @@ Windows native 문서의 저장 표시는 최근에 파일을 쓴 시각이 아�
 - Digital Rubbing은 6면 canonical frame, 정수 pixels/mm·µm recipe, front-depth raster와 QC를 `raster.digital_rubbing.v1` record로 보존
 - canonical GA8 PNG는 고정 chunk/DEFLATE bytes와 exact `pHYs`를 사용하며, `*.amr-rubbing/`에 provenance sidecar와 함께 저장
 - Cutline 3면·Outline 6면·Digital Rubbing 6면이 모두 완료되면 `완료 실측 15개 원자 묶음 내보내기` 버튼이 활성화되고, 기존 9개 `.amr-vector`와 6개 `.amr-rubbing`을 canonical manifest에 결합한 이동 가능한 `*.amr-survey/` 하나로 no-overwrite 게시
-- 기와 기록면 전개는 명시적 canonical 장축(`X/Y/Z`), Top/Bottom 기록면, 원본 face-range selection을 recipe로 고정하고 sectionwise 알고리즘의 자동 fallback·1 µm 격자 collapse·orientation foldover·품질 기준 초과를 정식 record에서 거부
+- 기와 기록면 전개는 명시적 canonical 장축(`X/Y/Z`), Top/Bottom 기록면, 최대 250,000개 원본 face-range selection을 recipe로 고정하고 sectionwise 알고리즘의 자동 fallback·1 µm 격자 collapse·orientation foldover·품질 기준 초과를 정식 record에서 거부
 - 통과한 결과는 `surface.tile_unwrap.v1` receipt로 보존하며 canonical binary 전체 SHA-256, 원본 vertex/face correspondence, exact µm bounds, section fit와 distortion QC를 서로 대조
 - `*.amr-unwrap/`은 canonical binary, 평면 OBJ, 실제 mm `width`/`height`/`viewBox`를 갖는 1:1 경계 SVG, 공개 provenance sidecar를 한 묶음으로 no-overwrite 게시
 - vector/rubbing/survey/tile-unwrap package는 원본 mesh와 GUI가 없어도 이동 후 별도 프로세스에서 offline 검증 가능
 - Qt/OpenGL과 분리된 `ArtifactWorkbench`가 ticketed Open, 명시적 Align readiness, `state_version`/`authority_epoch` 기반 publication과 canonical document SHA-256/정규화 project path 저장 checkpoint를 소유
 - native DerivedRecord worker는 시작 session과 projection을, viewport의 cut-section/ROI/surface-selection worker는 worker identity·target mesh/TRS·render frame을 확인하여 늦은 결과가 현재 문서·overlay·다른 유물·새 worker를 덮지 못하게 함
-- Cutline·Outline·Digital Rubbing·기와 전개 worker는 공통 취소 Event를 계산 내부의 deterministic chunk 경계까지 전달하며, 사용자는 진행 창에서 강제 스레드 종료 없이 취소를 요청할 수 있음
+- Cutline·Outline·Digital Rubbing·기와 전개 worker는 공통 취소 Event를 명시적 Python loop/chunk 경계까지 전달하며, 기와 section circle/seam fitting·row-shift section/grid/refinement과 export recipe 재계산도 이 경계에서 취소를 확인함. 현재 실행 중인 단일 NumPy·GEOS·선형대수 호출은 반환 전에 선점하지 않음
 - DerivedRecord 추가는 같은 render projection의 문서 binding만 compare-and-swap하며 live mesh·VBO·카메라·선택·preview cache를 다시 만들지 않음
 - 대좌표 장면은 CPU·문서의 절대 float64 world-mm 좌표를 유지하면서, 객체별 VBO origin을 float64에서 먼저 빼 relative `GL_FLOAT`로 업로드하고 live scene의 안정적인 render origin에 camera·model transform을 rebase함
 - 두 origin은 viewport 전용 transient 상태이며 ArtifactDocument·record·QC·hash·export에 기록하지 않음. mesh·cutline·ROI·pick·gizmo 등 활성 world overlay를 render-relative로 제출하고 CPU face 계산은 absolute float64를 유지함
@@ -87,7 +98,7 @@ Windows native 문서의 저장 표시는 최근에 파일을 쓴 시각이 아�
 - export 중 같은 Align에 무관한 record가 추가돼도 안전하게 게시하지만 Align/Open 완료로 권위가 바뀌면 destination을 만들지 않고 자신이 소유한 staging만 정리함
 - scene publication의 rollback·scene 복원·finalize 자체가 불확실하면 fatal authority 상태로 전환해 검증된 Open 전까지 저장·실측·내보내기를 차단
 
-Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 임의 `SurfaceVisualizer`/flatten PNG·SVG를 측정 산출물로 내보내는 우회 경로를 차단합니다. 검증된 Cutline/Outline record는 `.amr-vector`, Digital Rubbing record는 `.amr-rubbing`, 완료 3/6/6 세트는 `.amr-survey`, 엄격한 기와 전개 record는 `.amr-unwrap`으로 내보냅니다. 과거 세 OS 결과는 이식성의 역사적 증거로만 보존하고 현재 완료 판정은 Windows만 사용합니다. 패키지 gate는 상용 installer compiler 대신 검증형 portable ZIP을 만들고, 한글 경로에 안전하게 추출한 실행 파일을 네트워크 차단 상태에서 complete workflow와 native `qwindows` actual-frame까지 다시 실행하도록 구성합니다. CI 산출물은 업로드하지 않으며 공개 배포·서명을 뜻하지 않습니다.
+Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 임의 `SurfaceVisualizer`/flatten PNG·SVG를 측정 산출물로 내보내는 우회 경로를 차단합니다. 검증된 Cutline/Outline record는 `.amr-vector`, Digital Rubbing record는 `.amr-rubbing`, 완료 3/6/6 세트는 `.amr-survey`, 엄격한 기와 전개 record는 `.amr-unwrap`으로 내보냅니다. 현재 완료 판정과 패키지 증거는 Windows x64만 사용합니다. 패키지 gate는 상용 installer compiler 대신 검증형 portable ZIP을 만들고, 한글 경로에 안전하게 추출한 실행 파일을 네트워크 차단 상태에서 complete workflow와 native `qwindows` actual-frame까지 다시 실행하도록 구성합니다. CI 산출물은 업로드하지 않으며 공개 배포·서명을 뜻하지 않습니다.
 
 ### 1. 정식 기와 기록면 전개
 
@@ -95,9 +106,10 @@ Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 임의 
 - 자동 장축 추정 대신 기록자가 `X/Y/Z` 장축을 명시해 해석을 recipe에 남김
 - 선택 기록면을 정렬·병합된 원본 face 범위와 selection SHA-256으로 보존
 - sectionwise 계산이 cylinder/area 등으로 fallback하면 정식 결과로 위장하지 않고 실패
-- 결과 좌표를 1 µm 정수 격자로 고정하고 모든 삼각형의 collapse·방향 뒤집힘과 mean/p95 distortion gate를 검사
+- 굽힘·비틀림으로 생기는 단면별 longitudinal shear를 실제 3D edge 길이에 맞춰 결정적으로 보정하고, 결과 좌표를 1 µm 정수 격자로 고정함. 모든 삼각형의 3개 edge·면적·Jacobian singular value 왜곡, collapse·방향 뒤집힘, topology·중복 face·non-manifold edge·전역 positive-area UV 겹침을 READY 전에 검사
 - application shell의 `begin_tile_unwrap()`가 immutable work item, 취소, stale Align 차단, same-Align record publication을 기존 실측과 같은 방식으로 처리
 - 메인 `4축 작업 흐름`의 전용 바로가기에서 native desktop 패널을 열고, 전체/현재 face 선택, canonical `X/Y/Z` 장축, Top/Bottom 기록면, section 수를 명시해 계산·취소·record 재선택·QC 미리보기·1:1 export까지 같은 Workbench 권위로 실행
+- 현재 Top/Bottom은 같은 face selection의 U 방향을 구분해 별도 hash를 만드는 해석값이며 실제 기와 상·하면을 자동 분류하지 않는다. 기록자가 올바른 단일 기록면 faces를 선택해야 하고, 펼친 좌표 위 texture·Digital Rubbing 재투영은 아직 구현하지 않았다
 - 재열기 뒤 선택한 `READY + FRESH` record는 저장 recipe로 전개 좌표를 다시 계산해 receipt와 대조한 뒤에만 미리보기와 export를 허용하며, 기존 자유 flatten UI의 결과는 계속 legacy 검토용으로 구분
 
 ### 2. 기와형 메쉬용 기본 추천 펼침
@@ -171,7 +183,7 @@ Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 임의 
 - Align commit/parent activation은 GUI에서 현재 session·scene binding·preview 값만 캡처합니다. 원본 geometry 재해시, candidate session 구성과 canonical materialization은 닫힘이 잠긴 worker에서 준비하고, 완료 시 같은 객체·mesh·binding·preview와 Workbench session/state/epoch/project path인지 다시 확인합니다. 하나라도 바뀌면 결과를 폐기하며, OpenGL context가 필요한 VBO 준비와 two-phase scene publication만 GUI thread에서 수행합니다.
 - Cutline/Outline/Digital Rubbing/기와 전개/검증 제원·표면 anchor 측정은 application shell에서 파라미터와 가벼운 scene guard만 캡처하고 단일 worker에서 계산합니다. canonical scene materialization·vertex/face 일치 검사와 Digital Rubbing의 해상도별 전체 peak-memory 추정도 controller 실행 수명주기 안의 worker preflight에서 수행하므로 GUI event loop를 막지 않습니다. Rubbing 시작 시에는 원본 geometry·UV·texture 복사를 포함한 보수적 최소 예약을 먼저 잡고, 전체 추정이 예산을 넘으면 계산 전에 fail closed합니다. worker는 문서를 변경하지 않으며, 완료 결과는 예약된 record ID와 일회성 result capability를 검증한 뒤 현재의 같은 Align session에 rebase합니다. record append publication은 GPU 장면을 교체하지 않습니다. 기와의 ‘현재 선택 면’은 exact face-range recipe로 고정하며, 성공적으로 게시될 때 사용자가 선택을 바꾸지 않은 경우에만 소비합니다. 재개방한 기록은 READY + FRESH 목록에서 명시적으로 선택하고, 일시적인 Open/scene 충돌로 게시하지 못한 측정 결과는 새 ID를 만들지 않고 재시도합니다.
 - vector/rubbing/survey/tile-unwrap export는 비싼 생성·record recipe 재계산을 worker에서 staging까지만 수행합니다. `.amr-survey`는 15개 exact record와 동일 projection을 한 번에 fence합니다. 최종 no-replace rename은 현재 권위를 다시 검증한 뒤 실행하며, 목적지 경합에서는 기존 승자를 보존합니다. rename 뒤 directory `fsync`가 실패하거나 Windows처럼 지원 여부를 확인할 수 없으면 저장 완료와 crash durability 미확정을 구분해 경고합니다.
-- native Save/Save As는 immutable session snapshot과 경량 scene guard만 GUI에서 캡처합니다. Git build metadata 조회, 원본 closure 재해시, ZIP64 작성·file `fsync`, production reader 재개방, source/Align 재물질화는 잠긴 진행 대화상자의 worker에서 수행합니다. Windows commit은 긴 한글·UNC 경로를 보존한 `MoveFileExW` replace-existing/write-through 한 경로만 사용합니다. 성공한 호출 뒤에만 session·state version·authority epoch·기존 project path를 다시 비교해 결과 경로와 exact document hash checkpoint를 현재 프로젝트로 채택합니다. 같은 경로 Save와 Save As 모두 같은 CAS를 사용합니다. 중간에 권위가 바뀌면 파일은 유효한 과거 snapshot으로 명시하되 현재 문서가 저장됐다고 표시하지 않습니다. Win32 commit 실패는 기존 목적지를 보존하며 checkpoint를 만들지 않습니다. POSIX 호환 경로에서 replace 뒤 directory `fsync`가 실제 실패하면 committed-but-uncertain checkpoint로 남지만, 이것은 Windows 안정판 완료 판정에 사용하지 않습니다.
+- native Save/Save As는 immutable session snapshot과 경량 scene guard만 GUI에서 캡처합니다. Git build metadata 조회, 원본 closure 재해시, ZIP64 작성·file `fsync`, production reader 재개방, source/Align 재물질화는 잠긴 진행 대화상자의 worker에서 수행합니다. Windows commit은 긴 한글·UNC 경로를 보존한 `MoveFileExW` replace-existing/write-through 한 경로만 사용합니다. 성공한 호출 뒤에만 session·state version·authority epoch·기존 project path를 다시 비교해 결과 경로와 exact document hash checkpoint를 현재 프로젝트로 채택합니다. 같은 경로 Save와 Save As 모두 같은 CAS를 사용합니다. 중간에 권위가 바뀌면 파일은 유효한 과거 snapshot으로 명시하되 현재 문서가 저장됐다고 표시하지 않습니다. Win32 commit 실패는 기존 목적지를 보존하며 checkpoint를 만들지 않습니다. 비 Windows fallback의 durability 결과는 내부 회귀 시험에만 사용하며 Windows 제품 완료 판정에 포함하지 않습니다.
 - native 문서의 Close, 새 원본 Open, Project Open, 드래그 앤 드롭은 같은 `Save / Discard / Cancel` gate를 공유합니다. `Save`는 비동기 저장 완료 후 exact confirmed checkpoint가 현재 session/path와 같을 때만 원래 동작을 호출하며, 취소·실패·stale 결과·내구성 미확정에서는 현재 문서와 창을 유지합니다. 문서 변경 상태는 창 제목 `*`와 저장 상태 표시줄에서 같은 Workbench snapshot으로 파생합니다.
 - 중단 저장 복구는 자동 시작 스캔이나 임시본 정리를 하지 않습니다. 사용자가 범위를 폴더 하나로 지정하고 후보·새 목적지를 각각 확인한 뒤 잠긴 worker에서 descriptor copy, file `fsync`, embedded-session materialization을 수행합니다. Windows create-new 게이트는 긴 한글·UNC 경로를 보존한 `MoveFileExW(MOVEFILE_WRITE_THROUGH)`만 사용하며 기존 목적지가 있거나 Win32 호출이 실패하면 덮어쓰기나 더 약한 rename 없이 중단합니다. 성공 뒤에도 복구본 열기는 별도 확인이며, 실패·목적지 경합·후보 identity 변경에서는 live scene과 모든 기존 경로를 유지합니다.
 - 창 종료는 active authoritative 측정·내보내기의 record/publication 권위를 먼저 회수하고 강제 thread termination 없이 최대 30초 join을 기다립니다. native Align 준비·project save뿐 아니라 독립적인 원본 loader와 Project inspector도 request/ticket을 먼저 회수하고 같은 bounded join을 통과해야 합니다. worker 종료와 export staging의 안전한 terminal 상태를 증명하지 못하면 창을 닫지 않고 QThread 소유권을 유지하며, 검증된 join 뒤에만 signal과 identity를 제거해 늦은 결과 게시를 차단합니다.
@@ -205,7 +217,7 @@ Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 임의 
 - main mesh VBO, camera/model transform, native vector preview, ground/grid와 활성 cutline·ROI·pick·gizmo 등 world overlay를 render-relative 제출로 이식
 - 한 frame의 modelview·projection·viewport·scene origin을 묶은 `RenderFrameSnapshot`과 그 프레임의 visibility·ROI·X-ray·object TRS/geometry depth signature로 depth unprojection, screen projection, ray, Ctrl drag의 좌표·픽셀 계약을 일치시킴
 - 라쏘/가시 면 worker 결과는 시작 객체·mesh·TRS·depth authority와 완료 시점을 다시 비교하며, magnetic depth-edge cache는 잡힌 frame authority와 함께만 재사용. 객체 전환 시 미완성 gesture/polygon도 종료
-- mocked OpenGL·pure float64 게이트와 별도로, 현재 Windows source와 frozen 실행 파일의 qwindows+llvmpipe 실제 OpenGL context에서 `>= 1e9 mm` 장면의 0.25 mm gap·0.125 mm 높이차를 원근/정사영 모두 검증함. macOS·Linux 결과는 과거 이식성 기록이며 첫 안정판 지원 판정에는 사용하지 않음
+- mocked OpenGL·pure float64 게이트와 별도로, 현재 Windows source와 frozen 실행 파일의 qwindows+llvmpipe 실제 OpenGL context에서 `>= 1e9 mm` 장면의 0.25 mm gap·0.125 mm 높이차를 원근/정사영 모두 검증함. 지원 판정에는 Windows 차단 게이트와 실제 대상 PC 파일럿만 사용함
 
 기존 기와 기록면 기능도 flatten 코어를 책임별로 분리해 유지합니다.
 
@@ -265,15 +277,16 @@ py -3.12 -m venv .venv
 .venv\Scripts\activate
 python -m pip install --upgrade pip
 pip install -r requirements.txt
-pip install -r requirements-optional.txt
 python app_interactive.py
 ```
 
 또는:
 
-```bash
+```bat
 python main.py --gui
 ```
+
+`requirements-optional.txt`의 OpenCV/PyOpenGL-accelerate는 legacy 검토·실험 경로용이며 지원 Quick Start나 frozen portable payload의 일부가 아닙니다. Windows source 실행에 설치하지 않아도 됩니다.
 
 ---
 
@@ -281,7 +294,7 @@ python main.py --gui
 
 개발·CI 환경은 런타임 의존성과 함께 `requirements-dev.txt`를 설치합니다.
 
-```bash
+```bat
 python -m pip install -r requirements.txt -r requirements-dev.txt
 python -m ruff check .
 python -c "import subprocess,sys; raise SystemExit(subprocess.call([sys.executable,'-m','pyright','--pythonpath',sys.executable,'-p','pyright-m0.json']))"
@@ -298,20 +311,21 @@ python -m pytest -q
 
 ### 로컬 native smoke build
 
-Python 3.12의 깨끗한 환경에서만 unsigned 로컬 앱을 만듭니다.
+native AMD64 Windows와 64-bit CPython 3.12의 깨끗한 환경, clean Git checkout에서만 unsigned 로컬 앱을 만듭니다.
 
-```bash
+```bat
+set PYTHONDONTWRITEBYTECODE=1
 python -m pip install --require-hashes --only-binary=:all: -r requirements/windows-py312-x64-hashed.lock
 python tools/build_native.py
 ```
 
-이 명령은 기존 산출물을 기본적으로 덮어쓰지 않고, 빌드 뒤 실제 frozen executable의 offline self-test를 실행합니다. Windows build는 payload 전체 SHA-256 manifest, SPDX 2.3 SBOM·제3자 NOTICE와 정확한 Git commit/tree/blob을 담은 corresponding-source ZIP을 생성·재검증합니다. 현재 공개 바이너리는 만들지 않습니다. 패키지 CI는 Windows 하나만 차단 대상으로 사용하며 portable ZIP의 전체 entry를 검증한 뒤, 외부 unsigned provenance에 portable/source/evidence와 workflow·run·hosted runner identity를 결합합니다. 이어 한글 경로 원자적 추출, 같은 evidence·source archive·provenance, outbound 차단 complete workflow, native-QPA software OpenGL, 삭제를 검사합니다. 이 provenance는 내부 무결성 기록이지 서명된 출처 인증이 아닙니다. 라이선스 결정, 서명·신뢰 anchor와 대표 Windows GPU·실물 pilot은 여전히 남아 있습니다. 자세한 절차와 차단 게이트는 [docs/NATIVE_PACKAGING.md](docs/NATIVE_PACKAGING.md)를 참고하세요.
+이 명령은 실제 CPython 구현체와 `IsWow64Process2` native AMD64 host를 확인합니다. canonical Git top-level과 build root가 다르거나 Git repository override 환경이 있거나 요청 commit이 현재 `HEAD`와 다르면 출력 전에 실패합니다. HEAD의 모든 tracked path·blob·mode를 index와 대조한 뒤 Git의 Windows EOL clean representation으로 live bytes를 전수 hash하므로 `assume-unchanged`/`skip-worktree` 변경도 clean으로 통과하지 못합니다. PyInstaller 뒤에도 같은 검사를 통과한 다음에만 corresponding source와 release evidence를 발급합니다. 기존 산출물을 기본적으로 덮어쓰지 않고, 빌드 뒤 실제 frozen executable의 offline self-test를 실행합니다. Windows build는 payload 전체 SHA-256 manifest, SPDX 2.3 SBOM·제3자 NOTICE와 정확한 Git commit/tree/blob을 담은 corresponding-source ZIP을 생성·재검증합니다. 현재 공개 바이너리는 만들지 않습니다. 패키지 CI는 Windows 하나만 차단 대상으로 사용하며 portable ZIP의 전체 entry를 검증한 뒤, 외부 unsigned provenance에 portable/source/evidence와 workflow·run·hosted runner identity를 결합합니다. 이어 한글 경로 원자적 추출, 같은 evidence·source archive·provenance, outbound 차단 complete workflow, native-QPA software OpenGL, 삭제를 검사합니다. 이 provenance는 내부 무결성 기록이지 서명된 출처 인증이 아닙니다. 라이선스 결정, 서명·신뢰 anchor와 대표 Windows GPU·실물 pilot은 여전히 남아 있습니다. 자세한 절차와 차단 게이트는 [docs/NATIVE_PACKAGING.md](docs/NATIVE_PACKAGING.md)를 참고하세요.
 
 ---
 
 ## CLI 예시
 
-```bash
+```bat
 python main.py --help
 python main.py mesh.obj
 python main.py --open-project sample.amr
@@ -333,7 +347,7 @@ python main.py --project mesh.obj planview.png
 
 결과는 versioned closed JSON인 [`schemas/offline_verification_report-1.0.0.schema.json`](schemas/offline_verification_report-1.0.0.schema.json) 계약을 따른다. 성공 receipt에는 절대 입력 경로와 실행 시각을 기록하지 않으므로 검증에 성공한 같은 자료와 같은 authority mode는 같은 JSON 값을 만든다. `--report`는 기존 파일을 덮어쓰지 않는다. 검증 성공은 종료 코드 `0`, 자료 검증 실패는 `1`, 잘못된 옵션이나 report 저장 실패는 `2`다. `--report`를 생략하면 source/console 실행에서는 JSON 한 줄을 표준출력으로 보낸다.
 
-`--field-pilot`은 같은 `.amr`와 완료 `.amr-survey`, 현재 빌드에 결합된 Windows native OpenGL report, project document/survey aggregate hash에 명시적으로 묶인 고고학자 10항목 review를 결합한다. 네 근거가 모두 통과해야 `verified`이며, 근거가 빠지면 `incomplete`, 명시적 실패나 다른 artifact에 묶인 review가 있으면 `failed`다. report는 hostname·사용자명·절대 경로를 자동 기록하지 않고 `authentication=none`과 단일 유물·단일 컴퓨터 scope를 명시한다. self-hash는 서명이 아니며 report 하나가 release 승인도 아니다. 작성·판정·개인정보 경계는 [현장 파일럿 절차](docs/FIELD_PILOT.md)를 따른다.
+`--field-pilot`은 같은 `.amr`와 완료 `.amr-survey`, 현재 빌드에 결합된 Windows native OpenGL v2 report, project document/survey aggregate hash에 명시적으로 묶인 고고학자 10항목 review를 결합한다. OpenGL receipt는 닫힌 전체 actual-frame check와 두 projection mode를 가져야 하며, 저장한 Windows client runtime self-claim이 현재 pilot process와 정확히 같고 24시간 안에 생성돼야 한다. 네 근거와 Windows 10 build 17763+/Windows 11 client Workstation·native AMD64·64-bit AMD64 process·CPython 3.12·비호환 계층 계약이 모두 통과해야 `verified`이며, 과거 v1·부분·Server/ARM64/구빌드·오래된 report는 통과하지 않는다. report는 hostname·사용자명·절대 경로를 자동 기록하지 않고 `authentication=none`과 단일 유물·단일 컴퓨터 scope를 명시한다. 이 exact-match는 실수 재사용 방지용 self-claim이지 물리 장비 신원 인증이나 서명이 아니며 report 하나가 release 승인도 아니다. 작성·판정·개인정보 경계는 [현장 파일럿 절차](docs/FIELD_PILOT.md)를 따른다.
 
 `--flatten`, `--review`는 빠른 전체 경로용입니다.
 상면/하면 기록면을 유도형으로 준비하려면 GUI 사용을 권장합니다.
@@ -415,7 +429,7 @@ python main.py --project mesh.obj planview.png
 - Cutline/Outline/Digital Rubbing command와 worker 수명주기를 Qt/OpenGL-free application shell로 이식
 - DerivedRecord의 VBO-free binding rebind와 SVG/PNG worker staging → final-authority publication 이식
 - dependency-valid `READY + FRESH` record graph와 application command에서 Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6 순차 gate·초록 완료 표시·재열기/Align 복원 구현
-- packaged self-test가 실제 application authority를 통해 Open → explicit Align → Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6 → 검증 제원 1/1 → 거리 1/1 → 지름 1/1의 18개 record를 만들고, 외부 PLY 삭제 뒤 embedded `.amr`를 재열어 24 mm²/8 mm³ exact metrics와 1.000000 mm 거리·지름 receipt, SVG 9개·PNG 6개·원자적 `.amr-survey`를 원본 SHA-256·recipe·QC·aggregate hash 및 exact-project 결합으로 offline 재검증
+- packaged self-test가 실제 application authority를 통해 Open → explicit Align → Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6 → 검증 제원 1/1 → 거리 1/1 → 지름 1/1의 18개 record를 만들고, 외부 PLY 삭제 뒤 embedded `.amr`를 재열어 24 mm²/8 mm³ exact metrics와 1.000000 mm 거리·지름 receipt, SVG 9개·PNG 6개·원자적 `.amr-survey`를 원본 SHA-256·recipe·QC·aggregate hash 및 exact-project 결합으로 offline 재검증. 별도의 합성 비틀린 원통형 기와 fixture도 record → 외부 원본 삭제 → `.amr` reopen → 1.1 재계산 → `.amr-unwrap` relocation 검증을 통과하고 13개 station·최대 6,364 µm row-shift 증거와 동일 payload SHA-256을 강제한다. 이는 실물 기와 pilot의 대체 증거가 아니다
 - `--field-pilot-review-template`, `--field-pilot`, `--verify-field-pilot`이 project/survey materialization, Windows graphics receipt, 고고학자 review, machine/performance를 closed canonical report로 묶으며, 실제 review나 driver 근거가 없으면 packaged self-test에서도 `artifact-pass-human-driver-pending`으로만 남김
 - `--opengl-driver-smoke-report`가 source와 frozen Windows 실행 파일에서 native `qwindows` context를 열고 Qt·PyOpenGL을 bundled `opengl32sw.dll` 하나에 결합한 뒤, 768×768 FBO에서 `>= 1e9 mm` 장면의 relative VBO, color/depth readback, 0.125 mm depth pick을 원근·정사영으로 검증
 - Windows x64/CPython 3.12 build wheel 17개를 exact SHA-256으로 잠그고 sdist를 거부하며, frozen/portable payload의 모든 파일 hash와 runtime 10개의 SPDX 2.3 SBOM·라이선스 원문 NOTICE를 실행 파일 self-test에서 재검증
@@ -430,7 +444,7 @@ python main.py --project mesh.obj planview.png
 - 2026-07-14 중단 저장 복구 기준 commit `546d106c6ccf`: [source CI run 29282751462](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29282751462)에서 full pytest `777 passed, 128 subtests`, Ruff, M0 Pyright `0 errors`, Windows workflow `675 passed, 5 skipped, 118 subtests`와 qwindows+llvmpipe actual-frame `66/66` 통과. Windows `DirEntry`의 placeholder file identity까지 회귀 테스트로 고정함
 - 같은 복구 commit의 [portable package run 29282751606](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29282751606)에서 frozen·한글 경로 portable 실행 파일이 `recovery=verified-create-new`를 포함한 14-check offline self-test, outbound deny, public verification receipt, qwindows+llvmpipe actual-frame `66/66`, archive/provenance 재검증과 추출본·방화벽 규칙 정리를 통과
 - installer compiler 없이 표준 라이브러리만으로 deterministic portable ZIP과 canonical sidecar를 만들고, 경로 탈출·Windows 예약명·대소문자 충돌·symlink·변조를 fail-closed 검증한 뒤 기존 destination을 덮어쓰지 않는 원자적 추출 구현
-- 다음 단계: 모든 코드 권리자의 명시적 라이선스 결정, unsigned provenance와 portable/source 배포물을 인증할 서명·신뢰 anchor 정책, 구현된 파일럿 계약을 사용한 대표 Windows GPU·대용량 실제 유물·저메모리·완전 격리 offline 현장 증거 수집. macOS·Linux 배포 확대는 첫 안정판 이후 별도 범위
+- 다음 단계: 모든 코드 권리자의 명시적 라이선스 결정, unsigned provenance와 portable/source 배포물을 인증할 서명·신뢰 anchor 정책, 구현된 파일럿 계약을 사용한 지원 대상 Windows 10/11 x64의 대표 GPU·대용량 실제 유물·저메모리·완전 격리 offline 현장 증거 수집. 비 Windows 배포 확대는 현재 비목표
 
 ---
 

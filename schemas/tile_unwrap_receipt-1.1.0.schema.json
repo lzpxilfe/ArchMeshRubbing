@@ -1,0 +1,138 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:archmeshrubbing:schema:tile-unwrap-receipt:1.1.0",
+  "title": "ArchMeshRubbing Tile Unwrap Receipt 1.1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "axis",
+    "bounds_um",
+    "component_sha256",
+    "coordinate_quantum_um",
+    "coordinate_space",
+    "face_count",
+    "hash_scope",
+    "height_mm_exact",
+    "record_view",
+    "schema_version",
+    "selection_sha256",
+    "source_face_count",
+    "source_vertex_count",
+    "unwrap_sha256",
+    "vertex_count",
+    "width_mm_exact"
+  ],
+  "properties": {
+    "axis": {
+      "enum": ["x", "y", "z"]
+    },
+    "bounds_um": {
+      "$ref": "#/$defs/boundsUm"
+    },
+    "component_sha256": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "faces_i32le",
+        "source_face_indices_i64le",
+        "source_vertex_indices_i64le",
+        "uv_um_i64le"
+      ],
+      "properties": {
+        "faces_i32le": {"$ref": "#/$defs/sha256"},
+        "source_face_indices_i64le": {"$ref": "#/$defs/sha256"},
+        "source_vertex_indices_i64le": {"$ref": "#/$defs/sha256"},
+        "uv_um_i64le": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "coordinate_quantum_um": {
+      "const": 1
+    },
+    "coordinate_space": {
+      "const": "canonical_mm_tile_unwrap/v1"
+    },
+    "face_count": {
+      "$ref": "#/$defs/faceCount"
+    },
+    "hash_scope": {
+      "const": "amr-tile-unwrap-v1:length-prefixed-header+uv-i64le+faces-i32le+source-vertices-i64le+source-faces-i64le"
+    },
+    "height_mm_exact": {
+      "$ref": "#/$defs/exactDimensionMm"
+    },
+    "record_view": {
+      "enum": ["top", "bottom"]
+    },
+    "schema_version": {
+      "const": "1.1.0"
+    },
+    "selection_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "source_face_count": {
+      "$ref": "#/$defs/faceCount"
+    },
+    "source_vertex_count": {
+      "$ref": "#/$defs/vertexCount"
+    },
+    "unwrap_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "vertex_count": {
+      "$ref": "#/$defs/vertexCount"
+    },
+    "width_mm_exact": {
+      "$ref": "#/$defs/exactDimensionMm"
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "coordinateUm": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4503599627370496
+    },
+    "boundsUm": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "maximum_u",
+        "maximum_v",
+        "minimum_u",
+        "minimum_v"
+      ],
+      "properties": {
+        "maximum_u": {"$ref": "#/$defs/coordinateUm"},
+        "maximum_v": {"$ref": "#/$defs/coordinateUm"},
+        "minimum_u": {"const": 0},
+        "minimum_v": {"const": 0}
+      }
+    },
+    "faceCount": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 250000
+    },
+    "vertexCount": {
+      "type": "integer",
+      "minimum": 3,
+      "maximum": 2000000
+    },
+    "exactDimensionMm": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["denominator", "numerator"],
+      "properties": {
+        "denominator": {"const": 1000},
+        "numerator": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4503599627370496
+        }
+      }
+    }
+  }
+}

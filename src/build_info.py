@@ -477,22 +477,28 @@ def _check_resources() -> str:
         "surface_measurement_receipt-1.0.0.schema.json",
         "vector_payload-1.0.0.schema.json",
         "vector_export-1.0.0.schema.json",
+        "vector_export-1.1.0.schema.json",
         "rubbing_receipt-1.0.0.schema.json",
         "rubbing_export-1.0.0.schema.json",
+        "rubbing_export-1.1.0.schema.json",
         "survey_export-1.0.0.schema.json",
         "tile_unwrap_receipt-1.0.0.schema.json",
         "tile_unwrap_export-1.0.0.schema.json",
+        "tile_unwrap_receipt-1.1.0.schema.json",
+        "tile_unwrap_export-1.1.0.schema.json",
         "offline_verification_report-1.0.0.schema.json",
         "source_bundle-1.0.0.schema.json",
         "source_bundle-2.0.0.schema.json",
         "source_manifest-1.0.0.schema.json",
         "mesh_import_recipe-1.0.0.schema.json",
         "mesh_import_recipe-2.0.0.schema.json",
+        "mesh_admission_receipt-1.0.0.schema.json",
         "portable_archive_manifest-1.0.0.schema.json",
         "source_archive-1.0.0.schema.json",
         "build_provenance-1.0.0.schema.json",
         "field_pilot_review-1.0.0.schema.json",
         "field_pilot_report-1.0.0.schema.json",
+        "field_pilot_report-1.1.0.schema.json",
         "field_pilot_verification-1.0.0.schema.json",
     )
     for name in required_schemas:
@@ -512,7 +518,7 @@ def _check_release_evidence() -> str:
     if not bool(getattr(sys, "frozen", False)):
         return "source build; release evidence is generated after freezing"
     if sys.platform != "win32":
-        return "non-Windows frozen build; Windows release evidence is not required"
+        raise RuntimeError("frozen builds are supported only on Windows 10/11 x64")
     from src.release_evidence import verify_release_evidence
 
     payload_root = Path(sys.executable).resolve().parent
@@ -525,7 +531,7 @@ def _check_source_archive() -> str:
     if not bool(getattr(sys, "frozen", False)):
         return "source build; corresponding source is generated after freezing"
     if sys.platform != "win32":
-        return "non-Windows frozen build; bundled source archive is not required"
+        raise RuntimeError("frozen builds are supported only on Windows 10/11 x64")
     metadata = build_metadata()
     if metadata["source_tree"] != "clean":
         raise RuntimeError(

@@ -15,6 +15,7 @@ from src.core.alignment_utils import (
     scene_trs_matrix,
     scene_trs_matrix_about_pivot,
     transform_bounds,
+    transform_directions,
     transform_plane_world_to_local,
     transform_points,
 )
@@ -64,6 +65,16 @@ class TestAlignmentUtils(unittest.TestCase):
             rtol=0.0,
             atol=1e-12,
         )
+
+    def test_transform_points_rejects_finite_input_that_overflows(self):
+        matrix = np.eye(4, dtype=np.float64)
+        matrix[0, 0] = 1e200
+
+        with self.assertRaisesRegex(ValueError, "transformed points"):
+            transform_points([[1e200, 0.0, 0.0]], matrix)
+
+        with self.assertRaisesRegex(ValueError, "transformed directions"):
+            transform_directions([[1e200, 0.0, 0.0]], matrix)
 
     def test_scene_trs_about_pivot_keeps_object_centered_without_recentering(self):
         matrix = scene_trs_matrix_about_pivot(

@@ -762,6 +762,7 @@ class MeshLoadThread(QThread):
         source_format: str | None = None,
         import_recipe: Mapping[str, object] | None = None,
         capture_dependencies: bool = False,
+        authoritative: bool = False,
     ):
         super().__init__()
         self._filepath = str(filepath)
@@ -772,6 +773,7 @@ class MeshLoadThread(QThread):
             dict(import_recipe) if isinstance(import_recipe, Mapping) else None
         )
         self._capture_dependencies = bool(capture_dependencies)
+        self._authoritative = bool(authoritative)
 
     def run(self):
         try:
@@ -781,6 +783,7 @@ class MeshLoadThread(QThread):
                 source_format=self._source_format,
                 import_recipe=self._import_recipe,
                 capture_dependencies=self._capture_dependencies,
+                compute_face_normals=not self._authoritative,
             )
 
             if self._scale_factor != 1.0:
@@ -798,7 +801,10 @@ class MeshLoadThread(QThread):
             # - face_normals: required for display and many tools (compute once, in background)
             # - face_centroids: speeds up surface tools on huge meshes (lasso/brush)
             try:
-                if getattr(mesh_data, "face_normals", None) is None:
+                if (
+                    not self._authoritative
+                    and getattr(mesh_data, "face_normals", None) is None
+                ):
                     mesh_data.compute_normals(compute_vertex_normals=False)
             except Exception:
                 _LOGGER.debug("Mesh normals precompute failed (continuing)", exc_info=True)
@@ -813,7 +819,7 @@ class MeshLoadThread(QThread):
             except Exception:
                 threshold = 300000
 
-            if n_faces >= threshold:
+            if not self._authoritative and n_faces >= threshold:
                 try:
                     faces = np.asarray(getattr(mesh_data, "faces", None), dtype=np.int32)
                     verts = np.asarray(getattr(mesh_data, "vertices", None), dtype=np.float64)
@@ -9671,6 +9677,7 @@ class MainWindow(QMainWindow):
                 if isinstance(artifact_ticket, ArtifactLoadTicket)
                 else import_recipe is None
             ),
+            authoritative=isinstance(artifact_ticket, ArtifactLoadTicket),
         )
         request_id = (
             artifact_ticket.id
@@ -20748,6 +20755,9 @@ class MainWindow(QMainWindow):
 
 
 def main():
+    from src.windows_runtime import require_supported_windows_client_runtime
+
+    require_supported_windows_client_runtime()
     try:
         global _log_path
         try:

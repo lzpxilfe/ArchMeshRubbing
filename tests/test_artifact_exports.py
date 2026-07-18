@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from threading import Event, Thread
@@ -12,6 +13,7 @@ import src.application.artifact_exports as artifact_exports
 import src.core.artifact_rubbing_export as rubbing_export
 import src.core.artifact_tile_unwrap_export as tile_unwrap_export
 import src.core.artifact_vector_export as vector_export
+from src.core.artifact_cancellation import ArtifactComputationCancelledError
 from src.application.artifact_exports import (
     ArtifactExportController,
     ArtifactExportError,
@@ -595,6 +597,58 @@ def test_cooperative_cancel_after_stage_creation_cleans_without_publish(
         artifact_exports,
         "stage_vector_package",
         side_effect=blocking_stage,
+    ):
+        worker = Thread(target=run)
+        worker.start()
+        assert entered.wait(timeout=5.0)
+        summary = controller.cancel(item, reason="user cancelled")
+        assert summary.state is ArtifactExportState.CANCELLING
+        release.set()
+        worker.join(timeout=5.0)
+
+    assert not worker.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], ExportCancelledError)
+    assert not destination.exists()
+    assert list(tmp_path.iterdir()) == []
+    assert controller.summary(item).state is ArtifactExportState.CANCELLED
+
+
+def test_tile_export_recompute_receives_live_cancellation_probe(
+    tmp_path: Path,
+) -> None:
+    session = _tile_unwrap_session()
+    controller = ArtifactExportController(
+        ArtifactWorkbench(session=session),
+        id_factory=SequentialIds(),
+    )
+    destination = tmp_path / "cancelled-tile.amr-unwrap"
+    item = controller.begin_tile_unwrap(destination, "record:tile:export")
+    entered = Event()
+    release = Event()
+    errors: list[BaseException] = []
+
+    def cancelling_recompute(
+        *_args: object,
+        cancellation_probe: Callable[[], bool] | None = None,
+        **_kwargs: object,
+    ) -> object:
+        assert callable(cancellation_probe)
+        entered.set()
+        assert release.wait(timeout=5.0)
+        assert cancellation_probe() is True
+        raise ArtifactComputationCancelledError("cancelled during tile recompute")
+
+    def run() -> None:
+        try:
+            controller.execute(item)
+        except BaseException as exc:  # captured for the test thread
+            errors.append(exc)
+
+    with patch.object(
+        artifact_exports,
+        "compute_artifact_tile_unwrap_from_recipe",
+        side_effect=cancelling_recompute,
     ):
         worker = Thread(target=run)
         worker.start()

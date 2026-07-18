@@ -20,6 +20,8 @@ from src.core.artifact_tile_unwrap_extractor import (
     compute_artifact_tile_unwrap,
     compute_artifact_tile_unwrap_from_recipe,
     extract_tile_unwrap,
+    _orientation_qc,
+    _uv_overlap_pair_count,
     require_current_tile_unwrap_computation,
     tile_unwrap_recipe,
     validate_tile_unwrap_recipe,
@@ -136,6 +138,12 @@ def test_recipe_persists_canonical_face_ranges_and_rejects_axis_guessing() -> No
             record_view="top",
             total_face_count=10,
         )
+    with pytest.raises(ArtifactTileUnwrapError, match="250000-face QC limit"):
+        tile_unwrap_recipe(
+            longitudinal_axis="y",
+            record_view="top",
+            total_face_count=250_001,
+        )
 
 
 def test_authoritative_unwrap_is_deterministic_and_tracks_tile_scale() -> None:
@@ -192,7 +200,7 @@ def test_generated_receipt_matches_public_json_schema() -> None:
     schema_path = (
         Path(__file__).resolve().parents[1]
         / "schemas"
-        / "tile_unwrap_receipt-1.0.0.schema.json"
+        / "tile_unwrap_receipt-1.1.0.schema.json"
     )
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
     jsonschema.Draft202012Validator.check_schema(schema)
@@ -221,6 +229,35 @@ def test_known_record_validation_rejects_tampering(tamper: str) -> None:
     document = replace(session.document, records=(broken,))
 
     with pytest.raises(ArtifactKnownRecordError):
+        validate_known_records(document)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected_message"),
+    [
+        ("distortion_max_millionths", 250_001, "max distortion"),
+        ("distortion_p95_millionths", 150_001, "p95 distortion"),
+        ("distortion_mean_millionths", 75_001, "mean distortion"),
+    ],
+)
+def test_known_record_validation_enforces_current_distortion_gates(
+    field: str,
+    value: int,
+    expected_message: str,
+) -> None:
+    session, _truth = _recorded_session(seed=9)
+    record = session.document.record_index["record:tile-unwrap"]
+    record_dict = record.to_dict()
+    qc = record_dict["qc"]
+    qc["distortion_median_millionths"] = 0
+    qc["distortion_mean_millionths"] = 0
+    qc["distortion_p95_millionths"] = 0
+    qc["distortion_max_millionths"] = value
+    qc[field] = value
+    broken = DerivedRecord.from_dict(record_dict)
+    document = replace(session.document, records=(broken,))
+
+    with pytest.raises(ArtifactKnownRecordError, match=expected_message):
         validate_known_records(document)
 
 
@@ -277,6 +314,148 @@ def test_authoritative_unwrap_rejects_internal_algorithm_fallback() -> None:
 
     with pytest.raises(ArtifactTileUnwrapError, match="rejected algorithm fallback"):
         extract_tile_unwrap(mesh, recipe)
+
+
+def test_authoritative_unwrap_rejects_disconnected_recording_surfaces() -> None:
+    mesh, _truth = _source_mesh(seed=17)
+    vertices = np.concatenate(
+        [mesh.vertices, mesh.vertices + np.asarray([500.0, 0.0, 0.0])],
+        axis=0,
+    )
+    faces = np.concatenate(
+        [mesh.faces, mesh.faces + mesh.n_vertices],
+        axis=0,
+    )
+    duplicated = MeshData(vertices=vertices, faces=faces, unit="mm")
+    recipe = tile_unwrap_recipe(
+        longitudinal_axis="y",
+        record_view="top",
+        total_face_count=duplicated.n_faces,
+        n_sections=24,
+    )
+
+    with pytest.raises(ArtifactTileUnwrapError, match="one edge-connected component"):
+        extract_tile_unwrap(duplicated, recipe)
+
+
+def test_authoritative_unwrap_rejects_duplicate_faces_before_ready() -> None:
+    mesh, _truth = _source_mesh(seed=18)
+    faces = np.concatenate([mesh.faces, mesh.faces[:1]], axis=0)
+    duplicated = MeshData(vertices=mesh.vertices, faces=faces, unit="mm")
+    recipe = tile_unwrap_recipe(
+        longitudinal_axis="y",
+        record_view="top",
+        total_face_count=duplicated.n_faces,
+        n_sections=24,
+    )
+
+    with pytest.raises(ArtifactTileUnwrapError, match="duplicate faces"):
+        extract_tile_unwrap(duplicated, recipe)
+
+
+def test_authoritative_unwrap_tolerates_small_axial_scan_noise() -> None:
+    mesh, _truth = _source_mesh(seed=18)
+    vertices = np.asarray(mesh.vertices, dtype=np.float64).copy()
+    pattern = ((np.arange(vertices.shape[0], dtype=np.int64) * 17) % 11) - 5
+    vertices[:, 1] += pattern.astype(np.float64) * 0.0002
+    noisy = MeshData(vertices=vertices, faces=mesh.faces, unit="mm")
+    recipe = tile_unwrap_recipe(
+        longitudinal_axis="y",
+        record_view="top",
+        total_face_count=noisy.n_faces,
+        n_sections=32,
+    )
+
+    _unwrap, qc = extract_tile_unwrap(noisy, recipe)
+
+    assert qc["distortion_max_millionths"] <= 250_000
+    assert qc["distortion_p95_millionths"] <= 150_000
+    assert qc["distortion_mean_millionths"] <= 75_000
+
+
+def test_global_uv_overlap_qc_detects_positive_area_overlap() -> None:
+    uv_um = np.asarray(
+        [
+            [0, 0],
+            [10, 0],
+            [0, 10],
+            [1, 1],
+            [2, 1],
+            [1, 2],
+        ],
+        dtype=np.int64,
+    )
+    faces = np.asarray([[0, 1, 2], [3, 4, 5]], dtype=np.int32)
+
+    assert _uv_overlap_pair_count(
+        uv_um,
+        faces,
+        cancellation_probe=None,
+    ) == 1
+
+
+def test_orientation_qc_is_exact_near_maximum_coordinate_extent() -> None:
+    extent = 2**52
+    uv_um = np.asarray(
+        [[0, 0], [extent, extent - 1], [extent - 1, extent - 2]],
+        dtype=np.int64,
+    )
+    faces = np.asarray([[0, 1, 2]], dtype=np.int32)
+
+    assert _orientation_qc(uv_um, faces) == {
+        "degenerate_uv_face_count": 0,
+        "foldover_face_count": 0,
+        "negative_orientation_face_count": 1,
+        "positive_orientation_face_count": 0,
+    }
+
+
+def test_global_uv_overlap_qc_allows_shared_triangle_edges() -> None:
+    uv_um = np.asarray(
+        [[0, 0], [10, 0], [0, 10], [10, 10]],
+        dtype=np.int64,
+    )
+    faces = np.asarray([[0, 1, 2], [1, 3, 2]], dtype=np.int32)
+
+    assert _uv_overlap_pair_count(
+        uv_um,
+        faces,
+        cancellation_probe=None,
+    ) == 0
+
+
+def test_global_uv_overlap_qc_bounds_disjoint_pairs_within_one_grid_cell(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    uv_um = np.asarray(
+        [
+            [0, 0],
+            [1, 0],
+            [0, 1],
+            [10, 0],
+            [11, 0],
+            [10, 1],
+            [0, 10],
+            [1, 10],
+            [0, 11],
+            [10, 10],
+            [11, 10],
+            [10, 11],
+        ],
+        dtype=np.int64,
+    )
+    faces = np.arange(12, dtype=np.int32).reshape(4, 3)
+    monkeypatch.setattr(
+        "src.core.artifact_tile_unwrap_extractor.MAX_TILE_UNWRAP_OVERLAP_CANDIDATES",
+        3,
+    )
+
+    with pytest.raises(ArtifactTileUnwrapError, match="examined-pair budget"):
+        _uv_overlap_pair_count(
+            uv_um,
+            faces,
+            cancellation_probe=None,
+        )
 
 
 def test_align_change_makes_computation_stale_without_deleting_it() -> None:

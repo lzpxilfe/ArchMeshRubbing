@@ -84,9 +84,13 @@ def test_self_test_passes_with_complete_offline_artifact_workflow() -> None:
     assert "metrics=area 24.000000 mm2>volume 8.000000000 mm3" in checks[
         "artifact_complete_workflow_offline"
     ]["detail"]
-    assert "exports=vector 9/9>rubbing 6/6" in checks[
+    assert "exports=vector 9/9>rubbing 6/6>unwrap 1/1" in checks[
         "artifact_complete_workflow_offline"
     ]["detail"]
+    assert (
+        "unwrap=record 1/1>reopen 1/1>export 1/1>hash-match>row-shift "
+        in checks["artifact_complete_workflow_offline"]["detail"]
+    )
     assert "surface=distance 1.000000 mm>diameter 1.000000 mm" in checks[
         "artifact_complete_workflow_offline"
     ]["detail"]
@@ -196,6 +200,21 @@ def test_frozen_source_archive_is_clean_commit_bound() -> None:
             build_info._check_source_archive()
 
 
+@pytest.mark.parametrize(
+    "check",
+    [build_info._check_release_evidence, build_info._check_source_archive],
+)
+def test_frozen_non_windows_build_is_never_exempt(
+    check: Any,
+) -> None:
+    with (
+        patch.object(build_info.sys, "frozen", True, create=True),
+        patch.object(build_info.sys, "platform", "darwin"),
+        pytest.raises(RuntimeError, match="only on Windows 10/11 x64"),
+    ):
+        check()
+
+
 def test_release_cli_commands_are_machine_readable_and_return_status() -> None:
     with patch("src.core.logging_utils.setup_logging") as setup_logging:
         output = io.StringIO()
@@ -271,6 +290,20 @@ def test_native_opengl_report_cli_selects_the_windows_qpa() -> None:
     driver_smoke.assert_called_once_with(
         ["--report", "gl.json", "--qt-platform", "windows"]
     )
+
+
+def test_native_opengl_report_cli_rejects_non_windows_platform() -> None:
+    with (
+        patch.object(main.sys, "platform", "darwin"),
+        patch("src.gui.opengl_driver_smoke.main") as driver_smoke,
+        patch(
+            "sys.argv",
+            ["ArchMeshRubbing", "--opengl-driver-smoke-report", "gl.json"],
+        ),
+    ):
+        assert main.run_cli() == 2
+
+    driver_smoke.assert_not_called()
 
 
 def test_native_opengl_report_cli_rejects_missing_path() -> None:

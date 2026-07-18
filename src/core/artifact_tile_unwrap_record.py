@@ -15,6 +15,7 @@ from .artifact_document import (
 from .artifact_tile_unwrap_extractor import (
     MAX_TILE_UNWRAP_COORDINATE_UM,
     MAX_TILE_UNWRAP_FACES,
+    MAX_TILE_UNWRAP_QC_FACES,
     MAX_TILE_UNWRAP_VERTICES,
     TILE_UNWRAP_COORDINATE_QUANTUM_UM,
     TILE_UNWRAP_COORDINATE_SPACE,
@@ -37,6 +38,8 @@ MAX_TILE_UNWRAP_RECEIPT_BYTES = 64 * 1024
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _QC_FIELDS = {
+    "boundary_loop_count",
+    "connected_component_count",
     "degenerate_uv_face_count",
     "distortion_max_millionths",
     "distortion_mean_millionths",
@@ -46,15 +49,22 @@ _QC_FIELDS = {
     "foldover_face_count",
     "height_um",
     "negative_orientation_face_count",
+    "duplicate_face_count",
+    "inconsistent_oriented_edge_count",
+    "nonmanifold_edge_count",
     "positive_orientation_face_count",
     "section_centerline_length_um",
     "section_count",
     "section_fit_valid_count",
     "section_mean_radius_um",
     "section_mean_span_microdegrees",
+    "section_row_shift_applied",
+    "section_row_shift_max_um",
+    "section_row_shift_station_count",
     "selected_face_count",
     "selection_sha256",
     "unwrap_sha256",
+    "uv_overlap_pair_count",
     "vertex_count",
     "width_um",
 }
@@ -188,7 +198,7 @@ def validate_tile_unwrap_receipt(value: object) -> dict[str, Any]:
         receipt["face_count"],
         name="face_count",
         minimum=1,
-        maximum=MAX_TILE_UNWRAP_FACES,
+        maximum=MAX_TILE_UNWRAP_QC_FACES,
     )
     source_vertex_count = _strict_int(
         receipt["source_vertex_count"],
@@ -200,7 +210,7 @@ def validate_tile_unwrap_receipt(value: object) -> dict[str, Any]:
         receipt["source_face_count"],
         name="source_face_count",
         minimum=1,
-        maximum=MAX_TILE_UNWRAP_FACES,
+        maximum=MAX_TILE_UNWRAP_QC_FACES,
     )
     if source_vertex_count != vertex_count or source_face_count != face_count:
         raise ArtifactTileUnwrapRecordError(
@@ -327,6 +337,37 @@ def _validate_qc_against_receipt(
         raise ArtifactTileUnwrapRecordError(
             "authoritative tile unwrap cannot contain collapsed or folded faces"
         )
+    component_count = _strict_int(
+        value["connected_component_count"],
+        name="qc.connected_component_count",
+        minimum=1,
+        maximum=face_count,
+    )
+    _strict_int(
+        value["boundary_loop_count"],
+        name="qc.boundary_loop_count",
+        minimum=1,
+        maximum=face_count,
+    )
+    topology_zero_fields = (
+        "duplicate_face_count",
+        "inconsistent_oriented_edge_count",
+        "nonmanifold_edge_count",
+        "uv_overlap_pair_count",
+    )
+    topology_zero = {
+        key: _strict_int(
+            value[key],
+            name=f"qc.{key}",
+            minimum=0,
+            maximum=face_count,
+        )
+        for key in topology_zero_fields
+    }
+    if component_count != 1 or any(topology_zero.values()):
+        raise ArtifactTileUnwrapRecordError(
+            "authoritative tile unwrap topology/overlap QC did not pass"
+        )
     distortion_fields = (
         "distortion_max_millionths",
         "distortion_mean_millionths",
@@ -337,9 +378,11 @@ def _validate_qc_against_receipt(
         key: _strict_int(value[key], name=f"qc.{key}", minimum=0, maximum=1_000_000)
         for key in distortion_fields
     }
-    if distortion["distortion_mean_millionths"] > 550_000:
+    if distortion["distortion_max_millionths"] > 250_000:
+        raise ArtifactTileUnwrapRecordError("tile unwrap max distortion exceeds gate")
+    if distortion["distortion_mean_millionths"] > 75_000:
         raise ArtifactTileUnwrapRecordError("tile unwrap mean distortion exceeds gate")
-    if distortion["distortion_p95_millionths"] > 820_000:
+    if distortion["distortion_p95_millionths"] > 150_000:
         raise ArtifactTileUnwrapRecordError("tile unwrap p95 distortion exceeds gate")
     if (
         distortion["distortion_median_millionths"]
@@ -381,6 +424,32 @@ def _validate_qc_against_receipt(
         minimum=20_000_000,
         maximum=360_000_000,
     )
+    row_shift_applied = value["section_row_shift_applied"]
+    if not isinstance(row_shift_applied, bool):
+        raise ArtifactTileUnwrapRecordError(
+            "qc.section_row_shift_applied must be a boolean"
+        )
+    row_shift_max_um = _strict_int(
+        value["section_row_shift_max_um"],
+        name="qc.section_row_shift_max_um",
+        minimum=0,
+        maximum=MAX_TILE_UNWRAP_COORDINATE_UM,
+    )
+    row_shift_station_count = _strict_int(
+        value["section_row_shift_station_count"],
+        name="qc.section_row_shift_station_count",
+        minimum=0,
+        maximum=section_count,
+    )
+    if row_shift_applied:
+        if row_shift_max_um < 1 or row_shift_station_count != section_count:
+            raise ArtifactTileUnwrapRecordError(
+                "tile unwrap applied row-shift QC is inconsistent"
+            )
+    elif row_shift_max_um != 0 or row_shift_station_count != 0:
+        raise ArtifactTileUnwrapRecordError(
+            "tile unwrap inactive row-shift QC is inconsistent"
+        )
     return dict(value)
 
 

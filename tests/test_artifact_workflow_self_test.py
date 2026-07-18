@@ -14,12 +14,14 @@ from src.application.artifact_workflow_self_test import (
 
 def test_complete_workflow_self_test_has_deterministic_offline_receipts() -> None:
     result = run_artifact_workflow_self_test()
+    repeated = run_artifact_workflow_self_test()
 
+    assert repeated == result
     assert result.source_sha256 == (
         "60b5dca0fcef8346eea22a944ce0faa160e350cb97bd028b4a319c3e26883eb5"
     )
     assert result.document_sha256 == (
-        "6a78295dfecc901c7e9714111f88d517ea7af509f0c983184fbd882c77fce349"
+        "785ec77baedb6f37c9e3887c477b2f49710c2558ab091cd075511997fb3e7cd5"
     )
     assert result.align_revision_id == "align:workflow-self-test-explicit"
     assert (result.cutline_count, result.outline_count, result.rubbing_count) == (
@@ -31,31 +33,68 @@ def test_complete_workflow_self_test_has_deterministic_offline_receipts() -> Non
     assert (result.surface_distance_count, result.surface_diameter_count) == (1, 1)
     assert result.record_count == 18
     assert (result.vector_export_count, result.rubbing_export_count) == (9, 6)
+    assert (result.tile_unwrap_count, result.tile_unwrap_export_count) == (1, 1)
     assert result.vector_set_sha256 == (
-        "78936893e44a2d5e0f6eb1bc30961204d3ce752a2e279b5389b74395d9fbb3f3"
+        "5c8a9069c5fdc532c0a3da34d79b6e9ac479fdc5560e64a3031f7bfefa78cc3e"
     )
     assert result.rubbing_set_sha256 == (
-        "14a9fcbd576e9e7584dfe86edf0a65f13839661b92394bc91f6407a62985f25c"
+        "c4d8578cb36c201b7b0799fd2ea64ae553ec3f7e1200e7ef6f98b51d0bd8b10f"
+    )
+    assert result.tile_unwrap_source_sha256 == (
+        "5d1432cc1c6fe601cd2777da86a255f07689fcbfa775d0c38ae3178b28661eb6"
+    )
+    assert result.tile_unwrap_document_sha256 == (
+        "03ad3ea2c314d2fa5c0af1c535397b174e425666d69aa035ec8af6ab40ffdaeb"
+    )
+    assert result.tile_unwrap_sha256 == (
+        "54bebe8cc01e0b3bb4ea9cbba2b982a47014d0637b5dea17c923ee1512ff93eb"
+    )
+    assert (
+        result.tile_unwrap_sha256
+        == result.tile_unwrap_recomputed_sha256
+        == result.tile_unwrap_export_sha256
     )
     assert result.survey_manifest_sha256 == (
-        "124ab0217c50eed098c37ca502cdd58d5231a942fadc3e2a8a88f5b375389950"
+        "ca266f9a1e523aa162d31acbc051f5f9946d82c6fca1f6ad2f2d25d966c72a23"
     )
     assert result.survey_artifact_set_sha256 == (
-        "35aecfd83e8450b59d924f7cba81cf337a2b517e3bdc0e0d360a154aee70345b"
+        "de2b62817616cded9b3cd80c18e34f70d6aa2bdd8b73c86ade7b9de66a050a08"
     )
+    for digest in (
+        result.document_sha256,
+        result.vector_set_sha256,
+        result.rubbing_set_sha256,
+        result.survey_manifest_sha256,
+        result.survey_artifact_set_sha256,
+        result.svg_sha256,
+        result.png_sha256,
+        result.tile_unwrap_document_sha256,
+        result.tile_unwrap_sha256,
+    ):
+        assert len(digest) == 64
+        assert set(digest) <= set("0123456789abcdef")
     assert result.field_pilot_contract == "artifact-pass-human-driver-pending"
     assert result.svg_sha256 == (
-        "787b19c70f36a6479cc9d196f86d187932a70f1024d6782810322f335a15f5b6"
+        "980deba3f4b7f4eafb2a44ad8d79c14b281ed63aa619846699fcc1c84f2192a8"
     )
     assert result.png_sha256 == (
-        "447cbb8244758926ff036ed681b5e677094fd3f454491392b861b9338e3835e7"
+        "f9294927bce56e9f6659d520712e33051253e78bfb620559de471970e44bb9f9"
     )
+    assert result.tile_unwrap_row_shift_max_um == 6364
+    assert result.tile_unwrap_row_shift_station_count == 13
     assert result.surface_area_mm2_decimal == "24.000000"
     assert result.volume_mm3_decimal == "8.000000000"
     assert result.surface_distance_mm_decimal == "1.000000"
     assert result.surface_diameter_mm_decimal == "1.000000"
     detail_tokens = {part.strip() for part in result.detail().split(",")}
     assert "checkpoint=dirty>saved>dirty>saved" in detail_tokens
+    assert "exports=vector 9/9>rubbing 6/6>unwrap 1/1" in detail_tokens
+    assert any(
+        token.startswith(
+            "unwrap=record 1/1>reopen 1/1>export 1/1>hash-match>row-shift "
+        )
+        for token in detail_tokens
+    )
     assert result.project_commit_backend == project_commit_backend_identifier()
     assert (
         f"project_commit={project_commit_backend_identifier()}" in detail_tokens
@@ -81,7 +120,12 @@ def test_complete_workflow_accepts_explicit_committed_directory_fsync_warning(
 
     assert result.record_count == 18
     assert result.survey_manifest_sha256 == (
-        "124ab0217c50eed098c37ca502cdd58d5231a942fadc3e2a8a88f5b375389950"
+        "ca266f9a1e523aa162d31acbc051f5f9946d82c6fca1f6ad2f2d25d966c72a23"
+    )
+    assert (
+        result.tile_unwrap_sha256
+        == result.tile_unwrap_recomputed_sha256
+        == result.tile_unwrap_export_sha256
     )
 
 

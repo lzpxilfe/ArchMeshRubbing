@@ -184,7 +184,10 @@ def transform_points(
     affine = require_affine_matrix4x4(matrix)
     original_shape = pts.shape
     flat = pts.reshape(-1, 3)
-    transformed = flat @ affine[:3, :3].T + affine[:3, 3]
+    with np.errstate(over="ignore", invalid="ignore"):
+        transformed = flat @ affine[:3, :3].T + affine[:3, 3]
+    if not np.isfinite(transformed).all():
+        raise ValueError("transformed points must contain only finite values")
     return transformed.reshape(original_shape)
 
 
@@ -203,7 +206,10 @@ def transform_directions(
         raise ValueError("directions must contain only finite values")
     affine = require_affine_matrix4x4(matrix)
     original_shape = vectors.shape
-    transformed = vectors.reshape(-1, 3) @ affine[:3, :3].T
+    with np.errstate(over="ignore", invalid="ignore"):
+        transformed = vectors.reshape(-1, 3) @ affine[:3, :3].T
+    if not np.isfinite(transformed).all():
+        raise ValueError("transformed directions must contain only finite values")
     if normalize:
         lengths = np.linalg.norm(transformed, axis=1)
         if np.any(lengths <= MATRIX_ATOL) or not np.isfinite(lengths).all():

@@ -48,6 +48,12 @@ from .mesh_import_recipe import (
     MeshImportRecipeError,
     validate_mesh_import_recipe,
 )
+from .mesh_admission import (
+    MeshAdmissionError,
+    mesh_admission_receipt_for_arrays,
+    require_mesh_matches_admission_receipt,
+    validate_mesh_admission_receipt,
+)
 from .mesh_loader import MeshData
 
 
@@ -92,6 +98,7 @@ def immutable_source_mesh(mesh: MeshData) -> MeshData:
         source_identity=mesh.source_identity,
         source_format=mesh.source_format,
         source_import_recipe=mesh.source_import_recipe,
+        source_admission_receipt=mesh.source_admission_receipt,
         source_resources=mesh.source_resources,
     )
     # MeshData normalization may replace arrays, so freeze the final arrays.
@@ -236,6 +243,67 @@ class ArtifactSession:
                 raise ArtifactSessionError(
                     "source mesh import receipt does not match GeometryRevision"
                 )
+            geometry_qc = active_geometry.qc
+            if "vertex_count" in geometry_qc and geometry_qc["vertex_count"] != int(
+                self.source_mesh.vertices.shape[0]
+            ):
+                raise ArtifactSessionError(
+                    "source mesh vertex count does not match GeometryRevision QC"
+                )
+            if "face_count" in geometry_qc and geometry_qc["face_count"] != int(
+                self.source_mesh.faces.shape[0]
+            ):
+                raise ArtifactSessionError(
+                    "source mesh face count does not match GeometryRevision QC"
+                )
+            if "finite_vertices" in geometry_qc and geometry_qc[
+                "finite_vertices"
+            ] is not True:
+                raise ArtifactSessionError(
+                    "GeometryRevision QC does not confirm finite source vertices"
+                )
+            durable_admission = geometry_qc.get("import_admission")
+            if durable_admission is not None:
+                runtime_admission = self.source_mesh.source_admission_receipt
+                try:
+                    durable_receipt = require_mesh_matches_admission_receipt(
+                        durable_admission,
+                        self.source_mesh.vertices,
+                        self.source_mesh.faces,
+                        optional_arrays=(
+                            self.source_mesh.uv_coords,
+                            self.source_mesh.texture,
+                        ),
+                        source_format=_source_format,
+                        source_size_bytes=(
+                            self.source_mesh.source_identity.size_bytes
+                            if self.source_mesh.source_identity is not None
+                            else None
+                        ),
+                    )
+                    runtime_receipt = (
+                        durable_receipt
+                        if runtime_admission is None
+                        else validate_mesh_admission_receipt(runtime_admission)
+                    )
+                except MeshAdmissionError as exc:
+                    raise ArtifactSessionError(str(exc)) from exc
+                accepted_admission = durable_receipt["accepted"]
+                if (
+                    accepted_admission["geometry_sha256"]
+                    != active_geometry.geometry_sha256
+                ):
+                    raise ArtifactSessionError(
+                        "mesh admission geometry SHA-256 does not match GeometryRevision"
+                    )
+                if canonical_json_bytes(durable_receipt) != canonical_json_bytes(
+                    runtime_receipt
+                ):
+                    raise ArtifactSessionError(
+                        "source mesh admission receipt does not match GeometryRevision QC"
+                    )
+                if runtime_admission is None:
+                    self.source_mesh.source_admission_receipt = durable_receipt
             _validate_source_resources(self.source_mesh, source_recipe)
             from .artifact_record_validation import (  # noqa: PLC0415
                 validate_known_records,
@@ -304,9 +372,36 @@ class ArtifactSession:
                 "source mesh parser format does not match its strict import recipe"
             )
         _validate_source_resources(source, source_recipe)
+        admission_receipt = source.source_admission_receipt
+        if admission_receipt is None:
+            try:
+                admission_receipt = mesh_admission_receipt_for_arrays(
+                    source.vertices,
+                    source.faces,
+                    source_format=source_format,
+                    source_size_bytes=fingerprint.size_bytes,
+                    optional_arrays=(source.uv_coords, source.texture),
+                )
+            except MeshAdmissionError as exc:
+                raise ArtifactSessionError(str(exc)) from exc
+            source.source_admission_receipt = admission_receipt
+        else:
+            try:
+                admission_receipt = require_mesh_matches_admission_receipt(
+                    admission_receipt,
+                    source.vertices,
+                    source.faces,
+                    optional_arrays=(source.uv_coords, source.texture),
+                    source_format=source_format,
+                    source_size_bytes=fingerprint.size_bytes,
+                )
+            except MeshAdmissionError as exc:
+                raise ArtifactSessionError(str(exc)) from exc
+        source.source_admission_receipt = admission_receipt
         resolved_path = str(Path(resolved_source_path).expanduser().resolve(strict=False))
         timestamp = str(created_at or _utc_now())
-        geometry_sha256 = mesh_geometry_sha256(source)
+        accepted_admission = admission_receipt["accepted"]
+        geometry_sha256 = str(accepted_admission["geometry_sha256"])
         geometry_id = f"geometry:sha256:{geometry_sha256}"
         metadata_id = metadata_revision_id or _new_id("metadata")
         align_id = align_revision_id or _new_id("align")
@@ -325,6 +420,7 @@ class ArtifactSession:
             qc={
                 "face_count": int(source.faces.shape[0]),
                 "finite_vertices": True,
+                "import_admission": admission_receipt,
                 "vertex_count": int(source.vertices.shape[0]),
             },
             created_at=timestamp,

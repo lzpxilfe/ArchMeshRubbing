@@ -25,6 +25,10 @@ from src.core.output_paths import (  # noqa: E402
 )
 from src.core.unit_utils import DEFAULT_MESH_UNIT  # noqa: E402
 from src import build_info  # noqa: E402
+from src.windows_runtime import (  # noqa: E402
+    UnsupportedWindowsRuntimeError,
+    require_supported_windows_client_runtime,
+)
 
 _LOGGER = logging.getLogger(__name__)
 DEFAULT_EXPORT_DPI = DEFAULTS.export_dpi
@@ -190,12 +194,7 @@ def run_cli() -> int | None:
         if release_command == "--opengl-driver-smoke-report":
             if len(sys.argv) != 3:
                 return 2
-            qt_platform = {
-                "darwin": "cocoa",
-                "linux": "xcb",
-                "win32": "windows",
-            }.get(sys.platform)
-            if qt_platform is None:
+            if sys.platform != "win32":
                 return 2
             from src.gui.opengl_driver_smoke import main as run_driver_smoke
 
@@ -204,7 +203,7 @@ def run_cli() -> int | None:
                     "--report",
                     sys.argv[2],
                     "--qt-platform",
-                    qt_platform,
+                    "windows",
                 ]
             )
 
@@ -217,8 +216,7 @@ def run_cli() -> int | None:
 
     if len(sys.argv) < 2:
         if bool(getattr(sys, "frozen", False)):
-            launch_gui()
-            return 0
+            return 0 if launch_gui() else 2
         print_help()
         return 0
     
@@ -233,16 +231,13 @@ def run_cli() -> int | None:
         return
     
     if cmd == '--gui':
-        launch_gui()
-        return
+        return 0 if launch_gui() else 2
 
     if cmd == '--open-mesh' and len(sys.argv) > 2:
-        launch_gui(open_mesh=sys.argv[2])
-        return
+        return 0 if launch_gui(open_mesh=sys.argv[2]) else 2
 
     if cmd == '--open-project' and len(sys.argv) > 2:
-        launch_gui(open_project=sys.argv[2])
-        return
+        return 0 if launch_gui(open_project=sys.argv[2]) else 2
     
     if cmd == '--flatten' and len(sys.argv) > 2:
         flatten_mesh(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None)
@@ -281,7 +276,7 @@ def run_cli() -> int | None:
     
     # 기본: 파일 경로가 들어오면 인터랙티브 앱에서 연다.
     if os.path.exists(cmd):
-        launch_gui(open_mesh=cmd)
+        return 0 if launch_gui(open_mesh=cmd) else 2
     else:
         print(f"Error: Unknown command or file not found: {cmd}")
         print("Use --help for usage information")
@@ -643,15 +638,20 @@ def separate_mesh(filepath: str):
         traceback.print_exc()
 
 
-def launch_gui(*, open_project: str | None = None, open_mesh: str | None = None) -> None:
+def launch_gui(*, open_project: str | None = None, open_mesh: str | None = None) -> bool:
     """Launch the interactive GUI (app_interactive.py)."""
+    try:
+        require_supported_windows_client_runtime()
+    except UnsupportedWindowsRuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return False
     try:
         import app_interactive
     except Exception as e:
         print("Failed to import GUI.")
         print("Make sure PyQt6 is installed: pip install -r requirements.txt")
         print(f"Error: {type(e).__name__}: {e}")
-        return
+        return False
 
     if open_project:
         # Let app_interactive access the argument via sys.argv.
@@ -665,6 +665,8 @@ def launch_gui(*, open_project: str | None = None, open_mesh: str | None = None)
         app_interactive.main()
     except Exception as e:
         print(f"GUI failed to start: {type(e).__name__}: {e}")
+        return False
+    return True
 
 
 def _quick_full_surface_unwrap(mesh):

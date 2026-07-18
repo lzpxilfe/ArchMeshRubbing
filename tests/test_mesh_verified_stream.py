@@ -100,7 +100,7 @@ def test_load_verified_stream_rejects_mismatch_before_parsing(
     expected_size_bytes: int,
     message: str,
 ) -> None:
-    with patch("src.core.mesh_loader.trimesh.load") as trimesh_load:
+    with patch("src.core.mesh_loader.trimesh.load_scene") as trimesh_load:
         with pytest.raises(ValueError, match=message):
             MeshLoader().load_verified_stream(
                 BytesIO(PLY_BYTES),
@@ -117,7 +117,7 @@ def test_load_verified_stream_rejects_mismatch_before_parsing(
 def test_load_verified_stream_stops_when_input_crosses_expected_size() -> None:
     source = _EndlessStream()
 
-    with patch("src.core.mesh_loader.trimesh.load") as trimesh_load:
+    with patch("src.core.mesh_loader.trimesh.load_scene") as trimesh_load:
         with pytest.raises(ValueError, match="observed at least 3"):
             MeshLoader().load_verified_stream(
                 cast(BinaryIO, source),

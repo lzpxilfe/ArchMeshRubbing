@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import replace
 import errno
 import hashlib
@@ -11,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 from types import SimpleNamespace
+from typing import Any
 import unittest
 from unittest.mock import patch
 import xml.etree.ElementTree as ET
@@ -83,6 +85,27 @@ def _canonical_json(value: dict[str, object]) -> bytes:
         ).encode("utf-8")
         + b"\n"
     )
+
+
+def _rebound_vector_export(
+    sidecar: dict[str, Any],
+) -> tuple[bytes, bytes]:
+    payload = vector_export._validated_sidecar_payload(sidecar)
+    claims_sha256 = vector_export._sidecar_claims_sha256(sidecar)
+    options, _presentation = vector_export._options_from_presentation(
+        sidecar["presentation"]
+    )
+    svg_bytes, _bounds, _width, _height = vector_export._render_svg(
+        payload,
+        options=options,
+        provenance=sidecar["provenance"],
+        sidecar_claims_sha256=claims_sha256,
+    )
+    artifact = sidecar["artifact"]
+    assert isinstance(artifact, dict)
+    artifact["sha256"] = hashlib.sha256(svg_bytes).hexdigest()
+    artifact["size_bytes"] = len(svg_bytes)
+    return svg_bytes, _canonical_json(sidecar)
 
 
 def _session() -> ArtifactSession:
@@ -159,7 +182,7 @@ def _committed_session() -> ArtifactSession:
         record_id="record:cutline-0",
         created_at=STAMP,
         operator="고고학자",
-        qc={"plane_residual_max_mm": 0.0},
+        qc={},
     )
 
 
@@ -217,7 +240,7 @@ class TestArtifactVectorExportScaleAndProvenance(unittest.TestCase):
         self.assertEqual(metadata["unit"], "cm")
         self.assertEqual(metadata["source_to_canonical_mm"][0][0], 10.0)
         self.assertEqual(sidecar["vector_payload"]["frame"]["normal_world"], [-1.0, 0.0, 0.0])
-        self.assertEqual(sidecar["qc"]["record"]["plane_residual_max_mm"], 0.0)
+        self.assertEqual(sidecar["qc"]["record"], sidecar["qc"]["payload"])
         self.assertEqual(sidecar["qc"]["scale"]["physical_scale"], "1:1")
         self.assertEqual(sidecar["recipe"], RECIPE)
         self.assertTrue(bundle.sidecar_bytes.endswith(b"\n"))
@@ -279,7 +302,9 @@ class TestArtifactVectorExportScaleAndProvenance(unittest.TestCase):
             ArtifactVectorExportError,
             "manifest primary",
         ):
-            vector_export.validate_public_export_provenance(tampered["provenance"])
+            vector_export.validate_current_public_export_provenance(
+                tampered["provenance"]
+            )
 
     def test_known_metric_rectangle_converts_to_inches_exactly_once(self):
         session = _session()
@@ -329,11 +354,11 @@ class TestArtifactVectorExportScaleAndProvenance(unittest.TestCase):
         self.assertEqual(first.sidecar_sha256, second.sidecar_sha256)
         self.assertEqual(
             first.svg_sha256,
-            "e7d3ff863f680bcc2916a5d701ebdabc19f3b027c76d2bce8de63a0a349142f7",
+            "828a5b59bad95fb74d6d8fdae8e2639b8792d8c9ff3bd93948a8926433fa0a1c",
         )
         self.assertEqual(
             first.sidecar_sha256,
-            "a3a20cd32fb59c5566228ef94aafa381716e33fd87e8c29d76355e91693e82d6",
+            "aaa8a1379201f5120fde337668f316d892dfc34d076fd03d87a1b9b4105e8719",
         )
 
     def test_multiple_cutline_components_survive_without_world_xy_collapse(self):
@@ -540,6 +565,62 @@ class TestArtifactVectorExportScaleAndProvenance(unittest.TestCase):
 
 
 class TestArtifactVectorExportFailClosed(unittest.TestCase):
+    def test_legacy_1_0_package_remains_offline_verifiable(self):
+        legacy_geometry_qc_keys = frozenset(
+            {"face_count", "finite_vertices", "vertex_count"}
+        )
+        document = _committed_session().document
+        with patch.object(
+            vector_export,
+            "VECTOR_EXPORT_SCHEMA_VERSION",
+            "1.0.0",
+        ), patch.object(
+            vector_export,
+            "_PUBLIC_GEOMETRY_QC_KEYS",
+            legacy_geometry_qc_keys,
+        ):
+            bundle = build_vector_export(
+                document,
+                "record:cutline-0",
+            )
+
+        sidecar = json.loads(bundle.sidecar_bytes)
+        self.assertEqual(sidecar["schema_version"], "1.0.0")
+        self.assertNotIn(
+            "import_admission",
+            sidecar["provenance"]["geometry_revision"]["qc"],
+        )
+        validate_vector_export_bytes(
+            bundle.svg_bytes,
+            bundle.sidecar_bytes,
+            document=document,
+        )
+
+        forbidden = json.loads(bundle.sidecar_bytes)
+        forbidden["provenance"]["geometry_revision"]["qc"][
+            "import_admission"
+        ] = _committed_session().document.geometry_revisions[0].to_dict()["qc"][
+            "import_admission"
+        ]
+        with self.assertRaisesRegex(
+            ArtifactVectorExportError,
+            "legacy vector export schema",
+        ):
+            validate_vector_export_bytes(
+                bundle.svg_bytes,
+                _canonical_json(forbidden),
+            )
+
+    def test_current_record_qc_rejects_unknown_public_fields(self):
+        bundle = build_vector_export(
+            _committed_session().document,
+            "record:cutline-0",
+        )
+        sidecar = json.loads(bundle.sidecar_bytes)
+        sidecar["qc"]["record"]["org.example:private-note"] = "not public"
+        with self.assertRaisesRegex(ArtifactVectorExportError, "unknown cutline"):
+            validate_vector_export_bytes(bundle.svg_bytes, _canonical_json(sidecar))
+
     def test_svg_byte_tampering_is_detected(self):
         bundle = build_vector_export(_committed_session().document, "record:cutline-0")
         tampered = bundle.svg_bytes.replace(b"M 5 55", b"M 6 55", 1)
@@ -570,13 +651,163 @@ class TestArtifactVectorExportFailClosed(unittest.TestCase):
         sidecar = json.loads(bundle.sidecar_bytes)
         sidecar["provenance"]["align_revision"]["matrix4x4"][0][3] = 1000.0
 
-        with self.assertRaisesRegex(ArtifactVectorExportError, "canonical payload derivative"):
+        with self.assertRaisesRegex(ArtifactVectorExportError, "exactly match"):
             validate_vector_export_bytes(bundle.svg_bytes, _canonical_json(sidecar))
 
         sidecar = json.loads(bundle.sidecar_bytes)
         sidecar["provenance"]["document"]["active_align_revision_id"] = "align:forged"
         with self.assertRaisesRegex(ArtifactVectorExportError, "active Align"):
             validate_vector_export_bytes(bundle.svg_bytes, _canonical_json(sidecar))
+
+    def test_current_align_ancestry_is_recomputed_root_to_active(self):
+        session = _session().commit_preview(
+            translation_mm=(1.0, 2.0, 3.0),
+            rotation_deg=(5.0, 10.0, 15.0),
+            scale=1.0,
+            pivot_mm=(0.5, 0.25, 0.0),
+            operator="고고학자",
+            created_at=STAMP,
+            revision_id="align:a2",
+        ).commit_preview(
+            translation_mm=(-0.25, 0.5, 1.0),
+            rotation_deg=(0.0, -3.0, 7.0),
+            scale=1.0,
+            pivot_mm=(1.0, 2.0, 3.0),
+            operator="고고학자",
+            created_at=STAMP,
+            revision_id="align:a3",
+        )
+        context = session.capture_vector_operation(recipe=RECIPE)
+        committed = session.commit_vector_record(
+            context=context,
+            payload=_payload(),
+            recipe=RECIPE,
+            record_id="record:aligned-cutline",
+            created_at=STAMP,
+            operator="고고학자",
+            qc={},
+        )
+        bundle = build_vector_export(
+            committed.document,
+            "record:aligned-cutline",
+        )
+        original = json.loads(bundle.sidecar_bytes)
+        self.assertEqual(
+            [item["id"] for item in original["provenance"]["align_ancestry"]],
+            ["align:a1", "align:a2", "align:a3"],
+        )
+
+        cases = []
+        root_matrix = copy.deepcopy(original)
+        root_matrix["provenance"]["align_ancestry"][0]["matrix4x4"][0][3] = 1.0
+        cases.append(("root_identity", root_matrix, "must be identity"))
+
+        delta_matrix = copy.deepcopy(original)
+        delta_matrix["provenance"]["align_ancestry"][-1]["matrix4x4"][0][3] += 1.0
+        delta_matrix["provenance"]["align_revision"] = copy.deepcopy(
+            delta_matrix["provenance"]["align_ancestry"][-1]
+        )
+        cases.append(("delta_matrix", delta_matrix, "delta recipe"))
+
+        wrong_parent = copy.deepcopy(original)
+        wrong_parent["provenance"]["align_ancestry"][-1]["parent_id"] = "align:a1"
+        wrong_parent["provenance"]["align_revision"] = copy.deepcopy(
+            wrong_parent["provenance"]["align_ancestry"][-1]
+        )
+        cases.append(("wrong_parent", wrong_parent, "parent chain"))
+
+        duplicate_id = copy.deepcopy(original)
+        duplicate_id["provenance"]["align_ancestry"][-1]["id"] = "align:a2"
+        cases.append(("duplicate_id", duplicate_id, "must be unique"))
+
+        for label, sidecar, message in cases:
+            with self.subTest(label=label):
+                svg_bytes, sidecar_bytes = _rebound_vector_export(sidecar)
+                with self.assertRaisesRegex(ArtifactVectorExportError, message):
+                    validate_vector_export_bytes(svg_bytes, sidecar_bytes)
+
+    def test_mesh_admission_authority_is_cross_bound_with_rebound_claims(self):
+        bundle = build_vector_export(
+            _committed_session().document,
+            "record:cutline-0",
+        )
+        original = json.loads(bundle.sidecar_bytes)
+
+        wrong_format = copy.deepcopy(original)
+        admission = wrong_format["provenance"]["geometry_revision"]["qc"][
+            "import_admission"
+        ]
+        admission["source_format"] = "obj"
+
+        wrong_size = copy.deepcopy(original)
+        admission = wrong_size["provenance"]["geometry_revision"]["qc"][
+            "import_admission"
+        ]
+        admission["source_size_bytes"] += 1
+
+        low_array_bytes = copy.deepcopy(original)
+        admission = low_array_bytes["provenance"]["geometry_revision"]["qc"][
+            "import_admission"
+        ]
+        decoded = admission["decoded"]
+        decoded["array_bytes"] = (
+            24 * decoded["vertex_count"] + 12 * decoded["triangle_count"] - 1
+        )
+        decoded["estimated_peak_bytes"] = (
+            3 * decoded["array_bytes"]
+            + 32 * decoded["vertex_count"]
+            + 48 * decoded["triangle_count"]
+        )
+
+        wrong_geometry = copy.deepcopy(original)
+        admission = wrong_geometry["provenance"]["geometry_revision"]["qc"][
+            "import_admission"
+        ]
+        admission["accepted"]["geometry_sha256"] = "b" * 64
+
+        wrong_counts = copy.deepcopy(original)
+        admission = wrong_counts["provenance"]["geometry_revision"]["qc"][
+            "import_admission"
+        ]
+        admission["decoded"]["triangle_count"] += 1
+        admission["accepted"]["triangle_count"] += 1
+        decoded = admission["decoded"]
+        decoded["array_bytes"] += 12
+        decoded["estimated_peak_bytes"] = (
+            3 * decoded["array_bytes"]
+            + 32 * decoded["vertex_count"]
+            + 48 * decoded["triangle_count"]
+        )
+
+        contradictory_declaration = copy.deepcopy(original)
+        admission = contradictory_declaration["provenance"]["geometry_revision"][
+            "qc"
+        ]["import_admission"]
+        admission["declaration"] = {
+            "face_element_count": 100,
+            "kind": "ply_binary_header",
+            "parser_bytes": admission["source_size_bytes"] + 24 * 100 + 12 * 100,
+            "triangle_count": 100,
+            "vertex_count": 100,
+        }
+
+        cases = (
+            ("source_format", wrong_format, "source_format"),
+            ("source_size", wrong_size, "source_size_bytes"),
+            ("array_bytes", low_array_bytes, "below canonical"),
+            ("accepted_geometry", wrong_geometry, "geometry SHA-256"),
+            ("accepted_counts", wrong_counts, "face_count"),
+            (
+                "contradictory_declaration",
+                contradictory_declaration,
+                "declared triangle count",
+            ),
+        )
+        for label, sidecar, message in cases:
+            with self.subTest(label=label):
+                svg_bytes, sidecar_bytes = _rebound_vector_export(sidecar)
+                with self.assertRaisesRegex(ArtifactVectorExportError, message):
+                    validate_vector_export_bytes(svg_bytes, sidecar_bytes)
 
     def test_public_import_recipe_tampering_is_rejected_offline(self):
         bundle = build_vector_export(_committed_session().document, "record:cutline-0")

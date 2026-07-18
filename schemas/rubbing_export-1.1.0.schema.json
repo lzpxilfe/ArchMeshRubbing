@@ -1,0 +1,279 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:archmeshrubbing:schema:rubbing-export:1.1.0",
+  "title": "ArchMeshRubbing Digital Rubbing Export Sidecar 1.1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "artifact",
+    "format",
+    "presentation",
+    "privacy",
+    "provenance",
+    "qc",
+    "raster_receipt",
+    "recipe",
+    "schema_version"
+  ],
+  "properties": {
+    "artifact": {"$ref": "#/$defs/artifact"},
+    "format": {"const": "archmeshrubbing_rubbing_export"},
+    "presentation": {"$ref": "#/$defs/presentation"},
+    "privacy": {"$ref": "#/$defs/privacy"},
+    "provenance": {"$ref": "#/$defs/provenance"},
+    "qc": {"$ref": "#/$defs/qc"},
+    "raster_receipt": {
+      "$ref": "urn:archmeshrubbing:schema:rubbing-receipt:1.0.0"
+    },
+    "recipe": {"$ref": "#/$defs/rubbingRecipe"},
+    "schema_version": {"const": "1.1.0"}
+  },
+  "$defs": {
+    "artifact": {
+      "$ref": "urn:archmeshrubbing:schema:rubbing-export:1.0.0#/$defs/artifact"
+    },
+    "presentation": {
+      "$ref": "urn:archmeshrubbing:schema:rubbing-export:1.0.0#/$defs/presentation"
+    },
+    "privacy": {
+      "$ref": "urn:archmeshrubbing:schema:rubbing-export:1.0.0#/$defs/privacy"
+    },
+    "qc": {
+      "$ref": "urn:archmeshrubbing:schema:rubbing-export:1.0.0#/$defs/qc"
+    },
+    "rubbingRecipe": {
+      "$ref": "urn:archmeshrubbing:schema:rubbing-export:1.0.0#/$defs/rubbingRecipe"
+    },
+    "nonEmptyString": {
+      "$ref": "urn:archmeshrubbing:schema:rubbing-export:1.0.0#/$defs/nonEmptyString"
+    },
+    "sha256": {
+      "$ref": "urn:archmeshrubbing:schema:rubbing-export:1.0.0#/$defs/sha256"
+    },
+    "timestamp": {
+      "$ref": "urn:archmeshrubbing:schema:rubbing-export:1.0.0#/$defs/timestamp"
+    },
+    "stringArray": {
+      "$ref": "urn:archmeshrubbing:schema:rubbing-export:1.0.0#/$defs/stringArray"
+    },
+    "meshImportRecipe": {
+      "$ref": "urn:archmeshrubbing:schema:rubbing-export:1.0.0#/$defs/meshImportRecipe"
+    },
+    "alignRevision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "created_at",
+        "id",
+        "matrix4x4",
+        "operator",
+        "parent_id",
+        "qc",
+        "recipe",
+        "source_metadata_revision_id"
+      ],
+      "properties": {
+        "created_at": {"$ref": "#/$defs/timestamp"},
+        "id": {"$ref": "#/$defs/nonEmptyString"},
+        "matrix4x4": {
+          "$ref": "urn:archmeshrubbing:schema:rubbing-export:1.0.0#/$defs/matrix4x4"
+        },
+        "operator": {"$ref": "#/$defs/nonEmptyString"},
+        "parent_id": {
+          "anyOf": [
+            {"$ref": "#/$defs/nonEmptyString"},
+            {"type": "null"}
+          ]
+        },
+        "qc": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["proper_rigid"],
+          "properties": {"proper_rigid": {"const": true}}
+        },
+        "recipe": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind"],
+              "properties": {"kind": {"const": "initial_identity"}}
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "convention",
+                "kind",
+                "pivot_mm",
+                "rotation_deg",
+                "translation_mm"
+              ],
+              "properties": {
+                "convention": {"const": "delta @ parent"},
+                "kind": {"const": "manual_scene_trs_delta"},
+                "pivot_mm": {"$ref": "#/$defs/vec3"},
+                "rotation_deg": {"$ref": "#/$defs/vec3"},
+                "translation_mm": {"$ref": "#/$defs/vec3"}
+              }
+            }
+          ]
+        },
+        "source_metadata_revision_id": {"$ref": "#/$defs/nonEmptyString"}
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "recipe": {
+                "properties": {"kind": {"const": "initial_identity"}},
+                "required": ["kind"]
+              }
+            },
+            "required": ["recipe"]
+          },
+          "then": {"properties": {"parent_id": {"type": "null"}}}
+        },
+        {
+          "if": {
+            "properties": {
+              "recipe": {
+                "properties": {"kind": {"const": "manual_scene_trs_delta"}},
+                "required": ["kind"]
+              }
+            },
+            "required": ["recipe"]
+          },
+          "then": {
+            "properties": {"parent_id": {"$ref": "#/$defs/nonEmptyString"}}
+          }
+        }
+      ]
+    },
+    "vec3": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {"type": "number"}
+    },
+    "dependencyReceipt": {
+      "$ref": "urn:archmeshrubbing:schema:rubbing-export:1.0.0#/$defs/dependencyReceipt"
+    },
+    "documentReceipt": {
+      "$ref": "urn:archmeshrubbing:schema:rubbing-export:1.0.0#/$defs/documentReceipt"
+    },
+    "metadataRevision": {
+      "$ref": "urn:archmeshrubbing:schema:rubbing-export:1.0.0#/$defs/metadataRevision"
+    },
+    "recordReceipt": {
+      "$ref": "urn:archmeshrubbing:schema:rubbing-export:1.0.0#/$defs/recordReceipt"
+    },
+    "sourceAsset": {
+      "$ref": "urn:archmeshrubbing:schema:rubbing-export:1.0.0#/$defs/sourceAsset"
+    },
+    "geometryRevision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "created_at",
+        "geometry_hash_scope",
+        "geometry_sha256",
+        "id",
+        "import_recipe",
+        "operator",
+        "qc",
+        "source_asset_ids"
+      ],
+      "properties": {
+        "created_at": {"$ref": "#/$defs/timestamp"},
+        "geometry_hash_scope": {
+          "const": "positions-f64le+triangles-i32le/v1"
+        },
+        "geometry_sha256": {"$ref": "#/$defs/sha256"},
+        "id": {"$ref": "#/$defs/nonEmptyString"},
+        "import_recipe": {"$ref": "#/$defs/meshImportRecipe"},
+        "operator": {"$ref": "#/$defs/nonEmptyString"},
+        "qc": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "face_count",
+            "finite_vertices",
+            "import_admission",
+            "vertex_count"
+          ],
+          "properties": {
+            "face_count": {"type": "integer", "minimum": 1, "maximum": 2000000},
+            "finite_vertices": {"const": true},
+            "import_admission": {
+              "$ref": "urn:archmeshrubbing:schema:mesh-admission-receipt:1.0.0"
+            },
+            "vertex_count": {"type": "integer", "minimum": 3, "maximum": 5000000}
+          }
+        },
+        "source_asset_ids": {"$ref": "#/$defs/stringArray"}
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "align_ancestry",
+        "align_revision",
+        "dependency_closure",
+        "document",
+        "geometry_revision",
+        "record",
+        "source_assets",
+        "source_metadata_revision"
+      ],
+      "properties": {
+        "align_ancestry": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4096,
+          "uniqueItems": true,
+          "prefixItems": [
+            {
+              "allOf": [
+                {"$ref": "#/$defs/alignRevision"},
+                {
+                  "properties": {
+                    "matrix4x4": {
+                      "const": [
+                        [1, 0, 0, 0],
+                        [0, 1, 0, 0],
+                        [0, 0, 1, 0],
+                        [0, 0, 0, 1]
+                      ]
+                    },
+                    "parent_id": {"type": "null"},
+                    "recipe": {"const": {"kind": "initial_identity"}}
+                  }
+                }
+              ]
+            }
+          ],
+          "items": {"$ref": "#/$defs/alignRevision"}
+        },
+        "align_revision": {"$ref": "#/$defs/alignRevision"},
+        "dependency_closure": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/dependencyReceipt"}
+        },
+        "document": {"$ref": "#/$defs/documentReceipt"},
+        "geometry_revision": {"$ref": "#/$defs/geometryRevision"},
+        "record": {"$ref": "#/$defs/recordReceipt"},
+        "source_assets": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/sourceAsset"}
+        },
+        "source_metadata_revision": {"$ref": "#/$defs/metadataRevision"}
+      }
+    }
+  }
+}

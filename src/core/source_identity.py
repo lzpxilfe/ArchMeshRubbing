@@ -14,6 +14,7 @@ import hashlib
 import os
 from pathlib import Path
 import re
+import stat
 from typing import Any, BinaryIO, Iterator, Mapping
 
 
@@ -32,6 +33,10 @@ class SourceIdentityError(RuntimeError):
 
 class SourceChangedError(SourceIdentityError):
     """Raised when a source changes while its fingerprint is being calculated."""
+
+
+class SourceSizeLimitError(SourceIdentityError):
+    """Raised before hashing when the opened descriptor exceeds a caller limit."""
 
 
 class SourceVerificationStatus(str, Enum):
@@ -238,6 +243,7 @@ def open_fingerprinted_file(
     path: str | os.PathLike[str],
     *,
     chunk_size: int = DEFAULT_HASH_CHUNK_SIZE,
+    max_size_bytes: int | None = None,
 ) -> Iterator[tuple[BinaryIO, SourceFingerprint]]:
     """Yield one rewound descriptor and the identity computed from its bytes.
 
@@ -249,6 +255,12 @@ def open_fingerprinted_file(
     """
     if isinstance(chunk_size, bool) or not isinstance(chunk_size, int) or chunk_size <= 0:
         raise ValueError("chunk_size must be a positive integer")
+    if max_size_bytes is not None and (
+        isinstance(max_size_bytes, bool)
+        or not isinstance(max_size_bytes, int)
+        or max_size_bytes < 1
+    ):
+        raise ValueError("max_size_bytes must be a positive integer or None")
 
     source_path = Path(path)
     before_path = _stat_snapshot(source_path.stat())
@@ -256,20 +268,48 @@ def open_fingerprinted_file(
     bytes_read = 0
 
     with source_path.open("rb") as stream:
-        opened_file = _stat_snapshot(os.fstat(stream.fileno()))
+        opened_stat = os.fstat(stream.fileno())
+        if not stat.S_ISREG(opened_stat.st_mode):
+            raise SourceIdentityError(
+                f"Source is not an opened regular file: {source_path}"
+            )
+        opened_file = _stat_snapshot(opened_stat)
         _raise_if_changed(
             source_path,
             before_path,
             opened_file,
             compare_ctime=_path_descriptor_ctime_comparable(),
         )
+        if (
+            max_size_bytes is not None
+            and opened_file.size_bytes > max_size_bytes
+        ):
+            raise SourceSizeLimitError(
+                f"Source exceeds the {max_size_bytes:,}-byte safety limit: "
+                f"{opened_file.size_bytes:,} bytes"
+            )
 
         while True:
-            chunk = stream.read(chunk_size)
+            read_size = chunk_size
+            if max_size_bytes is not None:
+                # Once the opened file reaches the fixed boundary, read at
+                # most one sentinel byte.  A source that grows while it is
+                # being hashed must not turn the pre-hash size check into an
+                # unbounded read.
+                read_size = min(
+                    chunk_size,
+                    max_size_bytes - bytes_read + 1,
+                )
+            chunk = stream.read(read_size)
             if not chunk:
                 break
-            digest.update(chunk)
             bytes_read += len(chunk)
+            if max_size_bytes is not None and bytes_read > max_size_bytes:
+                raise SourceSizeLimitError(
+                    f"Source grew beyond the {max_size_bytes:,}-byte safety "
+                    f"limit while hashing: {source_path}"
+                )
+            digest.update(chunk)
 
         after_hash_file = _stat_snapshot(os.fstat(stream.fileno()))
         _raise_if_changed(source_path, opened_file, after_hash_file)

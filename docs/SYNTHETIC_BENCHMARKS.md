@@ -1,5 +1,7 @@
 # Synthetic Benchmark Guide / 합성 벤치마크 가이드
 
+이 가이드의 지원 실행 환경은 Windows 10 version 1809 이상 x64와 Windows 11 x64, CPython 3.12입니다. 합성 결과의 파일 포맷이 이동 가능하더라도 비 Windows 애플리케이션 실행 지원을 뜻하지 않습니다.
+
 ## Why This Exists / 왜 필요한가
 
 실제 기와 스캔이 충분하지 않은 단계에서도, 알고리즘과 워크플로우를 검증할 수 있는 기준 세트가 필요합니다.
@@ -39,7 +41,7 @@ A benchmark suite also writes summary files:
 
 ### Single Case / 단일 케이스
 
-```bash
+```bat
 python main.py --generate-synthetic sugkiwa_quarter 7 synthetic_tile.obj
 ```
 
@@ -49,8 +51,8 @@ This command saves the synthetic mesh, ground truth, evaluation, and review shee
 
 ### Benchmark Suite / 벤치마크 묶음
 
-```bash
-python main.py --benchmark-synthetic ./benchmarks 1,2,3
+```bat
+python main.py --benchmark-synthetic .\benchmarks 1,2,3
 ```
 
 이 명령은 preset별로 여러 seed를 돌려 benchmark suite를 만들고, 각 case의 review sheet와 요약 CSV/JSON을 저장합니다.

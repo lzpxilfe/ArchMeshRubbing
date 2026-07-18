@@ -13,12 +13,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import math
 from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 
 import numpy as np
 
-from .artifact_cancellation import CancellationProbe, raise_if_cancelled
+from .artifact_cancellation import (
+    CancellationProbe,
+    poll_cancellation,
+    raise_if_cancelled,
+)
 from .artifact_document import OperationContext, canonical_recipe_hash
 from .artifact_scene_adapter import ArtifactProjectionSnapshot
 from .artifact_session import ArtifactSession, ArtifactSessionError
@@ -36,9 +41,9 @@ from .mesh_loader import MeshData
 
 
 TILE_UNWRAP_ALGORITHM = "archmeshrubbing.sectionwise_tile_unwrap"
-TILE_UNWRAP_ALGORITHM_VERSION = "1.0.0"
-TILE_UNWRAP_RECIPE_SCHEMA_VERSION = "1.0.0"
-TILE_UNWRAP_OUTPUT_SCHEMA_VERSION = "1.0.0"
+TILE_UNWRAP_ALGORITHM_VERSION = "1.1.0"
+TILE_UNWRAP_RECIPE_SCHEMA_VERSION = "1.1.0"
+TILE_UNWRAP_OUTPUT_SCHEMA_VERSION = "1.1.0"
 TILE_UNWRAP_COORDINATE_SPACE = "canonical_mm_tile_unwrap/v1"
 TILE_UNWRAP_HASH_SCOPE = (
     "amr-tile-unwrap-v1:length-prefixed-header+uv-i64le+faces-i32le+"
@@ -55,6 +60,9 @@ MAX_TILE_UNWRAP_FACES = 2_000_000
 MAX_TILE_UNWRAP_SELECTION_RANGES = 250_000
 MAX_TILE_UNWRAP_COORDINATE_UM = 2**52
 MAX_TILE_UNWRAP_PAYLOAD_BYTES = 128 * 1024 * 1024
+MAX_TILE_UNWRAP_QC_FACES = 250_000
+MAX_TILE_UNWRAP_OVERLAP_CANDIDATES = 1_000_000
+MAX_TILE_UNWRAP_GRID_ASSIGNMENTS = 4_000_000
 
 _TILE_UNWRAP_PAYLOAD_MAGIC = b"AMR-TILE-UNWRAP\x00v1\x00"
 _TILE_UNWRAP_COMPONENT_LABELS = (
@@ -166,6 +174,10 @@ def _selection_value(
             )
         canonical_ranges.append([start, end])
         selected_count += end - start
+        if selected_count > MAX_TILE_UNWRAP_QC_FACES:
+            raise ArtifactTileUnwrapError(
+                "recording-surface selection exceeds the 250000-face QC limit"
+            )
         previous_end = end
     selection_core = {
         "face_ranges": canonical_ranges,
@@ -187,8 +199,10 @@ def _indices_to_ranges(
     if values.size == 0:
         raise ArtifactTileUnwrapError("at least one recording-surface face is required")
     values = np.unique(values)
-    if values.size > MAX_TILE_UNWRAP_FACES:
-        raise ArtifactTileUnwrapError("recording-surface selection is too large")
+    if values.size > MAX_TILE_UNWRAP_QC_FACES:
+        raise ArtifactTileUnwrapError(
+            "recording-surface selection exceeds the 250000-face QC limit"
+        )
     if int(values[0]) < 0 or int(values[-1]) >= total_face_count:
         raise ArtifactTileUnwrapError("recording-surface face index is out of range")
     ranges: list[list[int]] = []
@@ -750,21 +764,312 @@ def _submesh_for_selection(
     )
 
 
-def _orientation_qc(uv_um: np.ndarray, faces: np.ndarray) -> dict[str, int]:
-    uv = np.asarray(uv_um, dtype=np.float64)
+def _surface_topology_qc(
+    faces: np.ndarray,
+    *,
+    vertex_count: int,
+    cancellation_probe: CancellationProbe | None,
+) -> dict[str, int]:
+    """Audit one recording surface before its geometry can become READY."""
+
+    triangles = np.asarray(faces, dtype=np.int64)
+    if triangles.ndim != 2 or triangles.shape[1] != 3:
+        raise ArtifactTileUnwrapError("recording surface faces must be triangles")
+    face_count = int(triangles.shape[0])
+    if face_count < 1:
+        raise ArtifactTileUnwrapError("recording surface has no faces")
+    if face_count > MAX_TILE_UNWRAP_QC_FACES:
+        raise ArtifactTileUnwrapError(
+            "recording surface exceeds the topology/overlap QC face limit; "
+            "select a smaller contiguous surface"
+        )
+
+    parent = np.arange(face_count, dtype=np.int32)
+
+    def find(index: int) -> int:
+        root = index
+        while int(parent[root]) != root:
+            root = int(parent[root])
+        while int(parent[index]) != index:
+            next_index = int(parent[index])
+            parent[index] = root
+            index = next_index
+        return root
+
+    def union(first: int, second: int) -> None:
+        first_root = find(first)
+        second_root = find(second)
+        if first_root != second_root:
+            if first_root < second_root:
+                parent[second_root] = first_root
+            else:
+                parent[first_root] = second_root
+
+    # key -> [first face, first start, first end, count, second start, second end]
+    edge_state: dict[tuple[int, int], list[int]] = {}
+    canonical_faces: set[tuple[int, int, int]] = set()
+    duplicate_faces = 0
+    for face_index, raw_face in enumerate(triangles):
+        poll_cancellation(cancellation_probe, face_index)
+        a, b, c = (int(raw_face[0]), int(raw_face[1]), int(raw_face[2]))
+        if min(a, b, c) < 0 or max(a, b, c) >= vertex_count:
+            raise ArtifactTileUnwrapError(
+                "recording surface contains an invalid vertex index"
+            )
+        ordered_face = sorted((a, b, c))
+        canonical_face = (ordered_face[0], ordered_face[1], ordered_face[2])
+        if canonical_face in canonical_faces:
+            duplicate_faces += 1
+        else:
+            canonical_faces.add(canonical_face)
+        for start, end in ((a, b), (b, c), (c, a)):
+            key = (min(start, end), max(start, end))
+            state = edge_state.get(key)
+            if state is None:
+                edge_state[key] = [face_index, start, end, 1, -1, -1]
+            else:
+                union(face_index, state[0])
+                if state[3] == 1:
+                    state[4] = start
+                    state[5] = end
+                state[3] += 1
+
+    nonmanifold_edges = 0
+    inconsistent_edges = 0
+    boundary_adjacency: dict[int, list[int]] = {}
+    for state in edge_state.values():
+        count = state[3]
+        if count > 2:
+            nonmanifold_edges += 1
+        elif count == 2:
+            first_direction = (state[1], state[2])
+            second_direction = (state[4], state[5])
+            if second_direction == first_direction:
+                inconsistent_edges += 1
+        elif count == 1:
+            start, end = state[1], state[2]
+            boundary_adjacency.setdefault(start, []).append(end)
+            boundary_adjacency.setdefault(end, []).append(start)
+
+    if not boundary_adjacency:
+        boundary_loop_count = 0
+    elif any(len(neighbors) != 2 for neighbors in boundary_adjacency.values()):
+        boundary_loop_count = -1
+    else:
+        remaining = set(boundary_adjacency)
+        boundary_loop_count = 0
+        while remaining:
+            boundary_loop_count += 1
+            stack = [min(remaining)]
+            while stack:
+                vertex = stack.pop()
+                if vertex not in remaining:
+                    continue
+                remaining.remove(vertex)
+                stack.extend(boundary_adjacency[vertex])
+
+    component_count = len({find(index) for index in range(face_count)})
+    return {
+        "boundary_loop_count": boundary_loop_count,
+        "connected_component_count": component_count,
+        "duplicate_face_count": duplicate_faces,
+        "inconsistent_oriented_edge_count": inconsistent_edges,
+        "nonmanifold_edge_count": nonmanifold_edges,
+    }
+
+
+def _positive_area_triangle_overlap(
+    first: np.ndarray,
+    second: np.ndarray,
+) -> bool:
+    """Exact separating-axis test on integer-micrometre triangles."""
+
+    first_points = tuple((int(point[0]), int(point[1])) for point in first)
+    second_points = tuple((int(point[0]), int(point[1])) for point in second)
+    for triangle in (first_points, second_points):
+        for index in range(3):
+            start = triangle[index]
+            end = triangle[(index + 1) % 3]
+            dx = end[0] - start[0]
+            dy = end[1] - start[1]
+            axis_x, axis_y = -dy, dx
+            first_projection = tuple(
+                point[0] * axis_x + point[1] * axis_y
+                for point in first_points
+            )
+            second_projection = tuple(
+                point[0] * axis_x + point[1] * axis_y
+                for point in second_points
+            )
+            overlap = min(max(first_projection), max(second_projection)) - max(
+                min(first_projection), min(second_projection)
+            )
+            if overlap <= 0:
+                return False
+    return True
+
+
+def _uv_overlap_pair_count(
+    uv_um: np.ndarray,
+    faces: np.ndarray,
+    *,
+    cancellation_probe: CancellationProbe | None,
+) -> int:
+    """Detect positive-area global overlap using a deterministic uniform grid."""
+
+    uv = np.asarray(uv_um, dtype=np.int64)
     triangles = uv[np.asarray(faces, dtype=np.int32)]
-    edge_a = triangles[:, 1] - triangles[:, 0]
-    edge_b = triangles[:, 2] - triangles[:, 0]
-    signed_twice_area = edge_a[:, 0] * edge_b[:, 1] - edge_a[:, 1] * edge_b[:, 0]
-    degenerate = int(np.count_nonzero(signed_twice_area == 0.0))
-    positive = int(np.count_nonzero(signed_twice_area > 0.0))
-    negative = int(np.count_nonzero(signed_twice_area < 0.0))
+    face_count = int(triangles.shape[0])
+    if face_count > MAX_TILE_UNWRAP_QC_FACES:
+        raise ArtifactTileUnwrapError(
+            "tile unwrap exceeds the global-overlap QC face limit"
+        )
+    minimum = np.min(triangles, axis=1)
+    maximum = np.max(triangles, axis=1)
+    global_minimum = np.min(minimum, axis=0)
+    global_maximum = np.max(maximum, axis=0)
+    span_x = int(global_maximum[0] - global_minimum[0]) + 1
+    span_y = int(global_maximum[1] - global_minimum[1]) + 1
+    if span_x <= 1 or span_y <= 1:
+        raise ArtifactTileUnwrapError("tile unwrap has a collapsed global extent")
+
+    target_cells = max(1, math.ceil(face_count / 8))
+    aspect = float(span_x) / float(span_y)
+    cells_x = max(1, math.ceil(math.sqrt(target_cells * aspect)))
+    cells_y = max(1, math.ceil(target_cells / cells_x))
+    cell_width = max(1, math.ceil(span_x / cells_x))
+    cell_height = max(1, math.ceil(span_y / cells_y))
+
+    ranges: list[tuple[int, int, int, int]] = []
+    cells: dict[tuple[int, int], list[int]] = {}
+    assignments = 0
+    for face_index in range(face_count):
+        poll_cancellation(cancellation_probe, face_index)
+        min_x = int((int(minimum[face_index, 0]) - int(global_minimum[0])) // cell_width)
+        max_x = int((int(maximum[face_index, 0]) - int(global_minimum[0])) // cell_width)
+        min_y = int((int(minimum[face_index, 1]) - int(global_minimum[1])) // cell_height)
+        max_y = int((int(maximum[face_index, 1]) - int(global_minimum[1])) // cell_height)
+        value = (min_x, max_x, min_y, max_y)
+        ranges.append(value)
+        face_assignments = (max_x - min_x + 1) * (max_y - min_y + 1)
+        assignments += face_assignments
+        if assignments > MAX_TILE_UNWRAP_GRID_ASSIGNMENTS:
+            raise ArtifactTileUnwrapError(
+                "tile unwrap overlap grid exceeds its bounded assignment budget"
+            )
+        for cell_x in range(min_x, max_x + 1):
+            for cell_y in range(min_y, max_y + 1):
+                cells.setdefault((cell_x, cell_y), []).append(face_index)
+
+    examined_pairs = 0
+    for cell_index, cell in enumerate(sorted(cells)):
+        poll_cancellation(cancellation_probe, cell_index)
+        members = cells[cell]
+        for left_offset, left in enumerate(members):
+            left_range = ranges[left]
+            for right in members[left_offset + 1 :]:
+                right_range = ranges[right]
+                canonical_cell = (
+                    max(left_range[0], right_range[0]),
+                    max(left_range[2], right_range[2]),
+                )
+                if canonical_cell != cell:
+                    continue
+                examined_pairs += 1
+                if examined_pairs > MAX_TILE_UNWRAP_OVERLAP_CANDIDATES:
+                    raise ArtifactTileUnwrapError(
+                        "tile unwrap overlap QC exceeds its examined-pair budget"
+                    )
+                poll_cancellation(cancellation_probe, examined_pairs)
+                if (
+                    min(
+                        int(maximum[left, 0]),
+                        int(maximum[right, 0]),
+                    )
+                    <= max(
+                        int(minimum[left, 0]),
+                        int(minimum[right, 0]),
+                    )
+                    or min(
+                        int(maximum[left, 1]),
+                        int(maximum[right, 1]),
+                    )
+                    <= max(
+                        int(minimum[left, 1]),
+                        int(minimum[right, 1]),
+                    )
+                ):
+                    continue
+                if _positive_area_triangle_overlap(
+                    triangles[left], triangles[right]
+                ):
+                    return 1
+    return 0
+
+
+def _orientation_qc(
+    uv_um: np.ndarray,
+    faces: np.ndarray,
+    *,
+    cancellation_probe: CancellationProbe | None = None,
+) -> dict[str, int]:
+    """Classify quantized triangle orientation without float cancellation."""
+
+    uv = np.asarray(uv_um, dtype=np.int64)
+    triangles = uv[np.asarray(faces, dtype=np.int32)]
+    degenerate = 0
+    positive = 0
+    negative = 0
+    for face_index, triangle in enumerate(triangles):
+        poll_cancellation(cancellation_probe, face_index)
+        ax = int(triangle[1, 0]) - int(triangle[0, 0])
+        ay = int(triangle[1, 1]) - int(triangle[0, 1])
+        bx = int(triangle[2, 0]) - int(triangle[0, 0])
+        by = int(triangle[2, 1]) - int(triangle[0, 1])
+        signed_twice_area = ax * by - ay * bx
+        if signed_twice_area > 0:
+            positive += 1
+        elif signed_twice_area < 0:
+            negative += 1
+        else:
+            degenerate += 1
     foldovers = min(positive, negative)
     return {
         "degenerate_uv_face_count": degenerate,
         "foldover_face_count": foldovers,
         "negative_orientation_face_count": negative,
         "positive_orientation_face_count": positive,
+    }
+
+
+def recompute_tile_unwrap_payload_qc(
+    unwrap: TileUnwrapMesh,
+    *,
+    cancellation_probe: CancellationProbe | None = None,
+) -> dict[str, int]:
+    """Recompute every topology/orientation claim available from payload bytes."""
+
+    if not isinstance(unwrap, TileUnwrapMesh):
+        raise ArtifactTileUnwrapError("unwrap must be a TileUnwrapMesh")
+    topology = _surface_topology_qc(
+        unwrap.faces,
+        vertex_count=unwrap.vertex_count,
+        cancellation_probe=cancellation_probe,
+    )
+    orientation = _orientation_qc(
+        unwrap.uv_um,
+        unwrap.faces,
+        cancellation_probe=cancellation_probe,
+    )
+    overlap = _uv_overlap_pair_count(
+        unwrap.uv_um,
+        unwrap.faces,
+        cancellation_probe=cancellation_probe,
+    )
+    return {
+        **topology,
+        **orientation,
+        "uv_overlap_pair_count": overlap,
     }
 
 
@@ -789,6 +1094,27 @@ def extract_tile_unwrap(
         mesh,
         source_face_indices,
     )
+    topology = _surface_topology_qc(
+        submesh.faces,
+        vertex_count=submesh.n_vertices,
+        cancellation_probe=cancellation_probe,
+    )
+    if topology["connected_component_count"] != 1:
+        raise ArtifactTileUnwrapError(
+            "recording surface must be one edge-connected component"
+        )
+    if topology["duplicate_face_count"] != 0:
+        raise ArtifactTileUnwrapError("recording surface contains duplicate faces")
+    if topology["nonmanifold_edge_count"] != 0:
+        raise ArtifactTileUnwrapError("recording surface contains non-manifold edges")
+    if topology["inconsistent_oriented_edge_count"] != 0:
+        raise ArtifactTileUnwrapError(
+            "recording surface has inconsistent triangle orientation"
+        )
+    if topology["boundary_loop_count"] < 1:
+        raise ArtifactTileUnwrapError(
+            "recording surface must have a closed, non-branched open boundary"
+        )
     raise_if_cancelled(cancellation_probe)
     result = sectionwise_cylindrical_parameterization(
         submesh,
@@ -796,6 +1122,7 @@ def extract_tile_unwrap(
         n_sections=int(validated["n_sections"]),
         record_view=str(validated["record_view"]),
         return_meta=True,
+        cancellation_probe=cancellation_probe,
     )
     if not isinstance(result, tuple):  # pragma: no cover - return_meta contract
         raise ArtifactTileUnwrapError("sectionwise unwrap returned no quality metadata")
@@ -829,7 +1156,11 @@ def extract_tile_unwrap(
         axis=str(validated["longitudinal_axis"]),
         record_view=str(validated["record_view"]),
     )
-    orientation = _orientation_qc(unwrap.uv_um, unwrap.faces)
+    orientation = _orientation_qc(
+        unwrap.uv_um,
+        unwrap.faces,
+        cancellation_probe=cancellation_probe,
+    )
     if orientation["degenerate_uv_face_count"] > 0:
         raise ArtifactTileUnwrapError(
             "authoritative tile unwrap contains faces collapsed by the 1 um grid"
@@ -838,9 +1169,19 @@ def extract_tile_unwrap(
         raise ArtifactTileUnwrapError(
             "authoritative tile unwrap contains orientation foldovers"
         )
+    uv_overlap_pair_count = _uv_overlap_pair_count(
+        unwrap.uv_um,
+        unwrap.faces,
+        cancellation_probe=cancellation_probe,
+    )
+    if uv_overlap_pair_count > 0:
+        raise ArtifactTileUnwrapError(
+            "authoritative tile unwrap contains positive-area global UV overlap"
+        )
     receipt = unwrap.receipt(selection_sha256=str(selection["selection_sha256"]))
     qc = {
         **orientation,
+        **topology,
         "distortion_max_millionths": _rounded_millionths(float(summary["max"])),
         "distortion_mean_millionths": _rounded_millionths(float(summary["mean"])),
         "distortion_median_millionths": _rounded_millionths(float(summary["median"])),
@@ -858,9 +1199,19 @@ def extract_tile_unwrap(
         "section_mean_span_microdegrees": int(
             np.rint(float(meta.get("section_mean_span_deg", 0.0)) * 1_000_000.0)
         ),
+        "section_row_shift_applied": bool(
+            meta.get("section_row_shift_applied", False)
+        ),
+        "section_row_shift_max_um": int(
+            np.rint(float(meta.get("section_row_shift_max_world", 0.0)) * 1000.0)
+        ),
+        "section_row_shift_station_count": int(
+            meta.get("section_row_shift_station_count", 0)
+        ),
         "selected_face_count": int(selection["selected_face_count"]),
         "selection_sha256": str(selection["selection_sha256"]),
         "unwrap_sha256": str(receipt["unwrap_sha256"]),
+        "uv_overlap_pair_count": uv_overlap_pair_count,
         "vertex_count": unwrap.vertex_count,
         "width_um": int(receipt["width_mm_exact"]["numerator"]),
     }
@@ -1063,6 +1414,7 @@ __all__ = [
     "compute_artifact_tile_unwrap_from_recipe",
     "extract_tile_unwrap",
     "require_current_tile_unwrap_computation",
+    "recompute_tile_unwrap_payload_qc",
     "selection_face_indices",
     "tile_unwrap_computation_matches_active_projection",
     "tile_unwrap_recipe",

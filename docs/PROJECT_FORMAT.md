@@ -2,6 +2,8 @@
 
 이 문서는 ArchMeshRubbing 프로젝트 파일의 현재 저장 계약을 설명한다. AMR v2의 우선순위는 기능 수보다 **기존 연구 상태를 손상시키지 않는 저장**, **원본 바이트 식별**, **검증할 수 없는 상태의 명시적 표시**다.
 
+이 포맷의 제품 구현과 차단 검증 대상은 Windows 10 version 1809 이상 x64와 Windows 11 x64다. 최소 버전은 고정한 Qt 6.11의 [공식 지원 플랫폼](https://doc.qt.io/qt-6.11/supported-platforms.html)을 따른다. 문서 안의 portable logical path와 코드의 내부 비 Windows backend는 파일 내용의 결정성과 회귀 시험을 위한 구현 세부사항이며, 비 Windows 애플리케이션 지원·배포·호환성을 약속하지 않는다.
+
 ## 컨테이너
 
 `.amr`는 ZIP 컨테이너다. 모든 v2 문서는 앞의 두 파일을 포함하고, native portable artifact session은 뒤의 두 항목까지 포함한다.
@@ -76,7 +78,7 @@ AMR v2 container는 payload 종류와 payload schema를 분리한다.
 2. 기대 SHA-256·크기를 확인하면서 같은 parent의 임시 ZIP으로 복사한다.
 3. 임시 package의 central directory, member 규칙, 전체 checksum과 source index를 production reader로 다시 검증한다.
 4. embedded source closure를 저장된 전체 closed import recipe/unit과 manifest-only resolver로 실제 decode하고 document에 bind·materialize하여 source/dependency/geometry/Align projection과 parser receipt를 확인한다.
-5. source archive descriptor를 닫은 뒤에만 목적지를 commit한다. Windows 안정판은 같은 폴더 staging을 긴 Unicode/UNC path로 변환해 [`MoveFileExW`](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-movefileexw)의 `MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH`로 교체하며, 이 Win32 호출이 실패하면 기존 목적지를 보존하고 더 약한 rename으로 fallback하지 않는다. POSIX source 호환 경로만 `os.replace` 뒤 parent directory `fsync`를 유지한다.
+5. source archive descriptor를 닫은 뒤에만 목적지를 commit한다. Windows 제품 경로는 같은 폴더 staging을 긴 Unicode/UNC path로 변환해 [`MoveFileExW`](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-movefileexw)의 `MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH`로 교체하며, 이 Win32 호출이 실패하면 기존 목적지를 보존하고 더 약한 rename으로 fallback하지 않는다. 코드에 남은 비 Windows `os.replace`와 parent directory `fsync` 경로는 내부 회귀 시험용이다.
 
 native session 저장 대상은 `.amr` 확장자만 허용한다. 대상 경로가 외부 source resource와 같은 path, symlink 또는 hardlink inode라면 임시 파일 생성 전과 교체 직전에 거부한다. 이미 embedded source에서 열린 session은 같은 `.amr` 위 저장과 Save As를 모두 지원한다. 기존 source bundle이 없는 manifest-only artifact 문서는 계속 읽지만, session materialization에는 외부 주 원본을 다시 선택해야 한다.
 
@@ -96,7 +98,7 @@ native session 저장 대상은 `.amr` 확장자만 허용한다. 대상 경로�
 - embedded source closure, parser receipt, document/geometry/Align을 production reopen 경계에서 모두 검증한 project는 재열린 exact path/document의 confirmed checkpoint로 시작한다.
 - immutable Align revision이나 DerivedRecord를 append/activate해 canonical document SHA-256가 바뀌면 기존 checkpoint는 이력으로 남지만 현재 문서는 dirty이다.
 - 같은 경로 Save와 Save As는 모두 캡처한 session/state version/authority epoch/기존 project path의 exact compare-and-swap이 성공한 뒤에만 checkpoint를 갱신한다. 과거 snapshot 파일이 성공적으로 쓰였더라도 stale CAS이면 현재 문서는 clean이 아니다.
-- Windows의 `MoveFileExW` write-through 호출이 실패하면 pre-commit 실패이므로 checkpoint를 갱신하지 않는다. 성공하면 Microsoft가 문서화한 “move가 disk에서 완료될 때까지 반환하지 않음” 경계로 `confirmed`를 만들 수 있다. POSIX 호환 경로에서 `os.replace` 뒤 directory `fsync`가 실제 실패한 committed 결과만 파일 게시 성공과 crash durability 미확정을 구분하되 clean으로 승격하지 않는다. 이 POSIX 경로는 macOS·Linux 안정판 완료 주장이 아니다.
+- Windows의 `MoveFileExW` write-through 호출이 실패하면 pre-commit 실패이므로 checkpoint를 갱신하지 않는다. 성공하면 Microsoft가 문서화한 “move가 disk에서 완료될 때까지 반환하지 않음” 경계로 `confirmed`를 만들 수 있다. 내부 비 Windows backend에서 `os.replace` 뒤 directory `fsync`가 실제 실패한 committed 결과는 회귀 시험상 파일 게시 성공과 crash durability 미확정을 구분하되 clean으로 승격하지 않는다. 이 backend는 제품 지원 계약이 아니다.
 
 Windows native Close, 새 source Open, Project Open, drag-and-drop은 dirty 문서에서 공통 `Save / Discard / Cancel` gate를 통과한다. `Save`를 고르면 원래의 닫기/열기 명령은 비동기 저장이 exact current snapshot의 confirmed checkpoint를 만든 뒤에만 재개된다. Save As 대화상자 취소, writer/CAS 실패, stale 완료, durability-uncertain 결과는 후속 명령을 허가하지 않고 현재 문서와 창을 보존한다. `Discard`만 명시적으로 checkpoint 불일치를 무시하고 교체를 진행하며 `Cancel`은 아무 것도 바꾸지 않는다.
 
@@ -161,7 +163,9 @@ resolver_profile=relative-contained-v1
 source_manifest=(primary_mesh + import_dependency logical path/media type/SHA-256/size)
 ```
 
-`source_manifest 1.0`은 primary 하나와 parser가 성공한 import 동안 실제로 읽은 dependency만 정렬된 상대 POSIX logical path, 고정 media type, SHA-256, 크기로 기록한다. host 절대 경로는 durable recipe에 들어가지 않는다. replay resolver는 선언된 stream만 정확히 한 번 이상 제공하고, HTTP/file URI, 절대·drive·UNC 경로, source root를 벗어나는 `..`와 symlink, 누락·미선언·변조·미사용 entry를 거부한다. Windows식 `\` reference는 root 안에서만 POSIX path로 정규화한다.
+`source_manifest 1.0`은 primary 하나와 parser 또는 parser 전 admission이 성공한 import 동안 실제로 검증한 dependency만 정렬된 상대 POSIX logical path, 고정 media type, SHA-256, 크기로 기록한다. glTF/GLB가 선언한 외부 buffer는 parser 진입 전에 전부 exact-length/hash 검증하므로 이 closure에 포함된다. host 절대 경로는 durable recipe에 들어가지 않는다. replay resolver는 선언된 stream만 정확히 한 번 이상 제공하고, HTTP/file URI, 절대·drive·UNC 경로, source root를 벗어나는 `..`와 symlink, 누락·미선언·변조·미사용 entry를 거부한다. Windows식 `\` reference는 root 안에서만 POSIX path로 정규화한다.
+
+새 GeometryRevision의 `qc.import_admission`은 `schemas/mesh_admission_receipt-1.0.0.schema.json` 계약을 따른다. 열린 regular-file descriptor의 source size를 hash 전에 최대 4 GiB로 제한하고, hash 뒤에는 같은 identity를 다시 만족한 bounded spool snapshot만 preflight/parser에 전달한다. source 전체를 materialize하는 OBJ·OFF·ASCII PLY/STL parser 입력은 최대 256 MiB이며 binary PLY/STL·GLB는 4 GiB primary cap을 유지한다. OBJ·PLY·STL·OFF는 parser 전에 vertex·face element·triangulated face 수를 bounded scan한다. PLY는 정확히 vertex→face element만 허용하고 vertex/face property를 16/8개, auxiliary typed data를 128 MiB로 제한하며 list type·per-face texcoord count·payload EOF와 보수적인 source+typed arrays+canonical arrays+list-row parser footprint를 확인한다. 잠긴 binary PLY parser가 첫 list row로 element dtype을 고정하므로 모든 binary list property는 element 전체에서 같은 길이만 허용한다. glTF/GLB는 최대 16 MiB JSON, GLB JSON `buffer[0].byteLength`와 실제 BIN chunk 길이, 모든 declared buffer·중복/겹침을 포함한 각 bufferView slice·미사용 accessor array·sparse·primitive·node instance 증폭을 검증한다. `data:` buffer는 parser와 같은 lower-case `data:...;base64,` 형식만 허용해 bounded decode 후 declared length와 맞추며, `base64,`를 포함한 모호한 외부 URI는 parser 전에 거부한다. 상대 외부 buffer는 파일별 512 MiB·합계 1 GiB 안에서 parser 전에 actual bytes의 exact length/hash를 검증·cache하고, fingerprint 뒤 재읽은 payload도 같은 SHA-256이어야 manifest와 parser cache에 들어간다. GLB source, 모든 declared buffer·bufferView slice·accessor와 scene-instance canonical arrays를 합친 parser footprint도 같은 2 GiB/3 GiB envelope를 통과해야 한다. decoded profile은 최대 5,000,000 vertices, 2,000,000 triangles, 2 GiB arrays, 3 GiB 추정 native Open peak이며 texture는 512 MiB다. receipt는 선언 수, PLY/glTF parser bytes, decoded/accepted 수, sanitizer가 제거한 degenerate triangle 수, accepted geometry SHA-256과 exact limit set을 보존하고 reopen 시 source format·byte length와 UV/texture를 포함한 현재 accepted array byte 하한까지 대조한다. 현재 Windows physical/commit 여유 검사는 실행 PC에만 적용하는 비내구성 gate라 문서 값에 넣지 않는다. parser subprocess/Job Object crash·memory 격리는 아직 미완료이므로 이 admission을 임의 비신뢰 파일에 대한 보안 sandbox로 해석하지 않는다.
 
 `parser_runtime_sha256`은 정렬된 exact `numpy`, `pillow`, `trimesh` pin 문자열의 SHA-256이며 실제 geometry decode의 실행 gate다. `runtime_lock_sha256`은 전체 frozen 환경 provenance로 보존하지만 Qt 같은 무관한 pin 변경만으로 과거 geometry를 읽지 못하게 하지 않도록 parser 실행 gate로 사용하지 않는다. 알 수 없는 key, flag drift, loader/parser-subset version 불일치, 비정규화 format은 parse 전에 거부한다. 기존 배포가 만든 정확한 5-field recipe와 공식 2-field fixture만 명시적 legacy profile로 실행하며 임의 JSON을 parser option으로 해석하거나 immutable GeometryRevision을 자동 migration하지 않는다.
 
@@ -171,7 +175,8 @@ Resolved source의 suffix 대신 검증된 recipe의 `format`을 사용하고, r
 2. 실제 사용한 `MeshData.source_format`이 저장된 `import_recipe.format`과 일치한다.
 3. 실제 parser가 남긴 `MeshData.source_import_recipe`가 저장된 mapping과 key/value까지 정확히 일치한다.
 4. v2이면 runtime source resource가 manifest의 모든 logical path·SHA-256·크기를 정확히 제공하고, replay resolver가 같은 dependency closure를 소비한다.
-5. 저장된 `geometry_hash_scope`로 decode 결과를 다시 hash한 값이 `GeometryRevision.geometry_sha256`와 일치한다.
+5. durable import admission이 있으면 runtime receipt의 exact limit·declaration·decoded/accepted accounting, source format·byte length·accepted array byte 하한과 canonical geometry SHA-256이 GeometryRevision 및 현재 source snapshot과 일치한다.
+6. 저장된 `geometry_hash_scope`로 decode 결과를 다시 hash한 값이 `GeometryRevision.geometry_sha256`와 일치한다.
 
 저장된 recipe가 없거나 지원 profile이 아니거나 다른 parser/receipt로 열렸거나 source/geometry digest가 다르면 materialization 전에 실패한다. 따라서 이름과 확장자가 바뀐 동일 파일은 복원할 수 있지만, 단지 suffix가 같다는 이유로 다른 바이트나 다른 decode 결과를 받아들이지 않는다.
 
@@ -421,7 +426,7 @@ GUI는 한 번에 한 view의 `vector.outline.v1` record를 만든다. 여섯 vi
 | `artifact.svg` | canonical-mm payload에서 다시 만든 1:1 presentation derivative |
 | `artifact.amr-vector.json` | payload, recipe, QC, source/document/revision provenance, dependency closure, artifact hash |
 
-Finder/Explorer가 추가하는 `.DS_Store`, `Thumbs.db`, `desktop.ini`는 1 MiB 이하의 일반 파일일 때만 무시한다. 그 외 추가 member, symlink, oversized member는 거부한다. writer는 같은 parent의 임시 directory에 두 파일을 쓰고 flush/fsync/자체 검증한 뒤 Linux `renameat2(RENAME_NOREPLACE)`, macOS `renamex_np(RENAME_EXCL)`, Windows non-replacing rename으로 publish한다. 목적지가 경합 중 생겨도 덮어쓰지 않는다. staging 이름은 목적지 이름 길이와 무관한 고정 길이 UUID component로 배타 생성하며 충돌한 foreign directory를 검사·재사용·삭제하지 않는다. 안전한 discard는 staging을 먼저 고유 quarantine 이름으로 원자 이동하고 POSIX에서는 descriptor-relative로 소유 inode의 내용만 제거한다. Windows는 고유 quarantine과 inode 재확인 뒤 표준 라이브러리의 best-available cleanup을 사용하며, 증명할 수 없으면 foreign path를 보존하고 실패한다. directory mode는 강제 0700이 아니라 사용자의 umask를 따른다. final rename 뒤 실제 오류뿐 아니라 미지원 directory `fsync`도 package가 이미 공개된 `committed=true` durability-uncertain 상태로 전달한다.
+Explorer가 추가하는 `Thumbs.db`, `desktop.ini`는 1 MiB 이하의 일반 파일일 때만 무시한다. 그 외 추가 member, symlink, oversized member는 거부한다. Windows writer는 같은 parent의 임시 directory에 두 파일을 쓰고 flush/fsync/자체 검증한 뒤 non-replacing rename으로 publish한다. 목적지가 경합 중 생겨도 덮어쓰지 않는다. staging 이름은 목적지 이름 길이와 무관한 고정 길이 UUID component로 배타 생성하며 충돌한 foreign directory를 검사·재사용·삭제하지 않는다. 안전한 discard는 staging을 먼저 고유 quarantine 이름으로 원자 이동하고 inode를 재확인한 뒤 표준 라이브러리의 best-available cleanup을 사용한다. 소유권을 증명할 수 없으면 foreign path를 보존하고 실패한다. 내부 비 Windows backend의 native no-replace·descriptor-relative cleanup·directory `fsync`는 회귀 시험용이며 제품 지원 계약이 아니다. final rename 뒤 실제 오류뿐 아니라 미지원 directory `fsync`도 package가 이미 공개된 `committed=true` durability-uncertain 상태로 전달한다.
 
 1:1 규칙은 다음과 같다.
 
@@ -432,6 +437,8 @@ Finder/Explorer가 추가하는 `.DS_Store`, `Thumbs.db`, `desktop.ini`는 1 MiB
 - plane frame을 보존한 2D points를 그리므로 Front/Right/oblique section을 world XY로 다시 투영하지 않는다.
 
 sidecar는 primary source file SHA-256/size/scope, v2 source manifest dependency의 logical path/SHA-256/size, geometry hash, confirmed unit/axis matrix, Align matrix, export-time active IDs, record recipe/hash/QC와 transitive record dependency receipts를 포함한다. extension, asset ref, topology-map ref, host locator처럼 로컬 경로·site note가 들어갈 수 있는 필드는 public provenance allowlist에서 제외한다.
+
+현재 writer는 `schemas/vector_export-1.1.0.schema.json`을 사용한다. 1.1은 Align recipe/QC, geometry QC와 mesh-admission receipt, root payload QC를 exact-key로 닫고, record QC도 payload kind와 algorithm에 맞춘다. production Cutline/Outline은 해당 extractor QC 전부를 요구하며 custom algorithm은 공통 payload QC만 허용한다(Outline은 payload에서 재계산한 `outline_topology`도 필수). `vector_export-1.0.0.schema.json`은 바이트 불변 legacy 검증용으로 보존하며 reader는 admission receipt가 없던 유효 1.0 package를 계속 offline 검증한다.
 
 sidecar의 normative claim 전체(artifact descriptor 제외)는 RFC 8785 SHA-256으로 묶어 SVG metadata에 넣고, sidecar는 SVG exact-byte SHA-256을 가진다. 이 비순환 결합은 한 파일만 바뀐 손상을 검출한다. 원본 문서를 함께 줄 때 validator는 document manifest/record와도 대조한다. 문서 없이 relocation한 package도 독립 프로세스에서 payload/claim/SVG 구조와 hash를 offline 검증할 수 있다.
 
@@ -509,11 +516,11 @@ DerivedRecord(type=surface.tile_unwrap.v1)
     └── bounded receipt + receipt SHA-256
 ```
 
-- selection은 정렬·중복 제거·최대 병합한 `[start, end_exclusive]` face range로 recipe에 남긴다. output은 local vertex/face와 canonical source vertex/face row의 대응을 모두 보존한다.
-- sectionwise 내부 계산이 cylinder fallback을 사용했거나 section fit이 희박하거나 mean/p95 distortion gate를 넘으면 READY record를 만들지 않는다.
-- UV는 1 µm 정수 격자로 양자화한다. 삼각형 하나라도 격자에서 붕괴하거나 전체 지배 방향과 반대 orientation을 가지면 실패한다.
+- selection은 정렬·중복 제거·최대 병합한 `[start, end_exclusive]` face range로 recipe에 남긴다. topology와 전역 UV 겹침을 완전 검사하기 위해 한 기록면은 최대 250,000 faces로 제한하며, output은 local vertex/face와 canonical source vertex/face row의 대응을 모두 보존한다.
+- sectionwise 1.1 계산은 단면별 중심·반경 뒤 굽힘/비틀림에서 빠진 longitudinal U shift를 실제 3D edge 길이에 맞춰 결정적으로 보정한다. cylinder fallback, 희박한 section fit, max/mean/p95 distortion gate 초과는 READY record로 만들지 않는다.
+- UV는 1 µm 정수 격자로 양자화한다. 모든 삼각형의 세 edge, 면적비와 local 3D→2D Jacobian singular value를 평가하며, 격자 붕괴·orientation foldover, 다중 edge-connected component, 중복 face, non-manifold/inconsistent edge, branched boundary 또는 positive-area 전역 UV 겹침이 하나라도 있으면 실패한다.
 - canonical binary는 RFC 8785 header와 `uv int64le`, `faces int32le`, source vertex/face indices를 domain-separated length-prefix framing으로 묶는다. 파일 전체 SHA-256이 receipt의 `unwrap_sha256` 및 `geometry_ref`와 같다.
-- Top과 Bottom은 단순 표시 toggle이 아니라 recipe와 payload hash가 다른 독립 해석 결과다.
+- Top과 Bottom은 같은 face selection의 U 방향을 구분해 recipe와 payload hash가 달라지는 독립 해석 결과다. 현재 runtime은 실제 기와 상·하면을 자동 분류하지 않으므로 기록자가 올바른 단일 기록면 faces를 선택해야 하며, 펼친 좌표 위 texture·Digital Rubbing 재투영도 이 계약에 포함되지 않는다.
 - 동일 recipe 재계산은 receipt 전체와 binary bytes가 같아야 한다. Align을 바꾼 과거 record는 삭제하지 않고 `stale_alignment`로 남긴다.
 
 `*.amr-unwrap`은 정확히 네 regular file을 갖는 non-overwriting directory package다.
@@ -527,9 +534,9 @@ DerivedRecord(type=surface.tile_unwrap.v1)
 
 sidecar의 artifact descriptor를 제외한 claim을 RFC 8785 SHA-256으로 묶어 SVG metadata에도 저장하므로 한 member의 독립 손상을 검출한다. validator는 binary를 parse해 receipt를 다시 만들고 OBJ/SVG exact bytes를 재렌더하며, sidecar claim·artifact hash·privacy·READY/FRESH provenance를 대조한다. 원본 document 없이도 package 내부 무결성과 physical scale을 offline 검증할 수 있고, document를 함께 주면 exact record와 manifest까지 비교한다.
 
-writer는 같은 parent의 숨은 staging directory에서 네 파일을 모두 쓰고 자체 검증한 뒤 atomic no-replace rename한다. 기존 destination을 덮지 않으며 destination race의 승자를 보존한다. 현재 tile package writer는 소유 staging의 device/inode, closed member set과 regular-file 상태를 확인할 수 있을 때만 실패 정리를 수행한다. 이 hash도 제작자 서명은 아니다. desktop은 선택한 `READY + FRESH` record의 recipe/receipt를 worker에서 재계산·검증하고 prepared capability를 받은 뒤 current Workbench 권위를 다시 확인해 게시한다. 사용자 취소나 앱 종료는 publication 권위를 먼저 회수하고 worker join 동안 owned staging 정리를 기다린다.
+writer는 같은 parent의 숨은 staging directory에서 네 파일을 모두 쓰고 자체 검증한 뒤 atomic no-replace rename한다. 기존 destination을 덮지 않으며 destination race의 승자를 보존한다. 현재 tile package writer는 소유 staging의 device/inode, closed member set과 regular-file 상태를 확인할 수 있을 때만 실패 정리를 수행한다. 이 hash도 제작자 서명은 아니다. desktop은 선택한 `READY + FRESH` record의 recipe/receipt를 worker에서 재계산·검증하고 prepared capability를 받은 뒤 current Workbench 권위를 다시 확인해 게시한다. 이 재계산은 live 취소 Event를 section circle/seam fitting과 row-shift section/grid/refinement의 명시적 경계까지 전달하지만, 현재 실행 중인 단일 NumPy·선형대수 호출은 반환 전에 선점하지 않는다. 사용자 취소나 앱 종료는 publication 권위를 먼저 회수하고 worker join 동안 owned staging 정리를 기다린다.
 
-machine-readable 계약은 record receipt의 `schemas/tile_unwrap_receipt-1.0.0.schema.json`과 export sidecar의 `schemas/tile_unwrap_export-1.0.0.schema.json`이다. 두 schema는 axis 추정값, fallback 허용값, 사설 경로와 계약 밖 필드를 거부한다.
+현재 machine-readable 계약은 record receipt의 `schemas/tile_unwrap_receipt-1.1.0.schema.json`과 export sidecar의 `schemas/tile_unwrap_export-1.1.0.schema.json`이다. 두 schema는 axis 추정값, fallback 허용값, 사설 경로와 계약 밖 필드를 거부하고 topology·전역 UV overlap·row-shift QC를 고정한다. `section_row_shift_station_count == section_count` 같은 cross-field 의미 제약은 runtime known-record validator가 최종 강제한다. 공개 릴리스 전에 사용된 실험적 1.0 schema 파일은 byte-exact 회귀와 계약 이력 검토를 위해서만 보존한다. 현재 runtime은 1.0 record/package와 이를 포함한 프로젝트를 읽지 않으며 자동 migration도 제공하지 않는다.
 
 ## M0-6 Digital Rubbing record와 1:1 PNG package
 
@@ -566,7 +573,7 @@ DerivedRecord(type=raster.digital_rubbing.v1)
 - depth는 정수 µm tick으로 양자화하고 masked square local-mean integral image에서 raised/incised/bidirectional relief를 계산한다. tone mapping도 정수 규칙을 사용한다.
 - coverage는 binary alpha인 GA8(`grayscale-alpha-8/v1`)이고 구멍/비투영 영역은 alpha 0이다. 화면 배경색은 권위 pixel에 합성하지 않는다.
 - vertex/face/pixel/dimension/reference-radius/triangle-pixel-test 상한을 넘으면 해상도 축소, sampling 또는 다른 알고리즘으로 조용히 전환하지 않고 실패한다.
-- face order·winding·duplicate, hole, large absolute survey offset과 늦은 Align 결과를 차단 테스트로 검증한다. barycentric edge rule은 recipe에 명시하며, source commit `166103dcf0ea`의 Python 3.12 Windows·macOS·Linux persistence matrix에서 canonical raster/export golden이 모두 통과했다.
+- face order·winding·duplicate, hole, large absolute survey offset과 늦은 Align 결과를 Windows 차단 테스트로 검증한다. barycentric edge rule은 recipe에 명시하며 canonical raster/export golden을 Windows x64/CPython 3.12 기준선에 고정한다.
 
 GUI 계산은 worker에서 시작 당시 immutable `ArtifactSession`만 사용한다. 완료 callback은 exact result capability와 source/render projection을 검사한다. 같은 Align에서 다른 record가 중간에 추가되면 captured computation을 current immutable descendant document에 rebase하므로 기존 기록을 잃지 않으며, Align/Open authority가 바뀐 late result만 폐기한다. candidate publication은 `prepare_record_commit()`의 session/version/epoch CAS, append-only ancestor와 expected record ID 집합 검증을 다시 통과한다. record append는 SceneObject binding만 교체하고 VBO를 다시 만들지 않는다. 미리보기는 receipt와 맞는 최초 계산 raster만 표시하며 export 권위로 재사용하지 않는다. 재개방 기록의 background preview가 진행 중일 때 같은-Align record가 추가돼도 pending selection을 보존하고 완료 시 exact record/receipt를 다시 확인한다.
 
@@ -581,7 +588,7 @@ GUI 계산은 worker에서 시작 당시 immutable `ArtifactSession`만 사용�
 
 PNG writer는 `IHDR → sRGB → pHYs → iTXt → IDAT → IEND` 순서, row filter 0, 직접 작성한 stored DEFLATE block을 사용한다. 따라서 Pillow encoder나 zlib compression heuristic에 exact bytes를 맡기지 않는다. `pHYs`의 X/Y pixels-per-meter는 receipt와 같고, width/height와 pixel pitch는 sidecar에서 exact rational millimeter로 반복 선언한다. primary PNG에는 scale bar, 글꼴, review label, 절대 source path나 외부 resource를 넣지 않는다.
 
-sidecar의 artifact descriptor를 제외한 normative claim 전체를 RFC 8785 SHA-256으로 묶어 PNG iTXt metadata에 넣고, sidecar artifact descriptor는 PNG exact-byte SHA-256과 byte length를 가진다. validator는 PNG CRC/Adler/chunk/metadata/pixel hash/semantic raster hash, receipt, recipe, public provenance, scale와 privacy 선언을 모두 대조한다. 원본 document가 없어도 이동한 package를 별도 PID에서 offline 검증할 수 있고, document를 함께 주면 READY + FRESH record와 manifest까지 비교한다. machine-readable sidecar 계약은 `schemas/rubbing_export-1.0.0.schema.json`이다.
+sidecar의 artifact descriptor를 제외한 normative claim 전체를 RFC 8785 SHA-256으로 묶어 PNG iTXt metadata에 넣고, sidecar artifact descriptor는 PNG exact-byte SHA-256과 byte length를 가진다. validator는 PNG CRC/Adler/chunk/metadata/pixel hash/semantic raster hash, receipt, recipe, public provenance, scale와 privacy 선언을 모두 대조하며 closed provenance mapping의 계약 밖 key도 거부한다. 원본 document가 없어도 이동한 package를 별도 PID에서 offline 검증할 수 있고, document를 함께 주면 READY + FRESH record와 manifest까지 비교한다. mesh admission provenance를 포함하는 현재 machine-readable sidecar 계약은 `schemas/rubbing_export-1.1.0.schema.json`이며, 공개된 1.0.0 schema bytes와 offline validator 호환성은 보존한다.
 
 writer는 vector package와 같은 same-parent staging, prepared inode/fingerprint capability, file/directory `fsync`, self-validation, OS별 atomic no-replace publish를 사용한다. staging 이름은 배타적으로 예약하고 충돌한 foreign directory를 재사용·삭제하지 않는다. application cleanup도 등록한 device/inode가 그대로일 때만 수행한다. 기존 목적지, 추가 member와 symlink는 거부하며 `.DS_Store`, `Thumbs.db`, `desktop.ini`만 vector와 같은 1 MiB 제한으로 무시한다. final rename 뒤 실제 또는 미지원 directory `fsync`는 destination이 이미 게시된 `committed=true` 오류이며 GUI는 저장 완료와 crash durability 미확정을 구분한다. 이 package의 hash도 무결성 값이며 제작자 전자서명은 아니다.
 
@@ -629,9 +636,9 @@ export package는 기본적으로 package 내부 public provenance에 대해 sel
 3. ZIP을 닫고 file buffer를 flush한 뒤 `fsync`한다.
 4. 선택된 payload 종류의 production loader로 임시 파일을 다시 열어 checksum·schema·payload를 검증한다. artifact payload는 artifact loader로 다시 연다.
 5. Windows에서는 검증된 임시 파일과 목적지를 extended Unicode path로 바꾼 뒤 `MoveFileExW(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)`로 한 번에 commit한다.
-6. POSIX source 호환 경로에서는 `os.replace` 뒤 지원되는 파일시스템의 parent directory를 `fsync`한다.
+6. 내부 비 Windows backend는 회귀 시험에서만 `os.replace`와 parent directory `fsync`를 실행한다. 제품 저장 계약은 5번의 Windows 경로다.
 
-write, file `fsync`, 재검증, Windows write-through move 중 어느 단계에서 실패해도 기존 목적 파일의 바이트는 유지되고 해당 임시 파일은 정리된다. Win32 commit 실패에는 `committed=false`를 보고하고 다른 rename으로 fallback하지 않는다. POSIX 호환 경로에서 플랫폼·파일시스템이 directory `fsync`를 지원하지 않는 오류는 명시된 errno에 한해 무시하며, replace 뒤 실제 directory I/O 오류가 발생하면 파일은 이미 교체됐지만 crash durability가 불확실한 `committed=true` typed error로 보고한다. 이 POSIX 동작은 Windows 제품 gate와 별개다. 프로세스·전원 중단으로 `finally`가 실행되지 못한 경우에만 같은 parent에 임시본이 남을 수 있으며, 아래 수동 복구 경계가 이를 다룬다.
+write, file `fsync`, 재검증, Windows write-through move 중 어느 단계에서 실패해도 기존 목적 파일의 바이트는 유지되고 해당 임시 파일은 정리된다. Win32 commit 실패에는 `committed=false`를 보고하고 다른 rename으로 fallback하지 않는다. 내부 비 Windows backend는 directory `fsync` 미지원 오류와 replace 뒤 실제 I/O 오류를 구분하는 회귀 시험을 유지하지만 제품 gate와 지원 계약에는 포함되지 않는다. 프로세스·전원 중단으로 `finally`가 실행되지 못한 경우에만 같은 parent에 임시본이 남을 수 있으며, 아래 수동 복구 경계가 이를 다룬다.
 
 ## 비정상 종료 저장 임시본 복구
 
@@ -644,8 +651,8 @@ write, file `fsync`, 재검증, Windows write-through move 중 어느 단계에�
 3. 새 목적지 parent의 `.<new-destination>.XXXXXXXX.tmp` staging으로 descriptor bytes를 bounded streaming copy하고 file `fsync`한다. copy 전후 descriptor와 candidate path identity가 같아야 한다.
 4. staging을 `load_artifact_session_project()`로 완전 재개방한다. 즉 checksum·source index만 읽는 것이 아니라 embedded source closure를 saved parser로 decode하고 source/geometry SHA-256, 단위, Align과 canonical projection까지 물질화해야 한다. manifest-only artifact, legacy payload, 깨진 ZIP과 불완전 source closure는 실패한다.
 5. Windows는 검증된 staging과 새 목적지를 extended Unicode/UNC path로 바꿔 `MoveFileExW(MOVEFILE_WRITE_THROUGH)`로 게시한다. replace flag를 주지 않으므로 목적지가 이미 있거나 경합 중 생기면 `ERROR_FILE_EXISTS | ERROR_ALREADY_EXISTS`를 create-new 실패로 변환하고, 다른 Win32 오류에서도 기존 승자를 보존한 채 더 약한 rename으로 fallback하지 않는다.
-6. POSIX source 호환 경로만 같은 filesystem에서 Linux `renameat2(RENAME_NOREPLACE)` 또는 macOS `renamex_np(RENAME_EXCL)`로 게시한 뒤 directory `fsync`를 시도한다. 실제 sync 오류는 파일 생성 성공과 crash durability 미확정을 함께 보고한다.
-7. 모든 경로에서 published path가 검증 staging과 같은 inode인지 확인한다. Windows 성공은 write-through publication backend를 receipt에 남기고, POSIX 성공은 해당 no-replace/directory-fsync backend를 남긴다.
+6. 내부 비 Windows backend는 native atomic no-replace rename과 directory `fsync`를 회귀 시험할 때만 사용하며 제품 복구 경로로 문서화하지 않는다.
+7. published path가 검증 staging과 같은 inode인지 확인한다. Windows 성공은 write-through publication backend를 receipt에 남긴다. 내부 backend receipt는 제품 지원·배포 증거로 사용하지 않는다.
 
 복구 성공·실패와 무관하게 발견한 중단 임시본과 원래 intended destination은 수정·이동·삭제하지 않는다. publication 후 현재 GUI scene도 자동으로 교체하지 않으며 사용자가 복구본 열기를 다시 확인해야 한다. 복구 도중 다시 중단되면 새 목적지 parent에 같은 writer-compatible temp가 남을 수 있어 같은 절차로 재검증할 수 있다.
 
@@ -710,7 +717,7 @@ depth pick·screen projection·ray·Ctrl drag은 해당 depth buffer를 그린 m
 - 저장된 record·QC·selection
 - SVG/3D export의 world 좌표
 
-현재 게이트는 pure coordinate algebra, mocked relative VBO/overlay submission, frame-bound project/unproject/depth-pick 수명주기, absolute float64 face 계산, source/scene materialization 불변과 document canonical hash 비직렬화를 검증한다. 별도 `src.gui.opengl_driver_smoke`는 native QPA의 실제 `Viewport3D` widget FBO에서 `[1e9,-2e9,3e9] mm` 장면, relative VBO, 두 depth component, gap 예상 지점의 background와 overlay 예상 위치의 green pixel, 0.125 mm depth-pick 복원을 원근·정사영으로 검증한다. Windows 대상 commit `b12d4874a4a8`의 source CI와 frozen executable은 qwindows+bundled llvmpipe gate를 통과했다. 대표 Windows 하드웨어 GPU와 compositor 최종 presentation은 아직 별도 게이트이며, macOS·Linux 결과는 현재 지원 판정에 사용하지 않는다.
+현재 게이트는 pure coordinate algebra, mocked relative VBO/overlay submission, frame-bound project/unproject/depth-pick 수명주기, absolute float64 face 계산, source/scene materialization 불변과 document canonical hash 비직렬화를 검증한다. 별도 `src.gui.opengl_driver_smoke`는 native QPA의 실제 `Viewport3D` widget FBO에서 `[1e9,-2e9,3e9] mm` 장면, relative VBO, 두 depth component, gap 예상 지점의 background와 overlay 예상 위치의 green pixel, 0.125 mm depth-pick 복원을 원근·정사영으로 검증한다. Windows 대상 commit `b12d4874a4a8`의 source CI와 frozen executable은 qwindows+bundled llvmpipe gate를 통과했다. 대표 Windows 하드웨어 GPU와 compositor 최종 presentation은 아직 별도 게이트다.
 
 ### Legacy destructive bake 임시 안전 조건
 

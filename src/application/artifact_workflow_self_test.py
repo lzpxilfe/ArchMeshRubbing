@@ -7,7 +7,9 @@ reopened after the external source has been removed.  The reopened session then
 reproduces every authoritative Cutline/Outline 1:1 SVG and Digital Rubbing 1:1
 PNG package through the same export controllers used by the GUI.  It also
 publishes and revalidates guarded geometry-metrics, surface-distance, and
-surface-diameter records.
+surface-diameter records.  A separate fixed roof-tile fixture proves the same
+calculate/record/save/reopen/recompute/export chain for authoritative 1:1 tile
+unwrap output without changing the cube-based 3/6/6 survey golden.
 
 The fixture is intentionally tiny and the module imports neither Qt nor OpenGL,
 so the check remains deterministic and suitable for an offline Windows build.
@@ -49,6 +51,13 @@ from src.core.artifact_surface_measurement import (
     surface_measurement_receipt_from_record,
 )
 from src.core.artifact_survey_export import validate_survey_export_package
+from src.core.artifact_tile_unwrap_export import (
+    validate_tile_unwrap_export_package,
+)
+from src.core.artifact_tile_unwrap_extractor import (
+    compute_artifact_tile_unwrap_from_recipe,
+)
+from src.core.artifact_tile_unwrap_record import tile_unwrap_receipt_from_record
 from src.core.artifact_verification import build_artifact_verification_report
 from src.core.artifact_vector_export import validate_vector_export_package
 from src.core.artifact_vector_record import PlanarFrame
@@ -104,6 +113,88 @@ _PLY_BYTES = (
     b"3 3 4 7\n"
 )
 
+_TILE_CROSS_SECTION_XZ = (
+    (46.037747, -44.458136),
+    (50.086922, -39.840937),
+    (53.674916, -34.856898),
+    (56.768693, -29.551911),
+    (59.339767, -23.974822),
+    (61.364463, -18.176982),
+    (62.824140, -12.211776),
+    (63.705357, -6.134128),
+    (64.000000, 0.000000),
+    (63.705357, 6.134128),
+    (62.824140, 12.211776),
+    (61.364463, 18.176982),
+    (59.339767, 23.974822),
+    (56.768693, 29.551911),
+    (53.674916, 34.856898),
+    (50.086922, 39.840937),
+    (46.037747, 44.458136),
+)
+
+_TILE_ROW_ROTATION_COS_SIN = (
+    (0.998750260395, -0.049979169271),
+    (0.999132070024, -0.041654611386),
+    (0.999444495883, -0.033327160837),
+    (0.999687516276, -0.024997395915),
+    (0.999861114326, -0.016665895072),
+    (0.999965277979, -0.008333236883),
+    (1.000000000000, 0.000000000000),
+    (0.999965277979, 0.008333236883),
+    (0.999861114326, 0.016665895072),
+    (0.999687516276, 0.024997395915),
+    (0.999444495883, 0.033327160837),
+    (0.999132070024, 0.041654611386),
+    (0.998750260395, 0.049979169271),
+)
+
+
+def _fixed_tile_ply_bytes() -> bytes:
+    """Return a small fixed cylindrical tile patch without runtime trig."""
+
+    row_count = 13
+    column_count = len(_TILE_CROSS_SECTION_XZ)
+    vertices = []
+    for row in range(row_count):
+        cosine, sine = _TILE_ROW_ROTATION_COS_SIN[row]
+        for x, z in _TILE_CROSS_SECTION_XZ:
+            vertices.append(
+                (
+                    cosine * x - sine * z,
+                    -82.5 + 13.75 * row,
+                    sine * x + cosine * z,
+                )
+            )
+    faces: list[tuple[int, int, int]] = []
+    for row in range(row_count - 1):
+        for column in range(column_count - 1):
+            lower_left = row * column_count + column
+            lower_right = lower_left + 1
+            upper_left = (row + 1) * column_count + column
+            upper_right = upper_left + 1
+            faces.extend(
+                (
+                    (lower_left, lower_right, upper_right),
+                    (lower_left, upper_right, upper_left),
+                )
+            )
+    lines = [
+        "ply",
+        "format ascii 1.0",
+        "comment deterministic fixed roof tile workflow fixture",
+        f"element vertex {len(vertices)}",
+        "property double x",
+        "property double y",
+        "property double z",
+        f"element face {len(faces)}",
+        "property list uchar int vertex_indices",
+        "end_header",
+        *(f"{x:.6f} {y:.6f} {z:.6f}" for x, y, z in vertices),
+        *(f"3 {a} {b} {c}" for a, b, c in faces),
+    ]
+    return ("\n".join(lines) + "\n").encode("ascii")
+
 
 class _SequentialIds:
     def __init__(self) -> None:
@@ -129,8 +220,17 @@ class ArtifactWorkflowSelfTestResult:
     surface_diameter_count: int
     vector_export_count: int
     rubbing_export_count: int
+    tile_unwrap_count: int
+    tile_unwrap_export_count: int
     vector_set_sha256: str
     rubbing_set_sha256: str
+    tile_unwrap_source_sha256: str
+    tile_unwrap_document_sha256: str
+    tile_unwrap_sha256: str
+    tile_unwrap_recomputed_sha256: str
+    tile_unwrap_export_sha256: str
+    tile_unwrap_row_shift_max_um: int
+    tile_unwrap_row_shift_station_count: int
     survey_manifest_sha256: str
     survey_artifact_set_sha256: str
     field_pilot_contract: str
@@ -165,9 +265,15 @@ class ArtifactWorkflowSelfTestResult:
             f"project_commit={self.project_commit_backend}, "
             f"svg={self.svg_sha256[:12]}, png={self.png_sha256[:12]}, "
             f"exports=vector {self.vector_export_count}/9>"
-            f"rubbing {self.rubbing_export_count}/6, "
+            f"rubbing {self.rubbing_export_count}/6>"
+            f"unwrap {self.tile_unwrap_export_count}/1, "
             f"vector_set={self.vector_set_sha256[:12]}, "
             f"rubbing_set={self.rubbing_set_sha256[:12]}, "
+            f"unwrap=record {self.tile_unwrap_count}/1>reopen 1/1>"
+            f"export {self.tile_unwrap_export_count}/1>hash-match>"
+            f"row-shift {self.tile_unwrap_row_shift_max_um}um/"
+            f"{self.tile_unwrap_row_shift_station_count}, "
+            f"unwrap_hash={self.tile_unwrap_sha256[:12]}, "
             f"metrics=area {self.surface_area_mm2_decimal} mm2>"
             f"volume {self.volume_mm3_decimal} mm3, "
             f"surface=distance {self.surface_distance_mm_decimal} mm>"
@@ -467,6 +573,180 @@ def _export_and_verify_survey(
         "artifact_set_sha256": bundle.artifact_set_sha256,
         "relocated_path": str(relocated),
     }
+
+
+@dataclass(frozen=True, slots=True)
+class _TileUnwrapSelfTestEvidence:
+    source_sha256: str
+    document_sha256: str
+    durable_sha256: str
+    recomputed_sha256: str
+    export_sha256: str
+    row_shift_max_um: int
+    row_shift_station_count: int
+
+
+def _run_authoritative_tile_unwrap_evidence(
+    directory: Path,
+) -> _TileUnwrapSelfTestEvidence:
+    """Prove one fixed tile survives record, AMR reopen, and 1:1 export."""
+
+    tile_directory = directory / "한글-기와-전개"
+    tile_directory.mkdir()
+    source_path = tile_directory / "고정-원통형-기와.ply"
+    project_path = tile_directory / "기와-전개-기록.amr"
+    payload = _fixed_tile_ply_bytes()
+    source_path.write_bytes(payload)
+    source_sha256 = hashlib.sha256(payload).hexdigest()
+
+    mesh = MeshLoader(default_unit="mm").load(source_path, unit="mm")
+    if mesh.source_identity is None or mesh.source_identity.sha256 != source_sha256:
+        raise RuntimeError("tile unwrap Open lost the fixed source bytes")
+    aligned = ArtifactSession.create_from_source(
+        mesh,
+        resolved_source_path=str(source_path),
+        unit="mm",
+        axes={"source_x": "+X", "source_y": "+Y", "source_z": "+Z"},
+        handedness="right",
+        software_version="packaged-self-test/1",
+        operator=_OPERATOR,
+        created_at=_STAMP,
+        document_id="artifact:packaged-tile-unwrap-self-test",
+        metadata_revision_id="metadata:tile-workflow-self-test-mm",
+        align_revision_id="align:tile-workflow-self-test-initial",
+    ).commit_preview(
+        translation_mm=(0.0, 0.0, 0.0),
+        rotation_deg=(0.0, 0.0, 0.0),
+        scale=1.0,
+        pivot_mm=(0.0, 0.0, 0.0),
+        operator=_OPERATOR,
+        created_at=_STAMP,
+        revision_id="align:tile-workflow-self-test-explicit",
+    )
+
+    ids = _SequentialIds()
+    workbench = ArtifactWorkbench(session=aligned, id_factory=ids)
+    measurements = ArtifactMeasurementController(workbench, id_factory=ids)
+    work_item = measurements.begin_tile_unwrap(
+        longitudinal_axis="y",
+        record_view="top",
+        n_sections=13,
+        record_id="record:tile-unwrap:workflow-self-test",
+        created_at=_STAMP,
+        operator=_OPERATOR,
+    )
+    result = measurements.execute(work_item)
+    publication = measurements.publish_result(
+        work_item,
+        result,
+        lambda transition: _publish_measurement(workbench, transition),
+    )
+    recorded = publication.session
+    if len(recorded.document.records) != 1:
+        raise RuntimeError("tile unwrap workflow did not commit exactly one record")
+    record = recorded.document.record_index[publication.record_id]
+    durable_receipt = tile_unwrap_receipt_from_record(record)
+    record_qc = record.to_dict()["qc"]
+    if not isinstance(record_qc, dict):
+        raise RuntimeError("tile unwrap record lost its QC object")
+    row_shift_max_um = int(record_qc.get("section_row_shift_max_um", 0))
+    row_shift_station_count = int(
+        record_qc.get("section_row_shift_station_count", 0)
+    )
+    if (
+        record_qc.get("section_row_shift_applied") is not True
+        or row_shift_max_um < 1
+        or row_shift_station_count != 13
+    ):
+        raise RuntimeError("tile unwrap fixture did not exercise v1.1 row-shift")
+
+    save_artifact_session_project(project_path, recorded)
+    source_path.unlink()
+    if source_path.exists():
+        raise RuntimeError("tile unwrap external source could not be removed")
+    restored = load_artifact_session_project(project_path)
+    if restored.document.canonical_json_bytes() != recorded.document.canonical_json_bytes():
+        raise RuntimeError("tile unwrap AMR reopen changed the durable document")
+    restored_record = restored.document.record_index[publication.record_id]
+    restored_receipt = tile_unwrap_receipt_from_record(restored_record)
+    if restored_receipt != durable_receipt:
+        raise RuntimeError("tile unwrap AMR reopen changed the durable receipt")
+
+    recomputed = compute_artifact_tile_unwrap_from_recipe(
+        restored,
+        restored_record.recipe,
+    )
+    recomputed_receipt = recomputed.unwrap.receipt(
+        selection_sha256=str(restored_receipt["selection_sha256"])
+    )
+    if recomputed_receipt != restored_receipt:
+        raise RuntimeError("tile unwrap recipe did not reproduce its durable hash")
+
+    offline_workbench = ArtifactWorkbench(
+        session=restored,
+        project_path=str(project_path),
+        id_factory=ids,
+    )
+    exports = ArtifactExportController(offline_workbench, id_factory=ids)
+    destination = tile_directory / "기와-전개.amr-unwrap"
+    export_item = exports.begin_tile_unwrap(destination, publication.record_id)
+    export_result = exports.execute(export_item)
+    export_publication = exports.publish_result(export_item, export_result)
+    if export_publication.destination != destination:
+        raise RuntimeError("tile unwrap exporter returned an unexpected destination")
+    relocated = tile_directory / "이동된-기와-전개.amr-unwrap"
+    destination.rename(relocated)
+
+    sidecar = validate_tile_unwrap_export_package(
+        relocated,
+        document=restored.document,
+    )
+    geometry = _require_mapping(sidecar.get("geometry"), label="tile unwrap geometry")
+    presentation = _require_mapping(
+        sidecar.get("presentation"), label="tile unwrap presentation"
+    )
+    provenance = _require_mapping(
+        sidecar.get("provenance"), label="tile unwrap provenance"
+    )
+    assets = provenance.get("source_assets")
+    if not isinstance(assets, list) or len(assets) != 1:
+        raise RuntimeError("tile unwrap export lost its single source asset")
+    asset = _require_mapping(assets[0], label="tile unwrap source asset")
+    if (
+        geometry != restored_receipt
+        or sidecar.get("recipe") != restored_record.to_dict()["recipe"]
+        or presentation.get("physical_scale") != "1:1"
+        or asset.get("sha256") != source_sha256
+    ):
+        raise RuntimeError("tile unwrap export lost recipe, scale, or source authority")
+
+    evidence = _verification_evidence(
+        build_artifact_verification_report(
+            relocated,
+            against_project=project_path,
+        ),
+        artifact_kind="tile_unwrap_export",
+    )
+    evidence_geometry = _require_mapping(
+        evidence.get("geometry"), label="verified tile unwrap geometry"
+    )
+    export_sha256 = str(evidence_geometry.get("unwrap_sha256") or "")
+    if (
+        evidence.get("bound_project_document_sha256")
+        != restored.document.canonical_sha256
+        or export_sha256 != restored_receipt["unwrap_sha256"]
+    ):
+        raise RuntimeError("unified tile unwrap verification lost project authority")
+
+    return _TileUnwrapSelfTestEvidence(
+        source_sha256=source_sha256,
+        document_sha256=restored.document.canonical_sha256,
+        durable_sha256=str(restored_receipt["unwrap_sha256"]),
+        recomputed_sha256=str(recomputed_receipt["unwrap_sha256"]),
+        export_sha256=export_sha256,
+        row_shift_max_um=row_shift_max_um,
+        row_shift_station_count=row_shift_station_count,
+    )
 
 
 def _assert_progress_complete(session: ArtifactSession) -> tuple[int, int, int]:
@@ -877,6 +1157,8 @@ def _run_in_directory(directory: Path) -> ArtifactWorkflowSelfTestResult:
             "packaged field-pilot contract did not remain fail-closed"
         )
 
+    tile_unwrap_evidence = _run_authoritative_tile_unwrap_evidence(directory)
+
     top_cutline = next(
         receipt
         for receipt in vector_receipts
@@ -901,8 +1183,19 @@ def _run_in_directory(directory: Path) -> ArtifactWorkflowSelfTestResult:
         surface_diameter_count=1,
         vector_export_count=len(vector_receipts),
         rubbing_export_count=len(rubbing_receipts),
+        tile_unwrap_count=1,
+        tile_unwrap_export_count=1,
         vector_set_sha256=_receipt_set_sha256(vector_receipts),
         rubbing_set_sha256=_receipt_set_sha256(rubbing_receipts),
+        tile_unwrap_source_sha256=tile_unwrap_evidence.source_sha256,
+        tile_unwrap_document_sha256=tile_unwrap_evidence.document_sha256,
+        tile_unwrap_sha256=tile_unwrap_evidence.durable_sha256,
+        tile_unwrap_recomputed_sha256=tile_unwrap_evidence.recomputed_sha256,
+        tile_unwrap_export_sha256=tile_unwrap_evidence.export_sha256,
+        tile_unwrap_row_shift_max_um=tile_unwrap_evidence.row_shift_max_um,
+        tile_unwrap_row_shift_station_count=(
+            tile_unwrap_evidence.row_shift_station_count
+        ),
         survey_manifest_sha256=survey_receipt["manifest_sha256"],
         survey_artifact_set_sha256=survey_receipt["artifact_set_sha256"],
         field_pilot_contract="artifact-pass-human-driver-pending",

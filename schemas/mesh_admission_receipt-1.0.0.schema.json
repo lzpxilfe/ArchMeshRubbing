@@ -1,0 +1,312 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:archmeshrubbing:schema:mesh-admission-receipt:1.0.0",
+  "title": "ArchMeshRubbing Authoritative Mesh Admission Receipt 1.0.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "accepted",
+    "checks",
+    "declaration",
+    "decoded",
+    "limits",
+    "profile",
+    "schema_version",
+    "source_format",
+    "source_size_bytes",
+    "status"
+  ],
+  "properties": {
+    "accepted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "geometry_sha256",
+        "removed_degenerate_triangle_count",
+        "triangle_count",
+        "vertex_count"
+      ],
+      "properties": {
+        "geometry_sha256": {"$ref": "#/$defs/sha256"},
+        "removed_degenerate_triangle_count": {"$ref": "#/$defs/nonnegativeCount"},
+        "triangle_count": {"$ref": "#/$defs/triangleCount"},
+        "vertex_count": {"$ref": "#/$defs/vertexCount"}
+      }
+    },
+    "checks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["finite_vertices", "valid_triangle_indices"],
+      "properties": {
+        "finite_vertices": {"const": true},
+        "valid_triangle_indices": {"const": true}
+      }
+    },
+    "declaration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["face_element_count", "kind", "parser_bytes", "triangle_count", "vertex_count"],
+      "properties": {
+        "face_element_count": {
+          "anyOf": [
+            {"type": "integer", "minimum": 0, "maximum": 2000000},
+            {"type": "null"}
+          ]
+        },
+        "kind": {
+          "enum": [
+            "ascii_stl_stream",
+            "binary_stl_header",
+            "glb_json_chunk",
+            "gltf_json",
+            "not_available",
+            "obj_stream",
+            "off_header",
+            "ply_ascii_header",
+            "ply_binary_header"
+          ]
+        },
+        "parser_bytes": {
+          "anyOf": [
+            {"type": "integer", "minimum": 1, "maximum": 2147483648},
+            {"type": "null"}
+          ]
+        },
+        "triangle_count": {
+          "anyOf": [
+            {"type": "integer", "minimum": 0, "maximum": 2000000},
+            {"type": "null"}
+          ]
+        },
+        "vertex_count": {
+          "anyOf": [
+            {"type": "integer", "minimum": 0, "maximum": 5000000},
+            {"type": "null"}
+          ]
+        }
+      }
+    },
+    "decoded": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["array_bytes", "estimated_peak_bytes", "triangle_count", "vertex_count"],
+      "properties": {
+        "array_bytes": {"type": "integer", "minimum": 1, "maximum": 2147483648},
+        "estimated_peak_bytes": {"type": "integer", "minimum": 1, "maximum": 3221225472},
+        "triangle_count": {"$ref": "#/$defs/triangleCount"},
+        "vertex_count": {"$ref": "#/$defs/vertexCount"}
+      }
+    },
+    "limits": {
+      "const": {
+        "max_decoded_array_bytes": 2147483648,
+        "max_dependency_bytes": 536870912,
+        "max_dependency_total_bytes": 1073741824,
+        "max_estimated_peak_bytes": 3221225472,
+        "max_gltf_json_bytes": 16777216,
+        "max_header_bytes": 1048576,
+        "max_ply_auxiliary_bytes": 134217728,
+        "max_ply_face_properties": 8,
+        "max_ply_vertex_properties": 16,
+        "max_source_bytes": 4294967296,
+        "max_text_source_bytes": 268435456,
+        "max_text_line_bytes": 1048576,
+        "max_texture_bytes": 536870912,
+        "max_triangles": 2000000,
+        "max_vertices": 5000000
+      }
+    },
+    "profile": {"const": "archmeshrubbing.authoritative_mesh_admission"},
+    "schema_version": {"const": "1.0.0"},
+    "source_format": {"enum": ["obj", "ply", "stl", "off", "gltf", "glb"]},
+    "source_size_bytes": {"type": "integer", "minimum": 1, "maximum": 4294967296},
+    "status": {"const": "accepted"}
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "declaration": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "glb_json_chunk",
+                  "gltf_json",
+                  "ply_ascii_header",
+                  "ply_binary_header"
+                ]
+              }
+            },
+            "required": ["kind"]
+          }
+        },
+        "required": ["declaration"]
+      },
+      "then": {
+        "properties": {
+          "declaration": {
+            "properties": {
+              "parser_bytes": {"type": "integer", "minimum": 1}
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "declaration": {
+            "properties": {
+              "parser_bytes": {"type": "null"}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "source_format": {"enum": ["obj", "off"]}
+        },
+        "required": ["source_format"]
+      },
+      "then": {
+        "properties": {
+          "source_size_bytes": {"maximum": 268435456}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "declaration": {
+            "properties": {
+              "kind": {"enum": ["ascii_stl_stream", "ply_ascii_header"]}
+            },
+            "required": ["kind"]
+          }
+        },
+        "required": ["declaration"]
+      },
+      "then": {
+        "properties": {
+          "source_size_bytes": {"maximum": 268435456}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "declaration": {
+            "properties": {"kind": {"const": "not_available"}},
+            "required": ["kind"]
+          }
+        },
+        "required": ["declaration"]
+      },
+      "then": {
+        "properties": {
+          "declaration": {
+            "properties": {
+              "face_element_count": {"type": "null"},
+              "parser_bytes": {"type": "null"},
+              "triangle_count": {"type": "null"},
+              "vertex_count": {"type": "null"}
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "declaration": {
+            "properties": {
+              "face_element_count": {"type": "integer", "minimum": 1},
+              "triangle_count": {"type": "integer", "minimum": 1},
+              "vertex_count": {"type": "integer", "minimum": 3}
+            }
+          }
+        }
+      }
+    },
+    {
+      "oneOf": [
+        {
+          "properties": {
+            "source_format": {"const": "obj"},
+            "declaration": {
+              "properties": {
+                "kind": {"enum": ["not_available", "obj_stream"]}
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "source_format": {"const": "off"},
+            "declaration": {
+              "properties": {
+                "kind": {"enum": ["not_available", "off_header"]}
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "source_format": {"const": "ply"},
+            "declaration": {
+              "properties": {
+                "kind": {
+                  "enum": [
+                    "not_available",
+                    "ply_ascii_header",
+                    "ply_binary_header"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "source_format": {"const": "stl"},
+            "declaration": {
+              "properties": {
+                "kind": {
+                  "enum": [
+                    "not_available",
+                    "ascii_stl_stream",
+                    "binary_stl_header"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "source_format": {"const": "gltf"},
+            "declaration": {
+              "properties": {
+                "kind": {"enum": ["not_available", "gltf_json"]}
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "source_format": {"const": "glb"},
+            "declaration": {
+              "properties": {
+                "kind": {"enum": ["not_available", "glb_json_chunk"]}
+              }
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "$defs": {
+    "nonnegativeCount": {"type": "integer", "minimum": 0, "maximum": 2000000},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "triangleCount": {"type": "integer", "minimum": 1, "maximum": 2000000},
+    "vertexCount": {"type": "integer", "minimum": 3, "maximum": 5000000}
+  }
+}

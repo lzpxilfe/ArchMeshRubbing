@@ -2,8 +2,14 @@ import unittest
 
 import numpy as np
 
+from src.core.artifact_cancellation import ArtifactComputationCancelledError
 from src.core.flattener import flatten_with_method
-from src.core.flatten_models_sectionwise import sectionwise_quality_gate
+from src.core.flatten_models_sectionwise import (
+    _bounded_row_shift,
+    sectionwise_cylindrical_parameterization,
+    sectionwise_quality_gate,
+)
+from src.core.flatten_utils import _robust_circle_fit_2d
 from src.core.mesh_loader import MeshData
 
 
@@ -54,6 +60,61 @@ def _make_variable_radius_u_patch(
 
 
 class TestFlattenerSectionwise(unittest.TestCase):
+    def test_section_fitting_polls_cooperative_cancellation(self):
+        mesh, _row_radii, _theta_span = _make_variable_radius_u_patch()
+        poll_count = 0
+
+        def cancellation_probe() -> bool:
+            nonlocal poll_count
+            poll_count += 1
+            return poll_count >= 4
+
+        with self.assertRaises(ArtifactComputationCancelledError):
+            sectionwise_cylindrical_parameterization(
+                mesh,
+                axis="y",
+                n_sections=24,
+                return_meta=True,
+                cancellation_probe=cancellation_probe,
+            )
+
+        self.assertGreaterEqual(poll_count, 4)
+
+    def test_row_shift_search_polls_each_candidate_for_cancellation(self):
+        values = np.linspace(1.0, 2.0, 256, dtype=np.float64)
+        poll_count = 0
+
+        def cancellation_probe() -> bool:
+            nonlocal poll_count
+            poll_count += 1
+            return poll_count >= 3
+
+        with self.assertRaises(ArtifactComputationCancelledError):
+            _bounded_row_shift(
+                du=values * 0.2,
+                dv=values * 0.5,
+                source_length=values,
+                alpha=np.ones_like(values),
+                cancellation_probe=cancellation_probe,
+            )
+
+        self.assertEqual(poll_count, 3)
+
+    def test_circle_fit_is_stable_at_large_survey_offsets(self):
+        angles = np.linspace(-0.7, 0.9, 96, dtype=np.float64)
+        expected_center = np.array([10_000_000.25, -20_000_000.5])
+        expected_radius = 68.125
+        x = expected_center[0] + expected_radius * np.cos(angles)
+        y = expected_center[1] + expected_radius * np.sin(angles)
+
+        fitted = _robust_circle_fit_2d(x, y)
+
+        self.assertIsNotNone(fitted)
+        assert fitted is not None
+        center, radius = fitted
+        np.testing.assert_allclose(center, expected_center, atol=1e-6, rtol=0.0)
+        self.assertAlmostEqual(radius, expected_radius, places=6)
+
     def test_sectionwise_quality_gate_uses_radian_arc_span(self):
         meta = {
             "section_fit_valid_count": 12,

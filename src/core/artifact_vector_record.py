@@ -551,30 +551,46 @@ def _computed_payload_qc(payload: VectorGeometryPayload) -> dict[str, Any]:
     return computed
 
 
-def _validate_payload_recipe_contract(
+def validate_vector_payload_recipe_contract(
     payload: VectorGeometryPayload,
     recipe: Mapping[str, Any],
 ) -> None:
-    if VectorRecordKind(payload.kind) is not VectorRecordKind.OUTLINE:
-        return
-    from .artifact_outline_extractor import (  # noqa: PLC0415
+    kind = VectorRecordKind(payload.kind)
+    from .artifact_vector_extractor import (  # noqa: PLC0415
+        CUTLINE_ALGORITHM,
         ArtifactVectorExtractionError,
+        validate_cutline_record_contract,
+    )
+    from .artifact_outline_extractor import (  # noqa: PLC0415
         OUTLINE_ALGORITHM,
         validate_outline_record_contract,
     )
 
-    # vector.outline.v1 is intentionally extensible to other open algorithms;
-    # the stricter grid/ID/recipe proof applies when this implementation's
-    # production algorithm is claimed. Every outline still receives the
-    # algorithm-independent topology proof in _computed_payload_qc().
-    if recipe.get("algorithm") != OUTLINE_ALGORITHM:
+    algorithm = recipe.get("algorithm")
+    if not isinstance(algorithm, str):
+        raise ArtifactVectorRecordError(
+            "production vector algorithm must be a string"
+        )
+    known_algorithms = {
+        CUTLINE_ALGORITHM: VectorRecordKind.CUTLINE,
+        OUTLINE_ALGORITHM: VectorRecordKind.OUTLINE,
+    }
+    claimed_kind = known_algorithms.get(algorithm)
+    if claimed_kind is not None and claimed_kind is not kind:
+        raise ArtifactVectorRecordError(
+            "production vector algorithm does not match the payload kind"
+        )
+    if claimed_kind is None:
         return
 
     try:
-        validate_outline_record_contract(payload, recipe)
+        if kind is VectorRecordKind.CUTLINE:
+            validate_cutline_record_contract(payload, recipe)
+        else:
+            validate_outline_record_contract(payload, recipe)
     except ArtifactVectorExtractionError as exc:
         raise ArtifactVectorRecordError(
-            f"outline payload/recipe contract is invalid: {exc}"
+            f"{kind.value} payload/recipe contract is invalid: {exc}"
         ) from exc
 
 
@@ -602,7 +618,7 @@ def append_vector_record_from_context(
         recipe,
         expected_kind=VectorRecordKind(payload.kind),
     )
-    _validate_payload_recipe_contract(payload, recipe)
+    validate_vector_payload_recipe_contract(payload, recipe)
     payload_bytes = payload.canonical_json_bytes()
     computed_qc = _computed_payload_qc(payload)
     for key, value in dict(qc or {}).items():
@@ -675,7 +691,7 @@ def vector_payload_from_record(record: DerivedRecord) -> VectorGeometryPayload:
     if expected_kind is not VectorRecordKind(payload.kind):
         raise ArtifactVectorRecordError("vector record type does not match payload kind")
     validate_vector_recipe(record.recipe, expected_kind=expected_kind)
-    _validate_payload_recipe_contract(payload, record.recipe)
+    validate_vector_payload_recipe_contract(payload, record.recipe)
     thawed_qc = record.to_dict()["qc"]
     assert isinstance(thawed_qc, dict)
     for key, expected_value in _computed_payload_qc(payload).items():
@@ -715,6 +731,7 @@ __all__ = [
     "append_vector_record_from_context",
     "payload_sha256_from_geometry_ref",
     "validate_vector_records",
+    "validate_vector_payload_recipe_contract",
     "validate_vector_recipe",
     "vector_payload_from_record",
 ]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import replace
 import errno
 import hashlib
@@ -580,11 +581,11 @@ class TestRubbingExport(unittest.TestCase):
         self.assertEqual(bundle.pixels_per_meter, 10_000)
         self.assertEqual(
             bundle.png_sha256,
-            "8c639b6226252501eff6f97d9e9b572ab86d0108563efb5c625682f7e7df9c0b",
+            "66d648c29392388c67a6d2e3ff9f8b54a44386e305783b23ad2d84485820f475",
         )
         self.assertEqual(
             bundle.sidecar_sha256,
-            "1afd1355a9da006a623099a8cd7610f8c00c484ec822e40deb13fc16391d84d5",
+            "e77e683cb5eab9790928869e7e034bea1971c8e59948f1dbd450aa70c422331e",
         )
         pixels, ppm, metadata = decode_canonical_ga8_png(bundle.png_bytes)
         np.testing.assert_array_equal(pixels, computation.raster.pixels)
@@ -606,6 +607,198 @@ class TestRubbingExport(unittest.TestCase):
         self.assertEqual(public_import_recipe["dependency_policy"], "deny_external")
         self.assertNotIn(b"/private/lab/alice", bundle.sidecar_bytes)
         self.assertNotIn(b"secret-scan", bundle.png_bytes)
+
+    def test_legacy_schema_rejects_new_mesh_admission_field(self):
+        session, computation = _committed()
+        bundle = build_rubbing_export(
+            session.document,
+            "record:rubbing:export",
+            computation.raster,
+        )
+        sidecar = _sidecar(bundle)
+        geometry = sidecar["provenance"]["geometry_revision"]
+        self.assertIn("import_admission", geometry["qc"])
+        sidecar["provenance"].pop("align_ancestry")
+        sidecar["schema_version"] = "1.0.0"
+
+        with self.assertRaisesRegex(
+            ArtifactRubbingExportError,
+            "1.0.0 cannot contain mesh admission",
+        ):
+            validate_rubbing_export_bytes(
+                bundle.png_bytes,
+                canonical_json_bytes(sidecar),
+            )
+
+    def test_valid_legacy_1_0_export_passes_runtime_and_json_schema(self):
+        session, computation = _committed()
+        bundle = build_rubbing_export(
+            session.document,
+            "record:rubbing:export",
+            computation.raster,
+        )
+        sidecar = _sidecar(bundle)
+        geometry_qc = sidecar["provenance"]["geometry_revision"]["qc"]
+        self.assertIsNotNone(geometry_qc.pop("import_admission", None))
+        self.assertIsNotNone(sidecar["provenance"].pop("align_ancestry", None))
+        sidecar["schema_version"] = "1.0.0"
+
+        pixels, ppm, _metadata = decode_canonical_ga8_png(bundle.png_bytes)
+        claims_sha = rubbing_export._claims_sha256(sidecar)
+        legacy_metadata = rubbing_export._png_metadata(
+            provenance=sidecar["provenance"],
+            receipt=sidecar["raster_receipt"],
+            claims_sha256=claims_sha,
+        )
+        legacy_png = encode_canonical_ga8_png(
+            pixels,
+            pixels_per_meter=ppm,
+            metadata=legacy_metadata,
+        )
+        sidecar["artifact"]["sha256"] = hashlib.sha256(legacy_png).hexdigest()
+        sidecar["artifact"]["size_bytes"] = len(legacy_png)
+        legacy_sidecar_bytes = canonical_json_bytes(sidecar)
+
+        validated = validate_rubbing_export_bytes(
+            legacy_png,
+            legacy_sidecar_bytes,
+            document=session.document,
+        )
+        self.assertEqual(validated.png_sha256, hashlib.sha256(legacy_png).hexdigest())
+        self.assertEqual(
+            validated.sidecar_sha256,
+            hashlib.sha256(legacy_sidecar_bytes).hexdigest(),
+        )
+
+        jsonschema = importlib.import_module("jsonschema")
+        referencing = importlib.import_module("referencing")
+        schema_root = Path(__file__).resolve().parents[1] / "schemas"
+        schema_names = (
+            "rubbing_export-1.0.0.schema.json",
+            "rubbing_receipt-1.0.0.schema.json",
+            "mesh_import_recipe-1.0.0.schema.json",
+            "mesh_import_recipe-2.0.0.schema.json",
+        )
+        schemas = [
+            json.loads((schema_root / name).read_text(encoding="utf-8"))
+            for name in schema_names
+        ]
+        legacy_schema = schemas[0]
+        jsonschema.Draft202012Validator.check_schema(legacy_schema)
+        registry = referencing.Registry()
+        for dependency in schemas[1:]:
+            registry = registry.with_resource(
+                dependency["$id"],
+                referencing.Resource.from_contents(dependency),
+            )
+        validator = jsonschema.Draft202012Validator(
+            legacy_schema,
+            registry=registry,
+        )
+        errors = sorted(validator.iter_errors(sidecar), key=lambda item: list(item.path))
+        self.assertEqual([error.message for error in errors], [])
+
+    def test_offline_verifier_rejects_unknown_geometry_qc_with_rebound_claims(self):
+        session, computation = _committed()
+        bundle = build_rubbing_export(
+            session.document,
+            "record:rubbing:export",
+            computation.raster,
+        )
+        sidecar = _sidecar(bundle)
+        sidecar["provenance"]["geometry_revision"]["qc"]["unexpected"] = True
+        pixels, ppm, _metadata = decode_canonical_ga8_png(bundle.png_bytes)
+        claims_sha = rubbing_export._claims_sha256(sidecar)
+        metadata = rubbing_export._png_metadata(
+            provenance=sidecar["provenance"],
+            receipt=sidecar["raster_receipt"],
+            claims_sha256=claims_sha,
+        )
+        rebound_png = encode_canonical_ga8_png(
+            pixels,
+            pixels_per_meter=ppm,
+            metadata=metadata,
+        )
+        sidecar["artifact"]["sha256"] = hashlib.sha256(rebound_png).hexdigest()
+        sidecar["artifact"]["size_bytes"] = len(rebound_png)
+
+        with self.assertRaisesRegex(
+            ArtifactRubbingExportError,
+            "geometry_revision.qc has unknown fields",
+        ):
+            validate_rubbing_export_bytes(
+                rebound_png,
+                canonical_json_bytes(sidecar),
+            )
+
+    def test_current_export_requires_mesh_admission_with_rebound_claims(self):
+        session, computation = _committed()
+        bundle = build_rubbing_export(
+            session.document,
+            "record:rubbing:export",
+            computation.raster,
+        )
+        sidecar = _sidecar(bundle)
+        geometry_qc = sidecar["provenance"]["geometry_revision"]["qc"]
+        self.assertIsNotNone(geometry_qc.pop("import_admission", None))
+        pixels, ppm, _metadata = decode_canonical_ga8_png(bundle.png_bytes)
+        claims_sha = rubbing_export._claims_sha256(sidecar)
+        metadata = rubbing_export._png_metadata(
+            provenance=sidecar["provenance"],
+            receipt=sidecar["raster_receipt"],
+            claims_sha256=claims_sha,
+        )
+        rebound_png = encode_canonical_ga8_png(
+            pixels,
+            pixels_per_meter=ppm,
+            metadata=metadata,
+        )
+        sidecar["artifact"]["sha256"] = hashlib.sha256(rebound_png).hexdigest()
+        sidecar["artifact"]["size_bytes"] = len(rebound_png)
+
+        with self.assertRaisesRegex(
+            ArtifactRubbingExportError,
+            "missing fields: import_admission",
+        ):
+            validate_rubbing_export_bytes(
+                rebound_png,
+                canonical_json_bytes(sidecar),
+            )
+
+    def test_current_align_ancestry_rejects_rebound_root_matrix(self):
+        session, computation = _committed()
+        bundle = build_rubbing_export(
+            session.document,
+            "record:rubbing:export",
+            computation.raster,
+        )
+        sidecar = _sidecar(bundle)
+        ancestry = sidecar["provenance"]["align_ancestry"]
+        ancestry[0]["matrix4x4"][0][3] = 1.0
+        sidecar["provenance"]["align_revision"] = copy.deepcopy(ancestry[0])
+        pixels, ppm, _metadata = decode_canonical_ga8_png(bundle.png_bytes)
+        claims_sha = rubbing_export._claims_sha256(sidecar)
+        metadata = rubbing_export._png_metadata(
+            provenance=sidecar["provenance"],
+            receipt=sidecar["raster_receipt"],
+            claims_sha256=claims_sha,
+        )
+        rebound_png = encode_canonical_ga8_png(
+            pixels,
+            pixels_per_meter=ppm,
+            metadata=metadata,
+        )
+        sidecar["artifact"]["sha256"] = hashlib.sha256(rebound_png).hexdigest()
+        sidecar["artifact"]["size_bytes"] = len(rebound_png)
+
+        with self.assertRaisesRegex(
+            ArtifactRubbingExportError,
+            "must be identity",
+        ):
+            validate_rubbing_export_bytes(
+                rebound_png,
+                canonical_json_bytes(sidecar),
+            )
 
     def test_offline_package_relocation_and_independent_process_validation(self):
         session, computation = _committed()

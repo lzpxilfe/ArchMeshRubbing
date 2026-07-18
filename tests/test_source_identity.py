@@ -468,7 +468,10 @@ class TestSourceIdentity(unittest.TestCase):
                     process=False,
                 )
 
-            with patch("src.core.mesh_loader.trimesh.load", side_effect=mutate_while_parsing):
+            with patch(
+                "src.core.mesh_loader.trimesh.load_scene",
+                side_effect=mutate_while_parsing,
+            ):
                 with self.assertRaises((SourceChangedError, PermissionError)):
                     MeshLoader(default_unit="mm").load(source)
 
@@ -503,7 +506,7 @@ class TestSourceIdentity(unittest.TestCase):
                 )
 
             with patch(
-                "src.core.mesh_loader.trimesh.load",
+                "src.core.mesh_loader.trimesh.load_scene",
                 side_effect=replace_path_while_parsing,
             ):
                 with self.assertRaises(SourceChangedError):

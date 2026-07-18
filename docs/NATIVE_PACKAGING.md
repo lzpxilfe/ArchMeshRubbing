@@ -1,6 +1,6 @@
 # Native Packaging and Release Gates
 
-이 문서는 Windows frozen 앱과 검증형 portable ZIP을 만드는 절차를 설명한다. 첫 안정판의 패키지 경로는 설치 프로그램 compiler, 계정, 라이선스 서버를 요구하지 않는다. CI는 exact Git commit의 corresponding source를 ZIP에 포함하고 한글 경로에 검증·추출해 실제 실행한 뒤 삭제하지만, 서명, artifact 업로드 또는 공개 배포는 아직 수행하지 않는다.
+이 문서는 Windows frozen 앱과 검증형 portable ZIP을 만드는 절차를 설명한다. 지원 대상은 Windows 10 version 1809 이상 x64와 Windows 11 x64이며, 최소 버전은 고정한 Qt 6.11의 [공식 지원 플랫폼](https://doc.qt.io/qt-6.11/supported-platforms.html)을 따른다. Windows ARM64·32-bit·Server 최종 사용자 환경, 비 Windows 운영체제와 호환 계층, installer·MSIX·Store 패키지는 지원하거나 배포하지 않는다. CI는 exact Git commit의 corresponding source를 ZIP에 포함하고 한글 경로에 검증·추출해 실제 실행한 뒤 삭제하지만, 서명, artifact 업로드 또는 공개 배포는 아직 수행하지 않는다.
 
 ## 지원 빌드 기준
 
@@ -10,8 +10,9 @@
 - `requirements/windows-py312-x64-hashed.lock`: Windows x64/CPython 3.12 런타임·빌드 wheel 17개와 각 SHA-256. `--require-hashes --only-binary=:all:`로 설치한다.
 - `requirements/runtime-license-policy.json`, `third_party_licenses/`: wheel에 라이선스 원문이 없는 예외의 검토된 출처·원문 SHA-256
 - `requirements/public-release-policy.json`, `src/public_release_policy.py`: 프로젝트 `LICENSE` exact SHA-256, PyQt6 wheel `License-Expression`, rights-holder authorization 상태와 공개 바이너리 결정을 묶는 fail-closed 계약
-- `ArchMeshRubbing.spec`: 첫 안정판 대상인 Windows onedir build. Linux onedir와 macOS `.app` 분기는 source 호환용이며 현재 릴리스 게이트가 아니다.
-- `src/portable_archive.py`, `tools/build_portable_archive.py`: ZIP 생성, sidecar 검증, 안전한 원자적 추출
+- `tools/build_native.py`: `IsWow64Process2`로 native AMD64 host와 64-bit AMD64 CPython 3.12를 확인하고 exact checkout을 고정하는 유일한 제품 build 진입점
+- `ArchMeshRubbing.spec`: Windows x64·64-bit CPython 3.12가 아니면 분석 전에 거부하는 onedir spec
+- `src/portable_archive.py`, `tools/build_portable_archive.py`: 고정 root `ArchMeshRubbing`, 비어 있지 않은 `ArchMeshRubbing.exe`, 전체 payload를 강제하는 ZIP 생성·sidecar 검증·안전한 원자적 추출
 - `src/source_archive.py`, `tools/build_source_archive.py`: Git object 기반 corresponding-source ZIP/sidecar 생성과 Git 없이 offline 검증
 - `src/build_provenance.py`, `tools/generate_build_provenance.py`: portable/source/evidence와 GitHub Actions invocation·runner identity를 묶는 외부 unsigned provenance 생성·offline 검증
 - `schemas/portable_archive_manifest-1.0.0.schema.json`: portable sidecar의 machine-readable 계약
@@ -19,24 +20,27 @@
 - `schemas/build_provenance-1.0.0.schema.json`: unsigned build-provenance record의 closed machine-readable 계약
 - `schemas/offline_verification_report-1.0.0.schema.json`: 받은 `.amr`와 네 export package의 통합 offline verification receipt 계약
 - `schemas/surface_measurement_receipt-1.0.0.schema.json`: source triangle+barycentric 거리·원 맞춤 지름 receipt의 closed 계약
-- `schemas/field_pilot_review-1.0.0.schema.json`, `field_pilot_report-1.0.0.schema.json`, `field_pilot_verification-1.0.0.schema.json`: 단일 유물·단일 Windows machine의 현장 검토 증거와 재검증 receipt 계약
+- `schemas/field_pilot_review-1.0.0.schema.json`, `field_pilot_report-1.1.0.schema.json`, `field_pilot_verification-1.0.0.schema.json`: 지원 Windows client build/product type·native AMD64·64-bit AMD64 process·CPython 3.12·비호환 계층까지 닫힌 단일 유물·단일 machine의 현장 검토 증거와 재검증 receipt 계약
 - `build/generated/build_info.json`: version, channel, commit, runtime lock과 Windows wheel lock SHA-256
 
-일반 source 실행은 플랫폼 중립 version lock을 사용한다. 제품 대상 Windows frozen job은 평탄화된 hash lock만 설치하며 sdist와 검토되지 않은 wheel을 거부한다. 현재 lock은 Windows x64/CPython 3.12 한 대상의 증거이며 다른 OS 지원을 뜻하지 않는다.
+source checkout과 frozen build는 Windows x64의 CPython 3.12만 지원한다. `requirements/runtime-py312.lock`은 공통 dependency 입력과 내부 회귀 시험에 쓰이지만 비 Windows 실행 호환성을 약속하지 않는다. 제품 package job은 평탄화된 Windows hash lock만 설치하며 sdist와 검토되지 않은 wheel을 거부한다.
 
 ## 안전한 로컬 빌드
 
-깨끗한 Windows Python 3.12 환경에서 실행한다.
+깨끗한 native AMD64 Windows의 64-bit CPython 3.12 환경과 clean Git checkout에서 실행한다. 빌드 도구는 `IsWow64Process2`로 x64-on-ARM64 emulation을 거부하고, canonical `git --show-toplevel`이 실제 build root와 정확히 같은지 확인한다. `GIT_DIR`, `GIT_WORK_TREE`, alternate object/index/config 같은 repository override 환경과 replace object를 허용하지 않으며 요청한 `--commit`은 현재 `HEAD`와 정확히 같아야 한다.
+
+clean 판정은 `git status`의 index hint만 믿지 않는다. HEAD의 모든 regular blob path·blob ID·executable mode를 stage-0 index와 대조하고, 열린 worktree의 regular-file identity를 고정한 사이 `git hash-object --stdin-paths`의 Git canonical clean representation을 HEAD blob과 전수 비교한다. 따라서 `assume-unchanged`와 `skip-worktree`로 숨긴 변경도 실패한다. Git의 정상 `text`/`eol` clean 변환은 허용해 Windows CRLF checkout이 HEAD LF blob과 일치할 수 있지만, 외부 `filter`, `ident`, `working-tree-encoding` content transform은 재현 가능한 bytes를 가릴 수 있어 거부한다. 일반 untracked path와 frozen input root 안의 ignored 주입 파일도 거부한다. 이 전체 검사를 manifest·work directory·dist를 만들기 전과 PyInstaller 직후에 똑같이 통과해야만 corresponding source와 release evidence를 발급한다.
 
 ```bat
 py -3.12 -m venv .venv
 .venv\Scripts\activate
+set PYTHONDONTWRITEBYTECODE=1
 python -m pip install --require-hashes --only-binary=:all: ^
   -r requirements/windows-py312-x64-hashed.lock
 python tools/build_native.py
 ```
 
-기존 `build/ArchMeshRubbing` 또는 `dist/ArchMeshRubbing*`가 있으면 명령은 기본적으로 중단한다. 검토한 생성물만 명시적으로 교체할 때 `--replace-existing`를 사용한다. PyInstaller cache 삭제도 `--clean-cache`를 지정해야만 수행한다.
+`PYTHONDONTWRITEBYTECODE=1`은 build 전 정책 검사와 PyInstaller child까지 source-tree bytecode를 새로 만들지 않게 한다. 이미 `src` 아래에 ignored `__pycache__`/`.pyc` 또는 다른 ignored build input이 있으면 그것을 HEAD source로 오인하지 않고 출력 전에 중단하므로, 별도의 새 checkout에서 빌드한다. 기존 `build/ArchMeshRubbing` 또는 `dist/ArchMeshRubbing*`가 있으면 명령은 기본적으로 중단한다. 검토한 생성물만 명시적으로 교체할 때 `--replace-existing`를 사용한다. PyInstaller cache 삭제도 `--clean-cache`를 지정해야만 수행한다. `--commit`은 다른 commit을 대신 포장하는 선택지가 아니라 CI가 checkout identity를 명시적으로 재확인하는 입력이다.
 
 release evidence를 생성·검증한 onedir payload는 다음처럼 portable ZIP으로 묶는다. 출력 ZIP과 manifest는 기존 파일을 덮어쓰지 않는다.
 
@@ -62,7 +66,7 @@ python tools/build_portable_archive.py verify `
 
 1. embedded build manifest와 runtime/wheel lock hash
 2. 정확한 runtime distribution 버전과 Shapely/GEOS 조합
-3. 아이콘, runtime/wheel lock, license evidence policy, fail-closed public-release policy, 22개 JSON schema
+3. 아이콘, runtime/wheel lock, license evidence policy, fail-closed public-release policy, build에 고정된 전체 JSON schema set
 4. frozen/portable payload의 전체 파일 SHA-256 manifest, SPDX 2.3 SBOM, 제3자 NOTICE를 실제 bytes에서 재계산
 5. exact Git commit/tree/blob·SHA-256·LICENSE에 결합된 corresponding-source ZIP과 sidecar
 6. offscreen Qt application
@@ -73,7 +77,7 @@ python tools/build_portable_archive.py verify `
 11. canonical Cutline golden
 12. canonical Digital Rubbing golden
 13. 실제 PLY → 단위/Align session → embedded `.amr` 저장 → 외부 원본 삭제 → source/geometry/Align/world vertex 재검증
-14. 실제 application authority의 Open → explicit Align → Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6 → 검증 제원 1/1 → 표면 거리 1/1 → 원 맞춤 지름 1/1의 18개 record → completed `.amr` offline reopen → 이동된 1:1 SVG/PNG와 원자적 `.amr-survey`의 원본 SHA-256·recipe·QC·aggregate hash 재검증. 제원 record는 1 µm grid에서 cube 정답 24 mm²/8 mm³와 exact rational volume을, 두 anchor의 Euclidean chord와 네 anchor의 PCA 평면·정규화 대수 Kasa 원은 각각 1.000000 mm를 reopen 뒤 다시 확인한다. 이 check는 통합 verifier로 `.amr` embedded source materialization receipt를 만들고 개별 산출물과 15개 survey 묶음을 exact project에 다시 결합한다. 이어 같은 pair로 field-pilot report를 만들되 실제 human/OpenGL 입력을 만들어내지 않고 `artifact-pass-human-driver-pending`인 fail-closed 상태를 요구한다.
+14. 실제 application authority의 Open → explicit Align → Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6 → 검증 제원 1/1 → 표면 거리 1/1 → 원 맞춤 지름 1/1의 18개 record → completed `.amr` offline reopen → 이동된 1:1 SVG/PNG와 원자적 `.amr-survey`의 원본 SHA-256·recipe·QC·aggregate hash 재검증. 제원 record는 1 µm grid에서 cube 정답 24 mm²/8 mm³와 exact rational volume을, 두 anchor의 Euclidean chord와 네 anchor의 PCA 평면·정규화 대수 Kasa 원은 각각 1.000000 mm를 reopen 뒤 다시 확인한다. 별도의 합성 비틀린 원통형 기와 fixture는 외부 원본 삭제 뒤 `.amr` reopen·1.1 재계산·이동된 `.amr-unwrap` 검증과 동일 payload SHA-256, 13개 station·최대 6,364 µm row-shift를 강제한다. 이는 실물 기와 pilot의 대체 증거가 아니다. 이 check는 통합 verifier로 `.amr` embedded source materialization receipt를 만들고 개별 산출물과 15개 survey 묶음을 exact project에 다시 결합한다. 이어 같은 pair로 field-pilot report를 만들되 실제 human/OpenGL 입력을 만들어내지 않고 `artifact-pass-human-driver-pending`인 fail-closed 상태를 요구한다.
 
 Offscreen `QOpenGLWidget` 생성은 module/plugin 누락을 잡지만 실제 frame 정확성을 증명하지 않는다. Windows CI는 이어서 `QT_QPA_PLATFORM=windows`, `QT_OPENGL=software`로 native `qwindows`와 bundled `opengl32sw.dll`을 사용해 `src.gui.opengl_driver_smoke`를 실행한다. PyOpenGL의 GL/WGL dispatch도 같은 DLL에 결합해 Qt software context와 시스템 `opengl32.dll`이 섞이지 않게 한다. report는 768×768 실제 widget FBO, VBO, pixel/depth/pick과 두 투영 모드를 모두 검사한다.
 
@@ -85,7 +89,9 @@ python -m src.gui.opengl_driver_smoke ^
   --report build/opengl-driver-smoke.json
 ```
 
-2026-07-14 통합 verifier 기능 기준 commit `4a21666e7f7b`의 [source CI run 29280873586](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29280873586)은 qwindows+llvmpipe actual-frame 66/66을, [frozen package run 29280874076](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29280874076)은 frozen·한글 경로 14-check complete workflow, outbound deny 상태 public verification receipt, actual-frame 66/66과 cleanup gate를 통과했다. 과거 macOS/Linux source 결과는 이식성 기록일 뿐 첫 안정판 지원 판정에 사용하지 않는다.
+2026-07-14 통합 verifier 기능 기준 commit `4a21666e7f7b`의 [source CI run 29280873586](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29280873586)은 qwindows+llvmpipe actual-frame 66/66을, [frozen package run 29280874076](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29280874076)은 frozen·한글 경로 14-check complete workflow, outbound deny 상태 public verification receipt, actual-frame 66/66과 cleanup gate를 통과했다. 이 자동 runner 결과는 실제 지원 대상 Windows 10/11 PC의 하드웨어·driver 파일럿을 대신하지 않는다.
+
+현재 OpenGL smoke v2는 이 일반 Windows Server CI 경로를 차단하지 않고 OS build/product type·native/process architecture·Python·호환 계층 self-claim을 report에 함께 저장한다. field-pilot만 성공 root와 전체 필수 check/mode 구조를 닫아 확인하고, 지원 client에서 24시간 안에 수집한 동일 runtime claim과 exact match할 때 통과시킨다. 따라서 CI Server receipt는 package 회귀 증거로는 유효하지만 Windows 10/11 현장 pilot으로 승격되지 않는다.
 
 ## Windows portable CI
 
@@ -93,6 +99,7 @@ python -m src.gui.opengl_driver_smoke ^
 
 - Python 3.12와 hash-locked Windows wheel 17개만 설치하고 dependency closure 검사
 - public-release policy와 실제 `LICENSE`/설치된 PyQt6 metadata를 대조하고 `blocked` 상태 강제
+- 실제 CPython 3.12 구현체와 `IsWow64Process2` native AMD64 host, canonical Git top-level, override 없는 repository, `HEAD == requested commit`, 전수 HEAD blob/mode/live canonical bytes를 출력 생성 전 확인하고 PyInstaller 뒤 재확인
 - commit/runtime lock/wheel lock에 결합된 manifest와 PyInstaller onedir 생성
 - live worktree가 아닌 exact commit의 Git object에서 corresponding-source ZIP과 canonical sidecar 생성
 - payload 전체 파일 manifest, SPDX 2.3 JSON SBOM, machine/human NOTICE 생성·재검증
@@ -220,4 +227,4 @@ python tools/check_public_release_policy.py require-public
 - large mesh, low-memory, 완전 격리된 offline machine pilot
 - unsigned provenance와 공개 ZIP·sidecar·source archive를 인증하는 checksum/signature·trust-anchor 게시 규칙
 
-hash-locked frozen payload, 검증형 portable ZIP, exact corresponding-source archive, source/evidence/runner를 묶는 unsigned provenance, 한글 경로 offline/actual-frame/삭제 gate의 코드 경계는 구현됐다. 그래도 프로젝트/GUI 라이선스 결론, provenance·배포물의 서명과 신뢰 anchor, 대표 하드웨어·실물 대용량 pilot과 공개 릴리스는 아직 차단한다. macOS·Linux 배포는 첫 Windows 안정판 이후 별도 범위다.
+hash-locked frozen payload, 검증형 portable ZIP, exact corresponding-source archive, source/evidence/runner를 묶는 unsigned provenance, 한글 경로 offline/actual-frame/삭제 gate의 코드 경계는 구현됐다. 그래도 프로젝트/GUI 라이선스 결론, provenance·배포물의 서명과 신뢰 anchor, 지원 대상 Windows 10/11 x64의 대표 하드웨어·실물 대용량 pilot과 공개 릴리스는 아직 차단한다. 비 Windows 배포는 현재 비목표다.

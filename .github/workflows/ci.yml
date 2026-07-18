@@ -7,6 +7,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   quality:
     name: Windows quality
@@ -91,6 +94,7 @@ jobs:
           tests/test_build_manifest.py
           tests/test_release_evidence.py
           tests/test_source_identity.py
+          tests/test_mesh_admission.py
           tests/test_mesh_import_recipe.py
           tests/test_mesh_external_dependencies.py
           tests/test_mesh_verified_stream.py
@@ -116,6 +120,8 @@ jobs:
           tests/test_artifact_outline_topology.py
           tests/test_artifact_rubbing_extractor.py
           tests/test_artifact_rubbing_export.py
+          tests/test_flatten_metrics.py
+          tests/test_flattener_sectionwise.py
           tests/test_artifact_tile_unwrap.py
           tests/test_artifact_tile_unwrap_export.py
           tests/test_artifact_verification.py
@@ -147,6 +153,11 @@ jobs:
           p=pathlib.Path('build/windows-opengl-driver-smoke.json');
           d=json.loads(p.read_text(encoding='utf-8'));
           assert d.get('ok') is True, json.dumps(d,ensure_ascii=False,indent=2);
+          assert d.get('schema_version') == 2, d;
+          r=d.get('windows_runtime') or {};
+          assert set(r) == {'machine','process_bits','python_implementation','python_version','release','system','windows_build_number','windows_compatibility_layer','windows_major_version','windows_minor_version','windows_native_machine','windows_product_type'}, r;
+          assert r.get('system') == 'Windows' and r.get('windows_native_machine') == 'AMD64', r;
+          assert r.get('process_bits') == 64 and r.get('python_implementation') == 'CPython' and str(r.get('python_version')).startswith('3.12.'), r;
           c=d.get('context') or {};
           assert c.get('qt_platform') == 'windows', c;
           assert c.get('software_renderer') is True, c;
