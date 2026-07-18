@@ -4,15 +4,17 @@ import ast
 import os
 from pathlib import Path
 from types import MethodType, SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
+import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtCore import Qt
 from OpenGL.GL import GL_FALSE
 
+from src.core.artifact_scene_adapter import ArtifactProjectionSnapshot
 from src.core.mesh_loader import MeshData
 from src.gui.render_coordinates import RenderFrameSnapshot
 from src.gui.viewport_3d import SceneObject, Viewport3D, _SurfaceLassoSelectThread
@@ -77,6 +79,47 @@ def _identity_frame(
         ),
         render_origin_world_mm=np.asarray(origin, dtype=np.float64),
     )
+
+
+def _artifact_projection_snapshot() -> ArtifactProjectionSnapshot:
+    return ArtifactProjectionSnapshot(
+        document_id="artifact:surface-pick",
+        document_schema_version="1.0.0",
+        document_sha256="1" * 64,
+        source_asset_id="source:surface-pick",
+        geometry_revision_id="geometry:surface-pick",
+        source_metadata_revision_id="metadata:surface-pick",
+        align_revision_id="align:surface-pick",
+        geometry_sha256="2" * 64,
+        geometry_hash_scope="source_mesh",
+        matrix4x4=tuple(tuple(float(value) for value in row) for row in np.eye(4)),
+    )
+
+
+def _surface_pick_viewport(
+    *,
+    xray_mode: bool = False,
+    roi_enabled: bool = False,
+    translation: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    rotation: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    scale: float = 1.0,
+) -> tuple[SimpleNamespace, SimpleNamespace]:
+    obj = SimpleNamespace(
+        _amr_artifact_projection_snapshot=_artifact_projection_snapshot(),
+        visible=True,
+        translation=np.asarray(translation, dtype=np.float64),
+        rotation=np.asarray(rotation, dtype=np.float64),
+        scale=float(scale),
+    )
+    fake = SimpleNamespace(
+        objects=[obj],
+        selected_obj=obj,
+        xray_mode=bool(xray_mode),
+        roi_enabled=bool(roi_enabled),
+        pick_point_on_mesh_info=Mock(),
+        _world_radius_from_px_at_depth=Mock(return_value=0.00125),
+    )
+    return fake, obj
 
 
 def _mouse_event(
@@ -239,6 +282,78 @@ def test_depth_pick_unprojects_with_the_frame_that_produced_the_depth() -> None:
     assert returned_frame is depth_frame
     assert call_order == ["frame", "depth"]
     read_pixels.assert_called_once()
+
+
+def test_surface_anchor_observation_freezes_exact_frame_without_depth_search() -> None:
+    frame = _identity_frame(
+        np.array([1_000_000_000.0, -2_000_000_000.0, 500_000_000.0]),
+        serial=71,
+    )
+    fake, obj = _surface_pick_viewport()
+    depth_point = frame.render_origin_world_mm + [0.125, 0.25, 0.5]
+    fake.pick_point_on_mesh_info.return_value = (
+        np.asarray(depth_point, dtype=np.float64),
+        0.625,
+        43,
+        57,
+        np.asarray(frame.viewport, dtype=np.int32),
+        frame,
+    )
+    ray_origin = frame.render_origin_world_mm + [0.125, 0.25, 10.0]
+    ray_direction = np.asarray([0.0, 0.0, -1.0], dtype=np.float64)
+
+    with patch(
+        "src.gui.viewport_3d.world_ray_from_window",
+        return_value=(ray_origin, ray_direction),
+    ) as world_ray:
+        observation = Viewport3D.capture_surface_anchor_observation(fake, 42, 41)
+
+    assert observation is not None
+    assert observation.projection_snapshot is obj._amr_artifact_projection_snapshot
+    assert observation.frame_serial == 71
+    assert observation.projection_generation == frame.projection_generation
+    assert observation.depth_point_world_mm == tuple(depth_point)
+    assert observation.ray_origin_world_mm == tuple(ray_origin)
+    assert observation.ray_direction_world == (0.0, 0.0, -1.0)
+    assert observation.pixel_footprint_um == 2
+    assert observation.depth_search_offset_px == (0, 0)
+    fake.pick_point_on_mesh_info.assert_called_once_with(
+        42,
+        41,
+        allow_depth_search=False,
+        search_radius_px=0,
+    )
+    fake._world_radius_from_px_at_depth.assert_called_once_with(
+        43,
+        57,
+        0.625,
+        frame,
+        1.0,
+    )
+    world_ray.assert_called_once_with(frame, 43, 57)
+
+
+@pytest.mark.parametrize(
+    ("override", "message"),
+    [
+        ({"xray_mode": True}, "X-ray"),
+        ({"roi_enabled": True}, "ROI clipping"),
+        ({"translation": (0.001, 0.0, 0.0)}, "translation preview"),
+        ({"rotation": (0.0, 0.001, 0.0)}, "rotation preview"),
+        ({"scale": 1.000001}, "scale preview"),
+    ],
+)
+def test_surface_anchor_observation_fails_closed_before_depth_read(
+    override: dict[str, object],
+    message: str,
+) -> None:
+    fake, _obj = _surface_pick_viewport(**override)
+
+    with pytest.raises(ValueError, match=message):
+        Viewport3D.capture_surface_anchor_observation(fake, 12, 34)
+
+    fake.pick_point_on_mesh_info.assert_not_called()
+    fake._world_radius_from_px_at_depth.assert_not_called()
 
 
 def test_ctrl_drag_keeps_press_frame_after_a_new_live_frame_is_published() -> None:

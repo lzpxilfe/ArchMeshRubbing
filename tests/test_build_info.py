@@ -79,12 +79,15 @@ def test_self_test_passes_with_complete_offline_artifact_workflow() -> None:
     )
     assert checks["artifact_complete_workflow_offline"]["detail"].startswith(
         "workflow=Open>Align>Cutline 3/3>Outline 6/6>Rubbing 6/6>Metrics 1/1, "
-        "records=16"
+        "records=18"
     )
     assert "metrics=area 24.000000 mm2>volume 8.000000000 mm3" in checks[
         "artifact_complete_workflow_offline"
     ]["detail"]
     assert "exports=vector 9/9>rubbing 6/6" in checks[
+        "artifact_complete_workflow_offline"
+    ]["detail"]
+    assert "surface=distance 1.000000 mm>diameter 1.000000 mm" in checks[
         "artifact_complete_workflow_offline"
     ]["detail"]
     assert "survey=verified-atomic-15" in checks[

@@ -16,6 +16,7 @@ import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import Event
 from typing import Any, Callable, Mapping
 import uuid
 
@@ -235,7 +236,7 @@ from src.gui.opengl_context import (  # noqa: E402
 
 install_windows_software_pyopengl_bridge()
 
-from src.gui.viewport_3d import Viewport3D  # noqa: E402
+from src.gui.viewport_3d import SurfaceAnchorObservation, Viewport3D  # noqa: E402
 from src.core.mesh_loader import MeshData, MeshLoader  # noqa: E402
 from src.core.profile_exporter import ProfileExporter  # noqa: E402
 from src.core.project_file import (  # noqa: E402
@@ -261,6 +262,11 @@ from src.core.project_recovery import (  # noqa: E402
 from src.core.artifact_document import ArtifactDocument  # noqa: E402
 from src.core.artifact_geometry_metrics import (  # noqa: E402
     ArtifactGeometryMetricsComputation,
+)
+from src.core.artifact_surface_measurement import (  # noqa: E402
+    BARYCENTRIC_DENOMINATOR,
+    ArtifactSurfaceMeasurementComputation,
+    resolve_surface_anchor_from_ray,
 )
 from src.core.artifact_scene_adapter import (  # noqa: E402
     ArtifactProjectionSnapshot,
@@ -425,7 +431,11 @@ from src.core.alignment_utils import (  # noqa: E402
     transform_plane_world_to_local,
     transform_points,
 )
-from src.core.unit_utils import DEFAULT_MESH_UNIT, mm_to_mesh_units  # noqa: E402
+from src.core.unit_utils import (  # noqa: E402
+    DEFAULT_MESH_UNIT,
+    mesh_units_to_mm,
+    mm_to_mesh_units,
+)
 from src.core.tile_form_model import (  # noqa: E402
     AxisHint,
     AxisSource,
@@ -476,6 +486,7 @@ _VIEWPORT_PROJECT_SWAP_FIELDS = (
     "picked_points",
     "fitted_arc",
     "measure_picked_points",
+    "measure_picked_anchors",
     "slice_enabled",
     "slice_z",
     "slice_contours",
@@ -3748,8 +3759,8 @@ class MeasurePanel(QWidget):
         layout.setSpacing(10)
 
         hint = QLabel(
-            "Shift+클릭 거리·지름은 현재 검토용입니다.\n"
-            "표면적·체적은 아래 버튼으로 원본·단위·Align·위상 QC가 결박된 기록을 만듭니다."
+            "Native 문서의 Shift+클릭은 원본 삼각형·barycentric 좌표로 결박됩니다.\n"
+            "거리·지름·표면적·체적은 명시 단위와 Align에 연결된 재검산 가능 기록입니다."
         )
         hint.setStyleSheet("color: #718096; font-size: 10px;")
         hint.setWordWrap(True)
@@ -3769,7 +3780,7 @@ class MeasurePanel(QWidget):
         mode_layout = QFormLayout(mode_group)
 
         self.combo_mode = QComboBox()
-        self.combo_mode.addItems(["거리 (2점)", "지름/직경 (원 맞춤, 3점+)"])
+        self.combo_mode.addItems(["검증 거리 (2점)", "검증 원 맞춤 지름 (3~64점)"])
         self.combo_mode.currentIndexChanged.connect(self._on_mode_changed)
         mode_layout.addRow("모드:", self.combo_mode)
 
@@ -3777,9 +3788,11 @@ class MeasurePanel(QWidget):
         mode_layout.addRow("", self.label_point_count)
 
         btn_row = QHBoxLayout()
-        self.btn_fit_circle = QPushButton("지름 계산")
+        self.btn_fit_circle = QPushButton("지름 계산 · 기록")
         set_pixel_icon(self.btn_fit_circle, "measure")
-        self.btn_fit_circle.setToolTip("선택된 포인트(3점 이상)로 원을 맞추고 지름을 계산합니다.")
+        self.btn_fit_circle.setToolTip(
+            "3~64개의 표면 anchor에 PCA 평면·정규화 대수 Kasa 원을 맞추고 잔차 QC와 함께 기록합니다."
+        )
         self.btn_fit_circle.clicked.connect(self.fitCircleRequested.emit)
         self.btn_fit_circle.setEnabled(False)
         btn_row.addWidget(self.btn_fit_circle)
@@ -4564,6 +4577,9 @@ class MainWindow(QMainWindow):
             str,
             tuple[ArtifactMeasurementWorkItem, ArtifactMeasurementResult],
         ] = {}
+        # Fence late surface-pick workers from repopulating a transient point
+        # set that the operator already cleared or replaced.
+        self._surface_pick_generation = 0
         self._artifact_authority_faulted = False
         self._artifact_load_ticket: ArtifactLoadTicket | None = None
         self._mesh_load_request_id: str | None = None
@@ -4608,6 +4624,9 @@ class MainWindow(QMainWindow):
         self.viewport.floorAlignmentConfirmed.connect(self.on_floor_alignment_confirmed)
         self.viewport.surfaceAssignmentChanged.connect(self.on_surface_assignment_changed)
         self.viewport.measurePointPicked.connect(self.on_measure_point_picked)
+        self.viewport.surfaceAnchorPickRequested.connect(
+            self.on_surface_anchor_pick_requested
+        )
         self.viewport.undoRequested.connect(self.undo_last_action)
         
         # 단축키 설정 (Undo: Ctrl+Z)
@@ -7317,6 +7336,7 @@ class MainWindow(QMainWindow):
         session: ArtifactSession,
         *,
         allowed_selected_face_indices: tuple[int, ...] | None = None,
+        allow_surface_measurement_picks: bool = False,
     ) -> Callable[[], None]:
         """Capture GUI-only guards and defer canonical mesh comparison to a worker."""
 
@@ -7469,7 +7489,16 @@ class MainWindow(QMainWindow):
             getattr(obj, "tile_evaluation_report", None),
             getattr(self.viewport, "picked_points", []),
             getattr(self.viewport, "fitted_arc", None),
-            getattr(self.viewport, "measure_picked_points", []),
+            (
+                ()
+                if allow_surface_measurement_picks
+                else getattr(self.viewport, "measure_picked_points", [])
+            ),
+            (
+                ()
+                if allow_surface_measurement_picks
+                else getattr(self.viewport, "measure_picked_anchors", [])
+            ),
             getattr(self.viewport, "slice_contours", []),
             getattr(self.viewport, "x_profile", []),
             getattr(self.viewport, "y_profile", []),
@@ -15478,223 +15507,10 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-    """
-    NOTE: 아래 블록은 이전 패치 과정에서 깨진 상태로 남은 치수 측정 메서드들입니다.
-    안전하게 보존만 하고(문자열로 처리), 아래에 정상 구현을 다시 정의합니다.
-    (legacy measurement block continues below)
-
-    def toggle_measure_mode(self, enabled: bool) -> None:
-        \"\"\"치수(거리/지름) 측정 모드 토글\"\"\"
-        if enabled and self.viewport.selected_obj is None:
-            QMessageBox.warning(self, \"경고\", \"먼저 메쉬를 선택하세요.\")
-            self._disable_measure_mode()
-            self.viewport.update()
-            return
-
-        if enabled:
-            # 다른 입력 모드와 충돌 방지
-            try:
-                if self.flatten_panel.btn_measure.isChecked():
-                    self.flatten_panel.btn_measure.blockSignals(True)
-                    self.flatten_panel.btn_measure.setChecked(False)
-                    self.flatten_panel.btn_measure.blockSignals(False)
-            except Exception:
-                pass
-            try:
-                self.viewport.curvature_pick_mode = False
-            except Exception:
-                pass
-
-            try:
-                if bool(getattr(self.viewport, \"crosshair_enabled\", False)):
-                    self.viewport.crosshair_enabled = False
-                    self.section_panel.btn_toggle.blockSignals(True)
-                    self.section_panel.btn_toggle.setChecked(False)
-                    self.section_panel.btn_toggle.blockSignals(False)
-            except Exception:
-                pass
-
-            try:
-                if bool(getattr(self.viewport, \"cut_lines_enabled\", False)):
-                    self.viewport.set_cut_lines_enabled(False)
-                    self.section_panel.btn_line.blockSignals(True)
-                    self.section_panel.btn_line.setChecked(False)
-                    self.section_panel.btn_line.blockSignals(False)
-            except Exception:
-                pass
-
-            try:
-                if bool(getattr(self.viewport, \"roi_enabled\", False)):
-                    self.viewport.roi_enabled = False
-                    self.viewport.active_roi_edge = None
-                    self.section_panel.btn_roi.blockSignals(True)
-                    self.section_panel.btn_roi.setChecked(False)
-                    self.section_panel.btn_roi.blockSignals(False)
-                    self.section_panel.btn_silhouette.setEnabled(False)
-            except Exception:
-                pass
-
-            try:
-                self.viewport.clear_measure_picks()
-            except Exception:
-                pass
-            try:
-                self.measure_panel.set_points_count(0)
-            except Exception:
-                pass
-
-            self.viewport.picking_mode = \"measure\"
-            self.status_info.setText(\"치수 측정 모드: Shift+클릭으로 점을 찍으세요.\")
-        else:
-            try:
-                if self.viewport.picking_mode == \"measure\":
-                    self.viewport.picking_mode = \"none\"
-            except Exception:
-                pass
-            try:
-                self.viewport.clear_measure_picks()
-            except Exception:
-                pass
-            try:
-                self.measure_panel.set_points_count(0)
-            except Exception:
-                pass
-            self.status_info.setText(\"치수 측정 모드 종료\")
-
-        self.viewport.update()
-
-    def on_measure_mode_changed(self, mode: str) -> None:
-        try:
-            self.viewport.clear_measure_picks()
-            self.measure_panel.set_points_count(0)
-            self.viewport.update()
-        except Exception:
-            pass
-
-        if str(mode) == \"diameter\":
-            self.status_info.setText(\"지름 모드: 점 3개 이상 선택 후 '지름 계산'.\")
-        else:
-            self.status_info.setText(\"거리 모드: 점 2개 선택하면 자동 계산.\")
-
-    def on_measure_point_picked(self, _point: np.ndarray) -> None:
-        panel = getattr(self, \"measure_panel\", None)
-        if panel is None:
-            return
-
-        try:
-            pts = list(getattr(self.viewport, \"measure_picked_points\", []) or [])
-        except Exception:
-            pts = []
-
-        panel.set_points_count(len(pts))
-
-        if panel.mode != \"distance\":
-            return
-
-        if len(pts) < 2:
-            return
-
-        p0 = np.asarray(pts[-2], dtype=np.float64).reshape(-1)
-        p1 = np.asarray(pts[-1], dtype=np.float64).reshape(-1)
-        if p0.size < 3 or p1.size < 3:
-            return
-        if not np.isfinite(p0[:3]).all() or not np.isfinite(p1[:3]).all():
-            return
-
-        dist_cm = float(np.linalg.norm(p1[:3] - p0[:3]))
-        if not np.isfinite(dist_cm):
-            return
-
-        dist_mm = dist_cm * 10.0
-        msg = f\"거리: {dist_cm:.2f} cm ({dist_mm:.1f} mm)\"
-        panel.append_result(msg)
-        self.status_info.setText(f\"{msg}\")
-
-        try:
-            self.viewport.clear_measure_picks()
-            panel.set_points_count(0)
-            self.viewport.update()
-        except Exception:
-            pass
-
-    def fit_measure_circle(self) -> None:
-        panel = getattr(self, \"measure_panel\", None)
-        if panel is None:
-            return
-
-        if panel.mode != \"diameter\":
-            QMessageBox.information(self, \"안내\", \"지름/직경 모드에서만 사용할 수 있습니다.\")
-            return
-
-        try:
-            pts = np.asarray(getattr(self.viewport, \"measure_picked_points\", []) or [], dtype=np.float64)
-        except Exception:
-            pts = np.zeros((0, 3), dtype=np.float64)
-
-        if pts.ndim != 2 or pts.shape[0] < 3 or pts.shape[1] < 3:
-            QMessageBox.warning(
-                self,
-                \"경고\",
-                \"최소 3개의 포인트가 필요합니다.\\nShift+클릭으로 점을 더 찍어주세요.\",
-            )
-            return
-
-        from src.core.curvature_fitter import CurvatureFitter
-
-        fitter = CurvatureFitter()
-        arc = fitter.fit_arc(pts[:, :3])
-        if arc is None:
-            QMessageBox.warning(self, \"경고\", \"원 맞추기에 실패했습니다. 포인트를 다시 선택해보세요.\")
-            return
-
-        diameter_cm = float(arc.radius) * 2.0
-        diameter_mm = diameter_cm * 10.0
-        msg = f\"지름: {diameter_cm:.2f} cm ({diameter_mm:.1f} mm)\"
-        panel.append_result(msg)
-        self.status_info.setText(f\"{msg}\")
-
-        try:
-            self.viewport.clear_measure_picks()
-            panel.set_points_count(0)
-            self.viewport.update()
-        except Exception:
-            pass
-
-    def clear_measure_points(self) -> None:
-        try:
-            self.viewport.clear_measure_picks()
-            self.measure_panel.set_points_count(0)
-            self.viewport.update()
-            self.status_info.setText(\"측정 포인트 초기화\")
-        except Exception:
-            pass
-
-    def copy_measure_results(self) -> None:
-        panel = getattr(self, \"measure_panel\", None)
-        if panel is None:
-            return
-
-        text = panel.results_text().strip()
-        if not text:
-            return
-
-        try:
-            QApplication.clipboard().setText(text)
-            self.status_info.setText(\"측정 결과 복사됨\")
-        except Exception:
-            pass
-
-    def clear_measure_results(self) -> None:
-        try:
-            self.measure_panel.clear_results()
-            self.status_info.setText(\"측정 결과 지움\")
-        except Exception:
-            pass
-
-    """
 
     def toggle_measure_mode(self, enabled: bool) -> None:
         """치수(거리/지름) 측정 모드 토글"""
+        self._invalidate_surface_pick_requests()
         if enabled and self.viewport.selected_obj is None:
             QMessageBox.warning(self, "경고", "먼저 메쉬를 선택하세요.")
             try:
@@ -15704,6 +15520,25 @@ class MainWindow(QMainWindow):
             self._disable_measure_mode()
             self.viewport.update()
             return
+
+        if enabled and self._native_artifact_mode():
+            try:
+                obj = self.viewport.selected_obj
+                session = self._require_native_measurement_session(obj)
+                # Capture all GUI-only fail-closed guards now.  Canonical mesh
+                # equality is intentionally deferred to a worker.
+                self._capture_native_scene_preflight(session)
+            except Exception as exc:
+                self.measure_panel.set_measure_checked(False)
+                self._disable_measure_mode()
+                self.status_info.setText("검증 치수 측정 시작 실패 | 기존 문서 유지")
+                QMessageBox.warning(
+                    self,
+                    "검증 치수 측정 시작 실패",
+                    "원본·단위·Align이 확정된 단일 native 문서가 필요합니다.\n\n"
+                    f"{type(exc).__name__}: {exc}",
+                )
+                return
 
         if enabled:
             # 다른 입력 모드와 충돌 방지
@@ -15749,6 +15584,17 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
+            # X-ray does not write authoritative object depth.  Always leave
+            # it before a native pick instead of accepting a missing/stale hit.
+            try:
+                if bool(getattr(self.viewport, "xray_mode", False)):
+                    self.viewport.xray_mode = False
+                    self.trans_toolbar.btn_xray.blockSignals(True)
+                    self.trans_toolbar.btn_xray.setChecked(False)
+                    self.trans_toolbar.btn_xray.blockSignals(False)
+            except Exception:
+                pass
+
             try:
                 self.viewport.clear_measure_picks()
                 self.measure_panel.set_points_count(0)
@@ -15756,7 +15602,11 @@ class MainWindow(QMainWindow):
                 pass
 
             self.viewport.picking_mode = "measure"
-            self.status_info.setText("치수 측정 모드: Shift+클릭으로 점을 찍으세요.")
+            self.status_info.setText(
+                "검증 치수 측정: Shift+클릭 · source triangle+barycentric anchor"
+                if self._native_artifact_mode()
+                else "검토용 치수 측정: Shift+클릭으로 점을 찍으세요."
+            )
         else:
             try:
                 if self.viewport.picking_mode == "measure":
@@ -15773,6 +15623,7 @@ class MainWindow(QMainWindow):
         self.viewport.update()
 
     def on_measure_mode_changed(self, mode: str) -> None:
+        self._invalidate_surface_pick_requests()
         try:
             self.viewport.clear_measure_picks()
             self.measure_panel.set_points_count(0)
@@ -15781,9 +15632,317 @@ class MainWindow(QMainWindow):
             pass
 
         if str(mode) == "diameter":
-            self.status_info.setText("지름 모드: 점 3개 이상 선택 후 '지름 계산'.")
+            self.status_info.setText("원 맞춤 지름: 표면 anchor 3~64개 선택 후 '지름 계산 · 기록'.")
         else:
-            self.status_info.setText("거리 모드: 점 2개 선택하면 자동 계산.")
+            self.status_info.setText("검증 거리: 표면 anchor 2개 선택 시 자동 계산·기록.")
+
+    def on_surface_anchor_pick_requested(self, screen_x: int, screen_y: int) -> None:
+        """Resolve one native exact-frame click to a durable source anchor."""
+
+        if not self._native_artifact_mode():
+            return
+        try:
+            obj = self.viewport.selected_obj
+            session = self._require_native_measurement_session(obj)
+            observation = self.viewport.capture_surface_anchor_observation(
+                int(screen_x),
+                int(screen_y),
+            )
+            if observation is None:
+                self.status_info.setText(
+                    "표면 anchor 없음 | 메쉬 위를 Shift+클릭하세요"
+                )
+                return
+            if not isinstance(observation, SurfaceAnchorObservation):
+                raise ArtifactWorkbenchError("surface pick observation is invalid")
+            if observation.projection_snapshot != session.projection_snapshot():
+                raise ArtifactWorkbenchError(
+                    "surface pick frame does not match the active projection"
+                )
+        except Exception as exc:
+            self.status_info.setText("표면 anchor 캡처 실패 | 기록 변경 없음")
+            QMessageBox.warning(
+                self,
+                "표면 anchor 캡처 실패",
+                f"{type(exc).__name__}: {exc}",
+            )
+            return
+
+        cancellation = Event()
+        captured_obj = obj
+        pick_generation = int(getattr(self, "_surface_pick_generation", 0))
+
+        def resolve_anchor() -> tuple[
+            dict[str, Any],
+            np.ndarray,
+            ArtifactProjectionSnapshot,
+        ]:
+            projection = session.materialize()
+            if projection.snapshot != observation.projection_snapshot:
+                raise ArtifactWorkbenchError(
+                    "surface projection changed before anchor resolution"
+                )
+            anchor = resolve_surface_anchor_from_ray(
+                projection.mesh.vertices,
+                projection.mesh.faces,
+                source_faces=session.source_mesh.faces,
+                ray_origin_world_mm=observation.ray_origin_world_mm,
+                ray_direction_world=observation.ray_direction_world,
+                depth_point_world_mm=observation.depth_point_world_mm,
+                pixel_footprint_um=observation.pixel_footprint_um,
+                depth_search_offset_px=observation.depth_search_offset_px,
+                coordinate_grid_um=1,
+                cancellation_probe=cancellation.is_set,
+            )
+            row = np.asarray(anchor["face_vertex_indices"], dtype=np.int64)
+            weights = np.asarray(
+                anchor["barycentric_numerators"], dtype=np.float64
+            ) / float(BARYCENTRIC_DENOMINATOR)
+            point = np.einsum(
+                "i,ij->j",
+                weights,
+                np.asarray(projection.mesh.vertices, dtype=np.float64)[row],
+            )
+            return anchor, np.asarray(point, dtype=np.float64), projection.snapshot
+
+        def on_done(result: object) -> None:
+            try:
+                anchor, point, snapshot = result  # type: ignore[misc]
+                if not isinstance(anchor, dict) or not isinstance(
+                    snapshot, ArtifactProjectionSnapshot
+                ):
+                    raise ArtifactWorkbenchError(
+                        "surface anchor worker result is invalid"
+                    )
+                current = getattr(self, "_artifact_session", None)
+                live_obj = self.viewport.selected_obj
+                if not isinstance(current, ArtifactSession):
+                    raise ArtifactWorkbenchError("native document was closed")
+                current_snapshot = current.projection_snapshot()
+                live_binding = getattr(
+                    live_obj, "_amr_artifact_projection_snapshot", None
+                )
+                if (
+                    live_obj is not captured_obj
+                    or not isinstance(live_binding, ArtifactProjectionSnapshot)
+                    or current_snapshot.render_key != snapshot.render_key
+                    or live_binding.render_key != snapshot.render_key
+                    or self.viewport.picking_mode != "measure"
+                    or int(getattr(self, "_surface_pick_generation", 0))
+                    != pick_generation
+                ):
+                    raise ArtifactWorkbenchError(
+                        "surface anchor became stale before publication"
+                    )
+                anchors = getattr(self.viewport, "measure_picked_anchors", None)
+                points = getattr(self.viewport, "measure_picked_points", None)
+                if not isinstance(anchors, list) or not isinstance(points, list):
+                    raise ArtifactWorkbenchError("surface pick state is invalid")
+                maximum_anchors = 2 if self.measure_panel.mode == "distance" else 64
+                if len(anchors) >= maximum_anchors:
+                    raise ArtifactWorkbenchError(
+                        f"surface measurement accepts at most {maximum_anchors} anchors"
+                    )
+                anchors.append(dict(anchor))
+                points.append(np.asarray(point, dtype=np.float64).reshape(3))
+                self.measure_panel.set_points_count(len(anchors))
+                self.viewport.update()
+                self.status_info.setText(
+                    f"표면 anchor {len(anchors)}개 | face {int(anchor['face_index'])}"
+                )
+                if self.measure_panel.mode == "distance" and len(anchors) == 2:
+                    captured_anchors = tuple(dict(value) for value in anchors)
+                    QTimer.singleShot(
+                        0,
+                        lambda: self._start_native_surface_measurement(
+                            "distance",
+                            captured_anchors,
+                        ),
+                    )
+            except Exception as exc:
+                self.status_info.setText("표면 anchor 폐기 | 현재 문서 유지")
+                QMessageBox.warning(
+                    self,
+                    "표면 anchor 폐기",
+                    f"{type(exc).__name__}: {exc}",
+                )
+
+        def on_failed(message: str) -> None:
+            if (
+                int(getattr(self, "_surface_pick_generation", 0))
+                != pick_generation
+            ):
+                self.status_info.setText("표면 anchor 폐기 | 현재 점 목록 유지")
+                return
+            if cancellation.is_set():
+                self.status_info.setText("표면 anchor 계산 취소 | 기록 변경 없음")
+                return
+            self.status_info.setText("표면 anchor 계산 실패 | 기록 변경 없음")
+            QMessageBox.warning(
+                self,
+                "표면 anchor 계산 실패",
+                str(message),
+            )
+
+        def cancel_anchor() -> None:
+            cancellation.set()
+            self._invalidate_surface_pick_requests()
+
+        self.status_info.setText("전체 삼각형에서 표면 anchor 확인 중...")
+        started = self._start_task(
+            title="표면 anchor",
+            label="렌더 깊이와 원본 삼각형 교차 검증 중...",
+            thread=TaskThread("native_surface_anchor", resolve_anchor),
+            on_done=on_done,
+            on_failed=on_failed,
+            on_cancel_requested=cancel_anchor,
+        )
+        if not started:
+            cancellation.set()
+
+    def _start_native_surface_measurement(
+        self,
+        kind: str,
+        anchors: tuple[dict[str, Any], ...],
+    ) -> None:
+        """Compute and publish distance/diameter from captured source anchors."""
+
+        key = str(kind).strip().lower()
+        label = "검증 거리" if key == "distance" else "검증 원 맞춤 지름"
+        try:
+            obj = self.viewport.selected_obj
+            session = self._require_native_measurement_session(obj)
+            live_anchors = tuple(
+                dict(value)
+                for value in (
+                    getattr(self.viewport, "measure_picked_anchors", []) or []
+                )
+            )
+            if live_anchors != anchors:
+                raise ArtifactWorkbenchError(
+                    "surface anchors changed before measurement began"
+                )
+            preflight = self._capture_native_scene_preflight(
+                session,
+                allow_surface_measurement_picks=True,
+            )
+            controller = self._artifact_measurement_controller()
+            if key == "distance":
+                if len(anchors) != 2:
+                    raise ArtifactWorkbenchError(
+                        "surface distance requires exactly two anchors"
+                    )
+                work_item = controller.begin_surface_distance(
+                    anchors,
+                    coordinate_grid_um=1,
+                    record_id=f"record:surface-distance:{uuid.uuid4()}",
+                    created_at=self._utc_seconds_now(),
+                    operator="local-user",
+                )
+            elif key == "diameter":
+                if len(anchors) < 3 or len(anchors) > 64:
+                    raise ArtifactWorkbenchError(
+                        "surface diameter requires 3..64 anchors"
+                    )
+                work_item = controller.begin_surface_diameter(
+                    anchors,
+                    coordinate_grid_um=1,
+                    record_id=f"record:surface-diameter:{uuid.uuid4()}",
+                    created_at=self._utc_seconds_now(),
+                    operator="local-user",
+                )
+            else:
+                raise ArtifactWorkbenchError(
+                    f"unsupported surface measurement kind: {kind!r}"
+                )
+        except Exception as exc:
+            self.status_info.setText(f"{label} 준비 실패 | 기존 문서 유지")
+            QMessageBox.warning(
+                self,
+                f"{label} 준비 실패",
+                f"{type(exc).__name__}: {exc}",
+            )
+            return
+
+        def on_done(result: object) -> None:
+            if self._native_measurement_callback_is_terminal(
+                controller,
+                work_item,
+                label=label,
+            ):
+                return
+            try:
+                if not isinstance(result, ArtifactMeasurementResult):
+                    raise ArtifactWorkbenchError(
+                        "surface measurement worker result is invalid"
+                    )
+                self._publish_native_measurement_result(work_item, result)
+                self._invalidate_surface_pick_requests()
+                self.viewport.clear_measure_picks()
+                self.measure_panel.set_points_count(0)
+            except Exception as exc:
+                if self._report_artifact_authority_callback_failure(
+                    context=f"{label} 결과 게시 중 권위 확인 실패",
+                    detail=f"{type(exc).__name__}: {exc}",
+                ):
+                    return
+                pending = self._native_measurement_publication_is_pending(work_item)
+                self.status_info.setText(
+                    f"{label} 결과 게시 보류 | 재시도 버튼 사용"
+                    if pending
+                    else f"{label} 결과 폐기 | 현재 문서 유지"
+                )
+                QMessageBox.warning(
+                    self,
+                    f"{label} 결과 게시 보류" if pending else f"{label} 결과 폐기",
+                    f"{type(exc).__name__}: {exc}",
+                )
+
+        def on_failed(message: str) -> None:
+            if self._report_artifact_authority_callback_failure(
+                context=f"{label} worker 종료 콜백",
+                detail=str(message),
+            ):
+                return
+            if self._native_measurement_callback_is_terminal(
+                controller,
+                work_item,
+                label=label,
+            ):
+                return
+            self.status_info.setText(f"{label} 계산 실패 | 기록을 만들지 않았습니다")
+            QMessageBox.warning(
+                self,
+                f"{label} 계산 실패",
+                self._format_error_message("측정 중 오류가 발생했습니다:", message),
+            )
+
+        self.status_info.setText(f"{label} 계산 중 · canonical mm / 1 µm...")
+        started = self._start_task(
+            title=label,
+            label=f"{label}와 pick QC 계산 중...",
+            thread=TaskThread(
+                f"native_surface_{key}",
+                lambda: self._execute_native_measurement_with_preflight(
+                    preflight,
+                    controller,
+                    work_item,
+                ),
+            ),
+            on_done=on_done,
+            on_failed=on_failed,
+            on_cancel_requested=lambda: self._request_native_measurement_cancel(
+                controller,
+                work_item,
+                label=label,
+            ),
+            on_shutdown_joined=lambda: self._verify_native_measurement_shutdown(
+                controller,
+                work_item,
+            ),
+        )
+        if not started:
+            controller.cancel(work_item, reason="task_not_started")
 
     def on_measure_point_picked(self, _point: np.ndarray) -> None:
         panel = getattr(self, "measure_panel", None)
@@ -15810,12 +15969,14 @@ class MainWindow(QMainWindow):
         if not np.isfinite(p0[:3]).all() or not np.isfinite(p1[:3]).all():
             return
 
-        dist_cm = float(np.linalg.norm(p1[:3] - p0[:3]))
-        if not np.isfinite(dist_cm):
+        distance_mesh_units = float(np.linalg.norm(p1[:3] - p0[:3]))
+        if not np.isfinite(distance_mesh_units):
             return
 
-        dist_mm = dist_cm * 10.0
-        msg = f"거리: {dist_cm:.2f} cm ({dist_mm:.1f} mm)"
+        obj = getattr(self.viewport, "selected_obj", None)
+        unit = getattr(getattr(obj, "mesh", None), "unit", None)
+        dist_mm = mesh_units_to_mm(distance_mesh_units, unit)
+        msg = f"[검토용] 거리: {dist_mm:.3f} mm"
         panel.append_result(msg)
         self.status_info.setText(f"{msg}")
 
@@ -15835,6 +15996,26 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "안내", "지름/직경 모드에서만 사용할 수 있습니다.")
             return
 
+        if self._native_artifact_mode():
+            try:
+                anchors = tuple(
+                    dict(value)
+                    for value in (
+                        getattr(self.viewport, "measure_picked_anchors", []) or []
+                    )
+                )
+            except Exception:
+                anchors = ()
+            if len(anchors) < 3 or len(anchors) > 64:
+                QMessageBox.warning(
+                    self,
+                    "검증 원 맞춤 지름",
+                    "표면 anchor 3~64개가 필요합니다.\nShift+클릭으로 점을 선택하세요.",
+                )
+                return
+            self._start_native_surface_measurement("diameter", anchors)
+            return
+
         try:
             pts = np.asarray(getattr(self.viewport, "measure_picked_points", []) or [], dtype=np.float64)
         except Exception:
@@ -15852,12 +16033,10 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "경고", "원 맞추기에 실패했습니다. 포인트를 다시 선택해보세요.")
             return
 
-        from src.core.unit_utils import mesh_units_to_mm
-
         obj = getattr(self.viewport, "selected_obj", None)
         unit = getattr(getattr(obj, "mesh", None), "unit", None)
         diameter_mm = mesh_units_to_mm(float(arc.radius) * 2.0, unit)
-        msg = f"지름: {diameter_mm:.1f} mm"
+        msg = f"[검토용] 지름: {diameter_mm:.3f} mm"
         panel.append_result(msg)
         self.status_info.setText(f"{msg}")
 
@@ -15870,12 +16049,23 @@ class MainWindow(QMainWindow):
 
     def clear_measure_points(self) -> None:
         try:
+            self._invalidate_surface_pick_requests()
             self.viewport.clear_measure_picks()
             self.measure_panel.set_points_count(0)
             self.viewport.update()
             self.status_info.setText("측정 포인트 초기화")
         except Exception:
             pass
+
+    def _invalidate_surface_pick_requests(self) -> int:
+        """Invalidate workers bound to an older transient anchor list."""
+
+        try:
+            generation = int(getattr(self, "_surface_pick_generation", 0)) + 1
+        except Exception:
+            generation = 1
+        self._surface_pick_generation = generation
+        return generation
 
     def copy_measure_results(self) -> None:
         panel = getattr(self, "measure_panel", None)
@@ -17339,6 +17529,24 @@ class MainWindow(QMainWindow):
                 f"검증 제원 기록 | 표면적 {surface['decimal_mm2']} mm² · "
                 f"{volume_text}"
             )
+        elif work_item.kind in {
+            MeasurementOperationKind.SURFACE_DISTANCE,
+            MeasurementOperationKind.SURFACE_DIAMETER,
+        }:
+            assert isinstance(computation, ArtifactSurfaceMeasurementComputation)
+            receipt = computation.receipt_dict()
+            measurement = receipt["measurement"]
+            quality = receipt["quality"]
+            assert isinstance(measurement, dict)
+            assert isinstance(quality, dict)
+            if work_item.kind is MeasurementOperationKind.SURFACE_DISTANCE:
+                value_text = f"거리 {measurement['distance_mm_decimal']} mm"
+            else:
+                value_text = f"지름 {measurement['diameter_mm_decimal']} mm"
+            status_text = (
+                f"검증 표면 측정 기록 | {value_text} · "
+                f"pick QC {quality['status']}"
+            )
         else:  # pragma: no cover - closed enum guard
             raise ArtifactWorkbenchError(
                 f"unsupported native measurement kind: {work_item.kind.value}"
@@ -17468,6 +17676,40 @@ class MainWindow(QMainWindow):
                         f"orientation={topology['orientation_mismatch_edge_count']}, "
                         f"components={topology['connected_component_count']}"
                     )
+        elif isinstance(computation, ArtifactSurfaceMeasurementComputation):
+            receipt = computation.receipt_dict()
+            measurement = receipt["measurement"]
+            quality = receipt["quality"]
+            assert isinstance(measurement, dict)
+            assert isinstance(quality, dict)
+            panel = getattr(self, "measure_panel", None)
+            if panel is not None:
+                if computation.kind == "surface_distance":
+                    title = "검증 거리"
+                    value = f"{measurement['distance_mm_decimal']} mm"
+                    detail = "3D Euclidean chord (측지 거리 아님)"
+                else:
+                    title = "검증 원 맞춤 지름"
+                    value = f"{measurement['diameter_mm_decimal']} mm"
+                    detail = (
+                        f"samples={measurement['sample_count']}, "
+                        f"plane RMS={measurement['plane_rms_residual_mm_decimal']} mm, "
+                        f"radial RMS={measurement['radial_rms_residual_mm_decimal']} mm"
+                    )
+                panel.append_result(
+                    f"[{title}] record={publication.record_id} | {value}"
+                )
+                panel.append_result(f"- 의미: {detail}")
+                panel.append_result(
+                    "- pick QC: "
+                    f"{quality['status']} | max residual="
+                    f"{quality['maximum_capture_residual_mm_decimal']} mm, "
+                    f"pixel={quality['maximum_pixel_footprint_um']} µm, "
+                    f"near-edge={quality['near_edge_anchor_count']}"
+                )
+                reasons = list(quality["review_reasons"])
+                if reasons:
+                    panel.append_result("- 검토 사유: " + ", ".join(reasons))
         else:  # pragma: no cover - closed computation union
             raise ArtifactWorkbenchError(
                 "published an unsupported native measurement computation"

@@ -57,6 +57,16 @@ from src.core.artifact_rubbing_extractor import (
 )
 from src.core.artifact_scene_adapter import ArtifactProjectionSnapshot
 from src.core.artifact_session import ArtifactSession, ArtifactSessionError
+from src.core.artifact_surface_measurement import (
+    ArtifactSurfaceMeasurementComputation,
+    ArtifactSurfaceMeasurementError,
+    commit_artifact_surface_measurement,
+    extract_surface_measurement_from_source,
+    surface_diameter_recipe,
+    surface_distance_recipe,
+    surface_measurement_computation_matches_active_projection,
+    surface_measurement_selection_hash,
+)
 from src.core.artifact_tile_unwrap_extractor import (
     ArtifactTileUnwrapComputation,
     ArtifactTileUnwrapError,
@@ -119,6 +129,8 @@ class MeasurementOperationKind(str, Enum):
     DIGITAL_RUBBING = "digital_rubbing"
     TILE_UNWRAP = "tile_unwrap"
     GEOMETRY_METRICS = "geometry_metrics"
+    SURFACE_DISTANCE = "surface_distance"
+    SURFACE_DIAMETER = "surface_diameter"
 
 
 class MeasurementOperationState(str, Enum):
@@ -143,6 +155,7 @@ MeasurementComputation: TypeAlias = (
     | ArtifactRubbingComputation
     | ArtifactTileUnwrapComputation
     | ArtifactGeometryMetricsComputation
+    | ArtifactSurfaceMeasurementComputation
 )
 CancellationProbe: TypeAlias = Callable[[], bool]
 MeasurementPublisher: TypeAlias = Callable[[RecordBindingTransition], None]
@@ -210,6 +223,8 @@ def _operation_kind_for_computation(
 ) -> MeasurementOperationKind:
     if isinstance(computation, ArtifactGeometryMetricsComputation):
         return MeasurementOperationKind.GEOMETRY_METRICS
+    if isinstance(computation, ArtifactSurfaceMeasurementComputation):
+        return MeasurementOperationKind(computation.kind)
     if isinstance(computation, ArtifactRubbingComputation):
         return MeasurementOperationKind.DIGITAL_RUBBING
     if isinstance(computation, ArtifactTileUnwrapComputation):
@@ -534,6 +549,29 @@ def execute_measurement_work_item(
         except ArtifactGeometryMetricsError as exc:
             raise ArtifactMeasurementError(str(exc)) from exc
         computation = ArtifactGeometryMetricsComputation(
+            context=work_item.context,
+            projection_snapshot=work_item.projection_snapshot,
+            receipt=receipt,
+            recipe=recipe,
+            qc=qc,
+        )
+    elif work_item.kind in {
+        MeasurementOperationKind.SURFACE_DISTANCE,
+        MeasurementOperationKind.SURFACE_DIAMETER,
+    }:
+        try:
+            receipt, qc = extract_surface_measurement_from_source(
+                work_item.captured_session.source_mesh.vertices,
+                work_item.captured_session.source_mesh.faces,
+                work_item.projection_snapshot.matrix,
+                recipe,
+                cancellation_probe=cancellation_probe,
+            )
+        except ArtifactComputationCancelledError as exc:
+            raise MeasurementCancelledError(str(exc)) from exc
+        except ArtifactSurfaceMeasurementError as exc:
+            raise ArtifactMeasurementError(str(exc)) from exc
+        computation = ArtifactSurfaceMeasurementComputation(
             context=work_item.context,
             projection_snapshot=work_item.projection_snapshot,
             receipt=receipt,
@@ -1242,6 +1280,72 @@ class ArtifactMeasurementController:
             depends_on_record_ids=depends_on_record_ids,
         )
 
+    def begin_surface_distance(
+        self,
+        anchors: Sequence[Mapping[str, object]],
+        *,
+        coordinate_grid_um: int = 1,
+        record_id: str | None = None,
+        created_at: str | None = None,
+        operator: str = "local-user",
+        depends_on_record_ids: Sequence[str] = (),
+    ) -> ArtifactMeasurementWorkItem:
+        """Reserve one two-anchor Euclidean chord distance record."""
+
+        session = self._workbench.snapshot.session
+        if not isinstance(session, ArtifactSession):
+            raise ArtifactMeasurementError("no active ArtifactDocument session")
+        recipe = surface_distance_recipe(
+            anchors,
+            source_vertex_count=int(session.source_mesh.vertices.shape[0]),
+            source_face_count=int(session.source_mesh.faces.shape[0]),
+            coordinate_grid_um=coordinate_grid_um,
+        )
+        return self._begin(
+            kind=MeasurementOperationKind.SURFACE_DISTANCE,
+            recipe=recipe,
+            record_id=record_id,
+            created_at=created_at,
+            operator=operator,
+            selection_hash=surface_measurement_selection_hash(recipe),
+            depends_on_record_ids=depends_on_record_ids,
+        )
+
+    def begin_surface_diameter(
+        self,
+        anchors: Sequence[Mapping[str, object]],
+        *,
+        coordinate_grid_um: int = 1,
+        fit_review_threshold_um: int = 250,
+        maximum_fit_condition: int = 100_000_000,
+        record_id: str | None = None,
+        created_at: str | None = None,
+        operator: str = "local-user",
+        depends_on_record_ids: Sequence[str] = (),
+    ) -> ArtifactMeasurementWorkItem:
+        """Reserve one best-fit planar circle diameter record."""
+
+        session = self._workbench.snapshot.session
+        if not isinstance(session, ArtifactSession):
+            raise ArtifactMeasurementError("no active ArtifactDocument session")
+        recipe = surface_diameter_recipe(
+            anchors,
+            source_vertex_count=int(session.source_mesh.vertices.shape[0]),
+            source_face_count=int(session.source_mesh.faces.shape[0]),
+            coordinate_grid_um=coordinate_grid_um,
+            fit_review_threshold_um=fit_review_threshold_um,
+            maximum_fit_condition=maximum_fit_condition,
+        )
+        return self._begin(
+            kind=MeasurementOperationKind.SURFACE_DIAMETER,
+            recipe=recipe,
+            record_id=record_id,
+            created_at=created_at,
+            operator=operator,
+            selection_hash=surface_measurement_selection_hash(recipe),
+            depends_on_record_ids=depends_on_record_ids,
+        )
+
     def begin_rubbing(
         self,
         view: OutlineView | str,
@@ -1623,6 +1727,21 @@ class ArtifactMeasurementController:
                 operator=work_item.operator,
                 depends_on_record_ids=work_item.depends_on_record_ids,
             )
+        elif isinstance(computation, ArtifactSurfaceMeasurementComputation):
+            if not surface_measurement_computation_matches_active_projection(
+                current, computation
+            ):
+                raise StaleMeasurementOperationError(
+                    "surface measurement result is stale for the active projection"
+                )
+            candidate = commit_artifact_surface_measurement(
+                current,
+                computation,
+                record_id=work_item.record_id,
+                created_at=work_item.created_at,
+                operator=work_item.operator,
+                depends_on_record_ids=work_item.depends_on_record_ids,
+            )
         else:  # pragma: no cover - guarded by ArtifactMeasurementResult
             raise ArtifactMeasurementError("unsupported measurement computation")
 
@@ -1668,6 +1787,10 @@ class ArtifactMeasurementController:
             )
         if isinstance(computation, ArtifactGeometryMetricsComputation):
             return geometry_metrics_computation_matches_active_projection(
+                current, computation
+            )
+        if isinstance(computation, ArtifactSurfaceMeasurementComputation):
+            return surface_measurement_computation_matches_active_projection(
                 current, computation
             )
         return False

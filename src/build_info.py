@@ -474,6 +474,7 @@ def _check_resources() -> str:
     required_schemas = (
         "artifact_document-1.0.0.schema.json",
         "geometry_metrics_receipt-1.0.0.schema.json",
+        "surface_measurement_receipt-1.0.0.schema.json",
         "vector_payload-1.0.0.schema.json",
         "vector_export-1.0.0.schema.json",
         "rubbing_receipt-1.0.0.schema.json",

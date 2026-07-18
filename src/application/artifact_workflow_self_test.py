@@ -6,7 +6,8 @@ aligned, measured through the required 3/6/6 sequence, embedded in an AMR, and
 reopened after the external source has been removed.  The reopened session then
 reproduces every authoritative Cutline/Outline 1:1 SVG and Digital Rubbing 1:1
 PNG package through the same export controllers used by the GUI.  It also
-publishes and revalidates one guarded geometry-metrics record.
+publishes and revalidates guarded geometry-metrics, surface-distance, and
+surface-diameter records.
 
 The fixture is intentionally tiny and the module imports neither Qt nor OpenGL,
 so the check remains deterministic and suitable for an offline Windows build.
@@ -43,6 +44,10 @@ from src.application.artifact_workflow_progress import (
 from src.core.artifact_rubbing_export import validate_rubbing_export_package
 from src.core.artifact_geometry_metrics import geometry_metrics_receipt_from_record
 from src.core.artifact_session import ArtifactSession
+from src.core.artifact_surface_measurement import (
+    resolve_surface_anchor_from_ray,
+    surface_measurement_receipt_from_record,
+)
 from src.core.artifact_survey_export import validate_survey_export_package
 from src.core.artifact_verification import build_artifact_verification_report
 from src.core.artifact_vector_export import validate_vector_export_package
@@ -118,6 +123,8 @@ class ArtifactWorkflowSelfTestResult:
     outline_count: int
     rubbing_count: int
     geometry_metrics_count: int
+    surface_distance_count: int
+    surface_diameter_count: int
     vector_export_count: int
     rubbing_export_count: int
     vector_set_sha256: str
@@ -129,6 +136,8 @@ class ArtifactWorkflowSelfTestResult:
     png_sha256: str
     surface_area_mm2_decimal: str
     volume_mm3_decimal: str
+    surface_distance_mm_decimal: str
+    surface_diameter_mm_decimal: str
 
     @property
     def record_count(self) -> int:
@@ -137,6 +146,8 @@ class ArtifactWorkflowSelfTestResult:
             + self.outline_count
             + self.rubbing_count
             + self.geometry_metrics_count
+            + self.surface_distance_count
+            + self.surface_diameter_count
         )
 
     def detail(self) -> str:
@@ -153,6 +164,8 @@ class ArtifactWorkflowSelfTestResult:
             f"rubbing_set={self.rubbing_set_sha256[:12]}, "
             f"metrics=area {self.surface_area_mm2_decimal} mm2>"
             f"volume {self.volume_mm3_decimal} mm3, "
+            f"surface=distance {self.surface_distance_mm_decimal} mm>"
+            f"diameter {self.surface_diameter_mm_decimal} mm, "
             f"survey_manifest={self.survey_manifest_sha256[:12]}, "
             f"survey_set={self.survey_artifact_set_sha256[:12]}, "
             "survey=verified-atomic-15, "
@@ -207,6 +220,29 @@ def _measure_and_publish(
         lambda transition: _publish_measurement(controller.workbench, transition),
     )
     return publication.record_id
+
+
+def _top_surface_anchors(
+    session: ArtifactSession,
+    points_xy: tuple[tuple[float, float], ...],
+) -> list[dict[str, Any]]:
+    """Create deterministic source-topology anchors on the fixture's top face."""
+
+    projection = session.materialize()
+    if projection.snapshot != session.projection_snapshot():
+        raise RuntimeError("surface-anchor projection changed during self-test capture")
+    return [
+        resolve_surface_anchor_from_ray(
+            projection.mesh.vertices,
+            projection.mesh.faces,
+            source_faces=session.source_mesh.faces,
+            ray_origin_world_mm=(x, y, 3.0),
+            ray_direction_world=(0.0, 0.0, -1.0),
+            depth_point_world_mm=(x, y, 1.0),
+            pixel_footprint_um=1,
+        )
+        for x, y in points_xy
+    ]
 
 
 def _require_mapping(value: object, *, label: str) -> Mapping[str, Any]:
@@ -533,6 +569,61 @@ def _run_in_directory(directory: Path) -> ArtifactWorkflowSelfTestResult:
     ):
         raise RuntimeError("geometry metrics receipt lost cube ground truth")
 
+    circle_anchors = _top_surface_anchors(
+        metrics_session,
+        (
+            (0.5, 0.0),
+            (0.0, 0.5),
+            (-0.5, 0.0),
+            (0.0, -0.5),
+        ),
+    )
+    distance_id = _measure_and_publish(
+        measurements,
+        measurements.begin_surface_distance(
+            (circle_anchors[0], circle_anchors[2]),
+            coordinate_grid_um=1,
+            record_id="record:surface-distance:workflow-self-test",
+            created_at=_STAMP,
+            operator=_OPERATOR,
+        ),
+    )
+    distance_session = workbench.snapshot.session
+    if not isinstance(distance_session, ArtifactSession):
+        raise RuntimeError("surface distance publication lost the active session")
+    distance_receipt = surface_measurement_receipt_from_record(
+        distance_session.document.record_index[distance_id]
+    )
+    distance_measurement = _require_mapping(
+        distance_receipt.get("measurement"),
+        label="surface distance measurement",
+    )
+    if distance_measurement.get("distance_mm_decimal") != "1.000000":
+        raise RuntimeError("surface distance receipt lost 1 mm cube ground truth")
+
+    diameter_id = _measure_and_publish(
+        measurements,
+        measurements.begin_surface_diameter(
+            circle_anchors,
+            coordinate_grid_um=1,
+            record_id="record:surface-diameter:workflow-self-test",
+            created_at=_STAMP,
+            operator=_OPERATOR,
+        ),
+    )
+    diameter_session = workbench.snapshot.session
+    if not isinstance(diameter_session, ArtifactSession):
+        raise RuntimeError("surface diameter publication lost the active session")
+    diameter_receipt = surface_measurement_receipt_from_record(
+        diameter_session.document.record_index[diameter_id]
+    )
+    diameter_measurement = _require_mapping(
+        diameter_receipt.get("measurement"),
+        label="surface diameter measurement",
+    )
+    if diameter_measurement.get("diameter_mm_decimal") != "1.000000":
+        raise RuntimeError("surface diameter receipt lost 1 mm cube ground truth")
+
     cutline_ids: list[str] = []
     for view in REQUIRED_CUTLINE_VIEWS:
         item = measurements.begin_cutline(
@@ -596,6 +687,8 @@ def _run_in_directory(directory: Path) -> ArtifactWorkflowSelfTestResult:
         ArtifactWorkflowStep.DIGITAL_RUBBING,
     ) != tuple(rubbing_ids):
         raise RuntimeError("Digital Rubbing 6-view progress does not match records")
+    if len(current.document.records) != 18:
+        raise RuntimeError("complete self-test document does not contain 18 records")
 
     save_artifact_session_project(project_path, current)
     original_project_bytes = project_path.read_bytes()
@@ -624,6 +717,18 @@ def _run_in_directory(directory: Path) -> ArtifactWorkflowSelfTestResult:
     )
     if restored_metrics != metrics_receipt:
         raise RuntimeError("offline AMR reopen changed geometry metrics")
+    restored_distance = surface_measurement_receipt_from_record(
+        restored.document.record_index[distance_id]
+    )
+    if restored_distance != distance_receipt:
+        raise RuntimeError("offline AMR reopen changed the surface distance")
+    restored_diameter = surface_measurement_receipt_from_record(
+        restored.document.record_index[diameter_id]
+    )
+    if restored_diameter != diameter_receipt:
+        raise RuntimeError("offline AMR reopen changed the surface diameter")
+    if len(restored.document.records) != 18:
+        raise RuntimeError("offline AMR reopen changed the 18-record document")
     project_evidence = _verification_evidence(
         build_artifact_verification_report(recovered_path),
         artifact_kind="project",
@@ -739,6 +844,8 @@ def _run_in_directory(directory: Path) -> ArtifactWorkflowSelfTestResult:
         outline_count=counts[1],
         rubbing_count=counts[2],
         geometry_metrics_count=1,
+        surface_distance_count=1,
+        surface_diameter_count=1,
         vector_export_count=len(vector_receipts),
         rubbing_export_count=len(rubbing_receipts),
         vector_set_sha256=_receipt_set_sha256(vector_receipts),
@@ -750,6 +857,12 @@ def _run_in_directory(directory: Path) -> ArtifactWorkflowSelfTestResult:
         png_sha256=top_rubbing["png_sha256"],
         surface_area_mm2_decimal=str(metrics_surface["decimal_mm2"]),
         volume_mm3_decimal=str(metrics_volume["decimal_mm3"]),
+        surface_distance_mm_decimal=str(
+            distance_measurement["distance_mm_decimal"]
+        ),
+        surface_diameter_mm_decimal=str(
+            diameter_measurement["diameter_mm_decimal"]
+        ),
     )
 
 

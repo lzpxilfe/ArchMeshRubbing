@@ -242,6 +242,11 @@ class ArtifactSession:
             )
 
             validate_known_records(self.document)
+            from .artifact_surface_measurement import (  # noqa: PLC0415
+                validate_surface_measurement_records_against_session,
+            )
+
+            validate_surface_measurement_records_against_session(self)
             snapshot = ArtifactSceneAdapter(self.document).capture_snapshot(
                 self.verified_geometry
             )

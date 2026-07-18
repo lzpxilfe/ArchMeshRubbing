@@ -7,6 +7,7 @@ Licensed under the GNU General Public License v2.0 (GPL2)
 import logging
 import sys
 import time
+from dataclasses import dataclass
 import numpy as np
 from typing import Any, Optional, cast
 from scipy import ndimage
@@ -148,6 +149,26 @@ from .render_coordinates import (
     world_to_render_points,
     world_ray_from_window,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class SurfaceAnchorObservation:
+    """Transient exact-frame evidence for one authoritative surface pick.
+
+    This value deliberately contains no triangle identity.  The GUI thread
+    only reads the framebuffer and freezes the ray that produced that sample;
+    a cancellable CPU worker resolves the ray against every projected source
+    triangle before a durable barycentric anchor can be created.
+    """
+
+    projection_snapshot: ArtifactProjectionSnapshot
+    frame_serial: int
+    projection_generation: int
+    depth_point_world_mm: tuple[float, float, float]
+    ray_origin_world_mm: tuple[float, float, float]
+    ray_direction_world: tuple[float, float, float]
+    pixel_footprint_um: int
+    depth_search_offset_px: tuple[int, int] = (0, 0)
 
 
 def gluPerspective(
@@ -2032,6 +2053,7 @@ class Viewport3D(QOpenGLWidget):
     faceSelectionChanged = pyqtSignal(int)
     surfaceAssignmentChanged = pyqtSignal(int, int, int)  # outer/inner/migu faces count
     measurePointPicked = pyqtSignal(np.ndarray)
+    surfaceAnchorPickRequested = pyqtSignal(int, int)
     sliceScanRequested = pyqtSignal(float)
     sliceCaptureRequested = pyqtSignal(float)
     undoRequested = pyqtSignal()
@@ -2086,6 +2108,7 @@ class Viewport3D(QOpenGLWidget):
 
         # 移섏닔 痢≪젙 紐⑤뱶 (嫄곕━/吏곴꼍 ??
         self.measure_picked_points: list[np.ndarray] = []
+        self.measure_picked_anchors: list[dict[str, Any]] = []
         
         # Status text shown on viewport HUD
         self.status_info = ""
@@ -9102,6 +9125,7 @@ class Viewport3D(QOpenGLWidget):
         self.picked_points = []
         self.fitted_arc = None
         self.measure_picked_points = []
+        self.measure_picked_anchors = []
         self.slice_enabled = False
         self.slice_z = 0.0
         self.slice_contours = []
@@ -9288,6 +9312,7 @@ class Viewport3D(QOpenGLWidget):
         self.picked_points = []
         self.fitted_arc = None
         self.measure_picked_points = []
+        self.measure_picked_anchors = []
 
         self.slice_enabled = False
         self.slice_z = 0.0
@@ -10130,15 +10155,27 @@ class Viewport3D(QOpenGLWidget):
                     return
 
                 if self.picking_mode == "measure" and (modifiers & Qt.KeyboardModifier.ShiftModifier):
-                    # Shift+?대┃?쇰줈留???李띻린
-                    point = self.pick_point_on_mesh(event.pos().x(), event.pos().y())
-                    if point is not None:
-                        self.measure_picked_points.append(point)
+                    obj = self.selected_obj
+                    binding = getattr(obj, "_amr_artifact_projection_snapshot", None)
+                    if isinstance(binding, ArtifactProjectionSnapshot):
                         try:
-                            self.measurePointPicked.emit(point)
+                            self.surfaceAnchorPickRequested.emit(
+                                int(event.pos().x()),
+                                int(event.pos().y()),
+                            )
                         except Exception:
                             pass
-                        self.update()
+                    else:
+                        # Legacy documents retain their review-only floating
+                        # world-point path.  Native documents never enter it.
+                        point = self.pick_point_on_mesh(event.pos().x(), event.pos().y())
+                        if point is not None:
+                            self.measure_picked_points.append(point)
+                            try:
+                                self.measurePointPicked.emit(point)
+                            except Exception:
+                                pass
+                            self.update()
                     return
                         
                 elif self.picking_mode == 'floor_3point':
@@ -12423,6 +12460,94 @@ class Viewport3D(QOpenGLWidget):
         if info is None:
             return None
         return info[0]
+
+    def capture_surface_anchor_observation(
+        self,
+        screen_x: int,
+        screen_y: int,
+    ) -> SurfaceAnchorObservation | None:
+        """Capture exact-frame evidence without resolving source topology.
+
+        OpenGL framebuffer reads must remain on the GUI/context thread.  This
+        method therefore performs only the bounded depth read and ray capture;
+        global triangle intersection belongs to a worker.  Render modes that
+        can make the depth buffer differ from the authoritative full mesh fail
+        closed.
+        """
+
+        objects = list(getattr(self, "objects", []) or [])
+        obj = self.selected_obj
+        if len(objects) != 1 or obj is None or objects[0] is not obj:
+            raise ValueError("authoritative surface picking requires one selected object")
+        binding = getattr(obj, "_amr_artifact_projection_snapshot", None)
+        if not isinstance(binding, ArtifactProjectionSnapshot):
+            raise ValueError("selected object has no authoritative projection binding")
+        if not bool(getattr(obj, "visible", True)):
+            raise ValueError("selected object is hidden")
+        if bool(getattr(self, "xray_mode", False)):
+            raise ValueError("X-ray must be disabled for authoritative surface picking")
+        if bool(getattr(self, "roi_enabled", False)):
+            raise ValueError("ROI clipping must be disabled for authoritative surface picking")
+        if not np.allclose(
+            np.asarray(getattr(obj, "translation", ()), dtype=np.float64),
+            [0.0, 0.0, 0.0],
+            rtol=0.0,
+            atol=1e-12,
+        ):
+            raise ValueError("translation preview must be committed or reset before picking")
+        if not np.allclose(
+            np.asarray(getattr(obj, "rotation", ()), dtype=np.float64),
+            [0.0, 0.0, 0.0],
+            rtol=0.0,
+            atol=1e-12,
+        ):
+            raise ValueError("rotation preview must be committed or reset before picking")
+        if not np.isclose(
+            float(getattr(obj, "scale", 1.0)),
+            1.0,
+            rtol=0.0,
+            atol=1e-12,
+        ):
+            raise ValueError("scale preview must be reset before picking")
+
+        info = self.pick_point_on_mesh_info(
+            int(screen_x),
+            int(screen_y),
+            allow_depth_search=False,
+            search_radius_px=0,
+        )
+        if info is None:
+            return None
+        point, depth, gl_x, gl_y, _viewport, frame = info
+        if not isinstance(frame, RenderFrameSnapshot):
+            raise ValueError("surface pick has no immutable render frame")
+        ray_origin, ray_direction = world_ray_from_window(frame, gl_x, gl_y)
+        footprint_world_mm = self._world_radius_from_px_at_depth(
+            gl_x,
+            gl_y,
+            float(depth),
+            frame,
+            1.0,
+        )
+        if not np.isfinite(footprint_world_mm) or footprint_world_mm <= 0.0:
+            raise ValueError("surface pick pixel footprint could not be resolved")
+        footprint_um = max(1, int(np.ceil(footprint_world_mm * 1000.0)))
+        point_tuple = tuple(float(value) for value in np.asarray(point).reshape(3))
+        origin_tuple = tuple(
+            float(value) for value in np.asarray(ray_origin, dtype=np.float64).reshape(3)
+        )
+        direction_tuple = tuple(
+            float(value) for value in np.asarray(ray_direction, dtype=np.float64).reshape(3)
+        )
+        return SurfaceAnchorObservation(
+            projection_snapshot=binding,
+            frame_serial=int(frame.frame_serial),
+            projection_generation=int(frame.projection_generation),
+            depth_point_world_mm=point_tuple,
+            ray_origin_world_mm=origin_tuple,
+            ray_direction_world=direction_tuple,
+            pixel_footprint_um=footprint_um,
+        )
 
     def _world_radius_from_px_at_depth(
         self,
@@ -15700,8 +15825,10 @@ class Viewport3D(QOpenGLWidget):
         """Clear measure-picked points."""
         try:
             self.measure_picked_points = []
+            self.measure_picked_anchors = []
         except Exception:
             self.measure_picked_points = []
+            self.measure_picked_anchors = []
         self.update()
 
 

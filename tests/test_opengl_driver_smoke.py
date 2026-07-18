@@ -21,6 +21,7 @@ from src.gui.opengl_context import (
     install_windows_software_pyopengl_bridge,
 )
 from src.gui.opengl_driver_smoke import (
+    DriverSmokeFailure,
     PROBE_BASE_WORLD_MM,
     PROBE_GAP_WIDTH_MM,
     PROBE_STEP_HEIGHT_MM,
@@ -28,6 +29,7 @@ from src.gui.opengl_driver_smoke import (
     configure_probe_window,
     connected_component_sizes,
     probe_geometry,
+    resolve_probe_surface_anchor,
     write_report,
 )
 from src.gui.viewport_3d import gluLookAt, gluPerspective
@@ -289,6 +291,60 @@ def test_probe_geometry_exposes_absolute_float32_precision_regression() -> None:
     fresh_vertices, fresh_faces = probe_geometry()
     assert fresh_vertices[0, 0] != 0.0
     assert fresh_faces[0, 0] == 0
+
+
+def test_driver_probe_resolver_preserves_source_face_and_barycentrics() -> None:
+    vertices = PROBE_BASE_WORLD_MM.reshape(1, 3) + np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [0.0, 2.0, 0.0],
+        ],
+        dtype=np.float64,
+    )
+    source_faces = np.array([[0, 1, 2]], dtype=np.int32)
+    projected_faces = np.array([[0, 2, 1]], dtype=np.int32)
+    expected = PROBE_BASE_WORLD_MM + np.array([0.5, 0.25, 0.0])
+    observation = SimpleNamespace(
+        ray_origin_world_mm=tuple(
+            PROBE_BASE_WORLD_MM + np.array([0.5, 0.25, 1.0])
+        ),
+        ray_direction_world=(0.0, 0.0, -1.0),
+        depth_point_world_mm=tuple(expected),
+        pixel_footprint_um=1,
+        depth_search_offset_px=(0, 0),
+    )
+
+    anchor, reconstructed, residual_mm = resolve_probe_surface_anchor(
+        vertices,
+        projected_faces,
+        source_faces,
+        observation,
+    )
+
+    assert anchor["face_index"] == 0
+    assert anchor["face_vertex_indices"] == [0, 1, 2]
+    assert sum(anchor["barycentric_numerators"]) == 1_000_000_000
+    np.testing.assert_allclose(reconstructed, expected, rtol=0.0, atol=1e-9)
+    assert residual_mm <= 1e-9
+
+
+def test_driver_probe_resolver_forbids_neighbouring_depth_search() -> None:
+    vertices = np.array(
+        [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+        dtype=np.float64,
+    )
+    faces = np.array([[0, 1, 2]], dtype=np.int32)
+    observation = SimpleNamespace(
+        ray_origin_world_mm=(0.25, 0.25, 1.0),
+        ray_direction_world=(0.0, 0.0, -1.0),
+        depth_point_world_mm=(0.25, 0.25, 0.0),
+        pixel_footprint_um=1,
+        depth_search_offset_px=(1, 0),
+    )
+
+    with pytest.raises(DriverSmokeFailure, match="forbids"):
+        resolve_probe_surface_anchor(vertices, faces, faces, observation)
 
 
 def test_connected_component_sizes_uses_four_neighbours() -> None:

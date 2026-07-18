@@ -443,7 +443,32 @@ DerivedRecord(type=measurement.geometry_metrics.v1)
 - 유효한 체적은 grid 정수 좌표에서 계산한 signed six-volume을 exact rational mm³로 약분해 보존한다. 9자리 decimal은 이 유리수에서 재계산하며 독립 권위 값이 아니다.
 - 열린 scan, 서로 분리된 조각, 방향이 뒤집힌 일부 face, 비다양체에서는 표면적과 topology QC는 기록하되 체적 field를 `unavailable_topology`로 닫는다. convex-hull 근사값이나 자동 repair 결과를 체적으로 대체하지 않는다.
 - receipt, byte length, RFC 8785 hash, geometry ref, recipe grid와 QC 복제값을 project load/save마다 known-record registry에서 다시 검증한다. 현재 독립 package export는 없으며 self-contained `.amr`가 이 record의 전달 단위다.
-- Shift+클릭 거리·지름은 아직 viewport pick의 durable triangle/barycentric anchor가 없으므로 검토용 UI로 남고 이 record type으로 승격하지 않는다.
+
+## 표면 anchor 거리·원 맞춤 지름
+
+native 문서의 point 측정은 화면에서 얻은 float 좌표만 보존하지 않는다. exact `RenderFrameSnapshot`의 depth unproject와 ray를 사용하고, 전체 projected triangle을 bounded CPU ray/triangle 교차로 검사한 뒤 framebuffer depth point와 가장 가까운 hit를 source topology의 face row·vertex 순서에 다시 매핑한다. centroid-nearest face 추정은 권위 pick에 사용하지 않는다. machine-readable 계약은 `schemas/surface_measurement_receipt-1.0.0.schema.json`이다.
+
+```text
+DerivedRecord(type=measurement.surface_distance.v1 | measurement.circle_diameter.v1)
+├── selection_hash: source face+barycentric anchor 배열의 JCS digest
+├── recipe
+│   ├── coordinate_space: canonical_aligned_mm/v1
+│   ├── coordinate_grid_um: 1, rounding_mode: round_ties_to_even
+│   ├── pick_method: frame_depth_unproject+cpu_ray_triangle/v1
+│   └── anchor: source face_index + face_vertex_indices
+│       + barycentric_numerators / 1,000,000,000
+└── receipt
+    ├── anchor별 resolved point·depth residual·pixel footprint·edge 상태
+    ├── distance: exact squared-distance fraction + 6자리 mm
+    ├── diameter: PCA plane + normalized algebraic Kasa circle, center·normal·condition·residual + 6자리 mm
+    └── quality: pass | review와 닫힌 review reason
+```
+
+- `measurement.surface_distance.v1`은 정확히 두 anchor 사이의 3차원 Euclidean chord다. mesh 표면을 따라가는 geodesic 거리, 화면 투영 거리 또는 axis-aligned 폭이 아니다.
+- `measurement.circle_diameter.v1`은 3~64개 anchor의 PCA best-fit plane 위에서 좌표를 정규화한 뒤 대수 Kasa 방식으로 맞춘 원의 지름이다. 기하학적 radial least-squares가 아니며, 유물 전체의 maximum diameter, bounding-box 폭 또는 구 지름도 아니다. collinear/duplicate 입력, rank 부족, 평면 고유값 분리가 불충분한 입력, 비양수 반지름과 정책을 넘는 condition은 숫자를 만들지 않고 실패한다.
+- source face row와 10억 분율 barycentric weight가 durable anchor다. render origin, framebuffer depth와 ray는 source triangle을 찾기 위한 transient 관측값이며 document 권위로 저장하지 않는다. project reopen은 record가 참조한 과거 metadata·Align matrix로 source vertices를 다시 materialize하고 anchor point, 결과, receipt hash와 QC를 재계산한다.
+- pick QC는 depth→CPU hit residual, 한 pixel의 world footprint, triangle edge 근접도와 screen search offset만 보고한다. 지름은 여기에 plane/radial RMS·maximum residual과 fit condition을 더한다. 이는 화면 선택·재부착의 이산화와 원 맞춤 품질에 대한 검사이며 scanner calibration, mesh reconstruction, 표면 결손, 연구자 point 선택을 합친 총 측정불확도로 해석하면 안 된다. `review`도 값의 통계적 신뢰구간이나 현장 적합 판정이 아니다.
+- 과거 float world-point 기반 Shift+클릭 결과는 계속 검토용 legacy UI로만 취급하며 이 두 record type으로 자동 승격하지 않는다. 현재 전달 단위는 known-record 검증을 거치는 self-contained `.amr`이고 독립 측정 export는 없다.
 
 ## Authoritative tile unwrap record와 `.amr-unwrap`
 

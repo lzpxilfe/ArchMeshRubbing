@@ -81,6 +81,7 @@ from src.core.artifact_rubbing_extractor import (
 )
 from src.core.artifact_rubbing_record import rubbing_receipt_from_record
 from src.core.artifact_survey_export import validate_survey_export_package
+from src.core.artifact_surface_measurement import resolve_surface_anchor_from_ray
 from src.core.artifact_tile_unwrap_export import (
     ArtifactTileUnwrapExportError,
     validate_tile_unwrap_export_package,
@@ -114,7 +115,7 @@ from src.core.mesh_loader import MeshData
 from src.core.source_identity import SourceFingerprint, SourceVerificationStatus
 from src.core.tile_form_model import TileInterpretationState
 from src.core.tile_synthetic import generate_synthetic_tile, synthetic_tile_spec_from_preset
-from src.gui.viewport_3d import SceneObject, Viewport3D
+from src.gui.viewport_3d import SceneObject, SurfaceAnchorObservation, Viewport3D
 
 
 def _fingerprint(payload: bytes, *, name: str = "artifact.ply") -> SourceFingerprint:
@@ -332,6 +333,24 @@ def _projected_scene_object(session: ArtifactSession) -> SceneObject:
     obj._amr_artifact_projection_snapshot = projection.snapshot
     obj._amr_preview_pivot_mm = projection.mesh.centroid.copy()
     return obj
+
+
+def _surface_anchor_at(
+    session: ArtifactSession,
+    point_world_mm: tuple[float, float, float],
+) -> dict[str, object]:
+    projection = session.materialize()
+    point = np.asarray(point_world_mm, dtype=np.float64)
+    return resolve_surface_anchor_from_ray(
+        projection.mesh.vertices,
+        projection.mesh.faces,
+        source_faces=session.source_mesh.faces,
+        ray_origin_world_mm=point + np.asarray([0.0, 0.0, 100.0]),
+        ray_direction_world=(0.0, 0.0, -1.0),
+        depth_point_world_mm=point,
+        pixel_footprint_um=10,
+        coordinate_grid_um=1,
+    )
 
 
 def _capture_measurement_publication(
@@ -3356,6 +3375,209 @@ def test_native_geometry_metrics_publishes_record_without_scene_rebuild() -> Non
         assert "표면적: 2400.000000 mm²" in results
         assert "체적: 8000.000000000 mm³" in results
         assert "grid=1 µm" in results
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_native_surface_anchor_worker_cannot_repopulate_cleared_points() -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    session = _artifact_box_session()
+    obj = _projected_scene_object(session)
+    point = (-5.0, -7.0, 10.0)
+    observation = SurfaceAnchorObservation(
+        projection_snapshot=session.projection_snapshot(),
+        frame_serial=1,
+        projection_generation=1,
+        depth_point_world_mm=point,
+        ray_origin_world_mm=(point[0], point[1], point[2] + 100.0),
+        ray_direction_world=(0.0, 0.0, -1.0),
+        pixel_footprint_um=10,
+    )
+    window = MainWindow()
+    window._artifact_session = session
+    window.current_mesh = obj.mesh
+    window.viewport.objects = [obj]
+    window.viewport.selected_index = 0
+    window.viewport.picking_mode = "measure"
+    try:
+        with (
+            patch.object(
+                window.viewport,
+                "capture_surface_anchor_observation",
+                return_value=observation,
+            ),
+            patch.object(window, "_start_task", return_value=True) as start_task,
+        ):
+            window.on_surface_anchor_pick_requested(12, 34)
+
+        callbacks = start_task.call_args.kwargs
+        thread = callbacks["thread"]
+        assert isinstance(thread, TaskThread)
+        result = thread._fn()
+
+        window.clear_measure_points()
+        with patch.object(QMessageBox, "warning") as warning:
+            callbacks["on_done"](result)
+
+        warning.assert_called_once()
+        assert window.viewport.measure_picked_anchors == []
+        assert window.viewport.measure_picked_points == []
+        assert "표면 anchor 폐기" in window.status_info.text()
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+@pytest.mark.parametrize(
+    (
+        "kind",
+        "sample_points",
+        "task_name",
+        "record_type",
+        "result_line",
+    ),
+    [
+        (
+            "distance",
+            ((-5.0, -7.0, 10.0), (5.0, -7.0, 10.0)),
+            "native_surface_distance",
+            "measurement.surface_distance.v1",
+            "[검증 거리]",
+        ),
+        (
+            "diameter",
+            (
+                (5.0, 0.0, 10.0),
+                (0.0, 5.0, 10.0),
+                (-5.0, 0.0, 10.0),
+                (0.0, -5.0, 10.0),
+            ),
+            "native_surface_diameter",
+            "measurement.circle_diameter.v1",
+            "[검증 원 맞춤 지름]",
+        ),
+    ],
+)
+def test_native_surface_measurement_runs_in_worker_and_publishes_without_vbo_rebuild(
+    kind: str,
+    sample_points: tuple[tuple[float, float, float], ...],
+    task_name: str,
+    record_type: str,
+    result_line: str,
+) -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    session = _artifact_box_session()
+    anchors = tuple(_surface_anchor_at(session, point) for point in sample_points)
+    obj = _projected_scene_object(session)
+    initial_snapshot = obj._amr_artifact_projection_snapshot
+    window = MainWindow()
+    window._artifact_session = session
+    window.current_mesh = obj.mesh
+    window.viewport.objects = [obj]
+    window.viewport.selected_index = 0
+    window.viewport.measure_picked_anchors = [dict(anchor) for anchor in anchors]
+    captured: dict[str, object] = {}
+    original_materialize = ArtifactSession.materialize
+    worker_started = False
+    materialization_calls: list[ArtifactSession] = []
+
+    def guarded_materialize(current: ArtifactSession):
+        if not worker_started:
+            raise AssertionError("GUI handler materialized the canonical scene")
+        materialization_calls.append(current)
+        return original_materialize(current)
+
+    try:
+        with (
+            patch.object(window, "_start_task", return_value=True) as start_task,
+            patch.object(ArtifactSession, "materialize", new=guarded_materialize),
+        ):
+            window._start_native_surface_measurement(kind, anchors)
+
+            start_task.assert_called_once()
+            callbacks = start_task.call_args.kwargs
+            thread = callbacks["thread"]
+            assert isinstance(thread, TaskThread)
+            assert thread._task_name == task_name
+            assert materialization_calls == []
+
+            worker_started = True
+            result = thread._fn()
+
+        assert materialization_calls
+        with (
+            patch.object(
+                window,
+                "_publish_artifact_session_projection",
+                side_effect=_capture_measurement_publication(window, captured),
+            ),
+            patch.object(window.viewport, "prepare_mesh_object") as prepare,
+            patch.object(window.viewport, "swap_prepared_scene") as swap,
+        ):
+            callbacks["on_done"](result)
+
+        prepare.assert_not_called()
+        swap.assert_not_called()
+        committed = captured["session"]
+        assert isinstance(committed, ArtifactSession)
+        record = committed.document.records[-1]
+        assert record.type == record_type
+        transition = captured["transition"]
+        assert isinstance(transition, RecordBindingTransition)
+        assert transition.expected_snapshot.render_key == initial_snapshot.render_key
+        assert transition.candidate_snapshot.render_key == initial_snapshot.render_key
+        assert obj._amr_artifact_projection_snapshot == transition.candidate_snapshot
+        assert window.viewport.measure_picked_anchors == []
+        assert result_line in window.measure_panel.results_text()
+        assert "10.000000 mm" in window.measure_panel.results_text()
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+@pytest.mark.parametrize(
+    ("mesh_unit", "expected_mm"),
+    [("mm", "1.000"), ("cm", "10.000")],
+)
+def test_legacy_review_distance_converts_declared_mesh_units_once(
+    mesh_unit: str,
+    expected_mm: str,
+) -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    mesh = MeshData(
+        vertices=np.asarray(
+            [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            dtype=np.float64,
+        ),
+        faces=np.asarray([[0, 1, 2]], dtype=np.int32),
+        unit=mesh_unit,
+    )
+    obj = SceneObject(mesh, "legacy review mesh")
+    window = MainWindow()
+    window._artifact_session = None
+    window.viewport.objects = [obj]
+    window.viewport.selected_index = 0
+    window.viewport.measure_picked_points = [
+        np.asarray([0.0, 0.0, 0.0], dtype=np.float64),
+        np.asarray([1.0, 0.0, 0.0], dtype=np.float64),
+    ]
+    try:
+        window.on_measure_point_picked(window.viewport.measure_picked_points[-1])
+
+        results = window.measure_panel.results_text()
+        assert f"[검토용] 거리: {expected_mm} mm" in results
+        if mesh_unit == "mm":
+            assert "거리: 10.000 mm" not in results
     finally:
         window.deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)

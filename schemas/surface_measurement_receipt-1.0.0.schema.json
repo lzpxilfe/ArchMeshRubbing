@@ -1,0 +1,247 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:archmeshrubbing:schema:surface-measurement-receipt:1.0.0",
+  "title": "ArchMeshRubbing Surface Measurement Receipt 1.0.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "anchor_basis",
+    "anchors",
+    "barycentric_denominator",
+    "coordinate_grid_um",
+    "coordinate_space",
+    "input_face_count",
+    "input_vertex_count",
+    "kind",
+    "measurement",
+    "pick_method",
+    "quality",
+    "rounding_mode",
+    "schema_version"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0.0"},
+    "kind": {"enum": ["surface_distance", "surface_diameter"]},
+    "coordinate_space": {"const": "canonical_aligned_mm/v1"},
+    "coordinate_grid_um": {"type": "integer", "minimum": 1, "maximum": 1000},
+    "anchor_basis": {"const": "triangle_face_index+barycentric_ppb/v1"},
+    "barycentric_denominator": {"const": 1000000000},
+    "pick_method": {"const": "frame_depth_unproject+cpu_ray_triangle/v1"},
+    "rounding_mode": {"const": "round_ties_to_even"},
+    "input_vertex_count": {"type": "integer", "minimum": 3, "maximum": 5000000},
+    "input_face_count": {"type": "integer", "minimum": 1, "maximum": 2000000},
+    "anchors": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 64,
+      "items": {"$ref": "#/$defs/anchor"}
+    },
+    "measurement": {
+      "oneOf": [
+        {"$ref": "#/$defs/distanceMeasurement"},
+        {"$ref": "#/$defs/diameterMeasurement"}
+      ]
+    },
+    "quality": {"$ref": "#/$defs/quality"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"kind": {"const": "surface_distance"}}},
+      "then": {
+        "properties": {
+          "anchors": {"minItems": 2, "maxItems": 2},
+          "measurement": {"$ref": "#/$defs/distanceMeasurement"}
+        }
+      },
+      "else": {
+        "properties": {
+          "anchors": {"minItems": 3, "maxItems": 64},
+          "measurement": {"$ref": "#/$defs/diameterMeasurement"}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "gridVec3": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {
+        "type": "integer",
+        "minimum": -9007199254740991,
+        "maximum": 9007199254740991
+      }
+    },
+    "indexVec3": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {"type": "integer", "minimum": 0, "maximum": 4999999}
+    },
+    "barycentricVec3": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {"type": "integer", "minimum": 0, "maximum": 1000000000}
+    },
+    "screenVec2": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {"type": "integer", "minimum": -64, "maximum": 64}
+    },
+    "decimalVec3": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {"$ref": "#/$defs/signedDecimal6"}
+    },
+    "normalVec3": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {"$ref": "#/$defs/signedDecimal9"}
+    },
+    "integerStringVec3": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {"$ref": "#/$defs/signedIntegerString"}
+    },
+    "anchor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "barycentric_numerators",
+        "capture_point_grid",
+        "capture_residual_mm_decimal",
+        "depth_match_tolerance_um",
+        "depth_search_offset_px",
+        "edge_status",
+        "face_index",
+        "face_vertex_indices",
+        "minimum_barycentric_ppb",
+        "pixel_footprint_um",
+        "resolved_point_mm_decimal",
+        "resolved_point_numerator_grid_bary"
+      ],
+      "properties": {
+        "barycentric_numerators": {"$ref": "#/$defs/barycentricVec3"},
+        "capture_point_grid": {"$ref": "#/$defs/gridVec3"},
+        "capture_residual_mm_decimal": {"$ref": "#/$defs/decimal6"},
+        "depth_match_tolerance_um": {"type": "integer", "minimum": 50, "maximum": 10000},
+        "depth_search_offset_px": {"$ref": "#/$defs/screenVec2"},
+        "edge_status": {"enum": ["interior", "near_edge", "on_edge"]},
+        "face_index": {"type": "integer", "minimum": 0, "maximum": 1999999},
+        "face_vertex_indices": {"$ref": "#/$defs/indexVec3"},
+        "minimum_barycentric_ppb": {"type": "integer", "minimum": 0, "maximum": 1000000000},
+        "pixel_footprint_um": {"type": "integer", "minimum": 1, "maximum": 10000000},
+        "resolved_point_mm_decimal": {"$ref": "#/$defs/decimalVec3"},
+        "resolved_point_numerator_grid_bary": {"$ref": "#/$defs/integerStringVec3"}
+      }
+    },
+    "distanceMeasurement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "distance_mm_decimal",
+        "meaning",
+        "result_decimal_places",
+        "squared_distance_exact_mm2",
+        "status"
+      ],
+      "properties": {
+        "distance_mm_decimal": {"$ref": "#/$defs/positiveDecimal6"},
+        "meaning": {"const": "euclidean_3d_chord_between_surface_anchors/v1"},
+        "result_decimal_places": {"const": 6},
+        "squared_distance_exact_mm2": {"$ref": "#/$defs/positiveRational"},
+        "status": {"const": "available"}
+      }
+    },
+    "diameterMeasurement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "center_mm_decimal",
+        "condition_number_decimal",
+        "diameter_mm_decimal",
+        "fit_policy",
+        "normal_unit_decimal",
+        "plane_max_residual_mm_decimal",
+        "plane_rms_residual_mm_decimal",
+        "radial_max_residual_mm_decimal",
+        "radial_rms_residual_mm_decimal",
+        "radius_mm_decimal",
+        "result_decimal_places",
+        "sample_count",
+        "status"
+      ],
+      "properties": {
+        "center_mm_decimal": {"$ref": "#/$defs/decimalVec3"},
+        "condition_number_decimal": {"$ref": "#/$defs/decimal6"},
+        "diameter_mm_decimal": {"$ref": "#/$defs/positiveDecimal6"},
+        "fit_policy": {"const": "normalized_algebraic_kasa_on_pca_best_fit_plane/v1"},
+        "normal_unit_decimal": {"$ref": "#/$defs/normalVec3"},
+        "plane_max_residual_mm_decimal": {"$ref": "#/$defs/decimal6"},
+        "plane_rms_residual_mm_decimal": {"$ref": "#/$defs/decimal6"},
+        "radial_max_residual_mm_decimal": {"$ref": "#/$defs/decimal6"},
+        "radial_rms_residual_mm_decimal": {"$ref": "#/$defs/decimal6"},
+        "radius_mm_decimal": {"$ref": "#/$defs/positiveDecimal6"},
+        "result_decimal_places": {"const": 6},
+        "sample_count": {"type": "integer", "minimum": 3, "maximum": 64},
+        "status": {"const": "available"}
+      }
+    },
+    "quality": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "edge_review_threshold_ppb",
+        "fit_review_threshold_um",
+        "maximum_capture_residual_mm_decimal",
+        "maximum_pixel_footprint_um",
+        "near_edge_anchor_count",
+        "review_reasons",
+        "screen_search_anchor_count",
+        "status"
+      ],
+      "properties": {
+        "edge_review_threshold_ppb": {"type": "integer", "minimum": 0, "maximum": 333333333},
+        "fit_review_threshold_um": {"type": "integer", "minimum": 1, "maximum": 10000000},
+        "maximum_capture_residual_mm_decimal": {"$ref": "#/$defs/decimal6"},
+        "maximum_pixel_footprint_um": {"type": "integer", "minimum": 1, "maximum": 10000000},
+        "near_edge_anchor_count": {"type": "integer", "minimum": 0, "maximum": 64},
+        "review_reasons": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "anchor_near_triangle_edge",
+              "circle_fit_residual",
+              "coarse_pixel_footprint",
+              "depth_search_offset_used",
+              "plane_fit_residual"
+            ]
+          }
+        },
+        "screen_search_anchor_count": {"type": "integer", "minimum": 0, "maximum": 64},
+        "status": {"enum": ["pass", "review"]}
+      }
+    },
+    "decimal6": {"type": "string", "maxLength": 128, "pattern": "^(0|[1-9][0-9]*)\\.[0-9]{6}$"},
+    "positiveDecimal6": {"type": "string", "maxLength": 128, "pattern": "^(?:[1-9][0-9]*\\.[0-9]{6}|0\\.(?!000000)[0-9]{6})$"},
+    "signedDecimal6": {"type": "string", "maxLength": 128, "pattern": "^(0|-?(?:[1-9][0-9]*|0))\\.[0-9]{6}$"},
+    "signedDecimal9": {"type": "string", "maxLength": 128, "pattern": "^(0|-?(?:[1-9][0-9]*|0))\\.[0-9]{9}$"},
+    "positiveIntegerString": {"type": "string", "maxLength": 128, "pattern": "^[1-9][0-9]*$"},
+    "signedIntegerString": {"type": "string", "maxLength": 128, "pattern": "^(0|-?[1-9][0-9]*)$"},
+    "positiveRational": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["denominator", "numerator"],
+      "properties": {
+        "denominator": {"$ref": "#/$defs/positiveIntegerString"},
+        "numerator": {"$ref": "#/$defs/positiveIntegerString"}
+      }
+    }
+  }
+}

@@ -162,12 +162,12 @@ Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 임의 
 
 - [`src/application/artifact_workbench.py`](src/application/artifact_workbench.py): 한 artifact의 session/project path, 단일 pending Open, workflow readiness와 projection publication authority
 - [`src/application/artifact_workflow_progress.py`](src/application/artifact_workflow_progress.py): 검증된 session의 `READY + FRESH` view coverage에서 Cutline 3면·Outline 6면·Digital Rubbing 6면 진행도와 순차 gate를 재구성
-- [`src/application/artifact_measurements.py`](src/application/artifact_measurements.py): Cutline/Outline/Digital Rubbing/기와 전개/검증 제원의 immutable work item, Workbench 공유 예약·메모리 admission, cooperative cancellation, exact result capability와 same-Align rebase
+- [`src/application/artifact_measurements.py`](src/application/artifact_measurements.py): Cutline/Outline/Digital Rubbing/기와 전개/검증 제원·표면 anchor 거리/원 맞춤 지름의 immutable work item, Workbench 공유 예약·메모리 admission, cooperative cancellation, exact result capability와 same-Align rebase
 - [`src/application/artifact_exports.py`](src/application/artifact_exports.py): vector/rubbing/tile-unwrap export의 exact capability, worker staging, 안전한 정리와 final-authority publication
 - [`src/application/artifact_survey_exports.py`](src/application/artifact_survey_exports.py): 완료 15-record selection, 6개 raster 메모리 preflight, hidden aggregate staging과 모든 record를 한 번에 재확인하는 final-authority publication
 - Open/new import/project reopen과 Align commit/parent activation은 ticket과 compare-and-swap 검증을 거쳐 `prepare → activate → finalize`되며, scene swap 실패는 이전 authority로 rollback
 - Align commit/parent activation은 GUI에서 현재 session·scene binding·preview 값만 캡처합니다. 원본 geometry 재해시, candidate session 구성과 canonical materialization은 닫힘이 잠긴 worker에서 준비하고, 완료 시 같은 객체·mesh·binding·preview와 Workbench session/state/epoch/project path인지 다시 확인합니다. 하나라도 바뀌면 결과를 폐기하며, OpenGL context가 필요한 VBO 준비와 two-phase scene publication만 GUI thread에서 수행합니다.
-- Cutline/Outline/Digital Rubbing/기와 전개/검증 제원은 application shell에서 파라미터와 가벼운 scene guard만 캡처하고 단일 worker에서 계산합니다. canonical scene materialization·vertex/face 일치 검사와 Digital Rubbing의 해상도별 전체 peak-memory 추정도 controller 실행 수명주기 안의 worker preflight에서 수행하므로 GUI event loop를 막지 않습니다. Rubbing 시작 시에는 원본 geometry·UV·texture 복사를 포함한 보수적 최소 예약을 먼저 잡고, 전체 추정이 예산을 넘으면 계산 전에 fail closed합니다. worker는 문서를 변경하지 않으며, 완료 결과는 예약된 record ID와 일회성 result capability를 검증한 뒤 현재의 같은 Align session에 rebase합니다. record append publication은 GPU 장면을 교체하지 않습니다. 기와의 ‘현재 선택 면’은 exact face-range recipe로 고정하며, 성공적으로 게시될 때 사용자가 선택을 바꾸지 않은 경우에만 소비합니다. 재개방한 기록은 READY + FRESH 목록에서 명시적으로 선택하고, 일시적인 Open/scene 충돌로 게시하지 못한 측정 결과는 새 ID를 만들지 않고 재시도합니다.
+- Cutline/Outline/Digital Rubbing/기와 전개/검증 제원·표면 anchor 측정은 application shell에서 파라미터와 가벼운 scene guard만 캡처하고 단일 worker에서 계산합니다. canonical scene materialization·vertex/face 일치 검사와 Digital Rubbing의 해상도별 전체 peak-memory 추정도 controller 실행 수명주기 안의 worker preflight에서 수행하므로 GUI event loop를 막지 않습니다. Rubbing 시작 시에는 원본 geometry·UV·texture 복사를 포함한 보수적 최소 예약을 먼저 잡고, 전체 추정이 예산을 넘으면 계산 전에 fail closed합니다. worker는 문서를 변경하지 않으며, 완료 결과는 예약된 record ID와 일회성 result capability를 검증한 뒤 현재의 같은 Align session에 rebase합니다. record append publication은 GPU 장면을 교체하지 않습니다. 기와의 ‘현재 선택 면’은 exact face-range recipe로 고정하며, 성공적으로 게시될 때 사용자가 선택을 바꾸지 않은 경우에만 소비합니다. 재개방한 기록은 READY + FRESH 목록에서 명시적으로 선택하고, 일시적인 Open/scene 충돌로 게시하지 못한 측정 결과는 새 ID를 만들지 않고 재시도합니다.
 - vector/rubbing/survey/tile-unwrap export는 비싼 생성·record recipe 재계산을 worker에서 staging까지만 수행합니다. `.amr-survey`는 15개 exact record와 동일 projection을 한 번에 fence합니다. 최종 no-replace rename은 현재 권위를 다시 검증한 뒤 실행하며, 목적지 경합에서는 기존 승자를 보존합니다. rename 뒤 directory `fsync`가 실패하거나 Windows처럼 지원 여부를 확인할 수 없으면 저장 완료와 crash durability 미확정을 구분해 경고합니다.
 - native Save/Save As는 immutable session snapshot과 경량 scene guard만 GUI에서 캡처합니다. Git build metadata 조회, 원본 closure 재해시, ZIP64 작성·fsync, production reader 재개방, source/Align 재물질화는 잠긴 진행 대화상자의 worker에서 수행합니다. 완료 시 session·state version·authority epoch·기존 project path가 모두 그대로일 때만 결과 경로를 현재 프로젝트로 채택합니다. 중간에 권위가 바뀌면 파일은 유효한 과거 snapshot으로 명시하되 현재 문서가 저장됐다고 표시하지 않습니다.
 - 중단 저장 복구는 자동 시작 스캔이나 임시본 정리를 하지 않습니다. 사용자가 범위를 폴더 하나로 지정하고 후보·새 목적지를 각각 확인한 뒤 잠긴 worker에서 descriptor copy, file `fsync`, embedded-session materialization과 atomic create-new publish를 수행합니다. 성공 뒤에도 복구본 열기는 별도 확인이며, 실패·목적지 경합·후보 identity 변경에서는 live scene과 모든 기존 경로를 유지합니다.
@@ -183,6 +183,7 @@ Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 임의 
 - [`src/core/artifact_outline_extractor.py`](src/core/artifact_outline_extractor.py): fixed-grid 6면 Outline
 - [`src/core/artifact_rubbing_extractor.py`](src/core/artifact_rubbing_extractor.py): deterministic 6면 Digital Rubbing raster
 - [`src/core/artifact_geometry_metrics.py`](src/core/artifact_geometry_metrics.py): 1 µm canonical-mm 격자의 크기·표면적과 topology-gated exact-rational 체적 `measurement.geometry_metrics.v1`
+- [`src/core/artifact_surface_measurement.py`](src/core/artifact_surface_measurement.py): source triangle row와 10억 분율 barycentric anchor로 재현하는 3D Euclidean chord 거리와 3~64점 PCA 평면·정규화 대수 Kasa 원 지름 receipt
 - [`src/core/artifact_tile_unwrap_extractor.py`](src/core/artifact_tile_unwrap_extractor.py): 명시적 장축·face selection·1 µm 격자의 authoritative sectionwise 기와 전개
 - [`src/core/artifact_tile_unwrap_record.py`](src/core/artifact_tile_unwrap_record.py): `surface.tile_unwrap.v1` receipt·recipe·QC 검증
 - [`src/core/artifact_vector_export.py`](src/core/artifact_vector_export.py): `.amr-vector` 1:1 SVG package
@@ -246,7 +247,7 @@ Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 임의 
 - review sheet
 - 6방향 도면 패키지
 
-자유 flatten 전개·review sheet·기존 6방향 도면과 Shift+클릭 거리/지름은 현재 **검토용 legacy 결과**입니다. 1:1 측정 산출물로 검증되는 경로는 ArtifactDocument record에서 생성한 `.amr-vector` SVG, `.amr-rubbing` PNG, 완료 세트의 `.amr-survey`, 엄격한 sectionwise 계약을 통과한 `.amr-unwrap` 기와 전개, 그리고 `.amr` 안에 저장되는 `measurement.geometry_metrics.v1` 표면적·체적 receipt입니다. 체적은 단일 연결·폐쇄·일관 방향 edge-manifold일 때만 exact rational mm³로 기록하며 열린 메쉬·비다양체·다중 조각에서는 숫자를 만들지 않습니다.
+자유 flatten 전개·review sheet·기존 6방향 도면과 float world-point만 남기는 과거 Shift+클릭 거리는 **검토용 legacy 결과**입니다. native 문서의 측정 경로는 exact render-frame depth를 전체 CPU triangle과 교차해 source face+barycentric anchor로 고정하고, `.amr` 안에 `measurement.surface_distance.v1` 또는 `measurement.circle_diameter.v1` receipt를 저장합니다. 거리는 표면을 따라가는 geodesic이 아닌 두 anchor 사이의 3D Euclidean chord이며, 지름은 3~64개 anchor의 PCA best-fit plane 위에 정규화한 대수 Kasa 원의 지름이지 기하학적 radial least-squares나 유물의 최대 폭이 아닙니다. 1:1 측정 산출물로 검증되는 다른 경로는 ArtifactDocument record에서 생성한 `.amr-vector` SVG, `.amr-rubbing` PNG, 완료 세트의 `.amr-survey`, 엄격한 sectionwise 계약을 통과한 `.amr-unwrap` 기와 전개, `measurement.geometry_metrics.v1` 표면적·체적 receipt입니다. 체적은 단일 연결·폐쇄·일관 방향 edge-manifold일 때만 exact rational mm³로 기록하며 열린 메쉬·비다양체·다중 조각에서는 숫자를 만들지 않습니다.
 
 ---
 
@@ -284,7 +285,7 @@ python -c "import subprocess,sys; raise SystemExit(subprocess.call([sys.executab
 python -m pytest -q
 ```
 
-일반 `QT_QPA_PLATFORM=offscreen` suite는 실제 QOpenGLWidget context를 생성하거나 검증하지 않습니다. CI는 빠른 Linux quality job과 제품 대상인 Windows workflow job으로 나뉩니다. Windows job은 offscreen workflow 뒤 `qwindows` + Qt의 bundled `opengl32sw.dll`을 강제하고 Qt·PyOpenGL dispatch를 같은 DLL로 묶어 실제 768×768 widget FBO/VBO/pixel/depth/pick smoke를 실행합니다. Windows frozen executable도 같은 report CLI를 통과합니다. 이는 Windows software OpenGL 증거이며 대표 하드웨어 GPU나 compositor 최종 presentation 인증은 아닙니다. 자세한 판정 범위는 [docs/QUALITY_GATES.md](docs/QUALITY_GATES.md)에 기록합니다.
+일반 `QT_QPA_PLATFORM=offscreen` suite는 실제 QOpenGLWidget context를 생성하거나 검증하지 않습니다. CI의 전체 quality와 workflow smoke는 모두 Windows runner에서 실행합니다. workflow job은 offscreen 검증 뒤 `qwindows` + Qt의 bundled `opengl32sw.dll`을 강제하고 Qt·PyOpenGL dispatch를 같은 DLL로 묶어 실제 768×768 widget FBO/VBO/pixel/depth/pick smoke를 실행합니다. Windows frozen executable도 같은 report CLI를 통과합니다. 이는 Windows software OpenGL 증거이며 대표 하드웨어 GPU나 compositor 최종 presentation 인증은 아닙니다. 자세한 판정 범위는 [docs/QUALITY_GATES.md](docs/QUALITY_GATES.md)에 기록합니다.
 
 `pyright-m0.json`은 현재 M0 신뢰 커널 범위의 차단 게이트입니다. 전체 트리 타입 검사는 아직 부채를 보고하는 단계이며, 통과를 뜻하지 않습니다. 재현 환경, 게이트 범위, GUI 스모크 테스트의 한계는 [docs/QUALITY_GATES.md](docs/QUALITY_GATES.md)에 기록합니다.
 
@@ -400,6 +401,7 @@ python main.py --project mesh.obj planview.png
 - 원본 hash·명시적 단위·immutable Align revision 기반 `ArtifactDocument`
 - canonical-mm Cutline과 6면 fixed-grid Outline
 - recipe·QC·receipt가 있는 6면 Digital Rubbing과 1:1 `.amr-rubbing` export
+- source triangle+barycentric anchor로 재열어 검증하는 Euclidean chord 거리와 best-fit planar circle 지름
 - 완료 3/6/6을 한 버튼으로 15개 자식·canonical manifest에 결합하는 원자적 `.amr-survey` export
 - 전체/선택 face·명시적 장축·Top/Bottom·section/QC를 한 화면에서 기록하고 재열어 검증하는 native 기와 전개와 1:1 `.amr-unwrap` export
 - `.amr`, `.amr-vector`, `.amr-rubbing`, `.amr-survey`, `.amr-unwrap`의 자동 판별·이동 가능한 offline 검증과 exact project 결합 receipt
@@ -410,7 +412,7 @@ python main.py --project mesh.obj planview.png
 - Cutline/Outline/Digital Rubbing command와 worker 수명주기를 Qt/OpenGL-free application shell로 이식
 - DerivedRecord의 VBO-free binding rebind와 SVG/PNG worker staging → final-authority publication 이식
 - dependency-valid `READY + FRESH` record graph와 application command에서 Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6 순차 gate·초록 완료 표시·재열기/Align 복원 구현
-- packaged self-test가 실제 application authority를 통해 Open → explicit Align → Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6 → 검증 제원 1/1을 수행하고, 외부 PLY 삭제 뒤 embedded `.amr`를 재열어 24 mm²/8 mm³ exact metrics receipt와 SVG 9개·PNG 6개·원자적 `.amr-survey`를 원본 SHA-256·recipe·QC·aggregate hash 및 exact-project 결합으로 offline 재검증
+- packaged self-test가 실제 application authority를 통해 Open → explicit Align → Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6 → 검증 제원 1/1 → 거리 1/1 → 지름 1/1의 18개 record를 만들고, 외부 PLY 삭제 뒤 embedded `.amr`를 재열어 24 mm²/8 mm³ exact metrics와 1.000000 mm 거리·지름 receipt, SVG 9개·PNG 6개·원자적 `.amr-survey`를 원본 SHA-256·recipe·QC·aggregate hash 및 exact-project 결합으로 offline 재검증
 - `--field-pilot-review-template`, `--field-pilot`, `--verify-field-pilot`이 project/survey materialization, Windows graphics receipt, 고고학자 review, machine/performance를 closed canonical report로 묶으며, 실제 review나 driver 근거가 없으면 packaged self-test에서도 `artifact-pass-human-driver-pending`으로만 남김
 - `--opengl-driver-smoke-report`가 source와 frozen Windows 실행 파일에서 native `qwindows` context를 열고 Qt·PyOpenGL을 bundled `opengl32sw.dll` 하나에 결합한 뒤, 768×768 FBO에서 `>= 1e9 mm` 장면의 relative VBO, color/depth readback, 0.125 mm depth pick을 원근·정사영으로 검증
 - Windows x64/CPython 3.12 build wheel 17개를 exact SHA-256으로 잠그고 sdist를 거부하며, frozen/portable payload의 모든 파일 hash와 runtime 10개의 SPDX 2.3 SBOM·라이선스 원문 NOTICE를 실행 파일 self-test에서 재검증

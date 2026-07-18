@@ -49,6 +49,13 @@ from src.core.artifact_rubbing_extractor import (
     estimate_digital_rubbing_resources,
 )
 from src.core.artifact_session import ArtifactSession
+from src.core.artifact_surface_measurement import (
+    ArtifactSurfaceMeasurementComputation,
+    SURFACE_DIAMETER_RECORD_TYPE,
+    SURFACE_DISTANCE_RECORD_TYPE,
+    resolve_surface_anchor_from_ray,
+    surface_measurement_receipt_from_record,
+)
 from src.core.artifact_vector_extractor import (
     ArtifactVectorComputation,
     commit_vector_computation,
@@ -125,13 +132,19 @@ def _session(
     *,
     explicit_align: bool = True,
     source_mesh: MeshData | None = None,
+    axes: dict[str, str] | None = None,
+    handedness: str = "right",
 ) -> ArtifactSession:
     session = ArtifactSession.create_from_source(
         _box_mesh() if source_mesh is None else source_mesh,
         resolved_source_path="/source/box.ply",
         unit="cm",
-        axes={"source_x": "+X", "source_y": "+Y", "source_z": "+Z"},
-        handedness="right",
+        axes=(
+            {"source_x": "+X", "source_y": "+Y", "source_z": "+Z"}
+            if axes is None
+            else axes
+        ),
+        handedness=handedness,
         software_version="0.1.0",
         operator="pytest",
         created_at=STAMP,
@@ -246,12 +259,44 @@ def _begin_rubbing(
     )
 
 
+def _surface_anchor(
+    session: ArtifactSession,
+    point_world_mm: tuple[float, float, float],
+) -> dict[str, object]:
+    projection = session.materialize()
+    point = np.asarray(point_world_mm, dtype=np.float64)
+    return resolve_surface_anchor_from_ray(
+        projection.mesh.vertices,
+        projection.mesh.faces,
+        source_faces=session.source_mesh.faces,
+        ray_origin_world_mm=point + np.asarray([0.0, 0.0, 50.0]),
+        ray_direction_world=[0.0, 0.0, -1.0],
+        depth_point_world_mm=point,
+        pixel_footprint_um=10,
+    )
+
+
 def test_begin_requires_explicit_align_before_reserving_work() -> None:
     workbench = ArtifactWorkbench(session=_session(explicit_align=False))
     controller = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
 
     with pytest.raises(ArtifactWorkbenchError, match="explicit Align"):
         controller.begin_cutline(_cutline_frame(), record_id="record:blocked")
+
+    blocked_anchor = {
+        "barycentric_numerators": [1_000_000_000, 0, 0],
+        "capture_point_grid": [-10_000, -10_000, 10_000],
+        "depth_match_tolerance_um": 50,
+        "depth_search_offset_px": [0, 0],
+        "face_index": 2,
+        "face_vertex_indices": [4, 5, 6],
+        "pixel_footprint_um": 10,
+    }
+    with pytest.raises(ArtifactWorkbenchError, match="explicit Align"):
+        controller.begin_surface_distance(
+            [blocked_anchor, {**blocked_anchor, "barycentric_numerators": [0, 1_000_000_000, 0]}],
+            record_id="record:surface-blocked",
+        )
 
     assert controller.active_summaries == ()
     assert workbench.snapshot.session is not None
@@ -371,6 +416,142 @@ def test_geometry_metrics_executes_and_publishes_guarded_exact_record() -> None:
     record = publication.session.document.record_index[publication.record_id]
     assert geometry_metrics_receipt_from_record(record) == receipt
     assert controller.summary(item).state is MeasurementOperationState.COMPLETED
+
+
+def test_surface_distance_and_diameter_execute_publish_and_same_align_rebase() -> None:
+    session = _session()
+    workbench = ArtifactWorkbench(session=session, id_factory=SequentialIds())
+    controller = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
+    distance_anchors = [
+        _surface_anchor(session, (-5.0, -2.0, 10.0)),
+        _surface_anchor(session, (5.0, -2.0, 10.0)),
+    ]
+    diameter_anchors = [
+        _surface_anchor(session, (5.0, 0.0, 10.0)),
+        _surface_anchor(session, (0.0, 5.0, 10.0)),
+        _surface_anchor(session, (-5.0, 0.0, 10.0)),
+        _surface_anchor(session, (0.0, -5.0, 10.0)),
+    ]
+    distance_item = controller.begin_surface_distance(
+        distance_anchors,
+        record_id="record:surface-distance:test",
+        created_at=STAMP,
+        operator="pytest",
+    )
+    diameter_item = controller.begin_surface_diameter(
+        diameter_anchors,
+        record_id="record:surface-diameter:test",
+        created_at=STAMP,
+        operator="pytest",
+    )
+    assert distance_item.kind is MeasurementOperationKind.SURFACE_DISTANCE
+    assert diameter_item.kind is MeasurementOperationKind.SURFACE_DIAMETER
+    assert distance_item.context.selection_hash is not None
+    assert diameter_item.context.selection_hash is not None
+
+    distance_result = controller.execute(distance_item)
+    diameter_result = controller.execute(diameter_item)
+    assert isinstance(distance_result.computation, ArtifactSurfaceMeasurementComputation)
+    assert isinstance(diameter_result.computation, ArtifactSurfaceMeasurementComputation)
+
+    controller.publish_result(
+        distance_item,
+        distance_result,
+        _headless_publisher(workbench),
+    )
+    controller.publish_result(
+        diameter_item,
+        diameter_result,
+        _headless_publisher(workbench),
+    )
+    current = workbench.snapshot.session
+    assert isinstance(current, ArtifactSession)
+    distance_record = current.document.record_index[distance_item.record_id]
+    diameter_record = current.document.record_index[diameter_item.record_id]
+    assert distance_record.type == SURFACE_DISTANCE_RECORD_TYPE
+    assert diameter_record.type == SURFACE_DIAMETER_RECORD_TYPE
+    assert surface_measurement_receipt_from_record(distance_record)["measurement"][
+        "distance_mm_decimal"
+    ] == "10.000000"
+    assert surface_measurement_receipt_from_record(diameter_record)["measurement"][
+        "diameter_mm_decimal"
+    ] == "10.000000"
+    assert controller.summary(distance_item).state is MeasurementOperationState.COMPLETED
+    assert controller.summary(diameter_item).state is MeasurementOperationState.COMPLETED
+
+
+def test_surface_result_becomes_stale_after_align_change() -> None:
+    session = _session()
+    workbench = ArtifactWorkbench(session=session, id_factory=SequentialIds())
+    controller = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
+    item = controller.begin_surface_distance(
+        [
+            _surface_anchor(session, (-5.0, -2.0, 10.0)),
+            _surface_anchor(session, (5.0, -2.0, 10.0)),
+        ],
+        record_id="record:surface-distance:stale",
+        created_at=STAMP,
+        operator="pytest",
+    )
+    result = controller.execute(item)
+    changed = workbench.prepare_align_commit(
+        translation_mm=(1.0, 0.0, 0.0),
+        rotation_deg=(0.0, 0.0, 0.0),
+        scale=1.0,
+        pivot_mm=(0.0, 0.0, 0.0),
+        operator="pytest",
+        created_at=STAMP,
+        revision_id="align:surface-stale",
+    )
+    assert changed is not None
+    _headless_publisher(workbench)(changed)
+
+    with pytest.raises(StaleMeasurementOperationError, match="stale"):
+        controller.publish_result(item, result, _headless_publisher(workbench))
+    current = workbench.snapshot.session
+    assert isinstance(current, ArtifactSession)
+    assert item.record_id not in current.document.record_index
+    assert controller.summary(item).state is MeasurementOperationState.STALE
+
+
+def test_surface_distance_reopens_with_reflected_projected_face_winding() -> None:
+    session = _session(
+        axes={"source_x": "-X", "source_y": "+Y", "source_z": "+Z"},
+        handedness="left",
+    )
+    projection = session.materialize()
+    assert np.array_equal(
+        projection.mesh.faces,
+        np.asarray(session.source_mesh.faces)[:, [0, 2, 1]],
+    )
+    controller = ArtifactMeasurementController(ArtifactWorkbench(session=session))
+    item = controller.begin_surface_distance(
+        [
+            _surface_anchor(session, (-5.0, -2.0, 10.0)),
+            _surface_anchor(session, (5.0, -2.0, 10.0)),
+        ],
+        record_id="record:surface-distance:reflected",
+        created_at=STAMP,
+        operator="pytest",
+    )
+    result = controller.execute(item)
+    publication = controller.publish_result(
+        item,
+        result,
+        _headless_publisher(controller.workbench),
+    )
+    receipt = surface_measurement_receipt_from_record(
+        publication.session.document.record_index[item.record_id]
+    )
+    assert receipt["measurement"]["distance_mm_decimal"] == "10.000000"
+    rebound = ArtifactSession.bind_loaded_document(
+        publication.session.document,
+        session.source_mesh,
+        resolved_source_path=session.resolved_source_path,
+    )
+    assert rebound.document.record_index[item.record_id].type == (
+        SURFACE_DISTANCE_RECORD_TYPE
+    )
 
 
 def test_same_align_parallel_results_rebase_without_lost_updates() -> None:

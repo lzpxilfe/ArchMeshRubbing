@@ -21,7 +21,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -125,6 +125,86 @@ def probe_geometry() -> tuple[NDArray[np.float64], NDArray[np.int32]]:
 
     vertices = PROBE_BASE_WORLD_MM.reshape(1, 3) + PROBE_OFFSETS_MM
     return np.asarray(vertices, dtype=np.float64), PROBE_FACES.copy()
+
+
+def resolve_probe_surface_anchor(
+    vertices_world_mm: object,
+    projected_faces: object,
+    source_faces: object,
+    observation: Any,
+) -> tuple[dict[str, Any], NDArray[np.float64], float]:
+    """Run the production global resolver and reconstruct its source anchor.
+
+    The real-driver probe accepts only the exact clicked pixel.  A future
+    regression that reintroduces a neighbouring-depth search therefore fails
+    before durable topology is resolved.
+    """
+
+    from src.core.artifact_surface_measurement import (
+        BARYCENTRIC_DENOMINATOR,
+        resolve_surface_anchor_from_ray,
+    )
+
+    try:
+        search_offset = tuple(
+            int(value) for value in observation.depth_search_offset_px
+        )
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise DriverSmokeFailure(
+            "surface observation has no valid depth-search offset"
+        ) from exc
+    if search_offset != (0, 0):
+        raise DriverSmokeFailure(
+            "authoritative driver smoke forbids neighbouring depth search"
+        )
+
+    vertices = np.asarray(vertices_world_mm, dtype=np.float64)
+    projected = np.asarray(projected_faces, dtype=np.int64)
+    source = np.asarray(source_faces, dtype=np.int64)
+    anchor = resolve_surface_anchor_from_ray(
+        vertices,
+        projected,
+        source_faces=source,
+        ray_origin_world_mm=observation.ray_origin_world_mm,
+        ray_direction_world=observation.ray_direction_world,
+        depth_point_world_mm=observation.depth_point_world_mm,
+        pixel_footprint_um=int(observation.pixel_footprint_um),
+        depth_search_offset_px=search_offset,
+    )
+    face_index = int(anchor["face_index"])
+    source_row = np.asarray(anchor["face_vertex_indices"], dtype=np.int64)
+    if (
+        face_index < 0
+        or face_index >= source.shape[0]
+        or not np.array_equal(source_row, source[face_index])
+    ):
+        raise DriverSmokeFailure(
+            "global resolver did not preserve the source face row"
+        )
+    barycentric = np.asarray(
+        anchor["barycentric_numerators"],
+        dtype=np.int64,
+    )
+    if (
+        barycentric.shape != (3,)
+        or bool(np.any(barycentric < 0))
+        or int(np.sum(barycentric, dtype=np.int64))
+        != BARYCENTRIC_DENOMINATOR
+    ):
+        raise DriverSmokeFailure(
+            "global resolver produced invalid fixed-denominator barycentrics"
+        )
+    reconstructed = np.einsum(
+        "i,ij->j",
+        barycentric.astype(np.float64) / float(BARYCENTRIC_DENOMINATOR),
+        vertices[source_row],
+    )
+    depth_point = np.asarray(
+        observation.depth_point_world_mm,
+        dtype=np.float64,
+    ).reshape(3)
+    residual_mm = float(np.linalg.norm(reconstructed - depth_point))
+    return anchor, np.asarray(reconstructed, dtype=np.float64), residual_mm
 
 
 def connected_component_sizes(mask: object) -> list[int]:
@@ -505,10 +585,7 @@ def _render_mode(
     recorder: _CheckRecorder,
     mode: str,
 ) -> dict[str, Any]:
-    from src.gui.render_coordinates import (
-        unproject_window_to_world,
-        world_ray_from_window,
-    )
+    from src.gui.render_coordinates import unproject_window_to_world
 
     previous_frame = viewport._current_render_frame_snapshot()
     previous_frame_serial = (
@@ -709,41 +786,72 @@ def _render_mode(
 
     picked_points: list[np.ndarray] = []
     restored_points: list[np.ndarray] = []
+    oracle_points: list[np.ndarray] = []
+    anchor_points: list[np.ndarray] = []
+    surface_anchors: list[dict[str, Any]] = []
+    anchor_residuals: list[float] = []
+    pixel_footprints_um: list[int] = []
     pick_errors: list[float] = []
+    selected_obj = viewport.selected_obj
+    recorder.require(
+        f"{mode}.surface_anchor_selected_object",
+        selected_obj is not None,
+    )
+    if selected_obj is None:
+        raise DriverSmokeFailure("surface anchor probe has no selected object")
+    projected_vertices = np.asarray(
+        selected_obj.mesh.vertices,
+        dtype=np.float64,
+    )
+    projected_faces = np.asarray(selected_obj.mesh.faces, dtype=np.int64)
+    source_faces = PROBE_FACES.astype(np.int64, copy=False)
     for index, (pixel, expected_z) in enumerate(zip(sample_pixels, plane_z, strict=True)):
         gl_x, gl_y = pixel
         scale_x = float(width) / float(max(1, viewport.width()))
         scale_y = float(height) / float(max(1, viewport.height()))
         qt_x = (float(gl_x) - float(vx)) / scale_x
         qt_y = (float(vy + height - 1) - float(gl_y)) / scale_y
-        pick = viewport.pick_point_on_mesh_info(
+        observation = viewport.capture_surface_anchor_observation(
             int(round(qt_x)),
             int(round(qt_y)),
-            allow_depth_search=False,
         )
-        recorder.require(f"{mode}.pick_{index}_present", pick is not None)
-        if pick is None:
+        recorder.require(
+            f"{mode}.pick_{index}_present",
+            observation is not None,
+        )
+        if observation is None:
             raise DriverSmokeFailure("mesh pick unexpectedly returned None")
-        picked = np.asarray(pick[0], dtype=np.float64).reshape(3)
-        pick_gl_x = int(pick[2])
-        pick_gl_y = int(pick[3])
-        pick_frame = pick[5]
+        picked = np.asarray(
+            observation.depth_point_world_mm,
+            dtype=np.float64,
+        ).reshape(3)
         recorder.require(
             f"{mode}.pick_{index}_same_frame",
-            int(pick_frame.frame_serial) == int(frame.frame_serial),
+            int(observation.frame_serial) == int(frame.frame_serial)
+            and int(observation.projection_generation)
+            == int(frame.projection_generation),
             {
-                "pick_frame_serial": int(pick_frame.frame_serial),
+                "pick_frame_serial": int(observation.frame_serial),
                 "render_frame_serial": int(frame.frame_serial),
+                "pick_projection_generation": int(
+                    observation.projection_generation
+                ),
+                "render_projection_generation": int(
+                    frame.projection_generation
+                ),
             },
         )
         restored = unproject_window_to_world(
             frame,
             [float(gl_x), float(gl_y), sample_depths[index]],
         )
-        ray_origin, ray_direction = world_ray_from_window(
-            frame,
-            float(pick_gl_x),
-            float(pick_gl_y),
+        ray_origin = np.asarray(
+            observation.ray_origin_world_mm,
+            dtype=np.float64,
+        )
+        ray_direction = np.asarray(
+            observation.ray_direction_world,
+            dtype=np.float64,
         )
         denom = float(ray_direction[2])
         recorder.require(
@@ -764,8 +872,64 @@ def _render_mode(
                 "tolerance_mm": tolerance_mm,
             },
         )
+        anchor, anchor_point, anchor_residual = resolve_probe_surface_anchor(
+            projected_vertices,
+            projected_faces,
+            source_faces,
+            observation,
+        )
+        face_index = int(anchor["face_index"])
+        face_row = [int(value) for value in anchor["face_vertex_indices"]]
+        barycentric = [
+            int(value) for value in anchor["barycentric_numerators"]
+        ]
+        expected_face_group = {0, 1} if index == 0 else {2, 3}
+        recorder.require(
+            f"{mode}.anchor_{index}_global_source_face",
+            face_index in expected_face_group
+            and face_row == source_faces[face_index].tolist(),
+            {
+                "face_index": face_index,
+                "face_vertex_indices": face_row,
+                "expected_face_group": sorted(expected_face_group),
+            },
+        )
+        recorder.require(
+            f"{mode}.anchor_{index}_fixed_barycentric_sum",
+            min(barycentric) >= 0 and sum(barycentric) == 1_000_000_000,
+            {
+                "barycentric_numerators": barycentric,
+                "denominator": 1_000_000_000,
+            },
+        )
+        anchor_tolerance_mm = (
+            float(anchor["depth_match_tolerance_um"]) / 1000.0 + 1e-6
+        )
+        recorder.require(
+            f"{mode}.anchor_{index}_depth_reconstruction",
+            anchor_residual <= anchor_tolerance_mm,
+            {
+                "residual_mm": anchor_residual,
+                "tolerance_mm": anchor_tolerance_mm,
+            },
+        )
+        recorder.require(
+            f"{mode}.anchor_{index}_exact_pixel_only",
+            anchor["depth_search_offset_px"] == [0, 0]
+            and tuple(observation.depth_search_offset_px) == (0, 0),
+            {
+                "depth_search_offset_px": anchor[
+                    "depth_search_offset_px"
+                ],
+            },
+        )
         picked_points.append(picked)
         restored_points.append(np.asarray(restored, dtype=np.float64))
+        oracle_points.append(np.asarray(oracle, dtype=np.float64))
+        anchor_points.append(anchor_point)
+        surface_anchors.append(anchor)
+        anchor_residuals.append(anchor_residual)
+        pixel_footprints_um.append(int(observation.pixel_footprint_um))
         pick_errors.append(error)
 
     pick_delta = float(picked_points[1][2] - picked_points[0][2])
@@ -783,6 +947,40 @@ def _render_mode(
         },
     )
 
+    anchored_distance = float(np.linalg.norm(anchor_points[1] - anchor_points[0]))
+    oracle_distance = float(np.linalg.norm(oracle_points[1] - oracle_points[0]))
+    expected_distance = float(
+        np.linalg.norm(sample_world[1] - sample_world[0])
+    )
+    # Barycentric quantization is one part per billion on sub-mm triangles;
+    # allow only two nanometres here.  Framebuffer depth tolerance is checked
+    # separately above and must not weaken this topology reconstruction gate.
+    anchor_oracle_tolerance_mm = 2e-6
+    recorder.require(
+        f"{mode}.anchor_pair_matches_ray_oracle_distance",
+        abs(anchored_distance - oracle_distance)
+        <= anchor_oracle_tolerance_mm,
+        {
+            "anchor_distance_mm": anchored_distance,
+            "oracle_distance_mm": oracle_distance,
+            "tolerance_mm": anchor_oracle_tolerance_mm,
+        },
+    )
+    target_distance_tolerance_mm = max(
+        2.0 * tolerance_mm,
+        2.0 * sum(pixel_footprints_um) / 1000.0,
+    )
+    recorder.require(
+        f"{mode}.anchor_pair_known_distance",
+        abs(anchored_distance - expected_distance)
+        <= target_distance_tolerance_mm,
+        {
+            "anchor_distance_mm": anchored_distance,
+            "expected_mm": expected_distance,
+            "tolerance_mm": target_distance_tolerance_mm,
+        },
+    )
+
     return {
         "mode": mode,
         "projection_kind": "orthographic" if is_orthographic else "perspective",
@@ -797,6 +995,13 @@ def _render_mode(
         "overlay_pixel": overlay_pixel,
         "picked_world_mm": picked_points,
         "restored_world_mm": restored_points,
+        "surface_anchors": surface_anchors,
+        "surface_anchor_world_mm": anchor_points,
+        "max_surface_anchor_residual_mm": max(anchor_residuals),
+        "surface_anchor_distance_mm": anchored_distance,
+        "surface_anchor_expected_distance_mm": expected_distance,
+        "surface_anchor_oracle_distance_mm": oracle_distance,
+        "surface_anchor_pixel_footprints_um": pixel_footprints_um,
         "max_pick_error_mm": max(pick_errors),
         "pick_height_delta_mm": pick_delta,
         "restored_height_delta_mm": restored_delta,
@@ -820,6 +1025,7 @@ def run_driver_smoke(
     from PyQt6.QtOpenGLWidgets import QOpenGLWidget
     from PyQt6.QtWidgets import QApplication
 
+    from src.core.artifact_scene_adapter import ArtifactProjectionSnapshot
     from src.core.mesh_loader import MeshData
     from src.gui.opengl_context import (
         OPENGL_MINIMUM_DEPTH_BITS,
@@ -1030,6 +1236,24 @@ def run_driver_smoke(
         recorder.require("scene.selected_object", obj is not None)
         if obj is None:
             raise DriverSmokeFailure("probe mesh was not selected")
+        obj._amr_artifact_projection_snapshot = ArtifactProjectionSnapshot(
+            document_id="artifact:opengl-driver-smoke",
+            document_schema_version="1.0.0",
+            document_sha256="1" * 64,
+            source_asset_id="source:opengl-driver-smoke",
+            geometry_revision_id="geometry:opengl-driver-smoke",
+            source_metadata_revision_id="metadata:opengl-driver-smoke",
+            align_revision_id="align:opengl-driver-smoke",
+            geometry_sha256="2" * 64,
+            geometry_hash_scope="source_mesh",
+            matrix4x4=cast(
+                tuple[tuple[float, float, float, float], ...],
+                tuple(
+                    tuple(float(value) for value in row)
+                    for row in np.eye(4, dtype=np.float64)
+                ),
+            ),
+        )
         report["vbo"] = _read_vbo_payload(viewport, obj, GL, recorder)
 
         viewport.flat_shading = True

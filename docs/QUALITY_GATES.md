@@ -1,6 +1,6 @@
 # Quality Gates
 
-이 문서는 ArchMeshRubbing의 현재 개발 기준선과 CI가 실제로 보장하는 범위를 기록한다. 첫 공개 안정판의 제품 대상은 Windows 하나다. Linux quality job은 빠른 정적 검사와 전체 pytest 수집을 위한 구현 환경일 뿐 Linux 배포 지원 약속이 아니며, macOS·Linux 패키징은 현재 완료 조건에서 제외한다.
+이 문서는 ArchMeshRubbing의 현재 개발 기준선과 CI가 실제로 보장하는 범위를 기록한다. 첫 공개 안정판의 제품 대상과 현재 차단 CI runner는 Windows 하나다. macOS·Linux 패키징은 현재 완료 조건에서 제외한다.
 
 ## 재현 환경
 
@@ -25,7 +25,7 @@ python -m pytest -q
 
 - Ruff는 전체 트리를 검사한다.
 - pytest는 pytest 함수와 `unittest.TestCase`를 모두 수집한다. 별도의 `unittest discover`는 하위 호환성 확인용이며 CI의 권위 수집기가 아니다.
-- `pyright-m0.json`은 persistence·source identity·source manifest/bundle·unit·matrix 경계에 더해 M0-6의 `artifact_document`, `geometry_identity`, `artifact_scene_adapter`, `artifact_session`, core cooperative cancellation, Qt/OpenGL-free `artifact_workbench`·`artifact_workflow_progress`·`artifact_measurements`·`artifact_exports`·`artifact_survey_exports`·complete workflow self-test, `src/gui/opengl_context.py`의 명시적 surface 계약, actual-driver CLI와 actual context를 열지 않는 helper/support tests, Qt/OpenGL-free render-coordinate algebra인 `src/gui/render_coordinates.py`, known-record registry, RFC 8785 canonical JSON, vector record/export, Cutline, fixed-grid Outline/topology, Digital Rubbing record/extractor, 1 µm geometry metrics receipt, canonical GA8 PNG, atomic survey export, authoritative tile unwrap record/export, fail-closed public-release policy와 release evidence 및 해당 테스트를 포함하는 M0 신뢰 커널 범위다. 독립 프로세스 source-closure 왕복과 offline vector/rubbing/survey/tile-unwrap package 테스트도 목록에 포함한다. wrapper 명령은 활성 Python interpreter를 Pyright에 명시해 Windows CI의 dependency를 정확히 해석한다.
+- `pyright-m0.json`은 persistence·source identity·source manifest/bundle·unit·matrix 경계에 더해 M0-6의 `artifact_document`, `geometry_identity`, `artifact_scene_adapter`, `artifact_session`, core cooperative cancellation, Qt/OpenGL-free `artifact_workbench`·`artifact_workflow_progress`·`artifact_measurements`·`artifact_exports`·`artifact_survey_exports`·complete workflow self-test, `src/gui/opengl_context.py`의 명시적 surface 계약, actual-driver CLI와 actual context를 열지 않는 helper/support tests, Qt/OpenGL-free render-coordinate algebra인 `src/gui/render_coordinates.py`, known-record registry, RFC 8785 canonical JSON, vector record/export, Cutline, fixed-grid Outline/topology, Digital Rubbing record/extractor, 1 µm geometry metrics receipt, triangle+barycentric 표면 거리·원 맞춤 지름 receipt, canonical GA8 PNG, atomic survey export, authoritative tile unwrap record/export, fail-closed public-release policy와 release evidence 및 해당 테스트를 포함하는 M0 신뢰 커널 범위다. 독립 프로세스 source-closure 왕복과 offline vector/rubbing/survey/tile-unwrap package 테스트도 목록에 포함한다. wrapper 명령은 활성 Python interpreter를 Pyright에 명시해 Windows CI의 dependency를 정확히 해석한다.
 
 과거 `opengl-driver-smoke`는 Ubuntu 24.04의 24-bit Xvfb, native `xcb`, Mesa llvmpipe로 다음 명령에 해당하는 검사를 통과했다.
 
@@ -59,6 +59,7 @@ python -m pytest -q \
   tests/test_alignment_utils.py \
   tests/test_artifact_document.py \
   tests/test_artifact_geometry_metrics.py \
+  tests/test_artifact_surface_measurement.py \
   tests/test_geometry_identity.py \
   tests/test_artifact_scene_adapter.py \
   tests/test_artifact_session.py \
@@ -97,6 +98,7 @@ python -m pytest -q \
 - Align의 scale·shear·reflection·perspective·non-finite 거부
 - canonical millimeter metadata, immutable append/activate, deterministic serialization
 - 1 µm ties-to-even geometry metrics의 고정 표면적, exact-rational 체적, open/non-manifold/orientation/multi-component fail-closed, receipt schema·known-record reopen 검증
+- source face row와 10억 분율 barycentric anchor, 전체 CPU ray/triangle hit, large-offset exact squared chord distance, PCA 평면·정규화 대수 Kasa 원의 rank/eigengap/condition/RMS·maximum residual, receipt schema·과거 Align reopen·tamper·취소 검증
 - Align/metadata 전환에 따른 record freshness와 background operation context 고정
 - versioned canonical JSON golden fixture와 Draft 2020-12 `ArtifactDocument 1.0` schema 검증
 - raw source `(identity_scope, SHA-256, size)`와 saved parser format 재검증
@@ -143,7 +145,7 @@ python -m pytest -q \
 - portable/source/evidence exact hash와 실제 payload file set, GitHub repository/workflow/run attempt/Windows X64 hosted-runner identity를 결합하는 canonical unsigned provenance, 한글 추출본 offline 재검증, closed `authentication=none` 계약과 변조·source mismatch 거부
 - vector/rubbing/survey/tile-unwrap worker의 hidden same-parent staging·전체 검증·prepared inode/fingerprint capability, 빠른 final Workbench record-authority fence, same-Align append 허용, Align/Open stale 정리와 pending Open GUI 취소 정책
 - 고정 길이 staging UUID 충돌·quarantine/foreign inode 보존, exact result/prepared capability 위조·사전 목적지 이동·destination race 차단, post-rename 실제/미지원 directory-fsync `committed` 내구성 경고
-- Qt-free Cutline/Outline/Digital Rubbing/기와 전개/검증 제원 work item, exact result capability, same-Align 병렬 rebase, Workbench 공유 record reservation, Align/Open stale·취소·rollback 방어와 pending Open 게시 재시도
+- Qt-free Cutline/Outline/Digital Rubbing/기와 전개/검증 제원·표면 anchor 거리/지름 work item, exact result capability, same-Align 병렬 rebase, Workbench 공유 record reservation, Align/Open stale·취소·rollback 방어와 pending Open 게시 재시도
 - core 고유 `RuntimeError` 취소 신호, 세 extractor 내부의 bounded polling과 대형 NumPy 단계·최종 결과 fence, false-probe payload/raster/QC 동일성, controller의 `FAILED > STALE > CANCELLED` 경합 우선순위·`CANCELLING → CANCELLED` slot 보존, GUI one-shot 취소 요청·대기 창 수명·무경고 종료
 - Digital Rubbing 누적 peak-memory admission, UV/texture materialize 복사비의 무복사 사전 차단, controller별 한도 우회 방어, 실행 exactly-once, 취소 worker 종료 전 slot 보존
 - 재개방 프로젝트의 READY + FRESH vector/rubbing/tile-unwrap 명시 선택, background recipe 재계산과 완료 시 document/Align/record 재검증, active raster 예산 중첩 차단, 일시 게시 실패 재시도 queue와 보류 중 저장 차단
@@ -179,7 +181,7 @@ python -m pytest -q \
 
 전체 트리 Pyright는 아직 통과하지 않는다. CI에서는 이 결과를 `continue-on-error`로 보고하여 부채가 보이게 하되, M0 범위를 넘는 기존 오류 때문에 모든 변경을 막지는 않는다. 신뢰 커널 전환이 진행될 때마다 차단 범위를 넓힌다. 독립 프로세스 테스트의 worker program은 Python 문자열이므로 Pyright가 문자열 내부를 분석하지는 않지만, 차단 pytest가 두 문자열을 각각 새 interpreter에서 실제 실행한다.
 
-Windows workflow smoke에서는 프로젝트 저장과 중단 save-temp의 identity-pinned create-new 복구, source/geometry identity와 versioned source manifest/bundle, ArtifactDocument·scene adapter·session·application workbench와 record-derived workflow progress, ticketed Open과 explicit Align gate, RFC 8785/vector record/export/Cutline/Outline/topology/schema, Digital Rubbing record/extractor/canonical PNG/export/schema, atomic survey export, field-pilot review/report/verification schema와 CLI routing, authoritative tile-unwrap record/desktop panel/staged export, 독립 프로세스 source closure 및 relocated vector/rubbing/survey/tile-unwrap package 왕복, render-coordinate algebra·relative VBO/native preview smoke, matrix golden, GUI 런처, MainWindow 생성, native source-of-truth binding, native Cutline/Outline/Rubbing/기와 전개 command, 3/6/6 순차 gate와 completed `.amr` offline reopen, session/version/epoch 및 late-result 방어, legacy export 우회와 fail-closed 경계를 실행한다. Linux quality job은 별도로 전체 테스트와 Ruff·M0 Pyright를 빠르게 실행한다. Windows GUI 스모크는 `QT_QPA_PLATFORM=offscreen`이므로 CPU/document/scene transaction과 widget wiring을 검증하지만 실제 OpenGL frame을 증명하지 않는다.
+Windows workflow smoke에서는 프로젝트 저장과 중단 save-temp의 identity-pinned create-new 복구, source/geometry identity와 versioned source manifest/bundle, ArtifactDocument·scene adapter·session·application workbench와 record-derived workflow progress, ticketed Open과 explicit Align gate, RFC 8785/vector record/export/Cutline/Outline/topology/schema, Digital Rubbing record/extractor/canonical PNG/export/schema, atomic survey export, field-pilot review/report/verification schema와 CLI routing, authoritative tile-unwrap record/desktop panel/staged export, 독립 프로세스 source closure 및 relocated vector/rubbing/survey/tile-unwrap package 왕복, render-coordinate algebra·relative VBO/native preview smoke, matrix golden, GUI 런처, MainWindow 생성, native source-of-truth binding, native Cutline/Outline/Rubbing/기와 전개 command, 3/6/6 순차 gate와 completed `.amr` offline reopen, session/version/epoch 및 late-result 방어, legacy export 우회와 fail-closed 경계를 실행한다. 별도 Windows quality job도 전체 테스트와 Ruff·M0 Pyright를 실행한다. Windows GUI 스모크는 `QT_QPA_PLATFORM=offscreen`이므로 CPU/document/scene transaction과 widget wiring을 검증하지만 실제 OpenGL frame을 증명하지 않는다.
 
 같은 Windows job의 다음 단계는 `QT_QPA_PLATFORM=windows`, `QT_OPENGL=software`로 실제 `QOpenGLWidget` context를 열고 `src.gui.opengl_driver_smoke` report를 검증한다. Qt wheel에 포함된 `opengl32sw.dll`을 강제하고 PyOpenGL의 GL/WGL dispatch도 같은 DLL에 결합한다. 이렇게 해야 Qt의 software context와 시스템 `opengl32.dll`을 섞어 호출하지 않는다. qwindows/context/768×768 FBO/VBO/pixel/depth/pick 경계를 실행하며, 이는 software OpenGL 실제-frame 증거이지 대표 GPU 또는 compositor 최종 presentation 인증은 아니다.
 
