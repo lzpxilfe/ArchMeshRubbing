@@ -21,13 +21,14 @@ import hashlib
 import hmac
 import json
 import math
+import ntpath
 import os
 from pathlib import Path, PurePosixPath
 import re
 import stat
 import struct
 import tempfile
-from typing import TYPE_CHECKING, Any, BinaryIO, Iterator, NoReturn, cast
+from typing import TYPE_CHECKING, Any, BinaryIO, Callable, Iterator, NoReturn, cast
 import zipfile
 
 from .artifact_document import (
@@ -96,6 +97,19 @@ _COPY_CHUNK_BYTES = 1024 * 1024
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _SEMVER_RE = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:[-+].*)?$")
 
+# The Windows release target commits a fully written and production-validated
+# same-directory staging file with the documented Win32 write-through rename.
+# Keep the identifier stable: packaged workflow reports use it as an exact
+# machine-readable durability gate.
+WINDOWS_PROJECT_COMMIT_BACKEND = "windows-movefileex-write-through"
+POSIX_PROJECT_COMMIT_BACKEND = "posix-replace-directory-fsync"
+MOVEFILE_REPLACE_EXISTING = 0x00000001
+MOVEFILE_WRITE_THROUGH = 0x00000008
+_WINDOWS_PROJECT_COMMIT_FLAGS = MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH
+
+_MoveFileExW = Callable[[str, str, int], int]
+_GetLastError = Callable[[], int]
+
 
 class ProjectFormatError(RuntimeError):
     """The input is not a supported, trustworthy project document."""
@@ -106,10 +120,12 @@ class ProjectSerializationError(ProjectFormatError):
 
 
 class ProjectSaveError(RuntimeError):
-    """A transactional save failed before it could be committed.
+    """A transactional save failed before or just after its commit boundary.
 
     ``stage`` is stable enough for UI diagnostics and retry policy.  The
-    original exception is retained as ``__cause__``.
+    original exception is retained as ``__cause__``. ``committed=True`` is
+    reserved for a successful POSIX replacement whose following directory
+    fsync failed; a failed Windows write-through move remains uncommitted.
     """
 
     def __init__(
@@ -959,6 +975,159 @@ def _best_effort_fsync_directory(directory: Path) -> None:
                 pass
 
 
+def project_commit_backend_identifier(*, platform_name: str | None = None) -> str:
+    """Return the exact staged-project commit backend for one platform.
+
+    Windows is the release target and therefore has a required Win32
+    write-through backend.  The POSIX identifier describes the historical
+    compatibility path; it is not a macOS/Linux release-completion claim.
+    """
+
+    selected_platform = os.name if platform_name is None else str(platform_name)
+    if selected_platform == "nt":
+        return WINDOWS_PROJECT_COMMIT_BACKEND
+    return POSIX_PROJECT_COMMIT_BACKEND
+
+
+def _windows_extended_path(path: str | os.PathLike[str]) -> str:
+    """Return an absolute Win32 extended-length path without losing Unicode.
+
+    ``MoveFileExW`` receives Unicode strings with the Win32 extended-length
+    prefix, so long local and UNC project paths do not fall back to legacy
+    ``MAX_PATH`` parsing. Device namespace paths are deliberately not
+    manufactured by the project writer, while an already-normalized extended
+    path is preserved.
+    """
+
+    raw_path = os.fspath(path)
+    if not isinstance(raw_path, str):
+        raise TypeError("Windows project paths must be text paths")
+    if "\x00" in raw_path:
+        raise ValueError("Windows project paths cannot contain NUL")
+
+    normalized = raw_path.replace("/", "\\")
+    if normalized.startswith("\\\\?\\"):
+        return normalized
+    if normalized.startswith("\\\\.\\"):
+        raise ValueError("Windows device namespace paths are not supported")
+    if normalized.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + normalized[2:]
+
+    drive, tail = ntpath.splitdrive(normalized)
+    if not drive or not tail.startswith("\\"):
+        # Production reaches this branch only on Windows. ``os.path.abspath``
+        # then applies the process drive/current-directory rules before the
+        # extended prefix disables Win32 path normalization.
+        normalized = os.path.abspath(raw_path).replace("/", "\\")
+        drive, tail = ntpath.splitdrive(normalized)
+    if not drive or not tail.startswith("\\"):
+        raise ValueError("Windows project paths must resolve to an absolute drive path")
+    return "\\\\?\\" + normalized
+
+
+def _load_move_file_ex_w() -> tuple[_MoveFileExW, _GetLastError]:
+    """Load ``kernel32!MoveFileExW`` without importing pywin32."""
+
+    import ctypes  # noqa: PLC0415
+    from ctypes import wintypes  # noqa: PLC0415
+
+    win_dll_factory = getattr(ctypes, "WinDLL", None)
+    get_last_error = getattr(ctypes, "get_last_error", None)
+    if win_dll_factory is None or get_last_error is None:
+        raise OSError("Win32 MoveFileExW is unavailable in this Python runtime")
+    kernel32 = win_dll_factory("kernel32", use_last_error=True)
+    move_file_ex = kernel32.MoveFileExW
+    move_file_ex.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+    )
+    move_file_ex.restype = wintypes.BOOL
+    return cast(_MoveFileExW, move_file_ex), cast(_GetLastError, get_last_error)
+
+
+def _windows_replace_write_through(
+    source: str | os.PathLike[str],
+    destination: str | os.PathLike[str],
+    *,
+    move_file_ex: _MoveFileExW | None = None,
+    get_last_error: _GetLastError | None = None,
+) -> None:
+    """Replace ``destination`` with a same-volume write-through Win32 move."""
+
+    if (move_file_ex is None) != (get_last_error is None):
+        raise ValueError("MoveFileExW and GetLastError must be supplied together")
+    if move_file_ex is None or get_last_error is None:
+        move_file_ex, get_last_error = _load_move_file_ex_w()
+
+    source_path = _windows_extended_path(source)
+    destination_path = _windows_extended_path(destination)
+    source_parent = ntpath.normcase(ntpath.dirname(source_path))
+    destination_parent = ntpath.normcase(ntpath.dirname(destination_path))
+    if not source_parent or source_parent != destination_parent:
+        raise ValueError(
+            "Windows project commit requires staging in the destination directory"
+        )
+    result = int(
+        move_file_ex(
+            source_path,
+            destination_path,
+            _WINDOWS_PROJECT_COMMIT_FLAGS,
+        )
+    )
+    if result:
+        return
+
+    winerror = int(get_last_error())
+    raise OSError(
+        winerror,
+        f"MoveFileExW write-through replacement failed (Win32 error {winerror})",
+        os.fspath(destination),
+    )
+
+
+def _commit_staged_project(
+    source: Path,
+    destination: Path,
+    *,
+    platform_name: str | None = None,
+    move_file_ex: _MoveFileExW | None = None,
+    get_last_error: _GetLastError | None = None,
+) -> str:
+    """Commit one validated same-directory project staging file.
+
+    A failed Windows call is a pre-commit failure and never falls back to a
+    weaker rename.  On POSIX, the historical ``os.replace`` plus parent
+    directory fsync behavior is retained, including its typed committed-but-
+    uncertain error after a successful replacement.
+    """
+
+    backend = project_commit_backend_identifier(platform_name=platform_name)
+    if backend == WINDOWS_PROJECT_COMMIT_BACKEND:
+        _windows_replace_write_through(
+            source,
+            destination,
+            move_file_ex=move_file_ex,
+            get_last_error=get_last_error,
+        )
+        return backend
+
+    if move_file_ex is not None or get_last_error is not None:
+        raise ValueError("Win32 callables cannot be supplied to the POSIX backend")
+    os.replace(source, destination)
+    try:
+        _best_effort_fsync_directory(destination.parent)
+    except OSError as exc:
+        raise ProjectSaveError(
+            "directory_fsync",
+            "Project file was atomically replaced, but POSIX directory fsync failed; "
+            f"crash durability is uncertain: {exc}",
+            retryable=True,
+            committed=True,
+        ) from exc
+    return backend
+
+
 def _save_payload_project(
     path: str | Path,
     state: dict[str, Any],
@@ -971,8 +1140,11 @@ def _save_payload_project(
 
     The new archive is written to a unique same-directory temporary file,
     flushed and fsynced, reopened through the production parser, and only then
-    committed with ``os.replace``.  Any failure before replace leaves an
-    existing destination byte-for-byte unchanged and removes the temporary.
+    committed through the platform backend. Windows uses ``MoveFileExW`` with
+    replace-existing and write-through flags; historical POSIX compatibility
+    uses ``os.replace`` followed by parent-directory fsync. Any failure before
+    commit leaves an existing destination byte-for-byte unchanged and removes
+    the temporary.
     """
 
     if not isinstance(state, dict):
@@ -1046,19 +1218,8 @@ def _save_payload_project(
         )
 
         stage = "replace"
-        os.replace(temp_path, out_path)
+        _commit_staged_project(temp_path, out_path)
         committed = True
-        stage = "directory_fsync"
-        try:
-            _best_effort_fsync_directory(out_path.parent)
-        except OSError as exc:
-            raise ProjectSaveError(
-                stage,
-                "Project file was atomically replaced, but directory fsync failed; "
-                f"crash durability is uncertain: {exc}",
-                retryable=True,
-                committed=True,
-            ) from exc
         return str(out_path)
     except ProjectSerializationError:
         raise
@@ -1533,19 +1694,8 @@ def save_artifact_session_project(
                 "project destination changed to resolve to an external source resource",
                 retryable=False,
             )
-        os.replace(temp_path, out_path)
+        _commit_staged_project(temp_path, out_path)
         committed = True
-        stage = "directory_fsync"
-        try:
-            _best_effort_fsync_directory(out_path.parent)
-        except OSError as exc:
-            raise ProjectSaveError(
-                stage,
-                "Project file was atomically replaced, but directory fsync failed; "
-                f"crash durability is uncertain: {exc}",
-                retryable=True,
-                committed=True,
-            ) from exc
         return str(out_path)
     except ProjectSerializationError:
         raise

@@ -10,8 +10,9 @@ Discovery trusts only the writer's exact basename shape.  Recovery then pins
 the candidate's filesystem identity, copies it through an already-open regular
 file descriptor, fsyncs a new staging file, and reopens that copy through the
 production embedded-session loader.  Only a fully self-contained native AMR
-is published with the platform's same-filesystem atomic no-replace rename.
-The interrupted candidate is never modified or removed.
+is published. Windows uses a write-through, non-replacing Win32 move; the
+historical POSIX path uses a same-filesystem atomic no-replace rename followed
+by directory fsync. The interrupted candidate is never modified or removed.
 """
 
 from __future__ import annotations
@@ -20,17 +21,22 @@ import ctypes
 from dataclasses import dataclass
 import errno
 import hashlib
+import ntpath
 import os
 from pathlib import Path
 import re
 import stat
 import sys
 import tempfile
+from typing import Callable
 
 from .project_file import (
     MAX_PROJECT_FILE_BYTES,
+    MOVEFILE_WRITE_THROUGH,
     ProjectFormatError,
     _best_effort_fsync_directory,
+    _load_move_file_ex_w,
+    _windows_extended_path,
     load_artifact_session_project,
 )
 
@@ -40,6 +46,12 @@ _TEMP_NAME_RE = re.compile(
     r"^\.(?P<destination>.+\.(?i:amr))\.(?P<token>[a-z0-9_]{8})\.tmp$",
 )
 _COPY_CHUNK_BYTES = 1024 * 1024
+WINDOWS_RECOVERY_PUBLISH_BACKEND = "windows-movefileex-write-through-noreplace"
+POSIX_RECOVERY_PUBLISH_BACKEND = "posix-rename-noreplace-directory-fsync"
+_WINDOWS_DESTINATION_EXISTS_ERRORS = frozenset({80, 183})
+
+_MoveFileExW = Callable[[str, str, int], int]
+_GetLastError = Callable[[], int]
 
 
 class ProjectRecoveryError(RuntimeError):
@@ -79,6 +91,7 @@ class ProjectRecoveryResult:
     project_sha256: str
     size_bytes: int
     durability_warning: str | None = None
+    publish_backend: str = "unknown"
 
 
 def _absolute_path(path: str | os.PathLike[str]) -> Path:
@@ -239,13 +252,90 @@ def _unlink_if_owned(path: Path, identity: tuple[int, int] | None) -> None:
         return
 
 
-def _publish_file_noreplace(source: Path, destination: Path) -> None:
+def project_recovery_publish_backend_identifier(
+    *,
+    platform_name: str | None = None,
+) -> str:
+    """Return the exact recovery publication backend for one platform."""
+
+    selected_platform = os.name if platform_name is None else str(platform_name)
+    if selected_platform == "nt":
+        return WINDOWS_RECOVERY_PUBLISH_BACKEND
+    return POSIX_RECOVERY_PUBLISH_BACKEND
+
+
+def _windows_publish_file_noreplace(
+    source: str | os.PathLike[str],
+    destination: str | os.PathLike[str],
+    *,
+    move_file_ex: _MoveFileExW | None = None,
+    get_last_error: _GetLastError | None = None,
+) -> None:
+    """Publish one same-folder file with a durable Win32 create-new move."""
+
+    if (move_file_ex is None) != (get_last_error is None):
+        raise ValueError("MoveFileExW and GetLastError must be supplied together")
+    if move_file_ex is None or get_last_error is None:
+        move_file_ex, get_last_error = _load_move_file_ex_w()
+
+    source_path = _windows_extended_path(source)
+    destination_path = _windows_extended_path(destination)
+    source_parent = ntpath.normcase(ntpath.dirname(source_path))
+    destination_parent = ntpath.normcase(ntpath.dirname(destination_path))
+    if not source_parent or source_parent != destination_parent:
+        raise ValueError(
+            "Windows recovery publication requires staging in the destination directory"
+        )
+
+    result = int(
+        move_file_ex(
+            source_path,
+            destination_path,
+            MOVEFILE_WRITE_THROUGH,
+        )
+    )
+    if result:
+        return
+
+    winerror = int(get_last_error())
+    if winerror in _WINDOWS_DESTINATION_EXISTS_ERRORS:
+        raise FileExistsError(
+            winerror,
+            f"Recovered project destination already exists (Win32 error {winerror})",
+            os.fspath(destination),
+        )
+    raise OSError(
+        winerror,
+        f"MoveFileExW write-through create-new publication failed "
+        f"(Win32 error {winerror})",
+        os.fspath(destination),
+    )
+
+
+def _publish_file_noreplace(
+    source: Path,
+    destination: Path,
+    *,
+    platform_name: str | None = None,
+    move_file_ex: _MoveFileExW | None = None,
+    get_last_error: _GetLastError | None = None,
+) -> str:
     """Atomically rename one same-filesystem file without replacement."""
 
-    if os.name == "nt":
-        # On Windows Python's rename fails when the destination exists.
-        os.rename(source, destination)
-        return
+    backend = project_recovery_publish_backend_identifier(
+        platform_name=platform_name
+    )
+    if backend == WINDOWS_RECOVERY_PUBLISH_BACKEND:
+        _windows_publish_file_noreplace(
+            source,
+            destination,
+            move_file_ex=move_file_ex,
+            get_last_error=get_last_error,
+        )
+        return backend
+
+    if move_file_ex is not None or get_last_error is not None:
+        raise ValueError("Win32 callables cannot be supplied to the POSIX backend")
 
     source_bytes = os.fsencode(source)
     destination_bytes = os.fsencode(destination)
@@ -279,7 +369,7 @@ def _publish_file_noreplace(source: Path, destination: Path) -> None:
             str(destination),
         )
     if result == 0:
-        return
+        return backend
     error_number = ctypes.get_errno()
     if error_number in {errno.EEXIST, errno.ENOTEMPTY}:
         raise FileExistsError(
@@ -431,7 +521,7 @@ def recover_interrupted_project_save(
 
         stage = "publish"
         try:
-            _publish_file_noreplace(stage_path, output)
+            publish_backend = _publish_file_noreplace(stage_path, output)
         except FileExistsError as exc:
             raise ProjectRecoveryError(
                 "publish",
@@ -450,14 +540,15 @@ def recover_interrupted_project_save(
             )
 
         durability_warning: str | None = None
-        stage = "directory_fsync"
-        try:
-            _best_effort_fsync_directory(output.parent)
-        except OSError as exc:
-            durability_warning = (
-                "Recovered project was published, but directory fsync failed; "
-                f"crash durability is uncertain: {exc}"
-            )
+        if publish_backend != WINDOWS_RECOVERY_PUBLISH_BACKEND:
+            stage = "directory_fsync"
+            try:
+                _best_effort_fsync_directory(output.parent)
+            except OSError as exc:
+                durability_warning = (
+                    "Recovered project was published, but POSIX directory fsync failed; "
+                    f"crash durability is uncertain: {exc}"
+                )
         return ProjectRecoveryResult(
             destination=str(output),
             candidate_path=str(candidate_path),
@@ -465,6 +556,7 @@ def recover_interrupted_project_save(
             project_sha256=digest.hexdigest(),
             size_bytes=copied,
             durability_warning=durability_warning,
+            publish_backend=publish_backend,
         )
     except ProjectRecoveryError:
         if published and stage != "directory_fsync":
@@ -501,6 +593,9 @@ __all__ = [
     "MAX_INTERRUPTED_SAVE_CANDIDATES",
     "ProjectRecoveryError",
     "ProjectRecoveryResult",
+    "POSIX_RECOVERY_PUBLISH_BACKEND",
+    "WINDOWS_RECOVERY_PUBLISH_BACKEND",
     "discover_interrupted_project_saves",
+    "project_recovery_publish_backend_identifier",
     "recover_interrupted_project_save",
 ]

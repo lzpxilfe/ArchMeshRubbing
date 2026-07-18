@@ -284,6 +284,8 @@ from src.application.artifact_workbench import (  # noqa: E402
     RecordBindingTransition,
     StaleWorkflowOperationError,
     WorkflowBusyError,
+    WorkflowSaveStatus,
+    WorkflowSnapshot,
     WorkflowStage,
     WorkflowTransitionKind,
 )
@@ -1062,6 +1064,37 @@ class _TaskDialogCloseGuard(QObject):
 class _NativeProjectSaveResult:
     destination: str
     durability_warning: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _NativeTransientIssue:
+    """One GUI-only value that has no ArtifactDocument serialization contract."""
+
+    code: str
+    message: str
+
+
+@dataclass(frozen=True, slots=True)
+class _NativeTransientWorkState:
+    """Cheap, fail-closed summary of native work that Save cannot persist."""
+
+    issues: tuple[_NativeTransientIssue, ...] = ()
+
+    @property
+    def has_unpersisted_work(self) -> bool:
+        return bool(self.issues)
+
+    @property
+    def reasons(self) -> tuple[str, ...]:
+        return tuple(issue.message for issue in self.issues)
+
+    def detail(self, *, limit: int = 8) -> str:
+        shown = self.reasons[: max(1, int(limit))]
+        lines = [f"- {reason}" for reason in shown]
+        hidden = len(self.issues) - len(shown)
+        if hidden > 0:
+            lines.append(f"- 그 밖의 미확정 작업 {hidden}개")
+        return "\n".join(lines)
 
 
 @dataclass(frozen=True, slots=True)
@@ -4495,7 +4528,8 @@ class MainWindow(QMainWindow):
         
         sha, dirty = _safe_git_info(str(Path(basedir)))
         sha_s = f"{sha}{'*' if dirty else ''}" if sha else "unknown"
-        self.setWindowTitle(f"{APP_NAME} v{APP_VERSION} ({sha_s})")
+        self._base_window_title = f"{APP_NAME} v{APP_VERSION} ({sha_s})"
+        self.setWindowTitle(self._base_window_title)
         self.resize(1400, 900)
         
         # 메인 위젯
@@ -4605,6 +4639,14 @@ class MainWindow(QMainWindow):
         self.init_menu()
         self.init_toolbar()
         self.init_statusbar()
+        self._workbench_unsubscribe = self._artifact_workbench.subscribe(
+            self._on_workbench_snapshot_changed
+        )
+        self.destroyed.connect(
+            lambda _object=None, unsubscribe=self._workbench_unsubscribe: (
+                unsubscribe()
+            )
+        )
         self._restore_ui_state()
         self._hide_unused_docks()
     
@@ -4618,12 +4660,18 @@ class MainWindow(QMainWindow):
         self.viewport.faceSelectionChanged.connect(self.on_face_selection_count_changed)
         self.viewport.meshLoaded.connect(self.on_mesh_loaded)
         self.viewport.meshTransformChanged.connect(self.sync_transform_panel)
+        self.viewport.meshTransformChanged.connect(
+            self._refresh_native_save_indicator
+        )
         self.viewport.floorPointPicked.connect(self.on_floor_point_picked)
         self.viewport.floorFacePicked.connect(self.on_floor_face_picked)
         self.viewport.alignToBrushSelected.connect(self.on_align_to_brush_selected)
         self.viewport.floorAlignmentConfirmed.connect(self.on_floor_alignment_confirmed)
         self.viewport.surfaceAssignmentChanged.connect(self.on_surface_assignment_changed)
         self.viewport.measurePointPicked.connect(self.on_measure_point_picked)
+        self.viewport.curvaturePickStateChanged.connect(
+            lambda _count: self._refresh_native_save_indicator()
+        )
         self.viewport.surfaceAnchorPickRequested.connect(
             self.on_surface_anchor_pick_requested
         )
@@ -5029,16 +5077,39 @@ class MainWindow(QMainWindow):
     def closeEvent(self, a0):
         if a0 is None:
             return
-        reply = QMessageBox.question(
-            self,
-            "종료 확인",
-            "정말 종료하시겠습니까?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            a0.ignore()
-            return
+        if self._native_artifact_mode():
+            transient_state = self._native_transient_work_state()
+            if transient_state.has_unpersisted_work:
+                reply = self._ask_native_transient_action(
+                    "프로그램을 종료",
+                    transient_state,
+                )
+                if reply != QMessageBox.StandardButton.Discard:
+                    a0.ignore()
+                    return
+            elif self._native_document_has_unsaved_changes():
+                reply = self._ask_native_unsaved_action("프로그램을 종료")
+                if reply == QMessageBox.StandardButton.Save:
+                    # A native save finishes on a worker. Keep this close event
+                    # rejected and close only after the exact captured document
+                    # owns a Windows write-through-confirmed save checkpoint.
+                    a0.ignore()
+                    self.save_project(on_saved=self.close)
+                    return
+                if reply != QMessageBox.StandardButton.Discard:
+                    a0.ignore()
+                    return
+        else:
+            reply = QMessageBox.question(
+                self,
+                "종료 확인",
+                "정말 종료하시겠습니까?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                a0.ignore()
+                return
         self._application_closing = True
         if not self._shutdown_active_task_worker():
             self._application_closing = False
@@ -5056,8 +5127,43 @@ class MainWindow(QMainWindow):
                 "작업 종료가 표시된 뒤 다시 종료하세요.",
             )
             return
-        self._shutdown_project_open_worker()
+        if not self._shutdown_mesh_load_worker():
+            self._application_closing = False
+            a0.ignore()
+            try:
+                self.status_info.setText(
+                    "종료 보류 | 원본 로더의 안전한 종료를 기다리는 중"
+                )
+            except Exception:
+                pass
+            QMessageBox.warning(
+                self,
+                "종료 보류",
+                "원본 로더가 아직 안전하게 끝나지 않았습니다. 현재 문서 권위는 "
+                "유지했고 늦은 로드 결과는 폐기합니다. 로더 종료 후 다시 종료하세요.",
+            )
+            return
+        if not self._shutdown_project_open_worker():
+            self._application_closing = False
+            a0.ignore()
+            try:
+                self.status_info.setText(
+                    "종료 보류 | 프로젝트 검증기의 안전한 종료를 기다리는 중"
+                )
+            except Exception:
+                pass
+            QMessageBox.warning(
+                self,
+                "종료 보류",
+                "프로젝트 검증기가 아직 안전하게 끝나지 않았습니다. 현재 문서 "
+                "권위는 유지했고 늦은 검증 결과는 폐기합니다. 종료 후 다시 시도하세요.",
+            )
+            return
         self._save_ui_state()
+        unsubscribe = getattr(self, "_workbench_unsubscribe", None)
+        if callable(unsubscribe):
+            unsubscribe()
+            self._workbench_unsubscribe = None
         super().closeEvent(a0)
 
     @staticmethod
@@ -5140,13 +5246,76 @@ class MainWindow(QMainWindow):
             pass
         return True
 
-    def _shutdown_project_open_worker(self) -> None:
-        """Fence callbacks and join package inspection before window teardown."""
+    def _shutdown_mesh_load_worker(self) -> bool:
+        """Fence and join the independent source loader before window teardown.
+
+        ``MeshLoadThread`` is not part of the shared ``_task_thread`` slot.  Revoke
+        its request ID and Open ticket before waiting so a queued ``loaded`` signal
+        can never publish into the live scene after a close attempt.  The worker is
+        cooperative and may be inside a parser that cannot stop immediately; in
+        that case retain the QThread object and leave the window alive.
+        """
+
+        thread = getattr(self, "_mesh_load_thread", None)
+        if thread is None:
+            return True
+
+        # Fence queued and future callbacks before requesting interruption.
+        self._mesh_load_request_id = None
+        for signal_name in ("loaded", "failed", "finished"):
+            try:
+                getattr(thread, signal_name).disconnect()
+            except Exception:
+                pass
+
+        try:
+            thread.requestInterruption()
+        except Exception:
+            pass
+
+        # Roll pending Open authority back to the exact current session.  Legacy
+        # project staging is CPU-only here, so discard it without touching scene.
+        if bool(getattr(self, "_artifact_load_active", False)):
+            self._clear_artifact_pending_load(cancel_workbench=True)
+        if bool(getattr(self, "_project_load_active", False)):
+            self._project_load_active = False
+            self._project_load_queue = []
+            self._project_load_current = None
+            self._project_load_state = None
+            self._project_load_from_legacy = False
+            self._discard_project_staging_and_restore_context()
+
+        dialog = getattr(self, "_mesh_load_dialog", None)
+        self._mesh_load_dialog = None
+        if dialog is not None:
+            try:
+                dialog.close()
+            except Exception:
+                pass
+        try:
+            self._status_task_end()
+        except Exception:
+            pass
+
+        if not self._wait_for_thread_shutdown(thread, TASK_SHUTDOWN_WAIT_MS):
+            # Keep the only explicit owner while the QThread is still running.
+            # A later close attempt can join and release it safely.
+            return False
+
+        if getattr(self, "_mesh_load_thread", None) is thread:
+            self._mesh_load_thread = None
+        try:
+            thread.deleteLater()
+        except Exception:
+            pass
+        return True
+
+    def _shutdown_project_open_worker(self) -> bool:
+        """Fence and bounded-join package inspection before window teardown."""
 
         thread = getattr(self, "_project_open_thread", None)
         if thread is None:
-            return
-        self._project_open_thread = None
+            return True
         self._project_open_request_id = None
         self._project_open_base_authority_epoch = None
         self._clear_artifact_pending_load(cancel_workbench=True)
@@ -5159,15 +5328,17 @@ class MainWindow(QMainWindow):
             thread.requestInterruption()
         except Exception:
             pass
-        try:
-            if thread.isRunning():
-                thread.wait()
-        except Exception:
-            _LOGGER.debug("Project Open worker shutdown wait failed", exc_info=True)
+        if not self._wait_for_thread_shutdown(thread, TASK_SHUTDOWN_WAIT_MS):
+            # Retain the QThread owner while the package parser finishes.  Its
+            # request ID is already revoked, so no late result can be published.
+            return False
+        if getattr(self, "_project_open_thread", None) is thread:
+            self._project_open_thread = None
         try:
             thread.deleteLater()
         except Exception:
             pass
+        return True
 
     def _native_artifact_mode(self) -> bool:
         return isinstance(getattr(self, "_artifact_session", None), ArtifactSession)
@@ -5680,6 +5851,7 @@ class MainWindow(QMainWindow):
         self.viewport.floor_picks = [v.copy() for v in vertices]
         self.viewport.status_info = "면 선택됨. Enter를 누르면 정렬됩니다."
         self.viewport.update()
+        self._refresh_native_save_indicator()
 
     def on_floor_point_picked(self, point):
         """바닥면 점 선택 - 점이 추가되면 상태바 업데이트"""
@@ -5702,6 +5874,7 @@ class MainWindow(QMainWindow):
             self.viewport.status_info = f"점 {count}개 선택됨. 계속 추가하거나 Enter로 확정하세요."
         
         self.viewport.update()
+        self._refresh_native_save_indicator()
 
     def on_floor_alignment_confirmed(self):
         """Enter 키 입력 시 호출: 선택된 점들을 기반으로 평면 정렬 수행"""
@@ -5820,6 +5993,7 @@ class MainWindow(QMainWindow):
                 self.scene_panel.update_list(self.viewport.objects, self.viewport.selected_index)
                 self.viewport.update()
                 self.status_info.setText(f"원호 #{arc_idx+1} 삭제됨")
+                self._refresh_native_save_indicator()
     
     def on_layer_visibility_changed(self, obj_idx: int, layer_idx: int, visible: bool):
         try:
@@ -6153,11 +6327,13 @@ class MainWindow(QMainWindow):
         self.status_mesh = QLabel("") # 메쉬 정보 (정점, 면)
         self.status_grid = QLabel("격자: -")
         self.status_unit = QLabel("단위: -")
+        self.status_save = QLabel("저장: -")
         
         self.statusbar.addWidget(self.status_info, 1)
         self.statusbar.addPermanentWidget(self.status_mesh)
         self.statusbar.addPermanentWidget(self.status_grid)
         self.statusbar.addPermanentWidget(self.status_unit)
+        self.statusbar.addPermanentWidget(self.status_save)
         
         # 버전 표시 (사용자 확인용)
         sha, dirty = _safe_git_info(str(Path(basedir)))
@@ -6183,6 +6359,588 @@ class MainWindow(QMainWindow):
         task_layout.addWidget(self._status_task_bar)
         self._status_task_widget.setVisible(False)
         self.statusbar.addPermanentWidget(self._status_task_widget)
+
+    @staticmethod
+    def _contains_native_transient_value(value: Any) -> bool:
+        """Return whether a GUI value contains a material, unrecorded result."""
+
+        if value is None:
+            return False
+        if isinstance(value, np.ndarray):
+            return bool(value.size)
+        if isinstance(value, Mapping):
+            return any(
+                MainWindow._contains_native_transient_value(item)
+                for item in value.values()
+            )
+        if isinstance(value, (list, tuple, set, frozenset)):
+            if not value:
+                return False
+            if all(
+                isinstance(
+                    item,
+                    (Mapping, list, tuple, set, frozenset, np.ndarray),
+                )
+                or item is None
+                for item in value
+            ):
+                return any(
+                    MainWindow._contains_native_transient_value(item)
+                    for item in value
+                )
+            return True
+        if isinstance(value, str):
+            return bool(value.strip())
+        return bool(value)
+
+    def _native_transient_work_state(
+        self,
+        *,
+        obj: Any | None = None,
+        allowed_selected_face_indices: tuple[int, ...] | None = None,
+        allow_surface_measurement_picks: bool = False,
+    ) -> _NativeTransientWorkState:
+        """Capture every cheap GUI-only guard shared by Save and navigation.
+
+        The immutable document hash cannot see these values.  Detection is
+        deliberately fail-closed: malformed transform/selection/operation
+        state becomes an issue instead of being treated as clean.
+        """
+
+        issues: dict[str, _NativeTransientIssue] = {}
+
+        def add(code: str, message: str) -> None:
+            issues.setdefault(
+                str(code),
+                _NativeTransientIssue(code=str(code), message=str(message)),
+            )
+
+        controller_factory = getattr(
+            self,
+            "_artifact_measurement_controller",
+            None,
+        )
+        if callable(controller_factory):
+            try:
+                active_measurements = tuple(
+                    controller_factory().active_summaries or ()
+                )
+            except Exception:
+                _LOGGER.exception(
+                    "Could not inspect active native measurement operations"
+                )
+                add(
+                    "measurement_state_unreadable",
+                    "실측 작업 상태를 확인할 수 없어 안전하게 중단해야 합니다.",
+                )
+            else:
+                if active_measurements:
+                    states = ", ".join(
+                        f"{getattr(getattr(summary, 'kind', None), 'value', 'unknown')}:"
+                        f"{getattr(getattr(summary, 'state', None), 'value', 'unknown')}"
+                        for summary in active_measurements
+                    )
+                    add(
+                        "active_measurement",
+                        "계산 또는 게시가 끝나지 않은 실측 작업이 있습니다 "
+                        f"({states}).",
+                    )
+
+        try:
+            pending_publications = getattr(
+                self,
+                "_pending_native_measurement_publications",
+                {},
+            )
+            if pending_publications:
+                add(
+                    "active_measurement",
+                    "계산은 끝났지만 ArtifactDocument에 게시되지 않은 실측 "
+                    "결과가 있습니다.",
+                )
+        except Exception:
+            add(
+                "measurement_state_unreadable",
+                "보류 실측 결과 상태를 확인할 수 없어 안전하게 중단해야 합니다.",
+            )
+
+        active_task = getattr(self, "_task_thread", None)
+        if active_task is not None:
+            try:
+                task_name = str(getattr(active_task, "_task_name", ""))
+            except Exception:
+                task_name = ""
+            # Derived measurement commands own controller capabilities and are
+            # covered above.  Surface-anchor resolution is the one pre-command
+            # measurement worker whose result would otherwise be invisible.
+            # Generic Save/export/Align workers are not scene dirtiness.
+            if task_name == "native_surface_anchor":
+                add(
+                    "pending_surface_anchor",
+                    "표면 anchor 선택을 확인하는 실측 작업이 끝나지 않았습니다.",
+                )
+
+        viewport = getattr(self, "viewport", None)
+        if viewport is None:
+            add(
+                "scene_state_unreadable",
+                "3D 장면 상태를 확인할 수 없어 안전하게 중단해야 합니다.",
+            )
+            return _NativeTransientWorkState(tuple(issues.values()))
+
+        if obj is None:
+            try:
+                objects = list(getattr(viewport, "objects", []) or [])
+            except Exception:
+                objects = []
+                add(
+                    "scene_state_unreadable",
+                    "3D 장면 객체 상태를 확인할 수 없어 안전하게 중단해야 합니다.",
+                )
+            if len(objects) == 1:
+                obj = objects[0]
+            else:
+                add(
+                    "scene_object_count",
+                    "Native 유물 문서는 검증된 장면 객체 하나만 "
+                    f"소유해야 하지만 현재 {len(objects)}개입니다.",
+                )
+        if obj is None:
+            return _NativeTransientWorkState(tuple(issues.values()))
+
+        def identity_triplet(value: Any) -> bool:
+            array = np.asarray(value, dtype=np.float64).reshape(-1)
+            return bool(
+                array.shape == (3,)
+                and np.isfinite(array).all()
+                and np.allclose(array, [0.0, 0.0, 0.0], rtol=0.0, atol=1e-12)
+            )
+
+        try:
+            if not identity_triplet(getattr(obj, "translation")):
+                add(
+                    "align_translation_preview",
+                    "현재 보이는 이동 preview를 먼저 정치 확정하거나 초기화하세요.",
+                )
+        except Exception:
+            add(
+                "align_translation_unreadable",
+                "이동 preview 상태를 확인할 수 없어 안전하게 중단해야 합니다.",
+            )
+        try:
+            if not identity_triplet(getattr(obj, "rotation")):
+                add(
+                    "align_rotation_preview",
+                    "현재 보이는 회전 preview를 먼저 정치 확정하거나 초기화하세요.",
+                )
+        except Exception:
+            add(
+                "align_rotation_unreadable",
+                "회전 preview 상태를 확인할 수 없어 안전하게 중단해야 합니다.",
+            )
+        try:
+            scale = float(getattr(obj, "scale"))
+            if not np.isfinite(scale) or not np.isclose(
+                scale,
+                1.0,
+                rtol=0.0,
+                atol=1e-12,
+            ):
+                add(
+                    "align_scale_preview",
+                    "Native Align scale preview는 저장할 수 없습니다.",
+                )
+        except Exception:
+            add(
+                "align_scale_unreadable",
+                "배율 preview 상태를 확인할 수 없어 안전하게 중단해야 합니다.",
+            )
+        try:
+            if bool(getattr(obj, "_amr_has_unpersisted_bake", False)):
+                add(
+                    "unpersisted_vertex_bake",
+                    "Native projection에 문서화되지 않은 vertex bake 흔적이 있습니다.",
+                )
+        except Exception:
+            add(
+                "unpersisted_vertex_bake_unreadable",
+                "vertex bake 상태를 확인할 수 없어 안전하게 중단해야 합니다.",
+            )
+
+        raw_tile_state = getattr(obj, "tile_interpretation_state", None)
+        if raw_tile_state is not None:
+            try:
+                normalized_tile_state = (
+                    raw_tile_state
+                    if isinstance(raw_tile_state, TileInterpretationState)
+                    else TileInterpretationState.from_dict(raw_tile_state)
+                )
+                if (
+                    normalized_tile_state.to_dict()
+                    != TileInterpretationState().to_dict()
+                ):
+                    add(
+                        "tile_interpretation",
+                        "기와 판독 상태가 아직 ArtifactDocument record로 승격되지 "
+                        "않았습니다.",
+                    )
+            except Exception:
+                add(
+                    "tile_interpretation_unreadable",
+                    "기와 판독 상태를 확인할 수 없어 안전하게 중단해야 합니다.",
+                )
+
+        try:
+            selected_faces = tuple(
+                sorted(
+                    int(value)
+                    for value in (getattr(obj, "selected_faces", set()) or set())
+                )
+            )
+        except Exception:
+            selected_faces = ()
+            add(
+                "selected_faces_unreadable",
+                "선택 face 상태를 확인할 수 없어 안전하게 중단해야 합니다.",
+            )
+        if allowed_selected_face_indices is not None:
+            try:
+                allowed_selection = tuple(
+                    sorted(int(value) for value in allowed_selected_face_indices)
+                )
+            except Exception:
+                allowed_selection = ()
+                add(
+                    "allowed_selection_unreadable",
+                    "캡처한 face selection 상태를 확인할 수 없습니다.",
+                )
+            if selected_faces != allowed_selection:
+                add(
+                    "selected_faces_changed",
+                    "기와 전개 face selection이 preflight capture와 다릅니다.",
+                )
+        elif selected_faces:
+            add(
+                "selected_faces",
+                "선택 face가 아직 ArtifactDocument record로 승격되지 않았습니다.",
+            )
+
+        object_values = (
+            ("polyline_layers", "폴리라인 레이어"),
+            ("fitted_arcs", "맞춤 원호"),
+            ("outer_face_indices", "외면 face 지정"),
+            ("inner_face_indices", "내면 face 지정"),
+            ("migu_face_indices", "미구 face 지정"),
+            (
+                "surface_assist_unresolved_face_indices",
+                "미확정 표면 보조 face",
+            ),
+            ("surface_assist_meta", "표면 보조 메타데이터"),
+            ("surface_assist_runtime", "표면 보조 실행 결과"),
+            ("tile_synthetic_truth", "기와 합성 기준값"),
+            ("tile_evaluation_report", "기와 평가 결과"),
+        )
+        viewport_values = (
+            ("picked_points", "곡률 선택점"),
+            ("fitted_arc", "곡률 맞춤 원호"),
+            ("slice_contours", "단면 contour"),
+            ("x_profile", "X 단면 profile"),
+            ("y_profile", "Y 단면 profile"),
+            ("_world_x_profile", "월드 X 단면 profile"),
+            ("_world_y_profile", "월드 Y 단면 profile"),
+            ("roi_cut_edges", "ROI 절단 edge"),
+            ("roi_cap_verts", "ROI cap vertex"),
+            ("roi_section_world", "ROI 단면"),
+            ("cut_lines", "단면선"),
+            ("cut_line_preview", "단면선 preview"),
+            ("cut_section_profiles", "단면 profile"),
+            ("cut_section_world", "월드 단면"),
+            ("cut_section_contours_world", "월드 단면 contour"),
+            ("cut_section_contours_local", "로컬 단면 contour"),
+            ("line_profile", "선형 단면 profile"),
+            ("line_section_contours", "선형 단면 contour"),
+            ("floor_picks", "바닥면 선택점"),
+            ("brush_selected_faces", "브러시 선택 face"),
+            ("surface_paint_points", "표면 지정점"),
+            ("surface_lasso_points", "표면 lasso 점"),
+            ("surface_lasso_face_indices", "표면 lasso face"),
+            ("surface_magnetic_points", "표면 자석점"),
+        )
+        for field_name, label in object_values:
+            try:
+                value = getattr(obj, field_name, None)
+                if MainWindow._contains_native_transient_value(value):
+                    add(
+                        f"object:{field_name}",
+                        f"{label}이 아직 ArtifactDocument record로 승격되지 않았습니다.",
+                    )
+            except Exception:
+                add(
+                    f"object:{field_name}:unreadable",
+                    f"{label} 상태를 확인할 수 없어 안전하게 중단해야 합니다.",
+                )
+        for field_name, label in viewport_values:
+            try:
+                value = getattr(viewport, field_name, None)
+                if MainWindow._contains_native_transient_value(value):
+                    add(
+                        f"viewport:{field_name}",
+                        f"{label}이 아직 ArtifactDocument record로 승격되지 않았습니다.",
+                    )
+            except Exception:
+                add(
+                    f"viewport:{field_name}:unreadable",
+                    f"{label} 상태를 확인할 수 없어 안전하게 중단해야 합니다.",
+                )
+        if not allow_surface_measurement_picks:
+            for field_name, label in (
+                ("measure_picked_points", "실측 선택점"),
+                ("measure_picked_anchors", "실측 surface anchor"),
+            ):
+                try:
+                    value = getattr(viewport, field_name, None)
+                    if MainWindow._contains_native_transient_value(value):
+                        add(
+                            f"viewport:{field_name}",
+                            f"{label}가 아직 ArtifactDocument record로 승격되지 않았습니다.",
+                        )
+                except Exception:
+                    add(
+                        f"viewport:{field_name}:unreadable",
+                        f"{label} 상태를 확인할 수 없어 안전하게 중단해야 합니다.",
+                    )
+
+        return _NativeTransientWorkState(tuple(issues.values()))
+
+    def _refresh_native_save_indicator(self) -> None:
+        """Refresh shell dirtiness after a GUI-only native mutation."""
+
+        if not self._native_artifact_mode():
+            return
+        try:
+            snapshot = self._artifact_workbench_controller().snapshot
+            self._on_workbench_snapshot_changed(snapshot)
+        except Exception:
+            _LOGGER.exception("Could not refresh native transient save status")
+            base_title = str(getattr(self, "_base_window_title", APP_NAME))
+            self.setWindowTitle(f"* {base_title}")
+            status_label = getattr(self, "status_save", None)
+            if isinstance(status_label, QLabel):
+                status_label.setText("저장: 상태 확인 필요")
+
+    def _on_workbench_snapshot_changed(self, snapshot: WorkflowSnapshot) -> None:
+        """Reflect document checkpoints and GUI-only work in the Windows shell."""
+
+        if not isinstance(snapshot, WorkflowSnapshot):
+            return
+        base_title = str(
+            getattr(
+                self,
+                "_base_window_title",
+                f"{APP_NAME} v{APP_VERSION}",
+            )
+        )
+        status_label = getattr(self, "status_save", None)
+        if snapshot.save_status is WorkflowSaveStatus.EMPTY:
+            self.setWindowTitle(base_title)
+            if isinstance(status_label, QLabel):
+                status_label.setText("저장: -")
+                status_label.setToolTip("")
+            return
+
+        transient_state = _NativeTransientWorkState()
+        if snapshot.session is not None and self._native_artifact_mode():
+            transient_state = self._native_transient_work_state()
+
+        display_path = snapshot.project_path
+        if not display_path and snapshot.session is not None:
+            display_path = snapshot.session.resolved_source_path
+        display_name = Path(display_path).name if display_path else "새 유물"
+        dirty_prefix = (
+            "* "
+            if snapshot.has_unsaved_changes
+            or transient_state.has_unpersisted_work
+            else ""
+        )
+        self.setWindowTitle(f"{dirty_prefix}{display_name} — {base_title}")
+
+        if not isinstance(status_label, QLabel):
+            return
+        if transient_state.has_unpersisted_work:
+            status_label.setText("저장: 미확정 작업")
+        elif snapshot.save_status is WorkflowSaveStatus.SAVED:
+            status_label.setText("저장: 저장됨")
+        elif snapshot.save_status is WorkflowSaveStatus.DURABILITY_UNCERTAIN:
+            status_label.setText("저장: 내구성 미확정")
+        else:
+            status_label.setText("저장: 미저장")
+        document_sha256 = snapshot.document_sha256 or ""
+        tooltip_parts = (
+            [f"문서 SHA-256: {document_sha256}"] if document_sha256 else []
+        )
+        if transient_state.has_unpersisted_work:
+            tooltip_parts.extend(
+                [
+                    "프로젝트 저장에 포함되지 않는 미확정 작업:",
+                    transient_state.detail(),
+                ]
+            )
+        status_label.setToolTip("\n".join(tooltip_parts))
+
+    def _native_document_has_unsaved_changes(self) -> bool:
+        """Fail closed when native document save authority cannot be read."""
+
+        if not self._native_artifact_mode():
+            return False
+        try:
+            return bool(
+                self._artifact_workbench_controller().snapshot.has_unsaved_changes
+            )
+        except Exception:
+            _LOGGER.exception("Could not determine native document save status")
+            return True
+
+    def _ask_native_unsaved_action(
+        self,
+        action_label: str,
+    ) -> QMessageBox.StandardButton:
+        return QMessageBox.warning(
+            self,
+            "저장되지 않은 변경",
+            "현재 유물 문서에 저장되지 않은 변경이 있습니다.\n"
+            f"{action_label}하기 전에 저장하시겠습니까?",
+            (
+                QMessageBox.StandardButton.Save
+                | QMessageBox.StandardButton.Discard
+                | QMessageBox.StandardButton.Cancel
+            ),
+            QMessageBox.StandardButton.Cancel,
+        )
+
+    def _ask_native_transient_action(
+        self,
+        action_label: str,
+        state: _NativeTransientWorkState,
+    ) -> QMessageBox.StandardButton:
+        """Offer only explicit discard/cancel for work Save cannot serialize."""
+
+        if not isinstance(state, _NativeTransientWorkState) or not (
+            state.has_unpersisted_work
+        ):
+            return QMessageBox.StandardButton.Cancel
+        return QMessageBox.warning(
+            self,
+            "저장할 수 없는 미확정 작업",
+            "현재 장면에 프로젝트 파일로 저장할 수 없는 미확정 작업이 "
+            "있습니다.\n\n"
+            f"{state.detail()}\n\n"
+            "계속 작업하려면 먼저 정치 확정·record 기록 또는 초기화를 "
+            "완료하세요.\n"
+            f"'{action_label}' 작업에서 [버리기]를 누르면 위 작업을 복구하지 "
+            "않고 현재 장면을 버립니다.",
+            (
+                QMessageBox.StandardButton.Discard
+                | QMessageBox.StandardButton.Cancel
+            ),
+            QMessageBox.StandardButton.Cancel,
+        )
+
+    def _continue_after_native_unsaved_guard(
+        self,
+        action_label: str,
+        continuation: Callable[[], None],
+    ) -> bool:
+        """Run a destructive action now, or after one exact durable Save."""
+
+        if self._native_artifact_mode():
+            transient_state = self._native_transient_work_state()
+            if transient_state.has_unpersisted_work:
+                reply = self._ask_native_transient_action(
+                    action_label,
+                    transient_state,
+                )
+                if reply == QMessageBox.StandardButton.Discard:
+                    continuation()
+                    return True
+                return False
+        if not self._native_document_has_unsaved_changes():
+            continuation()
+            return True
+        reply = self._ask_native_unsaved_action(action_label)
+        if reply == QMessageBox.StandardButton.Discard:
+            continuation()
+            return True
+        if reply == QMessageBox.StandardButton.Save:
+            self.save_project(on_saved=continuation)
+        return False
+
+    def _defer_exact_native_save_continuation(
+        self,
+        callback: Callable[[], None],
+        *,
+        captured_session: ArtifactSession,
+        project_path: str,
+        save_thread: object | None,
+    ) -> None:
+        """Continue after task cleanup only while the saved checkpoint is current."""
+
+        normalized_project_path = str(
+            Path(project_path).expanduser().resolve(strict=False)
+        )
+        cleanup_wait_attempts = 0
+
+        def invoke_when_safe() -> None:
+            nonlocal cleanup_wait_attempts
+            if bool(getattr(self, "_application_closing", False)):
+                return
+            active_task = getattr(self, "_task_thread", None)
+            if save_thread is not None and active_task is save_thread:
+                # TaskThread emits done just before QThread emits finished.
+                # Waiting for finished prevents close/open from re-entering
+                # while the Save worker still owns the shared task slot.
+                cleanup_wait_attempts += 1
+                if cleanup_wait_attempts > 500:
+                    _LOGGER.error(
+                        "Native Save continuation stayed blocked after worker completion"
+                    )
+                    return
+                QTimer.singleShot(1, invoke_when_safe)
+                return
+            if active_task is not None:
+                return
+            try:
+                snapshot = self._artifact_workbench_controller().snapshot
+                gui_project_path = getattr(self, "_current_project_path", None)
+                normalized_gui_project_path = (
+                    str(
+                        Path(str(gui_project_path))
+                        .expanduser()
+                        .resolve(strict=False)
+                    )
+                    if gui_project_path is not None
+                    else None
+                )
+                transient_state = self._native_transient_work_state()
+                checkpoint_is_current = bool(
+                    snapshot.session is captured_session
+                    and getattr(self, "_artifact_session", None) is captured_session
+                    and snapshot.project_path == normalized_project_path
+                    and normalized_gui_project_path == normalized_project_path
+                    and snapshot.can_save
+                    and snapshot.save_checkpoint_current
+                    and not transient_state.has_unpersisted_work
+                )
+            except Exception:
+                _LOGGER.exception(
+                    "Could not validate native Save continuation authority"
+                )
+                return
+            if checkpoint_is_current:
+                callback()
+            else:
+                self._refresh_native_save_indicator()
+
+        QTimer.singleShot(0, invoke_when_safe)
 
     def copy_debug_info(self) -> None:
         try:
@@ -6215,6 +6973,25 @@ class MainWindow(QMainWindow):
         """Open a mesh file from a known path."""
         if not filepath:
             return
+        path = str(filepath)
+        metadata = dict(source_metadata) if isinstance(source_metadata, dict) else None
+        self._continue_after_native_unsaved_guard(
+            "다른 원본을 열기",
+            lambda: self._open_file_path_after_unsaved_guard(
+                path,
+                prompt_unit=prompt_unit,
+                source_metadata=metadata,
+            ),
+        )
+
+    def _open_file_path_after_unsaved_guard(
+        self,
+        filepath: str,
+        *,
+        prompt_unit: bool,
+        source_metadata: dict[str, Any] | None,
+    ) -> None:
+        """Continue Open only after the current native document is safe."""
 
         if bool(prompt_unit):
             dialog = UnitSelectionDialog(self)
@@ -6499,6 +7276,15 @@ class MainWindow(QMainWindow):
         """Open a project file (.amr) from a known path (no file dialog)."""
         if not filepath:
             return
+        path = str(filepath)
+        self._continue_after_native_unsaved_guard(
+            "다른 프로젝트를 열기",
+            lambda: self._open_project_path_after_unsaved_guard(path),
+        )
+
+    def _open_project_path_after_unsaved_guard(self, filepath: str) -> None:
+        """Start Project Open only after the current native document is safe."""
+
         thread = getattr(self, "_mesh_load_thread", None)
         project_thread = getattr(self, "_project_open_thread", None)
         if (
@@ -6963,7 +7749,11 @@ class MainWindow(QMainWindow):
         if not started:
             self._clear_artifact_pending_load(cancel_workbench=True)
 
-    def save_project(self) -> None:
+    def save_project(
+        self,
+        *,
+        on_saved: Callable[[], None] | None = None,
+    ) -> None:
         if bool(getattr(self, "_artifact_load_active", False)) or bool(
             getattr(self, "_project_load_active", False)
         ) or bool(
@@ -6985,18 +7775,23 @@ class MainWindow(QMainWindow):
                 "이 프로젝트는 AMR v1에서 읽었습니다. 원본을 보존하기 위해 "
                 "첫 저장은 새 AMR v2 파일로만 할 수 있습니다.",
             )
-            self.save_project_as()
+            self.save_project_as(on_saved=on_saved)
             return
         if not getattr(self, "_current_project_path", None):
-            self.save_project_as()
+            self.save_project_as(on_saved=on_saved)
             return
         destination = str(self._current_project_path)
         if isinstance(getattr(self, "_artifact_session", None), ArtifactSession):
-            self._start_native_project_save(destination)
+            self._start_native_project_save(destination, on_saved=on_saved)
             return
-        self._write_project(destination)
+        if self._write_project(destination) and callable(on_saved):
+            on_saved()
 
-    def save_project_as(self) -> None:
+    def save_project_as(
+        self,
+        *,
+        on_saved: Callable[[], None] | None = None,
+    ) -> None:
         if bool(getattr(self, "_artifact_load_active", False)) or bool(
             getattr(self, "_project_load_active", False)
         ) or bool(
@@ -7035,10 +7830,12 @@ class MainWindow(QMainWindow):
             filepath = str(filepath) + ".amr"
 
         if isinstance(getattr(self, "_artifact_session", None), ArtifactSession):
-            self._start_native_project_save(filepath)
+            self._start_native_project_save(filepath, on_saved=on_saved)
             return
         if self._write_project(filepath):
             self._current_project_path = str(filepath)
+            if callable(on_saved):
+                on_saved()
 
     @staticmethod
     def _write_native_project_snapshot(
@@ -7070,7 +7867,12 @@ class MainWindow(QMainWindow):
             )
         return _NativeProjectSaveResult(destination=str(destination))
 
-    def _start_native_project_save(self, filepath: str) -> bool:
+    def _start_native_project_save(
+        self,
+        filepath: str,
+        *,
+        on_saved: Callable[[], None] | None = None,
+    ) -> bool:
         """Start a native project save without blocking the Qt event loop."""
 
         if bool(getattr(self, "_artifact_load_active", False)) or bool(
@@ -7140,6 +7942,7 @@ class MainWindow(QMainWindow):
             getattr(self, "_project_requires_save_as", False)
         )
         base_legacy_path = getattr(self, "_legacy_project_path", None)
+        save_thread: TaskThread | None = None
 
         def authority_is_current() -> bool:
             current = controller.snapshot
@@ -7199,6 +8002,7 @@ class MainWindow(QMainWindow):
                     value.destination,
                     expected_state_version=base_state_version,
                     expected_authority_epoch=base_authority_epoch,
+                    durability_confirmed=not bool(value.durability_warning),
                 )
             except ArtifactWorkbenchError:
                 _LOGGER.warning(
@@ -7234,6 +8038,13 @@ class MainWindow(QMainWindow):
             self.status_info.setText(
                 f"프로젝트 저장: {Path(value.destination).name}"
             )
+            if callable(on_saved):
+                self._defer_exact_native_save_continuation(
+                    on_saved,
+                    captured_session=session,
+                    project_path=value.destination,
+                    save_thread=save_thread,
+                )
 
         def on_failed(message: str) -> None:
             self.status_info.setText("프로젝트 저장 실패 | 기존 파일 유지")
@@ -7247,18 +8058,19 @@ class MainWindow(QMainWindow):
             )
 
         try:
+            save_thread = TaskThread(
+                "save_native_project",
+                lambda: MainWindow._write_native_project_snapshot(
+                    destination,
+                    session,
+                    meta,
+                    preflight,
+                ),
+            )
             started = self._start_task(
                 title="프로젝트 저장",
                 label="원본·문서·Align을 검증하고 AMR 패키지를 저장하는 중...",
-                thread=TaskThread(
-                    "save_native_project",
-                    lambda: MainWindow._write_native_project_snapshot(
-                        destination,
-                        session,
-                        meta,
-                        preflight,
-                    ),
-                ),
+                thread=save_thread,
                 on_done=on_done,
                 on_failed=on_failed,
                 lock_dialog_until_finished=True,
@@ -7340,30 +8152,6 @@ class MainWindow(QMainWindow):
     ) -> Callable[[], None]:
         """Capture GUI-only guards and defer canonical mesh comparison to a worker."""
 
-        controller_factory = getattr(
-            self,
-            "_artifact_measurement_controller",
-            None,
-        )
-        active_measurements_value = (
-            controller_factory().active_summaries
-            if callable(controller_factory)
-            else ()
-        )
-        active_measurements = (
-            active_measurements_value
-            if isinstance(active_measurements_value, tuple)
-            else ()
-        )
-        if active_measurements:
-            states = ", ".join(
-                f"{summary.kind.value}:{summary.state.value}"
-                for summary in active_measurements
-            )
-            raise ProjectSerializationError(
-                "계산 또는 게시가 끝나지 않은 실측 작업이 있어 저장과 새 실측을 "
-                f"차단합니다 ({states})"
-            )
         objects = list(getattr(self.viewport, "objects", []) or [])
         if len(objects) != 1:
             raise ProjectSerializationError(
@@ -7380,21 +8168,16 @@ class MainWindow(QMainWindow):
             raise ProjectSerializationError(
                 "Native scene projection is stale for the active ArtifactDocument"
             )
-        if not np.allclose(obj.translation, [0.0, 0.0, 0.0], rtol=0.0, atol=1e-12):
+        transient_state = MainWindow._native_transient_work_state(
+            self,
+            obj=obj,
+            allowed_selected_face_indices=allowed_selected_face_indices,
+            allow_surface_measurement_picks=allow_surface_measurement_picks,
+        )
+        if transient_state.has_unpersisted_work:
             raise ProjectSerializationError(
-                "현재 보이는 이동 preview를 먼저 정치 확정하거나 초기화하세요"
-            )
-        if not np.allclose(obj.rotation, [0.0, 0.0, 0.0], rtol=0.0, atol=1e-12):
-            raise ProjectSerializationError(
-                "현재 보이는 회전 preview를 먼저 정치 확정하거나 초기화하세요"
-            )
-        if not np.isclose(float(obj.scale), 1.0, rtol=0.0, atol=1e-12):
-            raise ProjectSerializationError(
-                "Native Align은 scale preview를 저장할 수 없습니다"
-            )
-        if bool(getattr(obj, "_amr_has_unpersisted_bake", False)):
-            raise ProjectSerializationError(
-                "Native projection에 문서화되지 않은 vertex bake 흔적이 있습니다"
+                "현재 장면에 저장할 수 없는 미확정 작업이 있습니다. "
+                + " ".join(transient_state.reasons)
             )
 
         actual_mesh = getattr(obj, "mesh", None)
@@ -7423,112 +8206,6 @@ class MainWindow(QMainWindow):
                     "다릅니다"
                 )
 
-        def contains_material_result(value: Any) -> bool:
-            if value is None:
-                return False
-            if isinstance(value, np.ndarray):
-                return bool(value.size)
-            if isinstance(value, dict):
-                return any(contains_material_result(item) for item in value.values())
-            if isinstance(value, (list, tuple, set, frozenset)):
-                if not value:
-                    return False
-                if all(
-                    isinstance(item, (dict, list, tuple, set, frozenset, np.ndarray))
-                    or item is None
-                    for item in value
-                ):
-                    return any(contains_material_result(item) for item in value)
-                return True
-            if isinstance(value, str):
-                return bool(value.strip())
-            return bool(value)
-
-        raw_tile_state = getattr(obj, "tile_interpretation_state", None)
-        tile_state_changed = False
-        if raw_tile_state is not None:
-            try:
-                normalized_tile_state = (
-                    raw_tile_state
-                    if isinstance(raw_tile_state, TileInterpretationState)
-                    else TileInterpretationState.from_dict(raw_tile_state)
-                )
-                tile_state_changed = (
-                    normalized_tile_state.to_dict()
-                    != TileInterpretationState().to_dict()
-                )
-            except Exception:
-                tile_state_changed = True
-
-        selected_faces = tuple(
-            sorted(int(value) for value in (getattr(obj, "selected_faces", set()) or set()))
-        )
-        if allowed_selected_face_indices is not None:
-            allowed_selection = tuple(
-                sorted(int(value) for value in allowed_selected_face_indices)
-            )
-            if selected_faces != allowed_selection:
-                raise ProjectSerializationError(
-                    "기와 전개 face selection이 preflight capture와 다릅니다"
-                )
-            unported_selected_faces: tuple[int, ...] = ()
-        else:
-            unported_selected_faces = selected_faces
-
-        unported_values = (
-            getattr(obj, "polyline_layers", []),
-            getattr(obj, "fitted_arcs", []),
-            unported_selected_faces,
-            getattr(obj, "outer_face_indices", set()),
-            getattr(obj, "inner_face_indices", set()),
-            getattr(obj, "migu_face_indices", set()),
-            getattr(obj, "surface_assist_unresolved_face_indices", set()),
-            getattr(obj, "surface_assist_meta", {}),
-            getattr(obj, "surface_assist_runtime", {}),
-            getattr(obj, "tile_synthetic_truth", None),
-            getattr(obj, "tile_evaluation_report", None),
-            getattr(self.viewport, "picked_points", []),
-            getattr(self.viewport, "fitted_arc", None),
-            (
-                ()
-                if allow_surface_measurement_picks
-                else getattr(self.viewport, "measure_picked_points", [])
-            ),
-            (
-                ()
-                if allow_surface_measurement_picks
-                else getattr(self.viewport, "measure_picked_anchors", [])
-            ),
-            getattr(self.viewport, "slice_contours", []),
-            getattr(self.viewport, "x_profile", []),
-            getattr(self.viewport, "y_profile", []),
-            getattr(self.viewport, "_world_x_profile", []),
-            getattr(self.viewport, "_world_y_profile", []),
-            getattr(self.viewport, "roi_cut_edges", {}),
-            getattr(self.viewport, "roi_cap_verts", {}),
-            getattr(self.viewport, "roi_section_world", {}),
-            getattr(self.viewport, "cut_lines", []),
-            getattr(self.viewport, "cut_line_preview", None),
-            getattr(self.viewport, "cut_section_profiles", []),
-            getattr(self.viewport, "cut_section_world", []),
-            getattr(self.viewport, "cut_section_contours_world", []),
-            getattr(self.viewport, "cut_section_contours_local", []),
-            getattr(self.viewport, "line_profile", []),
-            getattr(self.viewport, "line_section_contours", []),
-            getattr(self.viewport, "floor_picks", []),
-            getattr(self.viewport, "brush_selected_faces", set()),
-            getattr(self.viewport, "surface_paint_points", []),
-            getattr(self.viewport, "surface_lasso_points", []),
-            getattr(self.viewport, "surface_lasso_face_indices", []),
-            getattr(self.viewport, "surface_magnetic_points", []),
-        )
-        if tile_state_changed or any(
-            contains_material_result(value) for value in unported_values
-        ):
-            raise ProjectSerializationError(
-                "현재 장면에는 아직 ArtifactDocument record로 승격되지 않은 결과가 "
-                "있습니다. M0-4 record 전환 전에는 이를 포함한 저장을 차단합니다."
-            )
         return validate_geometry
 
     def _validate_native_scene_for_save(self, session: ArtifactSession) -> None:
@@ -10012,6 +10689,7 @@ class MainWindow(QMainWindow):
 
         self._task_dialog = dlg
         self._task_thread = thread
+        self._refresh_native_save_indicator()
         dialog_close_guard = _TaskDialogCloseGuard()
         dialog_close_guard.waiting_for_worker = bool(lock_dialog_until_finished)
         try:
@@ -10063,6 +10741,7 @@ class MainWindow(QMainWindow):
                 self._task_cancel_request = None
                 self._task_close_dialog = None
                 self._task_shutdown_verify = None
+                self._refresh_native_save_indicator()
 
         def _default_failed(message: str):
             QMessageBox.critical(self, "오류", self._format_error_message("작업 실패:", message))
@@ -10162,6 +10841,7 @@ class MainWindow(QMainWindow):
             pass
         self._sync_tile_panel()
         self._sync_workflow_panel()
+        self._refresh_native_save_indicator()
         
     def on_selection_changed(self, index):
         self.scene_panel.update_list(self.viewport.objects, index)
@@ -10197,12 +10877,14 @@ class MainWindow(QMainWindow):
                 panel.set_points_count(0)
         except Exception:
             pass
+        self._refresh_native_save_indicator()
 
     def on_surface_assignment_changed(self, outer: int, inner: int, migu: int) -> None:
         try:
             self.flatten_panel.update_surface_assignment_counts(int(outer), int(inner), int(migu))
         except Exception:
             pass
+        self._refresh_native_save_indicator()
 
     def on_face_selection_count_changed(self, count: int) -> None:
         try:
@@ -10221,6 +10903,7 @@ class MainWindow(QMainWindow):
             pass
         self._sync_tile_panel()
         self._sync_workflow_panel()
+        self._refresh_native_save_indicator()
 
     def _ensure_tile_interpretation_state(self, obj) -> TileInterpretationState:
         raw_state = getattr(obj, "tile_interpretation_state", None)
@@ -10401,6 +11084,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self._sync_tile_panel()
+        self._refresh_native_save_indicator()
 
     @staticmethod
     def _tile_slot_key(slot_index: object) -> str:
@@ -11852,6 +12536,7 @@ class MainWindow(QMainWindow):
                     "기와 해석",
                     self._format_error_message("합성 기와를 생성하지 못했습니다:", f"{type(e).__name__}: {e}"),
                 )
+                self._refresh_native_save_indicator()
             return
         if action == "export_synthetic_benchmark_suite":
             seeds_arg = "1"
@@ -12434,6 +13119,7 @@ class MainWindow(QMainWindow):
                         f"기와 위저드 자동 진행 완료 ({len(executed_steps)}단계)"
                     )
                 self._sync_tile_panel()
+                self._refresh_native_save_indicator()
                 return
             else:
                 return
@@ -12443,11 +13129,13 @@ class MainWindow(QMainWindow):
                 "기와 해석",
                 self._format_error_message("기와 해석 상태를 갱신하지 못했습니다:", f"{type(e).__name__}: {e}"),
             )
+            self._refresh_native_save_indicator()
             return
 
         state.touch()
         setattr(obj, "tile_interpretation_state", state)
         self._sync_tile_panel()
+        self._refresh_native_save_indicator()
 
     def update_slice_range(self):
         """현재 선택된 객체의 Z 범위로 슬라이더 업데이트"""
@@ -15471,11 +16159,13 @@ class MainWindow(QMainWindow):
         self.status_info.setText(
             f"원호 #{arc_count} 생성됨 (월드 고정): 반지름 = {radius_mm:.1f} mm"
         )
+        self._refresh_native_save_indicator()
     
     def clear_curvature_points(self):
         """곡률 측정용 점 초기화"""
         self.viewport.clear_curvature_picks()
         self.status_info.setText("측정 점 초기화됨")
+        self._refresh_native_save_indicator()
     
     def clear_all_arcs(self):
         """선택된 객체의 모든 원호 삭제"""
@@ -15486,6 +16176,7 @@ class MainWindow(QMainWindow):
             self.scene_panel.update_list(self.viewport.objects, self.viewport.selected_index)
             self.viewport.update()
             self.status_info.setText(f"{count}개 원호 삭제됨")
+            self._refresh_native_save_indicator()
     
     def _disable_measure_mode(self) -> None:
         panel = getattr(self, "measure_panel", None)
@@ -15506,6 +16197,7 @@ class MainWindow(QMainWindow):
             self.viewport.clear_measure_picks()
         except Exception:
             pass
+        self._refresh_native_save_indicator()
 
 
     def toggle_measure_mode(self, enabled: bool) -> None:
@@ -15621,6 +16313,7 @@ class MainWindow(QMainWindow):
             self.status_info.setText("치수 측정 모드 종료")
 
         self.viewport.update()
+        self._refresh_native_save_indicator()
 
     def on_measure_mode_changed(self, mode: str) -> None:
         self._invalidate_surface_pick_requests()
@@ -15635,6 +16328,7 @@ class MainWindow(QMainWindow):
             self.status_info.setText("원 맞춤 지름: 표면 anchor 3~64개 선택 후 '지름 계산 · 기록'.")
         else:
             self.status_info.setText("검증 거리: 표면 anchor 2개 선택 시 자동 계산·기록.")
+        self._refresh_native_save_indicator()
 
     def on_surface_anchor_pick_requested(self, screen_x: int, screen_y: int) -> None:
         """Resolve one native exact-frame click to a durable source anchor."""
@@ -15747,6 +16441,7 @@ class MainWindow(QMainWindow):
                 points.append(np.asarray(point, dtype=np.float64).reshape(3))
                 self.measure_panel.set_points_count(len(anchors))
                 self.viewport.update()
+                self._refresh_native_save_indicator()
                 self.status_info.setText(
                     f"표면 anchor {len(anchors)}개 | face {int(anchor['face_index'])}"
                 )
@@ -15955,6 +16650,7 @@ class MainWindow(QMainWindow):
             pts = []
 
         panel.set_points_count(len(pts))
+        self._refresh_native_save_indicator()
 
         if panel.mode != "distance":
             return
@@ -16054,6 +16750,7 @@ class MainWindow(QMainWindow):
             self.measure_panel.set_points_count(0)
             self.viewport.update()
             self.status_info.setText("측정 포인트 초기화")
+            self._refresh_native_save_indicator()
         except Exception:
             pass
 

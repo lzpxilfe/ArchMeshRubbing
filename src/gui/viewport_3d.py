@@ -2053,6 +2053,7 @@ class Viewport3D(QOpenGLWidget):
     faceSelectionChanged = pyqtSignal(int)
     surfaceAssignmentChanged = pyqtSignal(int, int, int)  # outer/inner/migu faces count
     measurePointPicked = pyqtSignal(np.ndarray)
+    curvaturePickStateChanged = pyqtSignal(int)
     surfaceAnchorPickRequested = pyqtSignal(int, int)
     sliceScanRequested = pyqtSignal(float)
     sliceCaptureRequested = pyqtSignal(float)
@@ -10151,6 +10152,7 @@ class Viewport3D(QOpenGLWidget):
                     point = self.pick_point_on_mesh(event.pos().x(), event.pos().y())
                     if point is not None:
                         self.picked_points.append(point)
+                        self.curvaturePickStateChanged.emit(len(self.picked_points))
                         self.update()
                     return
 
@@ -15819,6 +15821,7 @@ class Viewport3D(QOpenGLWidget):
         """Clear curvature-picked points."""
         self.picked_points = []
         self.fitted_arc = None
+        self.curvaturePickStateChanged.emit(0)
         self.update()
 
     def clear_measure_picks(self) -> None:

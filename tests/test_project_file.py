@@ -849,6 +849,128 @@ class TestProjectFileV2(unittest.TestCase):
             self.assertFalse(raised.exception.retryable)
             self.assertFalse(path.exists())
 
+    def test_windows_extended_paths_preserve_unicode_local_and_unc_names(self):
+        self.assertEqual(
+            project_file._windows_extended_path(
+                r"C:\문화유산\한글 경로\기와 결과.amr"
+            ),
+            r"\\?\C:\문화유산\한글 경로\기와 결과.amr",
+        )
+        self.assertEqual(
+            project_file._windows_extended_path(
+                r"\\조사실-서버\공유 자료\유물\결과.amr"
+            ),
+            r"\\?\UNC\조사실-서버\공유 자료\유물\결과.amr",
+        )
+        already_extended = r"\\?\C:\매우 긴 경로\project.amr"
+        self.assertEqual(
+            project_file._windows_extended_path(already_extended),
+            already_extended,
+        )
+
+    def test_windows_movefileex_uses_replace_and_write_through_flags(self):
+        calls: list[tuple[str, str, int]] = []
+
+        def move_file_ex(source: str, destination: str, flags: int) -> int:
+            calls.append((source, destination, flags))
+            return 1
+
+        project_file._windows_replace_write_through(
+            r"C:\문화유산\.project.amr.staged.tmp",
+            r"C:\문화유산\project.amr",
+            move_file_ex=move_file_ex,
+            get_last_error=lambda: 0,
+        )
+
+        self.assertEqual(
+            calls,
+            [
+                (
+                    r"\\?\C:\문화유산\.project.amr.staged.tmp",
+                    r"\\?\C:\문화유산\project.amr",
+                    project_file.MOVEFILE_REPLACE_EXISTING
+                    | project_file.MOVEFILE_WRITE_THROUGH,
+                )
+            ],
+        )
+
+    def test_windows_movefileex_failure_is_not_downgraded_to_replace(self):
+        with mock.patch.object(project_file.os, "replace") as fallback_replace:
+            with self.assertRaises(OSError) as raised:
+                project_file._commit_staged_project(
+                    Path(r"C:\유물\.project.amr.staged.tmp"),
+                    Path(r"C:\유물\project.amr"),
+                    platform_name="nt",
+                    move_file_ex=lambda _source, _destination, _flags: 0,
+                    get_last_error=lambda: 32,
+                )
+
+        self.assertEqual(raised.exception.errno, 32)
+        self.assertIn("MoveFileExW write-through", str(raised.exception))
+        fallback_replace.assert_not_called()
+
+    def test_windows_movefileex_rejects_cross_directory_staging(self):
+        move_file_ex = mock.Mock(return_value=1)
+
+        with self.assertRaisesRegex(ValueError, "destination directory"):
+            project_file._windows_replace_write_through(
+                r"C:\다른 폴더\.project.amr.staged.tmp",
+                r"C:\유물\project.amr",
+                move_file_ex=move_file_ex,
+                get_last_error=lambda: 0,
+            )
+
+        move_file_ex.assert_not_called()
+
+    def test_legacy_writer_routes_validated_stage_through_commit_backend(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "project.amr"
+            with mock.patch.object(
+                project_file,
+                "_commit_staged_project",
+                wraps=project_file._commit_staged_project,
+            ) as commit:
+                save_project(path, {"writer": "legacy"})
+
+            commit.assert_called_once()
+            staged, destination = commit.call_args.args
+            self.assertEqual(Path(staged).parent, path.parent)
+            self.assertEqual(destination, path)
+
+    def test_windows_writer_failure_preserves_destination_and_staging_cleanup(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "existing.amr"
+            save_project(path, {"original": True})
+            previous = path.read_bytes()
+
+            with (
+                mock.patch.object(
+                    project_file,
+                    "project_commit_backend_identifier",
+                    return_value=project_file.WINDOWS_PROJECT_COMMIT_BACKEND,
+                ),
+                mock.patch.object(
+                    project_file,
+                    "_windows_extended_path",
+                    side_effect=lambda candidate: str(candidate),
+                ),
+                mock.patch.object(
+                    project_file,
+                    "_load_move_file_ex_w",
+                    return_value=(
+                        lambda _source, _destination, _flags: 0,
+                        lambda: 5,
+                    ),
+                ),
+            ):
+                with self.assertRaises(ProjectSaveError) as raised:
+                    save_project(path, {"replacement": True})
+
+            self.assertEqual(raised.exception.stage, "replace")
+            self.assertFalse(raised.exception.committed)
+            self.assertEqual(path.read_bytes(), previous)
+            self.assertEqual(self._temp_artifacts(path), [])
+
     def test_atomic_failures_preserve_destination_and_remove_same_dir_temp(self):
         failure_cases = (
             ("temp_write", "_write_zip_archive", OSError("injected write failure")),
@@ -858,7 +980,11 @@ class TestProjectFileV2(unittest.TestCase):
                 "_validate_staged_project",
                 ProjectFormatError("injected validation failure"),
             ),
-            ("replace", "os.replace", OSError("injected replace failure")),
+            (
+                "replace",
+                "_commit_staged_project",
+                OSError("injected commit failure"),
+            ),
         )
         for expected_stage, target, error in failure_cases:
             with self.subTest(stage=expected_stage), tempfile.TemporaryDirectory() as td:
@@ -866,12 +992,7 @@ class TestProjectFileV2(unittest.TestCase):
                 save_project(path, {"original": True})
                 previous = path.read_bytes()
 
-                patch_target = (
-                    mock.patch("src.core.project_file.os.replace", side_effect=error)
-                    if target == "os.replace"
-                    else mock.patch.object(project_file, target, side_effect=error)
-                )
-                with patch_target:
+                with mock.patch.object(project_file, target, side_effect=error):
                     with self.assertRaises(ProjectSaveError) as raised:
                         save_project(path, {"replacement": expected_stage})
 
@@ -894,10 +1015,13 @@ class TestProjectFileV2(unittest.TestCase):
             self.assertEqual(result, str(path))
             self.assertEqual(load_project(path)["state"], {"committed": True})
 
-    def test_directory_fsync_io_failure_reports_committed_but_uncertain(self):
+    def test_posix_directory_fsync_failure_reports_committed_but_uncertain(self):
         with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "project.amr"
-            save_project(path, {"before": True})
+            directory = Path(td)
+            staged = directory / ".project.amr.staged.tmp"
+            path = directory / "project.amr"
+            staged.write_bytes(b"after")
+            path.write_bytes(b"before")
 
             with mock.patch.object(
                 project_file,
@@ -905,11 +1029,16 @@ class TestProjectFileV2(unittest.TestCase):
                 side_effect=OSError(errno.EIO, "injected directory I/O failure"),
             ):
                 with self.assertRaises(ProjectSaveError) as raised:
-                    save_project(path, {"after": True})
+                    project_file._commit_staged_project(
+                        staged,
+                        path,
+                        platform_name="posix",
+                    )
 
             self.assertEqual(raised.exception.stage, "directory_fsync")
             self.assertTrue(raised.exception.committed)
-            self.assertEqual(load_project(path)["state"], {"after": True})
+            self.assertEqual(path.read_bytes(), b"after")
+            self.assertFalse(staged.exists())
 
 
 class TestEmbeddedArtifactProject(unittest.TestCase):
@@ -1005,6 +1134,26 @@ class TestEmbeddedArtifactProject(unittest.TestCase):
                 package.source_bundle,
                 SourceBundleIndex.for_document(session.document),
             )
+
+    def test_session_writer_routes_validated_stage_through_commit_backend(self):
+        with tempfile.TemporaryDirectory() as td:
+            directory = Path(td)
+            source_path = directory / "source.ply"
+            source_path.write_bytes(TEST_PLY_BYTES)
+            session = _artifact_session_from_path(source_path)
+            project_path = directory / "artifact.amr"
+
+            with mock.patch.object(
+                project_file,
+                "_commit_staged_project",
+                wraps=project_file._commit_staged_project,
+            ) as commit:
+                save_artifact_session_project(project_path, session)
+
+            commit.assert_called_once()
+            staged, destination = commit.call_args.args
+            self.assertEqual(Path(staged).parent, project_path.parent)
+            self.assertEqual(destination, project_path)
 
     def test_unified_offline_report_materializes_embedded_project_source(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1346,8 +1495,8 @@ class TestEmbeddedArtifactProject(unittest.TestCase):
             )
 
             # Save must also work over the archive that currently owns the
-            # embedded source. The old archive is closed before os.replace so
-            # this remains valid on Windows.
+            # embedded source. The old archive is closed before the Windows
+            # MoveFileExW write-through commit.
             save_artifact_session_project(resave_path, resaved)
             same_path = load_artifact_session_project(resave_path)
             self.assertEqual(same_path.document, restored.document)

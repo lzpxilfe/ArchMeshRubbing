@@ -80,6 +80,22 @@ class WorkflowStage(str, Enum):
     MEASUREMENT_READY = "measurement_ready"
 
 
+class SaveDurability(str, Enum):
+    """Whether a completed project write has proven directory durability."""
+
+    CONFIRMED = "confirmed"
+    UNCERTAIN = "uncertain"
+
+
+class WorkflowSaveStatus(str, Enum):
+    """Derived save state for the exact immutable document authority."""
+
+    EMPTY = "empty"
+    UNSAVED = "unsaved"
+    SAVED = "saved"
+    DURABILITY_UNCERTAIN = "durability_uncertain"
+
+
 class WorkflowTransitionKind(str, Enum):
     NEW_SOURCE = "new_source"
     REOPEN_PROJECT = "reopen_project"
@@ -216,6 +232,49 @@ class WorkflowFailure:
 
 
 @dataclass(frozen=True, slots=True)
+class SavedProjectCheckpoint:
+    """Exact document/path pair proven by one completed project save.
+
+    A project path alone is not evidence that the current immutable document
+    was saved.  The canonical document hash closes that gap, while durability
+    records whether the parent-directory sync completed successfully.
+    """
+
+    document_sha256: str
+    project_path: str
+    durability: SaveDurability | str = SaveDurability.CONFIRMED
+
+    def __post_init__(self) -> None:
+        document_sha256 = _required_text(
+            self.document_sha256,
+            field_name="saved checkpoint document_sha256",
+        ).lower()
+        if len(document_sha256) != 64 or any(
+            character not in "0123456789abcdef" for character in document_sha256
+        ):
+            raise ArtifactWorkbenchError(
+                "saved checkpoint document_sha256 must be 64 lowercase hexadecimal characters"
+            )
+        try:
+            durability = SaveDurability(self.durability)
+        except (TypeError, ValueError) as exc:
+            raise ArtifactWorkbenchError(
+                "saved checkpoint durability must be confirmed or uncertain"
+            ) from exc
+        object.__setattr__(self, "document_sha256", document_sha256)
+        object.__setattr__(
+            self,
+            "project_path",
+            _normalized_path(self.project_path, field_name="saved checkpoint project_path"),
+        )
+        object.__setattr__(self, "durability", durability)
+
+    @property
+    def durability_confirmed(self) -> bool:
+        return self.durability is SaveDurability.CONFIRMED
+
+
+@dataclass(frozen=True, slots=True)
 class ArtifactLoadTicket:
     id: str
     base_authority_epoch: int
@@ -254,6 +313,7 @@ class WorkflowSnapshot:
     project_path: str | None
     pending_load: ArtifactLoadTicket | None
     failure: WorkflowFailure | None
+    save_checkpoint: SavedProjectCheckpoint | None = None
     tentative: bool = False
     faulted: bool = False
 
@@ -301,6 +361,44 @@ class WorkflowSnapshot:
     @property
     def document_sha256(self) -> str | None:
         return self.session.document.canonical_sha256 if self.session is not None else None
+
+    @property
+    def save_checkpoint_current(self) -> bool:
+        checkpoint = self.save_checkpoint
+        return bool(
+            self.session is not None
+            and self.project_path is not None
+            and checkpoint is not None
+            and checkpoint.document_sha256 == self.document_sha256
+            and checkpoint.project_path == self.project_path
+            and checkpoint.durability is SaveDurability.CONFIRMED
+        )
+
+    @property
+    def save_status(self) -> WorkflowSaveStatus:
+        if self.session is None:
+            return WorkflowSaveStatus.EMPTY
+        checkpoint = self.save_checkpoint
+        checkpoint_matches = bool(
+            self.project_path is not None
+            and checkpoint is not None
+            and checkpoint.document_sha256 == self.document_sha256
+            and checkpoint.project_path == self.project_path
+        )
+        if self.faulted:
+            return WorkflowSaveStatus.UNSAVED
+        if not checkpoint_matches:
+            return WorkflowSaveStatus.UNSAVED
+        if checkpoint is not None and checkpoint.durability is SaveDurability.UNCERTAIN:
+            return WorkflowSaveStatus.DURABILITY_UNCERTAIN
+        return WorkflowSaveStatus.SAVED
+
+    @property
+    def has_unsaved_changes(self) -> bool:
+        return self.save_status not in {
+            WorkflowSaveStatus.EMPTY,
+            WorkflowSaveStatus.SAVED,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -356,21 +454,37 @@ class ArtifactWorkbench:
     ) -> None:
         if session is not None:
             session.projection_snapshot()
+        normalized_project = (
+            _normalized_path(project_path, field_name="project_path")
+            if project_path is not None
+            else None
+        )
+        initial_checkpoint = (
+            SavedProjectCheckpoint(
+                document_sha256=session.document.canonical_sha256,
+                project_path=normalized_project,
+            )
+            if session is not None and normalized_project is not None
+            else None
+        )
         self._lock = RLock()
         self._id_factory = id_factory
         self._state = WorkflowSnapshot(
             state_version=0,
             authority_epoch=0,
             session=session,
-            project_path=(
-                _normalized_path(project_path, field_name="project_path")
-                if project_path is not None
-                else None
-            ),
+            project_path=normalized_project,
             pending_load=None,
             failure=None,
+            save_checkpoint=initial_checkpoint,
         )
         self._tentative_activation_id: str | None = None
+        # Open transitions cross an asynchronous worker/GUI boundary.  Their
+        # frozen dataclass fields remain inspectable evidence, but field equality
+        # is not an authority capability because ``dataclasses.replace`` can
+        # reproduce and alter them.  Only the exact object most recently issued
+        # by ``prepare_loaded_source`` may consume the one live Open ticket.
+        self._prepared_open_transition: ProjectionTransition | None = None
         self._external_effect_publication_lease: object | None = None
         self._observers: dict[str, Observer] = {}
         self._observer_versions: dict[str, int] = {}
@@ -511,14 +625,16 @@ class ArtifactWorkbench:
         *,
         expected_state_version: int,
         expected_authority_epoch: int,
+        durability_confirmed: bool = True,
     ) -> WorkflowSnapshot:
         """Adopt a completed Save destination only for its captured authority.
 
         Project serialization happens before this fast compare-and-swap.  A
-        successful path change advances the state version so a transition
-        prepared against the former locator cannot silently restore it.  The
-        authority epoch stays unchanged because the immutable document and
-        render projection do not change.
+        successful checkpoint change advances the state version, even when a
+        same-path save establishes new document or durability evidence.  A
+        transition prepared against the former checkpoint therefore cannot
+        silently restore it.  The authority epoch stays unchanged because the
+        immutable document and render projection do not change.
         """
 
         if not isinstance(captured_session, ArtifactSession):
@@ -533,9 +649,20 @@ class ArtifactWorkbench:
             raise ArtifactWorkbenchError(
                 "expected_authority_epoch must be a non-negative integer"
             )
+        if type(durability_confirmed) is not bool:
+            raise ArtifactWorkbenchError("durability_confirmed must be a boolean")
         normalized_project = _normalized_path(
             project_path,
             field_name="project_path",
+        )
+        checkpoint = SavedProjectCheckpoint(
+            document_sha256=captured_session.document.canonical_sha256,
+            project_path=normalized_project,
+            durability=(
+                SaveDurability.CONFIRMED
+                if durability_confirmed
+                else SaveDurability.UNCERTAIN
+            ),
         )
         with self._lock:
             state = self._require_command_slot()
@@ -551,12 +678,16 @@ class ArtifactWorkbench:
                 raise ArtifactWorkbenchError(
                     "artifact authority is not stable for saved-path adoption"
                 )
-            if state.project_path == normalized_project:
+            if (
+                state.project_path == normalized_project
+                and state.save_checkpoint == checkpoint
+            ):
                 return state
             self._state = replace(
                 state,
                 state_version=state.state_version + 1,
                 project_path=normalized_project,
+                save_checkpoint=checkpoint,
             )
             changed = self._state
         self._notify(changed)
@@ -816,6 +947,7 @@ class ArtifactWorkbench:
                 align_revision_id=align_revision_id,
                 capture_dependencies=True,
             )
+            self._prepared_open_transition = None
             self._state = WorkflowSnapshot(
                 state_version=state.state_version + 1,
                 authority_epoch=state.authority_epoch,
@@ -823,6 +955,7 @@ class ArtifactWorkbench:
                 project_path=state.project_path,
                 pending_load=ticket,
                 failure=None,
+                save_checkpoint=state.save_checkpoint,
                 faulted=state.faulted,
             )
             changed = self._state
@@ -875,6 +1008,7 @@ class ArtifactWorkbench:
                 operator=None,
                 capture_dependencies=False,
             )
+            self._prepared_open_transition = None
             self._state = WorkflowSnapshot(
                 state_version=state.state_version + 1,
                 authority_epoch=state.authority_epoch,
@@ -882,6 +1016,7 @@ class ArtifactWorkbench:
                 project_path=state.project_path,
                 pending_load=ticket,
                 failure=None,
+                save_checkpoint=state.save_checkpoint,
                 faulted=state.faulted,
             )
             changed = self._state
@@ -972,7 +1107,7 @@ class ArtifactWorkbench:
                 raise StaleWorkflowOperationError(
                     "artifact Open state changed while its candidate was prepared"
                 )
-            return ProjectionTransition(
+            transition = ProjectionTransition(
                 id=transition_id or self._id_factory("projection"),
                 kind=kind,
                 base_state_version=current.state_version,
@@ -983,6 +1118,11 @@ class ArtifactWorkbench:
                 projection=projection,
                 project_path=ticket.project_path,
             )
+            # A second successful preparation for the same ticket deliberately
+            # supersedes the first.  Failed preparation leaves the last valid
+            # capability usable because no authority state changed.
+            self._prepared_open_transition = transition
+            return transition
 
     def fail_load(
         self,
@@ -1004,8 +1144,10 @@ class ArtifactWorkbench:
                 project_path=state.project_path,
                 pending_load=None,
                 failure=failure,
+                save_checkpoint=state.save_checkpoint,
                 faulted=state.faulted,
             )
+            self._prepared_open_transition = None
             changed = self._state
         self._notify(changed)
         return changed
@@ -1020,8 +1162,10 @@ class ArtifactWorkbench:
                 project_path=state.project_path,
                 pending_load=None,
                 failure=None,
+                save_checkpoint=state.save_checkpoint,
                 faulted=state.faulted,
             )
+            self._prepared_open_transition = None
             changed = self._state
         self._notify(changed)
         return changed
@@ -1398,13 +1542,45 @@ class ArtifactWorkbench:
                     "projection transition was prepared for stale authority"
                 )
             if transition.load_ticket_id is not None:
+                if self._prepared_open_transition is not transition:
+                    raise StaleWorkflowOperationError(
+                        "Open projection transition is not the current prepared "
+                        "capability"
+                    )
                 pending = state.pending_load
                 if pending is None or pending.id != transition.load_ticket_id:
                     raise StaleWorkflowOperationError(
                         "projection transition belongs to a stale Open request"
                     )
+                expected_kind = WorkflowTransitionKind(pending.kind.value)
+                if transition.kind is not expected_kind:
+                    raise ArtifactWorkbenchError(
+                        "projection transition kind does not match its Open ticket"
+                    )
             elif state.pending_load is not None:
                 raise WorkflowBusyError("cannot publish an update during artifact Open")
+            elif transition.kind in {
+                WorkflowTransitionKind.NEW_SOURCE,
+                WorkflowTransitionKind.REOPEN_PROJECT,
+            }:
+                raise ArtifactWorkbenchError(
+                    "Open projection transition has no live load ticket"
+                )
+            if transition.kind is WorkflowTransitionKind.NEW_SOURCE:
+                checkpoint = None
+            elif transition.kind is WorkflowTransitionKind.REOPEN_PROJECT:
+                if transition.project_path is None:
+                    raise ArtifactWorkbenchError(
+                        "project reopen transition has no project path"
+                    )
+                checkpoint = SavedProjectCheckpoint(
+                    document_sha256=(
+                        transition.candidate_session.document.canonical_sha256
+                    ),
+                    project_path=transition.project_path,
+                )
+            else:
+                checkpoint = state.save_checkpoint
             activation = ProjectionActivation(
                 id=activation_id or self._id_factory("activation"),
                 transition_id=transition.id,
@@ -1416,10 +1592,17 @@ class ArtifactWorkbench:
                     project_path=transition.project_path,
                     pending_load=None,
                     failure=None,
+                    save_checkpoint=checkpoint,
                     tentative=True,
                     faulted=state.faulted,
                 ),
             )
+            if transition.load_ticket_id is not None:
+                # Consume the controller-owned capability only after every
+                # validation and activation construction has succeeded.  A
+                # rejected forged copy therefore cannot invalidate the genuine
+                # transition returned to the caller.
+                self._prepared_open_transition = None
             self._state = activation.current
             self._tentative_activation_id = activation.id
             return activation
@@ -1483,6 +1666,7 @@ class ArtifactWorkbench:
                     project_path=transition.project_path,
                     pending_load=None,
                     failure=None,
+                    save_checkpoint=state.save_checkpoint,
                     tentative=True,
                     faulted=state.faulted,
                 ),
@@ -1568,6 +1752,7 @@ class ArtifactWorkbench:
                 project_path=activation.previous.project_path,
                 pending_load=None,
                 failure=failure,
+                save_checkpoint=activation.previous.save_checkpoint,
                 faulted=activation.previous.faulted,
             )
             self._tentative_activation_id = None
@@ -1609,6 +1794,16 @@ class ArtifactWorkbench:
         )
         with self._lock:
             state = self._state
+            checkpoint = state.save_checkpoint
+            if not (
+                checkpoint is not None
+                and session is not None
+                and normalized_project is not None
+                and checkpoint.document_sha256
+                == session.document.canonical_sha256
+                and checkpoint.project_path == normalized_project
+            ):
+                checkpoint = None
             failure = WorkflowFailure(
                 operation_id=operation_id or self._id_factory("fault"),
                 operation="authority_fault",
@@ -1625,8 +1820,10 @@ class ArtifactWorkbench:
                 project_path=normalized_project,
                 pending_load=None,
                 failure=failure,
+                save_checkpoint=checkpoint,
                 faulted=True,
             )
+            self._prepared_open_transition = None
             self._tentative_activation_id = None
             changed = self._state
         self._notify(changed)
@@ -1651,6 +1848,7 @@ class ArtifactWorkbench:
             session.projection_snapshot()
         with self._lock:
             state = self._require_command_slot()
+            self._prepared_open_transition = None
             normalized_project = (
                 _normalized_path(project_path, field_name="project_path")
                 if project_path is not None
@@ -1665,6 +1863,7 @@ class ArtifactWorkbench:
                 project_path=normalized_project,
                 pending_load=None,
                 failure=None,
+                save_checkpoint=None,
             )
             changed = self._state
         self._notify(changed)
@@ -1679,10 +1878,13 @@ __all__ = [
     "ProjectionActivation",
     "ProjectionTransition",
     "RecordBindingTransition",
+    "SaveDurability",
+    "SavedProjectCheckpoint",
     "StaleWorkflowOperationError",
     "WorkflowBusyError",
     "WorkflowFailure",
     "WorkflowPhase",
+    "WorkflowSaveStatus",
     "WorkflowSnapshot",
     "WorkflowStage",
     "WorkflowTransitionKind",

@@ -59,10 +59,12 @@ from src.core.field_pilot import (
 from src.core.mesh_loader import MeshLoader
 from src.core.project_file import (
     load_artifact_session_project,
+    project_commit_backend_identifier,
     save_artifact_session_project,
 )
 from src.core.project_recovery import (
     discover_interrupted_project_saves,
+    project_recovery_publish_backend_identifier,
     recover_interrupted_project_save,
 )
 
@@ -132,6 +134,8 @@ class ArtifactWorkflowSelfTestResult:
     survey_manifest_sha256: str
     survey_artifact_set_sha256: str
     field_pilot_contract: str
+    project_commit_backend: str
+    recovery_publish_backend: str
     svg_sha256: str
     png_sha256: str
     surface_area_mm2_decimal: str
@@ -157,6 +161,8 @@ class ArtifactWorkflowSelfTestResult:
             f"Metrics {self.geometry_metrics_count}/1, "
             f"records={self.record_count}, source={self.source_sha256[:12]}, "
             f"document={self.document_sha256[:12]}, "
+            "checkpoint=dirty>saved>dirty>saved, "
+            f"project_commit={self.project_commit_backend}, "
             f"svg={self.svg_sha256[:12]}, png={self.png_sha256[:12]}, "
             f"exports=vector {self.vector_export_count}/9>"
             f"rubbing {self.rubbing_export_count}/6, "
@@ -170,7 +176,8 @@ class ArtifactWorkflowSelfTestResult:
             f"survey_set={self.survey_artifact_set_sha256[:12]}, "
             "survey=verified-atomic-15, "
             f"pilot={self.field_pilot_contract}, "
-            "recovery=verified-create-new"
+            "recovery=verified-create-new, "
+            f"recovery_commit={self.recovery_publish_backend}"
         )
 
 
@@ -519,6 +526,8 @@ def _run_in_directory(directory: Path) -> ArtifactWorkflowSelfTestResult:
     opened_state = workbench.finalize_projection(opened_activation)
     if opened_state.stage is not WorkflowStage.ALIGN_REQUIRED:
         raise RuntimeError("Open did not require an explicit Align confirmation")
+    if not opened_state.has_unsaved_changes or opened_state.save_checkpoint is not None:
+        raise RuntimeError("newly imported source did not begin as unsaved authority")
 
     aligned = workbench.prepare_align_commit(
         translation_mm=(0.0, 0.0, 0.0),
@@ -539,6 +548,24 @@ def _run_in_directory(directory: Path) -> ArtifactWorkflowSelfTestResult:
         or not aligned_state.can_measure
     ):
         raise RuntimeError("explicit Align did not unlock measurement")
+    if not aligned_state.has_unsaved_changes:
+        raise RuntimeError("explicit Align was not marked as unsaved authority")
+
+    aligned_session = aligned_state.session
+    if not isinstance(aligned_session, ArtifactSession):
+        raise RuntimeError("explicit Align lost the active ArtifactSession")
+    save_artifact_session_project(project_path, aligned_session)
+    aligned_saved_state = workbench.adopt_saved_project_path(
+        aligned_session,
+        str(project_path),
+        expected_state_version=aligned_state.state_version,
+        expected_authority_epoch=aligned_state.authority_epoch,
+    )
+    if (
+        aligned_saved_state.has_unsaved_changes
+        or not aligned_saved_state.save_checkpoint_current
+    ):
+        raise RuntimeError("aligned pre-measurement checkpoint was not confirmed saved")
 
     measurements = ArtifactMeasurementController(workbench, id_factory=ids)
     metrics_id = _measure_and_publish(
@@ -553,6 +580,8 @@ def _run_in_directory(directory: Path) -> ArtifactWorkflowSelfTestResult:
     metrics_session = workbench.snapshot.session
     if not isinstance(metrics_session, ArtifactSession):
         raise RuntimeError("geometry metrics publication lost the active session")
+    if not workbench.snapshot.has_unsaved_changes:
+        raise RuntimeError("first record binding did not invalidate the saved checkpoint")
     metrics_receipt = geometry_metrics_receipt_from_record(
         metrics_session.document.record_index[metrics_id]
     )
@@ -690,7 +719,21 @@ def _run_in_directory(directory: Path) -> ArtifactWorkflowSelfTestResult:
     if len(current.document.records) != 18:
         raise RuntimeError("complete self-test document does not contain 18 records")
 
+    before_final_save = workbench.snapshot
+    if before_final_save.session is not current:
+        raise RuntimeError("final save did not capture the active ArtifactSession")
     save_artifact_session_project(project_path, current)
+    final_saved_state = workbench.adopt_saved_project_path(
+        current,
+        str(project_path),
+        expected_state_version=before_final_save.state_version,
+        expected_authority_epoch=before_final_save.authority_epoch,
+    )
+    if (
+        final_saved_state.has_unsaved_changes
+        or not final_saved_state.save_checkpoint_current
+    ):
+        raise RuntimeError("same-path final save did not confirm the exact checkpoint")
     original_project_bytes = project_path.read_bytes()
     interrupted_path = directory / f".{project_path.name}.recover1.tmp"
     interrupted_path.write_bytes(original_project_bytes)
@@ -703,7 +746,12 @@ def _run_in_directory(directory: Path) -> ArtifactWorkflowSelfTestResult:
     recovered_path = directory / "workflow-fixture-recovered.amr"
     recovery = recover_interrupted_project_save(candidates[0], recovered_path)
     if recovery.durability_warning is not None:
-        raise RuntimeError("recovery self-test could not confirm directory durability")
+        raise RuntimeError("recovery self-test could not confirm publication durability")
+    expected_recovery_backend = project_recovery_publish_backend_identifier()
+    if recovery.publish_backend != expected_recovery_backend:
+        raise RuntimeError(
+            "recovery self-test did not use the current platform publication backend"
+        )
     if not interrupted_path.exists() or project_path.read_bytes() != original_project_bytes:
         raise RuntimeError("recovery modified its candidate or existing project")
     restored = load_artifact_session_project(recovered_path)
@@ -747,6 +795,11 @@ def _run_in_directory(directory: Path) -> ArtifactWorkflowSelfTestResult:
     )
     if not offline_workbench.snapshot.can_measure:
         raise RuntimeError("offline AMR reopen lost explicit Align authority")
+    if (
+        offline_workbench.snapshot.has_unsaved_changes
+        or not offline_workbench.snapshot.save_checkpoint_current
+    ):
+        raise RuntimeError("offline AMR reopen did not establish a clean checkpoint")
     exports = ArtifactExportController(offline_workbench, id_factory=ids)
 
     vector_receipts = [
@@ -853,6 +906,8 @@ def _run_in_directory(directory: Path) -> ArtifactWorkflowSelfTestResult:
         survey_manifest_sha256=survey_receipt["manifest_sha256"],
         survey_artifact_set_sha256=survey_receipt["artifact_set_sha256"],
         field_pilot_contract="artifact-pass-human-driver-pending",
+        project_commit_backend=project_commit_backend_identifier(),
+        recovery_publish_backend=recovery.publish_backend,
         svg_sha256=top_cutline["svg_sha256"],
         png_sha256=top_rubbing["png_sha256"],
         surface_area_mm2_decimal=str(metrics_surface["decimal_mm2"]),

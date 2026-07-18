@@ -76,11 +76,31 @@ AMR v2 container는 payload 종류와 payload schema를 분리한다.
 2. 기대 SHA-256·크기를 확인하면서 같은 parent의 임시 ZIP으로 복사한다.
 3. 임시 package의 central directory, member 규칙, 전체 checksum과 source index를 production reader로 다시 검증한다.
 4. embedded source closure를 저장된 전체 closed import recipe/unit과 manifest-only resolver로 실제 decode하고 document에 bind·materialize하여 source/dependency/geometry/Align projection과 parser receipt를 확인한다.
-5. source archive descriptor를 닫은 뒤에만 목적지를 원자 교체하고 directory fsync를 시도한다.
+5. source archive descriptor를 닫은 뒤에만 목적지를 commit한다. Windows 안정판은 같은 폴더 staging을 긴 Unicode/UNC path로 변환해 [`MoveFileExW`](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-movefileexw)의 `MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH`로 교체하며, 이 Win32 호출이 실패하면 기존 목적지를 보존하고 더 약한 rename으로 fallback하지 않는다. POSIX source 호환 경로만 `os.replace` 뒤 parent directory `fsync`를 유지한다.
 
 native session 저장 대상은 `.amr` 확장자만 허용한다. 대상 경로가 외부 source resource와 같은 path, symlink 또는 hardlink inode라면 임시 파일 생성 전과 교체 직전에 거부한다. 이미 embedded source에서 열린 session은 같은 `.amr` 위 저장과 Save As를 모두 지원한다. 기존 source bundle이 없는 manifest-only artifact 문서는 계속 읽지만, session materialization에는 외부 주 원본을 다시 선택해야 한다.
 
 한 source manifest와 v2 bundle index는 현재 최대 61개 entry이며, embedded source 전체 합계는 최대 16 GiB다. 일반 member의 기존 256 MiB/총 512 MiB 제한과 분리한다. source blob은 압축 폭탄을 피하고 streaming hash를 가능하게 하기 위해 `ZIP_STORED`만 허용한다. 이 한계보다 큰 multi-file scan은 아직 authoritative import/save 대상이 아니다.
+
+### Runtime saved-snapshot checkpoint
+
+저장 checkpoint는 `.amr` container member가 아니라 Windows native application state다. Workbench는 다음 세 값을 한 묶음으로 유지한다.
+
+- 저장 당시 immutable `ArtifactDocument` canonical SHA-256
+- 정규화한 project path
+- `confirmed` 또는 `uncertain` 내구성 상태
+
+현재 document SHA-256와 project path가 checkpoint와 exact match하고 내구성이 `confirmed`일 때만 clean이다. checkpoint가 없거나 hash/path가 다르거나 내구성이 `uncertain`이면 unsaved changes로 취급하고 `durability_uncertain` save status를 표시한다. 이 상태는 별도 serialized `dirty` flag로 저장하지 않으며, 창 제목의 `*`와 상태 표시줄도 같은 Workbench snapshot에서 파생한다.
+
+- 새 source import는 저장 checkpoint가 없는 dirty 문서로 게시한다.
+- embedded source closure, parser receipt, document/geometry/Align을 production reopen 경계에서 모두 검증한 project는 재열린 exact path/document의 confirmed checkpoint로 시작한다.
+- immutable Align revision이나 DerivedRecord를 append/activate해 canonical document SHA-256가 바뀌면 기존 checkpoint는 이력으로 남지만 현재 문서는 dirty이다.
+- 같은 경로 Save와 Save As는 모두 캡처한 session/state version/authority epoch/기존 project path의 exact compare-and-swap이 성공한 뒤에만 checkpoint를 갱신한다. 과거 snapshot 파일이 성공적으로 쓰였더라도 stale CAS이면 현재 문서는 clean이 아니다.
+- Windows의 `MoveFileExW` write-through 호출이 실패하면 pre-commit 실패이므로 checkpoint를 갱신하지 않는다. 성공하면 Microsoft가 문서화한 “move가 disk에서 완료될 때까지 반환하지 않음” 경계로 `confirmed`를 만들 수 있다. POSIX 호환 경로에서 `os.replace` 뒤 directory `fsync`가 실제 실패한 committed 결과만 파일 게시 성공과 crash durability 미확정을 구분하되 clean으로 승격하지 않는다. 이 POSIX 경로는 macOS·Linux 안정판 완료 주장이 아니다.
+
+Windows native Close, 새 source Open, Project Open, drag-and-drop은 dirty 문서에서 공통 `Save / Discard / Cancel` gate를 통과한다. `Save`를 고르면 원래의 닫기/열기 명령은 비동기 저장이 exact current snapshot의 confirmed checkpoint를 만든 뒤에만 재개된다. Save As 대화상자 취소, writer/CAS 실패, stale 완료, durability-uncertain 결과는 후속 명령을 허가하지 않고 현재 문서와 창을 보존한다. `Discard`만 명시적으로 checkpoint 불일치를 무시하고 교체를 진행하며 `Cancel`은 아무 것도 바꾸지 않는다.
+
+Packaged complete-workflow self-test는 새 import `dirty` → 첫 exact Save `saved` → record append `dirty` → 동일 경로 exact Save `saved`를 실제 Workbench에서 통과하고 report detail에 `checkpoint=dirty>saved>dirty>saved`와 `project_commit=windows-movefileex-write-through`를 남겨야 한다. frozen과 한글 경로 portable Windows gate는 쉼표로 구분한 두 marker token이 정확히 없으면 실패한다. 이 marker는 runtime checkpoint 전이와 실제 Windows commit backend의 패키지 회귀 증거이지 `.amr` member가 아니다. 현재 완료 판정과 frozen/portable 증거는 Windows에만 적용한다. 이 저장 계약은 코드 권리·공개 배포 적합성, 대표 하드웨어, 실제 유물/고고학자 파일럿 완료를 증명하지 않는다.
 
 ## 외부 원본 식별
 
@@ -289,9 +309,9 @@ M0-3에서 시작한 durable core와 현재 native GUI/application 경계는 다
 - headless `ArtifactSceneAdapter`가 항상 immutable source에서 시작해 active `Align @ SourceMetadata`를 적용한 새 float64 world-mm `MeshData`를 만든다. source vertex를 mutate하거나 centroid로 recenter하지 않고, document/revision/hash/matrix snapshot이 바뀐 늦은 결과를 거부한다.
 - native application은 정확히 한 artifact를 다루며 `ArtifactWorkbench.snapshot.session.document`를 source of truth로 둔다. MainWindow의 session field는 이행 중 compatibility mirror다. 사용자 Open은 단위·축·handedness 확인 후 ticketed load로 들어가고, `initial_identity` baseline에서는 `ALIGN_REQUIRED`에 머문다. 이동·회전은 preview일 뿐이며 첫 정위치 확정은 변화량이 0이어도 proper-rigid child Align revision을 append한 뒤 immutable source에서 장면을 다시 materialize한다. parent activation으로 baseline에 돌아가면 측정·내보내기가 다시 잠긴다. scale은 metadata 영역이므로 native Align preview에서 차단한다.
 - Align commit과 parent activation은 GUI에서 immutable session, exact scene binding, preview TRS/pivot와 Workbench version만 캡처한다. source geometry hash 검증, candidate session 생성과 canonical materialization은 application-modal locked worker에서 수행한다. 완료 시 object/mesh/binding/preview, session/state version/authority epoch와 project path가 capture와 모두 같아야만 GUI thread의 VBO 준비·two-phase scene publication으로 넘어간다. 변경된 late result는 document나 scene을 수정하지 않고 폐기한다.
-- artifact project reopen은 embedded source가 있으면 별도 picker 없이 background worker에서 package와 source bytes를 검증하고 saved parser/unit으로 CPU staging한다. manifest-only 문서만 외부 source resolver를 사용한다. corrupt embedded package를 external/legacy 경로로 fallback하지 않는다. `ArtifactWorkbench`는 한 pending Open ticket과 `state_version`/`authority_epoch`를 검증하고, candidate projection을 준비한 뒤 scene notification 동안에만 tentative authority로 활성화한다. scene swap 성공 후 finalize하고, 실패하면 이전 session·scene·project path로 rollback한다. observer는 finalize 전 candidate를 보지 않는다.
+- artifact project reopen은 embedded source가 있으면 별도 picker 없이 background worker에서 package와 source bytes를 검증하고 saved parser/unit으로 CPU staging한다. manifest-only 문서만 외부 source resolver를 사용한다. corrupt embedded package를 external/legacy 경로로 fallback하지 않는다. `ArtifactWorkbench`는 한 pending Open ticket과 `state_version`/`authority_epoch`를 검증하고, candidate projection을 준비한 뒤 scene notification 동안에만 tentative authority로 활성화한다. scene swap 성공 후 finalize하고, 실패하면 이전 session·scene·project path/checkpoint로 rollback한다. observer는 finalize 전 candidate를 보지 않으며, fully verified reopen finalize만 현재 document/path의 confirmed checkpoint를 만든다.
 - rollback·scene 복원·finalize 자체가 실패해 application authority와 live scene의 일치를 증명할 수 없으면 fatal authority 상태로 전환한다. 이 상태에서는 ordinary Save target을 해제하고 저장·실측·내보내기를 모두 거부하며, 검증된 새 Open만 정상 authority를 회복한다.
-- artifact save는 active document만 쓰기 전에 정확히 한 projection, current snapshot, identity preview, source에서 재현한 vertices/faces 일치, destructive bake 부재를 확인한다. desktop은 immutable session과 Workbench state/authority version, 기존 project path를 캡처하고 이 geometry 비교부터 source closure 재검증·ZIP64/fsync·staged package 재개방/materialization까지 worker에서 실행한다. atomic writer 완료 뒤 캡처 권위가 달라졌으면 만들어진 파일은 과거 snapshot으로 보고하며 현재 project path와 Save As/migration 상태를 갱신하지 않는다. 경로 채택은 Workbench의 exact session/state/epoch CAS이며 성공 시 path-only state version만 전진한다. `ALIGN_REQUIRED` document 자체는 보존할 수 있지만 Cutline/Outline/Digital Rubbing/기와 전개/검증 제원 계산과 vector/rubbing/survey/tile-unwrap export는 명시적 Align 전까지 차단한다. 아직 `DerivedRecord`로 승격되지 않은 cutline·선택·기록면·평가 등의 결과가 하나라도 있으면 누락한 채 저장하지 않고 fail closed한다.
+- artifact save는 active document만 쓰기 전에 정확히 한 projection, current snapshot, identity preview, source에서 재현한 vertices/faces 일치, destructive bake 부재를 확인한다. desktop은 immutable session과 Workbench state/authority version, 기존 project path를 캡처하고 이 geometry 비교부터 source closure 재검증·ZIP64/fsync·staged package 재개방/materialization까지 worker에서 실행한다. atomic writer 완료 뒤 캡처 권위가 달라졌으면 만들어진 파일은 과거 snapshot으로 보고하며 현재 project path/checkpoint와 Save As/migration 상태를 갱신하지 않는다. 경로/checkpoint 채택은 Workbench의 exact session/state/epoch CAS이며 성공 시 state version만 전진한다. `ALIGN_REQUIRED` document 자체는 보존할 수 있지만 Cutline/Outline/Digital Rubbing/기와 전개/검증 제원 계산과 vector/rubbing/survey/tile-unwrap export는 명시적 Align 전까지 차단한다. 아직 `DerivedRecord`로 승격되지 않은 cutline·선택·기록면·평가 등의 결과가 하나라도 있으면 누락한 채 저장하지 않고 fail closed한다.
 - Cutline/Outline/Digital Rubbing/기와 전개/검증 제원은 application layer가 canonical recipe, projection context, exact record ID와 result capability를 소유한다. GUI handler는 projection binding·TRS·transient mutation만 확인하고, canonical source materialization과 live vertex/face exact comparison은 controller 실행 경계의 worker preflight에서 수행한다. worker는 session을 commit하지 않고 computation만 반환하며, 완료 시 captured document가 current document의 immutable ancestor이고 active source/metadata/Align/matrix가 같을 때만 current session에 rebase하여 expected record ID 하나를 publish한다. DerivedRecord append는 `RecordBindingTransition`으로 live object의 immutable document snapshot만 CAS하고 기존 mesh/VBO를 보존한다. 일반 scene selection은 유지하되, 기와 ‘현재 선택 면’ recipe와 live selection이 게시 시점에도 정확히 같으면 record로 소비된 선택만 비운다. Align/Open finalize 뒤 늦은 결과는 되살아나지 않는다. pending Open이나 rollback 가능한 binding 준비 실패는 계산 결과와 예약 ID를 보존해 명시적으로 재시도하며, 그동안 저장과 새 실측을 차단한다. Rubbing begin은 geometry·UV·texture 복사를 포함한 최소 admission만 예약하고, worker가 해상도별 전체 peak-memory estimate를 계산해 공유 budget 안에서 원자 확장한다. preflight 실패·취소는 같은 terminal 상태 머신에서 예약을 해제하며 실행은 exactly-once다.
 - vector/rubbing/survey/tile-unwrap export는 exact work item/result capability를 별도로 예약한다. worker는 비싼 SVG 생성, Rubbing 또는 tile-unwrap recipe 재계산·receipt 비교, package 전체 검증을 수행하고 destination·parent·staging inode·member fingerprint에 묶인 prepared capability까지 만든다. survey export는 dependency-valid 3/6/6의 exact record 15개를 canonical 순서로 캡처하고 6개 raster를 다시 계산한 뒤 부모 tree 전체를 fingerprint한다. final dispatcher는 current source session, render projection과 캡처한 모든 `READY + FRESH` record를 Workbench lock에서 다시 확인한 뒤 빠른 fingerprint 재확인과 atomic no-replace rename만 실행한다. 같은 Align의 append-only record 추가는 허용하고 Align/Open 완료는 destination을 만들지 않은 채 stale 처리한다. pending Open은 core에서 재시도 가능한 stage로 남지만 현재 GUI는 안전하게 정리하고 Open 완료 후 재실행을 안내한다.
 - `Open → Align commit → save → independent-process load → source rebind → materialize` 왕복을 별도 프로세스에서 검증한다.
@@ -608,10 +628,10 @@ export package는 기본적으로 package 내부 public provenance에 대해 sel
 2. 목적 파일과 같은 디렉터리에 고유 임시 파일을 만든다.
 3. ZIP을 닫고 file buffer를 flush한 뒤 `fsync`한다.
 4. 선택된 payload 종류의 production loader로 임시 파일을 다시 열어 checksum·schema·payload를 검증한다. artifact payload는 artifact loader로 다시 연다.
-5. 검증된 임시 파일을 `os.replace`로 한 번에 목적 경로에 교체한다.
-6. 지원되는 파일시스템에서는 디렉터리도 `fsync`한다.
+5. Windows에서는 검증된 임시 파일과 목적지를 extended Unicode path로 바꾼 뒤 `MoveFileExW(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)`로 한 번에 commit한다.
+6. POSIX source 호환 경로에서는 `os.replace` 뒤 지원되는 파일시스템의 parent directory를 `fsync`한다.
 
-write, file `fsync`, 재검증, replace 중 어느 단계에서 실패해도 기존 목적 파일의 바이트는 유지되고 해당 임시 파일은 정리된다. 플랫폼·파일시스템이 directory `fsync`를 지원하지 않는 오류는 명시된 errno에 한해 무시한다. replace 후 실제 I/O 오류가 발생하면 파일은 이미 교체됐지만 crash durability가 불확실한 `committed=true` typed error로 보고한다. 프로세스·전원 중단으로 `finally`가 실행되지 못한 경우에만 같은 parent에 임시본이 남을 수 있으며, 아래 수동 복구 경계가 이를 다룬다.
+write, file `fsync`, 재검증, Windows write-through move 중 어느 단계에서 실패해도 기존 목적 파일의 바이트는 유지되고 해당 임시 파일은 정리된다. Win32 commit 실패에는 `committed=false`를 보고하고 다른 rename으로 fallback하지 않는다. POSIX 호환 경로에서 플랫폼·파일시스템이 directory `fsync`를 지원하지 않는 오류는 명시된 errno에 한해 무시하며, replace 뒤 실제 directory I/O 오류가 발생하면 파일은 이미 교체됐지만 crash durability가 불확실한 `committed=true` typed error로 보고한다. 이 POSIX 동작은 Windows 제품 gate와 별개다. 프로세스·전원 중단으로 `finally`가 실행되지 못한 경우에만 같은 parent에 임시본이 남을 수 있으며, 아래 수동 복구 경계가 이를 다룬다.
 
 ## 비정상 종료 저장 임시본 복구
 
@@ -623,8 +643,9 @@ write, file `fsync`, 재검증, replace 중 어느 단계에서 실패해도 기
 2. `O_NOFOLLOW`를 사용할 수 있는 플랫폼에서는 이를 포함해 후보 descriptor를 열고, 발견 시 identity와 같은 descriptor인지 확인한다.
 3. 새 목적지 parent의 `.<new-destination>.XXXXXXXX.tmp` staging으로 descriptor bytes를 bounded streaming copy하고 file `fsync`한다. copy 전후 descriptor와 candidate path identity가 같아야 한다.
 4. staging을 `load_artifact_session_project()`로 완전 재개방한다. 즉 checksum·source index만 읽는 것이 아니라 embedded source closure를 saved parser로 decode하고 source/geometry SHA-256, 단위, Align과 canonical projection까지 물질화해야 한다. manifest-only artifact, legacy payload, 깨진 ZIP과 불완전 source closure는 실패한다.
-5. 검증된 staging inode를 같은 filesystem에서 Linux `renameat2(RENAME_NOREPLACE)`, macOS `renamex_np(RENAME_EXCL)`, Windows non-replacing rename으로 새 목적지에 publish한다. 이 create-new 연산은 목적지가 이미 있거나 경합 중 생기면 실패하며 기존 승자를 덮어쓰지 않는다.
-6. published path가 검증 staging과 같은 inode인지 확인하고 directory `fsync`를 시도한다. 실제 sync 오류는 파일 생성 성공과 crash durability 미확정을 함께 보고한다.
+5. Windows는 검증된 staging과 새 목적지를 extended Unicode/UNC path로 바꿔 `MoveFileExW(MOVEFILE_WRITE_THROUGH)`로 게시한다. replace flag를 주지 않으므로 목적지가 이미 있거나 경합 중 생기면 `ERROR_FILE_EXISTS | ERROR_ALREADY_EXISTS`를 create-new 실패로 변환하고, 다른 Win32 오류에서도 기존 승자를 보존한 채 더 약한 rename으로 fallback하지 않는다.
+6. POSIX source 호환 경로만 같은 filesystem에서 Linux `renameat2(RENAME_NOREPLACE)` 또는 macOS `renamex_np(RENAME_EXCL)`로 게시한 뒤 directory `fsync`를 시도한다. 실제 sync 오류는 파일 생성 성공과 crash durability 미확정을 함께 보고한다.
+7. 모든 경로에서 published path가 검증 staging과 같은 inode인지 확인한다. Windows 성공은 write-through publication backend를 receipt에 남기고, POSIX 성공은 해당 no-replace/directory-fsync backend를 남긴다.
 
 복구 성공·실패와 무관하게 발견한 중단 임시본과 원래 intended destination은 수정·이동·삭제하지 않는다. publication 후 현재 GUI scene도 자동으로 교체하지 않으며 사용자가 복구본 열기를 다시 확인해야 한다. 복구 도중 다시 중단되면 새 목적지 parent에 같은 writer-compatible temp가 남을 수 있어 같은 절차로 재검증할 수 있다.
 

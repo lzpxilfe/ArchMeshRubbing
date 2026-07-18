@@ -13,9 +13,12 @@ from src.application.artifact_workbench import (
     ArtifactWorkbench,
     ArtifactWorkbenchError,
     ConfirmedSourceMetadata,
+    SaveDurability,
+    SavedProjectCheckpoint,
     StaleWorkflowOperationError,
     WorkflowBusyError,
     WorkflowPhase,
+    WorkflowSaveStatus,
     WorkflowStage,
     WorkflowTransitionKind,
 )
@@ -151,6 +154,36 @@ def test_initial_state_is_headless_empty_and_not_measurement_ready() -> None:
     assert snapshot.session is None
     assert not snapshot.can_save
     assert not snapshot.can_measure
+    assert snapshot.save_status is WorkflowSaveStatus.EMPTY
+    assert not snapshot.has_unsaved_changes
+
+
+def test_initial_checkpoint_distinguishes_saved_and_unsaved_sessions() -> None:
+    session = _session(explicit_align=True)
+
+    unsaved = ArtifactWorkbench(
+        session=session,
+        id_factory=SequentialIds(),
+    ).snapshot
+    saved = ArtifactWorkbench(
+        session=session,
+        project_path="/projects/saved.amr",
+        id_factory=SequentialIds(),
+    ).snapshot
+
+    assert unsaved.project_path is None
+    assert unsaved.save_checkpoint is None
+    assert unsaved.save_status is WorkflowSaveStatus.UNSAVED
+    assert unsaved.has_unsaved_changes
+    assert not unsaved.save_checkpoint_current
+
+    assert saved.save_checkpoint == SavedProjectCheckpoint(
+        document_sha256=session.document.canonical_sha256,
+        project_path="/projects/saved.amr",
+    )
+    assert saved.save_status is WorkflowSaveStatus.SAVED
+    assert not saved.has_unsaved_changes
+    assert saved.save_checkpoint_current
 
 
 def test_saved_project_path_adoption_is_an_authority_checked_cas() -> None:
@@ -175,6 +208,8 @@ def test_saved_project_path_adoption_is_an_authority_checked_cas() -> None:
     assert adopted.project_path == _resolved("/projects/after.amr")
     assert adopted.state_version == captured.state_version + 1
     assert adopted.authority_epoch == captured.authority_epoch
+    assert adopted.save_checkpoint_current
+    assert adopted.save_status is WorkflowSaveStatus.SAVED
     assert observed == [captured, adopted]
 
     with pytest.raises(StaleWorkflowOperationError, match="stale artifact authority"):
@@ -185,6 +220,45 @@ def test_saved_project_path_adoption_is_an_authority_checked_cas() -> None:
             expected_authority_epoch=captured.authority_epoch,
         )
     assert workbench.snapshot is adopted
+
+
+def test_same_path_save_creates_checkpoint_and_uncertain_durability_stays_dirty() -> None:
+    session = _session(explicit_align=True)
+    workbench = ArtifactWorkbench(session=session, id_factory=SequentialIds())
+    workbench.synchronize_legacy_session(
+        session,
+        project_path="/projects/live.amr",
+    )
+    before_save = workbench.snapshot
+    assert before_save.project_path == _resolved("/projects/live.amr")
+    assert before_save.save_checkpoint is None
+    assert before_save.has_unsaved_changes
+
+    uncertain = workbench.adopt_saved_project_path(
+        session,
+        "/projects/live.amr",
+        expected_state_version=before_save.state_version,
+        expected_authority_epoch=before_save.authority_epoch,
+        durability_confirmed=False,
+    )
+
+    assert uncertain.state_version == before_save.state_version + 1
+    assert uncertain.save_checkpoint is not None
+    assert uncertain.save_checkpoint.durability is SaveDurability.UNCERTAIN
+    assert uncertain.save_status is WorkflowSaveStatus.DURABILITY_UNCERTAIN
+    assert uncertain.has_unsaved_changes
+    assert not uncertain.save_checkpoint_current
+
+    confirmed = workbench.adopt_saved_project_path(
+        session,
+        "/projects/live.amr",
+        expected_state_version=uncertain.state_version,
+        expected_authority_epoch=uncertain.authority_epoch,
+    )
+    assert confirmed.save_checkpoint is not None
+    assert confirmed.save_checkpoint.durability is SaveDurability.CONFIRMED
+    assert confirmed.save_checkpoint_current
+    assert not confirmed.has_unsaved_changes
 
 
 def test_saved_project_path_noop_still_requires_exact_authority() -> None:
@@ -216,6 +290,22 @@ def test_saved_project_path_noop_still_requires_exact_authority() -> None:
             "/projects/live.amr",
             expected_state_version=captured.state_version,
             expected_authority_epoch=captured.authority_epoch,
+        )
+    assert workbench.snapshot.save_checkpoint is None
+    assert workbench.snapshot.has_unsaved_changes
+
+
+def test_saved_checkpoint_rejects_invalid_hash_and_durability() -> None:
+    with pytest.raises(ArtifactWorkbenchError, match="64 lowercase hexadecimal"):
+        SavedProjectCheckpoint(
+            document_sha256="not-a-document-hash",
+            project_path="/projects/live.amr",
+        )
+    with pytest.raises(ArtifactWorkbenchError, match="confirmed or uncertain"):
+        SavedProjectCheckpoint(
+            document_sha256="a" * 64,
+            project_path="/projects/live.amr",
+            durability="maybe",
         )
 
 
@@ -260,7 +350,48 @@ def test_new_import_is_ticketed_and_publishes_only_after_finalize() -> None:
     assert len(events) == 3
     assert events[-1] is ready
     assert ready.session is not None
+    assert ready.save_checkpoint is None
+    assert ready.save_status is WorkflowSaveStatus.UNSAVED
+    assert ready.has_unsaved_changes
     np.testing.assert_array_equal(_mesh().vertices, ready.session.source_mesh.vertices)
+
+
+def test_pending_failed_and_cancelled_open_preserve_saved_checkpoint() -> None:
+    live = _session(explicit_align=True)
+    workbench = ArtifactWorkbench(
+        session=live,
+        project_path="/projects/live.amr",
+        id_factory=SequentialIds(),
+    )
+    saved = workbench.snapshot
+    assert saved.save_checkpoint_current
+
+    failed_ticket = workbench.begin_new_import(
+        "/source/replacement.ply",
+        _metadata(),
+        software_version="0.1.0",
+        operator="pytest",
+    )
+    importing = workbench.snapshot
+    assert importing.save_checkpoint is saved.save_checkpoint
+    assert importing.save_checkpoint_current
+    assert not importing.has_unsaved_changes
+
+    failed = workbench.fail_load(failed_ticket, RuntimeError("load failed"))
+    assert failed.save_checkpoint is saved.save_checkpoint
+    assert failed.save_checkpoint_current
+    assert not failed.has_unsaved_changes
+
+    cancelled_ticket = workbench.begin_new_import(
+        "/source/replacement.ply",
+        _metadata(),
+        software_version="0.1.0",
+        operator="pytest",
+    )
+    cancelled = workbench.cancel_load(cancelled_ticket)
+    assert cancelled.save_checkpoint is saved.save_checkpoint
+    assert cancelled.save_checkpoint_current
+    assert not cancelled.has_unsaved_changes
 
 
 def test_new_import_rejects_parser_runtime_failure_without_state_change() -> None:
@@ -323,6 +454,85 @@ def test_zero_delta_align_is_a_durable_explicit_confirmation() -> None:
         is None
     )
     assert workbench.snapshot is state_before
+
+
+def test_align_and_record_append_dirty_the_exact_saved_document_checkpoint() -> None:
+    source = _session()
+    workbench = ArtifactWorkbench(
+        session=source,
+        project_path="/projects/live.amr",
+        id_factory=SequentialIds(),
+    )
+    original_checkpoint = workbench.snapshot.save_checkpoint
+    assert original_checkpoint is not None
+    assert workbench.snapshot.save_checkpoint_current
+
+    align = workbench.prepare_align_commit(
+        translation_mm=(0.0, 0.0, 0.0),
+        rotation_deg=(0.0, 0.0, 0.0),
+        scale=1.0,
+        pivot_mm=(0.0, 0.0, 0.0),
+        operator="pytest",
+        created_at=STAMP,
+        revision_id="align:checkpoint-dirty",
+    )
+    assert align is not None
+    aligned = _publish(workbench, align)
+    assert aligned.save_checkpoint is original_checkpoint
+    assert aligned.document_sha256 != original_checkpoint.document_sha256
+    assert aligned.has_unsaved_changes
+    assert aligned.session is not None
+
+    saved = workbench.adopt_saved_project_path(
+        aligned.session,
+        "/projects/live.amr",
+        expected_state_version=aligned.state_version,
+        expected_authority_epoch=aligned.authority_epoch,
+    )
+    assert not saved.has_unsaved_changes
+    assert saved.session is not None
+
+    candidate = _record_candidate(saved.session, record_id="record:checkpoint-dirty")
+    binding = workbench.prepare_record_commit(
+        saved.session,
+        candidate,
+        expected_new_record_ids=("record:checkpoint-dirty",),
+    )
+    with_record = workbench.finalize_record_binding(
+        workbench.activate_record_binding(binding)
+    )
+    assert with_record.save_checkpoint is saved.save_checkpoint
+    assert with_record.has_unsaved_changes
+    assert with_record.save_status is WorkflowSaveStatus.UNSAVED
+
+
+def test_session_update_cannot_forge_a_clean_project_reopen_checkpoint() -> None:
+    live = _session(explicit_align=True)
+    workbench = ArtifactWorkbench(
+        session=live,
+        project_path="/projects/live.amr",
+        id_factory=SequentialIds(),
+    )
+    transition = workbench.prepare_align_commit(
+        translation_mm=(1.0, 0.0, 0.0),
+        rotation_deg=(0.0, 0.0, 0.0),
+        scale=1.0,
+        pivot_mm=(0.0, 0.0, 0.0),
+        operator="pytest",
+        revision_id="align:forged-reopen",
+    )
+    assert transition is not None
+    forged = replace(
+        transition,
+        kind=WorkflowTransitionKind.REOPEN_PROJECT,
+        project_path="/projects/forged.amr",
+    )
+
+    with pytest.raises(ArtifactWorkbenchError, match="no live load ticket"):
+        workbench.activate_projection(forged)
+
+    assert workbench.snapshot.project_path == _resolved("/projects/live.amr")
+    assert workbench.snapshot.save_checkpoint_current
 
 
 def test_busy_begin_and_stale_results_are_atomic() -> None:
@@ -495,6 +705,77 @@ def test_project_reopen_accepts_relocated_identical_source_and_saved_parser() ->
     )
     assert ready.project_path == _resolved("/projects/saved.amr")
     assert ready.can_measure
+    assert ready.save_checkpoint_current
+    assert ready.save_status is WorkflowSaveStatus.SAVED
+    assert not ready.has_unsaved_changes
+
+
+def test_project_reopen_rejects_replaced_prepared_capability_atomically() -> None:
+    saved = _session(explicit_align=True)
+    workbench = ArtifactWorkbench(id_factory=SequentialIds())
+    ticket = workbench.begin_project_reopen(
+        saved.document,
+        project_path="/projects/saved.amr",
+        resolved_source_path="/relocated/artifact.ply",
+        request_id="open:capability",
+    )
+    transition = workbench.prepare_loaded_source(
+        ticket,
+        _mesh(),
+        resolved_source_path="/relocated/artifact.ply",
+    )
+
+    # Replacing both candidate and projection defeats structural self-consistency
+    # checks: the forged pair is a valid session/projection, but it was never
+    # issued by this Workbench for the live project file.
+    forged_session = _record_candidate(
+        transition.candidate_session,
+        record_id="record:forged-reopen",
+    )
+    forged = replace(
+        transition,
+        candidate_session=forged_session,
+        projection=forged_session.materialize(),
+    )
+
+    before_forgery = workbench.snapshot
+    with pytest.raises(StaleWorkflowOperationError, match="prepared capability"):
+        workbench.activate_projection(forged)
+
+    assert workbench.snapshot is before_forgery
+    assert workbench.snapshot.pending_load is ticket
+    assert workbench.snapshot.session is None
+    assert not workbench.snapshot.tentative
+
+    # Rejection must not consume the genuine one-shot capability.
+    ready = _publish(workbench, transition)
+    assert ready.session is not None
+    assert ready.session is transition.candidate_session
+    assert ready.session.document is saved.document
+    assert ready.session.document.records == ()
+    assert ready.save_checkpoint_current
+    assert not ready.has_unsaved_changes
+
+
+def test_second_open_preparation_supersedes_the_first_capability() -> None:
+    saved = _session(explicit_align=True)
+    workbench = ArtifactWorkbench(id_factory=SequentialIds())
+    ticket = workbench.begin_project_reopen(
+        saved.document,
+        project_path="/projects/saved.amr",
+        resolved_source_path="/relocated/artifact.ply",
+    )
+    first = workbench.prepare_loaded_source(ticket, _mesh())
+    second = workbench.prepare_loaded_source(ticket, _mesh())
+    captured = workbench.snapshot
+
+    with pytest.raises(StaleWorkflowOperationError, match="prepared capability"):
+        workbench.activate_projection(first)
+    assert workbench.snapshot is captured
+
+    ready = _publish(workbench, second)
+    assert ready.session is second.candidate_session
+    assert ready.save_checkpoint_current
 
 
 def test_project_source_mismatch_never_replaces_live_authority() -> None:
@@ -639,7 +920,13 @@ def test_record_commit_rebinds_document_without_materializing_a_mesh() -> None:
 def test_record_binding_rollback_restores_previous_authority() -> None:
     live = _session(explicit_align=True)
     candidate = _record_candidate(live, record_id="record:rollback")
-    workbench = ArtifactWorkbench(session=live, id_factory=SequentialIds())
+    workbench = ArtifactWorkbench(
+        session=live,
+        project_path="/projects/live.amr",
+        id_factory=SequentialIds(),
+    )
+    checkpoint = workbench.snapshot.save_checkpoint
+    assert checkpoint is not None
     transition = workbench.prepare_record_commit(
         live,
         candidate,
@@ -654,6 +941,9 @@ def test_record_binding_rollback_restores_previous_authority() -> None:
 
     assert rolled_back.session is live
     assert not rolled_back.tentative
+    assert rolled_back.save_checkpoint is checkpoint
+    assert rolled_back.save_checkpoint_current
+    assert not rolled_back.has_unsaved_changes
     assert rolled_back.failure is not None
     assert rolled_back.failure.operation == "record_binding_publish"
 

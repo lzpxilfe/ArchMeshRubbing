@@ -5,6 +5,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 import src.core.artifact_survey_export as artifact_survey_export
+from src.core.project_file import project_commit_backend_identifier
+from src.core.project_recovery import project_recovery_publish_backend_identifier
 from src.application.artifact_workflow_self_test import (
     run_artifact_workflow_self_test,
 )
@@ -52,6 +54,20 @@ def test_complete_workflow_self_test_has_deterministic_offline_receipts() -> Non
     assert result.volume_mm3_decimal == "8.000000000"
     assert result.surface_distance_mm_decimal == "1.000000"
     assert result.surface_diameter_mm_decimal == "1.000000"
+    detail_tokens = {part.strip() for part in result.detail().split(",")}
+    assert "checkpoint=dirty>saved>dirty>saved" in detail_tokens
+    assert result.project_commit_backend == project_commit_backend_identifier()
+    assert (
+        f"project_commit={project_commit_backend_identifier()}" in detail_tokens
+    )
+    assert (
+        result.recovery_publish_backend
+        == project_recovery_publish_backend_identifier()
+    )
+    assert (
+        f"recovery_commit={project_recovery_publish_backend_identifier()}"
+        in detail_tokens
+    )
 
 
 def test_complete_workflow_accepts_explicit_committed_directory_fsync_warning(

@@ -158,6 +158,10 @@ jobs:
           workflow=next((c for c in checks if c.get('name') == 'artifact_complete_workflow_offline'), None);
           assert workflow is not None, d;
           assert 'records=18' in str(workflow.get('detail') or ''), workflow;
+          detail_tokens={part.strip() for part in str(workflow.get('detail') or '').split(',')};
+          assert 'checkpoint=dirty>saved>dirty>saved' in detail_tokens, workflow;
+          assert 'project_commit=windows-movefileex-write-through' in detail_tokens, workflow;
+          assert 'recovery_commit=windows-movefileex-write-through-noreplace' in detail_tokens, workflow;
           assert 'surface=distance 1.000000 mm>diameter 1.000000 mm' in str(workflow.get('detail') or ''), workflow;
           assert 'exports=vector 9/9>rubbing 6/6' in str(workflow.get('detail') or ''), workflow;
           assert 'survey=verified-atomic-15' in str(workflow.get('detail') or ''), workflow;
@@ -367,6 +371,19 @@ jobs:
           }
           if (-not ([string]$workflowCheck.detail).Contains("records=18")) {
             throw "Portable self-test did not preserve all 18 authoritative records"
+          }
+          $workflowDetailTokens = @(
+            ([string]$workflowCheck.detail).Split(",") |
+              ForEach-Object { $_.Trim() }
+          )
+          if ($workflowDetailTokens -notcontains "checkpoint=dirty>saved>dirty>saved") {
+            throw "Portable self-test did not prove the exact save checkpoint lifecycle"
+          }
+          if ($workflowDetailTokens -notcontains "project_commit=windows-movefileex-write-through") {
+            throw "Portable self-test did not use Win32 MoveFileExW write-through project commits"
+          }
+          if ($workflowDetailTokens -notcontains "recovery_commit=windows-movefileex-write-through-noreplace") {
+            throw "Portable self-test did not use Win32 write-through create-new recovery publication"
           }
           if (-not ([string]$workflowCheck.detail).Contains("surface=distance 1.000000 mm>diameter 1.000000 mm")) {
             throw "Portable self-test did not verify surface distance and circle diameter"

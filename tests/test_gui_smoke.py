@@ -5,6 +5,7 @@ import hashlib
 import os
 from pathlib import Path
 import tempfile
+from threading import Event
 from types import SimpleNamespace
 from unittest.mock import ANY, Mock, call, patch
 
@@ -13,8 +14,8 @@ import numpy as np
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PyQt6.QtCore import QCoreApplication, QEvent, QStandardPaths, Qt
-from PyQt6.QtGui import QKeyEvent
+from PyQt6.QtCore import QCoreApplication, QEvent, QStandardPaths, Qt, QTimer
+from PyQt6.QtGui import QCloseEvent, QKeyEvent
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import (
     QApplication,
@@ -399,6 +400,52 @@ def _reloaded_source_mesh(
         source_format=str(source.source_format),
         source_import_recipe=source.source_import_recipe,
     )
+
+
+def _install_dirty_native_document(
+    window: MainWindow,
+    *,
+    project_path: str = "/tmp/native-unsaved.amr",
+) -> ArtifactSession:
+    session = _artifact_session()
+    obj = _projected_scene_object(session)
+    window._artifact_session = session
+    window._current_project_path = project_path
+    window.current_filepath = session.resolved_source_path
+    window.current_mesh = obj.mesh
+    window.viewport.objects = [obj]
+    window.viewport.selected_index = 0
+    controller = window._artifact_workbench_controller()
+    assert controller.snapshot.session is session
+    assert controller.snapshot.has_unsaved_changes
+    return session
+
+
+def _install_clean_native_document(
+    window: MainWindow,
+    *,
+    project_path: str = "/tmp/native-saved.amr",
+) -> tuple[ArtifactSession, SceneObject]:
+    session = _artifact_box_session()
+    obj = _projected_scene_object(session)
+    window._artifact_session = session
+    window._current_project_path = project_path
+    window.current_filepath = session.resolved_source_path
+    window.current_mesh = obj.mesh
+    window.viewport.objects = [obj]
+    window.viewport.selected_index = 0
+    controller = window._artifact_workbench_controller()
+    snapshot = controller.snapshot
+    controller.adopt_saved_project_path(
+        session,
+        project_path,
+        expected_state_version=snapshot.state_version,
+        expected_authority_epoch=snapshot.authority_epoch,
+    )
+    window._refresh_native_save_indicator()
+    assert controller.snapshot.save_checkpoint_current
+    assert window.status_save.text() == "저장: 저장됨"
+    return session, obj
 
 
 def test_main_window_constructs_offscreen() -> None:
@@ -1342,6 +1389,251 @@ def test_close_event_refuses_teardown_while_task_join_is_unproven() -> None:
         app.processEvents()
 
 
+def test_native_dirty_close_cancel_keeps_window_and_document_live() -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    window = MainWindow()
+    _install_dirty_native_document(window)
+    event = Mock()
+    try:
+        assert window.status_save.text() == "저장: 미저장"
+        assert window.windowTitle().startswith("* ")
+        with (
+            patch.object(
+                window,
+                "_ask_native_unsaved_action",
+                return_value=QMessageBox.StandardButton.Cancel,
+            ) as ask,
+            patch.object(window, "save_project") as save_project,
+            patch.object(window, "_shutdown_active_task_worker") as shutdown,
+        ):
+            window.closeEvent(event)
+
+        ask.assert_called_once_with("프로그램을 종료")
+        event.ignore.assert_called_once_with()
+        save_project.assert_not_called()
+        shutdown.assert_not_called()
+        assert window._native_document_has_unsaved_changes()
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_native_dirty_close_save_defers_close_until_callback() -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    window = MainWindow()
+    _install_dirty_native_document(window)
+    event = Mock()
+    try:
+        with (
+            patch.object(
+                window,
+                "_ask_native_unsaved_action",
+                return_value=QMessageBox.StandardButton.Save,
+            ),
+            patch.object(window, "save_project") as save_project,
+            patch.object(window, "close") as close_after_save,
+            patch.object(window, "_shutdown_active_task_worker") as shutdown,
+        ):
+            window.closeEvent(event)
+            event.ignore.assert_called_once_with()
+            shutdown.assert_not_called()
+            callback = save_project.call_args.kwargs["on_saved"]
+            assert callable(callback)
+            close_after_save.assert_not_called()
+            callback()
+            close_after_save.assert_called_once_with()
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_native_dirty_close_discard_runs_safe_shutdown() -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    window = MainWindow()
+    _install_dirty_native_document(window)
+    event = QCloseEvent()
+    try:
+        with (
+            patch.object(
+                window,
+                "_ask_native_unsaved_action",
+                return_value=QMessageBox.StandardButton.Discard,
+            ),
+            patch.object(
+                window,
+                "_shutdown_active_task_worker",
+                return_value=True,
+            ) as shutdown,
+            patch.object(window, "_shutdown_project_open_worker") as shutdown_open,
+            patch.object(window, "_save_ui_state") as save_state,
+        ):
+            window.closeEvent(event)
+
+        assert event.isAccepted()
+        shutdown.assert_called_once_with()
+        shutdown_open.assert_called_once_with()
+        save_state.assert_called_once_with()
+        assert window._application_closing
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_close_event_joins_and_fences_actual_native_mesh_loader() -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    window = MainWindow()
+    session, _obj = _install_clean_native_document(window)
+    controller = window._artifact_workbench_controller()
+    ticket = controller.begin_new_import(
+        "/source/replacement.ply",
+        ConfirmedSourceMetadata(
+            unit="cm",
+            source_x="+X",
+            source_y="+Y",
+            source_z="+Z",
+            handedness="right",
+        ),
+        software_version="test",
+        operator="pytest",
+    )
+    window._artifact_load_active = True
+    window._artifact_load_ticket = ticket
+    window._artifact_pending_source_metadata = {"unit": "cm"}
+    worker_started = Event()
+    late_loaded = Mock()
+
+    class InterruptibleMeshLoadThread(MeshLoadThread):
+        def __init__(self) -> None:
+            super().__init__(
+                filepath="/source/replacement.ply",
+                scale_factor=1.0,
+                default_unit="cm",
+                source_format="ply",
+            )
+
+        def run(self) -> None:
+            worker_started.set()
+            while not self.isInterruptionRequested():
+                self.msleep(1)
+            # Exercise a late result emitted while closeEvent is synchronously
+            # joining this real QThread.  The shutdown fence must suppress it.
+            self.loaded.emit(object(), "/source/replacement.ply")
+
+    thread = InterruptibleMeshLoadThread()
+    request_id = ticket.id
+    thread.loaded.connect(
+        lambda mesh, path: window._dispatch_mesh_load_success(
+            thread,
+            request_id,
+            ticket,
+            mesh,
+            path,
+        )
+    )
+    thread.loaded.connect(late_loaded)
+    thread.finished.connect(
+        lambda: window._dispatch_mesh_load_finished(thread, request_id)
+    )
+    window._mesh_load_thread = thread
+    window._mesh_load_request_id = request_id
+    thread.start()
+    assert worker_started.wait(timeout=1.0)
+    event = QCloseEvent()
+    try:
+        with (
+            patch.object(window, "_shutdown_active_task_worker", return_value=True),
+            patch.object(window, "_shutdown_project_open_worker"),
+            patch.object(window, "_save_ui_state"),
+        ):
+            window.closeEvent(event)
+
+        assert event.isAccepted()
+        assert not thread.isRunning()
+        assert window._mesh_load_thread is None
+        assert window._mesh_load_request_id is None
+        assert not window._artifact_load_active
+        assert controller.snapshot.pending_load is None
+        assert controller.snapshot.session is session
+        assert controller.snapshot.save_checkpoint_current
+        app.processEvents()
+        late_loaded.assert_not_called()
+    finally:
+        if thread.isRunning():
+            thread.requestInterruption()
+            thread.wait(3_000)
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_close_event_bounded_joins_and_fences_actual_project_inspector() -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    window = MainWindow()
+    session, _obj = _install_clean_native_document(window)
+    worker_started = Event()
+    late_done = Mock()
+
+    class InterruptibleProjectOpenThread(TaskThread):
+        def __init__(self) -> None:
+            super().__init__("project-open", lambda: None)
+
+        def run(self) -> None:
+            worker_started.set()
+            while not self.isInterruptionRequested():
+                self.msleep(1)
+            self.done.emit({"kind": "late-result"})
+
+    thread = InterruptibleProjectOpenThread()
+    request_id = "project-open:close-regression"
+    thread.done.connect(late_done)
+    window._project_open_thread = thread
+    window._project_open_request_id = request_id
+    window._project_open_base_authority_epoch = (
+        window._artifact_workbench_controller().snapshot.authority_epoch
+    )
+    window._artifact_load_active = True
+    window._artifact_pending_project_path = "/source/replacement.amr"
+    thread.start()
+    assert worker_started.wait(timeout=1.0)
+    event = QCloseEvent()
+    try:
+        with (
+            patch.object(window, "_shutdown_active_task_worker", return_value=True),
+            patch.object(window, "_save_ui_state"),
+        ):
+            window.closeEvent(event)
+
+        assert event.isAccepted()
+        assert not thread.isRunning()
+        assert window._project_open_thread is None
+        assert window._project_open_request_id is None
+        assert window._project_open_base_authority_epoch is None
+        assert not window._artifact_load_active
+        assert window._artifact_workbench_controller().snapshot.session is session
+        app.processEvents()
+        late_done.assert_not_called()
+    finally:
+        if thread.isRunning():
+            thread.requestInterruption()
+            thread.wait(3_000)
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
 def test_source_metadata_dialog_requires_explicit_bijective_axis_confirmation() -> None:
     app = QApplication.instance()
     if app is None:
@@ -1873,6 +2165,7 @@ def test_native_project_save_defers_materialization_writer_and_git_probe() -> No
     original_materialize = ArtifactSession.materialize
     materialization_allowed = False
     materialization_calls: list[ArtifactSession] = []
+    continued = Mock()
 
     def guarded_materialize(current: ArtifactSession):
         if not materialization_allowed:
@@ -1894,8 +2187,9 @@ def test_native_project_save_defers_materialization_writer_and_git_probe() -> No
             ) as git_info,
             patch.object(QMessageBox, "warning") as warning,
             patch.object(QMessageBox, "critical") as critical,
+            patch.object(QTimer, "singleShot") as single_shot,
         ):
-            window.save_project()
+            window.save_project(on_saved=continued)
             assert start_task.call_count == 1
             assert materialization_calls == []
             save_native.assert_not_called()
@@ -1909,9 +2203,14 @@ def test_native_project_save_defers_materialization_writer_and_git_probe() -> No
             materialization_allowed = True
             result = thread._fn()
             callbacks["on_done"](result)
+            continued.assert_not_called()
+            single_shot.assert_called_once()
+            queued_continuation = single_shot.call_args.args[1]
+            queued_continuation()
 
         warning.assert_not_called()
         critical.assert_not_called()
+        continued.assert_called_once_with()
         assert materialization_calls == [session]
         git_info.assert_called_once()
         save_native.assert_called_once()
@@ -1921,6 +2220,9 @@ def test_native_project_save_defers_materialization_writer_and_git_probe() -> No
             window._artifact_workbench_controller().snapshot.project_path
             == str(Path("/tmp/native-worker-save.amr").resolve(strict=False))
         )
+        assert window._artifact_workbench_controller().snapshot.save_checkpoint_current
+        assert window.status_save.text() == "저장: 저장됨"
+        assert not window.windowTitle().startswith("* ")
         assert "프로젝트 저장:" in window.status_info.text()
     finally:
         window.deleteLater()
@@ -1992,6 +2294,7 @@ def test_native_project_save_preserves_gui_path_when_final_cas_rejects() -> None
     window.viewport.objects = [obj]
     window.viewport.selected_index = 0
     controller = window._artifact_workbench_controller()
+    continued = Mock()
     try:
         with (
             patch.object(window, "_start_task", return_value=True) as start_task,
@@ -2003,7 +2306,8 @@ def test_native_project_save_preserves_gui_path_when_final_cas_rejects() -> None
             patch.object(QMessageBox, "warning") as warning,
         ):
             assert window._start_native_project_save(
-                "/tmp/native-raced-save.amr"
+                "/tmp/native-raced-save.amr",
+                on_saved=continued,
             )
             callbacks = start_task.call_args.kwargs
             result = callbacks["thread"]._fn()
@@ -2019,6 +2323,9 @@ def test_native_project_save_preserves_gui_path_when_final_cas_rejects() -> None
         assert window._current_project_path == "/tmp/native-before-race.amr"
         assert window._project_requires_save_as
         assert "다시 저장 필요" in window.status_info.text()
+        assert window._artifact_workbench_controller().snapshot.has_unsaved_changes
+        assert window.status_save.text() == "저장: 미저장"
+        continued.assert_not_called()
     finally:
         window.deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
@@ -2038,6 +2345,7 @@ def test_native_project_save_does_not_adopt_path_after_authority_change() -> Non
     window.current_mesh = obj.mesh
     window.viewport.objects = [obj]
     window.viewport.selected_index = 0
+    continued = Mock()
     try:
         with (
             patch.object(window, "_start_task", return_value=True) as start_task,
@@ -2049,7 +2357,8 @@ def test_native_project_save_does_not_adopt_path_after_authority_change() -> Non
             patch.object(QMessageBox, "warning") as warning,
         ):
             assert window._start_native_project_save(
-                "/tmp/captured-snapshot.amr"
+                "/tmp/captured-snapshot.amr",
+                on_saved=continued,
             )
             callbacks = start_task.call_args.kwargs
             result = callbacks["thread"]._fn()
@@ -2076,6 +2385,9 @@ def test_native_project_save_does_not_adopt_path_after_authority_change() -> Non
         assert window._current_project_path == "/tmp/current-before-save.amr"
         assert window._project_requires_save_as
         assert "다시 저장 필요" in window.status_info.text()
+        assert window._artifact_workbench_controller().snapshot.has_unsaved_changes
+        assert window.status_save.text() == "저장: 미저장"
+        continued.assert_not_called()
     finally:
         window.deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
@@ -2105,6 +2417,96 @@ def test_native_project_save_worker_returns_committed_durability_warning() -> No
     preflight.assert_called_once_with()
     assert result.destination == "/tmp/committed-save.amr"
     assert result.durability_warning == "directory fsync unsupported"
+
+
+def test_native_project_save_durability_warning_keeps_dirty_guard_closed() -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    session = _artifact_session()
+    obj = _projected_scene_object(session)
+    window = MainWindow()
+    window._artifact_session = session
+    window._current_project_path = "/tmp/native-uncertain.amr"
+    window.current_mesh = obj.mesh
+    window.viewport.objects = [obj]
+    window.viewport.selected_index = 0
+    continued = Mock()
+    error = ProjectSaveError(
+        "directory_fsync",
+        "directory fsync unsupported",
+        committed=True,
+    )
+    try:
+        with (
+            patch.object(window, "_start_task", return_value=True) as start_task,
+            patch(
+                "app_interactive.save_amr_artifact_session_project",
+                side_effect=error,
+            ),
+            patch("app_interactive._safe_git_info", return_value=("abc123", False)),
+            patch.object(QMessageBox, "warning") as warning,
+            patch.object(QTimer, "singleShot") as single_shot,
+        ):
+            assert window._start_native_project_save(
+                "/tmp/native-uncertain.amr",
+                on_saved=continued,
+            )
+            callbacks = start_task.call_args.kwargs
+            result = callbacks["thread"]._fn()
+            callbacks["on_done"](result)
+
+        warning.assert_called_once()
+        assert "내구성" in warning.call_args.args[1]
+        continued.assert_not_called()
+        single_shot.assert_not_called()
+        snapshot = window._artifact_workbench_controller().snapshot
+        assert snapshot.has_unsaved_changes
+        assert not snapshot.save_checkpoint_current
+        assert snapshot.save_checkpoint is not None
+        assert not snapshot.save_checkpoint.durability_confirmed
+        assert window.status_save.text() == "저장: 내구성 미확정"
+        assert window.windowTitle().startswith("* ")
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_native_project_save_failure_never_continues_destructive_action() -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    session = _artifact_session()
+    obj = _projected_scene_object(session)
+    window = MainWindow()
+    window._artifact_session = session
+    window._current_project_path = "/tmp/native-failed.amr"
+    window.current_mesh = obj.mesh
+    window.viewport.objects = [obj]
+    window.viewport.selected_index = 0
+    continued = Mock()
+    try:
+        with (
+            patch.object(window, "_start_task", return_value=True) as start_task,
+            patch.object(QMessageBox, "critical") as critical,
+            patch.object(QTimer, "singleShot") as single_shot,
+        ):
+            assert window._start_native_project_save(
+                "/tmp/native-failed.amr",
+                on_saved=continued,
+            )
+            start_task.call_args.kwargs["on_failed"]("disk full")
+
+        critical.assert_called_once()
+        continued.assert_not_called()
+        single_shot.assert_not_called()
+        assert window._artifact_workbench_controller().snapshot.has_unsaved_changes
+        assert window.status_save.text() == "저장: 미저장"
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
 
 
 def test_native_project_save_worker_never_writes_after_preflight_failure() -> None:
@@ -5340,6 +5742,505 @@ def test_drop_event_routes_through_explicit_native_open_contract() -> None:
 
     window_like.open_file_path.assert_called_once_with(filepath, prompt_unit=True)
     accept.assert_called_once()
+
+
+@pytest.mark.parametrize("target", ("source", "project"))
+@pytest.mark.parametrize("decision", ("cancel", "discard", "save"))
+def test_native_dirty_open_requires_save_discard_or_cancel(
+    target: str,
+    decision: str,
+) -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    window = MainWindow()
+    _install_dirty_native_document(window)
+    choice = {
+        "cancel": QMessageBox.StandardButton.Cancel,
+        "discard": QMessageBox.StandardButton.Discard,
+        "save": QMessageBox.StandardButton.Save,
+    }[decision]
+    internal_name = (
+        "_open_file_path_after_unsaved_guard"
+        if target == "source"
+        else "_open_project_path_after_unsaved_guard"
+    )
+    action_label = (
+        "다른 원본을 열기" if target == "source" else "다른 프로젝트를 열기"
+    )
+    path = "/candidate/new-artifact.ply" if target == "source" else "/candidate/new.amr"
+    try:
+        with (
+            patch.object(
+                window,
+                "_ask_native_unsaved_action",
+                return_value=choice,
+            ) as ask,
+            patch.object(window, "_ask_native_transient_action") as transient_ask,
+            patch.object(window, internal_name) as continue_open,
+            patch.object(window, "save_project") as save_project,
+        ):
+            if target == "source":
+                window.open_file_path(path, prompt_unit=True)
+            else:
+                window.open_project_path(path)
+
+            ask.assert_called_once_with(action_label)
+            transient_ask.assert_not_called()
+            if decision == "discard":
+                save_project.assert_not_called()
+                assert continue_open.call_count == 1
+            elif decision == "cancel":
+                save_project.assert_not_called()
+                continue_open.assert_not_called()
+            else:
+                continue_open.assert_not_called()
+                callback = save_project.call_args.kwargs["on_saved"]
+                assert callable(callback)
+                callback()
+                assert continue_open.call_count == 1
+
+        if decision in {"discard", "save"}:
+            if target == "source":
+                continue_open.assert_called_once_with(
+                    path,
+                    prompt_unit=True,
+                    source_metadata=None,
+                )
+            else:
+                continue_open.assert_called_once_with(path)
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_native_transient_warning_has_no_save_button() -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    window = MainWindow()
+    _session, obj = _install_clean_native_document(window)
+    obj.translation = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+    state = window._native_transient_work_state()
+    try:
+        assert state.has_unpersisted_work
+        with patch.object(
+            QMessageBox,
+            "warning",
+            return_value=QMessageBox.StandardButton.Cancel,
+        ) as warning:
+            result = window._ask_native_transient_action(
+                "다른 원본을 열기",
+                state,
+            )
+
+        assert result == QMessageBox.StandardButton.Cancel
+        buttons = warning.call_args.args[3]
+        assert buttons & QMessageBox.StandardButton.Discard
+        assert buttons & QMessageBox.StandardButton.Cancel
+        assert not buttons & QMessageBox.StandardButton.Save
+        assert "정치 확정·record 기록 또는 초기화" in warning.call_args.args[2]
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+@pytest.mark.parametrize("object_count", (0, 2))
+def test_native_scene_cardinality_fails_closed_for_destructive_open(
+    object_count: int,
+) -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    window = MainWindow()
+    _session, obj = _install_clean_native_document(window)
+    window.viewport.objects = [] if object_count == 0 else [obj, obj]
+    window.viewport.selected_index = -1 if object_count == 0 else 0
+    window._refresh_native_save_indicator()
+    try:
+        state = window._native_transient_work_state()
+        assert state.has_unpersisted_work
+        assert "scene_object_count" in {issue.code for issue in state.issues}
+        assert window.status_save.text() == "저장: 미확정 작업"
+        assert window.windowTitle().startswith("* ")
+
+        with (
+            patch.object(
+                window,
+                "_ask_native_transient_action",
+                return_value=QMessageBox.StandardButton.Cancel,
+            ) as transient_ask,
+            patch.object(window, "_open_project_path_after_unsaved_guard") as open_project,
+        ):
+            window.open_project_path("/candidate/cardinality.amr")
+
+        transient_ask.assert_called_once()
+        open_project.assert_not_called()
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+@pytest.mark.parametrize("late_change", ("transient", "gui_project_path"))
+def test_native_save_continuation_rechecks_late_gui_authority(
+    late_change: str,
+) -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    window = MainWindow()
+    session, obj = _install_clean_native_document(window)
+    project_path = str(window._current_project_path)
+    continued = Mock()
+    try:
+        with patch.object(QTimer, "singleShot") as single_shot:
+            window._defer_exact_native_save_continuation(
+                continued,
+                captured_session=session,
+                project_path=project_path,
+                save_thread=None,
+            )
+            queued_continuation = single_shot.call_args.args[1]
+
+        if late_change == "transient":
+            obj.selected_faces = {0}
+        else:
+            window._current_project_path = "/tmp/different-gui-authority.amr"
+        queued_continuation()
+
+        continued.assert_not_called()
+        if late_change == "transient":
+            assert window.status_save.text() == "저장: 미확정 작업"
+            assert window.windowTitle().startswith("* ")
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_native_tile_interpretation_mutation_refreshes_transient_indicator() -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    window = MainWindow()
+    _session, _obj = _install_clean_native_document(window)
+    try:
+        window.on_tile_interpretation_action("set_tile_class", "sugkiwa")
+
+        state = window._native_transient_work_state()
+        assert "tile_interpretation" in {issue.code for issue in state.issues}
+        assert window.status_save.text() == "저장: 미확정 작업"
+        assert window.windowTitle().startswith("* ")
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+@pytest.mark.parametrize("target", ("source", "project"))
+@pytest.mark.parametrize(
+    ("decision", "continues"),
+    (
+        (QMessageBox.StandardButton.Cancel, False),
+        (QMessageBox.StandardButton.Discard, True),
+    ),
+)
+def test_native_transient_navigation_requires_explicit_discard_or_cancel(
+    target: str,
+    decision: QMessageBox.StandardButton,
+    continues: bool,
+) -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    window = MainWindow()
+    _session, obj = _install_clean_native_document(window)
+    obj.selected_faces = {0}
+    window.on_face_selection_count_changed(1)
+    internal_name = (
+        "_open_file_path_after_unsaved_guard"
+        if target == "source"
+        else "_open_project_path_after_unsaved_guard"
+    )
+    path = "/candidate/transient.ply" if target == "source" else "/candidate/transient.amr"
+    try:
+        assert window.status_save.text() == "저장: 미확정 작업"
+        assert window.windowTitle().startswith("* ")
+        with (
+            patch.object(
+                window,
+                "_ask_native_transient_action",
+                return_value=decision,
+            ) as transient_ask,
+            patch.object(window, "_ask_native_unsaved_action") as document_ask,
+            patch.object(window, internal_name) as continue_open,
+            patch.object(window, "save_project") as save_project,
+        ):
+            if target == "source":
+                window.open_file_path(path, prompt_unit=True)
+            else:
+                window.open_project_path(path)
+
+        transient_ask.assert_called_once()
+        assert transient_ask.call_args.args[0] == (
+            "다른 원본을 열기" if target == "source" else "다른 프로젝트를 열기"
+        )
+        assert transient_ask.call_args.args[1].has_unpersisted_work
+        document_ask.assert_not_called()
+        save_project.assert_not_called()
+        assert bool(continue_open.call_count) is continues
+        if continues and target == "source":
+            continue_open.assert_called_once_with(
+                path,
+                prompt_unit=True,
+                source_metadata=None,
+            )
+        elif continues:
+            continue_open.assert_called_once_with(path)
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_native_align_preview_refreshes_transient_title_and_blocks_save() -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    window = MainWindow()
+    _session, _obj = _install_clean_native_document(window)
+    try:
+        window.trans_toolbar.trans_x.setValue(2.0)
+        state = window._native_transient_work_state()
+        assert "align_translation_preview" in {
+            issue.code for issue in state.issues
+        }
+        assert window.status_save.text() == "저장: 미확정 작업"
+        assert window.windowTitle().startswith("* ")
+
+        with (
+            patch.object(
+                window,
+                "_ask_native_transient_action",
+                return_value=QMessageBox.StandardButton.Cancel,
+            ) as transient_ask,
+            patch.object(window, "_ask_native_unsaved_action") as document_ask,
+            patch.object(window, "save_project") as save_project,
+            patch.object(window, "_open_file_path_after_unsaved_guard") as open_file,
+        ):
+            window.open_file_path("/candidate/align-preview.ply", prompt_unit=True)
+
+        transient_ask.assert_called_once()
+        document_ask.assert_not_called()
+        save_project.assert_not_called()
+        open_file.assert_not_called()
+
+        window.trans_toolbar.trans_x.setValue(0.0)
+        assert window.status_save.text() == "저장: 저장됨"
+        assert not window.windowTitle().startswith("* ")
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_native_curvature_pick_fit_and_clear_refresh_transient_indicator() -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    window = MainWindow()
+    _session, obj = _install_clean_native_document(window)
+    try:
+        window.viewport.picked_points = [
+            np.array([1.0, 0.0, 0.0], dtype=np.float64)
+        ]
+        window.viewport.curvaturePickStateChanged.emit(1)
+        assert window.status_save.text() == "저장: 미확정 작업"
+        assert window.windowTitle().startswith("* ")
+
+        window.clear_curvature_points()
+        assert window.viewport.picked_points == []
+        assert window.status_save.text() == "저장: 저장됨"
+        assert not window.windowTitle().startswith("* ")
+
+        window.viewport.picked_points = [
+            np.array([1.0, 0.0, 0.0], dtype=np.float64),
+            np.array([0.0, 1.0, 0.0], dtype=np.float64),
+            np.array([-1.0, 0.0, 0.0], dtype=np.float64),
+        ]
+        window.viewport.curvaturePickStateChanged.emit(3)
+        window.fit_curvature_arc()
+        assert len(obj.fitted_arcs) == 1
+        assert window.viewport.picked_points == []
+        assert "object:fitted_arcs" in {
+            issue.code for issue in window._native_transient_work_state().issues
+        }
+        assert window.status_save.text() == "저장: 미확정 작업"
+
+        window.clear_all_arcs()
+        assert obj.fitted_arcs == []
+        assert window.status_save.text() == "저장: 저장됨"
+        assert not window.windowTitle().startswith("* ")
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_native_selection_pick_and_active_measurement_are_transient() -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    window = MainWindow()
+    _session, obj = _install_clean_native_document(window)
+    controller = window._artifact_measurement_controller()
+    work_item = None
+    try:
+        obj.selected_faces = {0}
+        window.on_face_selection_count_changed(1)
+        assert "selected_faces" in {
+            issue.code for issue in window._native_transient_work_state().issues
+        }
+        assert window.status_save.text() == "저장: 미확정 작업"
+
+        obj.selected_faces.clear()
+        window.on_face_selection_count_changed(0)
+        assert window.status_save.text() == "저장: 저장됨"
+
+        point = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+        window.viewport.measure_picked_points = [point]
+        window.on_measure_point_picked(point)
+        assert "viewport:measure_picked_points" in {
+            issue.code for issue in window._native_transient_work_state().issues
+        }
+        assert window.status_save.text() == "저장: 미확정 작업"
+
+        window.clear_measure_points()
+        assert window.status_save.text() == "저장: 저장됨"
+
+        work_item = controller.begin_cutline(
+            _native_cutline_frame("top", 0.0),
+            record_id="record:gui-transient-active",
+            created_at="2026-07-11T00:00:01Z",
+            operator="pytest",
+        )
+        window._refresh_native_save_indicator()
+        assert "active_measurement" in {
+            issue.code for issue in window._native_transient_work_state().issues
+        }
+        assert window.status_save.text() == "저장: 미확정 작업"
+    finally:
+        if work_item is not None:
+            try:
+                controller.cancel(work_item, reason="test_cleanup")
+            except Exception:
+                pass
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+@pytest.mark.parametrize(
+    ("decision", "should_close"),
+    (
+        (QMessageBox.StandardButton.Cancel, False),
+        (QMessageBox.StandardButton.Discard, True),
+    ),
+)
+def test_native_transient_close_requires_explicit_discard(
+    decision: QMessageBox.StandardButton,
+    should_close: bool,
+) -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    window = MainWindow()
+    _session, obj = _install_clean_native_document(window)
+    obj.selected_faces = {0}
+    window.on_face_selection_count_changed(1)
+    event = QCloseEvent() if should_close else Mock()
+    try:
+        with (
+            patch.object(
+                window,
+                "_ask_native_transient_action",
+                return_value=decision,
+            ) as transient_ask,
+            patch.object(window, "_ask_native_unsaved_action") as document_ask,
+            patch.object(window, "save_project") as save_project,
+            patch.object(
+                window,
+                "_shutdown_active_task_worker",
+                return_value=True,
+            ) as shutdown,
+            patch.object(window, "_shutdown_project_open_worker"),
+            patch.object(window, "_save_ui_state"),
+        ):
+            window.closeEvent(event)
+
+        transient_ask.assert_called_once()
+        document_ask.assert_not_called()
+        save_project.assert_not_called()
+        if should_close:
+            shutdown.assert_called_once_with()
+            assert event.isAccepted()
+        else:
+            shutdown.assert_not_called()
+            event.ignore.assert_called_once_with()
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_native_save_named_task_lifecycle_never_marks_clean_scene_transient() -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    window = MainWindow()
+    _install_clean_native_document(window)
+    worker_started = Event()
+    release_worker = Event()
+
+    def run_worker() -> None:
+        worker_started.set()
+        release_worker.wait(timeout=3.0)
+
+    thread = TaskThread("save_native_project", run_worker)
+    try:
+        assert window._start_task(
+            title="프로젝트 저장",
+            label="테스트 저장",
+            thread=thread,
+            on_done=lambda _value: None,
+            lock_dialog_until_finished=True,
+        )
+        assert worker_started.wait(timeout=1.0)
+        app.processEvents()
+        assert not window._native_transient_work_state().has_unpersisted_work
+        assert window.status_save.text() == "저장: 저장됨"
+        assert not window.windowTitle().startswith("* ")
+
+        release_worker.set()
+        assert thread.wait(3_000)
+        for _attempt in range(20):
+            app.processEvents()
+            if window._task_thread is None:
+                break
+            QTest.qWait(5)
+        assert window._task_thread is None
+        assert window.status_save.text() == "저장: 저장됨"
+        assert not window.windowTitle().startswith("* ")
+    finally:
+        release_worker.set()
+        if thread.isRunning():
+            thread.wait(3_000)
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
 
 
 def test_failed_worker_start_rolls_back_ticketed_artifact_open() -> None:

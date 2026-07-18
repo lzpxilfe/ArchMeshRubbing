@@ -44,6 +44,8 @@ Open 직후 만들어지는 `recipe.kind="initial_identity"` Align은 canonical 
 
 Align 확정 뒤에도 모든 기능이 한꺼번에 열리지는 않습니다. 현재 활성 Align의 고유한 `READY + FRESH` 기록을 기준으로 `Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6` 순서로 다음 단계가 열리고, 완료 버튼은 초록색으로 바뀝니다. application command도 같은 gate를 강제하며, 각 Outline은 Cutline 3면을, 각 Digital Rubbing은 dependency-valid Outline 6면을 직접 참조합니다. 이 선행 record coverage가 없으면 READY 기록도 완료 증거로 세지 않습니다. 같은 방향을 여러 번 기록해도 한 면으로 계산합니다. Align을 바꾸면 기존 기록은 삭제하지 않고 stale로 제외하며, 이전 Align을 다시 활성화하거나 프로젝트를 재열면 문서의 record graph에서 진행도를 그대로 복원합니다.
 
+Windows native 문서의 저장 표시는 최근에 파일을 쓴 시각이 아니라 **정확한 canonical document SHA-256 + 정규화한 `.amr` 경로** checkpoint에서 파생합니다. 새 원본 Open은 미저장으로 시작하고, 내장 원본과 문서를 끝까지 검증한 프로젝트 재열기만 저장됨으로 시작합니다. Align/record 추가로 문서 hash가 바뀌면 즉시 미저장이 되며 창 제목의 `*`와 상태 표시줄에 드러납니다. 미저장 상태에서 창 닫기·새 원본 Open·Project Open·드래그 앤 드롭을 시도하면 `Save / Discard / Cancel`을 고르며, Save를 고른 후속 동작은 캡처한 정확한 snapshot이 내구성까지 확정된 저장에 성공한 뒤에만 재개됩니다. Windows project writer는 production 재검증을 마친 같은 폴더 staging을 `MoveFileExW(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)`로 교체하며, Win32 호출 실패를 미저장 pre-commit 실패로 처리하고 더 약한 rename으로 우회하지 않습니다. POSIX의 `os.replace + directory fsync`는 과거 source 호환 경로일 뿐 macOS·Linux 완료 근거가 아닙니다.
+
 처음 쓰는 사용자도 **5분 안에 첫 결과**를 얻는 것이 목표입니다.
 
 ---
@@ -73,7 +75,7 @@ Align 확정 뒤에도 모든 기능이 한꺼번에 열리지는 않습니다. 
 - 통과한 결과는 `surface.tile_unwrap.v1` receipt로 보존하며 canonical binary 전체 SHA-256, 원본 vertex/face correspondence, exact µm bounds, section fit와 distortion QC를 서로 대조
 - `*.amr-unwrap/`은 canonical binary, 평면 OBJ, 실제 mm `width`/`height`/`viewBox`를 갖는 1:1 경계 SVG, 공개 provenance sidecar를 한 묶음으로 no-overwrite 게시
 - vector/rubbing/survey/tile-unwrap package는 원본 mesh와 GUI가 없어도 이동 후 별도 프로세스에서 offline 검증 가능
-- Qt/OpenGL과 분리된 `ArtifactWorkbench`가 ticketed Open, 명시적 Align readiness, `state_version`/`authority_epoch` 기반 publication을 소유
+- Qt/OpenGL과 분리된 `ArtifactWorkbench`가 ticketed Open, 명시적 Align readiness, `state_version`/`authority_epoch` 기반 publication과 canonical document SHA-256/정규화 project path 저장 checkpoint를 소유
 - native DerivedRecord worker는 시작 session과 projection을, viewport의 cut-section/ROI/surface-selection worker는 worker identity·target mesh/TRS·render frame을 확인하여 늦은 결과가 현재 문서·overlay·다른 유물·새 worker를 덮지 못하게 함
 - Cutline·Outline·Digital Rubbing·기와 전개 worker는 공통 취소 Event를 계산 내부의 deterministic chunk 경계까지 전달하며, 사용자는 진행 창에서 강제 스레드 종료 없이 취소를 요청할 수 있음
 - DerivedRecord 추가는 같은 render projection의 문서 binding만 compare-and-swap하며 live mesh·VBO·카메라·선택·preview cache를 다시 만들지 않음
@@ -160,7 +162,7 @@ Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 임의 
 
 ### Application workflow shell
 
-- [`src/application/artifact_workbench.py`](src/application/artifact_workbench.py): 한 artifact의 session/project path, 단일 pending Open, workflow readiness와 projection publication authority
+- [`src/application/artifact_workbench.py`](src/application/artifact_workbench.py): 한 artifact의 session/project path, 단일 pending Open, workflow readiness, projection publication authority와 exact saved-snapshot checkpoint
 - [`src/application/artifact_workflow_progress.py`](src/application/artifact_workflow_progress.py): 검증된 session의 `READY + FRESH` view coverage에서 Cutline 3면·Outline 6면·Digital Rubbing 6면 진행도와 순차 gate를 재구성
 - [`src/application/artifact_measurements.py`](src/application/artifact_measurements.py): Cutline/Outline/Digital Rubbing/기와 전개/검증 제원·표면 anchor 거리/원 맞춤 지름의 immutable work item, Workbench 공유 예약·메모리 admission, cooperative cancellation, exact result capability와 same-Align rebase
 - [`src/application/artifact_exports.py`](src/application/artifact_exports.py): vector/rubbing/tile-unwrap export의 exact capability, worker staging, 안전한 정리와 final-authority publication
@@ -169,9 +171,10 @@ Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 임의 
 - Align commit/parent activation은 GUI에서 현재 session·scene binding·preview 값만 캡처합니다. 원본 geometry 재해시, candidate session 구성과 canonical materialization은 닫힘이 잠긴 worker에서 준비하고, 완료 시 같은 객체·mesh·binding·preview와 Workbench session/state/epoch/project path인지 다시 확인합니다. 하나라도 바뀌면 결과를 폐기하며, OpenGL context가 필요한 VBO 준비와 two-phase scene publication만 GUI thread에서 수행합니다.
 - Cutline/Outline/Digital Rubbing/기와 전개/검증 제원·표면 anchor 측정은 application shell에서 파라미터와 가벼운 scene guard만 캡처하고 단일 worker에서 계산합니다. canonical scene materialization·vertex/face 일치 검사와 Digital Rubbing의 해상도별 전체 peak-memory 추정도 controller 실행 수명주기 안의 worker preflight에서 수행하므로 GUI event loop를 막지 않습니다. Rubbing 시작 시에는 원본 geometry·UV·texture 복사를 포함한 보수적 최소 예약을 먼저 잡고, 전체 추정이 예산을 넘으면 계산 전에 fail closed합니다. worker는 문서를 변경하지 않으며, 완료 결과는 예약된 record ID와 일회성 result capability를 검증한 뒤 현재의 같은 Align session에 rebase합니다. record append publication은 GPU 장면을 교체하지 않습니다. 기와의 ‘현재 선택 면’은 exact face-range recipe로 고정하며, 성공적으로 게시될 때 사용자가 선택을 바꾸지 않은 경우에만 소비합니다. 재개방한 기록은 READY + FRESH 목록에서 명시적으로 선택하고, 일시적인 Open/scene 충돌로 게시하지 못한 측정 결과는 새 ID를 만들지 않고 재시도합니다.
 - vector/rubbing/survey/tile-unwrap export는 비싼 생성·record recipe 재계산을 worker에서 staging까지만 수행합니다. `.amr-survey`는 15개 exact record와 동일 projection을 한 번에 fence합니다. 최종 no-replace rename은 현재 권위를 다시 검증한 뒤 실행하며, 목적지 경합에서는 기존 승자를 보존합니다. rename 뒤 directory `fsync`가 실패하거나 Windows처럼 지원 여부를 확인할 수 없으면 저장 완료와 crash durability 미확정을 구분해 경고합니다.
-- native Save/Save As는 immutable session snapshot과 경량 scene guard만 GUI에서 캡처합니다. Git build metadata 조회, 원본 closure 재해시, ZIP64 작성·fsync, production reader 재개방, source/Align 재물질화는 잠긴 진행 대화상자의 worker에서 수행합니다. 완료 시 session·state version·authority epoch·기존 project path가 모두 그대로일 때만 결과 경로를 현재 프로젝트로 채택합니다. 중간에 권위가 바뀌면 파일은 유효한 과거 snapshot으로 명시하되 현재 문서가 저장됐다고 표시하지 않습니다.
-- 중단 저장 복구는 자동 시작 스캔이나 임시본 정리를 하지 않습니다. 사용자가 범위를 폴더 하나로 지정하고 후보·새 목적지를 각각 확인한 뒤 잠긴 worker에서 descriptor copy, file `fsync`, embedded-session materialization과 atomic create-new publish를 수행합니다. 성공 뒤에도 복구본 열기는 별도 확인이며, 실패·목적지 경합·후보 identity 변경에서는 live scene과 모든 기존 경로를 유지합니다.
-- 창 종료는 active authoritative 측정·내보내기의 record/publication 권위를 먼저 회수하고 강제 thread termination 없이 최대 30초 join을 기다립니다. native Align 준비나 project save처럼 내부 해시·materialization·파일 호출을 선점할 수 없는 task도 같은 bounded join을 통과해야 합니다. worker 종료와 export staging의 안전한 terminal 상태를 증명하지 못하면 창을 닫지 않으며, 검증된 join 뒤에만 task signal과 identity를 제거해 늦은 결과 게시를 차단합니다.
+- native Save/Save As는 immutable session snapshot과 경량 scene guard만 GUI에서 캡처합니다. Git build metadata 조회, 원본 closure 재해시, ZIP64 작성·file `fsync`, production reader 재개방, source/Align 재물질화는 잠긴 진행 대화상자의 worker에서 수행합니다. Windows commit은 긴 한글·UNC 경로를 보존한 `MoveFileExW` replace-existing/write-through 한 경로만 사용합니다. 성공한 호출 뒤에만 session·state version·authority epoch·기존 project path를 다시 비교해 결과 경로와 exact document hash checkpoint를 현재 프로젝트로 채택합니다. 같은 경로 Save와 Save As 모두 같은 CAS를 사용합니다. 중간에 권위가 바뀌면 파일은 유효한 과거 snapshot으로 명시하되 현재 문서가 저장됐다고 표시하지 않습니다. Win32 commit 실패는 기존 목적지를 보존하며 checkpoint를 만들지 않습니다. POSIX 호환 경로에서 replace 뒤 directory `fsync`가 실제 실패하면 committed-but-uncertain checkpoint로 남지만, 이것은 Windows 안정판 완료 판정에 사용하지 않습니다.
+- native 문서의 Close, 새 원본 Open, Project Open, 드래그 앤 드롭은 같은 `Save / Discard / Cancel` gate를 공유합니다. `Save`는 비동기 저장 완료 후 exact confirmed checkpoint가 현재 session/path와 같을 때만 원래 동작을 호출하며, 취소·실패·stale 결과·내구성 미확정에서는 현재 문서와 창을 유지합니다. 문서 변경 상태는 창 제목 `*`와 저장 상태 표시줄에서 같은 Workbench snapshot으로 파생합니다.
+- 중단 저장 복구는 자동 시작 스캔이나 임시본 정리를 하지 않습니다. 사용자가 범위를 폴더 하나로 지정하고 후보·새 목적지를 각각 확인한 뒤 잠긴 worker에서 descriptor copy, file `fsync`, embedded-session materialization을 수행합니다. Windows create-new 게이트는 긴 한글·UNC 경로를 보존한 `MoveFileExW(MOVEFILE_WRITE_THROUGH)`만 사용하며 기존 목적지가 있거나 Win32 호출이 실패하면 덮어쓰기나 더 약한 rename 없이 중단합니다. 성공 뒤에도 복구본 열기는 별도 확인이며, 실패·목적지 경합·후보 identity 변경에서는 live scene과 모든 기존 경로를 유지합니다.
+- 창 종료는 active authoritative 측정·내보내기의 record/publication 권위를 먼저 회수하고 강제 thread termination 없이 최대 30초 join을 기다립니다. native Align 준비·project save뿐 아니라 독립적인 원본 loader와 Project inspector도 request/ticket을 먼저 회수하고 같은 bounded join을 통과해야 합니다. worker 종료와 export staging의 안전한 terminal 상태를 증명하지 못하면 창을 닫지 않고 QThread 소유권을 유지하며, 검증된 join 뒤에만 signal과 identity를 제거해 늦은 결과 게시를 차단합니다.
 
 ### Artifact trust core
 
