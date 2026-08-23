@@ -6,7 +6,7 @@
 
 ArchMeshRubbing은 스캔한 문화유산 3D 메쉬를 원본 보존형 연구 자료로 불러와,
 `Open → 단위·축 확인 → Align → Cutline/Outline·기와 기록면 전개 → Digital Rubbing → 1:1 export`
-흐름으로 기록하고 다시 검증하는 오프라인 오픈소스 워크벤치를 목표로 합니다. 기와형 메쉬의 기록면 전개도 이제 같은 원본·Align·record 신뢰 경계 안에서 계산할 수 있습니다.
+흐름으로 기록하고 다시 검증하는 오프라인 오픈소스 워크벤치를 목표로 합니다. 기와형 메쉬의 기록면 전개도 이제 같은 원본·Align·record 신뢰 경계 안에서 자동 경계 또는 기록자가 고정한 펼침 경계로 계산할 수 있습니다.
 
 ## 지원 계약
 
@@ -82,9 +82,10 @@ Windows native 문서의 저장 표시는 최근에 파일을 쓴 시각이 아�
 - Digital Rubbing은 6면 canonical frame, 정수 pixels/mm·µm recipe, front-depth raster와 QC를 `raster.digital_rubbing.v1` record로 보존
 - canonical GA8 PNG는 고정 chunk/DEFLATE bytes와 exact `pHYs`를 사용하며, `*.amr-rubbing/`에 provenance sidecar와 함께 저장
 - Cutline 3면·Outline 6면·Digital Rubbing 6면이 모두 완료되면 `완료 실측 15개 원자 묶음 내보내기` 버튼이 활성화되고, 기존 9개 `.amr-vector`와 6개 `.amr-rubbing`을 canonical manifest에 결합한 이동 가능한 `*.amr-survey/` 하나로 no-overwrite 게시
-- 기와 기록면 전개는 명시적 canonical 장축(`X/Y/Z`), Top/Bottom 기록면, 최대 250,000개 원본 face-range selection을 recipe로 고정하고 sectionwise 알고리즘의 자동 fallback·1 µm 격자 collapse·orientation foldover·품질 기준 초과를 정식 record에서 거부
+- 기와 기록면 전개는 명시적 canonical 장축(`X/Y/Z`), Top/Bottom 기록면, 최대 250,000개 원본 face-range selection, 자동 경계 또는 `[-180°, 180°)`의 0.000001° 고정 seam을 recipe로 고정하고 sectionwise 알고리즘의 자동 fallback·1 µm 격자 collapse·orientation foldover·품질 기준 초과를 정식 record에서 거부
 - 통과한 결과는 `surface.tile_unwrap.v1` receipt로 보존하며 canonical binary 전체 SHA-256, 원본 vertex/face correspondence, exact µm bounds, section fit와 distortion QC를 서로 대조
 - `*.amr-unwrap/`은 canonical binary, 평면 OBJ, 실제 mm `width`/`height`/`viewBox`를 갖는 1:1 경계 SVG, 공개 provenance sidecar를 한 묶음으로 no-overwrite 게시
+- 메쉬 정보 패널은 실제 `MeshData.unit`의 `mm/cm/m`을 그대로 표시하고, 대형 메쉬 면적도 무작위 표본 대신 고정 청크 전수 합산한다. 단위 미확인·계산 불가는 물리량으로 위장하지 않고 명시적으로 표시
 - vector/rubbing/survey/tile-unwrap package는 원본 mesh와 GUI가 없어도 이동 후 별도 프로세스에서 offline 검증 가능
 - Qt/OpenGL과 분리된 `ArtifactWorkbench`가 ticketed Open, 명시적 Align readiness, `state_version`/`authority_epoch` 기반 publication과 canonical document SHA-256/정규화 project path 저장 checkpoint를 소유
 - native DerivedRecord worker는 시작 session과 projection을, viewport의 cut-section/ROI/surface-selection worker는 worker identity·target mesh/TRS·render frame을 확인하여 늦은 결과가 현재 문서·overlay·다른 유물·새 worker를 덮지 못하게 함
@@ -105,11 +106,12 @@ Native 문서에서는 기존 screenshot/OpenCV/convex-hull 2D 도면과 임의 
 - Align이 확정된 canonical millimeter geometry에서만 계산
 - 자동 장축 추정 대신 기록자가 `X/Y/Z` 장축을 명시해 해석을 recipe에 남김
 - 선택 기록면을 정렬·병합된 원본 face 범위와 selection SHA-256으로 보존
+- 펼침 경계는 단면의 빈 각도 구간을 찾는 자동 방식과 결정적 단면 기준축에 대한 `[-180°, 180°)` 고정 각도 중 하나를 고른다. 고정값은 0.000001° 정수로 recipe에 저장하며 기록면을 가로질러 foldover·겹침이 생기면 QC가 결과를 거부한다
 - sectionwise 계산이 cylinder/area 등으로 fallback하면 정식 결과로 위장하지 않고 실패
 - 굽힘·비틀림으로 생기는 단면별 longitudinal shear를 실제 3D edge 길이에 맞춰 결정적으로 보정하고, 결과 좌표를 1 µm 정수 격자로 고정함. 모든 삼각형의 3개 edge·면적·Jacobian singular value 왜곡, collapse·방향 뒤집힘, topology·중복 face·non-manifold edge·전역 positive-area UV 겹침을 READY 전에 검사
 - application shell의 `begin_tile_unwrap()`가 immutable work item, 취소, stale Align 차단, same-Align record publication을 기존 실측과 같은 방식으로 처리
 - 메인 `4축 작업 흐름`의 전용 바로가기에서 native desktop 패널을 열고, 전체/현재 face 선택, canonical `X/Y/Z` 장축, Top/Bottom 기록면, section 수를 명시해 계산·취소·record 재선택·QC 미리보기·1:1 export까지 같은 Workbench 권위로 실행
-- 현재 Top/Bottom은 같은 face selection의 U 방향을 구분해 별도 hash를 만드는 해석값이며 실제 기와 상·하면을 자동 분류하지 않는다. 기록자가 올바른 단일 기록면 faces를 선택해야 하고, 펼친 좌표 위 texture·Digital Rubbing 재투영은 아직 구현하지 않았다
+- 현재 Top/Bottom은 같은 face selection의 U 방향을 구분해 별도 hash를 만드는 해석값이며 실제 기와 상·하면을 자동 분류하지 않는다. 명시적 seam 선택은 구현됐지만 기록자가 올바른 단일 기록면 faces를 선택해야 하고, 펼친 좌표 위 texture·Digital Rubbing 재투영은 아직 구현하지 않았다
 - 재열기 뒤 선택한 `READY + FRESH` record는 저장 recipe로 전개 좌표를 다시 계산해 receipt와 대조한 뒤에만 미리보기와 export를 허용하며, 기존 자유 flatten UI의 결과는 계속 legacy 검토용으로 구분
 
 ### 2. 기와형 메쉬용 기본 추천 펼침
@@ -420,7 +422,7 @@ python main.py --project mesh.obj planview.png
 - recipe·QC·receipt가 있는 6면 Digital Rubbing과 1:1 `.amr-rubbing` export
 - source triangle+barycentric anchor로 재열어 검증하는 Euclidean chord 거리와 best-fit planar circle 지름
 - 완료 3/6/6을 한 버튼으로 15개 자식·canonical manifest에 결합하는 원자적 `.amr-survey` export
-- 전체/선택 face·명시적 장축·Top/Bottom·section/QC를 한 화면에서 기록하고 재열어 검증하는 native 기와 전개와 1:1 `.amr-unwrap` export
+- 전체/선택 face·명시적 장축·Top/Bottom·자동/0.000001° 고정 seam·section/QC를 한 화면에서 기록하고 재열어 검증하는 native 기와 전개와 1:1 `.amr-unwrap` export
 - `.amr`, `.amr-vector`, `.amr-rubbing`, `.amr-survey`, `.amr-unwrap`의 자동 판별·이동 가능한 offline 검증과 exact project 결합 receipt
 - 주 원본과 실제 parser dependency bytes를 포함한 content-addressed `.amr` 저장, 원본 디렉터리 삭제 뒤 독립 프로세스 reopen·relocation·archive-to-archive 재저장
 - self-contained v1 `deny_external`과 multi-file v2 `closed_manifest` mesh import recipe, parser-runtime subset identity, 경로 탈출·변조·미선언 resource deny gate와 동일 receipt의 독립 프로세스 재실행
@@ -429,7 +431,7 @@ python main.py --project mesh.obj planview.png
 - Cutline/Outline/Digital Rubbing command와 worker 수명주기를 Qt/OpenGL-free application shell로 이식
 - DerivedRecord의 VBO-free binding rebind와 SVG/PNG worker staging → final-authority publication 이식
 - dependency-valid `READY + FRESH` record graph와 application command에서 Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6 순차 gate·초록 완료 표시·재열기/Align 복원 구현
-- packaged self-test가 실제 application authority를 통해 Open → explicit Align → Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6 → 검증 제원 1/1 → 거리 1/1 → 지름 1/1의 18개 record를 만들고, 외부 PLY 삭제 뒤 embedded `.amr`를 재열어 24 mm²/8 mm³ exact metrics와 1.000000 mm 거리·지름 receipt, SVG 9개·PNG 6개·원자적 `.amr-survey`를 원본 SHA-256·recipe·QC·aggregate hash 및 exact-project 결합으로 offline 재검증. 별도의 합성 비틀린 원통형 기와 fixture도 record → 외부 원본 삭제 → `.amr` reopen → 1.1 재계산 → `.amr-unwrap` relocation 검증을 통과하고 13개 station·최대 6,364 µm row-shift 증거와 동일 payload SHA-256을 강제한다. 이는 실물 기와 pilot의 대체 증거가 아니다
+- packaged self-test가 실제 application authority를 통해 Open → explicit Align → Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6 → 검증 제원 1/1 → 거리 1/1 → 지름 1/1의 18개 record를 만들고, 외부 PLY 삭제 뒤 embedded `.amr`를 재열어 24 mm²/8 mm³ exact metrics와 1.000000 mm 거리·지름 receipt, SVG 9개·PNG 6개·원자적 `.amr-survey`를 원본 SHA-256·recipe·QC·aggregate hash 및 exact-project 결합으로 offline 재검증. 별도의 합성 비틀린 원통형 기와 fixture도 record → 외부 원본 삭제 → `.amr` reopen → 현재 1.2 recipe 재계산 → `.amr-unwrap` relocation 검증을 통과하고 13개 station·최대 6,364 µm row-shift 증거와 동일 payload SHA-256을 강제한다. 기존 자동 seam 1.1 recipe/package도 hash를 바꾸지 않고 재계산·offline 검증한다. 이는 실물 기와 pilot의 대체 증거가 아니다
 - `--field-pilot-review-template`, `--field-pilot`, `--verify-field-pilot`이 project/survey materialization, Windows graphics receipt, 고고학자 review, machine/performance를 closed canonical report로 묶으며, 실제 review나 driver 근거가 없으면 packaged self-test에서도 `artifact-pass-human-driver-pending`으로만 남김
 - `--opengl-driver-smoke-report`가 source와 frozen Windows 실행 파일에서 native `qwindows` context를 열고 Qt·PyOpenGL을 bundled `opengl32sw.dll` 하나에 결합한 뒤, 768×768 FBO에서 `>= 1e9 mm` 장면의 relative VBO, color/depth readback, 0.125 mm depth pick을 원근·정사영으로 검증
 - Windows x64/CPython 3.12 build wheel 17개를 exact SHA-256으로 잠그고 sdist를 거부하며, frozen/portable payload의 모든 파일 hash와 runtime 10개의 SPDX 2.3 SBOM·라이선스 원문 NOTICE를 실행 파일 self-test에서 재검증
@@ -444,6 +446,7 @@ python main.py --project mesh.obj planview.png
 - 2026-07-14 중단 저장 복구 기준 commit `546d106c6ccf`: [source CI run 29282751462](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29282751462)에서 full pytest `777 passed, 128 subtests`, Ruff, M0 Pyright `0 errors`, Windows workflow `675 passed, 5 skipped, 118 subtests`와 qwindows+llvmpipe actual-frame `66/66` 통과. Windows `DirEntry`의 placeholder file identity까지 회귀 테스트로 고정함
 - 같은 복구 commit의 [portable package run 29282751606](https://github.com/lzpxilfe/ArchMeshRubbing/actions/runs/29282751606)에서 frozen·한글 경로 portable 실행 파일이 `recovery=verified-create-new`를 포함한 14-check offline self-test, outbound deny, public verification receipt, qwindows+llvmpipe actual-frame `66/66`, archive/provenance 재검증과 추출본·방화벽 규칙 정리를 통과
 - installer compiler 없이 표준 라이브러리만으로 deterministic portable ZIP과 canonical sidecar를 만들고, 경로 탈출·Windows 예약명·대소문자 충돌·symlink·변조를 fail-closed 검증한 뒤 기존 destination을 덮어쓰지 않는 원자적 추출 구현
+- 다음 제품 단계: 원본 메쉬를 파괴하지 않는 `Clip/Fragment` revision, Cutline 위치 recall, 조각 목록·재열기 검증을 native Workbench authority로 이식
 - 다음 단계: 모든 코드 권리자의 명시적 라이선스 결정, unsigned provenance와 portable/source 배포물을 인증할 서명·신뢰 anchor 정책, 구현된 파일럿 계약을 사용한 지원 대상 Windows 10/11 x64의 대표 GPU·대용량 실제 유물·저메모리·완전 격리 offline 현장 증거 수집. 비 Windows 배포 확대는 현재 비목표
 
 ---

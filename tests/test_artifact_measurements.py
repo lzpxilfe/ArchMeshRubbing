@@ -350,6 +350,34 @@ def test_begin_enforces_sequence_and_captures_canonical_prerequisites() -> None:
     outline_controller.cancel(rubbing)
 
 
+def test_begin_tile_unwrap_captures_explicit_seam_in_canonical_recipe() -> None:
+    session = _session()
+    controller = ArtifactMeasurementController(
+        ArtifactWorkbench(session=session),
+        id_factory=SequentialIds(),
+    )
+
+    work_item = controller.begin_tile_unwrap(
+        longitudinal_axis="y",
+        record_view="top",
+        selected_face_indices=(5, 1, 3),
+        n_sections=24,
+        seam_angle_microdegrees=12_345_678,
+        record_id="record:tile:fixed-seam",
+        created_at=STAMP,
+        operator="pytest",
+    )
+
+    recipe = work_item.recipe_dict()
+    assert recipe["seam_angle_microdegrees"] == 12_345_678
+    selection = recipe["selection"]
+    assert isinstance(selection, dict)
+    assert selection["face_ranges"] == [[1, 2], [3, 4], [5, 6]]
+    assert selection["selected_face_count"] == 3
+    assert work_item.context.selection_hash == selection["selection_sha256"]
+    controller.cancel(work_item)
+
+
 def test_cutline_executes_and_publishes_only_the_reserved_record_id() -> None:
     session = _session()
     workbench = ArtifactWorkbench(session=session, id_factory=SequentialIds())

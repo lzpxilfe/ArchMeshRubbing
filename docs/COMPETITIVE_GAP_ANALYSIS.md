@@ -19,7 +19,7 @@ ArchMeshRubbing의 제품 비교 범위는 Windows 10 version 1809 이상 x64와
 
 | 영역 | ARIA Pro 공개 화면 | ArchMeshRubbing 현재 증거 | 판정과 다음 조건 |
 |---|---|---|---|
-| 기와 정렬·전개 | 기와 정렬, 원통 투영 이미지, 영역 선택 곡률 전개 UI가 표시됨 | native desktop의 전체/선택 face·X/Y/Z 장축·Top/Bottom·section/QC 패널, variable-radius sectionwise, `surface.tile_unwrap.v1`, 1 µm 좌표·왜곡/foldover gate, 권위 재검증 뒤 `.amr-unwrap` binary/OBJ/SVG/provenance | 계산·신뢰·desktop 연결은 차별화. 실물 암·수키와 pilot 전에는 종합 우위라고 표시하지 않음 |
+| 기와 정렬·전개 | 기와 정렬, 원통 투영 이미지, 영역 선택 곡률 전개 UI가 표시됨 | native desktop의 전체/선택 face·X/Y/Z 장축·Top/Bottom·자동/0.000001° 고정 seam·section/QC 패널, variable-radius sectionwise, `surface.tile_unwrap.v1`, 1 µm 좌표·왜곡/foldover gate, 권위 재검증 뒤 `.amr-unwrap` binary/OBJ/SVG/provenance | 계산·신뢰·desktop 연결은 차별화. 자동 표면 분류와 실물 암·수키와 pilot 전에는 종합 우위라고 표시하지 않음 |
 | 단위·정렬 이력 | 두 점 거리 scale 보정과 축 정렬 UI가 표시됨 | source bytes와 decode geometry의 별도 hash, 확인 단위/축, immutable proper-rigid Align revision, stale history 복원 | ArchMeshRubbing 우위. 실제 사용자 오류율 비교는 필요 |
 | 1:1 결과 근거 | SVG drawing/OBJ export 메뉴가 표시됨 | exact-mm SVG/PNG/unwrap, recipe/QC/dependency closure, canonical payload hash, offline verifier, 완료 3/6/6을 15개 자식과 aggregate manifest로 한 번에 게시하는 `.amr-survey` | ArchMeshRubbing 우위. Illustrator 왕복 실물 출력 pilot 필요 |
 | 절단·단면 | 직선/교차/경사 절단, clipping, quadrant, 단면선 추출 UI가 표시됨 | 검증 Cutline과 단면/clip 기반 legacy 도구가 있으나 조각 생성·통합 편집 UX는 부족 | ARIA UI가 앞섬. non-destructive fragment record와 recall clip 필요 |
@@ -46,14 +46,15 @@ ArchMeshRubbing의 제품 비교 범위는 Windows 10 version 1809 이상 x64와
 - 완료: 한 project/survey, 현재 Windows build의 native OpenGL report, 정량 scale과 10항목 고고학자 review를 canonical 단일 파일럿 report로 묶고 근거가 빠지면 `incomplete`로 남기는 공개 CLI·schema를 마련했다.
 - 완료: 전체 active geometry의 표면적과 topology-gated 체적을 `measurement.geometry_metrics.v1`로 원자 게시한다. 열린 메쉬·비다양체·방향 불일치·다중 조각은 convex-hull 값으로 숨기지 않고 체적을 unavailable로 남긴다.
 - 완료: exact frame의 depth ray를 전체 CPU triangle과 교차해 source face+barycentric anchor로 고정하고, 3D Euclidean chord 거리와 3~64점 PCA 평면·정규화 대수 Kasa 원 지름을 immutable record로 게시·재열어 검증한다. pick QC는 총 스캔 불확도가 아니라 depth 재부착·pixel footprint·edge 근접·fit residual 범위임을 명시한다.
-- 실제 상·하면을 자동 분류하는 기록면 classifier와 명시적 seam 편집을 구현한다. 현재 Top/Bottom은 사용자가 고른 동일 face selection의 방향 해석이며 자동 표면 판정이 아니다.
+- 완료: 자동 경계와 기록자가 지정한 `[-180°, 180°)` 고정 seam을 구분하고 0.000001° 정수 recipe, 프로젝트 record, 재계산, 1:1 export와 offline schema 검증까지 같은 신뢰 경계에 넣는다. 기존 자동 seam 1.1 기록과 패키지는 hash를 바꾸지 않고 계속 검증한다.
+- 실제 상·하면을 자동 분류하는 기록면 classifier를 구현한다. 현재 Top/Bottom은 사용자가 고른 동일 face selection의 방향 해석이며 자동 표면 판정이 아니다.
 - 공개 가능한 암키와·수키와 scan set을 마련해 폭/길이/단면 arc 오차, foldover, 처리시간을 기록한다.
 - SVG를 Illustrator/Inkscape로 열어 physical size를 실물 자와 대조한다.
 
 ### P1: 공개 화면에서 확인된 기능 격차 닫기
 
-- non-destructive cutting/fragment revision, recall clip, piece list
-- triangle/barycentric anchor 기반 distance·diameter record와 pick uncertainty QC
+- 다음 구현 목표: non-destructive cutting/fragment revision, Cutline recall clip, piece list와 재열기 검증
+- Windows Job Object와 별도 process를 사용하는 bounded mesh parser 격리·취소
 - RTI light recipe와 deterministic image export
 - MSII scale/radius recipe, 공개 합성 benchmark와 feature map record
 - 펼친 기와 좌표에서 Digital Rubbing/문양선을 재투영하는 결합 workflow

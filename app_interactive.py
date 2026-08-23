@@ -238,6 +238,7 @@ install_windows_software_pyopengl_bridge()
 
 from src.gui.viewport_3d import SurfaceAnchorObservation, Viewport3D  # noqa: E402
 from src.core.mesh_loader import MeshData, MeshLoader  # noqa: E402
+from src.core.mesh_display import format_mesh_display_values  # noqa: E402
 from src.core.profile_exporter import ProfileExporter  # noqa: E402
 from src.core.project_file import (  # noqa: E402
     EmbeddedSourceRequiredError,
@@ -3288,9 +3289,20 @@ class PropertiesPanel(QWidget):
         self.label_vertices.setText(f"{mesh.n_vertices:,}")
         self.label_faces.setText(f"{mesh.n_faces:,}")
         
-        extents = mesh.extents
-        self.label_size.setText(f"{extents[0]:.1f} × {extents[1]:.1f} × {extents[2]:.1f} cm")
-        self.label_area.setText(f"{mesh.surface_area:.1f} cm²")
+        try:
+            surface_area = mesh.surface_area
+            surface_area_state = mesh.surface_area_status
+        except Exception:
+            surface_area = None
+            surface_area_state = "unavailable"
+        display = format_mesh_display_values(
+            extents=mesh.extents,
+            surface_area=surface_area,
+            unit=getattr(mesh, "unit", None),
+            surface_area_state=surface_area_state,
+        )
+        self.label_size.setText(display.size_text)
+        self.label_area.setText(display.area_text)
         self.label_texture.setText("있음" if mesh.has_texture else "없음")
 
 
@@ -3340,17 +3352,23 @@ class InfoBarWidget(QWidget):
             except Exception:
                 file_name = str(filepath)
 
-        extents = mesh.extents
-        size_txt = f"{extents[0]:.1f}×{extents[1]:.1f}×{extents[2]:.1f}cm"
         try:
-            area_txt = f"{mesh.surface_area:.1f}cm²"
+            surface_area = mesh.surface_area
+            surface_area_state = mesh.surface_area_status
         except Exception:
-            area_txt = "-"
+            surface_area = None
+            surface_area_state = "unavailable"
+        display = format_mesh_display_values(
+            extents=mesh.extents,
+            surface_area=surface_area,
+            unit=getattr(mesh, "unit", None),
+            surface_area_state=surface_area_state,
+        )
 
         tex_txt = "있음" if getattr(mesh, "has_texture", False) else "없음"
         self.label_summary.setText(
             f"File: {file_name} | V: {mesh.n_vertices:,} | F: {mesh.n_faces:,} | "
-            f"Size: {size_txt} | Area: {area_txt} | Tex: {tex_txt}"
+            f"Size: {display.size_text} | Area: {display.area_text} | Tex: {tex_txt}"
         )
 
 
@@ -4282,6 +4300,33 @@ class SectionPanel(QWidget):
         self.combo_native_tile_record_view.addItem("상면", "top")
         self.combo_native_tile_record_view.addItem("하면", "bottom")
         tile_form.addRow("기록면", self.combo_native_tile_record_view)
+        self.combo_native_tile_seam = QComboBox()
+        self.combo_native_tile_seam.addItem("자동 경계", "auto")
+        self.combo_native_tile_seam.addItem("고정 각도", "fixed")
+        self.combo_native_tile_seam.setToolTip(
+            "자동 경계는 각 단면의 비어 있는 각도 구간을 펼침 경계(seam)로 사용합니다. "
+            "고정 각도는 길이축에 수직인 단면 좌표계에서 경계 방향을 명시해 "
+            "recipe와 프로젝트에 0.000001도 단위로 기록합니다."
+        )
+        tile_form.addRow("펼침 경계", self.combo_native_tile_seam)
+        self.spin_native_tile_seam_angle = QDoubleSpinBox()
+        self.spin_native_tile_seam_angle.setRange(-180.0, 179.999999)
+        self.spin_native_tile_seam_angle.setDecimals(6)
+        self.spin_native_tile_seam_angle.setSingleStep(1.0)
+        self.spin_native_tile_seam_angle.setSuffix("°")
+        self.spin_native_tile_seam_angle.setValue(0.0)
+        self.spin_native_tile_seam_angle.setEnabled(False)
+        self.spin_native_tile_seam_angle.setToolTip(
+            "고정 펼침 경계 방향입니다. 선택한 길이축의 결정적 단면 기준축에서 "
+            "반시계 방향 각도로 해석되며 -180도 이상 180도 미만만 허용합니다. "
+            "선택 표면 내부를 가르면 foldover/중첩 QC가 결과를 차단할 수 있습니다."
+        )
+        self.combo_native_tile_seam.currentIndexChanged.connect(
+            lambda _index: self.spin_native_tile_seam_angle.setEnabled(
+                self.combo_native_tile_seam.currentData() == "fixed"
+            )
+        )
+        tile_form.addRow("고정 경계각", self.spin_native_tile_seam_angle)
         self.spin_native_tile_sections = QSpinBox()
         self.spin_native_tile_sections.setRange(12, 512)
         self.spin_native_tile_sections.setValue(32)
@@ -4300,7 +4345,7 @@ class SectionPanel(QWidget):
         set_pixel_icon(self.btn_native_tile_unwrap, "flatten")
         self.btn_native_tile_unwrap.setToolTip(
             "원본 canonical-mm 메쉬에서 variable-radius sectionwise 전개를 계산하고 "
-            "선택·축·기록면·왜곡·foldover QC와 함께 기록합니다."
+            "선택·축·기록면·펼침 경계·왜곡·foldover QC와 함께 기록합니다."
         )
         self.btn_native_tile_unwrap.clicked.connect(
             self.nativeTileUnwrapRequested.emit
@@ -17425,9 +17470,16 @@ class MainWindow(QMainWindow):
         )
         qc = record.qc
         distortion_percent = int(qc.get("distortion_p95_millionths", 0)) / 10_000.0
+        seam_angle = record.recipe.get("seam_angle_microdegrees")
+        seam_text = (
+            "자동"
+            if seam_angle is None
+            else f"{int(seam_angle) / 1_000_000.0:g}°"
+        )
         self.section_panel.label_native_tile_unwrap_info.setText(
             f"{str(record.recipe['record_view']).title()} · 길이축 "
             f"{str(record.recipe['longitudinal_axis']).upper()} · "
+            f"경계 {seam_text} · "
             f"선택 {int(qc.get('selected_face_count', 0)):,}면 · "
             f"{width_mm:g}×{height_mm:g} mm · "
             f"section {int(qc.get('section_count', 0))} · "
@@ -18211,9 +18263,16 @@ class MainWindow(QMainWindow):
             )
         elif work_item.kind is MeasurementOperationKind.TILE_UNWRAP:
             assert isinstance(computation, ArtifactTileUnwrapComputation)
+            seam_angle = computation.recipe.get("seam_angle_microdegrees")
+            seam_text = (
+                "자동"
+                if seam_angle is None
+                else f"{int(seam_angle) / 1_000_000.0:g}°"
+            )
             status_text = (
                 f"{str(computation.recipe['record_view']).title()} 기와 전개 기록 | "
                 f"길이축 {str(computation.recipe['longitudinal_axis']).upper()} · "
+                f"경계 {seam_text} · "
                 f"{int(computation.qc.get('selected_face_count', 0)):,}면 · "
                 f"foldover {int(computation.qc.get('foldover_face_count', 0))}"
             )
@@ -19834,6 +19893,20 @@ class MainWindow(QMainWindow):
             selected_face_indices = tuple(selected)
         elif target != "all":
             raise ArtifactTileUnwrapError("기와 전개 기록 영역이 올바르지 않습니다")
+        seam_mode = str(panel.combo_native_tile_seam.currentData() or "auto")
+        if seam_mode == "auto":
+            seam_angle_microdegrees: int | None = None
+        elif seam_mode == "fixed":
+            seam_angle_degrees = float(panel.spin_native_tile_seam_angle.value())
+            if not np.isfinite(seam_angle_degrees) or not (
+                -180.0 <= seam_angle_degrees < 180.0
+            ):
+                raise ArtifactTileUnwrapError(
+                    "고정 seam 각도는 -180도 이상 180도 미만이어야 합니다"
+                )
+            seam_angle_microdegrees = int(np.rint(seam_angle_degrees * 1_000_000.0))
+        else:
+            raise ArtifactTileUnwrapError("기와 전개 seam 모드가 올바르지 않습니다")
         return {
             "longitudinal_axis": str(
                 panel.combo_native_tile_axis.currentData() or "y"
@@ -19843,6 +19916,7 @@ class MainWindow(QMainWindow):
             ),
             "selected_face_indices": selected_face_indices,
             "n_sections": int(panel.spin_native_tile_sections.value()),
+            "seam_angle_microdegrees": seam_angle_microdegrees,
         }
 
     def _compute_and_commit_native_tile_unwrap(
@@ -19852,6 +19926,7 @@ class MainWindow(QMainWindow):
         record_view: str,
         selected_face_indices: tuple[int, ...] | None = None,
         n_sections: int = 32,
+        seam_angle_microdegrees: int | None = None,
         record_id: str | None = None,
         created_at: str | None = None,
         operator: str = "local-user",
@@ -19874,6 +19949,7 @@ class MainWindow(QMainWindow):
             record_view=record_view,
             selected_face_indices=selected_face_indices,
             n_sections=n_sections,
+            seam_angle_microdegrees=seam_angle_microdegrees,
             record_id=new_record_id,
             created_at=(self._utc_seconds_now() if created_at is None else created_at),
             operator=operator,
@@ -19959,10 +20035,12 @@ class MainWindow(QMainWindow):
                 self._format_error_message("기와 전개 계산 중 오류:", message),
             )
 
-        self.status_info.setText("기와 전개 계산 중 · canonical mm 단면 적합...")
+        self.status_info.setText(
+            "기와 전개 계산 중 · canonical mm 단면·펼침 경계 적합..."
+        )
         started = self._start_task(
             title="기와 기록면 전개",
-            label="선택·축·기록면을 고정한 µm 전개 좌표 계산 중...",
+            label="선택·축·기록면·펼침 경계를 고정한 µm 전개 좌표 계산 중...",
             thread=TaskThread(
                 "native_tile_unwrap",
                 lambda: self._execute_native_measurement_with_preflight(

@@ -509,6 +509,8 @@ DerivedRecord(type=surface.tile_unwrap.v1)
 │   ├── explicit longitudinal_axis: x | y | z
 │   ├── record_view: top | bottom
 │   ├── n_sections: 12..96
+│   ├── seam_policy: minimum_angular_range_auto | fixed_angle_microdegrees
+│   ├── seam_angle_microdegrees: null | integer [-180000000, 180000000)
 │   ├── coordinate_quantum_um: 1
 │   └── fallback_policy: reject
 ├── qc: section fit + integer distortion millionths + foldover/collapse counts
@@ -517,10 +519,10 @@ DerivedRecord(type=surface.tile_unwrap.v1)
 ```
 
 - selection은 정렬·중복 제거·최대 병합한 `[start, end_exclusive]` face range로 recipe에 남긴다. topology와 전역 UV 겹침을 완전 검사하기 위해 한 기록면은 최대 250,000 faces로 제한하며, output은 local vertex/face와 canonical source vertex/face row의 대응을 모두 보존한다.
-- sectionwise 1.1 계산은 단면별 중심·반경 뒤 굽힘/비틀림에서 빠진 longitudinal U shift를 실제 3D edge 길이에 맞춰 결정적으로 보정한다. cylinder fallback, 희박한 section fit, max/mean/p95 distortion gate 초과는 READY record로 만들지 않는다.
+- sectionwise 1.2 계산은 단면별 중심·반경 뒤 굽힘/비틀림에서 빠진 longitudinal U shift를 실제 3D edge 길이에 맞춰 결정적으로 보정한다. 자동 seam은 각 단면의 최소 angular range 경계를 사용하고, 고정 seam은 canonical 장축에서 파생한 결정적 단면 기준축에 대한 0.000001° 정수 각도를 모든 section에 적용한다. cylinder fallback, 희박한 section fit, max/mean/p95 distortion gate 초과는 READY record로 만들지 않는다.
 - UV는 1 µm 정수 격자로 양자화한다. 모든 삼각형의 세 edge, 면적비와 local 3D→2D Jacobian singular value를 평가하며, 격자 붕괴·orientation foldover, 다중 edge-connected component, 중복 face, non-manifold/inconsistent edge, branched boundary 또는 positive-area 전역 UV 겹침이 하나라도 있으면 실패한다.
 - canonical binary는 RFC 8785 header와 `uv int64le`, `faces int32le`, source vertex/face indices를 domain-separated length-prefix framing으로 묶는다. 파일 전체 SHA-256이 receipt의 `unwrap_sha256` 및 `geometry_ref`와 같다.
-- Top과 Bottom은 같은 face selection의 U 방향을 구분해 recipe와 payload hash가 달라지는 독립 해석 결과다. 현재 runtime은 실제 기와 상·하면을 자동 분류하지 않으므로 기록자가 올바른 단일 기록면 faces를 선택해야 하며, 펼친 좌표 위 texture·Digital Rubbing 재투영도 이 계약에 포함되지 않는다.
+- Top과 Bottom은 같은 face selection의 U 방향을 구분해 recipe와 payload hash가 달라지는 독립 해석 결과다. 자동/고정 seam도 recipe hash와 재계산 입력에 포함되며, 고정 경계가 선택 표면을 갈라 foldover·전역 UV 겹침을 만들면 결과를 게시하지 않는다. 현재 runtime은 실제 기와 상·하면을 자동 분류하지 않으므로 기록자가 올바른 단일 기록면 faces를 선택해야 하며, 펼친 좌표 위 texture·Digital Rubbing 재투영도 이 계약에 포함되지 않는다.
 - 동일 recipe 재계산은 receipt 전체와 binary bytes가 같아야 한다. Align을 바꾼 과거 record는 삭제하지 않고 `stale_alignment`로 남긴다.
 
 `*.amr-unwrap`은 정확히 네 regular file을 갖는 non-overwriting directory package다.
@@ -536,7 +538,7 @@ sidecar의 artifact descriptor를 제외한 claim을 RFC 8785 SHA-256으로 묶�
 
 writer는 같은 parent의 숨은 staging directory에서 네 파일을 모두 쓰고 자체 검증한 뒤 atomic no-replace rename한다. 기존 destination을 덮지 않으며 destination race의 승자를 보존한다. 현재 tile package writer는 소유 staging의 device/inode, closed member set과 regular-file 상태를 확인할 수 있을 때만 실패 정리를 수행한다. 이 hash도 제작자 서명은 아니다. desktop은 선택한 `READY + FRESH` record의 recipe/receipt를 worker에서 재계산·검증하고 prepared capability를 받은 뒤 current Workbench 권위를 다시 확인해 게시한다. 이 재계산은 live 취소 Event를 section circle/seam fitting과 row-shift section/grid/refinement의 명시적 경계까지 전달하지만, 현재 실행 중인 단일 NumPy·선형대수 호출은 반환 전에 선점하지 않는다. 사용자 취소나 앱 종료는 publication 권위를 먼저 회수하고 worker join 동안 owned staging 정리를 기다린다.
 
-현재 machine-readable 계약은 record receipt의 `schemas/tile_unwrap_receipt-1.1.0.schema.json`과 export sidecar의 `schemas/tile_unwrap_export-1.1.0.schema.json`이다. 두 schema는 axis 추정값, fallback 허용값, 사설 경로와 계약 밖 필드를 거부하고 topology·전역 UV overlap·row-shift QC를 고정한다. `section_row_shift_station_count == section_count` 같은 cross-field 의미 제약은 runtime known-record validator가 최종 강제한다. 공개 릴리스 전에 사용된 실험적 1.0 schema 파일은 byte-exact 회귀와 계약 이력 검토를 위해서만 보존한다. 현재 runtime은 1.0 record/package와 이를 포함한 프로젝트를 읽지 않으며 자동 migration도 제공하지 않는다.
+현재 machine-readable 계약은 record receipt의 `schemas/tile_unwrap_receipt-1.1.0.schema.json`과 export sidecar의 `schemas/tile_unwrap_export-1.2.0.schema.json`이다. 새 export schema는 자동 seam 1.1 recipe와 자동/고정 seam 1.2 recipe를 닫힌 형태로 구분하며, current writer는 1.2 sidecar를 만든다. 공개된 `tile_unwrap_export-1.1.0.schema.json`의 bytes와 1.1 recipe hash는 바꾸지 않고 runtime이 기존 패키지와 프로젝트를 계속 offline 검증·재계산한다. 두 세대 모두 axis 추정값, fallback 허용값, 사설 경로와 계약 밖 필드를 거부하고 topology·전역 UV overlap·row-shift QC를 고정한다. `section_row_shift_station_count == section_count` 같은 cross-field 의미 제약은 runtime known-record validator가 최종 강제한다. 공개 릴리스 전에 사용된 실험적 1.0 schema 파일은 byte-exact 회귀와 계약 이력 검토를 위해서만 보존한다. 현재 runtime은 1.0 record/package와 이를 포함한 프로젝트를 읽지 않으며 자동 migration도 제공하지 않는다.
 
 ## M0-6 Digital Rubbing record와 1:1 PNG package
 

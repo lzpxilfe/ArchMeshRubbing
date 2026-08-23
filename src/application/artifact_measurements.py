@@ -1232,6 +1232,7 @@ class ArtifactMeasurementController:
         record_view: str,
         selected_face_indices: Sequence[int] | None = None,
         n_sections: int = 32,
+        seam_angle_microdegrees: int | None = None,
         record_id: str | None = None,
         created_at: str | None = None,
         operator: str = "local-user",
@@ -1246,6 +1247,7 @@ class ArtifactMeasurementController:
             total_face_count=int(session.source_mesh.faces.shape[0]),
             selected_face_indices=selected_face_indices,
             n_sections=n_sections,
+            seam_angle_microdegrees=seam_angle_microdegrees,
         )
         selection = recipe["selection"]
         assert isinstance(selection, Mapping)

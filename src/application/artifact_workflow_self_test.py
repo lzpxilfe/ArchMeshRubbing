@@ -52,9 +52,12 @@ from src.core.artifact_surface_measurement import (
 )
 from src.core.artifact_survey_export import validate_survey_export_package
 from src.core.artifact_tile_unwrap_export import (
+    TILE_UNWRAP_EXPORT_SCHEMA_VERSION,
     validate_tile_unwrap_export_package,
 )
 from src.core.artifact_tile_unwrap_extractor import (
+    TILE_UNWRAP_ALGORITHM_VERSION,
+    TILE_UNWRAP_RECIPE_SCHEMA_VERSION,
     compute_artifact_tile_unwrap_from_recipe,
 )
 from src.core.artifact_tile_unwrap_record import tile_unwrap_receipt_from_record
@@ -635,6 +638,17 @@ def _run_authoritative_tile_unwrap_evidence(
         created_at=_STAMP,
         operator=_OPERATOR,
     )
+    work_item_recipe = work_item.recipe_dict()
+    if (
+        work_item_recipe.get("algorithm_version")
+        != TILE_UNWRAP_ALGORITHM_VERSION
+        or work_item_recipe.get("schema_version")
+        != TILE_UNWRAP_RECIPE_SCHEMA_VERSION
+        or work_item_recipe.get("seam_policy")
+        != "minimum_angular_range_auto"
+        or work_item_recipe.get("seam_angle_microdegrees") is not None
+    ):
+        raise RuntimeError("tile unwrap workflow did not capture the current auto seam")
     result = measurements.execute(work_item)
     publication = measurements.publish_result(
         work_item,
@@ -658,7 +672,7 @@ def _run_authoritative_tile_unwrap_evidence(
         or row_shift_max_um < 1
         or row_shift_station_count != 13
     ):
-        raise RuntimeError("tile unwrap fixture did not exercise v1.1 row-shift")
+        raise RuntimeError("tile unwrap fixture did not exercise v1.2 row-shift")
 
     save_artifact_session_project(project_path, recorded)
     source_path.unlink()
@@ -715,6 +729,7 @@ def _run_authoritative_tile_unwrap_evidence(
     if (
         geometry != restored_receipt
         or sidecar.get("recipe") != restored_record.to_dict()["recipe"]
+        or sidecar.get("schema_version") != TILE_UNWRAP_EXPORT_SCHEMA_VERSION
         or presentation.get("physical_scale") != "1:1"
         or asset.get("sha256") != source_sha256
     ):

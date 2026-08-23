@@ -8,11 +8,12 @@ Supports: OBJ, PLY, STL, OFF formats
 from dataclasses import dataclass, field
 import hashlib
 import io
+import math
 import os
 import stat
 import tempfile
 from pathlib import Path
-from typing import Any, BinaryIO, Callable, Mapping, Optional, List, Union, cast
+from typing import Any, BinaryIO, Callable, Literal, Mapping, Optional, List, Union, cast
 import logging
 import numpy as np
 
@@ -59,6 +60,10 @@ _LOGGER = logging.getLogger(__name__)
 
 _VERIFIED_STREAM_CHUNK_SIZE = 1024 * 1024
 _VERIFIED_STREAM_SPOOL_LIMIT = 8 * _VERIFIED_STREAM_CHUNK_SIZE
+_SURFACE_AREA_CHUNK_FACES = 65_536
+
+SurfaceAreaStatus = Literal["exact", "unavailable"]
+_SurfaceAreaCacheStatus = Literal["not_computed", "exact", "unavailable"]
 
 try:
     import trimesh
@@ -911,6 +916,10 @@ class MeshData:
     _bounds: Optional[np.ndarray] = field(default=None, repr=False)
     _centroid: Optional[np.ndarray] = field(default=None, repr=False)
     _surface_area: Optional[float] = field(default=None, repr=False)
+    _surface_area_status: _SurfaceAreaCacheStatus = field(
+        default="not_computed",
+        repr=False,
+    )
     _normals_chunk_faces: Optional[int] = field(default=None, repr=False)
 
     # Optional runtime tuning knobs used by surface separation / assist.
@@ -1089,8 +1098,16 @@ class MeshData:
     
     @property
     def surface_area(self) -> float:
-        """총 표면적 계산 (대형 메쉬 안전 처리)"""
+        """Return whole-mesh surface area in ``unit`` squared.
+
+        Every accepted triangle is included.  Work is split into fixed-size
+        chunks so the Windows large-scan path does not allocate whole-mesh
+        vertex/cross-product temporaries.  ``-1.0`` remains the compatibility
+        sentinel for an unavailable result; callers which display the value
+        must also consult :attr:`surface_area_status`.
+        """
         if self._surface_area is None:
+            self._surface_area_status = "not_computed"
             try:
                 faces = np.asarray(self.faces)
                 if (
@@ -1101,36 +1118,63 @@ class MeshData:
                     or faces.size == 0
                 ):
                     self._surface_area = 0.0
+                    self._surface_area_status = "exact"
                     return self._surface_area
 
-                # 면이 너무 많으면 (100만 이상) 추정값 사용
-                if len(self.faces) > 1000000:
-                    # 샘플링으로 추정 (10만 면만 계산)
-                    sample_size = 100000
-                    indices = np.random.choice(len(self.faces), sample_size, replace=False)
-                    sample_faces = self.faces[indices]
-                    
-                    v0 = self.vertices[sample_faces[:, 0]]
-                    v1 = self.vertices[sample_faces[:, 1]]
-                    v2 = self.vertices[sample_faces[:, 2]]
-                    
-                    cross = np.cross(v1 - v0, v2 - v0)
-                    sample_area = np.linalg.norm(cross, axis=1).sum() / 2.0
-                    # 비율로 전체 추정
-                    self._surface_area = float(sample_area * len(self.faces) / sample_size)
-                else:
-                    # 정상 계산
-                    v0 = self.vertices[self.faces[:, 0]]
-                    v1 = self.vertices[self.faces[:, 1]]
-                    v2 = self.vertices[self.faces[:, 2]]
-                    
-                    cross = np.cross(v1 - v0, v2 - v0)
-                    areas = np.linalg.norm(cross, axis=1) / 2.0
-                    self._surface_area = float(areas.sum())
-            except MemoryError:
-                # 메모리 부족 시 추정값 반환
-                self._surface_area = -1.0  # 계산 불가 표시
+                chunk_totals: list[float] = []
+                n_faces = int(faces.shape[0])
+                for start in range(0, n_faces, _SURFACE_AREA_CHUNK_FACES):
+                    end = min(n_faces, start + _SURFACE_AREA_CHUNK_FACES)
+                    face_chunk = np.asarray(
+                        faces[start:end, :3],
+                        dtype=np.int32,
+                    )
+                    v0 = self.vertices[face_chunk[:, 0]]
+                    v1 = self.vertices[face_chunk[:, 1]]
+                    v2 = self.vertices[face_chunk[:, 2]]
+                    with np.errstate(over="ignore", invalid="ignore"):
+                        cross = np.cross(v1 - v0, v2 - v0)
+                        # Nested hypot avoids the avoidable overflow caused by
+                        # squaring each component in ``np.linalg.norm``.
+                        twice_area = np.hypot(
+                            np.hypot(cross[:, 0], cross[:, 1]),
+                            cross[:, 2],
+                        )
+                    if not bool(np.all(np.isfinite(twice_area))):
+                        raise FloatingPointError(
+                            "surface area contains a non-finite triangle"
+                        )
+                    chunk_totals.append(
+                        0.5 * float(np.sum(twice_area, dtype=np.float64))
+                    )
+
+                area = float(math.fsum(chunk_totals))
+                if not math.isfinite(area) or area < 0.0:
+                    raise FloatingPointError("surface area is not finite")
+                self._surface_area = area
+                self._surface_area_status = "exact"
+            except (MemoryError, FloatingPointError, OverflowError):
+                self._surface_area = -1.0
+                self._surface_area_status = "unavailable"
         return self._surface_area
+
+    @property
+    def surface_area_status(self) -> SurfaceAreaStatus:
+        """Return ``exact`` or ``unavailable`` for the cached area value."""
+
+        if self._surface_area is None:
+            _ = self.surface_area
+        if self._surface_area_status not in {"exact", "unavailable"}:
+            # A legacy caller may have populated only ``_surface_area``.
+            self._surface_area_status = (
+                "exact"
+                if self._surface_area is not None
+                and math.isfinite(self._surface_area)
+                and self._surface_area >= 0.0
+                else "unavailable"
+            )
+        assert self._surface_area_status in {"exact", "unavailable"}
+        return cast(SurfaceAreaStatus, self._surface_area_status)
     
     @property
     def has_texture(self) -> bool:

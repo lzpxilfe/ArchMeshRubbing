@@ -41,8 +41,8 @@ from .mesh_loader import MeshData
 
 
 TILE_UNWRAP_ALGORITHM = "archmeshrubbing.sectionwise_tile_unwrap"
-TILE_UNWRAP_ALGORITHM_VERSION = "1.1.0"
-TILE_UNWRAP_RECIPE_SCHEMA_VERSION = "1.1.0"
+TILE_UNWRAP_ALGORITHM_VERSION = "1.2.0"
+TILE_UNWRAP_RECIPE_SCHEMA_VERSION = "1.2.0"
 TILE_UNWRAP_OUTPUT_SCHEMA_VERSION = "1.1.0"
 TILE_UNWRAP_COORDINATE_SPACE = "canonical_mm_tile_unwrap/v1"
 TILE_UNWRAP_HASH_SCOPE = (
@@ -63,6 +63,13 @@ MAX_TILE_UNWRAP_PAYLOAD_BYTES = 128 * 1024 * 1024
 MAX_TILE_UNWRAP_QC_FACES = 250_000
 MAX_TILE_UNWRAP_OVERLAP_CANDIDATES = 1_000_000
 MAX_TILE_UNWRAP_GRID_ASSIGNMENTS = 4_000_000
+MIN_TILE_UNWRAP_SEAM_ANGLE_MICRODEGREES = -180_000_000
+MAX_TILE_UNWRAP_SEAM_ANGLE_MICRODEGREES_EXCLUSIVE = 180_000_000
+
+_LEGACY_TILE_UNWRAP_ALGORITHM_VERSION = "1.1.0"
+_LEGACY_TILE_UNWRAP_RECIPE_SCHEMA_VERSION = "1.1.0"
+_AUTO_SEAM_POLICY = "minimum_angular_range_auto"
+_FIXED_SEAM_POLICY = "fixed_angle_microdegrees"
 
 _TILE_UNWRAP_PAYLOAD_MAGIC = b"AMR-TILE-UNWRAP\x00v1\x00"
 _TILE_UNWRAP_COMPONENT_LABELS = (
@@ -128,6 +135,26 @@ def _record_view(value: object) -> str:
     if view not in {"top", "bottom"}:
         raise ArtifactTileUnwrapError("record_view must be 'top' or 'bottom'")
     return view
+
+
+def _seam_angle_microdegrees(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+        raise ArtifactTileUnwrapError(
+            "seam_angle_microdegrees must be null or an integer"
+        )
+    result = int(value)
+    if not (
+        MIN_TILE_UNWRAP_SEAM_ANGLE_MICRODEGREES
+        <= result
+        < MAX_TILE_UNWRAP_SEAM_ANGLE_MICRODEGREES_EXCLUSIVE
+    ):
+        raise ArtifactTileUnwrapError(
+            "seam_angle_microdegrees must be in the half-open range "
+            "[-180000000, 180000000)"
+        )
+    return result
 
 
 def _selection_value(
@@ -273,6 +300,7 @@ def tile_unwrap_recipe(
     total_face_count: int,
     selected_face_indices: Sequence[int] | np.ndarray | None = None,
     n_sections: int = 32,
+    seam_angle_microdegrees: int | None = None,
 ) -> dict[str, Any]:
     total = _strict_int(
         total_face_count,
@@ -288,6 +316,7 @@ def tile_unwrap_recipe(
             total_face_count=total,
         )
     selection = _selection_value(total_face_count=total, face_ranges=ranges)
+    seam_angle = _seam_angle_microdegrees(seam_angle_microdegrees)
     return {
         "algorithm": TILE_UNWRAP_ALGORITHM,
         "algorithm_version": TILE_UNWRAP_ALGORITHM_VERSION,
@@ -304,13 +333,97 @@ def tile_unwrap_recipe(
         ),
         "record_view": _record_view(record_view),
         "schema_version": TILE_UNWRAP_RECIPE_SCHEMA_VERSION,
-        "seam_policy": "minimum_angular_range_auto",
+        "seam_angle_microdegrees": seam_angle,
+        "seam_policy": (
+            _AUTO_SEAM_POLICY if seam_angle is None else _FIXED_SEAM_POLICY
+        ),
         "selection": selection,
         "smoothing_iterations": 0,
     }
 
 
 def validate_tile_unwrap_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
+    if not isinstance(recipe, Mapping):
+        raise ArtifactTileUnwrapError("tile unwrap recipe must be an object")
+    algorithm_version = recipe.get("algorithm_version")
+    schema_version = recipe.get("schema_version")
+    if (
+        algorithm_version == _LEGACY_TILE_UNWRAP_ALGORITHM_VERSION
+        and schema_version == _LEGACY_TILE_UNWRAP_RECIPE_SCHEMA_VERSION
+    ):
+        return _validate_legacy_tile_unwrap_recipe(recipe)
+    if (
+        algorithm_version != TILE_UNWRAP_ALGORITHM_VERSION
+        or schema_version != TILE_UNWRAP_RECIPE_SCHEMA_VERSION
+    ):
+        raise ArtifactTileUnwrapError(
+            "tile unwrap recipe algorithm/schema version is unsupported"
+        )
+
+    value = _exact_keys(
+        recipe,
+        {
+            "algorithm",
+            "algorithm_version",
+            "coordinate_quantum_um",
+            "coordinate_space",
+            "fallback_policy",
+            "kind",
+            "longitudinal_axis",
+            "n_sections",
+            "record_view",
+            "schema_version",
+            "seam_angle_microdegrees",
+            "seam_policy",
+            "selection",
+            "smoothing_iterations",
+        },
+        name="tile unwrap recipe",
+    )
+    expected_literals = {
+        "algorithm": TILE_UNWRAP_ALGORITHM,
+        "algorithm_version": TILE_UNWRAP_ALGORITHM_VERSION,
+        "coordinate_quantum_um": TILE_UNWRAP_COORDINATE_QUANTUM_UM,
+        "coordinate_space": TILE_UNWRAP_COORDINATE_SPACE,
+        "fallback_policy": "reject",
+        "kind": "tile_unwrap",
+        "schema_version": TILE_UNWRAP_RECIPE_SCHEMA_VERSION,
+        "smoothing_iterations": 0,
+    }
+    for key, expected in expected_literals.items():
+        if value[key] != expected:
+            raise ArtifactTileUnwrapError(
+                f"tile unwrap recipe field {key!r} is invalid"
+            )
+    seam_angle = _seam_angle_microdegrees(value["seam_angle_microdegrees"])
+    expected_seam_policy = (
+        _AUTO_SEAM_POLICY if seam_angle is None else _FIXED_SEAM_POLICY
+    )
+    if value["seam_policy"] != expected_seam_policy:
+        raise ArtifactTileUnwrapError(
+            "tile unwrap recipe seam policy and angle are inconsistent"
+        )
+    return {
+        **expected_literals,
+        "longitudinal_axis": _axis(value["longitudinal_axis"]),
+        "n_sections": _strict_int(
+            value["n_sections"],
+            name="n_sections",
+            minimum=MIN_TILE_UNWRAP_SECTIONS,
+            maximum=MAX_TILE_UNWRAP_SECTIONS,
+        ),
+        "record_view": _record_view(value["record_view"]),
+        "seam_angle_microdegrees": seam_angle,
+        "seam_policy": expected_seam_policy,
+        "selection": validate_tile_unwrap_selection(value["selection"]),
+    }
+
+
+def _validate_legacy_tile_unwrap_recipe(
+    recipe: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate the immutable 1.1 recipe shape without upgrading its hash."""
+
     value = _exact_keys(
         recipe,
         {
@@ -328,23 +441,23 @@ def validate_tile_unwrap_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
             "selection",
             "smoothing_iterations",
         },
-        name="tile unwrap recipe",
+        name="legacy tile unwrap recipe",
     )
     expected_literals = {
         "algorithm": TILE_UNWRAP_ALGORITHM,
-        "algorithm_version": TILE_UNWRAP_ALGORITHM_VERSION,
+        "algorithm_version": _LEGACY_TILE_UNWRAP_ALGORITHM_VERSION,
         "coordinate_quantum_um": TILE_UNWRAP_COORDINATE_QUANTUM_UM,
         "coordinate_space": TILE_UNWRAP_COORDINATE_SPACE,
         "fallback_policy": "reject",
         "kind": "tile_unwrap",
-        "schema_version": TILE_UNWRAP_RECIPE_SCHEMA_VERSION,
-        "seam_policy": "minimum_angular_range_auto",
+        "schema_version": _LEGACY_TILE_UNWRAP_RECIPE_SCHEMA_VERSION,
+        "seam_policy": _AUTO_SEAM_POLICY,
         "smoothing_iterations": 0,
     }
     for key, expected in expected_literals.items():
         if value[key] != expected:
             raise ArtifactTileUnwrapError(
-                f"tile unwrap recipe field {key!r} is invalid"
+                f"legacy tile unwrap recipe field {key!r} is invalid"
             )
     return {
         **expected_literals,
@@ -1121,6 +1234,7 @@ def extract_tile_unwrap(
         axis=validated["longitudinal_axis"],
         n_sections=int(validated["n_sections"]),
         record_view=str(validated["record_view"]),
+        seam_angle_microdegrees=validated.get("seam_angle_microdegrees"),
         return_meta=True,
         cancellation_probe=cancellation_probe,
     )
@@ -1271,6 +1385,7 @@ def compute_artifact_tile_unwrap(
     record_view: str,
     selected_face_indices: Sequence[int] | np.ndarray | None = None,
     n_sections: int = 32,
+    seam_angle_microdegrees: int | None = None,
     cancellation_probe: CancellationProbe | None = None,
 ) -> ArtifactTileUnwrapComputation:
     if not isinstance(session, ArtifactSession):
@@ -1282,7 +1397,23 @@ def compute_artifact_tile_unwrap(
         total_face_count=face_count,
         selected_face_indices=selected_face_indices,
         n_sections=n_sections,
+        seam_angle_microdegrees=seam_angle_microdegrees,
     )
+    return _compute_artifact_tile_unwrap_with_validated_recipe(
+        session,
+        recipe,
+        cancellation_probe=cancellation_probe,
+    )
+
+
+def _compute_artifact_tile_unwrap_with_validated_recipe(
+    session: ArtifactSession,
+    recipe: Mapping[str, Any],
+    *,
+    cancellation_probe: CancellationProbe | None,
+) -> ArtifactTileUnwrapComputation:
+    """Compute without silently upgrading a persisted recipe version."""
+
     selection = recipe["selection"]
     assert isinstance(selection, Mapping)
     try:
@@ -1313,15 +1444,12 @@ def compute_artifact_tile_unwrap_from_recipe(
     *,
     cancellation_probe: CancellationProbe | None = None,
 ) -> ArtifactTileUnwrapComputation:
+    if not isinstance(session, ArtifactSession):
+        raise ArtifactTileUnwrapError("session must be an ArtifactSession")
     validated = validate_tile_unwrap_recipe(recipe)
-    selection = validated["selection"]
-    assert isinstance(selection, Mapping)
-    return compute_artifact_tile_unwrap(
+    return _compute_artifact_tile_unwrap_with_validated_recipe(
         session,
-        longitudinal_axis=str(validated["longitudinal_axis"]),
-        record_view=str(validated["record_view"]),
-        selected_face_indices=selection_face_indices(selection),
-        n_sections=int(validated["n_sections"]),
+        validated,
         cancellation_probe=cancellation_probe,
     )
 

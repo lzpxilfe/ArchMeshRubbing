@@ -486,6 +486,7 @@ def _check_resources() -> str:
         "tile_unwrap_export-1.0.0.schema.json",
         "tile_unwrap_receipt-1.1.0.schema.json",
         "tile_unwrap_export-1.1.0.schema.json",
+        "tile_unwrap_export-1.2.0.schema.json",
         "offline_verification_report-1.0.0.schema.json",
         "source_bundle-1.0.0.schema.json",
         "source_bundle-2.0.0.schema.json",

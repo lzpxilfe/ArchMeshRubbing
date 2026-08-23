@@ -17,7 +17,7 @@ ArchMeshRubbing을 전면 재작성하지 않는다. 검증 가능한 headless �
 코드베이스에는 버릴 부분과 지킬 부분이 명확히 함께 존재한다.
 
 - `app_interactive.py`는 약 16,800줄, `src/gui/viewport_3d.py`는 약 15,600줄이며 각각 수백 개 메서드와 많은 광범위 예외 처리를 포함한다. UI, 상태, 렌더링, 작업 실행, 저장 정책이 서로 강하게 얽혀 있어 이 두 파일을 계속 확장하는 비용은 높다.
-- 반면 primary source identity, versioned parser source closure, 명시적 단위, immutable Align revision, canonical JSON/PNG, Cutline, Outline, Digital Rubbing, offline export는 GUI와 분리된 코어와 버전 스키마를 가진다.
+- 반면 primary source identity, versioned parser source closure, 명시적 단위, immutable Align revision, canonical JSON/PNG, Cutline, Outline, Digital Rubbing, 자동/고정 seam 기와 전개, offline export는 GUI와 분리된 코어와 버전 스키마를 가진다.
 - Windows 대상 commit `b12d4874a4a8`의 source CI에서 전체 `670 passed, 128 subtests passed`, M0 Pyright `0 errors`, Ruff와 Windows workflow·native actual-frame gate가 통과해 현재 계약을 보호한다.
 - 같은 commit의 unsigned Windows frozen 앱은 당시 offline complete workflow와 qwindows+llvmpipe actual-frame gate를 통과했다. 이후 installer 실험도 내부 설치·제거를 통과했지만 상용 compiler 정책 때문에 현재 배포 계약에서 제거했다. 두 결과 모두 서명·대표 하드웨어 GPU 또는 공개 배포 증거는 아니다.
 
@@ -76,7 +76,7 @@ Native project Save는 GUI가 immutable `ArtifactSession`, project path와 Workb
 2. application shell package를 만들고 Open → 단위 확인 → Align을 먼저 이식한다. 이 단계는 완료됐으며 기존 GUI field는 이행 중 compatibility mirror로만 남긴다.
 3. Cutline, 6-view Outline, Digital Rubbing을 command 단위로 옮긴다. immutable work item, worker computation, same-Align rebase와 VBO-free exact record publication까지 이식 완료했다.
 4. vector/rubbing/survey/tile-unwrap export를 worker staging과 final Workbench authority publication으로 분리한다. 이 단계는 이식 완료했으며 실제 대형 package에서 lock hold 시간과 취소 지연을 후속 측정한다.
-5. 각 단계가 새 record/export로 완전히 연결되면 대응 legacy 측정 진입점을 제거한다.
+5. 다음 native 제품 단계로 원본 보존형 Clip/Fragment revision, Cutline recall, piece list를 record graph와 reopen 검증에 연결한다. 대응 native 단계가 완성될 때마다 같은 기능의 legacy 측정 진입점을 제거한다.
 6. 구현된 field-pilot contract로 실제 유물, 대용량/저메모리/GPU precision과 고고학자 review 증거를 수집한 뒤 legacy 기와 검토 기능의 유지·플러그인화·제거를 결정한다.
 7. Windows wheel hash lock, 실제 payload manifest, SPDX/NOTICE와 검증형 portable ZIP을 유지한다. ZIP은 한글 경로에 추출해 outbound 차단 complete workflow·actual-frame·삭제를 다시 통과해야 한다. 라이선스 결론, 서명 정책, 상위 build provenance와 대표 Windows pilot이 해결된 뒤에만 공개 바이너리를 만든다.
 

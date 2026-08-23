@@ -16,7 +16,7 @@ import platform
 import re
 import struct
 import sys
-from typing import Any
+from typing import Any, Protocol, cast
 
 
 MINIMUM_WINDOWS_CLIENT_BUILD = 17_763
@@ -37,6 +37,15 @@ class UnsupportedWindowsRuntimeError(RuntimeError):
     """The live process does not meet the supported Windows GUI contract."""
 
 
+class _WindowsVersion(Protocol):
+    """Attributes consumed from ``sys.getwindowsversion()`` on Windows."""
+
+    major: int
+    minor: int
+    build: int
+    product_type: int
+
+
 def _windows_version_claims() -> tuple[int | None, int | None, int | None, int | None]:
     if sys.platform != "win32":
         return None, None, None, None
@@ -44,7 +53,7 @@ def _windows_version_claims() -> tuple[int | None, int | None, int | None, int |
     if not callable(getwindowsversion):
         return None, None, None, None
     try:
-        value = getwindowsversion()
+        value = cast(_WindowsVersion, getwindowsversion())
         major = int(value.major)
         minor = int(value.minor)
         build = int(value.build)

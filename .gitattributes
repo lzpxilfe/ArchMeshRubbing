@@ -1,4 +1,5 @@
 /LICENSE text eol=lf
+/schemas/*.json text eol=lf
 /tests/fixtures/projects/*.json text eol=lf
 /requirements/*.lock text eol=lf
 /requirements/runtime-license-policy.json text eol=lf

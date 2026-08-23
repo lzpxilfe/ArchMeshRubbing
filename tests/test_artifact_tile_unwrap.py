@@ -7,7 +7,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from src.core.artifact_document import ArtifactDocument, DerivedRecord
+from src.core.artifact_document import (
+    ArtifactDocument,
+    DerivedRecord,
+    canonical_recipe_hash,
+)
 from src.core.artifact_record_validation import (
     ArtifactKnownRecordError,
     validate_known_records,
@@ -130,6 +134,10 @@ def test_recipe_persists_canonical_face_ranges_and_rejects_axis_guessing() -> No
 
     assert recipe["selection"]["face_ranges"] == [[0, 2], [3, 5], [8, 9]]
     assert recipe["selection"]["selected_face_count"] == 5
+    assert recipe["algorithm_version"] == "1.2.0"
+    assert recipe["schema_version"] == "1.2.0"
+    assert recipe["seam_policy"] == "minimum_angular_range_auto"
+    assert recipe["seam_angle_microdegrees"] is None
     assert validate_tile_unwrap_recipe(recipe) == recipe
 
     with pytest.raises(ArtifactTileUnwrapError, match="explicit canonical"):
@@ -144,6 +152,127 @@ def test_recipe_persists_canonical_face_ranges_and_rejects_axis_guessing() -> No
             record_view="top",
             total_face_count=250_001,
         )
+
+
+def test_legacy_1_1_recipe_hash_and_recompute_are_not_upgraded() -> None:
+    hash_fixture = tile_unwrap_recipe(
+        longitudinal_axis="y",
+        record_view="top",
+        total_face_count=10,
+        selected_face_indices=[4, 0, 1, 3, 4, 8],
+        n_sections=24,
+    )
+    hash_fixture.pop("seam_angle_microdegrees")
+    hash_fixture["algorithm_version"] = "1.1.0"
+    hash_fixture["schema_version"] = "1.1.0"
+
+    assert validate_tile_unwrap_recipe(hash_fixture) == hash_fixture
+    assert canonical_recipe_hash(hash_fixture) == (
+        "0318c7c5c5b4c901d5e22f2b1941f894200ac3f221e2f1f8b0a638cf7da1ed3b"
+    )
+
+    session, _truth = _aligned_session()
+    face_count = int(np.asarray(session.source_mesh.faces).shape[0])
+    current_auto = tile_unwrap_recipe(
+        longitudinal_axis="y",
+        record_view="top",
+        total_face_count=face_count,
+        n_sections=32,
+    )
+    legacy = dict(current_auto)
+    legacy.pop("seam_angle_microdegrees")
+    legacy["algorithm_version"] = "1.1.0"
+    legacy["schema_version"] = "1.1.0"
+
+    legacy_result = compute_artifact_tile_unwrap_from_recipe(session, legacy)
+    current_result = compute_artifact_tile_unwrap_from_recipe(session, current_auto)
+
+    assert dict(legacy_result.recipe) == legacy
+    assert legacy_result.context.recipe_hash == canonical_recipe_hash(legacy)
+    assert np.array_equal(legacy_result.unwrap.uv_um, current_result.unwrap.uv_um)
+    assert np.array_equal(legacy_result.unwrap.faces, current_result.unwrap.faces)
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        True,
+        0.0,
+        float("nan"),
+        float("inf"),
+        "0",
+        -180_000_001,
+        180_000_000,
+    ],
+)
+def test_explicit_seam_recipe_rejects_noncanonical_values(invalid: object) -> None:
+    with pytest.raises(ArtifactTileUnwrapError, match="seam_angle_microdegrees"):
+        tile_unwrap_recipe(
+            longitudinal_axis="y",
+            record_view="top",
+            total_face_count=10,
+            seam_angle_microdegrees=invalid,  # type: ignore[arg-type]
+        )
+
+
+def test_explicit_seam_recipe_is_closed_and_policy_bound() -> None:
+    recipe = tile_unwrap_recipe(
+        longitudinal_axis="y",
+        record_view="top",
+        total_face_count=10,
+        seam_angle_microdegrees=-180_000_000,
+    )
+
+    assert recipe["seam_policy"] == "fixed_angle_microdegrees"
+    assert recipe["seam_angle_microdegrees"] == -180_000_000
+    assert validate_tile_unwrap_recipe(recipe) == recipe
+
+    inconsistent = dict(recipe)
+    inconsistent["seam_policy"] = "minimum_angular_range_auto"
+    with pytest.raises(ArtifactTileUnwrapError, match="inconsistent"):
+        validate_tile_unwrap_recipe(inconsistent)
+
+    missing = dict(recipe)
+    missing.pop("seam_angle_microdegrees")
+    with pytest.raises(ArtifactTileUnwrapError, match="missing fields"):
+        validate_tile_unwrap_recipe(missing)
+
+    unknown = dict(recipe)
+    unknown["seam_angle_degrees"] = 0
+    with pytest.raises(ArtifactTileUnwrapError, match="unknown fields"):
+        validate_tile_unwrap_recipe(unknown)
+
+
+def test_explicit_seam_is_deterministic_and_changes_parameterization() -> None:
+    session, _truth = _aligned_session()
+    zero = compute_artifact_tile_unwrap(
+        session,
+        longitudinal_axis="y",
+        record_view="top",
+        n_sections=32,
+        seam_angle_microdegrees=0,
+    )
+    repeated = compute_artifact_tile_unwrap_from_recipe(session, zero.recipe)
+    quarter_turn = compute_artifact_tile_unwrap(
+        session,
+        longitudinal_axis="y",
+        record_view="top",
+        n_sections=32,
+        seam_angle_microdegrees=90_000_000,
+    )
+
+    assert np.array_equal(zero.unwrap.uv_um, repeated.unwrap.uv_um)
+    assert zero.qc == repeated.qc
+    assert not np.array_equal(zero.unwrap.uv_um, quarter_turn.unwrap.uv_um)
+    assert zero.context.recipe_hash != quarter_turn.context.recipe_hash
+    assert (
+        zero.unwrap.receipt(selection_sha256=zero.context.selection_hash or "")[
+            "unwrap_sha256"
+        ]
+        != quarter_turn.unwrap.receipt(
+            selection_sha256=quarter_turn.context.selection_hash or ""
+        )["unwrap_sha256"]
+    )
 
 
 def test_authoritative_unwrap_is_deterministic_and_tracks_tile_scale() -> None:

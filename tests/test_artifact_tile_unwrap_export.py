@@ -40,6 +40,7 @@ from src.core.artifact_tile_unwrap_extractor import (
     TileUnwrapMesh,
     commit_artifact_tile_unwrap,
     compute_artifact_tile_unwrap,
+    compute_artifact_tile_unwrap_from_recipe,
     tile_unwrap_recipe,
 )
 from src.core.artifact_tile_unwrap_record import tile_unwrap_receipt_from_record
@@ -72,7 +73,11 @@ class _SequentialIds:
         return f"{prefix}:tile-test-{self.value}"
 
 
-def _recorded() -> tuple[ArtifactSession, ArtifactTileUnwrapComputation]:
+def _recorded(
+    *,
+    seam_angle_microdegrees: int | None = None,
+    legacy_recipe: bool = False,
+) -> tuple[ArtifactSession, ArtifactTileUnwrapComputation]:
     synthetic = generate_synthetic_tile(
         synthetic_tile_spec_from_preset("sugkiwa_quarter", seed=17)
     )
@@ -112,12 +117,25 @@ def _recorded() -> tuple[ArtifactSession, ArtifactTileUnwrapComputation]:
         created_at="2026-07-13T00:00:01Z",
         revision_id="align:confirmed",
     )
-    computation = compute_artifact_tile_unwrap(
-        session,
-        longitudinal_axis="y",
-        record_view="top",
-        n_sections=32,
-    )
+    if legacy_recipe:
+        recipe = tile_unwrap_recipe(
+            longitudinal_axis="y",
+            record_view="top",
+            total_face_count=mesh.n_faces,
+            n_sections=32,
+        )
+        recipe.pop("seam_angle_microdegrees")
+        recipe["algorithm_version"] = "1.1.0"
+        recipe["schema_version"] = "1.1.0"
+        computation = compute_artifact_tile_unwrap_from_recipe(session, recipe)
+    else:
+        computation = compute_artifact_tile_unwrap(
+            session,
+            longitudinal_axis="y",
+            record_view="top",
+            n_sections=32,
+            seam_angle_microdegrees=seam_angle_microdegrees,
+        )
     committed = commit_artifact_tile_unwrap(
         session,
         computation,
@@ -153,6 +171,73 @@ def test_bundle_is_deterministic_portable_and_exactly_one_to_one() -> None:
     assert b'height="166.426mm"' in first.svg_bytes
     assert b"/private/scans" not in first.sidecar_bytes
     assert sidecar["presentation"]["boundary_loop_count"] == 1
+
+
+def test_offline_validator_accepts_legacy_1_1_export_without_upgrade() -> None:
+    session, computation = _recorded(legacy_recipe=True)
+    current_bundle = build_tile_unwrap_export(
+        session.document,
+        "record:tile-export",
+        computation.unwrap,
+    )
+    legacy_sidecar = json.loads(current_bundle.sidecar_bytes)
+    assert isinstance(legacy_sidecar, dict)
+    legacy_sidecar["schema_version"] = "1.1.0"
+    legacy_sidecar["claims_sha256"] = tile_export.canonical_json_sha256(
+        tile_export._sidecar_claims(legacy_sidecar)
+    )
+    legacy_svg, _loop_count = tile_export._render_svg(
+        computation.unwrap,
+        legacy_sidecar["geometry"],
+        legacy_sidecar["provenance"],
+        sidecar_claims_sha256=legacy_sidecar["claims_sha256"],
+    )
+    artifacts = legacy_sidecar["artifacts"]
+    assert isinstance(artifacts, dict)
+    artifacts["outline"] = tile_export._artifact_descriptor(
+        name=tile_export.TILE_UNWRAP_EXPORT_SVG_NAME,
+        media_type=tile_export.TILE_UNWRAP_SVG_MEDIA_TYPE,
+        payload=legacy_svg,
+    )
+    legacy_sidecar_bytes = tile_export.canonical_json_bytes(legacy_sidecar) + b"\n"
+
+    validated = validate_tile_unwrap_export_bytes(
+        current_bundle.payload_bytes,
+        current_bundle.obj_bytes,
+        legacy_svg,
+        legacy_sidecar_bytes,
+        document=session.document,
+    )
+
+    assert validated["schema_version"] == "1.1.0"
+    assert validated["recipe"]["algorithm_version"] == "1.1.0"
+    assert "seam_angle_microdegrees" not in validated["recipe"]
+
+
+def test_legacy_1_1_export_rejects_current_1_2_recipe() -> None:
+    session, computation = _recorded()
+    bundle = build_tile_unwrap_export(
+        session.document,
+        "record:tile-export",
+        computation.unwrap,
+    )
+    sidecar = json.loads(bundle.sidecar_bytes)
+    assert isinstance(sidecar, dict)
+    sidecar["schema_version"] = "1.1.0"
+    sidecar["claims_sha256"] = tile_export.canonical_json_sha256(
+        tile_export._sidecar_claims(sidecar)
+    )
+
+    with pytest.raises(
+        ArtifactTileUnwrapExportError,
+        match="legacy 1.1 recipe",
+    ):
+        validate_tile_unwrap_export_bytes(
+            bundle.payload_bytes,
+            bundle.obj_bytes,
+            bundle.svg_bytes,
+            tile_export.canonical_json_bytes(sidecar) + b"\n",
+        )
 
 
 def test_export_validator_recomputes_payload_topology_claims() -> None:
@@ -387,7 +472,8 @@ def test_generated_sidecar_matches_closed_public_json_schema() -> None:
         assert isinstance(value, dict)
         return value
 
-    export_schema = load_schema("tile_unwrap_export-1.1.0.schema.json")
+    export_schema = load_schema("tile_unwrap_export-1.2.0.schema.json")
+    legacy_export_schema = load_schema("tile_unwrap_export-1.1.0.schema.json")
     receipt_schema = load_schema("tile_unwrap_receipt-1.1.0.schema.json")
     rubbing_export_schema = load_schema("rubbing_export-1.1.0.schema.json")
     legacy_rubbing_export_schema = load_schema("rubbing_export-1.0.0.schema.json")
@@ -396,6 +482,7 @@ def test_generated_sidecar_matches_closed_public_json_schema() -> None:
     import_recipe_v2_schema = load_schema("mesh_import_recipe-2.0.0.schema.json")
     for schema in (
         export_schema,
+        legacy_export_schema,
         receipt_schema,
         rubbing_export_schema,
         legacy_rubbing_export_schema,
@@ -425,6 +512,10 @@ def test_generated_sidecar_matches_closed_public_json_schema() -> None:
         export_schema,
         registry=registry,
     )
+    legacy_validator = jsonschema.Draft202012Validator(
+        legacy_export_schema,
+        registry=registry,
+    )
     session, computation = _recorded()
     bundle = build_tile_unwrap_export(
         session.document,
@@ -433,7 +524,36 @@ def test_generated_sidecar_matches_closed_public_json_schema() -> None:
     )
     sidecar = json.loads(bundle.sidecar_bytes)
     assert isinstance(sidecar, dict)
+    assert sidecar["schema_version"] == "1.2.0"
     assert list(validator.iter_errors(sidecar)) == []
+
+    fixed_session, fixed_computation = _recorded(
+        seam_angle_microdegrees=90_000_000
+    )
+    fixed_bundle = build_tile_unwrap_export(
+        fixed_session.document,
+        "record:tile-export",
+        fixed_computation.unwrap,
+    )
+    fixed_sidecar = json.loads(fixed_bundle.sidecar_bytes)
+    assert isinstance(fixed_sidecar, dict)
+    assert list(validator.iter_errors(fixed_sidecar)) == []
+
+    mismatched_seam = copy.deepcopy(fixed_sidecar)
+    fixed_recipe = mismatched_seam["recipe"]
+    assert isinstance(fixed_recipe, dict)
+    fixed_recipe["seam_angle_microdegrees"] = None
+    assert list(validator.iter_errors(mismatched_seam))
+
+    legacy_shaped = copy.deepcopy(sidecar)
+    legacy_shaped["schema_version"] = "1.1.0"
+    legacy_recipe = legacy_shaped["recipe"]
+    assert isinstance(legacy_recipe, dict)
+    legacy_recipe.pop("seam_angle_microdegrees")
+    legacy_recipe["algorithm_version"] = "1.1.0"
+    legacy_recipe["schema_version"] = "1.1.0"
+    assert list(legacy_validator.iter_errors(legacy_shaped)) == []
+    assert list(validator.iter_errors(legacy_shaped))
 
     tampered = copy.deepcopy(sidecar)
     recipe = tampered["recipe"]
@@ -507,6 +627,14 @@ def test_experimental_legacy_schema_files_remain_byte_exact(
     schema_bytes = (ROOT / "schemas" / name).read_bytes()
 
     assert hashlib.sha256(schema_bytes).hexdigest() == expected_sha256
+
+
+def test_published_legacy_1_1_export_schema_remains_byte_exact() -> None:
+    schema_bytes = (ROOT / "schemas/tile_unwrap_export-1.1.0.schema.json").read_bytes()
+
+    assert hashlib.sha256(schema_bytes).hexdigest() == (
+        "e8f2bac9e85014a2b566c7085b4c62f6aeced52c03eb5e09c3d091e0d248e916"
+    )
 
 
 def test_canonical_payload_roundtrips_and_rejects_trailing_bytes() -> None:

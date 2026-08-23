@@ -359,10 +359,27 @@ def sectionwise_cylindrical_parameterization(
     cut_lines_world: list[list[list[float]]] | None = None,
     section_guides: list[dict[str, Any]] | None = None,
     record_view: str | None = None,
+    seam_angle_microdegrees: int | None = None,
     return_meta: bool = False,
     cancellation_probe: CancellationProbe | None = None,
 ) -> np.ndarray | tuple[np.ndarray, dict[str, Any]]:
     """Section-wise cylindrical unwrap for roof-tile like shapes."""
+    if seam_angle_microdegrees is None:
+        fixed_seam_angle_rad: float | None = None
+    else:
+        if isinstance(seam_angle_microdegrees, bool) or not isinstance(
+            seam_angle_microdegrees, (int, np.integer)
+        ):
+            raise ValueError("seam_angle_microdegrees must be null or an integer")
+        seam_angle_value = int(seam_angle_microdegrees)
+        if not (-180_000_000 <= seam_angle_value < 180_000_000):
+            raise ValueError(
+                "seam_angle_microdegrees must be in the half-open range "
+                "[-180000000, 180000000)"
+            )
+        fixed_seam_angle_rad = float(
+            np.deg2rad(float(seam_angle_value) / 1_000_000.0)
+        )
     raise_if_cancelled(cancellation_probe)
     vertices = np.asarray(mesh.vertices, dtype=np.float64)
     if vertices.ndim != 2 or vertices.shape[0] == 0 or vertices.shape[1] < 3:
@@ -646,11 +663,18 @@ def sectionwise_cylindrical_parameterization(
         theta_loc = np.arctan2(y_valid[local_idx] - float(cy[i]), x_valid[local_idx] - float(cx[i]))
         _wrapped, seam_i, span_i = _angles_to_min_range(theta_loc, seam_hint=None)
         raise_if_cancelled(cancellation_probe)
-        seams[i] = float(seam_i)
+        seams[i] = (
+            float(seam_i)
+            if fixed_seam_angle_rad is None
+            else fixed_seam_angle_rad
+        )
         spans[i] = float(span_i)
 
-    seams = _unwrap_angle_series(seams, hint=seam_hint)
-    seams = _smooth_finite_series(seams, passes=1)
+    if fixed_seam_angle_rad is None:
+        seams = _unwrap_angle_series(seams, hint=seam_hint)
+        seams = _smooth_finite_series(seams, passes=1)
+    else:
+        seams.fill(fixed_seam_angle_rad)
 
     centerline = (
         s_sections.reshape(-1, 1) * a.reshape(1, 3)
@@ -730,6 +754,7 @@ def sectionwise_cylindrical_parameterization(
             "section_mean_span_rad": mean_span_rad,
             "section_mean_span_deg": float(np.rad2deg(mean_span_rad)),
             "section_seam_hint": None if seam_hint is None else float(seam_hint),
+            "section_fixed_seam_angle_microdegrees": seam_angle_microdegrees,
             "section_record_view": record_view_key,
             "section_u_flipped": bool(flip_u),
             **row_shift_meta,

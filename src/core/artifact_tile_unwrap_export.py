@@ -56,7 +56,8 @@ from .canonical_json import (
 
 
 TILE_UNWRAP_EXPORT_FORMAT = "archmeshrubbing_tile_unwrap_export"
-TILE_UNWRAP_EXPORT_SCHEMA_VERSION = "1.1.0"
+TILE_UNWRAP_EXPORT_SCHEMA_VERSION = "1.2.0"
+TILE_UNWRAP_LEGACY_EXPORT_SCHEMA_VERSION = "1.1.0"
 TILE_UNWRAP_EXPORT_DIRECTORY_SUFFIX = ".amr-unwrap"
 TILE_UNWRAP_EXPORT_PAYLOAD_NAME = "artifact.amr-unwrap.bin"
 TILE_UNWRAP_EXPORT_OBJ_NAME = "artifact.obj"
@@ -619,7 +620,11 @@ def validate_tile_unwrap_export_bytes(
     )
     if root["format"] != TILE_UNWRAP_EXPORT_FORMAT:
         raise ArtifactTileUnwrapExportError("tile unwrap export format is invalid")
-    if root["schema_version"] != TILE_UNWRAP_EXPORT_SCHEMA_VERSION:
+    sidecar_schema_version = root["schema_version"]
+    if sidecar_schema_version not in {
+        TILE_UNWRAP_EXPORT_SCHEMA_VERSION,
+        TILE_UNWRAP_LEGACY_EXPORT_SCHEMA_VERSION,
+    }:
         raise ArtifactTileUnwrapExportError("tile unwrap export schema is invalid")
     claims_sha256 = root["claims_sha256"]
     if (
@@ -641,6 +646,13 @@ def validate_tile_unwrap_export_bytes(
         ArtifactVectorExportError,
     ) as exc:
         raise ArtifactTileUnwrapExportError(str(exc)) from exc
+    if sidecar_schema_version == TILE_UNWRAP_LEGACY_EXPORT_SCHEMA_VERSION and (
+        recipe.get("algorithm_version") != "1.1.0"
+        or recipe.get("schema_version") != "1.1.0"
+    ):
+        raise ArtifactTileUnwrapExportError(
+            "legacy tile unwrap export requires a legacy 1.1 recipe"
+        )
     selection = recipe["selection"]
     assert isinstance(selection, Mapping)
     if receipt["selection_sha256"] != selection["selection_sha256"]:
@@ -1319,6 +1331,7 @@ __all__ = [
     "TILE_UNWRAP_EXPORT_OBJ_NAME",
     "TILE_UNWRAP_EXPORT_PAYLOAD_NAME",
     "TILE_UNWRAP_EXPORT_SCHEMA_VERSION",
+    "TILE_UNWRAP_LEGACY_EXPORT_SCHEMA_VERSION",
     "TILE_UNWRAP_EXPORT_SIDECAR_NAME",
     "TILE_UNWRAP_EXPORT_SVG_NAME",
     "TileUnwrapExportBundle",

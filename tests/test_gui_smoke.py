@@ -27,8 +27,10 @@ from PyQt6.QtWidgets import (
 
 import src.core.artifact_session as artifact_session_module
 from app_interactive import (
+    InfoBarWidget,
     MainWindow,
     MeshLoadThread,
+    PropertiesPanel,
     TASK_SHUTDOWN_WAIT_MS,
     TaskThread,
     UnitSelectionDialog,
@@ -492,6 +494,35 @@ def test_main_workflow_exposes_authoritative_measurement_and_tile_shortcut() -> 
         assert requested[-1] == ("show_section_tools", None)
     finally:
         window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_mesh_information_widgets_use_the_mesh_physical_unit() -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    mesh = MeshData(
+        vertices=np.asarray(
+            [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [0.0, 20.0, 0.0]],
+            dtype=np.float64,
+        ),
+        faces=np.asarray([[0, 1, 2]], dtype=np.int32),
+        unit="mm",
+    )
+    properties = PropertiesPanel()
+    info_bar = InfoBarWidget()
+    try:
+        properties.update_mesh_info(mesh, "/scan/기와.ply")
+        info_bar.update_mesh_info(mesh, "/scan/기와.ply")
+
+        assert properties.label_size.text() == "10.0 × 20.0 × 0.0 mm"
+        assert properties.label_area.text() == "100.0 mm²"
+        assert "Size: 10.0 × 20.0 × 0.0 mm" in info_bar.label_summary.text()
+        assert "Area: 100.0 mm²" in info_bar.label_summary.text()
+    finally:
+        properties.deleteLater()
+        info_bar.deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         app.processEvents()
 
@@ -4192,6 +4223,15 @@ def test_native_tile_unwrap_ui_requires_explicit_axis_view_and_selection() -> No
             panel.combo_native_tile_record_view.itemData(index)
             for index in range(panel.combo_native_tile_record_view.count())
         ] == ["top", "bottom"]
+        assert [
+            panel.combo_native_tile_seam.itemData(index)
+            for index in range(panel.combo_native_tile_seam.count())
+        ] == ["auto", "fixed"]
+        assert panel.combo_native_tile_seam.currentData() == "auto"
+        assert not panel.spin_native_tile_seam_angle.isEnabled()
+        assert panel.spin_native_tile_seam_angle.minimum() == pytest.approx(-180.0)
+        assert panel.spin_native_tile_seam_angle.maximum() == pytest.approx(179.999999)
+        assert panel.spin_native_tile_seam_angle.decimals() == 6
         assert panel.spin_native_tile_sections.value() == 32
         assert panel.spin_native_tile_sections.minimum() == 12
         assert panel.spin_native_tile_sections.suffix() == " 구간"
@@ -4217,7 +4257,15 @@ def test_native_tile_unwrap_ui_requires_explicit_axis_view_and_selection() -> No
             "record_view": "top",
             "selected_face_indices": (1, 3, 5),
             "n_sections": 32,
+            "seam_angle_microdegrees": None,
         }
+        panel.combo_native_tile_seam.setCurrentIndex(
+            panel.combo_native_tile_seam.findData("fixed")
+        )
+        assert panel.spin_native_tile_seam_angle.isEnabled()
+        panel.spin_native_tile_seam_angle.setValue(12.345678)
+        fixed_options = window._native_tile_unwrap_options_from_panel()
+        assert fixed_options["seam_angle_microdegrees"] == 12_345_678
         assert "현재 선택 3면" in panel.label_native_tile_selection.text()
     finally:
         window.deleteLater()
@@ -4339,6 +4387,8 @@ def test_native_tile_unwrap_command_previews_and_exports_recomputed_record(
         assert record.recipe["longitudinal_axis"] == "y"
         assert record.recipe["record_view"] == "top"
         assert record.recipe["n_sections"] == 24
+        assert record.recipe["seam_policy"] == "minimum_angular_range_auto"
+        assert record.recipe["seam_angle_microdegrees"] is None
         assert record.qc["foldover_face_count"] == 0
         assert receipt["unwrap_sha256"] in record.geometry_ref
         assert captured["kwargs"]["status_text"].startswith(
@@ -4346,6 +4396,7 @@ def test_native_tile_unwrap_command_previews_and_exports_recomputed_record(
         )
         assert window._native_tile_unwrap_preview_record_id == record_id
         assert window.section_panel.label_native_tile_unwrap_preview.pixmap() is not None
+        assert "경계 자동" in window.section_panel.label_native_tile_unwrap_info.text()
         assert "foldover 0" in window.section_panel.label_native_tile_unwrap_info.text()
 
         recomputed = window._recompute_native_tile_unwrap_record(committed, record)
