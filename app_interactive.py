@@ -4328,7 +4328,7 @@ class SectionPanel(QWidget):
         )
         tile_form.addRow("고정 경계각", self.spin_native_tile_seam_angle)
         self.spin_native_tile_sections = QSpinBox()
-        self.spin_native_tile_sections.setRange(12, 512)
+        self.spin_native_tile_sections.setRange(12, 96)
         self.spin_native_tile_sections.setValue(32)
         self.spin_native_tile_sections.setSuffix(" 구간")
         self.spin_native_tile_sections.setToolTip(

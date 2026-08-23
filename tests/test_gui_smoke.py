@@ -4234,6 +4234,7 @@ def test_native_tile_unwrap_ui_requires_explicit_axis_view_and_selection() -> No
         assert panel.spin_native_tile_seam_angle.decimals() == 6
         assert panel.spin_native_tile_sections.value() == 32
         assert panel.spin_native_tile_sections.minimum() == 12
+        assert panel.spin_native_tile_sections.maximum() == 96
         assert panel.spin_native_tile_sections.suffix() == " 구간"
         assert panel.combo_native_tile_target.currentData() == "all"
         assert panel.btn_native_tile_unwrap.isEnabled()

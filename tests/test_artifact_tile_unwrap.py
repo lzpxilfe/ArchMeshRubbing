@@ -140,6 +140,25 @@ def test_recipe_persists_canonical_face_ranges_and_rejects_axis_guessing() -> No
     assert recipe["seam_angle_microdegrees"] is None
     assert validate_tile_unwrap_recipe(recipe) == recipe
 
+    upper_bound_recipe = tile_unwrap_recipe(
+        longitudinal_axis="y",
+        record_view="top",
+        total_face_count=10,
+        n_sections=96,
+    )
+    assert upper_bound_recipe["n_sections"] == 96
+
+    with pytest.raises(
+        ArtifactTileUnwrapError,
+        match=r"n_sections must be in the inclusive range 12\.\.96",
+    ):
+        tile_unwrap_recipe(
+            longitudinal_axis="y",
+            record_view="top",
+            total_face_count=10,
+            n_sections=97,
+        )
+
     with pytest.raises(ArtifactTileUnwrapError, match="explicit canonical"):
         tile_unwrap_recipe(
             longitudinal_axis="auto",
