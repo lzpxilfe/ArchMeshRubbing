@@ -382,7 +382,7 @@ jobs:
             throw "Portable self-test did not verify all 9 vector, 6 rubbing, and 1 tile unwrap exports"
           }
           if (-not ([string]$workflowCheck.detail).Contains("unwrap=record 1/1>reopen 1/1>export 1/1>hash-match>row-shift ")) {
-            throw "Portable self-test did not reproduce the authoritative tile unwrap and exercise v1.1 row-shift"
+            throw "Portable self-test did not reproduce the authoritative tile unwrap and exercise the current row-shift contract"
           }
           if (-not ([string]$workflowCheck.detail).Contains("survey=verified-atomic-15")) {
             throw "Portable self-test did not verify the atomic 15-artifact survey package"
