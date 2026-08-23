@@ -224,7 +224,7 @@ $epoch = [int64]((& git show -s --format=%ct HEAD).Trim())
 6. `기와 전개 계산 · 기록` 후 section fit, 왜곡, collapse, foldover, overlap QC를 확인합니다. 실패를 억지로 export하지 말고 기록면 선택·장축·seam을 다시 확인합니다.
 7. READY + FRESH 결과가 만들어졌는지 확인합니다. 모든 기록을 마친 뒤 아래 공통 순서에서 저장하고 export합니다.
 
-정식 전개 record가 통과하려면 선택 patch는 하나의 edge-connected component이고, 최소 하나의 닫힌 비분기 경계 고리를 가진 open surface이며, triangle orientation이 일관돼야 합니다. duplicate/non-manifold face, 폐합 shell 전체 또는 기록면을 가르는 seam은 엄격한 QC에서 거부됩니다. 현재 펼친 좌표 위에 원본 texture나 Digital Rubbing을 재투영하는 결합 기능은 아직 없습니다.
+정식 전개 record가 통과하려면 선택 patch는 하나의 edge-connected component이고, 최소 하나의 닫힌 비분기 경계 고리를 가진 open surface이며, triangle orientation이 일관돼야 합니다. duplicate face, non-manifold edge와 폐합 shell 전체는 거부됩니다. 선택면 내부를 가르는 고정 seam은 foldover나 overlap을 만들면 거부될 수 있습니다. 현재 펼친 좌표 위에 원본 texture나 Digital Rubbing을 재투영하는 결합 기능은 아직 없습니다.
 
 ### 저장과 export 순서
 
