@@ -2926,6 +2926,7 @@ def test_initial_identity_requires_explicit_align_before_measurement() -> None:
         assert not window.section_panel.btn_native_outline.isEnabled()
         assert not window.section_panel.btn_native_rubbing.isEnabled()
         assert not window.section_panel.btn_native_tile_unwrap.isEnabled()
+        assert not window.section_panel.btn_native_developed_rubbing.isEnabled()
         assert window.section_panel.btn_native_cutline.text().endswith("(0/3)")
         assert window.section_panel.btn_native_outline.text().endswith("(0/6)")
         assert window.section_panel.btn_native_rubbing.text().endswith("(0/6)")
@@ -2973,6 +2974,9 @@ def test_initial_identity_requires_explicit_align_before_measurement() -> None:
         assert not window.section_panel.btn_native_outline.isEnabled()
         assert not window.section_panel.btn_native_rubbing.isEnabled()
         assert window.section_panel.btn_native_tile_unwrap.isEnabled()
+        # A rubbing on a development waits for a tile-unwrap record to be
+        # chosen and re-verified, like the 1:1 export of that record.
+        assert not window.section_panel.btn_native_developed_rubbing.isEnabled()
         assert window.section_panel.btn_native_cutline.text().endswith("(0/3)")
         assert window.section_panel.btn_native_outline.text().endswith("(0/6)")
         assert window.section_panel.btn_native_rubbing.text().endswith("(0/6)")

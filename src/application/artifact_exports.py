@@ -42,6 +42,15 @@ from src.core.artifact_rubbing_export import (
     stage_rubbing_package,
     validate_rubbing_export_package,
 )
+from src.core.artifact_developed_rubbing import (
+    ArtifactDevelopedRubbingError,
+    DEVELOPED_RUBBING_RECORD_TYPE,
+    compute_developed_rubbing_from_recipe,
+    developed_rubbing_receipt_from_record,
+    development_record_for_recipe,
+    estimate_developed_rubbing_resources,
+    require_current_developed_rubbing_computation,
+)
 from src.core.artifact_rubbing_extractor import (
     compute_artifact_rubbing_from_recipe,
     estimate_digital_rubbing_resources,
@@ -167,7 +176,7 @@ def _destination_path(
 
 
 def _record_kind(record: DerivedRecord) -> ArtifactExportKind:
-    if record.type == RUBBING_RECORD_TYPE:
+    if record.type in {RUBBING_RECORD_TYPE, DEVELOPED_RUBBING_RECORD_TYPE}:
         return ArtifactExportKind.DIGITAL_RUBBING
     if record.type == TILE_UNWRAP_RECORD_TYPE:
         return ArtifactExportKind.TILE_UNWRAP
@@ -610,6 +619,50 @@ class ArtifactExportController:
 
         snapshot = work_item.projection_snapshot
         mesh = session.source_mesh
+        if record.type == DEVELOPED_RUBBING_RECORD_TYPE:
+            # The package is the same; the raster is drawn on the development
+            # the record names, recomputed and proven before staging.
+            try:
+                _development, development_receipt = development_record_for_recipe(
+                    session.document,
+                    record.recipe,
+                )
+                developed_estimate = estimate_developed_rubbing_resources(
+                    development_receipt,
+                    record.recipe,
+                    source_vertex_count=int(mesh.vertices.shape[0]),
+                    source_face_count=int(mesh.faces.shape[0]),
+                    source_geometry_bytes=int(mesh.vertices.nbytes + mesh.faces.nbytes),
+                )
+            except ArtifactDevelopedRubbingError as exc:
+                raise ArtifactExportError(str(exc)) from exc
+            if developed_estimate.estimated_peak_bytes > self._rubbing_memory_budget_bytes:
+                raise ExportResourceLimitError(
+                    "developed rubbing reproduction estimated peak memory "
+                    f"{developed_estimate.estimated_peak_bytes} bytes exceeds the "
+                    f"configured budget {self._rubbing_memory_budget_bytes} bytes"
+                )
+            try:
+                developed = compute_developed_rubbing_from_recipe(
+                    session,
+                    record.recipe,
+                    cancellation_probe=cancellation_probe,
+                )
+                require_current_developed_rubbing_computation(session, developed)
+                if developed.raster.receipt() != developed_rubbing_receipt_from_record(
+                    record
+                ):
+                    raise ArtifactExportError(
+                        "recomputed developed rubbing does not match its durable receipt"
+                    )
+            except ArtifactDevelopedRubbingError as exc:
+                raise ArtifactExportError(str(exc)) from exc
+            return stage_rubbing_package(
+                work_item.destination,
+                session.document,
+                record.id,
+                developed.raster,
+            )
         estimate = estimate_digital_rubbing_resources(
             mesh.vertices,
             mesh.faces,

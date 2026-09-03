@@ -46,6 +46,7 @@ Windows ARM64, x64-on-ARM64 에뮬레이션, 32-bit Windows, Windows Server, mac
 | 단면 | Top, Front, Right의 canonical-mm Cutline | `.amr-vector` 1:1 SVG |
 | 외곽 | 6면 Outline, 정밀도 격자, 오목부·구멍·분리 성분 보존 | `.amr-vector` 1:1 SVG |
 | 디지털 탁본 | 6면, 해상도·여백·깊이·먹 농도·양각/음각 설정 | `.amr-rubbing` 1:1 PNG |
+| 전개 탁본 | 기와 전개 record의 펴진 좌표 위에 같은 요철을 그린 탁본 (정치한 토기의 외면 띠 포함) | `.amr-rubbing` 1:1 PNG (sidecar 1.2.0) |
 | 완료 실측 | Cutline 3 + Outline 6 + Rubbing 6의 15개 결과 결합 | `.amr-survey` |
 | 제원 측정 | 표면적, 조건부 체적, 두 점 거리, 선택점 best-fit 원 지름 | 검증 가능한 measurement record |
 | 기와 전개 | 전체/선택 면, X/Y/Z 장축, Top/Bottom 해석, 자동/고정 seam, 왜곡 QC | `.amr-unwrap` OBJ·1:1 SVG |
@@ -224,7 +225,7 @@ $epoch = [int64]((& git show -s --format=%ct HEAD).Trim())
 6. `기와 전개 계산 · 기록` 후 section fit, 왜곡, collapse, foldover, overlap QC를 확인합니다. 실패를 억지로 export하지 말고 기록면 선택·장축·seam을 다시 확인합니다.
 7. READY + FRESH 결과가 만들어졌는지 확인합니다. 모든 기록을 마친 뒤 아래 공통 순서에서 저장하고 export합니다.
 
-정식 전개 record가 통과하려면 선택 patch는 하나의 edge-connected component이고, 최소 하나의 닫힌 비분기 경계 고리를 가진 open surface이며, triangle orientation이 일관돼야 합니다. duplicate face, non-manifold edge와 폐합 shell 전체는 거부됩니다. 선택면 내부를 가르는 고정 seam은 foldover나 overlap을 만들면 거부될 수 있습니다. 현재 펼친 좌표 위에 원본 texture나 Digital Rubbing을 재투영하는 결합 기능은 아직 없습니다.
+정식 전개 record가 통과하려면 선택 patch는 하나의 edge-connected component이고, 최소 하나의 닫힌 비분기 경계 고리를 가진 open surface이며, triangle orientation이 일관돼야 합니다. duplicate face, non-manifold edge와 폐합 shell 전체는 거부됩니다. 선택면 내부를 가르는 고정 seam은 foldover나 overlap을 만들면 거부될 수 있습니다. 펼친 좌표 위에 요철을 직접 그리는 전개 탁본은 있습니다. READY + FRESH 전개 기록을 고른 뒤 `선택한 전개 위에 탁본 계산 · 기록`을 누르면 탁본 항목의 해상도·기준 반경·검정 기준 깊이·먹 농도·극성으로 전개 위의 탁본 raster를 만들고, 탁본 기록 목록에서 골라 같은 1:1 PNG 패키지로 내보냅니다. 배경과 실측 수치는 [`docs/POTTERY_STRIP_UNWRAP.md`](docs/POTTERY_STRIP_UNWRAP.md)에 있습니다. 원본 texture를 펼친 좌표 위에 재투영하는 기능은 아직 없습니다.
 
 ### 저장과 export 순서
 

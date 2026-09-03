@@ -590,7 +590,7 @@ GUI 계산은 worker에서 시작 당시 immutable `ArtifactSession`만 사용�
 
 PNG writer는 `IHDR → sRGB → pHYs → iTXt → IDAT → IEND` 순서, row filter 0, 직접 작성한 stored DEFLATE block을 사용한다. 따라서 Pillow encoder나 zlib compression heuristic에 exact bytes를 맡기지 않는다. `pHYs`의 X/Y pixels-per-meter는 receipt와 같고, width/height와 pixel pitch는 sidecar에서 exact rational millimeter로 반복 선언한다. primary PNG에는 scale bar, 글꼴, review label, 절대 source path나 외부 resource를 넣지 않는다.
 
-sidecar의 artifact descriptor를 제외한 normative claim 전체를 RFC 8785 SHA-256으로 묶어 PNG iTXt metadata에 넣고, sidecar artifact descriptor는 PNG exact-byte SHA-256과 byte length를 가진다. validator는 PNG CRC/Adler/chunk/metadata/pixel hash/semantic raster hash, receipt, recipe, public provenance, scale와 privacy 선언을 모두 대조하며 closed provenance mapping의 계약 밖 key도 거부한다. 원본 document가 없어도 이동한 package를 별도 PID에서 offline 검증할 수 있고, document를 함께 주면 READY + FRESH record와 manifest까지 비교한다. mesh admission provenance를 포함하는 현재 machine-readable sidecar 계약은 `schemas/rubbing_export-1.1.0.schema.json`이며, 공개된 1.0.0 schema bytes와 offline validator 호환성은 보존한다.
+sidecar의 artifact descriptor를 제외한 normative claim 전체를 RFC 8785 SHA-256으로 묶어 PNG iTXt metadata에 넣고, sidecar artifact descriptor는 PNG exact-byte SHA-256과 byte length를 가진다. validator는 PNG CRC/Adler/chunk/metadata/pixel hash/semantic raster hash, receipt, recipe, public provenance, scale와 privacy 선언을 모두 대조하며 closed provenance mapping의 계약 밖 key도 거부한다. 원본 document가 없어도 이동한 package를 별도 PID에서 offline 검증할 수 있고, document를 함께 주면 READY + FRESH record와 manifest까지 비교한다. mesh admission provenance를 포함하고 여섯 뷰 receipt와 전개 receipt를 모두 허용하는 현재 machine-readable sidecar 계약은 `schemas/rubbing_export-1.2.0.schema.json`이며, 공개된 1.0.0·1.1.0 schema bytes와 offline validator 호환성은 보존한다.
 
 writer는 vector package와 같은 same-parent staging, prepared inode/fingerprint capability, file/directory `fsync`, self-validation, OS별 atomic no-replace publish를 사용한다. staging 이름은 배타적으로 예약하고 충돌한 foreign directory를 재사용·삭제하지 않는다. application cleanup도 등록한 device/inode가 그대로일 때만 수행한다. 기존 목적지, 추가 member와 symlink는 거부하며 `.DS_Store`, `Thumbs.db`, `desktop.ini`만 vector와 같은 1 MiB 제한으로 무시한다. final rename 뒤 실제 또는 미지원 directory `fsync`는 destination이 이미 게시된 `committed=true` 오류이며 GUI는 저장 완료와 crash durability 미확정을 구분한다. 이 package의 hash도 무결성 값이며 제작자 전자서명은 아니다.
 
@@ -611,7 +611,9 @@ DerivedRecord(type=raster.developed_rubbing.v1)
     └── receipt: development_sha256 + lattice origin/dimensions + exact mm + hashes
 ```
 
-다시 열 때는 receipt·recipe·QC의 정합성에 더해 recipe가 이름 지은 전개 record가 문서에 있고, 그 receipt의 `unwrap_sha256`과 recipe 해시가 탁본 recipe가 적은 값과 같은지 확인한다. raster를 재계산할 때는 전개 record의 recipe로 전개를 다시 계산해 receipt와 payload 해시가 맞아야만 탁본을 그린다. 전개가 STALE이면 탁본도 STALE이다. 1:1 package 내보내기는 아직 없다.
+다시 열 때는 receipt·recipe·QC의 정합성에 더해 recipe가 이름 지은 전개 record가 문서에 있고, 그 receipt의 `unwrap_sha256`과 recipe 해시가 탁본 recipe가 적은 값과 같은지 확인한다. raster를 재계산할 때는 전개 record의 recipe로 전개를 다시 계산해 receipt와 payload 해시가 맞아야만 탁본을 그린다. 전개가 STALE이면 탁본도 STALE이다.
+
+내보내기는 같은 `.amr-rubbing` package를 쓴다. sidecar schema 1.2.0은 `raster_receipt`에 여섯 뷰 receipt(`rubbing_receipt-1.0.0`)와 전개 receipt(`developed_rubbing_receipt-1.0.0`) 중 하나를 허용하고, `recipe.kind`가 `developed_rubbing`이면 receipt는 전개 receipt, provenance record type은 `raster.developed_rubbing.v1`이어야 한다. 1.0.0·1.1.0 package는 그대로 검증되며, 전개 탁본은 1.2.0에만 들어간다. writer는 전개를 재계산해 receipt·payload 해시를 맞춘 뒤에야 raster를 다시 그리고 package를 만든다.
 
 ## 완료 3/6/6 원자 묶음 `.amr-survey`
 

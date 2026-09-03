@@ -4,11 +4,17 @@ import copy
 import hashlib
 import importlib
 import json
+import math
 from pathlib import Path
 import unittest
 
 import numpy as np
 
+from src.core.artifact_developed_rubbing import (
+    commit_developed_rubbing,
+    compute_developed_rubbing,
+    validate_developed_rubbing_receipt,
+)
 from src.core.artifact_outline_extractor import OutlineView, outline_frame
 from src.core.artifact_rubbing_export import build_rubbing_export
 from src.core.artifact_rubbing_extractor import (
@@ -18,9 +24,16 @@ from src.core.artifact_rubbing_extractor import (
 )
 from src.core.artifact_rubbing_record import validate_rubbing_receipt
 from src.core.artifact_session import ArtifactSession
+from src.core.artifact_tile_unwrap_extractor import (
+    SECTION_CENTER_CANONICAL_AXIS,
+    STATION_MERIDIAN_ARC,
+    commit_artifact_tile_unwrap,
+    compute_artifact_tile_unwrap,
+)
 from src.core.mesh_loader import MeshData
 from src.core.mesh_import_recipe import current_mesh_import_recipe
 from src.core.source_identity import SourceFingerprint
+from synthetic_vessel import meridional_strip_faces, positioned_vessel_session
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -105,15 +118,73 @@ def _generated_receipt_and_sidecar() -> tuple[dict[str, object], dict[str, objec
     return receipt, sidecar
 
 
+def _generated_developed_receipt_and_sidecar() -> tuple[dict[str, object], dict[str, object]]:
+    """A rubbing on the developed strip of a positioned pot, packaged."""
+
+    session, vertices, faces = positioned_vessel_session(segments=24, rings=12)
+    selected = meridional_strip_faces(
+        vertices, faces, center_angle_rad=math.pi / 2.0, width_mm=20.0
+    )
+    unwrap = compute_artifact_tile_unwrap(
+        session,
+        longitudinal_axis="z",
+        record_view="top",
+        selected_face_indices=selected,
+        n_sections=12,
+        section_center_policy=SECTION_CENTER_CANONICAL_AXIS,
+        station_policy=STATION_MERIDIAN_ARC,
+    )
+    session = commit_artifact_tile_unwrap(
+        session,
+        unwrap,
+        record_id="record:unwrap:schema",
+        created_at=STAMP,
+        operator="tester",
+    )
+    computation = compute_developed_rubbing(
+        session,
+        "record:unwrap:schema",
+        pixels_per_mm=2,
+        margin_um=1_000,
+        reference_radius_um=3_000,
+        depth_quantization_um=10,
+        black_point_um=250,
+        ink_strength_percent=100,
+        relief_polarity="bidirectional",
+    )
+    committed = commit_developed_rubbing(
+        session,
+        computation,
+        record_id="record:developed:schema",
+        created_at=STAMP,
+        operator="tester",
+    )
+    bundle = build_rubbing_export(
+        committed.document,
+        "record:developed:schema",
+        computation.raster,
+    )
+    receipt = validate_developed_rubbing_receipt(computation.raster.receipt())
+    sidecar = json.loads(bundle.sidecar_bytes.decode("utf-8"))
+    assert isinstance(sidecar, dict)
+    return receipt, sidecar
+
+
 class TestRubbingSchemas(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         jsonschema = importlib.import_module("jsonschema")
         referencing = importlib.import_module("referencing")
         cls.receipt_schema = _load_schema("rubbing_receipt-1.0.0.schema.json")
-        cls.export_schema = _load_schema("rubbing_export-1.1.0.schema.json")
+        cls.developed_receipt_schema = _load_schema(
+            "developed_rubbing_receipt-1.0.0.schema.json"
+        )
+        cls.export_schema = _load_schema("rubbing_export-1.2.0.schema.json")
         cls.legacy_export_schema = _load_schema(
             "rubbing_export-1.0.0.schema.json"
+        )
+        cls.legacy_1_1_export_schema = _load_schema(
+            "rubbing_export-1.1.0.schema.json"
         )
         cls.mesh_admission_schema = _load_schema(
             "mesh_admission_receipt-1.0.0.schema.json"
@@ -125,19 +196,32 @@ class TestRubbingSchemas(unittest.TestCase):
             "mesh_import_recipe-2.0.0.schema.json"
         )
         jsonschema.Draft202012Validator.check_schema(cls.receipt_schema)
+        jsonschema.Draft202012Validator.check_schema(cls.developed_receipt_schema)
         jsonschema.Draft202012Validator.check_schema(cls.export_schema)
         jsonschema.Draft202012Validator.check_schema(cls.legacy_export_schema)
+        jsonschema.Draft202012Validator.check_schema(cls.legacy_1_1_export_schema)
         jsonschema.Draft202012Validator.check_schema(cls.mesh_admission_schema)
         jsonschema.Draft202012Validator.check_schema(cls.import_recipe_schema)
         jsonschema.Draft202012Validator.check_schema(cls.import_recipe_v2_schema)
         cls.receipt_validator = jsonschema.Draft202012Validator(cls.receipt_schema)
+        cls.developed_receipt_validator = jsonschema.Draft202012Validator(
+            cls.developed_receipt_schema
+        )
         registry = referencing.Registry().with_resource(
             cls.receipt_schema["$id"],
             referencing.Resource.from_contents(cls.receipt_schema),
         )
         registry = registry.with_resource(
+            cls.developed_receipt_schema["$id"],
+            referencing.Resource.from_contents(cls.developed_receipt_schema),
+        )
+        registry = registry.with_resource(
             cls.legacy_export_schema["$id"],
             referencing.Resource.from_contents(cls.legacy_export_schema),
+        )
+        registry = registry.with_resource(
+            cls.legacy_1_1_export_schema["$id"],
+            referencing.Resource.from_contents(cls.legacy_1_1_export_schema),
         )
         registry = registry.with_resource(
             cls.mesh_admission_schema["$id"],
@@ -156,6 +240,9 @@ class TestRubbingSchemas(unittest.TestCase):
             registry=registry,
         )
         cls.receipt, cls.sidecar = _generated_receipt_and_sidecar()
+        cls.developed_receipt, cls.developed_sidecar = (
+            _generated_developed_receipt_and_sidecar()
+        )
 
     def test_legacy_export_schema_remains_byte_exact(self) -> None:
         payload = (ROOT / "schemas" / "rubbing_export-1.0.0.schema.json").read_bytes()
@@ -163,6 +250,47 @@ class TestRubbingSchemas(unittest.TestCase):
             hashlib.sha256(payload).hexdigest(),
             "31cc5dd55a8ce2acce934fd7fdd3211093f58a80a7b5259d8d6f52f7cb50ac89",
         )
+        payload = (ROOT / "schemas" / "rubbing_export-1.1.0.schema.json").read_bytes()
+        self.assertEqual(
+            hashlib.sha256(payload).hexdigest(),
+            "6dc7ceb0ed456f451d91935fa62d0c9585d12acd6755a265a5afebb5c6efc811",
+        )
+
+    def test_developed_rubbing_receipt_and_sidecar_validate(self) -> None:
+        self.assert_schema_valid(self.developed_receipt_validator, self.developed_receipt)
+        self.assert_schema_invalid(self.receipt_validator, self.developed_receipt)
+        self.assert_schema_valid(self.export_validator, self.developed_sidecar)
+        self.assertEqual(self.developed_sidecar["schema_version"], "1.2.0")
+        recipe = self.developed_sidecar["recipe"]
+        assert isinstance(recipe, dict)
+        self.assertEqual(recipe["kind"], "developed_rubbing")
+
+        # A developed receipt cannot pose as a six-view one, and the two
+        # recipe shapes do not blend.
+        posing = copy.deepcopy(self.developed_sidecar)
+        posing["raster_receipt"] = copy.deepcopy(self.receipt)
+        self.assert_schema_invalid(self.export_validator, posing)
+        blended = copy.deepcopy(self.developed_sidecar)
+        blended_recipe = blended["recipe"]
+        assert isinstance(blended_recipe, dict)
+        blended_recipe["view"] = "top"
+        self.assert_schema_invalid(self.export_validator, blended)
+        wrong_ref = copy.deepcopy(self.developed_sidecar)
+        provenance = wrong_ref["provenance"]
+        assert isinstance(provenance, dict)
+        record = provenance["record"]
+        assert isinstance(record, dict)
+        record["geometry_ref"] = (
+            "urn:archmeshrubbing:digital-rubbing-raster:sha256:" + "0" * 64
+        )
+        self.assert_schema_invalid(self.export_validator, wrong_ref)
+        # The developed sidecar is a 1.2.0 shape; the 1.1.0 contract has no
+        # room for it.
+        legacy_validator = importlib.import_module("jsonschema").Draft202012Validator(
+            self.legacy_1_1_export_schema,
+            registry=self.export_validator._registry,  # type: ignore[attr-defined]
+        )
+        self.assert_schema_invalid(legacy_validator, self.developed_sidecar)
 
     def assert_schema_valid(self, validator, value: object) -> None:
         errors = sorted(validator.iter_errors(value), key=lambda item: list(item.path))
@@ -174,7 +302,7 @@ class TestRubbingSchemas(unittest.TestCase):
     def test_generated_receipt_and_export_sidecar_validate(self) -> None:
         self.assert_schema_valid(self.receipt_validator, self.receipt)
         self.assert_schema_valid(self.export_validator, self.sidecar)
-        self.assertEqual(self.sidecar["schema_version"], "1.1.0")
+        self.assertEqual(self.sidecar["schema_version"], "1.2.0")
         provenance = self.sidecar["provenance"]
         assert isinstance(provenance, dict)
         geometry = provenance["geometry_revision"]

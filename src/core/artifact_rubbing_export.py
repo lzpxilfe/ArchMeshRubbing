@@ -11,9 +11,18 @@ import re
 import shutil
 import stat
 from threading import RLock
-from typing import Any, Mapping
+from typing import Any, Mapping, TypeAlias
 import uuid
 
+from .artifact_developed_rubbing import (
+    ArtifactDevelopedRubbingError,
+    DEVELOPED_RUBBING_COORDINATE_SPACE,
+    DEVELOPED_RUBBING_RECORD_TYPE,
+    DevelopedRubbingRaster,
+    developed_rubbing_receipt_from_record,
+    validate_developed_rubbing_receipt,
+    validate_developed_rubbing_recipe,
+)
 from .artifact_document import (
     ArtifactDocument,
     ArtifactDocumentError,
@@ -57,9 +66,13 @@ from .canonical_png import (
 
 
 RUBBING_EXPORT_FORMAT = "archmeshrubbing_rubbing_export"
-_CURRENT_RUBBING_EXPORT_SCHEMA_VERSION = "1.1.0"
+# 1.2.0 admits a raster drawn on a developed surface next to the six-view
+# raster; the receipt's coordinate space says which one a package carries.
+_CURRENT_RUBBING_EXPORT_SCHEMA_VERSION = "1.2.0"
 RUBBING_EXPORT_SCHEMA_VERSION = _CURRENT_RUBBING_EXPORT_SCHEMA_VERSION
-SUPPORTED_RUBBING_EXPORT_SCHEMA_VERSIONS = frozenset({"1.0.0", "1.1.0"})
+SUPPORTED_RUBBING_EXPORT_SCHEMA_VERSIONS = frozenset({"1.0.0", "1.1.0", "1.2.0"})
+_RUBBING_RECORD_TYPES = frozenset({RUBBING_RECORD_TYPE, DEVELOPED_RUBBING_RECORD_TYPE})
+RubbingRaster: TypeAlias = DigitalRubbingRaster | DevelopedRubbingRaster
 RUBBING_EXPORT_DIRECTORY_SUFFIX = ".amr-rubbing"
 RUBBING_EXPORT_PNG_NAME = "artifact.png"
 RUBBING_EXPORT_SIDECAR_NAME = "artifact.amr-rubbing.json"
@@ -225,7 +238,7 @@ def _require_exportable_record(
     if not isinstance(record_id, str) or not record_id.strip():
         raise ArtifactRubbingExportError("record_id must be a non-empty string")
     record = document.record_index.get(record_id)
-    if record is None or record.type != RUBBING_RECORD_TYPE:
+    if record is None or record.type not in _RUBBING_RECORD_TYPES:
         raise ArtifactRubbingExportError("Digital Rubbing record does not exist")
     if record.lifecycle_status is not RecordLifecycleStatus.READY:
         raise ArtifactRubbingExportError("only READY Digital Rubbing records may export")
@@ -238,8 +251,11 @@ def _require_exportable_record(
             f"only FRESH Digital Rubbing records may export (got {freshness.value})"
         )
     try:
-        receipt = rubbing_receipt_from_record(record)
-    except ArtifactRubbingRecordError as exc:
+        if record.type == DEVELOPED_RUBBING_RECORD_TYPE:
+            receipt = developed_rubbing_receipt_from_record(record)
+        else:
+            receipt = rubbing_receipt_from_record(record)
+    except (ArtifactRubbingRecordError, ArtifactDevelopedRubbingError) as exc:
         raise ArtifactRubbingExportError(str(exc)) from exc
     record_qc = record.to_dict()["qc"]
     if not isinstance(record_qc, dict):
@@ -247,12 +263,22 @@ def _require_exportable_record(
     return record, receipt, record_qc
 
 
+def _receipt_is_developed(receipt: Mapping[str, Any]) -> bool:
+    return receipt.get("coordinate_space") == DEVELOPED_RUBBING_COORDINATE_SPACE
+
+
 def _require_matching_raster(
-    raster: DigitalRubbingRaster,
+    raster: RubbingRaster,
     receipt: Mapping[str, Any],
 ) -> None:
-    if not isinstance(raster, DigitalRubbingRaster):
-        raise ArtifactRubbingExportError("raster must be a DigitalRubbingRaster")
+    if not isinstance(raster, (DigitalRubbingRaster, DevelopedRubbingRaster)):
+        raise ArtifactRubbingExportError(
+            "raster must be a DigitalRubbingRaster or a DevelopedRubbingRaster"
+        )
+    if isinstance(raster, DevelopedRubbingRaster) != _receipt_is_developed(receipt):
+        raise ArtifactRubbingExportError(
+            "raster coordinate space does not match the Digital Rubbing record"
+        )
     if raster.receipt() != dict(receipt):
         raise ArtifactRubbingExportError(
             "recomputed raster does not match the Digital Rubbing record receipt"
@@ -381,7 +407,7 @@ def _png_metadata(
 def build_rubbing_export(
     document: ArtifactDocument,
     record_id: str,
-    raster: DigitalRubbingRaster,
+    raster: RubbingRaster,
 ) -> RubbingExportBundle:
     record, receipt, record_qc = _require_exportable_record(document, record_id)
     _require_matching_raster(raster, receipt)
@@ -453,7 +479,7 @@ def build_rubbing_export(
 def _validate_qc(
     value: object,
     *,
-    raster: DigitalRubbingRaster,
+    raster: RubbingRaster,
 ) -> Mapping[str, Any]:
     qc = _exact_keys(
         value,
@@ -527,21 +553,42 @@ def validate_rubbing_export_bytes(
         or artifact["sha256"] != _sha256_bytes(png_bytes)
     ):
         raise ArtifactRubbingExportError("PNG artifact descriptor does not match bytes")
-    try:
-        receipt = validate_rubbing_receipt(root["raster_receipt"])
-        recipe = validate_rubbing_recipe(root["recipe"])
-        pixels, ppm, metadata = decode_canonical_ga8_png(png_bytes)
-        raster = DigitalRubbingRaster(
-            pixels=pixels,
-            frame=outline_frame_from_receipt(receipt),
-            view=receipt["view"],
-            pixels_per_meter=ppm,
-            minimum_u_pixel_index=int(receipt["minimum_u_pixel_index"]),
-            minimum_v_pixel_index=int(receipt["minimum_v_pixel_index"]),
+    raw_receipt = root["raster_receipt"]
+    developed = isinstance(raw_receipt, Mapping) and _receipt_is_developed(raw_receipt)
+    if developed and schema_version != "1.2.0":
+        raise ArtifactRubbingExportError(
+            "a rubbing on a developed surface needs rubbing export schema 1.2.0"
         )
+    raster: RubbingRaster
+    try:
+        pixels, ppm, metadata = decode_canonical_ga8_png(png_bytes)
+        if developed:
+            receipt = validate_developed_rubbing_receipt(raw_receipt)
+            recipe = validate_developed_rubbing_recipe(root["recipe"])
+            raster = DevelopedRubbingRaster(
+                pixels=pixels,
+                pixels_per_meter=ppm,
+                minimum_u_pixel_index=int(receipt["minimum_u_pixel_index"]),
+                minimum_v_pixel_index=int(receipt["minimum_v_pixel_index"]),
+                development_sha256=str(receipt["development_sha256"]),
+            )
+            expected_record_type = DEVELOPED_RUBBING_RECORD_TYPE
+        else:
+            receipt = validate_rubbing_receipt(raw_receipt)
+            recipe = validate_rubbing_recipe(root["recipe"])
+            raster = DigitalRubbingRaster(
+                pixels=pixels,
+                frame=outline_frame_from_receipt(receipt),
+                view=receipt["view"],
+                pixels_per_meter=ppm,
+                minimum_u_pixel_index=int(receipt["minimum_u_pixel_index"]),
+                minimum_v_pixel_index=int(receipt["minimum_v_pixel_index"]),
+            )
+            expected_record_type = RUBBING_RECORD_TYPE
     except (
         ArtifactRubbingError,
         ArtifactRubbingRecordError,
+        ArtifactDevelopedRubbingError,
         CanonicalPNGError,
     ) as exc:
         raise ArtifactRubbingExportError(str(exc)) from exc
@@ -568,7 +615,7 @@ def validate_rubbing_export_bytes(
     record_provenance = provenance["record"]
     assert isinstance(record_provenance, Mapping)
     if (
-        record_provenance["type"] != RUBBING_RECORD_TYPE
+        record_provenance["type"] != expected_record_type
         or record_provenance["geometry_ref"] != raster.geometry_ref
         or record_provenance["recipe_hash"] != canonical_recipe_hash(recipe)
     ):
@@ -1078,7 +1125,7 @@ def _stage_rubbing_package_owned(
     directory: str | os.PathLike[str],
     document: ArtifactDocument,
     record_id: str,
-    raster: DigitalRubbingRaster,
+    raster: RubbingRaster,
 ) -> _OwnedStagingDirectory:
     destination = _validate_rubbing_destination(directory)
     if destination.exists() or destination.is_symlink():
@@ -1147,7 +1194,7 @@ def stage_rubbing_package(
     directory: str | os.PathLike[str],
     document: ArtifactDocument,
     record_id: str,
-    raster: DigitalRubbingRaster,
+    raster: RubbingRaster,
 ) -> Path:
     """Create and verify a same-parent package without publishing it.
 
@@ -1371,7 +1418,7 @@ def export_rubbing_package(
     directory: str | os.PathLike[str],
     document: ArtifactDocument,
     record_id: str,
-    raster: DigitalRubbingRaster,
+    raster: RubbingRaster,
 ) -> Path:
     """Stage and atomically publish a new ``*.amr-rubbing`` package."""
 

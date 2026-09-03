@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:archmeshrubbing:schema:developed-rubbing-receipt:1.0.0",
+  "title": "ArchMeshRubbing Developed Rubbing Raster Receipt 1.0.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "coordinate_space",
+    "development_sha256",
+    "height_mm_exact",
+    "height_pixels",
+    "minimum_u_pixel_index",
+    "minimum_v_pixel_index",
+    "pixel_format",
+    "pixels_per_meter",
+    "raster_hash_scope",
+    "raster_sha256",
+    "raw_pixel_byte_length",
+    "raw_pixel_sha256",
+    "row_order",
+    "schema_version",
+    "width_mm_exact",
+    "width_pixels"
+  ],
+  "properties": {
+    "coordinate_space": {
+      "const": "canonical_mm_developed_raster/v1"
+    },
+    "development_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "height_mm_exact": {
+      "$ref": "#/$defs/exactDimensionMm"
+    },
+    "height_pixels": {
+      "$ref": "#/$defs/dimensionPixels"
+    },
+    "minimum_u_pixel_index": {
+      "$ref": "#/$defs/gridIndex"
+    },
+    "minimum_v_pixel_index": {
+      "$ref": "#/$defs/gridIndex"
+    },
+    "pixel_format": {
+      "const": "grayscale-alpha-8/v1"
+    },
+    "pixels_per_meter": {
+      "$ref": "#/$defs/pixelsPerMeter"
+    },
+    "raster_hash_scope": {
+      "const": "header-rfc8785+pixels-ga8-row-major/v1"
+    },
+    "raster_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "raw_pixel_byte_length": {
+      "type": "integer",
+      "minimum": 2,
+      "maximum": 16000000,
+      "multipleOf": 2
+    },
+    "raw_pixel_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "row_order": {
+      "const": "top_to_bottom_v_descending"
+    },
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "width_mm_exact": {
+      "$ref": "#/$defs/exactDimensionMm"
+    },
+    "width_pixels": {
+      "$ref": "#/$defs/dimensionPixels"
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "dimensionPixels": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100000
+    },
+    "gridIndex": {
+      "type": "integer",
+      "minimum": -281474976710656,
+      "maximum": 281474976710656
+    },
+    "pixelsPerMeter": {
+      "type": "integer",
+      "minimum": 1000,
+      "maximum": 100000,
+      "multipleOf": 1000
+    },
+    "exactDimensionMm": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "denominator",
+        "numerator"
+      ],
+      "properties": {
+        "denominator": {
+          "$ref": "#/$defs/pixelsPerMeter"
+        },
+        "numerator": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 100000000000,
+          "multipleOf": 1000
+        }
+      }
+    }
+  }
+}

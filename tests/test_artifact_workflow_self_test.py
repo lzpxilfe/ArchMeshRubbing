@@ -38,7 +38,7 @@ def test_complete_workflow_self_test_has_deterministic_offline_receipts() -> Non
         "5c8a9069c5fdc532c0a3da34d79b6e9ac479fdc5560e64a3031f7bfefa78cc3e"
     )
     assert result.rubbing_set_sha256 == (
-        "c4d8578cb36c201b7b0799fd2ea64ae553ec3f7e1200e7ef6f98b51d0bd8b10f"
+        "51f2df0e3519e67eb6a2ded5e0385c58bf875277fa754f910f930bdf7ae9c099"
     )
     assert result.tile_unwrap_source_sha256 == (
         "5d1432cc1c6fe601cd2777da86a255f07689fcbfa775d0c38ae3178b28661eb6"
@@ -55,10 +55,10 @@ def test_complete_workflow_self_test_has_deterministic_offline_receipts() -> Non
         == result.tile_unwrap_export_sha256
     )
     assert result.survey_manifest_sha256 == (
-        "ca266f9a1e523aa162d31acbc051f5f9946d82c6fca1f6ad2f2d25d966c72a23"
+        "3af0f87f574fde1f9cc8a349852c6db8f36cbb8848937c45a033e4efd5adc521"
     )
     assert result.survey_artifact_set_sha256 == (
-        "de2b62817616cded9b3cd80c18e34f70d6aa2bdd8b73c86ade7b9de66a050a08"
+        "72b5bc60a396eb4c5071422bd8944db715ab75679014845b9f0cd1fee4bdc1a1"
     )
     for digest in (
         result.document_sha256,
@@ -78,7 +78,7 @@ def test_complete_workflow_self_test_has_deterministic_offline_receipts() -> Non
         "980deba3f4b7f4eafb2a44ad8d79c14b281ed63aa619846699fcc1c84f2192a8"
     )
     assert result.png_sha256 == (
-        "f9294927bce56e9f6659d520712e33051253e78bfb620559de471970e44bb9f9"
+        "80fe9fec5979001df9104ff3c01b9e475a8479e58ee514d8d5e64380159904e8"
     )
     assert result.tile_unwrap_row_shift_max_um == 6364
     assert result.tile_unwrap_row_shift_station_count == 13
@@ -120,7 +120,7 @@ def test_complete_workflow_accepts_explicit_committed_directory_fsync_warning(
 
     assert result.record_count == 18
     assert result.survey_manifest_sha256 == (
-        "ca266f9a1e523aa162d31acbc051f5f9946d82c6fca1f6ad2f2d25d966c72a23"
+        "3af0f87f574fde1f9cc8a349852c6db8f36cbb8848937c45a033e4efd5adc521"
     )
     assert (
         result.tile_unwrap_sha256

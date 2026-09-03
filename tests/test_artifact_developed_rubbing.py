@@ -8,6 +8,7 @@ the raster is the strip a rubber would paste beside the drawing.
 
 from __future__ import annotations
 
+import json
 import math
 from pathlib import Path
 import tempfile
@@ -16,6 +17,7 @@ from typing import Any
 import numpy as np
 import pytest
 
+from src.application.artifact_exports import ArtifactExportController
 from src.application.artifact_measurements import (
     ArtifactMeasurementController,
     ArtifactMeasurementError,
@@ -40,10 +42,18 @@ from src.core.artifact_developed_rubbing import (
     validate_developed_rubbing_recipe,
 )
 from src.core.artifact_document import RecordFreshness
+from src.core.artifact_outline_extractor import outline_frame
 from src.core.artifact_record_validation import (
     ArtifactKnownRecordError,
     validate_known_records,
 )
+from src.core.artifact_rubbing_export import (
+    ArtifactRubbingExportError,
+    build_rubbing_export,
+    export_rubbing_package,
+    validate_rubbing_export_package,
+)
+from src.core.artifact_rubbing_extractor import DigitalRubbingRaster
 from src.core.artifact_session import ArtifactSession
 from src.core.artifact_tile_unwrap_extractor import (
     SECTION_CENTER_CANONICAL_AXIS,
@@ -341,6 +351,90 @@ def test_the_estimate_knows_the_artboard_before_any_work(corded: ArtifactSession
         computation.raster.height_pixels,
     )
     assert estimate.estimated_peak_bytes > estimate.pixel_count * 64
+
+
+def test_the_same_package_carries_a_developed_rubbing(corded: ArtifactSession) -> None:
+    computation = _rubbing(corded)
+    session = commit_developed_rubbing(
+        corded,
+        computation,
+        record_id="record:developed:package",
+        created_at="2026-09-03T00:00:11Z",
+        operator="tester",
+    )
+    with tempfile.TemporaryDirectory() as directory:
+        destination = Path(directory) / "strip.amr-rubbing"
+        published = export_rubbing_package(
+            destination,
+            session.document,
+            "record:developed:package",
+            computation.raster,
+        )
+        assert published == destination
+        bundle = validate_rubbing_export_package(destination, document=session.document)
+        relocated = validate_rubbing_export_package(destination)
+        sidecar = json.loads(bundle.sidecar_bytes.decode("utf-8"))
+
+    assert bundle.raster_sha256 == relocated.raster_sha256 == computation.raster.raster_sha256
+    assert (bundle.width_pixels, bundle.height_pixels) == (
+        computation.raster.width_pixels,
+        computation.raster.height_pixels,
+    )
+    assert sidecar["schema_version"] == "1.2.0"
+    assert sidecar["recipe"]["kind"] == "developed_rubbing"
+    assert sidecar["raster_receipt"]["coordinate_space"] == "canonical_mm_developed_raster/v1"
+    assert sidecar["provenance"]["record"]["type"] == DEVELOPED_RUBBING_RECORD_TYPE
+    assert sidecar["presentation"]["physical_scale"] == "1:1_planar_sampling"
+    assert sidecar["qc"]["raster"]["development_sha256"] == (
+        computation.raster.development_sha256
+    )
+    # The development travels in the dependency closure, so the reader knows
+    # which strip the paper was on.
+    closure_ids = {entry["id"] for entry in sidecar["provenance"]["dependency_closure"]}
+    assert UNWRAP_ID in closure_ids
+
+    # A six-view raster cannot be passed off as this record, and a stale
+    # development blocks the export the way it blocks the drawing.
+    with pytest.raises(ArtifactRubbingExportError, match="coordinate space"):
+        build_rubbing_export(
+            session.document,
+            "record:developed:package",
+            DigitalRubbingRaster(
+                pixels=computation.raster.pixels,
+                frame=outline_frame("top"),
+                view="top",
+                pixels_per_meter=computation.raster.pixels_per_meter,
+                minimum_u_pixel_index=0,
+                minimum_v_pixel_index=0,
+            ),
+        )
+    dragged = session.activate_parent_align()
+    with pytest.raises(ArtifactRubbingExportError, match="FRESH"):
+        build_rubbing_export(
+            dragged.document, "record:developed:package", computation.raster
+        )
+
+
+def test_the_export_controller_reproduces_the_developed_raster(
+    corded: ArtifactSession, tmp_path: Path
+) -> None:
+    computation = _rubbing(corded)
+    session = commit_developed_rubbing(
+        corded,
+        computation,
+        record_id="record:developed:export",
+        created_at="2026-09-03T00:00:11Z",
+        operator="tester",
+    )
+    controller = ArtifactExportController(ArtifactWorkbench(session=session))
+    destination = tmp_path / "strip.amr-rubbing"
+    work_item = controller.begin_rubbing(destination, "record:developed:export")
+    result = controller.execute(work_item)
+    controller.publish_result(work_item, result)
+
+    bundle = validate_rubbing_export_package(destination, document=session.document)
+    assert bundle.raster_sha256 == computation.raster.raster_sha256
+    assert bundle.pixels_per_meter == 10_000
 
 
 def _publish(workbench: ArtifactWorkbench):

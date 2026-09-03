@@ -1,0 +1,1299 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:archmeshrubbing:schema:rubbing-export:1.2.0",
+  "title": "ArchMeshRubbing Digital Rubbing Export Sidecar 1.2.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "artifact",
+    "format",
+    "presentation",
+    "privacy",
+    "provenance",
+    "qc",
+    "raster_receipt",
+    "recipe",
+    "schema_version"
+  ],
+  "properties": {
+    "artifact": {
+      "$ref": "#/$defs/artifact"
+    },
+    "format": {
+      "const": "archmeshrubbing_rubbing_export"
+    },
+    "presentation": {
+      "$ref": "#/$defs/presentation"
+    },
+    "privacy": {
+      "$ref": "#/$defs/privacy"
+    },
+    "provenance": {
+      "$ref": "#/$defs/provenance"
+    },
+    "qc": {
+      "$ref": "#/$defs/qc"
+    },
+    "raster_receipt": {
+      "oneOf": [
+        {
+          "$ref": "urn:archmeshrubbing:schema:rubbing-receipt:1.0.0"
+        },
+        {
+          "$ref": "urn:archmeshrubbing:schema:developed-rubbing-receipt:1.0.0"
+        }
+      ]
+    },
+    "recipe": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/rubbingRecipe"
+        },
+        {
+          "$ref": "#/$defs/developedRubbingRecipe"
+        }
+      ]
+    },
+    "schema_version": {
+      "const": "1.2.0"
+    }
+  },
+  "$defs": {
+    "artifact": {
+      "$ref": "urn:archmeshrubbing:schema:rubbing-export:1.0.0#/$defs/artifact"
+    },
+    "presentation": {
+      "$ref": "urn:archmeshrubbing:schema:rubbing-export:1.0.0#/$defs/presentation"
+    },
+    "privacy": {
+      "$ref": "urn:archmeshrubbing:schema:rubbing-export:1.0.0#/$defs/privacy"
+    },
+    "qc": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "export_gate",
+        "raster",
+        "record",
+        "scale"
+      ],
+      "properties": {
+        "export_gate": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "raster_recomputed_and_verified",
+            "record_freshness",
+            "record_lifecycle_status"
+          ],
+          "properties": {
+            "raster_recomputed_and_verified": {
+              "const": true
+            },
+            "record_freshness": {
+              "const": "fresh"
+            },
+            "record_lifecycle_status": {
+              "const": "ready"
+            }
+          }
+        },
+        "raster": {
+          "$ref": "#/$defs/rasterQc"
+        },
+        "record": {
+          "$ref": "#/$defs/recordQc"
+        },
+        "scale": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "physical_scale",
+            "png_phys_matches_sidecar",
+            "unit"
+          ],
+          "properties": {
+            "physical_scale": {
+              "const": "1:1_planar_sampling"
+            },
+            "png_phys_matches_sidecar": {
+              "const": true
+            },
+            "unit": {
+              "const": "mm"
+            }
+          }
+        }
+      }
+    },
+    "rubbingRecipe": {
+      "$ref": "urn:archmeshrubbing:schema:rubbing-export:1.0.0#/$defs/rubbingRecipe"
+    },
+    "nonEmptyString": {
+      "$ref": "urn:archmeshrubbing:schema:rubbing-export:1.0.0#/$defs/nonEmptyString"
+    },
+    "sha256": {
+      "$ref": "urn:archmeshrubbing:schema:rubbing-export:1.0.0#/$defs/sha256"
+    },
+    "timestamp": {
+      "$ref": "urn:archmeshrubbing:schema:rubbing-export:1.0.0#/$defs/timestamp"
+    },
+    "stringArray": {
+      "$ref": "urn:archmeshrubbing:schema:rubbing-export:1.0.0#/$defs/stringArray"
+    },
+    "meshImportRecipe": {
+      "$ref": "urn:archmeshrubbing:schema:rubbing-export:1.0.0#/$defs/meshImportRecipe"
+    },
+    "alignRevision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "created_at",
+        "id",
+        "matrix4x4",
+        "operator",
+        "parent_id",
+        "qc",
+        "recipe",
+        "source_metadata_revision_id"
+      ],
+      "properties": {
+        "created_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "matrix4x4": {
+          "$ref": "urn:archmeshrubbing:schema:rubbing-export:1.0.0#/$defs/matrix4x4"
+        },
+        "operator": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "parent_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/nonEmptyString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "qc": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/alignQcManual"
+            },
+            {
+              "$ref": "#/$defs/alignQcAxis"
+            }
+          ]
+        },
+        "recipe": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "initial_identity"
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "convention",
+                "kind",
+                "pivot_mm",
+                "rotation_deg",
+                "translation_mm"
+              ],
+              "properties": {
+                "convention": {
+                  "const": "delta @ parent"
+                },
+                "kind": {
+                  "const": "manual_scene_trs_delta"
+                },
+                "pivot_mm": {
+                  "$ref": "#/$defs/vec3"
+                },
+                "rotation_deg": {
+                  "$ref": "#/$defs/vec3"
+                },
+                "translation_mm": {
+                  "$ref": "#/$defs/vec3"
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "bottom_center_mm_decimal",
+                "bottom_normal_unit_decimal",
+                "bottom_record_id",
+                "convention",
+                "kind",
+                "top_center_mm_decimal",
+                "top_normal_unit_decimal",
+                "top_record_id"
+              ],
+              "properties": {
+                "bottom_center_mm_decimal": {
+                  "$ref": "#/$defs/vec3Decimal6"
+                },
+                "bottom_normal_unit_decimal": {
+                  "$ref": "#/$defs/vec3Decimal9"
+                },
+                "bottom_record_id": {
+                  "$ref": "#/$defs/nonEmptyString"
+                },
+                "convention": {
+                  "const": "delta @ parent"
+                },
+                "kind": {
+                  "const": "rotation_axis_from_circle_records/v1"
+                },
+                "top_center_mm_decimal": {
+                  "$ref": "#/$defs/vec3Decimal6"
+                },
+                "top_normal_unit_decimal": {
+                  "$ref": "#/$defs/vec3Decimal9"
+                },
+                "top_record_id": {
+                  "$ref": "#/$defs/nonEmptyString"
+                }
+              }
+            }
+          ]
+        },
+        "source_metadata_revision_id": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "recipe": {
+                "properties": {
+                  "kind": {
+                    "const": "initial_identity"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            },
+            "required": [
+              "recipe"
+            ]
+          },
+          "then": {
+            "properties": {
+              "parent_id": {
+                "type": "null"
+              },
+              "qc": {
+                "$ref": "#/$defs/alignQcManual"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "recipe": {
+                "properties": {
+                  "kind": {
+                    "const": "manual_scene_trs_delta"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            },
+            "required": [
+              "recipe"
+            ]
+          },
+          "then": {
+            "properties": {
+              "parent_id": {
+                "$ref": "#/$defs/nonEmptyString"
+              },
+              "qc": {
+                "$ref": "#/$defs/alignQcManual"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "recipe": {
+                "properties": {
+                  "kind": {
+                    "const": "rotation_axis_from_circle_records/v1"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            },
+            "required": [
+              "recipe"
+            ]
+          },
+          "then": {
+            "properties": {
+              "parent_id": {
+                "$ref": "#/$defs/nonEmptyString"
+              },
+              "qc": {
+                "$ref": "#/$defs/alignQcAxis"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "vec3": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {
+        "type": "number"
+      }
+    },
+    "vec3Decimal6": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {
+        "type": "string",
+        "pattern": "^-?(0|[1-9][0-9]*)\\.[0-9]{6}$"
+      }
+    },
+    "vec3Decimal9": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {
+        "type": "string",
+        "pattern": "^-?(0|[1-9][0-9]*)\\.[0-9]{9}$"
+      }
+    },
+    "alignQcManual": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "proper_rigid"
+      ],
+      "properties": {
+        "proper_rigid": {
+          "const": true
+        }
+      }
+    },
+    "alignQcAxis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "axis_tilt_corrected_deg",
+        "center_separation_mm",
+        "circle_normal_disagreement_deg",
+        "proper_rigid"
+      ],
+      "properties": {
+        "axis_tilt_corrected_deg": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 180
+        },
+        "center_separation_mm": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "circle_normal_disagreement_deg": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 180
+        },
+        "proper_rigid": {
+          "const": true
+        }
+      }
+    },
+    "dependencyReceipt": {
+      "$ref": "urn:archmeshrubbing:schema:rubbing-export:1.0.0#/$defs/dependencyReceipt"
+    },
+    "documentReceipt": {
+      "$ref": "urn:archmeshrubbing:schema:rubbing-export:1.0.0#/$defs/documentReceipt"
+    },
+    "metadataRevision": {
+      "$ref": "urn:archmeshrubbing:schema:rubbing-export:1.0.0#/$defs/metadataRevision"
+    },
+    "recordReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "align_revision_id",
+        "created_at",
+        "depends_on_record_ids",
+        "geometry_revision_id",
+        "geometry_ref",
+        "id",
+        "lifecycle_status",
+        "operator",
+        "recipe_hash",
+        "selection_hash",
+        "type"
+      ],
+      "properties": {
+        "align_revision_id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "created_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "depends_on_record_ids": {
+          "$ref": "#/$defs/stringArray"
+        },
+        "geometry_revision_id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "geometry_ref": {
+          "type": "string",
+          "pattern": "^urn:archmeshrubbing:(digital|developed)-rubbing-raster:sha256:[0-9a-f]{64}$"
+        },
+        "id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "lifecycle_status": {
+          "const": "ready"
+        },
+        "operator": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "recipe_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "selection_hash": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "type": {
+          "enum": [
+            "raster.digital_rubbing.v1",
+            "raster.developed_rubbing.v1"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "raster.digital_rubbing.v1"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "geometry_ref": {
+                "pattern": "^urn:archmeshrubbing:digital-rubbing-raster:sha256:[0-9a-f]{64}$"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "raster.developed_rubbing.v1"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "geometry_ref": {
+                "pattern": "^urn:archmeshrubbing:developed-rubbing-raster:sha256:[0-9a-f]{64}$"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "sourceAsset": {
+      "$ref": "urn:archmeshrubbing:schema:rubbing-export:1.0.0#/$defs/sourceAsset"
+    },
+    "geometryRevision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "created_at",
+        "geometry_hash_scope",
+        "geometry_sha256",
+        "id",
+        "import_recipe",
+        "operator",
+        "qc",
+        "source_asset_ids"
+      ],
+      "properties": {
+        "created_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "geometry_hash_scope": {
+          "const": "positions-f64le+triangles-i32le/v1"
+        },
+        "geometry_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "import_recipe": {
+          "$ref": "#/$defs/meshImportRecipe"
+        },
+        "operator": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "qc": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "face_count",
+            "finite_vertices",
+            "import_admission",
+            "vertex_count"
+          ],
+          "properties": {
+            "face_count": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2000000
+            },
+            "finite_vertices": {
+              "const": true
+            },
+            "import_admission": {
+              "$ref": "urn:archmeshrubbing:schema:mesh-admission-receipt:1.0.0"
+            },
+            "vertex_count": {
+              "type": "integer",
+              "minimum": 3,
+              "maximum": 5000000
+            }
+          }
+        },
+        "source_asset_ids": {
+          "$ref": "#/$defs/stringArray"
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "align_ancestry",
+        "align_revision",
+        "dependency_closure",
+        "document",
+        "geometry_revision",
+        "record",
+        "source_assets",
+        "source_metadata_revision"
+      ],
+      "properties": {
+        "align_ancestry": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4096,
+          "uniqueItems": true,
+          "prefixItems": [
+            {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/alignRevision"
+                },
+                {
+                  "properties": {
+                    "matrix4x4": {
+                      "const": [
+                        [
+                          1,
+                          0,
+                          0,
+                          0
+                        ],
+                        [
+                          0,
+                          1,
+                          0,
+                          0
+                        ],
+                        [
+                          0,
+                          0,
+                          1,
+                          0
+                        ],
+                        [
+                          0,
+                          0,
+                          0,
+                          1
+                        ]
+                      ]
+                    },
+                    "parent_id": {
+                      "type": "null"
+                    },
+                    "recipe": {
+                      "const": {
+                        "kind": "initial_identity"
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          ],
+          "items": {
+            "$ref": "#/$defs/alignRevision"
+          }
+        },
+        "align_revision": {
+          "$ref": "#/$defs/alignRevision"
+        },
+        "dependency_closure": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/dependencyReceipt"
+          }
+        },
+        "document": {
+          "$ref": "#/$defs/documentReceipt"
+        },
+        "geometry_revision": {
+          "$ref": "#/$defs/geometryRevision"
+        },
+        "record": {
+          "$ref": "#/$defs/recordReceipt"
+        },
+        "source_assets": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/sourceAsset"
+          }
+        },
+        "source_metadata_revision": {
+          "$ref": "#/$defs/metadataRevision"
+        }
+      }
+    },
+    "rasterQc": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "alpha_binary",
+        "covered_gray_max",
+        "covered_gray_min",
+        "covered_pixel_count",
+        "height_pixels",
+        "ink_sum",
+        "inked_pixel_count",
+        "pixel_count",
+        "pixel_format",
+        "pixels_per_meter",
+        "raster_sha256",
+        "raw_pixel_sha256",
+        "width_pixels"
+      ],
+      "properties": {
+        "alpha_binary": {
+          "const": true
+        },
+        "covered_gray_max": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "covered_gray_min": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "covered_pixel_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8000000
+        },
+        "height_pixels": {
+          "$ref": "urn:archmeshrubbing:schema:rubbing-receipt:1.0.0#/$defs/dimensionPixels"
+        },
+        "ink_sum": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2040000000
+        },
+        "inked_pixel_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 8000000
+        },
+        "pixel_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8000000
+        },
+        "pixel_format": {
+          "const": "grayscale-alpha-8/v1"
+        },
+        "pixels_per_meter": {
+          "$ref": "urn:archmeshrubbing:schema:rubbing-receipt:1.0.0#/$defs/pixelsPerMeter"
+        },
+        "raster_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "raw_pixel_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "width_pixels": {
+          "$ref": "urn:archmeshrubbing:schema:rubbing-receipt:1.0.0#/$defs/dimensionPixels"
+        },
+        "development_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "recordQc": {
+      "type": "object",
+      "required": [
+        "alpha_binary",
+        "covered_gray_max",
+        "covered_gray_min",
+        "covered_pixel_count",
+        "height_pixels",
+        "ink_sum",
+        "inked_pixel_count",
+        "pixel_count",
+        "pixel_format",
+        "pixels_per_meter",
+        "raster_sha256",
+        "raw_pixel_sha256",
+        "width_pixels"
+      ],
+      "properties": {
+        "all_projected_faces_included": {
+          "const": true
+        },
+        "alpha_binary": {
+          "const": true
+        },
+        "artboard_height_pixels": {
+          "$ref": "urn:archmeshrubbing:schema:rubbing-receipt:1.0.0#/$defs/dimensionPixels"
+        },
+        "artboard_width_pixels": {
+          "$ref": "urn:archmeshrubbing:schema:rubbing-receipt:1.0.0#/$defs/dimensionPixels"
+        },
+        "covered_gray_max": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "covered_gray_min": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "covered_pixel_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8000000
+        },
+        "depth_span_quantized_ticks": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1099511627776
+        },
+        "depth_span_unquantized_um_rounded": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "height_pixels": {
+          "$ref": "urn:archmeshrubbing:schema:rubbing-receipt:1.0.0#/$defs/dimensionPixels"
+        },
+        "ink_sum": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2040000000
+        },
+        "inked_pixel_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 8000000
+        },
+        "input_face_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2000000
+        },
+        "input_vertex_count": {
+          "type": "integer",
+          "minimum": 3,
+          "maximum": 5000000
+        },
+        "maximum_second_layer_gap_um_rounded": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "multi_layer_pixel_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 8000000
+        },
+        "pixel_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8000000
+        },
+        "pixel_format": {
+          "const": "grayscale-alpha-8/v1"
+        },
+        "pixels_per_meter": {
+          "$ref": "urn:archmeshrubbing:schema:rubbing-receipt:1.0.0#/$defs/pixelsPerMeter"
+        },
+        "projected_nonzero_area_face_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2000000
+        },
+        "projected_zero_area_face_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2000000
+        },
+        "raster_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "raw_pixel_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "sampling_applied": {
+          "const": false
+        },
+        "triangle_pixel_test_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 250000000
+        },
+        "view": {
+          "$ref": "#/$defs/view"
+        },
+        "width_pixels": {
+          "$ref": "urn:archmeshrubbing:schema:rubbing-receipt:1.0.0#/$defs/dimensionPixels"
+        },
+        "all_developed_faces_included": {
+          "const": true
+        },
+        "depth_measure": {
+          "const": "radius_about_unrolling_centre/v1"
+        },
+        "development_distortion_max_millionths": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "development_distortion_mean_millionths": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "development_face_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2000000
+        },
+        "development_record_id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "development_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "development_vertex_count": {
+          "type": "integer",
+          "minimum": 3,
+          "maximum": 2000000
+        },
+        "radius_max_um_rounded": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "radius_min_um_rounded": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": true
+    },
+    "developedRubbingRecipe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "algorithm",
+        "algorithm_version",
+        "artboard_policy",
+        "coordinate_space",
+        "depth_policy",
+        "development",
+        "kind",
+        "pixel_policy",
+        "rasterization_policy",
+        "relief_policy",
+        "resource_limits"
+      ],
+      "properties": {
+        "algorithm": {
+          "const": "archmeshrubbing.developed_local_mean_relief"
+        },
+        "algorithm_version": {
+          "const": "1.0.0"
+        },
+        "artboard_policy": {
+          "const": "development_bounds_plus_margin/v1"
+        },
+        "coordinate_space": {
+          "const": "canonical_mm_developed_raster/v1"
+        },
+        "depth_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "measure",
+            "quantization_rounding",
+            "quantization_um"
+          ],
+          "properties": {
+            "measure": {
+              "const": "radius_about_unrolling_centre/v1"
+            },
+            "quantization_rounding": {
+              "const": "nearest_ties_to_even/v1"
+            },
+            "quantization_um": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000000
+            }
+          }
+        },
+        "development": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "record_id",
+            "record_type",
+            "recipe_hash",
+            "unwrap_sha256"
+          ],
+          "properties": {
+            "record_id": {
+              "$ref": "#/$defs/nonEmptyString"
+            },
+            "record_type": {
+              "const": "surface.tile_unwrap.v1"
+            },
+            "recipe_hash": {
+              "$ref": "#/$defs/sha256"
+            },
+            "unwrap_sha256": {
+              "$ref": "#/$defs/sha256"
+            }
+          }
+        },
+        "kind": {
+          "const": "developed_rubbing"
+        },
+        "pixel_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "margin_pixels",
+            "margin_requested_um",
+            "pixel_centres",
+            "pixel_format",
+            "pixels_per_meter",
+            "pixels_per_mm",
+            "row_order"
+          ],
+          "properties": {
+            "margin_pixels": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100000000
+            },
+            "margin_requested_um": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000000
+            },
+            "pixel_centres": {
+              "const": "half_integer_global_lattice/v1"
+            },
+            "pixel_format": {
+              "const": "grayscale-alpha-8/v1"
+            },
+            "pixels_per_meter": {
+              "$ref": "urn:archmeshrubbing:schema:rubbing-receipt:1.0.0#/$defs/pixelsPerMeter"
+            },
+            "pixels_per_mm": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            },
+            "row_order": {
+              "const": "top_to_bottom_v_descending"
+            }
+          }
+        },
+        "rasterization_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "edge_rule",
+            "multi_layer_policy",
+            "projected_zero_area_faces",
+            "sampling",
+            "surface",
+            "z_tie"
+          ],
+          "properties": {
+            "edge_rule": {
+              "const": "barycentric_nonnegative_with_fixed_epsilon/v1"
+            },
+            "multi_layer_policy": {
+              "const": "frontmost_and_count_second_depth/v1"
+            },
+            "projected_zero_area_faces": {
+              "const": "drop_and_count"
+            },
+            "sampling": {
+              "const": "none"
+            },
+            "surface": {
+              "const": "developed_uv_triangles_um/v1"
+            },
+            "z_tie": {
+              "const": "geometry_invariant_max_depth"
+            }
+          }
+        },
+        "relief_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "black_point_requested_um",
+            "effective_black_point_ticks",
+            "effective_black_point_um",
+            "ink_strength_percent",
+            "minimum_reference_sample_count",
+            "polarity",
+            "reference_filter",
+            "reference_radius_pixels",
+            "reference_radius_requested_um",
+            "tone_rounding"
+          ],
+          "properties": {
+            "black_point_requested_um": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000000000
+            },
+            "effective_black_point_ticks": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100000000000
+            },
+            "effective_black_point_um": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100000000000
+            },
+            "ink_strength_percent": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 400
+            },
+            "minimum_reference_sample_count": {
+              "const": 3
+            },
+            "polarity": {
+              "enum": [
+                "raised",
+                "incised",
+                "bidirectional"
+              ]
+            },
+            "reference_filter": {
+              "const": "masked_square_local_mean_integer_integral/v1"
+            },
+            "reference_radius_pixels": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 512
+            },
+            "reference_radius_requested_um": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000000000
+            },
+            "tone_rounding": {
+              "const": "nearest_half_up_integer/v1"
+            }
+          }
+        },
+        "resource_limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "max_dimension",
+            "max_faces",
+            "max_pixels",
+            "max_triangle_pixel_tests",
+            "max_vertices"
+          ],
+          "properties": {
+            "max_dimension": {
+              "const": 100000
+            },
+            "max_faces": {
+              "const": 2000000
+            },
+            "max_pixels": {
+              "const": 8000000
+            },
+            "max_triangle_pixel_tests": {
+              "const": 250000000
+            },
+            "max_vertices": {
+              "const": 5000000
+            }
+          }
+        }
+      }
+    },
+    "view": {
+      "enum": [
+        "top",
+        "bottom",
+        "front",
+        "back",
+        "right",
+        "left"
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "recipe": {
+            "properties": {
+              "kind": {
+                "const": "developed_rubbing"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          }
+        },
+        "required": [
+          "recipe"
+        ]
+      },
+      "then": {
+        "properties": {
+          "raster_receipt": {
+            "$ref": "urn:archmeshrubbing:schema:developed-rubbing-receipt:1.0.0"
+          },
+          "provenance": {
+            "properties": {
+              "record": {
+                "properties": {
+                  "type": {
+                    "const": "raster.developed_rubbing.v1"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "recipe": {
+            "properties": {
+              "kind": {
+                "const": "digital_rubbing"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          }
+        },
+        "required": [
+          "recipe"
+        ]
+      },
+      "then": {
+        "properties": {
+          "raster_receipt": {
+            "$ref": "urn:archmeshrubbing:schema:rubbing-receipt:1.0.0"
+          },
+          "provenance": {
+            "properties": {
+              "record": {
+                "properties": {
+                  "type": {
+                    "const": "raster.digital_rubbing.v1"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

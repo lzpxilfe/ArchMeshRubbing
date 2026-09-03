@@ -581,11 +581,11 @@ class TestRubbingExport(unittest.TestCase):
         self.assertEqual(bundle.pixels_per_meter, 10_000)
         self.assertEqual(
             bundle.png_sha256,
-            "66d648c29392388c67a6d2e3ff9f8b54a44386e305783b23ad2d84485820f475",
+            "e83dc5d753bf7ca4bee163d70617524548a800424b39114fa3c60569dce69679",
         )
         self.assertEqual(
             bundle.sidecar_sha256,
-            "e77e683cb5eab9790928869e7e034bea1971c8e59948f1dbd450aa70c422331e",
+            "e7c4b2af4140e309b0f91b9a4814ec88f1c0a7149431ca5b8129a60ef13df275",
         )
         pixels, ppm, metadata = decode_canonical_ga8_png(bundle.png_bytes)
         np.testing.assert_array_equal(pixels, computation.raster.pixels)

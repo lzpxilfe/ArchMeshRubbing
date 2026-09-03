@@ -317,6 +317,17 @@ from src.core.artifact_vector_extractor import (  # noqa: E402
 from src.core.artifact_outline_extractor import (  # noqa: E402
     DEFAULT_OUTLINE_PRECISION_GRID_MM,
 )
+from src.core.artifact_developed_rubbing import (  # noqa: E402
+    ArtifactDevelopedRubbingError,
+    DEVELOPED_RUBBING_RECORD_TYPE,
+    DevelopedRubbingComputation,
+    DevelopedRubbingRaster,
+    compute_developed_rubbing_from_recipe,
+    developed_rubbing_receipt_from_record,
+    development_record_for_recipe,
+    estimate_developed_rubbing_resources,
+    require_current_developed_rubbing_computation,
+)
 from src.core.artifact_rubbing_extractor import (  # noqa: E402
     ArtifactRubbingComputation,
     ArtifactRubbingError,
@@ -4001,6 +4012,7 @@ class SectionPanel(QWidget):
     nativeTileUnwrapRequested = pyqtSignal()
     nativeTileUnwrapRecordSelected = pyqtSignal(str)
     nativeTileUnwrapExportRequested = pyqtSignal()
+    nativeDevelopedRubbingRequested = pyqtSignal()
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -4616,6 +4628,24 @@ class SectionPanel(QWidget):
             self.nativeTileUnwrapExportRequested.emit
         )
         native_layout.addWidget(self.btn_native_tile_unwrap_export)
+        self.btn_native_developed_rubbing = QPushButton(
+            "선택한 전개 위에 탁본 계산 · 기록"
+        )
+        set_pixel_icon(self.btn_native_developed_rubbing, "rubbing")
+        self.btn_native_developed_rubbing.setEnabled(False)
+        self.btn_native_developed_rubbing.setToolTip(
+            "선택한 전개 record의 펴진 좌표 (u, v) 위에 요철을 탁본으로 그립니다. "
+            "깊이는 전개 중심(정치한 회전축 또는 단면 중심)에서 잰 반지름이고, "
+            "해상도·기준 반경·검정 기준 깊이·먹 농도·극성은 위 디지털 탁본 항목의 "
+            "값을 그대로 씁니다.\n"
+            "결과는 탁본 기록 목록에 '전개 탁본'으로 들어가며, 같은 1:1 PNG "
+            "패키지로 내보냅니다. 여섯 뷰 정사영이 옆에서 본 만큼 줄여 그리는 "
+            "굴곡면을, 종이가 붙은 그대로 펴서 그린 것입니다."
+        )
+        self.btn_native_developed_rubbing.clicked.connect(
+            self.nativeDevelopedRubbingRequested.emit
+        )
+        native_layout.addWidget(self.btn_native_developed_rubbing)
         self.label_native_tile_unwrap_preview = QLabel(
             "전개 미리보기는 여기에 표시됩니다.\n"
             "화면 이미지는 측정 권위가 아니며 µm 좌표 record를 다시 계산합니다."
@@ -5189,6 +5219,9 @@ class MainWindow(QMainWindow):
         )
         self.section_panel.nativeTileUnwrapExportRequested.connect(
             self.on_native_tile_unwrap_export_requested
+        )
+        self.section_panel.nativeDevelopedRubbingRequested.connect(
+            self.on_native_developed_rubbing_requested
         )
 
         self.viewport.lineProfileUpdated.connect(self.section_panel.update_line_profile)
@@ -17565,9 +17598,13 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _native_rubbing_record_is_exportable(session, record) -> bool:
+        # A rubbing on a developed surface is listed, previewed, and packaged
+        # through the same path as the six-view rubbing; the record type says
+        # which recipe reproduces it.
         return bool(
             isinstance(session, ArtifactSession)
-            and getattr(record, "type", None) == RUBBING_RECORD_TYPE
+            and getattr(record, "type", None)
+            in {RUBBING_RECORD_TYPE, DEVELOPED_RUBBING_RECORD_TYPE}
             and str(record.lifecycle_status.value) == "ready"
             and session.document.record_freshness(record.id).value == "fresh"
         )
@@ -17654,6 +17691,16 @@ class MainWindow(QMainWindow):
         )
         panel.label_native_rubbing_info.setText("READY + FRESH 탁본 기록 없음")
 
+    def _set_native_tile_unwrap_actions_enabled(self, enabled: bool) -> None:
+        """The 1:1 export and the rubbing on the development share one gate: a
+        READY + FRESH tile-unwrap record chosen and re-verified in the panel."""
+
+        panel = self.section_panel
+        panel.btn_native_tile_unwrap_export.setEnabled(bool(enabled))
+        developed = getattr(panel, "btn_native_developed_rubbing", None)
+        if developed is not None:
+            developed.setEnabled(bool(enabled))
+
     def _clear_native_tile_unwrap_preview(self) -> None:
         self._native_tile_unwrap_preview_record_id = None
         self._native_tile_unwrap_preview_document_id = None
@@ -17677,7 +17724,7 @@ class MainWindow(QMainWindow):
         self,
         session: ArtifactSession,
         record_id: str,
-        raster: DigitalRubbingRaster,
+        raster: DigitalRubbingRaster | DevelopedRubbingRaster,
     ) -> None:
         record = session.document.record_index.get(record_id)
         if record is None or not self._native_rubbing_record_is_exportable(
@@ -17686,7 +17733,17 @@ class MainWindow(QMainWindow):
             raise ArtifactRubbingError(
                 "native Digital Rubbing preview requires a READY + FRESH record"
             )
-        if raster.receipt() != rubbing_receipt_from_record(record):
+        developed = record.type == DEVELOPED_RUBBING_RECORD_TYPE
+        if developed != isinstance(raster, DevelopedRubbingRaster):
+            raise ArtifactRubbingError(
+                "native rubbing preview raster kind does not match its record"
+            )
+        receipt = (
+            developed_rubbing_receipt_from_record(record)
+            if developed
+            else rubbing_receipt_from_record(record)
+        )
+        if raster.receipt() != receipt:
             raise ArtifactRubbingError(
                 "native Digital Rubbing preview does not match its record receipt"
             )
@@ -17700,8 +17757,18 @@ class MainWindow(QMainWindow):
         )
         panel = self.section_panel
         panel.label_native_rubbing_preview.setPixmap(scaled)
+        if developed:
+            development = record.recipe.get("development")
+            development_id = (
+                str(development.get("record_id", ""))
+                if isinstance(development, Mapping)
+                else ""
+            )
+            view_text = f"전개 탁본 · 전개 {development_id}"
+        else:
+            view_text = str(record.recipe["view"])
         panel.label_native_rubbing_info.setText(
-            f"{record.recipe['view']} · {raster.width_pixels}×{raster.height_pixels} px · "
+            f"{view_text} · {raster.width_pixels}×{raster.height_pixels} px · "
             f"{raster.pixels_per_meter // 1000} px/mm · record {record.id}"
         )
         self._native_rubbing_preview_record_id = record.id
@@ -17821,13 +17888,18 @@ class MainWindow(QMainWindow):
             "vector.cutline.v1": "Cutline",
             "vector.outline.v1": "Outline",
             RUBBING_RECORD_TYPE: "Digital Rubbing",
+            DEVELOPED_RUBBING_RECORD_TYPE: "전개 탁본",
             TILE_UNWRAP_RECORD_TYPE: "Tile Unwrap",
             CONDITION_RECORD_TYPE: "상태",
         }.get(record_type, record_type or "Record")
         recipe = getattr(record, "recipe", {})
         view = ""
         if isinstance(recipe, Mapping):
-            if record_type == CONDITION_RECORD_TYPE:
+            if record_type == DEVELOPED_RUBBING_RECORD_TYPE:
+                development = recipe.get("development")
+                if isinstance(development, Mapping):
+                    view = f"전개 {str(development.get('record_id', ''))}"
+            elif record_type == CONDITION_RECORD_TYPE:
                 view = {
                     "missing": "결실",
                     "restored": "복원",
@@ -18322,7 +18394,10 @@ class MainWindow(QMainWindow):
             if self._restore_artifact_authority_fault_status():
                 return
             authoritative = current_record_if_authoritative()
-            if not isinstance(result, DigitalRubbingRaster) or authoritative is None:
+            if (
+                not isinstance(result, (DigitalRubbingRaster, DevelopedRubbingRaster))
+                or authoritative is None
+            ):
                 self._clear_native_rubbing_preview()
                 self._reset_native_record_choice(panel.combo_native_rubbing_record)
                 panel.btn_native_rubbing_export.setEnabled(False)
@@ -18394,7 +18469,7 @@ class MainWindow(QMainWindow):
         panel = self.section_panel
         if not record_id:
             self._clear_native_tile_unwrap_preview()
-            panel.btn_native_tile_unwrap_export.setEnabled(False)
+            self._set_native_tile_unwrap_actions_enabled(False)
             self.status_info.setText("기와 전개 기록 선택을 해제했습니다.")
             return
         session = getattr(self, "_artifact_session", None)
@@ -18410,7 +18485,7 @@ class MainWindow(QMainWindow):
         ):
             self._clear_native_tile_unwrap_preview()
             self._reset_native_record_choice(panel.combo_native_tile_unwrap_record)
-            panel.btn_native_tile_unwrap_export.setEnabled(False)
+            self._set_native_tile_unwrap_actions_enabled(False)
             self.status_info.setText(
                 "선택한 기와 전개 기록은 READY + FRESH 상태가 아닙니다."
             )
@@ -18418,7 +18493,7 @@ class MainWindow(QMainWindow):
         if self._artifact_measurement_controller().active_summaries:
             self._clear_native_tile_unwrap_preview()
             self._reset_native_record_choice(panel.combo_native_tile_unwrap_record)
-            panel.btn_native_tile_unwrap_export.setEnabled(False)
+            self._set_native_tile_unwrap_actions_enabled(False)
             self.status_info.setText(
                 "진행·보류 중인 실측 결과를 먼저 완료하거나 해제하세요."
             )
@@ -18428,7 +18503,7 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._clear_native_tile_unwrap_preview()
             self._reset_native_record_choice(panel.combo_native_tile_unwrap_record)
-            panel.btn_native_tile_unwrap_export.setEnabled(False)
+            self._set_native_tile_unwrap_actions_enabled(False)
             self.status_info.setText(f"기와 전개 기록 권위 확인 실패: {exc}")
             return
 
@@ -18437,7 +18512,7 @@ class MainWindow(QMainWindow):
         self._native_tile_unwrap_preview_pending_record_id = record_id
         self._native_tile_unwrap_preview_pending_record = record
         self._native_tile_unwrap_preview_pending_token = preview_token
-        panel.btn_native_tile_unwrap_export.setEnabled(False)
+        self._set_native_tile_unwrap_actions_enabled(False)
 
         def owns_preview_request() -> bool:
             return (
@@ -18487,7 +18562,7 @@ class MainWindow(QMainWindow):
                 self._reset_native_record_choice(
                     panel.combo_native_tile_unwrap_record
                 )
-                panel.btn_native_tile_unwrap_export.setEnabled(False)
+                self._set_native_tile_unwrap_actions_enabled(False)
                 self.status_info.setText(
                     "늦은 기와 전개 미리보기 폐기 | 현재 문서 유지"
                 )
@@ -18504,10 +18579,10 @@ class MainWindow(QMainWindow):
                 self._reset_native_record_choice(
                     panel.combo_native_tile_unwrap_record
                 )
-                panel.btn_native_tile_unwrap_export.setEnabled(False)
+                self._set_native_tile_unwrap_actions_enabled(False)
                 self.status_info.setText(f"기와 전개 미리보기 실패: {exc}")
                 return
-            panel.btn_native_tile_unwrap_export.setEnabled(True)
+            self._set_native_tile_unwrap_actions_enabled(True)
             self.status_info.setText(f"기와 전개 기록 선택: {current_record.id}")
 
         def on_failed(message: str) -> None:
@@ -18522,7 +18597,7 @@ class MainWindow(QMainWindow):
                 return
             self._clear_native_tile_unwrap_preview()
             self._reset_native_record_choice(panel.combo_native_tile_unwrap_record)
-            panel.btn_native_tile_unwrap_export.setEnabled(False)
+            self._set_native_tile_unwrap_actions_enabled(False)
             self.status_info.setText("기와 전개 기록 재계산 실패")
             QMessageBox.warning(
                 self,
@@ -18550,7 +18625,7 @@ class MainWindow(QMainWindow):
                 return
             self._clear_native_tile_unwrap_preview()
             self._reset_native_record_choice(panel.combo_native_tile_unwrap_record)
-            panel.btn_native_tile_unwrap_export.setEnabled(False)
+            self._set_native_tile_unwrap_actions_enabled(False)
             if not self._restore_artifact_authority_fault_status():
                 self.status_info.setText("기와 전개 미리보기 시작 실패")
                 QMessageBox.warning(
@@ -18562,7 +18637,7 @@ class MainWindow(QMainWindow):
         if not started and owns_preview_request():
             self._clear_native_tile_unwrap_preview()
             self._reset_native_record_choice(panel.combo_native_tile_unwrap_record)
-            panel.btn_native_tile_unwrap_export.setEnabled(False)
+            self._set_native_tile_unwrap_actions_enabled(False)
 
     def _sync_native_cutline_controls(self, *, reset_offset: bool) -> None:
         panel = getattr(self, "section_panel", None)
@@ -18579,7 +18654,7 @@ class MainWindow(QMainWindow):
             panel.btn_native_condition.setEnabled(False)
             panel.btn_native_vector_export.setEnabled(False)
             panel.btn_native_rubbing_export.setEnabled(False)
-            panel.btn_native_tile_unwrap_export.setEnabled(False)
+            self._set_native_tile_unwrap_actions_enabled(False)
             self._clear_native_vector_preview()
             self._clear_native_rubbing_preview()
             self._clear_native_tile_unwrap_preview()
@@ -18591,7 +18666,7 @@ class MainWindow(QMainWindow):
             panel.btn_native_condition.setEnabled(False)
             panel.btn_native_vector_export.setEnabled(False)
             panel.btn_native_rubbing_export.setEnabled(False)
-            panel.btn_native_tile_unwrap_export.setEnabled(False)
+            self._set_native_tile_unwrap_actions_enabled(False)
             self._clear_native_vector_preview()
             self._clear_native_rubbing_preview()
             self._clear_native_tile_unwrap_preview()
@@ -18678,7 +18753,7 @@ class MainWindow(QMainWindow):
         self._refresh_native_record_selectors(session)
         panel.btn_native_vector_export.setEnabled(current_vector is not None)
         panel.btn_native_rubbing_export.setEnabled(current_rubbing is not None)
-        panel.btn_native_tile_unwrap_export.setEnabled(
+        self._set_native_tile_unwrap_actions_enabled(
             current_tile_unwrap is not None
         )
         preview_id = getattr(self, "_native_rubbing_preview_record_id", None)
@@ -18866,6 +18941,13 @@ class MainWindow(QMainWindow):
                 f"상태 기록 | {condition_label} · "
                 f"{int(computation.qc.get('face_count', 0)):,}면 · "
                 f"뷰 {int(computation.qc.get('projected_view_count', 0))}/6"
+            )
+        elif work_item.kind is MeasurementOperationKind.DEVELOPED_RUBBING:
+            assert isinstance(computation, DevelopedRubbingComputation)
+            status_text = (
+                f"전개 탁본 기록 | 전개 {computation.development_record_id} · "
+                f"{computation.raster.width_pixels}×{computation.raster.height_pixels} px · "
+                f"ink {int(computation.qc.get('inked_pixel_count', 0))} px"
             )
         else:  # pragma: no cover - closed enum guard
             raise ArtifactWorkbenchError(
@@ -20296,6 +20378,40 @@ class MainWindow(QMainWindow):
             raise ArtifactRubbingExportError(
                 "no READY + FRESH Digital Rubbing record to export"
             )
+        if record.type == DEVELOPED_RUBBING_RECORD_TYPE:
+            mesh = session.source_mesh
+            try:
+                _development, development_receipt = development_record_for_recipe(
+                    session.document,
+                    record.recipe,
+                )
+                developed_estimate = estimate_developed_rubbing_resources(
+                    development_receipt,
+                    record.recipe,
+                    source_vertex_count=int(mesh.vertices.shape[0]),
+                    source_face_count=int(mesh.faces.shape[0]),
+                    source_geometry_bytes=int(mesh.vertices.nbytes + mesh.faces.nbytes),
+                )
+                if (
+                    developed_estimate.estimated_peak_bytes
+                    > DEFAULT_RUBBING_MEMORY_BUDGET_BYTES
+                ):
+                    raise ArtifactRubbingExportError(
+                        "developed rubbing recomputation exceeds the local 1 GiB "
+                        "memory budget"
+                    )
+                developed = compute_developed_rubbing_from_recipe(session, record.recipe)
+                require_current_developed_rubbing_computation(session, developed)
+                if developed.raster.receipt() != developed_rubbing_receipt_from_record(
+                    record
+                ):
+                    raise ArtifactRubbingExportError(
+                        "recomputed developed rubbing raster does not match its "
+                        "record receipt"
+                    )
+            except ArtifactDevelopedRubbingError as exc:
+                raise ArtifactRubbingExportError(str(exc)) from exc
+            return developed.raster
         snapshot = session.projection_snapshot()
         estimate = estimate_digital_rubbing_resources(
             session.source_mesh.vertices,
@@ -20367,6 +20483,124 @@ class MainWindow(QMainWindow):
         except ArtifactExportError as exc:
             raise ArtifactRubbingExportError(str(exc)) from exc
 
+    def on_native_developed_rubbing_requested(self) -> None:
+        """Draw a rubbing on the tile-unwrap record chosen in the panel."""
+
+        panel = self.section_panel
+        try:
+            obj = self.viewport.selected_obj
+            session = self._require_native_measurement_session(obj)
+            preflight = self._capture_native_scene_preflight(session)
+            development_id = str(
+                panel.combo_native_tile_unwrap_record.currentData() or ""
+            )
+            development = (
+                session.document.record_index.get(development_id)
+                if development_id
+                else None
+            )
+            if development is None or not self._native_tile_unwrap_record_is_exportable(
+                session, development
+            ):
+                raise ArtifactSessionError(
+                    "전개 탁본은 READY + FRESH 기와 전개 기록을 먼저 선택해야 합니다"
+                )
+            options = self._native_rubbing_options_from_panel()
+            options.pop("view", None)
+            record_id = f"record:developed-rubbing:{uuid.uuid4()}"
+            created_at = self._utc_seconds_now()
+            controller = self._artifact_measurement_controller()
+            work_item = controller.begin_developed_rubbing(
+                development_id,
+                **options,
+                record_id=record_id,
+                created_at=created_at,
+                operator="local-user",
+            )
+        except Exception as exc:
+            self.status_info.setText("전개 탁본 준비 실패 | 기존 문서 유지")
+            QMessageBox.warning(
+                self,
+                "전개 탁본 준비 실패",
+                f"{type(exc).__name__}: {exc}",
+            )
+            return
+
+        def task():
+            return self._execute_native_measurement_with_preflight(
+                preflight,
+                controller,
+                work_item,
+            )
+
+        def on_done(result: object) -> None:
+            if self._native_measurement_callback_is_terminal(
+                controller,
+                work_item,
+                label="전개 탁본",
+            ):
+                return
+            try:
+                if not isinstance(result, ArtifactMeasurementResult):
+                    raise ArtifactWorkbenchError("전개 탁본 worker result is invalid")
+                self._publish_native_measurement_result(work_item, result)
+            except Exception as exc:
+                if self._report_artifact_authority_callback_failure(
+                    context="전개 탁본 결과 게시 중 권위 확인 실패",
+                    detail=f"{type(exc).__name__}: {exc}",
+                ):
+                    return
+                pending = self._native_measurement_publication_is_pending(work_item)
+                self.status_info.setText(
+                    "전개 탁본 결과 게시 보류 | 재시도 버튼 사용"
+                    if pending
+                    else "늦은 전개 탁본 결과 폐기 | 현재 문서 유지"
+                )
+                QMessageBox.warning(
+                    self,
+                    "전개 탁본 결과 게시 보류" if pending else "전개 탁본 결과 폐기",
+                    f"{type(exc).__name__}: {exc}",
+                )
+
+        def on_failed(message: str) -> None:
+            if self._report_artifact_authority_callback_failure(
+                context="전개 탁본 worker 종료 콜백",
+                detail=str(message),
+            ):
+                return
+            if self._native_measurement_callback_is_terminal(
+                controller,
+                work_item,
+                label="전개 탁본",
+            ):
+                return
+            self.status_info.setText("전개 탁본 계산 실패 | 기존 문서 유지")
+            QMessageBox.warning(
+                self,
+                "전개 탁본 계산 실패",
+                self._format_error_message("전개 탁본 계산 중 오류가 발생했습니다:", message),
+            )
+
+        self.status_info.setText("전개 탁본 계산 중 · 전개를 재계산해 검증한 뒤 요철을 그립니다...")
+        started = self._start_task(
+            title="전개 탁본",
+            label="전개 좌표 위에 1:1 탁본 raster 계산 중...",
+            thread=TaskThread("native_developed_rubbing", task),
+            on_done=on_done,
+            on_failed=on_failed,
+            on_cancel_requested=lambda: self._request_native_measurement_cancel(
+                controller,
+                work_item,
+                label="전개 탁본",
+            ),
+            on_shutdown_joined=lambda: self._verify_native_measurement_shutdown(
+                controller,
+                work_item,
+            ),
+        )
+        if not started:
+            controller.cancel(work_item, reason="task_not_started")
+
     def on_native_rubbing_export_requested(self) -> None:
         session = getattr(self, "_artifact_session", None)
         record = self._current_native_rubbing_record()
@@ -20387,8 +20621,13 @@ class MainWindow(QMainWindow):
             self.status_info.setText(f"Digital Rubbing 내보내기 차단: {exc}")
             return
         source_path = Path(str(self.current_filepath or "artifact"))
+        package_stem = (
+            "developed-rubbing"
+            if record.type == DEVELOPED_RUBBING_RECORD_TYPE
+            else "digital-rubbing"
+        )
         default_path = source_path.with_name(
-            f"{source_path.stem}-digital-rubbing{RUBBING_EXPORT_DIRECTORY_SUFFIX}"
+            f"{source_path.stem}-{package_stem}{RUBBING_EXPORT_DIRECTORY_SUFFIX}"
         )
         selected, _filter = QFileDialog.getSaveFileName(
             self,
