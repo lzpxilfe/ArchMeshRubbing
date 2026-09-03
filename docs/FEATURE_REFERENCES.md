@@ -27,6 +27,7 @@
 | Feature | Core approach | Reference IDs | Type | Status | Main code |
 |---|---|---|---|---|---|
 | 디지털 탁본 | 6면 정사영 front-depth raster + 정수 µm 양자화 + masked square local-mean relief (summed-area table) | `[R10]`, `[R11]` | paper + engineering contract | native | `src/core/artifact_rubbing_extractor.py` (`RUBBING_ALGORITHM = archmeshrubbing.orthographic_local_mean_relief`) |
+| 회전축 기준 외면 띠 | 정치한 축을 기준으로 (자오선 각도, 면을 따라 잰 폭, 높이 범위)에서 면 집합을 자름; 법선의 바깥 방향과 두 겹의 반지름 대소를 함께 보고 외면을 가리며, 뒤집힌·감김이 뒤섞인·조각난 메쉬는 조각 크기를 알리고 거부 | `[L8]` | engineering contract | native | `src/core/artifact_surface_strip.py` |
 | 전개 탁본 | `tile_unwrap` record가 증명한 전개 좌표 (u, v) 위에 회전 중심 반지름을 깊이로 삼아 같은 local-mean relief를 그림; 전개 payload 해시로 record에 묶여 재계산·검증되고 같은 `.amr-rubbing` 패키지(sidecar 1.2.0)로 나감 | `[R10]`, `[R11]` | paper + engineering contract | native | `src/core/artifact_developed_rubbing.py` (`raster.developed_rubbing.v1`), `src/core/artifact_rubbing_export.py` |
 | 6면 외곽선 | 모든 투영 삼각형의 fixed-grid 다각형 합집합 (rasterisation·convex hull 없음) | `[L8]` | library + engineering contract | native | `src/core/artifact_outline_extractor.py` (`OUTLINE_ALGORITHM = archmeshrubbing.projected_triangle_union`) |
 | 회전축 정치 | 지름 record 2개의 원 중심을 잇는 축을 +Z로 보내는 proper rigid Align + recipe 자체 재계산 + 동축성 QC | `[R6]` | paper + engineering contract | native | `src/core/artifact_axis_alignment.py` (`rotation_axis_from_circle_records/v1`) |

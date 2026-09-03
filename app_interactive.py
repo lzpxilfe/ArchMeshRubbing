@@ -328,6 +328,10 @@ from src.core.artifact_developed_rubbing import (  # noqa: E402
     estimate_developed_rubbing_resources,
     require_current_developed_rubbing_computation,
 )
+from src.core.artifact_surface_strip import (  # noqa: E402
+    select_positioned_surface_strip,
+    strip_parameters,
+)
 from src.core.artifact_rubbing_extractor import (  # noqa: E402
     ArtifactRubbingComputation,
     ArtifactRubbingError,
@@ -4013,6 +4017,7 @@ class SectionPanel(QWidget):
     nativeTileUnwrapRecordSelected = pyqtSignal(str)
     nativeTileUnwrapExportRequested = pyqtSignal()
     nativeDevelopedRubbingRequested = pyqtSignal()
+    nativeSurfaceStripRequested = pyqtSignal()
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -4592,6 +4597,88 @@ class SectionPanel(QWidget):
             "회전축으로 정치한 문서에서만 켤 수 있습니다. 길이축은 Z로 두세요."
         )
         native_layout.addWidget(self.check_native_tile_axis_origin)
+        strip_title = QLabel("회전축 기준 외면 띠 · 세 숫자로 자르기")
+        strip_title.setStyleSheet("font-weight: bold;")
+        native_layout.addWidget(strip_title)
+        strip_form = QFormLayout()
+        self.spin_native_strip_angle_deg = QDoubleSpinBox()
+        self.spin_native_strip_angle_deg.setRange(-180.0, 179.999)
+        self.spin_native_strip_angle_deg.setDecimals(3)
+        self.spin_native_strip_angle_deg.setSingleStep(5.0)
+        self.spin_native_strip_angle_deg.setSuffix(" °")
+        self.spin_native_strip_angle_deg.setToolTip(
+            "띠의 한가운데를 지나는 자오선입니다. canonical 좌표에서 0°는 +X, "
+            "90°는 +Y 방향입니다."
+        )
+        strip_form.addRow("기준 자오선", self.spin_native_strip_angle_deg)
+        self.spin_native_strip_width_mm = QDoubleSpinBox()
+        self.spin_native_strip_width_mm.setRange(0.1, 10_000.0)
+        self.spin_native_strip_width_mm.setDecimals(3)
+        self.spin_native_strip_width_mm.setValue(20.0)
+        self.spin_native_strip_width_mm.setSuffix(" mm")
+        self.spin_native_strip_width_mm.setToolTip(
+            "종이의 폭입니다. 면을 따라 잰 폭이므로 배부른 곳에서는 각도가 좁아지고 "
+            "목에서는 넓어져, 어디서나 같은 폭의 띠가 됩니다."
+        )
+        strip_form.addRow("띠 폭", self.spin_native_strip_width_mm)
+        native_layout.addLayout(strip_form)
+        self.check_native_strip_full_revolution = QCheckBox("전체 둘레 (외면 전부)")
+        self.check_native_strip_full_revolution.setToolTip(
+            "폭을 무시하고 외면 전체를 고릅니다. 한 자오선 기준으로 360°를 펴면 "
+            "왜곡이 최대 98%까지 가므로, 도면에 쓸 탁본은 좁은 띠로 나눠 치세요."
+        )
+        self.check_native_strip_full_revolution.toggled.connect(
+            lambda checked: (
+                self.spin_native_strip_angle_deg.setEnabled(not checked),
+                self.spin_native_strip_width_mm.setEnabled(not checked),
+            )
+        )
+        native_layout.addWidget(self.check_native_strip_full_revolution)
+        self.check_native_strip_height_range = QCheckBox("높이 범위 지정")
+        native_layout.addWidget(self.check_native_strip_height_range)
+        strip_height_form = QFormLayout()
+        self.spin_native_strip_min_height_mm = QDoubleSpinBox()
+        self.spin_native_strip_min_height_mm.setRange(-100_000.0, 100_000.0)
+        self.spin_native_strip_min_height_mm.setDecimals(3)
+        self.spin_native_strip_min_height_mm.setSuffix(" mm")
+        self.spin_native_strip_min_height_mm.setEnabled(False)
+        self.spin_native_strip_max_height_mm = QDoubleSpinBox()
+        self.spin_native_strip_max_height_mm.setRange(-100_000.0, 100_000.0)
+        self.spin_native_strip_max_height_mm.setDecimals(3)
+        self.spin_native_strip_max_height_mm.setValue(100.0)
+        self.spin_native_strip_max_height_mm.setSuffix(" mm")
+        self.spin_native_strip_max_height_mm.setEnabled(False)
+        self.check_native_strip_height_range.toggled.connect(
+            lambda checked: (
+                self.spin_native_strip_min_height_mm.setEnabled(checked),
+                self.spin_native_strip_max_height_mm.setEnabled(checked),
+            )
+        )
+        strip_height_form.addRow("아래", self.spin_native_strip_min_height_mm)
+        strip_height_form.addRow("위", self.spin_native_strip_max_height_mm)
+        native_layout.addLayout(strip_height_form)
+        self.check_native_strip_largest_component = QCheckBox(
+            "떨어진 조각은 버리고 가장 큰 조각만"
+        )
+        self.check_native_strip_largest_component.setToolTip(
+            "높이로 자른 경계가 삼각형 한두 개를 떼어내는 일이 있습니다. 켜면 "
+            "가장 큰 조각만 남기고 버린 면 수를 알려줍니다. 꺼두면 조각이 갈릴 때 "
+            "각 조각의 크기를 알려주고 멈춥니다."
+        )
+        native_layout.addWidget(self.check_native_strip_largest_component)
+        self.btn_native_surface_strip = QPushButton("외면 띠 선택")
+        set_pixel_icon(self.btn_native_surface_strip, "flatten")
+        self.btn_native_surface_strip.setToolTip(
+            "정치로 잰 회전축을 기준으로 외면의 띠를 잘라 현재 선택 면으로 둡니다. "
+            "면의 법선이 축에서 바깥을 향하는지, 그리고 그 면들이 안쪽 면보다 "
+            "축에서 먼지를 함께 보고 외면을 가려냅니다. 두 신호가 어긋나면 "
+            "(뒤집힌 메쉬) 안쪽 벽을 내주는 대신 거부합니다.\n"
+            "회전축으로 정치한 문서에서만 쓸 수 있습니다."
+        )
+        self.btn_native_surface_strip.clicked.connect(
+            self.nativeSurfaceStripRequested.emit
+        )
+        native_layout.addWidget(self.btn_native_surface_strip)
         self.label_native_tile_selection = QLabel("현재 선택 0면 · 전체 사용 가능")
         self.label_native_tile_selection.setStyleSheet(
             "color: #4a5568; font-size: 10px;"
@@ -5222,6 +5309,9 @@ class MainWindow(QMainWindow):
         )
         self.section_panel.nativeDevelopedRubbingRequested.connect(
             self.on_native_developed_rubbing_requested
+        )
+        self.section_panel.nativeSurfaceStripRequested.connect(
+            self.on_native_surface_strip_requested
         )
 
         self.viewport.lineProfileUpdated.connect(self.section_panel.update_line_profile)
@@ -20482,6 +20572,88 @@ class MainWindow(QMainWindow):
             raise ArtifactRubbingExportError(str(exc)) from exc
         except ArtifactExportError as exc:
             raise ArtifactRubbingExportError(str(exc)) from exc
+
+    def _native_strip_parameters_from_panel(self) -> dict[str, Any]:
+        panel = self.section_panel
+        full = bool(panel.check_native_strip_full_revolution.isChecked())
+        ranged = bool(panel.check_native_strip_height_range.isChecked())
+        return strip_parameters(
+            longitudinal_axis="z",
+            reference_angle_microdegrees=(
+                0
+                if full
+                else int(
+                    round(float(panel.spin_native_strip_angle_deg.value()) * 1_000_000)
+                )
+            ),
+            width_um=(
+                None
+                if full
+                else int(
+                    round(float(panel.spin_native_strip_width_mm.value()) * 1000)
+                )
+            ),
+            minimum_height_um=(
+                int(round(float(panel.spin_native_strip_min_height_mm.value()) * 1000))
+                if ranged
+                else None
+            ),
+            maximum_height_um=(
+                int(round(float(panel.spin_native_strip_max_height_mm.value()) * 1000))
+                if ranged
+                else None
+            ),
+        )
+
+    def on_native_surface_strip_requested(self) -> None:
+        """Cut the outer strip from the panel's three numbers and select it."""
+
+        try:
+            obj = self.viewport.selected_obj
+            session = self._require_native_measurement_session(obj)
+            parameters = self._native_strip_parameters_from_panel()
+            selection = select_positioned_surface_strip(
+                session,
+                parameters,
+                largest_component=bool(
+                    self.section_panel.check_native_strip_largest_component.isChecked()
+                ),
+            )
+        except Exception as exc:
+            self.status_info.setText("외면 띠 선택 실패 | 기존 선택 유지")
+            QMessageBox.warning(
+                self,
+                "외면 띠 선택 실패",
+                f"{type(exc).__name__}: {exc}",
+            )
+            return
+
+        try:
+            obj.selected_faces = {int(index) for index in selection.face_indices}
+        except Exception as exc:
+            self.status_info.setText("외면 띠를 현재 선택으로 옮기지 못했습니다.")
+            QMessageBox.warning(
+                self,
+                "외면 띠 선택 실패",
+                f"{type(exc).__name__}: {exc}",
+            )
+            return
+        self.viewport.update()
+        self.on_face_selection_count_changed(selection.face_count)
+
+        qc = selection.qc_dict()
+        discarded = int(qc["discarded_component_face_count"])
+        dropped_text = (
+            "" if discarded == 0 else f" · 떨어진 조각 {discarded:,}면 버림"
+        )
+        self.status_info.setText(
+            f"외면 띠 {selection.face_count:,}면 선택{dropped_text} | "
+            f"반지름 {int(qc['minimum_radius_um']) / 1000.0:g}-"
+            f"{int(qc['maximum_radius_um']) / 1000.0:g} mm · "
+            f"높이 {int(qc['minimum_height_um']) / 1000.0:g}-"
+            f"{int(qc['maximum_height_um']) / 1000.0:g} mm · "
+            f"안쪽 면 {int(qc['inward_face_count']):,}면 제외"
+        )
 
     def on_native_developed_rubbing_requested(self) -> None:
         """Draw a rubbing on the tile-unwrap record chosen in the panel."""
