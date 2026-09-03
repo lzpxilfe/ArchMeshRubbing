@@ -125,6 +125,8 @@ def _recorded(
             n_sections=32,
         )
         recipe.pop("seam_angle_microdegrees")
+        recipe.pop("section_center_policy")
+        recipe.pop("station_policy")
         recipe["algorithm_version"] = "1.1.0"
         recipe["schema_version"] = "1.1.0"
         computation = compute_artifact_tile_unwrap_from_recipe(session, recipe)
@@ -472,7 +474,8 @@ def test_generated_sidecar_matches_closed_public_json_schema() -> None:
         assert isinstance(value, dict)
         return value
 
-    export_schema = load_schema("tile_unwrap_export-1.2.0.schema.json")
+    export_schema = load_schema("tile_unwrap_export-1.3.0.schema.json")
+    v12_export_schema = load_schema("tile_unwrap_export-1.2.0.schema.json")
     legacy_export_schema = load_schema("tile_unwrap_export-1.1.0.schema.json")
     receipt_schema = load_schema("tile_unwrap_receipt-1.1.0.schema.json")
     rubbing_export_schema = load_schema("rubbing_export-1.1.0.schema.json")
@@ -482,6 +485,7 @@ def test_generated_sidecar_matches_closed_public_json_schema() -> None:
     import_recipe_v2_schema = load_schema("mesh_import_recipe-2.0.0.schema.json")
     for schema in (
         export_schema,
+        v12_export_schema,
         legacy_export_schema,
         receipt_schema,
         rubbing_export_schema,
@@ -516,6 +520,10 @@ def test_generated_sidecar_matches_closed_public_json_schema() -> None:
         legacy_export_schema,
         registry=registry,
     )
+    v12_validator = jsonschema.Draft202012Validator(
+        v12_export_schema,
+        registry=registry,
+    )
     session, computation = _recorded()
     bundle = build_tile_unwrap_export(
         session.document,
@@ -524,8 +532,10 @@ def test_generated_sidecar_matches_closed_public_json_schema() -> None:
     )
     sidecar = json.loads(bundle.sidecar_bytes)
     assert isinstance(sidecar, dict)
-    assert sidecar["schema_version"] == "1.2.0"
+    assert sidecar["schema_version"] == "1.3.0"
     assert list(validator.iter_errors(sidecar)) == []
+    # A 1.3 recipe carries the policies, which the 1.2 sidecar never knew.
+    assert list(v12_validator.iter_errors(sidecar))
 
     fixed_session, fixed_computation = _recorded(
         seam_angle_microdegrees=90_000_000
@@ -545,7 +555,18 @@ def test_generated_sidecar_matches_closed_public_json_schema() -> None:
     fixed_recipe["seam_angle_microdegrees"] = None
     assert list(validator.iter_errors(mismatched_seam))
 
-    legacy_shaped = copy.deepcopy(sidecar)
+    v12_shaped = copy.deepcopy(sidecar)
+    v12_shaped["schema_version"] = "1.2.0"
+    v12_recipe = v12_shaped["recipe"]
+    assert isinstance(v12_recipe, dict)
+    v12_recipe.pop("section_center_policy")
+    v12_recipe.pop("station_policy")
+    v12_recipe["algorithm_version"] = "1.2.0"
+    v12_recipe["schema_version"] = "1.2.0"
+    assert list(v12_validator.iter_errors(v12_shaped)) == []
+    assert list(validator.iter_errors(v12_shaped))
+
+    legacy_shaped = copy.deepcopy(v12_shaped)
     legacy_shaped["schema_version"] = "1.1.0"
     legacy_recipe = legacy_shaped["recipe"]
     assert isinstance(legacy_recipe, dict)

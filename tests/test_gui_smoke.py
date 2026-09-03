@@ -4259,7 +4259,13 @@ def test_native_tile_unwrap_ui_requires_explicit_axis_view_and_selection() -> No
             "selected_face_indices": (1, 3, 5),
             "n_sections": 32,
             "seam_angle_microdegrees": None,
+            # The tile defaults: fitted centres and the centreline station.
+            "section_center_policy": "fit_per_section",
+            "station_policy": "centerline_arc",
         }
+        # Unrolling about the axis is offered only to an artifact stood on one.
+        assert not panel.check_native_tile_axis_origin.isEnabled()
+        assert not panel.check_native_tile_axis_origin.isChecked()
         panel.combo_native_tile_seam.setCurrentIndex(
             panel.combo_native_tile_seam.findData("fixed")
         )

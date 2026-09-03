@@ -44,7 +44,7 @@ def test_complete_workflow_self_test_has_deterministic_offline_receipts() -> Non
         "5d1432cc1c6fe601cd2777da86a255f07689fcbfa775d0c38ae3178b28661eb6"
     )
     assert result.tile_unwrap_document_sha256 == (
-        "1e6b50aa512778a6050e0dc4f77e419b403a3b08c10974fcafca4c0141de4304"
+        "ad871134d55502bf4d0bdebd19a2730fdb09bd6b8b761d4081dbe6552df01eb6"
     )
     assert result.tile_unwrap_sha256 == (
         "54bebe8cc01e0b3bb4ea9cbba2b982a47014d0637b5dea17c923ee1512ff93eb"

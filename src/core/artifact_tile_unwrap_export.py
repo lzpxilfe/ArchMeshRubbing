@@ -56,8 +56,11 @@ from .canonical_json import (
 
 
 TILE_UNWRAP_EXPORT_FORMAT = "archmeshrubbing_tile_unwrap_export"
-TILE_UNWRAP_EXPORT_SCHEMA_VERSION = "1.2.0"
+TILE_UNWRAP_EXPORT_SCHEMA_VERSION = "1.3.0"
 TILE_UNWRAP_LEGACY_EXPORT_SCHEMA_VERSION = "1.1.0"
+#: The 1.2 sidecar predates the section centre and station policies, so it
+#: can carry a 1.1 or 1.2 recipe but never a 1.3 one.
+TILE_UNWRAP_1_2_EXPORT_SCHEMA_VERSION = "1.2.0"
 TILE_UNWRAP_EXPORT_DIRECTORY_SUFFIX = ".amr-unwrap"
 TILE_UNWRAP_EXPORT_PAYLOAD_NAME = "artifact.amr-unwrap.bin"
 TILE_UNWRAP_EXPORT_OBJ_NAME = "artifact.obj"
@@ -623,6 +626,7 @@ def validate_tile_unwrap_export_bytes(
     sidecar_schema_version = root["schema_version"]
     if sidecar_schema_version not in {
         TILE_UNWRAP_EXPORT_SCHEMA_VERSION,
+        TILE_UNWRAP_1_2_EXPORT_SCHEMA_VERSION,
         TILE_UNWRAP_LEGACY_EXPORT_SCHEMA_VERSION,
     }:
         raise ArtifactTileUnwrapExportError("tile unwrap export schema is invalid")
@@ -652,6 +656,12 @@ def validate_tile_unwrap_export_bytes(
     ):
         raise ArtifactTileUnwrapExportError(
             "legacy tile unwrap export requires a legacy 1.1 recipe"
+        )
+    if sidecar_schema_version == TILE_UNWRAP_1_2_EXPORT_SCHEMA_VERSION and (
+        recipe.get("schema_version") not in {"1.1.0", "1.2.0"}
+    ):
+        raise ArtifactTileUnwrapExportError(
+            "a 1.2 tile unwrap export cannot carry a recipe newer than 1.2"
         )
     selection = recipe["selection"]
     assert isinstance(selection, Mapping)
@@ -1331,6 +1341,7 @@ __all__ = [
     "TILE_UNWRAP_EXPORT_OBJ_NAME",
     "TILE_UNWRAP_EXPORT_PAYLOAD_NAME",
     "TILE_UNWRAP_EXPORT_SCHEMA_VERSION",
+    "TILE_UNWRAP_1_2_EXPORT_SCHEMA_VERSION",
     "TILE_UNWRAP_LEGACY_EXPORT_SCHEMA_VERSION",
     "TILE_UNWRAP_EXPORT_SIDECAR_NAME",
     "TILE_UNWRAP_EXPORT_SVG_NAME",

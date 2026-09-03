@@ -153,10 +153,13 @@ def test_recipe_persists_canonical_face_ranges_and_rejects_axis_guessing() -> No
 
     assert recipe["selection"]["face_ranges"] == [[0, 2], [3, 5], [8, 9]]
     assert recipe["selection"]["selected_face_count"] == 5
-    assert recipe["algorithm_version"] == "1.2.0"
-    assert recipe["schema_version"] == "1.2.0"
+    assert recipe["algorithm_version"] == "1.3.0"
+    assert recipe["schema_version"] == "1.3.0"
     assert recipe["seam_policy"] == "minimum_angular_range_auto"
     assert recipe["seam_angle_microdegrees"] is None
+    # A tile keeps the behaviour it always had unless a policy says otherwise.
+    assert recipe["section_center_policy"] == "fit_per_section"
+    assert recipe["station_policy"] == "centerline_arc"
     assert validate_tile_unwrap_recipe(recipe) == recipe
 
     upper_bound_recipe = tile_unwrap_recipe(
@@ -201,6 +204,8 @@ def test_legacy_1_1_recipe_hash_and_recompute_are_not_upgraded() -> None:
         n_sections=24,
     )
     hash_fixture.pop("seam_angle_microdegrees")
+    hash_fixture.pop("section_center_policy")
+    hash_fixture.pop("station_policy")
     hash_fixture["algorithm_version"] = "1.1.0"
     hash_fixture["schema_version"] = "1.1.0"
 
@@ -219,6 +224,8 @@ def test_legacy_1_1_recipe_hash_and_recompute_are_not_upgraded() -> None:
     )
     legacy = dict(current_auto)
     legacy.pop("seam_angle_microdegrees")
+    legacy.pop("section_center_policy")
+    legacy.pop("station_policy")
     legacy["algorithm_version"] = "1.1.0"
     legacy["schema_version"] = "1.1.0"
 
@@ -229,6 +236,52 @@ def test_legacy_1_1_recipe_hash_and_recompute_are_not_upgraded() -> None:
     assert legacy_result.context.recipe_hash == canonical_recipe_hash(legacy)
     assert np.array_equal(legacy_result.unwrap.uv_um, current_result.unwrap.uv_um)
     assert np.array_equal(legacy_result.unwrap.faces, current_result.unwrap.faces)
+
+
+def test_legacy_1_2_recipe_keeps_its_hash_and_its_coordinates() -> None:
+    """A 1.2 record must reproduce itself after the policies were added."""
+
+    session, _truth = _aligned_session()
+    face_count = int(np.asarray(session.source_mesh.faces).shape[0])
+    current = tile_unwrap_recipe(
+        longitudinal_axis="y",
+        record_view="top",
+        total_face_count=face_count,
+        n_sections=32,
+        seam_angle_microdegrees=12_345_678,
+    )
+    legacy = dict(current)
+    legacy.pop("section_center_policy")
+    legacy.pop("station_policy")
+    legacy["algorithm_version"] = "1.2.0"
+    legacy["schema_version"] = "1.2.0"
+
+    assert validate_tile_unwrap_recipe(legacy) == legacy
+    with pytest.raises(ArtifactTileUnwrapError, match="unknown fields"):
+        validate_tile_unwrap_recipe({**legacy, "station_policy": "meridian_arc"})
+
+    legacy_result = compute_artifact_tile_unwrap_from_recipe(session, legacy)
+    current_result = compute_artifact_tile_unwrap_from_recipe(session, current)
+    assert dict(legacy_result.recipe) == legacy
+    assert legacy_result.context.recipe_hash == canonical_recipe_hash(legacy)
+    assert np.array_equal(legacy_result.unwrap.uv_um, current_result.unwrap.uv_um)
+
+
+def test_policies_are_closed_vocabularies() -> None:
+    with pytest.raises(ArtifactTileUnwrapError, match="section_center_policy"):
+        tile_unwrap_recipe(
+            longitudinal_axis="z",
+            record_view="top",
+            total_face_count=10,
+            section_center_policy="axis",
+        )
+    with pytest.raises(ArtifactTileUnwrapError, match="station_policy"):
+        tile_unwrap_recipe(
+            longitudinal_axis="z",
+            record_view="top",
+            total_face_count=10,
+            station_policy="profile",
+        )
 
 
 @pytest.mark.parametrize(

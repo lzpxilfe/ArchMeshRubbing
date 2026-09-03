@@ -31,6 +31,7 @@
 | 회전축 정치 | 지름 record 2개의 원 중심을 잇는 축을 +Z로 보내는 proper rigid Align + recipe 자체 재계산 + 동축성 QC | `[R6]` | paper + engineering contract | native | `src/core/artifact_axis_alignment.py` (`rotation_axis_from_circle_records/v1`) |
 | 단면선 | 명시 평면과 canonical-mm 삼각형의 정확 교차 + endpoint 스티칭, 모호한 경우 fail closed | - | engineering contract | native | `src/core/artifact_vector_extractor.py` |
 | 외곽선 topology 검증 | ring simple/area, hole ownership, 성분 비중첩 증명 | `[L8]` | library | native | `src/core/artifact_outline_topology.py` |
+| 토기 외면 띠 전개 | 정치로 잰 회전축을 단면 중심으로 고정하고 세로축을 자오선 길이로 잰 sectionwise 전개 (원 맞춤 없음) + 폭별 왜곡 QC | `[R6]` | paper + engineering contract | native | `src/core/flatten_models_sectionwise.py` (`section_center="axis_origin"`, `station="meridian"`), `src/core/artifact_tile_unwrap_extractor.py` (recipe 1.3.0) |
 | 정식 기와 전개 record | explicit canonical axis + exact face selection + 1 µm quantization + no-fallback quality gate | `[R4]`, `[R6]` | paper + heuristic | native | `src/core/artifact_tile_unwrap_extractor.py`, `src/core/artifact_tile_unwrap_record.py` |
 | sectionwise 펼침 | longitudinal axis + repeated cross-sections + local circular fits | `[R4]`, `[R6]` | paper + heuristic | native | `src/core/flatten_models_sectionwise.py` |
 | distortion summary | per-face distortion aggregation for QC gate | `[R1]`, `[R4]` | paper + heuristic | native | `src/core/flatten_metrics.py` |

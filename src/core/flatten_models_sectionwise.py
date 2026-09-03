@@ -335,7 +335,12 @@ def sectionwise_quality_gate(
         return True, "section_fit_too_sparse"
     if centerline <= 1e-9 or spacing <= 1e-9:
         return True, "section_trace_degenerate"
-    if mean_span_rad < float(np.deg2rad(20.0)):
+    # A narrow arc cannot support a circle fit; when the centre is the
+    # measured axis no fit is made, and a 10 mm strip on a pot is exactly the
+    # narrow arc this exists to refuse.  Distortion still gates it below.
+    if str(info.get("section_center_policy", "fit")) != "axis_origin" and (
+        mean_span_rad < float(np.deg2rad(20.0))
+    ):
         return True, "section_arc_span_too_small"
 
     dist = dict(distortion_summary or {})
@@ -360,10 +365,32 @@ def sectionwise_cylindrical_parameterization(
     section_guides: list[dict[str, Any]] | None = None,
     record_view: str | None = None,
     seam_angle_microdegrees: int | None = None,
+    section_center: str = "fit",
+    station: str = "centerline",
     return_meta: bool = False,
     cancellation_probe: CancellationProbe | None = None,
 ) -> np.ndarray | tuple[np.ndarray, dict[str, Any]]:
-    """Section-wise cylindrical unwrap for roof-tile like shapes."""
+    """Section-wise cylindrical unwrap for roof-tile like shapes.
+
+    ``section_center`` decides where each section's circle centre comes from.
+    ``"fit"`` estimates it from the section's own points, which is right for a
+    tile whose axis is only roughly known and whose sections are wide arcs.
+    ``"axis_origin"`` fixes it on the axis through the canonical origin, which
+    is right for a vessel that has been stood on its measured rotation axis:
+    a narrow meridional strip leaves each section only a short arc, and a
+    circle fitted to a short arc collapses to a small circle through the
+    points, unrolling the strip about a centre that is not the pot's.
+
+    ``station`` decides what the v axis measures.  ``"centerline"`` is the
+    length along the sequence of section centres, which for a straight axis is
+    the axial height.  ``"meridian"`` is the length along the profile, adding
+    the change in section radius to each step - what a paper strip laid on a
+    belly actually spans.
+    """
+    if section_center not in {"fit", "axis_origin"}:
+        raise ValueError("section_center must be 'fit' or 'axis_origin'")
+    if station not in {"centerline", "meridian"}:
+        raise ValueError("station must be 'centerline' or 'meridian'")
     if seam_angle_microdegrees is None:
         fixed_seam_angle_rad: float | None = None
     else:
@@ -571,6 +598,7 @@ def sectionwise_cylindrical_parameterization(
         poll_cancellation(cancellation_probe, i, interval=1)
         dist = np.abs(s_valid - float(s0))
         local_idx = np.flatnonzero(dist <= section_window).astype(np.int32, copy=False)
+        window_idx = local_idx
         if local_idx.size < min_fit_points:
             k = int(min(max(min_fit_points, nearest_k), s_valid.size))
             if k <= 0:
@@ -580,6 +608,33 @@ def sectionwise_cylindrical_parameterization(
             else:
                 local_idx = np.argpartition(dist, k - 1)[:k].astype(np.int32, copy=False)
         if local_idx.size < 3:
+            continue
+
+        if section_center == "axis_origin":
+            # A fit needs many points, so the tile path widens a thin section
+            # to its nearest neighbours.  A radius does not: one ring is
+            # enough, and neighbours from other heights carry other radii
+            # that would bend the profile the meridian is measured along.
+            radius_idx = window_idx if window_idx.size > 0 else local_idx
+            rr_axis = np.hypot(x_valid[radius_idx], y_valid[radius_idx])
+            ss_axis = s_valid[radius_idx]
+            keep = np.isfinite(rr_axis) & np.isfinite(ss_axis)
+            rr_axis = rr_axis[keep]
+            ss_axis = ss_axis[keep]
+            cx[i] = 0.0
+            cy[i] = 0.0
+            # The window usually straddles two rings of different radius; a
+            # median would answer with one ring's radius, and the profile the
+            # meridian is measured along would step instead of slope.  A line
+            # through the window evaluated at the station follows the profile.
+            radius_at_station = np.nan
+            if rr_axis.size >= 2 and float(np.ptp(ss_axis)) > 1e-9:
+                slope, intercept = np.polyfit(ss_axis - float(s0), rr_axis, 1)
+                radius_at_station = float(intercept)
+            elif rr_axis.size:
+                radius_at_station = float(np.median(rr_axis))
+            r_sec[i] = radius_at_station
+            fit_ok[i] = bool(np.isfinite(radius_at_station))
             continue
 
         x_sel = np.asarray(x_valid[local_idx], dtype=np.float64)
@@ -632,7 +687,13 @@ def sectionwise_cylindrical_parameterization(
 
     cx = _smooth_finite_series(cx, passes=2)
     cy = _smooth_finite_series(cy, passes=2)
-    r_sec = _smooth_finite_series(r_sec, passes=2)
+    if section_center == "axis_origin":
+        # The medians are already robust, and smoothing a radius profile
+        # flattens the belly it is supposed to measure.
+        r_sec = np.where(np.isfinite(r_sec), r_sec, np.nan)
+        r_sec = _smooth_finite_series(r_sec, passes=0)
+    else:
+        r_sec = _smooth_finite_series(r_sec, passes=2)
     raise_if_cancelled(cancellation_probe)
 
     mean_center = (float(np.mean(cx)) * b1) + (float(np.mean(cy)) * b2)
@@ -684,6 +745,17 @@ def sectionwise_cylindrical_parameterization(
     centerline_arc = np.zeros((s_sections.size,), dtype=np.float64)
     if centerline.shape[0] >= 2:
         centerline_arc[1:] = np.cumsum(np.linalg.norm(np.diff(centerline, axis=0), axis=1))
+    if station == "meridian" and s_sections.size >= 2:
+        # Paper follows the profile, not the axis.  Each step along the
+        # centreline is lengthened by the change in section radius, so a strip
+        # laid on a belly comes out as long as the surface it covered.
+        radius_profile = np.asarray(r_sec, dtype=np.float64).reshape(-1)
+        meridian_steps = np.hypot(
+            np.linalg.norm(np.diff(centerline, axis=0), axis=1),
+            np.diff(radius_profile),
+        )
+        meridian_steps = np.where(np.isfinite(meridian_steps), meridian_steps, 0.0)
+        centerline_arc = np.concatenate(([0.0], np.cumsum(meridian_steps)))
 
     cx_v = np.interp(s_raw, s_sections, cx)
     cy_v = np.interp(s_raw, s_sections, cy)
@@ -696,7 +768,22 @@ def sectionwise_cylindrical_parameterization(
     x = x0[finite] - cx_v[finite]
     y = y0[finite] - cy_v[finite]
     theta = np.arctan2(y, x)
-    theta_wrapped = np.mod(theta - seam_v[finite], 2.0 * np.pi)
+    if section_center == "axis_origin":
+        # A strip is unrolled about its own centre meridian, so that u is zero
+        # on that meridian at every height.  Measuring from the seam instead
+        # would put an offset of (seam angle) x r(z) on every row, which on a
+        # pot is a shear the tile row-shift search then has to undo, and does
+        # not undo exactly.  A fixed seam names the cut, which sits opposite.
+        if fixed_seam_angle_rad is None:
+            theta_ref = float(
+                np.arctan2(np.mean(np.sin(theta)), np.mean(np.cos(theta)))
+            )
+        else:
+            theta_ref = float(fixed_seam_angle_rad + np.pi)
+        theta_wrapped = np.mod(theta - theta_ref + np.pi, 2.0 * np.pi) - np.pi
+        seams.fill(float(np.mod(theta_ref + np.pi, 2.0 * np.pi)))
+    else:
+        theta_wrapped = np.mod(theta - seam_v[finite], 2.0 * np.pi)
     r_local = np.hypot(x, y)
     finite_radius = np.isfinite(r_local) & (r_local > 1e-9)
     if not bool(np.all(finite_radius)):
@@ -705,15 +792,24 @@ def sectionwise_cylindrical_parameterization(
         r_local = np.where(finite_radius, r_local, radius_fill)
     u[finite] = theta_wrapped * r_local
     v_out[finite] = v[finite]
-    u, row_shift_meta = _correct_section_row_shift(
-        vertices=vertices[:, :3],
-        faces=np.asarray(mesh.faces, dtype=np.int32),
-        station=s_raw,
-        section_stations=s_sections,
-        u=u,
-        v=v_out,
-        cancellation_probe=cancellation_probe,
-    )
+    if section_center == "axis_origin":
+        # With the centre known there is no lost shear to recover; a search
+        # for one can only move rows away from where the axis put them.
+        row_shift_meta = {
+            "section_row_shift_applied": False,
+            "section_row_shift_max_world": 0.0,
+            "section_row_shift_station_count": 0,
+        }
+    else:
+        u, row_shift_meta = _correct_section_row_shift(
+            vertices=vertices[:, :3],
+            faces=np.asarray(mesh.faces, dtype=np.int32),
+            station=s_raw,
+            section_stations=s_sections,
+            u=u,
+            v=v_out,
+            cancellation_probe=cancellation_probe,
+        )
     raise_if_cancelled(cancellation_probe)
 
     record_view_key = str(record_view or "").strip().lower()
@@ -755,6 +851,8 @@ def sectionwise_cylindrical_parameterization(
             "section_mean_span_deg": float(np.rad2deg(mean_span_rad)),
             "section_seam_hint": None if seam_hint is None else float(seam_hint),
             "section_fixed_seam_angle_microdegrees": seam_angle_microdegrees,
+            "section_center_policy": section_center,
+            "section_station_policy": station,
             "section_record_view": record_view_key,
             "section_u_flipped": bool(flip_u),
             **row_shift_meta,

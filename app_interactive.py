@@ -348,6 +348,10 @@ from src.core.artifact_tile_unwrap_export import (  # noqa: E402
     TILE_UNWRAP_EXPORT_DIRECTORY_SUFFIX,
 )
 from src.core.artifact_tile_unwrap_extractor import (  # noqa: E402
+    SECTION_CENTER_CANONICAL_AXIS,
+    SECTION_CENTER_FIT_PER_SECTION,
+    STATION_CENTERLINE_ARC,
+    STATION_MERIDIAN_ARC,
     ArtifactTileUnwrapComputation,
     ArtifactTileUnwrapError,
     TileUnwrapMesh,
@@ -367,6 +371,9 @@ from src.core.artifact_vector_export import (  # noqa: E402
 from src.core.drawing_style import (  # noqa: E402
     available_presets as drawing_style_presets,
     get_preset as drawing_style_preset,
+)
+from src.core.artifact_axis_alignment import (  # noqa: E402
+    AXIS_ALIGN_RECIPE_KIND,
 )
 from src.core.artifact_condition_annotation import (  # noqa: E402
     CONDITION_RECORD_TYPE,
@@ -4559,6 +4566,20 @@ class SectionPanel(QWidget):
         )
         tile_form.addRow("단면 수", self.spin_native_tile_sections)
         native_layout.addLayout(tile_form)
+        self.check_native_tile_axis_origin = QCheckBox(
+            "회전축 기준 전개 · 정치된 토기의 외면 띠"
+        )
+        self.check_native_tile_axis_origin.setEnabled(False)
+        self.check_native_tile_axis_origin.setToolTip(
+            "단면마다 원을 새로 맞추지 않고, 정치로 잰 회전축을 중심으로 펼칩니다. "
+            "토기 외면의 좁은 띠(trench 탁본)를 펼 때 켜세요. 좁은 호에 원을 맞추면 "
+            "중심이 무너져 띠가 엉키지만, 잰 축을 쓰면 10 mm 띠가 0.5%, 20 mm 띠가 "
+            "6% 안에서 펴집니다.\n"
+            "세로축은 축 높이가 아니라 기형을 따라 잰 자오선 길이가 됩니다 - "
+            "종이가 배부른 곳에서 더 길게 덮이는 것과 같습니다.\n"
+            "회전축으로 정치한 문서에서만 켤 수 있습니다. 길이축은 Z로 두세요."
+        )
+        native_layout.addWidget(self.check_native_tile_axis_origin)
         self.label_native_tile_selection = QLabel("현재 선택 0면 · 전체 사용 가능")
         self.label_native_tile_selection.setStyleSheet(
             "color: #4a5568; font-size: 10px;"
@@ -18602,6 +18623,21 @@ class MainWindow(QMainWindow):
         panel.apply_native_workflow_progress(workflow_progress)
         panel.btn_native_tile_unwrap.setEnabled(True)
         panel.btn_native_condition.setEnabled(True)
+        # Unrolling about the canonical axis is only true of an artifact stood
+        # on a measured axis, so the switch follows the active Align's kind.
+        active_align_id = session.document.active_align_revision_id
+        active_align = (
+            session.document.align_revision_index.get(active_align_id)
+            if isinstance(active_align_id, str)
+            else None
+        )
+        axis_positioned = bool(
+            active_align is not None
+            and active_align.recipe.get("kind") == AXIS_ALIGN_RECIPE_KIND
+        )
+        panel.check_native_tile_axis_origin.setEnabled(axis_positioned)
+        if not axis_positioned:
+            panel.check_native_tile_axis_origin.setChecked(False)
         selected_count = len(getattr(live_obj, "selected_faces", set()) or set())
         panel.label_native_tile_selection.setText(
             f"현재 선택 {selected_count:,}면 · 전체 "
@@ -20749,6 +20785,7 @@ class MainWindow(QMainWindow):
             seam_angle_microdegrees = int(np.rint(seam_angle_degrees * 1_000_000.0))
         else:
             raise ArtifactTileUnwrapError("기와 전개 seam 모드가 올바르지 않습니다")
+        axis_origin = bool(panel.check_native_tile_axis_origin.isChecked())
         return {
             "longitudinal_axis": str(
                 panel.combo_native_tile_axis.currentData() or "y"
@@ -20759,6 +20796,17 @@ class MainWindow(QMainWindow):
             "selected_face_indices": selected_face_indices,
             "n_sections": int(panel.spin_native_tile_sections.value()),
             "seam_angle_microdegrees": seam_angle_microdegrees,
+            # The two policies travel together: a strip unrolled about the
+            # measured axis is a strip of paper on a pot, and paper follows
+            # the profile, so its length is the meridian, not the height.
+            "section_center_policy": (
+                SECTION_CENTER_CANONICAL_AXIS
+                if axis_origin
+                else SECTION_CENTER_FIT_PER_SECTION
+            ),
+            "station_policy": (
+                STATION_MERIDIAN_ARC if axis_origin else STATION_CENTERLINE_ARC
+            ),
         }
 
     def _compute_and_commit_native_tile_unwrap(
@@ -20769,6 +20817,8 @@ class MainWindow(QMainWindow):
         selected_face_indices: tuple[int, ...] | None = None,
         n_sections: int = 32,
         seam_angle_microdegrees: int | None = None,
+        section_center_policy: str = SECTION_CENTER_FIT_PER_SECTION,
+        station_policy: str = STATION_CENTERLINE_ARC,
         record_id: str | None = None,
         created_at: str | None = None,
         operator: str = "local-user",
@@ -20792,6 +20842,8 @@ class MainWindow(QMainWindow):
             selected_face_indices=selected_face_indices,
             n_sections=n_sections,
             seam_angle_microdegrees=seam_angle_microdegrees,
+            section_center_policy=section_center_policy,
+            station_policy=station_policy,
             record_id=new_record_id,
             created_at=(self._utc_seconds_now() if created_at is None else created_at),
             operator=operator,

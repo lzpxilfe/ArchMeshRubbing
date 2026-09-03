@@ -78,7 +78,11 @@ from src.core.artifact_surface_measurement import (
     surface_measurement_computation_matches_active_projection,
     surface_measurement_selection_hash,
 )
+from src.core.artifact_axis_alignment import AXIS_ALIGN_RECIPE_KIND
 from src.core.artifact_tile_unwrap_extractor import (
+    SECTION_CENTER_CANONICAL_AXIS,
+    SECTION_CENTER_FIT_PER_SECTION,
+    STATION_CENTERLINE_ARC,
     ArtifactTileUnwrapComputation,
     ArtifactTileUnwrapError,
     commit_artifact_tile_unwrap,
@@ -1278,6 +1282,8 @@ class ArtifactMeasurementController:
         selected_face_indices: Sequence[int] | None = None,
         n_sections: int = 32,
         seam_angle_microdegrees: int | None = None,
+        section_center_policy: str = SECTION_CENTER_FIT_PER_SECTION,
+        station_policy: str = STATION_CENTERLINE_ARC,
         record_id: str | None = None,
         created_at: str | None = None,
         operator: str = "local-user",
@@ -1286,14 +1292,36 @@ class ArtifactMeasurementController:
         session = self._workbench.snapshot.session
         if not isinstance(session, ArtifactSession):
             raise ArtifactMeasurementError("no active ArtifactDocument session")
-        recipe = tile_unwrap_recipe(
-            longitudinal_axis=longitudinal_axis,
-            record_view=record_view,
-            total_face_count=int(session.source_mesh.faces.shape[0]),
-            selected_face_indices=selected_face_indices,
-            n_sections=n_sections,
-            seam_angle_microdegrees=seam_angle_microdegrees,
-        )
+        if section_center_policy == SECTION_CENTER_CANONICAL_AXIS:
+            # Unrolling about the canonical origin is only true of an artifact
+            # that was stood on a measured axis through that origin.  Under a
+            # manual drag the origin is wherever the drag left it, and the
+            # strip would be unrolled about a point that means nothing.
+            align_id = session.document.active_align_revision_id
+            align = (
+                session.document.align_revision_index.get(align_id)
+                if isinstance(align_id, str)
+                else None
+            )
+            if align is None or align.recipe.get("kind") != AXIS_ALIGN_RECIPE_KIND:
+                raise ArtifactMeasurementError(
+                    "unrolling about the canonical axis needs an artifact "
+                    "positioned on its measured rotation axis; the active Align "
+                    "was not made from one"
+                )
+        try:
+            recipe = tile_unwrap_recipe(
+                longitudinal_axis=longitudinal_axis,
+                record_view=record_view,
+                total_face_count=int(session.source_mesh.faces.shape[0]),
+                selected_face_indices=selected_face_indices,
+                n_sections=n_sections,
+                seam_angle_microdegrees=seam_angle_microdegrees,
+                section_center_policy=section_center_policy,
+                station_policy=station_policy,
+            )
+        except ArtifactTileUnwrapError as exc:
+            raise ArtifactMeasurementError(str(exc)) from exc
         selection = recipe["selection"]
         assert isinstance(selection, Mapping)
         return self._begin(

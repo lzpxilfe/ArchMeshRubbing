@@ -41,8 +41,8 @@ from .mesh_loader import MeshData
 
 
 TILE_UNWRAP_ALGORITHM = "archmeshrubbing.sectionwise_tile_unwrap"
-TILE_UNWRAP_ALGORITHM_VERSION = "1.2.0"
-TILE_UNWRAP_RECIPE_SCHEMA_VERSION = "1.2.0"
+TILE_UNWRAP_ALGORITHM_VERSION = "1.3.0"
+TILE_UNWRAP_RECIPE_SCHEMA_VERSION = "1.3.0"
 TILE_UNWRAP_OUTPUT_SCHEMA_VERSION = "1.1.0"
 TILE_UNWRAP_COORDINATE_SPACE = "canonical_mm_tile_unwrap/v1"
 TILE_UNWRAP_HASH_SCOPE = (
@@ -68,8 +68,24 @@ MAX_TILE_UNWRAP_SEAM_ANGLE_MICRODEGREES_EXCLUSIVE = 180_000_000
 
 _LEGACY_TILE_UNWRAP_ALGORITHM_VERSION = "1.1.0"
 _LEGACY_TILE_UNWRAP_RECIPE_SCHEMA_VERSION = "1.1.0"
+_LEGACY_1_2_TILE_UNWRAP_VERSION = "1.2.0"
 _AUTO_SEAM_POLICY = "minimum_angular_range_auto"
 _FIXED_SEAM_POLICY = "fixed_angle_microdegrees"
+
+#: Where each section's circle centre comes from.  Fitting is the tile case:
+#: the axis is only roughly known and every section is a wide arc.  The
+#: canonical axis is the vessel case: the artifact was stood on its measured
+#: rotation axis, so the centre is known and a narrow strip's short arcs must
+#: not be asked to re-estimate it.
+SECTION_CENTER_FIT_PER_SECTION = "fit_per_section"
+SECTION_CENTER_CANONICAL_AXIS = "canonical_axis_origin"
+SECTION_CENTER_POLICIES = (SECTION_CENTER_CANONICAL_AXIS, SECTION_CENTER_FIT_PER_SECTION)
+#: What the v axis measures: the length along the section centres, or the
+#: length along the profile, which is what a strip of paper laid on a belly
+#: actually spans.
+STATION_CENTERLINE_ARC = "centerline_arc"
+STATION_MERIDIAN_ARC = "meridian_arc"
+STATION_POLICIES = (STATION_CENTERLINE_ARC, STATION_MERIDIAN_ARC)
 
 _TILE_UNWRAP_PAYLOAD_MAGIC = b"AMR-TILE-UNWRAP\x00v1\x00"
 _TILE_UNWRAP_COMPONENT_LABELS = (
@@ -128,6 +144,23 @@ def _axis(value: object) -> str:
             "longitudinal_axis must be explicit canonical 'x', 'y', or 'z'"
         )
     return axis
+
+
+def _section_center_policy(value: object) -> str:
+    if not isinstance(value, str) or value not in SECTION_CENTER_POLICIES:
+        raise ArtifactTileUnwrapError(
+            "section_center_policy must be one of "
+            + ", ".join(SECTION_CENTER_POLICIES)
+        )
+    return value
+
+
+def _station_policy(value: object) -> str:
+    if not isinstance(value, str) or value not in STATION_POLICIES:
+        raise ArtifactTileUnwrapError(
+            "station_policy must be one of " + ", ".join(STATION_POLICIES)
+        )
+    return value
 
 
 def _record_view(value: object) -> str:
@@ -301,6 +334,8 @@ def tile_unwrap_recipe(
     selected_face_indices: Sequence[int] | np.ndarray | None = None,
     n_sections: int = 32,
     seam_angle_microdegrees: int | None = None,
+    section_center_policy: str = SECTION_CENTER_FIT_PER_SECTION,
+    station_policy: str = STATION_CENTERLINE_ARC,
 ) -> dict[str, Any]:
     total = _strict_int(
         total_face_count,
@@ -337,8 +372,10 @@ def tile_unwrap_recipe(
         "seam_policy": (
             _AUTO_SEAM_POLICY if seam_angle is None else _FIXED_SEAM_POLICY
         ),
+        "section_center_policy": _section_center_policy(section_center_policy),
         "selection": selection,
         "smoothing_iterations": 0,
+        "station_policy": _station_policy(station_policy),
     }
 
 
@@ -352,6 +389,11 @@ def validate_tile_unwrap_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
         and schema_version == _LEGACY_TILE_UNWRAP_RECIPE_SCHEMA_VERSION
     ):
         return _validate_legacy_tile_unwrap_recipe(recipe)
+    if (
+        algorithm_version == _LEGACY_1_2_TILE_UNWRAP_VERSION
+        and schema_version == _LEGACY_1_2_TILE_UNWRAP_VERSION
+    ):
+        return _validate_legacy_1_2_tile_unwrap_recipe(recipe)
     if (
         algorithm_version != TILE_UNWRAP_ALGORITHM_VERSION
         or schema_version != TILE_UNWRAP_RECIPE_SCHEMA_VERSION
@@ -375,8 +417,10 @@ def validate_tile_unwrap_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
             "schema_version",
             "seam_angle_microdegrees",
             "seam_policy",
+            "section_center_policy",
             "selection",
             "smoothing_iterations",
+            "station_policy",
         },
         name="tile unwrap recipe",
     )
@@ -402,6 +446,79 @@ def validate_tile_unwrap_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
     if value["seam_policy"] != expected_seam_policy:
         raise ArtifactTileUnwrapError(
             "tile unwrap recipe seam policy and angle are inconsistent"
+        )
+    return {
+        **expected_literals,
+        "longitudinal_axis": _axis(value["longitudinal_axis"]),
+        "n_sections": _strict_int(
+            value["n_sections"],
+            name="n_sections",
+            minimum=MIN_TILE_UNWRAP_SECTIONS,
+            maximum=MAX_TILE_UNWRAP_SECTIONS,
+        ),
+        "record_view": _record_view(value["record_view"]),
+        "seam_angle_microdegrees": seam_angle,
+        "seam_policy": expected_seam_policy,
+        "section_center_policy": _section_center_policy(
+            value["section_center_policy"]
+        ),
+        "selection": validate_tile_unwrap_selection(value["selection"]),
+        "station_policy": _station_policy(value["station_policy"]),
+    }
+
+
+def _validate_legacy_1_2_tile_unwrap_recipe(
+    recipe: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate the immutable 1.2 recipe shape without upgrading its hash.
+
+    A 1.2 recipe predates the centre and station policies.  It is read as the
+    fitted-centre, centreline-station computation it always was, so a record
+    made under it still reproduces its own coordinates.
+    """
+
+    value = _exact_keys(
+        recipe,
+        {
+            "algorithm",
+            "algorithm_version",
+            "coordinate_quantum_um",
+            "coordinate_space",
+            "fallback_policy",
+            "kind",
+            "longitudinal_axis",
+            "n_sections",
+            "record_view",
+            "schema_version",
+            "seam_angle_microdegrees",
+            "seam_policy",
+            "selection",
+            "smoothing_iterations",
+        },
+        name="legacy 1.2 tile unwrap recipe",
+    )
+    expected_literals = {
+        "algorithm": TILE_UNWRAP_ALGORITHM,
+        "algorithm_version": _LEGACY_1_2_TILE_UNWRAP_VERSION,
+        "coordinate_quantum_um": TILE_UNWRAP_COORDINATE_QUANTUM_UM,
+        "coordinate_space": TILE_UNWRAP_COORDINATE_SPACE,
+        "fallback_policy": "reject",
+        "kind": "tile_unwrap",
+        "schema_version": _LEGACY_1_2_TILE_UNWRAP_VERSION,
+        "smoothing_iterations": 0,
+    }
+    for key, expected in expected_literals.items():
+        if value[key] != expected:
+            raise ArtifactTileUnwrapError(
+                f"legacy 1.2 tile unwrap recipe field {key!r} is invalid"
+            )
+    seam_angle = _seam_angle_microdegrees(value["seam_angle_microdegrees"])
+    expected_seam_policy = (
+        _AUTO_SEAM_POLICY if seam_angle is None else _FIXED_SEAM_POLICY
+    )
+    if value["seam_policy"] != expected_seam_policy:
+        raise ArtifactTileUnwrapError(
+            "legacy 1.2 tile unwrap recipe seam policy and angle are inconsistent"
         )
     return {
         **expected_literals,
@@ -1237,12 +1354,24 @@ def extract_tile_unwrap(
             "recording surface must have a closed, non-branched open boundary"
         )
     raise_if_cancelled(cancellation_probe)
+    # Recipes before 1.3 carry no policies and mean the fitted-centre,
+    # centreline-station computation they were made under.
+    center_policy = str(
+        validated.get("section_center_policy", SECTION_CENTER_FIT_PER_SECTION)
+    )
+    station_policy = str(validated.get("station_policy", STATION_CENTERLINE_ARC))
     result = sectionwise_cylindrical_parameterization(
         submesh,
         axis=validated["longitudinal_axis"],
         n_sections=int(validated["n_sections"]),
         record_view=str(validated["record_view"]),
         seam_angle_microdegrees=validated.get("seam_angle_microdegrees"),
+        section_center=(
+            "axis_origin"
+            if center_policy == SECTION_CENTER_CANONICAL_AXIS
+            else "fit"
+        ),
+        station="meridian" if station_policy == STATION_MERIDIAN_ARC else "centerline",
         return_meta=True,
         cancellation_probe=cancellation_probe,
     )
@@ -1407,6 +1536,8 @@ def compute_artifact_tile_unwrap(
     selected_face_indices: Sequence[int] | np.ndarray | None = None,
     n_sections: int = 32,
     seam_angle_microdegrees: int | None = None,
+    section_center_policy: str = SECTION_CENTER_FIT_PER_SECTION,
+    station_policy: str = STATION_CENTERLINE_ARC,
     cancellation_probe: CancellationProbe | None = None,
 ) -> ArtifactTileUnwrapComputation:
     if not isinstance(session, ArtifactSession):
@@ -1419,6 +1550,8 @@ def compute_artifact_tile_unwrap(
         selected_face_indices=selected_face_indices,
         n_sections=n_sections,
         seam_angle_microdegrees=seam_angle_microdegrees,
+        section_center_policy=section_center_policy,
+        station_policy=station_policy,
     )
     return _compute_artifact_tile_unwrap_with_validated_recipe(
         session,
@@ -1549,6 +1682,12 @@ __all__ = [
     "MAX_TILE_UNWRAP_SELECTION_RANGES",
     "MAX_TILE_UNWRAP_VERTICES",
     "TILE_UNWRAP_ALGORITHM",
+    "SECTION_CENTER_CANONICAL_AXIS",
+    "SECTION_CENTER_FIT_PER_SECTION",
+    "SECTION_CENTER_POLICIES",
+    "STATION_CENTERLINE_ARC",
+    "STATION_MERIDIAN_ARC",
+    "STATION_POLICIES",
     "TILE_UNWRAP_ALGORITHM_VERSION",
     "TILE_UNWRAP_COORDINATE_QUANTUM_UM",
     "TILE_UNWRAP_COORDINATE_SPACE",
