@@ -7,6 +7,8 @@ import xml.etree.ElementTree as ET
 import numpy as np
 import pytest
 
+from src.core.drawing_svg import SVGRenderError, number_token
+
 from src.core.artifact_outline_extractor import compute_artifact_outline
 from src.core.artifact_session import ArtifactSession
 from src.core.artifact_vector_export import (
@@ -386,3 +388,23 @@ def test_every_condition_kind_is_visually_distinguishable_in_the_preset() -> Non
     # The one deliberate pair: an outline and the hole inside it are the same
     # line, and a reader tells them apart by where they are, not by weight.
     assert signatures[OUTLINE_VISIBLE] == signatures[OUTLINE_HOLE]
+
+
+def test_a_measured_coordinate_is_not_refused_for_its_thirteenth_decimal() -> None:
+    """A cut line through a measured pot produced this y in millimetres.
+
+    Rounded to the twelve decimals every ArchMeshRubbing SVG uses, it differs
+    from the double by 5.009e-13 mm - a hair over half the last decimal, and
+    so a tolerance set at exactly that boundary rejected it and refused the
+    whole sheet.  Half a picometre is not information; the token must carry it.
+    """
+
+    value = 17.4219396566915
+    token = number_token(value, field_name="path.y")
+
+    assert token == "17.421939656691"
+    assert abs(float(token) - value) < 1e-12
+    # The guard still exists: it separates a rounded value from an unwritable
+    # one, so a value it cannot express at all is still refused.
+    with pytest.raises(SVGRenderError, match="finite number"):
+        number_token(float("inf"), field_name="path.y")

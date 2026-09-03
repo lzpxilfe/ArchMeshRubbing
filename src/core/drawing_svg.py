@@ -31,6 +31,7 @@ SVG_NAMESPACE = "http://www.w3.org/2000/svg"
 # needs more precision than that is not a drawing, it is a measurement, and the
 # record it came from is where that precision lives.
 SVG_DECIMALS = 12
+SVG_TOKEN_TOLERANCE_MM = 1e-9
 
 
 class _PathLike(Protocol):
@@ -84,7 +85,15 @@ def number_token(value: object, *, field_name: str) -> str:
     token = f"{number:.{SVG_DECIMALS}f}".rstrip("0").rstrip(".")
     if token in {"", "-0"}:
         return "0"
-    if not math.isclose(float(token), number, rel_tol=0.0, abs_tol=5e-13):
+    # The check is that the token can carry the value at all, not that it
+    # carries every bit of it.  Twelve decimals of a millimetre is a picometre,
+    # so the rounding itself is never information; a tolerance set at exactly
+    # half the last decimal, though, refuses honest coordinates whose binary
+    # representation lands a fraction over the boundary - a cut line through a
+    # measured pot did, and took the whole sheet down with it.  A nanometre is
+    # three orders below the finest scanner and a thousand times the rounding
+    # step, so it separates "unwritable" from "rounded".
+    if not math.isclose(float(token), number, rel_tol=0.0, abs_tol=SVG_TOKEN_TOLERANCE_MM):
         raise SVGRenderError(
             f"{field_name} exceeds the {SVG_DECIMALS}-decimal SVG precision contract"
         )
