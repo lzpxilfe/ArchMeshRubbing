@@ -18,10 +18,37 @@ class TestMainCLI(unittest.TestCase):
 
     def test_run_cli_routes_review_command(self):
         with patch("main.review_mesh") as mock_review:
-            with patch("sys.argv", ["main.py", "--review", "tile.obj", "review.png"]):
+            with patch(
+                "sys.argv",
+                ["main.py", "--review", "tile.obj", "review.png", "--unit", "mm"],
+            ):
                 main.run_cli()
 
-        mock_review.assert_called_once_with("tile.obj", "review.png")
+        mock_review.assert_called_once_with("tile.obj", "review.png", "mm")
+
+    def test_legacy_mesh_commands_refuse_to_guess_the_source_unit(self):
+        # A millimetre scan run through the old centimetre default produced a
+        # rubbing and a scale bar ten times too large, with no warning.
+        for command in ("--flatten", "--review", "--project", "--separate"):
+            with self.subTest(command=command):
+                with patch("main.review_mesh"), patch("main.flatten_mesh"), patch(
+                    "main.project_mesh"
+                ), patch("main.separate_mesh"):
+                    with patch("sys.argv", ["main.py", command, "tile.obj"]):
+                        self.assertEqual(main.run_cli(), 2)
+
+    def test_unit_option_is_validated_before_any_work(self):
+        with patch("sys.argv", ["main.py", "--review", "tile.obj", "--unit", "furlong"]):
+            self.assertEqual(main.run_cli(), 2)
+        with patch("sys.argv", ["main.py", "--review", "tile.obj", "--unit"]):
+            self.assertEqual(main.run_cli(), 2)
+
+    def test_unit_option_accepts_the_equals_form(self):
+        with patch("main.flatten_mesh") as mock_flatten:
+            with patch("sys.argv", ["main.py", "--flatten", "tile.obj", "--unit=cm"]):
+                main.run_cli()
+
+        mock_flatten.assert_called_once_with("tile.obj", None, "cm")
 
     def test_print_help_mentions_review_command(self):
         buffer = io.StringIO()

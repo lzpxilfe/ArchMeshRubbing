@@ -4,12 +4,22 @@ Unit helpers (MeshData units ↔ SVG units)
 This project typically treats mesh coordinates as being in `mesh.unit` (mm/cm/m).
 SVG exports commonly use `mm` or `cm` units. These helpers centralize the
 conversion rules so different exporters stay consistent.
+
+These helpers serve the *legacy* review path only.  The authoritative pipeline
+never infers a unit: `SourceMetadataRevision` carries an explicitly confirmed
+unit and signed axis mapping, and `source_to_canonical_mm_matrix` turns it into
+canonical world millimetres.  Nothing here may be used to fill in a unit that
+the operator has not declared.
 """
 
 from __future__ import annotations
 
 from typing import Optional
 
+# Legacy projects were authored in a centimetre world and are reopened under
+# that assumption; new work is canonical millimetres and declares its unit.
+# Do not use this as a fallback for undeclared input -- refuse instead, the way
+# the unit dialog and the CLI's ``--unit`` requirement do.
 DEFAULT_MESH_UNIT = "cm"
 
 

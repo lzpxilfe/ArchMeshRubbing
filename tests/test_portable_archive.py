@@ -267,9 +267,27 @@ def test_windows_package_workflow_is_portable_offline_and_installer_independent(
     )
     assert workflow.count("runs-on: windows-latest") == 1
     assert quality_workflow.count("runs-on: windows-latest") == 2
+    # The packaging gate stays Windows-only outright.
     for unsupported_runner in ("ubuntu-latest", "macos-latest"):
         assert unsupported_runner not in workflow
-        assert unsupported_runner not in quality_workflow
+    # ci.yml may carry a non-Windows job so contributors without a Windows
+    # machine get a signal on the Qt-free core, but such a job must be
+    # advisory: the invariant being protected is that no non-Windows result
+    # can gate a merge or stand as product evidence, not that no such job
+    # exists.  macOS is neither supported nor advised on.
+    assert "macos-latest" not in quality_workflow
+    advisory_runs = quality_workflow.count("runs-on: ubuntu-latest")
+    assert quality_workflow.count("continue-on-error: true") >= advisory_runs
+    if advisory_runs:
+        advisory_block = quality_workflow.split("runs-on: ubuntu-latest", 1)[1]
+        next_job = advisory_block.find("\n  quality:")
+        advisory_block = advisory_block[:next_job] if next_job != -1 else advisory_block
+        assert "continue-on-error: true" in advisory_block
+        # An advisory job must not claim to prove the packaging or driver
+        # contracts, which only a real Windows runner can.
+        assert "build_native" not in advisory_block
+        assert "opengl_driver_smoke" not in advisory_block
+        assert "build_portable_archive" not in advisory_block
     assert "permissions:\n  contents: read" in workflow
     assert "permissions:\n  contents: read" in quality_workflow
     assert "LIBGL_ALWAYS_SOFTWARE" not in workflow

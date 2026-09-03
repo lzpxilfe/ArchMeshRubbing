@@ -441,3 +441,22 @@ class TestVectorSchemas(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_outline_backend_pin_has_one_definition() -> None:
+    """The exporter must not restate the extractor's backend pin.
+
+    Duplicated version literals meant bumping one side alone would make freshly
+    written outline packages fail their own validator.
+    """
+
+    from src.core import artifact_outline_extractor, artifact_vector_export
+
+    assert (
+        artifact_vector_export.REQUIRED_SHAPELY_VERSION
+        is artifact_outline_extractor.REQUIRED_SHAPELY_VERSION
+    )
+    assert (
+        artifact_vector_export.REQUIRED_GEOS_VERSION
+        is artifact_outline_extractor.REQUIRED_GEOS_VERSION
+    )

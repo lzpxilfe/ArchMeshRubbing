@@ -11,6 +11,43 @@ permissions:
   contents: read
 
 jobs:
+  linux-core:
+    # Advisory only.  The product target is Windows and that job stays the
+    # blocking gate; this exists so a contributor without a Windows machine
+    # gets a signal on the Qt-free core, which is most of the codebase.
+    name: Linux core (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    env:
+      ARCHMESHRUBBING_SKIP_QT_TESTS: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements/runtime-py312.lock
+            requirements-dev.txt
+
+      - name: Install
+        # The runtime lock is enforced at import time by
+        # src/core/mesh_import_recipe.py, so it must be installed exactly.
+        run: |
+          python -m pip install -U pip
+          python -m pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Lint (ruff)
+        run: python -m ruff check .
+
+      - name: Tests (Qt-free core)
+        run: python -m pytest -q
+
   quality:
     name: Windows quality
     runs-on: windows-latest

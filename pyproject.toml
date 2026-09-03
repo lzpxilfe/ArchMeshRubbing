@@ -1,0 +1,33 @@
+# Tooling configuration only.  ArchMeshRubbing is run from a source checkout
+# and frozen with PyInstaller; it is not installed as a distribution, so this
+# file deliberately declares no [project] table or build backend.
+
+[tool.pytest.ini_options]
+# Without this, a bare ``pytest`` also collects
+# ``src/application/artifact_workflow_self_test.py`` -- it matches the default
+# ``*_test.py`` glob, contains no tests, and an import error there aborts
+# collection for the whole run instead of failing one file.
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+markers = [
+    "real_scan: needs a real artifact scan fixture that is not committed",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+extend-exclude = ["build", "dist"]
+
+[tool.ruff.lint]
+# Pinned explicitly rather than inherited from whichever ruff version happens
+# to be installed: the repository has no other guard, so a routine tool bump
+# would otherwise turn the blocking lint gate from clean into thousands of
+# findings.  Widen this set deliberately, not by upgrading.
+select = ["E4", "E7", "E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+# Import-time side effects are load-bearing in the entry points.
+"main.py" = ["E402"]
+"app_gui.py" = ["E402"]

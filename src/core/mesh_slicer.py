@@ -2,6 +2,7 @@
 메쉬 단면 슬라이싱 모듈
 평면으로 메쉬를 자르고 단면 폴리라인을 추출합니다.
 """
+import logging
 import math
 import numpy as np
 from typing import List, Tuple, Optional, Sequence
@@ -9,6 +10,8 @@ import trimesh
 
 from .unit_utils import normalize_unit as _normalize_unit
 from .unit_utils import resolve_svg_unit as _resolve_svg_unit
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class MeshSlicer:
@@ -78,7 +81,13 @@ class MeshSlicer:
             return contours
             
         except Exception:
-            # print(f"Slice error: {e}") # 사용자 요청으로 에러 로그 숨김
+            # An unslicable mesh, an out-of-memory condition and a trimesh API
+            # change all reach here.  Keep the empty-section return contract the
+            # interactive callers rely on, but record why: a silent [] made a
+            # failed section indistinguishable from a section with no geometry.
+            _LOGGER.warning(
+                "plane slice failed; returning no contours", exc_info=True
+            )
             return []
     
     def get_z_range(self) -> Tuple[float, float]:

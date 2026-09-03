@@ -24,8 +24,6 @@ _LAZY_IMPORTS = {
     "RubbingImage": ".surface_visualizer",
     "SurfaceSeparator": ".surface_separator",
     "SeparatedSurfaces": ".surface_separator",
-    "RegionSelector": ".region_selector",
-    "SelectionResult": ".region_selector",
     "FlattenedSVGExporter": ".flattened_svg_exporter",
     "SVGExportOptions": ".flattened_svg_exporter",
     "RubbingSheetExporter": ".rubbing_sheet_exporter",

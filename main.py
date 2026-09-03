@@ -37,6 +37,60 @@ DEFAULT_ARAP_MAX_ITERATIONS = DEFAULTS.arap_max_iterations
 SUPPORTED_FORMATS = ["OBJ", "PLY", "STL", "OFF", "glTF (.gltf)", "glTF Binary (.glb)"]
 
 
+SUPPORTED_SOURCE_UNITS = ("mm", "cm", "m")
+
+
+def _extract_unit_option(argv: list[str]) -> tuple[list[str], str | None]:
+    """Pull ``--unit VALUE`` out of the argument list.
+
+    The legacy quick-review commands used to assume centimetres for any mesh
+    whose unit was not declared, so a millimetre scan silently produced a
+    rubbing and a scale bar ten times too large.  The GUI blocks exactly that
+    mistake with a mandatory unit dialog; the CLI now refuses to guess too.
+    """
+
+    remaining: list[str] = []
+    unit: str | None = None
+    index = 0
+    while index < len(argv):
+        argument = argv[index]
+        if argument == "--unit":
+            if index + 1 >= len(argv):
+                raise ValueError("--unit requires a value (mm, cm or m)")
+            unit = argv[index + 1].strip().lower()
+            index += 2
+            continue
+        if argument.startswith("--unit="):
+            unit = argument.split("=", 1)[1].strip().lower()
+            index += 1
+            continue
+        remaining.append(argument)
+        index += 1
+    if unit is not None and unit not in SUPPORTED_SOURCE_UNITS:
+        raise ValueError(
+            f"--unit must be one of {', '.join(SUPPORTED_SOURCE_UNITS)}; got {unit!r}"
+        )
+    return remaining, unit
+
+
+def _require_declared_unit(unit: str | None, command: str) -> str | None:
+    """Return the declared unit, or print an actionable error and give up."""
+
+    if unit:
+        return unit
+    print(
+        f"Error: {command} needs the source unit, which cannot be inferred from "
+        "the file.\n"
+        f"       Re-run with --unit {{{'|'.join(SUPPORTED_SOURCE_UNITS)}}}, for "
+        f"example: python main.py {command} <mesh> --unit mm\n"
+        "       Check the scanner or export setting rather than guessing: a "
+        "wrong unit\n"
+        "       silently scales every measurement and scale bar in the output.",
+        file=sys.stderr,
+    )
+    return None
+
+
 def run_cli() -> int | None:
     """명령줄 인터페이스 실행."""
     # Release diagnostics must remain usable even when logging cannot create a
@@ -220,14 +274,22 @@ def run_cli() -> int | None:
         print_help()
         return 0
     
-    cmd = sys.argv[1]
-    
+    argv = list(sys.argv[1:])
+    try:
+        argv, declared_unit = _extract_unit_option(argv)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+    sys.argv = [sys.argv[0], *argv]
+
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "--help"
+
     if cmd == '--help' or cmd == '-h':
         print_help()
         return
     
     if cmd == '--info' and len(sys.argv) > 2:
-        show_file_info(sys.argv[2])
+        show_file_info(sys.argv[2], declared_unit or DEFAULT_MESH_UNIT)
         return
     
     if cmd == '--gui':
@@ -240,11 +302,17 @@ def run_cli() -> int | None:
         return 0 if launch_gui(open_project=sys.argv[2]) else 2
     
     if cmd == '--flatten' and len(sys.argv) > 2:
-        flatten_mesh(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None)
+        unit = _require_declared_unit(declared_unit, '--flatten')
+        if unit is None:
+            return 2
+        flatten_mesh(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None, unit)
         return
 
     if cmd == '--review' and len(sys.argv) > 2:
-        review_mesh(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None)
+        unit = _require_declared_unit(declared_unit, '--review')
+        if unit is None:
+            return 2
+        review_mesh(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None, unit)
         return
 
     if cmd == '--generate-synthetic' and len(sys.argv) > 2:
@@ -267,11 +335,17 @@ def run_cli() -> int | None:
         return
     
     if cmd == '--project' and len(sys.argv) > 2:
-        project_mesh(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None)
+        unit = _require_declared_unit(declared_unit, '--project')
+        if unit is None:
+            return 2
+        project_mesh(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None, unit)
         return
     
     if cmd == '--separate' and len(sys.argv) > 2:
-        separate_mesh(sys.argv[2])
+        unit = _require_declared_unit(declared_unit, '--separate')
+        if unit is None:
+            return 2
+        separate_mesh(sys.argv[2], unit)
         return
     
     # 기본: 파일 경로가 들어오면 인터랙티브 앱에서 연다.
@@ -305,12 +379,12 @@ def print_help():
     print("  python main.py <mesh_file>              # Launch GUI and open mesh")
     print("  python main.py --info <mesh_file>       # Show file info")
     print("  python main.py --open-mesh <mesh_file>  # Launch GUI and open mesh")
-    print("  python main.py --flatten <mesh_file> [output]    # Quick full-surface unwrap only")
-    print("  python main.py --review <mesh_file> [output]     # Recording-surface review sheet (quick full-surface)")
+    print("  python main.py --flatten <mesh_file> [output] --unit {mm|cm|m}  # Quick full-surface unwrap only")
+    print("  python main.py --review <mesh_file> [output] --unit {mm|cm|m}   # Recording-surface review sheet (quick full-surface)")
     print("  python main.py --generate-synthetic <preset> [seed] [output]  # Synthetic tile benchmark bundle + review")
     print("  python main.py --benchmark-synthetic <output_dir> [seeds]     # Synthetic benchmark suite + review sheets")
-    print("  python main.py --project <mesh_file> [output]    # Orthographic projection")
-    print("  python main.py --separate <mesh_file>   # Separate inner/outer surfaces")
+    print("  python main.py --project <mesh_file> [output] --unit {mm|cm|m}  # Orthographic projection")
+    print("  python main.py --separate <mesh_file> --unit {mm|cm|m}  # Separate inner/outer surfaces")
     print("  python main.py --gui                    # Launch GUI (interactive)")
     print("  python main.py --open-project <project.amr>  # Launch GUI and open project")
     print()
@@ -318,22 +392,22 @@ def print_help():
     print()
     print("Examples:")
     print("  python main.py roof_tile.obj")
-    print("  python main.py --flatten roof_tile.ply rubbing.tiff")
-    print("  python main.py --review roof_tile.ply review.png")
+    print("  python main.py --flatten roof_tile.ply rubbing.tiff --unit mm")
+    print("  python main.py --review roof_tile.ply review.png --unit mm")
     print("  python main.py --generate-synthetic sugkiwa_quarter 7 synthetic_tile.obj")
     print("  python main.py --benchmark-synthetic ./benchmarks 1,2,3")
-    print("  python main.py --project roof_tile.stl planview.png")
+    print("  python main.py --project roof_tile.stl planview.png --unit mm")
 
 
-def show_file_info(filepath: str):
+def show_file_info(filepath: str, unit: str = DEFAULT_MESH_UNIT):
     """파일 정보 표시."""
     from src.core.mesh_loader import MeshLoader
-    
+
     print(f"\nFile Info: {filepath}")
     print("-" * 40)
-    
+
     try:
-        loader = MeshLoader(default_unit=DEFAULT_MESH_UNIT)
+        loader = MeshLoader(default_unit=unit)
         info = loader.get_file_info(filepath)
         for key, value in info.items():
             print(f"  {key}: {value}")
@@ -341,7 +415,7 @@ def show_file_info(filepath: str):
         print(f"  Error: {e}")
 
 
-def process_mesh(filepath: str):
+def process_mesh(filepath: str, unit: str):
     """메쉬 전체 처리 (로드 -> 기록면 전개 -> 탁본 이미지 생성)."""
     from src.core.mesh_loader import MeshLoader
     from src.core.surface_visualizer import SurfaceVisualizer
@@ -353,7 +427,7 @@ def process_mesh(filepath: str):
     try:
         # 1. Load
         print("\n[1/4] Loading mesh...")
-        loader = MeshLoader(default_unit=DEFAULT_MESH_UNIT)
+        loader = MeshLoader(default_unit=unit)
         mesh = loader.load(filepath)
         
         print(f"      Vertices: {mesh.n_vertices:,}")
@@ -396,7 +470,7 @@ def process_mesh(filepath: str):
         traceback.print_exc()
 
 
-def flatten_mesh(filepath: str, output_path: str | None = None):
+def flatten_mesh(filepath: str, output_path: str | None = None, unit: str = ""):
     """기록면 전개만 수행."""
     from src.core.mesh_loader import MeshLoader
     from src.core.surface_visualizer import SurfaceVisualizer
@@ -405,7 +479,7 @@ def flatten_mesh(filepath: str, output_path: str | None = None):
     print("-" * 40)
     
     try:
-        loader = MeshLoader(default_unit=DEFAULT_MESH_UNIT)
+        loader = MeshLoader(default_unit=unit)
         mesh = loader.load(filepath)
         
         print(f"  Loaded: {mesh.n_vertices:,} vertices, {mesh.n_faces:,} faces")
@@ -431,7 +505,7 @@ def flatten_mesh(filepath: str, output_path: str | None = None):
         traceback.print_exc()
 
 
-def review_mesh(filepath: str, output_path: str | None = None):
+def review_mesh(filepath: str, output_path: str | None = None, unit: str = ""):
     """기록면 검토 시트 생성."""
     from src.core.mesh_loader import MeshLoader
     from src.core.recording_surface_review import (
@@ -445,7 +519,7 @@ def review_mesh(filepath: str, output_path: str | None = None):
     print("-" * 40)
 
     try:
-        loader = MeshLoader(default_unit=DEFAULT_MESH_UNIT)
+        loader = MeshLoader(default_unit=unit)
         mesh = loader.load(filepath)
 
         print(f"  Loaded: {mesh.n_vertices:,} vertices, {mesh.n_faces:,} faces")
@@ -560,7 +634,7 @@ def benchmark_synthetic_tiles(output_dir: str, *, seeds_arg: str = "1"):
         traceback.print_exc()
 
 
-def project_mesh(filepath: str, output_path: str | None = None):
+def project_mesh(filepath: str, output_path: str | None = None, unit: str = ""):
     """정사영 이미지 생성."""
     from src.core.mesh_loader import MeshLoader
     from src.core.orthographic_projector import OrthographicProjector
@@ -569,7 +643,7 @@ def project_mesh(filepath: str, output_path: str | None = None):
     print("-" * 40)
     
     try:
-        loader = MeshLoader(default_unit=DEFAULT_MESH_UNIT)
+        loader = MeshLoader(default_unit=unit)
         mesh = loader.load(filepath)
         
         print(f"  Loaded: {mesh.n_vertices:,} vertices, {mesh.n_faces:,} faces")
@@ -597,7 +671,7 @@ def project_mesh(filepath: str, output_path: str | None = None):
         traceback.print_exc()
 
 
-def separate_mesh(filepath: str):
+def separate_mesh(filepath: str, unit: str = ""):
     """내면/외면 분리."""
     from src.core.mesh_loader import MeshLoader
     from src.core.surface_separator import SurfaceSeparator
@@ -606,7 +680,7 @@ def separate_mesh(filepath: str):
     print("-" * 40)
     
     try:
-        loader = MeshLoader(default_unit=DEFAULT_MESH_UNIT)
+        loader = MeshLoader(default_unit=unit)
         mesh = loader.load(filepath)
         
         print(f"  Loaded: {mesh.n_vertices:,} vertices, {mesh.n_faces:,} faces")

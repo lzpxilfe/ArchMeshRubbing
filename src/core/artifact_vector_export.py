@@ -33,6 +33,10 @@ from .alignment_utils import (
     compose_align_matrices,
     scene_trs_matrix_about_pivot,
 )
+from .artifact_outline_extractor import (
+    REQUIRED_GEOS_VERSION,
+    REQUIRED_SHAPELY_VERSION,
+)
 from .canonical_json import CanonicalJSONError, canonical_json_sha256
 from .artifact_document import (
     ARTIFACT_DOCUMENT_SCHEMA_VERSION,
@@ -1952,9 +1956,12 @@ def _validate_current_record_qc(
             value["grid_area_delta_mm2"],
             field_name="qc.record.grid_area_delta_mm2",
         )
+    # Imported rather than restated: these strings used to be duplicated here,
+    # so bumping the extractor's pin alone would have made freshly written
+    # outline packages fail their own validator.
     expected_backend_versions = {
-        "backend_geos_version": "3.13.1",
-        "backend_shapely_version": "2.1.2",
+        "backend_geos_version": REQUIRED_GEOS_VERSION,
+        "backend_shapely_version": REQUIRED_SHAPELY_VERSION,
     }
     for key, expected in expected_backend_versions.items():
         if key in value and value[key] != expected:

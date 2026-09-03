@@ -263,7 +263,15 @@ VBO_UPLOAD_VERTEX_CHUNK = 131_072
 CAMERA_PAN_SENSITIVITY_DEFAULT = 0.22
 
 
-def _log_ignored_exception(context: str = "Ignored exception", *, level: int = logging.DEBUG) -> None:
+def _log_ignored_exception(context: str = "Ignored exception", *, level: int = logging.INFO) -> None:
+    """Record a swallowed exception once per call site.
+
+    The default used to be DEBUG, which silenced roughly 220 handlers -- among
+    them projection setup, clip-plane management and render-frame snapshot
+    capture, all of which can invalidate the depth/pick contract.  Entries are
+    de-duplicated by location, so INFO does not flood a normal run.
+    """
+
     try:
         frame = sys._getframe(1)
         location = f"{frame.f_code.co_name}:{frame.f_lineno}"

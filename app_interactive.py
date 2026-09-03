@@ -81,11 +81,6 @@ CANONICAL_VIEW_AXES: dict[str, tuple[int, int]] = {
     "front": (2, 0),   # ZX
     "back": (2, 0),    # ZX
 }
-_UNIT_TO_INCHES: dict[str, float] = {
-    "mm": 1.0 / 25.4,
-    "cm": 1.0 / 2.54,
-    "m": 100.0 / 2.54,
-}
 _EXPORT_SURFACE_TARGET_LABELS: dict[str, str] = {
     "all": "전체 메쉬",
     "selected": "현재 선택",
@@ -210,10 +205,6 @@ def _safe_float_or_none(value: Any) -> float | None:
         return None
     return out
 
-
-def _width_in_inches(width_real: float, unit: str) -> float:
-    factor = _UNIT_TO_INCHES.get(str(unit).strip().lower(), _UNIT_TO_INCHES["mm"])
-    return float(width_real) * float(factor)
 
 # Add src to path
 # Add basedir to path so 'src' package can be found
@@ -369,6 +360,7 @@ from src.core.artifact_tile_unwrap_record import (  # noqa: E402
 from src.core.artifact_vector_export import (  # noqa: E402
     ArtifactVectorExportError,
     VECTOR_EXPORT_DIRECTORY_SUFFIX,
+    VectorSVGOptions,
 )
 from src.core.artifact_vector_record import (  # noqa: E402
     PlanarFrame,
@@ -1463,17 +1455,6 @@ class UnitSelectionDialog(QDialog):
             ),
         }
 
-    def get_scale_factor(self):
-        idx = self.combo.currentIndex()
-        if idx == 0:
-            return 0.1
-        if idx == 1:
-            return 1.0
-        if idx == 2:
-            return 100.0
-        return 1.0
-
-
 class ScenePanel(QWidget):
     """레이어 기준으로 객체 목록과 부착된 요소를 보여주는 트리 패널"""
     selectionChanged = pyqtSignal(int)
@@ -1597,10 +1578,10 @@ class ScenePanel(QWidget):
                 self.arcDeleted.emit(data[1], data[2])
         elif data[0] == "layer":
             menu = QMenu(self)
-            move_left = menu.addAction("왼쪽 5cm")
-            move_right = menu.addAction("오른쪽 5cm")
-            move_up = menu.addAction("위로 5cm")
-            move_down = menu.addAction("아래로 5cm")
+            move_left = menu.addAction("왼쪽 5 mm")
+            move_right = menu.addAction("오른쪽 5 mm")
+            move_up = menu.addAction("위로 5 mm")
+            move_down = menu.addAction("아래로 5 mm")
             reset_offset = menu.addAction("오프셋 초기화")
             menu.addSeparator()
             delete_action = menu.addAction(pixel_icon("delete"), "레이어 삭제")
@@ -1628,11 +1609,13 @@ class TransformToolbar(QToolBar):
         self.init_ui()
 
     def init_ui(self):
-        # 이동 (cm)
+        # 이동 (canonical mm).  These values are consumed verbatim as
+        # translation_mm by ArtifactSession.commit_preview, so the widgets must
+        # say millimetres.
         self.addWidget(QLabel("이동: "))
-        self.trans_x = self._create_spin(-10000, 10000, "X", step=0.1)
-        self.trans_y = self._create_spin(-10000, 10000, "Y", step=0.1)
-        self.trans_z = self._create_spin(-10000, 10000, "Z", step=0.1)
+        self.trans_x = self._create_spin(-10000, 10000, "X", step=0.1, suffix=" mm")
+        self.trans_y = self._create_spin(-10000, 10000, "Y", step=0.1, suffix=" mm")
+        self.trans_z = self._create_spin(-10000, 10000, "Z", step=0.1, suffix=" mm")
         self.addWidget(self.trans_x)
         self.addWidget(self.trans_y)
         self.addWidget(self.trans_z)
@@ -1641,9 +1624,9 @@ class TransformToolbar(QToolBar):
         
         # 회전 (deg)
         self.addWidget(QLabel("회전: "))
-        self.rot_x = self._create_spin(-360, 360, "Rx", step=1.0)
-        self.rot_y = self._create_spin(-360, 360, "Ry", step=1.0)
-        self.rot_z = self._create_spin(-360, 360, "Rz", step=1.0)
+        self.rot_x = self._create_spin(-360, 360, "Rx", step=1.0, suffix="°")
+        self.rot_y = self._create_spin(-360, 360, "Ry", step=1.0, suffix="°")
+        self.rot_z = self._create_spin(-360, 360, "Rz", step=1.0, suffix="°")
         self.addWidget(self.rot_x)
         self.addWidget(self.rot_y)
         self.addWidget(self.rot_z)
@@ -1695,12 +1678,16 @@ class TransformToolbar(QToolBar):
         self.btn_xray.setToolTip("선택된 메쉬를 X-Ray(투명)로 표시합니다 (선택 객체만).")
         self.addWidget(self.btn_xray)
 
-    def _create_spin(self, min_v, max_v, prefix="", step=None):
+    def _create_spin(self, min_v, max_v, prefix="", step=None, suffix=None):
         spin = QDoubleSpinBox()
         spin.setRange(min_v, max_v)
         spin.setDecimals(2)
         spin.setPrefix(f"{prefix}: ")
-        spin.setFixedWidth(90)
+        if suffix:
+            spin.setSuffix(str(suffix))
+            spin.setFixedWidth(112)
+        else:
+            spin.setFixedWidth(90)
         try:
             if step is not None:
                 spin.setSingleStep(float(step))
@@ -1726,8 +1713,9 @@ class TransformPanel(QWidget):
         layout.setSpacing(10)
 
         hint = QLabel(
-            "정치/바닥 정렬은 상단 툴바를 사용하세요.\n"
-            "바닥 면 그리기: 상단 툴바 버튼 → 메쉬 클릭으로 점 추가 → Enter로 확정"
+            "정치는 상단 툴바의 이동·회전 값을 조정한 뒤 `정치 확정`을 누릅니다.\n"
+            "이동 단위는 canonical 밀리미터이며, 변화량이 0이어도 한 번 확정해야\n"
+            "실측과 기와 전개가 열립니다."
         )
         hint.setStyleSheet("color: #718096; font-size: 10px;")
         hint.setWordWrap(True)
@@ -4128,6 +4116,38 @@ class SectionPanel(QWidget):
             )
         )
         native_layout.addWidget(self.combo_native_vector_record)
+
+        # Line weight is the one presentation choice a drawing needs before it
+        # reaches Illustrator, and the export contract already validates it.
+        # It was plumbed through the core but never reachable, so every SVG
+        # came out at the 0.2 mm default regardless of the plate scale.
+        stroke_row = QHBoxLayout()
+        stroke_row.setContentsMargins(0, 0, 0, 0)
+        stroke_row.addWidget(QLabel("선 굵기"))
+        self.spin_native_vector_stroke_mm = QDoubleSpinBox()
+        self.spin_native_vector_stroke_mm.setRange(0.05, 2.0)
+        self.spin_native_vector_stroke_mm.setDecimals(2)
+        self.spin_native_vector_stroke_mm.setSingleStep(0.05)
+        self.spin_native_vector_stroke_mm.setValue(0.20)
+        self.spin_native_vector_stroke_mm.setSuffix(" mm")
+        self.spin_native_vector_stroke_mm.setToolTip(
+            "SVG 선 굵기(종이 mm). 기하는 그대로이고 표현만 바뀝니다."
+        )
+        stroke_row.addWidget(self.spin_native_vector_stroke_mm)
+        stroke_row.addWidget(QLabel("여백"))
+        self.spin_native_vector_margin_mm = QDoubleSpinBox()
+        self.spin_native_vector_margin_mm.setRange(0.0, 50.0)
+        self.spin_native_vector_margin_mm.setDecimals(1)
+        self.spin_native_vector_margin_mm.setSingleStep(1.0)
+        self.spin_native_vector_margin_mm.setValue(5.0)
+        self.spin_native_vector_margin_mm.setSuffix(" mm")
+        self.spin_native_vector_margin_mm.setToolTip(
+            "도형 바깥 여백(mm). 선 굵기의 절반 이상이어야 잘리지 않습니다."
+        )
+        stroke_row.addWidget(self.spin_native_vector_margin_mm)
+        stroke_row.addStretch()
+        native_layout.addLayout(stroke_row)
+
         self.btn_native_vector_export = QPushButton("선택한 검증 벡터 1:1 SVG 내보내기")
         set_pixel_icon(self.btn_native_vector_export, "export")
         self.btn_native_vector_export.clicked.connect(self.nativeVectorExportRequested.emit)
@@ -4889,6 +4909,9 @@ class MainWindow(QMainWindow):
         self.section_panel = SectionPanel()
         self.section_panel.lineSectionToggled.connect(self.on_line_section_toggled)
         self.section_panel.cutLineActiveChanged.connect(self.on_cut_line_active_changed)
+        self.viewport.cutLineActiveChanged.connect(
+            self.on_viewport_cut_line_active_changed
+        )
         self.section_panel.cutLineClearRequested.connect(self.on_cut_line_clear_requested)
         self.section_panel.cutLinesClearAllRequested.connect(self.on_cut_lines_clear_all_requested)
         self.section_panel.roiToggled.connect(self.on_roi_toggled)
@@ -6369,6 +6392,35 @@ class MainWindow(QMainWindow):
             lambda: self.on_export_requested({"type": "review_sheet", "target": "selected"})
         )
         toolbar.addAction(action_review)
+
+    def _refresh_grid_status(self) -> None:
+        """Label the reference grid with the unit the scene is actually in.
+
+        The label used to hard-code ``cm`` while the grid spacing is derived
+        from unit-less scene bounds, and a native project reopen never wrote it
+        at all.  Derive the unit from the selected mesh instead, and say so.
+        """
+
+        try:
+            spacing = float(getattr(self.viewport, "grid_spacing", 0.0) or 0.0)
+        except Exception:
+            spacing = 0.0
+        if spacing <= 0.0:
+            self.status_grid.setText("격자: -")
+            return
+        unit = None
+        try:
+            obj = self.viewport.selected_obj
+            mesh = getattr(obj, "mesh", None) if obj is not None else None
+            raw_unit = getattr(mesh, "unit", None)
+            if isinstance(raw_unit, str) and raw_unit in {"mm", "cm", "m"}:
+                unit = raw_unit
+        except Exception:
+            unit = None
+        formatted = f"{spacing:g}"
+        self.status_grid.setText(
+            f"격자: {formatted}{unit}" if unit else f"격자: {formatted} (단위 미확인)"
+        )
 
     def init_statusbar(self):
         self.statusbar = QStatusBar()
@@ -10031,6 +10083,7 @@ class MainWindow(QMainWindow):
         try:
             self._sync_native_cutline_controls(reset_offset=False)
             self.status_unit.setText("단위: mm (canonical)")
+            self._refresh_grid_status()
             self.status_info.setText(status_text)
             self.viewport.update()
         except Exception:
@@ -10233,6 +10286,7 @@ class MainWindow(QMainWindow):
             else:
                 self._clear_native_vector_preview()
             self.status_unit.setText("단위: mm (canonical)")
+            self._refresh_grid_status()
             self.status_info.setText(status_text)
         except Exception:
             _LOGGER.debug("Artifact projection UI refresh failed", exc_info=True)
@@ -10469,7 +10523,7 @@ class MainWindow(QMainWindow):
                     f"메쉬 로드됨: {Path(filepath).name} | 다음: 1단계 정치에서 기준 시점을 맞추세요."
                 )
                 self.status_mesh.setText(f"V: {mesh_data.n_vertices:,} | F: {mesh_data.n_faces:,}")
-                self.status_grid.setText(f"격자: {self.viewport.grid_spacing}cm")
+                self._refresh_grid_status()
         finally:
             dlg = getattr(self, "_mesh_load_dialog", None)
             if dlg is not None:
@@ -14075,7 +14129,7 @@ class MainWindow(QMainWindow):
                 pass
             if enabled:
                 self.viewport.status_info = (
-                    f"실시간 단면 모드 ON (Z={z_next:.2f}cm): "
+                    f"실시간 단면 모드 ON (Z={z_next:.2f} mm): "
                     "Ctrl+휠/[, .]=스캔, C=촬영"
                 )
             else:
@@ -14325,6 +14379,21 @@ class MainWindow(QMainWindow):
                     method = "auto"
 
                 result = separator.auto_detect_surfaces(mesh_local, method=method, return_submeshes=False)
+                if force_cyl:
+                    # The auto router and the edge path both gate on this; the
+                    # forced cylinder path did not, so a non-cylindrical
+                    # artifact could have most of its faces swallowed into the
+                    # mid band and still report success.
+                    meta = getattr(result, "meta", None) or {}
+                    if not bool(meta.get("cylinder_ok", False)):
+                        QMessageBox.warning(
+                            self,
+                            "원통 분류 실패",
+                            "이 메쉬는 원통 맞춤 품질 기준을 통과하지 못했습니다.\n"
+                            "표면이 원통형이 아니거나 두께 대비 잡음이 큽니다.\n"
+                            "Ctrl 없이 자동 분류를 사용하거나, 기록면을 직접 선택하세요.",
+                        )
+                        return
                 obj.outer_face_indices = set(map(int, getattr(result, "outer_face_indices", np.zeros((0,), dtype=np.int32))))
                 obj.inner_face_indices = set(map(int, getattr(result, "inner_face_indices", np.zeros((0,), dtype=np.int32))))
                 try:
@@ -19057,7 +19126,9 @@ class MainWindow(QMainWindow):
         work_item: ArtifactExportWorkItem | None = None
         result: ArtifactExportResult | None = None
         try:
-            work_item = controller.begin_vector(destination, record.id)
+            work_item = controller.begin_vector(
+                destination, record.id, options=self._native_vector_svg_options()
+            )
             result = controller.execute(work_item)
             return controller.publish_result(work_item, result).destination
         except WorkflowBusyError as exc:
@@ -19104,7 +19175,9 @@ class MainWindow(QMainWindow):
             selected += VECTOR_EXPORT_DIRECTORY_SUFFIX
         try:
             controller = self._artifact_export_controller()
-            work_item = controller.begin_vector(selected, record.id)
+            work_item = controller.begin_vector(
+                selected, record.id, options=self._native_vector_svg_options()
+            )
         except Exception as exc:
             self.status_info.setText("벡터 패키지 준비 실패")
             QMessageBox.warning(
@@ -20387,6 +20460,51 @@ class MainWindow(QMainWindow):
                 self.section_panel.btn_line.blockSignals(False)
             except Exception:
                 pass
+
+    def on_viewport_cut_line_active_changed(self, index: int) -> None:
+        """Mirror a viewport-side active cut-line change back into the panel.
+
+        Tab and finishing a cut line in the 3D view emit this, but nothing was
+        listening, so the panel's 활성 선 combo kept showing the previous line
+        while the viewport had already switched.
+        """
+
+        panel = getattr(self, "section_panel", None)
+        combo = getattr(panel, "combo_cutline", None) if panel is not None else None
+        if combo is None:
+            return
+        try:
+            value = int(index)
+        except (TypeError, ValueError):
+            return
+        if value not in (0, 1) or combo.currentIndex() == value:
+            return
+        previous = combo.blockSignals(True)
+        try:
+            combo.setCurrentIndex(value)
+        finally:
+            combo.blockSignals(previous)
+
+    def _native_vector_svg_options(self) -> "VectorSVGOptions | None":
+        """Read the panel's presentation controls into a validated options object.
+
+        Returns None when the panel is absent or a value is out of contract, so
+        the export falls back to the core defaults rather than failing.
+        """
+
+        panel = getattr(self, "section_panel", None)
+        stroke_spin = getattr(panel, "spin_native_vector_stroke_mm", None)
+        margin_spin = getattr(panel, "spin_native_vector_margin_mm", None)
+        if stroke_spin is None or margin_spin is None:
+            return None
+        try:
+            return VectorSVGOptions(
+                margin_mm=float(margin_spin.value()),
+                stroke_width_mm=float(stroke_spin.value()),
+            )
+        except Exception:
+            _LOGGER.info("vector SVG options rejected; using defaults", exc_info=True)
+            return None
 
     def on_cut_line_active_changed(self, index: int):
         """단면선(2개) 중 활성 선 변경"""
