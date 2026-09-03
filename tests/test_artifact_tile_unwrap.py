@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 import json
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import pytest
@@ -52,7 +53,13 @@ STAMP = "2026-07-13T00:00:00Z"
 
 
 class _PlainMesh:
-    """Minimal vertices/faces carrier for the Qt-free sectionwise unwrap."""
+    """Minimal vertices/faces carrier for the Qt-free sectionwise unwrap.
+
+    The parameterisation reads only these three attributes, so a full MeshData
+    would drag in source identity and an import receipt that this test has no
+    use for. `cast` at the call site records that this is deliberate rather
+    than an unnoticed type hole.
+    """
 
     def __init__(self, vertices: np.ndarray, faces: np.ndarray) -> None:
         self.vertices = vertices
@@ -654,7 +661,7 @@ def test_global_uv_overlap_qc_handles_a_realistic_roof_tile_face_count() -> None
     assert faces.shape[0] > 55_000
 
     unwrapped, _meta = sectionwise_cylindrical_parameterization(
-        _PlainMesh(vertices, faces),
+        cast(MeshData, _PlainMesh(vertices, faces)),
         axis="y",
         n_sections=32,
         record_view="top",

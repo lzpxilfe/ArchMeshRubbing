@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-from typing import Mapping, Sequence
+from typing import Mapping, Protocol, Sequence
 
 import numpy as np
 
@@ -31,6 +31,27 @@ SVG_NAMESPACE = "http://www.w3.org/2000/svg"
 # needs more precision than that is not a drawing, it is a measurement, and the
 # record it came from is where that precision lives.
 SVG_DECIMALS = 12
+
+
+class _PathLike(Protocol):
+    """Anything shaped like a measured path.
+
+    Structural rather than nominal: the vector record layer owns `VectorPath`
+    and this module must not import it, or presentation would depend on the
+    record model it is supposed to stay clear of.
+    """
+
+    @property
+    def id(self) -> str: ...
+
+    @property
+    def role(self) -> str: ...
+
+    @property
+    def closed(self) -> bool: ...
+
+    @property
+    def points_mm(self) -> Sequence[Sequence[float]]: ...
 
 
 class SVGRenderError(ValueError):
@@ -326,13 +347,6 @@ def layer_elements(
     return lines
 
 
-class _PathLike:
-    """Structural note: anything with id, role, closed and points_mm."""
-
-    id: str
-    role: str
-    closed: bool
-    points_mm: Sequence[Sequence[float]]
 
 
 __all__ = [

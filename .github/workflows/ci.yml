@@ -14,16 +14,27 @@ jobs:
   linux-core:
     # Advisory only.  The product target is Windows and that job stays the
     # blocking gate; this exists so a contributor without a Windows machine
-    # gets a signal on the Qt-free core, which is most of the codebase.
+    # gets a signal on the whole suite before they open anything.
     name: Linux core (advisory)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     continue-on-error: true
     env:
-      ARCHMESHRUBBING_SKIP_QT_TESTS: "1"
+      QT_QPA_PLATFORM: offscreen
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Install Qt runtime libraries
+        # PyQt6 links libEGL even under the offscreen platform, and the runner
+        # image does not ship it.  Without these the build_info self-test fails
+        # on a missing shared object rather than on anything in the code, which
+        # would leave this job permanently red and therefore useless as a
+        # signal.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            libegl1 libgl1 libxkbcommon0 libdbus-1-3 libfontconfig1
 
       - name: Setup Python
         uses: actions/setup-python@v5

@@ -21,7 +21,7 @@ import shutil
 import stat
 import sys
 from threading import RLock
-from typing import Any, Mapping
+from typing import AbstractSet, Any, Mapping
 import uuid
 import xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape as xml_escape
@@ -290,7 +290,7 @@ def _required_string(value: object, *, field_name: str) -> str:
 
 def _exact_keys(
     value: object,
-    expected: set[str],
+    expected: AbstractSet[str],
     *,
     model_name: str,
 ) -> Mapping[str, Any]:
