@@ -14,6 +14,10 @@ def validate_known_records(document: ArtifactDocument) -> None:
         raise ArtifactKnownRecordError("document must be an ArtifactDocument")
     # Local imports keep record implementations independent and avoid cycles
     # through ArtifactSession during Digital Rubbing computation.
+    from .artifact_condition_annotation import (  # noqa: PLC0415
+        ArtifactConditionAnnotationError,
+        validate_condition_annotation_records,
+    )
     from .artifact_rubbing_record import (  # noqa: PLC0415
         ArtifactRubbingRecordError,
         validate_rubbing_records,
@@ -41,12 +45,14 @@ def validate_known_records(document: ArtifactDocument) -> None:
         validate_tile_unwrap_records(document)
         validate_geometry_metrics_records(document)
         validate_surface_measurement_records(document)
+        validate_condition_annotation_records(document)
     except (
         ArtifactVectorRecordError,
         ArtifactRubbingRecordError,
         ArtifactTileUnwrapRecordError,
         ArtifactGeometryMetricsError,
         ArtifactSurfaceMeasurementError,
+        ArtifactConditionAnnotationError,
     ) as exc:
         raise ArtifactKnownRecordError(str(exc)) from exc
 

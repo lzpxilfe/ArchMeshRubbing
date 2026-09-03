@@ -21,7 +21,12 @@ from src.core.artifact_vector_extractor import (
 )
 from src.core.artifact_vector_record import PlanarFrame
 from src.core.drawing_style import (
+    CENTER_AXIS,
+    CONDITION_CRACK,
+    CONDITION_LINE_KINDS,
     LINE_KINDS,
+    OUTLINE_HOLE,
+    OUTLINE_VISIBLE,
     PROVISIONAL_PRESET_ID,
     DrawingStyleError,
     HatchStyle,
@@ -29,6 +34,7 @@ from src.core.drawing_style import (
     available_presets,
     get_preset,
     layer_id,
+    line_kind_for_condition,
     line_kind_for_record_role,
 )
 from src.core.mesh_import_recipe import current_mesh_import_recipe
@@ -338,3 +344,45 @@ def test_the_drawing_conventions_document_ships_with_the_vocabulary() -> None:
 
     for kind in LINE_KINDS:
         assert f"`{kind}`" in text
+
+
+def test_the_condition_vocabulary_matches_the_record_layer_exactly() -> None:
+    """`CONDITION_LINE_KINDS` repeats the record vocabulary as literals.
+
+    That duplication is deliberate - presentation must not import the record
+    layer - so this is the check that keeps the two from drifting apart.
+    """
+
+    from src.core.artifact_condition_annotation import CONDITION_KINDS
+
+    assert tuple(sorted(CONDITION_LINE_KINDS)) == CONDITION_KINDS
+    for kind in CONDITION_KINDS:
+        assert line_kind_for_condition(kind) in LINE_KINDS
+
+    with pytest.raises(DrawingStyleError, match="has no drawing style"):
+        line_kind_for_condition("chipped")
+
+
+def test_condition_layers_are_drawn_over_the_shape_and_under_the_axis() -> None:
+    condition_kinds = [kind for kind in LINE_KINDS if kind.startswith("condition_")]
+
+    assert LINE_KINDS.index(OUTLINE_HOLE) < LINE_KINDS.index(condition_kinds[0])
+    assert LINE_KINDS.index(condition_kinds[-1]) < LINE_KINDS.index(CENTER_AXIS)
+    # A crack is a line on the object, so nothing in the group covers it.
+    assert condition_kinds[-1] == CONDITION_CRACK
+
+
+def test_every_condition_kind_is_visually_distinguishable_in_the_preset() -> None:
+    preset = get_preset(PROVISIONAL_PRESET_ID)
+    signatures = {
+        kind: (
+            preset.style(kind).stroke_width_mm,
+            preset.style(kind).dash_pattern_mm,
+        )
+        for kind in LINE_KINDS
+    }
+
+    assert len(set(signatures.values())) == len(signatures) - 1, signatures
+    # The one deliberate pair: an outline and the hole inside it are the same
+    # line, and a reader tells them apart by where they are, not by weight.
+    assert signatures[OUTLINE_VISIBLE] == signatures[OUTLINE_HOLE]

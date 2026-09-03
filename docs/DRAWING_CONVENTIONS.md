@@ -21,11 +21,19 @@
 | `section_cut` | 단면 절단선. 닫힌 경우 내부를 해칭한다 | `vector.cutline.v1`의 `section` role |
 | `outline_visible` | 보이는 외형선 | `vector.outline.v1`의 `exterior` role |
 | `outline_hole` | 유물 내부의 구멍 경계 | `vector.outline.v1`의 `hole` role |
+| `condition_missing` | 결실부 경계 | `annotation.condition.v1`, kind `missing` |
+| `condition_restored` | 복원부 경계 | `annotation.condition.v1`, kind `restored` |
+| `condition_worn` | 마모부 경계 | `annotation.condition.v1`, kind `worn` |
+| `condition_crack` | 균열 경계 | `annotation.condition.v1`, kind `crack` |
 | `center_axis` | 회전축·대칭축의 일점쇄선 | `rotation_axis_from_circle_records/v1` Align (record가 아니라 정치의 결과) |
 
 새 선 종류는 **그것을 실제로 만들어내는 것이 생긴 뒤에** 추가한다. 만들 수 없는 종류를 먼저 이름 붙이면 모든 도면에 빈 레이어가 생기고, preset이 아무도 지키지 않는 관례를 서술하게 된다.
 
 record의 role 이름(`section`, `exterior`, `hole`)은 payload 해시의 일부라 절대 바뀌지 않는다. role에서 선 종류로 가는 매핑은 표현이므로 `RECORD_ROLE_LINE_KINDS`에 있다.
+
+상태 표기는 role이 아니라 **record의 kind**로 선 종류가 정해진다(`CONDITION_LINE_KINDS`). 상태 경계도 outline payload로 저장되어 path의 role이 `exterior`·`hole`이기 때문에, role로 그리면 결실부가 유물의 외형선으로 인쇄된다.
+
+상태 선 종류는 외형선 뒤, 중심축 앞에 놓았다. 자기가 설명하는 형태 위에 그려져야 하고, 구조선인 중심축은 그 모두 위에서 읽혀야 한다. 상태 넷 안에서는 면 성격의 셋(`missing` · `restored` · `worn`)이 먼저이고 `condition_crack`이 마지막이다. 균열은 유물 위의 선이고, 면 밑에 깔린 선은 독자가 잃어버린다.
 
 ---
 
@@ -59,9 +67,15 @@ record의 role 이름(`section`, `exterior`, `hole`)은 payload 해시의 일부
 | `section_cut` | 0.35 | - | 해칭 |
 | `outline_visible` | 0.25 | - | - |
 | `outline_hole` | 0.25 | - | - |
+| `condition_missing` | 0.25 | 1.5 - 1.5 | - |
+| `condition_restored` | 0.25 | 3 - 1 - 0.5 - 1 | - |
+| `condition_worn` | 0.18 | 0.5 - 0.5 | - |
+| `condition_crack` | 0.3 | - | - |
 | `center_axis` | 0.13 | 4 - 1 - 1 - 1 (일점쇄선) | - |
 
 해칭: 45°, 간격 1.0 mm, 선 굵기 0.13 mm.
+
+상태 넷에는 해칭을 쓰지 않았다. 지금 렌더러는 해칭되는 모든 선 종류에 **같은 해칭 기하**를 쓰므로, 둘 이상을 해칭하면 종이에서 구별되지 않는다. 각도나 간격을 선 종류별로 가지려면 `HatchStyle`이 preset 안에서 선 종류별이 되어야 하고, 그건 출처 있는 수치를 옮길 때 함께 할 일이다.
 
 출처 ID: 없음. 위 4단계에 따라 채워야 한다.
 
@@ -150,8 +164,31 @@ DrawingSheetOptions(title_block=..., show_center_axis=True)
 
 ---
 
+## 유물 상태 표기
+
+결실 · 복원 · 균열 · 마모는 `annotation.condition.v1` record가 담는다. 자세한 내용은 [`docs/CONDITION_ANNOTATION.md`](CONDITION_ANNOTATION.md)에 있다. 도면 쪽에서 알아야 할 것은 이것뿐이다.
+
+```python
+DrawingSheetOptions(
+    title_block=...,
+    condition_records=("record:condition-1", "record:condition-2"),
+)
+```
+
+**기본값은 빈 튜플이고, 주지 않으면 도판 바이트가 이전과 같다.** sidecar에 `condition` 블록도 생기지 않는다.
+
+**투영 도면에만, 같은 평면에만 그린다.** 상태 경계는 한 방향에서 본 영역의 실루엣이다. 단면도는 평면이 자른 것을 보여주는 다른 종류의 그림이므로, 단면의 평면이 어떤 뷰와 우연히 같더라도 거기에는 그리지 않는다. 투영 도면끼리도 평면이 같은지는 뷰 이름이 아니라 **frame 자체**로 대조한다.
+
+**READY이고 FRESH여야 한다.** 정치가 바뀌면 상태 record는 STALE_ALIGNMENT가 되고 도판에 오르지 못한다. 유물이 더 이상 있지 않은 자리에 결실부를 그리게 되기 때문이다.
+
+sidecar의 `condition.records`에는 그리도록 지정된 record와 그 면 집합 해시가, `condition.drawn`에는 어느 record가 어느 도형에 어느 뷰로 실제로 그려졌는지가 남는다.
+
+---
+
 ## 아직 없는 것
 
 - 토기의 좌 반입면 · 우 반단면 미러 배치. 중심축은 생겼으므로 남은 것은 미러 배치 자체다.
-- 결실 · 복원 · 균열 같은 상태 표기. `annotation.condition.v1` record가 생긴 뒤의 일이다.
+- **1:1 vector export(`.amr-vector`)의 상태 표기.** 지금은 도판에만 그린다. 1:1 패키지는 검증할 때 sidecar만 가지고 SVG를 다시 렌더해 바이트를 대조하므로, 상태 경계를 그리려면 상태 payload 전체가 sidecar에 실리고 오프라인 검증기가 그것까지 검사해야 한다. 이 저장소에서 가장 엄격한 검증 경로라 따로 한 번에 한다.
+- 메쉬 위에서 영역을 칠하는 선택 도구. 지금은 면 인덱스를 직접 주어야 한다.
+- 선 종류별 해칭 기하.
 - DXF 내보내기.

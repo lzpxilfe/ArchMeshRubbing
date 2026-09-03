@@ -6,6 +6,11 @@ import xml.etree.ElementTree as ET
 import numpy as np
 import pytest
 
+from src.core.artifact_condition_annotation import (
+    commit_condition_annotation,
+    compute_condition_annotation,
+)
+from src.core.artifact_document import RecordFreshness
 from src.core.artifact_outline_extractor import compute_artifact_outline
 from src.core.artifact_session import ArtifactSession
 from src.core.artifact_vector_extractor import (
@@ -401,3 +406,145 @@ def test_an_unknown_page_size_or_orientation_is_named_in_the_error() -> None:
         SheetPage(size="B4")
     with pytest.raises(DrawingSheetError, match="orientation must be"):
         SheetPage(orientation="sideways")
+
+
+# --- condition annotations ----------------------------------------------------
+
+CONDITION_ID = "record:sheet-condition"
+
+
+def _condition_session() -> ArtifactSession:
+    """The sheet session with one restored region covering a single face."""
+
+    session = _session()
+    computation = compute_condition_annotation(
+        session,
+        kind="restored",
+        face_indices=[0],
+        precision_grid_mm=0.01,
+    )
+    return commit_condition_annotation(
+        session,
+        computation,
+        record_id=CONDITION_ID,
+        created_at="2026-09-03T00:00:03Z",
+        operator="tester",
+    )
+
+
+def test_a_sheet_without_condition_records_is_the_sheet_it_always_was() -> None:
+    """The overlay is opt-in, down to the byte."""
+
+    document = _condition_session().document
+    plain = compose_drawing_sheet(document, [OUTLINE_ID], options=_options())
+    explicit = compose_drawing_sheet(
+        document, [OUTLINE_ID], options=_options(condition_records=())
+    )
+
+    assert plain.svg_bytes == explicit.svg_bytes
+    assert b"condition" not in plain.svg_bytes
+    assert "condition" not in json.loads(plain.sidecar_bytes.decode("utf-8"))
+
+
+def test_a_condition_region_is_drawn_on_the_figure_that_shares_its_view() -> None:
+    document = _condition_session().document
+    bundle = compose_drawing_sheet(
+        document,
+        [OUTLINE_ID, CUTLINE_ID],
+        options=_options(condition_records=(CONDITION_ID,)),
+    )
+
+    root = ET.fromstring(bundle.svg_bytes)
+    figures = root.find(f"{SVG_NS}g[@id='sheet-figures']")
+    assert figures is not None
+    by_record = {child.attrib["data-record-id"]: child for child in figures}
+
+    # The outline is a top view, and the condition record holds a top boundary.
+    outline_layers = [
+        layer.attrib["id"] for layer in by_record[OUTLINE_ID].findall(f"{SVG_NS}g")
+    ]
+    assert "layer-condition-restored" in outline_layers
+    # The layer sits after the outline it annotates and before any axis.
+    assert outline_layers.index("layer-outline-visible") < outline_layers.index(
+        "layer-condition-restored"
+    )
+
+    # The cutline is a section on an arbitrary plane; no boundary matches it.
+    cutline_layers = [
+        layer.attrib["id"] for layer in by_record[CUTLINE_ID].findall(f"{SVG_NS}g")
+    ]
+    assert not [layer for layer in cutline_layers if "condition" in layer]
+
+    condition_layer = by_record[OUTLINE_ID].find(
+        f"{SVG_NS}g[@id='layer-condition-restored']"
+    )
+    assert condition_layer is not None
+    assert condition_layer.attrib["stroke-dasharray"] == "3,1,0.5,1"
+    for path in condition_layer:
+        assert path.attrib["id"].startswith(f"condition:{CONDITION_ID}:top:")
+
+
+def test_the_sidecar_says_which_region_was_drawn_where() -> None:
+    document = _condition_session().document
+    bundle = compose_drawing_sheet(
+        document,
+        [OUTLINE_ID, CUTLINE_ID],
+        options=_options(condition_records=(CONDITION_ID,)),
+    )
+
+    sidecar = json.loads(bundle.sidecar_bytes.decode("utf-8"))
+    condition = sidecar["condition"]
+    assert [entry["record_id"] for entry in condition["records"]] == [CONDITION_ID]
+    assert condition["records"][0]["condition_kind"] == "restored"
+    assert condition["records"][0]["face_count"] == 1
+    assert condition["drawn"] == [
+        {
+            "condition_kind": "restored",
+            "figure_record_id": OUTLINE_ID,
+            "line_kind": "condition_restored",
+            "record_id": CONDITION_ID,
+            "view": "top",
+        }
+    ]
+    validate_drawing_sheet_bytes(bundle.svg_bytes, bundle.sidecar_bytes)
+
+
+def test_a_sheet_refuses_a_record_that_is_not_a_condition_annotation() -> None:
+    document = _condition_session().document
+
+    with pytest.raises(DrawingSheetError, match="not a condition annotation"):
+        compose_drawing_sheet(
+            document,
+            [OUTLINE_ID],
+            options=_options(condition_records=(OUTLINE_ID,)),
+        )
+    with pytest.raises(DrawingSheetError, match="does not exist"):
+        compose_drawing_sheet(
+            document,
+            [OUTLINE_ID],
+            options=_options(condition_records=("record:absent",)),
+        )
+    with pytest.raises(DrawingSheetError, match="cannot be drawn twice"):
+        _options(condition_records=(CONDITION_ID, CONDITION_ID))
+
+
+def test_a_condition_under_a_superseded_alignment_is_refused() -> None:
+    """A boundary is where the artifact was; a new Align moves the artifact."""
+
+    session = _condition_session()
+    moved = session.commit_preview(
+        translation_mm=(5.0, 0.0, 0.0),
+        rotation_deg=(0.0, 0.0, 0.0),
+        scale=1.0,
+        operator="tester",
+        created_at="2026-09-03T00:00:04Z",
+        revision_id="align:moved",
+    )
+
+    assert moved.document.record_freshness(CONDITION_ID) is not RecordFreshness.FRESH
+    with pytest.raises(DrawingSheetError, match="only FRESH condition records"):
+        compose_drawing_sheet(
+            moved.document,
+            [OUTLINE_ID],
+            options=_options(condition_records=(CONDITION_ID,)),
+        )

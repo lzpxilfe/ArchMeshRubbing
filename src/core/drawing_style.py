@@ -1,9 +1,9 @@
 """Report drawing conventions as a closed, hash-locked presentation contract.
 
 An archaeological measured drawing does not read as one uniform stroke.  A cut
-face, a visible outline, an internal opening and a centre axis are different
-line kinds, and a reader identifies them by weight and dash before reading a
-single label.  This module is where those kinds are named, and where a preset
+face, a visible outline, an internal opening, a restored area and a centre axis
+are different line kinds, and a reader identifies them by weight and dash before
+reading a single label.  This module is where those kinds are named, and where a preset
 binds each kind to the paper-millimetre weight and dash that draws it.
 
 Two boundaries hold this apart from the measured geometry:
@@ -45,14 +45,56 @@ class DrawingStyleError(ValueError):
 SECTION_CUT = "section_cut"
 OUTLINE_VISIBLE = "outline_visible"
 OUTLINE_HOLE = "outline_hole"
+CONDITION_MISSING = "condition_missing"
+CONDITION_RESTORED = "condition_restored"
+CONDITION_WORN = "condition_worn"
+CONDITION_CRACK = "condition_crack"
 CENTER_AXIS = "center_axis"
 
 LINE_KINDS: tuple[str, ...] = (
     SECTION_CUT,
     OUTLINE_VISIBLE,
     OUTLINE_HOLE,
+    # Condition sits between the outline and the centre axis: it is drawn over
+    # the shape it describes, and under the axis, which is a construction line
+    # and has to stay readable across everything.  Within the group the three
+    # area conditions come before the crack, because a crack is a line on the
+    # object and a line drawn under an area is a line a reader loses.
+    CONDITION_MISSING,
+    CONDITION_RESTORED,
+    CONDITION_WORN,
+    CONDITION_CRACK,
     CENTER_AXIS,
 )
+
+# How a condition record's kind is drawn.  The keys are the closed vocabulary of
+# `artifact_condition_annotation.CONDITION_KINDS`, repeated as literals rather
+# than imported: presentation must not depend on the record layer.  A test
+# asserts the two agree, so the duplication cannot drift silently.
+CONDITION_LINE_KINDS: Mapping[str, str] = {
+    "crack": CONDITION_CRACK,
+    "missing": CONDITION_MISSING,
+    "restored": CONDITION_RESTORED,
+    "worn": CONDITION_WORN,
+}
+
+
+def line_kind_for_condition(kind: str) -> str:
+    """Return the line kind one condition record is drawn as.
+
+    A condition boundary is stored as an outline, so its paths carry the
+    `exterior` and `hole` roles.  Drawing it by role would print damage as the
+    artifact's own outline; the record's kind is what decides the line.
+    """
+
+    line_kind = CONDITION_LINE_KINDS.get(str(kind))
+    if line_kind is None:
+        known = ", ".join(sorted(CONDITION_LINE_KINDS))
+        raise DrawingStyleError(
+            f"condition kind {kind!r} has no drawing style; known kinds are {known}"
+        )
+    return line_kind
+
 
 # How the roles carried by an existing vector record map onto line kinds.
 #
@@ -259,6 +301,23 @@ _PRESETS: dict[str, DrawingStylePreset] = {
             SECTION_CUT: LineStyle(stroke_width_mm=0.35, hatch=True),
             OUTLINE_VISIBLE: LineStyle(stroke_width_mm=0.25),
             OUTLINE_HOLE: LineStyle(stroke_width_mm=0.25),
+            # Four dashes chosen only to stay apart from one another and from
+            # the outline at 1:1.  No published convention is claimed; hatching
+            # is not used because this renderer draws one hatch geometry for
+            # every hatched kind, so two hatched kinds would print alike.
+            CONDITION_MISSING: LineStyle(
+                stroke_width_mm=0.25,
+                dash_pattern_mm=(1.5, 1.5),
+            ),
+            CONDITION_RESTORED: LineStyle(
+                stroke_width_mm=0.25,
+                dash_pattern_mm=(3.0, 1.0, 0.5, 1.0),
+            ),
+            CONDITION_WORN: LineStyle(
+                stroke_width_mm=0.18,
+                dash_pattern_mm=(0.5, 0.5),
+            ),
+            CONDITION_CRACK: LineStyle(stroke_width_mm=0.3),
             CENTER_AXIS: LineStyle(
                 stroke_width_mm=0.13,
                 dash_pattern_mm=(4.0, 1.0, 1.0, 1.0),
@@ -290,6 +349,11 @@ def get_preset(preset_id: str) -> DrawingStylePreset:
 
 __all__ = [
     "CENTER_AXIS",
+    "CONDITION_CRACK",
+    "CONDITION_LINE_KINDS",
+    "CONDITION_MISSING",
+    "CONDITION_RESTORED",
+    "CONDITION_WORN",
     "DRAWING_STYLE_SCHEMA_VERSION",
     "DrawingStyleError",
     "DrawingStylePreset",
@@ -304,5 +368,6 @@ __all__ = [
     "available_presets",
     "get_preset",
     "layer_id",
+    "line_kind_for_condition",
     "line_kind_for_record_role",
 ]

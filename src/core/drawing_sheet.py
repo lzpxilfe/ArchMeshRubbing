@@ -25,24 +25,38 @@ itself is not a measurement and never becomes one.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import hashlib
 import math
 from typing import Any, Mapping, Sequence
 
 from .artifact_axis_alignment import AXIS_ALIGN_RECIPE_KIND
-from .artifact_document import ArtifactDocument
+from .artifact_condition_annotation import (
+    ArtifactConditionAnnotationError,
+    CONDITION_RECORD_TYPE,
+    ConditionAnnotationPayload,
+    condition_payload_from_record,
+)
+from .artifact_document import (
+    ArtifactDocument,
+    ArtifactDocumentError,
+    DerivedRecord,
+    RecordFreshness,
+    RecordLifecycleStatus,
+)
 from .artifact_vector_export import (
     ArtifactVectorExportError,
     _payload_bounds,
     _require_exportable_record,
     center_axis_vector_path,
 )
+from .artifact_vector_record import VectorRecordKind
 from .canonical_json import canonical_json_bytes
 from .drawing_style import (
     CENTER_AXIS,
     DrawingStyleError,
     get_preset as get_drawing_style_preset,
+    line_kind_for_condition,
     line_kind_for_record_role,
 )
 from .drawing_svg import (
@@ -65,6 +79,7 @@ DRAWING_SHEET_SIDECAR_NAME = "sheet.provenance.json"
 
 MAX_DRAWING_SHEET_SVG_BYTES = 64 * 1024 * 1024
 MAX_DRAWING_SHEET_FIGURES = 32
+MAX_DRAWING_SHEET_CONDITION_RECORDS = 64
 
 # ISO 216 sizes as portrait width x height in millimetres.
 PAGE_SIZES_MM: Mapping[str, tuple[float, float]] = {
@@ -200,6 +215,15 @@ class DrawingSheetOptions:
     page: SheetPage = field(default_factory=SheetPage)
     style_preset: str = "provisional/v1"
     show_center_axis: bool = False
+    condition_records: tuple[str, ...] = ()
+    """Condition annotations to draw over the figures, by record id.
+
+    Empty by default, and an empty tuple changes nothing: a sheet composed
+    without it is byte for byte the sheet it was before condition records
+    existed.  A named record is drawn only onto figures that share its view;
+    the same damage seen from another direction has its own boundary in the
+    same record, and the sheet uses whichever one matches.
+    """
     gutter_mm: float = 8.0
     stroke_color: str = "#111111"
     title: str = "ArchMeshRubbing measured drawing sheet"
@@ -211,6 +235,22 @@ class DrawingSheetOptions:
             raise DrawingSheetError("page must be a SheetPage")
         if not isinstance(self.show_center_axis, bool):
             raise DrawingSheetError("show_center_axis must be a boolean")
+        condition_records = tuple(self.condition_records)
+        if any(
+            not isinstance(record_id, str) or not record_id.strip()
+            for record_id in condition_records
+        ):
+            raise DrawingSheetError("condition_records must be record ids")
+        if len(set(condition_records)) != len(condition_records):
+            raise DrawingSheetError(
+                "the same condition record cannot be drawn twice on one sheet"
+            )
+        if len(condition_records) > MAX_DRAWING_SHEET_CONDITION_RECORDS:
+            raise DrawingSheetError(
+                f"a sheet draws at most {MAX_DRAWING_SHEET_CONDITION_RECORDS} "
+                "condition records"
+            )
+        object.__setattr__(self, "condition_records", condition_records)
         try:
             denominator = finite_number(
                 self.scale_denominator,
@@ -582,6 +622,82 @@ def _title_block_elements(
     return lines, [{"label": label, "value": value} for label, value in rows]
 
 
+def _require_drawable_condition_record(
+    document: ArtifactDocument,
+    record_id: str,
+) -> tuple[DerivedRecord, ConditionAnnotationPayload]:
+    """Resolve one condition record under the same rules a figure answers to."""
+
+    record = document.record_index.get(record_id)
+    if record is None:
+        raise DrawingSheetError(f"condition record {record_id!r} does not exist")
+    if record.type != CONDITION_RECORD_TYPE:
+        raise DrawingSheetError(
+            f"record {record_id!r} is not a condition annotation"
+        )
+    if record.lifecycle_status is not RecordLifecycleStatus.READY:
+        raise DrawingSheetError("only READY condition records may be drawn")
+    try:
+        freshness = document.record_freshness(record.id)
+    except ArtifactDocumentError as exc:
+        raise DrawingSheetError(str(exc)) from exc
+    if freshness is not RecordFreshness.FRESH:
+        raise DrawingSheetError(
+            "only FRESH condition records may be drawn "
+            f"(got {freshness.value}); a condition drawn under a superseded "
+            "alignment would sit somewhere the artifact no longer is"
+        )
+    try:
+        payload = condition_payload_from_record(record)
+    except ArtifactConditionAnnotationError as exc:
+        raise DrawingSheetError(str(exc)) from exc
+    return record, payload
+
+
+def _condition_paths_for_figure(
+    figure_record_type: str,
+    figure_payload_frame: Any,
+    conditions: Sequence[tuple[DerivedRecord, ConditionAnnotationPayload]],
+) -> tuple[dict[str, list[Any]], list[dict[str, str]]]:
+    """Return the condition layers that belong on one figure, and what they are.
+
+    Two things have to agree before a boundary is drawn.  The figure must be a
+    projection, because a condition boundary is the silhouette of a region seen
+    from one direction and a section drawing shows what a plane cuts, not what
+    is behind it - a section can share a plane with a view and still be the
+    wrong page for it.  And the plane must be the same one: the match is the
+    frame itself rather than a declared view name, so a region cannot end up
+    laid over a drawing it does not describe.
+    """
+
+    by_kind: dict[str, list[Any]] = {}
+    drawn: list[dict[str, str]] = []
+    if figure_record_type != VectorRecordKind.OUTLINE.record_type:
+        return by_kind, drawn
+    for record, payload in conditions:
+        for boundary in payload.views:
+            if boundary.outline.frame != figure_payload_frame:
+                continue
+            try:
+                kind = line_kind_for_condition(payload.kind)
+            except DrawingStyleError as exc:
+                raise DrawingSheetError(str(exc)) from exc
+            for path in boundary.outline.paths:
+                by_kind.setdefault(kind, []).append(
+                    replace(path, id=f"condition:{record.id}:{boundary.view}:{path.id}")
+                )
+            drawn.append(
+                {
+                    "condition_kind": payload.kind,
+                    "line_kind": kind,
+                    "record_id": record.id,
+                    "view": boundary.view,
+                }
+            )
+            break
+    return by_kind, drawn
+
+
 def _sheet_provenance(
     document: ArtifactDocument,
     placed: Sequence[_Figure],
@@ -590,9 +706,10 @@ def _sheet_provenance(
     scale_bar: Mapping[str, Any],
     title_rows: Sequence[Mapping[str, str]],
     center_axis: Mapping[str, Any],
+    condition: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     preset = get_drawing_style_preset(options.style_preset)
-    return {
+    provenance: dict[str, Any] = {
         "center_axis": dict(center_axis),
         "document_id": document.document_id,
         "document_manifest_sha256": document.canonical_sha256,
@@ -624,6 +741,11 @@ def _sheet_provenance(
         "title_block": [dict(row) for row in title_rows],
         "unit": "mm",
     }
+    if condition is not None:
+        # Added only when the caller asked for condition records, so a sheet
+        # composed without them keeps the exact bytes it had before.
+        provenance["condition"] = dict(condition)
+    return provenance
 
 
 def _render_sheet(
@@ -741,6 +863,12 @@ def compose_drawing_sheet(
         options.show_center_axis and align_recipe_kind == AXIS_ALIGN_RECIPE_KIND
     )
 
+    conditions = [
+        _require_drawable_condition_record(document, record_id)
+        for record_id in options.condition_records
+    ]
+    condition_drawn: list[dict[str, str]] = []
+
     prepared = []
     for record_id in ids:
         try:
@@ -761,6 +889,14 @@ def compose_drawing_sheet(
                 raise DrawingSheetError(str(exc)) from exc
             if axis_path is not None:
                 by_kind.setdefault(CENTER_AXIS, []).append(axis_path)
+        condition_by_kind, drawn = _condition_paths_for_figure(
+            record.type, payload.frame, conditions
+        )
+        for kind, condition_paths in condition_by_kind.items():
+            by_kind.setdefault(kind, []).extend(condition_paths)
+        condition_drawn.extend(
+            {"figure_record_id": record.id, **entry} for entry in drawn
+        )
         prepared.append(
             (
                 record.id,
@@ -791,6 +927,32 @@ def compose_drawing_sheet(
                 "drawn": draw_center_axis,
                 "requested": options.show_center_axis,
             },
+            condition=(
+                {
+                    "drawn": sorted(
+                        condition_drawn,
+                        key=lambda entry: (
+                            entry["figure_record_id"],
+                            entry["record_id"],
+                        ),
+                    ),
+                    "records": [
+                        {
+                            "condition_kind": payload.kind,
+                            "face_count": payload.face_count,
+                            "payload_sha256": payload.sha256,
+                            "recipe_hash": record.recipe_hash,
+                            "record_id": record.id,
+                            "selection_sha256": payload.selection_sha256,
+                        }
+                        for record, payload in sorted(
+                            conditions, key=lambda item: item[0].id
+                        )
+                    ],
+                }
+                if conditions
+                else None
+            ),
         )
         svg_bytes = _render_sheet(
             placed,
@@ -880,6 +1042,7 @@ __all__ = [
     "DrawingSheetBundle",
     "DrawingSheetError",
     "DrawingSheetOptions",
+    "MAX_DRAWING_SHEET_CONDITION_RECORDS",
     "MAX_DRAWING_SHEET_FIGURES",
     "ORIENTATIONS",
     "PAGE_SIZES_MM",
