@@ -346,6 +346,8 @@ from src.core.artifact_rubbing_extractor import (  # noqa: E402
     DEFAULT_RUBBING_POLARITY,
     DEFAULT_RUBBING_REFERENCE_RADIUS_UM,
     DigitalRubbingRaster,
+    MAX_RUBBING_PAPER_TONE_PERCENT,
+    RECOMMENDED_RUBBING_PAPER_TONE_PERCENT,
     compute_artifact_rubbing_from_recipe,
     estimate_digital_rubbing_resources,
     require_current_rubbing_computation,
@@ -4460,6 +4462,19 @@ class SectionPanel(QWidget):
         )
         self.combo_native_rubbing_polarity.setCurrentIndex(max(0, polarity_index))
         native_rubbing_form.addRow("표면 극성", self.combo_native_rubbing_polarity)
+        self.spin_native_rubbing_paper_tone = QSpinBox()
+        self.spin_native_rubbing_paper_tone.setRange(0, MAX_RUBBING_PAPER_TONE_PERCENT)
+        self.spin_native_rubbing_paper_tone.setValue(RECOMMENDED_RUBBING_PAPER_TONE_PERCENT)
+        self.spin_native_rubbing_paper_tone.setSuffix(" %")
+        self.spin_native_rubbing_paper_tone.setToolTip(
+            "기름먹을 묻힌 솜방망이로 두드리면 종이 전체가 옅은 먹을 먹고, 튀어나온 "
+            "부분일수록 진해집니다. 이 값이 주변과 높이가 같은 면이 먹는 먹의 농담"
+            "입니다.\n"
+            "0으로 두면 요철이 없는 면이 흰 종이 그대로 남습니다(예전 동작). 들어간 "
+            "부분은 이 값의 절반까지만 옅어지므로 음각선은 흰 선이 아니라 옅은 선으로 "
+            "납니다."
+        )
+        native_rubbing_form.addRow("종이 기저 농담", self.spin_native_rubbing_paper_tone)
         native_layout.addLayout(native_rubbing_form)
 
         self.btn_native_rubbing = QPushButton("탁본 계산 · 기록")
@@ -20378,6 +20393,7 @@ class MainWindow(QMainWindow):
                 panel.combo_native_rubbing_polarity.currentData()
                 or DEFAULT_RUBBING_POLARITY
             ),
+            "paper_tone_percent": int(panel.spin_native_rubbing_paper_tone.value()),
         }
 
     def _compute_and_commit_native_rubbing(

@@ -495,6 +495,8 @@ def _check_resources() -> str:
         "rubbing_receipt-1.0.0.schema.json",
         "rubbing_export-1.0.0.schema.json",
         "rubbing_export-1.1.0.schema.json",
+        "rubbing_export-1.2.0.schema.json",
+        "rubbing_export-1.3.0.schema.json",
         "survey_export-1.0.0.schema.json",
         "tile_unwrap_receipt-1.0.0.schema.json",
         "tile_unwrap_export-1.0.0.schema.json",

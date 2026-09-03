@@ -66,6 +66,7 @@ from src.core.artifact_outline_extractor import (
 )
 from src.core.artifact_rubbing_extractor import (
     ArtifactRubbingComputation,
+    DEFAULT_RUBBING_PAPER_TONE_PERCENT,
     DigitalRubbingResourceEstimate,
     RUBBING_ESTIMATED_PEAK_BYTES_PER_PIXEL,
     RUBBING_ESTIMATE_FIXED_OVERHEAD_BYTES,
@@ -1536,6 +1537,7 @@ class ArtifactMeasurementController:
         black_point_um: int,
         ink_strength_percent: int,
         relief_polarity: str,
+        paper_tone_percent: int = DEFAULT_RUBBING_PAPER_TONE_PERCENT,
         record_id: str | None = None,
         created_at: str | None = None,
         operator: str = "local-user",
@@ -1551,6 +1553,7 @@ class ArtifactMeasurementController:
                 black_point_um=black_point_um,
                 ink_strength_percent=ink_strength_percent,
                 relief_polarity=relief_polarity,
+                paper_tone_percent=paper_tone_percent,
             )
             return self._begin(
                 kind=MeasurementOperationKind.DIGITAL_RUBBING,
@@ -1573,6 +1576,7 @@ class ArtifactMeasurementController:
         black_point_um: int,
         ink_strength_percent: int,
         relief_polarity: str,
+        paper_tone_percent: int = DEFAULT_RUBBING_PAPER_TONE_PERCENT,
         artboard_policy: str = ARTBOARD_LARGEST_COVERED_RECTANGLE,
         record_id: str | None = None,
         created_at: str | None = None,
@@ -1596,6 +1600,7 @@ class ArtifactMeasurementController:
                     black_point_um=black_point_um,
                     ink_strength_percent=ink_strength_percent,
                     relief_polarity=relief_polarity,
+                    paper_tone_percent=paper_tone_percent,
                     artboard_policy=artboard_policy,
                 )
             except ArtifactDevelopedRubbingError as exc:

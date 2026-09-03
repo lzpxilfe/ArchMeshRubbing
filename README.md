@@ -46,7 +46,7 @@ Windows ARM64, x64-on-ARM64 에뮬레이션, 32-bit Windows, Windows Server, mac
 | 단면 | Top, Front, Right의 canonical-mm Cutline | `.amr-vector` 1:1 SVG |
 | 외곽 | 6면 Outline, 정밀도 격자, 오목부·구멍·분리 성분 보존 | `.amr-vector` 1:1 SVG |
 | 디지털 탁본 | 6면, 해상도·여백·깊이·먹 농도·양각/음각 설정 | `.amr-rubbing` 1:1 PNG |
-| 전개 탁본 | 기와 전개 record의 펴진 좌표 위에 같은 요철을 그린 탁본 (정치한 토기의 외면 띠 포함) | `.amr-rubbing` 1:1 PNG (sidecar 1.2.0) |
+| 전개 탁본 | 기와 전개 record의 펴진 좌표 위에 같은 요철을 그린 탁본 (정치한 토기의 외면 띠 포함) | `.amr-rubbing` 1:1 PNG (sidecar 1.3.0) |
 | 실측 도판 | 입면·단면·탁본을 한 축척으로 배치하고 축척바·제목란을 붙인 페이지 | `.svg` + provenance |
 | 완료 실측 | Cutline 3 + Outline 6 + Rubbing 6의 15개 결과 결합 | `.amr-survey` |
 | 제원 측정 | 표면적, 조건부 체적, 두 점 거리, 선택점 best-fit 원 지름 | 검증 가능한 measurement record |

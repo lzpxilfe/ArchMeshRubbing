@@ -68,9 +68,19 @@ from .canonical_png import (
 RUBBING_EXPORT_FORMAT = "archmeshrubbing_rubbing_export"
 # 1.2.0 admits a raster drawn on a developed surface next to the six-view
 # raster; the receipt's coordinate space says which one a package carries.
-_CURRENT_RUBBING_EXPORT_SCHEMA_VERSION = "1.2.0"
+# 1.3.0 admits the paper wash the dabber leaves on the whole sheet, which the
+# frozen 1.0.0 six-view recipe definition cannot describe.
+_CURRENT_RUBBING_EXPORT_SCHEMA_VERSION = "1.3.0"
 RUBBING_EXPORT_SCHEMA_VERSION = _CURRENT_RUBBING_EXPORT_SCHEMA_VERSION
-SUPPORTED_RUBBING_EXPORT_SCHEMA_VERSIONS = frozenset({"1.0.0", "1.1.0", "1.2.0"})
+SUPPORTED_RUBBING_EXPORT_SCHEMA_VERSIONS = frozenset(
+    {"1.0.0", "1.1.0", "1.2.0", "1.3.0"}
+)
+# Versions whose provenance block is the current public shape.
+_CURRENT_PROVENANCE_SCHEMA_VERSIONS = frozenset({"1.2.0", "1.3.0"})
+# Versions that can carry a rubbing drawn on a developed surface.
+_DEVELOPED_SCHEMA_VERSIONS = frozenset({"1.2.0", "1.3.0"})
+# Versions that can carry the paper wash.
+_PAPER_TONE_SCHEMA_VERSIONS = frozenset({"1.3.0"})
 _RUBBING_RECORD_TYPES = frozenset({RUBBING_RECORD_TYPE, DEVELOPED_RUBBING_RECORD_TYPE})
 RubbingRaster: TypeAlias = DigitalRubbingRaster | DevelopedRubbingRaster
 RUBBING_EXPORT_DIRECTORY_SUFFIX = ".amr-rubbing"
@@ -315,6 +325,17 @@ def _validated_current_public_provenance(value: object) -> Mapping[str, Any]:
         raise ArtifactRubbingExportError(str(exc)) from exc
 
 
+def _recipe_has_paper_tone(recipe: object) -> bool:
+    """Whether a recipe asks for the wash the dabber leaves on the whole sheet."""
+
+    if not isinstance(recipe, Mapping):
+        return False
+    relief_policy = recipe.get("relief_policy")
+    if not isinstance(relief_policy, Mapping):
+        return False
+    return "paper_tone_percent" in relief_policy
+
+
 def _presentation(receipt: Mapping[str, Any]) -> dict[str, Any]:
     width = receipt["width_pixels"]
     height = receipt["height_pixels"]
@@ -555,9 +576,17 @@ def validate_rubbing_export_bytes(
         raise ArtifactRubbingExportError("PNG artifact descriptor does not match bytes")
     raw_receipt = root["raster_receipt"]
     developed = isinstance(raw_receipt, Mapping) and _receipt_is_developed(raw_receipt)
-    if developed and schema_version != "1.2.0":
+    if developed and schema_version not in _DEVELOPED_SCHEMA_VERSIONS:
         raise ArtifactRubbingExportError(
-            "a rubbing on a developed surface needs rubbing export schema 1.2.0"
+            "a rubbing on a developed surface needs rubbing export schema 1.2.0 "
+            "or newer"
+        )
+    if (
+        _recipe_has_paper_tone(root["recipe"])
+        and schema_version not in _PAPER_TONE_SCHEMA_VERSIONS
+    ):
+        raise ArtifactRubbingExportError(
+            "a rubbing with a paper wash needs rubbing export schema 1.3.0"
         )
     raster: RubbingRaster
     try:
@@ -598,7 +627,7 @@ def validate_rubbing_export_bytes(
         raise ArtifactRubbingExportError("PNG pHYs does not match raster receipt")
     provenance = (
         _validated_current_public_provenance(root["provenance"])
-        if schema_version == _CURRENT_RUBBING_EXPORT_SCHEMA_VERSION
+        if schema_version in _CURRENT_PROVENANCE_SCHEMA_VERSIONS
         else _validated_public_provenance(root["provenance"])
     )
     geometry_provenance = provenance["geometry_revision"]

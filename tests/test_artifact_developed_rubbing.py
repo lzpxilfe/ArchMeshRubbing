@@ -56,7 +56,11 @@ from src.core.artifact_rubbing_export import (
     export_rubbing_package,
     validate_rubbing_export_package,
 )
-from src.core.artifact_rubbing_extractor import DigitalRubbingRaster
+from src.core.artifact_rubbing_extractor import (
+    MAX_RUBBING_PAPER_TONE_PERCENT,
+    RECESS_TONE_RETAINED_PERCENT,
+    DigitalRubbingRaster,
+)
 from src.core.artifact_session import ArtifactSession
 from src.core.drawing_sheet import (
     DrawingSheetOptions,
@@ -471,7 +475,7 @@ def test_the_same_package_carries_a_developed_rubbing(corded: ArtifactSession) -
         computation.raster.width_pixels,
         computation.raster.height_pixels,
     )
-    assert sidecar["schema_version"] == "1.2.0"
+    assert sidecar["schema_version"] == "1.3.0"
     assert sidecar["recipe"]["kind"] == "developed_rubbing"
     assert sidecar["raster_receipt"]["coordinate_space"] == "canonical_mm_developed_raster/v1"
     assert sidecar["provenance"]["record"]["type"] == DEVELOPED_RUBBING_RECORD_TYPE
@@ -612,3 +616,98 @@ def test_the_strip_goes_onto_a_drawing_sheet_at_the_sheet_scale(
     assert figure["record_type"] == DEVELOPED_RUBBING_RECORD_TYPE
     assert figure["raster_sha256"] == raster.raster_sha256
     validate_drawing_sheet_bytes(bundle.svg_bytes, bundle.sidecar_bytes)
+
+
+def test_the_dabber_leaves_ink_on_the_whole_sheet(corded: ArtifactSession) -> None:
+    """A rubbing is tapped, not traced.
+
+    An oiled cotton dabber loaded onto paper laid over the surface leaves ink
+    everywhere it touches.  The parts that stand out take it densely, but the
+    parts that sit back take a little too, so the sheet is a light wash with
+    the pattern dark on it - not black marks on white paper.
+    """
+
+    dry = _rubbing(corded, relief_polarity="raised").raster
+    washed = _rubbing(
+        corded, relief_polarity="raised", paper_tone_percent=20
+    ).raster
+
+    dry_grey = dry.pixels[:, :, 0]
+    washed_grey = washed.pixels[:, :, 0]
+    # The dry rubbing leaves plain wall as bare paper; the dabbed one does not.
+    assert int(dry_grey.max()) == 255
+    assert int(washed_grey.max()) < 255
+    # The lightest place on the sheet is the bottom of the deepest recess, and
+    # even there the wash keeps its retained share.
+    wash = (255 * 20 + 50) // 100
+    assert int(washed_grey.max()) == 255 - wash + (
+        wash * (100 - RECESS_TONE_RETAINED_PERCENT) + 50
+    ) // 100
+    assert int(washed_grey.min()) == 0
+    assert int(np.median(washed_grey)) < int(np.median(dry_grey))
+    # The wash only ever adds ink.  Nowhere on the sheet does dabbing leave a
+    # place lighter than the same place without it, so the relief the dry
+    # rubbing found is still there, on a ground instead of on bare paper.
+    assert bool((washed_grey <= dry_grey).all())
+    assert bool((dry_grey[dry_grey == 0] == washed_grey[dry_grey == 0]).all())
+
+
+def test_a_recess_comes_out_lighter_than_the_sheet_but_not_white(
+    corded: ArtifactSession,
+) -> None:
+    """The incised line across the belly is the test: the dabber reaches into
+    it less than onto the flat, so it reads as a lighter line on the wash, and
+    never as bare paper."""
+
+    raster = _rubbing(
+        corded, relief_polarity="raised", paper_tone_percent=20
+    ).raster
+    grey = raster.pixels[:, :, 0].astype(np.int64)
+    interior = grey[80 : raster.height_pixels - 80, :]
+    lightest = int(interior.max())
+
+    # Nothing reaches bare paper, and the lightest place is lighter than the
+    # tone a flat surface takes - that lightest place is the groove.
+    assert lightest < 255
+    flat_tone = (255 * 20 + 50) // 100
+    assert lightest > 255 - flat_tone
+    # It never gives up more than the retained share of the wash.
+    floor = 255 - flat_tone
+    assert lightest <= 255 - (flat_tone * RECESS_TONE_RETAINED_PERCENT) // 100 + 1
+    assert floor <= 255
+
+
+def test_a_recipe_written_before_the_wash_reproduces_byte_for_byte(
+    corded: ArtifactSession,
+) -> None:
+    """The wash keys are absent when it is off, so an older recipe rebuilds to
+    the same bytes and recomputes to the same raster."""
+
+    plain = _rubbing(corded, relief_polarity="raised")
+    recipe = plain.recipe_dict()
+    relief = recipe["relief_policy"]
+
+    assert "paper_tone_percent" not in relief
+    assert "paper_tone_level" not in relief
+    assert "recess_tone_retained_percent" not in relief
+    again = compute_developed_rubbing_from_recipe(corded, recipe)
+    assert again.raster.raster_sha256 == plain.raster.raster_sha256
+
+    washed = _rubbing(corded, relief_polarity="raised", paper_tone_percent=20)
+    washed_relief = washed.recipe_dict()["relief_policy"]
+    assert washed_relief["paper_tone_percent"] == 20
+    assert washed_relief["paper_tone_level"] == 51
+    assert washed_relief["recess_tone_retained_percent"] == (
+        RECESS_TONE_RETAINED_PERCENT
+    )
+    assert washed.raster.raster_sha256 != plain.raster.raster_sha256
+    replayed = compute_developed_rubbing_from_recipe(corded, washed.recipe_dict())
+    assert replayed.raster.raster_sha256 == washed.raster.raster_sha256
+
+
+def test_the_wash_is_refused_outside_its_range(corded: ArtifactSession) -> None:
+    for value in (-1, MAX_RUBBING_PAPER_TONE_PERCENT + 1):
+        with pytest.raises(
+            ArtifactDevelopedRubbingError, match="paper_tone_percent"
+        ):
+            _rubbing(corded, paper_tone_percent=value)

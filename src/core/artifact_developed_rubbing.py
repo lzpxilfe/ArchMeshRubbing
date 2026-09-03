@@ -39,6 +39,7 @@ from .artifact_document import (
 )
 from .artifact_rubbing_extractor import (
     ArtifactRubbingError,
+    DEFAULT_RUBBING_PAPER_TONE_PERCENT,
     DigitalRubbingResourceEstimate,
     MAX_RUBBING_DIMENSION,
     MAX_RUBBING_GRID_INDEX,
@@ -166,6 +167,7 @@ def developed_rubbing_recipe(
     black_point_um: int,
     ink_strength_percent: int,
     relief_polarity: str,
+    paper_tone_percent: int = DEFAULT_RUBBING_PAPER_TONE_PERCENT,
     artboard_policy: str = ARTBOARD_LARGEST_COVERED_RECTANGLE,
 ) -> dict[str, Any]:
     """Resolve every option before context capture, naming the development."""
@@ -183,6 +185,7 @@ def developed_rubbing_recipe(
             black_point_um=black_point_um,
             ink_strength_percent=ink_strength_percent,
             relief_polarity=relief_polarity,
+            paper_tone_percent=paper_tone_percent,
         )
     except ArtifactRubbingError as exc:
         raise ArtifactDevelopedRubbingError(str(exc)) from exc
@@ -258,6 +261,9 @@ def validate_developed_rubbing_recipe(recipe: Mapping[str, Any]) -> dict[str, An
         black_point_um=relief_policy.get("black_point_requested_um"),  # type: ignore[arg-type]
         ink_strength_percent=relief_policy.get("ink_strength_percent"),  # type: ignore[arg-type]
         relief_polarity=relief_policy.get("polarity"),  # type: ignore[arg-type]
+        paper_tone_percent=relief_policy.get(  # type: ignore[arg-type]
+            "paper_tone_percent", DEFAULT_RUBBING_PAPER_TONE_PERCENT
+        ),
     )
     try:
         actual_hash = canonical_recipe_hash(recipe)
@@ -650,6 +656,7 @@ def extract_developed_rubbing(
             minimum_reference_sample_count=int(
                 relief_policy["minimum_reference_sample_count"]
             ),
+            paper_tone_level=int(relief_policy.get("paper_tone_level", 0)),
             cancellation_probe=cancellation_probe,
         )
     except ArtifactRubbingError as exc:
@@ -789,6 +796,7 @@ def developed_rubbing_recipe_for_record(
     black_point_um: int,
     ink_strength_percent: int,
     relief_polarity: str,
+    paper_tone_percent: int = DEFAULT_RUBBING_PAPER_TONE_PERCENT,
     artboard_policy: str = ARTBOARD_LARGEST_COVERED_RECTANGLE,
 ) -> dict[str, Any]:
     """Name a READY + FRESH development by hash and resolve the raster options."""
@@ -808,6 +816,7 @@ def developed_rubbing_recipe_for_record(
         black_point_um=black_point_um,
         ink_strength_percent=ink_strength_percent,
         relief_polarity=relief_polarity,
+        paper_tone_percent=paper_tone_percent,
         artboard_policy=artboard_policy,
     )
 
@@ -1043,6 +1052,7 @@ def compute_developed_rubbing(
     black_point_um: int,
     ink_strength_percent: int,
     relief_polarity: str,
+    paper_tone_percent: int = DEFAULT_RUBBING_PAPER_TONE_PERCENT,
     artboard_policy: str = ARTBOARD_LARGEST_COVERED_RECTANGLE,
     cancellation_probe: CancellationProbe | None = None,
 ) -> DevelopedRubbingComputation:
@@ -1059,6 +1069,7 @@ def compute_developed_rubbing(
         black_point_um=black_point_um,
         ink_strength_percent=ink_strength_percent,
         relief_polarity=relief_polarity,
+        paper_tone_percent=paper_tone_percent,
         artboard_policy=artboard_policy,
     )
     return _compute_with_recipe(session, recipe, cancellation_probe=cancellation_probe)

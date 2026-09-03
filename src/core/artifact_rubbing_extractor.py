@@ -47,6 +47,18 @@ DEFAULT_RUBBING_DEPTH_QUANTIZATION_UM = 10
 DEFAULT_RUBBING_BLACK_POINT_UM = 250
 DEFAULT_RUBBING_INK_STRENGTH_PERCENT = 100
 DEFAULT_RUBBING_POLARITY = "bidirectional"
+DEFAULT_RUBBING_PAPER_TONE_PERCENT = 0
+# What the app offers.  Measured on the corded synthetic profile: below about
+# 10 the sheet still reads as white paper, above about 30 the wash swallows the
+# shallow relief.  The core default stays 0 so every recipe written before the
+# wash existed reproduces byte for byte.
+RECOMMENDED_RUBBING_PAPER_TONE_PERCENT = 20
+MAX_RUBBING_PAPER_TONE_PERCENT = 60
+# A rubbing is made by tapping an oiled cotton dabber onto paper laid over the
+# surface.  The dabber reaches a recess less often than the flat around it, but
+# it does reach it: a groove comes out lighter than the sheet, not white.  At a
+# full black point below the local mean the wash keeps this much of itself.
+RECESS_TONE_RETAINED_PERCENT = 50
 
 MAX_RUBBING_VERTICES = 5_000_000
 MAX_RUBBING_FACES = 2_000_000
@@ -178,6 +190,7 @@ def rubbing_policy_blocks(
     black_point_um: int,
     ink_strength_percent: int,
     relief_polarity: str,
+    paper_tone_percent: int = DEFAULT_RUBBING_PAPER_TONE_PERCENT,
 ) -> dict[str, Any]:
     """Resolve the physical/display options every rubbing raster shares.
 
@@ -222,6 +235,12 @@ def rubbing_policy_blocks(
         maximum=400,
     )
     polarity = _polarity(relief_polarity)
+    paper_tone = _strict_int(
+        paper_tone_percent,
+        field_name="paper_tone_percent",
+        minimum=0,
+        maximum=MAX_RUBBING_PAPER_TONE_PERCENT,
+    )
     margin_pixels = _ceil_div(margin * ppm, 1000)
     reference_radius_pixels = max(1, _ceil_div(radius_um * ppm, 1000))
     if reference_radius_pixels > MAX_RUBBING_REFERENCE_RADIUS_PIXELS:
@@ -233,6 +252,24 @@ def rubbing_policy_blocks(
         1,
         _ceil_div(effective_black_point_um, quantization_um),
     )
+    relief_policy: dict[str, Any] = {
+        "black_point_requested_um": black_um,
+        "effective_black_point_ticks": effective_black_point_ticks,
+        "effective_black_point_um": effective_black_point_um,
+        "ink_strength_percent": strength,
+        "minimum_reference_sample_count": 3,
+        "polarity": polarity,
+        "reference_filter": "masked_square_local_mean_integer_integral/v1",
+        "reference_radius_pixels": reference_radius_pixels,
+        "reference_radius_requested_um": radius_um,
+        "tone_rounding": "nearest_half_up_integer/v1",
+    }
+    if paper_tone:
+        # Absent when the wash is off, so every recipe written before the
+        # dabber was modelled rebuilds to the same bytes and the same raster.
+        relief_policy["paper_tone_level"] = (255 * paper_tone + 50) // 100
+        relief_policy["paper_tone_percent"] = paper_tone
+        relief_policy["recess_tone_retained_percent"] = RECESS_TONE_RETAINED_PERCENT
     return {
         "depth_policy": {
             "quantization_rounding": "nearest_ties_to_even/v1",
@@ -247,18 +284,7 @@ def rubbing_policy_blocks(
             "pixels_per_mm": ppm,
             "row_order": "top_to_bottom_v_descending",
         },
-        "relief_policy": {
-            "black_point_requested_um": black_um,
-            "effective_black_point_ticks": effective_black_point_ticks,
-            "effective_black_point_um": effective_black_point_um,
-            "ink_strength_percent": strength,
-            "minimum_reference_sample_count": 3,
-            "polarity": polarity,
-            "reference_filter": "masked_square_local_mean_integer_integral/v1",
-            "reference_radius_pixels": reference_radius_pixels,
-            "reference_radius_requested_um": radius_um,
-            "tone_rounding": "nearest_half_up_integer/v1",
-        },
+        "relief_policy": relief_policy,
         "resource_limits": {
             "max_dimension": MAX_RUBBING_DIMENSION,
             "max_faces": MAX_RUBBING_FACES,
@@ -279,6 +305,7 @@ def rubbing_recipe(
     black_point_um: int,
     ink_strength_percent: int,
     relief_polarity: str,
+    paper_tone_percent: int = DEFAULT_RUBBING_PAPER_TONE_PERCENT,
 ) -> dict[str, Any]:
     """Resolve every physical/display option before context capture."""
 
@@ -291,6 +318,7 @@ def rubbing_recipe(
         black_point_um=black_point_um,
         ink_strength_percent=ink_strength_percent,
         relief_polarity=relief_polarity,
+        paper_tone_percent=paper_tone_percent,
     )
     depth_policy = dict(blocks["depth_policy"])
     depth_policy["front_surface"] = "maximum_frame_normal_depth"
@@ -342,6 +370,11 @@ def validate_rubbing_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
         black_point_um=relief_policy.get("black_point_requested_um"),  # type: ignore[arg-type]
         ink_strength_percent=relief_policy.get("ink_strength_percent"),  # type: ignore[arg-type]
         relief_polarity=relief_policy.get("polarity"),  # type: ignore[arg-type]
+        # Absent means the wash is off, which is what every recipe written
+        # before the dabber was modelled meant.
+        paper_tone_percent=relief_policy.get(  # type: ignore[arg-type]
+            "paper_tone_percent", DEFAULT_RUBBING_PAPER_TONE_PERCENT
+        ),
     )
     if canonical_recipe_hash(recipe) != canonical_recipe_hash(expected):
         raise ArtifactRubbingError(
@@ -765,6 +798,7 @@ def _render_local_relief(
     effective_black_point_ticks: int,
     relief_polarity: str,
     minimum_reference_sample_count: int,
+    paper_tone_level: int = 0,
     cancellation_probe: CancellationProbe | None = None,
 ) -> tuple[np.ndarray, dict[str, int]]:
     raise_if_cancelled(cancellation_probe)
@@ -841,12 +875,18 @@ def _render_local_relief(
         tick_block = ticks[row_start:row_stop]
         mask_block = covered[row_start:row_stop]
         signed_response = tick_block * window_count - window_sum
+        # ``response`` runs with the ink, ``into`` against it.  The wash thins
+        # on the ``into`` side; a bidirectional rubbing inks both sides by
+        # convention and so has no side left to thin.
         if relief_polarity == "raised":
             response = np.maximum(signed_response, 0)
+            into = np.maximum(-signed_response, 0)
         elif relief_polarity == "incised":
             response = np.maximum(-signed_response, 0)
+            into = np.maximum(signed_response, 0)
         else:
             response = np.abs(signed_response)
+            into = np.zeros_like(response)
         valid_reference = window_count >= minimum_reference_sample_count
         denominator = effective_black_point_ticks * window_count
         usable = mask_block & valid_reference & (denominator > 0)
@@ -854,9 +894,20 @@ def _render_local_relief(
         if int(np.max(denominator, initial=0)) > (2**63 - 1) // 255:
             raise ArtifactRubbingError("rubbing tone mapping would overflow")
         drop = np.zeros(response.shape, dtype=np.int64)
-        drop[usable] = (
-            response[usable] * 255 + denominator[usable] // 2
+        # The wash is the tone a surface level with its surroundings takes, and
+        # the relief ramps from there to full black.  Both terms are bounded by
+        # 255 x denominator, which the guard above already covers.
+        head = 255 - paper_tone_level
+        drop[usable] = paper_tone_level + (
+            response[usable] * head + denominator[usable] // 2
         ) // denominator[usable]
+        if paper_tone_level:
+            into = np.where(usable, np.minimum(into, denominator), 0)
+            shed = 100 - RECESS_TONE_RETAINED_PERCENT
+            fall_denominator = 100 * denominator[usable]
+            drop[usable] -= (
+                into[usable] * paper_tone_level * shed + fall_denominator // 2
+            ) // fall_denominator
         gray = np.asarray(255 - drop, dtype=np.uint8)
         output[row_start:row_stop, :, 0] = gray
         output[row_start:row_stop, :, 1] = np.where(mask_block, 255, 0).astype(
@@ -924,6 +975,7 @@ def extract_digital_rubbing(
         minimum_reference_sample_count=int(
             relief_policy["minimum_reference_sample_count"]
         ),
+        paper_tone_level=int(relief_policy.get("paper_tone_level", 0)),
         cancellation_probe=cancellation_probe,
     )
     raise_if_cancelled(cancellation_probe)
