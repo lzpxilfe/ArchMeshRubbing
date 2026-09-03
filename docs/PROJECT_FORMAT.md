@@ -594,6 +594,25 @@ sidecar의 artifact descriptor를 제외한 normative claim 전체를 RFC 8785 S
 
 writer는 vector package와 같은 same-parent staging, prepared inode/fingerprint capability, file/directory `fsync`, self-validation, OS별 atomic no-replace publish를 사용한다. staging 이름은 배타적으로 예약하고 충돌한 foreign directory를 재사용·삭제하지 않는다. application cleanup도 등록한 device/inode가 그대로일 때만 수행한다. 기존 목적지, 추가 member와 symlink는 거부하며 `.DS_Store`, `Thumbs.db`, `desktop.ini`만 vector와 같은 1 MiB 제한으로 무시한다. final rename 뒤 실제 또는 미지원 directory `fsync`는 destination이 이미 게시된 `committed=true` 오류이며 GUI는 저장 완료와 crash durability 미확정을 구분한다. 이 package의 hash도 무결성 값이며 제작자 전자서명은 아니다.
 
+### 전개 좌표 위의 탁본 `raster.developed_rubbing.v1`
+
+여섯 뷰 탁본이 유물을 옆에서 본 것이라면, 전개 탁본은 `surface.tile_unwrap.v1` record가 증명한 전개 좌표 (u, v) 위에 같은 relief를 그린 것이다. 깊이는 전개 중심(정치한 회전축, 또는 단면마다 맞춘 중심)에 대한 반지름이고, 양자화·local-mean relief·먹 매핑은 Digital Rubbing과 같은 정책 블록을 공유한다. 배경은 [`docs/POTTERY_STRIP_UNWRAP.md`](POTTERY_STRIP_UNWRAP.md)에 있다.
+
+```text
+DerivedRecord(type=raster.developed_rubbing.v1)
+├── geometry_ref: urn:archmeshrubbing:developed-rubbing-raster:sha256:<digest>
+├── depends_on_record_ids: [<tile unwrap record>, ...]   (전개 record는 항상 포함)
+├── recipe
+│   ├── development: { record_id, record_type, recipe_hash, unwrap_sha256 }
+│   ├── depth_policy.measure: radius_about_unrolling_centre/v1
+│   └── pixel/relief/resource policies: Digital Rubbing과 동일
+├── qc: raster/ink counts, development face/vertex/distortion, radius span
+└── extensions[org.archmeshrubbing:developed-rubbing-v1]
+    └── receipt: development_sha256 + lattice origin/dimensions + exact mm + hashes
+```
+
+다시 열 때는 receipt·recipe·QC의 정합성에 더해 recipe가 이름 지은 전개 record가 문서에 있고, 그 receipt의 `unwrap_sha256`과 recipe 해시가 탁본 recipe가 적은 값과 같은지 확인한다. raster를 재계산할 때는 전개 record의 recipe로 전개를 다시 계산해 receipt와 payload 해시가 맞아야만 탁본을 그린다. 전개가 STALE이면 탁본도 STALE이다. 1:1 package 내보내기는 아직 없다.
+
 ## 완료 3/6/6 원자 묶음 `.amr-survey`
 
 `*.amr-survey`는 새 알고리즘 결과를 만드는 포맷이 아니라, 한 active Align 아래에서 dependency-valid `READY + FRESH`인 Cutline 3면, Outline 6면, Digital Rubbing 6면의 기존 권위 package를 한 번에 전달하는 non-overwriting directory다. GUI의 `완료 실측 15개 원자 묶음 내보내기`는 세 단계가 모두 완료된 경우에만 활성화된다.

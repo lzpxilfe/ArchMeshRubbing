@@ -143,6 +143,7 @@ python -m pytest -q ^
 - 동일 recipe 재계산과 canonical binary round-trip, source vertex/face correspondence, exact µm bounds·component hash·전체 payload SHA-256, Top/Bottom·자동/고정 seam 구분과 Align stale 보존. current 1.2 recipe/export와 byte-preserved 자동 seam 1.1 recipe/export를 모두 버전 그대로 재계산·offline 검증
 - `.amr-unwrap` canonical binary/flat OBJ/physical-mm SVG/provenance sidecar의 byte 결정성, four-member tamper 거부, offline 검증, hidden staging·exact prepared inode/fingerprint capability·no-overwrite final-authority publish와 destination race 정리
 - versioned tile unwrap receipt 1.1/current export 1.2 Draft 2020-12 schema, byte-preserved legacy export 1.1과 axis·seam·fallback·privacy closed contract
+- `READY + FRESH` 전개 record를 payload 해시·recipe 해시로 이름 짓고, 재계산한 전개가 receipt·payload 해시와 다르거나 전개가 STALE이면 그리지 않는 `raster.developed_rubbing.v1`; 전개 record를 항상 dependency로 갖고, 같은 recipe에서 raster SHA-256이 같으며, Digital Rubbing과 같은 raster/pixel/dimension 상한과 admission 예산을 공유
 - exact Git commit/tree의 regular blob만 허용하는 결정적 corresponding-source ZIP, 내부 manifest·외부 sidecar·Git blob ID·SHA-256·라이선스 결합과 저장소 삭제 뒤 offline 검증
 - portable/source/evidence exact hash와 실제 payload file set, GitHub repository/workflow/run attempt/Windows X64 hosted-runner identity를 결합하는 canonical unsigned provenance, 한글 추출본 offline 재검증, closed `authentication=none` 계약과 변조·source mismatch 거부
 - vector/rubbing/survey/tile-unwrap worker의 hidden same-parent staging·전체 검증·prepared inode/fingerprint capability, 빠른 final Workbench record-authority fence, same-Align append 허용, Align/Open stale 정리와 pending Open GUI 취소 정책

@@ -1319,6 +1319,28 @@ def extract_tile_unwrap(
 ) -> tuple[TileUnwrapMesh, dict[str, Any]]:
     """Compute one authoritative unwrap or fail without substituting a method."""
 
+    unwrap, qc, _radius = extract_tile_unwrap_development(
+        mesh,
+        recipe,
+        cancellation_probe=cancellation_probe,
+    )
+    return unwrap, qc
+
+
+def extract_tile_unwrap_development(
+    mesh: MeshData,
+    recipe: Mapping[str, Any],
+    *,
+    cancellation_probe: CancellationProbe | None = None,
+) -> tuple[TileUnwrapMesh, dict[str, Any], np.ndarray]:
+    """The unwrap, its QC, and each developed vertex's radius in millimetres.
+
+    The radius is measured about the centre the surface was unrolled on -
+    the canonical axis for a positioned pot, the fitted section centres for a
+    tile - and is what a rubbing drawn on the developed coordinates uses as
+    depth.  It is a by-product: the unwrap and its hashes do not depend on it.
+    """
+
     validated = validate_tile_unwrap_recipe(recipe)
     selection = validated["selection"]
     assert isinstance(selection, Mapping)
@@ -1382,6 +1404,11 @@ def extract_tile_unwrap(
         reason = str(meta.get("sectionwise_reason", "sectionwise_internal_fallback"))
         raise ArtifactTileUnwrapError(
             f"authoritative tile unwrap rejected algorithm fallback: {reason}"
+        )
+    vertex_radius = np.asarray(meta.get("vertex_radius"), dtype=np.float64)
+    if vertex_radius.shape != (submesh.n_vertices,):
+        raise ArtifactTileUnwrapError(
+            "sectionwise unwrap returned no per-vertex radius"
         )
     # Stations are drawn from mesh quantiles, so ties collapse and the achieved
     # count can fall short of the requested one.  The record contract requires
@@ -1480,7 +1507,8 @@ def extract_tile_unwrap(
         "width_um": int(receipt["width_mm_exact"]["numerator"]),
     }
     raise_if_cancelled(cancellation_probe)
-    return unwrap, qc
+    vertex_radius.setflags(write=False)
+    return unwrap, qc, vertex_radius
 
 
 @dataclass(frozen=True, slots=True)
@@ -1701,6 +1729,7 @@ __all__ = [
     "compute_artifact_tile_unwrap",
     "compute_artifact_tile_unwrap_from_recipe",
     "extract_tile_unwrap",
+    "extract_tile_unwrap_development",
     "require_current_tile_unwrap_computation",
     "recompute_tile_unwrap_payload_qc",
     "selection_face_indices",

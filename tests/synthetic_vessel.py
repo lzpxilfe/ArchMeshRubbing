@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -39,22 +39,33 @@ def outer_radius(z_mm: float) -> float:
     return 25.0 + 22.0 * t + 9.0 * math.sin(math.pi * t)
 
 
+Relief = Callable[[float, float], float]
+
+
 def hollow_vessel(
     *,
     segments: int = 24,
     rings: int = 10,
+    relief: Relief | None = None,
 ) -> tuple[np.ndarray, np.ndarray, list[np.ndarray], list[np.ndarray]]:
-    """Return (vertices, faces, rim circle points, floor circle points)."""
+    """Return (vertices, faces, rim circle points, floor circle points).
+
+    ``relief(angle_rad, z_mm)`` is a radial offset in millimetres added to
+    the outer wall only: a stamped or corded surface a rubbing has to show.
+    """
 
     phase = math.pi / segments
     vertices: list[list[float]] = []
     faces: list[list[int]] = []
 
-    def ring(radius: float, z_mm: float) -> int:
+    def ring(radius: float, z_mm: float, *, textured: bool = False) -> int:
         start = len(vertices)
         for segment in range(segments):
             angle = phase + 2.0 * math.pi * segment / segments
-            vertices.append([radius * math.cos(angle), radius * math.sin(angle), z_mm])
+            r = radius
+            if textured and relief is not None:
+                r += float(relief(angle, z_mm))
+            vertices.append([r * math.cos(angle), r * math.sin(angle), z_mm])
         return start
 
     def band(lower: int, upper: int, *, inward: bool = False) -> None:
@@ -72,7 +83,11 @@ def hollow_vessel(
             faces.append(second)
 
     outer = [
-        ring(outer_radius(HEIGHT_MM * index / rings), HEIGHT_MM * index / rings)
+        ring(
+            outer_radius(HEIGHT_MM * index / rings),
+            HEIGHT_MM * index / rings,
+            textured=True,
+        )
         for index in range(rings + 1)
     ]
     for index in range(rings):
@@ -201,11 +216,12 @@ def positioned_vessel_session(
     segments: int = 24,
     rings: int = 10,
     document_id: str = "artifact:vessel",
+    relief: Relief | None = None,
 ) -> tuple[ArtifactSession, np.ndarray, np.ndarray]:
     """A vessel stood on its axis by two measured circles, plus its arrays."""
 
     vertices, faces, rim_points, floor_points = hollow_vessel(
-        segments=segments, rings=rings
+        segments=segments, rings=rings, relief=relief
     )
     mesh = MeshData(
         vertices=vertices,

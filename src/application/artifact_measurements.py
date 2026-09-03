@@ -38,6 +38,17 @@ from src.core.artifact_condition_annotation import (
     project_condition_from_recipe,
     validate_condition_recipe,
 )
+from src.core.artifact_developed_rubbing import (
+    ArtifactDevelopedRubbingError,
+    DevelopedRubbingComputation,
+    commit_developed_rubbing,
+    derive_developed_rubbing,
+    developed_rubbing_computation_matches_active_projection,
+    developed_rubbing_recipe_for_record,
+    development_record_for_recipe,
+    estimate_developed_rubbing_resources,
+    validate_developed_rubbing_recipe,
+)
 from src.core.artifact_document import OperationContext, canonical_recipe_hash
 from src.core.artifact_geometry_metrics import (
     ArtifactGeometryMetricsComputation,
@@ -147,6 +158,16 @@ class MeasurementOperationKind(str, Enum):
     SURFACE_DISTANCE = "surface_distance"
     SURFACE_DIAMETER = "surface_diameter"
     CONDITION_ANNOTATION = "condition_annotation"
+    DEVELOPED_RUBBING = "developed_rubbing"
+
+
+# Kinds that allocate a raster and therefore share the rubbing memory budget.
+_RASTER_KINDS = frozenset(
+    {
+        MeasurementOperationKind.DIGITAL_RUBBING,
+        MeasurementOperationKind.DEVELOPED_RUBBING,
+    }
+)
 
 
 class MeasurementOperationState(str, Enum):
@@ -173,6 +194,7 @@ MeasurementComputation: TypeAlias = (
     | ArtifactGeometryMetricsComputation
     | ArtifactSurfaceMeasurementComputation
     | ConditionAnnotationComputation
+    | DevelopedRubbingComputation
 )
 CancellationProbe: TypeAlias = Callable[[], bool]
 MeasurementPublisher: TypeAlias = Callable[[RecordBindingTransition], None]
@@ -248,6 +270,8 @@ def _operation_kind_for_computation(
         return MeasurementOperationKind.TILE_UNWRAP
     if isinstance(computation, ConditionAnnotationComputation):
         return MeasurementOperationKind.CONDITION_ANNOTATION
+    if isinstance(computation, DevelopedRubbingComputation):
+        return MeasurementOperationKind.DEVELOPED_RUBBING
     if isinstance(computation, ArtifactVectorComputation):
         kind = VectorRecordKind(computation.payload.kind)
         if kind is VectorRecordKind.CUTLINE:
@@ -349,7 +373,7 @@ class ArtifactMeasurementWorkItem:
         if type(self.base_authority_epoch) is not int or self.base_authority_epoch < 0:
             raise ArtifactMeasurementError("base_authority_epoch must be non-negative")
         if (
-            self.kind is MeasurementOperationKind.DIGITAL_RUBBING
+            self.kind in _RASTER_KINDS
             and self.resource_estimate is not None
             and not isinstance(
                 self.resource_estimate,
@@ -360,7 +384,7 @@ class ArtifactMeasurementWorkItem:
                 "Digital Rubbing resource estimate has an invalid type"
             )
         if (
-            self.kind is not MeasurementOperationKind.DIGITAL_RUBBING
+            self.kind not in _RASTER_KINDS
             and self.resource_estimate is not None
         ):
             raise ArtifactMeasurementError(
@@ -616,6 +640,25 @@ def execute_measurement_work_item(
             recipe=recipe,
             qc=payload.qc_summary(),
         )
+    elif work_item.kind is MeasurementOperationKind.DEVELOPED_RUBBING:
+        try:
+            developed_raster, developed_qc = derive_developed_rubbing(
+                work_item.captured_session.document,
+                projection.mesh,
+                recipe,
+                cancellation_probe=cancellation_probe,
+            )
+        except ArtifactComputationCancelledError as exc:
+            raise MeasurementCancelledError(str(exc)) from exc
+        except ArtifactDevelopedRubbingError as exc:
+            raise ArtifactMeasurementError(str(exc)) from exc
+        computation = DevelopedRubbingComputation(
+            context=work_item.context,
+            projection_snapshot=work_item.projection_snapshot,
+            raster=developed_raster,
+            recipe=recipe,
+            qc=developed_qc,
+        )
     elif work_item.kind is MeasurementOperationKind.DIGITAL_RUBBING:
         try:
             raster, qc = extract_digital_rubbing(
@@ -748,7 +791,7 @@ class ArtifactMeasurementController:
                     }
                 ),
             )
-            if work_item.kind is not MeasurementOperationKind.DIGITAL_RUBBING:
+            if work_item.kind not in _RASTER_KINDS:
                 return None
             return runtime.resource_estimate or work_item.resource_estimate
 
@@ -973,7 +1016,7 @@ class ArtifactMeasurementController:
         active = [
             runtime
             for runtime in self._active.values()
-            if runtime.work_item.kind is MeasurementOperationKind.DIGITAL_RUBBING
+            if runtime.work_item.kind in _RASTER_KINDS
         ]
         memory_budgets = [
             runtime.rubbing_memory_budget_bytes
@@ -1035,8 +1078,23 @@ class ArtifactMeasurementController:
                 raise StaleMeasurementOperationError(
                     "condition selection does not match the active source mesh"
                 )
+        development_prerequisites: tuple[str, ...] = ()
+        if kind is MeasurementOperationKind.DEVELOPED_RUBBING:
+            # The development must still be the one the recipe names, by
+            # hash, in the session the work is captured on.  A development
+            # that was recomputed or superseded is another development.
+            try:
+                developed_recipe = validate_developed_rubbing_recipe(recipe)
+                development_record, _development_receipt = (
+                    development_record_for_recipe(session.document, developed_recipe)
+                )
+            except ArtifactDevelopedRubbingError as exc:
+                raise ArtifactMeasurementError(str(exc)) from exc
+            development_prerequisites = (development_record.id,)
         prerequisite_ids: tuple[str, ...] = ()
-        if kind is MeasurementOperationKind.OUTLINE:
+        if kind is MeasurementOperationKind.DEVELOPED_RUBBING:
+            prerequisite_ids = development_prerequisites
+        elif kind is MeasurementOperationKind.OUTLINE:
             prerequisite_ids = workflow_step_record_ids(
                 session,
                 ArtifactWorkflowStep.CUTLINE,
@@ -1182,7 +1240,7 @@ class ArtifactMeasurementController:
                 raise ArtifactMeasurementError(
                     f"record ID {resolved_record_id!r} is reserved by {reservation_owner!r}"
                 )
-            if kind is MeasurementOperationKind.DIGITAL_RUBBING:
+            if kind in _RASTER_KINDS:
                 (
                     active_rubbing,
                     reserved_bytes,
@@ -1208,19 +1266,17 @@ class ArtifactMeasurementController:
                 cancellation=Event(),
                 rubbing_memory_budget_bytes=(
                     self._rubbing_memory_budget_bytes
-                    if kind is MeasurementOperationKind.DIGITAL_RUBBING
+                    if kind in _RASTER_KINDS
                     else None
                 ),
                 max_active_rubbing_operations=(
                     self._max_active_rubbing_operations
-                    if kind is MeasurementOperationKind.DIGITAL_RUBBING
+                    if kind in _RASTER_KINDS
                     else None
                 ),
                 resource_estimate=estimate,
                 reserved_peak_bytes=(
-                    minimum_estimated_bytes
-                    if kind is MeasurementOperationKind.DIGITAL_RUBBING
-                    else 0
+                    minimum_estimated_bytes if kind in _RASTER_KINDS else 0
                 ),
             )
             self._active[operation_id] = runtime
@@ -1505,6 +1561,52 @@ class ArtifactMeasurementController:
                 estimate_rubbing=True,
             )
 
+    def begin_developed_rubbing(
+        self,
+        development_record_id: str,
+        *,
+        pixels_per_mm: int,
+        margin_um: int,
+        reference_radius_um: int,
+        depth_quantization_um: int,
+        black_point_um: int,
+        ink_strength_percent: int,
+        relief_polarity: str,
+        record_id: str | None = None,
+        created_at: str | None = None,
+        operator: str = "local-user",
+        depends_on_record_ids: Sequence[str] = (),
+    ) -> ArtifactMeasurementWorkItem:
+        """Draw a rubbing on a READY + FRESH tile-unwrap record's development."""
+
+        session = self._workbench.snapshot.session
+        if not isinstance(session, ArtifactSession):
+            raise ArtifactMeasurementError("no active ArtifactDocument session")
+        with self._rubbing_admission_lock:
+            try:
+                recipe = developed_rubbing_recipe_for_record(
+                    session.document,
+                    development_record_id,
+                    pixels_per_mm=pixels_per_mm,
+                    margin_um=margin_um,
+                    reference_radius_um=reference_radius_um,
+                    depth_quantization_um=depth_quantization_um,
+                    black_point_um=black_point_um,
+                    ink_strength_percent=ink_strength_percent,
+                    relief_polarity=relief_polarity,
+                )
+            except ArtifactDevelopedRubbingError as exc:
+                raise ArtifactMeasurementError(str(exc)) from exc
+            return self._begin(
+                kind=MeasurementOperationKind.DEVELOPED_RUBBING,
+                recipe=recipe,
+                record_id=record_id,
+                created_at=created_at,
+                operator=operator,
+                depends_on_record_ids=depends_on_record_ids,
+                estimate_rubbing=True,
+            )
+
     def _prepare_rubbing_resource_estimate(
         self,
         runtime: _MeasurementRuntime,
@@ -1513,18 +1615,39 @@ class ArtifactMeasurementController:
         """Expand a cheap admission reservation on the executing worker."""
 
         work_item = runtime.work_item
-        if work_item.kind is not MeasurementOperationKind.DIGITAL_RUBBING:
+        if work_item.kind not in _RASTER_KINDS:
             return
         _raise_if_cancelled(cancellation.is_set)
         session = work_item.captured_session
-        estimate = estimate_digital_rubbing_resources(
-            session.source_mesh.vertices,
-            session.source_mesh.faces,
-            work_item.recipe_dict(),
-            source_to_world_mm_matrix4x4=work_item.projection_snapshot.matrix4x4,
-            uv_coords=session.source_mesh.uv_coords,
-            texture=session.source_mesh.texture,
-        )
+        if work_item.kind is MeasurementOperationKind.DEVELOPED_RUBBING:
+            # The development receipt states the strip's exact extent, so the
+            # artboard is known without unrolling anything on the worker.
+            try:
+                _development, development_receipt = development_record_for_recipe(
+                    session.document,
+                    work_item.recipe_dict(),
+                )
+                estimate = estimate_developed_rubbing_resources(
+                    development_receipt,
+                    work_item.recipe_dict(),
+                    source_vertex_count=int(session.source_mesh.vertices.shape[0]),
+                    source_face_count=int(session.source_mesh.faces.shape[0]),
+                    source_geometry_bytes=int(
+                        session.source_mesh.vertices.nbytes
+                        + session.source_mesh.faces.nbytes
+                    ),
+                )
+            except ArtifactDevelopedRubbingError as exc:
+                raise ArtifactMeasurementError(str(exc)) from exc
+        else:
+            estimate = estimate_digital_rubbing_resources(
+                session.source_mesh.vertices,
+                session.source_mesh.faces,
+                work_item.recipe_dict(),
+                source_to_world_mm_matrix4x4=work_item.projection_snapshot.matrix4x4,
+                uv_coords=session.source_mesh.uv_coords,
+                texture=session.source_mesh.texture,
+            )
         if session.projection_snapshot() != work_item.projection_snapshot:
             raise StaleMeasurementOperationError(
                 "artifact projection changed during resource preflight"
@@ -1882,6 +2005,24 @@ class ArtifactMeasurementController:
                 )
             except ArtifactConditionAnnotationError as exc:
                 raise ArtifactMeasurementError(str(exc)) from exc
+        elif isinstance(computation, DevelopedRubbingComputation):
+            if not developed_rubbing_computation_matches_active_projection(
+                current, computation
+            ):
+                raise StaleMeasurementOperationError(
+                    "developed rubbing result is stale for the active projection"
+                )
+            try:
+                candidate = commit_developed_rubbing(
+                    current,
+                    computation,
+                    record_id=work_item.record_id,
+                    created_at=work_item.created_at,
+                    operator=work_item.operator,
+                    depends_on_record_ids=work_item.depends_on_record_ids,
+                )
+            except ArtifactDevelopedRubbingError as exc:
+                raise ArtifactMeasurementError(str(exc)) from exc
         else:  # pragma: no cover - guarded by ArtifactMeasurementResult
             raise ArtifactMeasurementError("unsupported measurement computation")
 
@@ -1931,6 +2072,10 @@ class ArtifactMeasurementController:
             )
         if isinstance(computation, ArtifactSurfaceMeasurementComputation):
             return surface_measurement_computation_matches_active_projection(
+                current, computation
+            )
+        if isinstance(computation, DevelopedRubbingComputation):
+            return developed_rubbing_computation_matches_active_projection(
                 current, computation
             )
         return False

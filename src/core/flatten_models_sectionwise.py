@@ -792,6 +792,11 @@ def sectionwise_cylindrical_parameterization(
         r_local = np.where(finite_radius, r_local, radius_fill)
     u[finite] = theta_wrapped * r_local
     v_out[finite] = v[finite]
+    # The radius about the unrolling centre is the height a rubbing on the
+    # developed surface records: what the paper feels, measured the way the
+    # strip was unrolled.  It is reported, never used for the coordinates.
+    vertex_radius = np.full(s_raw.shape, np.nan, dtype=np.float64)
+    vertex_radius[finite] = r_local
     if section_center == "axis_origin":
         # With the centre known there is no lost shear to recover; a search
         # for one can only move rows away from where the axis put them.
@@ -855,6 +860,7 @@ def sectionwise_cylindrical_parameterization(
             "section_station_policy": station,
             "section_record_view": record_view_key,
             "section_u_flipped": bool(flip_u),
+            "vertex_radius": vertex_radius,
             **row_shift_meta,
         }
         return uv, meta

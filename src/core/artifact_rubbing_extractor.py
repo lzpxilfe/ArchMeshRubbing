@@ -169,8 +169,7 @@ def _polarity(value: object) -> str:
     return value
 
 
-def rubbing_recipe(
-    view: OutlineView | str,
+def rubbing_policy_blocks(
     *,
     pixels_per_mm: int,
     margin_um: int,
@@ -180,9 +179,12 @@ def rubbing_recipe(
     ink_strength_percent: int,
     relief_polarity: str,
 ) -> dict[str, Any]:
-    """Resolve every physical/display option before context capture."""
+    """Resolve the physical/display options every rubbing raster shares.
 
-    resolved_view = _view(view)
+    The six-view rubbing and the rubbing on a developed surface quantise,
+    filter, and ink the same way; only where the depth comes from differs.
+    """
+
     ppm = _strict_int(
         pixels_per_mm,
         field_name="pixels_per_mm",
@@ -232,17 +234,10 @@ def rubbing_recipe(
         _ceil_div(effective_black_point_um, quantization_um),
     )
     return {
-        "algorithm": RUBBING_ALGORITHM,
-        "algorithm_version": RUBBING_ALGORITHM_VERSION,
-        "artboard_policy": "global_pixel_lattice_bounds_plus_margin/v1",
-        "coordinate_space": RUBBING_COORDINATE_SPACE,
         "depth_policy": {
-            "front_surface": "maximum_frame_normal_depth",
             "quantization_rounding": "nearest_ties_to_even/v1",
             "quantization_um": quantization_um,
         },
-        "frame": outline_frame(resolved_view).to_dict(),
-        "kind": "digital_rubbing",
         "pixel_policy": {
             "margin_pixels": margin_pixels,
             "margin_requested_um": margin,
@@ -251,14 +246,6 @@ def rubbing_recipe(
             "pixels_per_meter": ppm * 1000,
             "pixels_per_mm": ppm,
             "row_order": "top_to_bottom_v_descending",
-        },
-        "rasterization_policy": {
-            "backfaces": "include",
-            "edge_rule": "barycentric_nonnegative_with_fixed_epsilon/v1",
-            "multi_layer_policy": "frontmost_and_count_second_depth/v1",
-            "projected_zero_area_faces": "drop_and_count",
-            "sampling": "none",
-            "z_tie": "geometry_invariant_max_depth",
         },
         "relief_policy": {
             "black_point_requested_um": black_um,
@@ -279,6 +266,53 @@ def rubbing_recipe(
             "max_triangle_pixel_tests": MAX_RUBBING_TRIANGLE_PIXEL_TESTS,
             "max_vertices": MAX_RUBBING_VERTICES,
         },
+    }
+
+
+def rubbing_recipe(
+    view: OutlineView | str,
+    *,
+    pixels_per_mm: int,
+    margin_um: int,
+    reference_radius_um: int,
+    depth_quantization_um: int,
+    black_point_um: int,
+    ink_strength_percent: int,
+    relief_polarity: str,
+) -> dict[str, Any]:
+    """Resolve every physical/display option before context capture."""
+
+    resolved_view = _view(view)
+    blocks = rubbing_policy_blocks(
+        pixels_per_mm=pixels_per_mm,
+        margin_um=margin_um,
+        reference_radius_um=reference_radius_um,
+        depth_quantization_um=depth_quantization_um,
+        black_point_um=black_point_um,
+        ink_strength_percent=ink_strength_percent,
+        relief_polarity=relief_polarity,
+    )
+    depth_policy = dict(blocks["depth_policy"])
+    depth_policy["front_surface"] = "maximum_frame_normal_depth"
+    return {
+        "algorithm": RUBBING_ALGORITHM,
+        "algorithm_version": RUBBING_ALGORITHM_VERSION,
+        "artboard_policy": "global_pixel_lattice_bounds_plus_margin/v1",
+        "coordinate_space": RUBBING_COORDINATE_SPACE,
+        "depth_policy": depth_policy,
+        "frame": outline_frame(resolved_view).to_dict(),
+        "kind": "digital_rubbing",
+        "pixel_policy": blocks["pixel_policy"],
+        "rasterization_policy": {
+            "backfaces": "include",
+            "edge_rule": "barycentric_nonnegative_with_fixed_epsilon/v1",
+            "multi_layer_policy": "frontmost_and_count_second_depth/v1",
+            "projected_zero_area_faces": "drop_and_count",
+            "sampling": "none",
+            "z_tie": "geometry_invariant_max_depth",
+        },
+        "relief_policy": blocks["relief_policy"],
+        "resource_limits": blocks["resource_limits"],
         "view": resolved_view.value,
     }
 
@@ -314,6 +348,43 @@ def validate_rubbing_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
             "Digital Rubbing recipe does not match the production contract"
         )
     return expected
+
+
+def ga8_raster_summary(pixels: np.ndarray) -> dict[str, Any]:
+    """Count coverage and ink in a grey+alpha raster whose alpha is a mask."""
+
+    array = np.asarray(pixels)
+    if array.dtype != np.uint8 or array.ndim != 3 or array.shape[2] != 2:
+        raise ArtifactRubbingError("raster pixels must be an HxWx2 uint8 array")
+    gray = array[:, :, 0]
+    alpha = array[:, :, 1]
+    covered = alpha == 255
+    covered_count = int(np.count_nonzero(covered))
+    if covered_count:
+        covered_gray = gray[covered]
+        minimum = int(covered_gray.min())
+        maximum = int(covered_gray.max())
+        ink_sum = int(np.sum(255 - covered_gray, dtype=np.int64))
+        inked_count = int(np.count_nonzero(covered_gray < 255))
+    else:
+        minimum = 255
+        maximum = 255
+        ink_sum = 0
+        inked_count = 0
+    if np.any((alpha != 0) & (alpha != 255)):
+        raise ArtifactRubbingError("raster alpha mask must be binary")
+    return {
+        "alpha_binary": True,
+        "covered_gray_max": maximum,
+        "covered_gray_min": minimum,
+        "covered_pixel_count": covered_count,
+        "height_pixels": int(array.shape[0]),
+        "ink_sum": ink_sum,
+        "inked_pixel_count": inked_count,
+        "pixel_count": int(array.shape[0]) * int(array.shape[1]),
+        "pixel_format": RUBBING_PIXEL_FORMAT,
+        "width_pixels": int(array.shape[1]),
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -428,37 +499,11 @@ class DigitalRubbingRaster:
         }
 
     def qc_summary(self) -> dict[str, Any]:
-        gray = self.pixels[:, :, 0]
-        alpha = self.pixels[:, :, 1]
-        covered = alpha == 255
-        covered_count = int(np.count_nonzero(covered))
-        if covered_count:
-            covered_gray = gray[covered]
-            minimum = int(covered_gray.min())
-            maximum = int(covered_gray.max())
-            ink_sum = int(np.sum(255 - covered_gray, dtype=np.int64))
-            inked_count = int(np.count_nonzero(covered_gray < 255))
-        else:
-            minimum = 255
-            maximum = 255
-            ink_sum = 0
-            inked_count = 0
-        if np.any((alpha != 0) & (alpha != 255)):
-            raise ArtifactRubbingError("raster alpha mask must be binary")
         return {
-            "alpha_binary": True,
-            "covered_gray_max": maximum,
-            "covered_gray_min": minimum,
-            "covered_pixel_count": covered_count,
-            "height_pixels": self.height_pixels,
-            "ink_sum": ink_sum,
-            "inked_pixel_count": inked_count,
-            "pixel_count": self.width_pixels * self.height_pixels,
-            "pixel_format": RUBBING_PIXEL_FORMAT,
+            **ga8_raster_summary(self.pixels),
             "pixels_per_meter": self.pixels_per_meter,
             "raster_sha256": self.raster_sha256,
             "raw_pixel_sha256": self.raw_pixel_sha256,
-            "width_pixels": self.width_pixels,
         }
 
 
@@ -523,6 +568,36 @@ def _rasterize_front_depth(
     projected = np.column_stack((relative @ u_axis, relative @ v_axis))
     raise_if_cancelled(cancellation_probe)
     depths = relative @ normal
+    return _rasterize_depth_field(
+        projected,
+        depths,
+        faces,
+        pixels_per_mm=pixels_per_mm,
+        margin_pixels=margin_pixels,
+        layer_separation_mm=layer_separation_mm,
+        cancellation_probe=cancellation_probe,
+    )
+
+
+def _rasterize_depth_field(
+    projected: np.ndarray,
+    depths: np.ndarray,
+    faces: np.ndarray,
+    *,
+    pixels_per_mm: int,
+    margin_pixels: int,
+    layer_separation_mm: float,
+    cancellation_probe: CancellationProbe | None = None,
+) -> tuple[np.ndarray, int, int, dict[str, int]]:
+    """Resolve the front-most depth at every pixel centre of a planar field.
+
+    ``projected`` holds each vertex's (u, v) in millimetres on the artboard
+    plane and ``depths`` its height towards the viewer.  The six-view rubbing
+    projects a frame to get them; the rubbing on a developed surface reads
+    them off the unrolled strip.  The lattice, the edge rule, and the layer
+    bookkeeping are the same either way.
+    """
+
     raise_if_cancelled(cancellation_probe)
     referenced = np.unique(faces.reshape(-1))
     raise_if_cancelled(cancellation_probe)
@@ -1153,6 +1228,8 @@ __all__ = [
     "compute_artifact_rubbing_from_recipe",
     "extract_digital_rubbing",
     "estimate_digital_rubbing_resources",
+    "ga8_raster_summary",
+    "rubbing_policy_blocks",
     "commit_artifact_rubbing",
     "require_current_rubbing_computation",
     "rubbing_computation_matches_active_projection",
