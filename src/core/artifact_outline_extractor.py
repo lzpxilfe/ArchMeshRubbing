@@ -51,6 +51,21 @@ OUTLINE_ALGORITHM_VERSION = "1.0.0"
 DEFAULT_OUTLINE_PRECISION_GRID_MM = 0.01
 REQUIRED_SHAPELY_VERSION = "2.1.2"
 REQUIRED_GEOS_VERSION = "3.13.1"
+
+# Every (Shapely, GEOS) pair this project has computed authoritative outlines
+# with.  Append here when the pin moves; never remove an entry.
+#
+# Computing an outline uses `REQUIRED_*` alone, because a new record must come
+# from the one backend the release actually tests.  Verifying a record that
+# already exists uses this table instead: the pair it names was reviewed when
+# it was current, and a package must not stop verifying merely because the
+# project later moved on.  Comparing a stored version against `REQUIRED_*`
+# would have failed every outline package the moment the pin changed.
+REVIEWED_OUTLINE_BACKENDS: frozenset[tuple[str, str]] = frozenset(
+    {
+        (REQUIRED_SHAPELY_VERSION, REQUIRED_GEOS_VERSION),
+    }
+)
 MAX_OUTLINE_FACES = 2_000_000
 MAX_OUTLINE_VERTICES = 5_000_000
 MAX_OUTLINE_INTERMEDIATE_COORDINATES = 1_000_000
@@ -1096,6 +1111,7 @@ __all__ = [
     "OutlineGeometryResult",
     "OutlineView",
     "REQUIRED_GEOS_VERSION",
+    "REVIEWED_OUTLINE_BACKENDS",
     "REQUIRED_SHAPELY_VERSION",
     "compute_artifact_outline",
     "extract_outline_geometry",

@@ -11,6 +11,8 @@ from src.core.mesh_import_recipe import (
     MESH_IMPORT_RECIPE_ID,
     MESH_IMPORT_RECIPE_VERSION,
     MeshImportRecipeError,
+    RUNTIME_POLICY_RECORD_ONLY,
+    RUNTIME_POLICY_REQUIRE_CURRENT,
     current_mesh_import_recipe,
     mesh_import_receipt_matches_base,
     mesh_import_recipe_with_manifest,
@@ -147,13 +149,81 @@ def test_saved_recipe_can_be_inspected_without_dispatching_wrong_runtime() -> No
     inspected = validate_mesh_import_recipe(
         recipe,
         allow_legacy=False,
-        require_current_runtime=False,
+        runtime_policy=RUNTIME_POLICY_RECORD_ONLY,
     )
     assert inspected.source_format == "off"
     assert inspected.loader_version == "99.0.0"
 
     with pytest.raises(MeshImportRecipeError, match="Trimesh version"):
         validate_mesh_import_recipe(recipe, allow_legacy=False)
+
+
+def test_record_only_reports_the_runtime_a_reopen_actually_runs_under() -> None:
+    """A version difference is provenance to show, not a reason to refuse.
+
+    Reopening proves the parser by re-decoding the source and reproducing the
+    recorded geometry digest, so the execution carries the difference for the
+    verification report instead of blocking on it.
+    """
+
+    current = current_mesh_import_recipe("obj")
+    saved = dict(current)
+    saved["loader_version"] = "99.0.0"
+
+    execution = validate_mesh_import_recipe(
+        saved,
+        allow_legacy=False,
+        runtime_policy=RUNTIME_POLICY_RECORD_ONLY,
+    )
+
+    assert execution.loader_version == "99.0.0"
+    assert execution.reopened_under_runtime == current["loader_version"]
+
+    unchanged = validate_mesh_import_recipe(
+        current,
+        allow_legacy=False,
+        runtime_policy=RUNTIME_POLICY_RECORD_ONLY,
+    )
+    assert unchanged.reopened_under_runtime is None
+
+
+def test_record_only_still_rejects_a_malformed_runtime_identity() -> None:
+    """Relaxing the comparison must not relax the shape of what is recorded."""
+
+    recipe = current_mesh_import_recipe("ply")
+    recipe["parser_runtime_sha256"] = "not-a-digest"
+
+    with pytest.raises(MeshImportRecipeError, match="hexadecimal"):
+        validate_mesh_import_recipe(
+            recipe,
+            allow_legacy=False,
+            runtime_policy=RUNTIME_POLICY_RECORD_ONLY,
+        )
+
+
+def test_new_geometry_still_requires_the_locked_parser_runtime() -> None:
+    """Producing authoritative geometry keeps the strict gate it always had."""
+
+    recipe = current_mesh_import_recipe("stl")
+    recipe["loader_version"] = "99.0.0"
+
+    with pytest.raises(MeshImportRecipeError, match="Trimesh version"):
+        validate_mesh_import_recipe(
+            recipe,
+            allow_legacy=False,
+            runtime_policy=RUNTIME_POLICY_REQUIRE_CURRENT,
+        )
+
+
+def test_unknown_runtime_policy_is_refused_rather_than_defaulted() -> None:
+    recipe = current_mesh_import_recipe("obj")
+
+    with pytest.raises(MeshImportRecipeError, match="unsupported runtime policy"):
+        validate_mesh_import_recipe(
+            recipe,
+            allow_legacy=False,
+            runtime_policy="ignore",
+        )
 
 
 def test_full_runtime_lock_is_provenance_not_an_unrelated_execution_gate() -> None:

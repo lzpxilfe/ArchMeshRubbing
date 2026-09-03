@@ -36,6 +36,8 @@ from .mesh_admission import (
 from .mesh_import_recipe import (
     current_mesh_import_recipe,
     mesh_import_recipe_with_manifest,
+    RUNTIME_POLICY_RECORD_ONLY,
+    RUNTIME_POLICY_REQUIRE_CURRENT,
     validate_mesh_import_recipe,
 )
 from .source_identity import (
@@ -1698,7 +1700,20 @@ class MeshLoader:
             if import_recipe is None
             else import_recipe
         )
-        execution = validate_mesh_import_recipe(recipe, allow_legacy=True)
+        execution = validate_mesh_import_recipe(
+            recipe,
+            allow_legacy=True,
+            # No caller recipe means a new GeometryRevision, which may only
+            # be decoded by the locked runtime.  A caller recipe is a saved
+            # one being replayed, and the decode that follows is what proves
+            # it: the caller compares the resulting geometry digest against
+            # the GeometryRevision it came from.
+            runtime_policy=(
+                RUNTIME_POLICY_REQUIRE_CURRENT
+                if import_recipe is None
+                else RUNTIME_POLICY_RECORD_ONLY
+            ),
+        )
         if execution.source_format != file_type:
             raise ValueError(
                 "import recipe format does not match requested parser format: "
@@ -1879,7 +1894,20 @@ class MeshLoader:
             if import_recipe is None
             else import_recipe
         )
-        execution = validate_mesh_import_recipe(recipe, allow_legacy=True)
+        execution = validate_mesh_import_recipe(
+            recipe,
+            allow_legacy=True,
+            # No caller recipe means a new GeometryRevision, which may only
+            # be decoded by the locked runtime.  A caller recipe is a saved
+            # one being replayed, and the decode that follows is what proves
+            # it: the caller compares the resulting geometry digest against
+            # the GeometryRevision it came from.
+            runtime_policy=(
+                RUNTIME_POLICY_REQUIRE_CURRENT
+                if import_recipe is None
+                else RUNTIME_POLICY_RECORD_ONLY
+            ),
+        )
         if execution.source_format != format_hint:
             raise ValueError(
                 "import recipe format does not match source_format: "

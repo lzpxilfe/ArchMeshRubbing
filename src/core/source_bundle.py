@@ -20,7 +20,11 @@ from .artifact_document import (
     ArtifactDocument,
 )
 from .canonical_json import canonical_json_bytes as _canonical_json_bytes
-from .mesh_import_recipe import MeshImportRecipeError, validate_mesh_import_recipe
+from .mesh_import_recipe import (
+    MeshImportRecipeError,
+    RUNTIME_POLICY_RECORD_ONLY,
+    validate_mesh_import_recipe,
+)
 from .source_manifest import (
     DEPENDENCY_RESOURCE_ROLE,
     MAX_SOURCE_MANIFEST_ENTRIES,
@@ -348,7 +352,7 @@ class SourceBundleIndex:
                 execution = validate_mesh_import_recipe(
                     geometry.import_recipe,
                     allow_legacy=True,
-                    require_current_runtime=False,
+                    runtime_policy=RUNTIME_POLICY_RECORD_ONLY,
                 )
             except MeshImportRecipeError as exc:
                 raise SourceBundleError(
@@ -378,7 +382,7 @@ class SourceBundleIndex:
                     active_execution = validate_mesh_import_recipe(
                         active_geometry.import_recipe,
                         allow_legacy=True,
-                        require_current_runtime=False,
+                        runtime_policy=RUNTIME_POLICY_RECORD_ONLY,
                     )
                 except MeshImportRecipeError as exc:
                     raise SourceBundleError(str(exc)) from exc

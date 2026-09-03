@@ -1949,6 +1949,7 @@ def _materialize_artifact_project_package(
     geometry = document.geometry_revision_index[metadata.geometry_revision_id]
     from .mesh_import_recipe import (  # noqa: PLC0415
         MeshImportRecipeError,
+        RUNTIME_POLICY_RECORD_ONLY,
         validate_mesh_import_recipe,
     )
 
@@ -1956,6 +1957,7 @@ def _materialize_artifact_project_package(
         import_execution = validate_mesh_import_recipe(
             geometry.import_recipe,
             allow_legacy=True,
+            runtime_policy=RUNTIME_POLICY_RECORD_ONLY,
         )
     except MeshImportRecipeError as exc:
         raise ProjectFormatError(

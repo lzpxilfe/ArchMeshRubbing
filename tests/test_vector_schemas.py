@@ -9,6 +9,7 @@ from typing import Any
 import unittest
 
 import numpy as np
+import pytest
 
 import src.core.artifact_vector_export as vector_export
 from src.core.artifact_document import ArtifactDocument
@@ -411,7 +412,7 @@ class TestVectorSchemas(unittest.TestCase):
         cases.append(("outline_view", changed, "view does not match"))
         changed = copy.deepcopy(outline)
         changed["qc"]["record"]["backend_geos_version"] = "3.13.0"
-        cases.append(("outline_backend", changed, "backend_geos_version"))
+        cases.append(("outline_backend", changed, "unreviewed geometry backend"))
         changed = copy.deepcopy(outline)
         changed["qc"]["record"]["input_vertex_count"] += 1
         cases.append(("outline_vertices", changed, "input_vertex_count"))
@@ -453,10 +454,81 @@ def test_outline_backend_pin_has_one_definition() -> None:
     from src.core import artifact_outline_extractor, artifact_vector_export
 
     assert (
-        artifact_vector_export.REQUIRED_SHAPELY_VERSION
-        is artifact_outline_extractor.REQUIRED_SHAPELY_VERSION
+        artifact_vector_export.REVIEWED_OUTLINE_BACKENDS
+        is artifact_outline_extractor.REVIEWED_OUTLINE_BACKENDS
     )
+
+
+def test_the_computed_backend_is_always_a_reviewed_one() -> None:
+    """A pin bump that forgets the reviewed table would write unverifiable packages."""
+
+    from src.core.artifact_outline_extractor import (
+        REQUIRED_GEOS_VERSION,
+        REQUIRED_SHAPELY_VERSION,
+        REVIEWED_OUTLINE_BACKENDS,
+    )
+
     assert (
-        artifact_vector_export.REQUIRED_GEOS_VERSION
-        is artifact_outline_extractor.REQUIRED_GEOS_VERSION
+        REQUIRED_SHAPELY_VERSION,
+        REQUIRED_GEOS_VERSION,
+    ) in REVIEWED_OUTLINE_BACKENDS
+
+
+def test_the_export_schema_accepts_exactly_the_reviewed_backends() -> None:
+    """The JSON Schema and the code table are one policy, stated twice.
+
+    They are both shipped, and an offline verifier may consult either, so a
+    package must not pass one and fail the other.
+    """
+
+    from src.core.artifact_outline_extractor import REVIEWED_OUTLINE_BACKENDS
+
+    schema = json.loads(
+        (ROOT / "schemas/vector_export-1.1.0.schema.json").read_text(encoding="utf-8")
     )
+    properties = schema["$defs"]["recordQc"]["properties"]
+
+    assert set(properties["backend_shapely_version"]["enum"]) == {
+        pair[0] for pair in REVIEWED_OUTLINE_BACKENDS
+    }
+    assert set(properties["backend_geos_version"]["enum"]) == {
+        pair[1] for pair in REVIEWED_OUTLINE_BACKENDS
+    }
+
+
+def test_an_unreviewed_backend_is_refused_but_a_reviewed_one_keeps_verifying() -> None:
+    """Upgrading Shapely must not retire packages the project already wrote."""
+
+    from src.core.artifact_outline_extractor import (
+        REQUIRED_GEOS_VERSION,
+        REQUIRED_SHAPELY_VERSION,
+    )
+    from src.core.artifact_vector_export import (
+        ArtifactVectorExportError,
+        _require_reviewed_outline_backend,
+    )
+
+    _require_reviewed_outline_backend(
+        {
+            "backend_shapely_version": REQUIRED_SHAPELY_VERSION,
+            "backend_geos_version": REQUIRED_GEOS_VERSION,
+        }
+    )
+
+    with pytest.raises(ArtifactVectorExportError, match="unreviewed geometry backend"):
+        _require_reviewed_outline_backend(
+            {
+                "backend_shapely_version": "9.9.9",
+                "backend_geos_version": REQUIRED_GEOS_VERSION,
+            }
+        )
+
+    # The pair is the unit: a reviewed Shapely against an unreviewed GEOS is
+    # not a reviewed backend, because GEOS decides the fixed-precision union.
+    with pytest.raises(ArtifactVectorExportError, match="unreviewed geometry backend"):
+        _require_reviewed_outline_backend(
+            {
+                "backend_shapely_version": REQUIRED_SHAPELY_VERSION,
+                "backend_geos_version": "9.9.9",
+            }
+        )

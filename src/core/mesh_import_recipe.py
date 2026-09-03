@@ -69,6 +69,27 @@ _LEGACY_FULL_KEYS = frozenset(
 _LEGACY_DOCUMENT_KEYS = frozenset({"format", "process"})
 _PARSER_RUNTIME_DISTRIBUTIONS = ("numpy", "pillow", "trimesh")
 
+# How a recipe's recorded runtime identity is treated.
+#
+# `require_current` is for producing new authoritative geometry: a new
+# GeometryRevision may only be decoded by the exact locked parser runtime.
+#
+# `record_only` is for reopening geometry that already exists.  The recorded
+# version strings are validated for shape and kept as provenance, but they are
+# not compared against the installed runtime, because equality of version
+# strings was never the actual proof.  The proof is that the current parser
+# re-decodes the same source bytes into the same geometry: `ArtifactSession`
+# re-runs mesh admission and compares `accepted.geometry_sha256` against the
+# GeometryRevision, then `_require_unchanged_source_geometry()` re-hashes the
+# decoded mesh.  Gating on the version string ahead of that check only stopped
+# the proof from being attempted, which made every upgrade of Trimesh orphan
+# every project a researcher had already saved.
+RUNTIME_POLICY_REQUIRE_CURRENT = "require_current"
+RUNTIME_POLICY_RECORD_ONLY = "record_only"
+SUPPORTED_RUNTIME_POLICIES = frozenset(
+    {RUNTIME_POLICY_REQUIRE_CURRENT, RUNTIME_POLICY_RECORD_ONLY}
+)
+
 
 class MeshImportRecipeError(ValueError):
     """A mesh import recipe cannot be executed as the contract it claims."""
@@ -126,8 +147,16 @@ def _exact_keys(
         )
 
 
-def _current_runtime_identity() -> tuple[str, str, str]:
-    """Return Trimesh version, parser-subset digest, and full lock digest."""
+def _current_runtime_identity(*, enforce_lock: bool = True) -> tuple[str, str, str]:
+    """Return Trimesh version, parser-subset digest, and full lock digest.
+
+    With `enforce_lock` the installed parser versions must equal the locked
+    pins, which is the condition for producing new authoritative geometry.
+    Without it the digest describes the versions that are actually installed,
+    for recipes that record no runtime identity of their own and are only being
+    reopened; a parser that is missing entirely is still an error, because
+    nothing can be decoded without it.
+    """
 
     try:
         _path, pins, lock_sha256 = runtime_lock()
@@ -147,19 +176,36 @@ def _current_runtime_identity() -> tuple[str, str, str]:
             raise MeshImportRecipeError(
                 f"required parser runtime is not installed: {locked[0]}"
             ) from exc
-        if observed_version != locked[1]:
+        if enforce_lock and observed_version != locked[1]:
             raise MeshImportRecipeError(
                 f"installed {locked[0]} version does not match runtime lock: "
                 f"{observed_version!r} != {locked[1]!r}"
             )
         observed_versions[distribution] = observed_version
-        parser_lines.append(f"{distribution}=={locked[1]}\n")
+        parser_lines.append(
+            f"{distribution}=={locked[1] if enforce_lock else observed_version}\n"
+        )
     if _SHA256_RE.fullmatch(lock_sha256) is None:
         raise MeshImportRecipeError("runtime lock SHA-256 is invalid")
     parser_runtime_sha256 = hashlib.sha256(
         "".join(parser_lines).encode("ascii")
     ).hexdigest()
     return observed_versions[MESH_IMPORT_LOADER], parser_runtime_sha256, lock_sha256
+
+
+def _observed_loader_version() -> str | None:
+    """Return the installed parser version without consulting the runtime lock.
+
+    Reopening an existing document proves parser equivalence by re-decoding the
+    source and reproducing ``GeometryRevision.geometry_sha256``, so the version
+    string is evidence to display rather than a gate.  A missing distribution
+    fails later, in the decode itself, with a message about the actual problem.
+    """
+
+    try:
+        return importlib.metadata.version(MESH_IMPORT_LOADER)
+    except importlib.metadata.PackageNotFoundError:
+        return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,6 +219,13 @@ class MeshImportExecution:
     dependency_policy: str = MESH_IMPORT_DEPENDENCY_POLICY
     source_manifest: SourceManifest | None = None
     legacy_unversioned: bool = False
+    reopened_under_runtime: str | None = None
+    """Installed parser version when it differs from the recorded one.
+
+    `None` means the runtime matches the record, or was not examined.  This is
+    provenance for the verification report and the status line; it never
+    changes what is accepted.
+    """
 
     def strict_recipe(self) -> dict[str, Any]:
         if self.source_manifest is None:
@@ -268,18 +321,25 @@ def validate_mesh_import_recipe(
     value: Mapping[str, object],
     *,
     allow_legacy: bool,
-    require_current_runtime: bool = True,
+    runtime_policy: str = RUNTIME_POLICY_REQUIRE_CURRENT,
 ) -> MeshImportExecution:
     """Validate one executable strict or explicitly supported legacy recipe.
 
-    Strict v1 and v2 recipes must match the installed parser version and the
-    digest of the parser-relevant runtime subset. The full lock digest is
-    retained as build provenance but deliberately is not an execution gate:
-    unrelated GUI/runtime pins must not make authoritative geometry unreadable.
-    Legacy recipes can describe only the exact profiles emitted before v1;
-    arbitrary mappings are never treated as executable instructions.
+    Under `require_current` a strict v1 or v2 recipe must match the installed
+    parser version and the digest of the parser-relevant runtime subset, which
+    is what producing new authoritative geometry requires. Under `record_only`
+    those recorded values are validated for shape and kept as provenance, but
+    not compared against the installed runtime, so that geometry which already
+    exists stays readable; see `RUNTIME_POLICY_RECORD_ONLY`. The full lock
+    digest is retained as build provenance but is never an execution gate under
+    either policy: unrelated GUI/runtime pins must not make authoritative
+    geometry unreadable. Legacy recipes can describe only the exact profiles
+    emitted before v1; arbitrary mappings are never treated as executable
+    instructions.
     """
 
+    if runtime_policy not in SUPPORTED_RUNTIME_POLICIES:
+        raise MeshImportRecipeError(f"unsupported runtime policy: {runtime_policy!r}")
     if not isinstance(value, Mapping):
         raise MeshImportRecipeError("import recipe must be a mapping")
     keys = set(value)
@@ -304,8 +364,13 @@ def validate_mesh_import_recipe(
             raise MeshImportRecipeError(
                 "legacy import recipe sanitizer must be meshdata-v1"
             )
-        loader_version, parser_runtime_sha256, lock_sha256 = (
-            _current_runtime_identity()
+        # A legacy recipe records no runtime identity at all, so there is
+        # nothing to compare and the current one is filled in instead.  Under
+        # `record_only` the runtime lock must not be consulted either: a
+        # document saved before v1 would otherwise become unreadable the moment
+        # any locked parser pin moved.
+        loader_version, parser_runtime_sha256, lock_sha256 = _current_runtime_identity(
+            enforce_lock=runtime_policy == RUNTIME_POLICY_REQUIRE_CURRENT,
         )
         return MeshImportExecution(
             source_format=source_format,
@@ -393,7 +458,8 @@ def validate_mesh_import_recipe(
             "import_recipe.runtime_lock_sha256 must be 64 lowercase hexadecimal characters"
         )
 
-    if require_current_runtime:
+    reopened_under_runtime: str | None = None
+    if runtime_policy == RUNTIME_POLICY_REQUIRE_CURRENT:
         current_version, current_parser_sha256, _current_lock_sha256 = (
             _current_runtime_identity()
         )
@@ -406,6 +472,10 @@ def validate_mesh_import_recipe(
             raise MeshImportRecipeError(
                 "saved parser-runtime SHA-256 does not match current runtime"
             )
+    else:
+        observed_version = _observed_loader_version()
+        if observed_version is not None and observed_version != loader_version:
+            reopened_under_runtime = observed_version
 
     return MeshImportExecution(
         source_format=source_format,
@@ -414,6 +484,7 @@ def validate_mesh_import_recipe(
         runtime_lock_sha256=lock_sha256,
         dependency_policy=dependency_policy,
         source_manifest=source_manifest,
+        reopened_under_runtime=reopened_under_runtime,
     )
 
 
@@ -429,6 +500,9 @@ __all__ = [
     "MESH_IMPORT_SCENE_MERGE",
     "MeshImportExecution",
     "MeshImportRecipeError",
+    "RUNTIME_POLICY_RECORD_ONLY",
+    "RUNTIME_POLICY_REQUIRE_CURRENT",
+    "SUPPORTED_RUNTIME_POLICIES",
     "SUPPORTED_SOURCE_FORMATS",
     "current_mesh_import_recipe",
     "mesh_import_receipt_matches_base",

@@ -46,6 +46,7 @@ from .geometry_identity import mesh_geometry_sha256
 from .canonical_json import canonical_json_bytes
 from .mesh_import_recipe import (
     MeshImportRecipeError,
+    RUNTIME_POLICY_RECORD_ONLY,
     validate_mesh_import_recipe,
 )
 from .mesh_admission import (
@@ -137,7 +138,11 @@ def _mesh_import_recipe(
             "source mesh has no verified parser/runtime import receipt"
         )
     try:
-        execution = validate_mesh_import_recipe(raw, allow_legacy=allow_legacy)
+        execution = validate_mesh_import_recipe(
+            raw,
+            allow_legacy=allow_legacy,
+            runtime_policy=RUNTIME_POLICY_RECORD_ONLY,
+        )
     except MeshImportRecipeError as exc:
         raise ArtifactSessionError(str(exc)) from exc
     actual_format = str(mesh.source_format or "").strip().lower().removeprefix(".")
@@ -155,7 +160,11 @@ def _validate_source_resources(
     """Bind runtime locators to every durable v2 source-manifest entry."""
 
     try:
-        execution = validate_mesh_import_recipe(recipe, allow_legacy=True)
+        execution = validate_mesh_import_recipe(
+            recipe,
+            allow_legacy=True,
+            runtime_policy=RUNTIME_POLICY_RECORD_ONLY,
+        )
     except MeshImportRecipeError as exc:
         raise ArtifactSessionError(str(exc)) from exc
     manifest = execution.source_manifest
@@ -232,6 +241,7 @@ class ArtifactSession:
             validate_mesh_import_recipe(
                 active_geometry.import_recipe,
                 allow_legacy=True,
+                runtime_policy=RUNTIME_POLICY_RECORD_ONLY,
             )
             source_recipe, _source_format = _mesh_import_recipe(
                 self.source_mesh,
@@ -509,6 +519,7 @@ class ArtifactSession:
             execution = validate_mesh_import_recipe(
                 geometry.import_recipe,
                 allow_legacy=True,
+                runtime_policy=RUNTIME_POLICY_RECORD_ONLY,
             )
         except MeshImportRecipeError as exc:
             raise ArtifactSessionError(str(exc)) from exc
@@ -546,6 +557,32 @@ class ArtifactSession:
             self.source_mesh,
             self.verified_geometry,
         )
+
+    @property
+    def reopened_under_runtime(self) -> str | None:
+        """Installed parser version when it differs from the recorded import.
+
+        Derived rather than stored, so it cannot drift from the document.  A
+        value here does not mean anything is wrong: the geometry digest was
+        still reproduced, or the session would not exist.  It is what the
+        verification report and the status line need in order to say which
+        parser actually decoded the source this time.
+        """
+
+        metadata_id = self.document.active_source_metadata_revision_id
+        if metadata_id is None:
+            return None
+        metadata = self.document.source_metadata_revision_index[metadata_id]
+        geometry = self.document.geometry_revision_index[metadata.geometry_revision_id]
+        try:
+            execution = validate_mesh_import_recipe(
+                geometry.import_recipe,
+                allow_legacy=True,
+                runtime_policy=RUNTIME_POLICY_RECORD_ONLY,
+            )
+        except MeshImportRecipeError as exc:
+            raise ArtifactSessionError(str(exc)) from exc
+        return execution.reopened_under_runtime
 
     def projection_snapshot(self) -> ArtifactProjectionSnapshot:
         """Validate source geometry and return the current immutable binding."""

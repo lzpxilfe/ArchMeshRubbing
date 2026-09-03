@@ -43,6 +43,7 @@ from src.core.mesh_import_recipe import (
     MeshImportRecipeError,
     current_mesh_import_recipe,
     mesh_import_receipt_matches_base,
+    RUNTIME_POLICY_RECORD_ONLY,
     validate_mesh_import_recipe,
 )
 from src.core.mesh_loader import MeshData, MeshLoader
@@ -977,6 +978,7 @@ class ArtifactWorkbench:
             execution = validate_mesh_import_recipe(
                 geometry.import_recipe,
                 allow_legacy=True,
+                runtime_policy=RUNTIME_POLICY_RECORD_ONLY,
             )
         except MeshImportRecipeError as exc:
             raise ArtifactWorkbenchError(

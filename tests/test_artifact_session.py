@@ -5,6 +5,7 @@ import tempfile
 import unittest
 
 import numpy as np
+import trimesh
 
 from src.core.artifact_document import ArtifactDocument
 from src.core.artifact_session import ArtifactSession, ArtifactSessionError
@@ -98,9 +99,12 @@ class TestArtifactSession(unittest.TestCase):
         )
         self.assertEqual(rebound.document, legacy_document)
 
+        # Runtime identity is no longer compared against the installed parser,
+        # but the loaded source receipt must still agree with the document's
+        # recipe field for field, so drift is still caught here.
         for field, value, message in (
-            ("loader_version", "0.0.0", "Trimesh version"),
-            ("parser_runtime_sha256", "0" * 64, "parser-runtime"),
+            ("loader_version", "0.0.0", "does not match"),
+            ("parser_runtime_sha256", "0" * 64, "does not match"),
             ("process", True, "process"),
         ):
             changed = session.document.to_dict()
@@ -232,6 +236,94 @@ class TestArtifactSession(unittest.TestCase):
             committed.document.align_revision_index["align:pivoted"].recipe["pivot_mm"],
             (100.0, 0.0, 0.0),
         )
+
+    def test_upgrading_the_parser_does_not_orphan_a_project_already_saved(self):
+        """A newer Trimesh must not lock a researcher out of their own data.
+
+        The saved recipe here names a parser version this runtime does not
+        have, which is exactly what an app upgrade produces.  Reopening is
+        allowed because it proves the parser by reproducing the recorded
+        geometry, not because the version strings agree.
+        """
+
+        saved_recipe = current_mesh_import_recipe("ply")
+        saved_recipe["loader_version"] = "99.0.0"
+
+        def mesh_saved_under_another_parser() -> MeshData:
+            mesh = _mesh()
+            mesh.source_import_recipe = dict(saved_recipe)
+            return mesh
+
+        committed = ArtifactSession.create_from_source(
+            mesh_saved_under_another_parser(),
+            resolved_source_path="/source/artifact.ply",
+            unit="cm",
+            axes={"source_x": "+X", "source_y": "+Y", "source_z": "+Z"},
+            handedness="right",
+            software_version="0.1.0",
+            operator="tester",
+            created_at=STAMP,
+            document_id="artifact:reopen-across-runtimes",
+            metadata_revision_id="metadata:m1",
+            align_revision_id="align:a1",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "artifact.amr"
+            save_artifact_project(path, committed.document)
+            loaded = load_artifact_project(path)
+            rebound = ArtifactSession.bind_loaded_document(
+                loaded,
+                mesh_saved_under_another_parser(),
+                resolved_source_path="/relocated/artifact.ply",
+            )
+
+        self.assertEqual(
+            rebound.document.canonical_sha256,
+            committed.document.canonical_sha256,
+        )
+        np.testing.assert_array_equal(
+            rebound.materialize().mesh.vertices,
+            committed.materialize().mesh.vertices,
+        )
+        # The difference is reported rather than hidden.
+        self.assertEqual(rebound.reopened_under_runtime, trimesh.__version__)
+
+    def test_a_parser_that_decodes_different_geometry_is_still_refused(self):
+        """Relaxing the version check must not relax the actual proof."""
+
+        saved_recipe = current_mesh_import_recipe("ply")
+        saved_recipe["loader_version"] = "99.0.0"
+        mesh = _mesh()
+        mesh.source_import_recipe = dict(saved_recipe)
+
+        committed = ArtifactSession.create_from_source(
+            mesh,
+            resolved_source_path="/source/artifact.ply",
+            unit="cm",
+            axes={"source_x": "+X", "source_y": "+Y", "source_z": "+Z"},
+            handedness="right",
+            software_version="0.1.0",
+            operator="tester",
+            created_at=STAMP,
+            document_id="artifact:reopen-geometry-drift",
+            metadata_revision_id="metadata:m1",
+            align_revision_id="align:a1",
+        )
+
+        drifted = _mesh()
+        drifted.source_import_recipe = dict(saved_recipe)
+        drifted.vertices = np.array(
+            [[10.0, 0.0, 0.0], [20.0, 0.0, 0.0], [10.0, 10.000001, 0.0]],
+            dtype=np.float64,
+        )
+
+        with self.assertRaisesRegex(ArtifactSessionError, "SHA-256 mismatch"):
+            ArtifactSession.bind_loaded_document(
+                committed.document,
+                drifted,
+                resolved_source_path="/relocated/artifact.ply",
+            ).projection_snapshot()
 
     def test_saved_document_rebinds_source_and_restores_exact_matrix_and_geometry(self):
         committed = _session().commit_preview(

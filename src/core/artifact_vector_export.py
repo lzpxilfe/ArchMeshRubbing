@@ -33,10 +33,7 @@ from .alignment_utils import (
     compose_align_matrices,
     scene_trs_matrix_about_pivot,
 )
-from .artifact_outline_extractor import (
-    REQUIRED_GEOS_VERSION,
-    REQUIRED_SHAPELY_VERSION,
-)
+from .artifact_outline_extractor import REVIEWED_OUTLINE_BACKENDS
 from .canonical_json import CanonicalJSONError, canonical_json_sha256
 from .artifact_document import (
     ARTIFACT_DOCUMENT_SCHEMA_VERSION,
@@ -61,6 +58,7 @@ from .artifact_vector_record import (
 )
 from .mesh_import_recipe import (
     MeshImportRecipeError,
+    RUNTIME_POLICY_RECORD_ONLY,
     validate_mesh_import_recipe,
 )
 from .mesh_admission import (
@@ -550,17 +548,18 @@ def _closed_public_mapping(
     return value
 
 
-def _public_mesh_import_recipe(
-    value: Mapping[str, Any],
-    *,
-    require_current_runtime: bool,
-) -> dict[str, Any]:
+def _public_mesh_import_recipe(value: Mapping[str, Any]) -> dict[str, Any]:
     """Return the complete path-free executable parser contract.
 
     Strict recipes contain runtime identity and dependency-policy fields which
     are necessary to reproduce the source geometry.  Unknown document-only
     extensions remain private, while every recognized recipe field is kept and
     the resulting closed contract is validated before it enters provenance.
+
+    The recipe describes the past import, not this export, so it is validated
+    under `record_only`.  Requiring the current runtime here would have made a
+    project that reopened correctly under a newer parser still refuse to export
+    from itself, which is the same archive defect one step later.
     """
 
     public = _public_mapping(value, _PUBLIC_GEOMETRY_RECIPE_KEYS)
@@ -568,7 +567,7 @@ def _public_mesh_import_recipe(
         validate_mesh_import_recipe(
             public,
             allow_legacy=True,
-            require_current_runtime=require_current_runtime,
+            runtime_policy=RUNTIME_POLICY_RECORD_ONLY,
         )
     except MeshImportRecipeError as exc:
         raise ArtifactVectorExportError(
@@ -659,10 +658,7 @@ def _public_geometry_revision(
         "geometry_hash_scope": data["geometry_hash_scope"],
         "geometry_sha256": data["geometry_sha256"],
         "id": data["id"],
-        "import_recipe": _public_mesh_import_recipe(
-            data["import_recipe"],
-            require_current_runtime=True,
-        ),
+        "import_recipe": _public_mesh_import_recipe(data["import_recipe"]),
         "operator": data["operator"],
         "qc": _public_mapping(
             data["qc"],
@@ -1333,10 +1329,7 @@ def _validate_provenance_shape(
         )
     except ArtifactDocumentError as exc:
         raise ArtifactVectorExportError(f"invalid revision provenance: {exc}") from exc
-    public_import_recipe = _public_mesh_import_recipe(
-        geometry.import_recipe,
-        require_current_runtime=False,
-    )
+    public_import_recipe = _public_mesh_import_recipe(geometry.import_recipe)
     if dict(geometry.import_recipe) != public_import_recipe:
         raise ArtifactVectorExportError(
             "provenance geometry import_recipe contains non-public fields"
@@ -1436,7 +1429,7 @@ def _validate_provenance_shape(
         import_execution = validate_mesh_import_recipe(
             geometry.import_recipe,
             allow_legacy=True,
-            require_current_runtime=False,
+            runtime_policy=RUNTIME_POLICY_RECORD_ONLY,
         )
     except MeshImportRecipeError as exc:
         raise ArtifactVectorExportError(
@@ -1707,7 +1700,7 @@ def _validate_current_vector_provenance(
         import_execution = validate_mesh_import_recipe(
             geometry["import_recipe"],
             allow_legacy=True,
-            require_current_runtime=False,
+            runtime_policy=RUNTIME_POLICY_RECORD_ONLY,
         )
     except MeshImportRecipeError as exc:
         raise ArtifactVectorExportError(
@@ -1841,6 +1834,31 @@ def _validate_outline_topology_qc(value: object) -> None:
     )
 
 
+def _require_reviewed_outline_backend(value: Mapping[str, Any]) -> None:
+    """Require the recorded outline backend to be one this project reviewed.
+
+    An outline record names the exact Shapely and GEOS it was computed with.
+    Both are checked as a pair, because the guarantee belongs to the
+    combination: Shapely is a binding over a specific GEOS, and it is GEOS that
+    decides the fixed-precision union.
+    """
+
+    shapely_version = value.get("backend_shapely_version")
+    geos_version = value.get("backend_geos_version")
+    if shapely_version is None and geos_version is None:
+        return
+    if (shapely_version, geos_version) not in REVIEWED_OUTLINE_BACKENDS:
+        reviewed = ", ".join(
+            f"Shapely {pair[0]}/GEOS {pair[1]}"
+            for pair in sorted(REVIEWED_OUTLINE_BACKENDS)
+        )
+        raise ArtifactVectorExportError(
+            "outline record names an unreviewed geometry backend: "
+            f"Shapely {shapely_version!r} with GEOS {geos_version!r}; "
+            f"reviewed backends are {reviewed}"
+        )
+
+
 def _validate_current_record_qc(
     value: object,
     *,
@@ -1956,16 +1974,11 @@ def _validate_current_record_qc(
             value["grid_area_delta_mm2"],
             field_name="qc.record.grid_area_delta_mm2",
         )
-    # Imported rather than restated: these strings used to be duplicated here,
-    # so bumping the extractor's pin alone would have made freshly written
-    # outline packages fail their own validator.
-    expected_backend_versions = {
-        "backend_geos_version": REQUIRED_GEOS_VERSION,
-        "backend_shapely_version": REQUIRED_SHAPELY_VERSION,
-    }
-    for key, expected in expected_backend_versions.items():
-        if key in value and value[key] != expected:
-            raise ArtifactVectorExportError(f"qc.record.{key} is invalid")
+    # The recorded pair must be one this project reviewed, not necessarily the
+    # one it computes with today.  Demanding the current pin here meant that
+    # upgrading Shapely rejected every outline package written before the
+    # upgrade, including packages this same code had produced.
+    _require_reviewed_outline_backend(value)
     if "all_projected_faces_included" in value:
         if value["all_projected_faces_included"] is not True:
             raise ArtifactVectorExportError(
