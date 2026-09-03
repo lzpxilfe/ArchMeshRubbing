@@ -39,6 +39,7 @@ from src.core.artifact_condition_annotation import (
     validate_condition_recipe,
 )
 from src.core.artifact_developed_rubbing import (
+    ARTBOARD_LARGEST_COVERED_RECTANGLE,
     ArtifactDevelopedRubbingError,
     DevelopedRubbingComputation,
     commit_developed_rubbing,
@@ -1572,6 +1573,7 @@ class ArtifactMeasurementController:
         black_point_um: int,
         ink_strength_percent: int,
         relief_polarity: str,
+        artboard_policy: str = ARTBOARD_LARGEST_COVERED_RECTANGLE,
         record_id: str | None = None,
         created_at: str | None = None,
         operator: str = "local-user",
@@ -1594,6 +1596,7 @@ class ArtifactMeasurementController:
                     black_point_um=black_point_um,
                     ink_strength_percent=ink_strength_percent,
                     relief_polarity=relief_polarity,
+                    artboard_policy=artboard_policy,
                 )
             except ArtifactDevelopedRubbingError as exc:
                 raise ArtifactMeasurementError(str(exc)) from exc

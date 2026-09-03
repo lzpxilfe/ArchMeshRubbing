@@ -145,7 +145,7 @@ def _generated_developed_receipt_and_sidecar() -> tuple[dict[str, object], dict[
         session,
         "record:unwrap:schema",
         pixels_per_mm=2,
-        margin_um=1_000,
+        margin_um=0,
         reference_radius_um=3_000,
         depth_quantization_um=10,
         black_point_um=250,

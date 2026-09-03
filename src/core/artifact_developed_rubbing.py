@@ -77,6 +77,20 @@ DEVELOPED_RUBBING_RASTER_SCHEMA_VERSION = "1.0.0"
 DEVELOPED_RUBBING_COORDINATE_SPACE = "canonical_mm_developed_raster/v1"
 DEVELOPED_RUBBING_RASTER_HASH_SCOPE = "header-rfc8785+pixels-ga8-row-major/v1"
 DEVELOPED_RUBBING_DEPTH_MEASURE = "radius_about_unrolling_centre/v1"
+# A rubbing of a strip is a rectangle of paper: the rubber tapes it on, lifts
+# it, and pastes it beside the drawing with straight edges.  The development
+# it is drawn on is not rectangular - its boundary follows whole triangles,
+# and the facet spacing that quantises that boundary is the arc r * dtheta,
+# so a strip came out with its width stepping row by row.  Cropping to the
+# largest fully covered rectangle gives back the piece of paper.  A sherd is
+# not a strip, though, and cropping one would throw most of it away, so the
+# full development stays available.
+ARTBOARD_LARGEST_COVERED_RECTANGLE = "largest_covered_rectangle/v1"
+ARTBOARD_DEVELOPMENT_BOUNDS = "development_bounds_plus_margin/v1"
+ARTBOARD_POLICIES = (
+    ARTBOARD_DEVELOPMENT_BOUNDS,
+    ARTBOARD_LARGEST_COVERED_RECTANGLE,
+)
 DEVELOPED_RUBBING_RECEIPT_EXTENSION_KEY = "org.archmeshrubbing:developed-rubbing-v1"
 DEVELOPED_RUBBING_RECEIPT_MEDIA_TYPE = (
     "application/vnd.archmeshrubbing.developed-rubbing-receipt+json"
@@ -130,6 +144,16 @@ def _record_id(value: object, *, name: str) -> str:
     return value
 
 
+def _artboard_policy(value: object) -> str:
+    if not isinstance(value, str) or value not in ARTBOARD_POLICIES:
+        raise ArtifactDevelopedRubbingError(
+            "artboard_policy must be "
+            f"{ARTBOARD_LARGEST_COVERED_RECTANGLE!r} or "
+            f"{ARTBOARD_DEVELOPMENT_BOUNDS!r}"
+        )
+    return value
+
+
 def developed_rubbing_recipe(
     *,
     development_record_id: str,
@@ -142,9 +166,11 @@ def developed_rubbing_recipe(
     black_point_um: int,
     ink_strength_percent: int,
     relief_polarity: str,
+    artboard_policy: str = ARTBOARD_LARGEST_COVERED_RECTANGLE,
 ) -> dict[str, Any]:
     """Resolve every option before context capture, naming the development."""
 
+    policy = _artboard_policy(artboard_policy)
     record_id = _record_id(development_record_id, name="development record ID")
     unwrap_sha = _sha256(development_sha256, name="development unwrap_sha256")
     recipe_hash = _sha256(development_recipe_hash, name="development recipe_hash")
@@ -162,10 +188,21 @@ def developed_rubbing_recipe(
         raise ArtifactDevelopedRubbingError(str(exc)) from exc
     depth_policy = dict(blocks["depth_policy"])
     depth_policy["measure"] = DEVELOPED_RUBBING_DEPTH_MEASURE
+    pixel_policy = blocks["pixel_policy"]
+    if (
+        policy == ARTBOARD_LARGEST_COVERED_RECTANGLE
+        and int(pixel_policy["margin_pixels"]) != 0
+    ):
+        # A margin is uncovered paper, and the crop exists to remove exactly
+        # that; asking for both is asking for two different artboards.
+        raise ArtifactDevelopedRubbingError(
+            "a rubbing cropped to its covered rectangle cannot also carry a "
+            "margin; set margin_um to 0 or use the development-bounds artboard"
+        )
     return {
         "algorithm": DEVELOPED_RUBBING_ALGORITHM,
         "algorithm_version": DEVELOPED_RUBBING_ALGORITHM_VERSION,
-        "artboard_policy": "development_bounds_plus_margin/v1",
+        "artboard_policy": policy,
         "coordinate_space": DEVELOPED_RUBBING_COORDINATE_SPACE,
         "depth_policy": depth_policy,
         "development": {
@@ -208,6 +245,7 @@ def validate_developed_rubbing_recipe(recipe: Mapping[str, Any]) -> dict[str, An
     assert isinstance(relief_policy, Mapping)
     assert isinstance(development, Mapping)
     expected = developed_rubbing_recipe(
+        artboard_policy=recipe.get("artboard_policy"),  # type: ignore[arg-type]
         development_record_id=development.get("record_id"),  # type: ignore[arg-type]
         development_sha256=development.get("unwrap_sha256"),  # type: ignore[arg-type]
         development_recipe_hash=development.get("recipe_hash"),  # type: ignore[arg-type]
@@ -519,6 +557,42 @@ def _validate_qc_against_receipt(
         )
 
 
+def _largest_covered_rectangle(covered: np.ndarray) -> tuple[int, int, int, int]:
+    """(top, left, height, width) of the biggest all-covered rectangle.
+
+    The largest-rectangle-in-a-histogram scan, row by row.  Ties go to the
+    topmost then leftmost rectangle so one raster always yields one crop.
+    """
+
+    height = int(covered.shape[0])
+    width = int(covered.shape[1])
+    best_area = 0
+    best = (0, 0, 0, 0)
+    runs = np.zeros((width,), dtype=np.int64)
+    for row in range(height):
+        runs = np.where(covered[row], runs + 1, 0)
+        stack: list[tuple[int, int]] = []
+        for column in range(width + 1):
+            current = int(runs[column]) if column < width else 0
+            start = column
+            while stack and stack[-1][1] >= current:
+                origin, tall = stack.pop()
+                area = tall * (column - origin)
+                candidate = (row - tall + 1, origin, tall, column - origin)
+                if area > best_area or (
+                    area == best_area and area > 0 and candidate[:2] < best[:2]
+                ):
+                    best_area = area
+                    best = candidate
+                start = origin
+            stack.append((start, current))
+    if best_area <= 0:
+        raise ArtifactDevelopedRubbingError(
+            "the development covers no rectangle of pixels to crop to"
+        )
+    return best
+
+
 def extract_developed_rubbing(
     unwrap: TileUnwrapMesh,
     radius_mm: object,
@@ -581,6 +655,49 @@ def extract_developed_rubbing(
     except ArtifactRubbingError as exc:
         raise ArtifactDevelopedRubbingError(str(exc)) from exc
     raise_if_cancelled(cancellation_probe)
+
+    policy = str(validated["artboard_policy"])
+    uncropped_height = int(pixels.shape[0])
+    uncropped_width = int(pixels.shape[1])
+    # artboard_width_pixels / artboard_height_pixels already report the extent
+    # before any crop, so only the coverage inside it is new here.  The four
+    # trim counts are always reported, zero when the policy keeps the whole
+    # development, so a reader need not branch on the policy to add them up.
+    crop: dict[str, object] = {
+        "artboard_policy": policy,
+        "cropped_bottom_pixels": 0,
+        "cropped_left_pixels": 0,
+        "cropped_right_pixels": 0,
+        "cropped_top_pixels": 0,
+        "uncropped_covered_pixel_count": int(
+            np.count_nonzero(pixels[:, :, 1] == 255)
+        ),
+    }
+    if policy == ARTBOARD_LARGEST_COVERED_RECTANGLE:
+        # The relief is computed on the whole development first and cropped
+        # afterwards, so the tone inside the rectangle is the tone it had with
+        # its neighbours present: the crop frames the rubbing, it does not
+        # change it.
+        top, left, cropped_height, cropped_width = _largest_covered_rectangle(
+            pixels[:, :, 1] == 255
+        )
+        raise_if_cancelled(cancellation_probe)
+        pixels = np.ascontiguousarray(
+            pixels[top : top + cropped_height, left : left + cropped_width]
+        )
+        # Raster row zero is the largest v, so trimming the bottom rows is
+        # what moves the artboard's minimum v.
+        minimum_u += left
+        minimum_v += uncropped_height - top - cropped_height
+        crop.update(
+            {
+                "cropped_bottom_pixels": uncropped_height - top - cropped_height,
+                "cropped_left_pixels": left,
+                "cropped_right_pixels": uncropped_width - left - cropped_width,
+                "cropped_top_pixels": top,
+            }
+        )
+    raise_if_cancelled(cancellation_probe)
     raster = DevelopedRubbingRaster(
         pixels=pixels,
         pixels_per_meter=pixels_per_mm * 1000,
@@ -597,6 +714,7 @@ def extract_developed_rubbing(
         "radius_max_um_rounded": int(round(float(np.max(radius)) * 1000.0)),
         "radius_min_um_rounded": int(round(float(np.min(radius)) * 1000.0)),
         "sampling_applied": False,
+        **crop,
         **raster_qc,
         **relief_qc,
         **raster.qc_summary(),
@@ -671,6 +789,7 @@ def developed_rubbing_recipe_for_record(
     black_point_um: int,
     ink_strength_percent: int,
     relief_polarity: str,
+    artboard_policy: str = ARTBOARD_LARGEST_COVERED_RECTANGLE,
 ) -> dict[str, Any]:
     """Name a READY + FRESH development by hash and resolve the raster options."""
 
@@ -689,6 +808,7 @@ def developed_rubbing_recipe_for_record(
         black_point_um=black_point_um,
         ink_strength_percent=ink_strength_percent,
         relief_polarity=relief_polarity,
+        artboard_policy=artboard_policy,
     )
 
 
@@ -923,6 +1043,7 @@ def compute_developed_rubbing(
     black_point_um: int,
     ink_strength_percent: int,
     relief_polarity: str,
+    artboard_policy: str = ARTBOARD_LARGEST_COVERED_RECTANGLE,
     cancellation_probe: CancellationProbe | None = None,
 ) -> DevelopedRubbingComputation:
     if not isinstance(session, ArtifactSession):
@@ -938,6 +1059,7 @@ def compute_developed_rubbing(
         black_point_um=black_point_um,
         ink_strength_percent=ink_strength_percent,
         relief_polarity=relief_polarity,
+        artboard_policy=artboard_policy,
     )
     return _compute_with_recipe(session, recipe, cancellation_probe=cancellation_probe)
 
@@ -1225,6 +1347,9 @@ def validate_developed_rubbing_records(document: ArtifactDocument) -> None:
 
 
 __all__ = [
+    "ARTBOARD_DEVELOPMENT_BOUNDS",
+    "ARTBOARD_LARGEST_COVERED_RECTANGLE",
+    "ARTBOARD_POLICIES",
     "ArtifactDevelopedRubbingError",
     "DEVELOPED_RUBBING_ALGORITHM",
     "DEVELOPED_RUBBING_ALGORITHM_VERSION",

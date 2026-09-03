@@ -370,24 +370,43 @@ def select_surface_strip(
     ) / safe_radii
     raise_if_cancelled(cancellation_probe)
 
-    window = ~near_axis & ~degenerate
+    # The window is tested at the vertices, not at the face centre.  A
+    # triangle that holds any point of the strip must have a vertex on the
+    # inside of it, so taking every face with a vertex in the window covers
+    # the whole width the caller asked for.  Testing centres instead lets the
+    # boundary land wherever the facet spacing falls - and that spacing is the
+    # arc r * dtheta, wider where the body swells - so the strip came out with
+    # its width quantised per row: stacked trapezoids rather than a band.
+    vertex_heights = vertices[:, axis_index]
+    vertex_plane = np.column_stack(
+        (vertices[:, first_index], vertices[:, second_index])
+    )
+    vertex_radii = np.hypot(vertex_plane[:, 0], vertex_plane[:, 1])
+    inside = np.ones((vertices.shape[0],), dtype=bool)
     minimum_height = validated["minimum_height_um"]
     maximum_height = validated["maximum_height_um"]
     if minimum_height is not None:
-        window &= heights >= float(minimum_height) / 1000.0
+        inside &= vertex_heights >= float(minimum_height) / 1000.0
     if maximum_height is not None:
-        window &= heights <= float(maximum_height) / 1000.0
+        inside &= vertex_heights <= float(maximum_height) / 1000.0
     width = validated["width_um"]
     if width is not None:
         reference = math.radians(
             float(validated["reference_angle_microdegrees"]) / 1_000_000.0
         )
-        angles = np.arctan2(plane[:, 1], plane[:, 0])
+        vertex_angles = np.arctan2(vertex_plane[:, 1], vertex_plane[:, 0])
         offset = np.abs(
-            np.mod(angles - reference + math.pi, 2.0 * math.pi) - math.pi
+            np.mod(vertex_angles - reference + math.pi, 2.0 * math.pi) - math.pi
         )
+        window_arc = offset * vertex_radii
         half_width_mm = float(width) / 2000.0
-        window &= offset * safe_radii <= half_width_mm
+        # A vertex on the axis has no meridian of its own, so it cannot put a
+        # face inside a strip that is about one.
+        inside &= (window_arc <= half_width_mm) & (
+            vertex_radii > _MINIMUM_RADIUS_MM
+        )
+    raise_if_cancelled(cancellation_probe)
+    window = ~near_axis & ~degenerate & inside[triangles].any(axis=1)
     raise_if_cancelled(cancellation_probe)
 
     candidate_count = int(np.count_nonzero(window))

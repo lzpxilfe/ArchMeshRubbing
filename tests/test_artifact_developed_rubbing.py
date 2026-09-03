@@ -29,6 +29,8 @@ from src.application.artifact_workbench import (
     RecordBindingTransition,
 )
 from src.core.artifact_developed_rubbing import (
+    ARTBOARD_DEVELOPMENT_BOUNDS,
+    ARTBOARD_LARGEST_COVERED_RECTANGLE,
     DEVELOPED_RUBBING_RECORD_TYPE,
     ArtifactDevelopedRubbingError,
     DevelopedRubbingComputation,
@@ -70,18 +72,24 @@ from src.core.artifact_tile_unwrap_extractor import (
 )
 from src.core.artifact_tile_unwrap_record import tile_unwrap_receipt_from_record
 from src.core.project_file import load_artifact_project, save_artifact_project
+from src.core.artifact_surface_strip import (
+    select_positioned_surface_strip,
+    strip_parameters,
+)
 from synthetic_vessel import (
     RIM_ID,
-    meridional_strip_faces,
     positioned_vessel_session,
 )
 
 
 UNWRAP_ID = "record:unwrap:strip"
+STRIP_WIDTH_UM = 20_000
 STAMP = "2026-09-03T00:00:10Z"
 OPTIONS: dict[str, Any] = {
     "pixels_per_mm": 10,
-    "margin_um": 1_000,
+    # A rubbing cropped to its covered rectangle carries no margin: the crop
+    # exists to remove exactly that.
+    "margin_um": 0,
     "reference_radius_um": 3_000,
     "depth_quantization_um": 10,
     "black_point_um": 250,
@@ -100,12 +108,15 @@ def cords(angle_rad: float, z_mm: float) -> float:
 
 
 def _strip_session(relief=None, *, segments: int = 96, rings: int = 96) -> ArtifactSession:
-    session, vertices, faces = positioned_vessel_session(
+    session, _vertices, _faces = positioned_vessel_session(
         segments=segments, rings=rings, relief=relief
     )
-    selected = meridional_strip_faces(
-        vertices, faces, center_angle_rad=math.pi / 2.0, width_mm=20.0
-    )
+    selected = select_positioned_surface_strip(
+        session,
+        strip_parameters(
+            reference_angle_microdegrees=90_000_000, width_um=STRIP_WIDTH_UM
+        ),
+    ).face_indices
     unwrap = compute_artifact_tile_unwrap(
         session,
         longitudinal_axis="z",
@@ -150,17 +161,37 @@ def _drop_in_the_middle(raster: DevelopedRubbingRaster) -> np.ndarray:
     return np.where(alpha[rows, columns] == 255, 255 - gray[rows, columns], -1)
 
 
-def test_the_raster_is_the_strip_at_one_to_one(corded: ArtifactSession) -> None:
+def test_the_rubbing_is_a_rectangle_of_the_width_that_was_asked_for(
+    corded: ArtifactSession,
+) -> None:
+    """A rubbing is a piece of paper: straight edges, one width, top to bottom.
+
+    The development it is drawn on is not rectangular - its boundary follows
+    whole triangles, and the spacing that quantises that boundary is the arc
+    r x dtheta, which is wider where the body swells - so an uncropped strip
+    stepped in width row by row and read as stacked trapezoids.
+    """
+
+    raster = _rubbing(corded).raster
+    covered = raster.pixels[:, :, 1] == 255
+
+    assert bool(covered.all())
+    widths = {int(row.sum()) for row in covered}
+    assert widths == {raster.width_pixels}
+    # 10 px/mm on a 20 mm strip: the lattice may add one pixel, never a
+    # millimetre.
+    assert abs(raster.width_pixels / 10.0 - STRIP_WIDTH_UM / 1000.0) <= 0.2
+    # The height is the meridian the paper covers, not the 90 mm axis height.
+    assert 94.0 < raster.height_pixels / 10.0 < 95.5
+
+
+def test_the_record_says_which_development_and_how_it_was_framed(
+    corded: ArtifactSession,
+) -> None:
     receipt = tile_unwrap_receipt_from_record(corded.document.record_index[UNWRAP_ID])
     computation = _rubbing(corded)
     raster = computation.raster
 
-    # 10 px/mm, 1 mm margin each side; the development's exact bounds decide.
-    width_mm = receipt["bounds_um"]["maximum_u"] / 1000.0
-    height_mm = receipt["bounds_um"]["maximum_v"] / 1000.0
-    assert raster.width_pixels == math.ceil(width_mm * 10.0) + 20
-    assert raster.height_pixels == math.ceil(height_mm * 10.0) + 20
-    assert 94.0 < height_mm < 95.5  # the meridian, not the 90 mm axis height
     assert raster.receipt()["height_mm_exact"] == {
         "denominator": 10_000,
         "numerator": raster.height_pixels * 1000,
@@ -168,10 +199,49 @@ def test_the_raster_is_the_strip_at_one_to_one(corded: ArtifactSession) -> None:
     qc = computation.qc_dict()
     assert qc["development_record_id"] == UNWRAP_ID
     assert qc["development_sha256"] == receipt["unwrap_sha256"]
+    assert qc["artboard_policy"] == ARTBOARD_LARGEST_COVERED_RECTANGLE
     assert qc["multi_layer_pixel_count"] == 0
     assert qc["projected_zero_area_face_count"] == 0
     assert qc["radius_min_um_rounded"] == 25_000
     assert 47_500 < qc["radius_max_um_rounded"] < 48_500
+    # The crop is reported, not silent: the ragged margin it removed is the
+    # difference between the artboard and the rectangle.
+    assert qc["artboard_width_pixels"] > raster.width_pixels
+    assert qc["cropped_left_pixels"] + qc["cropped_right_pixels"] == (
+        qc["artboard_width_pixels"] - raster.width_pixels
+    )
+    assert qc["cropped_top_pixels"] + qc["cropped_bottom_pixels"] == (
+        qc["artboard_height_pixels"] - raster.height_pixels
+    )
+    assert qc["uncropped_covered_pixel_count"] > qc["covered_pixel_count"]
+
+
+def test_a_sherd_keeps_its_whole_development_when_asked(
+    corded: ArtifactSession,
+) -> None:
+    """Cropping a strip gives back the paper; cropping a sherd would throw
+    most of it away, so the full development stays available."""
+
+    computation = _rubbing(
+        corded,
+        artboard_policy=ARTBOARD_DEVELOPMENT_BOUNDS,
+        margin_um=1_000,
+    )
+    whole = computation.raster
+    rectangle = _rubbing(corded).raster
+
+    assert whole.width_pixels > rectangle.width_pixels
+    assert not bool((whole.pixels[:, :, 1] == 255).all())
+    # The four trim counts are reported whichever policy ran, so a reader can
+    # add them up without branching; keeping the whole development trims none.
+    qc = computation.qc_dict()
+    assert qc["artboard_policy"] == ARTBOARD_DEVELOPMENT_BOUNDS
+    for side in ("top", "bottom", "left", "right"):
+        assert qc[f"cropped_{side}_pixels"] == 0
+    assert qc["uncropped_covered_pixel_count"] == qc["covered_pixel_count"]
+
+    with pytest.raises(ArtifactDevelopedRubbingError, match="cannot also carry a margin"):
+        _rubbing(corded, margin_um=1_000)
 
 
 def test_cords_ink_and_a_plain_wall_stays_light(
@@ -353,10 +423,15 @@ def test_the_estimate_knows_the_artboard_before_any_work(corded: ArtifactSession
             corded.source_mesh.vertices.nbytes + corded.source_mesh.faces.nbytes
         ),
     )
+    # The estimate is admission control, so it bounds the artboard before the
+    # crop: the crop only ever takes pixels away.
+    qc = computation.qc_dict()
     assert (estimate.width_pixels, estimate.height_pixels) == (
-        computation.raster.width_pixels,
-        computation.raster.height_pixels,
+        qc["artboard_width_pixels"],
+        qc["artboard_height_pixels"],
     )
+    assert estimate.width_pixels >= computation.raster.width_pixels
+    assert estimate.height_pixels >= computation.raster.height_pixels
     assert estimate.estimated_peak_bytes > estimate.pixel_count * 64
 
 

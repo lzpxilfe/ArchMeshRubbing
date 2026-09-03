@@ -154,6 +154,8 @@ bundle = compose_drawing_sheet(
 
 넘긴 raster가 record의 receipt와 다르면 거부한다. 픽셀 없이 탁본 record만 올려도 거부한다 — 조용히 빈 자리를 남기지 않는다. 도판에 없는 record의 raster를 넘겨도 거부한다.
 
+토기 띠 탁본은 **직사각형**으로 붙는다. 종이 탁본이 견부나 경부에서 저부까지 한 폭으로 내려간 한 장이기 때문이고, 전개 탁본의 기본 artboard 정책(`largest_covered_rectangle/v1`)이 전개 안에 완전히 들어가는 가장 큰 직사각형만 남기기 때문이다. 조각의 깨진 윤곽 자체가 정보인 기와·전에서는 전개 경계 정책을 골라 윤곽을 살린다. 자세한 것은 [`docs/POTTERY_STRIP_UNWRAP.md`](POTTERY_STRIP_UNWRAP.md)의 "종이의 모양"에 있다.
+
 크기는 **물리 크기**다. receipt의 픽셀 수와 px/mm에서 mm를 계산하고, 시트 축척으로 함께 줄인다. 1:1이면 종이에서 실제 크기, 1:2면 절반이다. 선 굵기와 달리 탁본은 그림이므로 축척과 함께 줄어드는 것이 맞다.
 
 SVG에는 canonical GA8 PNG를 base64 data URI로 박는다. 그래서 도판 한 장이 자기 완결적이고, 바이트도 결정적이다. 탁본이 실린 도판만 `xmlns:xlink`를 선언하므로, 선만 있는 도판은 예전과 **바이트까지 같다.** sidecar의 도형 항목에는 `vector_payload_sha256` 대신 `raster_sha256`·`raster_pixels_per_meter`·픽셀 수가 들어간다.

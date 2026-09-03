@@ -57,43 +57,67 @@ def _strip(vessel: tuple[np.ndarray, np.ndarray], **overrides):
     return select_surface_strip(vertices, faces, strip_parameters(**options))
 
 
-def test_three_numbers_cut_the_strip_a_hand_would_paint(
+def test_the_strip_covers_the_width_that_was_asked_for(
     vessel: tuple[np.ndarray, np.ndarray],
 ) -> None:
+    """Every face holding any of the strip is taken, so the paper is covered.
+
+    A triangle that holds a point of the strip must have a vertex inside it,
+    so testing vertices takes every such face.  Testing face centres instead
+    let the boundary fall wherever the facet spacing did - and that spacing is
+    the arc r x dtheta, wider where the body swells - which quantised the
+    width row by row.
+    """
+
     vertices, faces = vessel
-    painted = meridional_strip_faces(
+    by_centre = meridional_strip_faces(
         vertices, faces, center_angle_rad=math.pi / 2.0, width_mm=20.0
     )
     selection = _strip(vessel)
+    chosen = set(selection.face_indices.tolist())
 
-    np.testing.assert_array_equal(selection.face_indices, painted)
+    # Every face whose centre is inside is still taken, plus the ring of
+    # faces that straddle the edge.
+    assert set(by_centre.tolist()) <= chosen
+    assert selection.face_count > int(by_centre.size)
+    assert selection.face_count < int(by_centre.size) * 1.3
     qc = selection.qc_dict()
     assert qc["component_count"] == 1
     assert qc["discarded_component_face_count"] == 0
-    assert qc["selected_face_count"] == int(painted.size)
 
-
-def test_the_strip_holds_its_width_where_the_body_swells(
-    vessel: tuple[np.ndarray, np.ndarray],
-) -> None:
-    vertices, faces = vessel
-    selection = _strip(vessel)
-    centroids = vertices[faces[selection.face_indices]].mean(axis=1)
-    radius = np.hypot(centroids[:, 0], centroids[:, 1])
+    # Every selected face has a vertex inside the 20 mm of paper, and the
+    # selection reaches past both edges so nothing of it is left uncovered.
+    corners = vertices[faces[selection.face_indices]]
+    radius = np.hypot(corners[:, :, 0], corners[:, :, 1])
     offset = np.abs(
         np.mod(
-            np.arctan2(centroids[:, 1], centroids[:, 0]) - math.pi / 2.0 + math.pi,
+            np.arctan2(corners[:, :, 1], corners[:, :, 0]) - math.pi / 2.0 + math.pi,
             2.0 * math.pi,
         )
         - math.pi
     )
     arc = offset * radius
+    assert bool((arc.min(axis=1) <= 10.0 + 1e-9).all())
+    assert float(arc.max()) > 10.0
 
-    # Every face centre is inside the 20 mm of paper, at the neck and at the
-    # belly alike, and the strip really does reach both edges of it.
-    assert float(arc.max()) <= 10.0 + 1e-9
-    assert float(arc.max()) > 9.0
-    # The angular half-width therefore narrows as the radius grows.
+
+def test_the_width_is_measured_along_the_surface_not_in_degrees(
+    vessel: tuple[np.ndarray, np.ndarray],
+) -> None:
+    vertices, faces = vessel
+    selection = _strip(vessel)
+    corners = vertices[faces[selection.face_indices]]
+    radius = np.hypot(corners[:, :, 0], corners[:, :, 1]).reshape(-1)
+    offset = np.abs(
+        np.mod(
+            np.arctan2(corners[:, :, 1], corners[:, :, 0]) - math.pi / 2.0 + math.pi,
+            2.0 * math.pi,
+        )
+        - math.pi
+    ).reshape(-1)
+
+    # The angular half-width narrows as the radius grows, which is what keeps
+    # the paper the same width at the neck and at the belly.
     narrow = radius < 30.0
     wide = radius > 45.0
     assert float(offset[narrow].max()) > float(offset[wide].max())
@@ -102,13 +126,20 @@ def test_the_strip_holds_its_width_where_the_body_swells(
 def test_the_height_range_clips_the_strip_at_both_ends(
     vessel: tuple[np.ndarray, np.ndarray],
 ) -> None:
+    vertices, faces = vessel
     whole = _strip(vessel)
     band = _strip(vessel, minimum_height_um=20_000, maximum_height_um=60_000)
 
     assert band.face_count < whole.face_count
-    assert band.qc["minimum_height_um"] >= 20_000
-    assert band.qc["maximum_height_um"] <= 60_000
     assert set(band.face_indices.tolist()) <= set(whole.face_indices.tolist())
+    # A face is taken when any vertex is in range, so the band overhangs the
+    # cut by at most the one triangle that straddles it.
+    corners = vertices[faces[band.face_indices]]
+    assert float(corners[:, :, 2].min(axis=1).max()) <= 60.0 + 1e-9
+    assert float(corners[:, :, 2].max(axis=1).min()) >= 20.0 - 1e-9
+    ring = float(HEIGHT_MM) / 96.0
+    assert band.qc["minimum_height_um"] >= int((20.0 - ring) * 1000)
+    assert band.qc["maximum_height_um"] <= int((60.0 + ring) * 1000)
 
 
 def test_the_full_revolution_is_the_outer_wall_and_nothing_else(
@@ -215,7 +246,9 @@ def test_an_empty_window_says_which_number_to_change(
                 maximum_height_um=int(HEIGHT_MM * 1000) + 20_000,
             ),
         )
-    with pytest.raises(ArtifactSurfaceStripError, match="too narrow"):
+    # A strip narrower than the vertex spacing holds no vertex at all, so no
+    # face holds any of it.
+    with pytest.raises(ArtifactSurfaceStripError, match="no face lies in this strip"):
         select_surface_strip(
             vertices,
             faces,
@@ -262,10 +295,17 @@ def test_cutting_a_strip_needs_an_artifact_stood_on_its_axis() -> None:
         select_positioned_surface_strip(dragged, parameters)
 
 
-def test_a_height_cut_across_a_band_can_shed_one_face_and_says_so() -> None:
+def test_a_height_cut_across_a_band_leaves_one_piece() -> None:
     """Positioning moves the origin to the measured base, so a height is read
-    in the canonical frame; a cut there runs through the middle of a
-    triangulated band and can leave a single face hanging by a vertex."""
+    in the canonical frame; the cut then runs through the middle of a
+    triangulated band, and the window must not shed the faces it crosses.
+
+    Testing the window at the face centre used to drop the triangles that
+    straddle the cut and leave one of them hanging by a vertex, which the cut
+    then refused as two pieces.  Testing it at the vertices keeps every
+    straddling triangle, so the band comes off whole and the paper is covered
+    down to the height that was asked for.
+    """
 
     session, _vertices, _faces = positioned_vessel_session(segments=48, rings=48)
     parameters = strip_parameters(
@@ -274,14 +314,16 @@ def test_a_height_cut_across_a_band_can_shed_one_face_and_says_so() -> None:
         minimum_height_um=10_000,
     )
 
-    with pytest.raises(ArtifactSurfaceStripError, match="separate pieces"):
-        select_positioned_surface_strip(session, parameters)
+    selection = select_positioned_surface_strip(session, parameters)
 
-    kept = select_positioned_surface_strip(
-        session, parameters, largest_component=True
-    )
-    assert kept.qc["discarded_component_face_count"] == 1
-    assert kept.face_count > 100
+    assert selection.qc["component_count"] == 1
+    assert selection.qc["discarded_component_face_count"] == 0
+    assert selection.face_count > 100
+    # The cut is covered from both sides: the strip reaches below 10 mm, but
+    # by less than the one triangle ring that straddles the cut.
+    ring_um = int(HEIGHT_MM * 1000.0 / 48.0)
+    assert int(selection.qc["minimum_height_um"]) < 10_000
+    assert int(selection.qc["minimum_height_um"]) >= 10_000 - ring_um
 
 
 def test_the_cut_strip_unrolls_the_way_the_painted_one_did() -> None:
@@ -309,7 +351,13 @@ def test_the_cut_strip_unrolls_the_way_the_painted_one_did() -> None:
     # A 20 mm strip on this profile: the numbers docs/POTTERY_STRIP_UNWRAP.md
     # measured for the painted one.
     assert int(qc["distortion_max_millionths"]) < 120_000
-    assert 20_000 < int(qc["width_um"]) < 30_000
+    # The selection overhangs the requested width by the ring of triangles
+    # that straddles each edge, which is what makes the 20 mm fully covered.
+    # One facet spans the arc 2 pi r / segments, widest where the body swells.
+    facet_arc_um = (
+        2.0 * math.pi * float(selection.qc["maximum_radius_um"]) / 48.0
+    )
+    assert 20_000 < int(qc["width_um"]) < 20_000 + 2.0 * facet_arc_um
     profile = np.linspace(0.0, HEIGHT_MM, 2001)
     meridian = float(
         np.sum(

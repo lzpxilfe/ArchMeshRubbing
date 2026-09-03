@@ -987,7 +987,10 @@
           "const": "1.0.0"
         },
         "artboard_policy": {
-          "const": "development_bounds_plus_margin/v1"
+          "enum": [
+            "development_bounds_plus_margin/v1",
+            "largest_covered_rectangle/v1"
+          ]
         },
         "coordinate_space": {
           "const": "canonical_mm_developed_raster/v1"

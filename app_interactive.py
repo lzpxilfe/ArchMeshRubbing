@@ -319,6 +319,8 @@ from src.core.artifact_outline_extractor import (  # noqa: E402
     DEFAULT_OUTLINE_PRECISION_GRID_MM,
 )
 from src.core.artifact_developed_rubbing import (  # noqa: E402
+    ARTBOARD_DEVELOPMENT_BOUNDS,
+    ARTBOARD_LARGEST_COVERED_RECTANGLE,
     ArtifactDevelopedRubbingError,
     DEVELOPED_RUBBING_RECORD_TYPE,
     DevelopedRubbingComputation,
@@ -4720,6 +4722,19 @@ class SectionPanel(QWidget):
             self.nativeTileUnwrapExportRequested.emit
         )
         native_layout.addWidget(self.btn_native_tile_unwrap_export)
+        self.check_native_developed_rubbing_whole = QCheckBox(
+            "전개 전체 유지 · 조각(기와) 탁본"
+        )
+        self.check_native_developed_rubbing_whole.setToolTip(
+            "기본은 완전히 덮인 최대 직사각형으로 잘라 종이 띠처럼 곧은 사각형을 "
+            "만듭니다. 전개 경계는 삼각형을 따라가고 그 간격이 반지름에 비례하므로, "
+            "자르지 않으면 폭이 행마다 계단처럼 흔들려 사다리꼴을 쌓은 모양이 "
+            "됩니다.\n"
+            "조각(기와 편)처럼 전개 자체가 사각형이 아닌 기록면은 잘라내면 대부분을 "
+            "버리게 되므로, 그때 이 항목을 켜서 전개 전체를 그대로 두세요. "
+            "이 경우에만 위의 여백 값이 쓰입니다."
+        )
+        native_layout.addWidget(self.check_native_developed_rubbing_whole)
         self.btn_native_developed_rubbing = QPushButton(
             "선택한 전개 위에 탁본 계산 · 기록"
         )
@@ -20719,6 +20734,16 @@ class MainWindow(QMainWindow):
                 )
             options = self._native_rubbing_options_from_panel()
             options.pop("view", None)
+            whole = bool(panel.check_native_developed_rubbing_whole.isChecked())
+            options["artboard_policy"] = (
+                ARTBOARD_DEVELOPMENT_BOUNDS
+                if whole
+                else ARTBOARD_LARGEST_COVERED_RECTANGLE
+            )
+            if not whole:
+                # The crop exists to remove uncovered paper, so a margin would
+                # only be cropped straight back off.
+                options["margin_um"] = 0
             record_id = f"record:developed-rubbing:{uuid.uuid4()}"
             created_at = self._utc_seconds_now()
             controller = self._artifact_measurement_controller()
