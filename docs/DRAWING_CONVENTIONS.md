@@ -137,6 +137,29 @@ bundle = compose_drawing_sheet(
 
 축척바는 1 · 2 · 5 × 10ⁿ mm 중에서 종이 위 길이가 90 mm를 넘지 않는 가장 긴 것을 고르고, 4칸으로 나눠 번갈아 칠한다. 라벨 단위는 크기에 따라 mm · cm · m로 바뀐다. 1 m를 "100 cm"라고 쓰지는 않는다.
 
+### 탁본 붙이기
+
+토기 외면 탁본은 종이 띠로 쳐서 도면 옆에 붙인다. 도판도 그렇게 한다. `record_ids`에 탁본 record(`raster.developed_rubbing.v1` 또는 `raster.digital_rubbing.v1`)를 벡터 기록과 **같은 목록에 섞어** 넣으면, 준 순서 그대로 자기 도형이 된다.
+
+탁본 record는 픽셀이 아니라 receipt를 저장하므로, 픽셀은 호출자가 recipe로 다시 계산해 넘긴다.
+
+```python
+bundle = compose_drawing_sheet(
+    document,
+    ["record:cutline-front", "record:rubbing-strip"],
+    options=options,
+    rasters={"record:rubbing-strip": recomputed_raster},
+)
+```
+
+넘긴 raster가 record의 receipt와 다르면 거부한다. 픽셀 없이 탁본 record만 올려도 거부한다 — 조용히 빈 자리를 남기지 않는다. 도판에 없는 record의 raster를 넘겨도 거부한다.
+
+크기는 **물리 크기**다. receipt의 픽셀 수와 px/mm에서 mm를 계산하고, 시트 축척으로 함께 줄인다. 1:1이면 종이에서 실제 크기, 1:2면 절반이다. 선 굵기와 달리 탁본은 그림이므로 축척과 함께 줄어드는 것이 맞다.
+
+SVG에는 canonical GA8 PNG를 base64 data URI로 박는다. 그래서 도판 한 장이 자기 완결적이고, 바이트도 결정적이다. 탁본이 실린 도판만 `xmlns:xlink`를 선언하므로, 선만 있는 도판은 예전과 **바이트까지 같다.** sidecar의 도형 항목에는 `vector_payload_sha256` 대신 `raster_sha256`·`raster_pixels_per_meter`·픽셀 수가 들어간다.
+
+앱에서는 탁본 기록이 도판 체크 목록에 함께 나온다. 체크하고 도판을 만들면 recipe로 다시 계산해 검증한 뒤 배치한다.
+
 ### 도판은 측정값이 아니다
 
 도판은 표현물이다. 각 도형은 자기가 그린 payload의 해시를 sidecar에 기록하므로 어떤 기록으로 만든 도판인지 확인할 수 있지만, 도판 자체가 측정 권위가 되지는 않는다. 그래서 원자 staging을 쓰는 export controller를 거치지 않고 바로 파일로 쓴다. 실질적인 관문은 그대로다. READY이고 FRESH가 아닌 기록은 도판에 오르지 못한다.
@@ -231,5 +254,6 @@ sidecar의 `condition.records`에는 그리도록 지정된 record와 그 면 �
 - **단면 절반의 상태 표기.** 상태 record는 여섯 뷰의 투영 경계를 담는데, 단면은 사용자가 정한 임의의 평면이라 커밋 시점에 미리 계산해 둘 수가 없다. 절단면 위의 결실·복원을 그리려면 상태 record와 단면 record 둘 다에 의존하는 별도의 record가 필요하다.
 - **1:1 vector export(`.amr-vector`)의 상태 표기.** 지금은 도판에만 그린다. 1:1 패키지는 검증할 때 sidecar만 가지고 SVG를 다시 렌더해 바이트를 대조하므로, 상태 경계를 그리려면 상태 payload 전체가 sidecar에 실리고 오프라인 검증기가 그것까지 검사해야 한다. 이 저장소에서 가장 엄격한 검증 경로라 따로 한 번에 한다.
 - 메쉬 위에서 영역을 칠하는 선택 도구. 지금은 면 인덱스를 직접 주어야 한다.
+- **탁본 도형의 캡션과 위치 지정.** 지금은 다른 도형과 같은 규칙으로 왼쪽에서 오른쪽으로 놓인다. 도면 옆 정해진 자리에 두거나 "동체부 우측 20 mm 띠" 같은 캡션을 붙이려면 도형별 배치 지시가 필요하다.
 - 선 종류별 해칭 기하.
 - DXF 내보내기.

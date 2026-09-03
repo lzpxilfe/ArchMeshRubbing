@@ -32,6 +32,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import (
     Qt,
+    QCoreApplication,
     QTimer,
     QSize,
     pyqtSignal,
@@ -399,6 +400,7 @@ from src.core.drawing_sheet import (  # noqa: E402
     DrawingSheetError,
     DrawingSheetOptions,
     SheetPage,
+    RUBBING_RECORD_TYPES,
     TitleBlock,
     compose_drawing_sheet,
 )
@@ -18150,7 +18152,9 @@ class MainWindow(QMainWindow):
             records=tile_unwrap_records,
             selected_id=selected_tile_unwrap_id,
         )
-        self._refresh_drawing_sheet_records(vector_records)
+        # A rubbing is a figure of the plate too: the strip a rubber tapes to
+        # the pot gets pasted beside the drawing.
+        self._refresh_drawing_sheet_records(vector_records + rubbing_records)
         self._refresh_drawing_sheet_mirror_choices(vector_records)
         self._refresh_drawing_sheet_conditions(condition_records)
         self._refresh_axis_alignment_records(diameter_records)
@@ -20065,6 +20069,39 @@ class MainWindow(QMainWindow):
                 )
                 return
             mirror_sections = ((elevation_id, section_id),)
+        # A rubbing record stores a receipt, not pixels, so any rubbing on the
+        # sheet is recomputed from its own recipe and checked against that
+        # receipt before it is placed.
+        rasters: dict[str, Any] = {}
+        rubbing_ids = [
+            record_id
+            for record_id in record_ids
+            if str(
+                getattr(session.document.record_index.get(record_id), "type", "")
+            )
+            in RUBBING_RECORD_TYPES
+        ]
+        if rubbing_ids:
+            self.status_info.setText(
+                f"도판의 탁본 {len(rubbing_ids)}개를 recipe로 다시 계산 중..."
+            )
+            QCoreApplication.processEvents()
+            for record_id in rubbing_ids:
+                record = session.document.record_index.get(record_id)
+                try:
+                    rasters[record_id] = MainWindow._recompute_native_rubbing_record(
+                        session,
+                        record,
+                    )
+                except Exception as exc:
+                    self.status_info.setText("도판의 탁본 재계산 실패")
+                    QMessageBox.warning(
+                        self,
+                        "도판 만들기 실패",
+                        f"탁본 기록 {record_id}을 다시 계산할 수 없습니다.\n"
+                        f"{type(exc).__name__}: {exc}",
+                    )
+                    return
         try:
             options = DrawingSheetOptions(
                 title_block=TitleBlock(artifact_label=label, rows=rows),
@@ -20075,7 +20112,7 @@ class MainWindow(QMainWindow):
                 condition_records=self._checked_drawing_sheet_condition_ids(),
             )
             bundle = compose_drawing_sheet(
-                session.document, record_ids, options=options
+                session.document, record_ids, options=options, rasters=rasters
             )
         except DrawingSheetError as exc:
             # These messages name the scale that would work, so show them

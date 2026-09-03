@@ -25,12 +25,26 @@ itself is not a measurement and never becomes one.
 
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass, field, replace
 import hashlib
 import math
 from typing import Any, Mapping, Sequence
 
 from .artifact_axis_alignment import AXIS_ALIGN_RECIPE_KIND
+from .artifact_developed_rubbing import (
+    ArtifactDevelopedRubbingError,
+    DEVELOPED_RUBBING_RECORD_TYPE,
+    DevelopedRubbingRaster,
+    developed_rubbing_receipt_from_record,
+)
+from .artifact_rubbing_extractor import DigitalRubbingRaster
+from .artifact_rubbing_record import (
+    ArtifactRubbingRecordError,
+    RUBBING_RECORD_TYPE,
+    rubbing_receipt_from_record,
+)
+from .canonical_png import CanonicalPNGError, encode_canonical_ga8_png
 from .artifact_condition_annotation import (
     ArtifactConditionAnnotationError,
     CONDITION_RECORD_TYPE,
@@ -90,6 +104,9 @@ DRAWING_SHEET_SIDECAR_NAME = "sheet.provenance.json"
 MAX_DRAWING_SHEET_SVG_BYTES = 64 * 1024 * 1024
 MAX_DRAWING_SHEET_FIGURES = 32
 MAX_DRAWING_SHEET_CONDITION_RECORDS = 64
+MAX_DRAWING_SHEET_RASTER_BYTES = 24 * 1024 * 1024
+RUBBING_RECORD_TYPES = frozenset({RUBBING_RECORD_TYPE, DEVELOPED_RUBBING_RECORD_TYPE})
+DRAWING_SHEET_PNG_METADATA_FORMAT = "archmeshrubbing_drawing_sheet_png_metadata"
 
 # ISO 216 sizes as portrait width x height in millimetres.
 PAGE_SIZES_MM: Mapping[str, tuple[float, float]] = {
@@ -438,6 +455,17 @@ def scale_bar_label(length_mm: float) -> str:
 
 
 @dataclass(frozen=True, slots=True)
+class _RasterImage:
+    """A 1:1 rubbing raster ready to be placed, and what proves it."""
+
+    data_uri: str
+    raster_sha256: str
+    pixels_per_meter: int
+    width_pixels: int
+    height_pixels: int
+
+
+@dataclass(frozen=True, slots=True)
 class _Prepared:
     """One figure's content, before it knows where on the page it goes."""
 
@@ -449,6 +477,7 @@ class _Prepared:
     paths_by_kind: Mapping[str, list[Any]]
     mirror_section_record_id: str | None = None
     fill_only_ids: frozenset[str] = frozenset()
+    raster: _RasterImage | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -461,6 +490,7 @@ class _Figure:
     paths_by_kind: Mapping[str, list[Any]]
     mirror_section_record_id: str | None = None
     fill_only_ids: frozenset[str] = frozenset()
+    raster: _RasterImage | None = None
 
 
 def _lay_out(
@@ -530,6 +560,7 @@ def _lay_out(
                 paths_by_kind=prepared.paths_by_kind,
                 mirror_section_record_id=prepared.mirror_section_record_id,
                 fill_only_ids=prepared.fill_only_ids,
+                raster=prepared.raster,
             )
         )
         cursor_x += width
@@ -711,6 +742,84 @@ def _require_drawable_condition_record(
     except ArtifactConditionAnnotationError as exc:
         raise DrawingSheetError(str(exc)) from exc
     return record, payload
+
+
+def _prepare_raster_figure(
+    document: ArtifactDocument,
+    record: DerivedRecord,
+    raster: Any,
+) -> _Prepared:
+    """Turn a proven rubbing raster into a figure of its own physical size.
+
+    A rubbing record stores a receipt, not pixels, so the caller recomputes
+    the raster and hands it in; the receipt is what decides whether those
+    pixels are the record's.  The strip then goes on the page at the sheet's
+    own scale, the way a rubber tapes the paper beside the drawing.
+    """
+
+    developed = record.type == DEVELOPED_RUBBING_RECORD_TYPE
+    expected_type = (
+        DevelopedRubbingRaster if developed else DigitalRubbingRaster
+    )
+    if not isinstance(raster, expected_type):
+        raise DrawingSheetError(
+            f"record {record.id!r} needs a {expected_type.__name__} to be drawn"
+        )
+    try:
+        receipt = (
+            developed_rubbing_receipt_from_record(record)
+            if developed
+            else rubbing_receipt_from_record(record)
+        )
+    except (ArtifactDevelopedRubbingError, ArtifactRubbingRecordError) as exc:
+        raise DrawingSheetError(str(exc)) from exc
+    if raster.receipt() != receipt:
+        raise DrawingSheetError(
+            f"the raster given for record {record.id!r} is not the one its "
+            "receipt describes"
+        )
+    pixels_per_meter = int(receipt["pixels_per_meter"])
+    width_mm = float(receipt["width_pixels"]) * 1000.0 / float(pixels_per_meter)
+    height_mm = float(receipt["height_pixels"]) * 1000.0 / float(pixels_per_meter)
+    metadata = {
+        "document_id": document.document_id,
+        "format": DRAWING_SHEET_PNG_METADATA_FORMAT,
+        "raster_sha256": receipt["raster_sha256"],
+        "recipe_hash": record.recipe_hash,
+        "record_id": record.id,
+        "record_type": record.type,
+        "schema_version": DRAWING_SHEET_SCHEMA_VERSION,
+    }
+    try:
+        png_bytes = encode_canonical_ga8_png(
+            raster.pixels,
+            pixels_per_meter=pixels_per_meter,
+            metadata=metadata,
+        )
+    except CanonicalPNGError as exc:
+        raise DrawingSheetError(str(exc)) from exc
+    encoded = base64.b64encode(png_bytes).decode("ascii")
+    if len(encoded) > MAX_DRAWING_SHEET_RASTER_BYTES:
+        raise DrawingSheetError(
+            f"record {record.id!r} embeds {len(encoded)} bytes of raster, above "
+            f"the {MAX_DRAWING_SHEET_RASTER_BYTES}-byte sheet limit; compute the "
+            "rubbing at a lower physical resolution"
+        )
+    return _Prepared(
+        record_id=record.id,
+        record_type=record.type,
+        recipe_hash=record.recipe_hash,
+        payload_sha256=str(receipt["raster_sha256"]),
+        bounds=(0.0, 0.0, width_mm, height_mm),
+        paths_by_kind={},
+        raster=_RasterImage(
+            data_uri=f"data:image/png;base64,{encoded}",
+            raster_sha256=str(receipt["raster_sha256"]),
+            pixels_per_meter=pixels_per_meter,
+            width_pixels=int(receipt["width_pixels"]),
+            height_pixels=int(receipt["height_pixels"]),
+        ),
+    )
 
 
 def _condition_paths_for_figure(
@@ -1002,8 +1111,17 @@ def _sheet_provenance(
                 "record_id": figure.record_id,
                 "record_type": figure.record_type,
                 "recipe_hash": figure.recipe_hash,
-                "vector_payload_sha256": figure.payload_sha256,
                 "width_mm": figure.placement.width_mm,
+                **(
+                    {"vector_payload_sha256": figure.payload_sha256}
+                    if figure.raster is None
+                    else {
+                        "raster_height_pixels": figure.raster.height_pixels,
+                        "raster_pixels_per_meter": figure.raster.pixels_per_meter,
+                        "raster_sha256": figure.raster.raster_sha256,
+                        "raster_width_pixels": figure.raster.width_pixels,
+                    }
+                ),
             }
             for figure in placed
         ],
@@ -1045,11 +1163,19 @@ def _render_sheet(
     width_token = number_token(page.width_mm, field_name="page.width_mm")
     height_token = number_token(page.height_mm, field_name="page.height_mm")
     metadata_text = canonical_json_bytes(provenance).decode("utf-8").rstrip("\n")
+    # SVG 1.1 addresses embedded images through xlink, so the namespace is
+    # declared only on a sheet that carries one; a sheet of pure line work is
+    # byte for byte the sheet it was before rubbings could be placed.
+    xlink_declaration = (
+        ' xmlns:xlink="http://www.w3.org/1999/xlink"'
+        if any(figure.raster is not None for figure in placed)
+        else ""
+    )
 
     lines = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         (
-            f'<svg xmlns="{SVG_NAMESPACE}" version="1.1" '
+            f'<svg xmlns="{SVG_NAMESPACE}"{xlink_declaration} version="1.1" '
             f'width="{width_token}mm" height="{height_token}mm" '
             f'viewBox="0 0 {width_token} {height_token}">'
         ),
@@ -1099,16 +1225,30 @@ def _render_sheet(
             f'data-record-type="{xml_attribute(figure.record_type)}"'
             f"{mirror_attribute}>"
         )
-        lines.extend(
-            layer_elements(
-                figure.paths_by_kind,
-                preset=preset,
-                placement=figure.placement,
-                hatched=hatched_kinds(figure.paths_by_kind, preset=preset),
-                indent="      ",
-                fill_only_ids=figure.fill_only_ids,
+        if figure.raster is not None:
+            placement = figure.placement
+            origin_x, origin_y = placement.origin_mm
+            lines.append(
+                '      <image id="'
+                f'rubbing-{index:04d}" '
+                f'x="{number_token(origin_x, field_name="figure.x")}" '
+                f'y="{number_token(origin_y, field_name="figure.y")}" '
+                f'width="{number_token(placement.width_mm, field_name="figure.width")}" '
+                f'height="{number_token(placement.height_mm, field_name="figure.height")}" '
+                'preserveAspectRatio="none" image-rendering="pixelated" '
+                f'xlink:href="{xml_attribute(figure.raster.data_uri)}"/>'
             )
-        )
+        else:
+            lines.extend(
+                layer_elements(
+                    figure.paths_by_kind,
+                    preset=preset,
+                    placement=figure.placement,
+                    hatched=hatched_kinds(figure.paths_by_kind, preset=preset),
+                    indent="      ",
+                    fill_only_ids=figure.fill_only_ids,
+                )
+            )
         lines.append("    </g>")
     lines.append("  </g>")
 
@@ -1127,14 +1267,28 @@ def compose_drawing_sheet(
     record_ids: Sequence[str],
     *,
     options: DrawingSheetOptions,
+    rasters: Mapping[str, Any] | None = None,
 ) -> DrawingSheetBundle:
-    """Compose READY and FRESH vector records into one printable sheet."""
+    """Compose READY and FRESH records into one printable sheet.
+
+    ``record_ids`` may name vector records and rubbing records alike, in the
+    order they should appear.  A rubbing record stores a receipt rather than
+    pixels, so its recomputed raster is passed in ``rasters`` under the same
+    id and is drawn only if it matches that receipt.
+    """
 
     if not isinstance(options, DrawingSheetOptions):
         raise DrawingSheetError("options must be DrawingSheetOptions")
+    rasters = dict(rasters or {})
     ids = [str(record_id) for record_id in record_ids]
     if not ids:
-        raise DrawingSheetError("a sheet needs at least one vector record")
+        raise DrawingSheetError("a sheet needs at least one record")
+    unplaced_rasters = sorted(set(rasters) - set(ids))
+    if unplaced_rasters:
+        raise DrawingSheetError(
+            "a raster was given for a record the sheet does not draw: "
+            f"{', '.join(unplaced_rasters)}"
+        )
     if len(ids) > MAX_DRAWING_SHEET_FIGURES:
         raise DrawingSheetError(
             f"a sheet holds at most {MAX_DRAWING_SHEET_FIGURES} figures"
@@ -1180,6 +1334,33 @@ def compose_drawing_sheet(
 
     prepared: list[_Prepared] = []
     for record_id in ids:
+        rubbing_record = document.record_index.get(record_id)
+        if (
+            rubbing_record is not None
+            and rubbing_record.type in RUBBING_RECORD_TYPES
+        ):
+            if rubbing_record.lifecycle_status is not RecordLifecycleStatus.READY:
+                raise DrawingSheetError(
+                    f"only READY records may be drawn (record {record_id!r})"
+                )
+            if document.record_freshness(record_id) is not RecordFreshness.FRESH:
+                raise DrawingSheetError(
+                    f"only FRESH records may be drawn (record {record_id!r})"
+                )
+            if record_id not in rasters:
+                raise DrawingSheetError(
+                    f"record {record_id!r} is a rubbing, so its recomputed raster "
+                    "must be given to the sheet; a rubbing record stores a "
+                    "receipt, not pixels"
+                )
+            prepared.append(
+                _prepare_raster_figure(
+                    document,
+                    rubbing_record,
+                    rasters[record_id],
+                )
+            )
+            continue
         try:
             record, payload, _record_qc = _require_exportable_record(document, record_id)
         except ArtifactVectorExportError as exc:

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import math
+import xml.etree.ElementTree as ET
 from pathlib import Path
 import tempfile
 from typing import Any
@@ -55,6 +56,12 @@ from src.core.artifact_rubbing_export import (
 )
 from src.core.artifact_rubbing_extractor import DigitalRubbingRaster
 from src.core.artifact_session import ArtifactSession
+from src.core.drawing_sheet import (
+    DrawingSheetOptions,
+    TitleBlock,
+    compose_drawing_sheet,
+    validate_drawing_sheet_bytes,
+)
 from src.core.artifact_tile_unwrap_extractor import (
     SECTION_CENTER_CANONICAL_AXIS,
     STATION_MERIDIAN_ARC,
@@ -489,3 +496,44 @@ def test_the_controller_refuses_a_development_that_is_not_there(
         controller.begin_developed_rubbing("record:unwrap:nowhere", **OPTIONS)
     with pytest.raises(ArtifactMeasurementError, match="not a tile unwrap"):
         controller.begin_developed_rubbing(RIM_ID, **OPTIONS)
+
+
+def test_the_strip_goes_onto_a_drawing_sheet_at_the_sheet_scale(
+    corded: ArtifactSession,
+) -> None:
+    """What a rubber does with the paper: paste it beside the drawing."""
+
+    computation = _rubbing(corded)
+    session = commit_developed_rubbing(
+        corded,
+        computation,
+        record_id="record:developed:sheet",
+        created_at="2026-09-03T00:00:11Z",
+        operator="tester",
+    )
+    options = DrawingSheetOptions(
+        title_block=TitleBlock(
+            artifact_label="시험 토기 001",
+            rows=(("작성", "tester"), ("일자", "2026-09-03")),
+        ),
+        scale_denominator=2.0,
+    )
+
+    bundle = compose_drawing_sheet(
+        session.document,
+        ["record:developed:sheet"],
+        options=options,
+        rasters={"record:developed:sheet": computation.raster},
+    )
+    root = ET.fromstring(bundle.svg_bytes.decode("utf-8"))
+    images = list(root.iter("{http://www.w3.org/2000/svg}image"))
+    assert len(images) == 1
+    raster = computation.raster
+    assert float(images[0].attrib["width"]) == pytest.approx(
+        raster.width_pixels * 1000.0 / raster.pixels_per_meter / 2.0, abs=1e-6
+    )
+    sidecar = json.loads(bundle.sidecar_bytes.decode("utf-8"))
+    figure = sidecar["figures"][0]
+    assert figure["record_type"] == DEVELOPED_RUBBING_RECORD_TYPE
+    assert figure["raster_sha256"] == raster.raster_sha256
+    validate_drawing_sheet_bytes(bundle.svg_bytes, bundle.sidecar_bytes)

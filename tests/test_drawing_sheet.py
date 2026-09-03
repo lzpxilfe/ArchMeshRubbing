@@ -12,6 +12,11 @@ from src.core.artifact_condition_annotation import (
 )
 from src.core.artifact_document import RecordFreshness
 from src.core.artifact_outline_extractor import compute_artifact_outline
+from src.core.artifact_rubbing_extractor import (
+    DigitalRubbingRaster,
+    commit_artifact_rubbing,
+    compute_artifact_rubbing,
+)
 from src.core.artifact_session import ArtifactSession
 from src.core.artifact_vector_extractor import (
     commit_vector_computation,
@@ -547,4 +552,150 @@ def test_a_condition_under_a_superseded_alignment_is_refused() -> None:
             moved.document,
             [OUTLINE_ID],
             options=_options(condition_records=(CONDITION_ID,)),
+        )
+
+
+RUBBING_ID = "record:sheet-rubbing"
+
+
+def _session_with_rubbing(
+    *, pixels_per_mm: int = 10, view: str = "top"
+) -> tuple[ArtifactSession, DigitalRubbingRaster]:
+    """The tetrahedron plus a six-view rubbing of it, ready to be placed."""
+
+    session = _session()
+    computation = compute_artifact_rubbing(
+        session,
+        view,
+        pixels_per_mm=pixels_per_mm,
+        margin_um=0,
+        reference_radius_um=500,
+        depth_quantization_um=10,
+        black_point_um=100,
+        ink_strength_percent=100,
+        relief_polarity="bidirectional",
+    )
+    committed = commit_artifact_rubbing(
+        session,
+        computation,
+        record_id=RUBBING_ID,
+        created_at="2026-09-03T00:00:03Z",
+        operator="tester",
+    )
+    return committed, computation.raster
+
+
+def _images(svg_bytes: bytes) -> list[dict[str, str]]:
+    root = ET.fromstring(svg_bytes.decode("utf-8"))
+    return [
+        dict(element.attrib)
+        for element in root.iter(f"{SVG_NS}image")
+    ]
+
+
+def test_a_rubbing_is_placed_beside_the_drawing_at_its_own_size() -> None:
+    session, raster = _session_with_rubbing()
+
+    bundle = compose_drawing_sheet(
+        session.document,
+        [OUTLINE_ID, RUBBING_ID],
+        options=_options(),
+        rasters={RUBBING_ID: raster},
+    )
+    images = _images(bundle.svg_bytes)
+    assert len(images) == 1
+    image = images[0]
+    expected_mm = raster.width_pixels * 1000.0 / raster.pixels_per_meter
+    assert float(image["width"]) == pytest.approx(expected_mm, abs=1e-6)
+    assert float(image["height"]) == pytest.approx(
+        raster.height_pixels * 1000.0 / raster.pixels_per_meter, abs=1e-6
+    )
+    assert image["preserveAspectRatio"] == "none"
+    assert image[
+        "{http://www.w3.org/1999/xlink}href"
+    ].startswith("data:image/png;base64,")
+
+    sidecar = json.loads(bundle.sidecar_bytes.decode("utf-8"))
+    figures = {figure["record_id"]: figure for figure in sidecar["figures"]}
+    assert set(figures) == {OUTLINE_ID, RUBBING_ID}
+    rubbing_figure = figures[RUBBING_ID]
+    assert rubbing_figure["raster_sha256"] == raster.raster_sha256
+    assert rubbing_figure["raster_pixels_per_meter"] == raster.pixels_per_meter
+    assert rubbing_figure["raster_width_pixels"] == raster.width_pixels
+    # A rubbing has no vector payload, and the sidecar does not pretend it does.
+    assert "vector_payload_sha256" not in rubbing_figure
+    assert "vector_payload_sha256" in figures[OUTLINE_ID]
+
+
+def test_the_sheet_scale_reduces_the_rubbing_with_everything_else() -> None:
+    session, raster = _session_with_rubbing()
+    full_size = raster.width_pixels * 1000.0 / raster.pixels_per_meter
+
+    for denominator in (1.0, 2.0, 4.0):
+        bundle = compose_drawing_sheet(
+            session.document,
+            [RUBBING_ID],
+            options=_options(scale_denominator=denominator),
+            rasters={RUBBING_ID: raster},
+        )
+        image = _images(bundle.svg_bytes)[0]
+        assert float(image["width"]) == pytest.approx(
+            full_size / denominator, abs=1e-6
+        )
+
+
+def test_a_sheet_of_line_work_alone_declares_no_image_namespace() -> None:
+    document = _session().document
+    bundle = compose_drawing_sheet(document, [OUTLINE_ID], options=_options())
+
+    assert b"xmlns:xlink" not in bundle.svg_bytes
+    assert b"<image" not in bundle.svg_bytes
+
+
+def test_the_raster_must_be_the_one_the_record_receipted() -> None:
+    session, _raster = _session_with_rubbing()
+    _other_session, other_raster = _session_with_rubbing(pixels_per_mm=5)
+
+    with pytest.raises(DrawingSheetError, match="not the one its receipt"):
+        compose_drawing_sheet(
+            session.document,
+            [RUBBING_ID],
+            options=_options(),
+            rasters={RUBBING_ID: other_raster},
+        )
+
+
+def test_a_rubbing_without_its_pixels_is_refused_not_skipped() -> None:
+    session, raster = _session_with_rubbing()
+
+    with pytest.raises(DrawingSheetError, match="receipt, not pixels"):
+        compose_drawing_sheet(session.document, [RUBBING_ID], options=_options())
+    with pytest.raises(DrawingSheetError, match="does not draw"):
+        compose_drawing_sheet(
+            session.document,
+            [OUTLINE_ID],
+            options=_options(),
+            rasters={RUBBING_ID: raster},
+        )
+
+
+def test_a_rubbing_left_stale_by_a_new_align_is_not_drawn() -> None:
+    session, raster = _session_with_rubbing()
+    moved = session.commit_preview(
+        translation_mm=(1.0, 0.0, 0.0),
+        rotation_deg=(0.0, 0.0, 0.0),
+        scale=1.0,
+        pivot_mm=(0.0, 0.0, 0.0),
+        operator="tester",
+        created_at="2026-09-03T00:00:04Z",
+        revision_id="align:sheet-moved",
+    )
+    assert moved.document.record_freshness(RUBBING_ID) is not RecordFreshness.FRESH
+
+    with pytest.raises(DrawingSheetError, match="only FRESH"):
+        compose_drawing_sheet(
+            moved.document,
+            [RUBBING_ID],
+            options=_options(),
+            rasters={RUBBING_ID: raster},
         )
