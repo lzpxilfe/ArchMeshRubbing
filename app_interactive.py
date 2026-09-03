@@ -27,7 +27,8 @@ from PyQt6.QtWidgets import (
     QSlider, QSpinBox, QStatusBar, QToolBar, QFrame,
     QMessageBox, QTextEdit, QProgressBar, QComboBox,
     QCheckBox, QScrollArea, QSizePolicy, QButtonGroup, QDialog, QLineEdit,
-    QGridLayout, QProgressDialog, QMenu, QInputDialog
+    QGridLayout, QProgressDialog, QMenu, QInputDialog,
+    QListWidget, QListWidgetItem
 )
 from PyQt6.QtCore import (
     Qt,
@@ -365,6 +366,14 @@ from src.core.artifact_vector_export import (  # noqa: E402
 from src.core.drawing_style import (  # noqa: E402
     available_presets as drawing_style_presets,
     get_preset as drawing_style_preset,
+)
+from src.core.drawing_sheet import (  # noqa: E402
+    PAGE_SIZES_MM as DRAWING_SHEET_PAGE_SIZES_MM,
+    DrawingSheetError,
+    DrawingSheetOptions,
+    SheetPage,
+    TitleBlock,
+    compose_drawing_sheet,
 )
 from src.core.artifact_vector_record import (  # noqa: E402
     PlanarFrame,
@@ -3970,6 +3979,7 @@ class SectionPanel(QWidget):
     nativeMeasurementRetryRequested = pyqtSignal()
     nativeVectorRecordSelected = pyqtSignal(str)
     nativeVectorExportRequested = pyqtSignal()
+    drawingSheetRequested = pyqtSignal()
     nativeRubbingRequested = pyqtSignal()
     nativeRubbingRecordSelected = pyqtSignal(str)
     nativeRubbingExportRequested = pyqtSignal()
@@ -4175,6 +4185,63 @@ class SectionPanel(QWidget):
         set_pixel_icon(self.btn_native_vector_export, "export")
         self.btn_native_vector_export.clicked.connect(self.nativeVectorExportRequested.emit)
         native_layout.addWidget(self.btn_native_vector_export)
+
+        sheet_line = QFrame()
+        sheet_line.setFrameShape(QFrame.Shape.HLine)
+        sheet_line.setFrameShadow(QFrame.Shadow.Sunken)
+        native_layout.addWidget(sheet_line)
+        sheet_title = QLabel("실측 도판 · 여러 기록을 한 장에")
+        sheet_title.setStyleSheet("font-weight: bold;")
+        native_layout.addWidget(sheet_title)
+
+        # Checked order is placement order, so a user who wants the elevation
+        # left of the section can say so by checking them in that order.
+        self.list_drawing_sheet_records = QListWidget()
+        self.list_drawing_sheet_records.setMaximumHeight(120)
+        self.list_drawing_sheet_records.setToolTip(
+            "도판에 올릴 READY + FRESH 벡터 기록을 고릅니다.\n"
+            "체크한 순서대로 왼쪽에서 오른쪽으로 배치되고, 한 줄이 차면 다음 줄로 넘어갑니다."
+        )
+        native_layout.addWidget(self.list_drawing_sheet_records)
+
+        self.edit_drawing_sheet_label = QLineEdit()
+        self.edit_drawing_sheet_label.setPlaceholderText("유물명 (제목란에 인쇄됩니다)")
+        self.edit_drawing_sheet_label.setMaxLength(120)
+        native_layout.addWidget(self.edit_drawing_sheet_label)
+
+        sheet_row = QHBoxLayout()
+        sheet_row.setContentsMargins(0, 0, 0, 0)
+        sheet_row.addWidget(QLabel("용지"))
+        self.combo_drawing_sheet_page = QComboBox()
+        for size in sorted(DRAWING_SHEET_PAGE_SIZES_MM):
+            for orientation, orientation_label in (
+                ("portrait", "세로"),
+                ("landscape", "가로"),
+            ):
+                self.combo_drawing_sheet_page.addItem(
+                    f"{size} {orientation_label}", (size, orientation)
+                )
+        default_page = self.combo_drawing_sheet_page.findData(("A4", "portrait"))
+        if default_page >= 0:
+            self.combo_drawing_sheet_page.setCurrentIndex(default_page)
+        sheet_row.addWidget(self.combo_drawing_sheet_page)
+        sheet_row.addWidget(QLabel("축척 1:"))
+        self.spin_drawing_sheet_scale = QSpinBox()
+        self.spin_drawing_sheet_scale.setRange(1, 100)
+        self.spin_drawing_sheet_scale.setValue(1)
+        self.spin_drawing_sheet_scale.setToolTip(
+            "1:N의 N입니다. 선 굵기는 축척과 무관하게 종이 mm 그대로 유지됩니다.\n"
+            "도판에 들어가지 않으면 쓸 수 있는 축척을 알려주고 실패합니다."
+        )
+        sheet_row.addWidget(self.spin_drawing_sheet_scale)
+        sheet_row.addStretch()
+        native_layout.addLayout(sheet_row)
+
+        self.btn_drawing_sheet = QPushButton("체크한 기록으로 실측 도판 만들기")
+        set_pixel_icon(self.btn_drawing_sheet, "export")
+        self.btn_drawing_sheet.setEnabled(False)
+        self.btn_drawing_sheet.clicked.connect(self.drawingSheetRequested.emit)
+        native_layout.addWidget(self.btn_drawing_sheet)
 
         rubbing_line = QFrame()
         rubbing_line.setFrameShape(QFrame.Shape.HLine)
@@ -4955,6 +5022,12 @@ class MainWindow(QMainWindow):
         )
         self.section_panel.nativeVectorExportRequested.connect(
             self.on_native_vector_export_requested
+        )
+        self.section_panel.drawingSheetRequested.connect(
+            self.on_drawing_sheet_requested
+        )
+        self.section_panel.list_drawing_sheet_records.itemChanged.connect(
+            self.on_drawing_sheet_item_changed
         )
         self.section_panel.nativeRubbingRequested.connect(
             self.on_native_rubbing_requested
@@ -17757,6 +17830,94 @@ class MainWindow(QMainWindow):
             records=tile_unwrap_records,
             selected_id=selected_tile_unwrap_id,
         )
+        self._refresh_drawing_sheet_records(vector_records)
+
+    def _refresh_drawing_sheet_records(self, records: list[Any]) -> None:
+        """Rebuild the sheet checklist, keeping what was checked and its order.
+
+        A record that stopped being READY or FRESH simply disappears, which is
+        the same rule the export selectors use: a sheet must never be composed
+        from a measurement the document no longer stands behind.
+        """
+
+        panel = getattr(self, "section_panel", None)
+        widget = getattr(panel, "list_drawing_sheet_records", None)
+        if widget is None:
+            return
+        available = {str(record.id) for record in records}
+        order = [
+            record_id
+            for record_id in getattr(self, "_drawing_sheet_check_order", [])
+            if record_id in available
+        ]
+        self._drawing_sheet_check_order = order
+        checked = set(order)
+        widget.blockSignals(True)
+        try:
+            widget.clear()
+            for record in sorted(
+                records,
+                key=lambda item: (str(item.created_at), str(item.id)),
+            ):
+                item = QListWidgetItem(self._native_record_choice_label(record))
+                item.setData(Qt.ItemDataRole.UserRole, record.id)
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(
+                    Qt.CheckState.Checked
+                    if record.id in checked
+                    else Qt.CheckState.Unchecked
+                )
+                widget.addItem(item)
+        finally:
+            widget.blockSignals(False)
+        button = getattr(panel, "btn_drawing_sheet", None)
+        if button is not None:
+            button.setEnabled(widget.count() > 0)
+
+    def on_drawing_sheet_item_changed(self, item: QListWidgetItem) -> None:
+        """Track the order the user checked records in.
+
+        Placement follows this order rather than the list order, so a user who
+        wants the elevation to the left of the section says so by checking the
+        elevation first.  The panel's tooltip promises exactly this.
+        """
+
+        record_id = str(item.data(Qt.ItemDataRole.UserRole) or "")
+        if not record_id:
+            return
+        order: list[str] = list(getattr(self, "_drawing_sheet_check_order", []))
+        if item.checkState() == Qt.CheckState.Checked:
+            if record_id not in order:
+                order.append(record_id)
+        elif record_id in order:
+            order.remove(record_id)
+        self._drawing_sheet_check_order = order
+
+    def _checked_drawing_sheet_record_ids(self) -> list[str]:
+        panel = getattr(self, "section_panel", None)
+        widget = getattr(panel, "list_drawing_sheet_records", None)
+        if widget is None:
+            return []
+        checked = {
+            str(widget.item(index).data(Qt.ItemDataRole.UserRole))
+            for index in range(widget.count())
+            if widget.item(index).checkState() == Qt.CheckState.Checked
+        }
+        order = [
+            record_id
+            for record_id in getattr(self, "_drawing_sheet_check_order", [])
+            if record_id in checked
+        ]
+        # Anything checked without passing through the handler (a restored
+        # state, a programmatic change) still belongs on the sheet; it goes
+        # after the explicitly ordered ones, in list order.
+        order.extend(
+            str(widget.item(index).data(Qt.ItemDataRole.UserRole))
+            for index in range(widget.count())
+            if widget.item(index).checkState() == Qt.CheckState.Checked
+            and str(widget.item(index).data(Qt.ItemDataRole.UserRole)) not in order
+        )
+        return order
 
     @staticmethod
     def _reset_native_record_choice(combo: QComboBox) -> None:
@@ -19164,6 +19325,98 @@ class MainWindow(QMainWindow):
             raise ArtifactVectorExportError(str(exc)) from exc
         except ArtifactExportError as exc:
             raise ArtifactVectorExportError(str(exc)) from exc
+
+    def on_drawing_sheet_requested(self) -> None:
+        """Compose the checked records into one printable sheet.
+
+        A sheet is presentation, not a measurement, so it is written directly
+        rather than through the export controller's atomic staging.  The gate
+        that matters is still enforced: `compose_drawing_sheet` refuses any
+        record that is not READY and FRESH.
+        """
+
+        session = getattr(self, "_artifact_session", None)
+        if not isinstance(session, ArtifactSession):
+            self.status_info.setText("도판을 만들 ArtifactDocument가 없습니다.")
+            return
+        try:
+            self._artifact_workbench_controller().require_stable_session(
+                session,
+                measurement=True,
+            )
+        except ArtifactWorkbenchError as exc:
+            self.status_info.setText(f"도판 만들기 차단: {exc}")
+            return
+        record_ids = self._checked_drawing_sheet_record_ids()
+        if not record_ids:
+            self.status_info.setText("도판에 올릴 기록을 하나 이상 체크하세요.")
+            return
+
+        panel = self.section_panel
+        label = panel.edit_drawing_sheet_label.text().strip()
+        if not label:
+            self.status_info.setText("제목란에 인쇄할 유물명을 입력하세요.")
+            return
+        page_size, orientation = panel.combo_drawing_sheet_page.currentData()
+        # The operator comes from the Align revision the measurements hang off,
+        # not from a text box: the title block should name who actually
+        # recorded the artifact, not whoever happens to be printing it.
+        align_id = session.document.active_align_revision_id
+        operator = ""
+        if isinstance(align_id, str):
+            align = session.document.align_revision_index.get(align_id)
+            operator = str(getattr(align, "operator", "") or "")
+        rows = (("작성", operator),) if operator else ()
+        try:
+            options = DrawingSheetOptions(
+                title_block=TitleBlock(artifact_label=label, rows=rows),
+                scale_denominator=float(panel.spin_drawing_sheet_scale.value()),
+                page=SheetPage(size=page_size, orientation=orientation),
+            )
+            bundle = compose_drawing_sheet(
+                session.document, record_ids, options=options
+            )
+        except DrawingSheetError as exc:
+            # These messages name the scale that would work, so show them
+            # verbatim rather than replacing them with a generic failure.
+            self.status_info.setText(f"도판 만들기 실패: {exc}")
+            QMessageBox.warning(self, "도판 만들기 실패", str(exc))
+            return
+        except Exception as exc:
+            self.status_info.setText("도판 만들기 실패")
+            QMessageBox.warning(
+                self,
+                "도판 만들기 실패",
+                f"{type(exc).__name__}: {exc}",
+            )
+            return
+
+        source_path = Path(str(self.current_filepath or "artifact"))
+        default_path = source_path.with_name(f"{source_path.stem}-도판.svg")
+        selected, _filter = QFileDialog.getSaveFileName(
+            self,
+            "실측 도판 저장",
+            str(default_path),
+            "SVG Drawing (*.svg)",
+        )
+        if not selected:
+            return
+        if not selected.lower().endswith(".svg"):
+            selected += ".svg"
+        svg_path = Path(selected)
+        sidecar_path = svg_path.with_suffix(".provenance.json")
+        try:
+            svg_path.write_bytes(bundle.svg_bytes)
+            sidecar_path.write_bytes(bundle.sidecar_bytes)
+        except OSError as exc:
+            self.status_info.setText("도판 저장 실패")
+            QMessageBox.warning(self, "도판 저장 실패", str(exc))
+            return
+        self.status_info.setText(
+            f"도판 저장 완료: {svg_path.name} "
+            f"({options.physical_scale}, {page_size} {orientation}, "
+            f"기록 {len(record_ids)}개)"
+        )
 
     def on_native_vector_export_requested(self) -> None:
         session = getattr(self, "_artifact_session", None)

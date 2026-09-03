@@ -353,6 +353,49 @@ def test_an_edited_preset_invalidates_a_sheet_that_used_it() -> None:
         validate_drawing_sheet_bytes(bundle.svg_bytes, forged)
 
 
+def test_the_title_block_names_who_recorded_the_artifact() -> None:
+    """The GUI fills the 작성 row from the Align revision, not from a text box.
+
+    A drawing should name whoever measured the artifact, not whoever happened
+    to print it, so this reproduces the slot's own construction headlessly.
+    """
+
+    session = _session()
+    document = session.document
+    align = document.align_revision_index[document.active_align_revision_id]
+
+    bundle = compose_drawing_sheet(
+        document,
+        [OUTLINE_ID],
+        options=DrawingSheetOptions(
+            title_block=TitleBlock(
+                artifact_label="시험 유물 001",
+                rows=(("작성", align.operator),),
+            ),
+        ),
+    )
+
+    rows = json.loads(bundle.sidecar_bytes)["title_block"]
+    assert {"label": "작성", "value": align.operator} in rows
+    assert rows[0] == {"label": "유물", "value": "시험 유물 001"}
+    assert rows[-1]["label"] == "문서"
+
+
+def test_a_sheet_with_no_operator_row_is_still_well_formed() -> None:
+    """An Align revision without an operator must not produce an empty row."""
+
+    document = _session().document
+    bundle = compose_drawing_sheet(
+        document,
+        [OUTLINE_ID],
+        options=DrawingSheetOptions(title_block=TitleBlock(artifact_label="A")),
+    )
+
+    rows = json.loads(bundle.sidecar_bytes)["title_block"]
+    assert [row["label"] for row in rows] == ["유물", "축척", "문서"]
+    validate_drawing_sheet_bytes(bundle.svg_bytes, bundle.sidecar_bytes)
+
+
 def test_an_unknown_page_size_or_orientation_is_named_in_the_error() -> None:
     with pytest.raises(DrawingSheetError, match="known sizes are"):
         SheetPage(size="B4")
