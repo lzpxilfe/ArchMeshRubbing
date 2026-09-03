@@ -36,6 +36,7 @@
 | 원 맞춤 지름 | PCA best-fit plane 위 정규화 대수 Kasa 원 | `[R6]` | paper | native | `src/core/artifact_surface_measurement.py` (`SURFACE_DIAMETER_FIT_POLICY`) |
 | 표면 거리 | source triangle + 10억 분율 barycentric anchor의 3D Euclidean chord (측지 거리 아님) | - | engineering contract | native | `src/core/artifact_surface_measurement.py` |
 | 표면적·체적 | 1 µm 격자 양자화 표면적 + topology-gated exact-rational 체적 (convex hull fallback 없음) | - | engineering contract | native | `src/core/artifact_geometry_metrics.py` |
+| 도면 선 종류 표현 | 닫힌 선 종류 어휘 + 종이 mm preset(해시 봉인) + role→선 종류 매핑 + 레이어드 SVG·단면 해칭 | - | engineering contract | native | `src/core/drawing_style.py`, `src/core/artifact_vector_export.py` |
 | 1:1 vector export | exact-mm SVG + canonical provenance + 재렌더 바이트 비교 | - | engineering contract | native | `src/core/artifact_vector_export.py` |
 | 1:1 탁본 export | 결정적 GA8 PNG + `pHYs` 물리 크기 + sidecar 결합 | - | engineering contract | native | `src/core/artifact_rubbing_export.py`, `src/core/canonical_png.py` |
 | 검증형 기와 전개 export | content-addressed canonical binary + flat OBJ + physical-mm SVG + public provenance | - | engineering contract | native | `src/core/artifact_tile_unwrap_export.py` |

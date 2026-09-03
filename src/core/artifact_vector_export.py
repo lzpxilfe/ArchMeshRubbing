@@ -34,6 +34,13 @@ from .alignment_utils import (
     scene_trs_matrix_about_pivot,
 )
 from .artifact_outline_extractor import REVIEWED_OUTLINE_BACKENDS
+from .drawing_style import (
+    LINE_KINDS,
+    DrawingStyleError,
+    get_preset as get_drawing_style_preset,
+    layer_id,
+    line_kind_for_record_role,
+)
 from .canonical_json import CanonicalJSONError, canonical_json_sha256
 from .artifact_document import (
     ARTIFACT_DOCUMENT_SCHEMA_VERSION,
@@ -51,6 +58,7 @@ from .artifact_document import (
 from .artifact_vector_record import (
     ArtifactVectorRecordError,
     VectorGeometryPayload,
+    VectorPath,
     VectorRecordKind,
     validate_vector_payload_recipe_contract,
     validate_vector_recipe,
@@ -338,6 +346,13 @@ class VectorSVGOptions:
     stroke_width_mm: float = 0.2
     stroke_color: str = "#111111"
     title: str = "ArchMeshRubbing measured vector"
+    style_preset: str | None = None
+    """Drawing style preset id, or `None` for the single-weight drawing.
+
+    `None` is the default deliberately.  A drawing exported before presets
+    existed must keep rendering to the same bytes, or every package already
+    written would stop verifying against its own sidecar.
+    """
 
     def __post_init__(self) -> None:
         margin = _finite_number(
@@ -366,6 +381,23 @@ class VectorSVGOptions:
         object.__setattr__(self, "stroke_width_mm", stroke_width)
         object.__setattr__(self, "stroke_color", color.lower())
         object.__setattr__(self, "title", title)
+        if self.style_preset is not None:
+            preset_id = _required_string(self.style_preset, field_name="style_preset")
+            try:
+                preset = get_drawing_style_preset(preset_id)
+            except DrawingStyleError as exc:
+                raise ArtifactVectorExportError(str(exc)) from exc
+            # A layer's own weight replaces the single stroke width, so the
+            # clipping margin has to clear the widest line the preset draws.
+            widest = max(
+                style.stroke_width_mm for style in preset.lines.values()
+            )
+            if margin < widest / 2.0:
+                raise ArtifactVectorExportError(
+                    f"margin_mm must be at least half of the widest stroke in "
+                    f"preset {preset_id!r} ({widest} mm) to prevent clipping"
+                )
+            object.__setattr__(self, "style_preset", preset_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -795,6 +827,136 @@ def _svg_metadata(
     }
 
 
+def _path_element(
+    path: VectorPath,
+    *,
+    bounds: tuple[float, float, float, float],
+    options: VectorSVGOptions,
+    fill: str | None = None,
+) -> str:
+    """Return one `<path>` element, in millimetres of the drawing's own frame."""
+
+    minimum_x, _minimum_y, _maximum_x, maximum_y = bounds
+    commands: list[str] = []
+    for index, point in enumerate(path.points_mm):
+        x = float(point[0]) - minimum_x + options.margin_mm
+        y = maximum_y - float(point[1]) + options.margin_mm
+        command = "M" if index == 0 else "L"
+        commands.append(
+            f"{command} {_number_token(x, field_name='path.x')} "
+            f"{_number_token(y, field_name='path.y')}"
+        )
+    if path.closed:
+        commands.append("Z")
+    fill_attribute = "" if fill is None else f' fill="{fill}"'
+    return (
+        f'<path id="{_xml_attribute(path.id)}" '
+        f'data-role="{_xml_attribute(path.role)}"{fill_attribute} '
+        f'd="{" ".join(commands)}"/>'
+    )
+
+
+def _hatch_pattern_id(kind: str) -> str:
+    return f"hatch-{kind.replace('_', '-')}"
+
+
+def _styled_layers(
+    payload: VectorGeometryPayload,
+    *,
+    bounds: tuple[float, float, float, float],
+    options: VectorSVGOptions,
+) -> list[str]:
+    """Return the drawing body as one group per line kind.
+
+    Layers appear in the vocabulary's own order and carry the preset's paper
+    millimetre weight, so a drawing opens in Illustrator or Inkscape as
+    separable line kinds rather than one undifferentiated stroke.  A kind with
+    no paths is omitted: an empty layer is noise in the layer panel.
+    """
+
+    assert options.style_preset is not None
+    preset = get_drawing_style_preset(options.style_preset)
+
+    by_kind: dict[str, list[VectorPath]] = {}
+    for path in payload.paths:
+        try:
+            kind = line_kind_for_record_role(path.role)
+        except DrawingStyleError as exc:
+            raise ArtifactVectorExportError(str(exc)) from exc
+        by_kind.setdefault(kind, []).append(path)
+
+    hatched_kinds = [
+        kind
+        for kind in LINE_KINDS
+        if kind in by_kind
+        and preset.style(kind).hatch
+        and any(path.closed for path in by_kind[kind])
+    ]
+
+    lines: list[str] = []
+    if hatched_kinds:
+        hatch = preset.hatch
+        spacing = _number_token(hatch.spacing_mm, field_name="hatch.spacing_mm")
+        half = _number_token(
+            hatch.spacing_mm / 2.0, field_name="hatch.spacing_mm"
+        )
+        hatch_stroke = _number_token(
+            hatch.stroke_width_mm, field_name="hatch.stroke_width_mm"
+        )
+        angle = _number_token(hatch.angle_deg, field_name="hatch.angle_deg")
+        lines.append("  <defs>")
+        for kind in hatched_kinds:
+            # The line sits half a tile in, so the whole stroke stays inside the
+            # tile; drawn on the edge it would be clipped to half its weight.
+            lines.extend(
+                (
+                    f'    <pattern id="{_hatch_pattern_id(kind)}" '
+                    'patternUnits="userSpaceOnUse" '
+                    f'width="{spacing}" height="{spacing}" '
+                    f'patternTransform="rotate({angle})">',
+                    f'      <path d="M {half} 0 L {half} {spacing}" '
+                    f'stroke="{options.stroke_color}" '
+                    f'stroke-width="{hatch_stroke}" fill="none"/>',
+                    "    </pattern>",
+                )
+            )
+        lines.append("  </defs>")
+
+    lines.append(
+        '  <g id="measured-vectors" fill="none" '
+        f'stroke="{options.stroke_color}" '
+        'stroke-linecap="round" stroke-linejoin="round">'
+    )
+    for kind in LINE_KINDS:
+        paths = by_kind.get(kind)
+        if not paths:
+            continue
+        style = preset.style(kind)
+        attributes = (
+            f'stroke-width="{_number_token(style.stroke_width_mm, field_name="stroke_width_mm")}"'
+        )
+        if style.dash_pattern_mm:
+            dashes = ",".join(
+                _number_token(length, field_name="dash_pattern_mm")
+                for length in style.dash_pattern_mm
+            )
+            attributes += f' stroke-dasharray="{dashes}"'
+        lines.append(f'    <g id="{layer_id(kind)}" {attributes}>')
+        hatch_fill = (
+            f"url(#{_hatch_pattern_id(kind)})" if kind in hatched_kinds else None
+        )
+        for path in paths:
+            # An open path has no interior, so filling it would shade the area
+            # under its implicit closing chord.
+            fill = hatch_fill if (hatch_fill and path.closed) else None
+            lines.append(
+                f"      {_path_element(path, bounds=bounds, options=options, fill=fill)}"
+            )
+        lines.append("    </g>")
+    lines.append("  </g>")
+    return lines
+
+
 def _render_svg(
     payload: VectorGeometryPayload,
     *,
@@ -818,7 +980,6 @@ def _render_svg(
         height_mm=height_mm,
     )
     metadata_text = _canonical_json_bytes(metadata).decode("utf-8").rstrip("\n")
-    minimum_x, _minimum_y, _maximum_x, maximum_y = bounds
     lines = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         (
@@ -831,29 +992,21 @@ def _render_svg(
             '  <metadata id="archmeshrubbing-provenance">'
             f"{xml_escape(metadata_text)}</metadata>"
         ),
-        (
+    ]
+    if options.style_preset is None:
+        lines.append(
             '  <g id="measured-vectors" fill="none" '
             f'stroke="{options.stroke_color}" stroke-width="{stroke_token}" '
             'stroke-linecap="round" stroke-linejoin="round">'
-        ),
-    ]
-    for path in payload.paths:
-        commands: list[str] = []
-        for index, point in enumerate(path.points_mm):
-            x = float(point[0]) - minimum_x + options.margin_mm
-            y = maximum_y - float(point[1]) + options.margin_mm
-            command = "M" if index == 0 else "L"
-            commands.append(
-                f"{command} {_number_token(x, field_name='path.x')} "
-                f"{_number_token(y, field_name='path.y')}"
-            )
-        if path.closed:
-            commands.append("Z")
-        lines.append(
-            f'    <path id="{_xml_attribute(path.id)}" '
-            f'data-role="{_xml_attribute(path.role)}" d="{' '.join(commands)}"/>'
         )
-    lines.extend(("  </g>", "</svg>"))
+        for path in payload.paths:
+            lines.append(
+                f"    {_path_element(path, bounds=bounds, options=options)}"
+            )
+        lines.append("  </g>")
+    else:
+        lines.extend(_styled_layers(payload, bounds=bounds, options=options))
+    lines.append("</svg>")
     svg_bytes = ("\n".join(lines) + "\n").encode("utf-8")
     if len(svg_bytes) > MAX_VECTOR_EXPORT_SVG_BYTES:
         raise ArtifactVectorExportError("SVG exceeds the export safety limit")
@@ -867,7 +1020,7 @@ def _presentation(
     height_mm: float,
     options: VectorSVGOptions,
 ) -> dict[str, Any]:
-    return {
+    presentation = {
         "content_bounds_mm": list(bounds),
         "height_mm": height_mm,
         "margin_mm": options.margin_mm,
@@ -884,6 +1037,17 @@ def _presentation(
         ],
         "width_mm": width_mm,
     }
+    if options.style_preset is not None:
+        # Recorded only for a styled drawing, so an unstyled sidecar keeps the
+        # exact key set and exact bytes it had before presets existed.
+        preset = get_drawing_style_preset(options.style_preset)
+        presentation["style_preset"] = {
+            "preset_id": preset.preset_id,
+            "provisional": preset.provisional,
+            "sha256": preset.sha256(),
+            "source_id": preset.source_id,
+        }
+    return presentation
 
 
 def _sidecar_claims_sha256(sidecar: Mapping[str, Any]) -> str:
@@ -1013,25 +1177,68 @@ def _validated_sidecar_payload(
     return payload
 
 
+def _validated_style_preset(value: object) -> str:
+    """Return the preset id a styled sidecar names, proving it still resolves.
+
+    The sidecar records the preset's canonical digest, so a preset whose values
+    were edited after the drawing was made is caught here rather than silently
+    re-rendering the drawing with different line weights.
+    """
+
+    claim = _exact_keys(
+        value,
+        {"preset_id", "provisional", "sha256", "source_id"},
+        model_name="presentation.style_preset",
+    )
+    preset_id = _required_string(
+        claim["preset_id"], field_name="presentation.style_preset.preset_id"
+    )
+    try:
+        preset = get_drawing_style_preset(preset_id)
+    except DrawingStyleError as exc:
+        raise ArtifactVectorExportError(str(exc)) from exc
+    if claim["sha256"] != preset.sha256():
+        raise ArtifactVectorExportError(
+            f"drawing style preset {preset_id!r} no longer matches the digest "
+            "recorded with this drawing"
+        )
+    if claim["provisional"] is not preset.provisional:
+        raise ArtifactVectorExportError(
+            f"drawing style preset {preset_id!r} disagrees about being provisional"
+        )
+    if claim["source_id"] != preset.source_id:
+        raise ArtifactVectorExportError(
+            f"drawing style preset {preset_id!r} disagrees about its source"
+        )
+    return preset_id
+
+
 def _options_from_presentation(value: object) -> tuple[VectorSVGOptions, Mapping[str, Any]]:
+    base_keys = {
+        "content_bounds_mm",
+        "height_mm",
+        "margin_mm",
+        "physical_scale",
+        "stroke_color",
+        "stroke_width_mm",
+        "title",
+        "unit",
+        "view_box",
+        "width_mm",
+    }
+    # Two closed contracts, not one contract with an optional field: a drawing
+    # is either styled or it is not, and the presence of the key says which.
+    styled = isinstance(value, Mapping) and "style_preset" in value
     presentation = _exact_keys(
         value,
-        {
-            "content_bounds_mm",
-            "height_mm",
-            "margin_mm",
-            "physical_scale",
-            "stroke_color",
-            "stroke_width_mm",
-            "title",
-            "unit",
-            "view_box",
-            "width_mm",
-        },
+        (base_keys | {"style_preset"}) if styled else base_keys,
         model_name="presentation",
     )
     if presentation["physical_scale"] != "1:1" or presentation["unit"] != "mm":
         raise ArtifactVectorExportError("presentation must declare 1:1 millimetres")
+    style_preset = (
+        _validated_style_preset(presentation["style_preset"]) if styled else None
+    )
     options = VectorSVGOptions(
         margin_mm=_finite_number(
             presentation["margin_mm"], field_name="presentation.margin_mm", minimum=0.0
@@ -1045,6 +1252,7 @@ def _options_from_presentation(value: object) -> tuple[VectorSVGOptions, Mapping
             presentation["stroke_color"], field_name="presentation.stroke_color"
         ),
         title=_required_string(presentation["title"], field_name="presentation.title"),
+        style_preset=style_preset,
     )
     return options, presentation
 

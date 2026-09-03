@@ -351,7 +351,98 @@
       "$ref": "urn:archmeshrubbing:schema:vector-export:1.0.0#/$defs/artifact"
     },
     "presentation": {
-      "$ref": "urn:archmeshrubbing:schema:vector-export:1.0.0#/$defs/presentation"
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "content_bounds_mm",
+        "height_mm",
+        "margin_mm",
+        "physical_scale",
+        "stroke_color",
+        "stroke_width_mm",
+        "title",
+        "unit",
+        "view_box",
+        "width_mm"
+      ],
+      "properties": {
+        "content_bounds_mm": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": {
+            "type": "number"
+          }
+        },
+        "height_mm": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "margin_mm": {
+          "type": "number",
+          "minimum": 0
+        },
+        "physical_scale": {
+          "const": "1:1"
+        },
+        "stroke_color": {
+          "type": "string",
+          "pattern": "^#[0-9a-f]{6}$"
+        },
+        "stroke_width_mm": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "title": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "unit": {
+          "const": "mm"
+        },
+        "view_box": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": {
+            "type": "string"
+          }
+        },
+        "width_mm": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "style_preset": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "preset_id",
+            "provisional",
+            "sha256",
+            "source_id"
+          ],
+          "properties": {
+            "preset_id": {
+              "$ref": "#/$defs/nonEmptyString"
+            },
+            "provisional": {
+              "type": "boolean"
+            },
+            "sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "source_id": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/$defs/nonEmptyString"
+                }
+              ]
+            }
+          }
+        }
+      }
     },
     "nonEmptyString": {
       "$ref": "urn:archmeshrubbing:schema:vector-export:1.0.0#/$defs/nonEmptyString"

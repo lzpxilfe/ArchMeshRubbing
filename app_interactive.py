@@ -362,6 +362,10 @@ from src.core.artifact_vector_export import (  # noqa: E402
     VECTOR_EXPORT_DIRECTORY_SUFFIX,
     VectorSVGOptions,
 )
+from src.core.drawing_style import (  # noqa: E402
+    available_presets as drawing_style_presets,
+    get_preset as drawing_style_preset,
+)
 from src.core.artifact_vector_record import (  # noqa: E402
     PlanarFrame,
     VectorRecordKind,
@@ -4147,6 +4151,25 @@ class SectionPanel(QWidget):
         stroke_row.addWidget(self.spin_native_vector_margin_mm)
         stroke_row.addStretch()
         native_layout.addLayout(stroke_row)
+
+        # Preset selection defaults to the single-weight drawing, so an export
+        # made before presets existed keeps producing the same bytes.
+        style_row = QHBoxLayout()
+        style_row.setContentsMargins(0, 0, 0, 0)
+        style_row.addWidget(QLabel("선 종류"))
+        self.combo_native_vector_style = QComboBox()
+        self.combo_native_vector_style.addItem("단일 굵기 (기본)", None)
+        for preset_id in drawing_style_presets():
+            preset = drawing_style_preset(preset_id)
+            label = f"{preset_id} (잠정)" if preset.provisional else preset_id
+            self.combo_native_vector_style.addItem(label, preset_id)
+        self.combo_native_vector_style.setToolTip(
+            "선 종류별 굵기와 단면 해칭을 적용하고 SVG를 레이어로 나눕니다.\n"
+            "'잠정'은 공개 지침에서 옮긴 값이 아직 아니라는 뜻이며, 도면에도 그렇게 기록됩니다.\n"
+            "측정 좌표는 어느 쪽을 골라도 같습니다."
+        )
+        style_row.addWidget(self.combo_native_vector_style, 1)
+        native_layout.addLayout(style_row)
 
         self.btn_native_vector_export = QPushButton("선택한 검증 벡터 1:1 SVG 내보내기")
         set_pixel_icon(self.btn_native_vector_export, "export")
@@ -20497,10 +20520,13 @@ class MainWindow(QMainWindow):
         margin_spin = getattr(panel, "spin_native_vector_margin_mm", None)
         if stroke_spin is None or margin_spin is None:
             return None
+        style_combo = getattr(panel, "combo_native_vector_style", None)
+        style_preset = None if style_combo is None else style_combo.currentData()
         try:
             return VectorSVGOptions(
                 margin_mm=float(margin_spin.value()),
                 stroke_width_mm=float(stroke_spin.value()),
+                style_preset=style_preset,
             )
         except Exception:
             _LOGGER.info("vector SVG options rejected; using defaults", exc_info=True)
