@@ -75,6 +75,7 @@ datas = [
     (str(PUBLIC_RELEASE_POLICY), "requirements"),
     (str(ROOT / "third_party_licenses"), "third_party_licenses"),
     (str(ROOT / "LICENSE"), "."),
+    (str(ROOT / "NOTICE"), "."),
     (str(ROOT / "README.md"), "."),
 ]
 

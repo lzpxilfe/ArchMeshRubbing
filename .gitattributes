@@ -1,6 +1,8 @@
 /LICENSE text eol=lf
+/NOTICE text eol=lf
 /schemas/*.json text eol=lf
 /tests/fixtures/projects/*.json text eol=lf
+/tests/fixtures/*.obj text eol=lf
 /requirements/*.lock text eol=lf
 /requirements/runtime-license-policy.json text eol=lf
 /requirements/public-release-policy.json text eol=lf

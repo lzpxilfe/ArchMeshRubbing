@@ -96,8 +96,8 @@ jobs:
       - name: Validate installed dependency closure
         run: python -m pip check
 
-      - name: Enforce fail-closed public release policy
-        run: python tools/check_public_release_policy.py assert-blocked
+      - name: Enforce derived public release policy
+        run: python tools/check_public_release_policy.py assert-allowed
 
       - name: Build frozen app, corresponding source, and release evidence
         run: >-

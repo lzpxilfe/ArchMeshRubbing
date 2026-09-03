@@ -6,7 +6,9 @@ import pytest
 from src.gui.render_coordinates import (
     RenderFrameSnapshot,
     absolute_modelview_from_render,
+    compute_clip_range,
     encode_relative_float32,
+    perspective_depth_resolution_mm,
     project_world_to_window,
     rebase_affine_for_render,
     rebase_world_plane_for_render,
@@ -481,4 +483,131 @@ def test_relative_encoding_rejects_float32_overflow() -> None:
         encode_relative_float32(
             [[maximum, 0.0, 0.0]],
             [-maximum, 0.0, 0.0],
+        )
+
+
+# --- perspective depth resolution -------------------------------------------------
+#
+# Depth picking unprojects a 24-bit depth sample back into world millimetres, so
+# the clip range decides whether a surface anchor can be resolved at all.  These
+# cases pin the real artifact framings the application produces.
+
+
+_VIEWPORT_PIXELS = 900
+_FOV_Y_DEG = 45.0
+
+
+def _pixel_footprint_mm(depth_mm: float) -> float:
+    """World millimetres one pixel spans at ``depth_mm``, for a 900 px view."""
+
+    span = 2.0 * depth_mm * np.tan(np.radians(_FOV_Y_DEG) * 0.5)
+    return float(span / _VIEWPORT_PIXELS)
+
+
+def _pick_tolerance_mm(depth_mm: float, coordinate_grid_um: float = 1.0) -> float:
+    """Mirror ``artifact_surface_measurement._pick_depth_tolerance_um``.
+
+    The measurement worker accepts a framebuffer depth sample only when it
+    agrees with the CPU ray/triangle hit to within
+    ``max(50 um, 2 * pixel_footprint + 4 * grid)``.  A clip range that cannot
+    resolve depth to inside that window makes every native surface anchor fail.
+    """
+
+    footprint_um = _pixel_footprint_mm(depth_mm) * 1000.0
+    return max(50.0, 2.0 * footprint_um + 4.0 * coordinate_grid_um) / 1000.0
+
+
+@pytest.mark.parametrize(
+    ("label", "largest_dimension_mm"),
+    [
+        ("100 mm potsherd", 100.0),
+        ("200 mm roof tile", 200.0),
+        ("450 mm storage jar", 450.0),
+    ],
+)
+def test_fit_to_object_framing_resolves_depth_inside_the_pick_tolerance(
+    label: str,
+    largest_dimension_mm: float,
+) -> None:
+    # ``fit`` places the camera at twice the largest dimension while the
+    # bounding-sphere radius is the half-diagonal, so ``distance <= 4 * radius``
+    # for every real artifact.  That is exactly the regime where the previous
+    # clip policy collapsed the near plane to 1e-5 mm.
+    radius = largest_dimension_mm * (3.0**0.5) / 2.0
+    distance = largest_dimension_mm * 2.0
+    assert distance <= radius * 4.0, label
+
+    near, far = compute_clip_range(
+        view_distance_mm=distance,
+        scene_radius_mm=radius,
+        camera_distance_mm=distance,
+        horizon_factor=10.0,
+    )
+    assert 0.0 < near < far
+
+    # Across the whole depth span the artifact occupies, one depth tick must
+    # stay well inside the tolerance the surface-anchor gate applies.
+    for depth in (distance - radius, distance, distance + radius):
+        resolution = perspective_depth_resolution_mm(
+            clip_near_mm=near, clip_far_mm=far, depth_mm=depth
+        )
+        tolerance = _pick_tolerance_mm(depth)
+        assert resolution < tolerance / 4.0, (label, depth, resolution, tolerance)
+
+        # The collapsed near plane the previous code produced in this framing
+        # blows straight through the same gate, which is the regression.
+        collapsed = perspective_depth_resolution_mm(
+            clip_near_mm=1e-5, clip_far_mm=far, depth_mm=depth
+        )
+        assert collapsed > tolerance * 100.0, (label, depth, collapsed, tolerance)
+
+
+def test_clip_near_never_collapses_across_framing_ratios() -> None:
+    radius = 86.6
+    for ratio in (1.0, 1.5, 2.0, 3.0, 4.0, 12.7, 50.0):
+        distance = radius * ratio
+        near, far = compute_clip_range(
+            view_distance_mm=distance,
+            scene_radius_mm=radius,
+            camera_distance_mm=distance,
+            horizon_factor=10.0,
+        )
+        # A thousandth of the camera distance, never the 1e-5 mm collapse.
+        assert near == pytest.approx(max(1e-4, distance * 1e-3))
+        assert far > distance + radius
+        resolution = perspective_depth_resolution_mm(
+            clip_near_mm=near, clip_far_mm=far, depth_mm=distance
+        )
+        # Depth resolution and pixel footprint both scale with camera
+        # distance, so the ratio between them stays bounded at every zoom.
+        assert resolution < _pick_tolerance_mm(distance) / 4.0, (ratio, resolution)
+
+
+def test_perspective_depth_resolution_matches_closed_form() -> None:
+    near, far, depth = 0.2, 2200.0, 200.0
+    steps = float((1 << 24) - 1)
+    expected = (depth * depth * (far - near)) / (near * far * steps)
+    assert perspective_depth_resolution_mm(
+        clip_near_mm=near, clip_far_mm=far, depth_mm=depth
+    ) == pytest.approx(expected)
+
+    # A collapsed near plane is what the regression guards against: the same
+    # framing with the old 1e-5 mm near plane cannot resolve a millimetre.
+    collapsed = perspective_depth_resolution_mm(
+        clip_near_mm=1e-5, clip_far_mm=far, depth_mm=depth
+    )
+    assert collapsed > 100.0
+
+
+def test_clip_range_rejects_non_finite_inputs() -> None:
+    with pytest.raises(ValueError, match="finite"):
+        compute_clip_range(
+            view_distance_mm=float("nan"),
+            scene_radius_mm=1.0,
+            camera_distance_mm=1.0,
+            horizon_factor=10.0,
+        )
+    with pytest.raises(ValueError, match="0 < near < far"):
+        perspective_depth_resolution_mm(
+            clip_near_mm=0.0, clip_far_mm=10.0, depth_mm=1.0
         )

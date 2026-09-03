@@ -32,7 +32,7 @@ Open → 단위·축 확인 → Align 확정 → Cutline → Outline → Digital
 
 Windows ARM64, x64-on-ARM64 에뮬레이션, 32-bit Windows, Windows Server, macOS, Linux, WSL, Wine/Proton은 지원하지 않습니다. installer, MSIX, Microsoft Store 패키지도 현재 목표가 아닙니다.
 
-공개 바이너리는 저장소의 `GPL-2.0-only`와 PyQt6의 `GPL-3.0-only` 결합에 대한 권리자 허가가 기록되지 않아 정책상 차단돼 있습니다. 로컬 unsigned 실행 파일은 직접 만들 수 있지만 재배포용이 아닙니다. 자세한 내용은 [native packaging 정책](docs/NATIVE_PACKAGING.md)을 참고하세요.
+저장소 source는 `Apache-2.0`이고, PyQt6를 포함한 바이너리는 결합물로서 `GPL-3.0` 조건으로 전달됩니다. 라이선스상 공개 배포를 막는 요인은 없으며, 남은 것은 서명과 대표 하드웨어 파일럿입니다. 자세한 내용은 [native packaging 정책](docs/NATIVE_PACKAGING.md)을 참고하세요.
 
 ## 지금 할 수 있는 일
 
@@ -406,7 +406,9 @@ Get-Content "$env:LOCALAPPDATA\ArchMeshRubbing\logs\archmeshrubbing.log" -Tail 2
 
 ## License와 Citation
 
-Source license: GNU General Public License v2.0 only (`GPL-2.0-only`). 현재 문구에는 `or later`가 없습니다. 공개 binary policy 상태는 다음 명령으로 확인할 수 있습니다.
+Source license: Apache License 2.0 (`Apache-2.0`). 코어의 포맷·전개·탁본·검증 코드는 Qt에 의존하지 않으므로 다른 도구나 기관 시스템에서 자유롭게 재사용할 수 있고, 특허 허여가 함께 제공됩니다.
+
+PyQt6를 포함해 만든 **바이너리**(frozen 실행 파일, portable ZIP)는 PyQt6의 `GPL-3.0-only` 때문에 결합물로서 GPL-3.0 조건으로 전달됩니다. Apache-2.0은 GPLv3과 호환되므로 이 결합은 허용되며, source만 받는 쪽에는 Apache-2.0 조건만 적용됩니다. 결합물 라이선스 원문은 [`third_party_licenses/GPL-3.0.txt`](third_party_licenses/GPL-3.0.txt), 고지 사항은 [`NOTICE`](NOTICE)에 있습니다. 공개 binary policy 상태는 다음 명령으로 확인할 수 있습니다.
 
 ```powershell
 .\.venv\Scripts\python.exe tools\check_public_release_policy.py status

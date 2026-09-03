@@ -451,6 +451,7 @@ def _check_resources() -> str:
     from src.public_release_policy import (
         PublicReleasePolicyError,
         load_public_release_policy,
+        verify_combined_work_license,
         verify_project_license,
         verify_runtime_license_observations,
     )
@@ -460,6 +461,19 @@ def _check_resources() -> str:
             public_policy_path
         )
         verify_project_license(public_policy, resource_path("LICENSE"))
+        if public_policy.combined_work_license is not None:
+            combined_parts = tuple(
+                Path(public_policy.combined_work_license.path).parts
+            )
+            combined_path = resource_path(*combined_parts)
+            if not combined_path.is_file():
+                raise PublicReleasePolicyError(
+                    "combined-work license file is missing or linked"
+                )
+            verify_combined_work_license(
+                public_policy,
+                combined_path.parents[len(combined_parts) - 1],
+            )
         observed_licenses: dict[str, tuple[str, str | None]] = {}
         for item in public_policy.runtime_license_observations:
             metadata = importlib.metadata.metadata(item.canonical_name)

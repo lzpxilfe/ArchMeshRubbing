@@ -38,6 +38,9 @@ from src.core.artifact_tile_unwrap_record import (
 from src.core.mesh_import_recipe import current_mesh_import_recipe
 from src.core.mesh_loader import MeshData
 from src.core.source_identity import SourceFingerprint
+from src.core.flatten_models_sectionwise import (
+    sectionwise_cylindrical_parameterization,
+)
 from src.core.tile_synthetic import (
     SyntheticTileGroundTruth,
     generate_synthetic_tile,
@@ -46,6 +49,15 @@ from src.core.tile_synthetic import (
 
 
 STAMP = "2026-07-13T00:00:00Z"
+
+
+class _PlainMesh:
+    """Minimal vertices/faces carrier for the Qt-free sectionwise unwrap."""
+
+    def __init__(self, vertices: np.ndarray, faces: np.ndarray) -> None:
+        self.vertices = vertices
+        self.faces = faces
+        self.n_vertices = int(vertices.shape[0])
 
 
 def _source_mesh(*, seed: int = 7) -> tuple[MeshData, SyntheticTileGroundTruth]:
@@ -572,9 +584,15 @@ def test_global_uv_overlap_qc_allows_shared_triangle_edges() -> None:
     ) == 0
 
 
-def test_global_uv_overlap_qc_bounds_disjoint_pairs_within_one_grid_cell(
+def test_global_uv_overlap_budget_ignores_bounding_box_rejected_pairs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Four disjoint triangles that share one broad-phase grid cell.  Every pair
+    # is rejected by the cheap bounding-box test, so none of them costs an
+    # exact overlap evaluation and none may consume the budget.  Counting these
+    # made the budget scale with grid occupancy instead of real work, which
+    # tripped at roughly 55,000 faces and put the documented 250,000-face QC
+    # limit out of reach.
     uv_um = np.asarray(
         [
             [0, 0],
@@ -595,15 +613,96 @@ def test_global_uv_overlap_qc_bounds_disjoint_pairs_within_one_grid_cell(
     faces = np.arange(12, dtype=np.int32).reshape(4, 3)
     monkeypatch.setattr(
         "src.core.artifact_tile_unwrap_extractor.MAX_TILE_UNWRAP_OVERLAP_CANDIDATES",
-        3,
+        1,
     )
 
-    with pytest.raises(ArtifactTileUnwrapError, match="examined-pair budget"):
-        _uv_overlap_pair_count(
-            uv_um,
-            faces,
-            cancellation_probe=None,
+    assert (
+        _uv_overlap_pair_count(uv_um, faces, cancellation_probe=None) == 0
+    )
+
+
+def test_requesting_more_sections_than_the_surface_supports_fails_early() -> None:
+    # Stations come from mesh quantiles, so a coarse surface collapses ties and
+    # cannot deliver the requested count.  The failure must name the achievable
+    # count instead of discarding the finished unwrap at commit time.
+    session, _truth = _aligned_session(seed=13)
+    with pytest.raises(ArtifactTileUnwrapError) as excinfo:
+        compute_artifact_tile_unwrap(
+            session,
+            longitudinal_axis="y",
+            record_view="top",
+            n_sections=96,
         )
+    message = str(excinfo.value)
+    assert "requested 96 sections" in message
+    assert "set n_sections to" in message
+
+
+def test_global_uv_overlap_qc_handles_a_realistic_roof_tile_face_count() -> None:
+    # A real scan of a roof tile lands well past the ~55,000 faces at which the
+    # candidate-counted budget used to trip, even though the documented QC
+    # limit is 250,000.  Drive the actual unwrap coordinates of a dense
+    # synthetic tile through the overlap gate.
+    spec = replace(
+        synthetic_tile_spec_from_preset("sugkiwa_quarter", seed=5),
+        axial_samples=175,
+        angular_samples=175,
+    )
+    artifact = generate_synthetic_tile(spec)
+    vertices = np.asarray(artifact.mesh.vertices, dtype=np.float64)
+    faces = np.asarray(artifact.mesh.faces, dtype=np.int32)
+    assert faces.shape[0] > 55_000
+
+    unwrapped, _meta = sectionwise_cylindrical_parameterization(
+        _PlainMesh(vertices, faces),
+        axis="y",
+        n_sections=32,
+        record_view="top",
+        return_meta=True,
+    )
+    uv_mm = np.asarray(unwrapped, dtype=np.float64)
+    uv_mm = uv_mm - np.min(uv_mm, axis=0, keepdims=True)
+    uv_um = np.rint(uv_mm * 1000.0).astype(np.int64)
+
+    assert _uv_overlap_pair_count(uv_um, faces, cancellation_probe=None) == 0
+
+
+def test_global_uv_overlap_budget_still_bounds_exact_overlap_tests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Three quads, each split into two edge-sharing triangles.  The two halves
+    # of a quad share a bounding box, so each quad costs exactly one exact
+    # overlap evaluation while never actually overlapping.  The budget must
+    # still fire on that real work.
+    vertices: list[list[int]] = []
+    faces: list[list[int]] = []
+    for quad_index in range(3):
+        base = quad_index * 4
+        left = quad_index * 100
+        vertices.extend(
+            [
+                [left, 0],
+                [left + 10, 0],
+                [left, 10],
+                [left + 10, 10],
+            ]
+        )
+        faces.append([base + 0, base + 1, base + 2])
+        faces.append([base + 1, base + 3, base + 2])
+    uv_um = np.asarray(vertices, dtype=np.int64)
+    face_array = np.asarray(faces, dtype=np.int32)
+
+    # Without a budget the surface is clean: shared edges are not overlap.
+    assert (
+        _uv_overlap_pair_count(uv_um, face_array, cancellation_probe=None) == 0
+    )
+
+    monkeypatch.setattr(
+        "src.core.artifact_tile_unwrap_extractor.MAX_TILE_UNWRAP_OVERLAP_CANDIDATES",
+        2,
+    )
+    with pytest.raises(ArtifactTileUnwrapError, match="examined-pair budget"):
+        _uv_overlap_pair_count(uv_um, face_array, cancellation_probe=None)
 
 
 def test_align_change_makes_computation_stale_without_deleting_it() -> None:

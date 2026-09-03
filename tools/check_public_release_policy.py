@@ -19,6 +19,7 @@ from src.public_release_policy import (  # noqa: E402
     PublicReleasePolicyError,
     load_public_release_policy,
     require_public_binary_distribution,
+    verify_combined_work_license,
     verify_project_license,
     verify_runtime_license_observations,
 )
@@ -62,7 +63,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument(
         "command",
-        choices=("status", "assert-blocked", "require-public"),
+        choices=("status", "assert-blocked", "assert-allowed", "require-public"),
     )
     parser.add_argument(
         "--policy",
@@ -70,10 +71,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=ROOT.joinpath(*PUBLIC_RELEASE_POLICY_PARTS),
     )
     parser.add_argument("--license", type=Path, default=ROOT / "LICENSE")
+    parser.add_argument("--repository-root", type=Path, default=ROOT)
     args = parser.parse_args(argv)
     try:
         policy, _raw = load_public_release_policy(args.policy)
         verify_project_license(policy, args.license)
+        verify_combined_work_license(policy, args.repository_root)
         observations = _installed_observations(
             [item.canonical_name for item in policy.runtime_license_observations]
         )
@@ -83,6 +86,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "assert-blocked" and policy.decision != "blocked":
             raise PublicReleasePolicyError(
                 "public binary release policy unexpectedly permits distribution"
+            )
+        elif args.command == "assert-allowed" and not policy.allows_public_binary:
+            raise PublicReleasePolicyError(
+                "public binary release policy does not permit distribution: "
+                + policy.reason_code
             )
     except PublicReleasePolicyError as exc:
         print(f"Public release policy failed: {exc}", file=sys.stderr)

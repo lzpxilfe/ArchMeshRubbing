@@ -141,6 +141,7 @@ from ..core.alignment_utils import (
 from .render_coordinates import (
     RenderFrameSnapshot,
     absolute_modelview_from_render,
+    compute_clip_range,
     encode_relative_float32,
     project_world_to_window,
     rebase_affine_for_render,
@@ -2878,8 +2879,6 @@ class Viewport3D(QOpenGLWidget):
             if (not np.isfinite(dist)) or dist <= 1e-9:
                 dist = float(max(1e-3, getattr(self.camera, "distance", 50.0)))
 
-            clip_near = float(max(1e-5, dist - (r * 4.0)))
-            clip_far = float(max(clip_near + 1.0, dist + (r * 6.0)))
             # Keep far clip sufficiently large so floor/grid/axes do not get visibly cut at low elevation.
             cam_dist = float(max(1e-3, float(getattr(self.camera, "distance", dist) or dist)))
             elev_abs = abs(float(getattr(self.camera, "elevation", 30.0) or 30.0))
@@ -2891,14 +2890,14 @@ class Viewport3D(QOpenGLWidget):
                 horizon_factor = 18.0
             else:
                 horizon_factor = 10.0
-            clip_far = max(clip_far, dist + cam_dist * horizon_factor)
-            clip_near = min(clip_near, max(1e-4, cam_dist * 1e-3))
-            if (not np.isfinite(clip_near)) or clip_near <= 0.0:
-                clip_near = 0.001
-            if (not np.isfinite(clip_far)) or clip_far <= clip_near:
-                clip_far = max(clip_near + 1.0, 1000.0)
-            clip_near = float(min(clip_near, 1e7))
-            clip_far = float(min(max(clip_far, clip_near + 1.0), 1e9))
+            # The clip policy lives in a Qt/OpenGL-free helper so the depth
+            # resolution it implies is unit-testable without a GL context.
+            clip_near, clip_far = compute_clip_range(
+                view_distance_mm=dist,
+                scene_radius_mm=r,
+                camera_distance_mm=cam_dist,
+                horizon_factor=horizon_factor,
+            )
         except Exception:
             clip_near = 0.1
             clip_far = 1000000.0

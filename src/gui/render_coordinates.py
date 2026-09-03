@@ -403,10 +403,102 @@ def absolute_modelview_from_render(
     return absolute
 
 
+DEPTH_BUFFER_BITS = 24
+_MINIMUM_CLIP_NEAR_MM = 1e-4
+_CLIP_NEAR_DISTANCE_FRACTION = 1e-3
+
+
+def perspective_depth_resolution_mm(
+    *,
+    clip_near_mm: float,
+    clip_far_mm: float,
+    depth_mm: float,
+    depth_bits: int = DEPTH_BUFFER_BITS,
+) -> float:
+    """Return the world-millimetre step one depth-buffer tick spans.
+
+    For a standard perspective projection the eye-space separation between two
+    adjacent depth-buffer values at distance ``z`` is approximately
+    ``z^2 * (f - n) / (n * f * (2**bits - 1))``.  A near plane that collapses
+    toward zero makes this grow without bound, which is what silently destroys
+    depth-based picking even though the rendered image still looks correct.
+    """
+
+    near = float(clip_near_mm)
+    far = float(clip_far_mm)
+    depth = float(depth_mm)
+    if not np.isfinite([near, far, depth]).all():
+        raise ValueError("clip range and depth must be finite")
+    if near <= 0.0 or far <= near:
+        raise ValueError("clip range must satisfy 0 < near < far")
+    if depth <= 0.0:
+        raise ValueError("depth must be positive")
+    if depth_bits < 1:
+        raise ValueError("depth_bits must be positive")
+    steps = float((1 << int(depth_bits)) - 1)
+    return (depth * depth * (far - near)) / (near * far * steps)
+
+
+def compute_clip_range(
+    *,
+    view_distance_mm: float,
+    scene_radius_mm: float,
+    camera_distance_mm: float,
+    horizon_factor: float,
+) -> tuple[float, float]:
+    """Derive a perspective clip range that keeps depth picking usable.
+
+    ``view_distance_mm`` is the camera-to-scene-centre distance and
+    ``scene_radius_mm`` the bounding-sphere radius, so scene geometry occupies
+    ``[d - r, d + r]``.
+
+    The near plane sits at a thousandth of the camera distance.  The previous
+    implementation computed ``max(1e-5, d - 4r)`` and then clamped that *down*
+    to the same bound, which meant any framing with ``d <= 4r`` -- including
+    the application's own fit-to-object default, where ``d`` is twice the
+    largest dimension and ``r`` is the bounding-sphere radius -- collapsed the
+    near plane to ``1e-5`` mm.  A 24-bit depth buffer then resolves hundreds
+    of millimetres per tick, so depth picking either fails its residual gate
+    or returns a point tens of millimetres off along the view ray.
+
+    Using the bound directly never places the near plane further from the
+    camera than that same clamp already did in the common case, so it does not
+    introduce clipping the previous behaviour avoided.
+    """
+
+    distance = float(view_distance_mm)
+    radius = float(scene_radius_mm)
+    camera_distance = float(camera_distance_mm)
+    factor = float(horizon_factor)
+    if not np.isfinite([distance, radius, camera_distance, factor]).all():
+        raise ValueError("clip range inputs must be finite")
+    radius = max(1e-6, radius)
+    distance = max(1e-9, distance)
+    camera_distance = max(1e-3, camera_distance)
+
+    near = max(
+        _MINIMUM_CLIP_NEAR_MM,
+        camera_distance * _CLIP_NEAR_DISTANCE_FRACTION,
+    )
+    far = max(near + 1.0, distance + radius * 6.0)
+    far = max(far, distance + camera_distance * factor)
+
+    if not np.isfinite(near) or near <= 0.0:
+        near = 0.001
+    if not np.isfinite(far) or far <= near:
+        far = max(near + 1.0, 1000.0)
+    near = float(min(near, 1e7))
+    far = float(min(max(far, near + 1.0), 1e9))
+    return near, far
+
+
 __all__ = [
+    "DEPTH_BUFFER_BITS",
     "RenderFrameSnapshot",
     "absolute_modelview_from_render",
+    "compute_clip_range",
     "encode_relative_float32",
+    "perspective_depth_resolution_mm",
     "project_world_to_window",
     "rebase_affine_for_render",
     "rebase_world_plane_for_render",

@@ -1074,6 +1074,13 @@ def _uv_overlap_pair_count(
             for cell_y in range(min_y, max_y + 1):
                 cells.setdefault((cell_x, cell_y), []).append(face_index)
 
+    # ``examined_pairs`` budgets the *expensive* exact overlap test.  It is a
+    # runtime guard only: it never reaches the recipe, the QC block or the
+    # receipt, so where it counts cannot move any recorded hash.  Counting
+    # candidates before the cheap bounding-box rejection made the budget scale
+    # with grid occupancy rather than with real work, which tripped at roughly
+    # 55,000 faces and put the documented 250,000-face limit out of reach.
+    candidate_pairs = 0
     examined_pairs = 0
     for cell_index, cell in enumerate(sorted(cells)):
         poll_cancellation(cancellation_probe, cell_index)
@@ -1088,12 +1095,8 @@ def _uv_overlap_pair_count(
                 )
                 if canonical_cell != cell:
                     continue
-                examined_pairs += 1
-                if examined_pairs > MAX_TILE_UNWRAP_OVERLAP_CANDIDATES:
-                    raise ArtifactTileUnwrapError(
-                        "tile unwrap overlap QC exceeds its examined-pair budget"
-                    )
-                poll_cancellation(cancellation_probe, examined_pairs)
+                candidate_pairs += 1
+                poll_cancellation(cancellation_probe, candidate_pairs)
                 if (
                     min(
                         int(maximum[left, 0]),
@@ -1113,6 +1116,11 @@ def _uv_overlap_pair_count(
                     )
                 ):
                     continue
+                examined_pairs += 1
+                if examined_pairs > MAX_TILE_UNWRAP_OVERLAP_CANDIDATES:
+                    raise ArtifactTileUnwrapError(
+                        "tile unwrap overlap QC exceeds its examined-pair budget"
+                    )
                 if _positive_area_triangle_overlap(
                     triangles[left], triangles[right]
                 ):
@@ -1245,6 +1253,19 @@ def extract_tile_unwrap(
         reason = str(meta.get("sectionwise_reason", "sectionwise_internal_fallback"))
         raise ArtifactTileUnwrapError(
             f"authoritative tile unwrap rejected algorithm fallback: {reason}"
+        )
+    # Stations are drawn from mesh quantiles, so ties collapse and the achieved
+    # count can fall short of the requested one.  The record contract requires
+    # the two to agree, so report it here -- with the count the mesh can
+    # actually support -- instead of discarding the finished computation at
+    # commit time behind a message that does not say what to change.
+    requested_sections = int(validated["n_sections"])
+    achieved_sections = int(meta.get("section_count", 0))
+    if achieved_sections != requested_sections:
+        raise ArtifactTileUnwrapError(
+            f"tile unwrap requested {requested_sections} sections but this "
+            f"recording surface supports {achieved_sections}; set n_sections to "
+            f"{achieved_sections} or select a longer surface"
         )
     uv_mm = np.asarray(uv, dtype=np.float64)
     if uv_mm.shape != (submesh.n_vertices, 2) or not np.isfinite(uv_mm).all():

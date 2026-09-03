@@ -1,0 +1,14 @@
+ArchMeshRubbing
+Copyright 2026 Jinseo Hwang
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Binary distributions of the desktop application bundle PyQt6, which is
+licensed GPL-3.0-only. Such a combined work is conveyed under the terms of
+the GNU General Public License version 3 (see third_party_licenses/GPL-3.0.txt).
+The Apache-2.0 licensed source in this repository remains available under
+Apache-2.0 on its own, independently of any GPL-licensed bundle.
+
+Third-party components included in binary distributions, their versions and
+their license texts are enumerated in the generated release evidence
+(release-evidence/THIRD_PARTY_NOTICES.md and release-evidence/sbom.spdx.json).

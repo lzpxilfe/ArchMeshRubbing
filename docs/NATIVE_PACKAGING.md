@@ -187,33 +187,35 @@ evidence는 ZIP 생성 전, frozen 실행 전, 한글 경로 추출 뒤에 모�
 
 형식 기준은 [pip secure installs](https://pip.pypa.io/en/stable/topics/secure-installs/), [Python Core Metadata](https://packaging.python.org/en/latest/specifications/core-metadata/), [SPDX 2.3 document creation](https://spdx.github.io/spdx-spec/v2.3/document-creation-information/)과 [package information](https://spdx.github.io/spdx-spec/v2.3/package-information/)이다.
 
-## 공개 배포 차단 게이트
+## 공개 배포 게이트
 
 ### 라이선스
 
-현재 저장소 파일은 `GPLv2`로 표기되고 `or later`를 명시하지 않는다. bundled `PyQt6 6.11.0` wheel 메타데이터는 `GPL-3.0-only`다. GNU는 GPLv2-only와 GPLv3의 결합이 호환되지 않는다고 설명하고 Riverbank는 무료 PyQt가 GPLv3이라고 명시한다.
+저장소 source는 `Apache-2.0`이다. bundled `PyQt6 6.11.0` wheel 메타데이터는 `GPL-3.0-only`이므로, PyQt6를 함께 담아 배포하는 **결합물(frozen 실행 파일, portable ZIP)** 은 `GPL-3.0-only` 조건으로 전달된다. Apache-2.0은 GPLv3과 호환되므로(GPLv2와는 비호환) 이 결합은 허용되며, source를 따로 받는 쪽은 Apache-2.0 조건만 지키면 된다. 즉 `src/core`의 포맷·전개·탁본·검증 코드는 Qt 없이 어디서든 재사용할 수 있고, 특허 허여와 함께 제공된다. GUI 바이너리만 GPL-3.0으로 전달된다.
 
-- [GNU GPL compatibility FAQ](https://www.gnu.org/licenses/gpl-faq.en.html#v2v3Compatibility)
+- [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0)
+- [GNU GPL version 3](https://www.gnu.org/licenses/gpl-3.0.html)
+- [GNU GPL FAQ: Apache 2.0과 GPLv3 호환성](https://www.gnu.org/licenses/gpl-faq.en.html#apache2)
 - [PyPI PyQt6 6.11.0 metadata](https://pypi.org/project/PyQt6/6.11.0/)
 - [Riverbank PyQt licensing](https://www.riverbankcomputing.com/software/pyqt/intro/)
-- [Qt open-source licensing](https://doc.qt.io/qt-6/licensing.html)
 
-`requirements/public-release-policy.json`은 이 검토 상태를 canonical JSON으로 기록한다. schema 1.0.0은 다음을 함께 강제한다.
+`requirements/public-release-policy.json`은 이 상태를 canonical JSON으로 기록한다. schema 1.1.0은 다음을 함께 강제한다.
 
-- 프로젝트 표현식 `GPL-2.0-only`와 현재 `LICENSE` exact SHA-256
+- 프로젝트 표현식 `Apache-2.0`과 현재 `LICENSE` exact SHA-256
+- 결합물 표현식 `GPL-3.0-only`와 `third_party_licenses/GPL-3.0.txt` exact SHA-256
 - `PyQt6==6.11.0`의 실제 wheel `License-Expression=GPL-3.0-only`
-- `rights_holder_authorization=not-recorded`, `decision=blocked`
+- `rights_holder_authorization`이 `not-recorded`가 아닐 것, `decision=allowed`
 - 검토 날짜와 위 공식 출처 URL
 
-parser 자체가 schema 1.0.0의 `allowed` 값을 거부하므로 정책 JSON 한 단어만 바꿔 공개 배포를 열 수 없다. 이 파일은 PyInstaller payload에 포함되고 payload manifest, SPDX comment, machine/human NOTICE, portable manifest와 provenance hash chain에 들어간다. frozen self-test와 Windows package workflow도 실제 payload bytes에서 다시 검증한다.
+`decision=allowed`는 선언만으로 통과하지 않는다. loader는 프로젝트 라이선스와 관측된 모든 runtime 라이선스에서 결합물 표현식을 **직접 계산**해(`derive_combined_work_expression`) 문서가 선언한 값과 일치할 때만 정책을 받아들이고, 표에 없는 표현식이나 `GPL-2.0-only` + GPL-3.0 같은 비호환 조합은 거부한다. 따라서 JSON 한 단어를 바꿔 배포를 열거나 닫을 수 없다. 이 파일은 PyInstaller payload에 포함되고 payload manifest, SPDX comment, machine/human NOTICE, portable manifest와 provenance hash chain에 들어간다. frozen self-test와 Windows package workflow도 실제 payload bytes에서 다시 검증한다.
 
 ```bat
 python tools/check_public_release_policy.py status
-python tools/check_public_release_policy.py assert-blocked
+python tools/check_public_release_policy.py assert-allowed
 python tools/check_public_release_policy.py require-public
 ```
 
-앞의 두 명령은 현재 정책과 설치된 runtime이 일치하면 성공한다. `require-public`은 현재 종료 코드 2로 실패하는 것이 정상이다. 모든 권리자의 동의에 따른 재허가, 적절한 상용 라이선스와 추가 허가, 또는 GUI 경계 교체 같은 전략을 결정한 뒤에만 새 schema와 코드 검토를 거쳐 열 수 있다. 이는 법률 자문이 아니라 보수적인 릴리스 게이트다.
+세 명령 모두 현재 정책과 설치된 runtime이 일치하면 성공한다. `assert-blocked`는 정책이 다시 차단 상태로 돌아갔을 때만 성공하므로 회귀 확인용으로 남겨 둔다. 이는 법률 자문이 아니라 재현 가능한 사실 기록이다.
 
 과거 CI가 사용한 Inno Setup 6.7.1의 `Non-commercial use only` compiler 경로는 제거했다. portable ZIP은 Python 표준 라이브러리만 사용하므로 installer compiler 구매·계정·서버가 빌드 전제에 남지 않는다. 과거 installer run은 역사적 내부 검증일 뿐 현재 배포 계약이 아니다.
 
