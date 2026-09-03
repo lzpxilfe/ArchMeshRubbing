@@ -364,13 +364,22 @@ def test_the_same_package_carries_a_developed_rubbing(corded: ArtifactSession) -
     )
     with tempfile.TemporaryDirectory() as directory:
         destination = Path(directory) / "strip.amr-rubbing"
-        published = export_rubbing_package(
-            destination,
-            session.document,
-            "record:developed:package",
-            computation.raster,
-        )
+        try:
+            published = export_rubbing_package(
+                destination,
+                session.document,
+                "record:developed:package",
+                computation.raster,
+            )
+        except ArtifactRubbingExportError as exc:
+            # A host that cannot fsync a directory still publishes the package
+            # atomically and says so by raising with committed set; that is the
+            # writer's contract, not a failure to write.
+            if not exc.committed:
+                raise
+            published = destination
         assert published == destination
+        assert destination.is_dir()
         bundle = validate_rubbing_export_package(destination, document=session.document)
         relocated = validate_rubbing_export_package(destination)
         sidecar = json.loads(bundle.sidecar_bytes.decode("utf-8"))
