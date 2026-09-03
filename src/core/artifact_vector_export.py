@@ -35,11 +35,17 @@ from .alignment_utils import (
 )
 from .artifact_outline_extractor import REVIEWED_OUTLINE_BACKENDS
 from .drawing_style import (
-    LINE_KINDS,
     DrawingStyleError,
     get_preset as get_drawing_style_preset,
-    layer_id,
     line_kind_for_record_role,
+)
+from .drawing_svg import (
+    Placement,
+    SVGRenderError,
+    hatch_pattern_elements,
+    hatched_kinds,
+    layer_elements,
+    path_element,
 )
 from .canonical_json import CanonicalJSONError, canonical_json_sha256
 from .artifact_document import (
@@ -827,6 +833,19 @@ def _svg_metadata(
     }
 
 
+def _placement(
+    bounds: tuple[float, float, float, float],
+    options: VectorSVGOptions,
+) -> Placement:
+    """Return the 1:1 placement of a record inside its own margined page."""
+
+    return Placement(
+        content_bounds_mm=bounds,
+        origin_mm=(options.margin_mm, options.margin_mm),
+        scale_denominator=1.0,
+    )
+
+
 def _path_element(
     path: VectorPath,
     *,
@@ -836,28 +855,30 @@ def _path_element(
 ) -> str:
     """Return one `<path>` element, in millimetres of the drawing's own frame."""
 
-    minimum_x, _minimum_y, _maximum_x, maximum_y = bounds
-    commands: list[str] = []
-    for index, point in enumerate(path.points_mm):
-        x = float(point[0]) - minimum_x + options.margin_mm
-        y = maximum_y - float(point[1]) + options.margin_mm
-        command = "M" if index == 0 else "L"
-        commands.append(
-            f"{command} {_number_token(x, field_name='path.x')} "
-            f"{_number_token(y, field_name='path.y')}"
+    try:
+        return path_element(
+            path_id=path.id,
+            role=path.role,
+            closed=path.closed,
+            points_mm=path.points_mm,
+            placement=_placement(bounds, options),
+            fill=fill,
         )
-    if path.closed:
-        commands.append("Z")
-    fill_attribute = "" if fill is None else f' fill="{fill}"'
-    return (
-        f'<path id="{_xml_attribute(path.id)}" '
-        f'data-role="{_xml_attribute(path.role)}"{fill_attribute} '
-        f'd="{" ".join(commands)}"/>'
-    )
+    except SVGRenderError as exc:
+        raise ArtifactVectorExportError(str(exc)) from exc
 
 
-def _hatch_pattern_id(kind: str) -> str:
-    return f"hatch-{kind.replace('_', '-')}"
+def _paths_by_line_kind(
+    payload: VectorGeometryPayload,
+) -> dict[str, list[VectorPath]]:
+    by_kind: dict[str, list[VectorPath]] = {}
+    for path in payload.paths:
+        try:
+            kind = line_kind_for_record_role(path.role)
+        except DrawingStyleError as exc:
+            raise ArtifactVectorExportError(str(exc)) from exc
+        by_kind.setdefault(kind, []).append(path)
+    return by_kind
 
 
 def _styled_layers(
@@ -866,94 +887,43 @@ def _styled_layers(
     bounds: tuple[float, float, float, float],
     options: VectorSVGOptions,
 ) -> list[str]:
-    """Return the drawing body as one group per line kind.
-
-    Layers appear in the vocabulary's own order and carry the preset's paper
-    millimetre weight, so a drawing opens in Illustrator or Inkscape as
-    separable line kinds rather than one undifferentiated stroke.  A kind with
-    no paths is omitted: an empty layer is noise in the layer panel.
-    """
+    """Return the drawing body as one group per line kind."""
 
     assert options.style_preset is not None
     preset = get_drawing_style_preset(options.style_preset)
+    by_kind = _paths_by_line_kind(payload)
+    hatched = hatched_kinds(by_kind, preset=preset)
 
-    by_kind: dict[str, list[VectorPath]] = {}
-    for path in payload.paths:
-        try:
-            kind = line_kind_for_record_role(path.role)
-        except DrawingStyleError as exc:
-            raise ArtifactVectorExportError(str(exc)) from exc
-        by_kind.setdefault(kind, []).append(path)
-
-    hatched_kinds = [
-        kind
-        for kind in LINE_KINDS
-        if kind in by_kind
-        and preset.style(kind).hatch
-        and any(path.closed for path in by_kind[kind])
-    ]
-
-    lines: list[str] = []
-    if hatched_kinds:
-        hatch = preset.hatch
-        spacing = _number_token(hatch.spacing_mm, field_name="hatch.spacing_mm")
-        half = _number_token(
-            hatch.spacing_mm / 2.0, field_name="hatch.spacing_mm"
-        )
-        hatch_stroke = _number_token(
-            hatch.stroke_width_mm, field_name="hatch.stroke_width_mm"
-        )
-        angle = _number_token(hatch.angle_deg, field_name="hatch.angle_deg")
-        lines.append("  <defs>")
-        for kind in hatched_kinds:
-            # The line sits half a tile in, so the whole stroke stays inside the
-            # tile; drawn on the edge it would be clipped to half its weight.
+    try:
+        lines: list[str] = []
+        if hatched:
+            lines.append("  <defs>")
             lines.extend(
-                (
-                    f'    <pattern id="{_hatch_pattern_id(kind)}" '
-                    'patternUnits="userSpaceOnUse" '
-                    f'width="{spacing}" height="{spacing}" '
-                    f'patternTransform="rotate({angle})">',
-                    f'      <path d="M {half} 0 L {half} {spacing}" '
-                    f'stroke="{options.stroke_color}" '
-                    f'stroke-width="{hatch_stroke}" fill="none"/>',
-                    "    </pattern>",
+                hatch_pattern_elements(
+                    hatched,
+                    preset=preset,
+                    color=options.stroke_color,
+                    indent="    ",
                 )
             )
-        lines.append("  </defs>")
-
-    lines.append(
-        '  <g id="measured-vectors" fill="none" '
-        f'stroke="{options.stroke_color}" '
-        'stroke-linecap="round" stroke-linejoin="round">'
-    )
-    for kind in LINE_KINDS:
-        paths = by_kind.get(kind)
-        if not paths:
-            continue
-        style = preset.style(kind)
-        attributes = (
-            f'stroke-width="{_number_token(style.stroke_width_mm, field_name="stroke_width_mm")}"'
+            lines.append("  </defs>")
+        lines.append(
+            '  <g id="measured-vectors" fill="none" '
+            f'stroke="{options.stroke_color}" '
+            'stroke-linecap="round" stroke-linejoin="round">'
         )
-        if style.dash_pattern_mm:
-            dashes = ",".join(
-                _number_token(length, field_name="dash_pattern_mm")
-                for length in style.dash_pattern_mm
+        lines.extend(
+            layer_elements(
+                by_kind,
+                preset=preset,
+                placement=_placement(bounds, options),
+                hatched=hatched,
+                indent="    ",
             )
-            attributes += f' stroke-dasharray="{dashes}"'
-        lines.append(f'    <g id="{layer_id(kind)}" {attributes}>')
-        hatch_fill = (
-            f"url(#{_hatch_pattern_id(kind)})" if kind in hatched_kinds else None
         )
-        for path in paths:
-            # An open path has no interior, so filling it would shade the area
-            # under its implicit closing chord.
-            fill = hatch_fill if (hatch_fill and path.closed) else None
-            lines.append(
-                f"      {_path_element(path, bounds=bounds, options=options, fill=fill)}"
-            )
-        lines.append("    </g>")
-    lines.append("  </g>")
+        lines.append("  </g>")
+    except SVGRenderError as exc:
+        raise ArtifactVectorExportError(str(exc)) from exc
     return lines
 
 

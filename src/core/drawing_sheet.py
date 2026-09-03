@@ -1,0 +1,856 @@
+"""Compose verified vector records into one printable measured-drawing sheet.
+
+A 1:1 SVG export is the measurement.  A sheet is the page a reader receives: an
+elevation and a section beside each other, reduced to a stated scale, with a
+scale bar and a title block that says what they are looking at.  Those are the
+parts a report figure cannot omit, and the parts a single-record export cannot
+supply.
+
+Three properties hold the sheet honest:
+
+* **The scale is printed, always.**  A reduced drawing whose reduction is not
+  stated cannot be measured off the page, and a caller cannot suppress the row
+  that states it.
+* **Weights are paper millimetres at every scale.**  Coordinates are divided by
+  the scale denominator; stroke widths, dash lengths and hatch spacing are not.
+  A 0.35 mm cut line is 0.35 mm on paper whether the sheet is 1:1 or 1:4.
+* **It never silently shrinks to fit.**  Content that does not fit the page at
+  the requested scale is an error naming what would have to change, because the
+  alternative is a page that says 1:2 and measures as something else.
+
+The sheet is presentation.  Each figure records the digest of the payload it
+drew, so a sheet can be checked against the records it claims, but the sheet
+itself is not a measurement and never becomes one.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+import hashlib
+import math
+from typing import Any, Mapping, Sequence
+
+from .artifact_document import ArtifactDocument
+from .artifact_vector_export import (
+    ArtifactVectorExportError,
+    _payload_bounds,
+    _require_exportable_record,
+)
+from .canonical_json import canonical_json_bytes
+from .drawing_style import (
+    DrawingStyleError,
+    get_preset as get_drawing_style_preset,
+    line_kind_for_record_role,
+)
+from .drawing_svg import (
+    Placement,
+    SVG_NAMESPACE,
+    SVGRenderError,
+    finite_number,
+    hatch_pattern_elements,
+    hatched_kinds,
+    layer_elements,
+    number_token,
+    xml_attribute,
+)
+
+
+DRAWING_SHEET_SCHEMA_VERSION = "1.0.0"
+DRAWING_SHEET_FORMAT = "archmeshrubbing.drawing-sheet.svg/v1"
+DRAWING_SHEET_SVG_NAME = "sheet.svg"
+DRAWING_SHEET_SIDECAR_NAME = "sheet.provenance.json"
+
+MAX_DRAWING_SHEET_SVG_BYTES = 64 * 1024 * 1024
+MAX_DRAWING_SHEET_FIGURES = 32
+
+# ISO 216 sizes as portrait width x height in millimetres.
+PAGE_SIZES_MM: Mapping[str, tuple[float, float]] = {
+    "A5": (148.0, 210.0),
+    "A4": (210.0, 297.0),
+    "A3": (297.0, 420.0),
+    "A2": (420.0, 594.0),
+    "A1": (594.0, 841.0),
+}
+ORIENTATIONS = ("portrait", "landscape")
+
+_TITLE_BLOCK_WIDTH_MM = 78.0
+_TITLE_BLOCK_ROW_MM = 5.0
+_TITLE_BLOCK_FONT_MM = 2.6
+_TITLE_BLOCK_PADDING_MM = 1.6
+_SCALE_BAR_HEIGHT_MM = 2.4
+_SCALE_BAR_LABEL_MM = 2.6
+_SCALE_BAR_SEGMENTS = 4
+_SCALE_BAR_MIN_PAPER_MM = 25.0
+_SCALE_BAR_MAX_PAPER_MM = 90.0
+_HAIRLINE_MM = 0.13
+_FONT_STACK = "'Noto Sans KR', 'Malgun Gothic', sans-serif"
+
+# The scale bar's band: the bar itself plus the row of labels beneath it.
+_SCALE_BAR_BAND_MM = _SCALE_BAR_HEIGHT_MM + _SCALE_BAR_LABEL_MM
+# Clear space between the last figure and the footer band, so a drawing never
+# appears to touch the sheet's own annotations.
+_FOOTER_GAP_MM = 4.0
+
+
+class DrawingSheetError(ValueError):
+    """A sheet cannot be composed as requested."""
+
+
+@dataclass(frozen=True, slots=True)
+class SheetPage:
+    """The physical page a sheet is drawn on."""
+
+    size: str = "A4"
+    orientation: str = "portrait"
+    margin_mm: float = 12.0
+
+    def __post_init__(self) -> None:
+        size = str(self.size).strip().upper()
+        if size not in PAGE_SIZES_MM:
+            known = ", ".join(sorted(PAGE_SIZES_MM))
+            raise DrawingSheetError(f"unknown page size: {self.size!r}; known sizes are {known}")
+        object.__setattr__(self, "size", size)
+        orientation = str(self.orientation).strip().lower()
+        if orientation not in ORIENTATIONS:
+            raise DrawingSheetError(
+                f"orientation must be one of: {', '.join(ORIENTATIONS)}"
+            )
+        object.__setattr__(self, "orientation", orientation)
+        try:
+            margin = finite_number(
+                self.margin_mm, field_name="margin_mm", minimum=0.0
+            )
+        except SVGRenderError as exc:
+            raise DrawingSheetError(str(exc)) from exc
+        if margin > 100.0:
+            raise DrawingSheetError("margin_mm must be at most 100")
+        object.__setattr__(self, "margin_mm", margin)
+        if self.content_width_mm <= 0.0:
+            raise DrawingSheetError(
+                "margin_mm leaves no room to draw on this page size"
+            )
+
+    @property
+    def width_mm(self) -> float:
+        portrait_width, portrait_height = PAGE_SIZES_MM[self.size]
+        return portrait_width if self.orientation == "portrait" else portrait_height
+
+    @property
+    def height_mm(self) -> float:
+        portrait_width, portrait_height = PAGE_SIZES_MM[self.size]
+        return portrait_height if self.orientation == "portrait" else portrait_width
+
+    @property
+    def content_width_mm(self) -> float:
+        return self.width_mm - 2.0 * self.margin_mm
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "height_mm": self.height_mm,
+            "margin_mm": self.margin_mm,
+            "orientation": self.orientation,
+            "size": self.size,
+            "width_mm": self.width_mm,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class TitleBlock:
+    """What the sheet says about itself.
+
+    The scale row is added by the composer and cannot be supplied here: a
+    measured drawing that does not print its own reduction cannot be measured.
+    """
+
+    artifact_label: str
+    rows: tuple[tuple[str, str], ...] = ()
+
+    def __post_init__(self) -> None:
+        label = str(self.artifact_label).strip()
+        if not label:
+            raise DrawingSheetError("artifact_label must be a non-empty string")
+        if len(label) > 120:
+            raise DrawingSheetError("artifact_label must not exceed 120 characters")
+        object.__setattr__(self, "artifact_label", label)
+        rows: list[tuple[str, str]] = []
+        for entry in self.rows:
+            if not isinstance(entry, Sequence) or len(entry) != 2:
+                raise DrawingSheetError("each title block row must be (label, value)")
+            row_label = str(entry[0]).strip()
+            row_value = str(entry[1]).strip()
+            if not row_label:
+                raise DrawingSheetError("title block row labels must not be empty")
+            if len(row_label) > 24 or len(row_value) > 96:
+                raise DrawingSheetError("title block row is too long for the block")
+            rows.append((row_label, row_value))
+        if len(rows) > 6:
+            raise DrawingSheetError("a title block holds at most six extra rows")
+        object.__setattr__(self, "rows", tuple(rows))
+
+
+@dataclass(frozen=True, slots=True)
+class DrawingSheetOptions:
+    """Everything that decides what the composed page looks like."""
+
+    title_block: TitleBlock
+    scale_denominator: float = 1.0
+    page: SheetPage = field(default_factory=SheetPage)
+    style_preset: str = "provisional/v1"
+    gutter_mm: float = 8.0
+    stroke_color: str = "#111111"
+    title: str = "ArchMeshRubbing measured drawing sheet"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.title_block, TitleBlock):
+            raise DrawingSheetError("title_block must be a TitleBlock")
+        if not isinstance(self.page, SheetPage):
+            raise DrawingSheetError("page must be a SheetPage")
+        try:
+            denominator = finite_number(
+                self.scale_denominator,
+                field_name="scale_denominator",
+                strictly_positive=True,
+            )
+            gutter = finite_number(self.gutter_mm, field_name="gutter_mm", minimum=0.0)
+        except SVGRenderError as exc:
+            raise DrawingSheetError(str(exc)) from exc
+        if denominator < 1.0:
+            raise DrawingSheetError(
+                "scale_denominator must be at least 1; a sheet reduces, it does not "
+                "enlarge a measured drawing"
+            )
+        if denominator > 1000.0:
+            raise DrawingSheetError("scale_denominator must be at most 1000")
+        object.__setattr__(self, "scale_denominator", denominator)
+        object.__setattr__(self, "gutter_mm", gutter)
+        try:
+            get_drawing_style_preset(self.style_preset)
+        except DrawingStyleError as exc:
+            raise DrawingSheetError(str(exc)) from exc
+        color = str(self.stroke_color).strip().lower()
+        if len(color) != 7 or not color.startswith("#"):
+            raise DrawingSheetError("stroke_color must be a six-digit hexadecimal color")
+        try:
+            int(color[1:], 16)
+        except ValueError as exc:
+            raise DrawingSheetError(
+                "stroke_color must be a six-digit hexadecimal color"
+            ) from exc
+        object.__setattr__(self, "stroke_color", color)
+        title = str(self.title).strip()
+        if not title or len(title) > 512:
+            raise DrawingSheetError("title must be between 1 and 512 characters")
+        object.__setattr__(self, "title", title)
+        if self.content_height_mm <= 0.0:
+            raise DrawingSheetError(
+                f"{self.page.size} {self.page.orientation} with a "
+                f"{self.page.margin_mm} mm margin leaves no room to draw above the "
+                f"title block; use a larger page, a smaller margin, or fewer "
+                "title block rows"
+            )
+
+    @property
+    def physical_scale(self) -> str:
+        return f"1:{_scale_token(self.scale_denominator)}"
+
+    @property
+    def title_block_rows(self) -> int:
+        """Artifact label, the mandatory scale row, the caller's rows, document."""
+
+        return 2 + len(self.title_block.rows) + 1
+
+    @property
+    def title_block_height_mm(self) -> float:
+        return _TITLE_BLOCK_ROW_MM * self.title_block_rows
+
+    @property
+    def footer_height_mm(self) -> float:
+        """Height of the band the sheet reserves for its own annotations.
+
+        The title block and the scale bar sit side by side, but the band is
+        reserved across the full width rather than only under each one.  A
+        figure that reached into the gap between them would still print as a
+        drawing crowding the caption, and a rule that depends on how wide the
+        title block happens to be is a rule that breaks when a label gets
+        longer.
+        """
+
+        return max(self.title_block_height_mm, _SCALE_BAR_BAND_MM)
+
+    @property
+    def content_height_mm(self) -> float:
+        """Drawable height, with the footer band and its clearance removed."""
+
+        return (
+            self.page.height_mm
+            - 2.0 * self.page.margin_mm
+            - self.footer_height_mm
+            - _FOOTER_GAP_MM
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class DrawingSheetBundle:
+    svg_bytes: bytes
+    sidecar_bytes: bytes
+    svg_sha256: str
+    sidecar_sha256: str
+
+
+def _scale_token(denominator: float) -> str:
+    """Return `4` rather than `4.0`, so a sheet reads `1:4`."""
+
+    if float(denominator).is_integer():
+        return str(int(denominator))
+    return number_token(denominator, field_name="scale_denominator")
+
+
+def scale_bar_length_mm(scale_denominator: float) -> float:
+    """Return the artifact length a scale bar should span, in millimetres.
+
+    A scale bar is only useful if a reader can name the number under it, so the
+    candidates are 1, 2 and 5 times a power of ten.  Among those, take the
+    longest bar that still fits the paper band; if even the shortest candidate
+    overflows it, the longest bar that fits is still better than none.
+    """
+
+    denominator = float(scale_denominator)
+    candidates: list[float] = []
+    exponent = -1
+    while exponent <= 6:
+        for step in (1.0, 2.0, 5.0):
+            candidates.append(step * (10.0**exponent))
+        exponent += 1
+    fitting = [
+        length
+        for length in candidates
+        if _SCALE_BAR_MIN_PAPER_MM <= length / denominator <= _SCALE_BAR_MAX_PAPER_MM
+    ]
+    if fitting:
+        return max(fitting)
+    under = [
+        length for length in candidates if length / denominator <= _SCALE_BAR_MAX_PAPER_MM
+    ]
+    if under:
+        return max(under)
+    return min(candidates)
+
+
+def scale_bar_label(length_mm: float) -> str:
+    """Return the bar's end label in the unit a reader would say out loud.
+
+    Nobody labels a bar "100 cm" when they mean a metre, and nobody labels a
+    5 cm bar "50 mm" on a pottery drawing.  The unit follows the magnitude.
+    """
+
+    if length_mm >= 1000.0 and float(length_mm / 1000.0).is_integer():
+        return f"{int(length_mm / 1000.0)} m"
+    if length_mm >= 10.0 and float(length_mm / 10.0).is_integer():
+        return f"{int(length_mm / 10.0)} cm"
+    if float(length_mm).is_integer():
+        return f"{int(length_mm)} mm"
+    return f"{number_token(length_mm, field_name='scale_bar.length_mm')} mm"
+
+
+@dataclass(frozen=True, slots=True)
+class _Figure:
+    record_id: str
+    record_type: str
+    recipe_hash: str
+    payload_sha256: str
+    placement: Placement
+    paths_by_kind: Mapping[str, list[Any]]
+
+
+def _lay_out(
+    figures: Sequence[tuple[str, str, str, str, tuple[float, float, float, float], Mapping[str, list[Any]]]],
+    *,
+    options: DrawingSheetOptions,
+) -> list[_Figure]:
+    """Place figures left to right, wrapping into rows, and refuse to overflow.
+
+    Rows keep the order the caller gave, because a reader of a report figure
+    expects the elevation and the section in the order the caption names them.
+    """
+
+    page = options.page
+    denominator = options.scale_denominator
+    available_width = page.content_width_mm
+    available_height = options.content_height_mm
+
+    placed: list[_Figure] = []
+    cursor_x = page.margin_mm
+    cursor_y = page.margin_mm
+    row_height = 0.0
+    row_count = 0
+
+    for record_id, record_type, recipe_hash, payload_sha256, bounds, by_kind in figures:
+        probe = Placement(content_bounds_mm=bounds, scale_denominator=denominator)
+        width, height = probe.width_mm, probe.height_mm
+        if width > available_width or height > available_height:
+            overflow = max(width / available_width, height / available_height)
+            # Round the suggestion up, never to nearest: a suggested scale that
+            # still does not fit is worse than no suggestion at all.
+            suggestion = math.ceil(denominator * overflow)
+            raise DrawingSheetError(
+                f"record {record_id!r} does not fit {page.size} "
+                f"{page.orientation} at {options.physical_scale}: it needs "
+                f"{width:.1f} x {height:.1f} mm of the available "
+                f"{available_width:.1f} x {available_height:.1f} mm. Use a scale "
+                f"denominator of {suggestion} or more, or a larger page."
+            )
+        gutter = options.gutter_mm if row_count else 0.0
+        if cursor_x + gutter + width > page.margin_mm + available_width + 1e-9:
+            cursor_y += row_height + options.gutter_mm
+            cursor_x = page.margin_mm
+            row_height = 0.0
+            row_count = 0
+            gutter = 0.0
+        if cursor_y + height > page.margin_mm + available_height + 1e-9:
+            raise DrawingSheetError(
+                f"the figures do not fit {page.size} {page.orientation} at "
+                f"{options.physical_scale}; reduce the scale, use a larger page, "
+                "or put fewer records on one sheet"
+            )
+        cursor_x += gutter
+        placed.append(
+            _Figure(
+                record_id=record_id,
+                record_type=record_type,
+                recipe_hash=recipe_hash,
+                payload_sha256=payload_sha256,
+                placement=Placement(
+                    content_bounds_mm=bounds,
+                    origin_mm=(cursor_x, cursor_y),
+                    scale_denominator=denominator,
+                ),
+                paths_by_kind=by_kind,
+            )
+        )
+        cursor_x += width
+        row_height = max(row_height, height)
+        row_count += 1
+    return placed
+
+
+def _text_element(
+    text: str,
+    *,
+    x_mm: float,
+    y_mm: float,
+    size_mm: float,
+    color: str,
+    anchor: str = "start",
+    weight: str | None = None,
+) -> str:
+    weight_attribute = "" if weight is None else f' font-weight="{weight}"'
+    return (
+        f'<text x="{number_token(x_mm, field_name="text.x")}" '
+        f'y="{number_token(y_mm, field_name="text.y")}" '
+        f'font-family="{_FONT_STACK}" '
+        f'font-size="{number_token(size_mm, field_name="text.size")}" '
+        f'fill="{color}" text-anchor="{anchor}"{weight_attribute}>'
+        f"{xml_attribute(text)}</text>"
+    )
+
+
+def _scale_bar_elements(options: DrawingSheetOptions) -> tuple[list[str], dict[str, Any]]:
+    """Return the scale bar, and what the sidecar records about it."""
+
+    page = options.page
+    length_mm = scale_bar_length_mm(options.scale_denominator)
+    paper_mm = length_mm / options.scale_denominator
+    segment = paper_mm / _SCALE_BAR_SEGMENTS
+    # Bottom-aligned with the title block, so the two read as one footer row.
+    top = page.height_mm - page.margin_mm - _SCALE_BAR_BAND_MM
+    left = page.margin_mm
+
+    lines = [f'  <g id="scale-bar" stroke="{options.stroke_color}" '
+             f'stroke-width="{number_token(_HAIRLINE_MM, field_name="hairline")}">']
+    for index in range(_SCALE_BAR_SEGMENTS):
+        x = left + index * segment
+        # Alternating solid and empty cells are what makes a bar readable at a
+        # glance; the outline alone gives the reader nothing to count.
+        fill = options.stroke_color if index % 2 == 0 else "none"
+        lines.append(
+            f'    <rect x="{number_token(x, field_name="scale_bar.x")}" '
+            f'y="{number_token(top, field_name="scale_bar.y")}" '
+            f'width="{number_token(segment, field_name="scale_bar.width")}" '
+            f'height="{number_token(_SCALE_BAR_HEIGHT_MM, field_name="scale_bar.height")}" '
+            f'fill="{fill}"/>'
+        )
+    label_y = top + _SCALE_BAR_HEIGHT_MM + _SCALE_BAR_LABEL_MM
+    lines.append(
+        "    "
+        + _text_element(
+            "0",
+            x_mm=left,
+            y_mm=label_y,
+            size_mm=_SCALE_BAR_LABEL_MM,
+            color=options.stroke_color,
+        )
+    )
+    label = scale_bar_label(length_mm)
+    lines.append(
+        "    "
+        + _text_element(
+            label,
+            x_mm=left + paper_mm,
+            y_mm=label_y,
+            size_mm=_SCALE_BAR_LABEL_MM,
+            color=options.stroke_color,
+            anchor="middle",
+        )
+    )
+    lines.append("  </g>")
+    return lines, {
+        "artifact_length_mm": length_mm,
+        "label": label,
+        "paper_length_mm": paper_mm,
+        "segments": _SCALE_BAR_SEGMENTS,
+    }
+
+
+def _title_block_elements(
+    options: DrawingSheetOptions,
+    *,
+    document_manifest_sha256: str,
+) -> tuple[list[str], list[dict[str, str]]]:
+    """Return the title block, and the rows it prints."""
+
+    block = options.title_block
+    rows: list[tuple[str, str]] = [("유물", block.artifact_label)]
+    # The scale is derived and mandatory.  A reduced drawing that does not say
+    # what it was reduced by cannot be measured off the page.
+    rows.append(("축척", options.physical_scale))
+    rows.extend(block.rows)
+    rows.append(("문서", document_manifest_sha256[:12]))
+
+    page = options.page
+    assert len(rows) == options.title_block_rows
+    height = options.title_block_height_mm
+    left = page.width_mm - page.margin_mm - _TITLE_BLOCK_WIDTH_MM
+    top = page.height_mm - page.margin_mm - height
+
+    lines = [
+        f'  <g id="title-block" stroke="{options.stroke_color}" '
+        f'stroke-width="{number_token(_HAIRLINE_MM, field_name="hairline")}" fill="none">',
+        f'    <rect x="{number_token(left, field_name="title_block.x")}" '
+        f'y="{number_token(top, field_name="title_block.y")}" '
+        f'width="{number_token(_TITLE_BLOCK_WIDTH_MM, field_name="title_block.width")}" '
+        f'height="{number_token(height, field_name="title_block.height")}"/>',
+    ]
+    for index, (label, value) in enumerate(rows):
+        baseline = top + _TITLE_BLOCK_ROW_MM * index + _TITLE_BLOCK_ROW_MM - 1.6
+        if index:
+            divider_y = top + _TITLE_BLOCK_ROW_MM * index
+            lines.append(
+                f'    <path d="M {number_token(left, field_name="title_block.x")} '
+                f'{number_token(divider_y, field_name="title_block.y")} '
+                f'L {number_token(left + _TITLE_BLOCK_WIDTH_MM, field_name="title_block.x")} '
+                f'{number_token(divider_y, field_name="title_block.y")}"/>'
+            )
+        lines.append(
+            "    "
+            + _text_element(
+                label,
+                x_mm=left + _TITLE_BLOCK_PADDING_MM,
+                y_mm=baseline,
+                size_mm=_TITLE_BLOCK_FONT_MM,
+                color=options.stroke_color,
+                weight="bold",
+            )
+        )
+        lines.append(
+            "    "
+            + _text_element(
+                value,
+                x_mm=left + _TITLE_BLOCK_WIDTH_MM - _TITLE_BLOCK_PADDING_MM,
+                y_mm=baseline,
+                size_mm=_TITLE_BLOCK_FONT_MM,
+                color=options.stroke_color,
+                anchor="end",
+            )
+        )
+    lines.append("  </g>")
+    return lines, [{"label": label, "value": value} for label, value in rows]
+
+
+def _sheet_provenance(
+    document: ArtifactDocument,
+    placed: Sequence[_Figure],
+    *,
+    options: DrawingSheetOptions,
+    scale_bar: Mapping[str, Any],
+    title_rows: Sequence[Mapping[str, str]],
+) -> dict[str, Any]:
+    preset = get_drawing_style_preset(options.style_preset)
+    return {
+        "document_id": document.document_id,
+        "document_manifest_sha256": document.canonical_sha256,
+        "figures": [
+            {
+                "height_mm": figure.placement.height_mm,
+                "origin_mm": list(figure.placement.origin_mm),
+                "record_id": figure.record_id,
+                "record_type": figure.record_type,
+                "recipe_hash": figure.recipe_hash,
+                "vector_payload_sha256": figure.payload_sha256,
+                "width_mm": figure.placement.width_mm,
+            }
+            for figure in placed
+        ],
+        "format": DRAWING_SHEET_FORMAT,
+        "page": options.page.to_dict(),
+        "physical_scale": options.physical_scale,
+        "scale_bar": dict(scale_bar),
+        "scale_denominator": options.scale_denominator,
+        "schema_version": DRAWING_SHEET_SCHEMA_VERSION,
+        "style_preset": {
+            "preset_id": preset.preset_id,
+            "provisional": preset.provisional,
+            "sha256": preset.sha256(),
+            "source_id": preset.source_id,
+        },
+        "title": options.title,
+        "title_block": [dict(row) for row in title_rows],
+        "unit": "mm",
+    }
+
+
+def _render_sheet(
+    placed: Sequence[_Figure],
+    *,
+    options: DrawingSheetOptions,
+    provenance: Mapping[str, Any],
+    scale_bar_lines: Sequence[str],
+    title_block_lines: Sequence[str],
+) -> bytes:
+    page = options.page
+    preset = get_drawing_style_preset(options.style_preset)
+    width_token = number_token(page.width_mm, field_name="page.width_mm")
+    height_token = number_token(page.height_mm, field_name="page.height_mm")
+    metadata_text = canonical_json_bytes(provenance).decode("utf-8").rstrip("\n")
+
+    lines = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        (
+            f'<svg xmlns="{SVG_NAMESPACE}" version="1.1" '
+            f'width="{width_token}mm" height="{height_token}mm" '
+            f'viewBox="0 0 {width_token} {height_token}">'
+        ),
+        f"  <title>{xml_attribute(options.title)}</title>",
+        (
+            '  <metadata id="archmeshrubbing-provenance">'
+            f"{xml_attribute(metadata_text)}</metadata>"
+        ),
+    ]
+
+    sheet_hatched = sorted(
+        {
+            kind
+            for figure in placed
+            for kind in hatched_kinds(figure.paths_by_kind, preset=preset)
+        }
+    )
+    if sheet_hatched:
+        lines.append("  <defs>")
+        lines.extend(
+            hatch_pattern_elements(
+                sheet_hatched,
+                preset=preset,
+                color=options.stroke_color,
+                indent="    ",
+            )
+        )
+        lines.append("  </defs>")
+
+    lines.append(
+        '  <g id="sheet-figures" fill="none" '
+        f'stroke="{options.stroke_color}" '
+        'stroke-linecap="round" stroke-linejoin="round">'
+    )
+    for index, figure in enumerate(placed):
+        lines.append(
+            f'    <g id="figure-{index:04d}" '
+            f'data-record-id="{xml_attribute(figure.record_id)}" '
+            f'data-record-type="{xml_attribute(figure.record_type)}">'
+        )
+        lines.extend(
+            layer_elements(
+                figure.paths_by_kind,
+                preset=preset,
+                placement=figure.placement,
+                hatched=hatched_kinds(figure.paths_by_kind, preset=preset),
+                indent="      ",
+            )
+        )
+        lines.append("    </g>")
+    lines.append("  </g>")
+
+    lines.extend(scale_bar_lines)
+    lines.extend(title_block_lines)
+    lines.append("</svg>")
+
+    svg_bytes = ("\n".join(lines) + "\n").encode("utf-8")
+    if len(svg_bytes) > MAX_DRAWING_SHEET_SVG_BYTES:
+        raise DrawingSheetError("sheet SVG exceeds the export safety limit")
+    return svg_bytes
+
+
+def compose_drawing_sheet(
+    document: ArtifactDocument,
+    record_ids: Sequence[str],
+    *,
+    options: DrawingSheetOptions,
+) -> DrawingSheetBundle:
+    """Compose READY and FRESH vector records into one printable sheet."""
+
+    if not isinstance(options, DrawingSheetOptions):
+        raise DrawingSheetError("options must be DrawingSheetOptions")
+    ids = [str(record_id) for record_id in record_ids]
+    if not ids:
+        raise DrawingSheetError("a sheet needs at least one vector record")
+    if len(ids) > MAX_DRAWING_SHEET_FIGURES:
+        raise DrawingSheetError(
+            f"a sheet holds at most {MAX_DRAWING_SHEET_FIGURES} figures"
+        )
+    if len(set(ids)) != len(ids):
+        raise DrawingSheetError("the same record cannot appear twice on one sheet")
+
+    prepared = []
+    for record_id in ids:
+        try:
+            record, payload, _record_qc = _require_exportable_record(document, record_id)
+        except ArtifactVectorExportError as exc:
+            raise DrawingSheetError(str(exc)) from exc
+        by_kind: dict[str, list[Any]] = {}
+        for path in payload.paths:
+            try:
+                kind = line_kind_for_record_role(path.role)
+            except DrawingStyleError as exc:
+                raise DrawingSheetError(str(exc)) from exc
+            by_kind.setdefault(kind, []).append(path)
+        prepared.append(
+            (
+                record.id,
+                record.type,
+                record.recipe_hash,
+                payload.sha256,
+                _payload_bounds(payload),
+                by_kind,
+            )
+        )
+
+    try:
+        placed = _lay_out(prepared, options=options)
+        scale_bar_lines, scale_bar = _scale_bar_elements(options)
+        title_block_lines, title_rows = _title_block_elements(
+            options,
+            document_manifest_sha256=document.canonical_sha256,
+        )
+        provenance = _sheet_provenance(
+            document,
+            placed,
+            options=options,
+            scale_bar=scale_bar,
+            title_rows=title_rows,
+        )
+        svg_bytes = _render_sheet(
+            placed,
+            options=options,
+            provenance=provenance,
+            scale_bar_lines=scale_bar_lines,
+            title_block_lines=title_block_lines,
+        )
+    except SVGRenderError as exc:
+        raise DrawingSheetError(str(exc)) from exc
+
+    sidecar = dict(provenance)
+    sidecar["artifact"] = {
+        "file": DRAWING_SHEET_SVG_NAME,
+        "media_type": "image/svg+xml",
+        "sha256": hashlib.sha256(svg_bytes).hexdigest(),
+        "size_bytes": len(svg_bytes),
+    }
+    sidecar_bytes = canonical_json_bytes(sidecar)
+    return DrawingSheetBundle(
+        svg_bytes=svg_bytes,
+        sidecar_bytes=sidecar_bytes,
+        svg_sha256=hashlib.sha256(svg_bytes).hexdigest(),
+        sidecar_sha256=hashlib.sha256(sidecar_bytes).hexdigest(),
+    )
+
+
+def validate_drawing_sheet_bytes(svg_bytes: bytes, sidecar_bytes: bytes) -> None:
+    """Check a sheet against its own sidecar, without the document.
+
+    This is the offline half: it proves the SVG is the one the sidecar
+    describes and that the sidecar is internally consistent.  Proving the
+    figures are the records they name additionally needs the document, which
+    `compose_drawing_sheet` re-derives when it builds the sheet.
+    """
+
+    import json  # noqa: PLC0415
+
+    if not isinstance(svg_bytes, (bytes, bytearray)):
+        raise DrawingSheetError("svg_bytes must be bytes")
+    try:
+        sidecar = json.loads(bytes(sidecar_bytes).decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise DrawingSheetError(f"sheet sidecar is not valid JSON: {exc}") from exc
+    if not isinstance(sidecar, Mapping):
+        raise DrawingSheetError("sheet sidecar must be an object")
+    if sidecar.get("format") != DRAWING_SHEET_FORMAT:
+        raise DrawingSheetError("sheet sidecar declares an unsupported format")
+    if sidecar.get("schema_version") != DRAWING_SHEET_SCHEMA_VERSION:
+        raise DrawingSheetError("sheet sidecar declares an unsupported schema version")
+    artifact = sidecar.get("artifact")
+    if not isinstance(artifact, Mapping):
+        raise DrawingSheetError("sheet sidecar has no artifact block")
+    if artifact.get("sha256") != hashlib.sha256(bytes(svg_bytes)).hexdigest():
+        raise DrawingSheetError("sheet SVG does not match the digest in its sidecar")
+    if artifact.get("size_bytes") != len(bytes(svg_bytes)):
+        raise DrawingSheetError("sheet SVG does not match the size in its sidecar")
+    if canonical_json_bytes(sidecar) != bytes(sidecar_bytes):
+        raise DrawingSheetError("sheet sidecar is not in canonical JSON form")
+
+    preset_claim = sidecar.get("style_preset")
+    if not isinstance(preset_claim, Mapping):
+        raise DrawingSheetError("sheet sidecar has no style preset block")
+    try:
+        preset = get_drawing_style_preset(str(preset_claim.get("preset_id")))
+    except DrawingStyleError as exc:
+        raise DrawingSheetError(str(exc)) from exc
+    if preset_claim.get("sha256") != preset.sha256():
+        raise DrawingSheetError(
+            "drawing style preset no longer matches the digest recorded with this sheet"
+        )
+
+    # The scale must be on the page, not only in the metadata.
+    rows = sidecar.get("title_block")
+    if not isinstance(rows, Sequence) or not any(
+        isinstance(row, Mapping) and row.get("value") == sidecar.get("physical_scale")
+        for row in rows
+    ):
+        raise DrawingSheetError("sheet title block does not print its own scale")
+
+
+__all__ = [
+    "DRAWING_SHEET_FORMAT",
+    "DRAWING_SHEET_SCHEMA_VERSION",
+    "DRAWING_SHEET_SIDECAR_NAME",
+    "DRAWING_SHEET_SVG_NAME",
+    "DrawingSheetBundle",
+    "DrawingSheetError",
+    "DrawingSheetOptions",
+    "MAX_DRAWING_SHEET_FIGURES",
+    "ORIENTATIONS",
+    "PAGE_SIZES_MM",
+    "SheetPage",
+    "TitleBlock",
+    "compose_drawing_sheet",
+    "scale_bar_label",
+    "scale_bar_length_mm",
+    "validate_drawing_sheet_bytes",
+]
