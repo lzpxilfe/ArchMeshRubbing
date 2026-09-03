@@ -50,11 +50,16 @@ from .artifact_vector_export import (
     _require_exportable_record,
     center_axis_vector_path,
 )
-from .artifact_vector_record import VectorRecordKind
+from .artifact_vector_record import (
+    VectorGeometryPayload,
+    VectorPath,
+    VectorRecordKind,
+)
 from .canonical_json import canonical_json_bytes
 from .drawing_style import (
     CENTER_AXIS,
     DrawingStyleError,
+    DrawingStylePreset,
     get_preset as get_drawing_style_preset,
     line_kind_for_condition,
     line_kind_for_record_role,
@@ -63,11 +68,16 @@ from .drawing_svg import (
     Placement,
     SVG_NAMESPACE,
     SVGRenderError,
+    center_axis_line,
+    center_axis_segment,
+    clip_closed_ring,
+    clip_open_path,
     finite_number,
     hatch_pattern_elements,
     hatched_kinds,
     layer_elements,
     number_token,
+    split_ring_off_line,
     xml_attribute,
 )
 
@@ -215,6 +225,14 @@ class DrawingSheetOptions:
     page: SheetPage = field(default_factory=SheetPage)
     style_preset: str = "provisional/v1"
     show_center_axis: bool = False
+    mirror_sections: tuple[tuple[str, str], ...] = ()
+    """(elevation record id, section record id) pairs drawn as one figure.
+
+    The pottery convention: the left half of the figure is the elevation and
+    the right half is the section through the same plane, joined at the
+    rotation axis.  The elevation record keeps its place in `record_ids`; the
+    section record is not a figure of its own and must not be listed there.
+    """
     condition_records: tuple[str, ...] = ()
     """Condition annotations to draw over the figures, by record id.
 
@@ -235,6 +253,27 @@ class DrawingSheetOptions:
             raise DrawingSheetError("page must be a SheetPage")
         if not isinstance(self.show_center_axis, bool):
             raise DrawingSheetError("show_center_axis must be a boolean")
+        mirror_sections: list[tuple[str, str]] = []
+        for pair in self.mirror_sections:
+            if not isinstance(pair, (tuple, list)) or len(pair) != 2:
+                raise DrawingSheetError(
+                    "mirror_sections entries must be "
+                    "(elevation record id, section record id) pairs"
+                )
+            elevation_id, section_id = (str(item).strip() for item in pair)
+            if not elevation_id or not section_id:
+                raise DrawingSheetError("mirror_sections entries must be record ids")
+            if elevation_id == section_id:
+                raise DrawingSheetError(
+                    "a record cannot be both halves of one mirrored figure"
+                )
+            mirror_sections.append((elevation_id, section_id))
+        halves = [item for pair in mirror_sections for item in pair]
+        if len(set(halves)) != len(halves):
+            raise DrawingSheetError(
+                "a record can be one half of at most one mirrored figure"
+            )
+        object.__setattr__(self, "mirror_sections", tuple(mirror_sections))
         condition_records = tuple(self.condition_records)
         if any(
             not isinstance(record_id, str) or not record_id.strip()
@@ -399,6 +438,20 @@ def scale_bar_label(length_mm: float) -> str:
 
 
 @dataclass(frozen=True, slots=True)
+class _Prepared:
+    """One figure's content, before it knows where on the page it goes."""
+
+    record_id: str
+    record_type: str
+    recipe_hash: str
+    payload_sha256: str
+    bounds: tuple[float, float, float, float]
+    paths_by_kind: Mapping[str, list[Any]]
+    mirror_section_record_id: str | None = None
+    fill_only_ids: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True, slots=True)
 class _Figure:
     record_id: str
     record_type: str
@@ -406,10 +459,12 @@ class _Figure:
     payload_sha256: str
     placement: Placement
     paths_by_kind: Mapping[str, list[Any]]
+    mirror_section_record_id: str | None = None
+    fill_only_ids: frozenset[str] = frozenset()
 
 
 def _lay_out(
-    figures: Sequence[tuple[str, str, str, str, tuple[float, float, float, float], Mapping[str, list[Any]]]],
+    figures: Sequence[_Prepared],
     *,
     options: DrawingSheetOptions,
 ) -> list[_Figure]:
@@ -430,7 +485,9 @@ def _lay_out(
     row_height = 0.0
     row_count = 0
 
-    for record_id, record_type, recipe_hash, payload_sha256, bounds, by_kind in figures:
+    for prepared in figures:
+        record_id = prepared.record_id
+        bounds = prepared.bounds
         probe = Placement(content_bounds_mm=bounds, scale_denominator=denominator)
         width, height = probe.width_mm, probe.height_mm
         if width > available_width or height > available_height:
@@ -462,15 +519,17 @@ def _lay_out(
         placed.append(
             _Figure(
                 record_id=record_id,
-                record_type=record_type,
-                recipe_hash=recipe_hash,
-                payload_sha256=payload_sha256,
+                record_type=prepared.record_type,
+                recipe_hash=prepared.recipe_hash,
+                payload_sha256=prepared.payload_sha256,
                 placement=Placement(
                     content_bounds_mm=bounds,
                     origin_mm=(cursor_x, cursor_y),
                     scale_denominator=denominator,
                 ),
-                paths_by_kind=by_kind,
+                paths_by_kind=prepared.paths_by_kind,
+                mirror_section_record_id=prepared.mirror_section_record_id,
+                fill_only_ids=prepared.fill_only_ids,
             )
         )
         cursor_x += width
@@ -698,6 +757,228 @@ def _condition_paths_for_figure(
     return by_kind, drawn
 
 
+def _paths_bounds(
+    paths_by_kind: Mapping[str, Sequence[Any]],
+) -> tuple[float, float, float, float]:
+    """Return the extent of already-built drawing paths, in record millimetres."""
+
+    points = [
+        point
+        for paths in paths_by_kind.values()
+        for path in paths
+        for point in path.points_mm
+    ]
+    if not points:
+        raise DrawingSheetError("a figure with no drawable path has no extent")
+    us = [float(point[0]) for point in points]
+    vs = [float(point[1]) for point in points]
+    return (min(us), min(vs), max(us), max(vs))
+
+
+def _clipped_half(
+    paths_by_kind: Mapping[str, Sequence[Any]],
+    *,
+    preset: DrawingStylePreset,
+    base: Sequence[float],
+    direction: Sequence[float],
+    keep_negative: bool,
+    id_prefix: str,
+    half_name: str,
+) -> tuple[dict[str, list[Any]], set[str]]:
+    """Return one half of a figure's paths, cut at the rotation axis.
+
+    A ring the cut passes through comes back as the open chains that were
+    actually measured; the chord closing it lies on the axis and is where the
+    drawing was folded, not an edge of the artifact.  Where that ring carried a
+    hatch, the closed shape is kept too, but fill-only and unstroked, so the
+    cut face is still shaded without printing a boundary along the axis.
+    """
+
+    halved: dict[str, list[Any]] = {}
+    fill_only: set[str] = set()
+    for kind, paths in paths_by_kind.items():
+        hatched = preset.style(kind).hatch
+        for path in paths:
+            try:
+                if path.closed:
+                    ring = clip_closed_ring(
+                        path.points_mm,
+                        base=base,
+                        direction=direction,
+                        keep_negative=keep_negative,
+                        label=f"{half_name} half, path {path.id!r}",
+                    )
+                    if ring is None:
+                        continue
+                    chains = split_ring_off_line(
+                        ring, base=base, direction=direction
+                    )
+                    if chains is None:
+                        pieces: list[tuple[list[Any], bool]] = [(list(ring), True)]
+                    else:
+                        pieces = [(chain, False) for chain in chains]
+                        if hatched:
+                            halved.setdefault(kind, []).append(
+                                replace(
+                                    path,
+                                    id=f"{id_prefix}{path.id}:fill",
+                                    points_mm=tuple(ring),
+                                )
+                            )
+                            fill_only.add(f"{id_prefix}{path.id}:fill")
+                else:
+                    pieces = [
+                        (piece, False)
+                        for piece in clip_open_path(
+                            path.points_mm,
+                            base=base,
+                            direction=direction,
+                            keep_negative=keep_negative,
+                        )
+                    ]
+            except SVGRenderError as exc:
+                raise DrawingSheetError(str(exc)) from exc
+            for index, (piece, closed) in enumerate(pieces):
+                suffix = "" if len(pieces) == 1 else f":{index:04d}"
+                halved.setdefault(kind, []).append(
+                    replace(
+                        path,
+                        id=f"{id_prefix}{path.id}{suffix}",
+                        closed=closed,
+                        points_mm=tuple(piece),
+                    )
+                )
+    return halved, fill_only
+
+
+def _mirrored_figure(
+    document: ArtifactDocument,
+    *,
+    elevation: DerivedRecord,
+    elevation_payload: VectorGeometryPayload,
+    elevation_by_kind: Mapping[str, Sequence[Any]],
+    section_record_id: str,
+    axis_ready: bool,
+    preset: DrawingStylePreset,
+) -> tuple[
+    DerivedRecord,
+    dict[str, list[Any]],
+    tuple[float, float, float, float],
+    set[str],
+]:
+    """Join an elevation's left half and a section's right half into one figure.
+
+    This is the convention a wheel-thrown vessel is drawn in: one figure whose
+    left side is the outside of the pot and whose right side is the wall cut
+    through the axis, so a reader sees profile and thickness at once without
+    matching two drawings to each other.
+
+    Everything it needs is checkable, so everything it needs is checked.  Half
+    a pot is only meaningful about the axis the pot turns on, the two records
+    have to be in one plane before they can be two halves of one figure, and a
+    half that comes back empty means the drawing would be a lie of omission.
+    """
+
+    if not axis_ready:
+        raise DrawingSheetError(
+            "a half-elevation and half-section figure needs an artifact "
+            "positioned on its rotation axis; the active Align was not made "
+            "from one, so there is no axis to fold the drawing about"
+        )
+    try:
+        section, section_payload, _qc = _require_exportable_record(
+            document,
+            section_record_id,
+        )
+    except ArtifactVectorExportError as exc:
+        raise DrawingSheetError(str(exc)) from exc
+    if elevation.type != VectorRecordKind.OUTLINE.record_type:
+        raise DrawingSheetError(
+            f"record {elevation.id!r} is not an outline, so it cannot be the "
+            "elevation half of a mirrored figure"
+        )
+    if section.type != VectorRecordKind.CUTLINE.record_type:
+        raise DrawingSheetError(
+            f"record {section.id!r} is not a cutline, so it cannot be the "
+            "section half of a mirrored figure"
+        )
+    if section_payload.frame != elevation_payload.frame:
+        raise DrawingSheetError(
+            f"records {elevation.id!r} and {section.id!r} are not in the same "
+            "plane, so they cannot be two halves of one figure"
+        )
+    try:
+        line = center_axis_line(elevation_payload.frame.to_dict())
+    except SVGRenderError as exc:
+        raise DrawingSheetError(str(exc)) from exc
+    if line is None:
+        raise DrawingSheetError(
+            f"the rotation axis is perpendicular to the plane of {elevation.id!r}, "
+            "so it projects to a point and there is no line to fold about"
+        )
+    base, direction = line
+
+    section_by_kind: dict[str, list[Any]] = {}
+    for path in section_payload.paths:
+        try:
+            kind = line_kind_for_record_role(path.role)
+        except DrawingStyleError as exc:
+            raise DrawingSheetError(str(exc)) from exc
+        section_by_kind.setdefault(kind, []).append(path)
+
+    left, left_fill_only = _clipped_half(
+        elevation_by_kind,
+        preset=preset,
+        base=base,
+        direction=direction,
+        keep_negative=True,
+        id_prefix="mirror:left:",
+        half_name="elevation",
+    )
+    right, right_fill_only = _clipped_half(
+        section_by_kind,
+        preset=preset,
+        base=base,
+        direction=direction,
+        keep_negative=False,
+        id_prefix="mirror:right:",
+        half_name="section",
+    )
+    if not left:
+        raise DrawingSheetError(
+            f"the elevation {elevation.id!r} has nothing left of the rotation "
+            "axis, so the mirrored figure would be half empty"
+        )
+    if not right:
+        raise DrawingSheetError(
+            f"the section {section.id!r} has nothing right of the rotation "
+            "axis, so the mirrored figure would be half empty"
+        )
+
+    combined: dict[str, list[Any]] = {}
+    for half in (left, right):
+        for kind, paths in half.items():
+            combined.setdefault(kind, []).extend(paths)
+    bounds = _paths_bounds(combined)
+    # The axis is the seam of this convention, not an optional annotation: the
+    # two halves meet on it, and without it a reader cannot tell a joined
+    # figure from one drawing of an asymmetric object.
+    try:
+        segment = center_axis_segment(elevation_payload.frame.to_dict(), bounds)
+    except SVGRenderError as exc:
+        raise DrawingSheetError(str(exc)) from exc
+    if segment is not None:
+        combined.setdefault(CENTER_AXIS, []).append(
+            VectorPath(
+                id="mirror:center-axis",
+                role=CENTER_AXIS,
+                closed=False,
+                points_mm=segment,
+            )
+        )
+    return section, combined, bounds, left_fill_only | right_fill_only
+
+
 def _sheet_provenance(
     document: ArtifactDocument,
     placed: Sequence[_Figure],
@@ -707,6 +988,7 @@ def _sheet_provenance(
     title_rows: Sequence[Mapping[str, str]],
     center_axis: Mapping[str, Any],
     condition: Mapping[str, Any] | None,
+    mirrored: Sequence[Mapping[str, str]],
 ) -> dict[str, Any]:
     preset = get_drawing_style_preset(options.style_preset)
     provenance: dict[str, Any] = {
@@ -745,6 +1027,8 @@ def _sheet_provenance(
         # Added only when the caller asked for condition records, so a sheet
         # composed without them keeps the exact bytes it had before.
         provenance["condition"] = dict(condition)
+    if mirrored:
+        provenance["mirrored_figures"] = [dict(entry) for entry in mirrored]
     return provenance
 
 
@@ -801,10 +1085,19 @@ def _render_sheet(
         'stroke-linecap="round" stroke-linejoin="round">'
     )
     for index, figure in enumerate(placed):
+        mirror_attribute = (
+            ""
+            if figure.mirror_section_record_id is None
+            else (
+                " data-mirror-section-record-id="
+                f'"{xml_attribute(figure.mirror_section_record_id)}"'
+            )
+        )
         lines.append(
             f'    <g id="figure-{index:04d}" '
             f'data-record-id="{xml_attribute(figure.record_id)}" '
-            f'data-record-type="{xml_attribute(figure.record_type)}">'
+            f'data-record-type="{xml_attribute(figure.record_type)}"'
+            f"{mirror_attribute}>"
         )
         lines.extend(
             layer_elements(
@@ -813,6 +1106,7 @@ def _render_sheet(
                 placement=figure.placement,
                 hatched=hatched_kinds(figure.paths_by_kind, preset=preset),
                 indent="      ",
+                fill_only_ids=figure.fill_only_ids,
             )
         )
         lines.append("    </g>")
@@ -863,13 +1157,28 @@ def compose_drawing_sheet(
         options.show_center_axis and align_recipe_kind == AXIS_ALIGN_RECIPE_KIND
     )
 
+    mirror_by_elevation = dict(options.mirror_sections)
+    unplaced = sorted(set(mirror_by_elevation) - set(ids))
+    if unplaced:
+        raise DrawingSheetError(
+            "the elevation half of a mirrored figure must be one of the sheet's "
+            f"records: {', '.join(unplaced)}"
+        )
+    listed_sections = sorted(set(mirror_by_elevation.values()) & set(ids))
+    if listed_sections:
+        raise DrawingSheetError(
+            "the section half of a mirrored figure is drawn inside that figure, "
+            f"so it must not also be a figure of its own: {', '.join(listed_sections)}"
+        )
+
     conditions = [
         _require_drawable_condition_record(document, record_id)
         for record_id in options.condition_records
     ]
     condition_drawn: list[dict[str, str]] = []
+    mirrored: list[dict[str, str]] = []
 
-    prepared = []
+    prepared: list[_Prepared] = []
     for record_id in ids:
         try:
             record, payload, _record_qc = _require_exportable_record(document, record_id)
@@ -882,13 +1191,6 @@ def compose_drawing_sheet(
             except DrawingStyleError as exc:
                 raise DrawingSheetError(str(exc)) from exc
             by_kind.setdefault(kind, []).append(path)
-        if draw_center_axis:
-            try:
-                axis_path = center_axis_vector_path(payload)
-            except ArtifactVectorExportError as exc:
-                raise DrawingSheetError(str(exc)) from exc
-            if axis_path is not None:
-                by_kind.setdefault(CENTER_AXIS, []).append(axis_path)
         condition_by_kind, drawn = _condition_paths_for_figure(
             record.type, payload.frame, conditions
         )
@@ -897,14 +1199,56 @@ def compose_drawing_sheet(
         condition_drawn.extend(
             {"figure_record_id": record.id, **entry} for entry in drawn
         )
+        section_record_id = mirror_by_elevation.get(record.id)
+        if section_record_id is None:
+            if draw_center_axis:
+                try:
+                    axis_path = center_axis_vector_path(payload)
+                except ArtifactVectorExportError as exc:
+                    raise DrawingSheetError(str(exc)) from exc
+                if axis_path is not None:
+                    by_kind.setdefault(CENTER_AXIS, []).append(axis_path)
+            prepared.append(
+                _Prepared(
+                    record_id=record.id,
+                    record_type=record.type,
+                    recipe_hash=record.recipe_hash,
+                    payload_sha256=payload.sha256,
+                    bounds=_payload_bounds(payload),
+                    paths_by_kind=by_kind,
+                )
+            )
+            continue
+        # A mirrored figure draws its own axis, so the caller's centre-axis
+        # switch is not consulted: the two halves meet on that line.
+        section, combined, bounds, fill_only_ids = _mirrored_figure(
+            document,
+            elevation=record,
+            elevation_payload=payload,
+            elevation_by_kind=by_kind,
+            section_record_id=section_record_id,
+            axis_ready=align_recipe_kind == AXIS_ALIGN_RECIPE_KIND,
+            preset=get_drawing_style_preset(options.style_preset),
+        )
+        mirrored.append(
+            {
+                "elevation_record_id": record.id,
+                "elevation_side": "left",
+                "section_record_id": section.id,
+                "section_recipe_hash": section.recipe_hash,
+                "section_side": "right",
+            }
+        )
         prepared.append(
-            (
-                record.id,
-                record.type,
-                record.recipe_hash,
-                payload.sha256,
-                _payload_bounds(payload),
-                by_kind,
+            _Prepared(
+                record_id=record.id,
+                record_type=record.type,
+                recipe_hash=record.recipe_hash,
+                payload_sha256=payload.sha256,
+                bounds=bounds,
+                paths_by_kind=combined,
+                mirror_section_record_id=section.id,
+                fill_only_ids=frozenset(fill_only_ids),
             )
         )
 
@@ -952,6 +1296,9 @@ def compose_drawing_sheet(
                 }
                 if conditions
                 else None
+            ),
+            mirrored=sorted(
+                mirrored, key=lambda entry: entry["elevation_record_id"]
             ),
         )
         svg_bytes = _render_sheet(

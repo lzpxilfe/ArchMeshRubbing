@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-from typing import Mapping, Protocol, Sequence
+from typing import AbstractSet, Mapping, Protocol, Sequence
 
 import numpy as np
 
@@ -161,6 +161,45 @@ class Placement:
         return x, y
 
 
+def center_axis_line(
+    frame: Mapping[str, Sequence[float]],
+    *,
+    axis_world: Sequence[float] = (0.0, 0.0, 1.0),
+) -> tuple[tuple[float, float], tuple[float, float]] | None:
+    """Return the rotation axis as an infinite line in a record's own plane.
+
+    The result is `(base, direction)` in the frame's millimetre coordinates,
+    with `direction` a unit vector oriented towards +v - and towards +u when
+    the axis lies along the frame's v = 0 line - so that "which side" is a
+    fixed question and not one whose answer depends on how a record happened
+    to be built.
+
+    Returns `None` when the axis is perpendicular to the plane, which is the
+    top and bottom views: there it projects to a point, and there is no line.
+    """
+
+    try:
+        origin = np.asarray(frame["origin_world_mm"], dtype=np.float64)
+        u_axis = np.asarray(frame["u_axis_world"], dtype=np.float64)
+        v_axis = np.asarray(frame["v_axis_world"], dtype=np.float64)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise SVGRenderError(f"frame is not a planar frame: {exc}") from exc
+    axis = np.asarray(axis_world, dtype=np.float64)
+    if origin.shape != (3,) or u_axis.shape != (3,) or v_axis.shape != (3,):
+        raise SVGRenderError("frame axes must be three-component vectors")
+
+    direction = (float(np.dot(axis, u_axis)), float(np.dot(axis, v_axis)))
+    length = math.hypot(*direction)
+    # A degenerate projection is the perpendicular case, not an error.
+    if length <= 1e-12:
+        return None
+    unit = (direction[0] / length, direction[1] / length)
+    if unit[1] < 0.0 or (unit[1] == 0.0 and unit[0] < 0.0):
+        unit = (-unit[0], -unit[1])
+    base = (float(np.dot(-origin, u_axis)), float(np.dot(-origin, v_axis)))
+    return base, unit
+
+
 def center_axis_segment(
     frame: Mapping[str, Sequence[float]],
     bounds: Sequence[float],
@@ -179,21 +218,10 @@ def center_axis_segment(
     put a line through it would be asserting something untrue.
     """
 
-    try:
-        origin = np.asarray(frame["origin_world_mm"], dtype=np.float64)
-        u_axis = np.asarray(frame["u_axis_world"], dtype=np.float64)
-        v_axis = np.asarray(frame["v_axis_world"], dtype=np.float64)
-    except (KeyError, TypeError, ValueError) as exc:
-        raise SVGRenderError(f"frame is not a planar frame: {exc}") from exc
-    axis = np.asarray(axis_world, dtype=np.float64)
-    if origin.shape != (3,) or u_axis.shape != (3,) or v_axis.shape != (3,):
-        raise SVGRenderError("frame axes must be three-component vectors")
-
-    direction = (float(np.dot(axis, u_axis)), float(np.dot(axis, v_axis)))
-    # A degenerate projection is the perpendicular case, not an error.
-    if math.hypot(*direction) <= 1e-12:
+    line = center_axis_line(frame, axis_world=axis_world)
+    if line is None:
         return None
-    base = (float(np.dot(-origin, u_axis)), float(np.dot(-origin, v_axis)))
+    base, direction = line
 
     minimum_u, minimum_v, maximum_u, maximum_v = (float(value) for value in bounds)
     # Liang-Barsky against the content rectangle, on the infinite line.
@@ -218,6 +246,198 @@ def center_axis_segment(
     )
 
 
+def half_plane_side(
+    point: Sequence[float],
+    *,
+    base: Sequence[float],
+    direction: Sequence[float],
+) -> float:
+    """Return where a point falls relative to an oriented line.
+
+    Negative is the paper-left side and positive the paper-right side, because
+    `center_axis_line` orients the direction towards +v and paper x follows +u.
+    Exact zero is on the line and belongs to neither half.
+    """
+
+    return (float(point[0]) - float(base[0])) * float(direction[1]) - (
+        float(point[1]) - float(base[1])
+    ) * float(direction[0])
+
+
+def _crossing_point(
+    first: Sequence[float],
+    second: Sequence[float],
+    first_side: float,
+    second_side: float,
+) -> tuple[float, float]:
+    ratio = first_side / (first_side - second_side)
+    return (
+        float(first[0]) + ratio * (float(second[0]) - float(first[0])),
+        float(first[1]) + ratio * (float(second[1]) - float(first[1])),
+    )
+
+
+def clip_closed_ring(
+    points: Sequence[Sequence[float]],
+    *,
+    base: Sequence[float],
+    direction: Sequence[float],
+    keep_negative: bool,
+    label: str = "path",
+) -> list[tuple[float, float]] | None:
+    """Return one half of a closed ring, closed along the cutting line.
+
+    A ring that stays wholly on one side is kept or dropped whole.  A ring that
+    crosses the line exactly twice - the case a vessel's elevation outline is,
+    entering at the rim and leaving at the base - is cut and closed along the
+    line itself.
+
+    More than two crossings is refused rather than drawn.  Sutherland-Hodgman
+    would answer with a single ring joined by an edge lying on the cutting
+    line, which prints as a boundary the artifact does not have; a shape that
+    genuinely falls into several pieces at the axis needs a decision this
+    module is not entitled to make.
+    """
+
+    ring = [(float(point[0]), float(point[1])) for point in points]
+    if len(ring) < 3:
+        raise SVGRenderError(f"{label}: a closed ring needs at least three points")
+    sides = [half_plane_side(point, base=base, direction=direction) for point in ring]
+    keep = (lambda value: value < 0.0) if keep_negative else (lambda value: value > 0.0)
+
+    crossings = 0
+    for index, side in enumerate(sides):
+        following = sides[(index + 1) % len(ring)]
+        if (side < 0.0 < following) or (following < 0.0 < side):
+            crossings += 1
+    if crossings > 2:
+        raise SVGRenderError(
+            f"{label}: the cutting line divides this closed path into more than "
+            "two pieces, so which half is the drawing is not a question this "
+            "layout can answer"
+        )
+    if crossings == 0:
+        # Points exactly on the line decide nothing; the rest of the ring does.
+        return ring if any(keep(side) for side in sides) else None
+
+    clipped: list[tuple[float, float]] = []
+    for index, point in enumerate(ring):
+        side = sides[index]
+        following_index = (index + 1) % len(ring)
+        following = sides[following_index]
+        if keep(side) or side == 0.0:
+            clipped.append(point)
+        if (side < 0.0 < following) or (following < 0.0 < side):
+            clipped.append(_crossing_point(point, ring[following_index], side, following))
+    deduplicated: list[tuple[float, float]] = []
+    for point in clipped:
+        if not deduplicated or deduplicated[-1] != point:
+            deduplicated.append(point)
+    if len(deduplicated) > 1 and deduplicated[0] == deduplicated[-1]:
+        deduplicated.pop()
+    return deduplicated if len(deduplicated) >= 3 else None
+
+
+def clip_open_path(
+    points: Sequence[Sequence[float]],
+    *,
+    base: Sequence[float],
+    direction: Sequence[float],
+    keep_negative: bool,
+) -> list[list[tuple[float, float]]]:
+    """Return the parts of an open polyline that lie on the kept side."""
+
+    chain = [(float(point[0]), float(point[1])) for point in points]
+    if len(chain) < 2:
+        return []
+    sides = [half_plane_side(point, base=base, direction=direction) for point in chain]
+    keep = (lambda value: value < 0.0) if keep_negative else (lambda value: value > 0.0)
+
+    pieces: list[list[tuple[float, float]]] = []
+    current: list[tuple[float, float]] = []
+    for index in range(len(chain) - 1):
+        side, following = sides[index], sides[index + 1]
+        if keep(side) or side == 0.0:
+            if not current or current[-1] != chain[index]:
+                current.append(chain[index])
+        if (side < 0.0 < following) or (following < 0.0 < side):
+            crossing = _crossing_point(chain[index], chain[index + 1], side, following)
+            if not current or current[-1] != crossing:
+                current.append(crossing)
+            if keep(side):
+                pieces.append(current)
+                current = []
+            else:
+                current = [crossing]
+    last_side = sides[-1]
+    if keep(last_side) or last_side == 0.0:
+        if not current or current[-1] != chain[-1]:
+            current.append(chain[-1])
+    if current:
+        pieces.append(current)
+    return [piece for piece in pieces if len(piece) >= 2]
+
+
+def split_ring_off_line(
+    points: Sequence[Sequence[float]],
+    *,
+    base: Sequence[float],
+    direction: Sequence[float],
+) -> list[list[tuple[float, float]]] | None:
+    """Return a ring's edges with the ones lying on the line removed.
+
+    A ring that was cut at a line is closed along that line, and the closing
+    chord is not a boundary of anything: it is where the drawing was folded.
+    Stroking it prints an edge the object does not have.  This returns the
+    remaining open chains, or `None` when no edge lies on the line and the
+    ring is therefore whole.
+    """
+
+    ring = [(float(point[0]), float(point[1])) for point in points]
+    if len(ring) < 3:
+        return None
+    extent = max(
+        max(point[0] for point in ring) - min(point[0] for point in ring),
+        max(point[1] for point in ring) - min(point[1] for point in ring),
+        1.0,
+    )
+    tolerance = 1e-9 * extent
+    on_line = [
+        abs(half_plane_side(point, base=base, direction=direction)) <= tolerance
+        for point in ring
+    ]
+    edges = [
+        (index, (index + 1) % len(ring))
+        for index in range(len(ring))
+    ]
+    dropped = [
+        index
+        for index, (first, second) in enumerate(edges)
+        if on_line[first] and on_line[second]
+    ]
+    if not dropped:
+        return None
+
+    chains: list[list[tuple[float, float]]] = []
+    current: list[tuple[float, float]] = []
+    # Start after a dropped edge so a chain is never split across the wrap.
+    start = (dropped[-1] + 1) % len(edges)
+    for step in range(len(edges)):
+        index = (start + step) % len(edges)
+        first, second = edges[index]
+        if index in dropped:
+            if len(current) >= 2:
+                chains.append(current)
+            current = []
+            continue
+        if not current:
+            current = [ring[first]]
+        current.append(ring[second])
+    if len(current) >= 2:
+        chains.append(current)
+    return chains
+
+
 def path_element(
     *,
     path_id: str,
@@ -226,6 +446,7 @@ def path_element(
     points_mm: Sequence[Sequence[float]],
     placement: Placement,
     fill: str | None = None,
+    stroke: str | None = None,
 ) -> str:
     """Return one `<path>` element for a measured path."""
 
@@ -240,9 +461,10 @@ def path_element(
     if closed:
         commands.append("Z")
     fill_attribute = "" if fill is None else f' fill="{fill}"'
+    stroke_attribute = "" if stroke is None else f' stroke="{stroke}"'
     return (
         f'<path id="{xml_attribute(path_id)}" '
-        f'data-role="{xml_attribute(role)}"{fill_attribute} '
+        f'data-role="{xml_attribute(role)}"{fill_attribute}{stroke_attribute} '
         f'd="{" ".join(commands)}"/>'
     )
 
@@ -302,6 +524,7 @@ def layer_elements(
     placement: Placement,
     hatched: Sequence[str],
     indent: str,
+    fill_only_ids: AbstractSet[str] = frozenset(),
 ) -> list[str]:
     """Return one `<g>` per line kind, in the vocabulary's own order.
 
@@ -331,6 +554,10 @@ def layer_elements(
         for path in paths:
             # An open path has no interior, so filling it would shade the area
             # under its implicit closing chord.
+            # A fill-only path carries an area whose boundary is drawn
+            # elsewhere, or not at all: stroking it would print the edge its
+            # own layer deliberately left out.
+            fill_only = path.id in fill_only_ids
             lines.append(
                 indent
                 + "  "
@@ -341,6 +568,7 @@ def layer_elements(
                     points_mm=path.points_mm,
                     placement=placement,
                     fill=fill if (fill and path.closed) else None,
+                    stroke="none" if fill_only else None,
                 )
             )
         lines.append(f"{indent}</g>")
@@ -354,7 +582,11 @@ __all__ = [
     "SVGRenderError",
     "SVG_DECIMALS",
     "SVG_NAMESPACE",
+    "center_axis_line",
     "center_axis_segment",
+    "clip_closed_ring",
+    "clip_open_path",
+    "half_plane_side",
     "finite_number",
     "hatch_pattern_elements",
     "hatch_pattern_id",
@@ -362,5 +594,6 @@ __all__ = [
     "layer_elements",
     "number_token",
     "path_element",
+    "split_ring_off_line",
     "xml_attribute",
 ]
