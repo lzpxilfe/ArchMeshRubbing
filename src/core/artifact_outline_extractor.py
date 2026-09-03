@@ -756,6 +756,7 @@ def _payload_from_union(
     try:
         topology = validate_outline_topology(
             payload,
+            precision_grid_mm=grid,
             cancellation_probe=cancellation_probe,
         )
     except ValueError as exc:

@@ -324,3 +324,66 @@ class TestExteriorTopology(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestGridScaleRefusalMessage(unittest.TestCase):
+    """A pinhole the size of the grid must say so, and change no decision."""
+
+    def setUp(self) -> None:
+        self.exterior = _path(
+            "exterior:main",
+            "exterior",
+            ((0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)),
+        )
+        # One grid cell of a 0.5 mm grid, sitting on the exterior's edge: what
+        # a triangle that collapsed on that grid leaves behind.
+        self.pinhole = _path(
+            "hole:pinhole",
+            "hole",
+            ((0.0, 4.0), (0.5, 4.0), (0.5, 4.5), (0.0, 4.5)),
+        )
+
+    def test_the_message_names_the_grid_and_what_to_change(self) -> None:
+        with self.assertRaises(ArtifactOutlineTopologyError) as raised:
+            validate_outline_topology(
+                _outline(self.exterior, self.pinhole),
+                precision_grid_mm=0.5,
+            )
+        message = str(raised.exception)
+        self.assertEqual(raised.exception.code, "hole_not_strictly_inside")
+        self.assertIn("1.0 x 1.0 cells", message)
+        self.assertIn("0.5 mm precision grid", message)
+        self.assertIn("finer precision_grid_mm", message)
+
+    def test_the_grid_changes_no_decision_and_is_optional(self) -> None:
+        without = self.assertRaises(ArtifactOutlineTopologyError)
+        with without as bare:
+            validate_outline_topology(_outline(self.exterior, self.pinhole))
+        self.assertEqual(bare.exception.code, "hole_not_strictly_inside")
+        self.assertNotIn("precision grid", str(bare.exception))
+        self.assertEqual(bare.exception.path_ids, ("exterior:main", "hole:pinhole"))
+
+    def test_a_hole_larger_than_the_grid_gets_no_pinhole_excuse(self) -> None:
+        wide = _path(
+            "hole:wide",
+            "hole",
+            ((0.0, 2.0), (5.0, 2.0), (5.0, 7.0), (0.0, 7.0)),
+        )
+        with self.assertRaises(ArtifactOutlineTopologyError) as raised:
+            validate_outline_topology(
+                _outline(self.exterior, wide),
+                precision_grid_mm=0.5,
+            )
+        self.assertNotIn("pinhole", str(raised.exception))
+
+    def test_a_valid_outline_is_unaffected_by_the_grid_argument(self) -> None:
+        inside = _path(
+            "hole:inside",
+            "hole",
+            ((2.0, 2.0), (4.0, 2.0), (4.0, 4.0), (2.0, 4.0)),
+        )
+        payload = _outline(self.exterior, inside)
+
+        bare = validate_outline_topology(payload)
+        with_grid = validate_outline_topology(payload, precision_grid_mm=0.5)
+        self.assertEqual(bare.to_dict(), with_grid.to_dict())

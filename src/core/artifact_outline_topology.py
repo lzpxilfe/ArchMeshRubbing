@@ -124,6 +124,11 @@ class _RingGeometry:
     polygon: Polygon
 
 
+# A ring no wider than this many precision-grid cells is at the grid's own
+# resolution, so a refusal can say where it came from.
+_GRID_PINHOLE_CELLS = 4.0
+
+
 def _path_order_key(path: VectorPath) -> tuple[Any, ...]:
     role_rank = {"exterior": 0, "hole": 1}.get(path.role, 2)
     return (role_rank, path.points_mm, path.id)
@@ -199,10 +204,47 @@ def _ring_geometry(
     return _RingGeometry(path=path, polygon=polygon)
 
 
+def _grid_scale_note(
+    hole: _RingGeometry,
+    *,
+    precision_grid_mm: float | None,
+) -> str:
+    """Say when a refused hole is the size of the grid rather than a feature.
+
+    Snapping a triangle to the precision grid can collapse it to zero area,
+    and a collapsed triangle drops out of the union and leaves its two
+    neighbours joined at a point only.  Near a silhouette every smooth
+    surface has such triangles, so a grid coarser than their projected width
+    puts a pinhole on the outline edge.  The refusal is right - a pinhole
+    touching the boundary is not a hole in an artifact - but the reader
+    cannot act on it without being told where it came from.
+    """
+
+    if precision_grid_mm is None or not math.isfinite(precision_grid_mm):
+        return ""
+    grid = float(precision_grid_mm)
+    if grid <= 0.0:
+        return ""
+    minimum_x, minimum_y, maximum_x, maximum_y = hole.polygon.bounds
+    width_cells = (maximum_x - minimum_x) / grid
+    height_cells = (maximum_y - minimum_y) / grid
+    if max(width_cells, height_cells) > _GRID_PINHOLE_CELLS:
+        return ""
+    return (
+        f"; this hole measures {width_cells:.1f} x {height_cells:.1f} cells of "
+        f"the declared {grid:g} mm precision grid, so it is a pinhole at the "
+        "grid's own resolution rather than a feature of the artifact: a "
+        "triangle whose projection collapsed on that grid dropped out of the "
+        "union. A finer precision_grid_mm resolves it, and a dense mesh or a "
+        "relieved surface needs one"
+    )
+
+
 def _validate_hole_owners(
     exteriors: Sequence[_RingGeometry],
     holes: Sequence[_RingGeometry],
     *,
+    precision_grid_mm: float | None = None,
     cancellation_probe: CancellationProbe | None = None,
 ) -> tuple[tuple[_RingGeometry, _RingGeometry], ...]:
     assignments: list[tuple[_RingGeometry, _RingGeometry]] = []
@@ -231,7 +273,8 @@ def _validate_hole_owners(
             if intersecting:
                 raise _issue(
                     "hole_not_strictly_inside",
-                    "a hole must not cross or touch an exterior boundary",
+                    "a hole must not cross or touch an exterior boundary"
+                    + _grid_scale_note(hole, precision_grid_mm=precision_grid_mm),
                     hole.path,
                     *(exterior.path for exterior in intersecting),
                 )
@@ -334,6 +377,7 @@ def _path_area_mm2(
 def validate_outline_topology(
     payload: VectorGeometryPayload,
     *,
+    precision_grid_mm: float | None = None,
     cancellation_probe: CancellationProbe | None = None,
 ) -> OutlineTopologyDiagnostics:
     """Validate and summarize an outline Polygon or MultiPolygon.
@@ -341,6 +385,10 @@ def validate_outline_topology(
     The function does not normalize or repair geometry.  A successful return
     proves that every path participates in one valid polygon topology under
     the explicit ``exterior`` and ``hole`` roles.
+
+    ``precision_grid_mm`` is used only to explain a refusal: it lets the
+    message say when the offending ring is the size of the grid it was
+    snapped to.  It changes no decision.
     """
 
     raise_if_cancelled(cancellation_probe)
@@ -373,6 +421,7 @@ def validate_outline_topology(
     assignments = _validate_hole_owners(
         exteriors,
         holes,
+        precision_grid_mm=precision_grid_mm,
         cancellation_probe=cancellation_probe,
     )
     _validate_hole_pairs(holes, cancellation_probe=cancellation_probe)
