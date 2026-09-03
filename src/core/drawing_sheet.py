@@ -30,14 +30,17 @@ import hashlib
 import math
 from typing import Any, Mapping, Sequence
 
+from .artifact_axis_alignment import AXIS_ALIGN_RECIPE_KIND
 from .artifact_document import ArtifactDocument
 from .artifact_vector_export import (
     ArtifactVectorExportError,
     _payload_bounds,
     _require_exportable_record,
+    center_axis_vector_path,
 )
 from .canonical_json import canonical_json_bytes
 from .drawing_style import (
+    CENTER_AXIS,
     DrawingStyleError,
     get_preset as get_drawing_style_preset,
     line_kind_for_record_role,
@@ -196,6 +199,7 @@ class DrawingSheetOptions:
     scale_denominator: float = 1.0
     page: SheetPage = field(default_factory=SheetPage)
     style_preset: str = "provisional/v1"
+    show_center_axis: bool = False
     gutter_mm: float = 8.0
     stroke_color: str = "#111111"
     title: str = "ArchMeshRubbing measured drawing sheet"
@@ -205,6 +209,8 @@ class DrawingSheetOptions:
             raise DrawingSheetError("title_block must be a TitleBlock")
         if not isinstance(self.page, SheetPage):
             raise DrawingSheetError("page must be a SheetPage")
+        if not isinstance(self.show_center_axis, bool):
+            raise DrawingSheetError("show_center_axis must be a boolean")
         try:
             denominator = finite_number(
                 self.scale_denominator,
@@ -583,9 +589,11 @@ def _sheet_provenance(
     options: DrawingSheetOptions,
     scale_bar: Mapping[str, Any],
     title_rows: Sequence[Mapping[str, str]],
+    center_axis: Mapping[str, Any],
 ) -> dict[str, Any]:
     preset = get_drawing_style_preset(options.style_preset)
     return {
+        "center_axis": dict(center_axis),
         "document_id": document.document_id,
         "document_manifest_sha256": document.canonical_sha256,
         "figures": [
@@ -718,6 +726,21 @@ def compose_drawing_sheet(
     if len(set(ids)) != len(ids):
         raise DrawingSheetError("the same record cannot appear twice on one sheet")
 
+    # The axis is where the active Align put the artifact, so it is drawable
+    # only when that Align established one.  Asking for it under a manual drag
+    # is not an error the user can act on; the honest answer is to draw the
+    # sheet without a line nothing backs, and to say so in the sidecar.
+    align_id = document.active_align_revision_id
+    align = (
+        document.align_revision_index.get(align_id)
+        if isinstance(align_id, str)
+        else None
+    )
+    align_recipe_kind = str(getattr(align, "recipe", {}).get("kind", "") or "")
+    draw_center_axis = (
+        options.show_center_axis and align_recipe_kind == AXIS_ALIGN_RECIPE_KIND
+    )
+
     prepared = []
     for record_id in ids:
         try:
@@ -731,6 +754,13 @@ def compose_drawing_sheet(
             except DrawingStyleError as exc:
                 raise DrawingSheetError(str(exc)) from exc
             by_kind.setdefault(kind, []).append(path)
+        if draw_center_axis:
+            try:
+                axis_path = center_axis_vector_path(payload)
+            except ArtifactVectorExportError as exc:
+                raise DrawingSheetError(str(exc)) from exc
+            if axis_path is not None:
+                by_kind.setdefault(CENTER_AXIS, []).append(axis_path)
         prepared.append(
             (
                 record.id,
@@ -755,6 +785,12 @@ def compose_drawing_sheet(
             options=options,
             scale_bar=scale_bar,
             title_rows=title_rows,
+            center_axis={
+                "align_recipe_kind": align_recipe_kind,
+                "align_revision_id": str(align_id or ""),
+                "drawn": draw_center_axis,
+                "requested": options.show_center_axis,
+            },
         )
         svg_bytes = _render_sheet(
             placed,

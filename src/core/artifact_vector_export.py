@@ -33,8 +33,14 @@ from .alignment_utils import (
     compose_align_matrices,
     scene_trs_matrix_about_pivot,
 )
+from .artifact_axis_alignment import (
+    AXIS_ALIGN_RECIPE_KIND,
+    ArtifactAxisAlignmentError,
+    verify_axis_alignment_matrix,
+)
 from .artifact_outline_extractor import REVIEWED_OUTLINE_BACKENDS
 from .drawing_style import (
+    CENTER_AXIS,
     DrawingStyleError,
     get_preset as get_drawing_style_preset,
     line_kind_for_record_role,
@@ -42,6 +48,7 @@ from .drawing_style import (
 from .drawing_svg import (
     Placement,
     SVGRenderError,
+    center_axis_segment,
     hatch_pattern_elements,
     hatched_kinds,
     layer_elements,
@@ -111,10 +118,41 @@ _SVG_NAMESPACE = "http://www.w3.org/2000/svg"
 _HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _UTC_SECONDS_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+_AXIS_ALIGN_RECIPE_KEYS = frozenset(
+    {
+        "bottom_center_mm_decimal",
+        "bottom_normal_unit_decimal",
+        "bottom_record_id",
+        "convention",
+        "kind",
+        "top_center_mm_decimal",
+        "top_normal_unit_decimal",
+        "top_record_id",
+    }
+)
+_MANUAL_ALIGN_RECIPE_KIND = "manual_scene_trs_delta"
+_NON_ROOT_ALIGN_RECIPE_KINDS = frozenset(
+    {_MANUAL_ALIGN_RECIPE_KIND, AXIS_ALIGN_RECIPE_KIND}
+)
+# The union of every recipe key any supported kind uses.  `_public_mapping`
+# filters against this before validation, so a key missing here is dropped in
+# silence rather than rejected: the recipe would then fail its own exact-key
+# check with a confusing "missing field" instead of an unsupported-kind error.
 _PUBLIC_ALIGN_RECIPE_KEYS = frozenset(
     {"convention", "kind", "pivot_mm", "rotation_deg", "translation_mm"}
+) | _AXIS_ALIGN_RECIPE_KEYS
+# Likewise for QC.  A computed alignment records what made it believable, and
+# that evidence has to survive into the package rather than being filtered out
+# on the way.
+_AXIS_ALIGN_QC_KEYS = frozenset(
+    {
+        "axis_tilt_corrected_deg",
+        "center_separation_mm",
+        "circle_normal_disagreement_deg",
+        "proper_rigid",
+    }
 )
-_PUBLIC_ALIGN_QC_KEYS = frozenset({"proper_rigid", "rigid"})
+_PUBLIC_ALIGN_QC_KEYS = frozenset({"proper_rigid", "rigid"}) | _AXIS_ALIGN_QC_KEYS
 _PUBLIC_GEOMETRY_RECIPE_KEYS = frozenset(
     {
         "dependency_policy",
@@ -359,6 +397,13 @@ class VectorSVGOptions:
     existed must keep rendering to the same bytes, or every package already
     written would stop verifying against its own sidecar.
     """
+    show_center_axis: bool = False
+    """Draw the artifact's rotation axis as a centre line.
+
+    Off by default, and meaningful only where a preset separates line kinds.
+    The caller decides whether the active Align actually established an axis;
+    drawing one otherwise would put a claim on the page that nothing backs.
+    """
 
     def __post_init__(self) -> None:
         margin = _finite_number(
@@ -375,6 +420,14 @@ class VectorSVGOptions:
         if _HEX_COLOR_RE.fullmatch(color) is None:
             raise ArtifactVectorExportError(
                 "stroke_color must be a six-digit hexadecimal color"
+            )
+        if not isinstance(self.show_center_axis, bool):
+            raise ArtifactVectorExportError("show_center_axis must be a boolean")
+        if self.show_center_axis and self.style_preset is None:
+            raise ArtifactVectorExportError(
+                "show_center_axis needs a style_preset; without one every line is "
+                "drawn at the same weight and a centre line would be "
+                "indistinguishable from the outline"
             )
         title = _required_string(self.title, field_name="title").strip()
         if len(title) > 512:
@@ -870,6 +923,8 @@ def _path_element(
 
 def _paths_by_line_kind(
     payload: VectorGeometryPayload,
+    *,
+    center_axis: bool = False,
 ) -> dict[str, list[VectorPath]]:
     by_kind: dict[str, list[VectorPath]] = {}
     for path in payload.paths:
@@ -878,7 +933,33 @@ def _paths_by_line_kind(
         except DrawingStyleError as exc:
             raise ArtifactVectorExportError(str(exc)) from exc
         by_kind.setdefault(kind, []).append(path)
+    if center_axis:
+        axis_path = center_axis_vector_path(payload)
+        if axis_path is not None:
+            by_kind.setdefault(CENTER_AXIS, []).append(axis_path)
     return by_kind
+
+
+def center_axis_vector_path(payload: VectorGeometryPayload) -> VectorPath | None:
+    """Return the rotation axis drawn across this record's own content.
+
+    The axis is not a measurement and has no record of its own: it is where the
+    active Align put the artifact.  Deciding *whether* an alignment established
+    an axis belongs to the caller; this only draws the line once that is known.
+    """
+
+    try:
+        segment = center_axis_segment(payload.frame.to_dict(), _payload_bounds(payload))
+    except SVGRenderError as exc:
+        raise ArtifactVectorExportError(str(exc)) from exc
+    if segment is None:
+        return None
+    return VectorPath(
+        id="center-axis",
+        role=CENTER_AXIS,
+        closed=False,
+        points_mm=segment,
+    )
 
 
 def _styled_layers(
@@ -891,7 +972,7 @@ def _styled_layers(
 
     assert options.style_preset is not None
     preset = get_drawing_style_preset(options.style_preset)
-    by_kind = _paths_by_line_kind(payload)
+    by_kind = _paths_by_line_kind(payload, center_axis=options.show_center_axis)
     hatched = hatched_kinds(by_kind, preset=preset)
 
     try:
@@ -1017,6 +1098,7 @@ def _presentation(
             "sha256": preset.sha256(),
             "source_id": preset.source_id,
         }
+        presentation["show_center_axis"] = options.show_center_axis
     return presentation
 
 
@@ -1201,7 +1283,7 @@ def _options_from_presentation(value: object) -> tuple[VectorSVGOptions, Mapping
     styled = isinstance(value, Mapping) and "style_preset" in value
     presentation = _exact_keys(
         value,
-        (base_keys | {"style_preset"}) if styled else base_keys,
+        (base_keys | {"show_center_axis", "style_preset"}) if styled else base_keys,
         model_name="presentation",
     )
     if presentation["physical_scale"] != "1:1" or presentation["unit"] != "mm":
@@ -1209,6 +1291,11 @@ def _options_from_presentation(value: object) -> tuple[VectorSVGOptions, Mapping
     style_preset = (
         _validated_style_preset(presentation["style_preset"]) if styled else None
     )
+    show_center_axis = bool(presentation["show_center_axis"]) if styled else False
+    if styled and not isinstance(presentation["show_center_axis"], bool):
+        raise ArtifactVectorExportError(
+            "presentation.show_center_axis must be a boolean"
+        )
     options = VectorSVGOptions(
         margin_mm=_finite_number(
             presentation["margin_mm"], field_name="presentation.margin_mm", minimum=0.0
@@ -1223,6 +1310,7 @@ def _options_from_presentation(value: object) -> tuple[VectorSVGOptions, Mapping
         ),
         title=_required_string(presentation["title"], field_name="presentation.title"),
         style_preset=style_preset,
+        show_center_axis=show_center_axis,
     )
     return options, presentation
 
@@ -1701,18 +1789,14 @@ def _validate_current_vector_provenance(
                 "provenance Align ancestry revision IDs must be unique"
             )
         seen_ids.add(revision.id)
-        qc = _exact_keys(
-            public["qc"],
-            {"proper_rigid"},
-            model_name=f"{model_name}.qc",
-        )
-        if qc["proper_rigid"] is not True:
-            raise ArtifactVectorExportError(
-                f"{model_name}.qc.proper_rigid must be true"
-            )
         recipe_value = public["recipe"]
         assert isinstance(recipe_value, Mapping)
         recipe_kind = recipe_value.get("kind")
+        # QC keys depend on the recipe: a manual drag establishes nothing but
+        # rigidity, while a computed alignment carries the evidence that made it
+        # believable.  Validating QC against a fixed key set would have silently
+        # dropped that evidence on its way into the package.
+        _validate_align_qc(public["qc"], recipe_kind, model_name=f"{model_name}.qc")
         if index == 0:
             _exact_keys(
                 recipe_value,
@@ -1732,24 +1816,10 @@ def _validate_current_vector_provenance(
                     "initial Align ancestry matrix must be identity"
                 )
         else:
-            manual = _exact_keys(
-                recipe_value,
-                {
-                    "convention",
-                    "kind",
-                    "pivot_mm",
-                    "rotation_deg",
-                    "translation_mm",
-                },
-                model_name=f"{model_name}.recipe",
-            )
-            if recipe_kind != "manual_scene_trs_delta":
+            if recipe_kind not in _NON_ROOT_ALIGN_RECIPE_KINDS:
+                supported = ", ".join(sorted(_NON_ROOT_ALIGN_RECIPE_KINDS))
                 raise ArtifactVectorExportError(
-                    "non-root Align ancestry revisions must be manual deltas"
-                )
-            if manual["convention"] != "delta @ parent":
-                raise ArtifactVectorExportError(
-                    "manual Align ancestry convention is invalid"
+                    f"non-root Align ancestry revisions must be one of: {supported}"
                 )
             parent = parsed_chain[-1]
             if revision.parent_id != parent.id:
@@ -1763,32 +1833,67 @@ def _validate_current_vector_provenance(
                 raise ArtifactVectorExportError(
                     "provenance Align ancestry changes source metadata"
                 )
-            for key in ("pivot_mm", "rotation_deg", "translation_mm"):
-                _strict_vec3(
-                    manual[key],
-                    field_name=f"{model_name}.recipe.{key}",
+            # Every non-root revision is re-derived from its own recipe and
+            # compared against the matrix it stores.  The recipe is never taken
+            # on trust, whichever kind it is.
+            if recipe_kind == AXIS_ALIGN_RECIPE_KIND:
+                axis = _exact_keys(
+                    recipe_value,
+                    _AXIS_ALIGN_RECIPE_KEYS,
+                    model_name=f"{model_name}.recipe",
                 )
-            try:
-                delta = scene_trs_matrix_about_pivot(
-                    manual["translation_mm"],
-                    manual["rotation_deg"],
-                    1.0,
-                    manual["pivot_mm"],
+                try:
+                    verify_axis_alignment_matrix(
+                        recipe=axis,
+                        parent_matrix=parent.matrix,
+                        matrix=revision.matrix,
+                    )
+                except ArtifactAxisAlignmentError as exc:
+                    raise ArtifactVectorExportError(
+                        f"cannot verify {model_name}: {exc}"
+                    ) from exc
+            else:
+                manual = _exact_keys(
+                    recipe_value,
+                    {
+                        "convention",
+                        "kind",
+                        "pivot_mm",
+                        "rotation_deg",
+                        "translation_mm",
+                    },
+                    model_name=f"{model_name}.recipe",
                 )
-                recomputed = compose_align_matrices(delta, parent.matrix)
-            except (TypeError, ValueError) as exc:
-                raise ArtifactVectorExportError(
-                    f"cannot recompute {model_name}: {exc}"
-                ) from exc
-            if not np.allclose(
-                revision.matrix,
-                recomputed,
-                rtol=0.0,
-                atol=MATRIX_ATOL,
-            ):
-                raise ArtifactVectorExportError(
-                    "provenance Align ancestry matrix does not match its delta recipe"
-                )
+                if manual["convention"] != "delta @ parent":
+                    raise ArtifactVectorExportError(
+                        "manual Align ancestry convention is invalid"
+                    )
+                for key in ("pivot_mm", "rotation_deg", "translation_mm"):
+                    _strict_vec3(
+                        manual[key],
+                        field_name=f"{model_name}.recipe.{key}",
+                    )
+                try:
+                    delta = scene_trs_matrix_about_pivot(
+                        manual["translation_mm"],
+                        manual["rotation_deg"],
+                        1.0,
+                        manual["pivot_mm"],
+                    )
+                    recomputed = compose_align_matrices(delta, parent.matrix)
+                except (TypeError, ValueError) as exc:
+                    raise ArtifactVectorExportError(
+                        f"cannot recompute {model_name}: {exc}"
+                    ) from exc
+                if not np.allclose(
+                    revision.matrix,
+                    recomputed,
+                    rtol=0.0,
+                    atol=MATRIX_ATOL,
+                ):
+                    raise ArtifactVectorExportError(
+                        "provenance Align ancestry matrix does not match its delta recipe"
+                    )
         public_chain.append(public)
         parsed_chain.append(revision)
 
@@ -2009,6 +2114,35 @@ def _validate_outline_topology_qc(value: object) -> None:
     _required_string(
         topology["validity_reason"],
         field_name="qc.record.outline_topology.validity_reason",
+    )
+
+
+def _validate_align_qc(
+    value: object,
+    recipe_kind: object,
+    *,
+    model_name: str,
+) -> None:
+    """Close the Align QC against the key set its recipe kind is entitled to."""
+
+    expected = (
+        _AXIS_ALIGN_QC_KEYS
+        if recipe_kind == AXIS_ALIGN_RECIPE_KIND
+        else frozenset({"proper_rigid"})
+    )
+    qc = _exact_keys(value, expected, model_name=model_name)
+    if qc["proper_rigid"] is not True:
+        raise ArtifactVectorExportError(f"{model_name}.proper_rigid must be true")
+    if recipe_kind != AXIS_ALIGN_RECIPE_KIND:
+        return
+    for key in ("axis_tilt_corrected_deg", "circle_normal_disagreement_deg"):
+        angle = _finite_number(qc[key], field_name=f"{model_name}.{key}", minimum=0.0)
+        if angle > 180.0:
+            raise ArtifactVectorExportError(f"{model_name}.{key} must be at most 180")
+    _finite_number(
+        qc["center_separation_mm"],
+        field_name=f"{model_name}.center_separation_mm",
+        strictly_positive=True,
     )
 
 

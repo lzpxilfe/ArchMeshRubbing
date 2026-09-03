@@ -16,6 +16,8 @@ from dataclasses import dataclass
 import math
 from typing import Mapping, Sequence
 
+import numpy as np
+
 from .drawing_style import (
     DrawingStylePreset,
     LINE_KINDS,
@@ -136,6 +138,63 @@ class Placement:
         x = origin_x + (float(point[0]) - minimum_x) / self.scale_denominator
         y = origin_y + (maximum_y - float(point[1])) / self.scale_denominator
         return x, y
+
+
+def center_axis_segment(
+    frame: Mapping[str, Sequence[float]],
+    bounds: Sequence[float],
+    *,
+    axis_world: Sequence[float] = (0.0, 0.0, 1.0),
+) -> tuple[tuple[float, float], tuple[float, float]] | None:
+    """Return the artifact's rotation axis as a segment in a record's frame.
+
+    A positioned artifact's axis is `axis_world` through the world origin.  This
+    projects that line into the record's own plane and clips it to the drawn
+    content, so an elevation gets the centre line at the place the artifact
+    actually turns about.
+
+    Returns `None` when the axis is perpendicular to the plane, which is the
+    top and bottom views: there the axis projects to a point, and a drawing that
+    put a line through it would be asserting something untrue.
+    """
+
+    try:
+        origin = np.asarray(frame["origin_world_mm"], dtype=np.float64)
+        u_axis = np.asarray(frame["u_axis_world"], dtype=np.float64)
+        v_axis = np.asarray(frame["v_axis_world"], dtype=np.float64)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise SVGRenderError(f"frame is not a planar frame: {exc}") from exc
+    axis = np.asarray(axis_world, dtype=np.float64)
+    if origin.shape != (3,) or u_axis.shape != (3,) or v_axis.shape != (3,):
+        raise SVGRenderError("frame axes must be three-component vectors")
+
+    direction = (float(np.dot(axis, u_axis)), float(np.dot(axis, v_axis)))
+    # A degenerate projection is the perpendicular case, not an error.
+    if math.hypot(*direction) <= 1e-12:
+        return None
+    base = (float(np.dot(-origin, u_axis)), float(np.dot(-origin, v_axis)))
+
+    minimum_u, minimum_v, maximum_u, maximum_v = (float(value) for value in bounds)
+    # Liang-Barsky against the content rectangle, on the infinite line.
+    low, high = -math.inf, math.inf
+    for delta, base_value, low_edge, high_edge in (
+        (direction[0], base[0], minimum_u, maximum_u),
+        (direction[1], base[1], minimum_v, maximum_v),
+    ):
+        if abs(delta) <= 1e-12:
+            if base_value < low_edge or base_value > high_edge:
+                return None
+            continue
+        first = (low_edge - base_value) / delta
+        second = (high_edge - base_value) / delta
+        low = max(low, min(first, second))
+        high = min(high, max(first, second))
+    if not (low < high):
+        return None
+    return (
+        (base[0] + direction[0] * low, base[1] + direction[1] * low),
+        (base[0] + direction[0] * high, base[1] + direction[1] * high),
+    )
 
 
 def path_element(
@@ -281,6 +340,7 @@ __all__ = [
     "SVGRenderError",
     "SVG_DECIMALS",
     "SVG_NAMESPACE",
+    "center_axis_segment",
     "finite_number",
     "hatch_pattern_elements",
     "hatch_pattern_id",

@@ -651,6 +651,53 @@ class ArtifactSession:
         )
         return self.with_document(self.document.append_align_revision(revision))
 
+    def commit_axis_alignment(
+        self,
+        *,
+        top_record_id: str,
+        bottom_record_id: str,
+        operator: str,
+        created_at: str | None = None,
+        revision_id: str | None = None,
+    ) -> "ArtifactSession":
+        """Commit an Align derived from two measured circles.
+
+        `commit_preview` cannot express this: it takes translation and rotation
+        numbers and writes `manual_scene_trs_delta` unconditionally, which is
+        the right contract for a drag but says nothing about where a computed
+        alignment came from.  Here the recipe carries its own derivation, the
+        way `commit_vector_record` already lets a caller supply one.
+        """
+
+        from .artifact_axis_alignment import (  # noqa: PLC0415
+            ArtifactAxisAlignmentError,
+            build_axis_alignment,
+        )
+
+        parent_id = self.document.active_align_revision_id
+        if parent_id is None:
+            raise ArtifactSessionError("an active Align revision is required")
+        parent = self.document.align_revision_index[parent_id]
+        try:
+            matrix, recipe, qc = build_axis_alignment(
+                self.document,
+                top_record_id=top_record_id,
+                bottom_record_id=bottom_record_id,
+            )
+        except ArtifactAxisAlignmentError as exc:
+            raise ArtifactSessionError(str(exc)) from exc
+        revision = AlignRevision(
+            id=revision_id or _new_id("align"),
+            parent_id=parent.id,
+            source_metadata_revision_id=parent.source_metadata_revision_id,
+            matrix4x4=_matrix4x4_tuple(matrix),
+            recipe=recipe,
+            qc=qc,
+            created_at=str(created_at or _utc_now()),
+            operator=operator,
+        )
+        return self.with_document(self.document.append_align_revision(revision))
+
     def activate_align(self, revision_id: str) -> "ArtifactSession":
         try:
             document = self.document.activate_align_revision(revision_id)

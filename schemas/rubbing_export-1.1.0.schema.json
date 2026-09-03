@@ -86,10 +86,10 @@
           ]
         },
         "qc": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["proper_rigid"],
-          "properties": {"proper_rigid": {"const": true}}
+          "oneOf": [
+            {"$ref": "#/$defs/alignQcManual"},
+            {"$ref": "#/$defs/alignQcAxis"}
+          ]
         },
         "recipe": {
           "oneOf": [
@@ -116,6 +116,30 @@
                 "rotation_deg": {"$ref": "#/$defs/vec3"},
                 "translation_mm": {"$ref": "#/$defs/vec3"}
               }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "bottom_center_mm_decimal",
+                "bottom_normal_unit_decimal",
+                "bottom_record_id",
+                "convention",
+                "kind",
+                "top_center_mm_decimal",
+                "top_normal_unit_decimal",
+                "top_record_id"
+              ],
+              "properties": {
+                "bottom_center_mm_decimal": {"$ref": "#/$defs/vec3Decimal6"},
+                "bottom_normal_unit_decimal": {"$ref": "#/$defs/vec3Decimal9"},
+                "bottom_record_id": {"$ref": "#/$defs/nonEmptyString"},
+                "convention": {"const": "delta @ parent"},
+                "kind": {"const": "rotation_axis_from_circle_records/v1"},
+                "top_center_mm_decimal": {"$ref": "#/$defs/vec3Decimal6"},
+                "top_normal_unit_decimal": {"$ref": "#/$defs/vec3Decimal9"},
+                "top_record_id": {"$ref": "#/$defs/nonEmptyString"}
+              }
             }
           ]
         },
@@ -132,7 +156,12 @@
             },
             "required": ["recipe"]
           },
-          "then": {"properties": {"parent_id": {"type": "null"}}}
+          "then": {
+            "properties": {
+              "parent_id": {"type": "null"},
+              "qc": {"$ref": "#/$defs/alignQcManual"}
+            }
+          }
         },
         {
           "if": {
@@ -145,7 +174,29 @@
             "required": ["recipe"]
           },
           "then": {
-            "properties": {"parent_id": {"$ref": "#/$defs/nonEmptyString"}}
+            "properties": {
+              "parent_id": {"$ref": "#/$defs/nonEmptyString"},
+              "qc": {"$ref": "#/$defs/alignQcManual"}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "recipe": {
+                "properties": {
+                  "kind": {"const": "rotation_axis_from_circle_records/v1"}
+                },
+                "required": ["kind"]
+              }
+            },
+            "required": ["recipe"]
+          },
+          "then": {
+            "properties": {
+              "parent_id": {"$ref": "#/$defs/nonEmptyString"},
+              "qc": {"$ref": "#/$defs/alignQcAxis"}
+            }
           }
         }
       ]
@@ -155,6 +206,42 @@
       "minItems": 3,
       "maxItems": 3,
       "items": {"type": "number"}
+    },
+    "vec3Decimal6": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {"type": "string", "pattern": "^-?(0|[1-9][0-9]*)\\.[0-9]{6}$"}
+    },
+    "vec3Decimal9": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {"type": "string", "pattern": "^-?(0|[1-9][0-9]*)\\.[0-9]{9}$"}
+    },
+    "alignQcManual": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["proper_rigid"],
+      "properties": {"proper_rigid": {"const": true}}
+    },
+    "alignQcAxis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "axis_tilt_corrected_deg",
+        "center_separation_mm",
+        "circle_normal_disagreement_deg",
+        "proper_rigid"
+      ],
+      "properties": {
+        "axis_tilt_corrected_deg": {"type": "number", "minimum": 0, "maximum": 180},
+        "center_separation_mm": {"type": "number", "exclusiveMinimum": 0},
+        "circle_normal_disagreement_deg": {
+          "type": "number", "minimum": 0, "maximum": 180
+        },
+        "proper_rigid": {"const": true}
+      }
     },
     "dependencyReceipt": {
       "$ref": "urn:archmeshrubbing:schema:rubbing-export:1.0.0#/$defs/dependencyReceipt"
