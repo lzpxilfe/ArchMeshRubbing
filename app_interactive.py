@@ -257,6 +257,7 @@ from src.core.artifact_geometry_metrics import (  # noqa: E402
     ArtifactGeometryMetricsComputation,
 )
 from src.core.artifact_surface_measurement import (  # noqa: E402
+    SURFACE_DIAMETER_RECORD_TYPE,
     BARYCENTRIC_DENOMINATOR,
     ArtifactSurfaceMeasurementComputation,
     resolve_surface_anchor_from_ray,
@@ -3980,6 +3981,7 @@ class SectionPanel(QWidget):
     nativeVectorRecordSelected = pyqtSignal(str)
     nativeVectorExportRequested = pyqtSignal()
     drawingSheetRequested = pyqtSignal()
+    axisAlignRequested = pyqtSignal()
     nativeRubbingRequested = pyqtSignal()
     nativeRubbingRecordSelected = pyqtSignal(str)
     nativeRubbingExportRequested = pyqtSignal()
@@ -4242,6 +4244,43 @@ class SectionPanel(QWidget):
         self.btn_drawing_sheet.setEnabled(False)
         self.btn_drawing_sheet.clicked.connect(self.drawingSheetRequested.emit)
         native_layout.addWidget(self.btn_drawing_sheet)
+
+        self.check_drawing_sheet_center_axis = QCheckBox("중심축선 그리기")
+        self.check_drawing_sheet_center_axis.setToolTip(
+            "회전축으로 정치한 경우에만 도면에 일점쇄선 중심축이 들어갑니다.\n"
+            "수동 정치 상태에서는 켜도 그리지 않습니다. 근거 없는 축선은 그리지 않습니다."
+        )
+        native_layout.addWidget(self.check_drawing_sheet_center_axis)
+
+        axis_line = QFrame()
+        axis_line.setFrameShape(QFrame.Shape.HLine)
+        axis_line.setFrameShadow(QFrame.Shadow.Sunken)
+        native_layout.addWidget(axis_line)
+        axis_title = QLabel("회전축 정치 · 지름 기록 두 개로")
+        axis_title.setStyleSheet("font-weight: bold;")
+        native_layout.addWidget(axis_title)
+        axis_hint = QLabel(
+            "구연과 저부 지름을 재두면 두 원의 중심을 잇는 선이 회전축입니다."
+        )
+        axis_hint.setWordWrap(True)
+        native_layout.addWidget(axis_hint)
+
+        self.combo_axis_top_record = QComboBox()
+        self.combo_axis_top_record.setToolTip("위쪽 원. 보통 구연부입니다.")
+        native_layout.addWidget(self.combo_axis_top_record)
+        self.combo_axis_bottom_record = QComboBox()
+        self.combo_axis_bottom_record.setToolTip("아래쪽 원. 보통 저부입니다.")
+        native_layout.addWidget(self.combo_axis_bottom_record)
+
+        self.btn_axis_align = QPushButton("회전축으로 정치")
+        set_pixel_icon(self.btn_axis_align, "align")
+        self.btn_axis_align.setEnabled(False)
+        self.btn_axis_align.setToolTip(
+            "회전축을 +Z로, 아래 원의 중심을 원점으로 보냅니다.\n"
+            "새 Align이므로 기존 측정 기록은 모두 이전 정치 기준이 되어 다시 재야 합니다."
+        )
+        self.btn_axis_align.clicked.connect(self.axisAlignRequested.emit)
+        native_layout.addWidget(self.btn_axis_align)
 
         rubbing_line = QFrame()
         rubbing_line.setFrameShape(QFrame.Shape.HLine)
@@ -5025,6 +5064,9 @@ class MainWindow(QMainWindow):
         )
         self.section_panel.drawingSheetRequested.connect(
             self.on_drawing_sheet_requested
+        )
+        self.section_panel.axisAlignRequested.connect(
+            self.on_axis_align_requested
         )
         self.section_panel.list_drawing_sheet_records.itemChanged.connect(
             self.on_drawing_sheet_item_changed
@@ -17725,6 +17767,7 @@ class MainWindow(QMainWindow):
         vector_records: list[Any] = []
         rubbing_records: list[Any] = []
         tile_unwrap_records: list[Any] = []
+        diameter_records: list[Any] = []
         selected_vector_id: str | None = None
         selected_rubbing_id: str | None = None
         selected_tile_unwrap_id: str | None = None
@@ -17810,6 +17853,8 @@ class MainWindow(QMainWindow):
                         record,
                     ):
                         tile_unwrap_records.append(record)
+                    elif self._native_diameter_record_is_usable(session, record):
+                        diameter_records.append(record)
                 except Exception:
                     continue
         self._replace_native_record_choices(
@@ -17831,6 +17876,39 @@ class MainWindow(QMainWindow):
             selected_id=selected_tile_unwrap_id,
         )
         self._refresh_drawing_sheet_records(vector_records)
+        self._refresh_axis_alignment_records(diameter_records)
+
+    @staticmethod
+    def _native_diameter_record_is_usable(session, record) -> bool:
+        """READY and FRESH circle records are the ones an axis may rest on."""
+
+        return bool(
+            isinstance(session, ArtifactSession)
+            and getattr(record, "type", None) == SURFACE_DIAMETER_RECORD_TYPE
+            and str(record.lifecycle_status.value) == "ready"
+            and session.document.record_freshness(record.id).value == "fresh"
+        )
+
+    def _refresh_axis_alignment_records(self, records: list[Any]) -> None:
+        panel = getattr(self, "section_panel", None)
+        top = getattr(panel, "combo_axis_top_record", None)
+        bottom = getattr(panel, "combo_axis_bottom_record", None)
+        if top is None or bottom is None:
+            return
+        for combo, placeholder in (
+            (top, "위쪽 원 (구연) 지름 기록"),
+            (bottom, "아래쪽 원 (저부) 지름 기록"),
+        ):
+            self._replace_native_record_choices(
+                combo,
+                placeholder=placeholder,
+                records=records,
+                selected_id=str(combo.currentData() or "") or None,
+            )
+        button = getattr(panel, "btn_axis_align", None)
+        if button is not None:
+            # Two circles are the minimum: one gives a plane, not an axis.
+            button.setEnabled(len(records) >= 2)
 
     def _refresh_drawing_sheet_records(self, records: list[Any]) -> None:
         """Rebuild the sheet checklist, keeping what was checked and its order.
@@ -19326,6 +19404,84 @@ class MainWindow(QMainWindow):
         except ArtifactExportError as exc:
             raise ArtifactVectorExportError(str(exc)) from exc
 
+    def on_axis_align_requested(self) -> None:
+        """Commit an Align whose axis comes from two measured circles."""
+
+        session = getattr(self, "_artifact_session", None)
+        if not isinstance(session, ArtifactSession):
+            self.status_info.setText("정치할 ArtifactDocument가 없습니다.")
+            return
+        try:
+            self._artifact_workbench_controller().require_stable_session(
+                session,
+                measurement=True,
+            )
+        except ArtifactWorkbenchError as exc:
+            self.status_info.setText(f"회전축 정치 차단: {exc}")
+            return
+        panel = self.section_panel
+        top_id = str(panel.combo_axis_top_record.currentData() or "")
+        bottom_id = str(panel.combo_axis_bottom_record.currentData() or "")
+        if not top_id or not bottom_id:
+            self.status_info.setText("위쪽과 아래쪽 지름 기록을 각각 고르세요.")
+            return
+
+        # A new Align makes every earlier record stale, which is correct but
+        # invisible: say so before it happens rather than letting the user
+        # think their measurements disappeared.
+        stale = sum(
+            1
+            for record in session.document.records
+            if session.document.record_freshness(record.id).value == "fresh"
+        )
+        answer = QMessageBox.question(
+            self,
+            "회전축으로 정치",
+            "회전축을 +Z로, 아래 원의 중심을 원점으로 보냅니다.\n\n"
+            f"새 Align이 만들어지므로 지금 FRESH 상태인 기록 {stale}개는 "
+            "이전 정치 기준이 되어 다시 측정해야 합니다. 기록이 사라지지는 "
+            "않고 이력에 그대로 남습니다.\n\n계속할까요?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            aligned = session.commit_axis_alignment(
+                top_record_id=top_id,
+                bottom_record_id=bottom_id,
+                operator="local-user",
+            )
+        except ArtifactSessionError as exc:
+            # These messages name the measured angle or distance that failed,
+            # so show them as they are.
+            self.status_info.setText(f"회전축 정치 실패: {exc}")
+            QMessageBox.warning(self, "회전축 정치 실패", str(exc))
+            return
+        except Exception as exc:
+            self.status_info.setText("회전축 정치 실패")
+            QMessageBox.warning(
+                self,
+                "회전축 정치 실패",
+                f"{type(exc).__name__}: {exc}",
+            )
+            return
+
+        self._artifact_session = aligned
+        revision = aligned.document.align_revision_index[
+            aligned.document.active_align_revision_id
+        ]
+        qc = revision.qc
+        self._refresh_native_record_selectors(aligned)
+        self.status_info.setText(
+            "회전축 정치 완료 | "
+            f"기울기 {qc['axis_tilt_corrected_deg']:.3f}° 보정, "
+            f"두 원 중심 거리 {qc['center_separation_mm']:.2f} mm, "
+            f"법선 어긋남 {qc['circle_normal_disagreement_deg']:.3f}° | "
+            "이전 기록은 다시 측정해야 합니다"
+        )
+
     def on_drawing_sheet_requested(self) -> None:
         """Compose the checked records into one printable sheet.
 
@@ -19372,6 +19528,7 @@ class MainWindow(QMainWindow):
                 title_block=TitleBlock(artifact_label=label, rows=rows),
                 scale_denominator=float(panel.spin_drawing_sheet_scale.value()),
                 page=SheetPage(size=page_size, orientation=orientation),
+                show_center_axis=panel.check_drawing_sheet_center_axis.isChecked(),
             )
             bundle = compose_drawing_sheet(
                 session.document, record_ids, options=options

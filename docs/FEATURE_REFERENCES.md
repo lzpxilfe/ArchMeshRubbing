@@ -28,6 +28,7 @@
 |---|---|---|---|---|---|
 | 디지털 탁본 | 6면 정사영 front-depth raster + 정수 µm 양자화 + masked square local-mean relief (summed-area table) | `[R10]`, `[R11]` | paper + engineering contract | native | `src/core/artifact_rubbing_extractor.py` (`RUBBING_ALGORITHM = archmeshrubbing.orthographic_local_mean_relief`) |
 | 6면 외곽선 | 모든 투영 삼각형의 fixed-grid 다각형 합집합 (rasterisation·convex hull 없음) | `[L8]` | library + engineering contract | native | `src/core/artifact_outline_extractor.py` (`OUTLINE_ALGORITHM = archmeshrubbing.projected_triangle_union`) |
+| 회전축 정치 | 지름 record 2개의 원 중심을 잇는 축을 +Z로 보내는 proper rigid Align + recipe 자체 재계산 + 동축성 QC | `[R6]` | paper + engineering contract | native | `src/core/artifact_axis_alignment.py` (`rotation_axis_from_circle_records/v1`) |
 | 단면선 | 명시 평면과 canonical-mm 삼각형의 정확 교차 + endpoint 스티칭, 모호한 경우 fail closed | - | engineering contract | native | `src/core/artifact_vector_extractor.py` |
 | 외곽선 topology 검증 | ring simple/area, hole ownership, 성분 비중첩 증명 | `[L8]` | library | native | `src/core/artifact_outline_topology.py` |
 | 정식 기와 전개 record | explicit canonical axis + exact face selection + 1 µm quantization + no-fallback quality gate | `[R4]`, `[R6]` | paper + heuristic | native | `src/core/artifact_tile_unwrap_extractor.py`, `src/core/artifact_tile_unwrap_record.py` |

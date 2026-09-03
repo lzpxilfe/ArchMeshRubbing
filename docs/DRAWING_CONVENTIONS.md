@@ -21,7 +21,7 @@
 | `section_cut` | 단면 절단선. 닫힌 경우 내부를 해칭한다 | `vector.cutline.v1`의 `section` role |
 | `outline_visible` | 보이는 외형선 | `vector.outline.v1`의 `exterior` role |
 | `outline_hole` | 유물 내부의 구멍 경계 | `vector.outline.v1`의 `hole` role |
-| `center_axis` | 회전축·대칭축의 일점쇄선 | 아직 생산자 없음 |
+| `center_axis` | 회전축·대칭축의 일점쇄선 | `rotation_axis_from_circle_records/v1` Align (record가 아니라 정치의 결과) |
 
 새 선 종류는 **그것을 실제로 만들어내는 것이 생긴 뒤에** 추가한다. 만들 수 없는 종류를 먼저 이름 붙이면 모든 도면에 빈 레이어가 생기고, preset이 아무도 지키지 않는 관례를 서술하게 된다.
 
@@ -129,8 +129,29 @@ bundle = compose_drawing_sheet(
 
 ---
 
+## 중심축선
+
+중심축은 측정값이 아니라 **정치의 결과**다. 그래서 record type이 없다. record로 만들면 사용자가 축을 따로 "생성"해야 하고 3/6/6 완료 게이트까지 건드리는데, 이 선이 실제로 무엇인지와 맞지 않는다.
+
+회전축으로 정치한 문서에서는 회전축이 월드 +Z이고 원점을 지난다. 도면 계층이 그 선을 각 record의 평면에 투영하고 그려진 내용 범위로 잘라 그린다.
+
+```python
+VectorSVGOptions(style_preset="provisional/v1", show_center_axis=True)
+DrawingSheetOptions(title_block=..., show_center_axis=True)
+```
+
+세 가지 규칙이 있다.
+
+**활성 Align이 회전축으로 만들어졌을 때만 그린다.** 수동 정치 상태에서 켜면 조용히 생략하고, 도판 sidecar의 `center_axis`에 요청은 있었으나 그리지 않았다는 사실과 그때의 Align recipe 종류를 남긴다. 근거 없는 축선은 종이 위에서 아무것도 뒷받침하지 않는 주장이 된다.
+
+**평면도에는 나오지 않는다.** 위에서 본 축은 점으로 투영되므로 그 자리에 선을 그으면 거짓이 된다. top·bottom 뷰는 자동으로 생략된다.
+
+**기본은 꺼짐이고, preset 없이는 켤 수 없다.** 모든 선이 같은 굵기면 중심축선을 외형선과 구분할 수 없으므로 preset 없이 요청하면 거부한다.
+
+---
+
 ## 아직 없는 것
 
-- 토기의 좌 반입면 · 우 반단면 미러 배치. 중심축이 필요하고, `center_axis`를 만들어내는 것이 아직 없다.
+- 토기의 좌 반입면 · 우 반단면 미러 배치. 중심축은 생겼으므로 남은 것은 미러 배치 자체다.
 - 결실 · 복원 · 균열 같은 상태 표기. `annotation.condition.v1` record가 생긴 뒤의 일이다.
 - DXF 내보내기.
