@@ -738,7 +738,7 @@ def _condition_paths_for_figure(
             if boundary.outline.frame != figure_payload_frame:
                 continue
             try:
-                kind = line_kind_for_condition(payload.kind)
+                kind = line_kind_for_condition(payload.condition)
             except DrawingStyleError as exc:
                 raise DrawingSheetError(str(exc)) from exc
             for path in boundary.outline.paths:
@@ -747,7 +747,7 @@ def _condition_paths_for_figure(
                 )
             drawn.append(
                 {
-                    "condition_kind": payload.kind,
+                    "condition_kind": payload.condition,
                     "line_kind": kind,
                     "record_id": record.id,
                     "view": boundary.view,
@@ -1282,7 +1282,7 @@ def compose_drawing_sheet(
                     ),
                     "records": [
                         {
-                            "condition_kind": payload.kind,
+                            "condition_kind": payload.condition,
                             "face_count": payload.face_count,
                             "payload_sha256": payload.sha256,
                             "recipe_hash": record.recipe_hash,

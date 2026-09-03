@@ -419,7 +419,7 @@ def _condition_session() -> ArtifactSession:
     session = _session()
     computation = compute_condition_annotation(
         session,
-        kind="restored",
+        condition="restored",
         face_indices=[0],
         precision_grid_mm=0.01,
     )

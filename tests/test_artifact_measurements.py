@@ -1778,3 +1778,77 @@ def test_result_type_validation_is_eager() -> None:
         )
 
     controller.cancel(item)
+
+
+def test_condition_annotation_executes_and_publishes_the_painted_region() -> None:
+    """A painted face set goes through the same worker path as every record."""
+
+    from src.core.artifact_condition_annotation import (
+        ConditionAnnotationComputation,
+        condition_payload_from_record,
+    )
+
+    session = _session()
+    workbench = ArtifactWorkbench(session=session, id_factory=SequentialIds())
+    controller = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
+    item = controller.begin_condition_annotation(
+        condition="restored",
+        selected_face_indices=(3, 1, 2, 2),
+        precision_grid_mm=0.01,
+        record_id="record:condition:reserved",
+        created_at=STAMP,
+        operator="pytest",
+    )
+
+    assert item.kind is MeasurementOperationKind.CONDITION_ANNOTATION
+    recipe = item.recipe_dict()
+    assert recipe["kind"] == "condition_annotation"
+    assert recipe["condition"] == "restored"
+    selection = recipe["selection"]
+    assert isinstance(selection, dict)
+    # Canonical: sorted, deduplicated, merged.
+    assert selection["face_ranges"] == [[1, 4]]
+    assert item.context.selection_hash == selection["selection_sha256"]
+
+    result = controller.execute(item)
+    assert isinstance(result.computation, ConditionAnnotationComputation)
+    assert result.computation.payload.face_count == 3
+
+    publication = controller.publish_result(
+        item,
+        result,
+        _headless_publisher(workbench),
+    )
+    assert publication.record_id == "record:condition:reserved"
+    record = publication.session.document.record_index["record:condition:reserved"]
+    payload = condition_payload_from_record(record)
+    assert list(payload.face_indices()) == [1, 2, 3]
+    assert payload.condition == "restored"
+    assert controller.summary(item).state is MeasurementOperationState.COMPLETED
+
+
+def test_condition_annotation_refuses_a_face_outside_the_mesh_before_work_begins() -> None:
+    session = _session()
+    controller = ArtifactMeasurementController(
+        ArtifactWorkbench(session=session),
+        id_factory=SequentialIds(),
+    )
+
+    with pytest.raises(ArtifactMeasurementError, match="outside the geometry"):
+        controller.begin_condition_annotation(
+            condition="missing",
+            selected_face_indices=(0, 12),
+            precision_grid_mm=0.01,
+        )
+    with pytest.raises(ArtifactMeasurementError, match="at least one face"):
+        controller.begin_condition_annotation(
+            condition="missing",
+            selected_face_indices=(),
+            precision_grid_mm=0.01,
+        )
+    with pytest.raises(ArtifactMeasurementError, match="condition kind"):
+        controller.begin_condition_annotation(
+            condition="chipped",
+            selected_face_indices=(0,),
+            precision_grid_mm=0.01,
+        )

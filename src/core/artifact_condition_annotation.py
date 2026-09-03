@@ -64,6 +64,10 @@ from .canonical_json import (
 
 
 CONDITION_RECORD_TYPE = "annotation.condition.v1"
+#: The recipe's `kind`, which names the operation the way every other recipe
+#: does (`cutline`, `outline`, `tile_unwrap`, ...).  The state of the object -
+#: missing, restored, crack, worn - is the recipe's `condition`.
+CONDITION_OPERATION_KIND = "condition_annotation"
 CONDITION_ALGORITHM = "archmeshrubbing.condition_region_projection"
 CONDITION_ALGORITHM_VERSION = "1.0.0"
 CONDITION_PAYLOAD_SCHEMA_VERSION = "1.0.0"
@@ -449,7 +453,7 @@ class ConditionAnnotationPayload:
     """One painted region: what it is, which faces it covers, how it projects."""
 
     schema_version: str
-    kind: str
+    condition: str
     selection: Mapping[str, Any]
     views: tuple[ConditionViewBoundary, ...]
     skipped_views: tuple[Mapping[str, str], ...] = ()
@@ -459,7 +463,7 @@ class ConditionAnnotationPayload:
             raise ArtifactConditionAnnotationError(
                 f"unsupported condition payload schema: {self.schema_version!r}"
             )
-        object.__setattr__(self, "kind", condition_kind(self.kind))
+        object.__setattr__(self, "condition", condition_kind(self.condition))
         object.__setattr__(self, "selection", validate_condition_selection(self.selection))
         views = tuple(self.views)
         if any(not isinstance(view, ConditionViewBoundary) for view in views):
@@ -539,7 +543,7 @@ class ConditionAnnotationPayload:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "kind": self.kind,
+            "condition": self.condition,
             "schema_version": self.schema_version,
             "selection": dict(self.selection),
             "skipped_views": [dict(entry) for entry in self.skipped_views],
@@ -551,7 +555,7 @@ class ConditionAnnotationPayload:
         block = _exact_keys(
             data,
             frozenset(
-                {"kind", "schema_version", "selection", "skipped_views", "views"}
+                {"condition", "schema_version", "selection", "skipped_views", "views"}
             ),
             name="condition payload",
         )
@@ -564,10 +568,10 @@ class ConditionAnnotationPayload:
                 "condition payload views must be an array"
             )
         schema_version = block["schema_version"]
-        kind = block["kind"]
+        condition = block["condition"]
         return cls(
             schema_version=schema_version if isinstance(schema_version, str) else "",
-            kind=kind if isinstance(kind, str) else "",
+            condition=condition if isinstance(condition, str) else "",
             selection=block["selection"],  # type: ignore[arg-type]
             views=tuple(
                 ConditionViewBoundary.from_dict(view)  # type: ignore[arg-type]
@@ -601,11 +605,11 @@ class ConditionAnnotationPayload:
 
     def qc_summary(self) -> dict[str, Any]:
         return {
+            "condition": self.condition,
             "empty_views": [entry["view"] for entry in self.skipped_views],
             "empty_view_reasons": [dict(entry) for entry in self.skipped_views],
             "face_count": self.face_count,
             "face_range_count": len(self.selection["face_ranges"]),
-            "kind": self.kind,
             "payload_sha256": self.sha256,
             "projected_view_count": len(self.views),
             "selection_sha256": self.selection_sha256,
@@ -616,26 +620,25 @@ class ConditionAnnotationPayload:
 
 def condition_recipe(
     *,
-    kind: str,
+    condition: str,
     precision_grid_mm: float,
-    selection_sha256: str,
+    selection: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Return the closed recipe one condition region is computed under.
 
-    The selection digest is part of the recipe because the region *is* the
-    operation: two different regions annotated the same way are two different
-    computations and must not share a recipe hash.
+    The whole selection is part of the recipe, not only its digest, because the
+    region *is* the operation: a worker handed nothing but this recipe and the
+    geometry can carry it out, and two different regions annotated the same
+    way are two different computations that must not share a recipe hash.
     """
 
-    if not isinstance(selection_sha256, str) or len(selection_sha256) != 64:
-        raise ArtifactConditionAnnotationError("selection_sha256 must be a SHA-256")
     return {
         "algorithm": CONDITION_ALGORITHM,
         "algorithm_version": CONDITION_ALGORITHM_VERSION,
-        "kind": condition_kind(kind),
+        "condition": condition_kind(condition),
+        "kind": CONDITION_OPERATION_KIND,
         "precision_grid_mm": _precision_grid(precision_grid_mm),
-        "selection_basis": CONDITION_SELECTION_KIND,
-        "selection_sha256": selection_sha256,
+        "selection": validate_condition_selection(selection),
         "views": list(CONDITION_VIEWS),
     }
 
@@ -644,16 +647,16 @@ _RECIPE_KEYS = frozenset(
     {
         "algorithm",
         "algorithm_version",
+        "condition",
         "kind",
         "precision_grid_mm",
-        "selection_basis",
-        "selection_sha256",
+        "selection",
         "views",
     }
 )
 
 
-def validate_condition_recipe(value: object) -> Mapping[str, Any]:
+def validate_condition_recipe(value: object) -> dict[str, Any]:
     recipe = _exact_keys(value, _RECIPE_KEYS, name="condition recipe")
     if recipe["algorithm"] != CONDITION_ALGORITHM:
         raise ArtifactConditionAnnotationError("condition algorithm is unsupported")
@@ -661,24 +664,21 @@ def validate_condition_recipe(value: object) -> Mapping[str, Any]:
         raise ArtifactConditionAnnotationError(
             "condition algorithm version is unsupported"
         )
-    if recipe["selection_basis"] != CONDITION_SELECTION_KIND:
-        raise ArtifactConditionAnnotationError(
-            "condition selection basis is unsupported"
-        )
+    if recipe["kind"] != CONDITION_OPERATION_KIND:
+        raise ArtifactConditionAnnotationError("condition recipe kind is unsupported")
     if list(recipe["views"]) != list(CONDITION_VIEWS):
         raise ArtifactConditionAnnotationError(
             "a condition region is projected into all six views"
         )
-    condition_kind(recipe["kind"])
-    _precision_grid(recipe["precision_grid_mm"])
-    if (
-        not isinstance(recipe["selection_sha256"], str)
-        or len(recipe["selection_sha256"]) != 64
-    ):
-        raise ArtifactConditionAnnotationError(
-            "condition recipe selection_sha256 must be a SHA-256"
-        )
-    return recipe
+    return {
+        "algorithm": CONDITION_ALGORITHM,
+        "algorithm_version": CONDITION_ALGORITHM_VERSION,
+        "condition": condition_kind(recipe["condition"]),
+        "kind": CONDITION_OPERATION_KIND,
+        "precision_grid_mm": _precision_grid(recipe["precision_grid_mm"]),
+        "selection": validate_condition_selection(recipe["selection"]),
+        "views": list(CONDITION_VIEWS),
+    }
 
 
 def _twice_area(triangles: np.ndarray) -> np.ndarray:
@@ -826,11 +826,57 @@ class ConditionAnnotationComputation:
     recipe: Mapping[str, Any]
     qc: Mapping[str, Any]
 
+    def recipe_dict(self) -> dict[str, Any]:
+        return validate_condition_recipe(self.recipe)
+
+    def qc_dict(self) -> dict[str, Any]:
+        return self.payload.qc_summary()
+
+
+def project_condition_from_recipe(
+    vertices_world_mm: object,
+    faces: object,
+    recipe: Mapping[str, Any],
+    *,
+    cancellation_probe: CancellationProbe | None = None,
+) -> ConditionAnnotationPayload:
+    """Carry out one condition recipe against canonical geometry.
+
+    This is the whole computation: the recipe names the region and the grid,
+    the geometry supplies the surface, and nothing else is consulted.  A worker
+    thread runs exactly this, and so does an offline check.
+    """
+
+    validated = validate_condition_recipe(recipe)
+    selection = validated["selection"]
+    total_face_count = int(np.asarray(faces).shape[0])
+    if int(selection["total_face_count"]) != total_face_count:
+        raise ArtifactConditionAnnotationError(
+            "condition selection was made on a mesh with a different face count"
+        )
+    views, skipped = project_condition_region(
+        vertices_world_mm,
+        faces,
+        face_indices_from_ranges(
+            selection["face_ranges"],
+            total_face_count=total_face_count,
+        ),
+        precision_grid_mm=float(validated["precision_grid_mm"]),
+        cancellation_probe=cancellation_probe,
+    )
+    return ConditionAnnotationPayload(
+        schema_version=CONDITION_PAYLOAD_SCHEMA_VERSION,
+        condition=str(validated["condition"]),
+        selection=selection,
+        views=views,
+        skipped_views=skipped,
+    )
+
 
 def compute_condition_annotation(
     session: ArtifactSession,
     *,
-    kind: str,
+    condition: str,
     face_indices: object,
     precision_grid_mm: float = DEFAULT_OUTLINE_PRECISION_GRID_MM,
     cancellation_probe: CancellationProbe | None = None,
@@ -840,8 +886,6 @@ def compute_condition_annotation(
     raise_if_cancelled(cancellation_probe)
     if not isinstance(session, ArtifactSession):
         raise ArtifactConditionAnnotationError("session must be an ArtifactSession")
-    resolved_kind = condition_kind(kind)
-    grid = _precision_grid(precision_grid_mm)
     try:
         projection = session.materialize()
     except ArtifactSessionError as exc:
@@ -855,9 +899,9 @@ def compute_condition_annotation(
         ),
     )
     recipe = condition_recipe(
-        kind=resolved_kind,
-        precision_grid_mm=grid,
-        selection_sha256=str(selection["selection_sha256"]),
+        condition=condition,
+        precision_grid_mm=precision_grid_mm,
+        selection=selection,
     )
     try:
         context = session.capture_operation(
@@ -866,22 +910,11 @@ def compute_condition_annotation(
         )
     except ArtifactSessionError as exc:
         raise ArtifactConditionAnnotationError(str(exc)) from exc
-    views, skipped = project_condition_region(
+    payload = project_condition_from_recipe(
         projection.mesh.vertices,
         projection.mesh.faces,
-        face_indices_from_ranges(
-            selection["face_ranges"],
-            total_face_count=total_face_count,
-        ),
-        precision_grid_mm=grid,
+        recipe,
         cancellation_probe=cancellation_probe,
-    )
-    payload = ConditionAnnotationPayload(
-        schema_version=CONDITION_PAYLOAD_SCHEMA_VERSION,
-        kind=resolved_kind,
-        selection=selection,
-        views=views,
-        skipped_views=skipped,
     )
     return ConditionAnnotationComputation(
         context=context,
@@ -929,11 +962,11 @@ def append_condition_record_from_context(
             "payload must be a ConditionAnnotationPayload"
         )
     validated_recipe = validate_condition_recipe(recipe)
-    if validated_recipe["kind"] != payload.kind:
+    if validated_recipe["condition"] != payload.condition:
         raise ArtifactConditionAnnotationError(
-            "condition recipe kind does not match the payload"
+            "condition recipe does not name the condition the payload records"
         )
-    if validated_recipe["selection_sha256"] != payload.selection_sha256:
+    if validated_recipe["selection"] != payload.selection:
         raise ArtifactConditionAnnotationError(
             "condition recipe does not name the region it was computed for"
         )
@@ -1043,11 +1076,11 @@ def condition_payload_from_record(
             "condition record geometry_ref does not match payload"
         )
     recipe = validate_condition_recipe(record.recipe)
-    if recipe["kind"] != payload.kind:
+    if recipe["condition"] != payload.condition:
         raise ArtifactConditionAnnotationError(
-            "condition record recipe kind does not match its payload"
+            "condition record recipe does not name the condition it stores"
         )
-    if recipe["selection_sha256"] != payload.selection_sha256:
+    if recipe["selection"] != payload.selection:
         raise ArtifactConditionAnnotationError(
             "condition record recipe does not name the region it stores"
         )
@@ -1088,6 +1121,7 @@ __all__ = [
     "CONDITION_GEOMETRY_REF_PREFIX",
     "CONDITION_KINDS",
     "CONDITION_MISSING",
+    "CONDITION_OPERATION_KIND",
     "CONDITION_PAYLOAD_EXTENSION_KEY",
     "CONDITION_PAYLOAD_MEDIA_TYPE",
     "CONDITION_PAYLOAD_SCHEMA_VERSION",
@@ -1115,6 +1149,7 @@ __all__ = [
     "condition_selection",
     "face_indices_from_ranges",
     "face_ranges_from_indices",
+    "project_condition_from_recipe",
     "project_condition_region",
     "validate_condition_annotation_records",
     "validate_condition_recipe",

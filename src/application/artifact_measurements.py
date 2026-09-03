@@ -27,6 +27,17 @@ import uuid
 from weakref import WeakKeyDictionary
 
 from src.core.artifact_cancellation import ArtifactComputationCancelledError
+from src.core.artifact_condition_annotation import (
+    ArtifactConditionAnnotationError,
+    ConditionAnnotationComputation,
+    commit_condition_annotation,
+    condition_computation_matches_active_projection,
+    condition_recipe,
+    condition_selection,
+    face_ranges_from_indices,
+    project_condition_from_recipe,
+    validate_condition_recipe,
+)
 from src.core.artifact_document import OperationContext, canonical_recipe_hash
 from src.core.artifact_geometry_metrics import (
     ArtifactGeometryMetricsComputation,
@@ -131,6 +142,7 @@ class MeasurementOperationKind(str, Enum):
     GEOMETRY_METRICS = "geometry_metrics"
     SURFACE_DISTANCE = "surface_distance"
     SURFACE_DIAMETER = "surface_diameter"
+    CONDITION_ANNOTATION = "condition_annotation"
 
 
 class MeasurementOperationState(str, Enum):
@@ -156,6 +168,7 @@ MeasurementComputation: TypeAlias = (
     | ArtifactTileUnwrapComputation
     | ArtifactGeometryMetricsComputation
     | ArtifactSurfaceMeasurementComputation
+    | ConditionAnnotationComputation
 )
 CancellationProbe: TypeAlias = Callable[[], bool]
 MeasurementPublisher: TypeAlias = Callable[[RecordBindingTransition], None]
@@ -229,6 +242,8 @@ def _operation_kind_for_computation(
         return MeasurementOperationKind.DIGITAL_RUBBING
     if isinstance(computation, ArtifactTileUnwrapComputation):
         return MeasurementOperationKind.TILE_UNWRAP
+    if isinstance(computation, ConditionAnnotationComputation):
+        return MeasurementOperationKind.CONDITION_ANNOTATION
     if isinstance(computation, ArtifactVectorComputation):
         kind = VectorRecordKind(computation.payload.kind)
         if kind is VectorRecordKind.CUTLINE:
@@ -577,6 +592,25 @@ def execute_measurement_work_item(
             receipt=receipt,
             recipe=recipe,
             qc=qc,
+        )
+    elif work_item.kind is MeasurementOperationKind.CONDITION_ANNOTATION:
+        try:
+            payload = project_condition_from_recipe(
+                projection.mesh.vertices,
+                projection.mesh.faces,
+                recipe,
+                cancellation_probe=cancellation_probe,
+            )
+        except ArtifactComputationCancelledError as exc:
+            raise MeasurementCancelledError(str(exc)) from exc
+        except ArtifactConditionAnnotationError as exc:
+            raise ArtifactMeasurementError(str(exc)) from exc
+        computation = ConditionAnnotationComputation(
+            context=work_item.context,
+            projection_snapshot=work_item.projection_snapshot,
+            payload=payload,
+            recipe=recipe,
+            qc=payload.qc_summary(),
         )
     elif work_item.kind is MeasurementOperationKind.DIGITAL_RUBBING:
         try:
@@ -986,6 +1020,17 @@ class ArtifactMeasurementController:
                 raise StaleMeasurementOperationError(
                     "tile unwrap selection does not match the active source mesh"
                 )
+        elif kind is MeasurementOperationKind.CONDITION_ANNOTATION:
+            try:
+                condition_selection_block = validate_condition_recipe(recipe)["selection"]
+            except ArtifactConditionAnnotationError as exc:
+                raise ArtifactMeasurementError(str(exc)) from exc
+            if int(condition_selection_block["total_face_count"]) != int(
+                session.source_mesh.faces.shape[0]
+            ):
+                raise StaleMeasurementOperationError(
+                    "condition selection does not match the active source mesh"
+                )
         prerequisite_ids: tuple[str, ...] = ()
         if kind is MeasurementOperationKind.OUTLINE:
             prerequisite_ids = workflow_step_record_ids(
@@ -1253,6 +1298,53 @@ class ArtifactMeasurementController:
         assert isinstance(selection, Mapping)
         return self._begin(
             kind=MeasurementOperationKind.TILE_UNWRAP,
+            recipe=recipe,
+            record_id=record_id,
+            created_at=created_at,
+            operator=operator,
+            selection_hash=str(selection["selection_sha256"]),
+            depends_on_record_ids=depends_on_record_ids,
+        )
+
+    def begin_condition_annotation(
+        self,
+        *,
+        condition: str,
+        selected_face_indices: Sequence[int],
+        precision_grid_mm: float,
+        record_id: str | None = None,
+        created_at: str | None = None,
+        operator: str = "local-user",
+        depends_on_record_ids: Sequence[str] = (),
+    ) -> ArtifactMeasurementWorkItem:
+        """Reserve one condition region - missing, restored, crack, or worn.
+
+        The face set is fixed here, canonically encoded, and carried in the
+        recipe, so the worker projects exactly what the user painted and the
+        record's recipe hash names exactly that region.
+        """
+
+        session = self._workbench.snapshot.session
+        if not isinstance(session, ArtifactSession):
+            raise ArtifactMeasurementError("no active ArtifactDocument session")
+        total_face_count = int(session.source_mesh.faces.shape[0])
+        try:
+            selection = condition_selection(
+                total_face_count=total_face_count,
+                face_ranges=face_ranges_from_indices(
+                    selected_face_indices,
+                    total_face_count=total_face_count,
+                ),
+            )
+            recipe = condition_recipe(
+                condition=condition,
+                precision_grid_mm=precision_grid_mm,
+                selection=selection,
+            )
+        except ArtifactConditionAnnotationError as exc:
+            raise ArtifactMeasurementError(str(exc)) from exc
+        return self._begin(
+            kind=MeasurementOperationKind.CONDITION_ANNOTATION,
             recipe=recipe,
             record_id=record_id,
             created_at=created_at,
@@ -1744,6 +1836,24 @@ class ArtifactMeasurementController:
                 operator=work_item.operator,
                 depends_on_record_ids=work_item.depends_on_record_ids,
             )
+        elif isinstance(computation, ConditionAnnotationComputation):
+            if not condition_computation_matches_active_projection(
+                current, computation
+            ):
+                raise StaleMeasurementOperationError(
+                    "condition annotation result is stale for the active projection"
+                )
+            try:
+                candidate = commit_condition_annotation(
+                    current,
+                    computation,
+                    record_id=work_item.record_id,
+                    created_at=work_item.created_at,
+                    operator=work_item.operator,
+                    depends_on_record_ids=work_item.depends_on_record_ids,
+                )
+            except ArtifactConditionAnnotationError as exc:
+                raise ArtifactMeasurementError(str(exc)) from exc
         else:  # pragma: no cover - guarded by ArtifactMeasurementResult
             raise ArtifactMeasurementError("unsupported measurement computation")
 

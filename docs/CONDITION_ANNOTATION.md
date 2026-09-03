@@ -14,6 +14,12 @@
 
 ---
 
+## 이름
+
+record의 `recipe.kind`는 다른 모든 recipe처럼 **연산의 이름**(`condition_annotation`)이다. 유물의 상태 — `missing` · `restored` · `crack` · `worn` — 는 recipe와 payload 양쪽에서 `condition`이다. recipe에는 면 집합 전체가 들어 있어서, recipe와 기하만 받은 worker가 계산을 그대로 수행할 수 있다.
+
+---
+
 ## 면 집합의 정규형
 
 정렬된 면 인덱스를 `[시작, 끝(제외)]` 구간의 배열로 저장한다.
@@ -84,7 +90,7 @@ record는 여섯 뷰 각각에 대해 **경계를 갖거나, 없는 이유를 �
 - 빈 면 집합
 - 여섯 뷰 모두에서 경계를 얻지 못한 영역
 - 여섯 뷰를 정확히 한 번씩 설명하지 않는 payload, 닫힌 집합 밖의 건너뛰기 이유
-- `missing` · `restored` · `crack` · `worn` 이외의 kind
+- `missing` · `restored` · `crack` · `worn` 이외의 condition
 - payload와 어긋나는 QC, 해시, `selection_hash`, recipe
 
 ---
@@ -103,7 +109,7 @@ from src.core.artifact_condition_annotation import (
 )
 
 computation = compute_condition_annotation(
-    session, kind="restored", face_indices=[120, 121, 122, 340],
+    session, condition="restored", face_indices=[120, 121, 122, 340],
 )
 session = commit_condition_annotation(
     session, computation,
@@ -115,11 +121,12 @@ session = commit_condition_annotation(
 
 도판에 얹는 방법은 [`docs/DRAWING_CONVENTIONS.md`](DRAWING_CONVENTIONS.md)의 "유물 상태 표기"에 있다.
 
+앱에서는 선택 패널의 클릭 · 브러시 · 올가미 · 확장/축소로 영역을 칠한 뒤, 단면 패널의 "유물 상태 표기"에서 상태를 고르고 **현재 선택 면 → 상태 기록**을 누른다. 면 집합은 그 순간 GUI 스레드에서 고정되어 recipe에 들어가므로, 계산 중에 선택을 바꿔도 기록은 바뀌지 않는다. 도판 패널의 "도판에 얹을 상태 표기" 목록에서 체크하면 같은 뷰의 투영 도면 위에 경계가 그려진다.
+
 ---
 
 ## 아직 없는 것
 
-- **메쉬 위에서 영역을 칠하는 선택 도구.** 지금은 면 인덱스를 직접 주어야 한다. 이게 있어야 고고학자가 실제로 쓴다.
 - **단면 위의 상태 표기.** 지금은 여섯 뷰의 투영 경계뿐이라 투영 도면에만 그린다. 단면은 임의 평면이라 커밋 시점에 미리 계산할 수 없고, 상태 record와 단면 record 양쪽에 의존하는 별도 record가 필요하다.
 - **1:1 vector export(`.amr-vector`)의 상태 표기.** 지금은 도판에만 그린다.
 - 상태별 면 채움(해칭). 지금 렌더러는 해칭 기하가 하나뿐이라 두 종류를 해칭하면 구별되지 않는다.

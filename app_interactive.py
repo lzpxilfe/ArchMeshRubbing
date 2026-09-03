@@ -368,6 +368,10 @@ from src.core.drawing_style import (  # noqa: E402
     available_presets as drawing_style_presets,
     get_preset as drawing_style_preset,
 )
+from src.core.artifact_condition_annotation import (  # noqa: E402
+    CONDITION_RECORD_TYPE,
+    ConditionAnnotationComputation,
+)
 from src.core.drawing_sheet import (  # noqa: E402
     PAGE_SIZES_MM as DRAWING_SHEET_PAGE_SIZES_MM,
     DrawingSheetError,
@@ -3982,6 +3986,7 @@ class SectionPanel(QWidget):
     nativeVectorExportRequested = pyqtSignal()
     drawingSheetRequested = pyqtSignal()
     axisAlignRequested = pyqtSignal()
+    nativeConditionRequested = pyqtSignal()
     nativeRubbingRequested = pyqtSignal()
     nativeRubbingRecordSelected = pyqtSignal(str)
     nativeRubbingExportRequested = pyqtSignal()
@@ -4252,6 +4257,38 @@ class SectionPanel(QWidget):
         )
         native_layout.addWidget(self.check_drawing_sheet_center_axis)
 
+        self.check_drawing_sheet_mirror = QCheckBox("좌 반입면 · 우 반단면으로 합치기")
+        self.check_drawing_sheet_mirror.setEnabled(False)
+        self.check_drawing_sheet_mirror.setToolTip(
+            "체크한 입면(Outline) 기록의 왼쪽 절반과 아래 단면(Cutline) 기록의 "
+            "오른쪽 절반을 한 도형으로 합칩니다.\n"
+            "회전축으로 정치된 경우에만 가능하고, 두 기록은 같은 평면이어야 합니다. "
+            "단면 기록은 도형 안에 들어가므로 위 목록에서 체크하지 마세요."
+        )
+        native_layout.addWidget(self.check_drawing_sheet_mirror)
+        mirror_form = QFormLayout()
+        self.combo_drawing_sheet_mirror_elevation = QComboBox()
+        self.combo_drawing_sheet_mirror_elevation.setToolTip(
+            "왼쪽 절반이 될 입면. 위 목록에서도 체크되어 있어야 합니다."
+        )
+        self.combo_drawing_sheet_mirror_section = QComboBox()
+        self.combo_drawing_sheet_mirror_section.setToolTip(
+            "오른쪽 절반이 될 단면. 입면과 같은 평면(예: 정면 입면 + 정면 단면)이어야 합니다."
+        )
+        mirror_form.addRow("입면", self.combo_drawing_sheet_mirror_elevation)
+        mirror_form.addRow("단면", self.combo_drawing_sheet_mirror_section)
+        native_layout.addLayout(mirror_form)
+
+        condition_sheet_label = QLabel("도판에 얹을 상태 표기")
+        native_layout.addWidget(condition_sheet_label)
+        self.list_drawing_sheet_conditions = QListWidget()
+        self.list_drawing_sheet_conditions.setMaximumHeight(90)
+        self.list_drawing_sheet_conditions.setToolTip(
+            "체크한 상태 기록의 경계가 같은 뷰의 투영 도면 위에 그려집니다. "
+            "단면 위에는 아직 그리지 않습니다."
+        )
+        native_layout.addWidget(self.list_drawing_sheet_conditions)
+
         axis_line = QFrame()
         axis_line.setFrameShape(QFrame.Shape.HLine)
         axis_line.setFrameShadow(QFrame.Shadow.Sunken)
@@ -4281,6 +4318,43 @@ class SectionPanel(QWidget):
         )
         self.btn_axis_align.clicked.connect(self.axisAlignRequested.emit)
         native_layout.addWidget(self.btn_axis_align)
+
+        condition_line = QFrame()
+        condition_line.setFrameShape(QFrame.Shape.HLine)
+        condition_line.setFrameShadow(QFrame.Shadow.Sunken)
+        native_layout.addWidget(condition_line)
+        condition_title = QLabel("유물 상태 표기 · 칠한 면을 결실·복원·균열·마모로")
+        condition_title.setStyleSheet("font-weight: bold;")
+        native_layout.addWidget(condition_title)
+        condition_hint = QLabel(
+            "선택 패널의 클릭·브러시·올가미로 영역을 칠한 뒤 저장합니다. 면 집합이 "
+            "기록에 남아 재열기해도 그대로이고, 여섯 뷰의 경계가 함께 계산됩니다."
+        )
+        condition_hint.setWordWrap(True)
+        condition_hint.setStyleSheet("color: #4a5568; font-size: 10px;")
+        native_layout.addWidget(condition_hint)
+        condition_row = QHBoxLayout()
+        condition_row.setContentsMargins(0, 0, 0, 0)
+        condition_row.addWidget(QLabel("상태"))
+        self.combo_native_condition = QComboBox()
+        for label, value in (
+            ("결실 (missing)", "missing"),
+            ("복원 (restored)", "restored"),
+            ("균열 (crack)", "crack"),
+            ("마모 (worn)", "worn"),
+        ):
+            self.combo_native_condition.addItem(label, value)
+        condition_row.addWidget(self.combo_native_condition, 1)
+        native_layout.addLayout(condition_row)
+        self.btn_native_condition = QPushButton("현재 선택 면 → 상태 기록")
+        set_pixel_icon(self.btn_native_condition, "selection")
+        self.btn_native_condition.setEnabled(False)
+        self.btn_native_condition.setToolTip(
+            "현재 선택된 면 집합을 위 상태로 기록합니다. 기록은 정치가 바뀌면 "
+            "이전 정치 기준이 되고, 도판의 같은 뷰 투영 도면 위에 경계로 그려집니다."
+        )
+        self.btn_native_condition.clicked.connect(self.nativeConditionRequested.emit)
+        native_layout.addWidget(self.btn_native_condition)
 
         rubbing_line = QFrame()
         rubbing_line.setFrameShape(QFrame.Shape.HLine)
@@ -5067,6 +5141,9 @@ class MainWindow(QMainWindow):
         )
         self.section_panel.axisAlignRequested.connect(
             self.on_axis_align_requested
+        )
+        self.section_panel.nativeConditionRequested.connect(
+            self.on_native_condition_requested
         )
         self.section_panel.list_drawing_sheet_records.itemChanged.connect(
             self.on_drawing_sheet_item_changed
@@ -17724,13 +17801,25 @@ class MainWindow(QMainWindow):
             "vector.outline.v1": "Outline",
             RUBBING_RECORD_TYPE: "Digital Rubbing",
             TILE_UNWRAP_RECORD_TYPE: "Tile Unwrap",
+            CONDITION_RECORD_TYPE: "상태",
         }.get(record_type, record_type or "Record")
         recipe = getattr(record, "recipe", {})
         view = ""
         if isinstance(recipe, Mapping):
-            view = str(
-                recipe.get("view", recipe.get("record_view", ""))
-            ).strip().title()
+            if record_type == CONDITION_RECORD_TYPE:
+                view = {
+                    "missing": "결실",
+                    "restored": "복원",
+                    "crack": "균열",
+                    "worn": "마모",
+                }.get(str(recipe.get("condition", "")), "")
+                selection = recipe.get("selection")
+                if isinstance(selection, Mapping):
+                    view += f" {int(selection.get('selected_face_count', 0)):,}면"
+            else:
+                view = str(
+                    recipe.get("view", recipe.get("record_view", ""))
+                ).strip().title()
         details = " · ".join(part for part in (kind, view) if part)
         return f"{details} · {record.id} · {record.created_at}"
 
@@ -17768,6 +17857,7 @@ class MainWindow(QMainWindow):
         rubbing_records: list[Any] = []
         tile_unwrap_records: list[Any] = []
         diameter_records: list[Any] = []
+        condition_records: list[Any] = []
         selected_vector_id: str | None = None
         selected_rubbing_id: str | None = None
         selected_tile_unwrap_id: str | None = None
@@ -17855,6 +17945,8 @@ class MainWindow(QMainWindow):
                         tile_unwrap_records.append(record)
                     elif self._native_diameter_record_is_usable(session, record):
                         diameter_records.append(record)
+                    elif self._native_condition_record_is_drawable(session, record):
+                        condition_records.append(record)
                 except Exception:
                     continue
         self._replace_native_record_choices(
@@ -17876,7 +17968,89 @@ class MainWindow(QMainWindow):
             selected_id=selected_tile_unwrap_id,
         )
         self._refresh_drawing_sheet_records(vector_records)
+        self._refresh_drawing_sheet_mirror_choices(vector_records)
+        self._refresh_drawing_sheet_conditions(condition_records)
         self._refresh_axis_alignment_records(diameter_records)
+
+    @staticmethod
+    def _native_condition_record_is_drawable(session, record) -> bool:
+        """READY and FRESH condition records are the ones a sheet may carry."""
+
+        return bool(
+            isinstance(session, ArtifactSession)
+            and getattr(record, "type", None) == CONDITION_RECORD_TYPE
+            and str(record.lifecycle_status.value) == "ready"
+            and session.document.record_freshness(record.id).value == "fresh"
+        )
+
+    def _refresh_drawing_sheet_mirror_choices(self, records: list[Any]) -> None:
+        panel = getattr(self, "section_panel", None)
+        elevation = getattr(panel, "combo_drawing_sheet_mirror_elevation", None)
+        section = getattr(panel, "combo_drawing_sheet_mirror_section", None)
+        if elevation is None or section is None:
+            return
+        outline_type = VectorRecordKind.OUTLINE.record_type
+        cutline_type = VectorRecordKind.CUTLINE.record_type
+        elevations = [record for record in records if record.type == outline_type]
+        sections = [record for record in records if record.type == cutline_type]
+        self._replace_native_record_choices(
+            elevation,
+            placeholder="입면 (Outline) 기록",
+            records=elevations,
+            selected_id=str(elevation.currentData() or "") or None,
+        )
+        self._replace_native_record_choices(
+            section,
+            placeholder="단면 (Cutline) 기록",
+            records=sections,
+            selected_id=str(section.currentData() or "") or None,
+        )
+        check = getattr(panel, "check_drawing_sheet_mirror", None)
+        if check is not None:
+            usable = bool(elevations and sections)
+            check.setEnabled(usable)
+            if not usable:
+                check.setChecked(False)
+
+    def _refresh_drawing_sheet_conditions(self, records: list[Any]) -> None:
+        panel = getattr(self, "section_panel", None)
+        widget = getattr(panel, "list_drawing_sheet_conditions", None)
+        if widget is None:
+            return
+        checked = {
+            str(widget.item(index).data(Qt.ItemDataRole.UserRole))
+            for index in range(widget.count())
+            if widget.item(index).checkState() == Qt.CheckState.Checked
+        }
+        widget.blockSignals(True)
+        try:
+            widget.clear()
+            for record in sorted(
+                records,
+                key=lambda item: (str(item.created_at), str(item.id)),
+            ):
+                item = QListWidgetItem(self._native_record_choice_label(record))
+                item.setData(Qt.ItemDataRole.UserRole, record.id)
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(
+                    Qt.CheckState.Checked
+                    if record.id in checked
+                    else Qt.CheckState.Unchecked
+                )
+                widget.addItem(item)
+        finally:
+            widget.blockSignals(False)
+
+    def _checked_drawing_sheet_condition_ids(self) -> tuple[str, ...]:
+        panel = getattr(self, "section_panel", None)
+        widget = getattr(panel, "list_drawing_sheet_conditions", None)
+        if widget is None:
+            return ()
+        return tuple(
+            str(widget.item(index).data(Qt.ItemDataRole.UserRole))
+            for index in range(widget.count())
+            if widget.item(index).checkState() == Qt.CheckState.Checked
+        )
 
     @staticmethod
     def _native_diameter_record_is_usable(session, record) -> bool:
@@ -18381,6 +18555,7 @@ class MainWindow(QMainWindow):
         if not native:
             panel.apply_native_workflow_progress(ArtifactWorkflowProgress.empty())
             panel.btn_native_tile_unwrap.setEnabled(False)
+            panel.btn_native_condition.setEnabled(False)
             panel.btn_native_vector_export.setEnabled(False)
             panel.btn_native_rubbing_export.setEnabled(False)
             panel.btn_native_tile_unwrap_export.setEnabled(False)
@@ -18392,6 +18567,7 @@ class MainWindow(QMainWindow):
         if not self._native_measurement_ready():
             panel.apply_native_workflow_progress(ArtifactWorkflowProgress.empty())
             panel.btn_native_tile_unwrap.setEnabled(False)
+            panel.btn_native_condition.setEnabled(False)
             panel.btn_native_vector_export.setEnabled(False)
             panel.btn_native_rubbing_export.setEnabled(False)
             panel.btn_native_tile_unwrap_export.setEnabled(False)
@@ -18425,6 +18601,7 @@ class MainWindow(QMainWindow):
         )
         panel.apply_native_workflow_progress(workflow_progress)
         panel.btn_native_tile_unwrap.setEnabled(True)
+        panel.btn_native_condition.setEnabled(True)
         selected_count = len(getattr(live_obj, "selected_faces", set()) or set())
         panel.label_native_tile_selection.setText(
             f"현재 선택 {selected_count:,}면 · 전체 "
@@ -18640,6 +18817,19 @@ class MainWindow(QMainWindow):
             status_text = (
                 f"검증 표면 측정 기록 | {value_text} · "
                 f"pick QC {quality['status']}"
+            )
+        elif work_item.kind is MeasurementOperationKind.CONDITION_ANNOTATION:
+            assert isinstance(computation, ConditionAnnotationComputation)
+            condition_label = {
+                "missing": "결실",
+                "restored": "복원",
+                "crack": "균열",
+                "worn": "마모",
+            }.get(str(computation.payload.condition), str(computation.payload.condition))
+            status_text = (
+                f"상태 기록 | {condition_label} · "
+                f"{int(computation.qc.get('face_count', 0)):,}면 · "
+                f"뷰 {int(computation.qc.get('projected_view_count', 0))}/6"
             )
         else:  # pragma: no cover - closed enum guard
             raise ArtifactWorkbenchError(
@@ -19482,6 +19672,131 @@ class MainWindow(QMainWindow):
             "이전 기록은 다시 측정해야 합니다"
         )
 
+    def on_native_condition_requested(self) -> None:
+        """Record the faces the user painted as one condition of the artifact.
+
+        The selection tools already exist; this is the step that turns a
+        selection into something durable.  The face set is fixed on the GUI
+        thread and carried in the recipe, so the worker projects exactly what
+        was painted and a later edit to the selection cannot change the record.
+        """
+
+        try:
+            obj = self.viewport.selected_obj
+            session = self._require_native_measurement_session(obj)
+            selected = tuple(
+                sorted(
+                    int(value)
+                    for value in (getattr(obj, "selected_faces", set()) or set())
+                )
+            )
+            if not selected:
+                self.status_info.setText(
+                    "먼저 선택 패널의 클릭·브러시·올가미로 상태를 표기할 면을 칠하세요."
+                )
+                return
+            panel = self.section_panel
+            condition = str(panel.combo_native_condition.currentData() or "")
+            preflight = self._capture_native_scene_preflight(
+                session,
+                allowed_selected_face_indices=selected,
+            )
+            record_id = f"record:condition:{condition}:{uuid.uuid4()}"
+            controller = self._artifact_measurement_controller()
+            work_item = controller.begin_condition_annotation(
+                condition=condition,
+                selected_face_indices=selected,
+                precision_grid_mm=float(panel.spin_native_outline_grid.value()),
+                record_id=record_id,
+                created_at=self._utc_seconds_now(),
+                operator="local-user",
+            )
+        except Exception as exc:
+            self.status_info.setText("상태 기록 준비 실패 | 기존 문서 유지")
+            QMessageBox.warning(
+                self,
+                "상태 기록 준비 실패",
+                f"{type(exc).__name__}: {exc}",
+            )
+            return
+
+        def on_done(result: object) -> None:
+            if self._native_measurement_callback_is_terminal(
+                controller,
+                work_item,
+                label="상태 기록",
+            ):
+                return
+            try:
+                if not isinstance(result, ArtifactMeasurementResult):
+                    raise ArtifactWorkbenchError("condition worker result is invalid")
+                self._publish_native_measurement_result(work_item, result)
+            except Exception as exc:
+                if self._report_artifact_authority_callback_failure(
+                    context="상태 기록 게시 중 권위 확인 실패",
+                    detail=f"{type(exc).__name__}: {exc}",
+                ):
+                    return
+                pending = self._native_measurement_publication_is_pending(work_item)
+                self.status_info.setText(
+                    "상태 기록 게시 보류 | 재시도 버튼 사용"
+                    if pending
+                    else "늦은 상태 기록 결과 폐기 | 현재 문서 유지"
+                )
+                QMessageBox.warning(
+                    self,
+                    "상태 기록 게시 보류" if pending else "상태 기록 결과 폐기",
+                    f"{type(exc).__name__}: {exc}",
+                )
+
+        def on_failed(message: str) -> None:
+            if self._report_artifact_authority_callback_failure(
+                context="상태 기록 worker 종료 콜백",
+                detail=str(message),
+            ):
+                return
+            if self._native_measurement_callback_is_terminal(
+                controller,
+                work_item,
+                label="상태 기록",
+            ):
+                return
+            self.status_info.setText("상태 기록 계산 실패 | 기존 문서 유지")
+            QMessageBox.warning(
+                self,
+                "상태 기록 계산 실패",
+                self._format_error_message("상태 영역 투영 중 오류:", message),
+            )
+
+        self.status_info.setText(
+            f"상태 기록 계산 중 · {len(selected):,}면을 여섯 뷰로 투영..."
+        )
+        started = self._start_task(
+            title="유물 상태 기록",
+            label="칠한 면 집합을 여섯 뷰의 경계로 투영하는 중...",
+            thread=TaskThread(
+                "native_condition_annotation",
+                lambda: self._execute_native_measurement_with_preflight(
+                    preflight,
+                    controller,
+                    work_item,
+                ),
+            ),
+            on_done=on_done,
+            on_failed=on_failed,
+            on_cancel_requested=lambda: self._request_native_measurement_cancel(
+                controller,
+                work_item,
+                label="상태 기록",
+            ),
+            on_shutdown_joined=lambda: self._verify_native_measurement_shutdown(
+                controller,
+                work_item,
+            ),
+        )
+        if not started:
+            controller.cancel(work_item, reason="task_not_started")
+
     def on_drawing_sheet_requested(self) -> None:
         """Compose the checked records into one printable sheet.
 
@@ -19523,12 +19838,33 @@ class MainWindow(QMainWindow):
             align = session.document.align_revision_index.get(align_id)
             operator = str(getattr(align, "operator", "") or "")
         rows = (("작성", operator),) if operator else ()
+        mirror_sections: tuple[tuple[str, str], ...] = ()
+        if panel.check_drawing_sheet_mirror.isChecked():
+            elevation_id = str(
+                panel.combo_drawing_sheet_mirror_elevation.currentData() or ""
+            )
+            section_id = str(
+                panel.combo_drawing_sheet_mirror_section.currentData() or ""
+            )
+            if not elevation_id or not section_id:
+                self.status_info.setText(
+                    "반입면·반단면으로 합치려면 입면과 단면 기록을 각각 고르세요."
+                )
+                return
+            if elevation_id not in record_ids:
+                self.status_info.setText(
+                    "합칠 입면 기록을 위 목록에서도 체크하세요. 단면 기록은 체크하지 않습니다."
+                )
+                return
+            mirror_sections = ((elevation_id, section_id),)
         try:
             options = DrawingSheetOptions(
                 title_block=TitleBlock(artifact_label=label, rows=rows),
                 scale_denominator=float(panel.spin_drawing_sheet_scale.value()),
                 page=SheetPage(size=page_size, orientation=orientation),
                 show_center_axis=panel.check_drawing_sheet_center_axis.isChecked(),
+                mirror_sections=mirror_sections,
+                condition_records=self._checked_drawing_sheet_condition_ids(),
             )
             bundle = compose_drawing_sheet(
                 session.document, record_ids, options=options

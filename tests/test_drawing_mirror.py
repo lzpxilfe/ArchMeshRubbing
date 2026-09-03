@@ -524,7 +524,7 @@ def test_a_condition_region_is_cut_to_the_elevation_half() -> None:
     session = _positioned()
     computation = compute_condition_annotation(
         session,
-        kind="missing",
+        condition="missing",
         face_indices=list(range(0, 40)),
         precision_grid_mm=0.5,
     )

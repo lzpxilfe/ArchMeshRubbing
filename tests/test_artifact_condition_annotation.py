@@ -120,11 +120,11 @@ def _flat_plate_session() -> ArtifactSession:
     )
 
 
-def _committed(kind: str = "missing", faces: object = (0, 2)) -> ArtifactSession:
+def _committed(condition: str = "missing", faces: object = (0, 2)) -> ArtifactSession:
     session = _session()
     computation = compute_condition_annotation(
         session,
-        kind=kind,
+        condition=condition,
         face_indices=faces,
     )
     return commit_condition_annotation(
@@ -215,7 +215,7 @@ def test_a_selection_digest_covers_the_faces_not_the_encoding() -> None:
 def test_a_region_projects_into_every_view_that_can_see_it() -> None:
     computation = compute_condition_annotation(
         _session(),
-        kind="missing",
+        condition="missing",
         face_indices=[0, 2],
     )
 
@@ -223,7 +223,7 @@ def test_a_region_projects_into_every_view_that_can_see_it() -> None:
     assert computation.qc["empty_views"] == []
     assert computation.qc["face_count"] == 2
     assert computation.qc["face_range_count"] == 2
-    assert computation.qc["kind"] == "missing"
+    assert computation.qc["condition"] == "missing"
     for view in computation.qc["views"]:
         assert view["area_mm2"] > 0.0
         assert view["component_count"] == 1
@@ -232,7 +232,7 @@ def test_a_region_projects_into_every_view_that_can_see_it() -> None:
 def test_a_view_that_sees_the_region_edge_on_is_reported_not_raised() -> None:
     computation = compute_condition_annotation(
         _flat_plate_session(),
-        kind="restored",
+        condition="restored",
         face_indices=[0],
     )
 
@@ -267,13 +267,13 @@ def test_projection_refuses_a_face_index_outside_the_geometry() -> None:
     with pytest.raises(
         ArtifactConditionAnnotationError, match="outside the geometry"
     ):
-        compute_condition_annotation(session, kind="worn", face_indices=[0, 4])
+        compute_condition_annotation(session, condition="worn", face_indices=[0, 4])
 
 
 def test_only_the_closed_condition_vocabulary_is_accepted() -> None:
     assert CONDITION_KINDS == ("crack", "missing", "restored", "worn")
     with pytest.raises(ArtifactConditionAnnotationError, match="condition kind"):
-        compute_condition_annotation(_session(), kind="chipped", face_indices=[0])
+        compute_condition_annotation(_session(), condition="chipped", face_indices=[0])
 
 
 # --- the durable record -------------------------------------------------------
@@ -284,12 +284,12 @@ def test_a_committed_record_carries_the_region_and_validates() -> None:
     record = session.document.record_index["record:condition-1"]
 
     assert record.type == CONDITION_RECORD_TYPE
-    assert record.selection_hash == record.recipe["selection_sha256"]
+    assert record.selection_hash == record.recipe["selection"]["selection_sha256"]
     validate_known_records(session.document)
 
     payload = condition_payload_from_record(record)
     assert list(payload.face_indices()) == [0, 2]
-    assert payload.kind == "missing"
+    assert payload.condition == "missing"
 
 
 def test_the_face_set_survives_saving_and_reopening() -> None:
@@ -365,7 +365,7 @@ def test_a_payload_holds_at_most_one_boundary_per_view() -> None:
     with pytest.raises(ArtifactConditionAnnotationError, match="one boundary per view"):
         ConditionAnnotationPayload(
             schema_version=payload.schema_version,
-            kind=payload.kind,
+            condition=payload.condition,
             selection=payload.selection,
             views=(front, front),
         )
@@ -384,14 +384,14 @@ def test_every_view_is_accounted_for_with_a_boundary_or_a_reason() -> None:
     with pytest.raises(ArtifactConditionAnnotationError, match="each of the six views"):
         ConditionAnnotationPayload(
             schema_version=payload.schema_version,
-            kind=payload.kind,
+            condition=payload.condition,
             selection=payload.selection,
             views=payload.views[:2],
         )
     with pytest.raises(ArtifactConditionAnnotationError, match="skip reason"):
         ConditionAnnotationPayload(
             schema_version=payload.schema_version,
-            kind=payload.kind,
+            condition=payload.condition,
             selection=payload.selection,
             views=payload.views[:5],
             skipped_views=({"reason": "because", "view": payload.views[5].view},),
@@ -403,7 +403,7 @@ def test_one_unusable_view_does_not_refuse_the_whole_annotation() -> None:
 
     computation = compute_condition_annotation(
         _flat_plate_session(),
-        kind="worn",
+        condition="worn",
         face_indices=[0, 1],
     )
 
@@ -425,7 +425,7 @@ def test_condition_records_do_not_change_the_completion_gate() -> None:
     session = _session()
     computation = compute_condition_annotation(
         session,
-        kind="crack",
+        condition="crack",
         face_indices=[1],
     )
     annotated = commit_condition_annotation(
