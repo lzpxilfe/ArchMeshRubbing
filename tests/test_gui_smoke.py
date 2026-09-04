@@ -4477,7 +4477,14 @@ def test_native_rubbing_ui_exposes_physical_recipe_and_six_views() -> None:
         # own enabled state rather than the effective one.
         assert not panel.spin_native_rubbing_contact_ink.testAttribute(_FORCE_DISABLED)
         assert panel.spin_native_rubbing_paper_tone.testAttribute(_FORCE_DISABLED)
+        # Paper touches one side, so the contact model opens on the raised
+        # polarity and the two-sided entry is off the menu.
+        polarity = panel.combo_native_rubbing_polarity
+        assert polarity.currentData() == "raised"
+        assert not polarity.model().item(polarity.findData("bidirectional")).isEnabled()
         model.setCurrentIndex(model.findData(RELIEF_MODEL_LOCAL_MEAN))
+        assert polarity.currentData() == DEFAULT_RUBBING_POLARITY
+        assert polarity.model().item(polarity.findData("bidirectional")).isEnabled()
         assert panel.spin_native_rubbing_reference_radius_um.value() == (
             DEFAULT_RUBBING_REFERENCE_RADIUS_UM
         )
@@ -5127,8 +5134,12 @@ def test_native_rubbing_handler_uses_worker_and_late_result_cannot_overwrite_ses
                 ),
             ),
             patch.object(window, "_start_task", return_value=True) as start_task,
+            # A refusal here opens a modal dialog, which under a test is a
+            # hang rather than a failure; catch it as a failure instead.
+            patch.object(QMessageBox, "warning") as preflight_warning,
         ):
             window.on_native_rubbing_requested()
+        preflight_warning.assert_not_called()
         assert start_task.call_count == 1
         thread = start_task.call_args.kwargs["thread"]
         assert isinstance(thread, TaskThread)

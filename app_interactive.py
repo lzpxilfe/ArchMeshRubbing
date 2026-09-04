@@ -4560,6 +4560,19 @@ class SectionPanel(QWidget):
             )
             self.spin_native_rubbing_contact_ink.setEnabled(contact)
             self.spin_native_rubbing_paper_tone.setEnabled(not contact)
+            # Paper touches one side of the surface, so the contact model
+            # refuses the two-sided polarity; offering it would turn every
+            # rubbing into a refusal dialog.  Take it off the menu while the
+            # contact model is chosen and put the shading's default back after.
+            polarity = self.combo_native_rubbing_polarity
+            both_sides = polarity.findData("bidirectional")
+            item = polarity.model().item(both_sides)  # type: ignore[union-attr]
+            if item is not None:
+                item.setEnabled(not contact)
+            if contact and polarity.currentData() == "bidirectional":
+                polarity.setCurrentIndex(max(0, polarity.findData("raised")))
+            elif not contact and polarity.currentData() == "raised":
+                polarity.setCurrentIndex(max(0, polarity.findData(DEFAULT_RUBBING_POLARITY)))
 
         self.combo_native_rubbing_model.currentIndexChanged.connect(_apply_model_defaults)
         _apply_model_defaults(self.combo_native_rubbing_model.currentIndex())
