@@ -79,6 +79,10 @@ from src.core.artifact_rubbing_extractor import (
     DEFAULT_RUBBING_PIXELS_PER_MM,
     DEFAULT_RUBBING_POLARITY,
     DEFAULT_RUBBING_REFERENCE_RADIUS_UM,
+    RECOMMENDED_RUBBING_CONTACT_BLACK_POINT_UM,
+    RECOMMENDED_RUBBING_CONTACT_REFERENCE_RADIUS_UM,
+    RECOMMENDED_RUBBING_RELIEF_MODEL,
+    RELIEF_MODEL_LOCAL_MEAN,
     commit_artifact_rubbing,
     compute_artifact_rubbing,
 )
@@ -4433,6 +4437,9 @@ def test_native_tile_unwrap_command_previews_and_exports_recomputed_record(
         app.processEvents()
 
 
+_FORCE_DISABLED = Qt.WidgetAttribute.WA_ForceDisabled
+
+
 def test_native_rubbing_ui_exposes_physical_recipe_and_six_views() -> None:
     app = QApplication.instance()
     if app is None:
@@ -4454,14 +4461,33 @@ def test_native_rubbing_ui_exposes_physical_recipe_and_six_views() -> None:
         )
         assert panel.spin_native_rubbing_pixels_per_mm.suffix() == " px/mm"
         assert panel.spin_native_rubbing_margin_um.value() == DEFAULT_RUBBING_MARGIN_UM
+        # The panel opens on the contact model with its own recommended pair;
+        # the two models read the reference radius and the black point
+        # differently, so switching back to the shading restores the core
+        # defaults rather than carrying the paper's numbers across.
+        model = panel.combo_native_rubbing_model
+        assert model.currentData() == RECOMMENDED_RUBBING_RELIEF_MODEL
+        assert panel.spin_native_rubbing_reference_radius_um.value() == (
+            RECOMMENDED_RUBBING_CONTACT_REFERENCE_RADIUS_UM
+        )
+        assert panel.spin_native_rubbing_black_point_um.value() == (
+            RECOMMENDED_RUBBING_CONTACT_BLACK_POINT_UM
+        )
+        # The panel is disabled until a mesh is loaded, so read each spin's
+        # own enabled state rather than the effective one.
+        assert not panel.spin_native_rubbing_contact_ink.testAttribute(_FORCE_DISABLED)
+        assert panel.spin_native_rubbing_paper_tone.testAttribute(_FORCE_DISABLED)
+        model.setCurrentIndex(model.findData(RELIEF_MODEL_LOCAL_MEAN))
         assert panel.spin_native_rubbing_reference_radius_um.value() == (
             DEFAULT_RUBBING_REFERENCE_RADIUS_UM
         )
-        assert panel.spin_native_rubbing_depth_quantization_um.value() == (
-            DEFAULT_RUBBING_DEPTH_QUANTIZATION_UM
-        )
         assert panel.spin_native_rubbing_black_point_um.value() == (
             DEFAULT_RUBBING_BLACK_POINT_UM
+        )
+        assert panel.spin_native_rubbing_contact_ink.testAttribute(_FORCE_DISABLED)
+        assert not panel.spin_native_rubbing_paper_tone.testAttribute(_FORCE_DISABLED)
+        assert panel.spin_native_rubbing_depth_quantization_um.value() == (
+            DEFAULT_RUBBING_DEPTH_QUANTIZATION_UM
         )
         assert panel.spin_native_rubbing_strength.value() == (
             DEFAULT_RUBBING_INK_STRENGTH_PERCENT

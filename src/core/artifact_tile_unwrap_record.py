@@ -17,6 +17,8 @@ from .artifact_tile_unwrap_extractor import (
     MAX_TILE_UNWRAP_FACES,
     MAX_TILE_UNWRAP_QC_FACES,
     MAX_TILE_UNWRAP_VERTICES,
+    SECTION_CENTER_CANONICAL_AXIS,
+    SECTION_CENTER_FIT_PER_SECTION,
     TILE_UNWRAP_COORDINATE_QUANTUM_UM,
     TILE_UNWRAP_COORDINATE_SPACE,
     TILE_UNWRAP_GEOMETRY_REF_PREFIX,
@@ -35,6 +37,14 @@ TILE_UNWRAP_RECEIPT_MEDIA_TYPE = (
     "application/vnd.archmeshrubbing.tile-unwrap-receipt+json"
 )
 MAX_TILE_UNWRAP_RECEIPT_BYTES = 64 * 1024
+
+#: Per-face distortion a fitted-centre record may not exceed anywhere.  A
+#: record unrolled about the measured axis reports its maximum and is gated
+#: on the mean and the 95th percentile alone: there a steep face is relief on
+#: the wall, not a centre in the wrong place.
+TILE_UNWRAP_DISTORTION_FACE_MAX_MILLIONTHS = 250_000
+TILE_UNWRAP_DISTORTION_MEAN_MAX_MILLIONTHS = 75_000
+TILE_UNWRAP_DISTORTION_P95_MAX_MILLIONTHS = 150_000
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _QC_FIELDS = {
@@ -288,7 +298,16 @@ def validate_tile_unwrap_receipt(value: object) -> dict[str, Any]:
 def _validate_qc_against_receipt(
     qc: Mapping[str, Any],
     receipt: Mapping[str, Any],
+    *,
+    section_center_policy: str = SECTION_CENTER_FIT_PER_SECTION,
 ) -> dict[str, Any]:
+    if section_center_policy not in {
+        SECTION_CENTER_FIT_PER_SECTION,
+        SECTION_CENTER_CANONICAL_AXIS,
+    }:
+        raise ArtifactTileUnwrapRecordError(
+            "tile unwrap QC gate needs a known section centre policy"
+        )
     value = _exact_keys(qc, _QC_FIELDS, name="tile unwrap QC")
     expected = {
         "face_count": receipt["face_count"],
@@ -378,11 +397,18 @@ def _validate_qc_against_receipt(
         key: _strict_int(value[key], name=f"qc.{key}", minimum=0, maximum=1_000_000)
         for key in distortion_fields
     }
-    if distortion["distortion_max_millionths"] > 250_000:
+    if (
+        section_center_policy != SECTION_CENTER_CANONICAL_AXIS
+        and distortion["distortion_max_millionths"]
+        > TILE_UNWRAP_DISTORTION_FACE_MAX_MILLIONTHS
+    ):
         raise ArtifactTileUnwrapRecordError("tile unwrap max distortion exceeds gate")
-    if distortion["distortion_mean_millionths"] > 75_000:
+    if (
+        distortion["distortion_mean_millionths"]
+        > TILE_UNWRAP_DISTORTION_MEAN_MAX_MILLIONTHS
+    ):
         raise ArtifactTileUnwrapRecordError("tile unwrap mean distortion exceeds gate")
-    if distortion["distortion_p95_millionths"] > 150_000:
+    if distortion["distortion_p95_millionths"] > TILE_UNWRAP_DISTORTION_P95_MAX_MILLIONTHS:
         raise ArtifactTileUnwrapRecordError("tile unwrap p95 distortion exceeds gate")
     if (
         distortion["distortion_median_millionths"]
@@ -456,11 +482,19 @@ def _validate_qc_against_receipt(
 def validate_tile_unwrap_qc(
     value: Mapping[str, Any],
     receipt: Mapping[str, Any],
+    *,
+    section_center_policy: str = SECTION_CENTER_FIT_PER_SECTION,
 ) -> dict[str, Any]:
-    """Validate the closed QC shape against a validated public receipt."""
+    """Validate the closed QC shape against a validated public receipt.
+
+    The distortion gate depends on where the section centres came from, so
+    the recipe's ``section_center_policy`` is passed alongside.
+    """
 
     validated_receipt = validate_tile_unwrap_receipt(receipt)
-    return _validate_qc_against_receipt(value, validated_receipt)
+    return _validate_qc_against_receipt(
+        value, validated_receipt, section_center_policy=section_center_policy
+    )
 
 
 def append_tile_unwrap_record_from_context(
@@ -507,7 +541,13 @@ def append_tile_unwrap_record_from_context(
         raise ArtifactTileUnwrapRecordError(
             "tile unwrap receipt selection count differs from recipe"
         )
-    validated_qc = _validate_qc_against_receipt(qc, receipt)
+    validated_qc = _validate_qc_against_receipt(
+        qc,
+        receipt,
+        section_center_policy=str(
+            validated_recipe.get("section_center_policy", SECTION_CENTER_FIT_PER_SECTION)
+        ),
+    )
     if validated_qc["section_count"] != validated_recipe["n_sections"]:
         raise ArtifactTileUnwrapRecordError(
             "tile unwrap section QC differs from recipe"
@@ -596,7 +636,13 @@ def tile_unwrap_receipt_from_record(record: DerivedRecord) -> dict[str, Any]:
         )
     record_qc = record.to_dict()["qc"]
     assert isinstance(record_qc, dict)
-    validated_qc = _validate_qc_against_receipt(record_qc, receipt)
+    validated_qc = _validate_qc_against_receipt(
+        record_qc,
+        receipt,
+        section_center_policy=str(
+            recipe.get("section_center_policy", SECTION_CENTER_FIT_PER_SECTION)
+        ),
+    )
     if validated_qc["section_count"] != recipe["n_sections"]:
         raise ArtifactTileUnwrapRecordError(
             "tile unwrap section QC differs from recipe"

@@ -19,6 +19,8 @@ from src.core.artifact_record_validation import (
 )
 from src.core.artifact_session import ArtifactSession
 from src.core.artifact_tile_unwrap_extractor import (
+    SECTION_CENTER_CANONICAL_AXIS,
+    SECTION_CENTER_FIT_PER_SECTION,
     ArtifactTileUnwrapError,
     TileUnwrapMesh,
     commit_artifact_tile_unwrap,
@@ -34,7 +36,9 @@ from src.core.artifact_tile_unwrap_extractor import (
 from src.core.artifact_tile_unwrap_record import (
     TILE_UNWRAP_RECEIPT_EXTENSION_KEY,
     TILE_UNWRAP_RECORD_TYPE,
+    ArtifactTileUnwrapRecordError,
     tile_unwrap_receipt_from_record,
+    validate_tile_unwrap_qc,
 )
 from src.core.mesh_import_recipe import current_mesh_import_recipe
 from src.core.mesh_loader import MeshData
@@ -479,6 +483,45 @@ def test_known_record_validation_enforces_current_distortion_gates(
 
     with pytest.raises(ArtifactKnownRecordError, match=expected_message):
         validate_known_records(document)
+
+
+def test_qc_gate_reports_but_does_not_refuse_a_steep_face_on_the_measured_axis() -> None:
+    """A fitted centre may not leave a face over 25%; the measured axis may.
+
+    With the centre fitted, one such face means the fit put it in the wrong
+    place.  With the centre on the measured axis every vertex lands where the
+    axis says, and a steep face is relief on the wall - what a rubbing records
+    and what a finer mesh resolves more of.  The mean and the 95th percentile
+    still gate the whole.
+    """
+
+    session, _truth = _recorded_session(seed=9)
+    record = session.document.record_index["record:tile-unwrap"]
+    receipt = tile_unwrap_receipt_from_record(record)
+    qc = dict(record.to_dict()["qc"])
+    qc["distortion_median_millionths"] = 0
+    qc["distortion_mean_millionths"] = 0
+    qc["distortion_p95_millionths"] = 0
+    qc["distortion_max_millionths"] = 300_000
+
+    with pytest.raises(ArtifactTileUnwrapRecordError, match="max distortion"):
+        validate_tile_unwrap_qc(qc, receipt)
+    with pytest.raises(ArtifactTileUnwrapRecordError, match="max distortion"):
+        validate_tile_unwrap_qc(
+            qc, receipt, section_center_policy=SECTION_CENTER_FIT_PER_SECTION
+        )
+    validated = validate_tile_unwrap_qc(
+        qc, receipt, section_center_policy=SECTION_CENTER_CANONICAL_AXIS
+    )
+    assert validated["distortion_max_millionths"] == 300_000
+
+    qc["distortion_p95_millionths"] = 150_001
+    with pytest.raises(ArtifactTileUnwrapRecordError, match="p95 distortion"):
+        validate_tile_unwrap_qc(
+            qc, receipt, section_center_policy=SECTION_CENTER_CANONICAL_AXIS
+        )
+    with pytest.raises(ArtifactTileUnwrapRecordError, match="section centre policy"):
+        validate_tile_unwrap_qc(qc, receipt, section_center_policy="guess")
 
 
 def test_known_record_selection_is_bound_to_geometry_counts() -> None:

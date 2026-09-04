@@ -313,6 +313,14 @@ def _estimate_section_longitudinal_axis(
     return _axis_unit_vector("z"), "z"
 
 
+#: Per-face distortion a fitted-centre unwrap may not exceed anywhere.
+SECTION_DISTORTION_FACE_MAX = 0.25
+#: Distortion the 95th-percentile face may not exceed under either centre.
+SECTION_DISTORTION_P95_MAX = 0.15
+#: Distortion the mean face may not exceed under either centre.
+SECTION_DISTORTION_MEAN_MAX = 0.075
+
+
 def sectionwise_quality_gate(
     meta: dict[str, Any] | None,
     *,
@@ -347,11 +355,20 @@ def sectionwise_quality_gate(
     p95 = float(dist.get("p95", 0.0) or 0.0)
     mean = float(dist.get("mean", 0.0) or 0.0)
     maximum = float(dist.get("max", 0.0) or 0.0)
-    if maximum > 0.25:
+    # A fitted centre can put a whole face in the wrong place, and one such
+    # face is a failed fit.  With the centre on the measured axis every
+    # vertex lands where the axis says, and a face's distortion is only how
+    # steeply it stands off the surface of revolution - a temper grain, a
+    # scan spike, the wall of an incised line.  That is what a rubbing
+    # records, and a finer mesh resolves more of it; the maximum is reported
+    # as it is, and the mean and the 95th percentile keep gating the whole.
+    if maximum > SECTION_DISTORTION_FACE_MAX and (
+        str(info.get("section_center_policy", "fit")) != "axis_origin"
+    ):
         return True, "section_distortion_max"
-    if p95 > 0.15:
+    if p95 > SECTION_DISTORTION_P95_MAX:
         return True, "section_distortion_p95"
-    if mean > 0.075:
+    if mean > SECTION_DISTORTION_MEAN_MAX:
         return True, "section_distortion_mean"
     return False, ""
 

@@ -474,7 +474,8 @@ def test_generated_sidecar_matches_closed_public_json_schema() -> None:
         assert isinstance(value, dict)
         return value
 
-    export_schema = load_schema("tile_unwrap_export-1.3.0.schema.json")
+    export_schema = load_schema("tile_unwrap_export-1.4.0.schema.json")
+    v13_export_schema = load_schema("tile_unwrap_export-1.3.0.schema.json")
     v12_export_schema = load_schema("tile_unwrap_export-1.2.0.schema.json")
     legacy_export_schema = load_schema("tile_unwrap_export-1.1.0.schema.json")
     receipt_schema = load_schema("tile_unwrap_receipt-1.1.0.schema.json")
@@ -485,6 +486,7 @@ def test_generated_sidecar_matches_closed_public_json_schema() -> None:
     import_recipe_v2_schema = load_schema("mesh_import_recipe-2.0.0.schema.json")
     for schema in (
         export_schema,
+        v13_export_schema,
         v12_export_schema,
         legacy_export_schema,
         receipt_schema,
@@ -524,6 +526,10 @@ def test_generated_sidecar_matches_closed_public_json_schema() -> None:
         v12_export_schema,
         registry=registry,
     )
+    v13_validator = jsonschema.Draft202012Validator(
+        v13_export_schema,
+        registry=registry,
+    )
     session, computation = _recorded()
     bundle = build_tile_unwrap_export(
         session.document,
@@ -532,10 +538,25 @@ def test_generated_sidecar_matches_closed_public_json_schema() -> None:
     )
     sidecar = json.loads(bundle.sidecar_bytes)
     assert isinstance(sidecar, dict)
-    assert sidecar["schema_version"] == "1.3.0"
+    assert sidecar["schema_version"] == "1.4.0"
     assert list(validator.iter_errors(sidecar)) == []
     # A 1.3 recipe carries the policies, which the 1.2 sidecar never knew.
     assert list(v12_validator.iter_errors(sidecar))
+
+    # The 1.4 sidecar differs from 1.3 in one bound: a record unrolled about
+    # the measured axis may report a face over 25%, a fitted one may not.
+    v13_shaped = copy.deepcopy(sidecar)
+    v13_shaped["schema_version"] = "1.3.0"
+    assert list(v13_validator.iter_errors(v13_shaped)) == []
+    assert list(validator.iter_errors(v13_shaped))
+    steep_fitted = copy.deepcopy(sidecar)
+    steep_fitted["qc"]["record"]["distortion_max_millionths"] = 300_000
+    assert list(validator.iter_errors(steep_fitted))
+    steep_on_axis = copy.deepcopy(steep_fitted)
+    steep_on_axis["recipe"]["section_center_policy"] = "canonical_axis_origin"
+    assert list(validator.iter_errors(steep_on_axis)) == []
+    steep_on_axis["schema_version"] = "1.3.0"
+    assert list(v13_validator.iter_errors(steep_on_axis))
 
     fixed_session, fixed_computation = _recorded(
         seam_angle_microdegrees=90_000_000
@@ -650,12 +671,26 @@ def test_experimental_legacy_schema_files_remain_byte_exact(
     assert hashlib.sha256(schema_bytes).hexdigest() == expected_sha256
 
 
-def test_published_legacy_1_1_export_schema_remains_byte_exact() -> None:
-    schema_bytes = (ROOT / "schemas/tile_unwrap_export-1.1.0.schema.json").read_bytes()
+@pytest.mark.parametrize(
+    ("name", "expected_sha256"),
+    [
+        (
+            "tile_unwrap_export-1.1.0.schema.json",
+            "e8f2bac9e85014a2b566c7085b4c62f6aeced52c03eb5e09c3d091e0d248e916",
+        ),
+        (
+            "tile_unwrap_export-1.3.0.schema.json",
+            "df896f8053e45b43c039167428bd1d02f975e9c47a7b95b5bf7776a76b219bc0",
+        ),
+    ],
+)
+def test_published_export_schemas_remain_byte_exact(
+    name: str,
+    expected_sha256: str,
+) -> None:
+    schema_bytes = (ROOT / "schemas" / name).read_bytes()
 
-    assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "e8f2bac9e85014a2b566c7085b4c62f6aeced52c03eb5e09c3d091e0d248e916"
-    )
+    assert hashlib.sha256(schema_bytes).hexdigest() == expected_sha256
 
 
 def test_canonical_payload_roundtrips_and_rejects_trailing_bytes() -> None:
