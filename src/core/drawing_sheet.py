@@ -64,6 +64,12 @@ from .artifact_profile_groove import (
     ProfileGroovePayload,
     profile_groove_payload_from_record,
 )
+from .artifact_technique_annotation import (
+    ArtifactTechniqueAnnotationError,
+    TECHNIQUE_RECORD_TYPE,
+    TechniqueAnnotationPayload,
+    technique_payload_from_record,
+)
 from .artifact_vector_export import (
     ArtifactVectorExportError,
     _payload_bounds,
@@ -81,11 +87,13 @@ from .drawing_style import (
     CENTER_AXIS,
     DrawingStyleError,
     DrawingStylePreset,
+    SYMBOL_LINE_KINDS,
     preset_claim as drawing_style_preset_claim,
     preset_from_claim as drawing_style_preset_from_claim,
     resolve_preset as resolve_drawing_style_preset,
     line_kind_for_condition,
     line_kind_for_record_role,
+    line_kind_for_technique,
 )
 from .drawing_svg import (
     Placement,
@@ -95,6 +103,7 @@ from .drawing_svg import (
     center_axis_segment,
     clip_closed_ring,
     clip_open_path,
+    finger_mark_symbol,
     finite_number,
     hatch_pattern_elements,
     hatched_kinds,
@@ -354,6 +363,14 @@ class DrawingSheetOptions:
     taken from, so a groove in the rubbing sits level with the same groove's
     line in the elevation, at the cost of shortening the bands on a belly.
     """
+    technique_records: tuple[str, ...] = ()
+    """Technique marks to draw over the figures, by record id.
+
+    Empty by default, and an empty tuple changes nothing.  Like a condition, a
+    mark is drawn only onto figures that share its view.  Most kinds are drawn
+    by the boundary of the painted region; a finger mark is drawn as the U
+    symbol the convention uses, sized to the region's extent.
+    """
     groove_records: tuple[str, ...] = ()
     """Groove readings to draw on the figures, by record id.
 
@@ -409,6 +426,22 @@ class DrawingSheetOptions:
                 "condition records"
             )
         object.__setattr__(self, "condition_records", condition_records)
+        technique_records = tuple(self.technique_records)
+        if any(
+            not isinstance(record_id, str) or not record_id.strip()
+            for record_id in technique_records
+        ):
+            raise DrawingSheetError("technique_records must be record ids")
+        if len(set(technique_records)) != len(technique_records):
+            raise DrawingSheetError(
+                "the same technique record cannot be drawn twice on one sheet"
+            )
+        if len(technique_records) > MAX_DRAWING_SHEET_CONDITION_RECORDS:
+            raise DrawingSheetError(
+                f"a sheet draws at most {MAX_DRAWING_SHEET_CONDITION_RECORDS} "
+                "technique records"
+            )
+        object.__setattr__(self, "technique_records", technique_records)
         groove_records = tuple(self.groove_records)
         if any(
             not isinstance(record_id, str) or not record_id.strip()
@@ -965,6 +998,38 @@ def _require_drawable_condition_record(
     return record, payload
 
 
+def _require_drawable_technique_record(
+    document: ArtifactDocument,
+    record_id: str,
+) -> tuple[DerivedRecord, TechniqueAnnotationPayload]:
+    """Resolve one technique record under the same rules a figure answers to."""
+
+    record = document.record_index.get(record_id)
+    if record is None:
+        raise DrawingSheetError(f"technique record {record_id!r} does not exist")
+    if record.type != TECHNIQUE_RECORD_TYPE:
+        raise DrawingSheetError(
+            f"record {record_id!r} is not a technique annotation"
+        )
+    if record.lifecycle_status is not RecordLifecycleStatus.READY:
+        raise DrawingSheetError("only READY technique records may be drawn")
+    try:
+        freshness = document.record_freshness(record.id)
+    except ArtifactDocumentError as exc:
+        raise DrawingSheetError(str(exc)) from exc
+    if freshness is not RecordFreshness.FRESH:
+        raise DrawingSheetError(
+            "only FRESH technique records may be drawn "
+            f"(got {freshness.value}); a mark drawn under a superseded "
+            "alignment would sit somewhere the artifact no longer is"
+        )
+    try:
+        payload = technique_payload_from_record(record)
+    except ArtifactTechniqueAnnotationError as exc:
+        raise DrawingSheetError(str(exc)) from exc
+    return record, payload
+
+
 def _require_drawable_groove_record(
     document: ArtifactDocument,
     record_id: str,
@@ -1268,6 +1333,66 @@ def _condition_paths_for_figure(
     return by_kind, drawn
 
 
+def _technique_paths_for_figure(
+    figure_record_type: str,
+    figure_payload_frame: Any,
+    techniques: Sequence[tuple[DerivedRecord, TechniqueAnnotationPayload]],
+) -> tuple[dict[str, list[Any]], list[dict[str, str]]]:
+    """Return the technique layers that belong on one figure, and what they are.
+
+    The same two conditions as for a condition boundary: the figure must be a
+    projection and its frame must be the one the mark was projected into.  A
+    kind in `SYMBOL_LINE_KINDS` is drawn as its symbol placed over the
+    region's extent in that view; every other kind by the region's boundary.
+    """
+
+    by_kind: dict[str, list[Any]] = {}
+    drawn: list[dict[str, str]] = []
+    if figure_record_type != VectorRecordKind.OUTLINE.record_type:
+        return by_kind, drawn
+    for record, payload in techniques:
+        for boundary in payload.views:
+            if boundary.outline.frame != figure_payload_frame:
+                continue
+            try:
+                kind = line_kind_for_technique(payload.technique)
+            except DrawingStyleError as exc:
+                raise DrawingSheetError(str(exc)) from exc
+            if kind in SYMBOL_LINE_KINDS:
+                try:
+                    symbol = finger_mark_symbol(_payload_bounds(boundary.outline))
+                except SVGRenderError as exc:
+                    raise DrawingSheetError(str(exc)) from exc
+                by_kind.setdefault(kind, []).append(
+                    VectorPath(
+                        id=f"technique:{record.id}:{boundary.view}:symbol",
+                        role="technique_symbol",
+                        closed=False,
+                        points_mm=symbol,
+                    )
+                )
+                representation = "symbol"
+            else:
+                for path in boundary.outline.paths:
+                    by_kind.setdefault(kind, []).append(
+                        replace(
+                            path, id=f"technique:{record.id}:{boundary.view}:{path.id}"
+                        )
+                    )
+                representation = "boundary"
+            drawn.append(
+                {
+                    "line_kind": kind,
+                    "record_id": record.id,
+                    "representation": representation,
+                    "technique_kind": payload.technique,
+                    "view": boundary.view,
+                }
+            )
+            break
+    return by_kind, drawn
+
+
 def _bounds_with_attachment(
     bounds: tuple[float, float, float, float],
     attached: _AttachedRaster | None,
@@ -1538,6 +1663,7 @@ def _sheet_provenance(
     condition: Mapping[str, Any] | None,
     groove: Mapping[str, Any] | None,
     mirrored: Sequence[Mapping[str, str]],
+    technique: Mapping[str, Any] | None = None,
     rubbings_on_axis: Sequence[Mapping[str, str]] = (),
 ) -> dict[str, Any]:
     preset = resolve_drawing_style_preset(options.style_preset)
@@ -1614,6 +1740,8 @@ def _sheet_provenance(
         provenance["condition"] = dict(condition)
     if groove is not None:
         provenance["groove"] = dict(groove)
+    if technique is not None:
+        provenance["technique"] = dict(technique)
     if mirrored:
         provenance["mirrored_figures"] = [dict(entry) for entry in mirrored]
     if rubbings_on_axis:
@@ -1960,11 +2088,16 @@ def compose_drawing_sheet(
         _require_drawable_condition_record(document, record_id)
         for record_id in options.condition_records
     ]
+    techniques = [
+        _require_drawable_technique_record(document, record_id)
+        for record_id in options.technique_records
+    ]
     grooves = [
         _require_drawable_groove_record(document, record_id)
         for record_id in options.groove_records
     ]
     condition_drawn: list[dict[str, str]] = []
+    technique_drawn: list[dict[str, str]] = []
     groove_drawn: list[dict[str, str]] = []
     attached_drawn: list[dict[str, str]] = []
     mirrored: list[dict[str, str]] = []
@@ -2017,6 +2150,14 @@ def compose_drawing_sheet(
             by_kind.setdefault(kind, []).extend(condition_paths)
         condition_drawn.extend(
             {"figure_record_id": record.id, **entry} for entry in drawn
+        )
+        technique_by_kind, techniques_drawn = _technique_paths_for_figure(
+            record.type, payload.frame, techniques
+        )
+        for kind, technique_paths in technique_by_kind.items():
+            by_kind.setdefault(kind, []).extend(technique_paths)
+        technique_drawn.extend(
+            {"figure_record_id": record.id, **entry} for entry in techniques_drawn
         )
         groove_by_kind, grooves_drawn = _groove_paths_for_figure(payload, grooves)
         for kind, groove_paths in groove_by_kind.items():
@@ -2154,6 +2295,32 @@ def compose_drawing_sheet(
                     ],
                 }
                 if conditions
+                else None
+            ),
+            technique=(
+                {
+                    "drawn": sorted(
+                        technique_drawn,
+                        key=lambda entry: (
+                            entry["figure_record_id"],
+                            entry["record_id"],
+                        ),
+                    ),
+                    "records": [
+                        {
+                            "face_count": payload.face_count,
+                            "payload_sha256": payload.sha256,
+                            "recipe_hash": record.recipe_hash,
+                            "record_id": record.id,
+                            "selection_sha256": payload.selection_sha256,
+                            "technique_kind": payload.technique,
+                        }
+                        for record, payload in sorted(
+                            techniques, key=lambda item: item[0].id
+                        )
+                    ],
+                }
+                if techniques
                 else None
             ),
             groove=(

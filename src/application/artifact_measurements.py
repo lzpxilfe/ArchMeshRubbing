@@ -38,6 +38,16 @@ from src.core.artifact_condition_annotation import (
     project_condition_from_recipe,
     validate_condition_recipe,
 )
+from src.core.artifact_technique_annotation import (
+    ArtifactTechniqueAnnotationError,
+    TechniqueAnnotationComputation,
+    commit_technique_annotation,
+    project_technique_from_recipe,
+    technique_computation_matches_active_projection,
+    technique_recipe,
+    technique_selection,
+    validate_technique_recipe,
+)
 from src.core.artifact_developed_rubbing import (
     ARTBOARD_LARGEST_COVERED_RECTANGLE,
     ArtifactDevelopedRubbingError,
@@ -163,6 +173,7 @@ class MeasurementOperationKind(str, Enum):
     SURFACE_DISTANCE = "surface_distance"
     SURFACE_DIAMETER = "surface_diameter"
     CONDITION_ANNOTATION = "condition_annotation"
+    TECHNIQUE_ANNOTATION = "technique_annotation"
     DEVELOPED_RUBBING = "developed_rubbing"
 
 
@@ -199,6 +210,7 @@ MeasurementComputation: TypeAlias = (
     | ArtifactGeometryMetricsComputation
     | ArtifactSurfaceMeasurementComputation
     | ConditionAnnotationComputation
+    | TechniqueAnnotationComputation
     | DevelopedRubbingComputation
 )
 CancellationProbe: TypeAlias = Callable[[], bool]
@@ -275,6 +287,8 @@ def _operation_kind_for_computation(
         return MeasurementOperationKind.TILE_UNWRAP
     if isinstance(computation, ConditionAnnotationComputation):
         return MeasurementOperationKind.CONDITION_ANNOTATION
+    if isinstance(computation, TechniqueAnnotationComputation):
+        return MeasurementOperationKind.TECHNIQUE_ANNOTATION
     if isinstance(computation, DevelopedRubbingComputation):
         return MeasurementOperationKind.DEVELOPED_RUBBING
     if isinstance(computation, ArtifactVectorComputation):
@@ -647,6 +661,25 @@ def execute_measurement_work_item(
             payload=payload,
             recipe=recipe,
             qc=payload.qc_summary(),
+        )
+    elif work_item.kind is MeasurementOperationKind.TECHNIQUE_ANNOTATION:
+        try:
+            technique_payload = project_technique_from_recipe(
+                projection.mesh.vertices,
+                projection.mesh.faces,
+                recipe,
+                cancellation_probe=cancellation_probe,
+            )
+        except ArtifactComputationCancelledError as exc:
+            raise MeasurementCancelledError(str(exc)) from exc
+        except ArtifactTechniqueAnnotationError as exc:
+            raise ArtifactMeasurementError(str(exc)) from exc
+        computation = TechniqueAnnotationComputation(
+            context=work_item.context,
+            projection_snapshot=work_item.projection_snapshot,
+            payload=technique_payload,
+            recipe=recipe,
+            qc=technique_payload.qc_summary(),
         )
     elif work_item.kind is MeasurementOperationKind.DEVELOPED_RUBBING:
         try:
@@ -1086,6 +1119,17 @@ class ArtifactMeasurementController:
                 raise StaleMeasurementOperationError(
                     "condition selection does not match the active source mesh"
                 )
+        elif kind is MeasurementOperationKind.TECHNIQUE_ANNOTATION:
+            try:
+                technique_selection_block = validate_technique_recipe(recipe)["selection"]
+            except ArtifactTechniqueAnnotationError as exc:
+                raise ArtifactMeasurementError(str(exc)) from exc
+            if int(technique_selection_block["total_face_count"]) != int(
+                session.source_mesh.faces.shape[0]
+            ):
+                raise StaleMeasurementOperationError(
+                    "technique selection does not match the active source mesh"
+                )
         development_prerequisites: tuple[str, ...] = ()
         if kind is MeasurementOperationKind.DEVELOPED_RUBBING:
             # The development must still be the one the recipe names, by
@@ -1437,6 +1481,50 @@ class ArtifactMeasurementController:
             raise ArtifactMeasurementError(str(exc)) from exc
         return self._begin(
             kind=MeasurementOperationKind.CONDITION_ANNOTATION,
+            recipe=recipe,
+            record_id=record_id,
+            created_at=created_at,
+            operator=operator,
+            selection_hash=str(selection["selection_sha256"]),
+            depends_on_record_ids=depends_on_record_ids,
+        )
+
+    def begin_technique_annotation(
+        self,
+        *,
+        technique: str,
+        selected_face_indices: Sequence[int],
+        precision_grid_mm: float,
+        record_id: str | None = None,
+        created_at: str | None = None,
+        operator: str = "local-user",
+        depends_on_record_ids: Sequence[str] = (),
+    ) -> ArtifactMeasurementWorkItem:
+        """Reserve one technique mark - a coil joint, a finger mark, and so on.
+
+        Same discipline as a condition: the face set is fixed here, canonically
+        encoded, and carried in the recipe, so the record's recipe hash names
+        exactly the region the archaeologist painted.
+        """
+
+        session = self._workbench.snapshot.session
+        if not isinstance(session, ArtifactSession):
+            raise ArtifactMeasurementError("no active ArtifactDocument session")
+        total_face_count = int(session.source_mesh.faces.shape[0])
+        try:
+            selection = technique_selection(
+                total_face_count=total_face_count,
+                face_indices=selected_face_indices,
+            )
+            recipe = technique_recipe(
+                technique=technique,
+                precision_grid_mm=precision_grid_mm,
+                selection=selection,
+            )
+        except ArtifactTechniqueAnnotationError as exc:
+            raise ArtifactMeasurementError(str(exc)) from exc
+        return self._begin(
+            kind=MeasurementOperationKind.TECHNIQUE_ANNOTATION,
             recipe=recipe,
             record_id=record_id,
             created_at=created_at,
@@ -2030,6 +2118,24 @@ class ArtifactMeasurementController:
                     depends_on_record_ids=work_item.depends_on_record_ids,
                 )
             except ArtifactConditionAnnotationError as exc:
+                raise ArtifactMeasurementError(str(exc)) from exc
+        elif isinstance(computation, TechniqueAnnotationComputation):
+            if not technique_computation_matches_active_projection(
+                current, computation
+            ):
+                raise StaleMeasurementOperationError(
+                    "technique annotation result is stale for the active projection"
+                )
+            try:
+                candidate = commit_technique_annotation(
+                    current,
+                    computation,
+                    record_id=work_item.record_id,
+                    created_at=work_item.created_at,
+                    operator=work_item.operator,
+                    depends_on_record_ids=work_item.depends_on_record_ids,
+                )
+            except ArtifactTechniqueAnnotationError as exc:
                 raise ArtifactMeasurementError(str(exc)) from exc
         elif isinstance(computation, DevelopedRubbingComputation):
             if not developed_rubbing_computation_matches_active_projection(

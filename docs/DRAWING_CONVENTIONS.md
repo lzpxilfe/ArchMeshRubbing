@@ -27,9 +27,12 @@
 | `condition_crack` | 균열 | 균열 경계 | `annotation.condition.v1`, kind `crack` |
 | `technique_groove_edge` | 직선 (홈 가장자리) | 홈의 튀어나온 능선 | `measurement.profile_groove.v1` |
 | `technique_groove_trough` | 간선 (홈 바닥) | 홈의 들어간 골 | `measurement.profile_groove.v1` |
+| `technique_coil_joint` | 테쌓기흔 | 점토 띠를 쌓은 이음 자국 | `annotation.technique.v1`, kind `coil_joint` |
+| `technique_finger_mark` | 지두흔 (U자) | 손끝으로 누른 자국. 경계가 아니라 U자 기호로 그린다 | `annotation.technique.v1`, kind `finger_mark` |
+| `technique_paddling` | 타날흔 | 두드림판 자국 | `annotation.technique.v1`, kind `paddling` |
+| `technique_water_smoothing` | 물손질흔 | 물 묻힌 손이나 헝겊으로 문지른 자국 | `annotation.technique.v1`, kind `water_smoothing` |
+| `technique_wood_grain` | 목리조정흔 | 나무 도구로 긁어 고른 자국 | `annotation.technique.v1`, kind `wood_grain_smoothing` |
 | `center_axis` | 중심선 | 회전축·대칭축의 일점쇄선 | `rotation_axis_from_circle_records/v1` Align (record가 아니라 정치의 결과) |
-
-목리조정흔·지두흔·타날흔·테쌓기흔·물손질흔은 아직 만드는 record가 없어 어휘에 없다. 기법 record(`annotation.technique.v1`)가 생기면 그때 함께 들어간다.
 
 새 선 종류는 **그것을 실제로 만들어내는 것이 생긴 뒤에** 추가한다. 만들 수 없는 종류를 먼저 이름 붙이면 모든 도면에 빈 레이어가 생기고, preset이 아무도 지키지 않는 관례를 서술하게 된다.
 
@@ -48,7 +51,7 @@ record의 role 이름(`section`, `exterior`, `hole`)은 payload 해시의 일부
 보고서 양식은 굵기를 숫자로 말한다: 외선 0.5 pt, 단면선 0.8 pt. 프로그램의 일은 그 숫자를 그리는 것이지 따지는 것이 아니다. `user_preset({"outline_visible": pt_to_mm(0.5), ...})`는 잠정 preset의 파선·해칭은 그대로 두고(종류가 서로 구분되어야 하니까) 굵기만 바꾼 preset을 만든다.
 
 - **이름은 내용이다.** preset id는 `user/` + 표 전체의 canonical SHA-256 앞 12자리. 같은 굵기는 언제나 같은 preset이고, 다른 굵기는 다른 preset이다.
-- **정의가 함께 간다.** 등록된 preset은 id와 digest만 기록하지만, 사용자 preset은 어떤 registry에도 없으므로 도판 sidecar(`style_preset.definition`)와 벡터 sidecar(`presentation.style_preset.definition`, 1.3.0부터)에 표 전체가 들어간다. 검증기는 그 정의를 다시 세워 digest·id·출처를 맞춘다. 정의를 고치면 digest가 어긋나 거부된다.
+- **정의가 함께 간다.** 등록된 preset은 id와 digest만 기록하지만, 사용자 preset은 어떤 registry에도 없으므로 도판 sidecar(`style_preset.definition`)와 벡터 sidecar(`presentation.style_preset.definition`, 1.3.0부터; 어휘가 자라면 닫힌 key set도 새 판이 되어 지금은 1.4.0)에 표 전체가 들어간다. 검증기는 그 정의를 다시 세워 digest·id·출처를 맞춘다. 정의를 고치면 digest가 어긋나 거부된다.
 - **잠정이다.** 사용자가 정한 값도 공개 지침이 뒷받침하는 관례는 아니므로 `provisional: true`, `source_id: "user"`로 기록된다.
 - **단위는 입력에서만.** 1 pt = 25.4/72 mm. 저장·기록·계약은 언제나 종이 mm다.
 
@@ -90,6 +93,11 @@ record의 role 이름(`section`, `exterior`, `hole`)은 payload 해시의 일부
 | `condition_crack` | 0.3 | - | - |
 | `technique_groove_edge` | 0.18 | - | - |
 | `technique_groove_trough` | 0.18 | - (기하로 끊는다) | - |
+| `technique_coil_joint` | 0.18 | 2 - 0.6 | - |
+| `technique_finger_mark` | 0.18 | - (U자 기호) | - |
+| `technique_paddling` | 0.18 | 0.8 - 0.4 | - |
+| `technique_water_smoothing` | 0.13 | 0.3 - 0.3 | - |
+| `technique_wood_grain` | 0.18 | 1.2 - 0.4 - 0.3 - 0.4 | - |
 | `center_axis` | 0.13 | 4 - 1 - 1 - 1 (일점쇄선) | - |
 
 해칭: 45°, 간격 1.0 mm, 선 굵기 0.13 mm.
@@ -339,10 +347,32 @@ DrawingSheetOptions(
 
 sidecar의 `groove.records`에는 그리도록 지정된 record와 골의 높이들이, `groove.drawn`에는 어느 record가 어느 도형에 그려졌는지가 남는다.
 
+## 제작 기법 — 손과 도구가 남긴 자국
+
+테쌓기흔 · 지두흔 · 타날흔 · 물손질흔 · 목리조정흔은 `annotation.technique.v1` record가 담는다. 상태 표기와 같은 record다 — 메쉬 위에 칠한 면 집합을 run-length로 저장하고, 커밋 시점에 여섯 뷰의 투영 경계를 함께 계산한다. 다른 것은 어휘(`TECHNIQUE_KINDS`)와 record type뿐이라, 상태와 기법이 한 record 안에서 섞이지 못한다. 결실 경계를 기법 선으로 그리거나 그 반대가 되는 일은 type 검사에서 거부된다.
+
+```python
+DrawingSheetOptions(
+    title_block=...,
+    technique_records=("record:technique-1",),
+)
+```
+
+**기본값은 빈 튜플이고, 주지 않으면 도판 바이트가 이전과 같다.** sidecar에 `technique` 블록도 생기지 않는다.
+
+**그리는 규칙은 상태와 같다.** 투영 도면에만, frame이 같은 뷰에만, READY이고 FRESH인 record만 그린다. 선 종류는 record의 kind로 정해진다(`TECHNIQUE_LINE_KINDS`).
+
+**지두흔은 경계가 아니라 U자다.** 손끝으로 누른 자국의 실루엣은 아무것도 말해주지 않는 덩어리이고, 관례가 쓰는 기호는 U자다. 그래서 `technique_finger_mark`는 `SYMBOL_LINE_KINDS`에 들어 있고, 도판은 그 뷰에서 영역이 차지하는 상자 크기의 U자(`finger_mark_symbol`)를 영역 자리에 놓는다. 두 팔은 상자 옆변, 굽은 바닥은 반타원이며 위로 열린다. 여는 방향은 작도자의 관례라 잠정값이다. sidecar의 `technique.drawn[].representation`이 `symbol`인지 `boundary`인지를 남긴다.
+
+**기법은 상태 밑에 깔린다.** 복원면에 칠한 기법 자국이 복원 경계에 가려지는 것은 옳은 결과다. 현대의 복원면에서 제작 기법을 읽어서는 안 된다.
+
+앱에서는 상태와 같은 자리에서 한다. 단면 패널의 "상태·기법" 목록이 상태 넷 뒤에 기법 다섯을 두고, **현재 선택 면 → 상태·기법 기록** 한 버튼이 고른 종류에 따라 상태 record나 기법 record를 만든다. 도판 패널의 "도판에 얹을 상태·기법 표기" 목록에는 둘이 함께 오르고, 체크한 것은 각자의 옵션으로 나뉘어 들어간다.
+
 ---
 
 ## 아직 없는 것
 
+- **기법 자국의 자동 검출.** 테쌓기흔이든 타날흔이든, 지금은 고고학자가 칠한다. 홈처럼 축에 대한 사실이 아니라 표면 결의 해석이므로, 프로그램이 제안하더라도 결정은 사람이 한다.
 - **단면 절반의 상태 표기.** 상태 record는 여섯 뷰의 투영 경계를 담는데, 단면은 사용자가 정한 임의의 평면이라 커밋 시점에 미리 계산해 둘 수가 없다. 절단면 위의 결실·복원을 그리려면 상태 record와 단면 record 둘 다에 의존하는 별도의 record가 필요하다.
 - **1:1 vector export(`.amr-vector`)의 상태 표기.** 지금은 도판에만 그린다. 1:1 패키지는 검증할 때 sidecar만 가지고 SVG를 다시 렌더해 바이트를 대조하므로, 상태 경계를 그리려면 상태 payload 전체가 sidecar에 실리고 오프라인 검증기가 그것까지 검사해야 한다. 이 저장소에서 가장 엄격한 검증 경로라 따로 한 번에 한다.
 - **외곽선의 격자 바늘구멍.** 외곽선은 삼각형 투영을 고정 격자에 스냅한 뒤 합집합한다. 실루엣 접선 부근에서는 어떤 매끄러운 면이든 투영 폭이 격자보다 좁은 삼각형이 생기고, 그런 삼각형은 스냅에서 면적 0이 되어 합집합에서 빠진다. 그러면 양옆 삼각형이 점으로만 붙어 실루엣 경계에 격자 한 칸짜리 바늘구멍이 남고, 경계에 닿은 구멍이므로 `hole_not_strictly_inside`로 거부된다. 거부 자체는 옳다 — 그건 유물의 구멍이 아니다 — 그리고 이제 메시지가 격자 몇 칸인지와 무엇을 바꿔야 하는지 말한다.

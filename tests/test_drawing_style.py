@@ -31,6 +31,7 @@ from src.core.drawing_style import (
     OUTLINE_VISIBLE,
     PROVISIONAL_PRESET_ID,
     TECHNIQUE_GROOVE_EDGE,
+    TECHNIQUE_FINGER_MARK,
     TECHNIQUE_GROOVE_TROUGH,
     DrawingStyleError,
     HatchStyle,
@@ -299,7 +300,7 @@ def test_a_styled_sidecar_validates_against_the_shipped_schema() -> None:
         ]
     )
     export_schema = json.loads(
-        (root / "schemas/vector_export-1.3.0.schema.json").read_text(encoding="utf-8")
+        (root / "schemas/vector_export-1.4.0.schema.json").read_text(encoding="utf-8")
     )
     validator = jsonschema.Draft202012Validator(export_schema, registry=registry)
 
@@ -367,6 +368,41 @@ def test_the_condition_vocabulary_matches_the_record_layer_exactly() -> None:
         line_kind_for_condition("chipped")
 
 
+def test_the_technique_vocabulary_matches_the_record_layer_exactly() -> None:
+    """`TECHNIQUE_LINE_KINDS` repeats the record vocabulary as literals."""
+
+    from src.core.artifact_technique_annotation import TECHNIQUE_KINDS
+    from src.core.drawing_style import (
+        LINE_KINDS,
+        SYMBOL_LINE_KINDS,
+        TECHNIQUE_FINGER_MARK,
+        TECHNIQUE_LINE_KINDS,
+        line_kind_for_technique,
+    )
+
+    assert tuple(sorted(TECHNIQUE_LINE_KINDS)) == TECHNIQUE_KINDS
+    for kind in TECHNIQUE_KINDS:
+        assert line_kind_for_technique(kind) in LINE_KINDS
+        assert line_kind_for_technique(kind).startswith("technique_")
+    assert SYMBOL_LINE_KINDS == {TECHNIQUE_FINGER_MARK}
+    with pytest.raises(DrawingStyleError, match="burnishing"):
+        line_kind_for_technique("burnishing")
+
+
+def test_technique_marks_are_drawn_over_the_outline_and_under_condition() -> None:
+    from src.core.drawing_style import (
+        CONDITION_MISSING,
+        LINE_KINDS,
+        OUTLINE_VISIBLE,
+        TECHNIQUE_LINE_KINDS,
+        TECHNIQUE_GROOVE_TROUGH,
+    )
+
+    for line_kind in list(TECHNIQUE_LINE_KINDS.values()) + [TECHNIQUE_GROOVE_TROUGH]:
+        assert LINE_KINDS.index(OUTLINE_VISIBLE) < LINE_KINDS.index(line_kind)
+        assert LINE_KINDS.index(line_kind) < LINE_KINDS.index(CONDITION_MISSING)
+
+
 def test_condition_layers_are_drawn_over_the_shape_and_under_the_axis() -> None:
     condition_kinds = [kind for kind in LINE_KINDS if kind.startswith("condition_")]
 
@@ -396,6 +432,9 @@ def test_every_condition_kind_is_visually_distinguishable_in_the_preset() -> Non
         # a drafter draws them.  The bottom is a 간선: what distinguishes it is
         # that its geometry is broken, which no style signature can carry.
         (TECHNIQUE_GROOVE_EDGE, TECHNIQUE_GROOVE_TROUGH),
+        # A finger mark is drawn with that same pen too: it is a symbol, the
+        # U the fingertip left, and its shape is what tells it apart.
+        (TECHNIQUE_GROOVE_TROUGH, TECHNIQUE_FINGER_MARK),
     )
     for first, second in deliberate:
         assert signatures[first] == signatures[second]

@@ -516,6 +516,171 @@ def test_the_sidecar_says_which_region_was_drawn_where() -> None:
     validate_drawing_sheet_bytes(bundle.svg_bytes, bundle.sidecar_bytes)
 
 
+# --- technique annotations ----------------------------------------------------
+
+TECHNIQUE_ID = "record:sheet-technique"
+
+
+def _technique_session(technique: str = "coil_joint") -> ArtifactSession:
+    """The sheet session with one technique mark covering a single face."""
+
+    from src.core.artifact_technique_annotation import (  # noqa: PLC0415
+        commit_technique_annotation,
+        compute_technique_annotation,
+    )
+
+    session = _session()
+    computation = compute_technique_annotation(
+        session,
+        technique=technique,
+        face_indices=[0],
+        precision_grid_mm=0.01,
+    )
+    return commit_technique_annotation(
+        session,
+        computation,
+        record_id=TECHNIQUE_ID,
+        created_at="2026-09-04T00:00:03Z",
+        operator="tester",
+    )
+
+
+def test_a_sheet_without_technique_records_is_the_sheet_it_always_was() -> None:
+    document = _technique_session().document
+    plain = compose_drawing_sheet(document, [OUTLINE_ID], options=_options())
+    explicit = compose_drawing_sheet(
+        document, [OUTLINE_ID], options=_options(technique_records=())
+    )
+    assert explicit.svg_bytes == plain.svg_bytes
+    assert explicit.sidecar_bytes == plain.sidecar_bytes
+    assert b"technique" not in plain.svg_bytes
+    assert "technique" not in json.loads(plain.sidecar_bytes.decode("utf-8"))
+
+
+def test_a_technique_mark_is_drawn_by_its_boundary_on_the_figure_that_shares_its_view() -> None:
+    document = _technique_session("coil_joint").document
+    bundle = compose_drawing_sheet(
+        document,
+        [OUTLINE_ID, CUTLINE_ID],
+        options=_options(technique_records=(TECHNIQUE_ID,)),
+    )
+
+    root = ET.fromstring(bundle.svg_bytes)
+    figures = root.find(f"{SVG_NS}g[@id='sheet-figures']")
+    assert figures is not None
+    by_record = {child.attrib["data-record-id"]: child for child in figures}
+    outline_layers = [
+        child.attrib["id"]
+        for child in by_record[OUTLINE_ID]
+        if child.tag == f"{SVG_NS}g"
+    ]
+    assert "layer-technique-coil-joint" in outline_layers
+    # Technique sits over the outline and under condition and the axis.
+    assert outline_layers.index("layer-outline-visible") < outline_layers.index(
+        "layer-technique-coil-joint"
+    )
+    cutline_layers = [
+        child.attrib["id"]
+        for child in by_record[CUTLINE_ID]
+        if child.tag == f"{SVG_NS}g"
+    ]
+    assert not [layer for layer in cutline_layers if "technique" in layer]
+    layer = by_record[OUTLINE_ID].find(f"{SVG_NS}g[@id='layer-technique-coil-joint']")
+    assert layer is not None
+    assert layer.attrib["stroke-dasharray"] == "2,0.6"
+    for path in layer:
+        assert path.attrib["id"].startswith(f"technique:{TECHNIQUE_ID}:top:")
+
+    sidecar = json.loads(bundle.sidecar_bytes.decode("utf-8"))
+    technique = sidecar["technique"]
+    assert [entry["record_id"] for entry in technique["records"]] == [TECHNIQUE_ID]
+    assert technique["records"][0]["technique_kind"] == "coil_joint"
+    assert technique["records"][0]["face_count"] == 1
+    assert technique["drawn"] == [
+        {
+            "figure_record_id": OUTLINE_ID,
+            "line_kind": "technique_coil_joint",
+            "record_id": TECHNIQUE_ID,
+            "representation": "boundary",
+            "technique_kind": "coil_joint",
+            "view": "top",
+        }
+    ]
+    validate_drawing_sheet_bytes(bundle.svg_bytes, bundle.sidecar_bytes)
+
+
+def test_a_finger_mark_is_drawn_as_a_u_over_the_region_not_by_its_boundary() -> None:
+    from src.core.artifact_technique_annotation import (  # noqa: PLC0415
+        technique_payload_from_record,
+    )
+    from src.core.drawing_svg import finger_mark_symbol  # noqa: PLC0415
+
+    document = _technique_session("finger_mark").document
+    bundle = compose_drawing_sheet(
+        document,
+        [OUTLINE_ID],
+        options=_options(technique_records=(TECHNIQUE_ID,)),
+    )
+
+    root = ET.fromstring(bundle.svg_bytes)
+    figures = root.find(f"{SVG_NS}g[@id='sheet-figures']")
+    assert figures is not None
+    figure = next(iter(figures))
+    layer = figure.find(f"{SVG_NS}g[@id='layer-technique-finger-mark']")
+    assert layer is not None
+    paths = list(layer)
+    assert len(paths) == 1
+    assert paths[0].attrib["id"] == f"technique:{TECHNIQUE_ID}:top:symbol"
+    # An open polyline: the U is never closed and never filled.
+    assert not paths[0].attrib["d"].rstrip().endswith("Z")
+    assert "stroke-dasharray" not in layer.attrib
+
+    # The U spans the region's extent in this view.
+    payload = technique_payload_from_record(document.record_index[TECHNIQUE_ID])
+    top = next(view for view in payload.views if view.view == "top")
+    points = np.vstack([np.asarray(path.points_mm) for path in top.outline.paths])
+    bounds = (
+        float(points[:, 0].min()),
+        float(points[:, 1].min()),
+        float(points[:, 0].max()),
+        float(points[:, 1].max()),
+    )
+    symbol = np.asarray(finger_mark_symbol(bounds))
+    assert symbol[:, 0].min() == pytest.approx(bounds[0])
+    assert symbol[:, 0].max() == pytest.approx(bounds[2])
+    assert symbol[:, 1].min() == pytest.approx(bounds[1])
+    assert symbol[:, 1].max() == pytest.approx(bounds[3])
+
+    sidecar = json.loads(bundle.sidecar_bytes.decode("utf-8"))
+    assert sidecar["technique"]["drawn"][0]["representation"] == "symbol"
+    validate_drawing_sheet_bytes(bundle.svg_bytes, bundle.sidecar_bytes)
+
+
+def test_a_sheet_refuses_a_record_that_is_not_a_technique_annotation() -> None:
+    document = _technique_session().document
+
+    with pytest.raises(DrawingSheetError, match="not a technique annotation"):
+        compose_drawing_sheet(
+            document,
+            [OUTLINE_ID],
+            options=_options(technique_records=(OUTLINE_ID,)),
+        )
+    with pytest.raises(DrawingSheetError, match="not a condition annotation"):
+        compose_drawing_sheet(
+            document,
+            [OUTLINE_ID],
+            options=_options(condition_records=(TECHNIQUE_ID,)),
+        )
+    with pytest.raises(DrawingSheetError, match="does not exist"):
+        compose_drawing_sheet(
+            document,
+            [OUTLINE_ID],
+            options=_options(technique_records=("record:nowhere",)),
+        )
+    with pytest.raises(DrawingSheetError, match="cannot be drawn twice"):
+        _options(technique_records=(TECHNIQUE_ID, TECHNIQUE_ID))
+
+
 def test_a_sheet_refuses_a_record_that_is_not_a_condition_annotation() -> None:
     document = _condition_session().document
 

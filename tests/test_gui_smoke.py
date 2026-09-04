@@ -7832,3 +7832,85 @@ def test_line_weight_table_takes_points_or_millimetres_and_reaches_both_exports(
         window.deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         app.processEvents()
+
+
+def test_technique_marks_share_the_condition_chooser_and_reach_the_sheet_separately() -> None:
+    """One button records a condition or a technique mark; the sheet list
+    holds both and hands each to its own option.
+
+    The panel's chooser names each technique kind after the condition kinds,
+    with data that says which it is; and a checked technique record goes to
+    `technique_records`, never to `condition_records`, so the sheet composer
+    can refuse a mix-up rather than draw damage as tooling.
+    """
+
+    from src.core.artifact_condition_annotation import (
+        commit_condition_annotation,
+        compute_condition_annotation,
+    )
+    from src.core.artifact_technique_annotation import (
+        TECHNIQUE_KIND_LABELS_KO,
+        TECHNIQUE_KINDS,
+        commit_technique_annotation,
+        compute_technique_annotation,
+    )
+
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    window = MainWindow()
+    try:
+        panel = window.section_panel
+        combo = panel.combo_native_condition
+        data = [combo.itemData(index) for index in range(combo.count())]
+        assert data[:4] == ["missing", "restored", "crack", "worn"]
+        for kind in TECHNIQUE_KINDS:
+            index = combo.findData(f"technique:{kind}")
+            assert index >= 0
+            assert combo.itemText(index).startswith(TECHNIQUE_KIND_LABELS_KO[kind])
+
+        session = _artifact_box_session()
+        session = commit_condition_annotation(
+            session,
+            compute_condition_annotation(
+                session, condition="worn", face_indices=[0], precision_grid_mm=0.01
+            ),
+            record_id="record:condition:gui",
+            created_at="2026-09-04T00:00:02Z",
+            operator="tester",
+        )
+        session = commit_technique_annotation(
+            session,
+            compute_technique_annotation(
+                session, technique="finger_mark", face_indices=[1], precision_grid_mm=0.01
+            ),
+            record_id="record:technique:gui",
+            created_at="2026-09-04T00:00:03Z",
+            operator="tester",
+        )
+        window._artifact_session = session
+        window._refresh_native_record_selectors(session)
+
+        listed = panel.list_drawing_sheet_conditions
+        ids = {
+            str(listed.item(index).data(Qt.ItemDataRole.UserRole))
+            for index in range(listed.count())
+        }
+        assert ids == {"record:condition:gui", "record:technique:gui"}
+        labels = {
+            str(listed.item(index).data(Qt.ItemDataRole.UserRole)): listed.item(index).text()
+            for index in range(listed.count())
+        }
+        assert "지두흔" in labels["record:technique:gui"]
+        assert "마모" in labels["record:condition:gui"]
+        for index in range(listed.count()):
+            listed.item(index).setCheckState(Qt.CheckState.Checked)
+
+        assert window._checked_drawing_sheet_condition_ids() == ("record:condition:gui",)
+        assert window._checked_drawing_sheet_technique_ids() == ("record:technique:gui",)
+    finally:
+        # The session was never saved, so closing would ask; drop it first.
+        window._artifact_session = None
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()

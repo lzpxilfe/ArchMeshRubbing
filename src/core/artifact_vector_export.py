@@ -106,17 +106,22 @@ from .source_identity import PRIMARY_FILE_IDENTITY_SCOPE
 
 
 VECTOR_EXPORT_FORMAT = "archmeshrubbing_vector_export"
-_CURRENT_VECTOR_EXPORT_SCHEMA_VERSION = "1.3.0"
+_CURRENT_VECTOR_EXPORT_SCHEMA_VERSION = "1.4.0"
 VECTOR_EXPORT_SCHEMA_VERSION = _CURRENT_VECTOR_EXPORT_SCHEMA_VERSION
 #: 1.1.0 introduced the current provenance contract (import admission, axis
 #: Align); 1.2.0 is 1.1.0 plus outline algorithm 1.1.0 - the grid closing -
 #: and its four QC keys; 1.3.0 is 1.2.0 plus a user drawing style preset's
-#: definition in the presentation claim.  All three carry the current
-#: contract; 1.0.0 is legacy.
-_CURRENT_CONTRACT_VECTOR_EXPORT_SCHEMA_VERSIONS = frozenset({"1.1.0", "1.2.0", "1.3.0"})
+#: definition in the presentation claim; 1.4.0 is 1.3.0 with the five
+#: technique line kinds in that definition's closed key set.  All four carry
+#: the current contract; 1.0.0 is legacy.
+_CURRENT_CONTRACT_VECTOR_EXPORT_SCHEMA_VERSIONS = frozenset(
+    {"1.1.0", "1.2.0", "1.3.0", "1.4.0"}
+)
 #: The sidecars that can carry an outline computed with the grid closing.
-_GRID_CLOSING_VECTOR_EXPORT_SCHEMA_VERSIONS = frozenset({"1.2.0", "1.3.0"})
-SUPPORTED_VECTOR_EXPORT_SCHEMA_VERSIONS = frozenset({"1.0.0", "1.1.0", "1.2.0", "1.3.0"})
+_GRID_CLOSING_VECTOR_EXPORT_SCHEMA_VERSIONS = frozenset({"1.2.0", "1.3.0", "1.4.0"})
+SUPPORTED_VECTOR_EXPORT_SCHEMA_VERSIONS = frozenset(
+    {"1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0"}
+)
 VECTOR_EXPORT_DIRECTORY_SUFFIX = ".amr-vector"
 VECTOR_EXPORT_SVG_NAME = "artifact.svg"
 VECTOR_EXPORT_SIDECAR_NAME = "artifact.amr-vector.json"
@@ -1371,7 +1376,9 @@ def _validated_style_preset(
     The sidecar records the preset's canonical digest, so a preset whose values
     were edited after the drawing was made is caught here rather than silently
     re-rendering the drawing with different line weights.  A user preset
-    carries its full definition, which only a 1.3.0 sidecar can hold.
+    carries its full definition over the whole line-kind vocabulary, which
+    only the current sidecar's closed key set can hold: an older one lacks
+    the kinds added since.
     """
 
     if (

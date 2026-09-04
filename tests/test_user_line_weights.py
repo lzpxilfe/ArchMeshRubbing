@@ -186,7 +186,7 @@ def test_a_vector_export_with_user_weights_needs_the_1_3_sidecar_and_validates()
 
     bundle = build_vector_export(document, OUTLINE_ID, options=options)
     sidecar = json.loads(bundle.sidecar_bytes)
-    assert sidecar["schema_version"] == "1.3.0"
+    assert sidecar["schema_version"] == "1.4.0"
     claim = sidecar["presentation"]["style_preset"]
     assert claim["definition"]["preset_id"] == preset.preset_id
     validate_vector_export_bytes(bundle.svg_bytes, bundle.sidecar_bytes)
@@ -207,7 +207,7 @@ def test_a_vector_export_with_user_weights_needs_the_1_3_sidecar_and_validates()
             schema["$id"], referencing.Resource.from_contents(schema)
         )
     validator = jsonschema.Draft202012Validator(
-        load("vector_export-1.3.0.schema.json"), registry=registry
+        load("vector_export-1.4.0.schema.json"), registry=registry
     )
     assert list(validator.iter_errors(sidecar)) == []
     # 1.2.0 has no room for the definition, in the schema or in the runtime.

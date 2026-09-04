@@ -1827,6 +1827,65 @@ def test_condition_annotation_executes_and_publishes_the_painted_region() -> Non
     assert controller.summary(item).state is MeasurementOperationState.COMPLETED
 
 
+def test_technique_annotation_executes_and_publishes_the_painted_mark() -> None:
+    """A painted technique mark goes through the same worker path as a condition."""
+
+    from src.core.artifact_technique_annotation import (
+        TechniqueAnnotationComputation,
+        technique_payload_from_record,
+    )
+
+    session = _session()
+    workbench = ArtifactWorkbench(session=session, id_factory=SequentialIds())
+    controller = ArtifactMeasurementController(workbench, id_factory=SequentialIds())
+    item = controller.begin_technique_annotation(
+        technique="finger_mark",
+        selected_face_indices=(3, 1, 2, 2),
+        precision_grid_mm=0.01,
+        record_id="record:technique:reserved",
+        created_at=STAMP,
+        operator="pytest",
+    )
+
+    assert item.kind is MeasurementOperationKind.TECHNIQUE_ANNOTATION
+    recipe = item.recipe_dict()
+    assert recipe["kind"] == "technique_annotation"
+    assert recipe["technique"] == "finger_mark"
+    selection = recipe["selection"]
+    assert isinstance(selection, dict)
+    assert selection["face_ranges"] == [[1, 4]]
+    assert item.context.selection_hash == selection["selection_sha256"]
+
+    result = controller.execute(item)
+    assert isinstance(result.computation, TechniqueAnnotationComputation)
+    assert result.computation.payload.face_count == 3
+
+    publication = controller.publish_result(
+        item,
+        result,
+        _headless_publisher(workbench),
+    )
+    assert publication.record_id == "record:technique:reserved"
+    record = publication.session.document.record_index["record:technique:reserved"]
+    payload = technique_payload_from_record(record)
+    assert list(payload.face_indices()) == [1, 2, 3]
+    assert payload.technique == "finger_mark"
+    assert controller.summary(item).state is MeasurementOperationState.COMPLETED
+
+    with pytest.raises(ArtifactMeasurementError, match="outside the geometry"):
+        controller.begin_technique_annotation(
+            technique="paddling",
+            selected_face_indices=(0, 12),
+            precision_grid_mm=0.01,
+        )
+    with pytest.raises(ArtifactMeasurementError, match="technique must be one of"):
+        controller.begin_technique_annotation(
+            technique="missing",
+            selected_face_indices=(0,),
+            precision_grid_mm=0.01,
+        )
+
+
 def test_condition_annotation_refuses_a_face_outside_the_mesh_before_work_begins() -> None:
     session = _session()
     controller = ArtifactMeasurementController(

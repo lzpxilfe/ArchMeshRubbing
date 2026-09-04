@@ -317,6 +317,46 @@ def broken_chord(
     return segments
 
 
+FINGER_MARK_ARC_STEPS = 8
+
+
+def finger_mark_symbol(
+    bounds_mm: Sequence[float],
+) -> tuple[tuple[float, float], ...]:
+    """The U a fingertip leaves, sized to the mark's extent, open upward.
+
+    지두흔 is drawn as a U rather than by its boundary: the boundary of a
+    pressed patch is a blob that says nothing, and the U is the sign the
+    convention uses for it.  The symbol fills the region's bounding box - the
+    two arms on its sides, the bend along its bottom - so it sits where the
+    mark is and is as large as the mark.  Which way the U opens is the
+    drafter's convention; upward is a provisional choice, recorded as such.
+    """
+
+    left, bottom, right, top = (float(value) for value in bounds_mm)
+    if not all(math.isfinite(value) for value in (left, bottom, right, top)):
+        raise SVGRenderError("finger mark bounds must be finite")
+    if right <= left or top <= bottom:
+        raise SVGRenderError("finger mark bounds must have positive width and height")
+    width = right - left
+    height = top - bottom
+    # The bend is a half-ellipse across the bottom, as deep as half the width
+    # or the whole height, whichever is smaller, so a tall mark keeps straight
+    # arms and a flat one is all bend.
+    bend = min(width / 2.0, height)
+    centre_x = left + width / 2.0
+    bend_top = bottom + bend
+    points: list[tuple[float, float]] = [(left, top), (left, bend_top)]
+    for step in range(1, FINGER_MARK_ARC_STEPS):
+        angle = math.pi + math.pi * step / FINGER_MARK_ARC_STEPS
+        points.append(
+            (centre_x + (width / 2.0) * math.cos(angle), bend_top + bend * math.sin(angle))
+        )
+    points.append((right, bend_top))
+    points.append((right, top))
+    return tuple(points)
+
+
 def center_axis_segment(
     frame: Mapping[str, Sequence[float]],
     bounds: Sequence[float],

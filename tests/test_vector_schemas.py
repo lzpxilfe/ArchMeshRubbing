@@ -209,7 +209,7 @@ class TestVectorSchemas(unittest.TestCase):
             )
         )
         export_schema = json.loads(
-            (ROOT / "schemas/vector_export-1.3.0.schema.json").read_text(
+            (ROOT / "schemas/vector_export-1.4.0.schema.json").read_text(
                 encoding="utf-8"
             )
         )
@@ -281,13 +281,13 @@ class TestVectorSchemas(unittest.TestCase):
             sidecar["provenance"]["geometry_revision"]["import_recipe"],
             document.geometry_revisions[0].to_dict()["import_recipe"],
         )
-        self.assertEqual(sidecar["schema_version"], "1.3.0")
+        self.assertEqual(sidecar["schema_version"], "1.4.0")
         self.assertIn(
             "import_admission",
             sidecar["provenance"]["geometry_revision"]["qc"],
         )
         # 1.2.0 is 1.1.0 plus the outline grid closing, 1.3.0 is 1.2.0 plus a
-        # user preset's definition.  A sidecar carries the 1.1.0 contract
+        # user preset's definition, 1.4.0 widens that definition's key set.  A sidecar carries the 1.1.0 contract
         # exactly when its record has no closing to declare.
         previous_validator = jsonschema.Draft202012Validator(
             previous_export_schema,
@@ -505,7 +505,7 @@ def test_the_export_schema_accepts_exactly_the_reviewed_backends() -> None:
     from src.core.artifact_outline_extractor import REVIEWED_OUTLINE_BACKENDS
 
     schema = json.loads(
-        (ROOT / "schemas/vector_export-1.3.0.schema.json").read_text(encoding="utf-8")
+        (ROOT / "schemas/vector_export-1.4.0.schema.json").read_text(encoding="utf-8")
     )
     properties = schema["$defs"]["recordQc"]["properties"]
 

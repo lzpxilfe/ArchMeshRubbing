@@ -69,6 +69,13 @@ CONDITION_WORN = "condition_worn"
 CONDITION_CRACK = "condition_crack"
 TECHNIQUE_GROOVE_EDGE = "technique_groove_edge"
 TECHNIQUE_GROOVE_TROUGH = "technique_groove_trough"
+# The marks a potter's tools and hands left, recorded as painted regions
+# (annotation.technique.v1) and drawn by their conventions.
+TECHNIQUE_COIL_JOINT = "technique_coil_joint"
+TECHNIQUE_FINGER_MARK = "technique_finger_mark"
+TECHNIQUE_PADDLING = "technique_paddling"
+TECHNIQUE_WATER_SMOOTHING = "technique_water_smoothing"
+TECHNIQUE_WOOD_GRAIN = "technique_wood_grain"
 CENTER_AXIS = "center_axis"
 
 LINE_KINDS: tuple[str, ...] = (
@@ -81,6 +88,11 @@ LINE_KINDS: tuple[str, ...] = (
     # right outcome: nobody should read a maker's tooling off a modern repair.
     TECHNIQUE_GROOVE_EDGE,
     TECHNIQUE_GROOVE_TROUGH,
+    TECHNIQUE_COIL_JOINT,
+    TECHNIQUE_FINGER_MARK,
+    TECHNIQUE_PADDLING,
+    TECHNIQUE_WATER_SMOOTHING,
+    TECHNIQUE_WOOD_GRAIN,
     # Condition sits between the outline and the centre axis: it is drawn over
     # the shape it describes, and under the axis, which is a construction line
     # and has to stay readable across everything.  Within the group the three
@@ -103,6 +115,11 @@ LINE_KIND_LABELS_KO: Mapping[str, str] = {
     OUTLINE_HOLE: "내선 (구멍·안쪽 윤곽)",
     TECHNIQUE_GROOVE_EDGE: "직선 (홈 가장자리)",
     TECHNIQUE_GROOVE_TROUGH: "간선 (홈 바닥)",
+    TECHNIQUE_COIL_JOINT: "테쌓기흔",
+    TECHNIQUE_FINGER_MARK: "지두흔 (U자)",
+    TECHNIQUE_PADDLING: "타날흔",
+    TECHNIQUE_WATER_SMOOTHING: "물손질흔",
+    TECHNIQUE_WOOD_GRAIN: "목리조정흔",
     CONDITION_MISSING: "결실",
     CONDITION_RESTORED: "복원",
     CONDITION_WORN: "마모",
@@ -145,6 +162,34 @@ def line_kind_for_condition(kind: str) -> str:
         known = ", ".join(sorted(CONDITION_LINE_KINDS))
         raise DrawingStyleError(
             f"condition kind {kind!r} has no drawing style; known kinds are {known}"
+        )
+    return line_kind
+
+
+# How a technique record's kind is drawn.  Keys are the closed vocabulary of
+# `artifact_technique_annotation.TECHNIQUE_KINDS`, repeated as literals for the
+# same reason as the conditions; a test asserts the two agree.
+TECHNIQUE_LINE_KINDS: Mapping[str, str] = {
+    "coil_joint": TECHNIQUE_COIL_JOINT,
+    "finger_mark": TECHNIQUE_FINGER_MARK,
+    "paddling": TECHNIQUE_PADDLING,
+    "water_smoothing": TECHNIQUE_WATER_SMOOTHING,
+    "wood_grain_smoothing": TECHNIQUE_WOOD_GRAIN,
+}
+#: Technique kinds drawn as a symbol placed in the region rather than by the
+#: region's boundary.  A finger mark (지두흔) is shown as a U, the shape the
+#: fingertip left; its boundary would be a blob that says nothing.
+SYMBOL_LINE_KINDS: frozenset[str] = frozenset({TECHNIQUE_FINGER_MARK})
+
+
+def line_kind_for_technique(kind: str) -> str:
+    """Return the line kind one technique record is drawn as."""
+
+    line_kind = TECHNIQUE_LINE_KINDS.get(str(kind))
+    if line_kind is None:
+        known = ", ".join(sorted(TECHNIQUE_LINE_KINDS))
+        raise DrawingStyleError(
+            f"technique kind {kind!r} has no drawing style; known kinds are {known}"
         )
     return line_kind
 
@@ -619,6 +664,22 @@ _PRESETS: dict[str, DrawingStylePreset] = {
             # no dash pattern because its breaks are cut into the geometry.
             TECHNIQUE_GROOVE_EDGE: LineStyle(stroke_width_mm=0.18),
             TECHNIQUE_GROOVE_TROUGH: LineStyle(stroke_width_mm=0.18),
+            # Five technique marks, each lighter than the outline and each
+            # told from the others by its dash; the finger mark is a symbol
+            # and needs no dash.  All provisional, like the rest.
+            TECHNIQUE_COIL_JOINT: LineStyle(
+                stroke_width_mm=0.18, dash_pattern_mm=(2.0, 0.6)
+            ),
+            TECHNIQUE_FINGER_MARK: LineStyle(stroke_width_mm=0.18),
+            TECHNIQUE_PADDLING: LineStyle(
+                stroke_width_mm=0.18, dash_pattern_mm=(0.8, 0.4)
+            ),
+            TECHNIQUE_WATER_SMOOTHING: LineStyle(
+                stroke_width_mm=0.13, dash_pattern_mm=(0.3, 0.3)
+            ),
+            TECHNIQUE_WOOD_GRAIN: LineStyle(
+                stroke_width_mm=0.18, dash_pattern_mm=(1.2, 0.4, 0.3, 0.4)
+            ),
             CENTER_AXIS: LineStyle(
                 stroke_width_mm=0.13,
                 dash_pattern_mm=(4.0, 1.0, 1.0, 1.0),
@@ -670,6 +731,13 @@ __all__ = [
     "PROVISIONAL_PRESET_ID",
     "RECORD_ROLE_LINE_KINDS",
     "SECTION_CUT",
+    "SYMBOL_LINE_KINDS",
+    "TECHNIQUE_COIL_JOINT",
+    "TECHNIQUE_FINGER_MARK",
+    "TECHNIQUE_LINE_KINDS",
+    "TECHNIQUE_PADDLING",
+    "TECHNIQUE_WATER_SMOOTHING",
+    "TECHNIQUE_WOOD_GRAIN",
     "USER_PRESET_ID_PREFIX",
     "USER_PRESET_SOURCE_ID",
     "available_presets",
