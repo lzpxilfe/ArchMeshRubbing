@@ -7970,6 +7970,20 @@ def test_technique_marks_share_the_condition_chooser_and_reach_the_sheet_separat
             assert index >= 0
             assert combo.itemText(index).startswith(TECHNIQUE_KIND_LABELS_KO[kind])
 
+        # 도구 방향은 기법에만 있는 것이라, 상태를 고르면 칸이 꺼진다.  (패널
+        # 전체가 메쉬를 열기 전까지 꺼져 있으므로 위젯 자신의 상태를 본다.)
+        combo.setCurrentIndex(combo.findData("worn"))
+        assert panel.check_native_technique_direction.testAttribute(_FORCE_DISABLED)
+        assert panel.spin_native_technique_direction.testAttribute(_FORCE_DISABLED)
+        combo.setCurrentIndex(combo.findData("technique:wood_grain_smoothing"))
+        assert not panel.check_native_technique_direction.testAttribute(_FORCE_DISABLED)
+        # The angle itself waits until the drafter says they observed one.
+        assert panel.spin_native_technique_direction.testAttribute(_FORCE_DISABLED)
+        panel.check_native_technique_direction.setChecked(True)
+        assert not panel.spin_native_technique_direction.testAttribute(_FORCE_DISABLED)
+        assert panel.spin_native_technique_direction.value() == pytest.approx(90.0)
+        panel.check_native_technique_direction.setChecked(False)
+
         session = _artifact_box_session()
         session = commit_condition_annotation(
             session,

@@ -4585,6 +4585,47 @@ class SectionPanel(QWidget):
             )
         condition_row.addWidget(self.combo_native_condition, 1)
         native_layout.addLayout(condition_row)
+
+        # 도구가 움직인 방향은 관찰한 사실이므로 record가 담는다.  기록할 때
+        # 넣어야 그 record로 그리는 도판마다 다시 넣지 않아도 된다.
+        direction_row = QHBoxLayout()
+        direction_row.setContentsMargins(0, 0, 0, 0)
+        self.check_native_technique_direction = QCheckBox("도구 방향")
+        self.check_native_technique_direction.setToolTip(
+            "관찰한 도구의 진행 방향을 이 기법 기록에 함께 담습니다. 종이 위 "
+            "각도이고 0°는 가로(회전물손질 방향), 90°는 세로(종방향 목리조정)"
+            "입니다.\n"
+            "도판에서 따로 각도를 주면 그쪽이 이기고, 없으면 이 값이, 그것도 "
+            "없으면 종류별 기본값이 쓰입니다. 방향이 없는 종류(지두흔·테쌓기흔)"
+            "는 담아도 그리는 데 쓰이지 않습니다.\n"
+            "상태 표기에는 방향이 없으므로 꺼집니다."
+        )
+        direction_row.addWidget(self.check_native_technique_direction)
+        self.spin_native_technique_direction = QDoubleSpinBox()
+        self.spin_native_technique_direction.setRange(0.0, 179.9)
+        self.spin_native_technique_direction.setDecimals(1)
+        self.spin_native_technique_direction.setSingleStep(5.0)
+        self.spin_native_technique_direction.setValue(90.0)
+        self.spin_native_technique_direction.setSuffix(" °")
+        direction_row.addWidget(self.spin_native_technique_direction)
+        direction_row.addStretch()
+        native_layout.addLayout(direction_row)
+
+        def _sync_direction_enabled(_index: int = 0) -> None:
+            is_technique = str(
+                self.combo_native_condition.currentData() or ""
+            ).startswith(TECHNIQUE_COMBO_PREFIX)
+            self.check_native_technique_direction.setEnabled(is_technique)
+            self.spin_native_technique_direction.setEnabled(
+                is_technique and self.check_native_technique_direction.isChecked()
+            )
+
+        self.combo_native_condition.currentIndexChanged.connect(_sync_direction_enabled)
+        self.check_native_technique_direction.toggled.connect(
+            lambda _checked: _sync_direction_enabled()
+        )
+        _sync_direction_enabled()
+
         self.btn_native_condition = QPushButton("현재 선택 면 → 상태·기법 기록")
         set_pixel_icon(self.btn_native_condition, "selection")
         self.btn_native_condition.setEnabled(False)
@@ -20533,10 +20574,16 @@ class MainWindow(QMainWindow):
             if choice.startswith(TECHNIQUE_COMBO_PREFIX):
                 technique = choice[len(TECHNIQUE_COMBO_PREFIX):]
                 what = "기법"
+                direction = (
+                    float(panel.spin_native_technique_direction.value())
+                    if panel.check_native_technique_direction.isChecked()
+                    else None
+                )
                 work_item = controller.begin_technique_annotation(
                     technique=technique,
                     selected_face_indices=selected,
                     precision_grid_mm=float(panel.spin_native_outline_grid.value()),
+                    direction_deg=direction,
                     record_id=f"record:technique:{technique}:{uuid.uuid4()}",
                     created_at=self._utc_seconds_now(),
                     operator="local-user",
