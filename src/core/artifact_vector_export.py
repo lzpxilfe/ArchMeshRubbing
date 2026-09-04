@@ -38,7 +38,13 @@ from .artifact_axis_alignment import (
     ArtifactAxisAlignmentError,
     verify_axis_alignment_matrix,
 )
-from .artifact_outline_extractor import REVIEWED_OUTLINE_BACKENDS
+from .artifact_outline_extractor import (
+    OUTLINE_ALGORITHM_VERSION,
+    OUTLINE_ALGORITHM_VERSIONS,
+    OUTLINE_GRID_CLOSING_RADIUS_CELLS,
+    OUTLINE_LEGACY_ALGORITHM_VERSION,
+    REVIEWED_OUTLINE_BACKENDS,
+)
 from .drawing_style import (
     CENTER_AXIS,
     GROOVE_TROUGH_BREAK_COUNT,
@@ -97,9 +103,13 @@ from .source_identity import PRIMARY_FILE_IDENTITY_SCOPE
 
 
 VECTOR_EXPORT_FORMAT = "archmeshrubbing_vector_export"
-_CURRENT_VECTOR_EXPORT_SCHEMA_VERSION = "1.1.0"
+_CURRENT_VECTOR_EXPORT_SCHEMA_VERSION = "1.2.0"
 VECTOR_EXPORT_SCHEMA_VERSION = _CURRENT_VECTOR_EXPORT_SCHEMA_VERSION
-SUPPORTED_VECTOR_EXPORT_SCHEMA_VERSIONS = frozenset({"1.0.0", "1.1.0"})
+#: 1.1.0 introduced the current provenance contract (import admission, axis
+#: Align); 1.2.0 is 1.1.0 plus outline algorithm 1.1.0 - the grid closing -
+#: and its four QC keys.  Both carry the current contract; 1.0.0 is legacy.
+_CURRENT_CONTRACT_VECTOR_EXPORT_SCHEMA_VERSIONS = frozenset({"1.1.0", "1.2.0"})
+SUPPORTED_VECTOR_EXPORT_SCHEMA_VERSIONS = frozenset({"1.0.0", "1.1.0", "1.2.0"})
 VECTOR_EXPORT_DIRECTORY_SUFFIX = ".amr-vector"
 VECTOR_EXPORT_SVG_NAME = "artifact.svg"
 VECTOR_EXPORT_SIDECAR_NAME = "artifact.amr-vector.json"
@@ -253,9 +263,30 @@ _OUTLINE_RECORD_QC_KEYS = frozenset(
         "view",
     }
 )
+#: Present exactly when the outline was computed with the grid closing
+#: (outline algorithm 1.1.0), which only a 1.2.0 sidecar can carry.
+_OUTLINE_CLOSING_QC_KEYS = frozenset(
+    {
+        "grid_closing_area_delta_mm2",
+        "grid_closing_component_merge_count",
+        "grid_closing_hole_fill_count",
+        "grid_closing_radius_cells",
+    }
+)
 _PRODUCTION_CUTLINE_ALGORITHM = "archmeshrubbing.triangle_plane_cutline"
 _PRODUCTION_OUTLINE_ALGORITHM = "archmeshrubbing.projected_triangle_union"
 _PRODUCTION_VECTOR_ALGORITHM_VERSION = "1.0.0"
+_PRODUCTION_ALGORITHM_VERSIONS: Mapping[str, frozenset[str]] = {
+    _PRODUCTION_CUTLINE_ALGORITHM: frozenset({_PRODUCTION_VECTOR_ALGORITHM_VERSION}),
+    _PRODUCTION_OUTLINE_ALGORITHM: frozenset(OUTLINE_ALGORITHM_VERSIONS),
+}
+_SNAP_ERROR_CONTRACTS: Mapping[str, tuple[str, float]] = {
+    OUTLINE_LEGACY_ALGORITHM_VERSION: ("axis<=grid/2;radial<=grid/sqrt(2)", 0.5),
+    OUTLINE_ALGORITHM_VERSION: (
+        "axis<=1.5*grid;radial<=1.5*grid*sqrt(2)",
+        OUTLINE_GRID_CLOSING_RADIUS_CELLS + 0.5,
+    ),
+}
 _IGNORABLE_OS_METADATA_NAMES = frozenset({".DS_Store", "Thumbs.db", "desktop.ini"})
 
 
@@ -2275,15 +2306,13 @@ def _validate_current_record_qc(
     payload: VectorGeometryPayload,
     recipe: Mapping[str, Any],
     provenance: Mapping[str, Any],
+    schema_version: str = _CURRENT_VECTOR_EXPORT_SCHEMA_VERSION,
 ) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise ArtifactVectorExportError("qc.record must be an object")
     kind = VectorRecordKind(payload.kind)
-    optional_keys = (
-        _CUTLINE_RECORD_QC_KEYS
-        if kind is VectorRecordKind.CUTLINE
-        else _OUTLINE_RECORD_QC_KEYS
-    )
+    algorithm = recipe.get("algorithm")
+    algorithm_version = recipe.get("algorithm_version")
     production_algorithm = (
         _PRODUCTION_CUTLINE_ALGORITHM
         if kind is VectorRecordKind.CUTLINE
@@ -2293,19 +2322,32 @@ def _validate_current_record_qc(
         _PRODUCTION_CUTLINE_ALGORITHM: VectorRecordKind.CUTLINE,
         _PRODUCTION_OUTLINE_ALGORITHM: VectorRecordKind.OUTLINE,
     }
-    algorithm = recipe.get("algorithm")
     if algorithm in known_algorithms:
         if known_algorithms[algorithm] is not kind:
             raise ArtifactVectorExportError(
                 "production vector algorithm does not match the payload kind"
             )
-        if recipe.get("algorithm_version") != _PRODUCTION_VECTOR_ALGORITHM_VERSION:
+        if algorithm_version not in _PRODUCTION_ALGORITHM_VERSIONS[str(algorithm)]:
             raise ArtifactVectorExportError(
                 "production vector algorithm version is unsupported"
             )
-    is_production = (
-        algorithm == production_algorithm
-        and recipe.get("algorithm_version") == _PRODUCTION_VECTOR_ALGORITHM_VERSION
+    is_production = algorithm == production_algorithm
+    # The grid closing arrived with outline 1.1.0 and the 1.2.0 sidecar; an
+    # earlier sidecar cannot carry it, and a closed outline cannot omit it.
+    closing = (
+        kind is VectorRecordKind.OUTLINE
+        and is_production
+        and algorithm_version == OUTLINE_ALGORITHM_VERSION
+    )
+    if closing and schema_version != _CURRENT_VECTOR_EXPORT_SCHEMA_VERSION:
+        raise ArtifactVectorExportError(
+            f"a vector export before {_CURRENT_VECTOR_EXPORT_SCHEMA_VERSION} cannot "
+            f"carry an outline computed with grid closing"
+        )
+    optional_keys = (
+        _CUTLINE_RECORD_QC_KEYS
+        if kind is VectorRecordKind.CUTLINE
+        else _OUTLINE_RECORD_QC_KEYS | (_OUTLINE_CLOSING_QC_KEYS if closing else frozenset())
     )
     always_kind_keys = (
         frozenset()
@@ -2398,12 +2440,26 @@ def _validate_current_record_qc(
         raise ArtifactVectorExportError("qc.record.sampling_applied must be false")
     if "topology_valid" in value and value["topology_valid"] is not True:
         raise ArtifactVectorExportError("qc.record.topology_valid must be true")
-    if "grid_snap_error_contract" in value and value[
-        "grid_snap_error_contract"
-    ] != "axis<=grid/2;radial<=grid/sqrt(2)":
+    if "grid_snap_error_contract" in value and value["grid_snap_error_contract"] != (
+        _SNAP_ERROR_CONTRACTS[
+            str(algorithm_version)
+            if closing
+            else OUTLINE_LEGACY_ALGORITHM_VERSION
+        ][0]
+    ):
         raise ArtifactVectorExportError(
             "qc.record.grid_snap_error_contract is invalid"
         )
+    for key in sorted(_OUTLINE_CLOSING_QC_KEYS & set(value)):
+        if key == "grid_closing_radius_cells":
+            if value[key] != OUTLINE_GRID_CLOSING_RADIUS_CELLS:
+                raise ArtifactVectorExportError(
+                    "qc.record.grid_closing_radius_cells is not the production radius"
+                )
+        elif key == "grid_closing_area_delta_mm2":
+            _finite_number(value[key], field_name=f"qc.record.{key}")
+        else:
+            _strict_nonnegative_int(value[key], field_name=f"qc.record.{key}")
     if "grid_origin_index_uv" in value:
         grid_origin = value["grid_origin_index_uv"]
         if (
@@ -2552,13 +2608,16 @@ def _validate_current_record_qc(
                 raise ArtifactVectorExportError(
                     "Outline QC Shapely version does not match recipe"
                 )
-            if value["grid_snap_axis_upper_bound_mm"] != precision_grid / 2.0:
+            snap_cells = _SNAP_ERROR_CONTRACTS[
+                str(algorithm_version) if closing else OUTLINE_LEGACY_ALGORITHM_VERSION
+            ][1]
+            if value["grid_snap_axis_upper_bound_mm"] != precision_grid * snap_cells:
                 raise ArtifactVectorExportError(
                     "Outline QC axis snap bound does not match precision grid"
                 )
             if (
                 value["grid_snap_radial_upper_bound_squared_mm2"]
-                != precision_grid * precision_grid / 2.0
+                != 2.0 * (precision_grid * snap_cells) ** 2
             ):
                 raise ArtifactVectorExportError(
                     "Outline QC radial snap bound does not match precision grid"
@@ -2605,12 +2664,13 @@ def _validate_qc(
             raise ArtifactVectorExportError(
                 f"sidecar record QC field {key!r} does not match payload"
             )
-    if schema_version == _CURRENT_VECTOR_EXPORT_SCHEMA_VERSION:
+    if schema_version in _CURRENT_CONTRACT_VECTOR_EXPORT_SCHEMA_VERSIONS:
         _validate_current_record_qc(
             record_qc,
             payload=payload,
             recipe=recipe,
             provenance=provenance,
+            schema_version=schema_version,
         )
     scale = _exact_keys(
         qc["scale"],
@@ -2721,10 +2781,10 @@ def validate_vector_export_bytes(
     provenance = _validate_provenance_shape(
         sidecar["provenance"],
         require_current_contract=(
-            schema_version == _CURRENT_VECTOR_EXPORT_SCHEMA_VERSION
+            schema_version in _CURRENT_CONTRACT_VECTOR_EXPORT_SCHEMA_VERSIONS
         ),
     )
-    if schema_version == _CURRENT_VECTOR_EXPORT_SCHEMA_VERSION:
+    if schema_version in _CURRENT_CONTRACT_VECTOR_EXPORT_SCHEMA_VERSIONS:
         _validate_current_vector_provenance(provenance)
     else:
         legacy_geometry = provenance["geometry_revision"]
@@ -2751,7 +2811,7 @@ def validate_vector_export_bytes(
             recipe,
             expected_kind=VectorRecordKind(payload.kind),
         )
-        if schema_version == _CURRENT_VECTOR_EXPORT_SCHEMA_VERSION:
+        if schema_version in _CURRENT_CONTRACT_VECTOR_EXPORT_SCHEMA_VERSIONS:
             validate_vector_payload_recipe_contract(payload, recipe)
     except ArtifactVectorRecordError as exc:
         raise ArtifactVectorExportError(str(exc)) from exc
@@ -2818,7 +2878,7 @@ def validate_vector_export_bytes(
             document,
             record,
             include_current_contract=(
-                schema_version == _CURRENT_VECTOR_EXPORT_SCHEMA_VERSION
+                schema_version in _CURRENT_CONTRACT_VECTOR_EXPORT_SCHEMA_VERSIONS
             ),
         ):
             raise ArtifactVectorExportError("export provenance does not match the document")

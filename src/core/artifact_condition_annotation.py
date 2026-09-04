@@ -41,6 +41,7 @@ from .artifact_document import (
 )
 from .artifact_outline_extractor import (
     DEFAULT_OUTLINE_PRECISION_GRID_MM,
+    OUTLINE_LEGACY_ALGORITHM_VERSION,
     OutlineView,
     extract_outline_geometry,
     outline_frame,
@@ -793,11 +794,16 @@ def project_condition_region(
             skipped.append({"reason": CONDITION_SKIP_NO_AREA, "view": view})
             continue
         try:
+            # A condition region is a painted face subset, not a closed
+            # surface, and its records were all written under the plain
+            # lattice union; they keep that contract so they recompute as
+            # they were.
             result = extract_outline_geometry(
                 vertices,
                 face_subset,
                 view,
                 precision_grid_mm=grid,
+                algorithm_version=OUTLINE_LEGACY_ALGORITHM_VERSION,
                 cancellation_probe=cancellation_probe,
             )
         except ValueError as exc:

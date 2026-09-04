@@ -122,7 +122,7 @@ python -m pytest -q ^
 - 서로 다른 PID에서 self-contained PLY와 textured OBJ source closure를 삭제·relocation한 뒤 saved-parser reopen하여 primary/dependency/texture/geometry hash, Align matrix와 world vertex가 같은 durable artifact round-trip
 - RFC 8785 cross-language number golden과 vector payload/recipe semantic SHA-256
 - canonical-mm Cutline의 exact box·multi-component·Front/Right/oblique frame, face order/winding, ambiguity fail-closed
-- canonical-mm 6-view Outline의 fixed-grid projected-triangle union, concavity·hole·island 보존, face order/winding/duplicate 안정성
+- canonical-mm 6-view Outline의 fixed-grid projected-triangle union, concavity·hole·island 보존, face order/winding/duplicate 안정성; algorithm 1.1.0의 한 격자 closing은 격자가 만든 sliver hole·pinch만 없애고 채운 수·합친 조각 수·면적 변화를 QC로 남기며, 1.0.0 record는 closing 없이 그대로 재계산
 - translated integer lattice의 `1e9 mm` survey offset, grid collapse/merge receipt, chunked balanced union과 resource-limit fail-closed
 - Outline ring simple/area, hole ownership/contact, hole/exterior overlap·nesting, production recipe/frame/grid/ID 재검증
 - native Outline widget/record/record-derived overlay와 screenshot/OpenCV legacy export 우회 차단
@@ -131,7 +131,7 @@ python -m pytest -q ^
 - package relocation 후 원본 문서·mesh·GUI 없이 별도 PID에서 수행하는 offline 검증
 - `.amr` embedded source의 saved-parser 재물질화와 `.amr-vector`/`.amr-rubbing`/`.amr-survey`/`.amr-unwrap` 자동 판별을 하나로 묶는 `--verify-artifact`; exact project 결합 성공·불일치 실패, manifest-only AMR 실패, symlink·mixed marker·tamper 거부, 절대 경로 없는 결정적 closed JSON receipt
 - 실제 complete-workflow `.amr`/`.amr-survey`를 exact-project로 다시 여는 field-pilot contract, project document/survey aggregate hash에 묶인 Windows 10 build 17763+/Windows 11 client Workstation·native AMD64·64-bit AMD64 process·CPython 3.12·비호환 계층, 닫힌 OpenGL v2 성공 root·필수 check ID·두 mode·동일 runtime self-claim·24시간 receipt, 닫힌 10항목 human review·정량 scale 교차 판정, canonical self-hash/no-overwrite publication, 절대 경로·hostname·사용자명 비수집과 `authentication=none`/single-pilot scope. 테스트의 합성 review/driver fixture는 계약 검증일 뿐 실제 현장 pilot 증거가 아님
-- versioned vector payload와 current vector-export 1.1 Draft 2020-12 schema, byte-preserved legacy export 1.0 schema 및 양 버전 offline runtime 검증; 1.1은 Align/geometry/payload QC를 exact-key로 닫고 production Cutline/Outline record QC 전체와 payload에서 재계산한 Outline topology를 검증
+- versioned vector payload와 current vector-export 1.2 Draft 2020-12 schema, byte-preserved 1.0·1.1 schema 및 세 버전 offline runtime 검증; 1.1부터 Align/geometry/payload QC를 exact-key로 닫고 production Cutline/Outline record QC 전체와 payload에서 재계산한 Outline topology를 검증하며, 1.2는 outline algorithm 1.1.0(격자 closing)의 recipe·QC 키를 더하고 그 이전 sidecar는 closing으로 계산한 outline을 담지 못한다
 - six-view canonical-mm front-depth raster, fixed integer µm quantization/local-mean tone mapping, coverage alpha와 multi-layer QC
 - face order·winding·duplicate, hole, large survey offset, resource limit 및 Align 전환 후 late Digital Rubbing 결과 거부
 - canonical GA8 PNG의 고정 chunk/DEFLATE bytes, exact `pHYs`, RFC 8785 iTXt metadata, pixel/CRC/chunk/scale tamper 거부

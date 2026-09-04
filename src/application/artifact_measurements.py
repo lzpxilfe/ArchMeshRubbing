@@ -555,6 +555,9 @@ def execute_measurement_work_item(
                 projection.mesh.faces,
                 str(recipe["view"]),
                 precision_grid_mm=_recipe_float(recipe, "precision_grid_mm"),
+                # The recipe says which contract to reproduce: a record made
+                # before grid closing recomputes without it.
+                algorithm_version=str(recipe["algorithm_version"]),
                 cancellation_probe=cancellation_probe,
             )
         except ArtifactComputationCancelledError as exc:

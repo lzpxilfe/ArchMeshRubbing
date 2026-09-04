@@ -47,7 +47,35 @@ from .artifact_vector_record import (
 
 
 OUTLINE_ALGORITHM = "archmeshrubbing.projected_triangle_union"
-OUTLINE_ALGORITHM_VERSION = "1.0.0"
+#: The lattice union alone, as every outline before grid closing was computed.
+OUTLINE_LEGACY_ALGORITHM_VERSION = "1.0.0"
+#: The lattice union followed by a one-cell morphological closing.  Snapping
+#: thin silhouette triangles to the grid leaves hairline slivers between them
+#: - holes one cell wide, pinches where the outline touches itself - that are
+#: the grid's, not the artifact's; the closing removes exactly the features
+#: narrower than two cells.  Records at 1.0.0 still recompute as they were.
+OUTLINE_ALGORITHM_VERSION = "1.1.0"
+OUTLINE_ALGORITHM_VERSIONS = (OUTLINE_LEGACY_ALGORITHM_VERSION, OUTLINE_ALGORITHM_VERSION)
+OUTLINE_GRID_CLOSING_RADIUS_CELLS = 1.0
+#: Snap error contracts, per algorithm version.  The union moves a vertex by
+#: at most half a cell on each axis; the closing may move a boundary point by
+#: its radius, and re-snapping by another half cell.
+_SNAP_CONTRACTS: Mapping[str, tuple[str, float]] = {
+    OUTLINE_LEGACY_ALGORITHM_VERSION: ("axis<=grid/2;radial<=grid/sqrt(2)", 0.5),
+    OUTLINE_ALGORITHM_VERSION: (
+        "axis<=1.5*grid;radial<=1.5*grid*sqrt(2)",
+        OUTLINE_GRID_CLOSING_RADIUS_CELLS + 0.5,
+    ),
+}
+
+
+def _outline_algorithm_version(value: object) -> str:
+    if not isinstance(value, str) or value not in OUTLINE_ALGORITHM_VERSIONS:
+        raise ArtifactVectorExtractionError(
+            "outline algorithm_version must be one of "
+            + ", ".join(OUTLINE_ALGORITHM_VERSIONS)
+        )
+    return value
 DEFAULT_OUTLINE_PRECISION_GRID_MM = 0.01
 REQUIRED_SHAPELY_VERSION = "2.1.2"
 REQUIRED_GEOS_VERSION = "3.13.1"
@@ -158,28 +186,49 @@ def outline_recipe(
     view: OutlineView | str,
     *,
     precision_grid_mm: float,
+    algorithm_version: str = OUTLINE_ALGORITHM_VERSION,
 ) -> dict[str, Any]:
     _require_outline_backend()
     resolved = _outline_view(view)
     grid = _precision_grid(precision_grid_mm)
+    version = _outline_algorithm_version(algorithm_version)
+    closing = version != OUTLINE_LEGACY_ALGORITHM_VERSION
     return {
         "algorithm": OUTLINE_ALGORITHM,
-        "algorithm_version": OUTLINE_ALGORITHM_VERSION,
+        "algorithm_version": version,
         "backend": {
             "name": "shapely",
             "geos_version": shapely.geos_version_string,
             "normalized_grid_size": 1.0,
-            "operation": "set_precision+union_all",
+            "operation": (
+                "set_precision+union_all+buffer" if closing else "set_precision+union_all"
+            ),
             "shapely_version": shapely.__version__,
         },
         "coordinate_space": VECTOR_COORDINATE_SPACE,
         "face_scope": "all_geometry_faces",
         "face_order": "geometry_revision_order/v1",
         "frame": outline_frame(resolved).to_dict(),
+        # Present from 1.1.0 on; a 1.0.0 recipe has no closing and no key, so
+        # it hashes exactly as it did.
+        **(
+            {
+                "grid_closing": {
+                    "join_style": "mitre",
+                    "operation": "buffer_out_then_in_then_set_precision/v1",
+                    "radius_cells": OUTLINE_GRID_CLOSING_RADIUS_CELLS,
+                }
+            }
+            if closing
+            else {}
+        ),
         "kind": VectorRecordKind.OUTLINE.value,
         "precision_grid_mm": grid,
         "precision_model": (
             "translated_integer_lattice_set_precision_valid_output_"
+            "then_balanced_union_all_then_one_cell_closing/v1"
+            if closing
+            else "translated_integer_lattice_set_precision_valid_output_"
             "then_balanced_union_all/v1"
         ),
         "projection": "orthographic_all_triangles/v1",
@@ -225,7 +274,11 @@ def validate_outline_record_contract(
         raise ArtifactVectorExtractionError("outline record recipe must be an object")
     view = _outline_view(recipe.get("view"))
     grid = _precision_grid(recipe.get("precision_grid_mm"))
-    expected_recipe = outline_recipe(view, precision_grid_mm=grid)
+    expected_recipe = outline_recipe(
+        view,
+        precision_grid_mm=grid,
+        algorithm_version=_outline_algorithm_version(recipe.get("algorithm_version")),
+    )
     if canonical_recipe_hash(recipe) != canonical_recipe_hash(expected_recipe):
         raise ArtifactVectorExtractionError(
             "outline record recipe does not match the production algorithm contract"
@@ -661,6 +714,53 @@ def _ring_segment_lengths(
     raise_if_cancelled(cancellation_probe)
 
 
+def _close_grid_slivers(
+    geometry: BaseGeometry,
+    *,
+    cancellation_probe: CancellationProbe | None = None,
+) -> tuple[BaseGeometry, dict[str, Any]]:
+    """Close the hairline gaps the fixed grid leaves in the lattice union.
+
+    Near a silhouette the projected triangles are thinner than a cell, and
+    snapping each to the grid leaves slivers between them: holes one cell
+    wide and a few cells long, and pinches where two parts of the outline
+    meet at a single lattice point.  They are the grid's, not the artifact's
+    - the surface is continuous there - and a finer grid only finds smaller
+    ones.  A morphological closing by ``OUTLINE_GRID_CLOSING_RADIUS_CELLS``
+    removes exactly the features narrower than twice that radius, and
+    re-snapping puts the result back on the lattice.  On the corded test body
+    the closing changes the area by a few parts per million; a real hole -
+    wider than two cells - is untouched.
+    """
+
+    raise_if_cancelled(cancellation_probe)
+    radius = OUTLINE_GRID_CLOSING_RADIUS_CELLS
+    holes_before = sum(len(polygon.interiors) for polygon in _polygon_sequence(geometry))
+    components_before = _polygon_count(geometry)
+    try:
+        closed = geometry.buffer(radius, join_style="mitre").buffer(
+            -radius, join_style="mitre"
+        )
+        raise_if_cancelled(cancellation_probe)
+        closed = set_precision(closed, 1.0, mode="valid_output")
+    except GEOSException as exc:
+        raise ArtifactVectorExtractionError(f"outline grid closing failed: {exc}") from exc
+    if closed.is_empty:
+        raise ArtifactVectorExtractionError("outline grid closing emptied the union")
+    if not closed.is_valid:
+        raise ArtifactVectorExtractionError(
+            f"outline union is invalid after grid closing: {is_valid_reason(closed)}"
+        )
+    holes_after = sum(len(polygon.interiors) for polygon in _polygon_sequence(closed))
+    components_after = _polygon_count(closed)
+    return closed, {
+        "grid_closing_radius_cells": radius,
+        "grid_closing_hole_fill_count": max(0, holes_before - holes_after),
+        "grid_closing_component_merge_count": max(0, components_before - components_after),
+        "grid_closing_area_delta_cells": float(closed.area - geometry.area),
+    }
+
+
 def _payload_from_union(
     geometry: BaseGeometry,
     *,
@@ -825,14 +925,22 @@ def extract_outline_geometry(
     view: OutlineView | str,
     *,
     precision_grid_mm: float,
+    algorithm_version: str = OUTLINE_ALGORITHM_VERSION,
     cancellation_probe: CancellationProbe | None = None,
 ) -> OutlineGeometryResult:
-    """Project and fixed-grid union every triangle into one canonical view."""
+    """Project and fixed-grid union every triangle into one canonical view.
+
+    ``algorithm_version`` selects the contract the result must reproduce:
+    1.0.0 is the lattice union alone, 1.1.0 adds the one-cell grid closing.
+    """
 
     raise_if_cancelled(cancellation_probe)
     _require_outline_backend()
     resolved = _outline_view(view)
     grid = _precision_grid(precision_grid_mm)
+    version = _outline_algorithm_version(algorithm_version)
+    closing = version != OUTLINE_LEGACY_ALGORITHM_VERSION
+    snap_contract, snap_cells = _SNAP_CONTRACTS[version]
     vertices, face_array = _validated_mesh_arrays(
         vertices_world_mm,
         faces,
@@ -986,6 +1094,18 @@ def extract_outline_geometry(
         raise ArtifactVectorExtractionError(
             f"outline polygon union is invalid: {is_valid_reason(snapped_union)}"
         )
+    closing_qc: dict[str, Any] = {}
+    if closing:
+        snapped_union, closing_cells = _close_grid_slivers(
+            snapped_union, cancellation_probe=cancellation_probe
+        )
+        closing_qc = {
+            "grid_closing_area_delta_mm2": round(
+                float(closing_cells.pop("grid_closing_area_delta_cells")) * grid * grid,
+                12,
+            ),
+            **closing_cells,
+        }
     snapped_component_count = _polygon_count(snapped_union)
 
     unsnapped_status = "available"
@@ -1041,11 +1161,14 @@ def extract_outline_geometry(
             else None
         ),
         "grid_collapsed_triangle_count": grid_collapsed_count,
+        # The closing's four keys exist only from algorithm 1.1.0 on, so a
+        # 1.0.0 recomputation keeps its QC bytes.
+        **closing_qc,
         "grid_component_merge_count": component_merge_count,
         "grid_component_split_count": component_split_count,
-        "grid_snap_axis_upper_bound_mm": grid / 2.0,
-        "grid_snap_error_contract": "axis<=grid/2;radial<=grid/sqrt(2)",
-        "grid_snap_radial_upper_bound_squared_mm2": grid * grid / 2.0,
+        "grid_snap_axis_upper_bound_mm": grid * snap_cells,
+        "grid_snap_error_contract": snap_contract,
+        "grid_snap_radial_upper_bound_squared_mm2": 2.0 * (grid * snap_cells) ** 2,
         "grid_origin_index_uv": [grid_origin[0], grid_origin[1]],
         "input_face_count": int(face_array.shape[0]),
         "input_vertex_count": int(vertices.shape[0]),
@@ -1113,6 +1236,9 @@ __all__ = [
     "MAX_OUTLINE_VERTICES",
     "OUTLINE_ALGORITHM",
     "OUTLINE_ALGORITHM_VERSION",
+    "OUTLINE_ALGORITHM_VERSIONS",
+    "OUTLINE_GRID_CLOSING_RADIUS_CELLS",
+    "OUTLINE_LEGACY_ALGORITHM_VERSION",
     "OUTLINE_UNION_BATCH_SIZE",
     "OutlineGeometryResult",
     "OutlineView",

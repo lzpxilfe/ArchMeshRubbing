@@ -267,3 +267,96 @@ def positioned_vessel_session(
         revision_id="align:axis",
     )
     return session, vertices, faces
+
+
+# ---------------------------------------------------------------------------
+# A fired wall's micro-relief, for tests that need a rough surface: finger
+# drag as value noise at two scales, and sand temper as round grains and pits.
+# Deterministic, and shaped so a 0.19-0.25 mm mesh can carry it.
+
+
+def _hash01(ix: int, iy: int, seed: int) -> float:
+    h = (ix * 73856093) ^ (iy * 19349663) ^ (seed * 83492791)
+    h &= 0xFFFFFFFF
+    h ^= h >> 13
+    h = (h * 0x5BD1E995) & 0xFFFFFFFF
+    h ^= h >> 15
+    return h / 4294967296.0
+
+
+def value_noise(x_mm: float, y_mm: float, *, cell_mm: float, seed: int) -> float:
+    """Smooth deterministic noise in [-1, 1] with features about cell_mm across."""
+
+    gx, gy = x_mm / cell_mm, y_mm / cell_mm
+    ix, iy = math.floor(gx), math.floor(gy)
+    fx, fy = gx - ix, gy - iy
+    sx, sy = fx * fx * (3 - 2 * fx), fy * fy * (3 - 2 * fy)
+    a = _hash01(ix, iy, seed)
+    b = _hash01(ix + 1, iy, seed)
+    c = _hash01(ix, iy + 1, seed)
+    d = _hash01(ix + 1, iy + 1, seed)
+    return 2.0 * ((a * (1 - sx) + b * sx) * (1 - sy) + (c * (1 - sx) + d * sx) * sy) - 1.0
+
+
+def _rotated(x_mm: float, y_mm: float, degrees: float) -> tuple[float, float]:
+    c, s = math.cos(math.radians(degrees)), math.sin(math.radians(degrees))
+    return c * x_mm - s * y_mm, s * x_mm + c * y_mm
+
+
+def temper(x_mm: float, y_mm: float, *, cell_mm: float, seed: int) -> float:
+    """Sand temper: at most one round grain or pit per cell, at a hashed spot."""
+
+    gx, gy = x_mm / cell_mm, y_mm / cell_mm
+    ix, iy = math.floor(gx), math.floor(gy)
+    total = 0.0
+    for dx in (-1, 0, 1):
+        for dy in (-1, 0, 1):
+            cx, cy = ix + dx, iy + dy
+            if _hash01(cx, cy, seed + 5) > 0.7:
+                continue
+            px = cx + _hash01(cx, cy, seed)
+            py = cy + _hash01(cx, cy, seed + 1)
+            radius = (0.14 + 0.16 * _hash01(cx, cy, seed + 2)) / cell_mm
+            d2 = ((gx - px) ** 2 + (gy - py) ** 2) / (radius * radius)
+            if d2 < 4.0:
+                sign = -1.0 if _hash01(cx, cy, seed + 3) < 0.55 else 1.0
+                height = 0.012 + 0.016 * _hash01(cx, cy, seed + 4)
+                total += sign * height * math.exp(-d2)
+    return total
+
+
+def grain(angle_rad: float, z_mm: float, radius_mm: float = 40.0) -> float:
+    """Micro-relief of a fired wall, in millimetres: drag, grains and pits."""
+
+    arc = angle_rad * radius_mm
+    cx, cy = _rotated(arc, z_mm, 31.0)
+    fx, fy = _rotated(arc, z_mm, -58.0)
+    coarse = 0.025 * value_noise(cx, cy, cell_mm=0.6, seed=3)
+    fine = 0.010 * value_noise(fx, fy, cell_mm=0.25, seed=11)
+    return coarse + fine + temper(arc, z_mm, cell_mm=0.45, seed=101)
+
+
+def incision(offset_mm: float, *, half_width_mm: float, depth_mm: float) -> float:
+    """A drawn line has a rounded bed, not a slot: a cosine trough."""
+
+    if abs(offset_mm) >= half_width_mm:
+        return 0.0
+    return -depth_mm * 0.5 * (1.0 + math.cos(math.pi * offset_mm / half_width_mm))
+
+
+def grained_surface(angle_rad: float, z_mm: float) -> float:
+    """Three incised lines, a corded band and one more line, on a grained wall."""
+
+    relief = grain(angle_rad, z_mm)
+    for centre in (26.0, 30.0, 34.0):
+        relief += incision(z_mm - centre, half_width_mm=1.1, depth_mm=0.2)
+    if 38.0 < z_mm < 52.0:
+        # The band fades in and out over a millimetre: a paddle's edge is
+        # not a cliff, and a cliff on a fine mesh is a face the unwrap refuses.
+        edge = min(z_mm - 38.0, 52.0 - z_mm, 1.0)
+        window = 0.5 * (1.0 - math.cos(math.pi * edge))
+        relief += window * 0.25 * max(
+            0.0, math.sin(2.0 * math.pi * (z_mm + 6.0 * angle_rad) / 4.0)
+        )
+    relief += incision(z_mm - 58.0, half_width_mm=1.1, depth_mm=0.18)
+    return relief

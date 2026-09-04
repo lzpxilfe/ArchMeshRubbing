@@ -209,6 +209,11 @@ class TestVectorSchemas(unittest.TestCase):
             )
         )
         export_schema = json.loads(
+            (ROOT / "schemas/vector_export-1.2.0.schema.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        previous_export_schema = json.loads(
             (ROOT / "schemas/vector_export-1.1.0.schema.json").read_text(
                 encoding="utf-8"
             )
@@ -235,6 +240,7 @@ class TestVectorSchemas(unittest.TestCase):
         )
         jsonschema.Draft202012Validator.check_schema(payload_schema)
         jsonschema.Draft202012Validator.check_schema(export_schema)
+        jsonschema.Draft202012Validator.check_schema(previous_export_schema)
         jsonschema.Draft202012Validator.check_schema(legacy_export_schema)
         jsonschema.Draft202012Validator.check_schema(admission_schema)
         jsonschema.Draft202012Validator.check_schema(import_recipe_schema)
@@ -275,11 +281,25 @@ class TestVectorSchemas(unittest.TestCase):
             sidecar["provenance"]["geometry_revision"]["import_recipe"],
             document.geometry_revisions[0].to_dict()["import_recipe"],
         )
-        self.assertEqual(sidecar["schema_version"], "1.1.0")
+        self.assertEqual(sidecar["schema_version"], "1.2.0")
         self.assertIn(
             "import_admission",
             sidecar["provenance"]["geometry_revision"]["qc"],
         )
+        # 1.2.0 is 1.1.0 plus the outline grid closing.  A sidecar carries the
+        # 1.1.0 contract exactly when its record has no closing to declare.
+        previous_validator = jsonschema.Draft202012Validator(
+            previous_export_schema,
+            registry=registry,
+        )
+        self.assertTrue(list(previous_validator.iter_errors(sidecar)))
+        previous_shaped = copy.deepcopy(sidecar)
+        previous_shaped["schema_version"] = "1.1.0"
+        previous_errors = list(previous_validator.iter_errors(previous_shaped))
+        if sidecar["recipe"].get("algorithm_version") == "1.1.0":
+            self.assertTrue(previous_errors)
+        else:
+            self.assertEqual(previous_errors, [])
         invalid_root = copy.deepcopy(sidecar)
         invalid_root["provenance"]["align_ancestry"][0]["matrix4x4"][0][3] = 1.0
         self.assertTrue(list(export_validator.iter_errors(invalid_root)))
@@ -484,7 +504,7 @@ def test_the_export_schema_accepts_exactly_the_reviewed_backends() -> None:
     from src.core.artifact_outline_extractor import REVIEWED_OUTLINE_BACKENDS
 
     schema = json.loads(
-        (ROOT / "schemas/vector_export-1.1.0.schema.json").read_text(encoding="utf-8")
+        (ROOT / "schemas/vector_export-1.2.0.schema.json").read_text(encoding="utf-8")
     )
     properties = schema["$defs"]["recordQc"]["properties"]
 

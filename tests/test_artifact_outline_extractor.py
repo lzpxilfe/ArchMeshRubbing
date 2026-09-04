@@ -539,15 +539,40 @@ class TestGridAndSafetyPolicy(unittest.TestCase):
         self.assertEqual(result.qc["unsnapped_component_count"], 3)
         self.assertEqual(result.qc["component_count"], 1)
         self.assertEqual(result.qc["grid_component_merge_count"], 2)
+        # The current algorithm closes the lattice union by one cell, so its
+        # error bound is the union's half cell plus the closing radius plus
+        # the re-snap.
         self.assertEqual(
             result.qc["grid_snap_error_contract"],
+            "axis<=1.5*grid;radial<=1.5*grid*sqrt(2)",
+        )
+        self.assertAlmostEqual(result.qc["grid_snap_axis_upper_bound_mm"], 0.15)
+        self.assertAlmostEqual(
+            result.qc["grid_snap_radial_upper_bound_squared_mm2"], 0.045
+        )
+        self.assertEqual(result.qc["grid_closing_radius_cells"], 1.0)
+        # A record made before the closing recomputes under the old contract.
+        legacy = extract_outline_geometry(
+            vertices,
+            faces,
+            "top",
+            precision_grid_mm=0.1,
+            algorithm_version="1.0.0",
+        )
+        self.assertEqual(
+            legacy.qc["grid_snap_error_contract"],
             "axis<=grid/2;radial<=grid/sqrt(2)",
         )
-        self.assertEqual(result.qc["grid_snap_axis_upper_bound_mm"], 0.05)
+        self.assertEqual(legacy.qc["grid_snap_axis_upper_bound_mm"], 0.05)
         self.assertEqual(
-            result.qc["grid_snap_radial_upper_bound_squared_mm2"],
+            legacy.qc["grid_snap_radial_upper_bound_squared_mm2"],
             0.005000000000000001,
         )
+        self.assertNotIn("grid_closing_radius_cells", legacy.qc)
+        with self.assertRaisesRegex(ArtifactVectorExtractionError, "algorithm_version"):
+            extract_outline_geometry(
+                vertices, faces, "top", precision_grid_mm=0.1, algorithm_version="2.0.0"
+            )
 
     def test_empty_invalid_grid_and_limits_fail_without_fallback(self):
         vertical_vertices = np.array(
