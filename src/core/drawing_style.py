@@ -496,20 +496,31 @@ def user_preset(
     stroke_widths_mm: Mapping[str, float],
     *,
     base_preset_id: str = "provisional/v1",
+    hatch_cut_faces: bool | None = None,
 ) -> DrawingStylePreset:
     """A preset with the drafter's own weights on the base preset's dashes.
 
     ``stroke_widths_mm`` names any subset of the line kinds; kinds left out
-    keep the base weight.  Dash patterns, hatch flags and the cut-face hatch
-    are the base preset's: a weight is the number a report style states, the
-    rest is how this renderer tells the kinds apart.  The result is named by
-    its content, so the same weights always give the same preset id.
+    keep the base weight.  Dash patterns and the hatch geometry are the base
+    preset's: a weight is the number a report style states, the rest is how
+    this renderer tells the kinds apart.  The result is named by its content,
+    so the same weights always give the same preset id.
+
+    ``hatch_cut_faces`` says whether the cut face inside a section is shaded.
+    Reports do it both ways - some hatch the cut, some leave it blank and let
+    the section line carry it - and neither is a measurement, so it is the
+    drafter's to choose.  ``None``, the default, keeps the base preset's
+    choice, and a preset built that way is exactly the preset it was before
+    this argument existed.  Only the cut face answers to it: the boundary of
+    the section is drawn either way, and no other kind is hatched.
     """
 
     base = get_preset(base_preset_id)
     unknown = sorted(set(stroke_widths_mm) - set(LINE_KINDS))
     if unknown:
         raise DrawingStyleError(f"unknown line kinds: {', '.join(unknown)}")
+    if hatch_cut_faces is not None and not isinstance(hatch_cut_faces, bool):
+        raise DrawingStyleError("hatch_cut_faces must be a boolean or None")
     lines = {
         kind: (
             LineStyle(
@@ -524,6 +535,13 @@ def user_preset(
         )
         for kind, style in base.lines.items()
     }
+    if hatch_cut_faces is not None and SECTION_CUT in lines:
+        cut = lines[SECTION_CUT]
+        lines[SECTION_CUT] = LineStyle(
+            stroke_width_mm=cut.stroke_width_mm,
+            dash_pattern_mm=cut.dash_pattern_mm,
+            hatch=hatch_cut_faces,
+        )
     return DrawingStylePreset(
         preset_id=user_preset_id(lines, base.hatch),
         lines=lines,

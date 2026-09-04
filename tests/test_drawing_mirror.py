@@ -39,6 +39,12 @@ from src.core.drawing_sheet import (
     compose_drawing_sheet,
     validate_drawing_sheet_bytes,
 )
+from src.core.drawing_style import (
+    PROVISIONAL_PRESET_ID,
+    SECTION_CUT,
+    get_preset,
+    user_preset,
+)
 from src.core.drawing_svg import (
     SVGRenderError,
     center_axis_line,
@@ -512,6 +518,31 @@ def test_the_cut_face_is_still_shaded_without_a_stroke_along_the_axis() -> None:
     assert fills[0].attrib["id"].endswith(":fill")
 
 
+def test_the_cut_face_is_left_blank_when_the_drafter_says_so() -> None:
+    """Some reports hatch the cut, some leave it blank; neither is measured."""
+
+    preset = user_preset({}, hatch_cut_faces=False)
+    bundle = _mirrored_sheet(style_preset=preset)
+    figure = _figure(bundle.svg_bytes)
+    section = _find(figure, f"{SVG_NS}g[@id='layer-section-cut']")
+
+    root = ET.fromstring(bundle.svg_bytes)
+    assert root.find(f"{SVG_NS}defs") is None, "no hatch was asked for"
+    assert len(section), "the section's own boundary is still drawn"
+    assert not [path for path in section if path.attrib.get("stroke") == "none"], (
+        "the fill-only ring exists to carry the hatch; without one it is "
+        "an invisible path"
+    )
+    # The preset is the shipped one with the hatch off, so the drawing keeps
+    # every weight it would have had.
+    base = get_preset(PROVISIONAL_PRESET_ID)
+    assert preset.style(SECTION_CUT).stroke_width_mm == (
+        base.style(SECTION_CUT).stroke_width_mm
+    )
+    assert preset.style(SECTION_CUT).hatch is False
+    assert user_preset({}, hatch_cut_faces=None) != preset
+
+
 def test_a_mirrored_figure_draws_its_own_axis_without_being_asked() -> None:
     """The axis is the seam of this convention, not an optional annotation."""
 
@@ -708,22 +739,16 @@ def test_a_record_cannot_be_both_halves_or_two_figures_halves() -> None:
         )
 
 
-def test_a_mark_inside_the_wall_is_drawn_on_the_section_half() -> None:
-    """A finger press on the inside shows through the cut, not on the elevation.
+def _vessel_with_halves() -> tuple[Any, int]:
+    """A synthetic vessel with its front elevation and its section committed.
 
-    [K2] 도면 3 and 6 put the press rows and the tool strokes on the inside,
-    to the right of the axis; the outside, smoothed over, carries little.
+    Returns the session and the number of outer faces, so a test can name the
+    outer and inner faces of the same segment.
     """
 
     from synthetic_vessel import positioned_vessel_session
 
-    from src.core.artifact_technique_annotation import (
-        commit_technique_annotation,
-        compute_technique_annotation,
-    )
-
-    session, _vertices, faces = positioned_vessel_session(segments=24, rings=10)
-    outer_count = 10 * 24 * 2
+    session, _vertices, _faces = positioned_vessel_session(segments=24, rings=10)
     outline = compute_artifact_outline(session, "front", precision_grid_mm=0.5)
     session = commit_vector_computation(
         session, outline, record_id=ELEVATION_ID, created_at="2026-09-04T00:00:01Z", operator="t"
@@ -740,6 +765,22 @@ def test_a_mark_inside_the_wall_is_drawn_on_the_section_half() -> None:
     session = commit_vector_computation(
         session, cutline, record_id=SECTION_ID, created_at="2026-09-04T00:00:02Z", operator="t"
     )
+    return session, 10 * 24 * 2
+
+
+def test_a_mark_inside_the_wall_is_drawn_on_the_section_half() -> None:
+    """A finger press on the inside shows through the cut, not on the elevation.
+
+    [K2] 도면 3 and 6 put the press rows and the tool strokes on the inside,
+    to the right of the axis; the outside, smoothed over, carries little.
+    """
+
+    from src.core.artifact_technique_annotation import (
+        commit_technique_annotation,
+        compute_technique_annotation,
+    )
+
+    session, outer_count = _vessel_with_halves()
     # Segment 3 of 24 sits at about 52 degrees: back-right, so the inner
     # face there is the far wall the section half looks onto.
     ring = 5
@@ -819,3 +860,59 @@ def test_a_mark_inside_the_wall_is_drawn_on_the_section_half() -> None:
             "record_id": "record:technique:inside",
         }
     ]
+
+
+def test_a_coil_seam_goes_on_the_section_half_whatever_faces_were_painted() -> None:
+    """The wavy seam is read inside; the outside was smoothed over.
+
+    [K2] 도면 2 and 4 draw 테쌓기흔 as the wavy line of the joint on the wall
+    seen through the cut.  Painting the outer faces says where round the pot
+    the seam runs - it does not move the seam onto the elevation, because
+    that is not the wall a drafter reads it on.
+    """
+
+    from src.core.artifact_technique_annotation import (
+        commit_technique_annotation,
+        compute_technique_annotation,
+    )
+
+    session, _outer_count = _vessel_with_halves()
+    ring = 5
+    outer_faces = [(ring * 24 + segment) * 2 + side
+                   for segment in range(12, 18) for side in (0, 1)]
+    session = commit_technique_annotation(
+        session,
+        compute_technique_annotation(
+            session,
+            technique="coil_joint",
+            face_indices=outer_faces,
+            precision_grid_mm=0.5,
+        ),
+        record_id="record:technique:seam",
+        created_at="2026-09-04T00:00:05Z",
+        operator="t",
+    )
+
+    bundle = compose_drawing_sheet(
+        session.document,
+        [ELEVATION_ID],
+        options=_options(
+            mirror_sections=((ELEVATION_ID, SECTION_ID),),
+            technique_records=("record:technique:seam",),
+        ),
+    )
+    figure = _figure(bundle.svg_bytes)
+    layer = figure.find(f"{SVG_NS}g[@id='layer-technique-coil-joint']")
+    assert layer is not None
+    axis_x = _axis_x(figure)
+    for path in layer:
+        assert path.attrib["id"].startswith("mirror:right:")
+        assert all(point[0] >= axis_x - 1e-9 for point in _points(path))
+
+    sidecar = json.loads(bundle.sidecar_bytes)
+    (entry,) = sidecar["technique"]["drawn"]
+    assert entry["half"] == "section"
+    # The record still says what was painted; the convention says where it goes.
+    assert entry["surface_side"] == "exterior"
+    assert entry["side_decided_by"] == "convention"
+    assert sidecar["technique"]["not_drawn"] == []

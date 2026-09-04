@@ -423,6 +423,7 @@ from src.core.artifact_condition_annotation import (  # noqa: E402
     ConditionAnnotationComputation,
 )
 from src.core.artifact_technique_annotation import (  # noqa: E402
+    TECHNIQUE_FINGER_MARK,
     TECHNIQUE_KIND_LABELS_KO,
     TECHNIQUE_KINDS,
     TECHNIQUE_RECORD_TYPE,
@@ -4294,6 +4295,15 @@ class SectionPanel(QWidget):
             self.spin_line_weights[kind] = spin
             weights_form.addRow(DRAWING_LINE_KIND_LABELS[kind], spin)
         native_layout.addLayout(weights_form)
+        self.check_line_hatch_cut_faces = QCheckBox("단면 안에 빗금")
+        self.check_line_hatch_cut_faces.setChecked(True)
+        self.check_line_hatch_cut_faces.setToolTip(
+            "잘린 면 안을 빗금으로 채울지. 보고서는 두 가지를 다 쓰고 어느 쪽도 "
+            "실측이 아니므로 실측자가 정합니다.\n"
+            "끄면 잘린 면 안이 비고, 단면선 자체는 그대로 그려집니다. 끈 채로 "
+            "만든 도면은 preset 전체가 provenance에 사용자 preset으로 남습니다."
+        )
+        native_layout.addWidget(self.check_line_hatch_cut_faces)
         self._line_weight_unit = "pt"
         self.combo_line_weight_unit.currentIndexChanged.connect(self._on_line_weight_unit_changed)
         self.btn_line_weights_reset.clicked.connect(self.reset_line_weights)
@@ -4430,8 +4440,11 @@ class SectionPanel(QWidget):
         self.list_drawing_sheet_conditions = QListWidget()
         self.list_drawing_sheet_conditions.setMaximumHeight(90)
         self.list_drawing_sheet_conditions.setToolTip(
-            "체크한 상태·기법 기록의 경계가 같은 뷰의 투영 도면 위에 그려집니다. "
-            "지두흔은 영역 크기의 U자 기호로 그립니다. 단면 위에는 아직 그리지 않습니다."
+            "체크한 상태·기법 기록이 같은 뷰의 투영 도면 위에 그려집니다. 상태는 "
+            "경계로, 기법은 보고서가 쓰는 획으로 그립니다.\n"
+            "테쌓기흔은 내면에서 읽는 흔적이라 좌 반입면·우 반단면 도형의 단면 쪽에 "
+            "그려지고, 단면 반쪽이 없는 도형에는 그리지 않고 그 사실을 provenance에 "
+            "남깁니다."
         )
         native_layout.addWidget(self.list_drawing_sheet_conditions)
         technique_row = QHBoxLayout()
@@ -4454,6 +4467,20 @@ class SectionPanel(QWidget):
         )
         technique_row.addWidget(self.spin_drawing_sheet_technique_angle)
         native_layout.addLayout(technique_row)
+        press_row = QHBoxLayout()
+        press_row.setContentsMargins(0, 0, 0, 0)
+        press_row.addWidget(QLabel("지두흔 모양"))
+        self.combo_drawing_sheet_press_shape = QComboBox()
+        self.combo_drawing_sheet_press_shape.addItem("닫힌 타원", "press_ovals")
+        self.combo_drawing_sheet_press_shape.addItem("뒤집힌 U (아래 열림)", "press_arcs")
+        self.combo_drawing_sheet_press_shape.setToolTip(
+            "누른 자국을 닫힌 타원으로 볼지, 아래가 벽으로 이어지는 뒤집힌 U로 볼지. "
+            "같은 관찰을 그리는 두 가지 방식이고 어느 쪽인지는 실측자가 정합니다.\n"
+            "지두흔·손누름 기록에만 적용되고 다른 기법은 관례대로 그립니다."
+        )
+        press_row.addWidget(self.combo_drawing_sheet_press_shape)
+        press_row.addStretch()
+        native_layout.addLayout(press_row)
 
         axis_line = QFrame()
         axis_line.setFrameShape(QFrame.Shape.HLine)
@@ -5235,11 +5262,30 @@ class SectionPanel(QWidget):
             {kind: base.style(kind).stroke_width_mm for kind in DRAWING_LINE_KINDS}
         )
 
+    def hatch_cut_faces_choice(self) -> "bool | None":
+        """Whether the cut face is hatched: None keeps the preset's own choice.
+
+        Checked returns None rather than True so a drawing made with the box
+        as it opens is byte for byte the drawing it was before the box
+        existed.
+        """
+
+        check = getattr(self, "check_line_hatch_cut_faces", None)
+        if check is None or check.isChecked():
+            return None
+        return False
+
     def drawing_style_preset_choice(self, choice: object) -> "str | object":
         """Turn a combo's data into what the core takes: an id or a user preset."""
 
+        hatch = self.hatch_cut_faces_choice()
         if choice == USER_LINE_WEIGHTS_PRESET:
-            return drawing_user_preset(self.user_line_weights_mm())
+            return drawing_user_preset(self.user_line_weights_mm(), hatch_cut_faces=hatch)
+        if hatch is not None and isinstance(choice, str) and choice:
+            # A shipped preset hatches the cut face; the drafter who does not
+            # want it gets that preset's own weights with the hatch off, named
+            # by its content and written into the drawing whole.
+            return drawing_user_preset({}, base_preset_id=choice, hatch_cut_faces=hatch)
         return choice
 
 class MainWindow(QMainWindow):
@@ -18625,6 +18671,38 @@ class MainWindow(QMainWindow):
     def _checked_drawing_sheet_technique_ids(self) -> tuple[str, ...]:
         return self._checked_drawing_sheet_annotation_ids(TECHNIQUE_RECORD_TYPE)
 
+    def _drawing_sheet_technique_representations(
+        self, technique_ids: tuple[str, ...]
+    ) -> tuple[tuple[str, str], ...]:
+        """How the drafter wants each press drawn, for the presses only.
+
+        A kind with one drawing takes no preference, so only the finger-mark
+        records are named; the sheet refuses a preference on anything else.
+        """
+
+        panel = getattr(self, "section_panel", None)
+        combo = getattr(panel, "combo_drawing_sheet_press_shape", None)
+        if combo is None:
+            return ()
+        representation = str(combo.currentData() or "")
+        if representation != "press_arcs":
+            return ()
+        session = getattr(self, "_artifact_session", None)
+        index_by_id = (
+            session.document.record_index
+            if isinstance(session, ArtifactSession)
+            else {}
+        )
+        pairs: list[tuple[str, str]] = []
+        for record_id in technique_ids:
+            record = index_by_id.get(record_id)
+            recipe = getattr(record, "recipe", None)
+            if isinstance(recipe, Mapping) and (
+                str(recipe.get("technique", "")) == TECHNIQUE_FINGER_MARK
+            ):
+                pairs.append((record_id, representation))
+        return tuple(pairs)
+
     def _checked_drawing_sheet_annotation_ids(self, record_type: str) -> tuple[str, ...]:
         panel = getattr(self, "section_panel", None)
         widget = getattr(panel, "list_drawing_sheet_conditions", None)
@@ -20576,6 +20654,9 @@ class MainWindow(QMainWindow):
                     if panel.check_drawing_sheet_technique_angle.isChecked()
                     else ()
                 ),
+                technique_representations=(
+                    self._drawing_sheet_technique_representations(technique_ids)
+                ),
             )
             bundle = compose_drawing_sheet(
                 session.document, record_ids, options=options, rasters=rasters
@@ -22251,7 +22332,7 @@ class MainWindow(QMainWindow):
             return None
         style_combo = getattr(panel, "combo_native_vector_style", None)
         style_preset = None if style_combo is None else style_combo.currentData()
-        if style_preset == USER_LINE_WEIGHTS_PRESET:
+        if style_preset is not None:
             style_preset = panel.drawing_style_preset_choice(style_preset)
         try:
             return VectorSVGOptions(

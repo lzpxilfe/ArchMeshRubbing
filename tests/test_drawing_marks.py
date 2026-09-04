@@ -8,15 +8,19 @@ from shapely.geometry import LineString, Polygon
 from src.core.artifact_vector_record import VectorPath
 from src.core.drawing_marks import (
     DrawingMarkError,
+    MARK_INTERIOR,
     MarkStyle,
     PARALLEL_LINES,
+    PRESS_ARCS,
     PRESS_OVALS,
     RUBBING,
     SEAM_LINE,
     STROKE_PATCHES,
+    TECHNIQUE_MARK_ALTERNATIVES,
     TECHNIQUE_MARK_STYLES,
     generate_marks,
     mark_style_for_line_kind,
+    observed_side_for_line_kind,
     region_polygons,
 )
 from src.core.drawing_style import (
@@ -148,6 +152,73 @@ def test_a_finger_press_is_one_oval_and_a_row_is_a_row_of_them() -> None:
     # Two separate presses are two ovals whatever the seed.
     two = generate_marks([_band(12.0, 10.0), _band(12.0, 10.0)], style, seed="two")
     assert len(two) == 2
+
+
+def test_a_press_can_be_drawn_as_an_inverted_u_instead_of_a_ring() -> None:
+    """The same presses, in the same places, with the lower rim left open."""
+
+    closed_style = TECHNIQUE_MARK_STYLES[TECHNIQUE_FINGER_MARK]
+    open_style = mark_style_for_line_kind(
+        TECHNIQUE_FINGER_MARK, representation=PRESS_ARCS
+    )
+    assert open_style.representation == PRESS_ARCS
+    assert open_style.length_mm == closed_style.length_mm
+
+    band = _band(60.0, 12.0)
+    rings = generate_marks([band], closed_style, seed="row")
+    arcs = generate_marks([band], open_style, seed="row")
+    assert len(arcs) == len(rings) == 4
+    assert all(not stroke.closed for stroke in arcs)
+
+    for arc, ring in zip(arcs, rings, strict=True):
+        xs = [x for x, _ in arc.points_mm]
+        ys = [y for _, y in arc.points_mm]
+        # The crown is up and the two ends are the low points: a ∩, not a U.
+        rise = max(ys) - min(ys)
+        assert abs(ys[0] - ys[-1]) < 0.3 * rise
+        assert max(ys) - ys[0] > 0.6 * rise
+        assert ys.index(max(ys)) not in (0, len(ys) - 1)
+        # It spans the press it came from, and sits where that press sits.
+        ring_xs = [x for x, _ in ring.points_mm]
+        assert min(xs) >= min(ring_xs) - 1e-6
+        assert max(xs) <= max(ring_xs) + 1e-6
+
+    # A row running down the sheet has its presses stacked, so each arc
+    # spans the press's own long axis and bulges across it - one consistent
+    # way, not alternating down the row.
+    tall = generate_marks([_band(12.0, 60.0)], open_style, seed="tall")
+    assert len(tall) == 4
+    bulges = []
+    for stroke in tall:
+        xs = [x for x, _ in stroke.points_mm]
+        middle = xs[len(xs) // 2]
+        bulges.append(middle - (xs[0] + xs[-1]) / 2.0)
+    assert all(bulge > 0.0 for bulge in bulges) or all(bulge < 0.0 for bulge in bulges)
+
+
+def test_only_a_press_offers_a_choice_of_how_it_is_drawn() -> None:
+    assert TECHNIQUE_MARK_ALTERNATIVES == {
+        TECHNIQUE_FINGER_MARK: (PRESS_OVALS, PRESS_ARCS)
+    }
+    # Asking for the kind's own reading is the kind's own style.
+    assert (
+        mark_style_for_line_kind(TECHNIQUE_FINGER_MARK, representation=PRESS_OVALS)
+        is TECHNIQUE_MARK_STYLES[TECHNIQUE_FINGER_MARK]
+    )
+    # How a seam or a paddle goes on paper is the convention's, not a taste.
+    with pytest.raises(DrawingMarkError, match="not drawn as"):
+        mark_style_for_line_kind(TECHNIQUE_COIL_JOINT, representation=PRESS_ARCS)
+    with pytest.raises(DrawingMarkError, match="nothing else"):
+        mark_style_for_line_kind(TECHNIQUE_PADDLING, representation=SEAM_LINE)
+
+
+def test_the_coil_seam_is_read_on_the_inner_wall() -> None:
+    """A kind whose convention names the wall settles where the mark is drawn."""
+
+    assert observed_side_for_line_kind(TECHNIQUE_COIL_JOINT) == MARK_INTERIOR
+    for kind in TECHNIQUE_LINE_KINDS.values():
+        if kind != TECHNIQUE_COIL_JOINT:
+            assert observed_side_for_line_kind(kind) is None
 
 
 def test_a_coil_seam_is_one_wavy_line_along_the_region() -> None:

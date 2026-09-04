@@ -7820,6 +7820,26 @@ def test_line_weight_table_takes_points_or_millimetres_and_reaches_both_exports(
             PROVISIONAL_PRESET_ID
         )
 
+        # 단면 안 빗금은 실측이 아니라 실측자의 선택.  체크된 채로는 지금까지와
+        # 같은 preset이 그대로 나가고, 끄면 같은 굵기에 빗금만 없는 사용자
+        # preset이 된다.
+        from src.core.drawing_style import SECTION_CUT  # noqa: PLC0415
+
+        assert panel.check_line_hatch_cut_faces.isChecked()
+        assert panel.hatch_cut_faces_choice() is None
+        panel.check_line_hatch_cut_faces.setChecked(False)
+        assert panel.hatch_cut_faces_choice() is False
+        unhatched = panel.drawing_style_preset_choice(PROVISIONAL_PRESET_ID)
+        assert unhatched.is_user
+        assert unhatched.style(SECTION_CUT).hatch is False
+        assert unhatched.style(SECTION_CUT).stroke_width_mm == (
+            base.style(SECTION_CUT).stroke_width_mm
+        )
+        assert panel.drawing_style_preset_choice("user") == user_preset(
+            panel.user_line_weights_mm(), hatch_cut_faces=False
+        )
+        panel.check_line_hatch_cut_faces.setChecked(True)
+
         # The table survives a restart: saved in millimetres, restored whole.
         settings = window._settings()
         window._save_line_weights(settings)

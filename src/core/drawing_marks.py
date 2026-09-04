@@ -8,8 +8,12 @@ This module draws them the way the measured-drawing textbooks do [K1][K2]:
 
 - 손누름·지두흔: every press is a small closed oval, and presses sit in rows
   along a coil seam ([K2] 도면 2, 도면 3; [K1] p.35 gives 1-2 cm for a 지두흔).
+  A press whose lower rim runs out into the wall is drawn as an inverted U
+  instead, and the drafter chooses which of the two the mark reads as.
 - 테쌓기흔: the seam itself, a thin slightly wavy line across the wall
-  ([K2] 도면 2, 도면 4).
+  ([K2] 도면 2, 도면 4).  It is read on the inner wall - the outside was
+  smoothed over - so it goes on the section half of a mirrored figure
+  whatever faces were painted.
 - 목리조정흔: clusters of fine parallel strokes with a direction, one cluster
   per pass of the wooden tool ([K2] 도면 6, 도면 7; the text asks for 군집 and
   for the direction to be shown).
@@ -27,7 +31,7 @@ sidecar records the style that produced them.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import math
 import random
@@ -52,12 +56,35 @@ class DrawingMarkError(ValueError):
 
 #: How a mark is put on paper.
 PRESS_OVALS = "press_ovals"
+#: The same press drawn as an inverted U - the rim of the depression, open
+#: below - rather than as a closed ring.  A finger press is not a hole with an
+#: edge all round it: the wall runs on out of it at the bottom, and a drafter
+#: who sees it that way draws the part they can see.
+PRESS_ARCS = "press_arcs"
 SEAM_LINE = "seam_line"
 STROKE_PATCHES = "stroke_patches"
 PARALLEL_LINES = "parallel_lines"
 #: The mark is left to the rubbing: no stroke goes on the line drawing.
 RUBBING = "rubbing"
-REPRESENTATIONS = (PRESS_OVALS, SEAM_LINE, STROKE_PATCHES, PARALLEL_LINES, RUBBING)
+REPRESENTATIONS = (
+    PRESS_OVALS,
+    PRESS_ARCS,
+    SEAM_LINE,
+    STROKE_PATCHES,
+    PARALLEL_LINES,
+    RUBBING,
+)
+
+#: Which wall a mark's convention reads it on, where the sources settle it.
+#: A coil seam is on both walls of the pot and readable on neither from
+#: outside: the potter smoothed the outside over, and it is the inner wall,
+#: seen through the cut, that carries the wavy line ([K2] 도면 2, 도면 4).
+#: So the seam goes on the section half whatever faces were painted - the
+#: painted region says where round the pot the seam runs, not which wall it
+#: was read on.  A kind absent here is placed by its record's own faces.
+MARK_INTERIOR = "interior"
+MARK_EXTERIOR = "exterior"
+MARK_OBSERVED_SIDES: Mapping[str, str] = {TECHNIQUE_COIL_JOINT: MARK_INTERIOR}
 
 #: A region that would need more strokes than this is asking for a texture,
 #: not a drawing; the caller should paint a smaller region or widen the
@@ -65,6 +92,8 @@ REPRESENTATIONS = (PRESS_OVALS, SEAM_LINE, STROKE_PATCHES, PARALLEL_LINES, RUBBI
 MAX_MARK_STROKES = 20_000
 #: Points along an oval and along a wavy line, per period.
 _OVAL_STEPS = 24
+#: An arc is half a turn, so it gets half the oval's points.
+_ARC_STEPS = _OVAL_STEPS // 2
 _WAVE_STEPS_PER_PERIOD = 8
 #: Coordinates are rounded so the strokes do not carry floating noise into
 #: the SVG bytes.
@@ -154,6 +183,9 @@ class MarkStyle:
             jitter=self.jitter,
         )
 
+    def with_representation(self, representation: str) -> "MarkStyle":
+        return replace(self, representation=representation)
+
     @property
     def directional(self) -> bool:
         """Whether the drafter's direction changes what is drawn."""
@@ -215,6 +247,16 @@ TECHNIQUE_MARK_STYLES: Mapping[str, MarkStyle] = {
         gap_mm=1.5,
         jitter=0.2,
     ),
+}
+
+
+#: The readings a kind may be drawn with, beyond the one it defaults to.
+#: A press is the only mark the sources leave a choice on: [K2] 도면 3 has
+#: rows of closed presses, and a press whose lower rim runs out into the wall
+#: is drawn as the arc alone.  Both are the same observation; which one is on
+#: the paper is the drafter's.  Every other kind has one drawing.
+TECHNIQUE_MARK_ALTERNATIVES: Mapping[str, tuple[str, ...]] = {
+    TECHNIQUE_FINGER_MARK: (PRESS_OVALS, PRESS_ARCS),
 }
 
 
@@ -355,7 +397,28 @@ def _check_budget(count: int) -> None:
         )
 
 
-def _press_ovals(polygon: Polygon, style: MarkStyle, rng: random.Random) -> list[MarkStroke]:
+@dataclass(frozen=True, slots=True)
+class _Press:
+    """One press placed in the region: where it sits and how big it is."""
+
+    centre: tuple[float, float]
+    long_mm: float
+    short_mm: float
+    axis: float
+    """The region's own long-axis angle, before this press was tilted."""
+    tilt: float
+    phase_a: float
+    phase_b: float
+
+
+def _presses(polygon: Polygon, style: MarkStyle, rng: random.Random) -> list[_Press]:
+    """Lay a row of presses along the painted region's long axis.
+
+    Shared by the two ways a press is drawn, so a mark keeps its places and
+    its sizes when the drafter changes how it reads; the random draws happen
+    in the same order either way.
+    """
+
     centre, long_mm, short_mm, angle = _long_axis(polygon)
     if long_mm <= 0.0 or short_mm <= 0.0:
         return []
@@ -364,24 +427,79 @@ def _press_ovals(polygon: Polygon, style: MarkStyle, rng: random.Random) -> list
     ux, uy = math.cos(angle), math.sin(angle)
     a = min(pitch, style.length_mm) * 0.45
     b = min(max(short_mm * 0.45, a * 0.45), a)
-    strokes: list[MarkStroke] = []
+    presses: list[_Press] = []
     for index in range(count):
         offset = (index + 0.5 - count / 2.0) * pitch
-        cx, cy = centre[0] + ux * offset, centre[1] + uy * offset
         # A pressed patch is not a drawn ellipse: two slow undulations of the
         # radius make it read as a fingertip rather than a compass.
         phase_a, phase_b = rng.random() * math.tau, rng.random() * math.tau
         tilt = angle + (rng.random() - 0.5) * style.jitter * math.pi / 3.0
-        cos_t, sin_t = math.cos(tilt), math.sin(tilt)
+        presses.append(
+            _Press(
+                centre=(centre[0] + ux * offset, centre[1] + uy * offset),
+                long_mm=a,
+                short_mm=b,
+                axis=angle,
+                tilt=tilt,
+                phase_a=phase_a,
+                phase_b=phase_b,
+            )
+        )
+    return presses
+
+
+def _press_wobble(theta: float, press: _Press, style: MarkStyle) -> float:
+    return 1.0 + style.jitter * (
+        0.5 * math.sin(2.0 * theta + press.phase_a)
+        + 0.5 * math.sin(3.0 * theta + press.phase_b)
+    )
+
+
+def _press_ovals(polygon: Polygon, style: MarkStyle, rng: random.Random) -> list[MarkStroke]:
+    strokes: list[MarkStroke] = []
+    for press in _presses(polygon, style, rng):
+        cx, cy = press.centre
+        a, b = press.long_mm, press.short_mm
+        cos_t, sin_t = math.cos(press.tilt), math.sin(press.tilt)
         points: list[tuple[float, float]] = []
         for step in range(_OVAL_STEPS):
             theta = math.tau * step / _OVAL_STEPS
-            wobble = 1.0 + style.jitter * (
-                0.5 * math.sin(2.0 * theta + phase_a) + 0.5 * math.sin(3.0 * theta + phase_b)
-            )
+            wobble = _press_wobble(theta, press, style)
             x0, y0 = a * wobble * math.cos(theta), b * wobble * math.sin(theta)
             points.append((cx + x0 * cos_t - y0 * sin_t, cy + x0 * sin_t + y0 * cos_t))
         stroke = _stroke(points, closed=True)
+        if stroke is not None:
+            strokes.append(stroke)
+    return strokes
+
+
+def _press_arcs(polygon: Polygon, style: MarkStyle, rng: random.Random) -> list[MarkStroke]:
+    """The same presses drawn as inverted Us instead of closed rings.
+
+    Half a turn of the same wobbly ellipse: the stroke runs from one end of
+    the press, over the crown, to the other, and the wall below is left
+    unbroken.  The crown is turned to the paper's +y whatever way the seam
+    runs, so a row of presses reads the same way up across the sheet.
+    """
+
+    strokes: list[MarkStroke] = []
+    for press in _presses(polygon, style, rng):
+        cx, cy = press.centre
+        cos_t, sin_t = math.cos(press.tilt), math.sin(press.tilt)
+        a = press.long_mm
+        # The crown lies along the press's short axis.  Which of its two
+        # directions is decided from the region's own axis rather than from
+        # this press's tilt, so every arc in a row bulges the same way: read
+        # off the tilt, a row running down the sheet would alternate as the
+        # jitter took the tilt either side of the vertical.
+        b = press.short_mm if math.cos(press.axis) >= 0.0 else -press.short_mm
+        points: list[tuple[float, float]] = []
+        for step in range(_ARC_STEPS + 1):
+            theta = math.pi * step / _ARC_STEPS
+            wobble = _press_wobble(theta, press, style)
+            x0, y0 = a * wobble * math.cos(theta), b * wobble * math.sin(theta)
+            points.append((cx + x0 * cos_t - y0 * sin_t, cy + x0 * sin_t + y0 * cos_t))
+        stroke = _stroke(points, closed=False)
         if stroke is not None:
             strokes.append(stroke)
     return strokes
@@ -557,6 +675,7 @@ def _nothing(polygon: Polygon, style: MarkStyle, rng: random.Random) -> list[Mar
 _GENERATORS = {
     RUBBING: _nothing,
     PRESS_OVALS: _press_ovals,
+    PRESS_ARCS: _press_arcs,
     SEAM_LINE: _seam_lines,
     PARALLEL_LINES: _parallel_lines,
     STROKE_PATCHES: _stroke_patches,
@@ -585,26 +704,58 @@ def generate_marks(
     return strokes
 
 
-def mark_style_for_line_kind(line_kind: str) -> MarkStyle:
+def mark_style_for_line_kind(
+    line_kind: str, *, representation: str | None = None
+) -> MarkStyle:
+    """The style a kind is drawn with, or one of the ways it may be drawn.
+
+    `representation` is the drafter's choice between the readings a kind
+    allows.  It is refused for a kind with nothing to choose: how a coil seam
+    or a paddle goes on paper is the convention's, not a preference, and a
+    sheet that could ask for any representation on any kind would let a
+    drawing say something the sources do not.
+    """
+
     style = TECHNIQUE_MARK_STYLES.get(str(line_kind))
     if style is None:
         raise DrawingStyleError(f"line kind {line_kind!r} is not drawn as a technique mark")
-    return style
+    if representation is None or representation == style.representation:
+        return style
+    allowed = TECHNIQUE_MARK_ALTERNATIVES.get(str(line_kind), ())
+    if representation not in allowed:
+        offer = ", ".join(allowed) if allowed else "nothing else"
+        raise DrawingMarkError(
+            f"line kind {line_kind!r} is not drawn as {representation!r}; "
+            f"it is drawn as {style.representation!r} and may be drawn as {offer}"
+        )
+    return style.with_representation(representation)
+
+
+def observed_side_for_line_kind(line_kind: str) -> str | None:
+    """The wall this kind's convention reads the mark on, or None."""
+
+    return MARK_OBSERVED_SIDES.get(str(line_kind))
 
 
 __all__ = [
     "DrawingMarkError",
+    "MARK_EXTERIOR",
+    "MARK_INTERIOR",
+    "MARK_OBSERVED_SIDES",
     "MAX_MARK_STROKES",
     "MarkStroke",
     "MarkStyle",
     "PARALLEL_LINES",
+    "PRESS_ARCS",
     "PRESS_OVALS",
     "REPRESENTATIONS",
     "RUBBING",
     "SEAM_LINE",
     "STROKE_PATCHES",
+    "TECHNIQUE_MARK_ALTERNATIVES",
     "TECHNIQUE_MARK_STYLES",
     "generate_marks",
     "mark_style_for_line_kind",
+    "observed_side_for_line_kind",
     "region_polygons",
 ]

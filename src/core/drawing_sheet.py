@@ -97,9 +97,12 @@ from .drawing_style import (
 )
 from .drawing_marks import (
     DrawingMarkError,
+    MARK_INTERIOR,
     MarkStyle,
+    REPRESENTATIONS,
     generate_marks,
     mark_style_for_line_kind,
+    observed_side_for_line_kind,
     region_polygons,
 )
 from .drawing_svg import (
@@ -389,6 +392,16 @@ class DrawingSheetOptions:
     without a direction (an oval, a seam) ignores it.  Degrees are on the
     paper, counter-clockwise from the figure's +x.
     """
+    technique_representations: tuple[tuple[str, str], ...] = ()
+    """(technique record id, how the mark reads) pairs.
+
+    A kind is drawn the way its convention draws it, and most kinds leave
+    nothing to choose.  Where the sources leave two readings of the same
+    observation - a finger press as a closed oval, or as the inverted U of a
+    press whose lower rim runs out into the wall - the drafter says which one
+    this record is.  A record named here whose kind has no alternative is
+    refused rather than silently drawn as its default.
+    """
     groove_records: tuple[str, ...] = ()
     """Groove readings to draw on the figures, by record id.
 
@@ -484,6 +497,32 @@ class DrawingSheetOptions:
         if len({record_id for record_id, _ in angles}) != len(angles):
             raise DrawingSheetError("a technique record has at most one direction")
         object.__setattr__(self, "technique_angles_deg", tuple(angles))
+        representations: list[tuple[str, str]] = []
+        for pair in self.technique_representations:
+            if not isinstance(pair, (tuple, list)) or len(pair) != 2:
+                raise DrawingSheetError(
+                    "technique_representations entries must be "
+                    "(record id, representation) pairs"
+                )
+            record_id, representation = pair
+            if not isinstance(record_id, str) or not record_id.strip():
+                raise DrawingSheetError(
+                    "technique_representations entries must name a record"
+                )
+            if record_id not in technique_records:
+                raise DrawingSheetError(
+                    f"technique_representations names {record_id!r}, which is not in "
+                    "technique_records"
+                )
+            if representation not in REPRESENTATIONS:
+                raise DrawingSheetError(
+                    "a technique representation must be one of "
+                    f"{', '.join(REPRESENTATIONS)}"
+                )
+            representations.append((record_id, representation))
+        if len({record_id for record_id, _ in representations}) != len(representations):
+            raise DrawingSheetError("a technique record is drawn one way, not two")
+        object.__setattr__(self, "technique_representations", tuple(representations))
         groove_records = tuple(self.groove_records)
         if any(
             not isinstance(record_id, str) or not record_id.strip()
@@ -1375,12 +1414,33 @@ def _condition_paths_for_figure(
     return by_kind, drawn
 
 
+def _technique_half(payload: TechniqueAnnotationPayload) -> tuple[bool, str]:
+    """Whether a mark goes on the section half, and what decided that.
+
+    Two things can settle it.  Where a kind's convention names the wall it is
+    read on - a coil seam is read inside, the outside having been smoothed -
+    that wall is where the drawing puts it, because the painted faces say
+    where round the pot the mark runs, not which wall the drafter read it on.
+    Everything else goes by the faces themselves.
+    """
+
+    try:
+        kind = line_kind_for_technique(payload.technique)
+    except DrawingStyleError as exc:
+        raise DrawingSheetError(str(exc)) from exc
+    convention = observed_side_for_line_kind(kind)
+    if convention is not None:
+        return convention == MARK_INTERIOR, "convention"
+    return payload.surface_side == SURFACE_INTERIOR, "surface_side"
+
+
 def _technique_paths_for_figure(
     figure_record_type: str,
     figure_payload_frame: Any,
     techniques: Sequence[tuple[DerivedRecord, TechniqueAnnotationPayload]],
     *,
     angles_deg: Mapping[str, float] = {},
+    representations: Mapping[str, str] = {},
     interior: bool = False,
 ) -> tuple[dict[str, list[Any]], list[dict[str, Any]], dict[str, MarkStyle]]:
     """Return the technique layers that belong on one figure, and what they are.
@@ -1395,7 +1455,7 @@ def _technique_paths_for_figure(
     drawn only when `interior` asks for the inside: the section half of a
     mirrored figure, where the far wall's inner face shows through the cut.
     A mark whose side is unknown (a 1.0.0 payload) or mixed is drawn with
-    the outside.
+    the outside, unless its kind's convention names the wall it is read on.
     """
 
     by_kind: dict[str, list[Any]] = {}
@@ -1404,15 +1464,20 @@ def _technique_paths_for_figure(
     if figure_record_type != VectorRecordKind.OUTLINE.record_type:
         return by_kind, drawn, styles
     for record, payload in techniques:
-        if (payload.surface_side == SURFACE_INTERIOR) != interior:
+        goes_inside, side_decided_by = _technique_half(payload)
+        if goes_inside != interior:
             continue
         for boundary in payload.views:
             if boundary.outline.frame != figure_payload_frame:
                 continue
             try:
                 kind = line_kind_for_technique(payload.technique)
-                style = mark_style_for_line_kind(kind)
+                style = mark_style_for_line_kind(
+                    kind, representation=representations.get(record.id)
+                )
             except DrawingStyleError as exc:
+                raise DrawingSheetError(str(exc)) from exc
+            except DrawingMarkError as exc:
                 raise DrawingSheetError(str(exc)) from exc
             # The sheet's direction wins over the record's; the record's
             # over the kind's default.
@@ -1444,6 +1509,7 @@ def _technique_paths_for_figure(
                     "record_id": record.id,
                     "representation": style.representation,
                     "seed": seed,
+                    "side_decided_by": side_decided_by,
                     "stroke_count": len(strokes),
                     "surface_side": payload.surface_side,
                     "technique_kind": payload.technique,
@@ -2168,6 +2234,22 @@ def compose_drawing_sheet(
     technique_not_drawn: list[dict[str, str]] = []
     technique_styles: dict[str, MarkStyle] = {}
     technique_angles = dict(options.technique_angles_deg)
+    technique_representations = dict(options.technique_representations)
+    # A reading asked for is checked against the record's kind here, before
+    # any figure is composed: a preference the kind does not offer is a
+    # mistake in the sheet, not something to discover on whichever half the
+    # mark happens to land on.
+    for technique_record, technique_payload in techniques:
+        representation = technique_representations.get(technique_record.id)
+        if representation is None:
+            continue
+        try:
+            mark_style_for_line_kind(
+                line_kind_for_technique(technique_payload.technique),
+                representation=representation,
+            )
+        except (DrawingStyleError, DrawingMarkError) as exc:
+            raise DrawingSheetError(str(exc)) from exc
     groove_drawn: list[dict[str, str]] = []
     attached_drawn: list[dict[str, str]] = []
     mirrored: list[dict[str, str]] = []
@@ -2222,7 +2304,11 @@ def compose_drawing_sheet(
             {"figure_record_id": record.id, **entry} for entry in drawn
         )
         technique_by_kind, techniques_drawn, styles_used = _technique_paths_for_figure(
-            record.type, payload.frame, techniques, angles_deg=technique_angles
+            record.type,
+            payload.frame,
+            techniques,
+            angles_deg=technique_angles,
+            representations=technique_representations,
         )
         for kind, technique_paths in technique_by_kind.items():
             by_kind.setdefault(kind, []).extend(technique_paths)
@@ -2243,6 +2329,7 @@ def compose_drawing_sheet(
                 payload.frame,
                 techniques,
                 angles_deg=technique_angles,
+                representations=technique_representations,
                 interior=True,
             )
             technique_styles.update(interior_styles)
@@ -2252,7 +2339,7 @@ def compose_drawing_sheet(
             )
         else:
             for interior_record, interior_payload in techniques:
-                if interior_payload.surface_side == SURFACE_INTERIOR and any(
+                if _technique_half(interior_payload)[0] and any(
                     boundary.outline.frame == payload.frame
                     for boundary in interior_payload.views
                 ):

@@ -558,7 +558,7 @@ def test_a_sheet_without_technique_records_is_the_sheet_it_always_was() -> None:
 
 
 def test_a_technique_mark_is_drawn_as_strokes_on_the_figure_that_shares_its_view() -> None:
-    document = _technique_session("coil_joint").document
+    document = _technique_session("water_smoothing").document
     bundle = compose_drawing_sheet(
         document,
         [OUTLINE_ID, CUTLINE_ID],
@@ -574,10 +574,10 @@ def test_a_technique_mark_is_drawn_as_strokes_on_the_figure_that_shares_its_view
         for child in by_record[OUTLINE_ID]
         if child.tag == f"{SVG_NS}g"
     ]
-    assert "layer-technique-coil-joint" in outline_layers
+    assert "layer-technique-water-smoothing" in outline_layers
     # Technique sits over the outline and under condition and the axis.
     assert outline_layers.index("layer-outline-visible") < outline_layers.index(
-        "layer-technique-coil-joint"
+        "layer-technique-water-smoothing"
     )
     cutline_layers = [
         child.attrib["id"]
@@ -585,31 +585,38 @@ def test_a_technique_mark_is_drawn_as_strokes_on_the_figure_that_shares_its_view
         if child.tag == f"{SVG_NS}g"
     ]
     assert not [layer for layer in cutline_layers if "technique" in layer]
-    layer = by_record[OUTLINE_ID].find(f"{SVG_NS}g[@id='layer-technique-coil-joint']")
+    layer = by_record[OUTLINE_ID].find(
+        f"{SVG_NS}g[@id='layer-technique-water-smoothing']"
+    )
     assert layer is not None
     # One fine solid pen: the mark is told by its strokes, not a dash code.
     assert "stroke-dasharray" not in layer.attrib
     paths = list(layer)
-    # A coil seam on one face is one open line along the region, never the
+    # Wet-hand lines are open lines laid across the region, never the
     # region's boundary.
-    assert len(paths) == 1
+    assert paths
     assert paths[0].attrib["id"] == f"technique:{TECHNIQUE_ID}:top:0"
-    assert not paths[0].attrib["d"].rstrip().endswith("Z")
+    assert not any(path.attrib["d"].rstrip().endswith("Z") for path in paths)
 
     sidecar = json.loads(bundle.sidecar_bytes.decode("utf-8"))
     technique = sidecar["technique"]
     assert [entry["record_id"] for entry in technique["records"]] == [TECHNIQUE_ID]
-    assert technique["records"][0]["technique_kind"] == "coil_joint"
+    assert technique["records"][0]["technique_kind"] == "water_smoothing"
     assert technique["records"][0]["face_count"] == 1
     (entry,) = technique["drawn"]
     assert entry["figure_record_id"] == OUTLINE_ID
-    assert entry["line_kind"] == "technique_coil_joint"
-    assert entry["representation"] == "seam_line"
-    assert entry["stroke_count"] == 1
-    assert entry["angle_deg"] is None
+    assert entry["line_kind"] == "technique_water_smoothing"
+    assert entry["representation"] == "parallel_lines"
+    assert entry["stroke_count"] == len(paths)
+    assert entry["angle_deg"] == 0.0
+    # Nothing decided this mark's wall but the faces the drafter painted.
+    assert entry["side_decided_by"] == "surface_side"
     assert entry["view"] == "top"
     assert entry["seed"].startswith(f"{TECHNIQUE_ID}:top:")
-    assert technique["styles"]["technique_coil_joint"]["representation"] == "seam_line"
+    assert (
+        technique["styles"]["technique_water_smoothing"]["representation"]
+        == "parallel_lines"
+    )
     validate_drawing_sheet_bytes(bundle.svg_bytes, bundle.sidecar_bytes)
 
     # The same sheet twice is the same bytes: the strokes are seeded.
@@ -662,6 +669,84 @@ def test_a_finger_mark_is_drawn_as_an_oval_inside_the_region_not_by_its_boundary
     assert entry["stroke_count"] == 1
     assert region.area > 0.0
     validate_drawing_sheet_bytes(bundle.svg_bytes, bundle.sidecar_bytes)
+
+
+def test_a_press_can_be_asked_for_as_an_inverted_u() -> None:
+    """The drafter says which of the two readings of a press is on the paper."""
+
+    document = _technique_session("finger_mark").document
+    closed = compose_drawing_sheet(
+        document, [OUTLINE_ID], options=_options(technique_records=(TECHNIQUE_ID,))
+    )
+    opened = compose_drawing_sheet(
+        document,
+        [OUTLINE_ID],
+        options=_options(
+            technique_records=(TECHNIQUE_ID,),
+            technique_representations=((TECHNIQUE_ID, "press_arcs"),),
+        ),
+    )
+    assert opened.svg_bytes != closed.svg_bytes
+
+    figure = next(
+        iter(ET.fromstring(opened.svg_bytes).find(f"{SVG_NS}g[@id='sheet-figures']"))
+    )
+    layer = figure.find(f"{SVG_NS}g[@id='layer-technique-finger-mark']")
+    assert layer is not None
+    (path,) = list(layer)
+    # An arc has no interior, so it neither closes nor is filled.
+    assert not path.attrib["d"].rstrip().endswith("Z")
+    assert path.attrib.get("fill", "none") == "none"
+
+    entry = json.loads(opened.sidecar_bytes)["technique"]["drawn"][0]
+    assert entry["representation"] == "press_arcs"
+    assert entry["stroke_count"] == 1
+    validate_drawing_sheet_bytes(opened.svg_bytes, opened.sidecar_bytes)
+
+    # A kind with one drawing does not take a preference.
+    seam = _technique_session("coil_joint").document
+    with pytest.raises(DrawingSheetError, match="not drawn as"):
+        compose_drawing_sheet(
+            seam,
+            [OUTLINE_ID],
+            options=_options(
+                technique_records=(TECHNIQUE_ID,),
+                technique_representations=((TECHNIQUE_ID, "press_arcs"),),
+                mirror_sections=(),
+            ),
+        )
+    with pytest.raises(DrawingSheetError, match="not in technique_records"):
+        _options(technique_representations=((TECHNIQUE_ID, "press_arcs"),))
+    with pytest.raises(DrawingSheetError, match="must be one of"):
+        _options(
+            technique_records=(TECHNIQUE_ID,),
+            technique_representations=((TECHNIQUE_ID, "scribble"),),
+        )
+
+
+def test_a_coil_seam_without_a_section_half_says_so_rather_than_moving_outside() -> None:
+    """테쌓기흔 is read on the inner wall, so a plain figure cannot carry it."""
+
+    document = _technique_session("coil_joint").document
+    bundle = compose_drawing_sheet(
+        document, [OUTLINE_ID], options=_options(technique_records=(TECHNIQUE_ID,))
+    )
+    figure = next(
+        iter(ET.fromstring(bundle.svg_bytes).find(f"{SVG_NS}g[@id='sheet-figures']"))
+    )
+    assert figure.find(f"{SVG_NS}g[@id='layer-technique-coil-joint']") is None
+
+    technique = json.loads(bundle.sidecar_bytes)["technique"]
+    assert technique["drawn"] == []
+    assert technique["not_drawn"] == [
+        {
+            "figure_record_id": OUTLINE_ID,
+            "reason": "interior_needs_section_half",
+            "record_id": TECHNIQUE_ID,
+        }
+    ]
+    # The faces themselves are on the outside; the convention still rules.
+    assert technique["records"][0]["surface_side"] == "exterior"
 
 
 def test_a_direction_given_for_a_record_turns_its_strokes() -> None:
