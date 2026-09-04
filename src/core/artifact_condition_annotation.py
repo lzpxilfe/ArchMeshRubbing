@@ -744,8 +744,13 @@ def project_condition_region(
     *,
     precision_grid_mm: float,
     cancellation_probe: CancellationProbe | None = None,
+    outline_algorithm_version: str = OUTLINE_LEGACY_ALGORITHM_VERSION,
 ) -> tuple[tuple[ConditionViewBoundary, ...], tuple[dict[str, str], ...]]:
     """Project one face set into every view, and say why any view has none.
+
+    `outline_algorithm_version` is the lattice union the boundary is drawn
+    with.  A condition record keeps the plain union (1.0.0) it was written
+    under; a technique record names its own in its recipe.
 
     A view is skipped rather than fatal.  A band of surface can be edge-on in
     one direction, or snap at the precision grid into pieces that touch, and
@@ -794,16 +799,15 @@ def project_condition_region(
             skipped.append({"reason": CONDITION_SKIP_NO_AREA, "view": view})
             continue
         try:
-            # A condition region is a painted face subset, not a closed
-            # surface, and its records were all written under the plain
-            # lattice union; they keep that contract so they recompute as
-            # they were.
+            # A painted face subset is not a closed surface; which lattice
+            # union draws its boundary is the caller's contract, so a record
+            # recomputes as it was written.
             result = extract_outline_geometry(
                 vertices,
                 face_subset,
                 view,
                 precision_grid_mm=grid,
-                algorithm_version=OUTLINE_LEGACY_ALGORITHM_VERSION,
+                algorithm_version=outline_algorithm_version,
                 cancellation_probe=cancellation_probe,
             )
         except ValueError as exc:

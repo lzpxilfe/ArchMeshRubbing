@@ -11,6 +11,7 @@ from src.core.drawing_marks import (
     MarkStyle,
     PARALLEL_LINES,
     PRESS_OVALS,
+    RUBBING,
     SEAM_LINE,
     STROKE_PATCHES,
     TECHNIQUE_MARK_STYLES,
@@ -61,7 +62,10 @@ def test_the_shapes_follow_the_sources() -> None:
     assert TECHNIQUE_MARK_STYLES[TECHNIQUE_COIL_JOINT].representation == SEAM_LINE
     assert TECHNIQUE_MARK_STYLES[TECHNIQUE_WOOD_GRAIN].representation == STROKE_PATCHES
     assert TECHNIQUE_MARK_STYLES[TECHNIQUE_WATER_SMOOTHING].representation == PARALLEL_LINES
-    assert TECHNIQUE_MARK_STYLES[TECHNIQUE_PADDLING].representation == PARALLEL_LINES
+    # A paddle's pattern is the rubbing's to show, so nothing is drawn.
+    assert TECHNIQUE_MARK_STYLES[TECHNIQUE_PADDLING].representation == RUBBING
+    assert not TECHNIQUE_MARK_STYLES[TECHNIQUE_PADDLING].directional
+    assert generate_marks([_band()], TECHNIQUE_MARK_STYLES[TECHNIQUE_PADDLING], seed="p") == []
     # A wet hand on a turning pot leaves horizontal lines.
     assert TECHNIQUE_MARK_STYLES[TECHNIQUE_WATER_SMOOTHING].angle_deg == 0.0
     # Only the stroke kinds take a direction.
@@ -96,6 +100,9 @@ def test_strokes_are_deterministic_for_a_seed_and_differ_between_seeds() -> None
         again = generate_marks([band], style, seed=f"{kind}:a")
         other = generate_marks([band], style, seed=f"{kind}:b")
         assert first == again, kind
+        if style.representation == RUBBING:
+            assert first == []
+            continue
         assert first, kind
         if style.jitter > 0.0:
             assert first != other, kind
@@ -104,8 +111,13 @@ def test_strokes_are_deterministic_for_a_seed_and_differ_between_seeds() -> None
 def test_every_stroke_stays_inside_the_painted_region() -> None:
     # A region with a hole, so clipping is exercised on both ring kinds.
     region = _band(60.0, 30.0).difference(Polygon([(20, 10), (40, 10), (40, 20), (20, 20)]))
-    for kind in (TECHNIQUE_WOOD_GRAIN, TECHNIQUE_WATER_SMOOTHING, TECHNIQUE_PADDLING):
-        strokes = generate_marks([region], TECHNIQUE_MARK_STYLES[kind], seed=kind)
+    lattice = MarkStyle(representation=PARALLEL_LINES, angle_deg=60.0, spacing_mm=2.0, crossed=True)
+    for kind, style in (
+        (TECHNIQUE_WOOD_GRAIN, TECHNIQUE_MARK_STYLES[TECHNIQUE_WOOD_GRAIN]),
+        (TECHNIQUE_WATER_SMOOTHING, TECHNIQUE_MARK_STYLES[TECHNIQUE_WATER_SMOOTHING]),
+        ("lattice", lattice),
+    ):
+        strokes = generate_marks([region], style, seed=kind)
         assert strokes
         _inside(strokes, region, tolerance_mm=1e-3)
         for stroke in strokes:
@@ -204,8 +216,8 @@ def test_water_smoothing_lines_are_horizontal_and_broken() -> None:
     assert 6 <= len(rows) <= 14
 
 
-def test_a_lattice_paddle_crosses_two_families() -> None:
-    plain = TECHNIQUE_MARK_STYLES[TECHNIQUE_PADDLING]
+def test_a_crossed_family_doubles_the_lines() -> None:
+    plain = MarkStyle(representation=PARALLEL_LINES, angle_deg=60.0, spacing_mm=2.0)
     crossed = MarkStyle(**{**plain.to_dict(), "crossed": True})
     band = _band(30.0, 30.0)
     single = generate_marks([band], plain, seed="p")

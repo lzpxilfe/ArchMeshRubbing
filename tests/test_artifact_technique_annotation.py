@@ -127,6 +127,34 @@ def test_the_recipe_is_the_whole_mark() -> None:
         technique_selection(total_face_count=4, face_indices=())
 
 
+def test_a_mark_is_projected_with_the_closing_and_an_old_recipe_without() -> None:
+    """1.1.0 closes the lattice union; a 1.0.0 recipe recomputes as written."""
+
+    from src.core.artifact_technique_annotation import TECHNIQUE_ALGORITHM_VERSIONS
+
+    selection = technique_selection(total_face_count=4, face_indices=(0,))
+    current = technique_recipe(technique="paddling", precision_grid_mm=0.05, selection=selection)
+    assert current["algorithm_version"] == "1.1.0"
+    old = technique_recipe(
+        technique="paddling", precision_grid_mm=0.05, selection=selection, algorithm_version="1.0.0"
+    )
+    assert validate_technique_recipe(old)["algorithm_version"] == "1.0.0"
+    assert TECHNIQUE_ALGORITHM_VERSIONS == ("1.0.0", "1.1.0")
+    with pytest.raises(ArtifactTechniqueAnnotationError, match="algorithm version"):
+        technique_recipe(
+            technique="paddling", precision_grid_mm=0.05, selection=selection, algorithm_version="2.0.0"
+        )
+    # Both compute on the same face; the closing changes nothing on a clean
+    # triangle, so the boundaries agree - the contract differs, not the shape.
+    session = _session()
+    from src.core.artifact_technique_annotation import project_technique_from_recipe
+
+    mesh = session.materialize().mesh
+    new_payload = project_technique_from_recipe(mesh.vertices, mesh.faces, current)
+    old_payload = project_technique_from_recipe(mesh.vertices, mesh.faces, old)
+    assert [v.view for v in new_payload.views] == [v.view for v in old_payload.views]
+
+
 # --- the record -----------------------------------------------------------------
 
 

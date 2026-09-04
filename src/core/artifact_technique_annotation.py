@@ -20,6 +20,10 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
+from .artifact_outline_extractor import (
+    OUTLINE_ALGORITHM_VERSION,
+    OUTLINE_LEGACY_ALGORITHM_VERSION,
+)
 from .artifact_condition_annotation import (
     CONDITION_SKIP_REASONS,
     CONDITION_VIEWS,
@@ -49,7 +53,16 @@ from .canonical_json import CanonicalJSONError, canonical_json_bytes, canonical_
 TECHNIQUE_RECORD_TYPE = "annotation.technique.v1"
 TECHNIQUE_OPERATION_KIND = "technique_annotation"
 TECHNIQUE_ALGORITHM = "archmeshrubbing.technique_region_projection"
-TECHNIQUE_ALGORITHM_VERSION = "1.0.0"
+#: 1.0.0 drew the boundary with the plain lattice union, like a condition;
+#: 1.1.0 draws it with outline algorithm 1.1.0's grid closing, because a
+#: mark painted on a rough wall snaps into slivers that touch and the plain
+#: union then refuses every view.  A 1.0.0 record recomputes as written.
+TECHNIQUE_ALGORITHM_VERSION = "1.1.0"
+TECHNIQUE_ALGORITHM_VERSIONS = ("1.0.0", TECHNIQUE_ALGORITHM_VERSION)
+_OUTLINE_ALGORITHM_FOR_TECHNIQUE: Mapping[str, str] = {
+    "1.0.0": OUTLINE_LEGACY_ALGORITHM_VERSION,
+    "1.1.0": OUTLINE_ALGORITHM_VERSION,
+}
 TECHNIQUE_PAYLOAD_SCHEMA_VERSION = "1.0.0"
 TECHNIQUE_PAYLOAD_EXTENSION_KEY = "org.archmeshrubbing:technique-annotation-v1"
 TECHNIQUE_PAYLOAD_MEDIA_TYPE = "application/vnd.archmeshrubbing.technique-annotation+json"
@@ -288,6 +301,7 @@ def technique_recipe(
     technique: str,
     precision_grid_mm: float,
     selection: Mapping[str, Any],
+    algorithm_version: str = TECHNIQUE_ALGORITHM_VERSION,
 ) -> dict[str, Any]:
     """The closed recipe one technique region is computed under.
 
@@ -297,7 +311,7 @@ def technique_recipe(
 
     return {
         "algorithm": TECHNIQUE_ALGORITHM,
-        "algorithm_version": TECHNIQUE_ALGORITHM_VERSION,
+        "algorithm_version": _technique_algorithm_version(algorithm_version),
         "kind": TECHNIQUE_OPERATION_KIND,
         "precision_grid_mm": _precision_grid(precision_grid_mm),
         "selection": _selection(selection),
@@ -315,8 +329,7 @@ def validate_technique_recipe(value: object) -> dict[str, Any]:
     recipe = _exact_keys(value, _RECIPE_KEYS, name="technique recipe")
     if recipe["algorithm"] != TECHNIQUE_ALGORITHM:
         raise ArtifactTechniqueAnnotationError("technique algorithm is unsupported")
-    if recipe["algorithm_version"] != TECHNIQUE_ALGORITHM_VERSION:
-        raise ArtifactTechniqueAnnotationError("technique algorithm version is unsupported")
+    _technique_algorithm_version(recipe["algorithm_version"])
     if recipe["kind"] != TECHNIQUE_OPERATION_KIND:
         raise ArtifactTechniqueAnnotationError("technique recipe kind is unsupported")
     if list(recipe["views"]) != list(TECHNIQUE_VIEWS):
@@ -327,7 +340,14 @@ def validate_technique_recipe(value: object) -> dict[str, Any]:
         technique=recipe["technique"],
         precision_grid_mm=recipe["precision_grid_mm"],
         selection=recipe["selection"],
+        algorithm_version=str(recipe["algorithm_version"]),
     )
+
+
+def _technique_algorithm_version(value: object) -> str:
+    if not isinstance(value, str) or value not in TECHNIQUE_ALGORITHM_VERSIONS:
+        raise ArtifactTechniqueAnnotationError("technique algorithm version is unsupported")
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -372,6 +392,9 @@ def project_technique_from_recipe(
             ),
             precision_grid_mm=float(validated["precision_grid_mm"]),
             cancellation_probe=cancellation_probe,
+            outline_algorithm_version=_OUTLINE_ALGORITHM_FOR_TECHNIQUE[
+                str(validated["algorithm_version"])
+            ],
         )
     except ArtifactConditionAnnotationError as exc:
         raise ArtifactTechniqueAnnotationError(str(exc)) from exc
@@ -628,6 +651,7 @@ __all__ = [
     "ArtifactTechniqueAnnotationError",
     "TECHNIQUE_ALGORITHM",
     "TECHNIQUE_ALGORITHM_VERSION",
+    "TECHNIQUE_ALGORITHM_VERSIONS",
     "TECHNIQUE_COIL_JOINT",
     "TECHNIQUE_FINGER_MARK",
     "TECHNIQUE_GEOMETRY_REF_PREFIX",

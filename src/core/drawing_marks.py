@@ -14,9 +14,10 @@ This module draws them the way the measured-drawing textbooks do [K1][K2]:
   per pass of the wooden tool ([K2] 도면 6, 도면 7; the text asks for 군집 and
   for the direction to be shown).
 - 물손질흔(회전물손질): fine parallel lines following the rotation.
-- 타날흔: the paddle pattern's own lines, crossed for a lattice paddle.
-  [K1] p.37 says the pattern is best recorded by a rubbing; the lines here
-  say where the paddling is and which family it belongs to, no more.
+- 타날흔: nothing is drawn on the elevation.  [K1] p.37 has the paddle
+  pattern recorded by a rubbing, and [K3] p.11 shows that rubbing pasted on
+  the drawing with the elevation line left visible; the record says where
+  the paddling is, the rubbing strip on the axis says what it looks like.
 
 The numbers - spacings, lengths, jitter - are provisional; the shapes are the
 sources'.  Every stroke is deterministic: the same region under the same seed
@@ -54,7 +55,9 @@ PRESS_OVALS = "press_ovals"
 SEAM_LINE = "seam_line"
 STROKE_PATCHES = "stroke_patches"
 PARALLEL_LINES = "parallel_lines"
-REPRESENTATIONS = (PRESS_OVALS, SEAM_LINE, STROKE_PATCHES, PARALLEL_LINES)
+#: The mark is left to the rubbing: no stroke goes on the line drawing.
+RUBBING = "rubbing"
+REPRESENTATIONS = (PRESS_OVALS, SEAM_LINE, STROKE_PATCHES, PARALLEL_LINES, RUBBING)
 
 #: A region that would need more strokes than this is asking for a texture,
 #: not a drawing; the caller should paint a smaller region or widen the
@@ -186,11 +189,9 @@ TECHNIQUE_MARK_STYLES: Mapping[str, MarkStyle] = {
     TECHNIQUE_FINGER_MARK: MarkStyle(
         representation=PRESS_OVALS, length_mm=15.0, jitter=0.12
     ),
-    # 선문 by default: one family of straight lines about a paddle unit
-    # apart.  crossed=True for 격자문.
-    TECHNIQUE_PADDLING: MarkStyle(
-        representation=PARALLEL_LINES, angle_deg=60.0, spacing_mm=2.0, jitter=0.1
-    ),
+    # A paddle's pattern is the rubbing's to show ([K1] p.37, [K3] p.11);
+    # drawing lines for it would put a guess where the rubbing puts a fact.
+    TECHNIQUE_PADDLING: MarkStyle(representation=RUBBING),
     # 회전물손질: lines follow the rotation, so horizontal on an upright pot,
     # a little wavy and broken as a wet hand leaves them.
     TECHNIQUE_WATER_SMOOTHING: MarkStyle(
@@ -549,7 +550,12 @@ def _stroke_patches(
     return strokes
 
 
+def _nothing(polygon: Polygon, style: MarkStyle, rng: random.Random) -> list[MarkStroke]:
+    return []
+
+
 _GENERATORS = {
+    RUBBING: _nothing,
     PRESS_OVALS: _press_ovals,
     SEAM_LINE: _seam_lines,
     PARALLEL_LINES: _parallel_lines,
@@ -594,6 +600,7 @@ __all__ = [
     "PARALLEL_LINES",
     "PRESS_OVALS",
     "REPRESENTATIONS",
+    "RUBBING",
     "SEAM_LINE",
     "STROKE_PATCHES",
     "TECHNIQUE_MARK_STYLES",
