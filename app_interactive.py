@@ -348,6 +348,10 @@ from src.core.artifact_rubbing_extractor import (  # noqa: E402
     DigitalRubbingRaster,
     DEFAULT_RUBBING_CONTACT_INK_PERCENT,
     DEFAULT_RUBBING_RELIEF_MODEL,
+    RUBBING_TONES,
+    RUBBING_TONE_LABELS_KO,
+    rubbing_tone_of,
+    rubbing_tone_settings,
     MAX_RUBBING_CONTACT_INK_PERCENT,
     MAX_RUBBING_INK_GAMMA,
     MAX_RUBBING_PAPER_TONE_PERCENT,
@@ -4611,6 +4615,25 @@ class SectionPanel(QWidget):
             self.combo_native_rubbing_view.addItem(label, value)
         native_rubbing_form.addRow("탁본 방향", self.combo_native_rubbing_view)
 
+        # 농담을 한 번에.  실측자는 "연하게" 하고 말하지 네 개의 숫자로 말하지
+        # 않는다.  고르면 아래 네 칸이 그 값으로 채워지고, 그 뒤에 아무 칸이나
+        # 고치면 이 칸은 "직접 지정"으로 돌아간다 - 화면이 실제로 계산될 값과
+        # 다른 말을 하면 안 되기 때문이다.
+        self.combo_native_rubbing_tone = QComboBox()
+        for tone in RUBBING_TONES:
+            self.combo_native_rubbing_tone.addItem(RUBBING_TONE_LABELS_KO[tone], tone)
+        self.combo_native_rubbing_tone.addItem("직접 지정", None)
+        self.combo_native_rubbing_tone.setToolTip(
+            "먹을 얼마나 진하게 두드릴지. 고르면 먹 농도·접촉 먹 농담·종이 기저 "
+            "농담이 함께 정해집니다.\n"
+            "가운데(중간)가 합성 승문 프로파일에서 재어 권하는 값이고, 연·진은 그 "
+            "양옆 한 단계입니다. 공개 지침의 수치가 아니라 이 프로그램의 제안이므로 "
+            "각 칸은 그대로 보이고 직접 고칠 수 있습니다.\n"
+            "먹 곡선(감마)은 농담이 아니라 먹이 요철을 얼마나 또렷하게 따르는지라 "
+            "여기에 들어가지 않습니다."
+        )
+        native_rubbing_form.addRow("먹 농담", self.combo_native_rubbing_tone)
+
         self.spin_native_rubbing_pixels_per_mm = QSpinBox()
         self.spin_native_rubbing_pixels_per_mm.setRange(1, 100)
         self.spin_native_rubbing_pixels_per_mm.setValue(DEFAULT_RUBBING_PIXELS_PER_MM)
@@ -4715,6 +4738,34 @@ class SectionPanel(QWidget):
         )
         native_rubbing_form.addRow("접촉 먹 농담", self.spin_native_rubbing_contact_ink)
 
+        self._rubbing_tone_spins = {
+            "contact_ink_percent": self.spin_native_rubbing_contact_ink,
+            "ink_strength_percent": self.spin_native_rubbing_strength,
+            "paper_tone_percent": self.spin_native_rubbing_paper_tone,
+        }
+
+        def _apply_rubbing_tone(_index: int) -> None:
+            tone = self.combo_native_rubbing_tone.currentData()
+            if tone is None:
+                return
+            settings = rubbing_tone_settings(
+                str(tone), relief_model=self.rubbing_relief_model()
+            )
+            for field, value in settings.items():
+                spin = self._rubbing_tone_spins[field]
+                previous = spin.blockSignals(True)
+                try:
+                    spin.setValue(int(value))
+                finally:
+                    spin.blockSignals(previous)
+
+        def _tone_from_spins(_value: int) -> None:
+            self.sync_rubbing_tone_combo()
+
+        self.combo_native_rubbing_tone.currentIndexChanged.connect(_apply_rubbing_tone)
+        for spin in self._rubbing_tone_spins.values():
+            spin.valueChanged.connect(_tone_from_spins)
+
         def _apply_model_defaults(_index: int) -> None:
             # The two models read the reference radius and the black point
             # differently, so switching one puts its own recommended pair in.
@@ -4748,7 +4799,13 @@ class SectionPanel(QWidget):
                 polarity.setCurrentIndex(max(0, polarity.findData(DEFAULT_RUBBING_POLARITY)))
 
         self.combo_native_rubbing_model.currentIndexChanged.connect(_apply_model_defaults)
+        # The two models read the ink differently, so the tone the same spins
+        # spell changes with the model.
+        self.combo_native_rubbing_model.currentIndexChanged.connect(
+            lambda _index: self.sync_rubbing_tone_combo()
+        )
         _apply_model_defaults(self.combo_native_rubbing_model.currentIndex())
+        self.sync_rubbing_tone_combo()
         native_layout.addLayout(native_rubbing_form)
 
         self.btn_native_rubbing = QPushButton("탁본 계산 · 기록")
@@ -5293,6 +5350,37 @@ class SectionPanel(QWidget):
         self.set_user_line_weights_mm(
             {kind: base.style(kind).stroke_width_mm for kind in DRAWING_LINE_KINDS}
         )
+
+    def rubbing_relief_model(self) -> str:
+        combo = getattr(self, "combo_native_rubbing_model", None)
+        if combo is None:
+            return DEFAULT_RUBBING_RELIEF_MODEL
+        return str(combo.currentData() or DEFAULT_RUBBING_RELIEF_MODEL)
+
+    def sync_rubbing_tone_combo(self) -> None:
+        """Show which named tone the ink settings are, or that they are none.
+
+        A tone is read in the model that is actually selected: the contact
+        model's darkness is its contact ink, the height model's is its ink
+        strength over the paper wash, so the same spins say different tones
+        under the two.
+        """
+
+        combo = getattr(self, "combo_native_rubbing_tone", None)
+        spins = getattr(self, "_rubbing_tone_spins", None)
+        if combo is None or not spins:
+            return
+        tone = rubbing_tone_of(
+            {field: int(spin.value()) for field, spin in spins.items()},
+            relief_model=self.rubbing_relief_model(),
+        )
+        index = combo.findData(tone)
+        if index >= 0 and index != combo.currentIndex():
+            previous = combo.blockSignals(True)
+            try:
+                combo.setCurrentIndex(index)
+            finally:
+                combo.blockSignals(previous)
 
     def hatch_cut_faces_choice(self) -> "bool | None":
         """Whether the cut face is hatched: None keeps the preset's own choice.

@@ -98,6 +98,62 @@ RECOMMENDED_RUBBING_RELIEF_MODEL = RELIEF_MODEL_CONTACT
 RECOMMENDED_RUBBING_CONTACT_REFERENCE_RADIUS_UM = 700
 RECOMMENDED_RUBBING_CONTACT_BLACK_POINT_UM = 120
 
+# 탁본의 농담.  How dark a rubbing comes out is how hard and how often the
+# dabber was tapped, and a drafter says it as one thing - 연하게, 진하게 - not
+# as a set of numbers.  These are those steps.
+#
+# A tone is per relief model, because the same field does not mean the same
+# thing in both.  The contact model inks the paper where it lies on the
+# surface, so its darkness is contact_ink_percent and ink_strength_percent is
+# the depth at which the ink is gone - raise it and the rubbing gets
+# *crisper*, not darker.  The height model inks by how far a point stands
+# above its neighbourhood, so there ink_strength_percent is the darkness, over
+# a paper_tone_percent wash.  One table that set the same fields for both
+# would make 진하게 lighten a contact rubbing.
+#
+# The middle step is the measured recommendation in each model; light and dark
+# are one step either side, and are this program's offer rather than a
+# published convention, so every number stays visible and editable underneath.
+# The ink curve is not part of a tone: gamma decides how crisply ink follows
+# the relief, which is a different question from how dark the sheet is.
+RUBBING_TONE_LIGHT = "light"
+RUBBING_TONE_MEDIUM = "medium"
+RUBBING_TONE_DARK = "dark"
+RUBBING_TONES: tuple[str, ...] = (
+    RUBBING_TONE_LIGHT,
+    RUBBING_TONE_MEDIUM,
+    RUBBING_TONE_DARK,
+)
+RUBBING_TONE_LABELS_KO: Mapping[str, str] = {
+    RUBBING_TONE_LIGHT: "연하게",
+    RUBBING_TONE_MEDIUM: "중간",
+    RUBBING_TONE_DARK: "진하게",
+}
+RUBBING_TONE_SETTINGS: Mapping[str, Mapping[str, Mapping[str, int]]] = {
+    RELIEF_MODEL_CONTACT: {
+        RUBBING_TONE_LIGHT: {"contact_ink_percent": 45},
+        RUBBING_TONE_MEDIUM: {
+            "contact_ink_percent": DEFAULT_RUBBING_CONTACT_INK_PERCENT
+        },
+        RUBBING_TONE_DARK: {"contact_ink_percent": 90},
+    },
+    RELIEF_MODEL_LOCAL_MEAN: {
+        RUBBING_TONE_LIGHT: {
+            "ink_strength_percent": 70,
+            "paper_tone_percent": 12,
+        },
+        RUBBING_TONE_MEDIUM: {
+            "ink_strength_percent": DEFAULT_RUBBING_INK_STRENGTH_PERCENT,
+            "paper_tone_percent": RECOMMENDED_RUBBING_PAPER_TONE_PERCENT,
+        },
+        RUBBING_TONE_DARK: {
+            "ink_strength_percent": 130,
+            "paper_tone_percent": 30,
+        },
+    },
+}
+
+
 MAX_RUBBING_VERTICES = 5_000_000
 MAX_RUBBING_FACES = 2_000_000
 MAX_RUBBING_PIXELS = 8_000_000
@@ -127,6 +183,45 @@ _SUPPORTED_POLARITIES = frozenset({"raised", "incised", "bidirectional"})
 
 class ArtifactRubbingError(ValueError):
     """An authoritative Digital Rubbing result cannot be produced safely."""
+
+
+def rubbing_tone_settings(tone: str, *, relief_model: str) -> dict[str, int]:
+    """The numbers a named tone stands for, in the model it is used in."""
+
+    by_tone = RUBBING_TONE_SETTINGS.get(str(relief_model))
+    if by_tone is None:
+        raise ArtifactRubbingError(
+            f"unknown relief model {relief_model!r}; known models are "
+            f"{', '.join(RELIEF_MODELS)}"
+        )
+    settings = by_tone.get(str(tone))
+    if settings is None:
+        raise ArtifactRubbingError(
+            f"unknown rubbing tone {tone!r}; known tones are {', '.join(RUBBING_TONES)}"
+        )
+    return dict(settings)
+
+
+def rubbing_tone_of(values: Mapping[str, Any], *, relief_model: str) -> str | None:
+    """Which named tone these settings are, or None if they are the drafter's.
+
+    A drafter who has typed their own numbers has not chosen a tone, and the
+    app has to say so rather than show the nearest one as though it were what
+    the rubbing will be.
+    """
+
+    for tone in RUBBING_TONES:
+        settings = rubbing_tone_settings(tone, relief_model=relief_model)
+        if all(
+            _is_integer(values.get(field)) and int(values[field]) == expected
+            for field, expected in settings.items()
+        ):
+            return tone
+    return None
+
+
+def _is_integer(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1534,6 +1629,12 @@ __all__ = [
     "RUBBING_PIXEL_FORMAT",
     "RUBBING_RASTER_HASH_SCOPE",
     "RUBBING_RASTER_SCHEMA_VERSION",
+    "RUBBING_TONES",
+    "RUBBING_TONE_DARK",
+    "RUBBING_TONE_LABELS_KO",
+    "RUBBING_TONE_LIGHT",
+    "RUBBING_TONE_MEDIUM",
+    "RUBBING_TONE_SETTINGS",
     "compute_artifact_rubbing",
     "compute_artifact_rubbing_from_recipe",
     "extract_digital_rubbing",
@@ -1544,6 +1645,8 @@ __all__ = [
     "require_current_rubbing_computation",
     "rubbing_computation_matches_active_projection",
     "rubbing_recipe",
+    "rubbing_tone_of",
+    "rubbing_tone_settings",
     "RUBBING_ESTIMATED_PEAK_BYTES_PER_PIXEL",
     "RUBBING_ESTIMATE_FIXED_OVERHEAD_BYTES",
     "RUBBING_ESTIMATE_GEOMETRY_MULTIPLIER",

@@ -528,3 +528,82 @@ def test_the_sliding_maximum_matches_a_brute_force_window() -> None:
                 ]
                 slow[y, x] = window.max()
         assert np.array_equal(fast, slow), radius
+
+
+def test_a_named_tone_is_the_ink_of_its_model_and_darker_means_more_ink() -> None:
+    """탁본의 농담: one choice, and it has to mean what it says.
+
+    A drafter says 연하게 or 진하게, not a set of numbers.  A tone is per
+    relief model because the same field does not mean the same thing in
+    both - ink strength darkens the height model and *sharpens* the contact
+    one - and the order of the names has to be the order of the ink actually
+    laid down, or the word on the control and the sheet disagree.
+    """
+
+    import numpy as np
+    import pytest
+
+    from src.core.artifact_rubbing_extractor import (
+        RELIEF_MODELS,
+        RELIEF_MODEL_CONTACT,
+        RUBBING_TONES,
+        RUBBING_TONE_DARK,
+        RUBBING_TONE_LABELS_KO,
+        RUBBING_TONE_LIGHT,
+        RUBBING_TONE_MEDIUM,
+        RUBBING_TONE_SETTINGS,
+        rubbing_tone_of,
+        rubbing_tone_settings,
+    )
+
+    assert RUBBING_TONES == (RUBBING_TONE_LIGHT, RUBBING_TONE_MEDIUM, RUBBING_TONE_DARK)
+    assert set(RUBBING_TONE_LABELS_KO) == set(RUBBING_TONES)
+    assert set(RUBBING_TONE_SETTINGS) == set(RELIEF_MODELS)
+    for model in RELIEF_MODELS:
+        steps = [rubbing_tone_settings(tone, relief_model=model) for tone in RUBBING_TONES]
+        assert {field for step in steps for field in step} == set(steps[0])
+        for field in steps[0]:
+            values = [step[field] for step in steps]
+            assert values == sorted(values) and len(set(values)) == 3, (model, field)
+        # The table and the reverse lookup are the same table.
+        for tone, step in zip(RUBBING_TONES, steps, strict=True):
+            assert rubbing_tone_of(step, relief_model=model) == tone
+        # A drafter's own numbers are not a tone, and are not rounded to one.
+        own = {field: value + 1 for field, value in steps[1].items()}
+        assert rubbing_tone_of(own, relief_model=model) is None
+
+    with pytest.raises(ArtifactRubbingError, match="unknown rubbing tone"):
+        rubbing_tone_settings("pitch-black", relief_model=RELIEF_MODEL_CONTACT)
+    with pytest.raises(ArtifactRubbingError, match="unknown relief model"):
+        rubbing_tone_settings(RUBBING_TONE_DARK, relief_model="crayon/v1")
+
+    vertices, faces = _bump()
+
+    def _ink(tone: str, *, model: str) -> float:
+        settings = rubbing_tone_settings(tone, relief_model=model)
+        contact = model == RELIEF_MODEL_CONTACT
+        raster, _qc = extract_digital_rubbing(
+            vertices,
+            faces,
+            rubbing_recipe(
+                "top",
+                pixels_per_mm=10,
+                margin_um=0,
+                reference_radius_um=500,
+                depth_quantization_um=10,
+                black_point_um=100,
+                # The contact model inks one side of the paper, so it refuses
+                # the two-sided polarity.
+                relief_polarity="raised" if contact else "bidirectional",
+                relief_model=model,
+                ink_strength_percent=settings.get("ink_strength_percent", 100),
+                paper_tone_percent=settings.get("paper_tone_percent", 0),
+                contact_ink_percent=settings.get("contact_ink_percent", 70),
+            ),
+        )
+        covered = raster.pixels[:, :, 1] > 0
+        return float(255.0 - np.asarray(raster.pixels[:, :, 0])[covered].mean())
+
+    for model in RELIEF_MODELS:
+        inks = [_ink(tone, model=model) for tone in RUBBING_TONES]
+        assert inks[0] < inks[1] < inks[2], (model, inks)

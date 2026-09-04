@@ -4508,6 +4508,82 @@ def test_native_rubbing_ui_exposes_physical_recipe_and_six_views() -> None:
         app.processEvents()
 
 
+def test_the_ink_tone_is_one_choice_that_means_what_it_says() -> None:
+    """탁본의 농담: pick 연하게 or 진하게 and the ink follows.
+
+    The control has to agree with what will actually be computed: choosing a
+    tone fills the ink numbers in, typing your own numbers takes the control
+    back to 직접 지정, and because the two relief models read the ink
+    differently the tone is read in the model that is selected.
+    """
+
+    from src.core.artifact_rubbing_extractor import (  # noqa: PLC0415
+        RELIEF_MODEL_CONTACT,
+        RUBBING_TONES,
+        RUBBING_TONE_DARK,
+        RUBBING_TONE_LIGHT,
+        RUBBING_TONE_MEDIUM,
+        rubbing_tone_settings,
+    )
+
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    window = MainWindow()
+    try:
+        panel = window.section_panel
+        combo = panel.combo_native_rubbing_tone
+        assert [combo.itemData(index) for index in range(combo.count())] == [
+            *RUBBING_TONES,
+            None,
+        ]
+        # The panel opens on the contact model, whose measured recommendation
+        # is the middle step.
+        assert panel.combo_native_rubbing_model.currentData() == RELIEF_MODEL_CONTACT
+        assert combo.currentData() == RUBBING_TONE_MEDIUM
+
+        combo.setCurrentIndex(combo.findData(RUBBING_TONE_DARK))
+        dark = rubbing_tone_settings(RUBBING_TONE_DARK, relief_model=RELIEF_MODEL_CONTACT)
+        assert panel.spin_native_rubbing_contact_ink.value() == (
+            dark["contact_ink_percent"]
+        )
+        assert window._native_rubbing_options_from_panel()["contact_ink_percent"] == (
+            dark["contact_ink_percent"]
+        )
+
+        # The drafter's own number is not a tone, and is not rounded to one.
+        panel.spin_native_rubbing_contact_ink.setValue(
+            dark["contact_ink_percent"] - 1
+        )
+        assert combo.currentData() is None
+        combo.setCurrentIndex(combo.findData(RUBBING_TONE_LIGHT))
+        assert panel.spin_native_rubbing_contact_ink.value() == (
+            rubbing_tone_settings(RUBBING_TONE_LIGHT, relief_model=RELIEF_MODEL_CONTACT)[
+                "contact_ink_percent"
+            ]
+        )
+
+        # Under the height model the same spins spell a tone from the ink
+        # strength and the paper wash instead.
+        model = panel.combo_native_rubbing_model
+        model.setCurrentIndex(model.findData(RELIEF_MODEL_LOCAL_MEAN))
+        combo.setCurrentIndex(combo.findData(RUBBING_TONE_DARK))
+        shading = rubbing_tone_settings(
+            RUBBING_TONE_DARK, relief_model=RELIEF_MODEL_LOCAL_MEAN
+        )
+        assert panel.spin_native_rubbing_strength.value() == (
+            shading["ink_strength_percent"]
+        )
+        assert panel.spin_native_rubbing_paper_tone.value() == (
+            shading["paper_tone_percent"]
+        )
+    finally:
+        window._artifact_session = None
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
 def test_native_rubbing_command_commits_previews_and_recomputes_offline_export() -> None:
     app = QApplication.instance()
     if app is None:
