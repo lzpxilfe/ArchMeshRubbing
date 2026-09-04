@@ -48,7 +48,7 @@ Windows ARM64, x64-on-ARM64 에뮬레이션, 32-bit Windows, Windows Server, mac
 | 디지털 탁본 | 6면, 해상도·여백·깊이·먹 농도·양각/음각 설정 | `.amr-rubbing` 1:1 PNG |
 | 제작 기법 (홈) | 정치한 토기를 한 바퀴 도는 홈을 profile에서 찾아 기록 | 도판에 간선 1줄 + 직선 2줄 |
 | 전개 탁본 | 기와 전개 record의 펴진 좌표 위에 같은 요철을 그린 탁본 (정치한 토기의 외면 띠 포함) | `.amr-rubbing` 1:1 PNG (sidecar 1.3.0) |
-| 실측 도판 | 입면·단면·탁본을 한 축척으로 배치하고 축척바·제목란을 붙인 페이지. 탁본이 실리면 제목란과 탁본 아래에 "3D 메쉬에서 계산 · 종이 탁본 아님"과 먹을 만든 수치가 반드시 찍힌다 | `.svg` + provenance |
+| 실측 도판 | 입면·단면·탁본을 한 축척으로 배치하고 축척바·제목란을 붙인 페이지. 선 종류별 굵기는 pt 또는 mm로 직접 넣을 수 있고 그 표가 provenance에 남는다. 탁본이 실리면 제목란과 탁본 아래에 "3D 메쉬에서 계산 · 종이 탁본 아님"과 먹을 만든 수치가 반드시 찍히며, 전개면 위의 탁본과 정사영 요철 그림은 캡션으로 구분된다 | `.svg` + provenance |
 | 완료 실측 | Cutline 3 + Outline 6 + Rubbing 6의 15개 결과 결합 | `.amr-survey` |
 | 제원 측정 | 표면적, 조건부 체적, 두 점 거리, 선택점 best-fit 원 지름 | 검증 가능한 measurement record |
 | 기와 전개 | 전체/선택 면, X/Y/Z 장축, Top/Bottom 해석, 자동/고정 seam, 왜곡 QC | `.amr-unwrap` OBJ·1:1 SVG |

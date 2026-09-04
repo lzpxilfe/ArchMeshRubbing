@@ -399,9 +399,18 @@ from src.core.artifact_vector_export import (  # noqa: E402
     VectorSVGOptions,
 )
 from src.core.drawing_style import (  # noqa: E402
+    LINE_KINDS as DRAWING_LINE_KINDS,
+    LINE_KIND_LABELS_KO as DRAWING_LINE_KIND_LABELS,
+    PROVISIONAL_PRESET_ID as DRAWING_PROVISIONAL_PRESET_ID,
     available_presets as drawing_style_presets,
     get_preset as drawing_style_preset,
+    mm_to_pt as drawing_mm_to_pt,
+    pt_to_mm as drawing_pt_to_mm,
+    user_preset as drawing_user_preset,
 )
+
+#: The combo entry that means "the weights in the panel's own table".
+USER_LINE_WEIGHTS_PRESET = "user"
 from src.core.artifact_axis_alignment import (  # noqa: E402
     AXIS_ALIGN_RECIPE_KIND,
 )
@@ -4228,8 +4237,56 @@ class SectionPanel(QWidget):
             "'잠정'은 공개 지침에서 옮긴 값이 아직 아니라는 뜻이며, 도면에도 그렇게 기록됩니다.\n"
             "측정 좌표는 어느 쪽을 골라도 같습니다."
         )
+        self.combo_native_vector_style.addItem("사용자 지정 굵기 (아래 표)", USER_LINE_WEIGHTS_PRESET)
         style_row.addWidget(self.combo_native_vector_style, 1)
         native_layout.addLayout(style_row)
+
+        # The drafter's own weights.  A report style states them in points
+        # or millimetres; the table takes either, keeps them in millimetres,
+        # and every drawing made with them carries the full table in its
+        # provenance.  Dashes and hatch stay the shipped preset's, so the
+        # kinds remain distinguishable whatever the weights.
+        weights_title = QLabel("선 굵기 (사용자 지정)")
+        weights_title.setStyleSheet("font-weight: bold;")
+        native_layout.addWidget(weights_title)
+        unit_row = QHBoxLayout()
+        unit_row.setContentsMargins(0, 0, 0, 0)
+        unit_row.addWidget(QLabel("단위"))
+        self.combo_line_weight_unit = QComboBox()
+        self.combo_line_weight_unit.addItem("pt", "pt")
+        self.combo_line_weight_unit.addItem("mm", "mm")
+        self.combo_line_weight_unit.setToolTip(
+            "굵기를 입력하는 단위입니다. 1 pt = 0.3528 mm. 저장과 기록은 언제나 mm입니다."
+        )
+        unit_row.addWidget(self.combo_line_weight_unit)
+        self.btn_line_weights_reset = QPushButton("잠정 기본값으로")
+        self.btn_line_weights_reset.setToolTip(
+            "표를 provisional/v1의 굵기로 되돌립니다."
+        )
+        unit_row.addWidget(self.btn_line_weights_reset)
+        unit_row.addStretch()
+        native_layout.addLayout(unit_row)
+        weights_form = QFormLayout()
+        weights_form.setContentsMargins(0, 0, 0, 0)
+        self.spin_line_weights: dict[str, QDoubleSpinBox] = {}
+        base_preset = drawing_style_preset(DRAWING_PROVISIONAL_PRESET_ID)
+        for kind in DRAWING_LINE_KINDS:
+            spin = QDoubleSpinBox()
+            spin.setDecimals(3)
+            spin.setSingleStep(0.05)
+            spin.setRange(0.01, 20.0)
+            spin.setValue(drawing_mm_to_pt(base_preset.style(kind).stroke_width_mm))
+            spin.setSuffix(" pt")
+            spin.setToolTip(
+                f"{DRAWING_LINE_KIND_LABELS[kind]} ({kind})의 종이 위 굵기. "
+                "축척과 무관하게 이 굵기로 인쇄됩니다."
+            )
+            self.spin_line_weights[kind] = spin
+            weights_form.addRow(DRAWING_LINE_KIND_LABELS[kind], spin)
+        native_layout.addLayout(weights_form)
+        self._line_weight_unit = "pt"
+        self.combo_line_weight_unit.currentIndexChanged.connect(self._on_line_weight_unit_changed)
+        self.btn_line_weights_reset.clicked.connect(self.reset_line_weights)
 
         self.btn_native_vector_export = QPushButton("선택한 검증 벡터 1:1 SVG 내보내기")
         set_pixel_icon(self.btn_native_vector_export, "export")
@@ -4284,6 +4341,18 @@ class SectionPanel(QWidget):
             "도판에 들어가지 않으면 쓸 수 있는 축척을 알려주고 실패합니다."
         )
         sheet_row.addWidget(self.spin_drawing_sheet_scale)
+        sheet_row.addWidget(QLabel("선"))
+        self.combo_drawing_sheet_style = QComboBox()
+        for preset_id in drawing_style_presets():
+            preset = drawing_style_preset(preset_id)
+            label = f"{preset_id} (잠정)" if preset.provisional else preset_id
+            self.combo_drawing_sheet_style.addItem(label, preset_id)
+        self.combo_drawing_sheet_style.addItem("사용자 지정 굵기", USER_LINE_WEIGHTS_PRESET)
+        self.combo_drawing_sheet_style.setToolTip(
+            "도판의 선 굵기 preset. 사용자 지정은 위 '선 굵기' 표의 값을 쓰고, "
+            "그 표 전체가 도판 provenance에 남습니다."
+        )
+        sheet_row.addWidget(self.combo_drawing_sheet_style)
         sheet_row.addStretch()
         native_layout.addLayout(sheet_row)
 
@@ -5068,6 +5137,66 @@ class SectionPanel(QWidget):
         pass
 
 
+    def _on_line_weight_unit_changed(self, _index: int) -> None:
+        """Convert the displayed weights when the unit changes; mm is kept."""
+
+        unit = str(self.combo_line_weight_unit.currentData() or "pt")
+        if unit == self._line_weight_unit:
+            return
+        for spin in self.spin_line_weights.values():
+            value = float(spin.value())
+            millimetres = drawing_pt_to_mm(value) if self._line_weight_unit == "pt" else value
+            previous = spin.blockSignals(True)
+            try:
+                spin.setSuffix(f" {unit}")
+                spin.setValue(
+                    drawing_mm_to_pt(millimetres) if unit == "pt" else millimetres
+                )
+            finally:
+                spin.blockSignals(previous)
+        self._line_weight_unit = unit
+
+    def user_line_weights_mm(self) -> dict[str, float]:
+        """The table's weights in millimetres, whatever unit is displayed."""
+
+        unit = self._line_weight_unit
+        return {
+            kind: (
+                drawing_pt_to_mm(float(spin.value()))
+                if unit == "pt"
+                else float(spin.value())
+            )
+            for kind, spin in self.spin_line_weights.items()
+        }
+
+    def set_user_line_weights_mm(self, weights_mm: "Mapping[str, float]") -> None:
+        for kind, spin in self.spin_line_weights.items():
+            value = weights_mm.get(kind)
+            if value is None:
+                continue
+            try:
+                millimetres = float(value)
+            except (TypeError, ValueError):
+                continue
+            if not (0.0 < millimetres <= 10.0):
+                continue
+            spin.setValue(
+                drawing_mm_to_pt(millimetres) if self._line_weight_unit == "pt" else millimetres
+            )
+
+    def reset_line_weights(self) -> None:
+        base = drawing_style_preset(DRAWING_PROVISIONAL_PRESET_ID)
+        self.set_user_line_weights_mm(
+            {kind: base.style(kind).stroke_width_mm for kind in DRAWING_LINE_KINDS}
+        )
+
+    def drawing_style_preset_choice(self, choice: object) -> "str | object":
+        """Turn a combo's data into what the core takes: an id or a user preset."""
+
+        if choice == USER_LINE_WEIGHTS_PRESET:
+            return drawing_user_preset(self.user_line_weights_mm())
+        return choice
+
 class MainWindow(QMainWindow):
     """메인 윈도우"""
 
@@ -5578,6 +5707,7 @@ class MainWindow(QMainWindow):
             pass
 
     def _restore_ui_state(self):
+        self._restore_line_weights()
         settings = self._settings()
         stored_version = settings.value("ui/state_version")
         if stored_version is not None:
@@ -5632,6 +5762,42 @@ class MainWindow(QMainWindow):
         settings.setValue("ui/state_version", self.UI_STATE_VERSION)
         settings.setValue("ui/geometry", self.saveGeometry())
         settings.setValue("ui/state", self.saveState(self.UI_STATE_VERSION))
+        self._save_line_weights(settings)
+
+    def _save_line_weights(self, settings: QSettings) -> None:
+        """Keep the drafter's weight table across sessions, in millimetres."""
+
+        panel = getattr(self, "section_panel", None)
+        if panel is None or not hasattr(panel, "spin_line_weights"):
+            return
+        try:
+            settings.setValue(
+                "drawing_style/user_weights_mm",
+                json.dumps(panel.user_line_weights_mm(), sort_keys=True),
+            )
+            settings.setValue(
+                "drawing_style/unit", str(panel.combo_line_weight_unit.currentData())
+            )
+        except Exception:
+            _LOGGER.info("line weights not saved", exc_info=True)
+
+    def _restore_line_weights(self) -> None:
+        panel = getattr(self, "section_panel", None)
+        if panel is None or not hasattr(panel, "spin_line_weights"):
+            return
+        settings = self._settings()
+        try:
+            unit = str(settings.value("drawing_style/unit") or "pt")
+            index = panel.combo_line_weight_unit.findData(unit)
+            if index >= 0:
+                panel.combo_line_weight_unit.setCurrentIndex(index)
+            stored = settings.value("drawing_style/user_weights_mm")
+            if isinstance(stored, str) and stored:
+                weights = json.loads(stored)
+                if isinstance(weights, dict):
+                    panel.set_user_line_weights_mm(weights)
+        except Exception:
+            _LOGGER.info("line weights not restored", exc_info=True)
 
     def reset_panel_layout(self):
         """사용자 레이아웃 저장값 삭제 후 기본 화면으로 복구"""
@@ -20285,6 +20451,9 @@ class MainWindow(QMainWindow):
                 title_block=TitleBlock(artifact_label=label, rows=rows),
                 scale_denominator=float(panel.spin_drawing_sheet_scale.value()),
                 page=SheetPage(size=page_size, orientation=orientation),
+                style_preset=panel.drawing_style_preset_choice(
+                    panel.combo_drawing_sheet_style.currentData()
+                ),
                 show_center_axis=panel.check_drawing_sheet_center_axis.isChecked(),
                 mirror_sections=mirror_sections,
                 rubbings_on_axis=rubbings_on_axis,
@@ -21964,6 +22133,8 @@ class MainWindow(QMainWindow):
             return None
         style_combo = getattr(panel, "combo_native_vector_style", None)
         style_preset = None if style_combo is None else style_combo.currentData()
+        if style_preset == USER_LINE_WEIGHTS_PRESET:
+            style_preset = panel.drawing_style_preset_choice(style_preset)
         try:
             return VectorSVGOptions(
                 margin_mm=float(margin_spin.value()),

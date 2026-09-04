@@ -841,7 +841,7 @@ def test_the_strip_is_pasted_flush_against_the_centre_line(
         "title_block"
     ]
     caption = sidecar["figures"][0]["caption"]
-    assert caption.startswith("전산 탁본 · 높이 모델 · 창 ")
+    assert caption.startswith("전산 탁본 · 전개면 · 높이 모델 · 창 ")
     assert caption.endswith(" · 먹 100% · 기저 20%")
     assert 'id="rubbing-caption-0000"' in svg
     assert caption in svg

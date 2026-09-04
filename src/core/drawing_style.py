@@ -30,9 +30,27 @@ from .canonical_json import canonical_json_sha256
 
 DRAWING_STYLE_SCHEMA_VERSION = "1.0.0"
 
+#: The source id of a preset whose weights the drafter typed in.  It is not a
+#: published convention any more than the shipped provisional one is, so it
+#: is provisional too; what distinguishes it is that the drawing carries its
+#: full definition, since no registry holds it.
+USER_PRESET_SOURCE_ID = "user"
+USER_PRESET_ID_PREFIX = "user/"
+#: One PostScript point in millimetres.  Illustrator and most report styles
+#: state weights in points; the contract is paper millimetres.
+POINT_MM = 25.4 / 72.0
+
 
 class DrawingStyleError(ValueError):
     """A drawing style vocabulary or preset is not usable as declared."""
+
+
+def pt_to_mm(points: float) -> float:
+    return float(points) * POINT_MM
+
+
+def mm_to_pt(millimetres: float) -> float:
+    return float(millimetres) / POINT_MM
 
 
 # The closed line-kind vocabulary.  The order is the drawing order: later kinds
@@ -74,6 +92,23 @@ LINE_KINDS: tuple[str, ...] = (
     CONDITION_CRACK,
     CENTER_AXIS,
 )
+
+# What the drafter calls each kind.  The ids above are the contract; these are
+# the words on the panel and in the docs, in the vocabulary of Korean report
+# drawing: 외선 the outer contour, 내선 an inner contour, 단면선 the cut, 간선 a
+# line broken a few times, 직선 a continuous technique line, 중심선 the axis.
+LINE_KIND_LABELS_KO: Mapping[str, str] = {
+    SECTION_CUT: "단면선",
+    OUTLINE_VISIBLE: "외선 (외곽선)",
+    OUTLINE_HOLE: "내선 (구멍·안쪽 윤곽)",
+    TECHNIQUE_GROOVE_EDGE: "직선 (홈 가장자리)",
+    TECHNIQUE_GROOVE_TROUGH: "간선 (홈 바닥)",
+    CONDITION_MISSING: "결실",
+    CONDITION_RESTORED: "복원",
+    CONDITION_WORN: "마모",
+    CONDITION_CRACK: "균열",
+    CENTER_AXIS: "중심선",
+}
 
 # 간선: the recessed line at the bottom of a groove is drawn as a straight line
 # broken a few times, and how many times is the drafter's judgement - "two or
@@ -203,6 +238,37 @@ class LineStyle:
             "stroke_width_mm": self.stroke_width_mm,
         }
 
+    @classmethod
+    def from_dict(cls, value: object, *, field_name: str = "line style") -> "LineStyle":
+        mapping = _closed_mapping(
+            value, {"dash_pattern_mm", "hatch", "stroke_width_mm"}, field_name=field_name
+        )
+        dash = mapping["dash_pattern_mm"]
+        if not isinstance(dash, Sequence) or isinstance(dash, (str, bytes)):
+            raise DrawingStyleError(f"{field_name}.dash_pattern_mm must be a list")
+        return cls(
+            stroke_width_mm=_paper_mm(
+                mapping["stroke_width_mm"], field_name=f"{field_name}.stroke_width_mm"
+            ),
+            dash_pattern_mm=tuple(
+                _paper_mm(item, field_name=f"{field_name}.dash_pattern_mm[]")
+                for item in dash
+            ),
+            hatch=mapping["hatch"],
+        )
+
+
+def _closed_mapping(
+    value: object, keys: set[str], *, field_name: str
+) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise DrawingStyleError(f"{field_name} must be an object")
+    if set(value) != keys:
+        raise DrawingStyleError(
+            f"{field_name} must have exactly the keys {', '.join(sorted(keys))}"
+        )
+    return value
+
 
 @dataclass(frozen=True, slots=True)
 class HatchStyle:
@@ -242,6 +308,17 @@ class HatchStyle:
             "stroke_width_mm": self.stroke_width_mm,
         }
 
+    @classmethod
+    def from_dict(cls, value: object, *, field_name: str = "hatch") -> "HatchStyle":
+        mapping = _closed_mapping(
+            value, {"angle_deg", "spacing_mm", "stroke_width_mm"}, field_name=field_name
+        )
+        return cls(
+            spacing_mm=mapping["spacing_mm"],
+            stroke_width_mm=mapping["stroke_width_mm"],
+            angle_deg=mapping["angle_deg"],
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class DrawingStylePreset:
@@ -274,12 +351,34 @@ class DrawingStylePreset:
         if self.source_id is not None and not str(self.source_id).strip():
             raise DrawingStyleError("source_id must be None or a non-empty string")
         object.__setattr__(self, "lines", dict(self.lines))
+        if not isinstance(self.hatch, HatchStyle):
+            raise DrawingStyleError("hatch must be a HatchStyle")
+        # A user preset is named by its content, so the same weights are always
+        # the same preset and a drawing's claim about it can be checked.
+        is_user = self.source_id == USER_PRESET_SOURCE_ID
+        if is_user != preset_id.startswith(USER_PRESET_ID_PREFIX):
+            raise DrawingStyleError(
+                f"preset {preset_id!r}: only a user preset carries the "
+                f"{USER_PRESET_ID_PREFIX!r} prefix, and every user preset does"
+            )
+        if is_user and preset_id != user_preset_id(self.lines, self.hatch):
+            raise DrawingStyleError(
+                f"user preset {preset_id!r} is not named by its own content"
+            )
 
     @property
     def provisional(self) -> bool:
-        """Whether this preset states a convention no published source backs."""
+        """Whether this preset states a convention no published source backs.
 
-        return self.source_id is None
+        A preset the drafter typed in is provisional too: it is their choice,
+        recorded with the drawing, not a convention a publication stands for.
+        """
+
+        return self.source_id is None or self.source_id == USER_PRESET_SOURCE_ID
+
+    @property
+    def is_user(self) -> bool:
+        return self.source_id == USER_PRESET_SOURCE_ID
 
     def style(self, kind: str) -> LineStyle:
         try:
@@ -301,6 +400,184 @@ class DrawingStylePreset:
         """Return the canonical digest a drawing records to prove its styling."""
 
         return canonical_json_sha256(self.to_dict())
+
+    @classmethod
+    def from_dict(cls, value: object) -> "DrawingStylePreset":
+        """Rebuild a preset from its own `to_dict`, refusing anything looser."""
+
+        mapping = _closed_mapping(
+            value,
+            {"hatch", "lines", "preset_id", "provisional", "schema_version", "source_id"},
+            field_name="drawing style preset",
+        )
+        if mapping["schema_version"] != DRAWING_STYLE_SCHEMA_VERSION:
+            raise DrawingStyleError(
+                f"drawing style preset schema must be {DRAWING_STYLE_SCHEMA_VERSION}"
+            )
+        lines_value = mapping["lines"]
+        if not isinstance(lines_value, Mapping):
+            raise DrawingStyleError("drawing style preset lines must be an object")
+        lines = {
+            str(kind): LineStyle.from_dict(style, field_name=f"lines[{kind!r}]")
+            for kind, style in lines_value.items()
+        }
+        source_id = mapping["source_id"]
+        if source_id is not None and not isinstance(source_id, str):
+            raise DrawingStyleError("drawing style preset source_id must be a string or null")
+        preset = cls(
+            preset_id=str(mapping["preset_id"]),
+            lines=lines,
+            hatch=HatchStyle.from_dict(mapping["hatch"]),
+            source_id=source_id,
+        )
+        if mapping["provisional"] is not preset.provisional:
+            raise DrawingStyleError(
+                f"drawing style preset {preset.preset_id!r} disagrees about being provisional"
+            )
+        return preset
+
+
+def user_preset_id(lines: Mapping[str, LineStyle], hatch: HatchStyle) -> str:
+    """The content-addressed id of a user preset with these lines and hatch."""
+
+    digest = canonical_json_sha256(
+        {
+            "hatch": hatch.to_dict(),
+            "lines": {kind: lines[kind].to_dict() for kind in sorted(lines)},
+            "schema_version": DRAWING_STYLE_SCHEMA_VERSION,
+            "source_id": USER_PRESET_SOURCE_ID,
+        }
+    )
+    return f"{USER_PRESET_ID_PREFIX}{digest[:12]}"
+
+
+def user_preset(
+    stroke_widths_mm: Mapping[str, float],
+    *,
+    base_preset_id: str = "provisional/v1",
+) -> DrawingStylePreset:
+    """A preset with the drafter's own weights on the base preset's dashes.
+
+    ``stroke_widths_mm`` names any subset of the line kinds; kinds left out
+    keep the base weight.  Dash patterns, hatch flags and the cut-face hatch
+    are the base preset's: a weight is the number a report style states, the
+    rest is how this renderer tells the kinds apart.  The result is named by
+    its content, so the same weights always give the same preset id.
+    """
+
+    base = get_preset(base_preset_id)
+    unknown = sorted(set(stroke_widths_mm) - set(LINE_KINDS))
+    if unknown:
+        raise DrawingStyleError(f"unknown line kinds: {', '.join(unknown)}")
+    lines = {
+        kind: (
+            LineStyle(
+                stroke_width_mm=_paper_mm(
+                    stroke_widths_mm[kind], field_name=f"stroke_widths_mm[{kind!r}]"
+                ),
+                dash_pattern_mm=style.dash_pattern_mm,
+                hatch=style.hatch,
+            )
+            if kind in stroke_widths_mm
+            else style
+        )
+        for kind, style in base.lines.items()
+    }
+    return DrawingStylePreset(
+        preset_id=user_preset_id(lines, base.hatch),
+        lines=lines,
+        hatch=base.hatch,
+        source_id=USER_PRESET_SOURCE_ID,
+    )
+
+
+def resolve_preset(value: object) -> DrawingStylePreset:
+    """Turn a preset id, a preset, or a preset's dict into the preset.
+
+    A registered id resolves through the registry; a dict is rebuilt and, if it
+    names a registered preset, must match it byte for byte.
+    """
+
+    if isinstance(value, DrawingStylePreset):
+        return value
+    if isinstance(value, str):
+        return get_preset(value)
+    if isinstance(value, Mapping):
+        preset = DrawingStylePreset.from_dict(value)
+        registered = _PRESETS.get(preset.preset_id)
+        if registered is not None and registered.sha256() != preset.sha256():
+            raise DrawingStyleError(
+                f"preset {preset.preset_id!r} is registered with different values"
+            )
+        return preset
+    raise DrawingStyleError("style_preset must be a preset id, a preset, or its dict")
+
+
+def preset_claim(preset: DrawingStylePreset) -> dict[str, Any]:
+    """What a drawing records about the preset it was styled with.
+
+    A registered preset is named and digested; a user preset also carries its
+    full definition, because no registry anywhere else holds it.
+    """
+
+    claim: dict[str, Any] = {
+        "preset_id": preset.preset_id,
+        "provisional": preset.provisional,
+        "sha256": preset.sha256(),
+        "source_id": preset.source_id,
+    }
+    if preset.is_user:
+        claim["definition"] = preset.to_dict()
+    return claim
+
+
+def preset_from_claim(claim: object) -> DrawingStylePreset:
+    """Re-prove a drawing's preset claim and return the preset it names."""
+
+    if not isinstance(claim, Mapping):
+        raise DrawingStyleError("style preset claim must be an object")
+    keys = set(claim)
+    definition = claim.get("definition")
+    expected = {"preset_id", "provisional", "sha256", "source_id"}
+    if keys != expected and keys != expected | {"definition"}:
+        raise DrawingStyleError(
+            "style preset claim must have exactly the keys "
+            + ", ".join(sorted(expected))
+            + " and, for a user preset, definition"
+        )
+    preset_id = str(claim.get("preset_id") or "").strip()
+    if not preset_id:
+        raise DrawingStyleError("style preset claim names no preset")
+    if "definition" in keys:
+        preset = DrawingStylePreset.from_dict(definition)
+        if not preset.is_user:
+            raise DrawingStyleError(
+                "only a user preset carries its definition in a drawing's claim"
+            )
+        if preset.preset_id != preset_id:
+            raise DrawingStyleError(
+                f"style preset claim names {preset_id!r} but defines {preset.preset_id!r}"
+            )
+    else:
+        if preset_id.startswith(USER_PRESET_ID_PREFIX):
+            raise DrawingStyleError(
+                f"user preset {preset_id!r} is claimed without its definition"
+            )
+        preset = get_preset(preset_id)
+    if claim.get("sha256") != preset.sha256():
+        raise DrawingStyleError(
+            f"drawing style preset {preset_id!r} no longer matches the digest "
+            "recorded with this drawing"
+        )
+    if claim.get("provisional") is not preset.provisional:
+        raise DrawingStyleError(
+            f"drawing style preset {preset_id!r} disagrees about being provisional"
+        )
+    if claim.get("source_id") != preset.source_id:
+        raise DrawingStyleError(
+            f"drawing style preset {preset_id!r} disagrees about its source"
+        )
+    return preset
 
 
 # The one preset that ships today.
@@ -385,15 +662,26 @@ __all__ = [
     "DrawingStylePreset",
     "HatchStyle",
     "LINE_KINDS",
+    "LINE_KIND_LABELS_KO",
     "LineStyle",
     "OUTLINE_HOLE",
     "OUTLINE_VISIBLE",
+    "POINT_MM",
     "PROVISIONAL_PRESET_ID",
     "RECORD_ROLE_LINE_KINDS",
     "SECTION_CUT",
+    "USER_PRESET_ID_PREFIX",
+    "USER_PRESET_SOURCE_ID",
     "available_presets",
     "get_preset",
     "layer_id",
     "line_kind_for_condition",
     "line_kind_for_record_role",
+    "mm_to_pt",
+    "preset_claim",
+    "preset_from_claim",
+    "pt_to_mm",
+    "resolve_preset",
+    "user_preset",
+    "user_preset_id",
 ]

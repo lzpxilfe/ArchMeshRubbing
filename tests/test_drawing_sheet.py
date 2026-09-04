@@ -658,9 +658,11 @@ def test_a_sheet_with_a_rubbing_says_the_rubbing_was_computed() -> None:
     figures = {figure["record_id"]: figure for figure in sidecar["figures"]}
     caption = figures[RUBBING_ID]["caption"]
     # Read off the recipe the raster was made with, not typed anywhere.
-    assert caption == "전산 탁본 · 높이 모델 · 창 0.5 mm · 검정 0.1 mm · 먹 100%"
+    # A six-view raster inks the wall as seen from one direction; paper would
+    # have followed the curvature.  The caption calls it what it is.
+    assert caption == "정사영 요철 · 전개 아님 · 높이 모델 · 창 0.5 mm · 검정 0.1 mm · 먹 100%"
     assert caption == computed_rubbing_caption(
-        session.document.record_index[RUBBING_ID].recipe
+        session.document.record_index[RUBBING_ID].recipe, developed=False
     )
     assert "caption" not in figures[OUTLINE_ID]
     assert 'id="rubbing-caption-0001"' in svg

@@ -81,7 +81,9 @@ from .drawing_style import (
     CENTER_AXIS,
     DrawingStyleError,
     DrawingStylePreset,
-    get_preset as get_drawing_style_preset,
+    preset_claim as drawing_style_preset_claim,
+    preset_from_claim as drawing_style_preset_from_claim,
+    resolve_preset as resolve_drawing_style_preset,
     line_kind_for_condition,
     line_kind_for_record_role,
 )
@@ -164,12 +166,23 @@ def _millimetre_token(micrometres: object) -> str:
     return f"{int(micrometres) / 1000.0:g} mm"
 
 
-def computed_rubbing_caption(recipe: Mapping[str, Any]) -> str:
-    """The caption printed under a rubbing: what made its ink.
+COMPUTED_RUBBING_CAPTION_PREFIX = "전산 탁본 · 전개면"
+PROJECTED_RELIEF_CAPTION_PREFIX = "정사영 요철 · 전개 아님"
+
+
+def computed_rubbing_caption(recipe: Mapping[str, Any], *, developed: bool) -> str:
+    """The caption printed under a rubbing: what it is and what made its ink.
 
     Read from the record's recipe, so the caption cannot disagree with what
     was computed.  The window is the paper's conformance size, the black
     point the depth at which ink is gone, and the ink the dabber's strength.
+
+    ``developed`` says whether the relief was read off a developed surface -
+    the tile unwrap or the pottery strip unrolled about its axis - or off an
+    orthographic view.  Only the first is a rubbing: paper follows the
+    curvature, a view does not, and a raster that inks a curved wall as seen
+    from one direction is a relief picture, whatever its texture.  The
+    caption names each for what it is.
     """
 
     relief = recipe.get("relief_policy")
@@ -188,7 +201,10 @@ def computed_rubbing_caption(recipe: Mapping[str, Any]) -> str:
                 ink += f" · 기저 {int(relief['paper_tone_percent'])}%"
     except (KeyError, TypeError, ValueError) as exc:
         raise DrawingSheetError(f"rubbing recipe relief policy is malformed: {exc}") from exc
-    return f"전산 탁본 · {model} · 창 {window} · 검정 {black} · {ink}"
+    prefix = (
+        COMPUTED_RUBBING_CAPTION_PREFIX if developed else PROJECTED_RELIEF_CAPTION_PREFIX
+    )
+    return f"{prefix} · {model} · 창 {window} · 검정 {black} · {ink}"
 
 
 class DrawingSheetError(ValueError):
@@ -294,7 +310,12 @@ class DrawingSheetOptions:
     title_block: TitleBlock
     scale_denominator: float = 1.0
     page: SheetPage = field(default_factory=SheetPage)
-    style_preset: str = "provisional/v1"
+    style_preset: str | DrawingStylePreset = "provisional/v1"
+    """A registered preset id, or a preset object such as `user_preset(...)`.
+
+    A user preset is named by its content and written into the sidecar in
+    full, so the sheet can be re-verified without any registry holding it.
+    """
     show_center_axis: bool = False
     mirror_sections: tuple[tuple[str, str], ...] = ()
     """(elevation record id, section record id) pairs drawn as one figure.
@@ -453,7 +474,7 @@ class DrawingSheetOptions:
         object.__setattr__(self, "scale_denominator", denominator)
         object.__setattr__(self, "gutter_mm", gutter)
         try:
-            get_drawing_style_preset(self.style_preset)
+            resolve_drawing_style_preset(self.style_preset)
         except DrawingStyleError as exc:
             raise DrawingSheetError(str(exc)) from exc
         color = str(self.stroke_color).strip().lower()
@@ -1100,7 +1121,9 @@ def _prepare_raster_figure(
         bounds=_bounds_with_caption((0.0, 0.0, width_mm, height_mm), scale_denominator),
         paths_by_kind={},
         raster=image,
-        caption=computed_rubbing_caption(record.recipe),
+        caption=computed_rubbing_caption(
+            record.recipe, developed=record.type == DEVELOPED_RUBBING_RECORD_TYPE
+        ),
     )
 
 
@@ -1517,7 +1540,7 @@ def _sheet_provenance(
     mirrored: Sequence[Mapping[str, str]],
     rubbings_on_axis: Sequence[Mapping[str, str]] = (),
 ) -> dict[str, Any]:
-    preset = get_drawing_style_preset(options.style_preset)
+    preset = resolve_drawing_style_preset(options.style_preset)
     provenance: dict[str, Any] = {
         "center_axis": dict(center_axis),
         "document_id": document.document_id,
@@ -1576,12 +1599,7 @@ def _sheet_provenance(
         "scale_bar": dict(scale_bar),
         "scale_denominator": options.scale_denominator,
         "schema_version": DRAWING_SHEET_SCHEMA_VERSION,
-        "style_preset": {
-            "preset_id": preset.preset_id,
-            "provisional": preset.provisional,
-            "sha256": preset.sha256(),
-            "source_id": preset.source_id,
-        },
+        "style_preset": drawing_style_preset_claim(preset),
         "title": options.title,
         "title_block": [dict(row) for row in title_rows],
         "unit": "mm",
@@ -1672,7 +1690,7 @@ def _render_sheet(
     title_block_lines: Sequence[str],
 ) -> bytes:
     page = options.page
-    preset = get_drawing_style_preset(options.style_preset)
+    preset = resolve_drawing_style_preset(options.style_preset)
     width_token = number_token(page.width_mm, field_name="page.width_mm")
     height_token = number_token(page.height_mm, field_name="page.height_mm")
     metadata_text = canonical_json_bytes(provenance).decode("utf-8").rstrip("\n")
@@ -2019,8 +2037,9 @@ def compose_drawing_sheet(
                 elevation_payload=payload,
                 fit=options.rubbing_on_axis_fit,
             )
+            # A strip on the axis is by construction a developed rubbing.
             caption = computed_rubbing_caption(
-                document.record_index[attached.record_id].recipe
+                document.record_index[attached.record_id].recipe, developed=True
             )
             attached_drawn.append(
                 {
@@ -2062,7 +2081,7 @@ def compose_drawing_sheet(
             elevation_by_kind=by_kind,
             section_record_id=section_record_id,
             axis_ready=align_recipe_kind == AXIS_ALIGN_RECIPE_KIND,
-            preset=get_drawing_style_preset(options.style_preset),
+            preset=resolve_drawing_style_preset(options.style_preset),
         )
         mirrored.append(
             {
@@ -2235,13 +2254,11 @@ def validate_drawing_sheet_bytes(svg_bytes: bytes, sidecar_bytes: bytes) -> None
     if not isinstance(preset_claim, Mapping):
         raise DrawingSheetError("sheet sidecar has no style preset block")
     try:
-        preset = get_drawing_style_preset(str(preset_claim.get("preset_id")))
+        # A user preset travels with the sheet in full and is re-proved
+        # against its own digest; a registered one against the registry.
+        drawing_style_preset_from_claim(preset_claim)
     except DrawingStyleError as exc:
         raise DrawingSheetError(str(exc)) from exc
-    if preset_claim.get("sha256") != preset.sha256():
-        raise DrawingSheetError(
-            "drawing style preset no longer matches the digest recorded with this sheet"
-        )
 
     # The scale must be on the page, not only in the metadata.
     rows = sidecar.get("title_block")
@@ -2274,7 +2291,9 @@ def validate_drawing_sheet_bytes(svg_bytes: bytes, sidecar_bytes: bytes) -> None
         svg_text = bytes(svg_bytes).decode("utf-8", errors="replace")
         for figure in rubbing_figures:
             caption = figure.get("caption")
-            if not isinstance(caption, str) or not caption.startswith("전산 탁본"):
+            if not isinstance(caption, str) or not caption.startswith(
+                (COMPUTED_RUBBING_CAPTION_PREFIX, PROJECTED_RELIEF_CAPTION_PREFIX)
+            ):
                 raise DrawingSheetError(
                     f"rubbing figure {figure.get('record_id')!r} carries no caption"
                 )
@@ -2285,7 +2304,9 @@ def validate_drawing_sheet_bytes(svg_bytes: bytes, sidecar_bytes: bytes) -> None
 
 
 __all__ = [
+    "COMPUTED_RUBBING_CAPTION_PREFIX",
     "COMPUTED_RUBBING_NOTE",
+    "PROJECTED_RELIEF_CAPTION_PREFIX",
     "DRAWING_SHEET_FORMAT",
     "DRAWING_SHEET_SCHEMA_VERSION",
     "DRAWING_SHEET_SIDECAR_NAME",

@@ -7752,3 +7752,83 @@ def test_large_coordinate_face_pick_keeps_float64_centroid_separation() -> None:
         viewport.deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         app.processEvents()
+
+
+def test_line_weight_table_takes_points_or_millimetres_and_reaches_both_exports() -> None:
+    """The drafter's weights, typed in pt or mm, drive the sheet and the SVG.
+
+    The table keeps millimetres underneath whatever unit is shown, so a
+    weight typed in points is the same weight after switching to mm and
+    back; and choosing the table on either export builds a user preset that
+    is named by its content and carries the whole table.
+    """
+
+    from src.core.drawing_style import (
+        LINE_KINDS,
+        LINE_KIND_LABELS_KO,
+        OUTLINE_VISIBLE,
+        PROVISIONAL_PRESET_ID,
+        get_preset,
+        pt_to_mm,
+        user_preset,
+    )
+
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    window = MainWindow()
+    try:
+        panel = window.section_panel
+        assert set(panel.spin_line_weights) == set(LINE_KINDS)
+        base = get_preset(PROVISIONAL_PRESET_ID)
+        # Opens in points, on the shipped weights, and says what each line is.
+        assert panel.combo_line_weight_unit.currentData() == "pt"
+        assert panel.spin_line_weights[OUTLINE_VISIBLE].suffix() == " pt"
+        # The spin shows three decimals of a point, a third of a micrometre.
+        assert panel.user_line_weights_mm()[OUTLINE_VISIBLE] == pytest.approx(
+            base.style(OUTLINE_VISIBLE).stroke_width_mm, abs=1e-3
+        )
+        assert LINE_KIND_LABELS_KO[OUTLINE_VISIBLE].startswith("외선")
+
+        panel.spin_line_weights[OUTLINE_VISIBLE].setValue(0.5)  # 0.5 pt
+        panel.combo_line_weight_unit.setCurrentIndex(
+            panel.combo_line_weight_unit.findData("mm")
+        )
+        assert panel.spin_line_weights[OUTLINE_VISIBLE].suffix() == " mm"
+        assert panel.spin_line_weights[OUTLINE_VISIBLE].value() == pytest.approx(
+            pt_to_mm(0.5), abs=1e-3
+        )
+        assert panel.user_line_weights_mm()[OUTLINE_VISIBLE] == pytest.approx(
+            pt_to_mm(0.5), abs=1e-3
+        )
+
+        expected = user_preset(panel.user_line_weights_mm())
+        combo = panel.combo_native_vector_style
+        combo.setCurrentIndex(combo.findData("user"))
+        options = window._native_vector_svg_options()
+        assert options is not None
+        assert options.style_preset == expected
+        assert options.style_preset.is_user
+        assert panel.combo_drawing_sheet_style.currentData() == PROVISIONAL_PRESET_ID
+        assert panel.drawing_style_preset_choice("user") == expected
+        assert panel.drawing_style_preset_choice(PROVISIONAL_PRESET_ID) == (
+            PROVISIONAL_PRESET_ID
+        )
+
+        # The table survives a restart: saved in millimetres, restored whole.
+        settings = window._settings()
+        window._save_line_weights(settings)
+        panel.reset_line_weights()
+        assert panel.user_line_weights_mm()[OUTLINE_VISIBLE] == pytest.approx(
+            base.style(OUTLINE_VISIBLE).stroke_width_mm, abs=1e-3
+        )
+        window._restore_line_weights()
+        assert panel.user_line_weights_mm()[OUTLINE_VISIBLE] == pytest.approx(
+            pt_to_mm(0.5), abs=1e-3
+        )
+        settings.remove("drawing_style/user_weights_mm")
+        settings.remove("drawing_style/unit")
+    finally:
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        app.processEvents()

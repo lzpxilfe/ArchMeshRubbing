@@ -16,18 +16,20 @@
 
 닫힌 집합이다. `LINE_KINDS`의 순서가 그리는 순서이자 SVG 레이어 순서이며, 이 순서 덕분에 같은 record는 언제 그려도 같은 바이트가 된다.
 
-| 선 종류 | 뜻 | 지금 만드는 곳 |
-|---|---|---|
-| `section_cut` | 단면 절단선. 닫힌 경우 내부를 해칭한다 | `vector.cutline.v1`의 `section` role |
-| `outline_visible` | 보이는 외형선 | `vector.outline.v1`의 `exterior` role |
-| `outline_hole` | 유물 내부의 구멍 경계 | `vector.outline.v1`의 `hole` role |
-| `condition_missing` | 결실부 경계 | `annotation.condition.v1`, kind `missing` |
-| `condition_restored` | 복원부 경계 | `annotation.condition.v1`, kind `restored` |
-| `condition_worn` | 마모부 경계 | `annotation.condition.v1`, kind `worn` |
-| `condition_crack` | 균열 경계 | `annotation.condition.v1`, kind `crack` |
-| `technique_groove_edge` | 홈의 튀어나온 능선 (직선) | `measurement.profile_groove.v1` |
-| `technique_groove_trough` | 홈의 들어간 골 (간선) | `measurement.profile_groove.v1` |
-| `center_axis` | 회전축·대칭축의 일점쇄선 | `rotation_axis_from_circle_records/v1` Align (record가 아니라 정치의 결과) |
+| 선 종류 | 부르는 이름 (`LINE_KIND_LABELS_KO`) | 뜻 | 지금 만드는 곳 |
+|---|---|---|---|
+| `section_cut` | 단면선 | 단면 절단선. 닫힌 경우 내부를 해칭한다 | `vector.cutline.v1`의 `section` role |
+| `outline_visible` | 외선 (외곽선) | 보이는 외형선 | `vector.outline.v1`의 `exterior` role |
+| `outline_hole` | 내선 (구멍·안쪽 윤곽) | 유물 내부의 구멍 경계 | `vector.outline.v1`의 `hole` role |
+| `condition_missing` | 결실 | 결실부 경계 | `annotation.condition.v1`, kind `missing` |
+| `condition_restored` | 복원 | 복원부 경계 | `annotation.condition.v1`, kind `restored` |
+| `condition_worn` | 마모 | 마모부 경계 | `annotation.condition.v1`, kind `worn` |
+| `condition_crack` | 균열 | 균열 경계 | `annotation.condition.v1`, kind `crack` |
+| `technique_groove_edge` | 직선 (홈 가장자리) | 홈의 튀어나온 능선 | `measurement.profile_groove.v1` |
+| `technique_groove_trough` | 간선 (홈 바닥) | 홈의 들어간 골 | `measurement.profile_groove.v1` |
+| `center_axis` | 중심선 | 회전축·대칭축의 일점쇄선 | `rotation_axis_from_circle_records/v1` Align (record가 아니라 정치의 결과) |
+
+목리조정흔·지두흔·타날흔·테쌓기흔·물손질흔은 아직 만드는 record가 없어 어휘에 없다. 기법 record(`annotation.technique.v1`)가 생기면 그때 함께 들어간다.
 
 새 선 종류는 **그것을 실제로 만들어내는 것이 생긴 뒤에** 추가한다. 만들 수 없는 종류를 먼저 이름 붙이면 모든 도면에 빈 레이어가 생기고, preset이 아무도 지키지 않는 관례를 서술하게 된다.
 
@@ -40,6 +42,17 @@ record의 role 이름(`section`, `exterior`, `hole`)은 payload 해시의 일부
 상태 선 종류는 외형선 뒤, 중심축 앞에 놓았다. 자기가 설명하는 형태 위에 그려져야 하고, 구조선인 중심축은 그 모두 위에서 읽혀야 한다. 상태 넷 안에서는 면 성격의 셋(`missing` · `restored` · `worn`)이 먼저이고 `condition_crack`이 마지막이다. 균열은 유물 위의 선이고, 면 밑에 깔린 선은 독자가 잃어버린다.
 
 ---
+
+## 사용자 굵기 - pt 또는 mm로 직접 넣기
+
+보고서 양식은 굵기를 숫자로 말한다: 외선 0.5 pt, 단면선 0.8 pt. 프로그램의 일은 그 숫자를 그리는 것이지 따지는 것이 아니다. `user_preset({"outline_visible": pt_to_mm(0.5), ...})`는 잠정 preset의 파선·해칭은 그대로 두고(종류가 서로 구분되어야 하니까) 굵기만 바꾼 preset을 만든다.
+
+- **이름은 내용이다.** preset id는 `user/` + 표 전체의 canonical SHA-256 앞 12자리. 같은 굵기는 언제나 같은 preset이고, 다른 굵기는 다른 preset이다.
+- **정의가 함께 간다.** 등록된 preset은 id와 digest만 기록하지만, 사용자 preset은 어떤 registry에도 없으므로 도판 sidecar(`style_preset.definition`)와 벡터 sidecar(`presentation.style_preset.definition`, 1.3.0부터)에 표 전체가 들어간다. 검증기는 그 정의를 다시 세워 digest·id·출처를 맞춘다. 정의를 고치면 digest가 어긋나 거부된다.
+- **잠정이다.** 사용자가 정한 값도 공개 지침이 뒷받침하는 관례는 아니므로 `provisional: true`, `source_id: "user"`로 기록된다.
+- **단위는 입력에서만.** 1 pt = 25.4/72 mm. 저장·기록·계약은 언제나 종이 mm다.
+
+앱에서는 벡터 내보내기 항목 아래 "선 굵기 (사용자 지정)" 표에 단위(pt/mm)를 골라 종류별 굵기를 넣고, 벡터 내보내기의 "선 종류"와 도판의 "선"에서 "사용자 지정 굵기"를 고른다. 표는 mm로 저장되어 다음 실행에도 남는다.
 
 ## preset과 출처
 

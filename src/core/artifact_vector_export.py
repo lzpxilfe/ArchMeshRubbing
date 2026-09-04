@@ -52,7 +52,10 @@ from .drawing_style import (
     TECHNIQUE_GROOVE_EDGE,
     TECHNIQUE_GROOVE_TROUGH,
     DrawingStyleError,
-    get_preset as get_drawing_style_preset,
+    DrawingStylePreset,
+    preset_claim as drawing_style_preset_claim,
+    preset_from_claim as drawing_style_preset_from_claim,
+    resolve_preset as resolve_drawing_style_preset,
     line_kind_for_record_role,
 )
 from .drawing_svg import (
@@ -103,13 +106,17 @@ from .source_identity import PRIMARY_FILE_IDENTITY_SCOPE
 
 
 VECTOR_EXPORT_FORMAT = "archmeshrubbing_vector_export"
-_CURRENT_VECTOR_EXPORT_SCHEMA_VERSION = "1.2.0"
+_CURRENT_VECTOR_EXPORT_SCHEMA_VERSION = "1.3.0"
 VECTOR_EXPORT_SCHEMA_VERSION = _CURRENT_VECTOR_EXPORT_SCHEMA_VERSION
 #: 1.1.0 introduced the current provenance contract (import admission, axis
 #: Align); 1.2.0 is 1.1.0 plus outline algorithm 1.1.0 - the grid closing -
-#: and its four QC keys.  Both carry the current contract; 1.0.0 is legacy.
-_CURRENT_CONTRACT_VECTOR_EXPORT_SCHEMA_VERSIONS = frozenset({"1.1.0", "1.2.0"})
-SUPPORTED_VECTOR_EXPORT_SCHEMA_VERSIONS = frozenset({"1.0.0", "1.1.0", "1.2.0"})
+#: and its four QC keys; 1.3.0 is 1.2.0 plus a user drawing style preset's
+#: definition in the presentation claim.  All three carry the current
+#: contract; 1.0.0 is legacy.
+_CURRENT_CONTRACT_VECTOR_EXPORT_SCHEMA_VERSIONS = frozenset({"1.1.0", "1.2.0", "1.3.0"})
+#: The sidecars that can carry an outline computed with the grid closing.
+_GRID_CLOSING_VECTOR_EXPORT_SCHEMA_VERSIONS = frozenset({"1.2.0", "1.3.0"})
+SUPPORTED_VECTOR_EXPORT_SCHEMA_VERSIONS = frozenset({"1.0.0", "1.1.0", "1.2.0", "1.3.0"})
 VECTOR_EXPORT_DIRECTORY_SUFFIX = ".amr-vector"
 VECTOR_EXPORT_SVG_NAME = "artifact.svg"
 VECTOR_EXPORT_SIDECAR_NAME = "artifact.amr-vector.json"
@@ -427,8 +434,8 @@ class VectorSVGOptions:
     stroke_width_mm: float = 0.2
     stroke_color: str = "#111111"
     title: str = "ArchMeshRubbing measured vector"
-    style_preset: str | None = None
-    """Drawing style preset id, or `None` for the single-weight drawing.
+    style_preset: str | DrawingStylePreset | None = None
+    """Drawing style preset id or preset, or `None` for the single-weight drawing.
 
     `None` is the default deliberately.  A drawing exported before presets
     existed must keep rendering to the same bytes, or every package already
@@ -478,9 +485,8 @@ class VectorSVGOptions:
         object.__setattr__(self, "stroke_color", color.lower())
         object.__setattr__(self, "title", title)
         if self.style_preset is not None:
-            preset_id = _required_string(self.style_preset, field_name="style_preset")
             try:
-                preset = get_drawing_style_preset(preset_id)
+                preset = resolve_drawing_style_preset(self.style_preset)
             except DrawingStyleError as exc:
                 raise ArtifactVectorExportError(str(exc)) from exc
             # A layer's own weight replaces the single stroke width, so the
@@ -491,9 +497,13 @@ class VectorSVGOptions:
             if margin < widest / 2.0:
                 raise ArtifactVectorExportError(
                     f"margin_mm must be at least half of the widest stroke in "
-                    f"preset {preset_id!r} ({widest} mm) to prevent clipping"
+                    f"preset {preset.preset_id!r} ({widest} mm) to prevent clipping"
                 )
-            object.__setattr__(self, "style_preset", preset_id)
+            # A registered preset stays a name; a user preset is kept whole,
+            # since nothing else could resolve it again.
+            object.__setattr__(
+                self, "style_preset", preset if preset.is_user else preset.preset_id
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1100,7 +1110,7 @@ def _styled_layers(
     """Return the drawing body as one group per line kind."""
 
     assert options.style_preset is not None
-    preset = get_drawing_style_preset(options.style_preset)
+    preset = resolve_drawing_style_preset(options.style_preset)
     by_kind = _paths_by_line_kind(payload, center_axis=options.show_center_axis)
     hatched = hatched_kinds(by_kind, preset=preset)
 
@@ -1220,13 +1230,8 @@ def _presentation(
     if options.style_preset is not None:
         # Recorded only for a styled drawing, so an unstyled sidecar keeps the
         # exact key set and exact bytes it had before presets existed.
-        preset = get_drawing_style_preset(options.style_preset)
-        presentation["style_preset"] = {
-            "preset_id": preset.preset_id,
-            "provisional": preset.provisional,
-            "sha256": preset.sha256(),
-            "source_id": preset.source_id,
-        }
+        preset = resolve_drawing_style_preset(options.style_preset)
+        presentation["style_preset"] = drawing_style_preset_claim(preset)
         presentation["show_center_axis"] = options.show_center_axis
     return presentation
 
@@ -1358,43 +1363,36 @@ def _validated_sidecar_payload(
     return payload
 
 
-def _validated_style_preset(value: object) -> str:
-    """Return the preset id a styled sidecar names, proving it still resolves.
+def _validated_style_preset(
+    value: object, *, schema_version: str
+) -> "str | DrawingStylePreset":
+    """Return the preset a styled sidecar claims, proving it still holds.
 
     The sidecar records the preset's canonical digest, so a preset whose values
     were edited after the drawing was made is caught here rather than silently
-    re-rendering the drawing with different line weights.
+    re-rendering the drawing with different line weights.  A user preset
+    carries its full definition, which only a 1.3.0 sidecar can hold.
     """
 
-    claim = _exact_keys(
-        value,
-        {"preset_id", "provisional", "sha256", "source_id"},
-        model_name="presentation.style_preset",
-    )
-    preset_id = _required_string(
-        claim["preset_id"], field_name="presentation.style_preset.preset_id"
-    )
+    if (
+        isinstance(value, Mapping)
+        and "definition" in value
+        and schema_version != _CURRENT_VECTOR_EXPORT_SCHEMA_VERSION
+    ):
+        raise ArtifactVectorExportError(
+            f"a vector export before {_CURRENT_VECTOR_EXPORT_SCHEMA_VERSION} cannot "
+            "carry a user drawing style preset"
+        )
     try:
-        preset = get_drawing_style_preset(preset_id)
+        preset = drawing_style_preset_from_claim(value)
     except DrawingStyleError as exc:
         raise ArtifactVectorExportError(str(exc)) from exc
-    if claim["sha256"] != preset.sha256():
-        raise ArtifactVectorExportError(
-            f"drawing style preset {preset_id!r} no longer matches the digest "
-            "recorded with this drawing"
-        )
-    if claim["provisional"] is not preset.provisional:
-        raise ArtifactVectorExportError(
-            f"drawing style preset {preset_id!r} disagrees about being provisional"
-        )
-    if claim["source_id"] != preset.source_id:
-        raise ArtifactVectorExportError(
-            f"drawing style preset {preset_id!r} disagrees about its source"
-        )
-    return preset_id
+    return preset if preset.is_user else preset.preset_id
 
 
-def _options_from_presentation(value: object) -> tuple[VectorSVGOptions, Mapping[str, Any]]:
+def _options_from_presentation(
+    value: object, *, schema_version: str = _CURRENT_VECTOR_EXPORT_SCHEMA_VERSION
+) -> tuple[VectorSVGOptions, Mapping[str, Any]]:
     base_keys = {
         "content_bounds_mm",
         "height_mm",
@@ -1418,7 +1416,11 @@ def _options_from_presentation(value: object) -> tuple[VectorSVGOptions, Mapping
     if presentation["physical_scale"] != "1:1" or presentation["unit"] != "mm":
         raise ArtifactVectorExportError("presentation must declare 1:1 millimetres")
     style_preset = (
-        _validated_style_preset(presentation["style_preset"]) if styled else None
+        _validated_style_preset(
+            presentation["style_preset"], schema_version=schema_version
+        )
+        if styled
+        else None
     )
     show_center_axis = bool(presentation["show_center_axis"]) if styled else False
     if styled and not isinstance(presentation["show_center_axis"], bool):
@@ -2339,10 +2341,10 @@ def _validate_current_record_qc(
         and is_production
         and algorithm_version == OUTLINE_ALGORITHM_VERSION
     )
-    if closing and schema_version != _CURRENT_VECTOR_EXPORT_SCHEMA_VERSION:
+    if closing and schema_version not in _GRID_CLOSING_VECTOR_EXPORT_SCHEMA_VERSIONS:
         raise ArtifactVectorExportError(
-            f"a vector export before {_CURRENT_VECTOR_EXPORT_SCHEMA_VERSION} cannot "
-            f"carry an outline computed with grid closing"
+            "a vector export before 1.2.0 cannot carry an outline computed with "
+            "grid closing"
         )
     optional_keys = (
         _CUTLINE_RECORD_QC_KEYS
@@ -2830,7 +2832,9 @@ def validate_vector_export_bytes(
     )
     claims_sha256 = _sidecar_claims_sha256(sidecar)
 
-    options, presentation = _options_from_presentation(sidecar["presentation"])
+    options, presentation = _options_from_presentation(
+        sidecar["presentation"], schema_version=schema_version
+    )
     expected_svg, expected_bounds, expected_width, expected_height = _render_svg(
         payload,
         options=options,

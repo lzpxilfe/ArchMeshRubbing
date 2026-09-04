@@ -299,7 +299,7 @@ def test_a_styled_sidecar_validates_against_the_shipped_schema() -> None:
         ]
     )
     export_schema = json.loads(
-        (root / "schemas/vector_export-1.2.0.schema.json").read_text(encoding="utf-8")
+        (root / "schemas/vector_export-1.3.0.schema.json").read_text(encoding="utf-8")
     )
     validator = jsonschema.Draft202012Validator(export_schema, registry=registry)
 

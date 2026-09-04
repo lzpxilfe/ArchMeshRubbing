@@ -35,7 +35,7 @@ def test_complete_workflow_self_test_has_deterministic_offline_receipts() -> Non
     assert (result.vector_export_count, result.rubbing_export_count) == (9, 6)
     assert (result.tile_unwrap_count, result.tile_unwrap_export_count) == (1, 1)
     assert result.vector_set_sha256 == (
-        "72179657e8926a1ba4feec6a62c5a05b57f7b2e19e56931b184442c3114273aa"
+        "520cad387e3901ca15f851eb06e64e8b3a28de9e6ee19eff580359cbcc75276f"
     )
     assert result.rubbing_set_sha256 == (
         "11684a56c60aedf5e2efaa0f5a5f89df2cebcce3760509f65dc18eeacf25e918"
@@ -55,10 +55,10 @@ def test_complete_workflow_self_test_has_deterministic_offline_receipts() -> Non
         == result.tile_unwrap_export_sha256
     )
     assert result.survey_manifest_sha256 == (
-        "fd9aae01f3b980c0f904c7a2bee079ef0b3813a2eca98a4d468733e744c9b951"
+        "1bcc3b85df21f1415fba02638764364ee19b27ecb6da1d59ff196b37b7b3a928"
     )
     assert result.survey_artifact_set_sha256 == (
-        "0eeb92c924187cd00f9fd3ed0d22ab37ea9dfa47de7d53cc8645505f5569b4d6"
+        "8e32fb283e3bf13eb2a72f8fc2ba220c8df2e91c6b1a9def7aa367456226a491"
     )
     for digest in (
         result.document_sha256,
@@ -75,7 +75,7 @@ def test_complete_workflow_self_test_has_deterministic_offline_receipts() -> Non
         assert set(digest) <= set("0123456789abcdef")
     assert result.field_pilot_contract == "artifact-pass-human-driver-pending"
     assert result.svg_sha256 == (
-        "61ddf9dda7e7d001626b5cd5540fb7e0dc0252d2cfec1f417cd8ea44575f64e0"
+        "7dcd665fe211d0eb5e9ce4b5a3e903c57685e194bbf23a52eb664119e29503eb"
     )
     assert result.png_sha256 == (
         "c0a391b54b1d535dda3956bbbb14efe14d76449bc8fdaccd9b05397d0bbf9b44"
@@ -120,7 +120,7 @@ def test_complete_workflow_accepts_explicit_committed_directory_fsync_warning(
 
     assert result.record_count == 18
     assert result.survey_manifest_sha256 == (
-        "fd9aae01f3b980c0f904c7a2bee079ef0b3813a2eca98a4d468733e744c9b951"
+        "1bcc3b85df21f1415fba02638764364ee19b27ecb6da1d59ff196b37b7b3a928"
     )
     assert (
         result.tile_unwrap_sha256
