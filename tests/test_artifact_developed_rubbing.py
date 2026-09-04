@@ -30,6 +30,7 @@ from src.application.artifact_workbench import (
 )
 from src.core.artifact_developed_rubbing import (
     ARTBOARD_DEVELOPMENT_BOUNDS,
+    ARTBOARD_HEIGHT_PROFILE_BANDS,
     ARTBOARD_LARGEST_COVERED_RECTANGLE,
     DEVELOPED_RUBBING_RECORD_TYPE,
     ArtifactDevelopedRubbingError,
@@ -59,10 +60,12 @@ from src.core.artifact_rubbing_export import (
 from src.core.artifact_rubbing_extractor import (
     MAX_RUBBING_PAPER_TONE_PERCENT,
     RECESS_TONE_RETAINED_PERCENT,
+    RELIEF_MODEL_CONTACT,
     DigitalRubbingRaster,
 )
 from src.core.artifact_session import ArtifactSession
 from src.core.drawing_sheet import (
+    DrawingSheetError,
     DrawingSheetOptions,
     TitleBlock,
     compose_drawing_sheet,
@@ -711,3 +714,291 @@ def test_the_wash_is_refused_outside_its_range(corded: ArtifactSession) -> None:
             ArtifactDevelopedRubbingError, match="paper_tone_percent"
         ):
             _rubbing(corded, paper_tone_percent=value)
+
+
+def test_the_record_says_what_heights_its_artboard_was_taken_from(
+    corded: ArtifactSession,
+) -> None:
+    """A strip is pasted back at the height it came from, so the record has
+    to say what that height is, row by row up the artboard."""
+
+    qc = _rubbing(corded).qc_dict()
+    profile = qc["artboard_height_profile_um"]
+
+    assert qc["artboard_base_height_um"] == profile[0]
+    assert qc["artboard_top_height_um"] == profile[-1]
+    assert profile == sorted(profile)
+    assert len(profile) == ARTBOARD_HEIGHT_PROFILE_BANDS + 1
+    # Positioning puts the origin on the measured floor, ten millimetres up
+    # the outer wall, so the strip's bottom row sits just above -10 mm and its
+    # top row just below the 80 mm rim; the paper between them is longer than
+    # that span because the wall bulges.
+    assert -10_500 < profile[0] < -9_000
+    assert 79_000 < profile[-1] < 80_000
+    raster = _rubbing(corded).raster
+    paper_um = raster.height_pixels * 1_000_000 // raster.pixels_per_meter
+    assert paper_um > profile[-1] - profile[0]
+
+
+def _axis_sheet_session(corded: ArtifactSession) -> tuple[ArtifactSession, Any]:
+    from src.core.artifact_outline_extractor import compute_artifact_outline
+    from src.core.artifact_vector_extractor import (
+        commit_vector_computation,
+        compute_artifact_cutline,
+    )
+    from src.core.artifact_vector_record import PlanarFrame
+
+    session = corded
+    outline = compute_artifact_outline(session, "front", precision_grid_mm=0.02)
+    session = commit_vector_computation(
+        session, outline, record_id="record:elevation:front",
+        created_at=STAMP, operator="tester",
+    )
+    cutline = compute_artifact_cutline(
+        session,
+        PlanarFrame(
+            origin_world_mm=(0.0, 0.0, 0.0),
+            u_axis_world=(1.0, 0.0, 0.0),
+            v_axis_world=(0.0, 0.0, 1.0),
+            normal_world=(0.0, -1.0, 0.0),
+        ),
+    )
+    session = commit_vector_computation(
+        session, cutline, record_id="record:section:front",
+        created_at=STAMP, operator="tester",
+    )
+    computation = _rubbing(session, relief_polarity="raised", paper_tone_percent=20)
+    session = commit_developed_rubbing(
+        session, computation, record_id="record:rubbing:axis",
+        created_at=STAMP, operator="tester",
+    )
+    return session, computation
+
+
+@pytest.fixture(scope="module")
+def axis_sheet(corded: ArtifactSession) -> tuple[ArtifactSession, Any]:
+    return _axis_sheet_session(corded)
+
+
+def _axis_options(**overrides: Any) -> DrawingSheetOptions:
+    base: dict[str, Any] = {
+        "title_block": TitleBlock(artifact_label="시험 토기", rows=()),
+        "mirror_sections": (("record:elevation:front", "record:section:front"),),
+        "rubbings_on_axis": (("record:rubbing:axis", "record:elevation:front"),),
+    }
+    base.update(overrides)
+    return DrawingSheetOptions(**base)
+
+
+def test_the_strip_is_pasted_flush_against_the_centre_line(
+    axis_sheet: tuple[ArtifactSession, Any],
+) -> None:
+    """The pottery convention: one edge of the rectangle exactly on the axis,
+    on the elevation side, each band at the height it was taken from."""
+
+    session, computation = axis_sheet
+    bundle = compose_drawing_sheet(
+        session.document,
+        ["record:elevation:front"],
+        options=_axis_options(),
+        rasters={"record:rubbing:axis": computation.raster},
+    )
+    validate_drawing_sheet_bytes(bundle.svg_bytes, bundle.sidecar_bytes)
+    svg = bundle.svg_bytes.decode("utf-8")
+    sidecar = json.loads(bundle.sidecar_bytes.decode("utf-8"))
+
+    # One figure carries everything: the elevation, the section, the paper.
+    assert len(sidecar["figures"]) == 1
+    pasted = sidecar["figures"][0]["rubbing_on_axis"]
+    assert pasted["record_id"] == "record:rubbing:axis"
+    assert pasted["raster_sha256"] == computation.raster.raster_sha256
+    assert pasted["fit"] == "paper"
+    assert pasted["side"] == "elevation"
+    left, bottom, right, top = pasted["rectangle_mm"]
+    # The axis of the front frame is u = 0; the paper ends on it and extends
+    # towards the elevation side, at its own width and its own length.
+    assert right == 0.0
+    assert left == pytest.approx(-computation.raster.width_pixels / 10.0)
+    qc = computation.qc_dict()
+    assert bottom == pytest.approx(qc["artboard_base_height_um"] / 1000.0)
+    assert top - bottom == pytest.approx(computation.raster.height_pixels / 10.0)
+    assert top > qc["artboard_top_height_um"] / 1000.0
+    # Pixels are embedded once and pasted whole.
+    assert svg.count("data:image/png;base64,") == 1
+    assert svg.count('<use xlink:href="#rubbing-on-axis-0000-pixels"/>') == 1
+    # The centre line is drawn back over the paper.
+    assert svg.index("rubbing-on-axis-0000-band-00") < svg.index(
+        'id="layer-center-axis"'
+    )
+    assert sidecar["rubbings_on_axis"] == [
+        {
+            "figure_record_id": "record:elevation:front",
+            "rubbing_record_id": "record:rubbing:axis",
+        }
+    ]
+
+
+def test_the_height_fit_pastes_each_band_where_it_was_taken(
+    axis_sheet: tuple[ArtifactSession, Any],
+) -> None:
+    """The alternative for a reader who wants the rubbing's grooves level with
+    the elevation's lines: bands, each at its own height, off by default."""
+
+    session, computation = axis_sheet
+    bundle = compose_drawing_sheet(
+        session.document,
+        ["record:elevation:front"],
+        options=_axis_options(rubbing_on_axis_fit="axis_height"),
+        rasters={"record:rubbing:axis": computation.raster},
+    )
+    validate_drawing_sheet_bytes(bundle.svg_bytes, bundle.sidecar_bytes)
+    pasted = json.loads(bundle.sidecar_bytes.decode("utf-8"))["figures"][0][
+        "rubbing_on_axis"
+    ]
+    left, bottom, right, top = pasted["rectangle_mm"]
+    qc = computation.qc_dict()
+    assert pasted["fit"] == "axis_height"
+    assert len(pasted["band_heights_mm"]) == ARTBOARD_HEIGHT_PROFILE_BANDS + 1
+    assert top == pytest.approx(qc["artboard_top_height_um"] / 1000.0)
+    assert top - bottom < computation.raster.height_pixels / 10.0
+    assert bundle.svg_bytes.decode("utf-8").count("<use xlink:href=") == (
+        ARTBOARD_HEIGHT_PROFILE_BANDS
+    )
+
+
+def test_a_pasted_rubbing_is_not_also_a_figure(
+    axis_sheet: tuple[ArtifactSession, Any],
+) -> None:
+    session, computation = axis_sheet
+    with pytest.raises(DrawingSheetError, match="must not also be a figure"):
+        compose_drawing_sheet(
+            session.document,
+            ["record:elevation:front", "record:rubbing:axis"],
+            options=_axis_options(),
+            rasters={"record:rubbing:axis": computation.raster},
+        )
+    with pytest.raises(DrawingSheetError, match="recomputed raster must be given"):
+        compose_drawing_sheet(
+            session.document,
+            ["record:elevation:front"],
+            options=_axis_options(),
+        )
+    with pytest.raises(DrawingSheetError, match="rubbing_on_axis_fit"):
+        _axis_options(rubbing_on_axis_fit="stretch")
+
+
+def test_a_rubbing_computed_before_heights_were_recorded_is_refused(
+    axis_sheet: tuple[ArtifactSession, Any],
+) -> None:
+    """An older record has no way to say where it goes; the sheet says so
+    rather than guessing a height."""
+
+    from dataclasses import replace
+
+    session, computation = axis_sheet
+    record = session.document.record_index["record:rubbing:axis"]
+    stale_qc = {
+        key: value
+        for key, value in record.qc.items()
+        if not key.startswith("artboard_") or key.endswith("_pixels")
+    }
+    older = replace(record, qc=stale_qc)
+    document = replace(
+        session.document,
+        records=tuple(
+            older if item.id == record.id else item for item in session.document.records
+        ),
+    )
+    with pytest.raises(DrawingSheetError, match="compute the rubbing again"):
+        compose_drawing_sheet(
+            document,
+            ["record:elevation:front"],
+            options=_axis_options(),
+            rasters={"record:rubbing:axis": computation.raster},
+        )
+
+
+CONTACT: dict[str, Any] = {
+    "relief_model": RELIEF_MODEL_CONTACT,
+    "reference_radius_um": 700,
+    "black_point_um": 120,
+    "contact_ink_percent": 70,
+    "relief_polarity": "raised",
+    "paper_tone_percent": 0,
+}
+
+
+def test_the_contact_model_inks_a_plain_wall_evenly(plain: ArtifactSession) -> None:
+    """Paper pressed onto a plain wall lies on all of it, so all of it takes
+    the contact tone - no wash, no shading from the wall's own curvature."""
+
+    raster = _rubbing(plain, **CONTACT).raster
+    interior = raster.pixels[80:-80, 40:-40, 0].astype(np.int64)
+    contact_level = (255 * 70 + 50) // 100
+    # The darkest tone anywhere is the contact tone, and everything is within
+    # a facet of it.  This synthetic wall is a 96-gon, so between two vertex
+    # rings the paper bridges a chord 21 um below the true circle, which the
+    # contact model reads faithfully as a hair less ink; a real scan is not
+    # faceted.  What must not appear is a gradient: no tone farther from the
+    # contact tone than that sag is worth.
+    assert int(interior.min()) == 255 - contact_level
+    assert int(interior.max()) - int(interior.min()) <= 20
+    assert int(np.percentile(interior, 99)) - int(np.percentile(interior, 1)) <= 20
+
+
+def test_the_contact_model_leaves_an_incised_line_white(corded: ArtifactSession) -> None:
+    """The paper bridges a groove, so the groove's floor is where the ink is
+    not - a light line on a dark ground, which is what a rubbing of a groove
+    looks like, and the reverse of what the local-mean shading gave it."""
+
+    contact = _rubbing(corded, **CONTACT).raster
+    shaded = _rubbing(corded, relief_polarity="raised").raster
+    grey_contact = contact.pixels[:, :, 0].astype(np.int64)
+    grey_shaded = shaded.pixels[:, :, 0].astype(np.int64)
+    # The groove is cut at z = 45 mm on the builder's scale, 35 mm canonical;
+    # find the raster rows lightest under the contact model in the middle
+    # third of the strip, and check they are the same rows the shading model
+    # darkened around.
+    middle = slice(contact.width_pixels // 3, 2 * contact.width_pixels // 3)
+    contact_rows = grey_contact[:, middle].mean(axis=1)
+    shaded_rows = grey_shaded[:, middle].mean(axis=1)
+    lightest = int(np.argmax(contact_rows[80:-80])) + 80
+    wall = int(np.median(contact_rows))
+    assert contact_rows[lightest] > wall + 60
+    # The shading model reads the wall beside the groove as raised: dark.
+    assert shaded_rows[lightest - 12 : lightest + 12].min() < np.median(shaded_rows) - 20
+
+
+def test_the_contact_model_inks_a_cord_on_its_ridge_only(corded: ArtifactSession) -> None:
+    raster = _rubbing(corded, **CONTACT).raster
+    grey = raster.pixels[:, :, 0].astype(np.int64)
+    band = grey[100:300, 40:-40]
+    contact_level = (255 * 70 + 50) // 100
+    # Ridges lie on the paper and take the contact tone (a facet's sag over
+    # it); the valleys between them do not reach the paper and go to white.
+    assert int(band.min()) == 255 - contact_level
+    assert int(np.percentile(band, 10)) <= 255 - contact_level + 20
+    assert int(np.percentile(band, 90)) >= 200
+    assert int(band.max()) == 255
+
+
+def test_the_contact_model_is_its_own_recipe_and_older_recipes_stay_shading(
+    corded: ArtifactSession,
+) -> None:
+    shaded = _rubbing(corded, relief_polarity="raised")
+    relief = shaded.recipe_dict()["relief_policy"]
+    assert "model" not in relief
+    assert "contact_ink_percent" not in relief
+
+    contact = _rubbing(corded, **CONTACT)
+    relief = contact.recipe_dict()["relief_policy"]
+    assert relief["model"] == RELIEF_MODEL_CONTACT
+    assert relief["contact_ink_percent"] == 70
+    assert relief["contact_ink_level"] == (255 * 70 + 50) // 100
+    assert relief["envelope_filter"] == "masked_square_local_max/v1"
+    replayed = compute_developed_rubbing_from_recipe(corded, contact.recipe_dict())
+    assert replayed.raster.raster_sha256 == contact.raster.raster_sha256
+    assert replayed.raster.raster_sha256 != shaded.raster.raster_sha256
+
+    with pytest.raises(ArtifactDevelopedRubbingError, match="one side"):
+        _rubbing(corded, **{**CONTACT, "relief_polarity": "bidirectional"})

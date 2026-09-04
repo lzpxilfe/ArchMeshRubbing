@@ -39,7 +39,10 @@ from .artifact_document import (
 )
 from .artifact_rubbing_extractor import (
     ArtifactRubbingError,
+    DEFAULT_RUBBING_CONTACT_INK_PERCENT,
+    DEFAULT_RUBBING_INK_GAMMA,
     DEFAULT_RUBBING_PAPER_TONE_PERCENT,
+    DEFAULT_RUBBING_RELIEF_MODEL,
     DigitalRubbingResourceEstimate,
     MAX_RUBBING_DIMENSION,
     MAX_RUBBING_GRID_INDEX,
@@ -88,6 +91,9 @@ DEVELOPED_RUBBING_DEPTH_MEASURE = "radius_about_unrolling_centre/v1"
 # full development stays available.
 ARTBOARD_LARGEST_COVERED_RECTANGLE = "largest_covered_rectangle/v1"
 ARTBOARD_DEVELOPMENT_BOUNDS = "development_bounds_plus_margin/v1"
+# How many bands the artboard's height profile is sampled in.  Sixteen keeps
+# the within-band error second order on any pot profile a strip is cut from.
+ARTBOARD_HEIGHT_PROFILE_BANDS = 16
 ARTBOARD_POLICIES = (
     ARTBOARD_DEVELOPMENT_BOUNDS,
     ARTBOARD_LARGEST_COVERED_RECTANGLE,
@@ -168,6 +174,9 @@ def developed_rubbing_recipe(
     ink_strength_percent: int,
     relief_polarity: str,
     paper_tone_percent: int = DEFAULT_RUBBING_PAPER_TONE_PERCENT,
+    ink_gamma: int = DEFAULT_RUBBING_INK_GAMMA,
+    relief_model: str = DEFAULT_RUBBING_RELIEF_MODEL,
+    contact_ink_percent: int = DEFAULT_RUBBING_CONTACT_INK_PERCENT,
     artboard_policy: str = ARTBOARD_LARGEST_COVERED_RECTANGLE,
 ) -> dict[str, Any]:
     """Resolve every option before context capture, naming the development."""
@@ -186,6 +195,9 @@ def developed_rubbing_recipe(
             ink_strength_percent=ink_strength_percent,
             relief_polarity=relief_polarity,
             paper_tone_percent=paper_tone_percent,
+            ink_gamma=ink_gamma,
+            relief_model=relief_model,
+            contact_ink_percent=contact_ink_percent,
         )
     except ArtifactRubbingError as exc:
         raise ArtifactDevelopedRubbingError(str(exc)) from exc
@@ -263,6 +275,15 @@ def validate_developed_rubbing_recipe(recipe: Mapping[str, Any]) -> dict[str, An
         relief_polarity=relief_policy.get("polarity"),  # type: ignore[arg-type]
         paper_tone_percent=relief_policy.get(  # type: ignore[arg-type]
             "paper_tone_percent", DEFAULT_RUBBING_PAPER_TONE_PERCENT
+        ),
+        ink_gamma=relief_policy.get(  # type: ignore[arg-type]
+            "ink_gamma", DEFAULT_RUBBING_INK_GAMMA
+        ),
+        relief_model=relief_policy.get(  # type: ignore[arg-type]
+            "model", DEFAULT_RUBBING_RELIEF_MODEL
+        ),
+        contact_ink_percent=relief_policy.get(  # type: ignore[arg-type]
+            "contact_ink_percent", DEFAULT_RUBBING_CONTACT_INK_PERCENT
         ),
     )
     try:
@@ -604,9 +625,16 @@ def extract_developed_rubbing(
     radius_mm: object,
     recipe: Mapping[str, Any],
     *,
+    height_mm: object | None = None,
     cancellation_probe: CancellationProbe | None = None,
 ) -> tuple[DevelopedRubbingRaster, dict[str, Any]]:
-    """Draw the relief of ``radius_mm`` on the developed triangles of ``unwrap``."""
+    """Draw the relief of ``radius_mm`` on the developed triangles of ``unwrap``.
+
+    ``height_mm`` is each developed vertex's position along the unrolling
+    axis.  When it is given, the QC also says at what height on the artifact
+    the artboard's bottom and top rows sit, which is what lets a sheet paste
+    the rubbing beside the elevation at the place it was taken from.
+    """
 
     raise_if_cancelled(cancellation_probe)
     validated = validate_developed_rubbing_recipe(recipe)
@@ -621,6 +649,15 @@ def extract_developed_rubbing(
         raise ArtifactDevelopedRubbingError(
             "development radius contains non-finite values"
         )
+    heights: np.ndarray | None = None
+    if height_mm is not None:
+        heights = np.asarray(height_mm, dtype=np.float64)
+        if heights.shape != (unwrap.vertex_count,) or not bool(
+            np.isfinite(heights).all()
+        ):
+            raise ArtifactDevelopedRubbingError(
+                "development height must carry one finite value per developed vertex"
+            )
     development = validated["development"]
     pixel_policy = validated["pixel_policy"]
     depth_policy = validated["depth_policy"]
@@ -657,6 +694,9 @@ def extract_developed_rubbing(
                 relief_policy["minimum_reference_sample_count"]
             ),
             paper_tone_level=int(relief_policy.get("paper_tone_level", 0)),
+            ink_gamma=int(relief_policy.get("ink_gamma", DEFAULT_RUBBING_INK_GAMMA)),
+            relief_model=str(relief_policy.get("model", DEFAULT_RUBBING_RELIEF_MODEL)),
+            contact_ink_level=int(relief_policy.get("contact_ink_level", 0)),
             cancellation_probe=cancellation_probe,
         )
     except ArtifactRubbingError as exc:
@@ -713,8 +753,31 @@ def extract_developed_rubbing(
         development_sha256=str(development["unwrap_sha256"]),
     )
     raise_if_cancelled(cancellation_probe)
+    placement: dict[str, Any] = {}
+    if heights is not None:
+        # On a surface unrolled about its axis, v is a function of the axial
+        # position alone - the meridian arc from the lowest station - so the
+        # height an artboard row sits at is read straight off that curve.
+        order = np.argsort(projected[:, 1], kind="stable")
+        v_sorted = projected[order, 1]
+        z_sorted = heights[order]
+        bottom_v = float(minimum_v) / float(pixels_per_mm)
+        top_v = float(minimum_v + raster.height_pixels) / float(pixels_per_mm)
+        # Sampled at evenly spaced rows from the bottom edge to the top edge,
+        # so a sheet can paste the paper in bands at the heights they came
+        # from as well as whole at its own length.
+        stations = np.linspace(bottom_v, top_v, ARTBOARD_HEIGHT_PROFILE_BANDS + 1)
+        profile = np.interp(stations, v_sorted, z_sorted)
+        placement = {
+            "artboard_base_height_um": int(round(float(profile[0]) * 1000.0)),
+            "artboard_height_profile_um": [
+                int(round(float(value) * 1000.0)) for value in profile
+            ],
+            "artboard_top_height_um": int(round(float(profile[-1]) * 1000.0)),
+        }
     qc = {
         "all_developed_faces_included": True,
+        **placement,
         "depth_measure": DEVELOPED_RUBBING_DEPTH_MEASURE,
         "development_face_count": unwrap.face_count,
         "development_vertex_count": unwrap.vertex_count,
@@ -797,6 +860,9 @@ def developed_rubbing_recipe_for_record(
     ink_strength_percent: int,
     relief_polarity: str,
     paper_tone_percent: int = DEFAULT_RUBBING_PAPER_TONE_PERCENT,
+    ink_gamma: int = DEFAULT_RUBBING_INK_GAMMA,
+    relief_model: str = DEFAULT_RUBBING_RELIEF_MODEL,
+    contact_ink_percent: int = DEFAULT_RUBBING_CONTACT_INK_PERCENT,
     artboard_policy: str = ARTBOARD_LARGEST_COVERED_RECTANGLE,
 ) -> dict[str, Any]:
     """Name a READY + FRESH development by hash and resolve the raster options."""
@@ -817,6 +883,9 @@ def developed_rubbing_recipe_for_record(
         ink_strength_percent=ink_strength_percent,
         relief_polarity=relief_polarity,
         paper_tone_percent=paper_tone_percent,
+        ink_gamma=ink_gamma,
+        relief_model=relief_model,
+        contact_ink_percent=contact_ink_percent,
         artboard_policy=artboard_policy,
     )
 
@@ -939,10 +1008,15 @@ def derive_developed_rubbing(
             "recomputed development payload does not match its record"
         )
     raise_if_cancelled(cancellation_probe)
+    axis_index = {"x": 0, "y": 1, "z": 2}[str(unwrap.axis)]
+    height = np.asarray(mesh.vertices, dtype=np.float64)[
+        np.asarray(unwrap.source_vertex_indices, dtype=np.int64), axis_index
+    ]
     raster, qc = extract_developed_rubbing(
         unwrap,
         radius,
         validated,
+        height_mm=height,
         cancellation_probe=cancellation_probe,
     )
     qc = {
@@ -1053,6 +1127,9 @@ def compute_developed_rubbing(
     ink_strength_percent: int,
     relief_polarity: str,
     paper_tone_percent: int = DEFAULT_RUBBING_PAPER_TONE_PERCENT,
+    ink_gamma: int = DEFAULT_RUBBING_INK_GAMMA,
+    relief_model: str = DEFAULT_RUBBING_RELIEF_MODEL,
+    contact_ink_percent: int = DEFAULT_RUBBING_CONTACT_INK_PERCENT,
     artboard_policy: str = ARTBOARD_LARGEST_COVERED_RECTANGLE,
     cancellation_probe: CancellationProbe | None = None,
 ) -> DevelopedRubbingComputation:
@@ -1070,6 +1147,9 @@ def compute_developed_rubbing(
         ink_strength_percent=ink_strength_percent,
         relief_polarity=relief_polarity,
         paper_tone_percent=paper_tone_percent,
+        ink_gamma=ink_gamma,
+        relief_model=relief_model,
+        contact_ink_percent=contact_ink_percent,
         artboard_policy=artboard_policy,
     )
     return _compute_with_recipe(session, recipe, cancellation_probe=cancellation_probe)

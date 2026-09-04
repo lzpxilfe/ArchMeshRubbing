@@ -59,6 +59,44 @@ MAX_RUBBING_PAPER_TONE_PERCENT = 60
 # it does reach it: a groove comes out lighter than the sheet, not white.  At a
 # full black point below the local mean the wash keeps this much of itself.
 RECESS_TONE_RETAINED_PERCENT = 50
+# How ink grows with height above the wash.  1 is proportional; higher values
+# hold the ink back until the surface actually stands up, the way a dabber
+# barely touches what is only just proud of the wall.  Integer so that the
+# curve stays exact: the normalised response is raised to this power in
+# integers and never through a float.
+DEFAULT_RUBBING_INK_GAMMA = 1
+RECOMMENDED_RUBBING_INK_GAMMA = 1
+MAX_RUBBING_INK_GAMMA = 4
+_INK_CURVE_STEPS = 4095
+
+# Two ways of turning relief into ink.
+#
+# ``local_mean_height`` is the one every earlier recipe used: ink grows with
+# how far a point stands above the mean of its neighbourhood.  It is a relief
+# shading, and it reads that way - a flat wall beside a groove stands above
+# the mean the groove pulled down, so the groove gets a grey halo, and shallow
+# curvature ramps into tone.
+#
+# ``contact_envelope`` is what a rubbing does.  The paper is pressed onto the
+# surface and conforms to it at about the scale of the reference window; the
+# dabber then inks the paper wherever it lies on the surface, and the ink
+# falls off with how far the surface sits below the paper.  So ink is
+# closeness to the local upper envelope of the detrended surface: a plain wall
+# takes the contact tone evenly, an incised line stays white, and a cord's
+# ridge takes ink while the valley between cords does not.
+RELIEF_MODEL_LOCAL_MEAN = "local_mean_height/v1"
+RELIEF_MODEL_CONTACT = "contact_envelope/v1"
+RELIEF_MODELS = (RELIEF_MODEL_LOCAL_MEAN, RELIEF_MODEL_CONTACT)
+DEFAULT_RUBBING_RELIEF_MODEL = RELIEF_MODEL_LOCAL_MEAN
+DEFAULT_RUBBING_CONTACT_INK_PERCENT = 70
+MAX_RUBBING_CONTACT_INK_PERCENT = 100
+# What the app offers for a rubbing on a developed pot surface.  Measured on
+# the corded and grooved synthetic profile: the paper conforms at about
+# 0.7 mm, the ink is gone 0.12 mm below the paper, and 70% contact ink leaves
+# a plain wall dark grey with the relief still readable inside it.
+RECOMMENDED_RUBBING_RELIEF_MODEL = RELIEF_MODEL_CONTACT
+RECOMMENDED_RUBBING_CONTACT_REFERENCE_RADIUS_UM = 700
+RECOMMENDED_RUBBING_CONTACT_BLACK_POINT_UM = 120
 
 MAX_RUBBING_VERTICES = 5_000_000
 MAX_RUBBING_FACES = 2_000_000
@@ -191,6 +229,9 @@ def rubbing_policy_blocks(
     ink_strength_percent: int,
     relief_polarity: str,
     paper_tone_percent: int = DEFAULT_RUBBING_PAPER_TONE_PERCENT,
+    ink_gamma: int = DEFAULT_RUBBING_INK_GAMMA,
+    relief_model: str = DEFAULT_RUBBING_RELIEF_MODEL,
+    contact_ink_percent: int = DEFAULT_RUBBING_CONTACT_INK_PERCENT,
 ) -> dict[str, Any]:
     """Resolve the physical/display options every rubbing raster shares.
 
@@ -241,6 +282,27 @@ def rubbing_policy_blocks(
         minimum=0,
         maximum=MAX_RUBBING_PAPER_TONE_PERCENT,
     )
+    gamma = _strict_int(
+        ink_gamma,
+        field_name="ink_gamma",
+        minimum=1,
+        maximum=MAX_RUBBING_INK_GAMMA,
+    )
+    if not isinstance(relief_model, str) or relief_model not in RELIEF_MODELS:
+        raise ArtifactRubbingError(
+            f"relief_model must be one of {', '.join(RELIEF_MODELS)}"
+        )
+    contact_ink = _strict_int(
+        contact_ink_percent,
+        field_name="contact_ink_percent",
+        minimum=1,
+        maximum=MAX_RUBBING_CONTACT_INK_PERCENT,
+    )
+    if relief_model == RELIEF_MODEL_CONTACT and polarity == "bidirectional":
+        raise ArtifactRubbingError(
+            "the contact model inks what the paper touches, which has one side; "
+            "use raised or incised polarity with it"
+        )
     margin_pixels = _ceil_div(margin * ppm, 1000)
     reference_radius_pixels = max(1, _ceil_div(radius_um * ppm, 1000))
     if reference_radius_pixels > MAX_RUBBING_REFERENCE_RADIUS_PIXELS:
@@ -270,6 +332,19 @@ def rubbing_policy_blocks(
         relief_policy["paper_tone_level"] = (255 * paper_tone + 50) // 100
         relief_policy["paper_tone_percent"] = paper_tone
         relief_policy["recess_tone_retained_percent"] = RECESS_TONE_RETAINED_PERCENT
+    if gamma != 1:
+        # Likewise absent when proportional, which is what every older recipe
+        # was.
+        relief_policy["ink_curve"] = "integer_power_of_normalised_response/v1"
+        relief_policy["ink_curve_steps"] = _INK_CURVE_STEPS
+        relief_policy["ink_gamma"] = gamma
+    if relief_model == RELIEF_MODEL_CONTACT:
+        # And absent for the local-mean model, which every older recipe is.
+        relief_policy["contact_ink_level"] = (255 * contact_ink + 50) // 100
+        relief_policy["contact_ink_percent"] = contact_ink
+        relief_policy["envelope_filter"] = "masked_square_local_max/v1"
+        relief_policy["model"] = relief_model
+        relief_policy["residual_rounding"] = "floor_half_up_integer/v1"
     return {
         "depth_policy": {
             "quantization_rounding": "nearest_ties_to_even/v1",
@@ -306,6 +381,9 @@ def rubbing_recipe(
     ink_strength_percent: int,
     relief_polarity: str,
     paper_tone_percent: int = DEFAULT_RUBBING_PAPER_TONE_PERCENT,
+    ink_gamma: int = DEFAULT_RUBBING_INK_GAMMA,
+    relief_model: str = DEFAULT_RUBBING_RELIEF_MODEL,
+    contact_ink_percent: int = DEFAULT_RUBBING_CONTACT_INK_PERCENT,
 ) -> dict[str, Any]:
     """Resolve every physical/display option before context capture."""
 
@@ -319,6 +397,9 @@ def rubbing_recipe(
         ink_strength_percent=ink_strength_percent,
         relief_polarity=relief_polarity,
         paper_tone_percent=paper_tone_percent,
+        ink_gamma=ink_gamma,
+        relief_model=relief_model,
+        contact_ink_percent=contact_ink_percent,
     )
     depth_policy = dict(blocks["depth_policy"])
     depth_policy["front_surface"] = "maximum_frame_normal_depth"
@@ -374,6 +455,15 @@ def validate_rubbing_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
         # before the dabber was modelled meant.
         paper_tone_percent=relief_policy.get(  # type: ignore[arg-type]
             "paper_tone_percent", DEFAULT_RUBBING_PAPER_TONE_PERCENT
+        ),
+        ink_gamma=relief_policy.get(  # type: ignore[arg-type]
+            "ink_gamma", DEFAULT_RUBBING_INK_GAMMA
+        ),
+        relief_model=relief_policy.get(  # type: ignore[arg-type]
+            "model", DEFAULT_RUBBING_RELIEF_MODEL
+        ),
+        contact_ink_percent=relief_policy.get(  # type: ignore[arg-type]
+            "contact_ink_percent", DEFAULT_RUBBING_CONTACT_INK_PERCENT
         ),
     )
     if canonical_recipe_hash(recipe) != canonical_recipe_hash(expected):
@@ -790,6 +880,144 @@ def _integral_image(
     return padded
 
 
+def _sliding_maximum(values: np.ndarray, *, radius: int) -> np.ndarray:
+    """The maximum over a centred (2r+1) square, by separable doubling.
+
+    Exact in integers: each pass takes the maximum of the array and a shifted
+    copy, so a window of any width is built from log2 of it passes and one
+    remainder pass.  Cells outside the array count as the smallest value.
+    """
+
+    result = values
+    width = 2 * radius + 1
+    sentinel = np.iinfo(np.int64).min // 2
+    for axis in (0, 1):
+        pad = [(0, 0), (0, 0)]
+        pad[axis] = (radius, radius)
+        padded = np.pad(result, pad, mode="constant", constant_values=sentinel)
+        # Forward-window maximum: after this, index i holds the maximum over
+        # padded[i : i + width], which is the centred window of original i.
+        block = padded
+        span = 1
+        while span * 2 <= width:
+            block = np.maximum(block, _shift_back(block, span, axis, sentinel))
+            span *= 2
+        rest = width - span
+        if rest:
+            block = np.maximum(block, _shift_back(block, rest, axis, sentinel))
+        slicer: list[slice] = [slice(None), slice(None)]
+        slicer[axis] = slice(0, values.shape[axis])
+        result = block[tuple(slicer)]
+    return result
+
+
+def _shift_back(block: np.ndarray, amount: int, axis: int, sentinel: int) -> np.ndarray:
+    """``block`` moved ``amount`` cells towards index 0 along ``axis``."""
+
+    shifted = np.full_like(block, sentinel)
+    if axis == 0:
+        shifted[:-amount, :] = block[amount:, :]
+    else:
+        shifted[:, :-amount] = block[:, amount:]
+    return shifted
+
+
+def _render_contact_relief(
+    depth_buffer: np.ndarray,
+    *,
+    depth_quantization_um: int,
+    reference_radius_pixels: int,
+    effective_black_point_ticks: int,
+    relief_polarity: str,
+    minimum_reference_sample_count: int,
+    contact_ink_level: int,
+    ink_gamma: int,
+    cancellation_probe: CancellationProbe | None,
+) -> tuple[np.ndarray, dict[str, int]]:
+    """Ink as closeness to the paper: the contact model described at the top."""
+
+    raise_if_cancelled(cancellation_probe)
+    covered = np.isfinite(depth_buffer)
+    covered_depths = depth_buffer[covered]
+    minimum_depth = float(np.min(covered_depths))
+    span_mm = float(np.max(covered_depths) - minimum_depth)
+    scaled = (depth_buffer[covered] - minimum_depth) * (
+        1000.0 / float(depth_quantization_um)
+    )
+    if not bool(np.isfinite(scaled).all()) or float(np.max(scaled)) > MAX_RUBBING_DEPTH_TICKS:
+        raise ArtifactRubbingError("rubbing depth span exceeds the quantized safety range")
+    height, width = int(depth_buffer.shape[0]), int(depth_buffer.shape[1])
+    ticks = np.zeros((height, width), dtype=np.int64)
+    ticks[covered] = np.rint(scaled).astype(np.int64)
+    maximum_tick = int(ticks[covered].max())
+    covered_count = int(np.count_nonzero(covered))
+    if maximum_tick * covered_count > MAX_RUBBING_INTEGRAL_SUM:
+        raise ArtifactRubbingError("rubbing integer integral would overflow")
+    raise_if_cancelled(cancellation_probe)
+
+    # Detrend against the same masked local mean the other model uses, so a
+    # sloping or curving wall is not read as standing below its own upper
+    # side; then read the paper as the local maximum of what is left.
+    sum_integral = _integral_image(ticks, cancellation_probe=cancellation_probe)
+    count_integral = _integral_image(
+        covered.astype(np.int64), cancellation_probe=cancellation_probe
+    )
+    ys = np.arange(height, dtype=np.int64)
+    xs = np.arange(width, dtype=np.int64)
+    y0 = np.maximum(0, ys - reference_radius_pixels)
+    y1 = np.minimum(height, ys + reference_radius_pixels + 1)
+    x0 = np.maximum(0, xs - reference_radius_pixels)
+    x1 = np.minimum(width, xs + reference_radius_pixels + 1)
+    window_sum = (
+        sum_integral[y1[:, None], x1[None, :]]
+        - sum_integral[y0[:, None], x1[None, :]]
+        - sum_integral[y1[:, None], x0[None, :]]
+        + sum_integral[y0[:, None], x0[None, :]]
+    )
+    window_count = (
+        count_integral[y1[:, None], x1[None, :]]
+        - count_integral[y0[:, None], x1[None, :]]
+        - count_integral[y1[:, None], x0[None, :]]
+        + count_integral[y0[:, None], x0[None, :]]
+    )
+    raise_if_cancelled(cancellation_probe)
+    usable = covered & (window_count >= minimum_reference_sample_count)
+    safe_count = np.where(window_count > 0, window_count, 1)
+    # Rounded to the nearest tick, halves up, in integers.
+    residual = np.floor_divide(
+        (ticks * window_count - window_sum) * 2 + safe_count, 2 * safe_count
+    )
+    if relief_polarity == "incised":
+        residual = -residual
+    sentinel = np.iinfo(np.int64).min // 2
+    residual = np.where(usable, residual, sentinel)
+    raise_if_cancelled(cancellation_probe)
+    envelope = _sliding_maximum(residual, radius=reference_radius_pixels)
+    raise_if_cancelled(cancellation_probe)
+    below = np.where(usable, envelope - residual, 0)
+    black = np.int64(effective_black_point_ticks)
+    response = np.clip(black - below, 0, black)
+    steps = np.int64(_INK_CURVE_STEPS)
+    normalised = (response * steps + black // 2) // black
+    if ink_gamma == 1:
+        drop = (normalised * contact_ink_level + steps // 2) // steps
+    else:
+        scale = steps**ink_gamma
+        drop = (normalised**ink_gamma * contact_ink_level + scale // 2) // scale
+    drop = np.where(usable, drop, 0)
+    raise_if_cancelled(cancellation_probe)
+    output = np.empty((height, width, 2), dtype=np.uint8)
+    output[:, :, 0] = np.asarray(255 - drop, dtype=np.uint8)
+    output[:, :, 1] = np.where(covered, 255, 0).astype(np.uint8)
+    top_down = np.ascontiguousarray(np.flipud(output))
+    return top_down, {
+        "depth_span_quantized_ticks": maximum_tick,
+        "depth_span_unquantized_um_rounded": int(round(span_mm * 1000.0)),
+        "ink_sum": int(np.sum(drop[covered], dtype=np.int64)),
+        "inked_pixel_count": int(np.count_nonzero(drop[covered] > 0)),
+    }
+
+
 def _render_local_relief(
     depth_buffer: np.ndarray,
     *,
@@ -799,8 +1027,23 @@ def _render_local_relief(
     relief_polarity: str,
     minimum_reference_sample_count: int,
     paper_tone_level: int = 0,
+    ink_gamma: int = DEFAULT_RUBBING_INK_GAMMA,
+    relief_model: str = DEFAULT_RUBBING_RELIEF_MODEL,
+    contact_ink_level: int = 0,
     cancellation_probe: CancellationProbe | None = None,
 ) -> tuple[np.ndarray, dict[str, int]]:
+    if relief_model == RELIEF_MODEL_CONTACT:
+        return _render_contact_relief(
+            depth_buffer,
+            depth_quantization_um=depth_quantization_um,
+            reference_radius_pixels=reference_radius_pixels,
+            effective_black_point_ticks=effective_black_point_ticks,
+            relief_polarity=relief_polarity,
+            minimum_reference_sample_count=minimum_reference_sample_count,
+            contact_ink_level=contact_ink_level,
+            ink_gamma=ink_gamma,
+            cancellation_probe=cancellation_probe,
+        )
     raise_if_cancelled(cancellation_probe)
     covered = np.isfinite(depth_buffer)
     raise_if_cancelled(cancellation_probe)
@@ -898,9 +1141,21 @@ def _render_local_relief(
         # the relief ramps from there to full black.  Both terms are bounded by
         # 255 x denominator, which the guard above already covers.
         head = 255 - paper_tone_level
-        drop[usable] = paper_tone_level + (
-            response[usable] * head + denominator[usable] // 2
-        ) // denominator[usable]
+        if ink_gamma == 1:
+            drop[usable] = paper_tone_level + (
+                response[usable] * head + denominator[usable] // 2
+            ) // denominator[usable]
+        else:
+            # Normalise to a fixed number of steps first, then raise to the
+            # power in integers: 4095**4 still fits an int64, and twelve bits
+            # of curve is more than an eight-bit tone can show.
+            steps = np.int64(_INK_CURVE_STEPS)
+            normalised = (
+                response[usable] * steps + denominator[usable] // 2
+            ) // denominator[usable]
+            curved = normalised**ink_gamma
+            scale = steps**ink_gamma
+            drop[usable] = paper_tone_level + (curved * head + scale // 2) // scale
         if paper_tone_level:
             into = np.where(usable, np.minimum(into, denominator), 0)
             shed = 100 - RECESS_TONE_RETAINED_PERCENT
@@ -976,6 +1231,9 @@ def extract_digital_rubbing(
             relief_policy["minimum_reference_sample_count"]
         ),
         paper_tone_level=int(relief_policy.get("paper_tone_level", 0)),
+        ink_gamma=int(relief_policy.get("ink_gamma", DEFAULT_RUBBING_INK_GAMMA)),
+        relief_model=str(relief_policy.get("model", DEFAULT_RUBBING_RELIEF_MODEL)),
+        contact_ink_level=int(relief_policy.get("contact_ink_level", 0)),
         cancellation_probe=cancellation_probe,
     )
     raise_if_cancelled(cancellation_probe)

@@ -791,11 +791,16 @@ def _payload_from_union(
         ),
         12,
     )
+    # The lattice area is exact; the validator's is a float sum over the same
+    # rings.  On a fine grid a body-sized outline (thousands of mm^2, tens of
+    # thousands of vertices) accumulates a few 1e-9 mm^2 of rounding, which is
+    # not a disagreement about the shape, so the tolerance is relative to the
+    # area as well as to the grid cell.
     if not math.isclose(
         outline_area_mm2,
         topology.area_mm2,
         rel_tol=0.0,
-        abs_tol=max(grid * grid * 1e-8, 1e-12),
+        abs_tol=max(grid * grid * 1e-8, abs(topology.area_mm2) * 1e-9, 1e-12),
     ):
         raise ArtifactVectorExtractionError(
             "integer-lattice and topology-validator outline areas disagree"

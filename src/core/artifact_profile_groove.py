@@ -166,7 +166,7 @@ def profile_groove_recipe(
             "half_window_percent_of_maximum_width": (
                 GROOVE_BASELINE_HALF_WINDOW_PERCENT
             ),
-            "refit": "drop_bins_below_minimum_depth/v1",
+            "refit": "drop_bins_below_half_minimum_depth/v1",
         },
         "coordinate_space": PROFILE_GROOVE_COORDINATE_SPACE,
         "detection_policy": {
@@ -547,7 +547,10 @@ def _wall_baseline(
     first = _local_polynomial(
         heights, radii, np.ones(heights.size, dtype=bool), half_window=half_window
     )
-    keep = (radii - first) > -minimum_depth_mm
+    # Drop anything set back by half the gate or more.  Dropping only what is
+    # already past the gate would let a groove near the gate keep dragging
+    # its own baseline down, and read as just too shallow to count.
+    keep = (radii - first) > -0.5 * minimum_depth_mm
     if int(np.count_nonzero(keep)) < GROOVE_BASELINE_FIT_DEGREE + 2:
         return first
     return _local_polynomial(heights, radii, keep, half_window=half_window)

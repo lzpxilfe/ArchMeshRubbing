@@ -294,8 +294,35 @@
               "minimum": 1,
               "maximum": 400
             },
+            "contact_ink_level": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 255
+            },
+            "contact_ink_percent": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            },
+            "envelope_filter": {
+              "const": "masked_square_local_max/v1"
+            },
+            "ink_curve": {
+              "const": "integer_power_of_normalised_response/v1"
+            },
+            "ink_curve_steps": {
+              "const": 4095
+            },
+            "ink_gamma": {
+              "type": "integer",
+              "minimum": 2,
+              "maximum": 4
+            },
             "minimum_reference_sample_count": {
               "const": 3
+            },
+            "model": {
+              "const": "contact_envelope/v1"
             },
             "paper_tone_level": {
               "type": "integer",
@@ -321,6 +348,9 @@
             },
             "reference_filter": {
               "const": "masked_square_local_mean_integer_integral/v1"
+            },
+            "residual_rounding": {
+              "const": "floor_half_up_integer/v1"
             },
             "reference_radius_pixels": {
               "type": "integer",
@@ -1637,8 +1667,35 @@
               "minimum": 1,
               "maximum": 400
             },
+            "contact_ink_level": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 255
+            },
+            "contact_ink_percent": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            },
+            "envelope_filter": {
+              "const": "masked_square_local_max/v1"
+            },
+            "ink_curve": {
+              "const": "integer_power_of_normalised_response/v1"
+            },
+            "ink_curve_steps": {
+              "const": 4095
+            },
+            "ink_gamma": {
+              "type": "integer",
+              "minimum": 2,
+              "maximum": 4
+            },
             "minimum_reference_sample_count": {
               "const": 3
+            },
+            "model": {
+              "const": "contact_envelope/v1"
             },
             "paper_tone_level": {
               "type": "integer",
@@ -1664,6 +1721,9 @@
             },
             "reference_filter": {
               "const": "masked_square_local_mean_integer_integral/v1"
+            },
+            "residual_rounding": {
+              "const": "floor_half_up_integer/v1"
             },
             "reference_radius_pixels": {
               "type": "integer",

@@ -505,3 +505,26 @@ class TestRubbingRecordWorkflow(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_the_sliding_maximum_matches_a_brute_force_window() -> None:
+    """The separable doubling filter must equal the plain definition on every
+    cell, including at the edges where the window runs off the array."""
+
+    import numpy as np
+
+    from src.core.artifact_rubbing_extractor import _sliding_maximum
+
+    rng = np.random.default_rng(7)
+    values = rng.integers(-1000, 1000, size=(23, 37), dtype=np.int64)
+    for radius in (1, 2, 3, 5, 8):
+        fast = _sliding_maximum(values, radius=radius)
+        slow = np.empty_like(values)
+        for y in range(values.shape[0]):
+            for x in range(values.shape[1]):
+                window = values[
+                    max(0, y - radius) : y + radius + 1,
+                    max(0, x - radius) : x + radius + 1,
+                ]
+                slow[y, x] = window.max()
+        assert np.array_equal(fast, slow), radius

@@ -113,6 +113,9 @@ MAX_DRAWING_SHEET_FIGURES = 32
 MAX_DRAWING_SHEET_CONDITION_RECORDS = 64
 MAX_DRAWING_SHEET_RASTER_BYTES = 24 * 1024 * 1024
 RUBBING_RECORD_TYPES = frozenset({RUBBING_RECORD_TYPE, DEVELOPED_RUBBING_RECORD_TYPE})
+RUBBING_ON_AXIS_FIT_HEIGHT = "axis_height"
+RUBBING_ON_AXIS_FIT_PAPER = "paper"
+RUBBING_ON_AXIS_FITS = (RUBBING_ON_AXIS_FIT_HEIGHT, RUBBING_ON_AXIS_FIT_PAPER)
 DRAWING_SHEET_PNG_METADATA_FORMAT = "archmeshrubbing_drawing_sheet_png_metadata"
 
 # ISO 216 sizes as portrait width x height in millimetres.
@@ -266,6 +269,26 @@ class DrawingSheetOptions:
     the same damage seen from another direction has its own boundary in the
     same record, and the sheet uses whichever one matches.
     """
+    rubbings_on_axis: tuple[tuple[str, str], ...] = ()
+    """(developed rubbing record id, elevation record id) pairs to paste flush.
+
+    The pottery convention: the strip rubbing is pasted with one edge exactly
+    on the centre line, so the rubbing and the elevation's own lines run into
+    each other.  The rubbing goes on the elevation side of the axis, at the
+    heights it was taken from.  It is drawn inside that figure and must not
+    also be listed as a figure of its own.
+    """
+    rubbing_on_axis_fit: str = "paper"
+    """How a pasted rubbing meets the elevation's heights.
+
+    ``paper`` pastes the sheet whole, at its own length, from the height its
+    bottom row was taken at - the way a real sheet is pasted.  A rubbing is a
+    rubbing and a measured drawing is a measured drawing; on a belly the paper
+    is a little longer than the wall is tall, and that is allowed to show.
+    ``axis_height`` instead pastes it in bands, each at the height it was
+    taken from, so a groove in the rubbing sits level with the same groove's
+    line in the elevation, at the cost of shortening the bands on a belly.
+    """
     groove_records: tuple[str, ...] = ()
     """Groove readings to draw on the figures, by record id.
 
@@ -337,6 +360,36 @@ class DrawingSheetOptions:
                 "groove records"
             )
         object.__setattr__(self, "groove_records", groove_records)
+        on_axis: list[tuple[str, str]] = []
+        for pair in self.rubbings_on_axis:
+            if not isinstance(pair, (tuple, list)) or len(pair) != 2:
+                raise DrawingSheetError(
+                    "rubbings_on_axis entries must be "
+                    "(rubbing record id, elevation record id) pairs"
+                )
+            rubbing_id, elevation_id = (str(item).strip() for item in pair)
+            if not rubbing_id or not elevation_id:
+                raise DrawingSheetError("rubbings_on_axis entries must be record ids")
+            if rubbing_id == elevation_id:
+                raise DrawingSheetError(
+                    "a record cannot be both the rubbing and the elevation it is "
+                    "pasted on"
+                )
+            on_axis.append((rubbing_id, elevation_id))
+        if len({rubbing for rubbing, _ in on_axis}) != len(on_axis):
+            raise DrawingSheetError(
+                "a rubbing can be pasted on at most one figure"
+            )
+        if len({elevation for _, elevation in on_axis}) != len(on_axis):
+            raise DrawingSheetError(
+                "a figure takes at most one rubbing on its axis"
+            )
+        object.__setattr__(self, "rubbings_on_axis", tuple(on_axis))
+        if self.rubbing_on_axis_fit not in RUBBING_ON_AXIS_FITS:
+            raise DrawingSheetError(
+                "rubbing_on_axis_fit must be one of "
+                f"{', '.join(RUBBING_ON_AXIS_FITS)}"
+            )
         try:
             denominator = finite_number(
                 self.scale_denominator,
@@ -496,6 +549,21 @@ class _RasterImage:
 
 
 @dataclass(frozen=True, slots=True)
+class _AttachedRaster:
+    """A rubbing pasted inside another figure, flush against the axis."""
+
+    record_id: str
+    recipe_hash: str
+    image: _RasterImage
+    rectangle_mm: tuple[float, float, float, float]
+    base_height_um: int
+    top_height_um: int
+    fit: str
+    band_heights_mm: tuple[float, ...]
+    """Record-mm v of each band boundary, bottom to top, in the figure's frame."""
+
+
+@dataclass(frozen=True, slots=True)
 class _Prepared:
     """One figure's content, before it knows where on the page it goes."""
 
@@ -508,6 +576,7 @@ class _Prepared:
     mirror_section_record_id: str | None = None
     fill_only_ids: frozenset[str] = frozenset()
     raster: _RasterImage | None = None
+    attached: _AttachedRaster | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -521,6 +590,7 @@ class _Figure:
     mirror_section_record_id: str | None = None
     fill_only_ids: frozenset[str] = frozenset()
     raster: _RasterImage | None = None
+    attached: _AttachedRaster | None = None
 
 
 def _lay_out(
@@ -591,6 +661,7 @@ def _lay_out(
                 mirror_section_record_id=prepared.mirror_section_record_id,
                 fill_only_ids=prepared.fill_only_ids,
                 raster=prepared.raster,
+                attached=prepared.attached,
             )
         )
         cursor_x += width
@@ -838,18 +909,12 @@ def _groove_paths_for_figure(
     return by_kind, drawn
 
 
-def _prepare_raster_figure(
+def _proven_raster_image(
     document: ArtifactDocument,
     record: DerivedRecord,
     raster: Any,
-) -> _Prepared:
-    """Turn a proven rubbing raster into a figure of its own physical size.
-
-    A rubbing record stores a receipt, not pixels, so the caller recomputes
-    the raster and hands it in; the receipt is what decides whether those
-    pixels are the record's.  The strip then goes on the page at the sheet's
-    own scale, the way a rubber tapes the paper beside the drawing.
-    """
+) -> tuple[_RasterImage, Mapping[str, Any]]:
+    """Encode a rubbing raster once its record's receipt has vouched for it."""
 
     developed = record.type == DEVELOPED_RUBBING_RECORD_TYPE
     expected_type = (
@@ -873,8 +938,6 @@ def _prepare_raster_figure(
             "receipt describes"
         )
     pixels_per_meter = int(receipt["pixels_per_meter"])
-    width_mm = float(receipt["width_pixels"]) * 1000.0 / float(pixels_per_meter)
-    height_mm = float(receipt["height_pixels"]) * 1000.0 / float(pixels_per_meter)
     metadata = {
         "document_id": document.document_id,
         "format": DRAWING_SHEET_PNG_METADATA_FORMAT,
@@ -899,6 +962,35 @@ def _prepare_raster_figure(
             f"the {MAX_DRAWING_SHEET_RASTER_BYTES}-byte sheet limit; compute the "
             "rubbing at a lower physical resolution"
         )
+    return (
+        _RasterImage(
+            data_uri=f"data:image/png;base64,{encoded}",
+            raster_sha256=str(receipt["raster_sha256"]),
+            pixels_per_meter=pixels_per_meter,
+            width_pixels=int(receipt["width_pixels"]),
+            height_pixels=int(receipt["height_pixels"]),
+        ),
+        receipt,
+    )
+
+
+def _prepare_raster_figure(
+    document: ArtifactDocument,
+    record: DerivedRecord,
+    raster: Any,
+) -> _Prepared:
+    """Turn a proven rubbing raster into a figure of its own physical size.
+
+    A rubbing record stores a receipt, not pixels, so the caller recomputes
+    the raster and hands it in; the receipt is what decides whether those
+    pixels are the record's.  The strip then goes on the page at the sheet's
+    own scale, the way a rubber tapes the paper beside the drawing.
+    """
+
+    image, receipt = _proven_raster_image(document, record, raster)
+    pixels_per_meter = int(receipt["pixels_per_meter"])
+    width_mm = float(receipt["width_pixels"]) * 1000.0 / float(pixels_per_meter)
+    height_mm = float(receipt["height_pixels"]) * 1000.0 / float(pixels_per_meter)
     return _Prepared(
         record_id=record.id,
         record_type=record.type,
@@ -906,13 +998,104 @@ def _prepare_raster_figure(
         payload_sha256=str(receipt["raster_sha256"]),
         bounds=(0.0, 0.0, width_mm, height_mm),
         paths_by_kind={},
-        raster=_RasterImage(
-            data_uri=f"data:image/png;base64,{encoded}",
-            raster_sha256=str(receipt["raster_sha256"]),
-            pixels_per_meter=pixels_per_meter,
-            width_pixels=int(receipt["width_pixels"]),
-            height_pixels=int(receipt["height_pixels"]),
-        ),
+        raster=image,
+    )
+
+
+def _attach_rubbing_on_axis(
+    document: ArtifactDocument,
+    *,
+    rubbing_id: str,
+    raster: Any,
+    elevation: DerivedRecord,
+    elevation_payload: VectorGeometryPayload,
+    fit: str,
+) -> _AttachedRaster:
+    """Paste a strip rubbing flush against the elevation's centre line.
+
+    The strip was taken along the meridian that faces the viewer, so it goes
+    where that meridian appears: on the elevation side of the axis, one edge
+    exactly on the line.  Vertically it sits at the height its bottom row was
+    taken from, and it keeps its own paper size - the meridian arc - because a
+    rubbing is paper and paper does not shrink to the axial height.  On a
+    belly the strip is therefore a little taller than the elevation between
+    the same two heights; the sidecar states both.
+    """
+
+    record = document.record_index.get(rubbing_id)
+    if record is None:
+        raise DrawingSheetError(f"rubbing record {rubbing_id!r} does not exist")
+    if record.type != DEVELOPED_RUBBING_RECORD_TYPE:
+        raise DrawingSheetError(
+            f"record {rubbing_id!r} is not a rubbing on a developed surface, so "
+            "it has no meridian to paste along the axis"
+        )
+    if record.lifecycle_status is not RecordLifecycleStatus.READY:
+        raise DrawingSheetError(f"only READY records may be drawn (record {rubbing_id!r})")
+    if document.record_freshness(rubbing_id) is not RecordFreshness.FRESH:
+        raise DrawingSheetError(f"only FRESH records may be drawn (record {rubbing_id!r})")
+    if raster is None:
+        raise DrawingSheetError(
+            f"record {rubbing_id!r} is a rubbing, so its recomputed raster must "
+            "be given to the sheet; a rubbing record stores a receipt, not pixels"
+        )
+    if elevation.type != VectorRecordKind.OUTLINE.record_type:
+        raise DrawingSheetError(
+            f"record {elevation.id!r} is not an outline, so a rubbing cannot be "
+            "pasted on it as an elevation"
+        )
+    base_height = record.qc.get("artboard_base_height_um")
+    top_height = record.qc.get("artboard_top_height_um")
+    profile = record.qc.get("artboard_height_profile_um")
+    if (
+        type(base_height) is not int
+        or type(top_height) is not int
+        or not isinstance(profile, Sequence)
+        or len(profile) < 2
+        or any(type(value) is not int for value in profile)
+        or profile[0] != base_height
+        or profile[-1] != top_height
+        or any(later < earlier for earlier, later in zip(profile, profile[1:]))
+    ):
+        raise DrawingSheetError(
+            f"rubbing record {rubbing_id!r} does not say what heights its "
+            "artboard was taken from; it was computed before that was recorded, "
+            "so compute the rubbing again"
+        )
+    if top_height <= base_height:
+        raise DrawingSheetError(
+            f"rubbing record {rubbing_id!r} spans no height on the artifact, so "
+            "there is nowhere on the elevation to paste it"
+        )
+    image, receipt = _proven_raster_image(document, record, raster)
+    try:
+        line = center_axis_line(elevation_payload.frame.to_dict())
+    except SVGRenderError as exc:
+        raise DrawingSheetError(str(exc)) from exc
+    if line is None or abs(line[1][0]) > 1e-9 or abs(line[1][1] - 1.0) > 1e-9:
+        raise DrawingSheetError(
+            f"the rotation axis is not the vertical of {elevation.id!r}, so a "
+            "rubbing cannot be pasted flush against it there"
+        )
+    base, _direction = line
+    pixels_per_meter = int(receipt["pixels_per_meter"])
+    width_mm = float(receipt["width_pixels"]) * 1000.0 / float(pixels_per_meter)
+    height_mm = float(receipt["height_pixels"]) * 1000.0 / float(pixels_per_meter)
+    bottom = base[1] + float(base_height) / 1000.0
+    if fit == RUBBING_ON_AXIS_FIT_PAPER:
+        band_heights = (bottom, bottom + height_mm)
+    else:
+        band_heights = tuple(base[1] + float(value) / 1000.0 for value in profile)
+    rectangle = (base[0] - width_mm, band_heights[0], base[0], band_heights[-1])
+    return _AttachedRaster(
+        record_id=record.id,
+        recipe_hash=record.recipe_hash,
+        image=image,
+        rectangle_mm=rectangle,
+        base_height_um=int(base_height),
+        top_height_um=int(top_height),
+        fit=fit,
+        band_heights_mm=band_heights,
     )
 
 
@@ -958,6 +1141,23 @@ def _condition_paths_for_figure(
             )
             break
     return by_kind, drawn
+
+
+def _bounds_with_attachment(
+    bounds: tuple[float, float, float, float],
+    attached: _AttachedRaster | None,
+) -> tuple[float, float, float, float]:
+    """Grow a figure's extent to hold the rubbing pasted inside it."""
+
+    if attached is None:
+        return bounds
+    left, bottom, right, top = attached.rectangle_mm
+    return (
+        min(bounds[0], left),
+        min(bounds[1], bottom),
+        max(bounds[2], right),
+        max(bounds[3], top),
+    )
 
 
 def _paths_bounds(
@@ -1193,6 +1393,7 @@ def _sheet_provenance(
     condition: Mapping[str, Any] | None,
     groove: Mapping[str, Any] | None,
     mirrored: Sequence[Mapping[str, str]],
+    rubbings_on_axis: Sequence[Mapping[str, str]] = (),
 ) -> dict[str, Any]:
     preset = get_drawing_style_preset(options.style_preset)
     provenance: dict[str, Any] = {
@@ -1215,6 +1416,32 @@ def _sheet_provenance(
                         "raster_pixels_per_meter": figure.raster.pixels_per_meter,
                         "raster_sha256": figure.raster.raster_sha256,
                         "raster_width_pixels": figure.raster.width_pixels,
+                    }
+                ),
+                **(
+                    {}
+                    if figure.attached is None
+                    else {
+                        "rubbing_on_axis": {
+                            "artboard_base_height_um": figure.attached.base_height_um,
+                            "artboard_top_height_um": figure.attached.top_height_um,
+                            "paper_height_mm": (
+                                figure.attached.rectangle_mm[3]
+                                - figure.attached.rectangle_mm[1]
+                            ),
+                            "raster_height_pixels": figure.attached.image.height_pixels,
+                            "raster_pixels_per_meter": (
+                                figure.attached.image.pixels_per_meter
+                            ),
+                            "raster_sha256": figure.attached.image.raster_sha256,
+                            "raster_width_pixels": figure.attached.image.width_pixels,
+                            "recipe_hash": figure.attached.recipe_hash,
+                            "record_id": figure.attached.record_id,
+                            "rectangle_mm": list(figure.attached.rectangle_mm),
+                            "fit": figure.attached.fit,
+                            "band_heights_mm": list(figure.attached.band_heights_mm),
+                            "side": "elevation",
+                        }
                     }
                 ),
             }
@@ -1244,7 +1471,69 @@ def _sheet_provenance(
         provenance["groove"] = dict(groove)
     if mirrored:
         provenance["mirrored_figures"] = [dict(entry) for entry in mirrored]
+    if rubbings_on_axis:
+        provenance["rubbings_on_axis"] = [dict(entry) for entry in rubbings_on_axis]
     return provenance
+
+
+def _attached_raster_elements(
+    attached: _AttachedRaster,
+    *,
+    placement: Placement,
+    index: int,
+) -> list[str]:
+    """Paste the rubbing as one image, or as bands each at its own height.
+
+    A band is the same image seen through a nested viewport whose viewBox
+    selects its rows, stretched to the band's height on the page.  The pixels
+    are never resampled or re-encoded: the raster on the sheet is still the
+    one the record's receipt proves, band by band.
+    """
+
+    left, _bottom, right, _top = attached.rectangle_mm
+    denominator = placement.scale_denominator
+    width_paper = (right - left) / denominator
+    image = attached.image
+    boundaries = attached.band_heights_mm
+    band_count = len(boundaries) - 1
+    rows_per_band = image.height_pixels / band_count
+    prefix = f"rubbing-on-axis-{index:04d}"
+    # The pixels are embedded once and every band refers to them, so sixteen
+    # bands cost sixteen viewports, not sixteen copies of the PNG.
+    elements: list[str] = [
+        "      <defs>",
+        (
+            f'        <image id="{prefix}-pixels" width="{image.width_pixels}" '
+            f'height="{image.height_pixels}" '
+            'preserveAspectRatio="none" image-rendering="pixelated" '
+            f'xlink:href="{xml_attribute(image.data_uri)}"/>'
+        ),
+        "      </defs>",
+    ]
+    for band in range(band_count):
+        lower = boundaries[band]
+        upper = boundaries[band + 1]
+        if upper <= lower:
+            continue
+        paper_x, paper_y = placement.paper_xy((left, upper))
+        band_paper_height = (upper - lower) / denominator
+        # Rows count from the top of the image; band 0 is the bottom of the
+        # artboard, which is the last rows.
+        row_top = image.height_pixels - rows_per_band * (band + 1)
+        elements.append(
+            f'      <svg id="{prefix}-band-{band:02d}" '
+            f'data-record-id="{xml_attribute(attached.record_id)}" '
+            f'x="{number_token(paper_x, field_name="rubbing.x")}" '
+            f'y="{number_token(paper_y, field_name="rubbing.y")}" '
+            f'width="{number_token(width_paper, field_name="rubbing.width")}" '
+            f'height="{number_token(band_paper_height, field_name="rubbing.height")}" '
+            f'viewBox="0 {number_token(row_top, field_name="rubbing.row")} '
+            f'{image.width_pixels} {number_token(rows_per_band, field_name="rubbing.rows")}" '
+            'preserveAspectRatio="none">'
+        )
+        elements.append(f'        <use xlink:href="#{prefix}-pixels"/>')
+        elements.append("      </svg>")
+    return elements
 
 
 def _render_sheet(
@@ -1265,7 +1554,10 @@ def _render_sheet(
     # byte for byte the sheet it was before rubbings could be placed.
     xlink_declaration = (
         ' xmlns:xlink="http://www.w3.org/1999/xlink"'
-        if any(figure.raster is not None for figure in placed)
+        if any(
+            figure.raster is not None or figure.attached is not None
+            for figure in placed
+        )
         else ""
     )
 
@@ -1335,13 +1627,56 @@ def _render_sheet(
                 'preserveAspectRatio="none" image-rendering="pixelated" '
                 f'xlink:href="{xml_attribute(figure.raster.data_uri)}"/>'
             )
-        else:
+        elif figure.attached is None:
             lines.extend(
                 layer_elements(
                     figure.paths_by_kind,
                     preset=preset,
                     placement=figure.placement,
                     hatched=hatched_kinds(figure.paths_by_kind, preset=preset),
+                    indent="      ",
+                    fill_only_ids=figure.fill_only_ids,
+                )
+            )
+        else:
+            # The rubbing is paper pasted onto the drawing: it covers the lines
+            # beneath it, and the centre line - the seam the paper is pasted to
+            # - is drawn back over it, the one construction line that has to
+            # stay readable across everything.
+            hatched = hatched_kinds(figure.paths_by_kind, preset=preset)
+            under = {
+                kind: paths
+                for kind, paths in figure.paths_by_kind.items()
+                if kind != CENTER_AXIS
+            }
+            over = {
+                kind: paths
+                for kind, paths in figure.paths_by_kind.items()
+                if kind == CENTER_AXIS
+            }
+            lines.extend(
+                layer_elements(
+                    under,
+                    preset=preset,
+                    placement=figure.placement,
+                    hatched=hatched,
+                    indent="      ",
+                    fill_only_ids=figure.fill_only_ids,
+                )
+            )
+            lines.extend(
+                _attached_raster_elements(
+                    figure.attached,
+                    placement=figure.placement,
+                    index=index,
+                )
+            )
+            lines.extend(
+                layer_elements(
+                    over,
+                    preset=preset,
+                    placement=figure.placement,
+                    hatched=hatched,
                     indent="      ",
                     fill_only_ids=figure.fill_only_ids,
                 )
@@ -1380,7 +1715,13 @@ def compose_drawing_sheet(
     ids = [str(record_id) for record_id in record_ids]
     if not ids:
         raise DrawingSheetError("a sheet needs at least one record")
-    unplaced_rasters = sorted(set(rasters) - set(ids))
+    attached_by_elevation = {
+        elevation_id: rubbing_id
+        for rubbing_id, elevation_id in options.rubbings_on_axis
+    }
+    unplaced_rasters = sorted(
+        set(rasters) - set(ids) - set(attached_by_elevation.values())
+    )
     if unplaced_rasters:
         raise DrawingSheetError(
             "a raster was given for a record the sheet does not draw: "
@@ -1422,6 +1763,19 @@ def compose_drawing_sheet(
             f"so it must not also be a figure of its own: {', '.join(listed_sections)}"
         )
 
+    unplaced = sorted(set(attached_by_elevation) - set(ids))
+    if unplaced:
+        raise DrawingSheetError(
+            "a rubbing is pasted on one of the sheet's figures, so its elevation "
+            f"must be one of them: {', '.join(unplaced)}"
+        )
+    listed_rubbings = sorted(set(attached_by_elevation.values()) & set(ids))
+    if listed_rubbings:
+        raise DrawingSheetError(
+            "a rubbing pasted on the axis is drawn inside that figure, so it "
+            f"must not also be a figure of its own: {', '.join(listed_rubbings)}"
+        )
+
     conditions = [
         _require_drawable_condition_record(document, record_id)
         for record_id in options.condition_records
@@ -1432,6 +1786,7 @@ def compose_drawing_sheet(
     ]
     condition_drawn: list[dict[str, str]] = []
     groove_drawn: list[dict[str, str]] = []
+    attached_drawn: list[dict[str, str]] = []
     mirrored: list[dict[str, str]] = []
 
     prepared: list[_Prepared] = []
@@ -1489,6 +1844,23 @@ def compose_drawing_sheet(
             {"figure_record_id": record.id, **entry} for entry in grooves_drawn
         )
         section_record_id = mirror_by_elevation.get(record.id)
+        attached: _AttachedRaster | None = None
+        attached_rubbing_id = attached_by_elevation.get(record.id)
+        if attached_rubbing_id is not None:
+            attached = _attach_rubbing_on_axis(
+                document,
+                rubbing_id=attached_rubbing_id,
+                raster=rasters.get(attached_rubbing_id),
+                elevation=record,
+                elevation_payload=payload,
+                fit=options.rubbing_on_axis_fit,
+            )
+            attached_drawn.append(
+                {
+                    "figure_record_id": record.id,
+                    "rubbing_record_id": attached.record_id,
+                }
+            )
         if section_record_id is None:
             if draw_center_axis:
                 try:
@@ -1503,8 +1875,9 @@ def compose_drawing_sheet(
                     record_type=record.type,
                     recipe_hash=record.recipe_hash,
                     payload_sha256=payload.sha256,
-                    bounds=_payload_bounds(payload),
+                    bounds=_bounds_with_attachment(_payload_bounds(payload), attached),
                     paths_by_kind=by_kind,
+                    attached=attached,
                 )
             )
             continue
@@ -1534,10 +1907,11 @@ def compose_drawing_sheet(
                 record_type=record.type,
                 recipe_hash=record.recipe_hash,
                 payload_sha256=payload.sha256,
-                bounds=bounds,
+                bounds=_bounds_with_attachment(bounds, attached),
                 paths_by_kind=combined,
                 mirror_section_record_id=section.id,
                 fill_only_ids=frozenset(fill_only_ids),
+                attached=attached,
             )
         )
 
@@ -1616,6 +1990,9 @@ def compose_drawing_sheet(
             ),
             mirrored=sorted(
                 mirrored, key=lambda entry: entry["elevation_record_id"]
+            ),
+            rubbings_on_axis=sorted(
+                attached_drawn, key=lambda entry: entry["figure_record_id"]
             ),
         )
         svg_bytes = _render_sheet(

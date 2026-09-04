@@ -346,8 +346,18 @@ from src.core.artifact_rubbing_extractor import (  # noqa: E402
     DEFAULT_RUBBING_POLARITY,
     DEFAULT_RUBBING_REFERENCE_RADIUS_UM,
     DigitalRubbingRaster,
+    DEFAULT_RUBBING_CONTACT_INK_PERCENT,
+    DEFAULT_RUBBING_RELIEF_MODEL,
+    MAX_RUBBING_CONTACT_INK_PERCENT,
+    MAX_RUBBING_INK_GAMMA,
     MAX_RUBBING_PAPER_TONE_PERCENT,
+    RECOMMENDED_RUBBING_CONTACT_BLACK_POINT_UM,
+    RECOMMENDED_RUBBING_CONTACT_REFERENCE_RADIUS_UM,
+    RECOMMENDED_RUBBING_INK_GAMMA,
     RECOMMENDED_RUBBING_PAPER_TONE_PERCENT,
+    RECOMMENDED_RUBBING_RELIEF_MODEL,
+    RELIEF_MODEL_CONTACT,
+    RELIEF_MODEL_LOCAL_MEAN,
     compute_artifact_rubbing_from_recipe,
     estimate_digital_rubbing_resources,
     require_current_rubbing_computation,
@@ -4311,6 +4321,25 @@ class SectionPanel(QWidget):
         mirror_form.addRow("입면", self.combo_drawing_sheet_mirror_elevation)
         mirror_form.addRow("단면", self.combo_drawing_sheet_mirror_section)
         native_layout.addLayout(mirror_form)
+        self.check_drawing_sheet_rubbing_on_axis = QCheckBox(
+            "띠 탁본을 가운데 선에 붙이기"
+        )
+        self.check_drawing_sheet_rubbing_on_axis.setEnabled(False)
+        self.check_drawing_sheet_rubbing_on_axis.setToolTip(
+            "전개 탁본 직사각형의 끝을 반입면·반단면 도형의 중심축선에 딱 붙입니다. "
+            "탁본은 입면 쪽에, 뜬 높이 그대로 놓이므로 탁본의 홈이 입면의 홈 선과 "
+            "같은 높이에 앉습니다.\n"
+            "위 합치기가 켜져 있어야 하고, 붙인 탁본은 도형 안에 들어가므로 위 "
+            "목록에서 따로 체크하지 마세요."
+        )
+        native_layout.addWidget(self.check_drawing_sheet_rubbing_on_axis)
+        rubbing_form = QFormLayout()
+        self.combo_drawing_sheet_rubbing_on_axis = QComboBox()
+        self.combo_drawing_sheet_rubbing_on_axis.setToolTip(
+            "축에 붙일 전개 탁본. 정면 자오선(-90°)에서 뜬 띠가 정면 입면에 맞습니다."
+        )
+        rubbing_form.addRow("탁본", self.combo_drawing_sheet_rubbing_on_axis)
+        native_layout.addLayout(rubbing_form)
 
         condition_sheet_label = QLabel("도판에 얹을 상태 표기")
         native_layout.addWidget(condition_sheet_label)
@@ -4475,6 +4504,65 @@ class SectionPanel(QWidget):
             "납니다."
         )
         native_rubbing_form.addRow("종이 기저 농담", self.spin_native_rubbing_paper_tone)
+        self.spin_native_rubbing_ink_gamma = QSpinBox()
+        self.spin_native_rubbing_ink_gamma.setRange(1, MAX_RUBBING_INK_GAMMA)
+        self.spin_native_rubbing_ink_gamma.setValue(RECOMMENDED_RUBBING_INK_GAMMA)
+        self.spin_native_rubbing_ink_gamma.setToolTip(
+            "먹이 요철 높이에 얼마나 늦게 붙는지. 1은 높이에 비례해서 얕은 요철도 "
+            "회색으로 나오고, 2-3은 튀어나온 곳에만 먹이 붙어 실제 탁본처럼 "
+            "또렷해집니다."
+        )
+        native_rubbing_form.addRow("먹 곡선", self.spin_native_rubbing_ink_gamma)
+        self.combo_native_rubbing_model = QComboBox()
+        self.combo_native_rubbing_model.addItem(
+            "접촉 · 종이가 닿는 곳에 먹 (탁본)", RELIEF_MODEL_CONTACT
+        )
+        self.combo_native_rubbing_model.addItem(
+            "높이 · 주변 평균보다 솟은 만큼 (음영)", RELIEF_MODEL_LOCAL_MEAN
+        )
+        self.combo_native_rubbing_model.setToolTip(
+            "접촉: 종이를 눌러 붙이고 두드린 것처럼, 종이가 닿는 면은 접촉 먹 농담으로 "
+            "고르게 먹고 종이 밑으로 들어간 만큼 옅어집니다. 평평한 벽은 고르게, "
+            "침선은 흰 선으로, 승문은 마루만 먹습니다. 기준 반경은 종이가 밀착되는 "
+            "크기(0.7 mm쯤), 검정 기준 깊이는 먹이 사라지는 깊이(0.12 mm쯤)입니다.\n"
+            "높이: 주변 평균보다 솟은 만큼 먹이 붙는 음영입니다. 홈 옆의 벽이 솟은 "
+            "것으로 읽혀 회색 후광이 생기므로 탁본으로는 권하지 않습니다."
+        )
+        self.combo_native_rubbing_model.setCurrentIndex(
+            max(0, self.combo_native_rubbing_model.findData(RECOMMENDED_RUBBING_RELIEF_MODEL))
+        )
+        native_rubbing_form.addRow("탁본 모델", self.combo_native_rubbing_model)
+        self.spin_native_rubbing_contact_ink = QSpinBox()
+        self.spin_native_rubbing_contact_ink.setRange(1, MAX_RUBBING_CONTACT_INK_PERCENT)
+        self.spin_native_rubbing_contact_ink.setValue(DEFAULT_RUBBING_CONTACT_INK_PERCENT)
+        self.spin_native_rubbing_contact_ink.setSuffix(" %")
+        self.spin_native_rubbing_contact_ink.setToolTip(
+            "접촉 모델에서 종이가 닿는 면이 먹는 먹의 농담. 두드리는 세기입니다. "
+            "100이면 닿는 곳이 완전한 검정입니다."
+        )
+        native_rubbing_form.addRow("접촉 먹 농담", self.spin_native_rubbing_contact_ink)
+
+        def _apply_model_defaults(_index: int) -> None:
+            # The two models read the reference radius and the black point
+            # differently, so switching one puts its own recommended pair in.
+            contact = (
+                self.combo_native_rubbing_model.currentData() == RELIEF_MODEL_CONTACT
+            )
+            self.spin_native_rubbing_reference_radius_um.setValue(
+                RECOMMENDED_RUBBING_CONTACT_REFERENCE_RADIUS_UM
+                if contact
+                else DEFAULT_RUBBING_REFERENCE_RADIUS_UM
+            )
+            self.spin_native_rubbing_black_point_um.setValue(
+                RECOMMENDED_RUBBING_CONTACT_BLACK_POINT_UM
+                if contact
+                else DEFAULT_RUBBING_BLACK_POINT_UM
+            )
+            self.spin_native_rubbing_contact_ink.setEnabled(contact)
+            self.spin_native_rubbing_paper_tone.setEnabled(not contact)
+
+        self.combo_native_rubbing_model.currentIndexChanged.connect(_apply_model_defaults)
+        _apply_model_defaults(self.combo_native_rubbing_model.currentIndex())
         native_layout.addLayout(native_rubbing_form)
 
         self.btn_native_rubbing = QPushButton("탁본 계산 · 기록")
@@ -4656,7 +4744,9 @@ class SectionPanel(QWidget):
             )
         )
         native_layout.addWidget(self.check_native_strip_full_revolution)
-        self.check_native_strip_height_range = QCheckBox("높이 범위 지정")
+        self.check_native_strip_height_range = QCheckBox(
+            "높이 범위 지정 · 구연부에서 저부까지 다 뜰지, 일부만 뜰지"
+        )
         native_layout.addWidget(self.check_native_strip_height_range)
         strip_height_form = QFormLayout()
         self.spin_native_strip_min_height_mm = QDoubleSpinBox()
@@ -4676,8 +4766,8 @@ class SectionPanel(QWidget):
                 self.spin_native_strip_max_height_mm.setEnabled(checked),
             )
         )
-        strip_height_form.addRow("아래", self.spin_native_strip_min_height_mm)
-        strip_height_form.addRow("위", self.spin_native_strip_max_height_mm)
+        strip_height_form.addRow("아래 (저부 쪽)", self.spin_native_strip_min_height_mm)
+        strip_height_form.addRow("위 (구연·경부 쪽)", self.spin_native_strip_max_height_mm)
         native_layout.addLayout(strip_height_form)
         self.check_native_strip_largest_component = QCheckBox(
             "떨어진 조각은 버리고 가장 큰 조각만"
@@ -18231,6 +18321,28 @@ class MainWindow(QMainWindow):
             check.setEnabled(usable)
             if not usable:
                 check.setChecked(False)
+        rubbing_combo = getattr(panel, "combo_drawing_sheet_rubbing_on_axis", None)
+        rubbing_check = getattr(panel, "check_drawing_sheet_rubbing_on_axis", None)
+        if rubbing_combo is not None and rubbing_check is not None:
+            # Only a rubbing on a developed surface has a meridian to paste
+            # along the axis, and only one computed since the artboard began
+            # recording the heights it was taken from.
+            rubbings = [
+                record
+                for record in records
+                if record.type == DEVELOPED_RUBBING_RECORD_TYPE
+                and isinstance(record.qc.get("artboard_height_profile_um"), list)
+            ]
+            self._replace_native_record_choices(
+                rubbing_combo,
+                placeholder="전개 탁본 기록",
+                records=rubbings,
+                selected_id=str(rubbing_combo.currentData() or "") or None,
+            )
+            pasteable = bool(rubbings and elevations and sections)
+            rubbing_check.setEnabled(pasteable)
+            if not pasteable:
+                rubbing_check.setChecked(False)
 
     def _refresh_drawing_sheet_conditions(self, records: list[Any]) -> None:
         panel = getattr(self, "section_panel", None)
@@ -20102,6 +20214,26 @@ class MainWindow(QMainWindow):
                 )
                 return
             mirror_sections = ((elevation_id, section_id),)
+        rubbings_on_axis: tuple[tuple[str, str], ...] = ()
+        if panel.check_drawing_sheet_rubbing_on_axis.isChecked():
+            rubbing_id = str(
+                panel.combo_drawing_sheet_rubbing_on_axis.currentData() or ""
+            )
+            if not mirror_sections:
+                self.status_info.setText(
+                    "탁본을 가운데 선에 붙이려면 먼저 좌 반입면 · 우 반단면으로 합치세요."
+                )
+                return
+            if not rubbing_id:
+                self.status_info.setText("축에 붙일 전개 탁본 기록을 고르세요.")
+                return
+            # The pasted rubbing lives inside the mirrored figure; a copy that
+            # was also checked as a figure of its own is not a second figure.
+            record_ids = [item for item in record_ids if item != rubbing_id]
+            if not record_ids:
+                self.status_info.setText("도판에 올릴 기록을 하나 이상 체크하세요.")
+                return
+            rubbings_on_axis = ((rubbing_id, mirror_sections[0][0]),)
         # A rubbing record stores a receipt, not pixels, so any rubbing on the
         # sheet is recomputed from its own recipe and checked against that
         # receipt before it is placed.
@@ -20113,7 +20245,7 @@ class MainWindow(QMainWindow):
                 getattr(session.document.record_index.get(record_id), "type", "")
             )
             in RUBBING_RECORD_TYPES
-        ]
+        ] + [rubbing_id for rubbing_id, _elevation_id in rubbings_on_axis]
         if rubbing_ids:
             self.status_info.setText(
                 f"도판의 탁본 {len(rubbing_ids)}개를 recipe로 다시 계산 중..."
@@ -20142,6 +20274,7 @@ class MainWindow(QMainWindow):
                 page=SheetPage(size=page_size, orientation=orientation),
                 show_center_axis=panel.check_drawing_sheet_center_axis.isChecked(),
                 mirror_sections=mirror_sections,
+                rubbings_on_axis=rubbings_on_axis,
                 condition_records=self._checked_drawing_sheet_condition_ids(),
             )
             bundle = compose_drawing_sheet(
@@ -20394,6 +20527,12 @@ class MainWindow(QMainWindow):
                 or DEFAULT_RUBBING_POLARITY
             ),
             "paper_tone_percent": int(panel.spin_native_rubbing_paper_tone.value()),
+            "ink_gamma": int(panel.spin_native_rubbing_ink_gamma.value()),
+            "relief_model": str(
+                panel.combo_native_rubbing_model.currentData()
+                or DEFAULT_RUBBING_RELIEF_MODEL
+            ),
+            "contact_ink_percent": int(panel.spin_native_rubbing_contact_ink.value()),
         }
 
     def _compute_and_commit_native_rubbing(
