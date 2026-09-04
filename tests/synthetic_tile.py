@@ -253,12 +253,28 @@ def _tile_grid(
     return outer_grid, inner_grid
 
 
+def _stood_on_the_canonical_axis(grid: np.ndarray, axis_z_mm: float) -> np.ndarray:
+    """Turn a tile so its own cylinder axis is +Z through the origin.
+
+    A quarter turn about +X and a slide down z - a rotation, so the winding
+    is untouched.  This is what an Align does for a real tile once the
+    drafter has established its axis; the fixture has no Align, so a caller
+    who needs the canonical pose asks for it here and says so.
+    """
+
+    x = grid[..., 0]
+    y = grid[..., 1]
+    z = grid[..., 2] - axis_z_mm
+    return np.stack([x, -z, y], axis=-1)
+
+
 def hollow_tile(
     shape: TileShape = AMKIWA_SHAPE,
     *,
     axial_step_mm: float = 2.0,
     angular_step_mm: float = 2.0,
     relief: bool = True,
+    on_canonical_axis: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return (vertices, faces) for one closed tile.
 
@@ -266,6 +282,11 @@ def hollow_tile(
     two sides - so the mesh is watertight: every edge belongs to exactly two
     faces, which is what the volume metric and the outline's topology check
     both need.  Faces wind counter-clockwise seen from outside.
+
+    By default the tile lies as it would on a roof, its cylinder axis along
+    +Y.  ``on_canonical_axis`` stands it on that axis instead, +Z through the
+    origin, which is where a development that centres its sections on the
+    canonical axis needs it.
     """
 
     outer_grid, inner_grid = _tile_grid(
@@ -274,6 +295,12 @@ def hollow_tile(
         angular_step_mm=angular_step_mm,
         relief=relief,
     )
+    if on_canonical_axis:
+        axis_z = 0.0 if shape.kind == SUGKIWA else float(
+            shape.outer_radius_mm - min(outer_grid[..., 2].min(), inner_grid[..., 2].min())
+        )
+        outer_grid = _stood_on_the_canonical_axis(outer_grid, axis_z)
+        inner_grid = _stood_on_the_canonical_axis(inner_grid, axis_z)
     rows, columns = outer_grid.shape[0], outer_grid.shape[1]
     vertices = np.vstack(
         [outer_grid.reshape(-1, 3), inner_grid.reshape(-1, 3)]
@@ -318,13 +345,16 @@ def tile_session(
     axial_step_mm: float = 2.0,
     angular_step_mm: float = 2.0,
     relief: bool = True,
+    on_canonical_axis: bool = False,
     document_id: str | None = None,
 ) -> tuple[ArtifactSession, np.ndarray, np.ndarray]:
     """One tile in a session, with its arrays.
 
-    No Align is committed: a tile has no rotation axis to stand on, and the
-    records a tile needs - the unwrap, the outline, the rubbing - are taken
-    in the source frame.
+    No Align is committed, so the canonical frame is the source frame.  A
+    development that centres its sections on the canonical axis therefore
+    needs the tile to arrive already standing on it: pass
+    ``on_canonical_axis``, which is the fixture standing in for the Align a
+    real tile would be given.
     """
 
     vertices, faces = hollow_tile(
@@ -332,6 +362,7 @@ def tile_session(
         axial_step_mm=axial_step_mm,
         angular_step_mm=angular_step_mm,
         relief=relief,
+        on_canonical_axis=on_canonical_axis,
     )
     name = document_id or f"artifact:{shape.kind}"
     mesh = MeshData(
