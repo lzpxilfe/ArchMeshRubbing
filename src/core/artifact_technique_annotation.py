@@ -15,6 +15,8 @@ boundary, because that is how the convention shows one.
 
 from __future__ import annotations
 
+import math
+
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
@@ -63,7 +65,23 @@ _OUTLINE_ALGORITHM_FOR_TECHNIQUE: Mapping[str, str] = {
     "1.0.0": OUTLINE_LEGACY_ALGORITHM_VERSION,
     "1.1.0": OUTLINE_ALGORITHM_VERSION,
 }
-TECHNIQUE_PAYLOAD_SCHEMA_VERSION = "1.0.0"
+#: 1.0.0 held the kind, the face set and the six views.  1.1.0 adds which
+#: side of the wall the faces are on (a coil seam or a finger press is
+#: usually seen inside, where the wall was not smoothed over) and, when the
+#: drafter observed it, the direction the tool moved.  A 1.0.0 payload reads
+#: and digests exactly as it was written.
+TECHNIQUE_PAYLOAD_SCHEMA_VERSION = "1.1.0"
+TECHNIQUE_PAYLOAD_SCHEMA_VERSIONS = ("1.0.0", TECHNIQUE_PAYLOAD_SCHEMA_VERSION)
+#: Which side of the wall a painted face set is on.  Decided from the mesh:
+#: a face whose normal points away from the mesh's centroid is exterior, one
+#: whose normal points toward it is interior; a region that mixes the two by
+#: more than a tenth either way is "mixed", which a sheet treats as exterior
+#: and says so.
+SURFACE_EXTERIOR = "exterior"
+SURFACE_INTERIOR = "interior"
+SURFACE_MIXED = "mixed"
+SURFACE_SIDES = (SURFACE_EXTERIOR, SURFACE_INTERIOR, SURFACE_MIXED)
+_SURFACE_SIDE_MARGIN = 100_000  # millionths: a tenth of the faces
 TECHNIQUE_PAYLOAD_EXTENSION_KEY = "org.archmeshrubbing:technique-annotation-v1"
 TECHNIQUE_PAYLOAD_MEDIA_TYPE = "application/vnd.archmeshrubbing.technique-annotation+json"
 TECHNIQUE_GEOMETRY_REF_PREFIX = "urn:archmeshrubbing:technique-annotation:sha256:"
@@ -142,12 +160,39 @@ class TechniqueAnnotationPayload:
     selection: Mapping[str, Any]
     views: tuple[ConditionViewBoundary, ...]
     skipped_views: tuple[Mapping[str, str], ...] = ()
+    surface_side: str | None = None
+    interior_face_fraction_millionths: int | None = None
+    direction_deg: float | None = None
 
     def __post_init__(self) -> None:
-        if self.schema_version != TECHNIQUE_PAYLOAD_SCHEMA_VERSION:
+        if self.schema_version not in TECHNIQUE_PAYLOAD_SCHEMA_VERSIONS:
             raise ArtifactTechniqueAnnotationError(
                 f"unsupported technique payload schema: {self.schema_version!r}"
             )
+        if self.schema_version == "1.0.0":
+            if (
+                self.surface_side is not None
+                or self.interior_face_fraction_millionths is not None
+                or self.direction_deg is not None
+            ):
+                raise ArtifactTechniqueAnnotationError(
+                    "a 1.0.0 technique payload carries no surface side or direction"
+                )
+        else:
+            if self.surface_side not in SURFACE_SIDES:
+                raise ArtifactTechniqueAnnotationError(
+                    f"technique surface_side must be one of {', '.join(SURFACE_SIDES)}"
+                )
+            fraction = self.interior_face_fraction_millionths
+            if type(fraction) is not int or not (0 <= fraction <= 1_000_000):
+                raise ArtifactTechniqueAnnotationError(
+                    "technique interior_face_fraction_millionths must be an integer "
+                    "between 0 and 1000000"
+                )
+            if self.direction_deg is not None:
+                object.__setattr__(
+                    self, "direction_deg", _direction_deg(self.direction_deg)
+                )
         object.__setattr__(self, "technique", technique_kind(self.technique))
         object.__setattr__(self, "selection", _selection(self.selection))
         views = tuple(self.views)
@@ -216,21 +261,30 @@ class TechniqueAnnotationPayload:
         return None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        block: dict[str, Any] = {
             "schema_version": self.schema_version,
             "selection": dict(self.selection),
             "skipped_views": [dict(entry) for entry in self.skipped_views],
             "technique": self.technique,
             "views": [view.to_dict() for view in self.views],
         }
+        if self.schema_version != "1.0.0":
+            block["direction_deg"] = self.direction_deg
+            block["interior_face_fraction_millionths"] = self.interior_face_fraction_millionths
+            block["surface_side"] = self.surface_side
+        return block
 
     @classmethod
     def from_dict(cls, data: Mapping[str, object]) -> "TechniqueAnnotationPayload":
-        block = _exact_keys(
-            data,
-            frozenset({"schema_version", "selection", "skipped_views", "technique", "views"}),
-            name="technique payload",
-        )
+        base_keys = frozenset({"schema_version", "selection", "skipped_views", "technique", "views"})
+        if isinstance(data, Mapping) and data.get("schema_version") == "1.0.0":
+            block = _exact_keys(data, base_keys, name="technique payload")
+        else:
+            block = _exact_keys(
+                data,
+                base_keys | {"direction_deg", "interior_face_fraction_millionths", "surface_side"},
+                name="technique payload",
+            )
         raw_views = block["views"]
         raw_skipped = block["skipped_views"]
         if not isinstance(raw_views, (list, tuple)) or not isinstance(
@@ -246,12 +300,20 @@ class TechniqueAnnotationPayload:
             raise ArtifactTechniqueAnnotationError(str(exc)) from exc
         schema_version = block["schema_version"]
         technique = block["technique"]
+        side = block.get("surface_side")
+        fraction = block.get("interior_face_fraction_millionths")
+        direction = block.get("direction_deg")
         return cls(
             schema_version=schema_version if isinstance(schema_version, str) else "",
             technique=technique if isinstance(technique, str) else "",
             selection=block["selection"],  # type: ignore[arg-type]
             views=views,
             skipped_views=tuple(raw_skipped),  # type: ignore[arg-type]
+            surface_side=side if isinstance(side, str) else None,
+            interior_face_fraction_millionths=(
+                fraction if type(fraction) is int else None
+            ),
+            direction_deg=direction if isinstance(direction, (int, float)) else None,
         )
 
     def canonical_json_bytes(self) -> bytes:
@@ -293,7 +355,64 @@ class TechniqueAnnotationPayload:
             "technique": self.technique,
             "total_face_count": self.total_face_count,
             "views": views,
+            **(
+                {}
+                if self.schema_version == "1.0.0"
+                else {
+                    "direction_deg": self.direction_deg,
+                    "interior_face_fraction_millionths": self.interior_face_fraction_millionths,
+                    "surface_side": self.surface_side,
+                }
+            ),
         }
+
+
+def _direction_deg(value: object) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+    ):
+        raise ArtifactTechniqueAnnotationError(
+            "technique direction_deg must be a finite number of degrees or null"
+        )
+    return float(value) % 180.0
+
+
+def surface_side_of_faces(
+    vertices_world_mm: object, faces: object, face_indices: object
+) -> tuple[str, int]:
+    """Say which side of the wall a face set is on, and how much of it is inside.
+
+    Exterior faces have normals pointing away from the mesh's centroid and
+    interior faces toward it; the fraction is the share of the painted area
+    facing in.  Degenerate faces carry no area and no vote.
+    """
+
+    vertices = np.asarray(vertices_world_mm, dtype=np.float64)
+    all_faces = np.asarray(faces, dtype=np.int64)
+    selected = np.asarray(face_indices, dtype=np.int64).reshape(-1)
+    if vertices.ndim != 2 or vertices.shape[1] != 3 or all_faces.ndim != 2:
+        raise ArtifactTechniqueAnnotationError("surface side needs (n, 3) vertices and faces")
+    if selected.size == 0:
+        raise ArtifactTechniqueAnnotationError("surface side needs at least one face")
+    if selected.min() < 0 or selected.max() >= all_faces.shape[0]:
+        raise ArtifactTechniqueAnnotationError("surface side face index is outside the geometry")
+    centre = vertices.mean(axis=0)
+    corners = vertices[all_faces[selected]]
+    normals = np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0])
+    area2 = np.linalg.norm(normals, axis=1)
+    centroids = corners.mean(axis=1)
+    facing_in = np.einsum("ij,ij->i", normals, centroids - centre) < 0.0
+    total = float(area2.sum())
+    if total <= 0.0:
+        raise ArtifactTechniqueAnnotationError("surface side needs faces with area")
+    fraction = int(round(1_000_000 * float(area2[facing_in].sum()) / total))
+    if fraction >= 1_000_000 - _SURFACE_SIDE_MARGIN:
+        return SURFACE_INTERIOR, fraction
+    if fraction <= _SURFACE_SIDE_MARGIN:
+        return SURFACE_EXTERIOR, fraction
+    return SURFACE_MIXED, fraction
 
 
 def technique_recipe(
@@ -302,6 +421,7 @@ def technique_recipe(
     precision_grid_mm: float,
     selection: Mapping[str, Any],
     algorithm_version: str = TECHNIQUE_ALGORITHM_VERSION,
+    direction_deg: float | None = None,
 ) -> dict[str, Any]:
     """The closed recipe one technique region is computed under.
 
@@ -309,7 +429,7 @@ def technique_recipe(
     the operation, and two marks painted the same way are two computations.
     """
 
-    return {
+    recipe: dict[str, Any] = {
         "algorithm": TECHNIQUE_ALGORITHM,
         "algorithm_version": _technique_algorithm_version(algorithm_version),
         "kind": TECHNIQUE_OPERATION_KIND,
@@ -318,6 +438,11 @@ def technique_recipe(
         "technique": technique_kind(technique),
         "views": list(TECHNIQUE_VIEWS),
     }
+    if direction_deg is not None:
+        # Omitted when unknown, so a recipe written before the key existed
+        # keeps its bytes and its hash.
+        recipe["direction_deg"] = _direction_deg(direction_deg)
+    return recipe
 
 
 _RECIPE_KEYS = frozenset(
@@ -326,7 +451,10 @@ _RECIPE_KEYS = frozenset(
 
 
 def validate_technique_recipe(value: object) -> dict[str, Any]:
-    recipe = _exact_keys(value, _RECIPE_KEYS, name="technique recipe")
+    keys = _RECIPE_KEYS
+    if isinstance(value, Mapping) and "direction_deg" in value:
+        keys = _RECIPE_KEYS | {"direction_deg"}
+    recipe = _exact_keys(value, keys, name="technique recipe")
     if recipe["algorithm"] != TECHNIQUE_ALGORITHM:
         raise ArtifactTechniqueAnnotationError("technique algorithm is unsupported")
     _technique_algorithm_version(recipe["algorithm_version"])
@@ -341,6 +469,7 @@ def validate_technique_recipe(value: object) -> dict[str, Any]:
         precision_grid_mm=recipe["precision_grid_mm"],
         selection=recipe["selection"],
         algorithm_version=str(recipe["algorithm_version"]),
+        direction_deg=recipe.get("direction_deg"),
     )
 
 
@@ -398,12 +527,20 @@ def project_technique_from_recipe(
         )
     except ArtifactConditionAnnotationError as exc:
         raise ArtifactTechniqueAnnotationError(str(exc)) from exc
+    side, fraction = surface_side_of_faces(
+        vertices_world_mm,
+        faces,
+        face_indices_from_ranges(selection["face_ranges"], total_face_count=total_face_count),
+    )
     return TechniqueAnnotationPayload(
         schema_version=TECHNIQUE_PAYLOAD_SCHEMA_VERSION,
         technique=str(validated["technique"]),
         selection=selection,
         views=views,
         skipped_views=skipped,
+        surface_side=side,
+        interior_face_fraction_millionths=fraction,
+        direction_deg=validated.get("direction_deg"),
     )
 
 
@@ -430,6 +567,7 @@ def compute_technique_annotation(
     face_indices: object,
     precision_grid_mm: float = DEFAULT_OUTLINE_PRECISION_GRID_MM,
     cancellation_probe: CancellationProbe | None = None,
+    direction_deg: float | None = None,
 ) -> TechniqueAnnotationComputation:
     """Project one painted mark under the session's active alignment."""
 
@@ -445,7 +583,10 @@ def compute_technique_annotation(
         total_face_count=total_face_count, face_indices=face_indices
     )
     recipe = technique_recipe(
-        technique=technique, precision_grid_mm=precision_grid_mm, selection=selection
+        technique=technique,
+        precision_grid_mm=precision_grid_mm,
+        selection=selection,
+        direction_deg=direction_deg,
     )
     try:
         context = session.capture_operation(
@@ -662,6 +803,12 @@ __all__ = [
     "TECHNIQUE_PAYLOAD_EXTENSION_KEY",
     "TECHNIQUE_PAYLOAD_MEDIA_TYPE",
     "TECHNIQUE_PAYLOAD_SCHEMA_VERSION",
+    "TECHNIQUE_PAYLOAD_SCHEMA_VERSIONS",
+    "SURFACE_EXTERIOR",
+    "SURFACE_INTERIOR",
+    "SURFACE_MIXED",
+    "SURFACE_SIDES",
+    "surface_side_of_faces",
     "TECHNIQUE_RECORD_TYPE",
     "TECHNIQUE_VIEWS",
     "TECHNIQUE_WATER_SMOOTHING",

@@ -706,3 +706,116 @@ def test_a_record_cannot_be_both_halves_or_two_figures_halves() -> None:
                 ("record:other", SECTION_ID),
             )
         )
+
+
+def test_a_mark_inside_the_wall_is_drawn_on_the_section_half() -> None:
+    """A finger press on the inside shows through the cut, not on the elevation.
+
+    [K2] 도면 3 and 6 put the press rows and the tool strokes on the inside,
+    to the right of the axis; the outside, smoothed over, carries little.
+    """
+
+    from synthetic_vessel import positioned_vessel_session
+
+    from src.core.artifact_technique_annotation import (
+        commit_technique_annotation,
+        compute_technique_annotation,
+    )
+
+    session, _vertices, faces = positioned_vessel_session(segments=24, rings=10)
+    outer_count = 10 * 24 * 2
+    outline = compute_artifact_outline(session, "front", precision_grid_mm=0.5)
+    session = commit_vector_computation(
+        session, outline, record_id=ELEVATION_ID, created_at="2026-09-04T00:00:01Z", operator="t"
+    )
+    cutline = compute_artifact_cutline(
+        session,
+        PlanarFrame(
+            origin_world_mm=(0.0, 0.0, 0.0),
+            u_axis_world=(1.0, 0.0, 0.0),
+            v_axis_world=(0.0, 0.0, 1.0),
+            normal_world=(0.0, -1.0, 0.0),
+        ),
+    )
+    session = commit_vector_computation(
+        session, cutline, record_id=SECTION_ID, created_at="2026-09-04T00:00:02Z", operator="t"
+    )
+    # Segment 3 of 24 sits at about 52 degrees: back-right, so the inner
+    # face there is the far wall the section half looks onto.
+    ring = 5
+    inner_faces = [outer_count + (ring * 24 + 3) * 2, outer_count + (ring * 24 + 3) * 2 + 1]
+    # Segment 15 is front-left: the outer face there is on the elevation half.
+    outer_faces = [(ring * 24 + 15) * 2, (ring * 24 + 15) * 2 + 1]
+    session = commit_technique_annotation(
+        session,
+        compute_technique_annotation(
+            session, technique="finger_mark", face_indices=inner_faces, precision_grid_mm=0.5
+        ),
+        record_id="record:technique:inside",
+        created_at="2026-09-04T00:00:03Z",
+        operator="t",
+    )
+    session = commit_technique_annotation(
+        session,
+        compute_technique_annotation(
+            session, technique="finger_mark", face_indices=outer_faces, precision_grid_mm=0.5
+        ),
+        record_id="record:technique:outside",
+        created_at="2026-09-04T00:00:04Z",
+        operator="t",
+    )
+    records = ("record:technique:inside", "record:technique:outside")
+
+    bundle = compose_drawing_sheet(
+        session.document,
+        [ELEVATION_ID],
+        options=_options(
+            mirror_sections=((ELEVATION_ID, SECTION_ID),),
+            technique_records=records,
+        ),
+    )
+    figure = _figure(bundle.svg_bytes)
+    layer = figure.find(f"{SVG_NS}g[@id='layer-technique-finger-mark']")
+    assert layer is not None
+    axis_x = _axis_x(figure)
+    sides = {}
+    for path in layer:
+        if path.attrib["id"].startswith("mirror:left:"):
+            sides.setdefault("left", []).append(path)
+            assert all(point[0] <= axis_x + 1e-9 for point in _points(path))
+        elif path.attrib["id"].startswith("mirror:right:"):
+            sides.setdefault("right", []).append(path)
+            assert all(point[0] >= axis_x - 1e-9 for point in _points(path))
+    assert sides.get("left") and sides.get("right")
+    assert all(":record:technique:outside:" in p.attrib["id"] for p in sides["left"])
+    assert all(":record:technique:inside:" in p.attrib["id"] for p in sides["right"])
+
+    sidecar = json.loads(bundle.sidecar_bytes)
+    halves = {entry["record_id"]: entry["half"] for entry in sidecar["technique"]["drawn"]}
+    assert halves == {
+        "record:technique:inside": "section",
+        "record:technique:outside": "elevation",
+    }
+    sides_recorded = {entry["record_id"]: entry["surface_side"] for entry in sidecar["technique"]["records"]}
+    assert sides_recorded == {
+        "record:technique:inside": "interior",
+        "record:technique:outside": "exterior",
+    }
+    assert sidecar["technique"]["not_drawn"] == []
+
+    # Without a section half there is nowhere to show the inside, and the
+    # sheet says so rather than drawing it on the outside.
+    plain = compose_drawing_sheet(
+        session.document, [ELEVATION_ID], options=_options(technique_records=records)
+    )
+    plain_sidecar = json.loads(plain.sidecar_bytes)
+    assert [entry["record_id"] for entry in plain_sidecar["technique"]["drawn"]] == [
+        "record:technique:outside"
+    ]
+    assert plain_sidecar["technique"]["not_drawn"] == [
+        {
+            "figure_record_id": ELEVATION_ID,
+            "reason": "interior_needs_section_half",
+            "record_id": "record:technique:inside",
+        }
+    ]

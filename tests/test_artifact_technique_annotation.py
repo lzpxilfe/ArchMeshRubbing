@@ -246,3 +246,112 @@ def test_technique_records_do_not_change_the_completion_gate() -> None:
     before = derive_artifact_workflow_progress(session, align_ready=True)
     after = derive_artifact_workflow_progress(annotated, align_ready=True)
     assert after == before
+
+
+# --- which side of the wall, and which way the tool moved ----------------------
+
+
+def test_the_record_says_which_side_of_the_wall_a_mark_is_on() -> None:
+    """A coil seam or a finger press is usually seen inside the pot, where the
+    wall was not smoothed over; the record decides from the mesh, not the
+    drafter, so a sheet can put the mark on the section half."""
+
+    from synthetic_vessel import hollow_vessel
+
+    from src.core.artifact_technique_annotation import (
+        SURFACE_EXTERIOR,
+        SURFACE_INTERIOR,
+        SURFACE_MIXED,
+        surface_side_of_faces,
+    )
+
+    vertices, faces, _rim, _floor = hollow_vessel(segments=24, rings=10)
+    outer_count = 10 * 24 * 2
+    outer = list(range(0, 48))
+    inner = list(range(outer_count, outer_count + 48))
+    assert surface_side_of_faces(vertices, faces, outer) == (SURFACE_EXTERIOR, 0)
+    assert surface_side_of_faces(vertices, faces, inner) == (SURFACE_INTERIOR, 1_000_000)
+    side, fraction = surface_side_of_faces(vertices, faces, outer + inner)
+    assert side == SURFACE_MIXED
+    assert 300_000 < fraction < 700_000
+    with pytest.raises(ArtifactTechniqueAnnotationError, match="outside the geometry"):
+        surface_side_of_faces(vertices, faces, [len(faces)])
+    with pytest.raises(ArtifactTechniqueAnnotationError, match="at least one face"):
+        surface_side_of_faces(vertices, faces, [])
+
+    # The committed payload carries it, digests it, and reports it in QC.
+    session = _committed("coil_joint")
+    payload = technique_payload_from_record(session.document.record_index[RECORD_ID])
+    assert payload.schema_version == "1.1.0"
+    assert payload.surface_side == SURFACE_EXTERIOR
+    assert payload.interior_face_fraction_millionths == 0
+    assert payload.direction_deg is None
+    qc = payload.qc_summary()
+    assert qc["surface_side"] == SURFACE_EXTERIOR
+    assert qc["direction_deg"] is None
+
+
+def test_a_direction_the_drafter_observed_travels_in_the_recipe_and_payload() -> None:
+    selection = technique_selection(total_face_count=4, face_indices=(0,))
+    plain = technique_recipe(technique="wood_grain_smoothing", precision_grid_mm=0.05, selection=selection)
+    assert "direction_deg" not in plain
+    turned = technique_recipe(
+        technique="wood_grain_smoothing", precision_grid_mm=0.05, selection=selection, direction_deg=210.0
+    )
+    # Degrees on the paper: 210 is the same direction as 30.
+    assert turned["direction_deg"] == 30.0
+    assert validate_technique_recipe(turned)["direction_deg"] == 30.0
+    with pytest.raises(ArtifactTechniqueAnnotationError, match="direction_deg"):
+        technique_recipe(
+            technique="wood_grain_smoothing",
+            precision_grid_mm=0.05,
+            selection=selection,
+            direction_deg=float("nan"),
+        )
+
+    session = _session()
+    computation = compute_technique_annotation(
+        session, technique="wood_grain_smoothing", face_indices=[0], direction_deg=45.0
+    )
+    committed = commit_technique_annotation(
+        session, computation, record_id=RECORD_ID, created_at=COMMITTED_AT, operator="tester"
+    )
+    payload = technique_payload_from_record(committed.document.record_index[RECORD_ID])
+    assert payload.direction_deg == 45.0
+    assert committed.document.record_index[RECORD_ID].recipe["direction_deg"] == 45.0
+
+
+def test_a_1_0_0_payload_still_reads_and_digests_as_it_was_written() -> None:
+    from src.core.artifact_technique_annotation import TechniqueAnnotationPayload
+
+    current = technique_payload_from_record(_committed().document.record_index[RECORD_ID])
+    old = TechniqueAnnotationPayload(
+        schema_version="1.0.0",
+        technique=current.technique,
+        selection=current.selection,
+        views=current.views,
+        skipped_views=current.skipped_views,
+    )
+    encoded = old.to_dict()
+    assert set(encoded) == {"schema_version", "selection", "skipped_views", "technique", "views"}
+    assert TechniqueAnnotationPayload.from_dict(encoded) == old
+    assert old.sha256 != current.sha256
+    assert "surface_side" not in old.qc_summary()
+    # The new keys are not optional on the new version, and forbidden on the old.
+    with pytest.raises(ArtifactTechniqueAnnotationError, match="surface_side"):
+        TechniqueAnnotationPayload(
+            schema_version="1.1.0",
+            technique=current.technique,
+            selection=current.selection,
+            views=current.views,
+            skipped_views=current.skipped_views,
+        )
+    with pytest.raises(ArtifactTechniqueAnnotationError, match="1.0.0"):
+        TechniqueAnnotationPayload(
+            schema_version="1.0.0",
+            technique=current.technique,
+            selection=current.selection,
+            views=current.views,
+            skipped_views=current.skipped_views,
+            surface_side="exterior",
+        )

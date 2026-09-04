@@ -66,6 +66,7 @@ from .artifact_profile_groove import (
 )
 from .artifact_technique_annotation import (
     ArtifactTechniqueAnnotationError,
+    SURFACE_INTERIOR,
     TECHNIQUE_RECORD_TYPE,
     TechniqueAnnotationPayload,
     technique_payload_from_record,
@@ -1380,6 +1381,7 @@ def _technique_paths_for_figure(
     techniques: Sequence[tuple[DerivedRecord, TechniqueAnnotationPayload]],
     *,
     angles_deg: Mapping[str, float] = {},
+    interior: bool = False,
 ) -> tuple[dict[str, list[Any]], list[dict[str, Any]], dict[str, MarkStyle]]:
     """Return the technique layers that belong on one figure, and what they are.
 
@@ -1388,6 +1390,12 @@ def _technique_paths_for_figure(
     The painted region is then filled with the strokes its kind is drawn
     with; the strokes are seeded by the record and the view, so the same
     sheet always carries the same strokes.
+
+    A mark on the inside of the wall is not seen from outside, so it is
+    drawn only when `interior` asks for the inside: the section half of a
+    mirrored figure, where the far wall's inner face shows through the cut.
+    A mark whose side is unknown (a 1.0.0 payload) or mixed is drawn with
+    the outside.
     """
 
     by_kind: dict[str, list[Any]] = {}
@@ -1396,6 +1404,8 @@ def _technique_paths_for_figure(
     if figure_record_type != VectorRecordKind.OUTLINE.record_type:
         return by_kind, drawn, styles
     for record, payload in techniques:
+        if (payload.surface_side == SURFACE_INTERIOR) != interior:
+            continue
         for boundary in payload.views:
             if boundary.outline.frame != figure_payload_frame:
                 continue
@@ -1404,7 +1414,11 @@ def _technique_paths_for_figure(
                 style = mark_style_for_line_kind(kind)
             except DrawingStyleError as exc:
                 raise DrawingSheetError(str(exc)) from exc
+            # The sheet's direction wins over the record's; the record's
+            # over the kind's default.
             angle = angles_deg.get(record.id)
+            if angle is None:
+                angle = payload.direction_deg
             if angle is not None and style.directional:
                 style = style.with_angle(angle)
             seed = f"{record.id}:{boundary.view}:{payload.sha256}"
@@ -1431,6 +1445,7 @@ def _technique_paths_for_figure(
                     "representation": style.representation,
                     "seed": seed,
                     "stroke_count": len(strokes),
+                    "surface_side": payload.surface_side,
                     "technique_kind": payload.technique,
                     "view": boundary.view,
                 }
@@ -1579,6 +1594,7 @@ def _mirrored_figure(
     section_record_id: str,
     axis_ready: bool,
     preset: DrawingStylePreset,
+    interior_by_kind: Mapping[str, Sequence[Any]] = {},
 ) -> tuple[
     DerivedRecord,
     dict[str, list[Any]],
@@ -1644,6 +1660,11 @@ def _mirrored_figure(
         except DrawingStyleError as exc:
             raise DrawingSheetError(str(exc)) from exc
         section_by_kind.setdefault(kind, []).append(path)
+    # The inside of the far wall shows through the cut, so marks on the
+    # inside are drawn on the section's side of the axis.  They were
+    # projected in the same frame as the elevation, so the same cut applies.
+    for kind, paths in interior_by_kind.items():
+        section_by_kind.setdefault(kind, []).extend(paths)
 
     left, left_fill_only = _clipped_half(
         elevation_by_kind,
@@ -2144,6 +2165,7 @@ def compose_drawing_sheet(
     ]
     condition_drawn: list[dict[str, str]] = []
     technique_drawn: list[dict[str, Any]] = []
+    technique_not_drawn: list[dict[str, str]] = []
     technique_styles: dict[str, MarkStyle] = {}
     technique_angles = dict(options.technique_angles_deg)
     groove_drawn: list[dict[str, str]] = []
@@ -2205,16 +2227,48 @@ def compose_drawing_sheet(
         for kind, technique_paths in technique_by_kind.items():
             by_kind.setdefault(kind, []).extend(technique_paths)
         technique_styles.update(styles_used)
+        section_record_id = mirror_by_elevation.get(record.id)
         technique_drawn.extend(
-            {"figure_record_id": record.id, **entry} for entry in techniques_drawn
+            {
+                "figure_record_id": record.id,
+                "half": "elevation" if section_record_id is not None else "figure",
+                **entry,
+            }
+            for entry in techniques_drawn
         )
+        interior_by_kind: dict[str, list[Any]] = {}
+        if section_record_id is not None:
+            interior_by_kind, interior_drawn, interior_styles = _technique_paths_for_figure(
+                record.type,
+                payload.frame,
+                techniques,
+                angles_deg=technique_angles,
+                interior=True,
+            )
+            technique_styles.update(interior_styles)
+            technique_drawn.extend(
+                {"figure_record_id": record.id, "half": "section", **entry}
+                for entry in interior_drawn
+            )
+        else:
+            for interior_record, interior_payload in techniques:
+                if interior_payload.surface_side == SURFACE_INTERIOR and any(
+                    boundary.outline.frame == payload.frame
+                    for boundary in interior_payload.views
+                ):
+                    technique_not_drawn.append(
+                        {
+                            "figure_record_id": record.id,
+                            "reason": "interior_needs_section_half",
+                            "record_id": interior_record.id,
+                        }
+                    )
         groove_by_kind, grooves_drawn = _groove_paths_for_figure(payload, grooves)
         for kind, groove_paths in groove_by_kind.items():
             by_kind.setdefault(kind, []).extend(groove_paths)
         groove_drawn.extend(
             {"figure_record_id": record.id, **entry} for entry in grooves_drawn
         )
-        section_record_id = mirror_by_elevation.get(record.id)
         attached: _AttachedRaster | None = None
         caption: str | None = None
         attached_rubbing_id = attached_by_elevation.get(record.id)
@@ -2272,6 +2326,7 @@ def compose_drawing_sheet(
             section_record_id=section_record_id,
             axis_ready=align_recipe_kind == AXIS_ALIGN_RECIPE_KIND,
             preset=resolve_drawing_style_preset(options.style_preset),
+            interior_by_kind=interior_by_kind,
         )
         mirrored.append(
             {
@@ -2355,13 +2410,19 @@ def compose_drawing_sheet(
                             entry["record_id"],
                         ),
                     ),
+                    "not_drawn": sorted(
+                        technique_not_drawn,
+                        key=lambda entry: (entry["figure_record_id"], entry["record_id"]),
+                    ),
                     "records": [
                         {
+                            "direction_deg": payload.direction_deg,
                             "face_count": payload.face_count,
                             "payload_sha256": payload.sha256,
                             "recipe_hash": record.recipe_hash,
                             "record_id": record.id,
                             "selection_sha256": payload.selection_sha256,
+                            "surface_side": payload.surface_side,
                             "technique_kind": payload.technique,
                         }
                         for record, payload in sorted(

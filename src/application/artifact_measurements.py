@@ -1495,6 +1495,7 @@ class ArtifactMeasurementController:
         technique: str,
         selected_face_indices: Sequence[int],
         precision_grid_mm: float,
+        direction_deg: float | None = None,
         record_id: str | None = None,
         created_at: str | None = None,
         operator: str = "local-user",
@@ -1520,6 +1521,7 @@ class ArtifactMeasurementController:
                 technique=technique,
                 precision_grid_mm=precision_grid_mm,
                 selection=selection,
+                direction_deg=direction_deg,
             )
         except ArtifactTechniqueAnnotationError as exc:
             raise ArtifactMeasurementError(str(exc)) from exc
