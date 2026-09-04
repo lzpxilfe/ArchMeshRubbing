@@ -146,6 +146,50 @@ _SCALE_BAR_BAND_MM = _SCALE_BAR_HEIGHT_MM + _SCALE_BAR_LABEL_MM
 # appears to touch the sheet's own annotations.
 _FOOTER_GAP_MM = 4.0
 
+# What the sheet says about every rubbing on it.  A rubbing computed from a
+# mesh can look like paper and ink, and a reader who takes it for a paper
+# rubbing has been misled about what was measured.  So a sheet that carries
+# one says so in its title block, and each rubbing carries a caption naming
+# the model and the numbers that turned depth into ink - the reader's, not
+# the program's, and printed where the reader looks.  Neither can be
+# switched off.
+COMPUTED_RUBBING_NOTE = "3D 메쉬에서 계산 · 종이 탁본 아님"
+_CAPTION_FONT_MM = 2.2
+_CAPTION_GAP_MM = 1.0
+# Paper millimetres reserved beneath a rubbing for its caption.
+_CAPTION_BAND_MM = _CAPTION_GAP_MM + _CAPTION_FONT_MM + 0.6
+
+
+def _millimetre_token(micrometres: object) -> str:
+    return f"{int(micrometres) / 1000.0:g} mm"
+
+
+def computed_rubbing_caption(recipe: Mapping[str, Any]) -> str:
+    """The caption printed under a rubbing: what made its ink.
+
+    Read from the record's recipe, so the caption cannot disagree with what
+    was computed.  The window is the paper's conformance size, the black
+    point the depth at which ink is gone, and the ink the dabber's strength.
+    """
+
+    relief = recipe.get("relief_policy")
+    if not isinstance(relief, Mapping):
+        raise DrawingSheetError("a rubbing recipe without a relief policy has no caption")
+    try:
+        window = _millimetre_token(relief["reference_radius_requested_um"])
+        black = _millimetre_token(relief["black_point_requested_um"])
+        if relief.get("model") == "contact_envelope/v1":
+            ink = f"먹 {int(relief['contact_ink_percent'])}%"
+            model = "접촉 모델"
+        else:
+            ink = f"먹 {int(relief['ink_strength_percent'])}%"
+            model = "높이 모델"
+            if int(relief.get("paper_tone_percent", 0) or 0):
+                ink += f" · 기저 {int(relief['paper_tone_percent'])}%"
+    except (KeyError, TypeError, ValueError) as exc:
+        raise DrawingSheetError(f"rubbing recipe relief policy is malformed: {exc}") from exc
+    return f"전산 탁본 · {model} · 창 {window} · 검정 {black} · {ink}"
+
 
 class DrawingSheetError(ValueError):
     """A sheet cannot be composed as requested."""
@@ -438,18 +482,29 @@ class DrawingSheetOptions:
     def physical_scale(self) -> str:
         return f"1:{_scale_token(self.scale_denominator)}"
 
+    def title_block_row_count(self, *, computed_rubbing: bool = False) -> int:
+        """Artifact label, the mandatory scale row, the caller's rows, document.
+
+        A sheet carrying a rubbing computed from the mesh gets one more
+        mandatory row saying so; the composer decides that, not the caller.
+        """
+
+        return 2 + int(computed_rubbing) + len(self.title_block.rows) + 1
+
     @property
     def title_block_rows(self) -> int:
-        """Artifact label, the mandatory scale row, the caller's rows, document."""
+        return self.title_block_row_count()
 
-        return 2 + len(self.title_block.rows) + 1
+    def title_block_height(self, *, computed_rubbing: bool = False) -> float:
+        return _TITLE_BLOCK_ROW_MM * self.title_block_row_count(
+            computed_rubbing=computed_rubbing
+        )
 
     @property
     def title_block_height_mm(self) -> float:
-        return _TITLE_BLOCK_ROW_MM * self.title_block_rows
+        return self.title_block_height()
 
-    @property
-    def footer_height_mm(self) -> float:
+    def footer_height(self, *, computed_rubbing: bool = False) -> float:
         """Height of the band the sheet reserves for its own annotations.
 
         The title block and the scale bar sit side by side, but the band is
@@ -460,18 +515,28 @@ class DrawingSheetOptions:
         longer.
         """
 
-        return max(self.title_block_height_mm, _SCALE_BAR_BAND_MM)
+        return max(
+            self.title_block_height(computed_rubbing=computed_rubbing),
+            _SCALE_BAR_BAND_MM,
+        )
 
     @property
-    def content_height_mm(self) -> float:
+    def footer_height_mm(self) -> float:
+        return self.footer_height()
+
+    def content_height(self, *, computed_rubbing: bool = False) -> float:
         """Drawable height, with the footer band and its clearance removed."""
 
         return (
             self.page.height_mm
             - 2.0 * self.page.margin_mm
-            - self.footer_height_mm
+            - self.footer_height(computed_rubbing=computed_rubbing)
             - _FOOTER_GAP_MM
         )
+
+    @property
+    def content_height_mm(self) -> float:
+        return self.content_height()
 
 
 @dataclass(frozen=True, slots=True)
@@ -577,6 +642,8 @@ class _Prepared:
     fill_only_ids: frozenset[str] = frozenset()
     raster: _RasterImage | None = None
     attached: _AttachedRaster | None = None
+    caption: str | None = None
+    """Printed beneath a rubbing: what it is and what made its ink."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -591,6 +658,7 @@ class _Figure:
     fill_only_ids: frozenset[str] = frozenset()
     raster: _RasterImage | None = None
     attached: _AttachedRaster | None = None
+    caption: str | None = None
 
 
 def _lay_out(
@@ -607,7 +675,9 @@ def _lay_out(
     page = options.page
     denominator = options.scale_denominator
     available_width = page.content_width_mm
-    available_height = options.content_height_mm
+    available_height = options.content_height(
+        computed_rubbing=any(figure.caption is not None for figure in figures)
+    )
 
     placed: list[_Figure] = []
     cursor_x = page.margin_mm
@@ -662,6 +732,7 @@ def _lay_out(
                 fill_only_ids=prepared.fill_only_ids,
                 raster=prepared.raster,
                 attached=prepared.attached,
+                caption=prepared.caption,
             )
         )
         cursor_x += width
@@ -689,6 +760,29 @@ def _text_element(
         f'fill="{color}" text-anchor="{anchor}"{weight_attribute}>'
         f"{xml_attribute(text)}</text>"
     )
+
+
+def _caption_element(
+    caption: str | None,
+    *,
+    right_mm: float,
+    below_mm: float,
+    color: str,
+    index: int,
+) -> str:
+    """The rubbing's caption, right-aligned under its lower edge."""
+
+    if caption is None:
+        raise DrawingSheetError("a rubbing on the sheet must carry its caption")
+    element = _text_element(
+        caption,
+        x_mm=right_mm,
+        y_mm=below_mm + _CAPTION_GAP_MM + _CAPTION_FONT_MM,
+        size_mm=_CAPTION_FONT_MM,
+        color=color,
+        anchor="end",
+    )
+    return element.replace("<text ", f'<text id="rubbing-caption-{index:04d}" ', 1)
 
 
 def _scale_bar_elements(options: DrawingSheetOptions) -> tuple[list[str], dict[str, Any]]:
@@ -752,6 +846,7 @@ def _title_block_elements(
     options: DrawingSheetOptions,
     *,
     document_manifest_sha256: str,
+    computed_rubbing: bool = False,
 ) -> tuple[list[str], list[dict[str, str]]]:
     """Return the title block, and the rows it prints."""
 
@@ -760,12 +855,16 @@ def _title_block_elements(
     # The scale is derived and mandatory.  A reduced drawing that does not say
     # what it was reduced by cannot be measured off the page.
     rows.append(("축척", options.physical_scale))
+    if computed_rubbing:
+        # So is this: a sheet with a rubbing on it says where the rubbing came
+        # from, and no caller can leave that out.
+        rows.append(("탁본", COMPUTED_RUBBING_NOTE))
     rows.extend(block.rows)
     rows.append(("문서", document_manifest_sha256[:12]))
 
     page = options.page
-    assert len(rows) == options.title_block_rows
-    height = options.title_block_height_mm
+    assert len(rows) == options.title_block_row_count(computed_rubbing=computed_rubbing)
+    height = options.title_block_height(computed_rubbing=computed_rubbing)
     left = page.width_mm - page.margin_mm - _TITLE_BLOCK_WIDTH_MM
     top = page.height_mm - page.margin_mm - height
 
@@ -978,6 +1077,8 @@ def _prepare_raster_figure(
     document: ArtifactDocument,
     record: DerivedRecord,
     raster: Any,
+    *,
+    scale_denominator: float,
 ) -> _Prepared:
     """Turn a proven rubbing raster into a figure of its own physical size.
 
@@ -996,9 +1097,10 @@ def _prepare_raster_figure(
         record_type=record.type,
         recipe_hash=record.recipe_hash,
         payload_sha256=str(receipt["raster_sha256"]),
-        bounds=(0.0, 0.0, width_mm, height_mm),
+        bounds=_bounds_with_caption((0.0, 0.0, width_mm, height_mm), scale_denominator),
         paths_by_kind={},
         raster=image,
+        caption=computed_rubbing_caption(record.recipe),
     )
 
 
@@ -1146,18 +1248,38 @@ def _condition_paths_for_figure(
 def _bounds_with_attachment(
     bounds: tuple[float, float, float, float],
     attached: _AttachedRaster | None,
+    *,
+    scale_denominator: float,
 ) -> tuple[float, float, float, float]:
-    """Grow a figure's extent to hold the rubbing pasted inside it."""
+    """Grow a figure's extent to hold the rubbing pasted inside it, captioned."""
 
     if attached is None:
         return bounds
     left, bottom, right, top = attached.rectangle_mm
-    return (
-        min(bounds[0], left),
-        min(bounds[1], bottom),
-        max(bounds[2], right),
-        max(bounds[3], top),
+    return _bounds_with_caption(
+        (
+            min(bounds[0], left),
+            min(bounds[1], bottom),
+            max(bounds[2], right),
+            max(bounds[3], top),
+        ),
+        scale_denominator,
     )
+
+
+def _bounds_with_caption(
+    bounds: tuple[float, float, float, float],
+    scale_denominator: float,
+) -> tuple[float, float, float, float]:
+    """Reserve the caption band beneath a figure, in record millimetres.
+
+    The band is a paper size, so on a reduced sheet it is that many record
+    millimetres times the reduction: the caption stays the same size on the
+    page whatever the scale.
+    """
+
+    left, bottom, right, top = bounds
+    return (left, bottom - _CAPTION_BAND_MM * float(scale_denominator), right, top)
 
 
 def _paths_bounds(
@@ -1444,6 +1566,7 @@ def _sheet_provenance(
                         }
                     }
                 ),
+                **({} if figure.caption is None else {"caption": figure.caption}),
             }
             for figure in placed
         ],
@@ -1463,6 +1586,10 @@ def _sheet_provenance(
         "title_block": [dict(row) for row in title_rows],
         "unit": "mm",
     }
+    if any(figure.caption is not None for figure in placed):
+        # Present exactly when a rubbing is on the sheet, like the title block
+        # row it mirrors; a sheet of line work keeps its bytes.
+        provenance["computed_rubbing_note"] = COMPUTED_RUBBING_NOTE
     if condition is not None:
         # Added only when the caller asked for condition records, so a sheet
         # composed without them keeps the exact bytes it had before.
@@ -1617,15 +1744,34 @@ def _render_sheet(
         if figure.raster is not None:
             placement = figure.placement
             origin_x, origin_y = placement.origin_mm
+            # The figure's extent holds the caption band beneath the paper;
+            # the paper itself is its own physical size over the reduction.
+            denominator = placement.scale_denominator
+            paper_width = (
+                figure.raster.width_pixels * 1000.0 / figure.raster.pixels_per_meter
+            ) / denominator
+            paper_height = (
+                figure.raster.height_pixels * 1000.0 / figure.raster.pixels_per_meter
+            ) / denominator
             lines.append(
                 '      <image id="'
                 f'rubbing-{index:04d}" '
                 f'x="{number_token(origin_x, field_name="figure.x")}" '
                 f'y="{number_token(origin_y, field_name="figure.y")}" '
-                f'width="{number_token(placement.width_mm, field_name="figure.width")}" '
-                f'height="{number_token(placement.height_mm, field_name="figure.height")}" '
+                f'width="{number_token(paper_width, field_name="figure.width")}" '
+                f'height="{number_token(paper_height, field_name="figure.height")}" '
                 'preserveAspectRatio="none" image-rendering="pixelated" '
                 f'xlink:href="{xml_attribute(figure.raster.data_uri)}"/>'
+            )
+            lines.append(
+                "      "
+                + _caption_element(
+                    figure.caption,
+                    right_mm=origin_x + paper_width,
+                    below_mm=origin_y + paper_height,
+                    color=options.stroke_color,
+                    index=index,
+                )
             )
         elif figure.attached is None:
             lines.extend(
@@ -1679,6 +1825,22 @@ def _render_sheet(
                     hatched=hatched,
                     indent="      ",
                     fill_only_ids=figure.fill_only_ids,
+                )
+            )
+            # The caption sits in the band reserved beneath the whole figure,
+            # ending on the axis the paper is pasted to.
+            axis_x, _y = figure.placement.paper_xy(
+                (figure.attached.rectangle_mm[2], figure.attached.rectangle_mm[1])
+            )
+            origin_y = figure.placement.origin_mm[1]
+            lines.append(
+                "      "
+                + _caption_element(
+                    figure.caption,
+                    right_mm=axis_x,
+                    below_mm=origin_y + figure.placement.height_mm - _CAPTION_BAND_MM,
+                    color=options.stroke_color,
+                    index=index,
                 )
             )
         lines.append("    </g>")
@@ -1815,6 +1977,7 @@ def compose_drawing_sheet(
                     document,
                     rubbing_record,
                     rasters[record_id],
+                    scale_denominator=options.scale_denominator,
                 )
             )
             continue
@@ -1845,6 +2008,7 @@ def compose_drawing_sheet(
         )
         section_record_id = mirror_by_elevation.get(record.id)
         attached: _AttachedRaster | None = None
+        caption: str | None = None
         attached_rubbing_id = attached_by_elevation.get(record.id)
         if attached_rubbing_id is not None:
             attached = _attach_rubbing_on_axis(
@@ -1854,6 +2018,9 @@ def compose_drawing_sheet(
                 elevation=record,
                 elevation_payload=payload,
                 fit=options.rubbing_on_axis_fit,
+            )
+            caption = computed_rubbing_caption(
+                document.record_index[attached.record_id].recipe
             )
             attached_drawn.append(
                 {
@@ -1875,9 +2042,14 @@ def compose_drawing_sheet(
                     record_type=record.type,
                     recipe_hash=record.recipe_hash,
                     payload_sha256=payload.sha256,
-                    bounds=_bounds_with_attachment(_payload_bounds(payload), attached),
+                    bounds=_bounds_with_attachment(
+                        _payload_bounds(payload),
+                        attached,
+                        scale_denominator=options.scale_denominator,
+                    ),
                     paths_by_kind=by_kind,
                     attached=attached,
+                    caption=caption,
                 )
             )
             continue
@@ -1907,20 +2079,25 @@ def compose_drawing_sheet(
                 record_type=record.type,
                 recipe_hash=record.recipe_hash,
                 payload_sha256=payload.sha256,
-                bounds=_bounds_with_attachment(bounds, attached),
+                bounds=_bounds_with_attachment(
+                    bounds, attached, scale_denominator=options.scale_denominator
+                ),
                 paths_by_kind=combined,
                 mirror_section_record_id=section.id,
                 fill_only_ids=frozenset(fill_only_ids),
                 attached=attached,
+                caption=caption,
             )
         )
 
+    computed_rubbing = any(figure.caption is not None for figure in prepared)
     try:
         placed = _lay_out(prepared, options=options)
         scale_bar_lines, scale_bar = _scale_bar_elements(options)
         title_block_lines, title_rows = _title_block_elements(
             options,
             document_manifest_sha256=document.canonical_sha256,
+            computed_rubbing=computed_rubbing,
         )
         provenance = _sheet_provenance(
             document,
@@ -2074,8 +2251,41 @@ def validate_drawing_sheet_bytes(svg_bytes: bytes, sidecar_bytes: bytes) -> None
     ):
         raise DrawingSheetError("sheet title block does not print its own scale")
 
+    # And a sheet with a rubbing on it must say where the rubbing came from,
+    # in the title block and under each rubbing.
+    figures = sidecar.get("figures")
+    if not isinstance(figures, Sequence):
+        raise DrawingSheetError("sheet sidecar has no figure list")
+    rubbing_figures = [
+        figure
+        for figure in figures
+        if isinstance(figure, Mapping)
+        and ("raster_sha256" in figure or "rubbing_on_axis" in figure)
+    ]
+    if rubbing_figures:
+        if not any(
+            isinstance(row, Mapping) and row.get("value") == COMPUTED_RUBBING_NOTE
+            for row in rows
+        ):
+            raise DrawingSheetError(
+                "sheet carries a rubbing but its title block does not say it "
+                "was computed from the mesh"
+            )
+        svg_text = bytes(svg_bytes).decode("utf-8", errors="replace")
+        for figure in rubbing_figures:
+            caption = figure.get("caption")
+            if not isinstance(caption, str) or not caption.startswith("전산 탁본"):
+                raise DrawingSheetError(
+                    f"rubbing figure {figure.get('record_id')!r} carries no caption"
+                )
+            if xml_attribute(caption) not in svg_text:
+                raise DrawingSheetError(
+                    f"rubbing figure {figure.get('record_id')!r} caption is not on the page"
+                )
+
 
 __all__ = [
+    "COMPUTED_RUBBING_NOTE",
     "DRAWING_SHEET_FORMAT",
     "DRAWING_SHEET_SCHEMA_VERSION",
     "DRAWING_SHEET_SIDECAR_NAME",
@@ -2090,6 +2300,7 @@ __all__ = [
     "SheetPage",
     "TitleBlock",
     "compose_drawing_sheet",
+    "computed_rubbing_caption",
     "scale_bar_label",
     "scale_bar_length_mm",
     "validate_drawing_sheet_bytes",

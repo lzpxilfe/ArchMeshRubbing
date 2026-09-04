@@ -25,11 +25,13 @@ from src.core.artifact_vector_extractor import (
 from src.core.artifact_vector_record import PlanarFrame
 from src.core.canonical_json import canonical_json_bytes
 from src.core.drawing_sheet import (
+    COMPUTED_RUBBING_NOTE,
     DrawingSheetError,
     DrawingSheetOptions,
     SheetPage,
     TitleBlock,
     compose_drawing_sheet,
+    computed_rubbing_caption,
     scale_bar_label,
     scale_bar_length_mm,
     validate_drawing_sheet_bytes,
@@ -625,6 +627,82 @@ def test_a_rubbing_is_placed_beside_the_drawing_at_its_own_size() -> None:
     # A rubbing has no vector payload, and the sidecar does not pretend it does.
     assert "vector_payload_sha256" not in rubbing_figure
     assert "vector_payload_sha256" in figures[OUTLINE_ID]
+
+
+def test_a_sheet_with_a_rubbing_says_the_rubbing_was_computed() -> None:
+    """A rubbing computed from a mesh can pass for paper and ink, and a reader
+    who takes it for a paper rubbing has been misled about what was measured.
+    So the sheet says so where the reader looks, and nothing can leave it out:
+    a mandatory title block row, and under the rubbing a caption naming the
+    model and the numbers that turned depth into ink."""
+
+    session, raster = _session_with_rubbing()
+    bundle = compose_drawing_sheet(
+        session.document,
+        [OUTLINE_ID, RUBBING_ID],
+        options=_options(),
+        rasters={RUBBING_ID: raster},
+    )
+    validate_drawing_sheet_bytes(bundle.svg_bytes, bundle.sidecar_bytes)
+    svg = bundle.svg_bytes.decode("utf-8")
+    sidecar = json.loads(bundle.sidecar_bytes.decode("utf-8"))
+
+    rows = sidecar["title_block"]
+    labels = [row["label"] for row in rows]
+    # Right after the scale, before the caller's own rows.
+    assert labels[:3] == ["유물", "축척", "탁본"] and labels[-1] == "문서"
+    assert rows[2]["value"] == COMPUTED_RUBBING_NOTE
+    assert COMPUTED_RUBBING_NOTE in svg
+    assert sidecar["computed_rubbing_note"] == COMPUTED_RUBBING_NOTE
+
+    figures = {figure["record_id"]: figure for figure in sidecar["figures"]}
+    caption = figures[RUBBING_ID]["caption"]
+    # Read off the recipe the raster was made with, not typed anywhere.
+    assert caption == "전산 탁본 · 높이 모델 · 창 0.5 mm · 검정 0.1 mm · 먹 100%"
+    assert caption == computed_rubbing_caption(
+        session.document.record_index[RUBBING_ID].recipe
+    )
+    assert "caption" not in figures[OUTLINE_ID]
+    assert 'id="rubbing-caption-0001"' in svg
+    assert caption in svg
+    # The caption sits under the paper, inside the figure's own extent, so
+    # the paper is still drawn at its own physical size.
+    image = _images(bundle.svg_bytes)[0]
+    assert float(image["height"]) == pytest.approx(
+        raster.height_pixels * 1000.0 / raster.pixels_per_meter, abs=1e-6
+    )
+    assert figures[RUBBING_ID]["height_mm"] > float(image["height"])
+
+    # A sheet of line work says nothing about rubbings and keeps its bytes.
+    plain = compose_drawing_sheet(session.document, [OUTLINE_ID], options=_options())
+    plain_sidecar = json.loads(plain.sidecar_bytes.decode("utf-8"))
+    assert "computed_rubbing_note" not in plain_sidecar
+    assert "탁본" not in [row["label"] for row in plain_sidecar["title_block"]]
+    assert COMPUTED_RUBBING_NOTE not in plain.svg_bytes.decode("utf-8")
+
+    # The validator holds the line: a sidecar whose title block lost the note,
+    # or a figure that lost its caption, is refused.
+    without_note = json.loads(bundle.sidecar_bytes.decode("utf-8"))
+    without_note["title_block"] = [
+        row for row in without_note["title_block"] if row["label"] != "탁본"
+    ]
+    with pytest.raises(DrawingSheetError, match="computed from the mesh"):
+        validate_drawing_sheet_bytes(
+            bundle.svg_bytes, _resigned_sidecar(without_note, bundle.svg_bytes)
+        )
+    without_caption = json.loads(bundle.sidecar_bytes.decode("utf-8"))
+    for figure in without_caption["figures"]:
+        figure.pop("caption", None)
+    with pytest.raises(DrawingSheetError, match="carries no caption"):
+        validate_drawing_sheet_bytes(
+            bundle.svg_bytes, _resigned_sidecar(without_caption, bundle.svg_bytes)
+        )
+
+
+def _resigned_sidecar(sidecar: dict, svg_bytes: bytes) -> bytes:
+    """Canonical bytes of an edited sidecar, its SVG digest left as it was."""
+
+    return canonical_json_bytes(sidecar)
 
 
 def test_the_sheet_scale_reduces_the_rubbing_with_everything_else() -> None:

@@ -836,6 +836,15 @@ def test_the_strip_is_pasted_flush_against_the_centre_line(
             "rubbing_record_id": "record:rubbing:axis",
         }
     ]
+    # The pasted paper says what it is, in the title block and under itself.
+    assert {"label": "탁본", "value": "3D 메쉬에서 계산 · 종이 탁본 아님"} in sidecar[
+        "title_block"
+    ]
+    caption = sidecar["figures"][0]["caption"]
+    assert caption.startswith("전산 탁본 · 높이 모델 · 창 ")
+    assert caption.endswith(" · 먹 100% · 기저 20%")
+    assert 'id="rubbing-caption-0000"' in svg
+    assert caption in svg
 
 
 def test_the_height_fit_pastes_each_band_where_it_was_taken(
