@@ -45,10 +45,10 @@
 | 원 맞춤 지름 | PCA best-fit plane 위 정규화 대수 Kasa 원 | `[R6]` | paper | native | `src/core/artifact_surface_measurement.py` (`SURFACE_DIAMETER_FIT_POLICY`) |
 | 표면 거리 | source triangle + 10억 분율 barycentric anchor의 3D Euclidean chord (측지 거리 아님) | - | engineering contract | native | `src/core/artifact_surface_measurement.py` |
 | 표면적·체적 | 1 µm 격자 양자화 표면적 + topology-gated exact-rational 체적 (convex hull fallback 없음) | - | engineering contract | native | `src/core/artifact_geometry_metrics.py` |
-| 도면 선 종류 표현 | 닫힌 선 종류 어휘 + 종이 mm preset(해시 봉인) + role→선 종류 매핑 + 레이어드 SVG·단면 해칭 | - | engineering contract | native | `src/core/drawing_style.py`, `src/core/artifact_vector_export.py` |
+| 도면 선 종류 표현 | 닫힌 선 종류 어휘 + 종이 mm preset(해시 봉인) + role→선 종류 매핑 + 레이어드 SVG·단면 해칭 | `[K1]` | paper + engineering contract | native | `src/core/drawing_style.py`, `src/core/artifact_vector_export.py` |
 | 좌 반입면 · 우 반단면 | 회전축 기준 반평면 클리핑으로 입면 record와 단면 record를 한 도형에 합침 + 접힌 변은 획을 긋지 않음 | - | engineering contract | native | `src/core/drawing_svg.py`, `src/core/drawing_sheet.py` |
 | 유물 상태 표기 | 3D 면 집합의 정규 run-length 저장 + 커밋 시점 6뷰 투영 경계 + 전 뷰 공백이면 fail closed | `[L8]` | library + engineering contract | native | `src/core/artifact_condition_annotation.py` (`annotation.condition.v1`) |
-| 제작 기법 흔적 표기 | 상태 표기와 같은 면 집합 record에 닫힌 기법 어휘(테쌓기흔·지두흔·타날흔·물손질흔·목리조정흔); 지두흔은 도판에서 영역 크기의 U자 기호 | `[L8]` | library + engineering contract | native | `src/core/artifact_technique_annotation.py` (`annotation.technique.v1`), `src/core/drawing_svg.py` (`finger_mark_symbol`) |
+| 제작 기법 흔적 표기 | 상태 표기와 같은 면 집합 record에 닫힌 기법 어휘(테쌓기흔·지두흔·타날흔·물손질흔·목리조정흔); 도판에는 [K1][K2]의 표현대로 그린다: 지두흔은 누른 자리마다 타원, 테쌓기흔은 이음선, 목리조정흔은 방향 있는 평행선 군집, 물손질흔·타날흔은 평행선. 획은 seed로 결정적 | `[K1]`, `[K2]`, `[K3]`, `[L8]` | library + engineering contract | native | `src/core/artifact_technique_annotation.py` (`annotation.technique.v1`), `src/core/drawing_marks.py` |
 | 실측 도판 | 여러 record를 ISO 용지에 1:N 배치 + 파생 축척 행 + 축척바·제목란 + 넘치면 fail closed | - | engineering contract | native | `src/core/drawing_sheet.py`, `src/core/drawing_svg.py` |
 | 1:1 vector export | exact-mm SVG + canonical provenance + 재렌더 바이트 비교 | - | engineering contract | native | `src/core/artifact_vector_export.py` |
 | 1:1 탁본 export | 결정적 GA8 PNG + `pHYs` 물리 크기 + sidecar 결합 | - | engineering contract | native | `src/core/artifact_rubbing_export.py`, `src/core/canonical_png.py` |

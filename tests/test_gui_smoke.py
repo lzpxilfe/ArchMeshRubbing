@@ -7809,7 +7809,12 @@ def test_line_weight_table_takes_points_or_millimetres_and_reaches_both_exports(
         assert options is not None
         assert options.style_preset == expected
         assert options.style_preset.is_user
-        assert panel.combo_drawing_sheet_style.currentData() == PROVISIONAL_PRESET_ID
+        # A sheet opens on the sourced pen widths; the provisional preset is
+        # still on the list.
+        from src.core.drawing_style import KCHA_2013_PEN_PRESET_ID  # noqa: PLC0415
+
+        assert panel.combo_drawing_sheet_style.currentData() == KCHA_2013_PEN_PRESET_ID
+        assert panel.combo_drawing_sheet_style.findData(PROVISIONAL_PRESET_ID) >= 0
         assert panel.drawing_style_preset_choice("user") == expected
         assert panel.drawing_style_preset_choice(PROVISIONAL_PRESET_ID) == (
             PROVISIONAL_PRESET_ID

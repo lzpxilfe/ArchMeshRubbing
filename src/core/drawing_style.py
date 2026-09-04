@@ -176,10 +176,6 @@ TECHNIQUE_LINE_KINDS: Mapping[str, str] = {
     "water_smoothing": TECHNIQUE_WATER_SMOOTHING,
     "wood_grain_smoothing": TECHNIQUE_WOOD_GRAIN,
 }
-#: Technique kinds drawn as a symbol placed in the region rather than by the
-#: region's boundary.  A finger mark (지두흔) is shown as a U, the shape the
-#: fingertip left; its boundary would be a blob that says nothing.
-SYMBOL_LINE_KINDS: frozenset[str] = frozenset({TECHNIQUE_FINGER_MARK})
 
 
 def line_kind_for_technique(kind: str) -> str:
@@ -633,6 +629,11 @@ def preset_from_claim(claim: object) -> DrawingStylePreset:
 # the source, is the work described in docs/DRAWING_CONVENTIONS.md; until then
 # `provisional` is true and every drawing made with this preset says so.
 PROVISIONAL_PRESET_ID = "provisional/v1"
+#: Pen widths from 그림 27 of the 2013 한국문화유산협회 (then
+#: 한국문화재조사연구기관협회) measured-drawing course text, docs/REFERENCES.md
+#: [K1].  Named for what it follows, as docs/DRAWING_CONVENTIONS.md asks.
+KCHA_2013_PEN_PRESET_ID = "kcha-2013-pen/v1"
+KCHA_2013_SOURCE_ID = "K1"
 
 _PRESETS: dict[str, DrawingStylePreset] = {
     PROVISIONAL_PRESET_ID: DrawingStylePreset(
@@ -664,22 +665,15 @@ _PRESETS: dict[str, DrawingStylePreset] = {
             # no dash pattern because its breaks are cut into the geometry.
             TECHNIQUE_GROOVE_EDGE: LineStyle(stroke_width_mm=0.18),
             TECHNIQUE_GROOVE_TROUGH: LineStyle(stroke_width_mm=0.18),
-            # Five technique marks, each lighter than the outline and each
-            # told from the others by its dash; the finger mark is a symbol
-            # and needs no dash.  All provisional, like the rest.
-            TECHNIQUE_COIL_JOINT: LineStyle(
-                stroke_width_mm=0.18, dash_pattern_mm=(2.0, 0.6)
-            ),
-            TECHNIQUE_FINGER_MARK: LineStyle(stroke_width_mm=0.18),
-            TECHNIQUE_PADDLING: LineStyle(
-                stroke_width_mm=0.18, dash_pattern_mm=(0.8, 0.4)
-            ),
-            TECHNIQUE_WATER_SMOOTHING: LineStyle(
-                stroke_width_mm=0.13, dash_pattern_mm=(0.3, 0.3)
-            ),
-            TECHNIQUE_WOOD_GRAIN: LineStyle(
-                stroke_width_mm=0.18, dash_pattern_mm=(1.2, 0.4, 0.3, 0.4)
-            ),
+            # Five technique marks, all with one fine pen: a mark is told
+            # from the others by the strokes drawn for it (drawing_marks),
+            # never by a dash pattern - a report drawing draws the marks,
+            # not a coded boundary around them.  Provisional, like the rest.
+            TECHNIQUE_COIL_JOINT: LineStyle(stroke_width_mm=0.13),
+            TECHNIQUE_FINGER_MARK: LineStyle(stroke_width_mm=0.13),
+            TECHNIQUE_PADDLING: LineStyle(stroke_width_mm=0.13),
+            TECHNIQUE_WATER_SMOOTHING: LineStyle(stroke_width_mm=0.13),
+            TECHNIQUE_WOOD_GRAIN: LineStyle(stroke_width_mm=0.13),
             CENTER_AXIS: LineStyle(
                 stroke_width_mm=0.13,
                 dash_pattern_mm=(4.0, 1.0, 1.0, 1.0),
@@ -687,6 +681,44 @@ _PRESETS: dict[str, DrawingStylePreset] = {
         },
         hatch=HatchStyle(spacing_mm=1.0, stroke_width_mm=0.13, angle_deg=45.0),
         source_id=None,
+    ),
+    KCHA_2013_PEN_PRESET_ID: DrawingStylePreset(
+        preset_id=KCHA_2013_PEN_PRESET_ID,
+        lines={
+            # 그림 27 (유물제도 펜 굵기), [K1] p.25: 단면 0.6, 평면·입면 0.4,
+            # 결실부 0.1; the figure marks 0.3 on the emphasised lines
+            # (돌대·실선) and 0.1 on the fine ones (허선, 내부 세부).
+            SECTION_CUT: LineStyle(stroke_width_mm=0.6, hatch=True),
+            OUTLINE_VISIBLE: LineStyle(stroke_width_mm=0.4),
+            OUTLINE_HOLE: LineStyle(stroke_width_mm=0.4),
+            # 결실부 0.1 ([K1] p.25).  A restored form is drawn dashed
+            # ([K2] 도면 2 rim; [K1] p.12); the dash lengths are not stated
+            # in the source and are the provisional preset's.
+            CONDITION_MISSING: LineStyle(stroke_width_mm=0.1),
+            CONDITION_RESTORED: LineStyle(
+                stroke_width_mm=0.1, dash_pattern_mm=(3.0, 1.0, 0.5, 1.0)
+            ),
+            CONDITION_WORN: LineStyle(stroke_width_mm=0.1, dash_pattern_mm=(0.5, 0.5)),
+            CONDITION_CRACK: LineStyle(stroke_width_mm=0.1),
+            # 실선 (a raised 돌대·침선) 0.3 and 허선 0.1, [K1] p.19 and 그림 27.
+            TECHNIQUE_GROOVE_EDGE: LineStyle(stroke_width_mm=0.3),
+            TECHNIQUE_GROOVE_TROUGH: LineStyle(stroke_width_mm=0.1),
+            # Technique marks are drawn with the fine pen ([K2] 도면 2, 3, 6).
+            TECHNIQUE_COIL_JOINT: LineStyle(stroke_width_mm=0.1),
+            TECHNIQUE_FINGER_MARK: LineStyle(stroke_width_mm=0.1),
+            TECHNIQUE_PADDLING: LineStyle(stroke_width_mm=0.1),
+            TECHNIQUE_WATER_SMOOTHING: LineStyle(stroke_width_mm=0.1),
+            TECHNIQUE_WOOD_GRAIN: LineStyle(stroke_width_mm=0.1),
+            # The centre line is the fine pen; a dotted centre line marks a
+            # drawing reconstructed from a fragment ([K3] p.49).
+            CENTER_AXIS: LineStyle(
+                stroke_width_mm=0.1, dash_pattern_mm=(4.0, 1.0, 1.0, 1.0)
+            ),
+        },
+        # The source does not give the hatch; these are the provisional
+        # preset's, with the pen thinned to the source's fine line.
+        hatch=HatchStyle(spacing_mm=1.0, stroke_width_mm=0.1, angle_deg=45.0),
+        source_id=KCHA_2013_SOURCE_ID,
     ),
 }
 
@@ -731,7 +763,8 @@ __all__ = [
     "PROVISIONAL_PRESET_ID",
     "RECORD_ROLE_LINE_KINDS",
     "SECTION_CUT",
-    "SYMBOL_LINE_KINDS",
+    "KCHA_2013_PEN_PRESET_ID",
+    "KCHA_2013_SOURCE_ID",
     "TECHNIQUE_COIL_JOINT",
     "TECHNIQUE_FINGER_MARK",
     "TECHNIQUE_LINE_KINDS",

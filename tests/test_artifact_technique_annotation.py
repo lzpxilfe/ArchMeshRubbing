@@ -26,7 +26,6 @@ from src.core.artifact_technique_annotation import (
     technique_selection,
     validate_technique_recipe,
 )
-from src.core.drawing_svg import SVGRenderError, finger_mark_symbol
 from src.core.mesh_import_recipe import current_mesh_import_recipe
 from src.core.mesh_loader import MeshData
 from src.core.project_file import load_artifact_project, save_artifact_project
@@ -219,32 +218,3 @@ def test_technique_records_do_not_change_the_completion_gate() -> None:
     before = derive_artifact_workflow_progress(session, align_ready=True)
     after = derive_artifact_workflow_progress(annotated, align_ready=True)
     assert after == before
-
-
-# --- the U symbol ---------------------------------------------------------------
-
-
-def test_the_finger_mark_symbol_fills_its_box_and_opens_upward() -> None:
-    points = finger_mark_symbol((2.0, 1.0, 8.0, 5.0))
-    xs = [x for x, _ in points]
-    ys = [y for _, y in points]
-    assert points[0] == (2.0, 5.0)
-    assert points[-1] == (8.0, 5.0)
-    assert min(xs) == pytest.approx(2.0) and max(xs) == pytest.approx(8.0)
-    assert min(ys) == pytest.approx(1.0) and max(ys) == pytest.approx(5.0)
-    # The two arms are vertical and the bend sits below them.
-    assert points[1] == (2.0, 4.0)
-    assert points[-2] == (8.0, 4.0)
-    lowest = min(points, key=lambda point: point[1])
-    assert lowest[0] == pytest.approx(5.0)
-    # A flat mark is all bend: no arm is longer than the box allows.
-    flat = finger_mark_symbol((0.0, 0.0, 10.0, 2.0))
-    assert flat[1] == (0.0, 2.0)
-    assert min(y for _, y in flat) == pytest.approx(0.0)
-
-
-def test_the_finger_mark_symbol_refuses_a_degenerate_box() -> None:
-    with pytest.raises(SVGRenderError):
-        finger_mark_symbol((0.0, 0.0, 0.0, 1.0))
-    with pytest.raises(SVGRenderError):
-        finger_mark_symbol((0.0, float("nan"), 1.0, 1.0))

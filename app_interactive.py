@@ -399,6 +399,7 @@ from src.core.artifact_vector_export import (  # noqa: E402
     VectorSVGOptions,
 )
 from src.core.drawing_style import (  # noqa: E402
+    KCHA_2013_PEN_PRESET_ID as DRAWING_KCHA_PRESET_ID,
     LINE_KINDS as DRAWING_LINE_KINDS,
     LINE_KIND_LABELS_KO as DRAWING_LINE_KIND_LABELS,
     PROVISIONAL_PRESET_ID as DRAWING_PROVISIONAL_PRESET_ID,
@@ -4357,6 +4358,11 @@ class SectionPanel(QWidget):
             label = f"{preset_id} (잠정)" if preset.provisional else preset_id
             self.combo_drawing_sheet_style.addItem(label, preset_id)
         self.combo_drawing_sheet_style.addItem("사용자 지정 굵기", USER_LINE_WEIGHTS_PRESET)
+        # A sheet opens on the sourced pen widths; the provisional preset
+        # stays on the list for drawings made under it.
+        sourced_index = self.combo_drawing_sheet_style.findData(DRAWING_KCHA_PRESET_ID)
+        if sourced_index >= 0:
+            self.combo_drawing_sheet_style.setCurrentIndex(sourced_index)
         self.combo_drawing_sheet_style.setToolTip(
             "도판의 선 굵기 preset. 사용자 지정은 위 '선 굵기' 표의 값을 쓰고, "
             "그 표 전체가 도판 provenance에 남습니다."
@@ -4428,6 +4434,26 @@ class SectionPanel(QWidget):
             "지두흔은 영역 크기의 U자 기호로 그립니다. 단면 위에는 아직 그리지 않습니다."
         )
         native_layout.addWidget(self.list_drawing_sheet_conditions)
+        technique_row = QHBoxLayout()
+        technique_row.setContentsMargins(0, 0, 0, 0)
+        self.check_drawing_sheet_technique_angle = QCheckBox("기법 획 방향 지정")
+        self.check_drawing_sheet_technique_angle.setToolTip(
+            "체크하면 이 도판의 목리조정흔·물손질흔·타날흔 획을 아래 각도로 긋습니다. "
+            "도구가 움직인 방향은 관찰한 사실이므로 종류별 기본값 대신 직접 넣습니다. "
+            "지두흔·테쌓기흔은 방향이 없어 영향을 받지 않습니다."
+        )
+        technique_row.addWidget(self.check_drawing_sheet_technique_angle)
+        self.spin_drawing_sheet_technique_angle = QDoubleSpinBox()
+        self.spin_drawing_sheet_technique_angle.setRange(0.0, 179.9)
+        self.spin_drawing_sheet_technique_angle.setDecimals(1)
+        self.spin_drawing_sheet_technique_angle.setSingleStep(5.0)
+        self.spin_drawing_sheet_technique_angle.setValue(90.0)
+        self.spin_drawing_sheet_technique_angle.setSuffix(" °")
+        self.spin_drawing_sheet_technique_angle.setToolTip(
+            "종이 위 각도. 0°는 가로(회전물손질 방향), 90°는 세로(종방향 목리조정)."
+        )
+        technique_row.addWidget(self.spin_drawing_sheet_technique_angle)
+        native_layout.addLayout(technique_row)
 
         axis_line = QFrame()
         axis_line.setFrameShape(QFrame.Shape.HLine)
@@ -20529,6 +20555,7 @@ class MainWindow(QMainWindow):
                     )
                     return
         try:
+            technique_ids = self._checked_drawing_sheet_technique_ids()
             options = DrawingSheetOptions(
                 title_block=TitleBlock(artifact_label=label, rows=rows),
                 scale_denominator=float(panel.spin_drawing_sheet_scale.value()),
@@ -20540,7 +20567,15 @@ class MainWindow(QMainWindow):
                 mirror_sections=mirror_sections,
                 rubbings_on_axis=rubbings_on_axis,
                 condition_records=self._checked_drawing_sheet_condition_ids(),
-                technique_records=self._checked_drawing_sheet_technique_ids(),
+                technique_records=technique_ids,
+                technique_angles_deg=(
+                    tuple(
+                        (record_id, float(panel.spin_drawing_sheet_technique_angle.value()))
+                        for record_id in technique_ids
+                    )
+                    if panel.check_drawing_sheet_technique_angle.isChecked()
+                    else ()
+                ),
             )
             bundle = compose_drawing_sheet(
                 session.document, record_ids, options=options, rasters=rasters

@@ -30,9 +30,10 @@ from src.core.drawing_style import (
     OUTLINE_HOLE,
     OUTLINE_VISIBLE,
     PROVISIONAL_PRESET_ID,
+    SECTION_CUT,
     TECHNIQUE_GROOVE_EDGE,
-    TECHNIQUE_FINGER_MARK,
     TECHNIQUE_GROOVE_TROUGH,
+    TECHNIQUE_LINE_KINDS,
     DrawingStyleError,
     HatchStyle,
     LineStyle,
@@ -120,6 +121,37 @@ def test_the_shipped_preset_says_it_is_provisional() -> None:
     assert preset.provisional is True
     assert preset.source_id is None
     assert set(preset.lines) == set(LINE_KINDS)
+
+
+def test_the_sourced_preset_carries_the_textbook_pen_widths() -> None:
+    """kcha-2013-pen/v1 follows 그림 27 of [K1]: 단면 0.6, 입면 0.4, 결실부 0.1."""
+
+    from src.core.drawing_style import (
+        CONDITION_MISSING,
+        KCHA_2013_PEN_PRESET_ID,
+        KCHA_2013_SOURCE_ID,
+        TECHNIQUE_WOOD_GRAIN,
+    )
+
+    preset = get_preset(KCHA_2013_PEN_PRESET_ID)
+    assert preset.provisional is False
+    assert preset.source_id == KCHA_2013_SOURCE_ID == "K1"
+    assert set(preset.lines) == set(LINE_KINDS)
+    assert preset.style(SECTION_CUT).stroke_width_mm == 0.6
+    assert preset.style(SECTION_CUT).hatch is True
+    assert preset.style(OUTLINE_VISIBLE).stroke_width_mm == 0.4
+    assert preset.style(OUTLINE_HOLE).stroke_width_mm == 0.4
+    assert preset.style(CONDITION_MISSING).stroke_width_mm == 0.1
+    assert preset.style(TECHNIQUE_GROOVE_EDGE).stroke_width_mm == 0.3
+    assert preset.style(TECHNIQUE_GROOVE_TROUGH).stroke_width_mm == 0.1
+    assert preset.style(TECHNIQUE_WOOD_GRAIN).stroke_width_mm == 0.1
+    assert available_presets() == (KCHA_2013_PEN_PRESET_ID, PROVISIONAL_PRESET_ID)
+    # The source is on the register, so a reader can check the numbers.
+    references = (Path(__file__).resolve().parents[1] / "docs" / "REFERENCES.md").read_text(
+        encoding="utf-8"
+    )
+    assert "`[K1]`" in references
+    assert "유물 실측의 이해" in references
 
 
 def test_a_preset_must_style_every_line_kind() -> None:
@@ -374,8 +406,6 @@ def test_the_technique_vocabulary_matches_the_record_layer_exactly() -> None:
     from src.core.artifact_technique_annotation import TECHNIQUE_KINDS
     from src.core.drawing_style import (
         LINE_KINDS,
-        SYMBOL_LINE_KINDS,
-        TECHNIQUE_FINGER_MARK,
         TECHNIQUE_LINE_KINDS,
         line_kind_for_technique,
     )
@@ -384,7 +414,6 @@ def test_the_technique_vocabulary_matches_the_record_layer_exactly() -> None:
     for kind in TECHNIQUE_KINDS:
         assert line_kind_for_technique(kind) in LINE_KINDS
         assert line_kind_for_technique(kind).startswith("technique_")
-    assert SYMBOL_LINE_KINDS == {TECHNIQUE_FINGER_MARK}
     with pytest.raises(DrawingStyleError, match="burnishing"):
         line_kind_for_technique("burnishing")
 
@@ -422,8 +451,8 @@ def test_every_condition_kind_is_visually_distinguishable_in_the_preset() -> Non
         for kind in LINE_KINDS
     }
 
-    # Two deliberate pairs share a signature, and each is told apart on paper
-    # by something other than the pen.
+    # Some kinds deliberately share a pen and are told apart on paper by
+    # something other than it.
     deliberate = (
         # An outline and the hole inside it are the same line; a reader tells
         # them apart by where they are, not by weight.
@@ -432,15 +461,19 @@ def test_every_condition_kind_is_visually_distinguishable_in_the_preset() -> Non
         # a drafter draws them.  The bottom is a 간선: what distinguishes it is
         # that its geometry is broken, which no style signature can carry.
         (TECHNIQUE_GROOVE_EDGE, TECHNIQUE_GROOVE_TROUGH),
-        # A finger mark is drawn with that same pen too: it is a symbol, the
-        # U the fingertip left, and its shape is what tells it apart.
-        (TECHNIQUE_GROOVE_TROUGH, TECHNIQUE_FINGER_MARK),
     )
     for first, second in deliberate:
         assert signatures[first] == signatures[second]
-    assert len(set(signatures.values())) == len(signatures) - len(deliberate), (
-        signatures
-    )
+    # The five technique marks all take one fine solid pen: each is drawn
+    # as its own strokes (ovals, a seam, clusters, lines), never as a coded
+    # boundary, so the pen carries nothing and must not pretend to.
+    mark_kinds = [kind for kind in LINE_KINDS if kind in TECHNIQUE_LINE_KINDS.values()]
+    assert len({signatures[kind] for kind in mark_kinds}) == 1
+    assert all(preset.style(kind).dash_pattern_mm == () for kind in mark_kinds)
+    others = {kind: signatures[kind] for kind in LINE_KINDS if kind not in mark_kinds}
+    assert len(set(others.values())) == len(others) - len(deliberate), others
+    # And the marks' pen is not another kind's pen.
+    assert signatures[mark_kinds[0]] not in others.values()
 
 
 def test_a_measured_coordinate_is_not_refused_for_its_thirteenth_decimal() -> None:

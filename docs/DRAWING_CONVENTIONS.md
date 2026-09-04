@@ -27,11 +27,11 @@
 | `condition_crack` | 균열 | 균열 경계 | `annotation.condition.v1`, kind `crack` |
 | `technique_groove_edge` | 직선 (홈 가장자리) | 홈의 튀어나온 능선 | `measurement.profile_groove.v1` |
 | `technique_groove_trough` | 간선 (홈 바닥) | 홈의 들어간 골 | `measurement.profile_groove.v1` |
-| `technique_coil_joint` | 테쌓기흔 | 점토 띠를 쌓은 이음 자국 | `annotation.technique.v1`, kind `coil_joint` |
-| `technique_finger_mark` | 지두흔 (U자) | 손끝으로 누른 자국. 경계가 아니라 U자 기호로 그린다 | `annotation.technique.v1`, kind `finger_mark` |
-| `technique_paddling` | 타날흔 | 두드림판 자국 | `annotation.technique.v1`, kind `paddling` |
-| `technique_water_smoothing` | 물손질흔 | 물 묻힌 손이나 헝겊으로 문지른 자국 | `annotation.technique.v1`, kind `water_smoothing` |
-| `technique_wood_grain` | 목리조정흔 | 나무 도구로 긁어 고른 자국 | `annotation.technique.v1`, kind `wood_grain_smoothing` |
+| `technique_coil_joint` | 테쌓기흔 | 점토 띠의 이음 경계. 영역의 긴 축을 따라 가늘고 약간 흔들리는 선 한 줄 | `annotation.technique.v1`, kind `coil_joint` |
+| `technique_finger_mark` | 지두흔 | 손끝으로 누른 자국. 누른 자리마다 작은 타원 하나, 긴 영역이면 타원의 열 | `annotation.technique.v1`, kind `finger_mark` |
+| `technique_paddling` | 타날흔 | 두드림판 자국. 판 무늬 방향의 평행선(격자문이면 교차) | `annotation.technique.v1`, kind `paddling` |
+| `technique_water_smoothing` | 물손질흔 | 물 묻힌 손으로 문지른 자국. 회전 방향의 가늘고 끊긴 평행선 | `annotation.technique.v1`, kind `water_smoothing` |
+| `technique_wood_grain` | 목리조정흔 | 나무 도구로 긁어 고른 자국. 방향을 가진 가는 평행선의 군집 | `annotation.technique.v1`, kind `wood_grain_smoothing` |
 | `center_axis` | 중심선 | 회전축·대칭축의 일점쇄선 | `rotation_axis_from_circle_records/v1` Align (record가 아니라 정치의 결과) |
 
 새 선 종류는 **그것을 실제로 만들어내는 것이 생긴 뒤에** 추가한다. 만들 수 없는 종류를 먼저 이름 붙이면 모든 도면에 빈 레이어가 생기고, preset이 아무도 지키지 않는 관례를 서술하게 된다.
@@ -61,7 +61,26 @@ record의 role 이름(`section`, `exterior`, `hole`)은 payload 해시의 일부
 
 `preset.source_id`가 `null`이면 **잠정값**이다. 공개된 지침이 뒷받침하지 않는, 그저 1:1 출력에서 읽히도록 고른 값이라는 뜻이다. 이 사실은 preset의 `provisional` 필드로 도면 sidecar에까지 그대로 실린다. 도면을 받은 사람이 그 값이 표준인지 아닌지 확인할 수 있어야 하기 때문이다.
 
-지금 배포되는 preset은 `provisional/v1` 하나이고, 모든 값이 잠정값이다.
+배포되는 preset은 둘이다.
+
+- `provisional/v1` - 모든 값이 잠정값.
+- `kcha-2013-pen/v1` - 출처 `[K1]`(한국문화유산협회 2013 『유물 실측의 이해』 그림 27 "유물제도 펜 굵기", p.25). 도판은 이 preset으로 열린다.
+
+### `kcha-2013-pen/v1`
+
+| 선 종류 | 굵기 (mm) | 근거 |
+|---|---|---|
+| `section_cut` | 0.6 | 단면 0.6 ([K1] p.25) |
+| `outline_visible` · `outline_hole` | 0.4 | 평면 및 입면 0.4 ([K1] p.25) |
+| `condition_missing` | 0.1 | 결실부 0.1 ([K1] p.25) |
+| `condition_restored` | 0.1, 파선 | 복원선은 점선으로([K1] p.12, [K2] 도면 2의 복원 구연). 파선 길이는 출처에 없어 잠정 preset의 것 |
+| `condition_worn` · `condition_crack` | 0.1 | 세부 선 0.1 (그림 27). 마모의 파선은 출처에 없어 잠정 |
+| `technique_groove_edge` | 0.3 | 강조 실선(돌대·침선) 0.3 (그림 27, [K1] p.19) |
+| `technique_groove_trough` | 0.1 | 허선 0.1 (그림 27) |
+| 기법 흔적 다섯 | 0.1 | [K2] 도면 2·3·6의 가는 펜 |
+| `center_axis` | 0.1, 일점쇄선 | 중심선은 가는 펜. 도면 복원한 유물은 중심선을 점선으로 표시한다([K3] p.49) |
+
+해칭은 출처에 없다. 잠정 preset의 간격·각도에 펜만 0.1로 가늘게 했다. 굵기는 출처에서 옮겼고 파선 길이와 해칭은 아직 잠정이라는 사실을 이 표가 말한다.
 
 ### 출처 있는 preset 추가하기
 
@@ -93,11 +112,11 @@ record의 role 이름(`section`, `exterior`, `hole`)은 payload 해시의 일부
 | `condition_crack` | 0.3 | - | - |
 | `technique_groove_edge` | 0.18 | - | - |
 | `technique_groove_trough` | 0.18 | - (기하로 끊는다) | - |
-| `technique_coil_joint` | 0.18 | 2 - 0.6 | - |
-| `technique_finger_mark` | 0.18 | - (U자 기호) | - |
-| `technique_paddling` | 0.18 | 0.8 - 0.4 | - |
-| `technique_water_smoothing` | 0.13 | 0.3 - 0.3 | - |
-| `technique_wood_grain` | 0.18 | 1.2 - 0.4 - 0.3 - 0.4 | - |
+| `technique_coil_joint` | 0.13 | - (획으로 구분) | - |
+| `technique_finger_mark` | 0.13 | - (획으로 구분) | - |
+| `technique_paddling` | 0.13 | - (획으로 구분) | - |
+| `technique_water_smoothing` | 0.13 | - (획으로 구분) | - |
+| `technique_wood_grain` | 0.13 | - (획으로 구분) | - |
 | `center_axis` | 0.13 | 4 - 1 - 1 - 1 (일점쇄선) | - |
 
 해칭: 45°, 간격 1.0 mm, 선 굵기 0.13 mm.
@@ -349,20 +368,33 @@ sidecar의 `groove.records`에는 그리도록 지정된 record와 골의 높이
 
 ## 제작 기법 — 손과 도구가 남긴 자국
 
-테쌓기흔 · 지두흔 · 타날흔 · 물손질흔 · 목리조정흔은 `annotation.technique.v1` record가 담는다. 상태 표기와 같은 record다 — 메쉬 위에 칠한 면 집합을 run-length로 저장하고, 커밋 시점에 여섯 뷰의 투영 경계를 함께 계산한다. 다른 것은 어휘(`TECHNIQUE_KINDS`)와 record type뿐이라, 상태와 기법이 한 record 안에서 섞이지 못한다. 결실 경계를 기법 선으로 그리거나 그 반대가 되는 일은 type 검사에서 거부된다.
+테쌓기흔 · 지두흔 · 타날흔 · 물손질흔 · 목리조정흔은 `annotation.technique.v1` record가 담는다. 상태 표기와 같은 record다 — 메쉬 위에 칠한 면 집합을 run-length로 저장하고, 커밋 시점에 여섯 뷰의 투영 경계를 함께 계산한다. 다른 것은 어휘(`TECHNIQUE_KINDS`)와 record type뿐이라, 상태와 기법이 한 record 안에서 섞이지 못한다.
+
+**흔적은 경계로 그리지 않는다.** 보고서 도면은 물손질 자국이 있는 *범위*를 상자로 두르지 않고, 자국 자체를 긋는다. record의 영역은 "어디에"를 말하고, 그 안에 무엇을 그릴지는 `src/core/drawing_marks.py`가 [K1][K2]의 도면대로 정한다.
+
+| 종류 | 표현 (`representation`) | 근거 |
+|---|---|---|
+| 지두흔 | `press_ovals` - 누른 자리마다 닫힌 작은 타원. 15 mm보다 긴 영역은 타원의 열로 나눈다 | [K2] 도면 2·3: 손누름자국은 점토띠 경계를 따라 횡으로 열을 지은 작은 타원. [K1] p.35: 지두흔은 1-2 cm |
+| 테쌓기흔 | `seam_line` - 영역의 긴 축을 따라 가늘고 약간 흔들리는 선 한 줄 | [K2] 도면 2·4: 테쌓기 경계는 가는 횡선 |
+| 목리조정흔 | `stroke_patches` - 가는 평행선 10줄 안팎의 군집을 간격을 두고 늘어놓는다. 방향은 작도자가 정한다 | [K2] 도면 6·7과 p.20: "군집을 이루는 형태로", 종·횡·사방향 |
+| 물손질흔 | `parallel_lines` - 회전 방향(가로)의 가늘고 끊긴 평행선 | [K3] p.34, p.42: 회전 물손질, 횡방향 물손질 |
+| 타날흔 | `parallel_lines` - 판 무늬 방향의 평행선. `crossed`면 격자문 | [K3] p.9: 격자문·평행선문·승문. [K1] p.37: 타날은 탁본으로 기록하는 것이 원칙이므로 이 선은 위치와 방향만 말한다 |
 
 ```python
 DrawingSheetOptions(
     title_block=...,
     technique_records=("record:technique-1",),
+    technique_angles_deg=(("record:technique-1", 30.0),),
 )
 ```
 
 **기본값은 빈 튜플이고, 주지 않으면 도판 바이트가 이전과 같다.** sidecar에 `technique` 블록도 생기지 않는다.
 
-**그리는 규칙은 상태와 같다.** 투영 도면에만, frame이 같은 뷰에만, READY이고 FRESH인 record만 그린다. 선 종류는 record의 kind로 정해진다(`TECHNIQUE_LINE_KINDS`).
+**그리는 규칙은 상태와 같다.** 투영 도면에만, frame이 같은 뷰에만, READY이고 FRESH인 record만 그린다. 선 종류는 record의 kind로 정해진다(`TECHNIQUE_LINE_KINDS`). 다섯 종류 모두 한 가지 가는 펜으로 긋고 파선을 쓰지 않는다. 종류는 획의 모양이 말한다.
 
-**지두흔은 경계가 아니라 U자다.** 손끝으로 누른 자국의 실루엣은 아무것도 말해주지 않는 덩어리이고, 관례가 쓰는 기호는 U자다. 그래서 `technique_finger_mark`는 `SYMBOL_LINE_KINDS`에 들어 있고, 도판은 그 뷰에서 영역이 차지하는 상자 크기의 U자(`finger_mark_symbol`)를 영역 자리에 놓는다. 두 팔은 상자 옆변, 굽은 바닥은 반타원이며 위로 열린다. 여는 방향은 작도자의 관례라 잠정값이다. sidecar의 `technique.drawn[].representation`이 `symbol`인지 `boundary`인지를 남긴다.
+**방향은 관찰한 사실이다.** 목리조정흔·물손질흔·타날흔은 도구가 움직인 방향으로 긋는다. `technique_angles_deg`로 record마다 종이 위 각도를 주면 그 방향으로, 주지 않으면 종류별 기본값(목리 90°, 물손질 0°, 타날 60°)으로 긋는다. 타원과 이음선은 방향이 없다. 앱에서는 도판 항목의 "기법 획 방향 지정"을 켜고 각도를 넣으면 그 도판의 기법 record 전부에 적용된다.
+
+**같은 도판은 같은 획이다.** 획의 흔들림과 끊김은 record id · 뷰 · payload 해시에서 만든 seed로 정해지므로, 같은 record는 언제 그려도 같은 바이트가 된다. sidecar의 `technique.drawn[]`에는 record마다 표현·획 수·각도·seed가, `technique.styles`에는 그 획을 만든 수치 전체가 남는다. 간격·길이·흔들림 같은 수치는 잠정값이고, 모양만이 출처의 것이다.
 
 **기법은 상태 밑에 깔린다.** 복원면에 칠한 기법 자국이 복원 경계에 가려지는 것은 옳은 결과다. 현대의 복원면에서 제작 기법을 읽어서는 안 된다.
 
@@ -373,6 +405,9 @@ DrawingSheetOptions(
 ## 아직 없는 것
 
 - **기법 자국의 자동 검출.** 테쌓기흔이든 타날흔이든, 지금은 고고학자가 칠한다. 홈처럼 축에 대한 사실이 아니라 표면 결의 해석이므로, 프로그램이 제안하더라도 결정은 사람이 한다.
+- **획 방향을 record에 담기.** 지금 방향은 도판 옵션이다. 도구가 움직인 방향은 관찰한 사실이므로 기법 record의 payload에 들어가야 하고, 그러려면 payload schema가 1.1.0이 되어야 한다.
+- **마연흔·목판정면·내박자흔·깎기.** [K1] p.19와 [K3] p.7이 드는 정면 수법 가운데 어휘에 없는 것들. record 어휘가 닫혀 있으므로 새 종류는 새 payload schema와 함께 들어간다.
+- **타날문 자체.** 타날 영역의 선은 위치와 방향만 말한다. 무늬(승문·격자문·평행선문)는 탁본이 말하고, [K3] p.11대로 입면선이 보이게 잘라 붙인 탁본이 도판에 오르는 것이 원칙이다.
 - **단면 절반의 상태 표기.** 상태 record는 여섯 뷰의 투영 경계를 담는데, 단면은 사용자가 정한 임의의 평면이라 커밋 시점에 미리 계산해 둘 수가 없다. 절단면 위의 결실·복원을 그리려면 상태 record와 단면 record 둘 다에 의존하는 별도의 record가 필요하다.
 - **1:1 vector export(`.amr-vector`)의 상태 표기.** 지금은 도판에만 그린다. 1:1 패키지는 검증할 때 sidecar만 가지고 SVG를 다시 렌더해 바이트를 대조하므로, 상태 경계를 그리려면 상태 payload 전체가 sidecar에 실리고 오프라인 검증기가 그것까지 검사해야 한다. 이 저장소에서 가장 엄격한 검증 경로라 따로 한 번에 한다.
 - **외곽선의 격자 바늘구멍.** 외곽선은 삼각형 투영을 고정 격자에 스냅한 뒤 합집합한다. 실루엣 접선 부근에서는 어떤 매끄러운 면이든 투영 폭이 격자보다 좁은 삼각형이 생기고, 그런 삼각형은 스냅에서 면적 0이 되어 합집합에서 빠진다. 그러면 양옆 삼각형이 점으로만 붙어 실루엣 경계에 격자 한 칸짜리 바늘구멍이 남고, 경계에 닿은 구멍이므로 `hole_not_strictly_inside`로 거부된다. 거부 자체는 옳다 — 그건 유물의 구멍이 아니다 — 그리고 이제 메시지가 격자 몇 칸인지와 무엇을 바꿔야 하는지 말한다.

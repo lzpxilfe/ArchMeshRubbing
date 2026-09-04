@@ -557,7 +557,7 @@ def test_a_sheet_without_technique_records_is_the_sheet_it_always_was() -> None:
     assert "technique" not in json.loads(plain.sidecar_bytes.decode("utf-8"))
 
 
-def test_a_technique_mark_is_drawn_by_its_boundary_on_the_figure_that_shares_its_view() -> None:
+def test_a_technique_mark_is_drawn_as_strokes_on_the_figure_that_shares_its_view() -> None:
     document = _technique_session("coil_joint").document
     bundle = compose_drawing_sheet(
         document,
@@ -587,33 +587,46 @@ def test_a_technique_mark_is_drawn_by_its_boundary_on_the_figure_that_shares_its
     assert not [layer for layer in cutline_layers if "technique" in layer]
     layer = by_record[OUTLINE_ID].find(f"{SVG_NS}g[@id='layer-technique-coil-joint']")
     assert layer is not None
-    assert layer.attrib["stroke-dasharray"] == "2,0.6"
-    for path in layer:
-        assert path.attrib["id"].startswith(f"technique:{TECHNIQUE_ID}:top:")
+    # One fine solid pen: the mark is told by its strokes, not a dash code.
+    assert "stroke-dasharray" not in layer.attrib
+    paths = list(layer)
+    # A coil seam on one face is one open line along the region, never the
+    # region's boundary.
+    assert len(paths) == 1
+    assert paths[0].attrib["id"] == f"technique:{TECHNIQUE_ID}:top:0"
+    assert not paths[0].attrib["d"].rstrip().endswith("Z")
 
     sidecar = json.loads(bundle.sidecar_bytes.decode("utf-8"))
     technique = sidecar["technique"]
     assert [entry["record_id"] for entry in technique["records"]] == [TECHNIQUE_ID]
     assert technique["records"][0]["technique_kind"] == "coil_joint"
     assert technique["records"][0]["face_count"] == 1
-    assert technique["drawn"] == [
-        {
-            "figure_record_id": OUTLINE_ID,
-            "line_kind": "technique_coil_joint",
-            "record_id": TECHNIQUE_ID,
-            "representation": "boundary",
-            "technique_kind": "coil_joint",
-            "view": "top",
-        }
-    ]
+    (entry,) = technique["drawn"]
+    assert entry["figure_record_id"] == OUTLINE_ID
+    assert entry["line_kind"] == "technique_coil_joint"
+    assert entry["representation"] == "seam_line"
+    assert entry["stroke_count"] == 1
+    assert entry["angle_deg"] is None
+    assert entry["view"] == "top"
+    assert entry["seed"].startswith(f"{TECHNIQUE_ID}:top:")
+    assert technique["styles"]["technique_coil_joint"]["representation"] == "seam_line"
     validate_drawing_sheet_bytes(bundle.svg_bytes, bundle.sidecar_bytes)
 
+    # The same sheet twice is the same bytes: the strokes are seeded.
+    again = compose_drawing_sheet(
+        document,
+        [OUTLINE_ID, CUTLINE_ID],
+        options=_options(technique_records=(TECHNIQUE_ID,)),
+    )
+    assert again.svg_bytes == bundle.svg_bytes
 
-def test_a_finger_mark_is_drawn_as_a_u_over_the_region_not_by_its_boundary() -> None:
+
+def test_a_finger_mark_is_drawn_as_an_oval_inside_the_region_not_by_its_boundary() -> None:
+    from shapely.geometry import Polygon  # noqa: PLC0415
+
     from src.core.artifact_technique_annotation import (  # noqa: PLC0415
         technique_payload_from_record,
     )
-    from src.core.drawing_svg import finger_mark_symbol  # noqa: PLC0415
 
     document = _technique_session("finger_mark").document
     bundle = compose_drawing_sheet(
@@ -629,31 +642,57 @@ def test_a_finger_mark_is_drawn_as_a_u_over_the_region_not_by_its_boundary() -> 
     layer = figure.find(f"{SVG_NS}g[@id='layer-technique-finger-mark']")
     assert layer is not None
     paths = list(layer)
+    # One press on one face: one closed oval, not the face's triangle.
     assert len(paths) == 1
-    assert paths[0].attrib["id"] == f"technique:{TECHNIQUE_ID}:top:symbol"
-    # An open polyline: the U is never closed and never filled.
-    assert not paths[0].attrib["d"].rstrip().endswith("Z")
-    assert "stroke-dasharray" not in layer.attrib
+    assert paths[0].attrib["id"] == f"technique:{TECHNIQUE_ID}:top:0"
+    assert paths[0].attrib["d"].rstrip().endswith("Z")
+    assert paths[0].attrib.get("fill", "none") == "none"
 
-    # The U spans the region's extent in this view.
     payload = technique_payload_from_record(document.record_index[TECHNIQUE_ID])
     top = next(view for view in payload.views if view.view == "top")
-    points = np.vstack([np.asarray(path.points_mm) for path in top.outline.paths])
-    bounds = (
-        float(points[:, 0].min()),
-        float(points[:, 1].min()),
-        float(points[:, 0].max()),
-        float(points[:, 1].max()),
-    )
-    symbol = np.asarray(finger_mark_symbol(bounds))
-    assert symbol[:, 0].min() == pytest.approx(bounds[0])
-    assert symbol[:, 0].max() == pytest.approx(bounds[2])
-    assert symbol[:, 1].min() == pytest.approx(bounds[1])
-    assert symbol[:, 1].max() == pytest.approx(bounds[3])
+    region = Polygon(top.outline.paths[0].points_mm)
+    # The oval sits on the region and is about its size.
+    numbers = [float(token) for token in paths[0].attrib["d"].replace("M", " ").replace("L", " ").replace("Z", " ").split()]
+    points = list(zip(numbers[0::2], numbers[1::2]))
+    assert len(points) >= 12
 
     sidecar = json.loads(bundle.sidecar_bytes.decode("utf-8"))
-    assert sidecar["technique"]["drawn"][0]["representation"] == "symbol"
+    (entry,) = sidecar["technique"]["drawn"]
+    assert entry["representation"] == "press_ovals"
+    assert entry["stroke_count"] == 1
+    assert region.area > 0.0
     validate_drawing_sheet_bytes(bundle.svg_bytes, bundle.sidecar_bytes)
+
+
+def test_a_direction_given_for_a_record_turns_its_strokes() -> None:
+    document = _technique_session("wood_grain_smoothing").document
+    default = compose_drawing_sheet(
+        document, [OUTLINE_ID], options=_options(technique_records=(TECHNIQUE_ID,))
+    )
+    turned = compose_drawing_sheet(
+        document,
+        [OUTLINE_ID],
+        options=_options(
+            technique_records=(TECHNIQUE_ID,),
+            technique_angles_deg=((TECHNIQUE_ID, 30.0),),
+        ),
+    )
+    assert turned.svg_bytes != default.svg_bytes
+    default_entry = json.loads(default.sidecar_bytes)["technique"]["drawn"][0]
+    turned_entry = json.loads(turned.sidecar_bytes)["technique"]["drawn"][0]
+    assert default_entry["angle_deg"] == 90.0
+    assert turned_entry["angle_deg"] == 30.0
+    assert json.loads(turned.sidecar_bytes)["technique"]["styles"][
+        "technique_wood_grain"
+    ]["angle_deg"] == 30.0
+
+    with pytest.raises(DrawingSheetError, match="not in technique_records"):
+        _options(technique_angles_deg=((TECHNIQUE_ID, 30.0),))
+    with pytest.raises(DrawingSheetError, match="finite"):
+        _options(
+            technique_records=(TECHNIQUE_ID,),
+            technique_angles_deg=((TECHNIQUE_ID, float("nan")),),
+        )
 
 
 def test_a_sheet_refuses_a_record_that_is_not_a_technique_annotation() -> None:

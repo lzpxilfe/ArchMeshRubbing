@@ -87,13 +87,19 @@ from .drawing_style import (
     CENTER_AXIS,
     DrawingStyleError,
     DrawingStylePreset,
-    SYMBOL_LINE_KINDS,
     preset_claim as drawing_style_preset_claim,
     preset_from_claim as drawing_style_preset_from_claim,
     resolve_preset as resolve_drawing_style_preset,
     line_kind_for_condition,
     line_kind_for_record_role,
     line_kind_for_technique,
+)
+from .drawing_marks import (
+    DrawingMarkError,
+    MarkStyle,
+    generate_marks,
+    mark_style_for_line_kind,
+    region_polygons,
 )
 from .drawing_svg import (
     Placement,
@@ -103,7 +109,6 @@ from .drawing_svg import (
     center_axis_segment,
     clip_closed_ring,
     clip_open_path,
-    finger_mark_symbol,
     finite_number,
     hatch_pattern_elements,
     hatched_kinds,
@@ -367,9 +372,21 @@ class DrawingSheetOptions:
     """Technique marks to draw over the figures, by record id.
 
     Empty by default, and an empty tuple changes nothing.  Like a condition, a
-    mark is drawn only onto figures that share its view.  Most kinds are drawn
-    by the boundary of the painted region; a finger mark is drawn as the U
-    symbol the convention uses, sized to the region's extent.
+    mark is drawn only onto figures that share its view.  A mark is never
+    drawn as the boundary of the painted region: the region says where, and
+    `drawing_marks` puts the strokes a report drawing uses there - ovals for
+    each finger press, the seam line of a coil joint, clusters of fine
+    strokes for a wooden tool, parallel lines for wet-hand smoothing and for
+    a paddle.
+    """
+    technique_angles_deg: tuple[tuple[str, float], ...] = ()
+    """(technique record id, direction in degrees) pairs.
+
+    The direction a tool moved is a fact the drafter observed, and a cluster
+    of 목리조정 strokes or a family of 물손질 lines is drawn along it.  A record
+    named here is drawn at that angle instead of its kind's default; a kind
+    without a direction (an oval, a seam) ignores it.  Degrees are on the
+    paper, counter-clockwise from the figure's +x.
     """
     groove_records: tuple[str, ...] = ()
     """Groove readings to draw on the figures, by record id.
@@ -442,6 +459,30 @@ class DrawingSheetOptions:
                 "technique records"
             )
         object.__setattr__(self, "technique_records", technique_records)
+        angles: list[tuple[str, float]] = []
+        for pair in self.technique_angles_deg:
+            if not isinstance(pair, (tuple, list)) or len(pair) != 2:
+                raise DrawingSheetError(
+                    "technique_angles_deg entries must be (record id, degrees) pairs"
+                )
+            record_id, angle = pair
+            if not isinstance(record_id, str) or not record_id.strip():
+                raise DrawingSheetError("technique_angles_deg entries must name a record")
+            if record_id not in technique_records:
+                raise DrawingSheetError(
+                    f"technique_angles_deg names {record_id!r}, which is not in "
+                    "technique_records"
+                )
+            if (
+                isinstance(angle, bool)
+                or not isinstance(angle, (int, float))
+                or not math.isfinite(angle)
+            ):
+                raise DrawingSheetError("a technique direction must be a finite number of degrees")
+            angles.append((record_id, float(angle)))
+        if len({record_id for record_id, _ in angles}) != len(angles):
+            raise DrawingSheetError("a technique record has at most one direction")
+        object.__setattr__(self, "technique_angles_deg", tuple(angles))
         groove_records = tuple(self.groove_records)
         if any(
             not isinstance(record_id, str) or not record_id.strip()
@@ -1337,60 +1378,65 @@ def _technique_paths_for_figure(
     figure_record_type: str,
     figure_payload_frame: Any,
     techniques: Sequence[tuple[DerivedRecord, TechniqueAnnotationPayload]],
-) -> tuple[dict[str, list[Any]], list[dict[str, str]]]:
+    *,
+    angles_deg: Mapping[str, float] = {},
+) -> tuple[dict[str, list[Any]], list[dict[str, Any]], dict[str, MarkStyle]]:
     """Return the technique layers that belong on one figure, and what they are.
 
     The same two conditions as for a condition boundary: the figure must be a
-    projection and its frame must be the one the mark was projected into.  A
-    kind in `SYMBOL_LINE_KINDS` is drawn as its symbol placed over the
-    region's extent in that view; every other kind by the region's boundary.
+    projection and its frame must be the one the mark was projected into.
+    The painted region is then filled with the strokes its kind is drawn
+    with; the strokes are seeded by the record and the view, so the same
+    sheet always carries the same strokes.
     """
 
     by_kind: dict[str, list[Any]] = {}
-    drawn: list[dict[str, str]] = []
+    drawn: list[dict[str, Any]] = []
+    styles: dict[str, MarkStyle] = {}
     if figure_record_type != VectorRecordKind.OUTLINE.record_type:
-        return by_kind, drawn
+        return by_kind, drawn, styles
     for record, payload in techniques:
         for boundary in payload.views:
             if boundary.outline.frame != figure_payload_frame:
                 continue
             try:
                 kind = line_kind_for_technique(payload.technique)
+                style = mark_style_for_line_kind(kind)
             except DrawingStyleError as exc:
                 raise DrawingSheetError(str(exc)) from exc
-            if kind in SYMBOL_LINE_KINDS:
-                try:
-                    symbol = finger_mark_symbol(_payload_bounds(boundary.outline))
-                except SVGRenderError as exc:
-                    raise DrawingSheetError(str(exc)) from exc
+            angle = angles_deg.get(record.id)
+            if angle is not None and style.directional:
+                style = style.with_angle(angle)
+            seed = f"{record.id}:{boundary.view}:{payload.sha256}"
+            try:
+                polygons = region_polygons(boundary.outline.paths)
+                strokes = generate_marks(polygons, style, seed=seed)
+            except DrawingMarkError as exc:
+                raise DrawingSheetError(str(exc)) from exc
+            for index, stroke in enumerate(strokes):
                 by_kind.setdefault(kind, []).append(
                     VectorPath(
-                        id=f"technique:{record.id}:{boundary.view}:symbol",
-                        role="technique_symbol",
-                        closed=False,
-                        points_mm=symbol,
+                        id=f"technique:{record.id}:{boundary.view}:{index}",
+                        role="technique_stroke",
+                        closed=stroke.closed,
+                        points_mm=stroke.points_mm,
                     )
                 )
-                representation = "symbol"
-            else:
-                for path in boundary.outline.paths:
-                    by_kind.setdefault(kind, []).append(
-                        replace(
-                            path, id=f"technique:{record.id}:{boundary.view}:{path.id}"
-                        )
-                    )
-                representation = "boundary"
+            styles[kind] = style
             drawn.append(
                 {
+                    "angle_deg": style.angle_deg if style.directional else None,
                     "line_kind": kind,
                     "record_id": record.id,
-                    "representation": representation,
+                    "representation": style.representation,
+                    "seed": seed,
+                    "stroke_count": len(strokes),
                     "technique_kind": payload.technique,
                     "view": boundary.view,
                 }
             )
             break
-    return by_kind, drawn
+    return by_kind, drawn, styles
 
 
 def _bounds_with_attachment(
@@ -2097,7 +2143,9 @@ def compose_drawing_sheet(
         for record_id in options.groove_records
     ]
     condition_drawn: list[dict[str, str]] = []
-    technique_drawn: list[dict[str, str]] = []
+    technique_drawn: list[dict[str, Any]] = []
+    technique_styles: dict[str, MarkStyle] = {}
+    technique_angles = dict(options.technique_angles_deg)
     groove_drawn: list[dict[str, str]] = []
     attached_drawn: list[dict[str, str]] = []
     mirrored: list[dict[str, str]] = []
@@ -2151,11 +2199,12 @@ def compose_drawing_sheet(
         condition_drawn.extend(
             {"figure_record_id": record.id, **entry} for entry in drawn
         )
-        technique_by_kind, techniques_drawn = _technique_paths_for_figure(
-            record.type, payload.frame, techniques
+        technique_by_kind, techniques_drawn, styles_used = _technique_paths_for_figure(
+            record.type, payload.frame, techniques, angles_deg=technique_angles
         )
         for kind, technique_paths in technique_by_kind.items():
             by_kind.setdefault(kind, []).extend(technique_paths)
+        technique_styles.update(styles_used)
         technique_drawn.extend(
             {"figure_record_id": record.id, **entry} for entry in techniques_drawn
         )
@@ -2319,6 +2368,12 @@ def compose_drawing_sheet(
                             techniques, key=lambda item: item[0].id
                         )
                     ],
+                    # The style each drawn kind's strokes were generated with,
+                    # so a reader can tell a provisional spacing from a fact.
+                    "styles": {
+                        kind: style.to_dict()
+                        for kind, style in sorted(technique_styles.items())
+                    },
                 }
                 if techniques
                 else None
