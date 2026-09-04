@@ -433,6 +433,7 @@ from src.core.drawing_sheet import (  # noqa: E402
     PAGE_SIZES_MM as DRAWING_SHEET_PAGE_SIZES_MM,
     DrawingSheetError,
     DrawingSheetOptions,
+    Interpretation,
     SheetPage,
     RUBBING_RECORD_TYPES,
     TitleBlock,
@@ -4481,6 +4482,37 @@ class SectionPanel(QWidget):
         press_row.addWidget(self.combo_drawing_sheet_press_shape)
         press_row.addStretch()
         native_layout.addLayout(press_row)
+
+        # 해석의 정도.  실측 도면은 실측만이 아니다: 홈이 얼마나 들어갔는지는
+        # 재는 것이지만, 그 홈을 만드는 두 능선이 얼마나 튀어나온 것으로
+        # 읽히게 할지는 그리는 사람의 판단이고, 형식 분류의 속성이 되는
+        # 구연부 마무리나 저부는 그 속성으로 읽히도록 그린다.  정할 수 있게
+        # 하되, 정한 만큼은 도판에 적힌다.
+        interpretation_form = QFormLayout()
+        interpretation_form.setContentsMargins(0, 0, 0, 0)
+        self.spin_drawing_sheet_edge_emphasis = QSpinBox()
+        self.spin_drawing_sheet_edge_emphasis.setRange(0, 100)
+        self.spin_drawing_sheet_edge_emphasis.setValue(0)
+        self.spin_drawing_sheet_edge_emphasis.setSuffix(" %")
+        self.spin_drawing_sheet_edge_emphasis.setToolTip(
+            "홈의 두 능선을 실측된 만큼보다 얼마나 더 튀어나오게 그릴지. 0이면 "
+            "잰 자리 그대로입니다.\n"
+            "골(간선)은 움직이지 않습니다. 홈이 얼마나 들어갔는지는 실측이고, "
+            "과장되는 것은 능선이 얼마나 도드라져 보이는지뿐입니다.\n"
+            "0보다 크면 제목란에 '해석' 행이 찍힙니다."
+        )
+        interpretation_form.addRow("홈 능선 강조", self.spin_drawing_sheet_edge_emphasis)
+        self.edit_drawing_sheet_interpretation = QLineEdit()
+        self.edit_drawing_sheet_interpretation.setMaxLength(60)
+        self.edit_drawing_sheet_interpretation.setPlaceholderText(
+            "예: 구연부 마무리 · 저부 형태는 관찰에 따름"
+        )
+        self.edit_drawing_sheet_interpretation.setToolTip(
+            "이 도판의 어디에 해석이 가미되었는지 실측자의 말로 적습니다. "
+            "제목란에 그대로 찍히고 provenance에도 남습니다. 60자까지."
+        )
+        interpretation_form.addRow("해석 표기", self.edit_drawing_sheet_interpretation)
+        native_layout.addLayout(interpretation_form)
 
         axis_line = QFrame()
         axis_line.setFrameShape(QFrame.Shape.HLine)
@@ -20656,6 +20688,12 @@ class MainWindow(QMainWindow):
                 ),
                 technique_representations=(
                     self._drawing_sheet_technique_representations(technique_ids)
+                ),
+                interpretation=Interpretation(
+                    groove_edge_emphasis=(
+                        float(panel.spin_drawing_sheet_edge_emphasis.value()) / 100.0
+                    ),
+                    note=str(panel.edit_drawing_sheet_interpretation.text()),
                 ),
             )
             bundle = compose_drawing_sheet(

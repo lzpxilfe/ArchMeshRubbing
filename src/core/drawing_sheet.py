@@ -229,6 +229,85 @@ class DrawingSheetError(ValueError):
     """A sheet cannot be composed as requested."""
 
 
+# What the sheet says about a drawing the drafter has interpreted.  Measured
+# drawing is not only measurement: a groove's depth is read off the surface,
+# but how far the two ridges that make it may stand out is judgement, and the
+# attributes a typology turns on - how a rim finishes, what a base does - are
+# drawn so that they can be read as those attributes.  That judgement is
+# legitimate and it is not measurement, so a sheet that carries it says so in
+# its title block, in the drafter's own words, and cannot be asked not to.
+INTERPRETATION_LABEL = "해석"
+#: The most a ridge may be drawn past the relief measured for it: one whole
+#: relief again.  Past that the line is not an emphasis of a measurement, it
+#: is a different measurement.
+MAX_GROOVE_EDGE_EMPHASIS = 1.0
+MAX_INTERPRETATION_NOTE_LENGTH = 60
+
+
+@dataclass(frozen=True, slots=True)
+class Interpretation:
+    """How far a sheet goes past what was measured, and what it says about it.
+
+    Nothing here can move a measured coordinate on its own: it changes where
+    a derived line is drawn from measured numbers, and every such line says
+    in the sidecar what it was derived from.  A sheet with any of it set
+    prints a title block row naming it.
+    """
+
+    groove_edge_emphasis: float = 0.0
+    """How far a groove's two ridges are drawn past their measured relief.
+
+    0.0 draws them where they were read.  0.3 pushes each ridge out by three
+    tenths of that groove's own measured relief.  The trough is not moved:
+    how deep the groove goes is measurement, and what is exaggerated is how
+    far the ridges either side of it stand proud.
+    """
+    note: str = ""
+    """What the drafter interpreted, in their own words, printed on the sheet."""
+
+    def __post_init__(self) -> None:
+        try:
+            emphasis = finite_number(
+                self.groove_edge_emphasis,
+                field_name="groove_edge_emphasis",
+                minimum=0.0,
+            )
+        except SVGRenderError as exc:
+            raise DrawingSheetError(str(exc)) from exc
+        if emphasis > MAX_GROOVE_EDGE_EMPHASIS:
+            raise DrawingSheetError(
+                "groove_edge_emphasis must be at most "
+                f"{MAX_GROOVE_EDGE_EMPHASIS}; past that the line is not an "
+                "emphasis of a measurement but a different measurement"
+            )
+        object.__setattr__(self, "groove_edge_emphasis", emphasis)
+        note = str(self.note).strip()
+        if len(note) > MAX_INTERPRETATION_NOTE_LENGTH:
+            raise DrawingSheetError(
+                "an interpretation note must fit the title block "
+                f"({MAX_INTERPRETATION_NOTE_LENGTH} characters)"
+            )
+        object.__setattr__(self, "note", note)
+
+    @property
+    def is_stated(self) -> bool:
+        return self.groove_edge_emphasis > 0.0 or bool(self.note)
+
+    def title_row(self) -> tuple[str, str]:
+        parts: list[str] = []
+        if self.groove_edge_emphasis > 0.0:
+            parts.append(f"홈 능선 강조 {self.groove_edge_emphasis * 100.0:g}%")
+        if self.note:
+            parts.append(self.note)
+        return (INTERPRETATION_LABEL, " · ".join(parts))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "groove_edge_emphasis": self.groove_edge_emphasis,
+            "note": self.note,
+        }
+
+
 @dataclass(frozen=True, slots=True)
 class SheetPage:
     """The physical page a sheet is drawn on."""
@@ -409,6 +488,15 @@ class DrawingSheetOptions:
     right round the artifact is drawn only on a figure whose plane contains the
     rotation axis: seen from above it is a circle, not a line.
     """
+    interpretation: Interpretation = field(default_factory=Interpretation)
+    """How far this sheet goes past what was measured, if it does at all.
+
+    Default is nothing interpreted, and a sheet composed that way is byte
+    for byte the sheet it was before this existed.  Anything set here is
+    printed in the title block: a reader has to be able to tell an
+    emphasised line from a measured one on the page, not only in the
+    sidecar.
+    """
     gutter_mm: float = 8.0
     stroke_color: str = "#111111"
     title: str = "ArchMeshRubbing measured drawing sheet"
@@ -416,6 +504,8 @@ class DrawingSheetOptions:
     def __post_init__(self) -> None:
         if not isinstance(self.title_block, TitleBlock):
             raise DrawingSheetError("title_block must be a TitleBlock")
+        if not isinstance(self.interpretation, Interpretation):
+            raise DrawingSheetError("interpretation must be an Interpretation")
         if not isinstance(self.page, SheetPage):
             raise DrawingSheetError("page must be a SheetPage")
         if not isinstance(self.show_center_axis, bool):
@@ -624,7 +714,13 @@ class DrawingSheetOptions:
         mandatory row saying so; the composer decides that, not the caller.
         """
 
-        return 2 + int(computed_rubbing) + len(self.title_block.rows) + 1
+        return (
+            2
+            + int(computed_rubbing)
+            + int(self.interpretation.is_stated)
+            + len(self.title_block.rows)
+            + 1
+        )
 
     @property
     def title_block_rows(self) -> int:
@@ -994,6 +1090,10 @@ def _title_block_elements(
         # So is this: a sheet with a rubbing on it says where the rubbing came
         # from, and no caller can leave that out.
         rows.append(("탁본", COMPUTED_RUBBING_NOTE))
+    if options.interpretation.is_stated:
+        # And so is this: a line drawn past what was measured is disclosed on
+        # the page, not only to whoever opens the sidecar.
+        rows.append(options.interpretation.title_row())
     rows.extend(block.rows)
     rows.append(("문서", document_manifest_sha256[:12]))
 
@@ -1144,6 +1244,8 @@ def _require_drawable_groove_record(
 def _groove_paths_for_figure(
     figure_payload: Any,
     grooves: Sequence[tuple[DerivedRecord, ProfileGroovePayload]],
+    *,
+    edge_emphasis: float = 0.0,
 ) -> tuple[dict[str, list[Any]], list[dict[str, str]]]:
     """Return the groove layers that belong on one figure, and what they are.
 
@@ -1158,7 +1260,10 @@ def _groove_paths_for_figure(
     for record, payload in grooves:
         try:
             paths = profile_groove_vector_paths(
-                figure_payload, payload.grooves, record_id=record.id
+                figure_payload,
+                payload.grooves,
+                record_id=record.id,
+                edge_emphasis=edge_emphasis,
             )
         except ArtifactVectorExportError as exc:
             raise DrawingSheetError(str(exc)) from exc
@@ -1863,6 +1968,10 @@ def _sheet_provenance(
         "title_block": [dict(row) for row in title_rows],
         "unit": "mm",
     }
+    if options.interpretation.is_stated:
+        # Present exactly when something was interpreted, so a sheet that is
+        # only measurement keeps its bytes and says nothing it need not.
+        provenance["interpretation"] = options.interpretation.to_dict()
     if any(figure.caption is not None for figure in placed):
         # Present exactly when a rubbing is on the sheet, like the title block
         # row it mirrors; a sheet of line work keeps its bytes.
@@ -2350,7 +2459,11 @@ def compose_drawing_sheet(
                             "record_id": interior_record.id,
                         }
                     )
-        groove_by_kind, grooves_drawn = _groove_paths_for_figure(payload, grooves)
+        groove_by_kind, grooves_drawn = _groove_paths_for_figure(
+            payload,
+            grooves,
+            edge_emphasis=options.interpretation.groove_edge_emphasis,
+        )
         for kind, groove_paths in groove_by_kind.items():
             by_kind.setdefault(kind, []).extend(groove_paths)
         groove_drawn.extend(
@@ -2638,6 +2751,34 @@ def validate_drawing_sheet_bytes(svg_bytes: bytes, sidecar_bytes: bytes) -> None
     ):
         raise DrawingSheetError("sheet title block does not print its own scale")
 
+    # A sheet that went past what was measured must say so on the page.
+    interpretation = sidecar.get("interpretation")
+    if interpretation is not None:
+        if not isinstance(interpretation, Mapping):
+            raise DrawingSheetError("sheet interpretation block must be an object")
+        try:
+            stated = Interpretation(
+                groove_edge_emphasis=interpretation.get("groove_edge_emphasis", 0.0),
+                note=str(interpretation.get("note", "")),
+            )
+        except DrawingSheetError as exc:
+            raise DrawingSheetError(f"sheet interpretation block is malformed: {exc}") from exc
+        if not stated.is_stated:
+            raise DrawingSheetError(
+                "sheet carries an interpretation block that interprets nothing"
+            )
+        label, value = stated.title_row()
+        if not any(
+            isinstance(row, Mapping)
+            and row.get("label") == label
+            and row.get("value") == value
+            for row in rows
+        ):
+            raise DrawingSheetError(
+                "sheet was drawn past what was measured but its title block "
+                "does not say so"
+            )
+
     # And a sheet with a rubbing on it must say where the rubbing came from,
     # in the title block and under each rubbing.
     figures = sidecar.get("figures")
@@ -2676,6 +2817,9 @@ def validate_drawing_sheet_bytes(svg_bytes: bytes, sidecar_bytes: bytes) -> None
 __all__ = [
     "COMPUTED_RUBBING_CAPTION_PREFIX",
     "COMPUTED_RUBBING_NOTE",
+    "INTERPRETATION_LABEL",
+    "Interpretation",
+    "MAX_GROOVE_EDGE_EMPHASIS",
     "PROJECTED_RELIEF_CAPTION_PREFIX",
     "DRAWING_SHEET_FORMAT",
     "DRAWING_SHEET_SCHEMA_VERSION",

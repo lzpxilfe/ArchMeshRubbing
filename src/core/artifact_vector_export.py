@@ -1014,11 +1014,29 @@ def center_axis_vector_path(payload: VectorGeometryPayload) -> VectorPath | None
     )
 
 
+def _emphasised_edge_radius_um(
+    edge_radius_um: float, trough_radius_um: float, emphasis: float
+) -> int:
+    """Draw a groove's ridge past the relief measured for it, by a fraction.
+
+    The trough is not moved: how deep the groove goes is measurement.  What
+    the drafter may exaggerate is how far the ridge either side of it stands
+    proud, and it is exaggerated by a share of that groove's own measured
+    relief, so a shallow groove is not given a ridge a deep one would have.
+    """
+
+    relief = float(edge_radius_um) - float(trough_radius_um)
+    if emphasis <= 0.0 or relief <= 0.0:
+        return int(edge_radius_um)
+    return int(round(float(edge_radius_um) + emphasis * relief))
+
+
 def profile_groove_vector_paths(
     payload: VectorGeometryPayload,
     grooves: Sequence[Any],
     *,
     record_id: str,
+    edge_emphasis: float = 0.0,
 ) -> dict[str, list[VectorPath]]:
     """Draw one groove reading across a record that shows the artifact's side.
 
@@ -1027,11 +1045,18 @@ def profile_groove_vector_paths(
     what a groove is - one place that goes in and two that stand out - so the
     drawing carries the same count the surface does.
 
+    `edge_emphasis` is the drafter's, not the measurement's: 0.0 draws every
+    line where it was read, and a larger value draws the two ridges that far
+    past their own relief.  A sheet that uses it discloses it.
+
     Returns nothing at all for a plane the axis does not lie in.  A plan view
     sees a circumferential groove as a circle, not a line, and a foreshortened
     plane would give it a width the artifact does not have there.
     """
 
+    emphasis = float(edge_emphasis)
+    if not math.isfinite(emphasis) or emphasis < 0.0:
+        raise ArtifactVectorExportError("edge_emphasis must be a finite share, 0 or more")
     frame = payload.frame.to_dict()
     by_kind: dict[str, list[VectorPath]] = {}
     for index, groove in enumerate(grooves):
@@ -1039,7 +1064,9 @@ def profile_groove_vector_paths(
             (
                 TECHNIQUE_GROOVE_EDGE,
                 groove.lower_edge_height_um,
-                groove.lower_edge_radius_um,
+                _emphasised_edge_radius_um(
+                    groove.lower_edge_radius_um, groove.trough_radius_um, emphasis
+                ),
                 False,
             ),
             (
@@ -1051,7 +1078,9 @@ def profile_groove_vector_paths(
             (
                 TECHNIQUE_GROOVE_EDGE,
                 groove.upper_edge_height_um,
-                groove.upper_edge_radius_um,
+                _emphasised_edge_radius_um(
+                    groove.upper_edge_radius_um, groove.trough_radius_um, emphasis
+                ),
                 False,
             ),
         ):

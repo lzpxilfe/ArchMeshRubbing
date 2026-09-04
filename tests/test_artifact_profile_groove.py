@@ -8,6 +8,7 @@ side, and the flank of a raised cordon.
 
 from __future__ import annotations
 
+import json
 import math
 from pathlib import Path
 import tempfile
@@ -362,6 +363,123 @@ def test_a_half_elevation_keeps_the_breaks_it_was_meant_to_have(
     trough_layer = svg.split('id="layer-technique-groove-trough"')[1].split("</g>")[0]
 
     assert trough_layer.count("<path") == 3 * (GROOVE_TROUGH_BREAK_COUNT + 1)
+
+
+def test_the_ridges_may_be_drawn_past_what_was_measured_if_the_sheet_says_so(
+    sheet_session: ArtifactSession,
+) -> None:
+    """홈의 깊이는 실측, 능선의 튀어나옴은 해석.
+
+    A groove's depth is read off the surface.  How far the two ridges that
+    make it are allowed to stand proud is the drafter's judgement, so the
+    sheet can push them out by a share of the measured relief - and then has
+    to say on the paper that it did.
+    """
+
+    from src.core.drawing_sheet import INTERPRETATION_LABEL, Interpretation
+
+    plain = compose_drawing_sheet(
+        sheet_session.document,
+        ["record:elevation:front"],
+        options=_options(groove_records=("record:groove:body",)),
+    )
+    # Nothing interpreted is the sheet it always was.
+    assert (
+        compose_drawing_sheet(
+            sheet_session.document,
+            ["record:elevation:front"],
+            options=_options(
+                groove_records=("record:groove:body",),
+                interpretation=Interpretation(),
+            ),
+        ).svg_bytes
+        == plain.svg_bytes
+    )
+    assert "interpretation" not in json.loads(plain.sidecar_bytes)
+
+    emphasised = compose_drawing_sheet(
+        sheet_session.document,
+        ["record:elevation:front"],
+        options=_options(
+            groove_records=("record:groove:body",),
+            interpretation=Interpretation(
+                groove_edge_emphasis=0.5, note="구연부 마무리"
+            ),
+        ),
+    )
+    validate_drawing_sheet_bytes(emphasised.svg_bytes, emphasised.sidecar_bytes)
+
+    def _chords(bundle: Any, layer: str) -> list[float]:
+        body = bundle.svg_bytes.decode("utf-8").split(f'id="{layer}"')[1]
+        body = body.split("</g>")[0]
+        widths = []
+        for piece in body.split("<path")[1:]:
+            numbers = [
+                float(token)
+                for token in piece.split(' d="')[1]
+                .split('"')[0]
+                .replace("M", " ")
+                .replace("L", " ")
+                .split()
+            ]
+            xs = numbers[0::2]
+            widths.append(max(xs) - min(xs))
+        return sorted(widths)
+
+    plain_edges = _chords(plain, "layer-technique-groove-edge")
+    wide_edges = _chords(emphasised, "layer-technique-groove-edge")
+    assert all(
+        wide > plain_width for wide, plain_width in zip(wide_edges, plain_edges)
+    ), "the ridges are drawn past the relief measured for them"
+    # The trough is measurement and is not moved.
+    assert _chords(plain, "layer-technique-groove-trough") == _chords(
+        emphasised, "layer-technique-groove-trough"
+    )
+
+    # And the sheet says so, on the page as well as in the sidecar.
+    sidecar = json.loads(emphasised.sidecar_bytes)
+    assert sidecar["interpretation"] == {
+        "groove_edge_emphasis": 0.5,
+        "note": "구연부 마무리",
+    }
+    (row,) = [
+        row for row in sidecar["title_block"] if row["label"] == INTERPRETATION_LABEL
+    ]
+    assert row["value"] == "홈 능선 강조 50% · 구연부 마무리"
+    assert row["value"] in emphasised.svg_bytes.decode("utf-8")
+
+
+def test_an_interpretation_is_bounded_and_a_note_alone_is_disclosed(
+    sheet_session: ArtifactSession,
+) -> None:
+    from src.core.drawing_sheet import (
+        DrawingSheetError,
+        INTERPRETATION_LABEL,
+        Interpretation,
+    )
+
+    assert not Interpretation().is_stated
+    assert Interpretation(note="저부 형태").is_stated
+    with pytest.raises(DrawingSheetError, match="at most"):
+        Interpretation(groove_edge_emphasis=1.5)
+    with pytest.raises(DrawingSheetError, match="groove_edge_emphasis"):
+        Interpretation(groove_edge_emphasis=-0.1)
+    with pytest.raises(DrawingSheetError, match="title block"):
+        Interpretation(note="가" * 61)
+
+    # A note without any exaggeration is still a disclosure.
+    bundle = compose_drawing_sheet(
+        sheet_session.document,
+        ["record:elevation:front"],
+        options=_options(interpretation=Interpretation(note="저부는 관찰에 따라 복원")),
+    )
+    validate_drawing_sheet_bytes(bundle.svg_bytes, bundle.sidecar_bytes)
+    (row,) = [
+        row
+        for row in json.loads(bundle.sidecar_bytes)["title_block"]
+        if row["label"] == INTERPRETATION_LABEL
+    ]
+    assert row["value"] == "저부는 관찰에 따라 복원"
 
 
 def test_a_groove_line_spans_the_wall_at_its_own_height(
