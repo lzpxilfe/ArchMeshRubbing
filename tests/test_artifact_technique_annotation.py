@@ -134,12 +134,12 @@ def test_a_mark_is_projected_with_the_closing_and_an_old_recipe_without() -> Non
 
     selection = technique_selection(total_face_count=4, face_indices=(0,))
     current = technique_recipe(technique="paddling", precision_grid_mm=0.05, selection=selection)
-    assert current["algorithm_version"] == "1.1.0"
+    assert current["algorithm_version"] == "1.2.0"
     old = technique_recipe(
         technique="paddling", precision_grid_mm=0.05, selection=selection, algorithm_version="1.0.0"
     )
     assert validate_technique_recipe(old)["algorithm_version"] == "1.0.0"
-    assert TECHNIQUE_ALGORITHM_VERSIONS == ("1.0.0", "1.1.0")
+    assert TECHNIQUE_ALGORITHM_VERSIONS == ("1.0.0", "1.1.0", "1.2.0")
     with pytest.raises(ArtifactTechniqueAnnotationError, match="algorithm version"):
         technique_recipe(
             technique="paddling", precision_grid_mm=0.05, selection=selection, algorithm_version="2.0.0"
@@ -355,3 +355,43 @@ def test_a_1_0_0_payload_still_reads_and_digests_as_it_was_written() -> None:
             skipped_views=current.skipped_views,
             surface_side="exterior",
         )
+
+
+def test_faces_seen_edge_on_are_left_out_of_that_view() -> None:
+    """A band that reaches the silhouette is drawn where it faces the viewer;
+    the edge-on faces at the silhouette are not a sliver anyone would draw."""
+
+    from synthetic_vessel import hollow_vessel
+
+    from src.core.artifact_technique_annotation import project_technique_from_recipe
+
+    segments = 72
+    vertices, faces, _rim, _floor = hollow_vessel(segments=segments, rings=10)
+    # Outer band faces of one ring run right round the pot.  The front view
+    # (along y) sees the faces near angle 0 and 180 edge-on.
+    ring = 5
+    all_round = [(ring * segments + seg) * 2 + k for seg in range(segments) for k in (0, 1)]
+    selection = technique_selection(total_face_count=len(faces), face_indices=all_round)
+    current = technique_recipe(technique="coil_joint", precision_grid_mm=0.5, selection=selection)
+    payload = project_technique_from_recipe(vertices, faces, current)
+    front = payload.boundary_for_view("front")
+    assert front is not None
+    xs = [x for path in front.outline.paths for x, _ in path.points_mm]
+    radius = max(abs(float(v[0])) for v in vertices)
+    # Not the full silhouette width: the grazing edge was left out.
+    assert max(xs) - min(xs) < 2.0 * radius - 1.0
+
+    # A set made only of edge-on faces has nothing to show in that view, and
+    # says so with its own reason rather than failing the record.
+    edge_on = [
+        (ring * segments + seg) * 2 + k
+        for seg in (0, segments - 1, segments // 2 - 1, segments // 2)
+        for k in (0, 1)
+    ]
+    selection = technique_selection(total_face_count=len(faces), face_indices=edge_on)
+    recipe = technique_recipe(technique="coil_joint", precision_grid_mm=0.5, selection=selection)
+    payload = project_technique_from_recipe(vertices, faces, recipe)
+    reasons = {entry["view"]: entry["reason"] for entry in payload.skipped_views}
+    assert reasons.get("front") == "grazing_view"
+    assert reasons.get("back") == "grazing_view"
+    assert payload.boundary_for_view("left") is not None

@@ -101,8 +101,13 @@ CONDITION_VIEWS: tuple[str, ...] = tuple(
 #: reason there is none - never merely "the rest of them".
 CONDITION_SKIP_NO_AREA = "no_projected_area"
 CONDITION_SKIP_DEGENERATE = "degenerate_projection"
+#: Every face of the region is seen at a grazing angle in this view - a band
+#: at the silhouette - so nothing of it is drawn there.  Only a caller that
+#: asks for a grazing limit can produce it (technique records do).
+CONDITION_SKIP_GRAZING = "grazing_view"
 CONDITION_SKIP_REASONS: tuple[str, ...] = (
     CONDITION_SKIP_DEGENERATE,
+    CONDITION_SKIP_GRAZING,
     CONDITION_SKIP_NO_AREA,
 )
 
@@ -745,12 +750,19 @@ def project_condition_region(
     precision_grid_mm: float,
     cancellation_probe: CancellationProbe | None = None,
     outline_algorithm_version: str = OUTLINE_LEGACY_ALGORITHM_VERSION,
+    grazing_cosine_min: float = 0.0,
 ) -> tuple[tuple[ConditionViewBoundary, ...], tuple[dict[str, str], ...]]:
     """Project one face set into every view, and say why any view has none.
 
     `outline_algorithm_version` is the lattice union the boundary is drawn
     with.  A condition record keeps the plain union (1.0.0) it was written
     under; a technique record names its own in its recipe.
+
+    `grazing_cosine_min`, when above zero, leaves out of each view the faces
+    seen at a grazing angle there - those whose normal makes a cosine smaller
+    than it with the view direction.  A band that reaches the silhouette
+    projects to a sliver at its edge, and the sliver is not a mark anyone
+    would draw; the part of the band that faces the viewer still is.
 
     A view is skipped rather than fatal.  A band of surface can be edge-on in
     one direction, or snap at the precision grid into pieces that touch, and
@@ -781,6 +793,17 @@ def project_condition_region(
             "condition face index is outside the geometry"
         )
     face_subset = all_faces[selected]
+    if not (0.0 <= float(grazing_cosine_min) < 1.0):
+        raise ArtifactConditionAnnotationError(
+            "grazing_cosine_min must be at least 0 and less than 1"
+        )
+    facing: np.ndarray | None = None
+    if grazing_cosine_min > 0.0:
+        corners = vertices[face_subset]
+        normals = np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0])
+        lengths = np.linalg.norm(normals, axis=1)
+        lengths[lengths == 0.0] = 1.0
+        facing = normals / lengths[:, None]
 
     boundaries: list[ConditionViewBoundary] = []
     skipped: list[dict[str, str]] = []
@@ -790,9 +813,17 @@ def project_condition_region(
     failures: list[str] = []
     for view in CONDITION_VIEWS:
         raise_if_cancelled(cancellation_probe)
+        view_faces = face_subset
+        if facing is not None:
+            direction = np.asarray(outline_frame(view).normal_world, dtype=np.float64)
+            kept = np.abs(facing @ direction) >= float(grazing_cosine_min)
+            if not bool(kept.any()):
+                skipped.append({"reason": CONDITION_SKIP_GRAZING, "view": view})
+                continue
+            view_faces = face_subset[kept]
         if not _view_leaves_area(
             vertices,
-            face_subset,
+            view_faces,
             view,
             precision_grid_mm=grid,
         ):
@@ -804,7 +835,7 @@ def project_condition_region(
             # recomputes as it was written.
             result = extract_outline_geometry(
                 vertices,
-                face_subset,
+                view_faces,
                 view,
                 precision_grid_mm=grid,
                 algorithm_version=outline_algorithm_version,
@@ -1139,6 +1170,7 @@ __all__ = [
     "CONDITION_RESTORED",
     "CONDITION_SELECTION_KIND",
     "CONDITION_SKIP_DEGENERATE",
+    "CONDITION_SKIP_GRAZING",
     "CONDITION_SKIP_NO_AREA",
     "CONDITION_SKIP_REASONS",
     "CONDITION_VIEWS",
