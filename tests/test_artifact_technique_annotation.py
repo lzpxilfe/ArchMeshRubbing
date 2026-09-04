@@ -134,12 +134,12 @@ def test_a_mark_is_projected_with_the_closing_and_an_old_recipe_without() -> Non
 
     selection = technique_selection(total_face_count=4, face_indices=(0,))
     current = technique_recipe(technique="paddling", precision_grid_mm=0.05, selection=selection)
-    assert current["algorithm_version"] == "1.2.0"
+    assert current["algorithm_version"] == "1.3.0"
     old = technique_recipe(
         technique="paddling", precision_grid_mm=0.05, selection=selection, algorithm_version="1.0.0"
     )
     assert validate_technique_recipe(old)["algorithm_version"] == "1.0.0"
-    assert TECHNIQUE_ALGORITHM_VERSIONS == ("1.0.0", "1.1.0", "1.2.0")
+    assert TECHNIQUE_ALGORITHM_VERSIONS == ("1.0.0", "1.1.0", "1.2.0", "1.3.0")
     with pytest.raises(ArtifactTechniqueAnnotationError, match="algorithm version"):
         technique_recipe(
             technique="paddling", precision_grid_mm=0.05, selection=selection, algorithm_version="2.0.0"
@@ -395,3 +395,34 @@ def test_faces_seen_edge_on_are_left_out_of_that_view() -> None:
     assert reasons.get("front") == "grazing_view"
     assert reasons.get("back") == "grazing_view"
     assert payload.boundary_for_view("left") is not None
+
+
+def test_a_region_unioned_whole_matches_the_outline_union_within_a_cell() -> None:
+    """extract_region_geometry is the outline's lattice union done once on the
+    whole region: on a smooth band the two agree to a cell's worth of area."""
+
+    from synthetic_vessel import hollow_vessel
+
+    from src.core.artifact_outline_extractor import (
+        REGION_ALGORITHM,
+        extract_outline_geometry,
+        extract_region_geometry,
+    )
+
+    segments = 72
+    vertices, faces, _rim, _floor = hollow_vessel(segments=segments, rings=10)
+    ring = 5
+    front_facing = [(ring * segments + seg) * 2 + k for seg in range(48, 62) for k in (0, 1)]
+    subset = faces[front_facing]
+    payload, qc = extract_region_geometry(vertices, subset, "front", precision_grid_mm=0.5)
+    outline = extract_outline_geometry(
+        vertices, subset, "front", precision_grid_mm=0.5, algorithm_version="1.1.0"
+    )
+    assert qc["algorithm"] == REGION_ALGORITHM
+    assert qc["grid_closing_radius_cells"] == 1
+    assert payload.frame == outline.payload.frame
+    region_area = float(qc["outline_area_mm2"])
+    outline_area = float(outline.qc["outline_area_mm2"])
+    assert abs(region_area - outline_area) <= 0.05 * outline_area
+    for path in payload.paths:
+        assert path.role in ("exterior", "hole")

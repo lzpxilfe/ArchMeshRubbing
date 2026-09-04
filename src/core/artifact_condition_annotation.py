@@ -44,6 +44,7 @@ from .artifact_outline_extractor import (
     OUTLINE_LEGACY_ALGORITHM_VERSION,
     OutlineView,
     extract_outline_geometry,
+    extract_region_geometry,
     outline_frame,
 )
 from .artifact_outline_topology import (
@@ -751,12 +752,18 @@ def project_condition_region(
     cancellation_probe: CancellationProbe | None = None,
     outline_algorithm_version: str = OUTLINE_LEGACY_ALGORITHM_VERSION,
     grazing_cosine_min: float = 0.0,
+    region_union: bool = False,
 ) -> tuple[tuple[ConditionViewBoundary, ...], tuple[dict[str, str], ...]]:
     """Project one face set into every view, and say why any view has none.
 
     `outline_algorithm_version` is the lattice union the boundary is drawn
     with.  A condition record keeps the plain union (1.0.0) it was written
     under; a technique record names its own in its recipe.
+
+    `region_union` draws the boundary with `extract_region_geometry` - the
+    face set unioned exactly and snapped once - instead of the outline
+    extractor's per-triangle lattice union; `outline_algorithm_version` is
+    then unused.
 
     `grazing_cosine_min`, when above zero, leaves out of each view the faces
     seen at a grazing angle there - those whose normal makes a cosine smaller
@@ -833,19 +840,28 @@ def project_condition_region(
             # A painted face subset is not a closed surface; which lattice
             # union draws its boundary is the caller's contract, so a record
             # recomputes as it was written.
-            result = extract_outline_geometry(
-                vertices,
-                view_faces,
-                view,
-                precision_grid_mm=grid,
-                algorithm_version=outline_algorithm_version,
-                cancellation_probe=cancellation_probe,
-            )
+            if region_union:
+                outline_payload, _region_qc = extract_region_geometry(
+                    vertices,
+                    view_faces,
+                    view,
+                    precision_grid_mm=grid,
+                    cancellation_probe=cancellation_probe,
+                )
+            else:
+                outline_payload = extract_outline_geometry(
+                    vertices,
+                    view_faces,
+                    view,
+                    precision_grid_mm=grid,
+                    algorithm_version=outline_algorithm_version,
+                    cancellation_probe=cancellation_probe,
+                ).payload
         except ValueError as exc:
             skipped.append({"reason": CONDITION_SKIP_DEGENERATE, "view": view})
             failures.append(f"{view}: {exc}")
             continue
-        boundaries.append(ConditionViewBoundary(view=view, outline=result.payload))
+        boundaries.append(ConditionViewBoundary(view=view, outline=outline_payload))
     if not boundaries:
         detail = "; ".join(failures) if failures else ", ".join(
             f"{entry['view']}={entry['reason']}" for entry in skipped

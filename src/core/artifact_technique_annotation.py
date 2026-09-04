@@ -61,13 +61,17 @@ TECHNIQUE_ALGORITHM = "archmeshrubbing.technique_region_projection"
 #: union then refuses every view; 1.2.0 also leaves out of each view the
 #: faces seen there at a grazing angle, because a mark that reaches the
 #: silhouette projects to a sliver at its edge and the sliver would make the
-#: whole view fail.  Every earlier version recomputes as written.
-TECHNIQUE_ALGORITHM_VERSION = "1.2.0"
-TECHNIQUE_ALGORITHM_VERSIONS = ("1.0.0", "1.1.0", TECHNIQUE_ALGORITHM_VERSION)
+#: whole view fail; 1.3.0 unions the region exactly and snaps it once as a
+#: whole (extract_region_geometry) instead of snapping its thousands of tiny
+#: triangles one by one, which on a fine mesh left slivers the closing could
+#: not mend.  Every earlier version recomputes as written.
+TECHNIQUE_ALGORITHM_VERSION = "1.3.0"
+TECHNIQUE_ALGORITHM_VERSIONS = ("1.0.0", "1.1.0", "1.2.0", TECHNIQUE_ALGORITHM_VERSION)
 _OUTLINE_ALGORITHM_FOR_TECHNIQUE: Mapping[str, str] = {
     "1.0.0": OUTLINE_LEGACY_ALGORITHM_VERSION,
     "1.1.0": OUTLINE_ALGORITHM_VERSION,
     "1.2.0": OUTLINE_ALGORITHM_VERSION,
+    "1.3.0": OUTLINE_ALGORITHM_VERSION,
 }
 #: cos 81.4 degrees: a face tilted more than that from the view is left out.
 TECHNIQUE_GRAZING_COSINE_MIN = 0.15
@@ -75,6 +79,13 @@ _GRAZING_FOR_TECHNIQUE: Mapping[str, float] = {
     "1.0.0": 0.0,
     "1.1.0": 0.0,
     "1.2.0": TECHNIQUE_GRAZING_COSINE_MIN,
+    "1.3.0": TECHNIQUE_GRAZING_COSINE_MIN,
+}
+_REGION_UNION_FOR_TECHNIQUE: Mapping[str, bool] = {
+    "1.0.0": False,
+    "1.1.0": False,
+    "1.2.0": False,
+    "1.3.0": True,
 }
 #: 1.0.0 held the kind, the face set and the six views.  1.1.0 adds which
 #: side of the wall the faces are on (a coil seam or a finger press is
@@ -536,6 +547,7 @@ def project_technique_from_recipe(
                 str(validated["algorithm_version"])
             ],
             grazing_cosine_min=_GRAZING_FOR_TECHNIQUE[str(validated["algorithm_version"])],
+            region_union=_REGION_UNION_FOR_TECHNIQUE[str(validated["algorithm_version"])],
         )
     except ArtifactConditionAnnotationError as exc:
         raise ArtifactTechniqueAnnotationError(str(exc)) from exc

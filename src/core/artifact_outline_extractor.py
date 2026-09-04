@@ -1227,8 +1227,137 @@ def compute_artifact_outline(
     return computation
 
 
+REGION_ALGORITHM = "archmeshrubbing.region_projection"
+REGION_ALGORITHM_VERSION = "1.0.0"
+
+
+def extract_region_geometry(
+    vertices_world_mm: object,
+    faces: object,
+    view: OutlineView | str,
+    *,
+    precision_grid_mm: float,
+    cancellation_probe: CancellationProbe | None = None,
+) -> tuple[VectorGeometryPayload, dict[str, Any]]:
+    """The silhouette of a painted face subset in one view.
+
+    An outline is measured: every triangle is snapped to the lattice on its
+    own and the union of the snapped triangles is the contract.  A painted
+    region is not a measurement of the artifact's edge, and snapping its
+    thousands of tiny triangles one by one leaves slivers between them that
+    the one-cell closing cannot always mend - a smooth wall would then refuse
+    to carry a finger mark.  So a region is unioned exactly first and snapped
+    once as a whole, then closed by one cell and re-snapped, and only the
+    result has to pass the topology rules.  The boundary is still on the
+    lattice, within the closing contract of outline 1.1.0.
+    """
+
+    raise_if_cancelled(cancellation_probe)
+    _require_outline_backend()
+    resolved = _outline_view(view)
+    grid = _precision_grid(precision_grid_mm)
+    vertices, face_array = _validated_mesh_arrays(
+        vertices_world_mm, faces, cancellation_probe=cancellation_probe
+    )
+    if vertices.shape[0] > MAX_OUTLINE_VERTICES:
+        raise ArtifactVectorExtractionError(
+            f"region exceeds the {MAX_OUTLINE_VERTICES}-vertex safety limit"
+        )
+    if face_array.shape[0] > MAX_OUTLINE_FACES:
+        raise ArtifactVectorExtractionError(
+            f"region exceeds the {MAX_OUTLINE_FACES}-face safety limit"
+        )
+    frame = outline_frame(resolved)
+    origin = np.asarray(frame.origin_world_mm, dtype=np.float64)
+    u_axis = np.asarray(frame.u_axis_world, dtype=np.float64)
+    v_axis = np.asarray(frame.v_axis_world, dtype=np.float64)
+    relative = vertices - origin
+    projected_vertices = np.column_stack((relative @ u_axis, relative @ v_axis))
+    referenced_indices = np.unique(face_array.reshape(-1))
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        referenced_scaled = projected_vertices[referenced_indices] / grid
+    if not bool(np.isfinite(referenced_scaled).all()):
+        raise ArtifactVectorExtractionError(
+            "region projection is non-finite at the selected precision grid"
+        )
+    if float(np.max(np.abs(referenced_scaled))) > MAX_GRID_INDEX:
+        raise ArtifactVectorExtractionError(
+            "region coordinates exceed the fixed-grid integer safety range"
+        )
+    grid_origin = (
+        math.floor(float(np.min(referenced_scaled[:, 0]))),
+        math.floor(float(np.min(referenced_scaled[:, 1]))),
+    )
+    lattice_vertices = projected_vertices / grid - np.asarray(grid_origin, dtype=np.float64)
+    raise_if_cancelled(cancellation_probe)
+
+    batches: list[BaseGeometry] = []
+    non_degenerate = 0
+    for start in range(0, face_array.shape[0], OUTLINE_UNION_BATCH_SIZE):
+        raise_if_cancelled(cancellation_probe)
+        triangles = lattice_vertices[face_array[start : start + OUTLINE_UNION_BATCH_SIZE]]
+        twice_area = (triangles[:, 1, 0] - triangles[:, 0, 0]) * (
+            triangles[:, 2, 1] - triangles[:, 0, 1]
+        ) - (triangles[:, 1, 1] - triangles[:, 0, 1]) * (triangles[:, 2, 0] - triangles[:, 0, 0])
+        candidates = triangles[twice_area != 0.0]
+        non_degenerate += int(candidates.shape[0])
+        if candidates.shape[0] == 0:
+            continue
+        batches.append(
+            _batched_union(
+                [Polygon(coordinates) for coordinates in candidates],
+                grid_size=None,
+                cancellation_probe=cancellation_probe,
+            )
+        )
+    if non_degenerate == 0 or not batches:
+        raise ArtifactVectorExtractionError(
+            "region projection contains no non-degenerate triangle area"
+        )
+    union = _balanced_union(batches, grid_size=None, cancellation_probe=cancellation_probe)
+    try:
+        snapped = set_precision(union, 1.0, mode="valid_output")
+    except GEOSException as exc:
+        raise ArtifactVectorExtractionError(f"region precision snapping failed: {exc}") from exc
+    if snapped.is_empty:
+        raise ArtifactVectorExtractionError(
+            "region area collapses at the selected precision grid"
+        )
+    if not snapped.is_valid:
+        raise ArtifactVectorExtractionError(
+            f"region union is invalid: {is_valid_reason(snapped)}"
+        )
+    closed, closing_cells = _close_grid_slivers(snapped, cancellation_probe=cancellation_probe)
+    payload, topology_qc = _payload_from_union(
+        closed,
+        frame=frame,
+        grid=grid,
+        grid_origin=grid_origin,
+        cancellation_probe=cancellation_probe,
+    )
+    qc = {
+        "algorithm": REGION_ALGORITHM,
+        "algorithm_version": REGION_ALGORITHM_VERSION,
+        "backend_geos_version": shapely.geos_version_string,
+        "backend_shapely_version": shapely.__version__,
+        "grid_closing_area_delta_mm2": round(
+            float(closing_cells.pop("grid_closing_area_delta_cells")) * grid * grid, 12
+        ),
+        **closing_cells,
+        "grid_origin_index_uv": [grid_origin[0], grid_origin[1]],
+        "input_face_count": int(face_array.shape[0]),
+        "precision_grid_mm": grid,
+        "projected_non_degenerate_triangle_count": non_degenerate,
+        **topology_qc,
+    }
+    return payload, qc
+
+
 __all__ = [
     "DEFAULT_OUTLINE_PRECISION_GRID_MM",
+    "REGION_ALGORITHM",
+    "REGION_ALGORITHM_VERSION",
+    "extract_region_geometry",
     "MAX_GRID_INDEX",
     "MAX_OUTLINE_FACES",
     "MAX_OUTLINE_INTERMEDIATE_COORDINATES",
