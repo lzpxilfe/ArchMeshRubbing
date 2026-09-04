@@ -49,12 +49,20 @@ CONDITION_MISSING = "condition_missing"
 CONDITION_RESTORED = "condition_restored"
 CONDITION_WORN = "condition_worn"
 CONDITION_CRACK = "condition_crack"
+TECHNIQUE_GROOVE_EDGE = "technique_groove_edge"
+TECHNIQUE_GROOVE_TROUGH = "technique_groove_trough"
 CENTER_AXIS = "center_axis"
 
 LINE_KINDS: tuple[str, ...] = (
     SECTION_CUT,
     OUTLINE_VISIBLE,
     OUTLINE_HOLE,
+    # Technique sits on the surface, so it is drawn over the outline; and it is
+    # drawn under condition, because condition says which part of the drawing
+    # can be read at all.  A technique line lost under a restored patch is the
+    # right outcome: nobody should read a maker's tooling off a modern repair.
+    TECHNIQUE_GROOVE_EDGE,
+    TECHNIQUE_GROOVE_TROUGH,
     # Condition sits between the outline and the centre axis: it is drawn over
     # the shape it describes, and under the axis, which is a construction line
     # and has to stay readable across everything.  Within the group the three
@@ -66,6 +74,16 @@ LINE_KINDS: tuple[str, ...] = (
     CONDITION_CRACK,
     CENTER_AXIS,
 )
+
+# 간선: the recessed line at the bottom of a groove is drawn as a straight line
+# broken a few times, and how many times is the drafter's judgement - "two or
+# three" is the usual answer.  A dash pattern cannot express that, because a
+# pattern fixes the frequency of the breaks and not their number; so the line
+# is emitted as separate collinear segments and the count lives here.
+#
+# Both numbers are provisional, like everything else in this module.
+GROOVE_TROUGH_BREAK_COUNT = 2
+GROOVE_TROUGH_BREAK_MM = 1.6
 
 # How a condition record's kind is drawn.  The keys are the closed vocabulary of
 # `artifact_condition_annotation.CONDITION_KINDS`, repeated as literals rather
@@ -318,6 +336,12 @@ _PRESETS: dict[str, DrawingStylePreset] = {
                 dash_pattern_mm=(0.5, 0.5),
             ),
             CONDITION_CRACK: LineStyle(stroke_width_mm=0.3),
+            # A groove is one line that goes in and two that stand out.  Both
+            # are drawn lighter than the outline, because they describe the
+            # surface rather than the artifact's edge; the recessed one carries
+            # no dash pattern because its breaks are cut into the geometry.
+            TECHNIQUE_GROOVE_EDGE: LineStyle(stroke_width_mm=0.18),
+            TECHNIQUE_GROOVE_TROUGH: LineStyle(stroke_width_mm=0.18),
             CENTER_AXIS: LineStyle(
                 stroke_width_mm=0.13,
                 dash_pattern_mm=(4.0, 1.0, 1.0, 1.0),
@@ -355,6 +379,8 @@ __all__ = [
     "CONDITION_RESTORED",
     "CONDITION_WORN",
     "DRAWING_STYLE_SCHEMA_VERSION",
+    "GROOVE_TROUGH_BREAK_COUNT",
+    "GROOVE_TROUGH_BREAK_MM",
     "DrawingStyleError",
     "DrawingStylePreset",
     "HatchStyle",

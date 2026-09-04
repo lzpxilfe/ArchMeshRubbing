@@ -22,6 +22,10 @@ def validate_known_records(document: ArtifactDocument) -> None:
         ArtifactDevelopedRubbingError,
         validate_developed_rubbing_records,
     )
+    from .artifact_profile_groove import (  # noqa: PLC0415
+        ArtifactProfileGrooveError,
+        validate_profile_groove_records,
+    )
     from .artifact_rubbing_record import (  # noqa: PLC0415
         ArtifactRubbingRecordError,
         validate_rubbing_records,
@@ -51,6 +55,7 @@ def validate_known_records(document: ArtifactDocument) -> None:
         validate_surface_measurement_records(document)
         validate_condition_annotation_records(document)
         validate_developed_rubbing_records(document)
+        validate_profile_groove_records(document)
     except (
         ArtifactVectorRecordError,
         ArtifactRubbingRecordError,
@@ -59,6 +64,7 @@ def validate_known_records(document: ArtifactDocument) -> None:
         ArtifactSurfaceMeasurementError,
         ArtifactConditionAnnotationError,
         ArtifactDevelopedRubbingError,
+        ArtifactProfileGrooveError,
     ) as exc:
         raise ArtifactKnownRecordError(str(exc)) from exc
 

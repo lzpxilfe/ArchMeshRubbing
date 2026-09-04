@@ -209,6 +209,114 @@ def center_axis_line(
     return base, unit
 
 
+def axis_profile_chord(
+    frame: Mapping[str, Sequence[float]],
+    *,
+    height_mm: float,
+    radius_mm: float,
+    axis_world: Sequence[float] = (0.0, 0.0, 1.0),
+) -> tuple[tuple[float, float], tuple[float, float]] | None:
+    """Return the full-width chord at one height on a body of revolution.
+
+    A feature that runs right round the artifact - a groove, a cordon - crosses
+    an elevation as a straight line from one side of the silhouette to the
+    other.  Given the height it sits at and the radius the wall has there, this
+    is that line in the record's own plane.
+
+    Returns `None` unless the drawing plane *contains* the axis.  On a plane
+    the axis merely leans into, the chord would be a foreshortened projection
+    of the feature rather than the feature, and a drawing that showed it would
+    be claiming a width the artifact does not have there.
+    """
+
+    try:
+        origin = np.asarray(frame["origin_world_mm"], dtype=np.float64)
+        u_axis = np.asarray(frame["u_axis_world"], dtype=np.float64)
+        v_axis = np.asarray(frame["v_axis_world"], dtype=np.float64)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise SVGRenderError(f"frame is not a planar frame: {exc}") from exc
+    if origin.shape != (3,) or u_axis.shape != (3,) or v_axis.shape != (3,):
+        raise SVGRenderError("frame axes must be three-component vectors")
+    axis = np.asarray(axis_world, dtype=np.float64)
+    if axis.shape != (3,):
+        raise SVGRenderError("axis_world must be a three-component vector")
+    if not (
+        math.isfinite(float(height_mm)) and math.isfinite(float(radius_mm))
+    ):
+        raise SVGRenderError("height_mm and radius_mm must be finite")
+    if float(radius_mm) < 0.0:
+        raise SVGRenderError("radius_mm must not be negative")
+
+    direction = np.array(
+        (float(np.dot(axis, u_axis)), float(np.dot(axis, v_axis))),
+        dtype=np.float64,
+    )
+    # The axis lies in the plane only when all of its length survives the
+    # projection onto the plane's two in-plane directions.
+    if abs(float(np.hypot(*direction)) - 1.0) > 1e-9:
+        return None
+    perpendicular = np.array((-direction[1], direction[0]), dtype=np.float64)
+    base = np.array(
+        (float(np.dot(-origin, u_axis)), float(np.dot(-origin, v_axis))),
+        dtype=np.float64,
+    )
+    centre = base + float(height_mm) * direction
+    left = centre - float(radius_mm) * perpendicular
+    right = centre + float(radius_mm) * perpendicular
+    return (
+        (float(left[0]), float(left[1])),
+        (float(right[0]), float(right[1])),
+    )
+
+
+def broken_chord(
+    start: Sequence[float],
+    end: Sequence[float],
+    *,
+    break_count: int,
+    break_mm: float,
+) -> list[tuple[tuple[float, float], tuple[float, float]]]:
+    """Split one straight line into collinear pieces with evenly spaced gaps.
+
+    간선: the recessed line of a groove is a straight line broken a few times.
+    The count is what a drafter decides, not a repeating texture, so the breaks
+    are cut into the geometry instead of being asked of a dash pattern - a dash
+    pattern fixes how often a line breaks, never how many times.
+
+    Falls back to the unbroken line when the gaps would not fit, so a short
+    line is drawn whole rather than as a row of dots.
+    """
+
+    if break_count < 0:
+        raise SVGRenderError("break_count must not be negative")
+    if not math.isfinite(float(break_mm)) or float(break_mm) < 0.0:
+        raise SVGRenderError("break_mm must be a non-negative length")
+    x0, y0 = float(start[0]), float(start[1])
+    x1, y1 = float(end[0]), float(end[1])
+    whole = [((x0, y0), (x1, y1))]
+    length = math.hypot(x1 - x0, y1 - y0)
+    gaps = float(break_mm) * break_count
+    if break_count == 0 or length <= 0.0 or gaps >= length:
+        return whole
+    piece = (length - gaps) / (break_count + 1)
+    if piece <= 0.0:
+        return whole
+    unit = ((x1 - x0) / length, (y1 - y0) / length)
+    segments: list[tuple[tuple[float, float], tuple[float, float]]] = []
+    travelled = 0.0
+    for index in range(break_count + 1):
+        head = travelled
+        travelled += piece
+        segments.append(
+            (
+                (x0 + unit[0] * head, y0 + unit[1] * head),
+                (x0 + unit[0] * travelled, y0 + unit[1] * travelled),
+            )
+        )
+        travelled += float(break_mm)
+    return segments
+
+
 def center_axis_segment(
     frame: Mapping[str, Sequence[float]],
     bounds: Sequence[float],
@@ -597,6 +705,8 @@ __all__ = [
     "clip_open_path",
     "half_plane_side",
     "finite_number",
+    "axis_profile_chord",
+    "broken_chord",
     "hatch_pattern_elements",
     "hatch_pattern_id",
     "hatched_kinds",

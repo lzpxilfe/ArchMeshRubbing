@@ -30,6 +30,8 @@ from src.core.drawing_style import (
     OUTLINE_HOLE,
     OUTLINE_VISIBLE,
     PROVISIONAL_PRESET_ID,
+    TECHNIQUE_GROOVE_EDGE,
+    TECHNIQUE_GROOVE_TROUGH,
     DrawingStyleError,
     HatchStyle,
     LineStyle,
@@ -384,10 +386,22 @@ def test_every_condition_kind_is_visually_distinguishable_in_the_preset() -> Non
         for kind in LINE_KINDS
     }
 
-    assert len(set(signatures.values())) == len(signatures) - 1, signatures
-    # The one deliberate pair: an outline and the hole inside it are the same
-    # line, and a reader tells them apart by where they are, not by weight.
-    assert signatures[OUTLINE_VISIBLE] == signatures[OUTLINE_HOLE]
+    # Two deliberate pairs share a signature, and each is told apart on paper
+    # by something other than the pen.
+    deliberate = (
+        # An outline and the hole inside it are the same line; a reader tells
+        # them apart by where they are, not by weight.
+        (OUTLINE_VISIBLE, OUTLINE_HOLE),
+        # A groove's bottom and its two edges are drawn with one pen, the way
+        # a drafter draws them.  The bottom is a 간선: what distinguishes it is
+        # that its geometry is broken, which no style signature can carry.
+        (TECHNIQUE_GROOVE_EDGE, TECHNIQUE_GROOVE_TROUGH),
+    )
+    for first, second in deliberate:
+        assert signatures[first] == signatures[second]
+    assert len(set(signatures.values())) == len(signatures) - len(deliberate), (
+        signatures
+    )
 
 
 def test_a_measured_coordinate_is_not_refused_for_its_thirteenth_decimal() -> None:

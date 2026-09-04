@@ -21,7 +21,7 @@ import shutil
 import stat
 import sys
 from threading import RLock
-from typing import AbstractSet, Any, Mapping
+from typing import AbstractSet, Any, Mapping, Sequence
 import uuid
 import xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape as xml_escape
@@ -41,6 +41,10 @@ from .artifact_axis_alignment import (
 from .artifact_outline_extractor import REVIEWED_OUTLINE_BACKENDS
 from .drawing_style import (
     CENTER_AXIS,
+    GROOVE_TROUGH_BREAK_COUNT,
+    GROOVE_TROUGH_BREAK_MM,
+    TECHNIQUE_GROOVE_EDGE,
+    TECHNIQUE_GROOVE_TROUGH,
     DrawingStyleError,
     get_preset as get_drawing_style_preset,
     line_kind_for_record_role,
@@ -48,6 +52,8 @@ from .drawing_style import (
 from .drawing_svg import (
     Placement,
     SVGRenderError,
+    axis_profile_chord,
+    broken_chord,
     center_axis_segment,
     hatch_pattern_elements,
     hatched_kinds,
@@ -960,6 +966,98 @@ def center_axis_vector_path(payload: VectorGeometryPayload) -> VectorPath | None
         closed=False,
         points_mm=segment,
     )
+
+
+def profile_groove_vector_paths(
+    payload: VectorGeometryPayload,
+    grooves: Sequence[Any],
+    *,
+    record_id: str,
+) -> dict[str, list[VectorPath]]:
+    """Draw one groove reading across a record that shows the artifact's side.
+
+    Each groove becomes three lines: the two raised edges as solid 직선, and
+    the recessed bottom as a 간선, a straight line broken a few times.  That is
+    what a groove is - one place that goes in and two that stand out - so the
+    drawing carries the same count the surface does.
+
+    Returns nothing at all for a plane the axis does not lie in.  A plan view
+    sees a circumferential groove as a circle, not a line, and a foreshortened
+    plane would give it a width the artifact does not have there.
+    """
+
+    frame = payload.frame.to_dict()
+    by_kind: dict[str, list[VectorPath]] = {}
+    for index, groove in enumerate(grooves):
+        for role, height_um, radius_um, broken in (
+            (
+                TECHNIQUE_GROOVE_EDGE,
+                groove.lower_edge_height_um,
+                groove.lower_edge_radius_um,
+                False,
+            ),
+            (
+                TECHNIQUE_GROOVE_TROUGH,
+                groove.trough_height_um,
+                groove.trough_radius_um,
+                True,
+            ),
+            (
+                TECHNIQUE_GROOVE_EDGE,
+                groove.upper_edge_height_um,
+                groove.upper_edge_radius_um,
+                False,
+            ),
+        ):
+            try:
+                chord = axis_profile_chord(
+                    frame,
+                    height_mm=float(height_um) / 1000.0,
+                    radius_mm=float(radius_um) / 1000.0,
+                )
+            except SVGRenderError as exc:
+                raise ArtifactVectorExportError(str(exc)) from exc
+            if chord is None:
+                return {}
+            start, end = chord
+            if broken:
+                # Break each half of the chord about the axis rather than the
+                # chord as a whole.  A 좌 반입면 draws one half, and it has to
+                # carry the breaks a drafter would put in the line they drew;
+                # breaking the whole chord would leave half of them on the
+                # half that gets clipped away.  On a full elevation the two
+                # halves then break symmetrically about the centre.
+                centre = (
+                    0.5 * (start[0] + end[0]),
+                    0.5 * (start[1] + end[1]),
+                )
+                try:
+                    pieces = broken_chord(
+                        centre,
+                        start,
+                        break_count=GROOVE_TROUGH_BREAK_COUNT,
+                        break_mm=GROOVE_TROUGH_BREAK_MM,
+                    ) + broken_chord(
+                        centre,
+                        end,
+                        break_count=GROOVE_TROUGH_BREAK_COUNT,
+                        break_mm=GROOVE_TROUGH_BREAK_MM,
+                    )
+                except SVGRenderError as exc:
+                    raise ArtifactVectorExportError(str(exc)) from exc
+            else:
+                pieces = [(start, end)]
+            for piece_index, (head, tail) in enumerate(pieces):
+                marker = "trough" if broken else f"edge{height_um}"
+                by_kind.setdefault(role, []).append(
+                    VectorPath(
+                        id=f"groove:{record_id}:{index}:{marker}:{piece_index}",
+                        role=role,
+                        closed=False,
+                        points_mm=(head, tail),
+                    )
+                )
+    return by_kind
 
 
 def _styled_layers(

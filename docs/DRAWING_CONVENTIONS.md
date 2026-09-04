@@ -25,6 +25,8 @@
 | `condition_restored` | 복원부 경계 | `annotation.condition.v1`, kind `restored` |
 | `condition_worn` | 마모부 경계 | `annotation.condition.v1`, kind `worn` |
 | `condition_crack` | 균열 경계 | `annotation.condition.v1`, kind `crack` |
+| `technique_groove_edge` | 홈의 튀어나온 능선 (직선) | `measurement.profile_groove.v1` |
+| `technique_groove_trough` | 홈의 들어간 골 (간선) | `measurement.profile_groove.v1` |
 | `center_axis` | 회전축·대칭축의 일점쇄선 | `rotation_axis_from_circle_records/v1` Align (record가 아니라 정치의 결과) |
 
 새 선 종류는 **그것을 실제로 만들어내는 것이 생긴 뒤에** 추가한다. 만들 수 없는 종류를 먼저 이름 붙이면 모든 도면에 빈 레이어가 생기고, preset이 아무도 지키지 않는 관례를 서술하게 된다.
@@ -32,6 +34,8 @@
 record의 role 이름(`section`, `exterior`, `hole`)은 payload 해시의 일부라 절대 바뀌지 않는다. role에서 선 종류로 가는 매핑은 표현이므로 `RECORD_ROLE_LINE_KINDS`에 있다.
 
 상태 표기는 role이 아니라 **record의 kind**로 선 종류가 정해진다(`CONDITION_LINE_KINDS`). 상태 경계도 outline payload로 저장되어 path의 role이 `exterior`·`hole`이기 때문에, role로 그리면 결실부가 유물의 외형선으로 인쇄된다.
+
+기법 선 종류는 외형선 뒤, 상태 앞에 놓았다. 기법은 표면 위에 있으므로 외형선 위에 그려지고, 상태는 그 도면을 어디까지 읽을 수 있는지를 말하므로 기법 위에 그려진다. 복원된 부분에 기법 선이 가려지는 것은 옳은 결과다 — 현대의 복원면에서 제작 기법을 읽어서는 안 된다.
 
 상태 선 종류는 외형선 뒤, 중심축 앞에 놓았다. 자기가 설명하는 형태 위에 그려져야 하고, 구조선인 중심축은 그 모두 위에서 읽혀야 한다. 상태 넷 안에서는 면 성격의 셋(`missing` · `restored` · `worn`)이 먼저이고 `condition_crack`이 마지막이다. 균열은 유물 위의 선이고, 면 밑에 깔린 선은 독자가 잃어버린다.
 
@@ -71,11 +75,17 @@ record의 role 이름(`section`, `exterior`, `hole`)은 payload 해시의 일부
 | `condition_restored` | 0.25 | 3 - 1 - 0.5 - 1 | - |
 | `condition_worn` | 0.18 | 0.5 - 0.5 | - |
 | `condition_crack` | 0.3 | - | - |
+| `technique_groove_edge` | 0.18 | - | - |
+| `technique_groove_trough` | 0.18 | - (기하로 끊는다) | - |
 | `center_axis` | 0.13 | 4 - 1 - 1 - 1 (일점쇄선) | - |
 
 해칭: 45°, 간격 1.0 mm, 선 굵기 0.13 mm.
 
 상태 넷에는 해칭을 쓰지 않았다. 지금 렌더러는 해칭되는 모든 선 종류에 **같은 해칭 기하**를 쓰므로, 둘 이상을 해칭하면 종이에서 구별되지 않는다. 각도나 간격을 선 종류별로 가지려면 `HatchStyle`이 preset 안에서 선 종류별이 되어야 하고, 그건 출처 있는 수치를 옮길 때 함께 할 일이다.
+
+**간선의 끊김은 파선 패턴이 아니라 기하다.** 파선 패턴은 선이 얼마나 자주 끊기는지를 정하지 몇 번 끊기는지를 정하지 못하는데, 간선은 "두세 번 끊어 긋는" 것이므로 횟수가 관례다. 그래서 골 선은 별개의 일직선 조각들로 나와 그린다. `GROOVE_TROUGH_BREAK_COUNT = 2`, `GROOVE_TROUGH_BREAK_MM = 1.6`이고 둘 다 잠정값이다.
+
+끊김은 **중심축을 기준으로 좌우 각각** 넣는다. 좌 반입면은 폭의 절반만 그리므로, 현 전체를 끊으면 그 절반이 잘려나가는 쪽에 남는다. 이렇게 하면 반입면이든 전체 입면이든 그려진 선이 제 횟수를 갖고, 전체 입면에서는 중심축에 대해 좌우 대칭으로 끊긴다.
 
 출처 ID: 없음. 위 4단계에 따라 채워야 한다.
 
@@ -250,6 +260,31 @@ DrawingSheetOptions(
 **READY이고 FRESH여야 한다.** 정치가 바뀌면 상태 record는 STALE_ALIGNMENT가 되고 도판에 오르지 못한다. 유물이 더 이상 있지 않은 자리에 결실부를 그리게 되기 때문이다.
 
 sidecar의 `condition.records`에는 그리도록 지정된 record와 그 면 집합 해시가, `condition.drawn`에는 어느 record가 어느 도형에 어느 뷰로 실제로 그려졌는지가 남는다.
+
+---
+
+## 제작 기법 — 한 바퀴 도는 홈
+
+토기 기벽을 한 바퀴 도는 홈(횡침선, 돌대 사이 홈)은 `measurement.profile_groove.v1` record가 담는다. 찾는 방법과 실측 수치는 [`docs/POTTERY_STRIP_UNWRAP.md`](POTTERY_STRIP_UNWRAP.md)의 "한 바퀴 도는 홈"에 있다. 도면 쪽에서 알아야 할 것은 이것뿐이다.
+
+```python
+DrawingSheetOptions(
+    title_block=...,
+    groove_records=("record:groove-body",),
+)
+```
+
+**기본값은 빈 튜플이고, 주지 않으면 도판 바이트가 이전과 같다.** sidecar에 `groove` 블록도 생기지 않는다.
+
+**홈 하나가 선 셋이다.** 들어간 골은 간선(`technique_groove_trough`), 튀어나온 두 능선은 직선(`technique_groove_edge`)으로 나온다. 홈은 결국 들어간 곳 하나와 나온 곳 둘로 이루어지므로, 도면이 표면과 같은 개수를 갖는다.
+
+**회전축이 그 평면 안에 있어야 그린다.** 입면이든 단면이든 축을 품은 평면에는 그리고, 평면도에는 그리지 않는다 — 위에서 보면 한 바퀴 도는 홈은 선이 아니라 원이다. 축이 평면에 비스듬히 걸친 경우도 같은 이유로 그리지 않는다. 그 선은 홈의 단축 투영이라 유물이 그 높이에서 갖지 않는 폭을 주장하게 된다.
+
+이 점이 상태 표기와 다르다. 상태 경계는 한 방향에서 본 실루엣이라 뷰마다 다른 모양이지만, 홈은 유물의 축에 대한 사실이라 축을 품은 어느 평면에서나 같은 선이다.
+
+**READY이고 FRESH여야 한다.** 정치가 바뀌면 홈 record는 STALE_ALIGNMENT가 되고 도판에 오르지 못한다. 다른 곳에 서 있는 유물의 높이를 부르게 되기 때문이다.
+
+sidecar의 `groove.records`에는 그리도록 지정된 record와 골의 높이들이, `groove.drawn`에는 어느 record가 어느 도형에 그려졌는지가 남는다.
 
 ---
 

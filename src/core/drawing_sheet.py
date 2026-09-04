@@ -58,11 +58,18 @@ from .artifact_document import (
     RecordFreshness,
     RecordLifecycleStatus,
 )
+from .artifact_profile_groove import (
+    ArtifactProfileGrooveError,
+    PROFILE_GROOVE_RECORD_TYPE,
+    ProfileGroovePayload,
+    profile_groove_payload_from_record,
+)
 from .artifact_vector_export import (
     ArtifactVectorExportError,
     _payload_bounds,
     _require_exportable_record,
     center_axis_vector_path,
+    profile_groove_vector_paths,
 )
 from .artifact_vector_record import (
     VectorGeometryPayload,
@@ -259,6 +266,13 @@ class DrawingSheetOptions:
     the same damage seen from another direction has its own boundary in the
     same record, and the sheet uses whichever one matches.
     """
+    groove_records: tuple[str, ...] = ()
+    """Groove readings to draw on the figures, by record id.
+
+    Empty by default, and an empty tuple changes nothing.  A groove that runs
+    right round the artifact is drawn only on a figure whose plane contains the
+    rotation axis: seen from above it is a circle, not a line.
+    """
     gutter_mm: float = 8.0
     stroke_color: str = "#111111"
     title: str = "ArchMeshRubbing measured drawing sheet"
@@ -307,6 +321,22 @@ class DrawingSheetOptions:
                 "condition records"
             )
         object.__setattr__(self, "condition_records", condition_records)
+        groove_records = tuple(self.groove_records)
+        if any(
+            not isinstance(record_id, str) or not record_id.strip()
+            for record_id in groove_records
+        ):
+            raise DrawingSheetError("groove_records must be record ids")
+        if len(set(groove_records)) != len(groove_records):
+            raise DrawingSheetError(
+                "the same groove record cannot be drawn twice on one sheet"
+            )
+        if len(groove_records) > MAX_DRAWING_SHEET_CONDITION_RECORDS:
+            raise DrawingSheetError(
+                f"a sheet draws at most {MAX_DRAWING_SHEET_CONDITION_RECORDS} "
+                "groove records"
+            )
+        object.__setattr__(self, "groove_records", groove_records)
         try:
             denominator = finite_number(
                 self.scale_denominator,
@@ -744,6 +774,70 @@ def _require_drawable_condition_record(
     return record, payload
 
 
+def _require_drawable_groove_record(
+    document: ArtifactDocument,
+    record_id: str,
+) -> tuple[DerivedRecord, ProfileGroovePayload]:
+    """Resolve one groove reading under the same rules a figure answers to."""
+
+    record = document.record_index.get(record_id)
+    if record is None:
+        raise DrawingSheetError(f"groove record {record_id!r} does not exist")
+    if record.type != PROFILE_GROOVE_RECORD_TYPE:
+        raise DrawingSheetError(f"record {record_id!r} is not a groove reading")
+    if record.lifecycle_status is not RecordLifecycleStatus.READY:
+        raise DrawingSheetError("only READY groove records may be drawn")
+    try:
+        freshness = document.record_freshness(record.id)
+    except ArtifactDocumentError as exc:
+        raise DrawingSheetError(str(exc)) from exc
+    if freshness is not RecordFreshness.FRESH:
+        raise DrawingSheetError(
+            "only FRESH groove records may be drawn "
+            f"(got {freshness.value}); a groove read under a superseded "
+            "alignment names a height on an artifact standing somewhere else"
+        )
+    try:
+        payload = profile_groove_payload_from_record(record)
+    except ArtifactProfileGrooveError as exc:
+        raise DrawingSheetError(str(exc)) from exc
+    return record, payload
+
+
+def _groove_paths_for_figure(
+    figure_payload: Any,
+    grooves: Sequence[tuple[DerivedRecord, ProfileGroovePayload]],
+) -> tuple[dict[str, list[Any]], list[dict[str, str]]]:
+    """Return the groove layers that belong on one figure, and what they are.
+
+    A groove is a fact about the artifact's own axis, so unlike a condition
+    boundary it is not tied to one view: any figure whose plane contains that
+    axis shows it, elevation and section alike.  A plan view shows it as a
+    circle instead, and gets nothing.
+    """
+
+    by_kind: dict[str, list[Any]] = {}
+    drawn: list[dict[str, str]] = []
+    for record, payload in grooves:
+        try:
+            paths = profile_groove_vector_paths(
+                figure_payload, payload.grooves, record_id=record.id
+            )
+        except ArtifactVectorExportError as exc:
+            raise DrawingSheetError(str(exc)) from exc
+        if not paths:
+            continue
+        for kind, groove_paths in paths.items():
+            by_kind.setdefault(kind, []).extend(groove_paths)
+        drawn.append(
+            {
+                "groove_count": str(len(payload.grooves)),
+                "record_id": record.id,
+            }
+        )
+    return by_kind, drawn
+
+
 def _prepare_raster_figure(
     document: ArtifactDocument,
     record: DerivedRecord,
@@ -1097,6 +1191,7 @@ def _sheet_provenance(
     title_rows: Sequence[Mapping[str, str]],
     center_axis: Mapping[str, Any],
     condition: Mapping[str, Any] | None,
+    groove: Mapping[str, Any] | None,
     mirrored: Sequence[Mapping[str, str]],
 ) -> dict[str, Any]:
     preset = get_drawing_style_preset(options.style_preset)
@@ -1145,6 +1240,8 @@ def _sheet_provenance(
         # Added only when the caller asked for condition records, so a sheet
         # composed without them keeps the exact bytes it had before.
         provenance["condition"] = dict(condition)
+    if groove is not None:
+        provenance["groove"] = dict(groove)
     if mirrored:
         provenance["mirrored_figures"] = [dict(entry) for entry in mirrored]
     return provenance
@@ -1329,7 +1426,12 @@ def compose_drawing_sheet(
         _require_drawable_condition_record(document, record_id)
         for record_id in options.condition_records
     ]
+    grooves = [
+        _require_drawable_groove_record(document, record_id)
+        for record_id in options.groove_records
+    ]
     condition_drawn: list[dict[str, str]] = []
+    groove_drawn: list[dict[str, str]] = []
     mirrored: list[dict[str, str]] = []
 
     prepared: list[_Prepared] = []
@@ -1379,6 +1481,12 @@ def compose_drawing_sheet(
             by_kind.setdefault(kind, []).extend(condition_paths)
         condition_drawn.extend(
             {"figure_record_id": record.id, **entry} for entry in drawn
+        )
+        groove_by_kind, grooves_drawn = _groove_paths_for_figure(payload, grooves)
+        for kind, groove_paths in groove_by_kind.items():
+            by_kind.setdefault(kind, []).extend(groove_paths)
+        groove_drawn.extend(
+            {"figure_record_id": record.id, **entry} for entry in grooves_drawn
         )
         section_record_id = mirror_by_elevation.get(record.id)
         if section_record_id is None:
@@ -1476,6 +1584,34 @@ def compose_drawing_sheet(
                     ],
                 }
                 if conditions
+                else None
+            ),
+            groove=(
+                {
+                    "drawn": sorted(
+                        groove_drawn,
+                        key=lambda entry: (
+                            entry["figure_record_id"],
+                            entry["record_id"],
+                        ),
+                    ),
+                    "records": [
+                        {
+                            "groove_count": len(payload.grooves),
+                            "payload_sha256": payload.sha256,
+                            "recipe_hash": record.recipe_hash,
+                            "record_id": record.id,
+                            "trough_heights_um": [
+                                groove.trough_height_um
+                                for groove in payload.grooves
+                            ],
+                        }
+                        for record, payload in sorted(
+                            grooves, key=lambda item: item[0].id
+                        )
+                    ],
+                }
+                if grooves
                 else None
             ),
             mirrored=sorted(
