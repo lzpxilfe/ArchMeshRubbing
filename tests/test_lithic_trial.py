@@ -99,7 +99,8 @@ def test_all_six_projections_draw_without_an_axis(tool) -> None:
         assert outline.qc["hole_count"] == 0
         areas[view] = float(outline.qc["outline_area_mm2"])
     assert areas["top"] == pytest.approx(plan_area_mm2(BIFACE_SHAPE), rel=0.002)
-    assert areas["top"] == areas["bottom"]
+    # The same plan from either side, to the grid's own noise.
+    assert areas["top"] == pytest.approx(areas["bottom"], rel=1e-5)
     # The side views are the tool's thickness: far smaller than the plan,
     # and the end views smaller again.
     assert areas["front"] < areas["top"] / 1.5

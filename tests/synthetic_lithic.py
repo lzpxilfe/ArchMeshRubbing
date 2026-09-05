@@ -10,7 +10,7 @@ as inner lines (내선, [K1] 2013 p. 48): the ridges where one scar meets the
 next are what tell a reader how the tool was made.
 
 This tool is a leaf-shaped flake worked on one face.  Its dorsal face is
-the upper envelope of a handful of planes, so the scars are flat and the
+the lower envelope of a handful of planes, so the scars are flat and the
 ridges between them are sharp, and its ventral face is one smooth surface
 with the bulb of percussion swelling near the platform end.  The two meet
 at the margin.  Sizes are those of a hand-sized biface, not a copy of any
@@ -55,15 +55,20 @@ class LithicShape:
     #: The ventral face's greatest depth below the margin, and the bulb's.
     ventral_depth_mm: float = 5.0
     bulb_mm: float = 2.5
-    #: The dorsal scars.  Their upper envelope, tapered to nothing at the
+    #: The dorsal scars.  Their lower envelope, tapered to nothing at the
     #: margin, is the dorsal face.
+    #: Steep enough that the ridges between them bend by 45-60 degrees, as
+    #: the ridges of a worked biface do; a scar's plane and its neighbour's
+    #: meet at twice the arctangent of their slopes.
+    #: The two lowest planes fall away to either side, so they meet along
+    #: the tool's length in a central ridge, as a biface's do.
     facets: tuple[Facet, ...] = (
-        Facet(height_mm=14.0, slope=0.30, direction_deg=90.0),
-        Facet(height_mm=14.0, slope=0.30, direction_deg=-90.0),
-        Facet(height_mm=12.5, slope=0.22, direction_deg=0.0),
-        Facet(height_mm=12.0, slope=0.26, direction_deg=180.0),
-        Facet(height_mm=11.0, slope=0.34, direction_deg=45.0),
-        Facet(height_mm=11.0, slope=0.34, direction_deg=-135.0),
+        Facet(height_mm=15.5, slope=0.55, direction_deg=90.0),
+        Facet(height_mm=15.5, slope=0.55, direction_deg=-90.0),
+        Facet(height_mm=22.0, slope=0.38, direction_deg=0.0),
+        Facet(height_mm=21.0, slope=0.35, direction_deg=180.0),
+        Facet(height_mm=21.0, slope=0.60, direction_deg=45.0),
+        Facet(height_mm=23.0, slope=0.60, direction_deg=-135.0),
     )
 
     def __post_init__(self) -> None:
@@ -74,9 +79,14 @@ class LithicShape:
             raise ValueError("taper must be between 0 and 0.6")
         if not self.facets:
             raise ValueError("a flaked tool has at least one scar")
+        # The scars must stay above the margin all the way to it: a plane
+        # that dips under it would fold the dorsal face into a valley.
+        for index in range(360):
+            angle = math.radians(index)
+            r = plan_radius(self, angle)
+            if dorsal_height(self, r * math.cos(angle), r * math.sin(angle)) <= 0.0:
+                raise ValueError("a scar falls below the margin before reaching it")
 
-
-BIFACE_SHAPE = LithicShape()
 
 
 def plan_radius(shape: LithicShape, angle_rad: float) -> float:
@@ -91,14 +101,19 @@ def plan_radius(shape: LithicShape, angle_rad: float) -> float:
 
 
 def dorsal_height(shape: LithicShape, x_mm: float, y_mm: float) -> float:
-    """The upper envelope of the scars over one point of the plan."""
+    """The lower envelope of the scars over one point of the plan.
 
-    best = -math.inf
+    Each scar is a plane falling away in its own direction; the stone is
+    under all of them, so the face is the lowest plane at each point - a
+    dome, whose creases stand out.
+    """
+
+    best = math.inf
     for facet in shape.facets:
         along = x_mm * math.cos(math.radians(facet.direction_deg)) + y_mm * math.sin(
             math.radians(facet.direction_deg)
         )
-        best = max(best, facet.height_mm - facet.slope * along)
+        best = min(best, facet.height_mm - facet.slope * along)
     return best
 
 
@@ -113,81 +128,272 @@ def ventral_depth(shape: LithicShape, x_mm: float, y_mm: float) -> float:
     return shape.ventral_depth_mm + shape.bulb_mm * math.exp(-reach)
 
 
+#: Defined after the surface functions its own check calls.
+BIFACE_SHAPE = LithicShape()
+
+
+Cell = tuple[list[tuple[float, float]], list[bool]]
+
+
+def _dorsal_cells(shape: LithicShape, *, segments: int) -> list[Cell]:
+    """The plan cut into one region per scar.
+
+    A scar's region is where its plane is the lowest: the margin polygon
+    clipped by one half-plane per other scar.  Each cell is its vertices in
+    order and, for the edge leaving each vertex, whether that edge is a piece
+    of the margin (True) or a crease shared with the neighbouring scar.
+    """
+
+    margin: list[tuple[float, float]] = []
+    for segment in range(segments):
+        angle = 2.0 * math.pi * segment / segments
+        r = plan_radius(shape, angle)
+        margin.append((r * math.cos(angle), r * math.sin(angle)))
+
+    def clip(cell: Cell, a: tuple[float, float], c: float) -> Cell:
+        # Keep the side a . p <= c (Sutherland-Hodgman, one half-plane).  A
+        # cut edge keeps its tag on the piece that survives; the edge that
+        # closes the cut runs along the clip line and is a crease.
+        polygon, tags = cell
+        out_vertices: list[tuple[float, float]] = []
+        out_tags: list[bool] = []
+        first_in_tag: bool | None = None
+
+        def emit(point: tuple[float, float], incoming: bool) -> None:
+            nonlocal first_in_tag
+            if out_vertices:
+                out_tags.append(incoming)
+            else:
+                first_in_tag = incoming
+            out_vertices.append(point)
+
+        count = len(polygon)
+        for index in range(count):
+            previous, current = polygon[index - 1], polygon[index]
+            tag = tags[index - 1]
+            dp = a[0] * previous[0] + a[1] * previous[1] - c
+            dc = a[0] * current[0] + a[1] * current[1] - c
+            inside_previous, inside_current = dp <= 0.0, dc <= 0.0
+            if inside_previous and inside_current:
+                emit(current, tag)
+            elif inside_previous and not inside_current:
+                t = dp / (dp - dc)
+                emit((previous[0] + t * (current[0] - previous[0]), previous[1] + t * (current[1] - previous[1])), tag)
+            elif not inside_previous and inside_current:
+                t = dp / (dp - dc)
+                emit((previous[0] + t * (current[0] - previous[0]), previous[1] + t * (current[1] - previous[1])), False)
+                emit(current, tag)
+        if out_vertices:
+            out_tags.append(bool(first_in_tag))
+        return out_vertices, out_tags
+
+    cells: list[Cell] = []
+    for i, facet in enumerate(shape.facets):
+        cell: Cell = (list(margin), [True] * len(margin))
+        di = (math.cos(math.radians(facet.direction_deg)), math.sin(math.radians(facet.direction_deg)))
+        for j, other in enumerate(shape.facets):
+            if j == i:
+                continue
+            dj = (math.cos(math.radians(other.direction_deg)), math.sin(math.radians(other.direction_deg)))
+            # P_i <= P_j  <=>  (s_j d_j - s_i d_i) . p <= h_j - h_i
+            a = (other.slope * dj[0] - facet.slope * di[0], other.slope * dj[1] - facet.slope * di[1])
+            cell = clip(cell, a, other.height_mm - facet.height_mm)
+            if len(cell[0]) < 3:
+                break
+        # Drop repeated points; a zero-length edge is no edge.
+        polygon, tags = cell
+        cleaned: list[tuple[float, float]] = []
+        cleaned_tags: list[bool] = []
+        for point, tag in zip(polygon, tags):
+            if cleaned and math.hypot(point[0] - cleaned[-1][0], point[1] - cleaned[-1][1]) < 1e-6:
+                cleaned_tags[-1] = tag
+                continue
+            cleaned.append(point)
+            cleaned_tags.append(tag)
+        if len(cleaned) > 1 and math.hypot(cleaned[0][0] - cleaned[-1][0], cleaned[0][1] - cleaned[-1][1]) < 1e-6:
+            cleaned.pop()
+            cleaned_tags.pop()
+        if len(cleaned) < 3:
+            continue
+        # A crease edge can run the tool's length; the margin's edges are
+        # about two millimetres.  Cut the creases to the same pitch, or the
+        # strips inside the cell become needles whose diagonals read as
+        # creases of their own on the tapered surface.
+        pitch = 2.0 * math.pi * max(shape.half_length_mm, shape.half_width_mm) / segments
+        divided: list[tuple[float, float]] = []
+        divided_tags: list[bool] = []
+        for index, point in enumerate(cleaned):
+            following = cleaned[(index + 1) % len(cleaned)]
+            tag = cleaned_tags[index]
+            pieces = 1
+            if not tag:
+                pieces = max(1, math.ceil(math.hypot(following[0] - point[0], following[1] - point[1]) / pitch))
+            for k in range(pieces):
+                t = k / pieces
+                divided.append((point[0] + t * (following[0] - point[0]), point[1] + t * (following[1] - point[1])))
+                divided_tags.append(tag)
+        cells.append((divided, divided_tags))
+    return cells
+
+
+def _on_margin(cell: Cell, index: int) -> bool:
+    """Whether a cell vertex lies on the margin: an edge either side is."""
+
+    _polygon, tags = cell
+    return bool(tags[index] or tags[index - 1])
+
+
+def dorsal_creases(
+    shape: LithicShape = BIFACE_SHAPE, *, segments: int = 120
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    """The scars' ridges as 3D segments, exactly as the mesh carries them.
+
+    Every cell edge that is not a piece of the margin is a crease shared by
+    two scars; each is returned once, as a pair of endpoints.
+    """
+
+    seen: set[tuple[tuple[float, float], tuple[float, float]]] = set()
+    creases: list[tuple[np.ndarray, np.ndarray]] = []
+    for cell in _dorsal_cells(shape, segments=segments):
+        polygon, tags = cell
+        for index, current in enumerate(polygon):
+            if tags[index]:
+                continue
+            following = polygon[(index + 1) % len(polygon)]
+            key = tuple(sorted(((round(current[0], 6), round(current[1], 6)), (round(following[0], 6), round(following[1], 6)))))
+            if key in seen:
+                continue
+            seen.add(key)
+            creases.append(
+                (
+                    np.asarray([current[0], current[1], _dorsal_z(shape, (current[0], current[1], _on_margin(cell, index)))]),
+                    np.asarray([following[0], following[1], _dorsal_z(shape, (following[0], following[1], _on_margin(cell, (index + 1) % len(polygon))))]),
+                )
+            )
+    return creases
+
+
+def _ring_fraction(ring: int, rings: int) -> float:
+    """Rings packed toward the margin, where both faces bevel to the edge.
+
+    The bevel is where the surface bends fastest, and rings spaced evenly
+    would sample it so coarsely that the strips between them read as ridges.
+    """
+
+    u = ring / rings
+    return 1.0 - (1.0 - u) ** 1.5
+
+
+def _taper(shape: LithicShape, x_mm: float, y_mm: float) -> float:
+    # 1 at the centre, 0 at the margin, flat at the centre.
+    r = math.hypot(x_mm, y_mm)
+    if r < 1e-12:
+        return 1.0
+    s = min(r / plan_radius(shape, math.atan2(y_mm, x_mm)), 1.0)
+    return 1.0 - s ** 4
+
+
+def _dorsal_z(shape: LithicShape, point: tuple[float, float, bool]) -> float:
+    if point[2]:
+        return 0.0
+    return dorsal_height(shape, point[0], point[1]) * _taper(shape, point[0], point[1])
+
+
+def _ventral_z(shape: LithicShape, point: tuple[float, float, bool]) -> float:
+    if point[2]:
+        return 0.0
+    return -ventral_depth(shape, point[0], point[1]) * _taper(shape, point[0], point[1])
+
+
 def flaked_tool(
     shape: LithicShape = BIFACE_SHAPE,
     *,
-    rings: int = 36,
+    rings: int = 20,
     segments: int = 120,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return (vertices, faces) for one closed flaked tool.
 
-    The plan is sampled on rings from the centre to the margin; the dorsal
-    and ventral faces share the margin ring, so the solid is watertight.
-    Both faces are drawn to the margin by a taper, so the edge is an edge.
+    The dorsal face is meshed scar by scar, each scar's region shrunk toward
+    its own centre in rings, so the creases between scars are mesh edges -
+    which is what a scan of a sharp ridge carries too.  The ventral face is
+    one surface in rings from the margin to the centre.  The two share the
+    margin, so the solid is watertight, and both are drawn to nothing at
+    the margin, so the edge is an edge.
     """
 
     if rings < 2 or segments < 8:
         raise ValueError("a tool needs at least 2 rings and 8 segments")
     vertices: list[list[float]] = []
     faces: list[list[int]] = []
+    index_of: dict[tuple[float, float, float], int] = {}
 
-    def taper(s: float) -> float:
-        # 1 at the centre, 0 at the margin, and flat at the centre.
-        return 1.0 - s ** 4
+    def vertex(x: float, y: float, z: float) -> int:
+        key = (round(x, 6), round(y, 6), round(z, 6))
+        found = index_of.get(key)
+        if found is None:
+            found = len(vertices)
+            index_of[key] = found
+            vertices.append([float(x), float(y), float(z)])
+        return found
 
-    def surface(*, dorsal: bool) -> tuple[int, int]:
-        centre = len(vertices)
-        z = dorsal_height(shape, 0.0, 0.0) if dorsal else -ventral_depth(shape, 0.0, 0.0)
-        vertices.append([0.0, 0.0, float(z)])
-        first_ring = len(vertices)
-        for ring in range(1, rings + 1):
-            s = ring / rings
-            for segment in range(segments):
-                angle = 2.0 * math.pi * segment / segments
-                r = s * plan_radius(shape, angle)
-                x, y = r * math.cos(angle), r * math.sin(angle)
-                if dorsal:
-                    z = dorsal_height(shape, x, y) * taper(s)
-                else:
-                    z = -ventral_depth(shape, x, y) * taper(s)
-                vertices.append([x, y, float(z)])
-        return centre, first_ring
+    def sew(inner: list[int], outer: list[int], *, upward: bool) -> None:
+        count = len(outer)
+        for i in range(count):
+            a, b = inner[i], inner[(i + 1) % count]
+            d, c = outer[i], outer[(i + 1) % count]
+            for triangle in (([a, d, c], [a, c, b]) if upward else ([a, c, d], [a, b, c])):
+                if len(set(triangle)) == 3:
+                    faces.append(triangle)
 
-    dorsal_centre, dorsal_first = surface(dorsal=True)
-    ventral_centre, ventral_first = surface(dorsal=False)
-    # The margin ring is one ring: the ventral face's last ring is dropped
-    # and its faces sewn to the dorsal margin instead.
-    margin_first = dorsal_first + (rings - 1) * segments
-    ventral_last = ventral_first + (rings - 1) * segments
-    kept = vertices[:ventral_last]
-    vertices = kept
+    def fan(centre: int, ring: list[int], *, upward: bool) -> None:
+        count = len(ring)
+        for i in range(count):
+            a, b = ring[i], ring[(i + 1) % count]
+            triangle = [centre, a, b] if upward else [centre, b, a]
+            if len(set(triangle)) == 3:
+                faces.append(triangle)
 
-    def ring_index(first: int, ring: int, segment: int, *, ventral: bool) -> int:
-        if ventral and ring == rings:
-            return margin_first + segment % segments
-        return first + (ring - 1) * segments + segment % segments
+    cells = _dorsal_cells(shape, segments=segments)
+    cell_rings = rings
+    margin_points: dict[tuple[float, float], tuple[float, float, bool]] = {}
+    for cell in cells:
+        polygon, _tags = cell
+        cx = sum(p[0] for p in polygon) / len(polygon)
+        cy = sum(p[1] for p in polygon) / len(polygon)
+        previous_ring: list[int] | None = None
+        centre_index = vertex(cx, cy, _dorsal_z(shape, (cx, cy, False)))
+        for ring in range(1, cell_rings + 1):
+            t = _ring_fraction(ring, cell_rings)
+            current_ring: list[int] = []
+            for index, point in enumerate(polygon):
+                x = cx + t * (point[0] - cx)
+                y = cy + t * (point[1] - cy)
+                on_margin = ring == cell_rings and _on_margin(cell, index)
+                if on_margin:
+                    margin_points[(round(x, 6), round(y, 6))] = (x, y, True)
+                current_ring.append(vertex(x, y, _dorsal_z(shape, (x, y, on_margin))))
+            if previous_ring is None:
+                fan(centre_index, current_ring, upward=True)
+            else:
+                sew(previous_ring, current_ring, upward=True)
+            previous_ring = current_ring
 
-    for dorsal in (True, False):
-        centre = dorsal_centre if dorsal else ventral_centre
-        first = dorsal_first if dorsal else ventral_first
-        for segment in range(segments):
-            a = ring_index(first, 1, segment, ventral=not dorsal)
-            b = ring_index(first, 1, segment + 1, ventral=not dorsal)
-            faces.append([centre, a, b] if dorsal else [centre, b, a])
-        for ring in range(1, rings):
-            for segment in range(segments):
-                a = ring_index(first, ring, segment, ventral=not dorsal)
-                b = ring_index(first, ring, segment + 1, ventral=not dorsal)
-                c = ring_index(first, ring + 1, segment + 1, ventral=not dorsal)
-                d = ring_index(first, ring + 1, segment, ventral=not dorsal)
-                # Wound to face out of the stone: up on the dorsal face,
-                # down on the ventral.
-                if dorsal:
-                    faces.append([a, d, c])
-                    faces.append([a, c, b])
-                else:
-                    faces.append([a, c, d])
-                    faces.append([a, b, c])
+    # The ventral face, in rings from the shared margin to its own centre.
+    margin = sorted(margin_points.values(), key=lambda p: math.atan2(p[1], p[0]))
+    ventral_centre = vertex(0.0, 0.0, _ventral_z(shape, (0.0, 0.0, False)))
+    previous_ring = None
+    for ring in range(1, rings + 1):
+        t = _ring_fraction(ring, rings)
+        current_ring = []
+        for point in margin:
+            x, y = t * point[0], t * point[1]
+            on_margin = ring == rings
+            current_ring.append(vertex(x, y, _ventral_z(shape, (x, y, on_margin))))
+        if previous_ring is None:
+            fan(ventral_centre, current_ring, upward=False)
+        else:
+            sew(previous_ring, current_ring, upward=False)
+        previous_ring = current_ring
     return np.asarray(vertices, dtype=np.float64), np.asarray(faces, dtype=np.int32)
 
 
@@ -204,7 +410,7 @@ def plan_area_mm2(shape: LithicShape, *, steps: int = 20000) -> float:
 def lithic_session(
     shape: LithicShape = BIFACE_SHAPE,
     *,
-    rings: int = 36,
+    rings: int = 20,
     segments: int = 120,
     document_id: str = "artifact:biface",
 ) -> tuple[ArtifactSession, np.ndarray, np.ndarray]:
@@ -251,6 +457,7 @@ __all__ = [
     "BIFACE_SHAPE",
     "Facet",
     "LithicShape",
+    "dorsal_creases",
     "dorsal_height",
     "flaked_tool",
     "lithic_session",
