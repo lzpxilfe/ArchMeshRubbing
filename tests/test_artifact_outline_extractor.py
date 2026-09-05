@@ -13,6 +13,7 @@ import src.core.artifact_outline_extractor as outline_extractor
 from src.core.artifact_cancellation import ArtifactComputationCancelledError
 from src.core.artifact_document import RecordFreshness
 from src.core.artifact_outline_extractor import (
+    OUTLINE_CLOSING_ALGORITHM_VERSION,
     OUTLINE_ALGORITHM,
     REQUIRED_GEOS_VERSION,
     REQUIRED_SHAPELY_VERSION,
@@ -305,7 +306,15 @@ class TestExactOutlineGeometry(unittest.TestCase):
         self.assertIn((1.0, 1.0), result.payload.paths[0].points_mm)
         self.assertEqual(result.qc["component_count"], 1)
 
-    def test_hole_and_disconnected_islands_are_all_preserved(self):
+    def test_a_hole_is_preserved_and_islands_are_refused_by_name(self):
+        """A hole is the artifact's; two islands never are.
+
+        A connected mesh projects to a connected silhouette, so a second
+        exterior component is a loose fragment in the mesh or a snap that
+        severed it - outline 1.2.0 refuses and says how many pieces and how
+        small, while 1.1.0 keeps drawing them as it was written to.
+        """
+
         vertices, faces = _annulus()
         annulus = extract_outline_geometry(
             vertices,
@@ -326,11 +335,22 @@ class TestExactOutlineGeometry(unittest.TestCase):
         islands_vertices, islands_faces = _combine(
             (_rectangle(-4.0, -1.0, -2.0, 1.0), _rectangle(2.0, -1.0, 4.0, 1.0))
         )
+        with self.assertRaisesRegex(
+            ArtifactVectorExtractionError,
+            r"more than one piece.*2 separate pieces.*loose fragment",
+        ):
+            extract_outline_geometry(
+                islands_vertices,
+                islands_faces,
+                "top",
+                precision_grid_mm=0.01,
+            )
         islands = extract_outline_geometry(
             islands_vertices,
             islands_faces,
             "top",
             precision_grid_mm=0.01,
+            algorithm_version=OUTLINE_CLOSING_ALGORITHM_VERSION,
         )
         self.assertEqual(islands.qc["component_count"], 2)
         self.assertEqual(

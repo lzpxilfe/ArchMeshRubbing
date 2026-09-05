@@ -41,6 +41,7 @@ from .artifact_axis_alignment import (
 from .artifact_outline_extractor import (
     OUTLINE_ALGORITHM_VERSION,
     OUTLINE_ALGORITHM_VERSIONS,
+    OUTLINE_CLOSING_ALGORITHM_VERSION,
     OUTLINE_GRID_CLOSING_RADIUS_CELLS,
     OUTLINE_LEGACY_ALGORITHM_VERSION,
     REVIEWED_OUTLINE_BACKENDS,
@@ -106,7 +107,7 @@ from .source_identity import PRIMARY_FILE_IDENTITY_SCOPE
 
 
 VECTOR_EXPORT_FORMAT = "archmeshrubbing_vector_export"
-_CURRENT_VECTOR_EXPORT_SCHEMA_VERSION = "1.5.0"
+_CURRENT_VECTOR_EXPORT_SCHEMA_VERSION = "1.6.0"
 VECTOR_EXPORT_SCHEMA_VERSION = _CURRENT_VECTOR_EXPORT_SCHEMA_VERSION
 #: 1.1.0 introduced the current provenance contract (import admission, axis
 #: Align); 1.2.0 is 1.1.0 plus outline algorithm 1.1.0 - the grid closing -
@@ -116,16 +117,20 @@ VECTOR_EXPORT_SCHEMA_VERSION = _CURRENT_VECTOR_EXPORT_SCHEMA_VERSION
 #: four 정면 kinds that came with technique payload 1.2.0 - 목판정면, 마연흔,
 #: 내박자흔, 깎기.  A user preset styles every line kind there is, so each
 #: time the vocabulary grows its definition needs a sidecar whose closed key
-#: set can hold it.  All five carry the current contract; 1.0.0 is legacy.
+#: set can hold it; 1.6.0 admits outline algorithm 1.2.0, which refuses a
+#: silhouette in more than one piece and is otherwise 1.1.0 byte for byte.
+#: All six carry the current contract; 1.0.0 is legacy.
 _CURRENT_CONTRACT_VECTOR_EXPORT_SCHEMA_VERSIONS = frozenset(
-    {"1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0"}
+    {"1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0"}
 )
 #: The sidecars that can carry an outline computed with the grid closing.
 _GRID_CLOSING_VECTOR_EXPORT_SCHEMA_VERSIONS = frozenset(
-    {"1.2.0", "1.3.0", "1.4.0", "1.5.0"}
+    {"1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0"}
 )
+#: The sidecars whose recipe enum names outline algorithm 1.2.0.
+_PIECE_GATE_VECTOR_EXPORT_SCHEMA_VERSIONS = frozenset({"1.6.0"})
 SUPPORTED_VECTOR_EXPORT_SCHEMA_VERSIONS = frozenset(
-    {"1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0"}
+    {"1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0"}
 )
 VECTOR_EXPORT_DIRECTORY_SUFFIX = ".amr-vector"
 VECTOR_EXPORT_SVG_NAME = "artifact.svg"
@@ -299,6 +304,10 @@ _PRODUCTION_ALGORITHM_VERSIONS: Mapping[str, frozenset[str]] = {
 }
 _SNAP_ERROR_CONTRACTS: Mapping[str, tuple[str, float]] = {
     OUTLINE_LEGACY_ALGORITHM_VERSION: ("axis<=grid/2;radial<=grid/sqrt(2)", 0.5),
+    OUTLINE_CLOSING_ALGORITHM_VERSION: (
+        "axis<=1.5*grid;radial<=1.5*grid*sqrt(2)",
+        OUTLINE_GRID_CLOSING_RADIUS_CELLS + 0.5,
+    ),
     OUTLINE_ALGORITHM_VERSION: (
         "axis<=1.5*grid;radial<=1.5*grid*sqrt(2)",
         OUTLINE_GRID_CLOSING_RADIUS_CELLS + 0.5,
@@ -2380,12 +2389,24 @@ def _validate_current_record_qc(
     closing = (
         kind is VectorRecordKind.OUTLINE
         and is_production
-        and algorithm_version == OUTLINE_ALGORITHM_VERSION
+        and algorithm_version != OUTLINE_LEGACY_ALGORITHM_VERSION
     )
     if closing and schema_version not in _GRID_CLOSING_VECTOR_EXPORT_SCHEMA_VERSIONS:
         raise ArtifactVectorExportError(
             "a vector export before 1.2.0 cannot carry an outline computed with "
             "grid closing"
+        )
+    # The piece gate arrived with outline 1.2.0 and the 1.6.0 sidecar, whose
+    # recipe enum is the first to name it.
+    if (
+        kind is VectorRecordKind.OUTLINE
+        and is_production
+        and algorithm_version == OUTLINE_ALGORITHM_VERSION
+        and schema_version not in _PIECE_GATE_VECTOR_EXPORT_SCHEMA_VERSIONS
+    ):
+        raise ArtifactVectorExportError(
+            "a vector export before 1.6.0 cannot carry an outline computed with "
+            "the piece gate"
         )
     optional_keys = (
         _CUTLINE_RECORD_QC_KEYS

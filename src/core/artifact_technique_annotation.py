@@ -23,7 +23,7 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 
 from .artifact_outline_extractor import (
-    OUTLINE_ALGORITHM_VERSION,
+    OUTLINE_CLOSING_ALGORITHM_VERSION,
     OUTLINE_LEGACY_ALGORITHM_VERSION,
 )
 from .artifact_condition_annotation import (
@@ -77,12 +77,15 @@ TECHNIQUE_ALGORITHM_VERSIONS = (
     "1.3.0",
     TECHNIQUE_ALGORITHM_VERSION,
 )
+#: Pinned as literals: a technique record recomputes with the outline
+#: algorithm it was written under, not with whichever is current.  1.3.0 on
+#: draws with extract_region_geometry, where this is unused.
 _OUTLINE_ALGORITHM_FOR_TECHNIQUE: Mapping[str, str] = {
     "1.0.0": OUTLINE_LEGACY_ALGORITHM_VERSION,
-    "1.1.0": OUTLINE_ALGORITHM_VERSION,
-    "1.2.0": OUTLINE_ALGORITHM_VERSION,
-    "1.3.0": OUTLINE_ALGORITHM_VERSION,
-    "1.4.0": OUTLINE_ALGORITHM_VERSION,
+    "1.1.0": OUTLINE_CLOSING_ALGORITHM_VERSION,
+    "1.2.0": OUTLINE_CLOSING_ALGORITHM_VERSION,
+    "1.3.0": OUTLINE_CLOSING_ALGORITHM_VERSION,
+    "1.4.0": OUTLINE_CLOSING_ALGORITHM_VERSION,
 }
 #: cos 81.4 degrees: a face tilted more than that from the view is left out.
 TECHNIQUE_GRAZING_COSINE_MIN = 0.15

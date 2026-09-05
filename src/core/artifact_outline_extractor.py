@@ -54,14 +54,33 @@ OUTLINE_LEGACY_ALGORITHM_VERSION = "1.0.0"
 #: - holes one cell wide, pinches where the outline touches itself - that are
 #: the grid's, not the artifact's; the closing removes exactly the features
 #: narrower than two cells.  Records at 1.0.0 still recompute as they were.
-OUTLINE_ALGORITHM_VERSION = "1.1.0"
-OUTLINE_ALGORITHM_VERSIONS = (OUTLINE_LEGACY_ALGORITHM_VERSION, OUTLINE_ALGORITHM_VERSION)
+OUTLINE_CLOSING_ALGORITHM_VERSION = "1.1.0"
+#: The closed union, refused when it is more than one piece.  A connected mesh
+#: projects to a connected silhouette, so a second exterior component is
+#: never the artifact: it is a loose fragment the scanner left in the mesh -
+#: the museum's 빗살무늬토기 (신수22891) carries a 24-face crumb beside a
+#: 391,432-face body - or a snap that severed the artifact at a grid coarser
+#: than the mesh.  1.1.0 drew both into the measured drawing without a word,
+#: the crumb as a second outline 0.8 mm2 large.  Nothing else changes: an
+#: outline that is one piece has the same bytes at 1.2.0 as at 1.1.0, and
+#: records at 1.0.0 and 1.1.0 still recompute as they were written.
+OUTLINE_ALGORITHM_VERSION = "1.2.0"
+OUTLINE_ALGORITHM_VERSIONS = (
+    OUTLINE_LEGACY_ALGORITHM_VERSION,
+    OUTLINE_CLOSING_ALGORITHM_VERSION,
+    OUTLINE_ALGORITHM_VERSION,
+)
 OUTLINE_GRID_CLOSING_RADIUS_CELLS = 1.0
 #: Snap error contracts, per algorithm version.  The union moves a vertex by
 #: at most half a cell on each axis; the closing may move a boundary point by
 #: its radius, and re-snapping by another half cell.
 _SNAP_CONTRACTS: Mapping[str, tuple[str, float]] = {
     OUTLINE_LEGACY_ALGORITHM_VERSION: ("axis<=grid/2;radial<=grid/sqrt(2)", 0.5),
+    OUTLINE_CLOSING_ALGORITHM_VERSION: (
+        "axis<=1.5*grid;radial<=1.5*grid*sqrt(2)",
+        OUTLINE_GRID_CLOSING_RADIUS_CELLS + 0.5,
+    ),
+    # The piece gate moves no vertex, so 1.2.0 keeps 1.1.0's contract.
     OUTLINE_ALGORITHM_VERSION: (
         "axis<=1.5*grid;radial<=1.5*grid*sqrt(2)",
         OUTLINE_GRID_CLOSING_RADIUS_CELLS + 0.5,
@@ -770,10 +789,16 @@ def _component_summary(
     artifact or an artifact and a speck of scanner noise.
     """
 
-    areas_mm2 = sorted(
-        abs(_integer_ring_area2(exterior)) * grid * grid / 2.0
-        for exterior, _holes in components
+    return _pieces_summary(
+        [
+            abs(_integer_ring_area2(exterior)) * grid * grid / 2.0
+            for exterior, _holes in components
+        ]
     )
+
+
+def _pieces_summary(areas: Sequence[float]) -> str:
+    areas_mm2 = sorted(float(area) for area in areas)
     if not areas_mm2:
         return "no exterior at all"
     if len(areas_mm2) == 1:
@@ -1138,6 +1163,17 @@ def extract_outline_geometry(
             **closing_cells,
         }
     snapped_component_count = _polygon_count(snapped_union)
+    if version == OUTLINE_ALGORITHM_VERSION and snapped_component_count > 1:
+        # A connected mesh has a connected silhouette.  Two pieces here are a
+        # loose fragment in the mesh or a snap that cut the artifact in two,
+        # and neither belongs on a measured drawing - so say which it looks
+        # like, in millimetres, rather than draw it.
+        raise ArtifactVectorExtractionError(
+            "outline is more than one piece, and a drawing may hold only the "
+            f"artifact: {_pieces_summary([polygon.area * grid * grid for polygon in _polygon_sequence(snapped_union)])}"
+            ". Remove the loose fragment from the mesh, or use a finer grid "
+            "if the mesh itself is one piece"
+        )
 
     unsnapped_status = "available"
     unsnapped_component_count: int | None
@@ -1397,6 +1433,7 @@ __all__ = [
     "OUTLINE_ALGORITHM",
     "OUTLINE_ALGORITHM_VERSION",
     "OUTLINE_ALGORITHM_VERSIONS",
+    "OUTLINE_CLOSING_ALGORITHM_VERSION",
     "OUTLINE_GRID_CLOSING_RADIUS_CELLS",
     "OUTLINE_LEGACY_ALGORITHM_VERSION",
     "OUTLINE_UNION_BATCH_SIZE",

@@ -193,42 +193,70 @@ def test_every_defect_is_the_same_mesh_twice() -> None:
     )
 
 
-def test_a_crumb_is_drawn_into_the_measured_drawing_without_a_word() -> None:
-    """KNOWN GAP.  Scanner noise reaches the paper as if it were the artifact.
+def test_a_crumb_beside_the_pot_is_refused_and_named_rather_than_drawn() -> None:
+    """Scanner noise does not reach the paper as if it were the artifact.
 
-    A loose crumb beside the pot projects to its own closed outline, and the
-    extractor draws it: two exterior components where the artifact has one,
-    no refusal, no warning, an area 0.8 mm2 larger than the truth.  A drafter
-    who does not look closely publishes a speck of the turntable as part of a
-    Neolithic pot.
-
-    The count is in the record's QC as `component_count`, so nothing needs to
-    be measured that is not measured already - what is missing is that
-    anything says it.  This test pins today's behaviour so that fixing it has
-    to come here and change this docstring.
+    A loose crumb beside the pot projects to its own closed outline.  Under
+    outline algorithm 1.1.0 the extractor drew it - two exterior components
+    where the artifact has one, an area 0.8 mm2 over the truth, no refusal,
+    no warning - and a drafter who did not look closely published a speck of
+    the turntable as part of a Neolithic pot.  1.2.0 refuses, and says what
+    it saw in millimetres so the drafter can find the crumb.  A connected
+    mesh has a connected silhouette, so there is nothing else two pieces can
+    be.  Records written at 1.1.0 still recompute as they were written.
     """
 
-    from src.core.artifact_outline_extractor import extract_outline_geometry
+    from src.core.artifact_outline_extractor import (
+        OUTLINE_ALGORITHM_VERSION,
+        OUTLINE_CLOSING_ALGORITHM_VERSION,
+        extract_outline_geometry,
+        outline_recipe,
+    )
+    from src.core.artifact_vector_extractor import ArtifactVectorExtractionError
 
+    # A record made today is written under the gated version.
+    assert outline_recipe("front", precision_grid_mm=0.2)["algorithm_version"] == (
+        OUTLINE_ALGORITHM_VERSION
+    )
     vertices, faces = _vessel(segments=64, rings=20)
     clean = extract_outline_geometry(vertices, faces, "front", precision_grid_mm=0.2)
     assert clean.qc["component_count"] == 1
-    clean_area = float(clean.qc["outline_area_mm2"])
 
     # Ten millimetres clear of the pot, so it is unmistakably not the pot.
-    crumbed = extract_outline_geometry(
-        *add_loose_crumb(vertices, faces, size_mm=1.5, gap_mm=10.0),
+    crumbed_vertices, crumbed_faces = add_loose_crumb(
+        vertices, faces, size_mm=1.5, gap_mm=10.0
+    )
+    with pytest.raises(ArtifactVectorExtractionError) as refusal:
+        extract_outline_geometry(
+            crumbed_vertices, crumbed_faces, "front", precision_grid_mm=0.2
+        )
+    message = str(refusal.value)
+    assert "more than one piece" in message
+    assert "2 separate pieces" in message
+    assert "loose fragment" in message
+
+    # The version the record was written under is the version it recomputes
+    # under: 1.1.0 still draws the crumb, exactly as it did.
+    as_written = extract_outline_geometry(
+        crumbed_vertices,
+        crumbed_faces,
         "front",
         precision_grid_mm=0.2,
+        algorithm_version=OUTLINE_CLOSING_ALGORITHM_VERSION,
     )
-    exteriors = [
-        path for path in crumbed.payload.paths if str(path.role) == "exterior"
-    ]
-    assert len(exteriors) == 2
-    assert crumbed.qc["component_count"] == 2
-    # The crumb's own area, added to the artifact's, in the published record.
-    assert float(crumbed.qc["outline_area_mm2"]) > clean_area
-    assert float(crumbed.qc["outline_area_mm2"]) - clean_area < 2.0
+    assert as_written.qc["component_count"] == 2
+    assert float(as_written.qc["outline_area_mm2"]) > float(clean.qc["outline_area_mm2"])
+
+    # And an outline that is one piece is the same bytes at 1.2.0 as at
+    # 1.1.0: the gate moves no vertex.
+    closing = extract_outline_geometry(
+        vertices,
+        faces,
+        "front",
+        precision_grid_mm=0.2,
+        algorithm_version=OUTLINE_CLOSING_ALGORITHM_VERSION,
+    )
+    assert closing.payload.sha256 == clean.payload.sha256
 
 
 def test_a_hole_or_a_broken_rim_does_not_confuse_the_outline() -> None:

@@ -209,7 +209,7 @@ class TestVectorSchemas(unittest.TestCase):
             )
         )
         export_schema = json.loads(
-            (ROOT / "schemas/vector_export-1.5.0.schema.json").read_text(
+            (ROOT / "schemas/vector_export-1.6.0.schema.json").read_text(
                 encoding="utf-8"
             )
         )
@@ -281,7 +281,7 @@ class TestVectorSchemas(unittest.TestCase):
             sidecar["provenance"]["geometry_revision"]["import_recipe"],
             document.geometry_revisions[0].to_dict()["import_recipe"],
         )
-        self.assertEqual(sidecar["schema_version"], "1.5.0")
+        self.assertEqual(sidecar["schema_version"], "1.6.0")
         self.assertIn(
             "import_admission",
             sidecar["provenance"]["geometry_revision"]["qc"],
@@ -407,6 +407,13 @@ class TestVectorSchemas(unittest.TestCase):
             hashlib.sha256(superseded).hexdigest(),
             "701d0aacf261e43719f1455cfc964fae44bb2b7ca966ab68b49d9580612ec9c7",
         )
+        # And 1.5.0, superseded by the sidecar whose recipe enum first names
+        # outline algorithm 1.2.0.
+        superseded = (ROOT / "schemas/vector_export-1.5.0.schema.json").read_bytes()
+        self.assertEqual(
+            hashlib.sha256(superseded).hexdigest(),
+            "eac4d048b852c58b6e7a5dcb3780561f941ce4617023c08449af74083b81b308",
+        )
 
     def test_production_qc_is_cross_bound_to_recipe_and_admission(self):
         production = _production_vector_session()
@@ -513,7 +520,7 @@ def test_the_export_schema_accepts_exactly_the_reviewed_backends() -> None:
     from src.core.artifact_outline_extractor import REVIEWED_OUTLINE_BACKENDS
 
     schema = json.loads(
-        (ROOT / "schemas/vector_export-1.5.0.schema.json").read_text(encoding="utf-8")
+        (ROOT / "schemas/vector_export-1.6.0.schema.json").read_text(encoding="utf-8")
     )
     properties = schema["$defs"]["recordQc"]["properties"]
 

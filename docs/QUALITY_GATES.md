@@ -131,7 +131,7 @@ python -m pytest -q ^
 - package relocation 후 원본 문서·mesh·GUI 없이 별도 PID에서 수행하는 offline 검증
 - `.amr` embedded source의 saved-parser 재물질화와 `.amr-vector`/`.amr-rubbing`/`.amr-survey`/`.amr-unwrap` 자동 판별을 하나로 묶는 `--verify-artifact`; exact project 결합 성공·불일치 실패, manifest-only AMR 실패, symlink·mixed marker·tamper 거부, 절대 경로 없는 결정적 closed JSON receipt
 - 실제 complete-workflow `.amr`/`.amr-survey`를 exact-project로 다시 여는 field-pilot contract, project document/survey aggregate hash에 묶인 Windows 10 build 17763+/Windows 11 client Workstation·native AMD64·64-bit AMD64 process·CPython 3.12·비호환 계층, 닫힌 OpenGL v2 성공 root·필수 check ID·두 mode·동일 runtime self-claim·24시간 receipt, 닫힌 10항목 human review·정량 scale 교차 판정, canonical self-hash/no-overwrite publication, 절대 경로·hostname·사용자명 비수집과 `authentication=none`/single-pilot scope. 테스트의 합성 review/driver fixture는 계약 검증일 뿐 실제 현장 pilot 증거가 아님
-- versioned vector payload와 current vector-export 1.5 Draft 2020-12 schema, byte-preserved 1.0·1.1·1.2·1.3·1.4 schema 및 여섯 버전 offline runtime 검증; 1.1부터 Align/geometry/payload QC를 exact-key로 닫고 production Cutline/Outline record QC 전체와 payload에서 재계산한 Outline topology를 검증하며, 1.2는 outline algorithm 1.1.0(격자 closing)의 recipe·QC 키를 더하고 그 이전 sidecar는 closing으로 계산한 outline을 담지 못하며, 1.3은 사용자 선 굵기 preset의 정의를 더하고 그 이전 sidecar는 사용자 preset으로 그린 도면을 담지 못하며, 1.4와 1.5는 그 정의의 닫힌 key set에 기법 선 종류 다섯과 정면 수법 넷을 차례로 더한다
+- versioned vector payload와 current vector-export 1.5 Draft 2020-12 schema, byte-preserved 1.0·1.1·1.2·1.3·1.4 schema 및 여섯 버전 offline runtime 검증; 1.1부터 Align/geometry/payload QC를 exact-key로 닫고 production Cutline/Outline record QC 전체와 payload에서 재계산한 Outline topology를 검증하며, 1.2는 outline algorithm 1.1.0(격자 closing)의 recipe·QC 키를 더하고 그 이전 sidecar는 closing으로 계산한 outline을 담지 못하며, 1.3은 사용자 선 굵기 preset의 정의를 더하고 그 이전 sidecar는 사용자 preset으로 그린 도면을 담지 못하며, 1.4와 1.5는 그 정의의 닫힌 key set에 기법 선 종류 다섯과 정면 수법 넷을 차례로 더한다며, 1.6은 recipe enum에 outline algorithm 1.2.0(조각 게이트)을 더하고 그 이전 sidecar는 1.2.0 외곽선을 담지 못한다
 - six-view canonical-mm front-depth raster, fixed integer µm quantization/local-mean tone mapping, coverage alpha와 multi-layer QC
 - face order·winding·duplicate, hole, large survey offset, resource limit 및 Align 전환 후 late Digital Rubbing 결과 거부
 - canonical GA8 PNG의 고정 chunk/DEFLATE bytes, exact `pHYs`, RFC 8785 iTXt metadata, pixel/CRC/chunk/scale tamper 거부
@@ -225,12 +225,12 @@ Native measurement 취소는 `QThread.terminate()`를 사용하지 않는다. �
   | 메쉬 | 격자 | 사라진 삼각형 | closing이 메운 구멍 | 남은 구멍 |
   |---|---|---|---|---|
   | 1.5 mm | 0.5 mm | 0.0% | 3 | 0 |
-  | 1.5 mm | 0.8 mm | 3.0% | 80 | 0 |
-  | 1.5 mm | 1.2 mm | 25.9% | 495 | **21** |
-  | 0.6 mm | 0.35 mm | 7.4% | 1202 | 0 |
-  | 0.6 mm | 0.5 mm | 27.9% | 1569 | **328** |
+  | 1.5 mm | 0.8 mm | 3.1% | 80 | 0 |
+  | 1.5 mm | 1.2 mm | 35.0% | 495 | **21** |
+  | 0.6 mm | 0.35 mm | 8.0% | 1202 | 0 |
+  | 0.6 mm | 0.5 mm | 38.8% | 1569 | **328** |
   | 0.6 mm | 0.8 mm 이상 | - | - | 위상 규칙이 **거부** |
 
-  크게 어긋나면 `hole_not_strictly_inside`로 거부되지만, 그 사이 구간은 **구멍이 난 채로 통과한다.** 실제 박물관 스캔에서도 같은 값이 나온다 — 평면 1.0 mm에서 삼각형의 79%가 사라지고 구멍 10개가 남은 도면이 통과했다([`docs/REAL_DATA_TRIAL.md`](REAL_DATA_TRIAL.md)). 사라진 삼각형 비율은 이미 QC의 `grid_collapsed_triangle_count`로 기록되고 있고 위 표에서 실패를 정확히 예측하므로(10% 게이트면 좋은 두 경우를 통과시키고 나쁜 두 경우를 잡는다), 고치는 방법은 그 값에 게이트를 두는 것이다. record를 만들 때 거부하고 이미 쓰인 record는 쓰인 대로 재계산해야 하므로 outline algorithm 1.2.0이 필요하다. GUI 기본값은 0.01 mm라 기본 설정으로는 걸리지 않으며, 격자 칸의 툴팁이 이 사실을 그대로 말한다.
+  크게 어긋나면 `hole_not_strictly_inside`로 거부되지만, 그 사이 구간은 **구멍이 난 채로 통과한다.** 실제 박물관 스캔에서도 같은 값이 나온다 — 평면 1.0 mm에서 삼각형의 79%가 사라지고 구멍 10개가 남은 도면이 통과했다([`docs/REAL_DATA_TRIAL.md`](REAL_DATA_TRIAL.md)). 사라진 삼각형의 비율에 게이트를 두면 잡히리라고 한 번 적었다가 **거두었다.** 처음 계산이 분모를 잘못 잡았고(사라진 삼각형은 `projected_non_degenerate_triangle_count` 안에 이미 들어 있다), 바로잡은 값으로는 갈라지지 않는다 — 실제 토기의 정면은 1.0 mm 격자에서 44%가 사라지고도 구멍이 하나도 없고, 합성 기와는 35%에서 구멍 21개다. 남은 구멍 자체는 QC의 `hole_count`에 있으나 손잡이 고리나 굽 안쪽처럼 진짜 구멍과 격자가 뚫은 구멍을 숫자만으로 가르지 못한다. **아직 열려 있다.** GUI 기본값은 0.01 mm라 기본 설정으로는 걸리지 않으며, 격자 칸의 툴팁이 이 사실을 그대로 말한다.
 
-- **떨어진 조각이 유물의 일부처럼 그려진다.** 스캐너가 남긴 부스러기가 메쉬에 떠 있으면 외곽선이 그것을 두 번째 외형 조각으로 그대로 그린다 — 거부도 경고도 없다. 합성 항아리에 1.5 mm 부스러기를 10 mm 떨어뜨려 붙이면 조각이 1개에서 2개가 되고 넓이가 7499.4에서 7500.2 mm²가 되지만 도면은 통과한다. 국립중앙박물관 빗살무늬토기 스캔에는 실제로 24면짜리 부스러기가 하나 떠 있다. 벽에 뚫린 구멍과 깨진 구연은 옳게 처리된다(실루엣이 덮거나 깨진 선을 따라간다). 조각 수는 이미 QC의 `component_count`에 있으니 새로 잴 것은 없고, 아무도 그것을 말하지 않을 뿐이다. 동작은 `tests/test_scan_defects.py`가 고정해 두었다.
+- ~~**떨어진 조각이 유물의 일부처럼 그려진다.**~~ **고쳤다 — outline algorithm 1.2.0.** 연결된 메쉬의 실루엣은 한 조각이므로 외형 조각이 둘이면 유물이 아니다: 메쉬에 뜬 부스러기거나, 메쉬보다 굵은 격자가 유물을 둘로 끊은 것이다. 1.1.0은 그것을 아무 말 없이 그렸다(합성 항아리에 1.5 mm 부스러기를 10 mm 떨어뜨리면 조각 1→2, 넓이 7499.4→7500.2 mm², 통과). 1.2.0은 거부하고 조각 수와 가장 작은 조각의 mm²를 말한다. 한 조각인 외곽선은 1.2.0과 1.1.0의 바이트가 같고, 1.0.0·1.1.0 record는 쓰인 대로 재계산된다. 벡터 sidecar 1.6.0의 recipe enum이 처음으로 1.2.0을 이름하며, 그 이전 sidecar는 1.2.0 외곽선을 담지 못한다. `tests/test_scan_defects.py`.
