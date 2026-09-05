@@ -292,3 +292,95 @@ def test_a_hole_or_a_broken_rim_does_not_confuse_the_outline() -> None:
         precision_grid_mm=0.2,
     )
     assert bitten.qc["component_count"] == 1
+
+
+def _through_hole(vertices, faces, *, radius_mm: float = 6.0):
+    """A hole through both walls at mid-height, where the front view looks."""
+
+    from synthetic_vessel import WALL_MM
+
+    z = HEIGHT_MM * 0.5
+    for sign in (1.0, -1.0):
+        for radius in (outer_radius(z), outer_radius(z) - WALL_MM):
+            vertices, faces = punch_hole(
+                vertices, faces, centre_mm=(0.0, sign * radius, z), radius_mm=radius_mm
+            )
+    return vertices, faces
+
+
+def test_a_hole_through_the_artifact_is_drawn_and_measured() -> None:
+    """A hole the artifact has stays a hole, at any grid.
+
+    The front view looks along Y, so a hole through both walls on the Y axis
+    is a hole in the silhouette.  The unsnapped union has it too, and covers
+    only the snap error at its rim - well under the fraction the gate
+    refuses at - and the outline records how much.
+    """
+
+    from src.core.artifact_outline_extractor import (
+        OUTLINE_GRID_HOLE_COVER_FRACTION_MAX,
+        OUTLINE_PIECE_GATE_ALGORITHM_VERSION,
+        extract_outline_geometry,
+    )
+
+    vertices, faces = _through_hole(*_vessel(segments=64, rings=20))
+    for grid in (0.2, 1.0):
+        holed = extract_outline_geometry(vertices, faces, "front", precision_grid_mm=grid)
+        assert holed.qc["hole_count"] == 1
+        assert holed.qc["component_count"] == 1
+        cover = holed.qc["grid_hole_unsnapped_cover_max"]
+        assert 0.0 < cover < OUTLINE_GRID_HOLE_COVER_FRACTION_MAX / 4.0, (grid, cover)
+        # The gate moves no vertex: 1.2.0 draws the same bytes, without the
+        # measurement.
+        as_1_2 = extract_outline_geometry(
+            vertices,
+            faces,
+            "front",
+            precision_grid_mm=grid,
+            algorithm_version=OUTLINE_PIECE_GATE_ALGORITHM_VERSION,
+        )
+        assert as_1_2.payload.sha256 == holed.payload.sha256
+        assert "grid_hole_unsnapped_cover_max" not in as_1_2.qc
+
+    # No hole at all: the measurement is zero, and the key is still there.
+    plain = extract_outline_geometry(*_vessel(), "front", precision_grid_mm=0.5)
+    assert plain.qc["hole_count"] == 0
+    assert plain.qc["grid_hole_unsnapped_cover_max"] == 0.0
+
+
+def test_a_hole_the_grid_punched_is_refused_by_size_rather_than_drawn() -> None:
+    """A grid coarser than the mesh opens holes the artifact does not have.
+
+    On a vessel meshed at 200 x 60 a 0.5 mm grid collapses a fifth of the
+    projected triangles, and four holes 3 to 4 mm wide open in the lattice
+    union where the wall is seen edge-on - beside the one hole the artifact
+    really has.  Outline 1.2.0 drew all five.  The unsnapped union covers the
+    four entirely and the real one by under 3 %, so 1.3.0 refuses, says four
+    of five are the grid's, and gives the size of the largest in
+    millimetres.  The museum pot's top view at 1.0 mm is the same case with
+    ten holes.
+    """
+
+    from src.core.artifact_outline_extractor import (
+        OUTLINE_PIECE_GATE_ALGORITHM_VERSION,
+        extract_outline_geometry,
+    )
+    from src.core.artifact_vector_extractor import ArtifactVectorExtractionError
+
+    vertices, faces = _through_hole(*_vessel(segments=200, rings=60))
+    with pytest.raises(ArtifactVectorExtractionError) as refusal:
+        extract_outline_geometry(vertices, faces, "front", precision_grid_mm=0.5)
+    message = str(refusal.value)
+    assert "4 of 5 holes in the outline are the grid's" in message
+    assert "covers 100% of a hole" in message
+    assert "mm" in message and "finer precision_grid_mm" in message
+
+    # As written under 1.2.0 the same outline passed, holes and all.
+    drawn = extract_outline_geometry(
+        vertices,
+        faces,
+        "front",
+        precision_grid_mm=0.5,
+        algorithm_version=OUTLINE_PIECE_GATE_ALGORITHM_VERSION,
+    )
+    assert drawn.qc["hole_count"] == 5

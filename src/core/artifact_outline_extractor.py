@@ -64,13 +64,35 @@ OUTLINE_CLOSING_ALGORITHM_VERSION = "1.1.0"
 #: the crumb as a second outline 0.8 mm2 large.  Nothing else changes: an
 #: outline that is one piece has the same bytes at 1.2.0 as at 1.1.0, and
 #: records at 1.0.0 and 1.1.0 still recompute as they were written.
-OUTLINE_ALGORITHM_VERSION = "1.2.0"
+OUTLINE_PIECE_GATE_ALGORITHM_VERSION = "1.2.0"
+#: The piece-gated union, refused when a hole in it is the grid's.  A grid
+#: coarser than the mesh collapses the thin triangles of a surface seen
+#: edge-on, and where enough of them go a hole opens in the lattice union
+#: that the closing cannot span - 1.2.0 drew it: the museum pot's top view at
+#: 1.0 mm has ten such holes, 4 to 7 mm wide, and passed.  The unsnapped
+#: union of the same triangles - already computed for the area comparison -
+#: has no hole there, because the surface is continuous.  1.3.0 measures how
+#: much of each hole the unsnapped union covers: a hole in the artifact is
+#: covered only by the snap error at its rim (a 12 mm hole through both
+#: walls of a test vessel: 0.4 to 7 %); a hole the grid punched is covered
+#: entirely (every one measured: 100 %).  Above the fraction below the
+#: outline is refused with the hole's size in millimetres.  Nothing else
+#: changes: an outline whose holes are the artifact's has the same bytes at
+#: 1.3.0 as at 1.2.0, and every earlier version still recomputes as written.
+OUTLINE_ALGORITHM_VERSION = "1.3.0"
 OUTLINE_ALGORITHM_VERSIONS = (
     OUTLINE_LEGACY_ALGORITHM_VERSION,
     OUTLINE_CLOSING_ALGORITHM_VERSION,
+    OUTLINE_PIECE_GATE_ALGORITHM_VERSION,
     OUTLINE_ALGORITHM_VERSION,
 )
 OUTLINE_GRID_CLOSING_RADIUS_CELLS = 1.0
+#: The largest fraction of a hole's area the unsnapped union may cover before
+#: the hole is the grid's.  Measured values sit at the two ends - under 0.07
+#: for a hole in the artifact, 1.0 for a hole the grid punched - and the
+#: middle is a hole too small to tell apart at this grid, which is refused
+#: with the same advice: a finer grid.
+OUTLINE_GRID_HOLE_COVER_FRACTION_MAX = 0.5
 #: Snap error contracts, per algorithm version.  The union moves a vertex by
 #: at most half a cell on each axis; the closing may move a boundary point by
 #: its radius, and re-snapping by another half cell.
@@ -80,7 +102,12 @@ _SNAP_CONTRACTS: Mapping[str, tuple[str, float]] = {
         "axis<=1.5*grid;radial<=1.5*grid*sqrt(2)",
         OUTLINE_GRID_CLOSING_RADIUS_CELLS + 0.5,
     ),
-    # The piece gate moves no vertex, so 1.2.0 keeps 1.1.0's contract.
+    # The piece gate and the hole gate move no vertex, so 1.2.0 and 1.3.0
+    # keep 1.1.0's contract.
+    OUTLINE_PIECE_GATE_ALGORITHM_VERSION: (
+        "axis<=1.5*grid;radial<=1.5*grid*sqrt(2)",
+        OUTLINE_GRID_CLOSING_RADIUS_CELLS + 0.5,
+    ),
     OUTLINE_ALGORITHM_VERSION: (
         "axis<=1.5*grid;radial<=1.5*grid*sqrt(2)",
         OUTLINE_GRID_CLOSING_RADIUS_CELLS + 0.5,
@@ -239,6 +266,18 @@ def outline_recipe(
                 }
             }
             if closing
+            else {}
+        ),
+        # Present from 1.3.0 on: the hole gate's threshold, so a record says
+        # what it was measured against.
+        **(
+            {
+                "grid_hole_gate": {
+                    "cover_fraction_max": OUTLINE_GRID_HOLE_COVER_FRACTION_MAX,
+                    "operation": "hole_area_covered_by_unsnapped_union/v1",
+                }
+            }
+            if version == OUTLINE_ALGORITHM_VERSION
             else {}
         ),
         "kind": VectorRecordKind.OUTLINE.value,
@@ -797,6 +836,70 @@ def _component_summary(
     )
 
 
+def _refuse_grid_holes(
+    geometry: BaseGeometry,
+    unsnapped: BaseGeometry | None,
+    *,
+    grid: float,
+    unsnapped_status: str,
+    cancellation_probe: CancellationProbe | None = None,
+) -> dict[str, Any]:
+    """Refuse a hole the artifact's surface is continuous under.
+
+    Every hole of the closed lattice union is measured against the unsnapped
+    union of the same triangles.  A hole in the artifact is a hole there too,
+    and the unsnapped union covers only the snap error at its rim; a hole the
+    grid punched - thin triangles collapsed, and the closing could not span
+    the gap - is covered entirely, because the surface never opened.  The
+    outline is refused when any hole is covered by more than
+    ``OUTLINE_GRID_HOLE_COVER_FRACTION_MAX`` of its area, and the largest
+    covered fraction of the holes that stay is returned as QC.
+    """
+
+    raise_if_cancelled(cancellation_probe)
+    holes = [
+        Polygon(interior.coords)
+        for polygon in _polygon_sequence(geometry)
+        for interior in polygon.interiors
+    ]
+    if not holes:
+        return {"grid_hole_unsnapped_cover_max": 0.0}
+    if unsnapped is None:
+        raise ArtifactVectorExtractionError(
+            f"outline has {len(holes)} holes and the unsnapped comparison is "
+            f"{unsnapped_status}, so it cannot tell the artifact's holes from "
+            "the grid's; use a finer grid"
+        )
+    covered: list[tuple[float, Polygon]] = []
+    try:
+        for index, hole in enumerate(holes):
+            poll_cancellation(cancellation_probe, index)
+            area = float(hole.area)
+            fraction = float(hole.intersection(unsnapped).area) / area if area > 0 else 1.0
+            covered.append((min(max(fraction, 0.0), 1.0), hole))
+    except GEOSException as exc:
+        raise ArtifactVectorExtractionError(
+            f"outline hole comparison failed: {exc}"
+        ) from exc
+    punched = [
+        item for item in covered if item[0] > OUTLINE_GRID_HOLE_COVER_FRACTION_MAX
+    ]
+    if punched:
+        fraction, hole = max(punched, key=lambda item: float(item[1].area))
+        x0, y0, x1, y1 = hole.bounds
+        raise ArtifactVectorExtractionError(
+            f"{len(punched)} of {len(holes)} holes in the outline are the grid's, "
+            "not the artifact's: the unsnapped projection covers "
+            f"{fraction:.0%} of a hole {(x1 - x0) * grid:.1f} x {(y1 - y0) * grid:.1f} mm, "
+            "so the surface is continuous where the drawing shows a hole. The "
+            f"{grid} mm grid is coarser than the mesh there; use a finer "
+            "precision_grid_mm"
+        )
+    return {
+        "grid_hole_unsnapped_cover_max": round(max(item[0] for item in covered), 6)
+    }
+
+
 def _pieces_summary(areas: Sequence[float]) -> str:
     areas_mm2 = sorted(float(area) for area in areas)
     if not areas_mm2:
@@ -996,6 +1099,11 @@ def extract_outline_geometry(
     grid = _precision_grid(precision_grid_mm)
     version = _outline_algorithm_version(algorithm_version)
     closing = version != OUTLINE_LEGACY_ALGORITHM_VERSION
+    piece_gate = version not in (
+        OUTLINE_LEGACY_ALGORITHM_VERSION,
+        OUTLINE_CLOSING_ALGORITHM_VERSION,
+    )
+    hole_gate = version == OUTLINE_ALGORITHM_VERSION
     snap_contract, snap_cells = _SNAP_CONTRACTS[version]
     vertices, face_array = _validated_mesh_arrays(
         vertices_world_mm,
@@ -1163,19 +1271,9 @@ def extract_outline_geometry(
             **closing_cells,
         }
     snapped_component_count = _polygon_count(snapped_union)
-    if version == OUTLINE_ALGORITHM_VERSION and snapped_component_count > 1:
-        # A connected mesh has a connected silhouette.  Two pieces here are a
-        # loose fragment in the mesh or a snap that cut the artifact in two,
-        # and neither belongs on a measured drawing - so say which it looks
-        # like, in millimetres, rather than draw it.
-        raise ArtifactVectorExtractionError(
-            "outline is more than one piece, and a drawing may hold only the "
-            f"artifact: {_pieces_summary([polygon.area * grid * grid for polygon in _polygon_sequence(snapped_union)])}"
-            ". Remove the loose fragment from the mesh, or use a finer grid "
-            "if the mesh itself is one piece"
-        )
 
     unsnapped_status = "available"
+    unsnapped_union: BaseGeometry | None = None
     unsnapped_component_count: int | None
     unsnapped_area_mm2: float | None
     try:
@@ -1195,8 +1293,46 @@ def extract_outline_geometry(
         )
     except ArtifactVectorExtractionError:
         unsnapped_status = "unavailable_geos_union_failure"
+        unsnapped_union = None
         unsnapped_component_count = None
         unsnapped_area_mm2 = None
+
+    if piece_gate and snapped_component_count > 1:
+        # A connected mesh has a connected silhouette.  Two pieces here are a
+        # loose fragment in the mesh or a snap that cut the artifact in two,
+        # and neither belongs on a measured drawing - so say which it looks
+        # like, in millimetres, rather than draw it.  The unsnapped union
+        # tells the two apart: a fragment is a piece of its own there as
+        # well, a severed sliver is not.
+        if unsnapped_component_count is None:
+            cause = (
+                ". Remove the loose fragment from the mesh, or use a finer grid "
+                "if the mesh itself is one piece"
+            )
+        elif unsnapped_component_count == 1:
+            cause = (
+                ". The unsnapped projection is one piece, so the grid severed "
+                "the artifact: use a finer grid"
+            )
+        else:
+            cause = (
+                f". The unsnapped projection is {unsnapped_component_count} "
+                "pieces as well, so the mesh carries a loose fragment: remove it"
+            )
+        raise ArtifactVectorExtractionError(
+            "outline is more than one piece, and a drawing may hold only the "
+            f"artifact: {_pieces_summary([polygon.area * grid * grid for polygon in _polygon_sequence(snapped_union)])}"
+            + cause
+        )
+    hole_gate_qc: dict[str, Any] = {}
+    if hole_gate:
+        hole_gate_qc = _refuse_grid_holes(
+            snapped_union,
+            unsnapped_union,
+            grid=grid,
+            unsnapped_status=unsnapped_status,
+            cancellation_probe=cancellation_probe,
+        )
 
     payload, topology_qc = _payload_from_union(
         snapped_union,
@@ -1228,9 +1364,11 @@ def extract_outline_geometry(
             else None
         ),
         "grid_collapsed_triangle_count": grid_collapsed_count,
-        # The closing's four keys exist only from algorithm 1.1.0 on, so a
-        # 1.0.0 recomputation keeps its QC bytes.
+        # The closing's four keys exist only from algorithm 1.1.0 on, and the
+        # hole gate's one only from 1.3.0, so an older recomputation keeps
+        # its QC bytes.
         **closing_qc,
+        **hole_gate_qc,
         "grid_component_merge_count": component_merge_count,
         "grid_component_split_count": component_split_count,
         "grid_snap_axis_upper_bound_mm": grid * snap_cells,
@@ -1435,6 +1573,8 @@ __all__ = [
     "OUTLINE_ALGORITHM_VERSIONS",
     "OUTLINE_CLOSING_ALGORITHM_VERSION",
     "OUTLINE_GRID_CLOSING_RADIUS_CELLS",
+    "OUTLINE_GRID_HOLE_COVER_FRACTION_MAX",
+    "OUTLINE_PIECE_GATE_ALGORITHM_VERSION",
     "OUTLINE_LEGACY_ALGORITHM_VERSION",
     "OUTLINE_UNION_BATCH_SIZE",
     "OutlineGeometryResult",
