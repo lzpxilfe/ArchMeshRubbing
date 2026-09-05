@@ -186,6 +186,14 @@ def _millimetre_token(micrometres: object) -> str:
 
 COMPUTED_RUBBING_CAPTION_PREFIX = "전산 탁본 · 전개면"
 PROJECTED_RELIEF_CAPTION_PREFIX = "정사영 요철 · 전개 아님"
+# A development is longer than the shadow of the same surface, and it cannot
+# be otherwise: unrolling measures the arc where a projection measures its
+# chord.  A 76 degree 암키와 develops 7.7% wider than its own outline, a
+# 178 degree 수키와 55% wider, and on a tapered tile the ratio changes from
+# one end to the other.  Put a development and an outline of one artifact on
+# one sheet at one stated scale and a reader has two widths for the same
+# tile, so the rubbing says which of the two its own width is.
+DEVELOPED_WIDTH_NOTE = "폭은 펼친 호의 길이"
 
 
 def computed_rubbing_caption(recipe: Mapping[str, Any], *, developed: bool) -> str:
@@ -219,9 +227,10 @@ def computed_rubbing_caption(recipe: Mapping[str, Any], *, developed: bool) -> s
                 ink += f" · 기저 {int(relief['paper_tone_percent'])}%"
     except (KeyError, TypeError, ValueError) as exc:
         raise DrawingSheetError(f"rubbing recipe relief policy is malformed: {exc}") from exc
-    prefix = (
-        COMPUTED_RUBBING_CAPTION_PREFIX if developed else PROJECTED_RELIEF_CAPTION_PREFIX
-    )
+    if developed:
+        prefix = f"{COMPUTED_RUBBING_CAPTION_PREFIX} · {DEVELOPED_WIDTH_NOTE}"
+    else:
+        prefix = PROJECTED_RELIEF_CAPTION_PREFIX
     return f"{prefix} · {model} · 창 {window} · 검정 {black} · {ink}"
 
 
@@ -2817,6 +2826,7 @@ def validate_drawing_sheet_bytes(svg_bytes: bytes, sidecar_bytes: bytes) -> None
 __all__ = [
     "COMPUTED_RUBBING_CAPTION_PREFIX",
     "COMPUTED_RUBBING_NOTE",
+    "DEVELOPED_WIDTH_NOTE",
     "INTERPRETATION_LABEL",
     "Interpretation",
     "MAX_GROOVE_EDGE_EMPHASIS",

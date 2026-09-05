@@ -841,7 +841,10 @@ def test_the_strip_is_pasted_flush_against_the_centre_line(
         "title_block"
     ]
     caption = sidecar["figures"][0]["caption"]
-    assert caption.startswith("전산 탁본 · 전개면 · 높이 모델 · 창 ")
+    # A development is wider than the shadow of the same wall - it measures
+    # the arc where a projection measures its chord - so the caption says
+    # which of the two its own width is.
+    assert caption.startswith("전산 탁본 · 전개면 · 폭은 펼친 호의 길이 · 높이 모델 · 창 ")
     assert caption.endswith(" · 먹 100% · 기저 20%")
     assert 'id="rubbing-caption-0000"' in svg
     assert caption in svg

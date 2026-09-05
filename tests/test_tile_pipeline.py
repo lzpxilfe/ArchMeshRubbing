@@ -9,6 +9,8 @@ paper is the paddle's cord because the cord is in the mesh.
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pytest
 
@@ -197,3 +199,110 @@ def test_the_rubbing_shows_the_cord_because_the_cord_is_in_the_mesh() -> None:
     assert float(corded.std()) > 10.0
     assert float(corded.min()) == pytest.approx(float(plain.min()), abs=2.0)
     assert float(corded.max()) > float(plain.max()) + 40.0
+
+
+#: A tile whose arc is wide enough that the difference is unmistakable.
+ARC = TileShape(
+    kind=AMKIWA,
+    length_mm=110.0,
+    inner_radius_mm=80.0,
+    thickness_mm=16.0,
+    span_deg=120.0,
+)
+
+
+def test_the_rubbing_is_wider_than_the_outline_and_by_exactly_the_arc() -> None:
+    """기와의 탁본은 외선보다 클 수밖에 없다.
+
+    Unrolling a curved surface measures the arc; looking down at it measures
+    the arc's chord.  So a development of a tile is wider than the tile's own
+    outline, by theta / (2 sin(theta/2)) and by nothing else - 7.7% on a 76
+    degree 암키와, 55% on a half-round 수키와.  Both figures can sit on one
+    sheet at one scale, so this is a thing a reader has to be told rather
+    than left to discover with a ruler.
+    """
+
+    from src.core.artifact_outline_extractor import compute_artifact_outline
+    from src.core.artifact_vector_extractor import commit_vector_computation
+    from src.core.artifact_vector_record import vector_payload_from_record
+    from src.core.drawing_sheet import (
+        COMPUTED_RUBBING_CAPTION_PREFIX,
+        DEVELOPED_WIDTH_NOTE,
+        computed_rubbing_caption,
+    )
+
+    session, vertices, faces = tile_session(
+        ARC, axial_step_mm=STEP_MM, angular_step_mm=STEP_MM, on_canonical_axis=True
+    )
+    radius = np.hypot(vertices[:, 0], vertices[:, 1])
+    threshold = ARC.inner_radius_mm + ARC.thickness_mm / 2.0
+    centres = vertices[faces].mean(axis=1)
+    selected = [
+        int(index)
+        for index in np.nonzero(
+            (radius > threshold)[faces].all(axis=1)
+            & (np.abs(centres[:, 2]) < ARC.length_mm / 2.0 - 5.0)
+        )[0]
+    ]
+
+    # The shadow: what the tile covers seen from the side, in millimetres.
+    outline = compute_artifact_outline(session, "front", precision_grid_mm=0.2)
+    session = commit_vector_computation(
+        session, outline, record_id="record:tile:side", created_at=STAMP, operator="tester"
+    )
+    points = np.vstack(
+        [
+            np.asarray(path.points_mm, dtype=np.float64)
+            for path in vector_payload_from_record(
+                session.document.record_index["record:tile:side"]
+            ).paths
+        ]
+    )
+    shadow_mm = float(points[:, 0].max() - points[:, 0].min())
+
+    # The development: the same surface unrolled.
+    unwrap = compute_artifact_tile_unwrap(
+        session,
+        longitudinal_axis="z",
+        record_view="top",
+        selected_face_indices=selected,
+        n_sections=12,
+        section_center_policy=SECTION_CENTER_CANONICAL_AXIS,
+        station_policy=STATION_CENTERLINE_ARC,
+    )
+    developed_mm = float(unwrap.unwrap.uv_um[:, 0].max() - unwrap.unwrap.uv_um[:, 0].min()) / 1000.0
+
+    theta = math.radians(ARC.span_deg)
+    arc_over_chord = theta / (2.0 * math.sin(theta / 2.0))
+    assert arc_over_chord > 1.2
+    assert developed_mm > shadow_mm
+    assert developed_mm / shadow_mm == pytest.approx(arc_over_chord, rel=0.02)
+
+    # And the sheet says so on the rubbing itself, in every rubbing's caption.
+    caption = computed_rubbing_caption(
+        {
+            "relief_policy": {
+                "model": "contact_envelope/v1",
+                "reference_radius_requested_um": 700,
+                "black_point_requested_um": 120,
+                "contact_ink_percent": 70,
+            }
+        },
+        developed=True,
+    )
+    assert caption.startswith(COMPUTED_RUBBING_CAPTION_PREFIX)
+    assert DEVELOPED_WIDTH_NOTE in caption
+    # A relief read off a projection is not a development and does not claim
+    # an arc.
+    flat = computed_rubbing_caption(
+        {
+            "relief_policy": {
+                "model": "contact_envelope/v1",
+                "reference_radius_requested_um": 700,
+                "black_point_requested_um": 120,
+                "contact_ink_percent": 70,
+            }
+        },
+        developed=False,
+    )
+    assert DEVELOPED_WIDTH_NOTE not in flat
