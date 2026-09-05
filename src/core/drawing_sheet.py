@@ -85,6 +85,7 @@ from .artifact_vector_export import (
     profile_groove_vector_paths,
 )
 from .artifact_vector_record import (
+    PlanarFrame,
     VectorGeometryPayload,
     VectorPath,
     VectorRecordKind,
@@ -461,6 +462,18 @@ class DrawingSheetOptions:
     rotation axis.  The elevation record keeps its place in `record_ids`; the
     section record is not a figure of its own and must not be listed there.
     """
+    plan_with_sections: tuple[str, str, str] | None = None
+    """The lithic layout: a plan with a section under it and one beside it.
+
+    ``(plan record id, section record id, section record id)``.  A stone
+    tool is drawn as its plan with the cross section below and the long
+    section to the right ([K1] 2013 p. 45), each section aligned with the
+    plan on the axis they share.  Which section goes where is read from the
+    records' own frames: a section whose horizontal axis is the plan's goes
+    below it, aligned left to right; one whose vertical axis is the plan's
+    goes to its right, aligned top to bottom.  The sheet must draw exactly
+    these three records and nothing else.  None keeps the row layout.
+    """
     crease_records: tuple[str, ...] = ()
     """Crease readings (능선, the ridges between flake scars) to draw as inner
     lines on the projections that see them, by record id.
@@ -643,6 +656,21 @@ class DrawingSheetOptions:
                 "crease records"
             )
         object.__setattr__(self, "crease_records", crease_records)
+        if self.plan_with_sections is not None:
+            trio = tuple(self.plan_with_sections)
+            if len(trio) != 3 or any(
+                not isinstance(record_id, str) or not record_id.strip() for record_id in trio
+            ):
+                raise DrawingSheetError(
+                    "plan_with_sections names a plan record and two section records"
+                )
+            if len(set(trio)) != 3:
+                raise DrawingSheetError("plan_with_sections must name three different records")
+            if self.mirror_sections:
+                raise DrawingSheetError(
+                    "plan_with_sections and mirror_sections cannot be used together"
+                )
+            object.__setattr__(self, "plan_with_sections", trio)
         angles: list[tuple[str, float]] = []
         for pair in self.technique_angles_deg:
             if not isinstance(pair, (tuple, list)) or len(pair) != 2:
@@ -1089,6 +1117,138 @@ def _lay_out(
         row_height = max(row_height, height)
         row_count += 1
     return placed
+
+
+def _same_axis(first: Sequence[float], second: Sequence[float]) -> bool:
+    return all(abs(float(a) - float(b)) <= 1e-9 for a, b in zip(first, second))
+
+
+def _lay_out_plan_with_sections(
+    figures: Sequence[_Prepared],
+    *,
+    frames: Mapping[str, PlanarFrame],
+    options: DrawingSheetOptions,
+    section_loops: bool = False,
+) -> tuple[list[_Figure], dict[str, str]]:
+    """Place a plan with one section under it and one beside it, aligned.
+
+    The guidelines put a stone tool's cross section under its plan and its
+    long section to the right, each in register with the plan: a point of
+    the section sits under, or beside, the point of the plan it was cut
+    through.  That register is a fact about the frames, so it is read from
+    them - a section sharing the plan's horizontal axis goes below and is
+    aligned left to right, one sharing its vertical axis goes to the right
+    and is aligned top to bottom - and a section sharing neither is refused
+    rather than put somewhere that would tell the reader nothing.
+    """
+
+    assert options.plan_with_sections is not None
+    plan_id, first_id, second_id = options.plan_with_sections
+    by_id = {figure.record_id: figure for figure in figures}
+    if set(by_id) != {plan_id, first_id, second_id}:
+        raise DrawingSheetError(
+            "plan_with_sections draws exactly its plan and its two sections; "
+            "the sheet's record ids must be those three"
+        )
+    plan = by_id[plan_id]
+    if plan.record_type != VectorRecordKind.OUTLINE.record_type:
+        raise DrawingSheetError(f"record {plan_id!r} is not an outline, so it cannot be the plan")
+    plan_frame = frames[plan_id]
+    below: _Prepared | None = None
+    right: _Prepared | None = None
+    for section_id in (first_id, second_id):
+        section = by_id[section_id]
+        if section.record_type != VectorRecordKind.CUTLINE.record_type:
+            raise DrawingSheetError(
+                f"record {section_id!r} is not a cutline, so it cannot be a section of the plan"
+            )
+        frame = frames[section_id]
+        shares_u = _same_axis(frame.u_axis_world, plan_frame.u_axis_world)
+        shares_v = _same_axis(frame.v_axis_world, plan_frame.v_axis_world)
+        if shares_u == shares_v:
+            raise DrawingSheetError(
+                f"section {section_id!r} shares "
+                + ("both axes" if shares_u else "no axis")
+                + " with the plan, so it has no place under or beside it; a "
+                "section under the plan runs along the plan's horizontal axis, "
+                "one beside it along its vertical axis"
+            )
+        if shares_u:
+            if below is not None:
+                raise DrawingSheetError("both sections would sit under the plan")
+            below = section
+        else:
+            if right is not None:
+                raise DrawingSheetError("both sections would sit beside the plan")
+            right = section
+    assert below is not None and right is not None
+
+    denominator = options.scale_denominator
+    gutter = options.gutter_mm
+    plan_probe = Placement(content_bounds_mm=plan.bounds, scale_denominator=denominator)
+    below_probe = Placement(content_bounds_mm=below.bounds, scale_denominator=denominator)
+    right_probe = Placement(content_bounds_mm=right.bounds, scale_denominator=denominator)
+    # Relative to the plan's origin: the section under it shares x, so its
+    # origin shifts by the difference of the two left edges; the one beside
+    # it shares y, so its origin shifts by the difference of the two tops.
+    below_x = (below.bounds[0] - plan.bounds[0]) / denominator
+    below_y = plan_probe.height_mm + gutter
+    right_x = plan_probe.width_mm + gutter
+    right_y = (plan.bounds[3] - right.bounds[3]) / denominator
+    left = min(0.0, below_x, right_x)
+    top = min(0.0, below_y, right_y)
+    total_width = max(plan_probe.width_mm, below_x + below_probe.width_mm, right_x + right_probe.width_mm) - left
+    total_height = max(plan_probe.height_mm, below_y + below_probe.height_mm, right_y + right_probe.height_mm) - top
+
+    page = options.page
+    available_width = page.content_width_mm
+    available_height = options.content_height(
+        computed_rubbing=any(figure.caption is not None for figure in figures),
+        section_loops=section_loops,
+    )
+    if total_width > available_width + 1e-9 or total_height > available_height + 1e-9:
+        overflow = max(total_width / available_width, total_height / available_height)
+        suggestion = math.ceil(denominator * overflow)
+        raise DrawingSheetError(
+            f"the plan with its sections does not fit {page.size} {page.orientation} "
+            f"at {options.physical_scale}: it needs {total_width:.1f} x "
+            f"{total_height:.1f} mm of the available {available_width:.1f} x "
+            f"{available_height:.1f} mm. Use a scale denominator of {suggestion} "
+            "or more, or a larger page."
+        )
+    origin_x = page.margin_mm - left
+    origin_y = page.margin_mm - top
+
+    def placed(figure: _Prepared, dx: float, dy: float) -> _Figure:
+        return _Figure(
+            record_id=figure.record_id,
+            record_type=figure.record_type,
+            recipe_hash=figure.recipe_hash,
+            payload_sha256=figure.payload_sha256,
+            placement=Placement(
+                content_bounds_mm=figure.bounds,
+                origin_mm=(origin_x + dx, origin_y + dy),
+                scale_denominator=denominator,
+            ),
+            paths_by_kind=figure.paths_by_kind,
+            mirror_section_record_id=figure.mirror_section_record_id,
+            fill_only_ids=figure.fill_only_ids,
+            raster=figure.raster,
+            attached=figure.attached,
+            caption=figure.caption,
+        )
+
+    # The plan first, then what lies under it, then what lies beside it: the
+    # order a reader takes them in, and the order the sidecar lists them.
+    return (
+        [placed(plan, 0.0, 0.0), placed(below, below_x, below_y), placed(right, right_x, right_y)],
+        {
+            "below": below.record_id,
+            "kind": "plan_with_sections/v1",
+            "plan": plan.record_id,
+            "right": right.record_id,
+        },
+    )
 
 
 def _text_element(
@@ -2129,6 +2289,7 @@ def _sheet_provenance(
     rubbings_on_axis: Sequence[Mapping[str, str]] = (),
     section_loops: Sequence[Mapping[str, Any]] = (),
     crease: Mapping[str, Any] | None = None,
+    layout: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     preset = resolve_drawing_style_preset(options.style_preset)
     provenance: dict[str, Any] = {
@@ -2208,6 +2369,9 @@ def _sheet_provenance(
         provenance["condition"] = dict(condition)
     if crease is not None:
         provenance["crease"] = dict(crease)
+    if layout is not None:
+        # Present exactly when a layout other than the row was asked for.
+        provenance["layout"] = dict(layout)
     if groove is not None:
         provenance["groove"] = dict(groove)
     if technique is not None:
@@ -2600,6 +2764,7 @@ def compose_drawing_sheet(
     mirrored: list[dict[str, str]] = []
     section_loops: list[dict[str, Any]] = []
     crease_drawn: list[dict[str, str]] = []
+    frames: dict[str, PlanarFrame] = {}
 
     prepared: list[_Prepared] = []
     rubbing_notes = dict(options.rubbing_notes)
@@ -2641,6 +2806,7 @@ def compose_drawing_sheet(
             record, payload, _record_qc = _require_exportable_record(document, record_id)
         except ArtifactVectorExportError as exc:
             raise DrawingSheetError(str(exc)) from exc
+        frames[record.id] = payload.frame
         if record.type == VectorRecordKind.CUTLINE.record_type:
             loops = _closed_loop_count(payload)
             if loops > 1:
@@ -2847,10 +3013,19 @@ def compose_drawing_sheet(
 
     computed_rubbing = any(figure.caption is not None for figure in prepared)
     section_loop_counts = [int(entry["closed_path_count"]) for entry in section_loops]
+    layout: dict[str, str] | None = None
     try:
-        placed = _lay_out(
-            prepared, options=options, section_loops=bool(section_loop_counts)
-        )
+        if options.plan_with_sections is not None:
+            placed, layout = _lay_out_plan_with_sections(
+                prepared,
+                frames=frames,
+                options=options,
+                section_loops=bool(section_loop_counts),
+            )
+        else:
+            placed = _lay_out(
+                prepared, options=options, section_loops=bool(section_loop_counts)
+            )
         scale_bar_lines, scale_bar = _scale_bar_elements(options)
         title_block_lines, title_rows = _title_block_elements(
             options,
@@ -2865,6 +3040,7 @@ def compose_drawing_sheet(
             scale_bar=scale_bar,
             title_rows=title_rows,
             section_loops=sorted(section_loops, key=lambda entry: entry["record_id"]),
+            layout=layout,
             center_axis={
                 "align_recipe_kind": align_recipe_kind,
                 "align_revision_id": str(align_id or ""),

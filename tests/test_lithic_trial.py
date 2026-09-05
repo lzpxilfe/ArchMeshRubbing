@@ -120,6 +120,130 @@ def test_the_two_sections_are_each_one_closed_ring(tool) -> None:
     assert float(platform[:, 1].min()) < float(tip[:, 1].min()) - 1.0
 
 
+def _bounds(payload) -> tuple[float, float, float, float]:
+    points = np.vstack([np.asarray(path.points_mm) for path in payload.paths])
+    return (
+        float(points[:, 0].min()),
+        float(points[:, 1].min()),
+        float(points[:, 0].max()),
+        float(points[:, 1].max()),
+    )
+
+
+def test_the_lithic_layout_puts_each_section_where_its_axis_says_and_in_register(tool) -> None:
+    """[K1] p. 45: the cross section under the plan, the long section beside
+    it, each aligned with the plan on the axis they share.
+
+    This tool lies along X, so the long section (x-z) shares the plan's
+    horizontal axis and goes under it, and the cross section, drawn with the
+    length up the page (z across, y up), shares the plan's vertical axis and
+    goes to its right.  Stand the tool along Y as the guidelines do and the
+    two swap places; the rule is the register, not the name.
+    """
+
+    from src.core.drawing_sheet import DrawingSheetError
+    from src.core.drawing_svg import Placement
+
+    session, _vertices, _faces = tool
+    plan = compute_artifact_outline(session, "top", precision_grid_mm=0.01)
+    session = commit_vector_computation(
+        session, plan, record_id=PLAN_ID, created_at=STAMP, operator="tester"
+    )
+    long = compute_artifact_cutline(session, LONG_SECTION)
+    session = commit_vector_computation(
+        session, long, record_id=LONG_ID, created_at="2026-09-05T00:00:02Z", operator="tester"
+    )
+    upright_cross = compute_artifact_cutline(
+        session,
+        PlanarFrame(
+            origin_world_mm=(0.13, 0.0, 0.0),
+            u_axis_world=(0.0, 0.0, 1.0),
+            v_axis_world=(0.0, 1.0, 0.0),
+            normal_world=(-1.0, 0.0, 0.0),
+        ),
+    )
+    session = commit_vector_computation(
+        session,
+        upright_cross,
+        record_id=CROSS_ID,
+        created_at="2026-09-05T00:00:03Z",
+        operator="tester",
+    )
+    flat_cross = compute_artifact_cutline(session, CROSS_SECTION)
+    session = commit_vector_computation(
+        session,
+        flat_cross,
+        record_id="record:biface-cross-flat",
+        created_at="2026-09-05T00:00:04Z",
+        operator="tester",
+    )
+    document = session.document
+
+    def options(**overrides) -> DrawingSheetOptions:
+        settings = {
+            "title_block": TitleBlock(artifact_label="합성 뗀석기", rows=(("작성", "tester"),)),
+            "page": SheetPage(size="A4", orientation="portrait"),
+            "scale_denominator": 1.0,
+        }
+        settings.update(overrides)
+        return DrawingSheetOptions(**settings)
+
+    bundle = compose_drawing_sheet(
+        document,
+        [CROSS_ID, PLAN_ID, LONG_ID],
+        options=options(plan_with_sections=(PLAN_ID, CROSS_ID, LONG_ID)),
+    )
+    validate_drawing_sheet_bytes(bundle.svg_bytes, bundle.sidecar_bytes)
+    sidecar = json.loads(bundle.sidecar_bytes)
+    assert sidecar["layout"] == {
+        "below": LONG_ID,
+        "kind": "plan_with_sections/v1",
+        "plan": PLAN_ID,
+        "right": CROSS_ID,
+    }
+    figures = {entry["record_id"]: entry for entry in sidecar["figures"]}
+    assert [entry["record_id"] for entry in sidecar["figures"]] == [PLAN_ID, LONG_ID, CROSS_ID]
+
+    def placement(record_id: str, payload) -> Placement:
+        return Placement(
+            content_bounds_mm=_bounds(payload),
+            origin_mm=tuple(figures[record_id]["origin_mm"]),
+            scale_denominator=1.0,
+        )
+
+    plan_at = placement(PLAN_ID, plan.payload)
+    below_at = placement(LONG_ID, long.payload)
+    right_at = placement(CROSS_ID, upright_cross.payload)
+    # Under the plan, and the same x on the page for the same x of the tool.
+    assert below_at.origin_mm[1] >= plan_at.origin_mm[1] + plan_at.height_mm
+    for x in (-30.0, 0.0, 25.0):
+        assert below_at.paper_xy((x, 0.0))[0] == pytest.approx(plan_at.paper_xy((x, 0.0))[0])
+    # Beside the plan, and the same y on the page for the same y of the tool.
+    assert right_at.origin_mm[0] >= plan_at.origin_mm[0] + plan_at.width_mm
+    for y in (-20.0, 0.0, 15.0):
+        assert right_at.paper_xy((0.0, y))[1] == pytest.approx(plan_at.paper_xy((0.0, y))[1])
+
+    # A section that shares neither axis has no place under or beside the
+    # plan, and the sheet must be exactly the three records.
+    with pytest.raises(DrawingSheetError, match="no axis"):
+        compose_drawing_sheet(
+            document,
+            [PLAN_ID, LONG_ID, "record:biface-cross-flat"],
+            options=options(plan_with_sections=(PLAN_ID, LONG_ID, "record:biface-cross-flat")),
+        )
+    with pytest.raises(DrawingSheetError, match="exactly its plan"):
+        compose_drawing_sheet(
+            document,
+            [PLAN_ID, LONG_ID],
+            options=options(plan_with_sections=(PLAN_ID, CROSS_ID, LONG_ID)),
+        )
+    # Without the option the row layout is what it was.
+    row = json.loads(
+        compose_drawing_sheet(document, [PLAN_ID, LONG_ID, CROSS_ID], options=options()).sidecar_bytes
+    )
+    assert "layout" not in row
+
+
 def test_a_plan_with_its_two_sections_composes_a_valid_sheet(tool) -> None:
     """The three drawings the guidelines ask for, on one A4 page.
 
