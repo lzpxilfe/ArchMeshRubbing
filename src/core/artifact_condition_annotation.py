@@ -743,6 +743,50 @@ def _view_leaves_area(
         return True
 
 
+def _face_piece_labels(faces: np.ndarray) -> np.ndarray:
+    """Label each face by the connected piece it belongs to.
+
+    Faces are joined through shared vertices, which is what "one painted
+    piece" means to the drafter who painted it: a brush stroke that touches
+    itself is one mark.
+    """
+
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+
+    if faces.shape[0] == 0:
+        return np.zeros(0, dtype=np.int64)
+    _used, inverse = np.unique(faces.reshape(-1), return_inverse=True)
+    rows = np.repeat(np.arange(faces.shape[0], dtype=np.int64), 3)
+    incidence = coo_matrix(
+        (np.ones(rows.size, dtype=np.int8), (rows, np.asarray(inverse).reshape(-1))),
+        shape=(faces.shape[0], int(_used.size)),
+    ).tocsr()
+    _count, labels = connected_components(incidence @ incidence.T, directed=False)
+    return np.asarray(labels, dtype=np.int64)
+
+
+def _largest_piece_of_each(
+    kept: np.ndarray, piece_before: np.ndarray, piece_after: np.ndarray
+) -> np.ndarray:
+    """Keep, inside each painted piece, the largest piece the cut left.
+
+    Ties go to the piece holding the lowest face index, so the choice is the
+    same on every machine and in every recomputation.
+    """
+
+    survivors = np.zeros(piece_after.size, dtype=bool)
+    for piece in np.unique(piece_before):
+        here = np.nonzero(piece_before == piece)[0]
+        pieces_here = piece_after[here]
+        counts = np.bincount(pieces_here)
+        best = int(np.flatnonzero(counts == counts.max())[0])
+        survivors[here[pieces_here == best]] = True
+    trimmed = np.zeros(kept.size, dtype=bool)
+    trimmed[np.nonzero(kept)[0][survivors]] = True
+    return trimmed
+
+
 def project_condition_region(
     vertices_world_mm: object,
     faces: object,
@@ -753,6 +797,7 @@ def project_condition_region(
     outline_algorithm_version: str = OUTLINE_LEGACY_ALGORITHM_VERSION,
     grazing_cosine_min: float = 0.0,
     region_union: bool = False,
+    trim_cut_islands: bool = False,
 ) -> tuple[tuple[ConditionViewBoundary, ...], tuple[dict[str, str], ...]]:
     """Project one face set into every view, and say why any view has none.
 
@@ -770,6 +815,16 @@ def project_condition_region(
     than it with the view direction.  A band that reaches the silhouette
     projects to a sliver at its edge, and the sliver is not a mark anyone
     would draw; the part of the band that faces the viewer still is.
+
+    `trim_cut_islands` cleans up after that cut.  The test is per face and
+    the wall is not smooth, so on a finely meshed relief the cut runs ragged
+    and leaves a scatter of faces adrift near the silhouette - each one a
+    bump that happens to face the viewer.  Snapped to the lattice they land
+    beside the band, touching it at a single corner, which no closing can
+    mend and the topology rules refuse: one speckle then costs the whole
+    view.  So inside each piece the drafter actually painted, only the
+    largest piece the cut leaves is kept.  A record of two separate patches
+    keeps both, because the pieces are counted before the cut, not after.
 
     A view is skipped rather than fatal.  A band of surface can be edge-on in
     one direction, or snap at the precision grid into pieces that touch, and
@@ -805,12 +860,16 @@ def project_condition_region(
             "grazing_cosine_min must be at least 0 and less than 1"
         )
     facing: np.ndarray | None = None
+    painted_pieces: np.ndarray | None = None
     if grazing_cosine_min > 0.0:
         corners = vertices[face_subset]
         normals = np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0])
         lengths = np.linalg.norm(normals, axis=1)
         lengths[lengths == 0.0] = 1.0
         facing = normals / lengths[:, None]
+        if trim_cut_islands:
+            # Counted once, before any view's cut: what the drafter painted.
+            painted_pieces = _face_piece_labels(face_subset)
 
     boundaries: list[ConditionViewBoundary] = []
     skipped: list[dict[str, str]] = []
@@ -827,6 +886,10 @@ def project_condition_region(
             if not bool(kept.any()):
                 skipped.append({"reason": CONDITION_SKIP_GRAZING, "view": view})
                 continue
+            if painted_pieces is not None:
+                kept = _largest_piece_of_each(
+                    kept, painted_pieces[kept], _face_piece_labels(face_subset[kept])
+                )
             view_faces = face_subset[kept]
         if not _view_leaves_area(
             vertices,

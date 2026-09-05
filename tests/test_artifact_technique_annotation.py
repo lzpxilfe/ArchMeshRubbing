@@ -140,12 +140,12 @@ def test_a_mark_is_projected_with_the_closing_and_an_old_recipe_without() -> Non
 
     selection = technique_selection(total_face_count=4, face_indices=(0,))
     current = technique_recipe(technique="paddling", precision_grid_mm=0.05, selection=selection)
-    assert current["algorithm_version"] == "1.3.0"
+    assert current["algorithm_version"] == "1.4.0"
     old = technique_recipe(
         technique="paddling", precision_grid_mm=0.05, selection=selection, algorithm_version="1.0.0"
     )
     assert validate_technique_recipe(old)["algorithm_version"] == "1.0.0"
-    assert TECHNIQUE_ALGORITHM_VERSIONS == ("1.0.0", "1.1.0", "1.2.0", "1.3.0")
+    assert TECHNIQUE_ALGORITHM_VERSIONS == ("1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0")
     with pytest.raises(ArtifactTechniqueAnnotationError, match="algorithm version"):
         technique_recipe(
             technique="paddling", precision_grid_mm=0.05, selection=selection, algorithm_version="2.0.0"
@@ -495,3 +495,171 @@ def test_a_region_unioned_whole_matches_the_outline_union_within_a_cell() -> Non
     assert abs(region_area - outline_area) <= 0.05 * outline_area
     for path in payload.paths:
         assert path.role in ("exterior", "hole")
+
+
+def _bumpy_cylinder_session(
+    *, rings: int = 60, segments: int = 220, amplitude_mm: float = 0.30
+) -> tuple[ArtifactSession, np.ndarray, np.ndarray]:
+    """A band of wall with relief on it, standing on +Z.
+
+    The relief is what makes the grazing cut ragged: a face's normal wobbles
+    around the threshold with the bumps, so near the silhouette the cut keeps
+    a bump here and drops its neighbour there.
+    """
+
+    radius, height = 40.0, 9.0
+    theta = np.linspace(-np.pi, np.pi, segments, endpoint=False)
+    z = np.linspace(0.0, height, rings)
+    grid_theta, grid_z = np.meshgrid(theta, z, indexing="xy")
+    bump = amplitude_mm * (
+        np.sin(grid_theta * 37.0) * np.cos(grid_z * 3.1)
+        + np.sin(grid_theta * 11.0 + grid_z * 5.0)
+    )
+    r = radius + bump
+    vertices = np.column_stack(
+        [
+            (r * np.cos(grid_theta)).reshape(-1),
+            (r * np.sin(grid_theta)).reshape(-1),
+            grid_z.reshape(-1),
+        ]
+    ).astype(np.float64)
+    faces: list[tuple[int, int, int]] = []
+    for row in range(rings - 1):
+        for column in range(segments):
+            nxt = (column + 1) % segments
+            a = row * segments + column
+            b = row * segments + nxt
+            c = (row + 1) * segments + column
+            d = (row + 1) * segments + nxt
+            faces.append((a, c, d))
+            faces.append((a, d, b))
+    face_array = np.asarray(faces, dtype=np.int32)
+    mesh = MeshData(
+        vertices=vertices,
+        faces=face_array,
+        unit="mm",
+        source_identity=SourceFingerprint(
+            sha256="c" * 64,
+            size_bytes=4096,
+            mtime_ns=1,
+            original_name="wall.ply",
+            format="ply",
+        ),
+        source_format="ply",
+        source_import_recipe=current_mesh_import_recipe("ply"),
+    )
+    session = ArtifactSession.create_from_source(
+        mesh,
+        resolved_source_path="/source/wall.ply",
+        unit="mm",
+        axes={"source_x": "+X", "source_y": "+Y", "source_z": "+Z"},
+        handedness="right",
+        software_version="technique-test",
+        operator="tester",
+        created_at=STAMP,
+        document_id="artifact:wall-test",
+        metadata_revision_id="metadata:wall-test",
+        align_revision_id="align:wall-test",
+    )
+    return session, vertices, np.asarray(face_array, dtype=np.int64)
+
+
+def test_the_grazing_cut_does_not_strew_islands_that_cost_a_whole_view() -> None:
+    """What a view is drawn from stays in one piece per piece painted.
+
+    The grazing cut is per face, and on a relieved wall it runs ragged: it
+    keeps a bump near the silhouette and drops its neighbour, leaving single
+    faces adrift beside the mark.  Snapped to the lattice those touch the
+    band at one corner - a pinch no closing can mend - and the topology rules
+    then refuse the view, so one speckle costs the whole elevation.  On the
+    corded test vessel at a 480-ring mesh that is exactly what happened: the
+    exterior 물손질 band drew in left and right only, and front, back, top and
+    bottom all came back `degenerate_projection`.  Algorithm 1.4.0 keeps,
+    inside each piece the drafter painted, the largest piece the cut leaves;
+    the same band then draws front and back too, and top and bottom report
+    the honest reason - a 6 mm band on a vertical wall has no area seen from
+    above.
+    """
+
+    from src.core.artifact_technique_annotation import TECHNIQUE_ALGORITHM_VERSION
+
+    session, vertices, faces = _bumpy_cylinder_session()
+    centres = vertices[faces].mean(axis=1)
+    angle = np.degrees(np.arctan2(centres[:, 1], centres[:, 0]))
+    # A band running up to the front view's silhouette, where the cut bites.
+    selected = [
+        int(index)
+        for index in np.nonzero(
+            (angle >= -178.0) & (angle <= -100.0) & (centres[:, 2] > 1.0)
+        )[0]
+    ]
+    assert len(selected) > 2_000
+
+    computation = compute_technique_annotation(
+        session,
+        technique="water_smoothing",
+        face_indices=selected,
+        precision_grid_mm=0.25,
+    )
+    assert computation.recipe["algorithm_version"] == TECHNIQUE_ALGORITHM_VERSION
+    drawn = {entry["view"] for entry in computation.qc["views"]}
+    assert {"front", "back", "left", "right"} <= drawn
+    # One painted piece, so one exterior per view - never a band plus the
+    # speckles the cut left beside it.
+    for boundary in computation.payload.views:
+        exteriors = [
+            path for path in boundary.outline.paths if str(path.role) == "exterior"
+        ]
+        assert len(exteriors) == 1, boundary.view
+
+
+def test_the_cut_may_split_a_piece_but_never_loses_a_piece_that_was_painted() -> None:
+    """The trim counts the pieces before the cut, not after.
+
+    A drafter who paints two patches into one record keeps both.  What is
+    dropped is only what the cut itself severed - and inside each painted
+    piece, only what is smaller than the piece the cut left standing.
+    """
+
+    from src.core.artifact_condition_annotation import (
+        _face_piece_labels,
+        _largest_piece_of_each,
+    )
+
+    # Two squares of two triangles each, sharing nothing: two painted pieces.
+    faces = np.asarray(
+        [[0, 1, 2], [0, 2, 3], [4, 5, 6], [4, 6, 7], [8, 9, 10]], dtype=np.int64
+    )
+    pieces = _face_piece_labels(faces)
+    assert len(np.unique(pieces)) == 3
+    assert pieces[0] == pieces[1]
+    assert pieces[2] == pieces[3]
+    assert pieces[4] not in (pieces[0], pieces[2])
+
+    # The cut keeps one triangle of the first square, both of the second, and
+    # the lone triangle.  Nothing is severed, so nothing is trimmed.
+    kept = np.asarray([True, False, True, True, True])
+    trimmed = _largest_piece_of_each(
+        kept, pieces[kept], _face_piece_labels(faces[kept])
+    )
+    assert list(trimmed) == [True, False, True, True, True]
+
+    # Now a piece the cut really did sever: a chain of three triangles joined
+    # end to end, whose middle one goes.  What is left is an island of one
+    # against a body of one, and the tie goes to the piece holding the lowest
+    # face index, so the answer is the same on every machine.
+    chain = np.asarray([[0, 1, 2], [2, 3, 4], [4, 5, 6]], dtype=np.int64)
+    chain_pieces = _face_piece_labels(chain)
+    assert len(np.unique(chain_pieces)) == 1
+    kept = np.asarray([True, False, True])
+    trimmed = _largest_piece_of_each(
+        kept, chain_pieces[kept], _face_piece_labels(chain[kept])
+    )
+    assert [bool(value) for value in trimmed] == [True, False, False]
+
+    # And a real body keeps its body, not its island: two triangles against
+    # one, whichever way round they come.
+    kept = np.asarray([True, True, True])
+    severed = np.asarray([0, 0, 1])
+    trimmed = _largest_piece_of_each(kept, np.zeros(3, dtype=np.int64), severed)
+    assert [bool(value) for value in trimmed] == [True, True, False]
