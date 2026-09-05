@@ -25,6 +25,7 @@ from src.core.artifact_rubbing_extractor import (
     rubbing_tone_settings,
 )
 from src.core.artifact_tile_unwrap_extractor import (
+    MAX_TILE_UNWRAP_QC_FACES,
     SECTION_CENTER_CANONICAL_AXIS,
     STATION_CENTERLINE_ARC,
     ArtifactTileUnwrapError,
@@ -199,6 +200,93 @@ def test_the_rubbing_shows_the_cord_because_the_cord_is_in_the_mesh() -> None:
     assert float(corded.std()) > 10.0
     assert float(corded.min()) == pytest.approx(float(plain.min()), abs=2.0)
     assert float(corded.max()) > float(plain.max()) + 40.0
+
+
+#: A whole 암키와, not a fragment: 34 cm long, a 76 degree arc.
+WHOLE = TileShape(
+    kind=AMKIWA,
+    length_mm=340.0,
+    inner_radius_mm=210.0,
+    thickness_mm=20.0,
+    span_deg=76.0,
+    taper=0.10,
+)
+#: What a 3 mm 승문 actually needs.  Measured on this tile, the ink range
+#: across the development is 142 at a 0.4 mm mesh and 150 at 1.2 mm - flat -
+#: and collapses to 105 only at 1.6 mm, which is past the cord's own Nyquist.
+#: So 1.2 mm is the coarse end of the useful range, and it is also what makes
+#: a whole tile fit the 250,000-face recording surface.
+DRAWING_STEP_MM = 1.2
+
+
+def test_a_whole_tile_fits_the_recording_surface_at_the_step_the_cord_needs() -> None:
+    """The 250,000-face cap does not stand between a 기와 and its 탁본.
+
+    A whole tile sampled three times finer than the cord needs does exceed
+    the cap - 555,000 faces of back at 0.6 mm - but that mesh draws no better
+    than a 1.2 mm one, and the cap is published in the receipt schema and
+    hashed into every payload header, so it is not a number to raise on a
+    demo's say-so.  What the drafter needs is the step, and this holds it.
+    """
+
+    session, vertices, faces = tile_session(
+        WHOLE,
+        axial_step_mm=DRAWING_STEP_MM,
+        angular_step_mm=DRAWING_STEP_MM,
+        on_canonical_axis=True,
+    )
+    radius = np.hypot(vertices[:, 0], vertices[:, 1])
+    threshold = WHOLE.inner_radius_mm + WHOLE.thickness_mm / 2.0
+    centres = vertices[faces].mean(axis=1)
+    selected = [
+        int(index)
+        for index in np.nonzero(
+            (radius > threshold)[faces].all(axis=1)
+            & (np.abs(centres[:, 2]) < WHOLE.length_mm / 2.0 - 6.0)
+        )[0]
+    ]
+    assert 100_000 < len(selected) < MAX_TILE_UNWRAP_QC_FACES
+
+    unwrap = compute_artifact_tile_unwrap(
+        session,
+        longitudinal_axis="z",
+        record_view="top",
+        selected_face_indices=selected,
+        n_sections=16,
+        section_center_policy=SECTION_CENTER_CANONICAL_AXIS,
+        station_policy=STATION_CENTERLINE_ARC,
+    )
+    assert unwrap.qc["foldover_face_count"] == 0
+    assert unwrap.qc["connected_component_count"] == 1
+    # The whole tile, end margins aside, on one development.
+    assert unwrap.qc["height_um"] == pytest.approx(
+        (WHOLE.length_mm - 12.0) * 1000.0, rel=0.02
+    )
+
+    session = commit_artifact_tile_unwrap(
+        session, unwrap, record_id="record:whole", created_at=STAMP, operator="tester"
+    )
+    tone = rubbing_tone_settings(RUBBING_TONE_MEDIUM, relief_model=RELIEF_MODEL_CONTACT)
+    rubbing = compute_developed_rubbing(
+        session,
+        "record:whole",
+        pixels_per_mm=4,
+        margin_um=0,
+        reference_radius_um=700,
+        depth_quantization_um=5,
+        black_point_um=120,
+        ink_strength_percent=100,
+        relief_polarity="raised",
+        relief_model=RELIEF_MODEL_CONTACT,
+        contact_ink_percent=tone["contact_ink_percent"],
+        artboard_policy=ARTBOARD_DEVELOPMENT_BOUNDS,
+    )
+    pixels = np.asarray(rubbing.raster.pixels)
+    covered = pixels[:, :, 1] > 0
+    ink = pixels[:, :, 0][covered].astype(np.float64)
+    low, high = np.percentile(ink, [2.0, 98.0])
+    # And the cord is on the paper at full strength, not a smudge.
+    assert float(high - low) > 100.0
 
 
 #: A tile whose arc is wide enough that the difference is unmistakable.

@@ -60,7 +60,30 @@ MAX_TILE_UNWRAP_FACES = 2_000_000
 MAX_TILE_UNWRAP_SELECTION_RANGES = 250_000
 MAX_TILE_UNWRAP_COORDINATE_UM = 2**52
 MAX_TILE_UNWRAP_PAYLOAD_BYTES = 128 * 1024 * 1024
+#: How much of an artifact one recording surface may be.
+#:
+#: This bound is published: `tile_unwrap_receipt-1.1.0.schema.json` states it,
+#: the receipt's `schema_version` names that shape, and the payload header
+#: carries the same version into the bytes that `unwrap_sha256` hashes.  So
+#: raising it is not a constant edit - it is a new receipt generation, and
+#: every unwrap ever written would hash differently.
+#:
+#: It also turns out not to be in the way.  Measured on the synthetic 암키와,
+#: a 3 mm 승문 standing 0.35 mm proud inks at full contrast from a 0.4 mm mesh
+#: all the way out to 1.2 mm (ink range 142 at 0.4 mm, 150 at 1.2 mm; it
+#: collapses to 105 only at 1.6 mm, which is past the cord's own Nyquist).
+#: A whole 34 cm tile at 1.2 mm is about 140,000 faces of back - well inside
+#: this - while the same tile at 0.6 mm is 555,000 faces and draws no better.
+#: A recording surface that does not fit is one sampled several times finer
+#: than the drawing can use.
 MAX_TILE_UNWRAP_QC_FACES = 250_000
+#: What to do about it, said where the drafter reads it.  A selection this
+#: large is a mesh sampled finer than the drawing can use, so the answers are
+#: a coarser import or one panel at a time - not a finer selection.
+_RECORDING_SURFACE_TOO_LARGE_REMEDY = (
+    "import the mesh at a coarser step or record the surface one panel at a "
+    "time (a 3 mm 승문 still inks fully from a 1.2 mm mesh)"
+)
 MAX_TILE_UNWRAP_OVERLAP_CANDIDATES = 1_000_000
 MAX_TILE_UNWRAP_GRID_ASSIGNMENTS = 4_000_000
 MIN_TILE_UNWRAP_SEAM_ANGLE_MICRODEGREES = -180_000_000
@@ -236,7 +259,9 @@ def _selection_value(
         selected_count += end - start
         if selected_count > MAX_TILE_UNWRAP_QC_FACES:
             raise ArtifactTileUnwrapError(
-                "recording-surface selection exceeds the 250000-face QC limit"
+                f"recording-surface selection exceeds the "
+                f"{MAX_TILE_UNWRAP_QC_FACES}-face QC limit; "
+                f"{_RECORDING_SURFACE_TOO_LARGE_REMEDY}"
             )
         previous_end = end
     selection_core = {
@@ -261,7 +286,9 @@ def _indices_to_ranges(
     values = np.unique(values)
     if values.size > MAX_TILE_UNWRAP_QC_FACES:
         raise ArtifactTileUnwrapError(
-            "recording-surface selection exceeds the 250000-face QC limit"
+            f"recording-surface selection of {int(values.size)} faces exceeds "
+            f"the {MAX_TILE_UNWRAP_QC_FACES}-face QC limit; "
+            f"{_RECORDING_SURFACE_TOO_LARGE_REMEDY}"
         )
     if int(values[0]) < 0 or int(values[-1]) >= total_face_count:
         raise ArtifactTileUnwrapError("recording-surface face index is out of range")
