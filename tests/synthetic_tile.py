@@ -71,6 +71,14 @@ class TileShape:
     tongue_drop_mm: float = 0.0
     #: How long the step at the 언강 takes to fall.
     tongue_step_mm: float = 8.0
+    #: 귀접이: the corner of the wide end cut off on the slant, this far along
+    #: the length and this far across the arc.  Goguryeo tiles have it; the
+    #: corner that would have caught the next course was trimmed before firing.
+    corner_cut_mm: float = 0.0
+    #: 분할흔: how far through the thickness the 와도 was drawn along each side
+    #: before the tile was snapped off the cylinder.  The knife's share of the
+    #: side is a clean radial cut; the rest is a fracture that wanders.
+    split_share: float = 0.0
 
     def __post_init__(self) -> None:
         if self.kind not in TILE_KINDS:
@@ -84,6 +92,13 @@ class TileShape:
             raise ValueError("a 미구 belongs to a 수키와, not to a 암키와")
         if self.tongue_mm and self.tongue_mm >= self.length_mm / 2.0:
             raise ValueError("the 미구 cannot be half the tile")
+        if self.corner_cut_mm < 0.0 or self.corner_cut_mm >= min(
+            self.length_mm / 2.0,
+            self.outer_radius_mm * math.radians(self.span_deg) / 2.0,
+        ):
+            raise ValueError("a 귀접이 must be smaller than half the tile either way")
+        if not (0.0 <= self.split_share < 1.0):
+            raise ValueError("split_share is the knife's share of the thickness, in [0, 1)")
 
     @property
     def outer_radius_mm(self) -> float:
@@ -231,8 +246,17 @@ def _tile_grid(
             )
         # A 암키와 narrows toward one end; a 수키와 keeps its span.
         span_here = span * (1.0 - shape.taper * s)
+        # 귀접이: at the wide end the j = 0 side comes in on a slant, so the
+        # corner is a straight chamfer in the developed surface and the side
+        # strip still runs along one grid line.
+        theta_lo = -span_here / 2.0
+        if shape.corner_cut_mm:
+            along = shape.length_mm * s
+            if along < shape.corner_cut_mm:
+                theta_lo += (shape.corner_cut_mm / outer) * (1.0 - along / shape.corner_cut_mm)
+        theta_hi = span_here / 2.0
         for j in range(n_theta + 1):
-            theta = span_here * (j / n_theta - 0.5)
+            theta = theta_lo + (theta_hi - theta_lo) * (j / n_theta)
             r_inner = shape.inner_radius_mm - drop
             r_outer = r_inner + shape.thickness_mm
             if relief:
@@ -322,20 +346,82 @@ def hollow_tile(
             # Inner: the same quad, wound the other way.
             faces.append((inn(i, j), inn(i + 1, j + 1), inn(i, j + 1)))
             faces.append((inn(i, j), inn(i + 1, j), inn(i + 1, j + 1)))
-    # The two cut ends.
+    last = rows - 1
+    edge = columns - 1
+    if not shape.split_share:
+        # The two cut ends.
+        for j in range(columns - 1):
+            faces.append((out(0, j), inn(0, j), inn(0, j + 1)))
+            faces.append((out(0, j), inn(0, j + 1), out(0, j + 1)))
+            faces.append((out(last, j), out(last, j + 1), inn(last, j + 1)))
+            faces.append((out(last, j), inn(last, j + 1), inn(last, j)))
+        # The two sides.
+        for i in range(rows - 1):
+            faces.append((out(i, 0), out(i + 1, 0), inn(i + 1, 0)))
+            faces.append((out(i, 0), inn(i + 1, 0), inn(i, 0)))
+            faces.append((out(i, edge), inn(i, edge), inn(i + 1, edge)))
+            faces.append((out(i, edge), inn(i + 1, edge), out(i + 1, edge)))
+        return vertices, np.asarray(faces, dtype=np.int32)
+
+    # 분할흔: each side gets a row of vertices part way through the thickness,
+    # where the 와도 stopped.  Outside it the side is the knife's clean radial
+    # cut; inside it the fracture wanders a little either way along the
+    # length, hashed so it is the same wander every time.  At the two cut
+    # ends the wander is nil so the end faces still meet the sides exactly.
+    mid_base = vertices.shape[0]
+    mids: list[np.ndarray] = []
+    for side_index, j in enumerate((0, edge)):
+        for i in range(rows):
+            outer_point = vertices[out(i, j)]
+            inner_point = vertices[inn(i, j)]
+            through = inner_point + (outer_point - inner_point) * (1.0 - shape.split_share)
+            wander = 0.0
+            if 0 < i < last:
+                wander = 0.6 * (2.0 * _strike_hash(i, side_index, 11) - 1.0)
+            # The fracture wanders out of the side's plane: across the arc,
+            # which is normal to both the thickness and the length.
+            along = vertices[out(min(i + 1, last), j)] - vertices[out(max(i - 1, 0), j)]
+            across = np.cross(outer_point - inner_point, along)
+            across /= max(float(np.linalg.norm(across)), 1e-9)
+            mids.append(through + wander * across)
+    vertices = np.vstack([vertices, np.asarray(mids, dtype=np.float64)])
+
+    def mid(i: int, j: int) -> int:
+        return mid_base + (0 if j == 0 else rows) + i
+
+    # The two cut ends, meeting the sides at their split vertex.
     for j in range(columns - 1):
-        faces.append((out(0, j), inn(0, j), inn(0, j + 1)))
-        faces.append((out(0, j), inn(0, j + 1), out(0, j + 1)))
-        last = rows - 1
-        faces.append((out(last, j), out(last, j + 1), inn(last, j + 1)))
-        faces.append((out(last, j), inn(last, j + 1), inn(last, j)))
-    # The two sides.
+        if j == 0:
+            faces.append((mid(0, 0), inn(0, 0), inn(0, 1)))
+            faces.append((out(0, 0), mid(0, 0), inn(0, 1)))
+        else:
+            faces.append((out(0, j), inn(0, j), inn(0, j + 1)))
+        if j + 1 == edge:
+            faces.append((out(0, j), inn(0, edge), mid(0, edge)))
+            faces.append((out(0, j), mid(0, edge), out(0, edge)))
+        else:
+            faces.append((out(0, j), inn(0, j + 1), out(0, j + 1)))
+        if j == 0:
+            faces.append((out(last, 0), out(last, 1), mid(last, 0)))
+            faces.append((mid(last, 0), out(last, 1), inn(last, 0)))
+            faces.append((inn(last, 0), out(last, 1), inn(last, 1)))
+        elif j + 1 == edge:
+            faces.append((out(last, j), out(last, edge), mid(last, edge)))
+            faces.append((out(last, j), mid(last, edge), inn(last, edge)))
+            faces.append((out(last, j), inn(last, edge), inn(last, j)))
+        else:
+            faces.append((out(last, j), out(last, j + 1), inn(last, j + 1)))
+            faces.append((out(last, j), inn(last, j + 1), inn(last, j)))
+    # The two sides, in two strips each: the knife's, then the fracture's.
     for i in range(rows - 1):
-        faces.append((out(i, 0), out(i + 1, 0), inn(i + 1, 0)))
-        faces.append((out(i, 0), inn(i + 1, 0), inn(i, 0)))
-        edge = columns - 1
-        faces.append((out(i, edge), inn(i, edge), inn(i + 1, edge)))
-        faces.append((out(i, edge), inn(i + 1, edge), out(i + 1, edge)))
+        faces.append((out(i, 0), out(i + 1, 0), mid(i + 1, 0)))
+        faces.append((out(i, 0), mid(i + 1, 0), mid(i, 0)))
+        faces.append((mid(i, 0), mid(i + 1, 0), inn(i + 1, 0)))
+        faces.append((mid(i, 0), inn(i + 1, 0), inn(i, 0)))
+        faces.append((out(i, edge), mid(i, edge), mid(i + 1, edge)))
+        faces.append((out(i, edge), mid(i + 1, edge), out(i + 1, edge)))
+        faces.append((mid(i, edge), inn(i, edge), inn(i + 1, edge)))
+        faces.append((mid(i, edge), inn(i + 1, edge), mid(i + 1, edge)))
     return vertices, np.asarray(faces, dtype=np.int32)
 
 

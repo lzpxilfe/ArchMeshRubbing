@@ -15,6 +15,7 @@ the same way twice.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import math
 
 import numpy as np
@@ -137,6 +138,7 @@ def bridge_the_wall(
     from_angle_deg: float,
     to_angle_deg: float,
     band_mm: float = 8.0,
+    tangled: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Put a break across the wall, with both fracture faces scanned.
 
@@ -154,6 +156,11 @@ def bridge_the_wall(
     part of the wall is closed by one fracture face and the upper part by
     the other.  The sides of the window are left open, as the real join's
     edges are.  No vertex is added or moved.
+
+    ``tangled`` keeps half of the skin the window would take away, one
+    triangle of every quad, so the fracture faces and the skin share edges
+    three faces deep: the non-manifold tangle the real join is, which a
+    section through it meets as a branching junction rather than two loops.
     """
 
     points = np.asarray(vertices, dtype=np.float64)
@@ -225,7 +232,93 @@ def bridge_the_wall(
         )
     if not window.any():
         raise ValueError("no skin between the rings to take away")
+    if tangled:
+        kept = np.flatnonzero(window)[::2]
+        window[kept] = False
     return points, np.vstack([triangles[~window], np.asarray(added, dtype=np.int64)])
+
+
+def fill_with_plaster(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    *,
+    centre_mm: tuple[float, float, float],
+    radius_mm: float,
+    wall_radius: Callable[[float], float],
+    recess_mm: float = 0.3,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Replace a patch of the outer wall with a restoration fill.
+
+    A mended pot has them: plaster or resin laid across a gap between sherds,
+    smoothed flush with the wall the sherds define, and a little under it.  A
+    scan shows the fill as a patch with no relief - no temper, no cord, no
+    finger drag - and a seam around it.  On a drawing the patch is what
+    ``annotation.condition.v1`` marks as ``restored``, and a rubbing shows it
+    blank.
+
+    Every vertex within ``radius_mm`` of ``centre_mm`` is moved onto the
+    wall's nominal surface, ``wall_radius(z)`` less ``recess_mm``; the mesh
+    keeps its faces and its numbering.  Returns the arrays and the indices of
+    the faces that lie wholly on the fill, which is the face set a condition
+    record would carry.
+    """
+
+    points = np.asarray(vertices, dtype=np.float64).copy()
+    triangles = np.asarray(faces, dtype=np.int64)
+    centre = np.asarray(centre_mm, dtype=np.float64)
+    radius = np.hypot(points[:, 0], points[:, 1])
+    # Only the outer wall: a vertex nearer the axis than the fill's centre by
+    # more than the recess is the inner wall behind it.
+    on_outer = radius > float(np.hypot(centre[0], centre[1])) - 3.0
+    within = (np.linalg.norm(points - centre, axis=1) <= float(radius_mm)) & on_outer
+    if not within.any():
+        raise ValueError("no outer wall within the fill")
+    for index in np.flatnonzero(within):
+        nominal = float(wall_radius(float(points[index, 2]))) - float(recess_mm)
+        scale = nominal / max(float(radius[index]), 1e-9)
+        points[index, 0] *= scale
+        points[index, 1] *= scale
+    filled = np.flatnonzero(within[triangles].all(axis=1))
+    return points, triangles, filled
+
+
+def sharpen_the_base(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    *,
+    depth_mm: float = 20.0,
+    up_to_mm: float = 9.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Draw the base out to a point: 첨저, the pointed base of a 빗살무늬토기.
+
+    The museum pot has no foot to stand on; its lowest point is a point.  A
+    rotation axis therefore cannot be taken from a base plane, only from the
+    rim and the inner floor - which is how ``positioned_vessel_session``
+    stands a vessel up, so a vessel with this base still positions.
+
+    Below ``up_to_mm`` the wall is pulled toward the axis and down, the base
+    ring to about a tenth of its radius at ``depth_mm`` below where the base
+    was, and the base's own centre vertex further still, to the apex.  The
+    inner floor above ``up_to_mm`` is not touched.
+    """
+
+    points = np.asarray(vertices, dtype=np.float64).copy()
+    triangles = np.asarray(faces, dtype=np.int64)
+    low = float(points[:, 2].min())
+    height = points[:, 2] - low
+    below = height < float(up_to_mm)
+    t = np.clip(height[below] / float(up_to_mm), 0.0, 1.0)
+    shrink = 0.12 + 0.88 * t
+    points[below, 0] *= shrink
+    points[below, 1] *= shrink
+    points[below, 2] -= float(depth_mm) * (1.0 - t)
+    apex = below & (np.hypot(points[:, 0], points[:, 1]) < 1e-9) & (height < 1e-9)
+    if apex.any():
+        # The base fan's centre becomes the point itself, a little below the
+        # ring it fans to, so the tip is a cone rather than a small disc.
+        ring = np.hypot(points[below & ~apex, 0], points[below & ~apex, 1])
+        points[apex, 2] -= 0.8 * float(ring.min()) if ring.size else 0.0
+    return points, triangles
 
 
 def stand_it_wrong(
@@ -333,8 +426,10 @@ __all__ = [
     "add_loose_crumb",
     "bite_the_rim",
     "bridge_the_wall",
+    "fill_with_plaster",
     "mesh_report",
     "punch_hole",
+    "sharpen_the_base",
     "stand_it_wrong",
     "warp",
 ]

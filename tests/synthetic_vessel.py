@@ -217,12 +217,22 @@ def positioned_vessel_session(
     rings: int = 10,
     document_id: str = "artifact:vessel",
     relief: Relief | None = None,
+    defect: Callable[[np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]] | None = None,
 ) -> tuple[ArtifactSession, np.ndarray, np.ndarray]:
-    """A vessel stood on its axis by two measured circles, plus its arrays."""
+    """A vessel stood on its axis by two measured circles, plus its arrays.
+
+    ``defect`` is applied to the arrays before the session is made - one of
+    ``scan_defects`` - and must leave the rim and the inner floor where the
+    two circles are measured, since that is how the vessel is positioned.
+    """
 
     vertices, faces, rim_points, floor_points = hollow_vessel(
         segments=segments, rings=rings, relief=relief
     )
+    if defect is not None:
+        vertices, faces = defect(vertices, faces)
+        vertices = np.asarray(vertices, dtype=np.float64)
+        faces = np.asarray(faces, dtype=np.int32)
     mesh = MeshData(
         vertices=vertices,
         faces=faces,

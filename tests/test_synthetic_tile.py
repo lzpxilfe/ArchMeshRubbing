@@ -142,6 +142,69 @@ def test_the_surfaces_carry_the_marks_a_tile_carries() -> None:
     assert moved[outer].max() < 0.6  # a cord, not a cordon
 
 
+def test_a_corner_cut_and_a_split_side_are_what_a_real_tiles_edges_carry() -> None:
+    """귀접이 and 분할흔, and what each does to the drawing.
+
+    A real 암키와 was cut from the cylinder with a 와도 drawn part way through
+    and snapped the rest, so its sides are half knife and half fracture; a
+    Goguryeo tile also has the corner of its wide end trimmed on the slant.
+    The generator's tiles had neither: their sides were planes and their
+    corners square.  With the corner cut, the plan loses the chamfer's
+    triangle, foreshortened by the arc's tilt at the side; with the split,
+    a section across the tile ends in a kinked line rather than a straight
+    one.  Both tiles stay closed solids.
+    """
+
+    from scan_defects import mesh_report
+    from src.core.artifact_outline_extractor import extract_outline_geometry
+    from src.core.artifact_vector_extractor import extract_cutline_geometry
+    from src.core.artifact_vector_record import PlanarFrame
+
+    base = dict(kind=AMKIWA, length_mm=120.0, inner_radius_mm=210.0, thickness_mm=20.0, span_deg=40.0)
+    shapes = {
+        "plain": TileShape(**base),
+        "cornered": TileShape(**base, corner_cut_mm=30.0),
+        "split": TileShape(**base, split_share=0.5),
+    }
+    meshes = {
+        name: hollow_tile(shape, axial_step_mm=4.0, angular_step_mm=4.0, relief=False)
+        for name, shape in shapes.items()
+    }
+    for vertices, faces in meshes.values():
+        report = mesh_report(vertices, faces.astype(np.int64))
+        assert report["boundary_edge_count"] == 0
+        assert report["nonmanifold_edge_count"] == 0
+        assert report["connected_piece_count"] == 1
+
+    plan = {
+        name: extract_outline_geometry(
+            vertices, faces.astype(np.int64), "top", precision_grid_mm=0.2
+        ).qc["outline_area_mm2"]
+        for name, (vertices, faces) in meshes.items()
+    }
+    chamfer = 0.5 * 30.0 * 30.0 * math.cos(math.radians(20.0))
+    assert plan["plain"] - plan["cornered"] == pytest.approx(chamfer, rel=0.05)
+    assert plan["split"] == pytest.approx(plan["plain"], rel=0.01)
+
+    across = PlanarFrame(
+        origin_world_mm=(0.0, 0.37, 0.0),
+        u_axis_world=(1.0, 0.0, 0.0),
+        v_axis_world=(0.0, 0.0, 1.0),
+        normal_world=(0.0, -1.0, 0.0),
+    )
+
+    def points_on_the_sides(vertices: np.ndarray, faces: np.ndarray) -> int:
+        section = extract_cutline_geometry(vertices, faces.astype(np.int64), across)
+        assert len(section.payload.paths) == 1
+        points = np.asarray(section.payload.paths[0].points_mm)
+        reach = float(np.abs(points[:, 0]).max())
+        return int((np.abs(points[:, 0]) > reach - 21.0).sum())
+
+    plain_sides = points_on_the_sides(*meshes["plain"])
+    assert points_on_the_sides(*meshes["cornered"]) == plain_sides
+    assert points_on_the_sides(*meshes["split"]) > plain_sides
+
+
 def test_the_same_arguments_give_the_same_tile() -> None:
     first = hollow_tile(AMKIWA_SHAPE, axial_step_mm=STEP_MM, angular_step_mm=STEP_MM)
     again = hollow_tile(AMKIWA_SHAPE, axial_step_mm=STEP_MM, angular_step_mm=STEP_MM)

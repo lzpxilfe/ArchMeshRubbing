@@ -20,8 +20,10 @@ from scan_defects import (
     add_loose_crumb,
     bite_the_rim,
     bridge_the_wall,
+    fill_with_plaster,
     mesh_report,
     punch_hole,
+    sharpen_the_base,
     stand_it_wrong,
     warp,
 )
@@ -216,6 +218,143 @@ def test_a_join_meshed_across_the_wall_splits_the_section_and_not_the_outline() 
     plain = extract_outline_geometry(vertices, faces, "right", precision_grid_mm=0.2)
     joined = extract_outline_geometry(*bridged, "right", precision_grid_mm=0.2)
     assert joined.payload.sha256 == plain.payload.sha256
+
+
+def test_a_tangled_join_stops_the_section_as_the_real_pots_does_off_centre() -> None:
+    """The real join, one plane over: a branching junction, refused.
+
+    The museum pot's section is two loops at y = 0 and a refusal at y = -6,
+    where the plane meets the join's tangle of non-manifold edges.  The
+    tangled join reproduces the refusal; the tidy one, the two loops.
+    """
+
+    from src.core.artifact_vector_extractor import (
+        ArtifactVectorExtractionError,
+        extract_cutline_geometry,
+    )
+    from src.core.artifact_vector_record import PlanarFrame
+
+    vertices, faces = _vessel(segments=48, rings=16)
+    tangled = bridge_the_wall(
+        vertices,
+        faces,
+        z_mm=HEIGHT_MM * 0.5,
+        from_angle_deg=-25.0,
+        to_angle_deg=25.0,
+        tangled=True,
+    )
+    report = mesh_report(*tangled)
+    assert report["nonmanifold_edge_count"] > 0
+    assert report["connected_piece_count"] == 1
+
+    plane = PlanarFrame(
+        origin_world_mm=(0.0, 0.37, 0.0),
+        u_axis_world=(1.0, 0.0, 0.0),
+        v_axis_world=(0.0, 0.0, 1.0),
+        normal_world=(0.0, -1.0, 0.0),
+    )
+    with pytest.raises(ArtifactVectorExtractionError, match="non-manifold branching"):
+        extract_cutline_geometry(*tangled, plane)
+
+
+def test_a_restoration_fill_is_blank_and_is_the_face_set_a_restored_record_marks() -> None:
+    """Plaster across a gap: no relief on the scan, ``restored`` on the drawing.
+
+    The fill takes the grain off a patch of wall and sets it a little under
+    the surface; the mesh keeps its faces, so the patch is a face set, which
+    is what a condition record carries.  Its projection in the view that
+    looks straight at it is the patch's own area.
+    """
+
+    from src.core.artifact_condition_annotation import compute_condition_annotation
+    from synthetic_vessel import grained_surface, outer_radius, positioned_vessel_session
+
+    z = HEIGHT_MM * 0.6
+    centre = (0.0, outer_radius(z), z)
+
+    def fill(vertices, faces):
+        filled_vertices, filled_faces, _filled = fill_with_plaster(
+            vertices, faces, centre_mm=centre, radius_mm=8.0, wall_radius=outer_radius
+        )
+        return filled_vertices, filled_faces
+
+    grained, vertices, faces = positioned_vessel_session(
+        segments=96, rings=40, relief=grained_surface, document_id="artifact:grained"
+    )
+    session, filled_vertices, filled_faces = positioned_vessel_session(
+        segments=96, rings=40, relief=grained_surface, defect=fill, document_id="artifact:filled"
+    )
+    _v, _f, filled = fill_with_plaster(
+        vertices, faces, centre_mm=centre, radius_mm=8.0, wall_radius=outer_radius
+    )
+    assert len(filled) > 20
+    assert mesh_report(filled_vertices, filled_faces) == mesh_report(vertices, faces)
+
+    def roughness(points: np.ndarray) -> float:
+        within = np.linalg.norm(points - np.asarray(centre), axis=1) <= 8.0
+        within &= np.hypot(points[:, 0], points[:, 1]) > outer_radius(z) - 3.0
+        radius = np.hypot(points[within, 0], points[within, 1])
+        nominal = np.array([outer_radius(float(h)) for h in points[within, 2]])
+        return float(np.std(radius - nominal))
+
+    assert roughness(vertices) > 0.03
+    assert roughness(filled_vertices) < 1e-9
+
+    record = compute_condition_annotation(
+        session, condition="restored", face_indices=filled, precision_grid_mm=0.05
+    )
+    front = next(view for view in record.payload.views if view.view == "front")
+    triangles = filled_vertices[filled_faces[filled]]
+    projected = 0.5 * np.abs(
+        (triangles[:, 1, 0] - triangles[:, 0, 0]) * (triangles[:, 2, 2] - triangles[:, 0, 2])
+        - (triangles[:, 1, 2] - triangles[:, 0, 2]) * (triangles[:, 2, 0] - triangles[:, 0, 0])
+    ).sum()
+    assert front.qc_summary()["area_mm2"] == pytest.approx(projected, rel=0.1)
+    assert front.qc_summary()["component_count"] == 1
+    del grained
+
+
+def test_a_pointed_base_still_positions_and_is_drawn_to_a_point() -> None:
+    """첨저: no foot to stand on, and the drawing shows the point.
+
+    The rotation axis is taken from the rim and the inner floor, so a vessel
+    with nothing flat underneath positions all the same; its front outline
+    comes to a point a few millimetres wide where the flat one is fifty.
+    """
+
+    from src.core.artifact_outline_extractor import compute_artifact_outline
+    from src.core.artifact_vector_extractor import compute_artifact_cutline
+    from src.core.artifact_vector_record import PlanarFrame
+    from synthetic_vessel import positioned_vessel_session
+
+    def width_at_the_bottom(session) -> float:
+        outline = compute_artifact_outline(session, "front", precision_grid_mm=0.2)
+        points = np.asarray(
+            next(path for path in outline.payload.paths if str(path.role) == "exterior").points_mm
+        )
+        lowest = float(points[:, 1].min())
+        near = points[points[:, 1] < lowest + 3.0]
+        return float(near[:, 0].max() - near[:, 0].min())
+
+    flat, _v, _f = positioned_vessel_session(segments=48, rings=16, document_id="artifact:flat")
+    pointed, _pv, _pf = positioned_vessel_session(
+        segments=48, rings=16, defect=sharpen_the_base, document_id="artifact:pointed"
+    )
+    assert width_at_the_bottom(flat) > 40.0
+    assert width_at_the_bottom(pointed) < 12.0
+
+    section = compute_artifact_cutline(
+        pointed,
+        PlanarFrame(
+            origin_world_mm=(0.0, 0.37, 0.0),
+            u_axis_world=(1.0, 0.0, 0.0),
+            v_axis_world=(0.0, 0.0, 1.0),
+            normal_world=(0.0, -1.0, 0.0),
+        ),
+    )
+    points = np.vstack([np.asarray(path.points_mm) for path in section.payload.paths])
+    apex = points[np.argmin(points[:, 1])]
+    assert abs(float(apex[0])) < 4.0
 
 
 def test_every_defect_is_the_same_mesh_twice() -> None:
