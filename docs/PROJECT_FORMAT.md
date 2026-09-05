@@ -618,6 +618,15 @@ DerivedRecord(type=raster.developed_rubbing.v1)
 
 내보내기는 같은 `.amr-rubbing` package를 쓴다. sidecar schema 1.2.0부터 `raster_receipt`에 여섯 뷰 receipt(`rubbing_receipt-1.0.0`)와 전개 receipt(`developed_rubbing_receipt-1.0.0`) 중 하나를 허용하고, `recipe.kind`가 `developed_rubbing`이면 receipt는 전개 receipt, provenance record type은 `raster.developed_rubbing.v1`이어야 한다. 1.0.0·1.1.0 package는 그대로 검증되며, 전개 탁본은 1.2.0 이상에, 종이 기저 농담을 깐 탁본은 1.3.0에만 들어간다 — 1.2.0의 여섯 뷰 recipe 정의는 고정된 1.0.0에서 오므로 그 열쇠들을 담지 못한다. writer는 전개를 재계산해 receipt·payload 해시를 맞춘 뒤에야 raster를 다시 그리고 package를 만든다.
 
+## 능선 record `measurement.crease.v1`
+
+석기 평면도의 내선 — 박리면이 만나는 능선 — 을 메쉬에서 읽어 둔 record다([`docs/LITHIC_TRIAL.md`](LITHIC_TRIAL.md)). 활성 Align 아래에서 한 번 계산하고(`compute_crease_reading` → `commit_crease_reading`), 다시 그릴 때 재계산하지 않는다.
+
+- **recipe**: `archmeshrubbing.convex_dihedral_crease` 1.0.0. 결정하는 수 둘은 `detection_policy.dihedral_min_millideg`(기본 25000)와 `min_length_um`(기본 2000)이고, 볼록 판정(`far_corner_below_neighbour_plane/v1`)·용접 반경(`weld_um` 1)·가시성(`both_faces_toward_viewer/v1`)·사슬 순서·여섯 뷰 목록·자원 한도(사슬 4,096, 점 250,000)는 고정 정책으로 recipe에 적힌다. `validate_crease_recipe`는 두 수로 recipe를 다시 만들어 같은 바이트를 요구한다.
+- **payload** (`org.archmeshrubbing:crease-v1`, schema 1.0.0): `chain_count`·`total_length_um`·`max_dihedral_millideg`와 `views` — 여섯 뷰를 정확히 한 번씩, 뷰마다 그 뷰가 보는 폴리라인들을 뷰 frame 좌표의 µm 정수로. 사슬 하나 없는 읽기는 record가 되지 않는다(문턱을 낮추거나 읽지 않는다). `geometry_ref`는 payload sha256이고, QC는 `chain_count`·`max_dihedral_millideg`·`total_length_um`·`view_polyline_counts`다. 읽어 들일 때 descriptor의 byte_length·sha256·geometry_ref·recipe·QC를 전부 대조한다(`crease_payload_from_record`, `validate_known_records`).
+- **도판**: `DrawingSheetOptions.crease_records`. record의 뷰와 frame이 같은 외곽선 도형에만 그리고 단면에는 그리지 않는다. 선 종류는 내선(`outline_hole`)을 쓴다 — 지침의 이름이 내선이고 능선만의 굵기를 말하는 출처가 없다. sidecar `crease.records`(record ID·recipe hash·payload sha256·사슬 수)와 `crease.drawn`(도형·뷰·선 종류·줄 수). 옵션이 비면 sidecar에 키가 없고 바이트가 그대로다.
+- 완료 게이트(3/6/6)와 `.amr-survey`에는 들어가지 않는다. 상태·기법 표기와 같이 덧붙이는 정보다.
+
 ## 완료 3/6/6 원자 묶음 `.amr-survey`
 
 `*.amr-survey`는 새 알고리즘 결과를 만드는 포맷이 아니라, 한 active Align 아래에서 dependency-valid `READY + FRESH`인 Cutline 3면, Outline 6면, Digital Rubbing 6면의 기존 권위 package를 한 번에 전달하는 non-overwriting directory다. GUI의 `완료 실측 15개 원자 묶음 내보내기`는 세 단계가 모두 완료된 경우에만 활성화된다.

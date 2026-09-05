@@ -18,6 +18,10 @@ def validate_known_records(document: ArtifactDocument) -> None:
         ArtifactConditionAnnotationError,
         validate_condition_annotation_records,
     )
+    from .artifact_crease_record import (  # noqa: PLC0415
+        ArtifactCreaseRecordError,
+        validate_crease_records,
+    )
     from .artifact_developed_rubbing import (  # noqa: PLC0415
         ArtifactDevelopedRubbingError,
         validate_developed_rubbing_records,
@@ -61,7 +65,9 @@ def validate_known_records(document: ArtifactDocument) -> None:
         validate_developed_rubbing_records(document)
         validate_profile_groove_records(document)
         validate_technique_annotation_records(document)
+        validate_crease_records(document)
     except (
+        ArtifactCreaseRecordError,
         ArtifactVectorRecordError,
         ArtifactRubbingRecordError,
         ArtifactTileUnwrapRecordError,

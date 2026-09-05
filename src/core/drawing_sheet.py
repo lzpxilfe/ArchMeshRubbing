@@ -51,6 +51,12 @@ from .artifact_condition_annotation import (
     ConditionAnnotationPayload,
     condition_payload_from_record,
 )
+from .artifact_crease_record import (
+    ArtifactCreaseRecordError,
+    CREASE_RECORD_TYPE,
+    CreasePayload,
+    crease_payload_from_record,
+)
 from .artifact_document import (
     ArtifactDocument,
     ArtifactDocumentError,
@@ -84,8 +90,10 @@ from .artifact_vector_record import (
     VectorRecordKind,
 )
 from .canonical_json import canonical_json_bytes
+from .artifact_outline_extractor import outline_frame
 from .drawing_style import (
     CENTER_AXIS,
+    OUTLINE_HOLE,
     DrawingStyleError,
     DrawingStylePreset,
     preset_claim as drawing_style_preset_claim,
@@ -453,6 +461,15 @@ class DrawingSheetOptions:
     rotation axis.  The elevation record keeps its place in `record_ids`; the
     section record is not a figure of its own and must not be listed there.
     """
+    crease_records: tuple[str, ...] = ()
+    """Crease readings (능선, the ridges between flake scars) to draw as inner
+    lines on the projections that see them, by record id.
+
+    Empty by default, and an empty tuple changes nothing.  A reading's lines
+    are drawn only onto outline figures whose plane is one of the six views
+    the reading was taken in, as 내선 - the same line kind as an inner
+    contour - so no new convention is claimed for them.
+    """
     condition_records: tuple[str, ...] = ()
     """Condition annotations to draw over the figures, by record id.
 
@@ -610,6 +627,22 @@ class DrawingSheetOptions:
                 "technique records"
             )
         object.__setattr__(self, "technique_records", technique_records)
+        crease_records = tuple(self.crease_records)
+        if any(
+            not isinstance(record_id, str) or not record_id.strip()
+            for record_id in crease_records
+        ):
+            raise DrawingSheetError("crease_records must be record ids")
+        if len(set(crease_records)) != len(crease_records):
+            raise DrawingSheetError(
+                "the same crease record cannot be drawn twice on one sheet"
+            )
+        if len(crease_records) > MAX_DRAWING_SHEET_CONDITION_RECORDS:
+            raise DrawingSheetError(
+                f"a sheet draws at most {MAX_DRAWING_SHEET_CONDITION_RECORDS} "
+                "crease records"
+            )
+        object.__setattr__(self, "crease_records", crease_records)
         angles: list[tuple[str, float]] = []
         for pair in self.technique_angles_deg:
             if not isinstance(pair, (tuple, list)) or len(pair) != 2:
@@ -1279,6 +1312,81 @@ def _require_drawable_condition_record(
     except ArtifactConditionAnnotationError as exc:
         raise DrawingSheetError(str(exc)) from exc
     return record, payload
+
+
+def _require_drawable_crease_record(
+    document: ArtifactDocument,
+    record_id: str,
+) -> tuple[DerivedRecord, CreasePayload]:
+    """Resolve one crease record under the same rules a figure answers to."""
+
+    record = document.record_index.get(record_id)
+    if record is None:
+        raise DrawingSheetError(f"crease record {record_id!r} does not exist")
+    if record.type != CREASE_RECORD_TYPE:
+        raise DrawingSheetError(f"record {record_id!r} is not a crease reading")
+    if record.lifecycle_status is not RecordLifecycleStatus.READY:
+        raise DrawingSheetError("only READY crease records may be drawn")
+    try:
+        freshness = document.record_freshness(record.id)
+    except ArtifactDocumentError as exc:
+        raise DrawingSheetError(str(exc)) from exc
+    if freshness is not RecordFreshness.FRESH:
+        raise DrawingSheetError(
+            "only FRESH crease records may be drawn "
+            f"(got {freshness.value}); ridges read under a superseded alignment "
+            "would sit somewhere the artifact no longer is"
+        )
+    try:
+        payload = crease_payload_from_record(record)
+    except ArtifactCreaseRecordError as exc:
+        raise DrawingSheetError(str(exc)) from exc
+    return record, payload
+
+
+def _crease_paths_for_figure(
+    figure_record_type: str,
+    figure_payload_frame: Any,
+    creases: Sequence[tuple[DerivedRecord, CreasePayload]],
+) -> tuple[dict[str, list[Any]], list[dict[str, str]]]:
+    """Return the ridge lines that belong on one figure, and what they are.
+
+    A reading stores what each of the six views sees, so a figure gets the
+    lines of the view whose plane is the figure's own, and a section gets
+    none: a ridge is on the surface, not in the cut.  The lines are drawn
+    as 내선, the inner-contour kind, which is what the guidelines call
+    them; a kind of their own would claim a weight no source has given.
+    """
+
+    by_kind: dict[str, list[Any]] = {}
+    drawn: list[dict[str, str]] = []
+    if figure_record_type != VectorRecordKind.OUTLINE.record_type:
+        return by_kind, drawn
+    for record, payload in creases:
+        for lines in payload.views:
+            if outline_frame(lines.view) != figure_payload_frame:
+                continue
+            for index, polyline in enumerate(lines.polylines):
+                by_kind.setdefault(OUTLINE_HOLE, []).append(
+                    VectorPath(
+                        id=f"crease:{record.id}:{lines.view}:{index:04d}",
+                        role="crease",
+                        closed=False,
+                        points_mm=tuple(
+                            (x / 1000.0, y / 1000.0) for x, y in polyline
+                        ),
+                    )
+                )
+            drawn.append(
+                {
+                    "line_kind": OUTLINE_HOLE,
+                    "polyline_count": str(len(lines.polylines)),
+                    "record_id": record.id,
+                    "view": lines.view,
+                }
+            )
+            break
+    return by_kind, drawn
 
 
 def _require_drawable_technique_record(
@@ -2020,6 +2128,7 @@ def _sheet_provenance(
     technique: Mapping[str, Any] | None = None,
     rubbings_on_axis: Sequence[Mapping[str, str]] = (),
     section_loops: Sequence[Mapping[str, Any]] = (),
+    crease: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     preset = resolve_drawing_style_preset(options.style_preset)
     provenance: dict[str, Any] = {
@@ -2097,6 +2206,8 @@ def _sheet_provenance(
         # Added only when the caller asked for condition records, so a sheet
         # composed without them keeps the exact bytes it had before.
         provenance["condition"] = dict(condition)
+    if crease is not None:
+        provenance["crease"] = dict(crease)
     if groove is not None:
         provenance["groove"] = dict(groove)
     if technique is not None:
@@ -2451,6 +2562,10 @@ def compose_drawing_sheet(
         _require_drawable_condition_record(document, record_id)
         for record_id in options.condition_records
     ]
+    creases = [
+        _require_drawable_crease_record(document, record_id)
+        for record_id in options.crease_records
+    ]
     techniques = [
         _require_drawable_technique_record(document, record_id)
         for record_id in options.technique_records
@@ -2484,6 +2599,7 @@ def compose_drawing_sheet(
     attached_drawn: list[dict[str, str]] = []
     mirrored: list[dict[str, str]] = []
     section_loops: list[dict[str, Any]] = []
+    crease_drawn: list[dict[str, str]] = []
 
     prepared: list[_Prepared] = []
     rubbing_notes = dict(options.rubbing_notes)
@@ -2549,6 +2665,14 @@ def compose_drawing_sheet(
             by_kind.setdefault(kind, []).extend(condition_paths)
         condition_drawn.extend(
             {"figure_record_id": record.id, **entry} for entry in drawn
+        )
+        crease_by_kind, ridges_drawn = _crease_paths_for_figure(
+            record.type, payload.frame, creases
+        )
+        for kind, crease_paths in crease_by_kind.items():
+            by_kind.setdefault(kind, []).extend(crease_paths)
+        crease_drawn.extend(
+            {"figure_record_id": record.id, **entry} for entry in ridges_drawn
         )
         technique_by_kind, techniques_drawn, styles_used = _technique_paths_for_figure(
             record.type,
@@ -2747,6 +2871,25 @@ def compose_drawing_sheet(
                 "drawn": draw_center_axis,
                 "requested": options.show_center_axis,
             },
+            crease=(
+                {
+                    "drawn": sorted(
+                        crease_drawn,
+                        key=lambda entry: (entry["figure_record_id"], entry["record_id"]),
+                    ),
+                    "records": [
+                        {
+                            "chain_count": payload.chain_count,
+                            "payload_sha256": payload.sha256,
+                            "recipe_hash": record.recipe_hash,
+                            "record_id": record.id,
+                        }
+                        for record, payload in sorted(creases, key=lambda item: item[0].id)
+                    ],
+                }
+                if creases
+                else None
+            ),
             condition=(
                 {
                     "drawn": sorted(
