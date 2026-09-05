@@ -1174,6 +1174,18 @@ def _uv_overlap_pair_count(
 ) -> int:
     """Detect positive-area global overlap using a deterministic uniform grid."""
 
+    return 0 if _first_uv_overlap_pair(uv_um, faces, cancellation_probe=cancellation_probe) is None else 1
+
+
+def _first_uv_overlap_pair(
+    uv_um: np.ndarray,
+    faces: np.ndarray,
+    *,
+    cancellation_probe: CancellationProbe | None,
+) -> tuple[int, int] | None:
+    """The first pair of faces that overlap with positive area, in the grid's
+    deterministic order, or None.  The pair is what an error can point at."""
+
     uv = np.asarray(uv_um, dtype=np.int64)
     triangles = uv[np.asarray(faces, dtype=np.int32)]
     face_count = int(triangles.shape[0])
@@ -1268,8 +1280,8 @@ def _uv_overlap_pair_count(
                 if _positive_area_triangle_overlap(
                     triangles[left], triangles[right]
                 ):
-                    return 1
-    return 0
+                    return (int(left), int(right))
+    return None
 
 
 def _orientation_qc(
@@ -1487,14 +1499,24 @@ def extract_tile_unwrap_development(
         raise ArtifactTileUnwrapError(
             "authoritative tile unwrap contains orientation foldovers"
         )
-    uv_overlap_pair_count = _uv_overlap_pair_count(
+    overlapping = _first_uv_overlap_pair(
         unwrap.uv_um,
         unwrap.faces,
         cancellation_probe=cancellation_probe,
     )
-    if uv_overlap_pair_count > 0:
+    if overlapping is not None:
+        # Say where on the surface the development folds over, so the
+        # window can be moved past it: a pit, a hole bored through the wall
+        # or a chip that undercuts the surface all do this.
+        corners = np.asarray(submesh.vertices, dtype=np.float64)[
+            np.asarray(submesh.faces, dtype=np.int64)[list(overlapping)]
+        ]
+        spot = corners.reshape(-1, 3).mean(axis=0)
         raise ArtifactTileUnwrapError(
-            "authoritative tile unwrap contains positive-area global UV overlap"
+            "authoritative tile unwrap contains positive-area global UV overlap: "
+            f"the development folds over around canonical "
+            f"({spot[0]:.1f}, {spot[1]:.1f}, {spot[2]:.1f}) mm - a pit, a hole or an "
+            "undercut there cannot be unrolled; move or narrow the window past it"
         )
     receipt = unwrap.receipt(selection_sha256=str(selection["selection_sha256"]))
     qc = {
@@ -1529,7 +1551,7 @@ def extract_tile_unwrap_development(
         "selected_face_count": int(selection["selected_face_count"]),
         "selection_sha256": str(selection["selection_sha256"]),
         "unwrap_sha256": str(receipt["unwrap_sha256"]),
-        "uv_overlap_pair_count": uv_overlap_pair_count,
+        "uv_overlap_pair_count": 0,
         "vertex_count": unwrap.vertex_count,
         "width_um": int(receipt["width_mm_exact"]["numerator"]),
     }

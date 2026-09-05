@@ -13,6 +13,8 @@ come here and say so.
 
 from __future__ import annotations
 
+import re
+
 import numpy as np
 import pytest
 
@@ -20,6 +22,7 @@ from scan_defects import (
     add_loose_crumb,
     bite_the_rim,
     bridge_the_wall,
+    dent_the_wall,
     fill_with_plaster,
     mesh_report,
     punch_hole,
@@ -256,6 +259,68 @@ def test_a_tangled_join_stops_the_section_as_the_real_pots_does_off_centre() -> 
     )
     with pytest.raises(ArtifactVectorExtractionError, match="non-manifold branching"):
         extract_cutline_geometry(*tangled, plane)
+
+
+def test_a_pit_unrolls_but_an_undercut_folds_the_development_and_the_refusal_says_where() -> None:
+    """The museum pot's strip development was refused for a UV overlap, and
+    the overlap turned out to be one spot: steep faces 2 to 6 mm under the
+    wall at one height, a chip whose fracture face the scanner meshed under
+    the skin.  A pit alone unrolls - a cylindrical development keeps angle
+    and station, and a dent changes neither.  A pit whose floor tucks under
+    the lip above puts two sheets over one station, and then the refusal
+    names the spot, so the window can be moved past it."""
+
+    from src.core.artifact_surface_strip import select_positioned_surface_strip, strip_parameters
+    from src.core.artifact_tile_unwrap_extractor import (
+        SECTION_CENTER_CANONICAL_AXIS,
+        STATION_MERIDIAN_ARC,
+        ArtifactTileUnwrapError,
+        compute_artifact_tile_unwrap,
+    )
+    from synthetic_vessel import positioned_vessel_session
+
+    z = HEIGHT_MM * 0.5
+    centre = (0.0, -outer_radius(z), z)
+
+    def unwrap_through(undercut_mm: float):
+        def dent(vertices, faces):
+            return dent_the_wall(
+                vertices, faces, centre_mm=centre, radius_mm=6.0, depth_mm=4.0, undercut_mm=undercut_mm
+            )
+
+        session, _v, _f = positioned_vessel_session(
+            segments=96, rings=40, defect=dent, document_id=f"artifact:dent-{undercut_mm:g}"
+        )
+        strip = select_positioned_surface_strip(
+            session,
+            strip_parameters(
+                reference_angle_microdegrees=-90_000_000,
+                width_um=20_000,
+                minimum_height_um=4_000,
+                maximum_height_um=70_000,
+            ),
+        )
+        return compute_artifact_tile_unwrap(
+            session,
+            longitudinal_axis="z",
+            record_view="top",
+            selected_face_indices=strip.face_indices,
+            n_sections=12,
+            section_center_policy=SECTION_CENTER_CANONICAL_AXIS,
+            station_policy=STATION_MERIDIAN_ARC,
+        )
+
+    plain = unwrap_through(0.0)
+    assert plain.qc_dict()["uv_overlap_pair_count"] == 0
+
+    # The vessel's rings are 2.25 mm apart; a 3 mm undercut tucks the floor
+    # under the next ring up.
+    with pytest.raises(ArtifactTileUnwrapError, match="folds over around canonical") as caught:
+        unwrap_through(3.0)
+    named = re.search(r"\(([-\d.]+), ([-\d.]+), ([-\d.]+)\) mm", str(caught.value))
+    assert named is not None
+    spot = np.array([float(named.group(k)) for k in (1, 2, 3)])
+    assert float(np.linalg.norm(spot - np.asarray(centre))) < 10.0
 
 
 def test_a_restoration_fill_is_blank_and_is_the_face_set_a_restored_record_marks() -> None:

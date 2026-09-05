@@ -238,6 +238,51 @@ def bridge_the_wall(
     return points, np.vstack([triangles[~window], np.asarray(added, dtype=np.int64)])
 
 
+def dent_the_wall(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    *,
+    centre_mm: tuple[float, float, float],
+    radius_mm: float,
+    depth_mm: float,
+    undercut_mm: float = 0.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Push a round patch of the outer wall in toward the axis.
+
+    A pot has them where a sherd's corner is gone, where a repair hole was
+    bored, where something struck it: a pit a few millimetres across.  Every
+    outer-wall vertex within ``radius_mm`` of ``centre_mm`` moves inward by
+    ``depth_mm`` at the centre, falling off smoothly to nothing at the edge;
+    faces and numbering stay as they were.  A plain pit still unrolls: a
+    cylindrical development keeps each vertex's angle and station, and a
+    dent changes neither.
+
+    ``undercut_mm`` above zero also lifts the inner half of the pit by that
+    much, so its floor tucks under the lip above it - the chip whose
+    fracture face the scanner meshed under the outer skin.  Two sheets then
+    lie over the same angle and station, and the development folds over
+    there; the museum pot has one such spot (docs/REAL_DATA_TRIAL.md).
+    """
+
+    points = np.asarray(vertices, dtype=np.float64).copy()
+    triangles = np.asarray(faces, dtype=np.int64)
+    centre = np.asarray(centre_mm, dtype=np.float64)
+    radius = np.hypot(points[:, 0], points[:, 1])
+    on_outer = radius > float(np.hypot(centre[0], centre[1])) - 3.0
+    distance = np.linalg.norm(points - centre, axis=1)
+    within = (distance < float(radius_mm)) & on_outer
+    if not within.any():
+        raise ValueError("no outer wall within the dent")
+    falloff = (1.0 - (distance[within] / float(radius_mm)) ** 2) ** 2
+    pull = 1.0 - float(depth_mm) * falloff / np.maximum(radius[within], 1e-9)
+    points[within, 0] *= pull
+    points[within, 1] *= pull
+    if float(undercut_mm) > 0.0:
+        inner = within & (distance < 0.5 * float(radius_mm))
+        points[inner, 2] += float(undercut_mm)
+    return points, triangles
+
+
 def fill_with_plaster(
     vertices: np.ndarray,
     faces: np.ndarray,
@@ -458,6 +503,7 @@ __all__ = [
     "add_loose_crumb",
     "bite_the_rim",
     "bridge_the_wall",
+    "dent_the_wall",
     "fill_with_plaster",
     "mesh_report",
     "punch_hole",
