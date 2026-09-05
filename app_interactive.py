@@ -4167,9 +4167,12 @@ class SectionPanel(QWidget):
         self.spin_native_outline_grid.setToolTip(
             "삼각형 투영을 합집합하기 전 적용할 고정 mm 격자입니다. "
             "격자보다 좁은 특징은 합쳐지거나 사라질 수 있으며 QC에 기록됩니다.\n"
-            "굵게 잡으면 실루엣 접선 부근의 삼각형이 스냅에서 사라져 경계에 "
-            "격자 한 칸짜리 구멍이 생기고 외곽선이 거부됩니다. 촘촘한 메쉬나 "
-            "무늬 있는 표면은 기본값을 그대로 두세요."
+            "메쉬보다 굵게 잡으면 삼각형이 통째로 스냅에서 사라져 외곽선 안에 "
+            "구멍이 생깁니다. 크게 어긋나면 거부되지만, 조금 굵은 정도에서는 "
+            "구멍이 난 채로 통과합니다 — 0.6 mm 메쉬에 0.5 mm 격자면 삼각형의 "
+            "28%가 사라지고 구멍 328개가 남습니다(QC의 grid_collapsed_triangle_count와 "
+            "hole_count로 확인하세요). 촘촘한 메쉬나 무늬 있는 표면은 기본값을 "
+            "그대로 두세요."
         )
         native_outline_form.addRow("외곽 정밀도", self.spin_native_outline_grid)
         native_layout.addLayout(native_outline_form)
