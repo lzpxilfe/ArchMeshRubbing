@@ -194,6 +194,12 @@ PROJECTED_RELIEF_CAPTION_PREFIX = "정사영 요철 · 전개 아님"
 # one sheet at one stated scale and a reader has two widths for the same
 # tile, so the rubbing says which of the two its own width is.
 DEVELOPED_WIDTH_NOTE = "폭은 펼친 호의 길이"
+#: How long a drafter's note on a rubbing may be.  It names a surface -
+#: "등면 (타날문)", "내면 (포목흔)" - and that is all it is for.  The caption is
+#: right-aligned under the figure's lower edge and the machine's own half of
+#: it already runs to about fifty characters, so a note long enough to be a
+#: sentence would push the line out from under the paper it belongs to.
+MAX_RUBBING_NOTE_CHARACTERS = 24
 
 
 def computed_rubbing_caption(recipe: Mapping[str, Any], *, developed: bool) -> str:
@@ -490,6 +496,22 @@ class DrawingSheetOptions:
     this record is.  A record named here whose kind has no alternative is
     refused rather than silently drawn as its default.
     """
+    rubbing_notes: tuple[tuple[str, str], ...] = ()
+    """(rubbing record id, what this rubbing is of) pairs.
+
+    A 기와 gives two rubbings - the 등면 the paddle struck and the 내면 the clay
+    took from the 와통 - and on one page nothing in the ink says which is
+    which.  The two are not even the same width: the outer wall lies a wall
+    thickness further from the axis, so its development measures the longer
+    arc by (R + t) / R.  A reader must not have to work that out with a
+    ruler, and the program cannot work it out for them - which wall a face
+    selection was made on is the drafter's own knowledge - so the drafter
+    writes it and the sheet prints it at the head of that rubbing's caption.
+
+    Empty by default, and an empty tuple changes nothing.  A note naming a
+    record the sheet is not drawing as a rubbing is refused rather than
+    quietly dropped.
+    """
     groove_records: tuple[str, ...] = ()
     """Groove readings to draw on the figures, by record id.
 
@@ -622,6 +644,29 @@ class DrawingSheetOptions:
         if len({record_id for record_id, _ in representations}) != len(representations):
             raise DrawingSheetError("a technique record is drawn one way, not two")
         object.__setattr__(self, "technique_representations", tuple(representations))
+        notes: list[tuple[str, str]] = []
+        for pair in self.rubbing_notes:
+            if not isinstance(pair, (tuple, list)) or len(pair) != 2:
+                raise DrawingSheetError(
+                    "rubbing_notes entries must be (record id, note) pairs"
+                )
+            record_id, note = pair
+            if not isinstance(record_id, str) or not record_id.strip():
+                raise DrawingSheetError("rubbing_notes entries must name a record")
+            if not isinstance(note, str) or not note.strip():
+                raise DrawingSheetError("a rubbing note must be text")
+            cleaned = note.strip()
+            if len(cleaned) > MAX_RUBBING_NOTE_CHARACTERS:
+                raise DrawingSheetError(
+                    "a rubbing note is at most "
+                    f"{MAX_RUBBING_NOTE_CHARACTERS} characters"
+                )
+            if any(character < " " or character == "\x7f" for character in cleaned):
+                raise DrawingSheetError("a rubbing note must not carry control characters")
+            notes.append((record_id.strip(), cleaned))
+        if len({record_id for record_id, _ in notes}) != len(notes):
+            raise DrawingSheetError("a rubbing carries at most one note")
+        object.__setattr__(self, "rubbing_notes", tuple(notes))
         groove_records = tuple(self.groove_records)
         if any(
             not isinstance(record_id, str) or not record_id.strip()
@@ -1354,12 +1399,23 @@ def _proven_raster_image(
     )
 
 
+def _captioned(caption: str, note: str | None) -> str:
+    """The drafter's note first, then what the machine has to say.
+
+    A reader looking for which wall a rubbing is of should find it at the
+    start of the line, not after the window and the black point.
+    """
+
+    return caption if note is None else f"{note} · {caption}"
+
+
 def _prepare_raster_figure(
     document: ArtifactDocument,
     record: DerivedRecord,
     raster: Any,
     *,
     scale_denominator: float,
+    note: str | None = None,
 ) -> _Prepared:
     """Turn a proven rubbing raster into a figure of its own physical size.
 
@@ -1381,8 +1437,11 @@ def _prepare_raster_figure(
         bounds=_bounds_with_caption((0.0, 0.0, width_mm, height_mm), scale_denominator),
         paths_by_kind={},
         raster=image,
-        caption=computed_rubbing_caption(
-            record.recipe, developed=record.type == DEVELOPED_RUBBING_RECORD_TYPE
+        caption=_captioned(
+            computed_rubbing_caption(
+                record.recipe, developed=record.type == DEVELOPED_RUBBING_RECORD_TYPE
+            ),
+            note,
         ),
     )
 
@@ -2373,6 +2432,8 @@ def compose_drawing_sheet(
     mirrored: list[dict[str, str]] = []
 
     prepared: list[_Prepared] = []
+    rubbing_notes = dict(options.rubbing_notes)
+    noted: set[str] = set()
     for record_id in ids:
         rubbing_record = document.record_index.get(record_id)
         if (
@@ -2393,12 +2454,16 @@ def compose_drawing_sheet(
                     "must be given to the sheet; a rubbing record stores a "
                     "receipt, not pixels"
                 )
+            note = rubbing_notes.get(record_id)
+            if note is not None:
+                noted.add(record_id)
             prepared.append(
                 _prepare_raster_figure(
                     document,
                     rubbing_record,
                     rasters[record_id],
                     scale_denominator=options.scale_denominator,
+                    note=note,
                 )
             )
             continue
@@ -2491,8 +2556,14 @@ def compose_drawing_sheet(
                 fit=options.rubbing_on_axis_fit,
             )
             # A strip on the axis is by construction a developed rubbing.
-            caption = computed_rubbing_caption(
-                document.record_index[attached.record_id].recipe, developed=True
+            attached_note = rubbing_notes.get(attached.record_id)
+            if attached_note is not None:
+                noted.add(attached.record_id)
+            caption = _captioned(
+                computed_rubbing_caption(
+                    document.record_index[attached.record_id].recipe, developed=True
+                ),
+                attached_note,
             )
             attached_drawn.append(
                 {
@@ -2561,6 +2632,14 @@ def compose_drawing_sheet(
                 attached=attached,
                 caption=caption,
             )
+        )
+
+    unplaced = sorted(set(rubbing_notes) - noted)
+    if unplaced:
+        raise DrawingSheetError(
+            "rubbing_notes names "
+            + ", ".join(repr(record_id) for record_id in unplaced)
+            + ", which this sheet does not draw as a rubbing"
         )
 
     computed_rubbing = any(figure.caption is not None for figure in prepared)
@@ -2811,11 +2890,31 @@ def validate_drawing_sheet_bytes(svg_bytes: bytes, sidecar_bytes: bytes) -> None
         svg_text = bytes(svg_bytes).decode("utf-8", errors="replace")
         for figure in rubbing_figures:
             caption = figure.get("caption")
-            if not isinstance(caption, str) or not caption.startswith(
-                (COMPUTED_RUBBING_CAPTION_PREFIX, PROJECTED_RELIEF_CAPTION_PREFIX)
+            # A drafter's note may stand at the head of the caption, naming
+            # the surface the rubbing was taken from - 등면, 내면 - but what
+            # the machine has to say about the ink must still be there whole,
+            # and a note may not be so long that it buries it.
+            body = caption if isinstance(caption, str) else ""
+            note_length = 0
+            for prefix in (
+                COMPUTED_RUBBING_CAPTION_PREFIX,
+                PROJECTED_RELIEF_CAPTION_PREFIX,
             ):
+                at = body.find(prefix)
+                if at == 0:
+                    note_length = 0
+                    break
+                if at > 0 and body[:at].endswith(" · "):
+                    note_length = at
+                    break
+            else:
                 raise DrawingSheetError(
                     f"rubbing figure {figure.get('record_id')!r} carries no caption"
+                )
+            if note_length > MAX_RUBBING_NOTE_CHARACTERS + 3:
+                raise DrawingSheetError(
+                    f"rubbing figure {figure.get('record_id')!r} carries a note "
+                    "longer than a caption band holds"
                 )
             if xml_attribute(caption) not in svg_text:
                 raise DrawingSheetError(

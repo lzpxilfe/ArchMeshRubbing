@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Event
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 import uuid
 
 from PyQt6.QtWidgets import (
@@ -438,6 +438,7 @@ from src.core.drawing_sheet import (  # noqa: E402
     DrawingSheetError,
     DrawingSheetOptions,
     Interpretation,
+    MAX_RUBBING_NOTE_CHARACTERS,
     SheetPage,
     RUBBING_RECORD_TYPES,
     TitleBlock,
@@ -4336,6 +4337,29 @@ class SectionPanel(QWidget):
         )
         native_layout.addWidget(self.list_drawing_sheet_records)
 
+        # 기와는 등면과 내면 탁본이 함께 실린다.  Two rubbings of one tile are
+        # not two views of one surface, and nothing in the ink says which is
+        # which, so the drafter names the surface and the sheet prints it at
+        # the head of that rubbing's caption.  Only they can know it: which
+        # wall a face selection was made on is not in the record.
+        note_row = QHBoxLayout()
+        note_row.setContentsMargins(0, 0, 0, 0)
+        note_row.addWidget(QLabel("탁본 면"))
+        self.edit_drawing_sheet_rubbing_note = QLineEdit()
+        self.edit_drawing_sheet_rubbing_note.setPlaceholderText(
+            "위에서 고른 탁본이 어느 면인지 (예: 내면 (포목흔))"
+        )
+        self.edit_drawing_sheet_rubbing_note.setMaxLength(
+            MAX_RUBBING_NOTE_CHARACTERS
+        )
+        self.edit_drawing_sheet_rubbing_note.setEnabled(False)
+        self.edit_drawing_sheet_rubbing_note.setToolTip(
+            "목록에서 탁본 기록을 클릭한 뒤 그 탁본이 어느 면인지 적습니다.\n"
+            "캡션 맨 앞에 인쇄되고, 비워 두면 아무것도 붙지 않습니다."
+        )
+        note_row.addWidget(self.edit_drawing_sheet_rubbing_note, 1)
+        native_layout.addLayout(note_row)
+
         self.edit_drawing_sheet_label = QLineEdit()
         self.edit_drawing_sheet_label.setPlaceholderText("유물명 (제목란에 인쇄됩니다)")
         self.edit_drawing_sheet_label.setMaxLength(120)
@@ -5804,6 +5828,12 @@ class MainWindow(QMainWindow):
         )
         self.section_panel.list_drawing_sheet_records.itemChanged.connect(
             self.on_drawing_sheet_item_changed
+        )
+        self.section_panel.list_drawing_sheet_records.currentItemChanged.connect(
+            self.on_drawing_sheet_row_selected
+        )
+        self.section_panel.edit_drawing_sheet_rubbing_note.textEdited.connect(
+            self.on_drawing_sheet_rubbing_note_edited
         )
         self.section_panel.nativeRubbingRequested.connect(
             self.on_native_rubbing_requested
@@ -18979,6 +19009,80 @@ class MainWindow(QMainWindow):
             order.remove(record_id)
         self._drawing_sheet_check_order = order
 
+    def on_drawing_sheet_row_selected(
+        self,
+        current: QListWidgetItem | None,
+        _previous: QListWidgetItem | None = None,
+    ) -> None:
+        """Show the note that belongs to the row the drafter just clicked.
+
+        Only a rubbing can carry one: a line drawing is what its own record
+        says it is, but a rubbing of a 기와 is of the 등면 or of the 내면 and
+        the record does not know which.
+        """
+
+        panel = getattr(self, "section_panel", None)
+        editor = getattr(panel, "edit_drawing_sheet_rubbing_note", None)
+        if editor is None:
+            return
+        record_id = (
+            str(current.data(Qt.ItemDataRole.UserRole) or "")
+            if current is not None
+            else ""
+        )
+        session = getattr(self, "_artifact_session", None)
+        record = (
+            session.document.record_index.get(record_id)
+            if isinstance(session, ArtifactSession) and record_id
+            else None
+        )
+        is_rubbing = str(getattr(record, "type", "")) in RUBBING_RECORD_TYPES
+        self._drawing_sheet_note_record_id = record_id if is_rubbing else ""
+        notes = dict(getattr(self, "_drawing_sheet_rubbing_notes", {}))
+        editor.setEnabled(is_rubbing)
+        editor.blockSignals(True)
+        try:
+            editor.setText(notes.get(record_id, "") if is_rubbing else "")
+        finally:
+            editor.blockSignals(False)
+
+    def on_drawing_sheet_rubbing_note_edited(self, text: str) -> None:
+        record_id = str(getattr(self, "_drawing_sheet_note_record_id", "") or "")
+        if not record_id:
+            return
+        notes = dict(getattr(self, "_drawing_sheet_rubbing_notes", {}))
+        cleaned = str(text).strip()
+        if cleaned:
+            notes[record_id] = cleaned
+        else:
+            notes.pop(record_id, None)
+        self._drawing_sheet_rubbing_notes = notes
+
+    def _drawing_sheet_rubbing_note_pairs(
+        self, record_ids: Sequence[str]
+    ) -> tuple[tuple[str, str], ...]:
+        """The notes for the rubbings actually going on this sheet.
+
+        A note for a record the drafter later unchecked is kept - they may
+        check it again - but not sent, because the sheet refuses a note for
+        something it is not drawing.
+        """
+
+        notes = dict(getattr(self, "_drawing_sheet_rubbing_notes", {}))
+        session = getattr(self, "_artifact_session", None)
+        index_by_id = (
+            session.document.record_index
+            if isinstance(session, ArtifactSession)
+            else {}
+        )
+        pairs: list[tuple[str, str]] = []
+        for record_id in record_ids:
+            note = notes.get(record_id, "").strip()
+            record = index_by_id.get(record_id)
+            if note and str(getattr(record, "type", "")) in RUBBING_RECORD_TYPES:
+                pairs.append((record_id, note))
+        return tuple(pairs)
+
     def _checked_drawing_sheet_record_ids(self) -> list[str]:
         panel = getattr(self, "section_panel", None)
         widget = getattr(panel, "list_drawing_sheet_records", None)
@@ -20823,6 +20927,9 @@ class MainWindow(QMainWindow):
                 ),
                 technique_representations=(
                     self._drawing_sheet_technique_representations(technique_ids)
+                ),
+                rubbing_notes=self._drawing_sheet_rubbing_note_pairs(
+                    [*record_ids, *(pair[0] for pair in rubbings_on_axis)]
                 ),
                 interpretation=Interpretation(
                     groove_edge_emphasis=(

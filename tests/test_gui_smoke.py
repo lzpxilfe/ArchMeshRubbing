@@ -8023,6 +8023,65 @@ def test_technique_marks_share_the_condition_chooser_and_reach_the_sheet_separat
 
         assert window._checked_drawing_sheet_condition_ids() == ("record:condition:gui",)
         assert window._checked_drawing_sheet_technique_ids() == ("record:technique:gui",)
+
+        # 기와의 등면·내면 탁본은 한 장에 함께 실린다.  The record cannot say
+        # which wall it is - a face selection carries no such word - so the
+        # drafter names it on the row and the sheet prints it.
+        window._artifact_session = _artifact_box_completed_session()
+        window._refresh_native_record_selectors(window._artifact_session)
+        records = panel.list_drawing_sheet_records
+        rubbing_row = next(
+            (
+                index
+                for index in range(records.count())
+                if str(records.item(index).data(Qt.ItemDataRole.UserRole)).startswith(
+                    "record:gui-prerequisite:rubbing:"
+                )
+            ),
+            None,
+        )
+        assert rubbing_row is not None
+        rubbing_id = str(records.item(rubbing_row).data(Qt.ItemDataRole.UserRole))
+        other_row = next(
+            index
+            for index in range(records.count())
+            if index != rubbing_row
+            and not str(
+                records.item(index).data(Qt.ItemDataRole.UserRole)
+            ).startswith("record:gui-prerequisite:rubbing:")
+        )
+        other_id = str(records.item(other_row).data(Qt.ItemDataRole.UserRole))
+
+        from src.core.drawing_sheet import (  # noqa: PLC0415
+            MAX_RUBBING_NOTE_CHARACTERS,
+        )
+
+        editor = panel.edit_drawing_sheet_rubbing_note
+        assert editor.maxLength() == MAX_RUBBING_NOTE_CHARACTERS
+        # A line drawing is what its own record says it is, so no note for it.
+        # (The whole panel is disabled until a mesh is open, so read the
+        # widget's own state the way the rest of this test does.)
+        records.setCurrentRow(other_row)
+        assert editor.testAttribute(_FORCE_DISABLED)
+        records.setCurrentRow(rubbing_row)
+        assert not editor.testAttribute(_FORCE_DISABLED)
+        editor.setText("내면 (포목흔)")
+        editor.textEdited.emit("내면 (포목흔)")
+        # The note follows the row, not the cursor: click away and back.
+        records.setCurrentRow(other_row)
+        assert editor.text() == ""
+        records.setCurrentRow(rubbing_row)
+        assert editor.text() == "내면 (포목흔)"
+
+        # Only a rubbing that is actually going on the sheet is named.
+        assert window._drawing_sheet_rubbing_note_pairs([rubbing_id]) == (
+            (rubbing_id, "내면 (포목흔)"),
+        )
+        assert window._drawing_sheet_rubbing_note_pairs([other_id]) == ()
+        records.setCurrentRow(rubbing_row)
+        editor.setText("   ")
+        editor.textEdited.emit("   ")
+        assert window._drawing_sheet_rubbing_note_pairs([rubbing_id]) == ()
     finally:
         # The session was never saved, so closing would ask; drop it first.
         window._artifact_session = None

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 import xml.etree.ElementTree as ET
 
@@ -987,6 +988,94 @@ def test_a_sheet_with_a_rubbing_says_the_rubbing_was_computed() -> None:
     with pytest.raises(DrawingSheetError, match="carries no caption"):
         validate_drawing_sheet_bytes(
             bundle.svg_bytes, _resigned_sidecar(without_caption, bundle.svg_bytes)
+        )
+
+
+def test_a_rubbing_carries_the_drafter_s_note_at_the_head_of_its_caption() -> None:
+    """기와 한 장에 등면·내면 탁본이 함께 실리면 어느 쪽인지 적어야 한다.
+
+    Two rubbings of one tile are not two views of one surface: the 등면 the
+    paddle struck and the 내면 the 와통 left are different walls at different
+    radii, so their developments are different widths.  The program cannot
+    tell them apart - which wall a face selection was made on is the
+    drafter's own knowledge - so the drafter writes it and the sheet prints
+    it first, before the window and the black point.
+    """
+
+    session, raster = _session_with_rubbing()
+    note = "내면 (포목흔)"
+    bundle = compose_drawing_sheet(
+        session.document,
+        [OUTLINE_ID, RUBBING_ID],
+        options=replace(_options(), rubbing_notes=((RUBBING_ID, note),)),
+        rasters={RUBBING_ID: raster},
+    )
+    validate_drawing_sheet_bytes(bundle.svg_bytes, bundle.sidecar_bytes)
+    sidecar = json.loads(bundle.sidecar_bytes.decode("utf-8"))
+    figures = {figure["record_id"]: figure for figure in sidecar["figures"]}
+    caption = figures[RUBBING_ID]["caption"]
+    assert caption.startswith(f"{note} · ")
+    # Everything the machine had to say is still there, unchanged.
+    assert caption.endswith(
+        computed_rubbing_caption(
+            session.document.record_index[RUBBING_ID].recipe, developed=False
+        )
+    )
+    assert note in bundle.svg_bytes.decode("utf-8")
+
+    # No note, no change: the sheet is byte for byte the one it always was.
+    plain = compose_drawing_sheet(
+        session.document,
+        [OUTLINE_ID, RUBBING_ID],
+        options=_options(),
+        rasters={RUBBING_ID: raster},
+    )
+    assert plain.svg_bytes != bundle.svg_bytes
+    again = compose_drawing_sheet(
+        session.document,
+        [OUTLINE_ID, RUBBING_ID],
+        options=replace(_options(), rubbing_notes=()),
+        rasters={RUBBING_ID: raster},
+    )
+    assert again.svg_bytes == plain.svg_bytes
+    assert again.sidecar_bytes == plain.sidecar_bytes
+
+    # A note for a record this sheet does not draw as a rubbing is refused
+    # rather than quietly dropped: the drafter meant it to be printed.
+    with pytest.raises(DrawingSheetError, match="does not draw as a rubbing"):
+        compose_drawing_sheet(
+            session.document,
+            [OUTLINE_ID, RUBBING_ID],
+            options=replace(_options(), rubbing_notes=((OUTLINE_ID, note),)),
+            rasters={RUBBING_ID: raster},
+        )
+    with pytest.raises(DrawingSheetError, match="at most one note"):
+        replace(_options(), rubbing_notes=((RUBBING_ID, "등면"), (RUBBING_ID, "내면")))
+    with pytest.raises(DrawingSheetError, match="must be text"):
+        replace(_options(), rubbing_notes=((RUBBING_ID, "   "),))
+    with pytest.raises(DrawingSheetError, match="control characters"):
+        replace(_options(), rubbing_notes=((RUBBING_ID, "등면\u0007"),))
+    with pytest.raises(DrawingSheetError, match="at most 24 characters"):
+        replace(_options(), rubbing_notes=((RUBBING_ID, "가" * 25),))
+
+    # And the offline validator holds the same line on a sidecar it is handed:
+    # a note forged long enough to push the machine's half off the paper is
+    # refused, as is one that replaces it.
+    forged = json.loads(bundle.sidecar_bytes.decode("utf-8"))
+    for figure in forged["figures"]:
+        if figure["record_id"] == RUBBING_ID:
+            figure["caption"] = "가" * 40 + " · " + figure["caption"]
+    with pytest.raises(DrawingSheetError, match="longer than a caption band"):
+        validate_drawing_sheet_bytes(
+            bundle.svg_bytes, _resigned_sidecar(forged, bundle.svg_bytes)
+        )
+    replaced = json.loads(bundle.sidecar_bytes.decode("utf-8"))
+    for figure in replaced["figures"]:
+        if figure["record_id"] == RUBBING_ID:
+            figure["caption"] = note
+    with pytest.raises(DrawingSheetError, match="carries no caption"):
+        validate_drawing_sheet_bytes(
+            bundle.svg_bytes, _resigned_sidecar(replaced, bundle.svg_bytes)
         )
 
 
