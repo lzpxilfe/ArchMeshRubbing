@@ -62,6 +62,10 @@ def test_the_recipe_carries_the_thresholds_and_rebuilds_from_them() -> None:
     recipe = crease_recipe(dihedral_min_deg=30.0, min_length_mm=1.5)
     assert recipe["detection_policy"]["dihedral_min_millideg"] == 30_000
     assert recipe["detection_policy"]["min_length_um"] == 1_500
+    assert recipe["detection_policy"]["scale_um"] == 0
+    scaled = crease_recipe(dihedral_min_deg=15.0, min_length_mm=2.0, scale_mm=4.0)
+    assert scaled["detection_policy"]["scale_um"] == 4_000
+    assert validate_crease_recipe(scaled) == scaled
     assert recipe["views"] == list(CREASE_VIEWS)
     assert validate_crease_recipe(recipe) == recipe
     with pytest.raises(ArtifactCreaseRecordError, match="does not match"):

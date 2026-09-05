@@ -55,6 +55,10 @@ class LithicShape:
     #: The ventral face's greatest depth below the margin, and the bulb's.
     ventral_depth_mm: float = 5.0
     bulb_mm: float = 2.5
+    #: How far the ridges are rounded over.  0 keeps them sharp, as planes
+    #: meeting at an edge; a real scan's ridge is rounded over a millimetre
+    #: or two by the stone and by the scanner, and this is that.
+    rounding_mm: float = 0.0
     #: The dorsal scars.  Their lower envelope, tapered to nothing at the
     #: margin, is the dorsal face.
     #: Steep enough that the ridges between them bend by 45-60 degrees, as
@@ -79,6 +83,8 @@ class LithicShape:
             raise ValueError("taper must be between 0 and 0.6")
         if not self.facets:
             raise ValueError("a flaked tool has at least one scar")
+        if self.rounding_mm < 0.0:
+            raise ValueError("rounding_mm cannot be negative")
         # The scars must stay above the margin all the way to it: a plane
         # that dips under it would fold the dorsal face into a valley.
         for index in range(360):
@@ -108,13 +114,19 @@ def dorsal_height(shape: LithicShape, x_mm: float, y_mm: float) -> float:
     dome, whose creases stand out.
     """
 
-    best = math.inf
+    heights = []
     for facet in shape.facets:
         along = x_mm * math.cos(math.radians(facet.direction_deg)) + y_mm * math.sin(
             math.radians(facet.direction_deg)
         )
-        best = min(best, facet.height_mm - facet.slope * along)
-    return best
+        heights.append(facet.height_mm - facet.slope * along)
+    lowest = min(heights)
+    if shape.rounding_mm <= 0.0:
+        return lowest
+    # A soft minimum: the planes blend over about rounding_mm either side of
+    # where they meet, and the crest stays on the line where they would have.
+    k = shape.rounding_mm * 0.5
+    return lowest - k * math.log(sum(math.exp(-(h - lowest) / k) for h in heights))
 
 
 def ventral_depth(shape: LithicShape, x_mm: float, y_mm: float) -> float:

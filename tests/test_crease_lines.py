@@ -100,6 +100,61 @@ def test_every_dorsal_crease_found_is_a_ridge_and_most_ridge_length_is_found(bif
     assert on_axis[:, 0].max() - on_axis[:, 0].min() > 0.6 * BIFACE_SHAPE.half_length_mm
 
 
+def test_a_rounded_ridge_needs_the_scale_and_is_found_at_it_with_some_invention() -> None:
+    """The ridge a scan has: rounded over a millimetre or two.
+
+    No single edge of it bends much, so the edge-by-edge reading finds next
+    to nothing.  Read at a scale of 4 mm - the bend between the surface
+    4 mm to either side, the crest picked as the edge that turns most per
+    millimetre among its neighbours - it finds most of the ridge length on
+    a tool rounded over 1.5 mm, and also invents lines the sharp reading
+    never did: a rounded surface bends at that scale in places that are
+    not ridges.  A tool rounded over 3 mm defeats it.  These are the
+    numbers, not a claim; docs/LITHIC_TRIAL.md.
+    """
+
+    from dataclasses import replace
+
+    truth = dorsal_creases()
+    truth_points = np.vstack([_sampled(np.vstack([p, q])) for p, q in truth])
+    up = np.array([0.0, 0.0, 1.0])
+
+    def dorsal_of(chains):
+        return [
+            chain
+            for chain in chains
+            if (chain.left_normals @ up > 0.0).all() and (chain.right_normals @ up > 0.0).all()
+        ]
+
+    def measure(chains, tolerance_mm: float = 0.6) -> tuple[float, float, float]:
+        on, off = 0.0, 0.0
+        for chain in chains:
+            nearest = np.min(
+                [_distance_to_segment(_sampled(chain.points_mm), p, q) for p, q in truth],
+                axis=0,
+            )
+            if float((nearest < tolerance_mm).mean()) >= 0.9:
+                on += chain.length_mm
+            else:
+                off += chain.length_mm
+        if not chains:
+            return on, off, 0.0
+        found = np.vstack([_sampled(chain.points_mm) for chain in chains])
+        gaps = np.min(np.linalg.norm(truth_points[:, None, :] - found[None, :, :], axis=2), axis=1)
+        return on, off, float((gaps < tolerance_mm).mean())
+
+    vertices, faces = flaked_tool(replace(BIFACE_SHAPE, rounding_mm=1.5))
+    _on, _off, sharp_recall = measure(dorsal_of(detect_convex_creases(vertices, faces)))
+    assert sharp_recall < 0.1
+
+    on, off, recall = measure(
+        dorsal_of(detect_convex_creases(vertices, faces, dihedral_min_deg=15.0, scale_mm=4.0))
+    )
+    assert recall >= 0.6
+    assert on > off
+    assert off > 0.0
+
+
 def test_the_margin_is_a_crease_but_not_an_inner_line(biface) -> None:
     """The edge of the tool bends hardest of all, and the plan already
     draws it as the outline; seen from above only the dorsal ridges show,

@@ -94,16 +94,29 @@ def crease_recipe(
     *,
     dihedral_min_deg: float = DEFAULT_CREASE_DIHEDRAL_MIN_DEG,
     min_length_mm: float = DEFAULT_CREASE_MIN_LENGTH_MM,
+    scale_mm: float = 0.0,
 ) -> dict[str, Any]:
-    """Resolve the two numbers that decide what counts as a ridge."""
+    """Resolve the numbers that decide what counts as a ridge.
+
+    ``scale_mm`` at zero reads the bend between the two faces of an edge;
+    above zero it reads the bend between the surface that far to either
+    side, for ridges a scan has rounded over.
+    """
 
     try:
         dihedral = float(dihedral_min_deg)
         length = float(min_length_mm)
+        scale = float(scale_mm)
     except (TypeError, ValueError) as exc:
         raise ArtifactCreaseRecordError("crease thresholds must be numbers") from exc
-    if not np.isfinite(dihedral) or not np.isfinite(length):
+    if not np.isfinite(dihedral) or not np.isfinite(length) or not np.isfinite(scale):
         raise ArtifactCreaseRecordError("crease thresholds must be finite")
+    scale_um = _strict_int(
+        int(round(scale * 1000.0)),
+        name="scale_mm (in micrometres)",
+        minimum=0,
+        maximum=MAX_CREASE_LENGTH_UM,
+    )
     dihedral_millideg = _strict_int(
         int(round(dihedral * 1000.0)),
         name="dihedral_min_deg (in millidegrees)",
@@ -123,8 +136,10 @@ def crease_recipe(
         "coordinate_space": CREASE_COORDINATE_SPACE,
         "detection_policy": {
             "convexity": "far_corner_below_neighbour_plane/v1",
+            "crest": "turning_per_mm_maximum_within_half_scale/v1",
             "dihedral_min_millideg": dihedral_millideg,
             "min_length_um": length_um,
+            "scale_um": scale_um,
             "weld_um": int(round(CREASE_WELD_MM * 1000.0)),
         },
         "kind": CREASE_OPERATION_KIND,
@@ -147,12 +162,15 @@ def validate_crease_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
         raise ArtifactCreaseRecordError("crease recipe detection_policy is invalid")
     dihedral = policy.get("dihedral_min_millideg")
     length = policy.get("min_length_um")
-    if isinstance(dihedral, bool) or isinstance(length, bool):
-        raise ArtifactCreaseRecordError("crease recipe thresholds must be integers")
-    if not isinstance(dihedral, int) or not isinstance(length, int):
-        raise ArtifactCreaseRecordError("crease recipe thresholds must be integers")
+    scale = policy.get("scale_um")
+    for value in (dihedral, length, scale):
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ArtifactCreaseRecordError("crease recipe thresholds must be integers")
+    assert isinstance(dihedral, int) and isinstance(length, int) and isinstance(scale, int)
     expected = crease_recipe(
-        dihedral_min_deg=dihedral / 1000.0, min_length_mm=length / 1000.0
+        dihedral_min_deg=dihedral / 1000.0,
+        min_length_mm=length / 1000.0,
+        scale_mm=scale / 1000.0,
     )
     try:
         same = canonical_json_bytes(dict(recipe)) == canonical_json_bytes(expected)
@@ -344,6 +362,7 @@ def read_creases(
     policy = validated["detection_policy"]
     dihedral_min_deg = int(policy["dihedral_min_millideg"]) / 1000.0
     min_length_mm = int(policy["min_length_um"]) / 1000.0
+    scale_mm = int(policy["scale_um"]) / 1000.0
     raise_if_cancelled(cancellation_probe)
     try:
         chains = detect_convex_creases(
@@ -351,6 +370,7 @@ def read_creases(
             faces,
             dihedral_min_deg=dihedral_min_deg,
             min_length_mm=min_length_mm,
+            scale_mm=scale_mm,
         )
     except ArtifactCreaseError as exc:
         raise ArtifactCreaseRecordError(str(exc)) from exc
@@ -403,13 +423,16 @@ def compute_crease_reading(
     *,
     dihedral_min_deg: float = DEFAULT_CREASE_DIHEDRAL_MIN_DEG,
     min_length_mm: float = DEFAULT_CREASE_MIN_LENGTH_MM,
+    scale_mm: float = 0.0,
     cancellation_probe: CancellationProbe | None = None,
 ) -> CreaseComputation:
     """Read the ridges of the artifact as positioned by its active Align."""
 
     if not isinstance(session, ArtifactSession):
         raise ArtifactCreaseRecordError("session must be an ArtifactSession")
-    recipe = crease_recipe(dihedral_min_deg=dihedral_min_deg, min_length_mm=min_length_mm)
+    recipe = crease_recipe(
+        dihedral_min_deg=dihedral_min_deg, min_length_mm=min_length_mm, scale_mm=scale_mm
+    )
     try:
         context = session.capture_operation(recipe=recipe)
         projection = session.materialize()

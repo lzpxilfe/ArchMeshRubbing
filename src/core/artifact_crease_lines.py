@@ -73,12 +73,98 @@ def _welded(vertices: np.ndarray, faces: np.ndarray) -> tuple[np.ndarray, np.nda
     return welded_points, inverse[faces]
 
 
+def _crest_edges_at_scale(
+    points: np.ndarray,
+    corners: np.ndarray,
+    normals: np.ndarray,
+    edge_low: np.ndarray,
+    edge_high: np.ndarray,
+    face_one: np.ndarray,
+    face_two: np.ndarray,
+    local_dihedral: np.ndarray,
+    *,
+    scale_mm: float,
+    dihedral_min_deg: float,
+) -> np.ndarray:
+    """Which shared edges are the crest of a ridge rounded over ``scale_mm``.
+
+    For each edge, the surface is sampled ``scale_mm`` away on either side -
+    out from the edge's midpoint toward each face's centroid, then snapped
+    to the nearest face - and the bend is the angle between the normals
+    there, convex when the far sample lies below the near sample's plane.
+    Every edge across a rounded ridge bends that much at that scale, so of
+    the edges that qualify only those whose own two faces bend most among
+    the qualifying edges within half the scale are kept: the crest.
+    """
+
+    from scipy.spatial import cKDTree  # noqa: PLC0415
+
+    centroids = corners.mean(axis=1)
+    tree = cKDTree(centroids)
+    mid = 0.5 * (points[edge_low] + points[edge_high])
+    along_edge = points[edge_high] - points[edge_low]
+    along_edge /= np.maximum(np.linalg.norm(along_edge, axis=1), 1e-12)[:, None]
+    samples = []
+    for face in (face_one, face_two):
+        # Straight out from the edge across the face - perpendicular to the
+        # edge, in the face's own plane, toward its centroid - so the sample
+        # lies on this side of the ridge and on this surface.  A sliver's
+        # centroid lies almost along the edge, so it gives the side only.
+        own = normals[face]
+        direction = np.cross(own, along_edge)
+        toward = np.einsum("ij,ij->i", centroids[face] - mid, direction)
+        direction *= np.where(toward < 0.0, -1.0, 1.0)[:, None]
+        length = np.linalg.norm(direction, axis=1)
+        direction = direction / np.maximum(length, 1e-12)[:, None]
+        target = mid + direction * scale_mm
+        _distances, nearest = tree.query(target, k=12)
+        nearest = np.asarray(nearest).reshape(target.shape[0], -1)
+        chosen = nearest[:, 0].copy()
+        for row in range(target.shape[0]):
+            for candidate in nearest[row]:
+                # Not the back of the stone, and not still on the ridge.
+                if float(normals[candidate] @ own[row]) <= 0.0:
+                    continue
+                if float((centroids[candidate] - mid[row]) @ direction[row]) < 0.5 * scale_mm:
+                    continue
+                chosen[row] = candidate
+                break
+        samples.append(chosen)
+    near_one, near_two = samples
+    n1, n2 = normals[near_one], normals[near_two]
+    cosine = np.clip(np.einsum("ij,ij->i", n1, n2), -1.0, 1.0)
+    bend = np.degrees(np.arccos(cosine))
+    below = np.einsum("ij,ij->i", centroids[near_two] - centroids[near_one], n1)
+    candidate = (bend >= dihedral_min_deg) & (below < 0.0)
+    keep = np.zeros(candidate.shape[0], dtype=bool)
+    indices = np.flatnonzero(candidate)
+    if indices.size == 0:
+        return keep
+    # How sharply the surface turns across each edge, per millimetre: the
+    # two faces' bend over how far their centroids stand from the edge on
+    # either side.  A bend alone favours big triangles, and the straight
+    # distance between centroids runs along a sliver; this favours the
+    # crest whatever the mesh happens to do there.
+    span = np.zeros(mid.shape[0], dtype=np.float64)
+    for face in (face_one, face_two):
+        offset = centroids[face] - points[edge_low]
+        span += np.linalg.norm(np.cross(offset, along_edge), axis=1)
+    turning = local_dihedral / np.maximum(span, 1e-6)
+    crest_tree = cKDTree(mid[indices])
+    neighbours = crest_tree.query_ball_point(mid[indices], r=0.5 * scale_mm)
+    for position, index in enumerate(indices):
+        rivals = indices[np.asarray(neighbours[position], dtype=np.int64)]
+        keep[index] = turning[index] >= 0.9 * float(turning[rivals].max())
+    return keep
+
+
 def detect_convex_creases(
     vertices: object,
     faces: object,
     *,
     dihedral_min_deg: float = DEFAULT_CREASE_DIHEDRAL_MIN_DEG,
     min_length_mm: float = DEFAULT_CREASE_MIN_LENGTH_MM,
+    scale_mm: float = 0.0,
 ) -> tuple[CreaseChain, ...]:
     """Every chain of convex edges bent by at least ``dihedral_min_deg``.
 
@@ -86,6 +172,15 @@ def detect_convex_creases(
     of the other, taking the faces' own winding as outward.  Edges shared by
     other than two faces are not creases: an open boundary or a tangle is
     something else.  Chains shorter than ``min_length_mm`` are dropped.
+
+    With ``scale_mm`` at zero the bend is the angle between the two faces
+    that share the edge, which is right for a mesh whose ridges are edges.
+    A scanned ridge is rounded over a millimetre or two, and no single edge
+    of it bends much; ``scale_mm`` then measures the bend between the
+    surface ``scale_mm`` to either side of the edge instead, and keeps, of
+    the edges that bend enough at that scale, only the ones that bend most
+    among their neighbours within half that distance - the crest.  The
+    scale that suits a real scan has not been measured.
     """
 
     points = np.asarray(vertices, dtype=np.float64)
@@ -96,6 +191,8 @@ def detect_convex_creases(
         raise ArtifactCreaseError("dihedral_min_deg must lie strictly between 0 and 180")
     if float(min_length_mm) < 0.0:
         raise ArtifactCreaseError("min_length_mm cannot be negative")
+    if not np.isfinite(float(scale_mm)) or float(scale_mm) < 0.0:
+        raise ArtifactCreaseError("scale_mm must be zero or a positive length")
     if triangles.size == 0:
         return ()
     points, triangles = _welded(points, triangles)
@@ -128,7 +225,21 @@ def detect_convex_creases(
     below = np.einsum(
         "ij,ij->i", points[opposite[second]] - points[low[first]], n1
     )
-    keep = (dihedral >= float(dihedral_min_deg)) & (below < 0.0)
+    if float(scale_mm) > 0.0:
+        keep = _crest_edges_at_scale(
+            points,
+            corners,
+            normals,
+            low[first],
+            high[first],
+            face_of[first],
+            face_of[second],
+            dihedral,
+            scale_mm=float(scale_mm),
+            dihedral_min_deg=float(dihedral_min_deg),
+        )
+    else:
+        keep = (dihedral >= float(dihedral_min_deg)) & (below < 0.0)
     crease_edges = np.stack([low[first][keep], high[first][keep]], axis=1)
     crease_dihedral = dihedral[keep]
     crease_n1, crease_n2 = n1[keep], n2[keep]
