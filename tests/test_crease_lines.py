@@ -155,6 +155,50 @@ def test_a_rounded_ridge_needs_the_scale_and_is_found_at_it_with_some_invention(
     assert off > 0.0
 
 
+def test_scanner_noise_floods_the_edge_reading_and_the_scale_reading_holds() -> None:
+    """With 0.05 mm of noise on every vertex, the edge-by-edge reading
+    reports several times the ridge length, most of it invented, while the
+    reading at a 4 mm scale keeps its invented share near what it was on
+    the clean tool.  On a scan the scale reading is the one to use."""
+
+    from scan_defects import roughen
+
+    truth = dorsal_creases()
+    truth_length = sum(float(np.linalg.norm(q - p)) for p, q in truth)
+    up = np.array([0.0, 0.0, 1.0])
+
+    def dorsal_length(chains) -> float:
+        return sum(
+            chain.length_mm
+            for chain in chains
+            if (chain.left_normals @ up > 0.0).all() and (chain.right_normals @ up > 0.0).all()
+        )
+
+    def invented(chains, tolerance_mm: float = 0.6) -> float:
+        off = 0.0
+        for chain in chains:
+            if not ((chain.left_normals @ up > 0.0).all() and (chain.right_normals @ up > 0.0).all()):
+                continue
+            nearest = np.min(
+                [_distance_to_segment(_sampled(chain.points_mm), p, q) for p, q in truth],
+                axis=0,
+            )
+            if float((nearest < tolerance_mm).mean()) < 0.9:
+                off += chain.length_mm
+        return off
+
+    vertices, faces = flaked_tool()
+    noisy = roughen(vertices, faces, amplitude_mm=0.05)
+    sharp = detect_convex_creases(noisy, faces)
+    assert dorsal_length(sharp) > 2.0 * truth_length
+    assert invented(sharp) > 0.5 * truth_length
+
+    scaled_clean = detect_convex_creases(vertices, faces, dihedral_min_deg=15.0, scale_mm=4.0)
+    scaled_noisy = detect_convex_creases(noisy, faces, dihedral_min_deg=15.0, scale_mm=4.0)
+    assert invented(scaled_noisy) < 0.5 * truth_length
+    assert invented(scaled_noisy) < 3.0 * max(invented(scaled_clean), 10.0)
+
+
 def test_the_margin_is_a_crease_but_not_an_inner_line(biface) -> None:
     """The edge of the tool bends hardest of all, and the plan already
     draws it as the outline; seen from above only the dorsal ridges show,

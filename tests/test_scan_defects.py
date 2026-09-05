@@ -23,6 +23,7 @@ from scan_defects import (
     fill_with_plaster,
     mesh_report,
     punch_hole,
+    roughen,
     sharpen_the_base,
     stand_it_wrong,
     warp,
@@ -355,6 +356,46 @@ def test_a_pointed_base_still_positions_and_is_drawn_to_a_point() -> None:
     points = np.vstack([np.asarray(path.points_mm) for path in section.payload.paths])
     apex = points[np.argmin(points[:, 1])]
     assert abs(float(apex[0])) < 4.0
+
+
+def test_scanner_noise_moves_no_outline_and_no_section() -> None:
+    """A few hundredths of a millimetre on every vertex, along its normal.
+
+    The outline and the section shrug it off: at 0.1 mm of noise on a
+    96 x 40 vessel the front outline's area moves by a few parts in ten
+    thousand and the section stays one closed ring, at a coarse grid and a
+    fine one.  The gates that watch for the grid's holes and severed pieces
+    are not tripped by noise of this size.
+    """
+
+    from src.core.artifact_outline_extractor import extract_outline_geometry
+    from src.core.artifact_vector_extractor import extract_cutline_geometry
+    from src.core.artifact_vector_record import PlanarFrame
+    from synthetic_vessel import grained_surface
+
+    vertices, faces, _rim, _floor = hollow_vessel(segments=96, rings=40, relief=grained_surface)
+    vertices = np.asarray(vertices, dtype=np.float64)
+    faces = np.asarray(faces, dtype=np.int64)
+    noisy = roughen(vertices, faces, amplitude_mm=0.1)
+    moved = np.linalg.norm(noisy - vertices, axis=1)
+    assert 0.09 < float(moved.max()) <= 0.1 + 1e-9
+    assert np.array_equal(noisy, roughen(vertices, faces, amplitude_mm=0.1))
+    assert mesh_report(noisy, faces) == mesh_report(vertices, faces)
+
+    plane = PlanarFrame(
+        origin_world_mm=(0.0, 0.37, 0.0),
+        u_axis_world=(1.0, 0.0, 0.0),
+        v_axis_world=(0.0, 0.0, 1.0),
+        normal_world=(0.0, -1.0, 0.0),
+    )
+    for grid in (0.25, 0.05):
+        clean = extract_outline_geometry(vertices, faces, "front", precision_grid_mm=grid)
+        rough = extract_outline_geometry(noisy, faces, "front", precision_grid_mm=grid)
+        assert rough.qc["hole_count"] == 0
+        assert rough.qc["component_count"] == 1
+        assert rough.qc["outline_area_mm2"] == pytest.approx(clean.qc["outline_area_mm2"], rel=3e-3)
+    section = extract_cutline_geometry(noisy, faces, plane)
+    assert [path.closed for path in section.payload.paths] == [True]
 
 
 def test_every_defect_is_the_same_mesh_twice() -> None:

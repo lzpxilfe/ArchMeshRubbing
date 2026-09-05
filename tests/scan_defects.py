@@ -385,6 +385,38 @@ def warp(
     return points
 
 
+def roughen(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    *,
+    amplitude_mm: float = 0.05,
+    seed: int = 1,
+) -> np.ndarray:
+    """Put a scanner's noise on the surface: every vertex moved a little
+    along its normal, by a hashed amount within ``amplitude_mm`` either way.
+
+    A structured-light or photogrammetric scan carries a few hundredths of
+    a millimetre of this everywhere; it is what makes a rounded ridge hard
+    to tell from the surface beside it, and what a crease reading has to
+    survive.  The faces and the numbering are untouched.  Deterministic:
+    the same seed moves the same vertex the same way.
+    """
+
+    points = np.asarray(vertices, dtype=np.float64).copy()
+    triangles = np.asarray(faces, dtype=np.int64)
+    corners = points[triangles]
+    face_normals = np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0])
+    normals = np.zeros_like(points)
+    for corner in range(3):
+        np.add.at(normals, triangles[:, corner], face_normals)
+    lengths = np.linalg.norm(normals, axis=1)
+    normals /= np.maximum(lengths, 1e-12)[:, None]
+    offsets = np.array(
+        [2.0 * _hash01(index, seed) - 1.0 for index in range(points.shape[0])]
+    )
+    return points + normals * (offsets * float(amplitude_mm))[:, None]
+
+
 def mesh_report(vertices: np.ndarray, faces: np.ndarray) -> dict[str, int]:
     """The numbers a drafter would want before drawing anything.
 
@@ -429,6 +461,7 @@ __all__ = [
     "fill_with_plaster",
     "mesh_report",
     "punch_hole",
+    "roughen",
     "sharpen_the_base",
     "stand_it_wrong",
     "warp",
