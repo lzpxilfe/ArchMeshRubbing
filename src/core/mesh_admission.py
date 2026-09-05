@@ -1759,9 +1759,20 @@ def _ply_binary_triangle_count(
                 list_key = (element.name, prop.name)
                 expected_count = fixed_list_counts.setdefault(list_key, list_count)
                 if list_count != expected_count:
+                    # The locked parser reads a binary PLY with one fixed row
+                    # shape taken from the first row, so a file that mixes
+                    # polygon sizes is read wrong rather than refused - and a
+                    # mixed file is ordinary: the museum's own scan of 신수22891
+                    # is 192,222 quads and 7,012 triangles.  Refuse it, and say
+                    # what would open instead.
                     raise MeshAdmissionError(
-                        "binary PLY list lengths must remain constant for the "
-                        "locked parser"
+                        f"binary PLY {element.name!r} mixes polygon sizes "
+                        f"({expected_count} then {list_count} vertices); the "
+                        "locked parser reads one fixed row shape and would read "
+                        "the rest wrong, so the file is refused rather than "
+                        "opened incorrectly. Export it with one polygon size "
+                        "(all triangles), or open another format of the same "
+                        "mesh - an STL is always triangles"
                     )
                 item_size = _ply_scalar_bytes(prop.list_item_type)
                 skip_bytes = list_count * item_size

@@ -771,3 +771,43 @@ class TestArtifactOutlineCommandAndExport(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_a_refused_outline_says_whether_the_mesh_carried_a_speck() -> None:
+    """A refusal has to be about the artifact, not about the rule.
+
+    Real scans carry loose crumbs.  The 국립중앙박물관 scan of 빗살무늬토기
+    (신수22891) is one body of 391,432 faces and one detached piece of 24, and
+    that crumb is enough to have the front view refused with `exteriors_touch`
+    - a message that sends a drafter looking for a fault in the pot.  So the
+    refusal now also says how many pieces the projection had and how small the
+    smallest was, which is the sentence that points at the crumb.
+    """
+
+    from src.core.artifact_outline_extractor import _component_summary
+
+    def square(x0: int, y0: int, side: int) -> list[tuple[int, int]]:
+        return [
+            (x0, y0),
+            (x0 + side, y0),
+            (x0 + side, y0 + side),
+            (x0, y0 + side),
+        ]
+
+    # One piece: the count is not the story, so it is not told as one.
+    only = _component_summary([(square(0, 0, 100), [])], 0.5)
+    assert "one piece" in only
+    # 100 cells of 0.5 mm square: 50 x 50 mm.
+    assert "2500.0 mm2" in only
+
+    # An artifact and a speck: both sizes, and what the small one usually is.
+    with_speck = _component_summary(
+        [(square(0, 0, 100), []), (square(400, 400, 2), [])], 0.5
+    )
+    assert "2 separate pieces" in with_speck
+    assert "2500.0 mm2" in with_speck
+    assert "1 mm2" in with_speck
+    assert "loose fragment" in with_speck
+
+    # And an empty projection says so rather than dividing by nothing.
+    assert "no exterior" in _component_summary([], 0.5)

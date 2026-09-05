@@ -525,7 +525,7 @@ end_header
     with mock.patch(
         "src.core.mesh_loader._load_authoritative_trimesh"
     ) as parser:
-        with pytest.raises(MeshAdmissionError, match="list lengths must remain constant"):
+        with pytest.raises(MeshAdmissionError, match="mixes polygon sizes"):
             MeshLoader().load(source_path)
     parser.assert_not_called()
 
@@ -1447,3 +1447,33 @@ def test_receipt_rejects_tampered_peak_estimate() -> None:
 
     with pytest.raises(MeshAdmissionError, match="admission formula"):
         validate_mesh_admission_receipt(receipt)
+
+
+def test_a_refused_sidecar_names_the_file_that_was_missing(tmp_path: Path) -> None:
+    """A published package can be wrong, and the refusal has to say where.
+
+    The 국립중앙박물관 OBJ for 빗살무늬토기 (신수22891) declares its texture as
+    `su022891-...jpg` while the file shipped beside it is `ssu022891-...jpg`.
+    Refusing is right - a declared sidecar really is missing - but a drafter
+    handed only "an unsafe, missing, or unreadable sidecar ... under
+    resolver_profile=relative-contained-v1" has nothing to check.
+    """
+
+    from src.core.mesh_loader import ExternalMeshDependencyError
+
+    obj = tmp_path / "pot.obj"
+    obj.write_text(
+        "mtllib ./pot.mtl\n"
+        "v 0 0 0\nv 10 0 0\nv 0 10 0\nv 0 0 10\n"
+        "f 1 2 3\nf 1 2 4\nf 1 3 4\nf 2 3 4\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "pot.mtl").write_text(
+        "newmtl defaultMat\nmap_Kd surface-texture.jpg\n", encoding="utf-8"
+    )
+    # The texture the .mtl names is not the one that shipped.
+    (tmp_path / "ssurface-texture.jpg").write_bytes(b"\xff\xd8\xff\xdb" + b"\x00" * 64)
+
+    with pytest.raises(ExternalMeshDependencyError) as refusal:
+        MeshLoader().load(obj)
+    assert "surface-texture.jpg" in str(refusal.value)

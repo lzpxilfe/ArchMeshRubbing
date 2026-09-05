@@ -504,11 +504,33 @@ class _CapturingDirectoryResolver(Resolver):
             set(self._state.expected_buffer_sizes) - set(self._state.resources)
         )
         if self._state.failures or missing_buffers:
+            # Say which file, in the drafter's terms.  A published package can
+            # be internally inconsistent - the museum's own OBJ for 신수22891
+            # names a texture whose file is spelt differently - and "an unsafe,
+            # missing, or unreadable sidecar" leaves them nothing to check.
+            detail = "; ".join(
+                [*self._state.failures[:_MAX_REPORTED_DEPENDENCY_FAILURES],
+                 *(f"declared glTF buffer not resolved: {path!r}"
+                   for path in missing_buffers[:_MAX_REPORTED_DEPENDENCY_FAILURES])]
+            )
+            more = max(
+                0,
+                len(self._state.failures)
+                + len(missing_buffers)
+                - 2 * _MAX_REPORTED_DEPENDENCY_FAILURES,
+            )
+            if more:
+                detail = f"{detail}; and {more} more"
             raise ExternalMeshDependencyError(
                 "authoritative source requested an unsafe, missing, or unreadable "
                 "sidecar, or did not resolve every declared external glTF buffer, "
-                "under resolver_profile=relative-contained-v1"
+                f"under resolver_profile=relative-contained-v1: {detail}"
             )
+
+
+#: How many of a package's own failures to repeat in the refusal.  Enough to
+#: find the mistake, not enough to bury it.
+_MAX_REPORTED_DEPENDENCY_FAILURES = 4
 
 
 ResourcePayloadLoader = Callable[[SourceManifestEntry], tuple[bytes, str]]

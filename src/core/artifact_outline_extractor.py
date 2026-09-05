@@ -761,6 +761,31 @@ def _close_grid_slivers(
     }
 
 
+def _component_summary(
+    components: Sequence[tuple[Any, Sequence[Any]]], grid: float
+) -> str:
+    """How many pieces the projection has, and how small the smallest is.
+
+    A drafter reading a refusal needs to know whether the drawing is one
+    artifact or an artifact and a speck of scanner noise.
+    """
+
+    areas_mm2 = sorted(
+        abs(_integer_ring_area2(exterior)) * grid * grid / 2.0
+        for exterior, _holes in components
+    )
+    if not areas_mm2:
+        return "no exterior at all"
+    if len(areas_mm2) == 1:
+        return f"one piece of {areas_mm2[0]:.1f} mm2"
+    return (
+        f"{len(areas_mm2)} separate pieces, the largest {areas_mm2[-1]:.1f} mm2 "
+        f"and the smallest {areas_mm2[0]:.4g} mm2; a piece far smaller than the "
+        "artifact is usually a loose fragment in the mesh rather than part of "
+        "what is being drawn"
+    )
+
+
 def _payload_from_union(
     geometry: BaseGeometry,
     *,
@@ -860,8 +885,14 @@ def _payload_from_union(
             cancellation_probe=cancellation_probe,
         )
     except ValueError as exc:
+        # Say what the drawing is made of as well as which rule broke.  A real
+        # scan carries specks: the museum's 신수22891 is one body of 391,432
+        # faces and one loose crumb of 24, and the crumb lands beside the pot
+        # on the lattice and touches it at a corner.  "exteriors_touch" alone
+        # sends a drafter looking for a fault in the pot.
         raise ArtifactVectorExtractionError(
             f"canonical outline topology is invalid: {exc}"
+            f"; this projection has {_component_summary(components, grid)}"
         ) from exc
     area_lattice2 = 0
     for component_index, (exterior, component_holes) in enumerate(components):
