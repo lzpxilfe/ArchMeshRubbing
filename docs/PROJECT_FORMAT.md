@@ -593,7 +593,7 @@ GUI 계산은 worker에서 시작 당시 immutable `ArtifactSession`만 사용�
 
 PNG writer는 `IHDR → sRGB → pHYs → iTXt → IDAT → IEND` 순서, row filter 0, 직접 작성한 stored DEFLATE block을 사용한다. 따라서 Pillow encoder나 zlib compression heuristic에 exact bytes를 맡기지 않는다. `pHYs`의 X/Y pixels-per-meter는 receipt와 같고, width/height와 pixel pitch는 sidecar에서 exact rational millimeter로 반복 선언한다. primary PNG에는 scale bar, 글꼴, review label, 절대 source path나 외부 resource를 넣지 않는다.
 
-sidecar의 artifact descriptor를 제외한 normative claim 전체를 RFC 8785 SHA-256으로 묶어 PNG iTXt metadata에 넣고, sidecar artifact descriptor는 PNG exact-byte SHA-256과 byte length를 가진다. validator는 PNG CRC/Adler/chunk/metadata/pixel hash/semantic raster hash, receipt, recipe, public provenance, scale와 privacy 선언을 모두 대조하며 closed provenance mapping의 계약 밖 key도 거부한다. 원본 document가 없어도 이동한 package를 별도 PID에서 offline 검증할 수 있고, document를 함께 주면 READY + FRESH record와 manifest까지 비교한다. mesh admission provenance를 포함하고 여섯 뷰 receipt와 전개 receipt를 모두 허용하며 종이 기저 농담까지 담는 현재 machine-readable sidecar 계약은 `schemas/rubbing_export-1.3.0.schema.json`이며, 공개된 1.0.0·1.1.0·1.2.0 schema bytes와 offline validator 호환성은 보존한다.
+sidecar의 artifact descriptor를 제외한 normative claim 전체를 RFC 8785 SHA-256으로 묶어 PNG iTXt metadata에 넣고, sidecar artifact descriptor는 PNG exact-byte SHA-256과 byte length를 가진다. validator는 PNG CRC/Adler/chunk/metadata/pixel hash/semantic raster hash, receipt, recipe, public provenance, scale와 privacy 선언을 모두 대조하며 closed provenance mapping의 계약 밖 key도 거부한다. 원본 document가 없어도 이동한 package를 별도 PID에서 offline 검증할 수 있고, document를 함께 주면 READY + FRESH record와 manifest까지 비교한다. mesh admission provenance를 포함하고 여섯 뷰 receipt와 전개 receipt를 모두 허용하며 종이 기저 농담과 법선 지도 기복(`texture_relief`)까지 담는 현재 machine-readable sidecar 계약은 `schemas/rubbing_export-1.4.0.schema.json`이며, 공개된 1.0.0·1.1.0·1.2.0·1.3.0 schema bytes와 offline validator 호환성은 보존한다.
 
 writer는 vector package와 같은 same-parent staging, prepared inode/fingerprint capability, file/directory `fsync`, self-validation, OS별 atomic no-replace publish를 사용한다. staging 이름은 배타적으로 예약하고 충돌한 foreign directory를 재사용·삭제하지 않는다. application cleanup도 등록한 device/inode가 그대로일 때만 수행한다. 기존 목적지, 추가 member와 symlink는 거부하며 `.DS_Store`, `Thumbs.db`, `desktop.ini`만 vector와 같은 1 MiB 제한으로 무시한다. final rename 뒤 실제 또는 미지원 directory `fsync`는 destination이 이미 게시된 `committed=true` 오류이며 GUI는 저장 완료와 crash durability 미확정을 구분한다. 이 package의 hash도 무결성 값이며 제작자 전자서명은 아니다.
 
@@ -616,7 +616,23 @@ DerivedRecord(type=raster.developed_rubbing.v1)
 
 다시 열 때는 receipt·recipe·QC의 정합성에 더해 recipe가 이름 지은 전개 record가 문서에 있고, 그 receipt의 `unwrap_sha256`과 recipe 해시가 탁본 recipe가 적은 값과 같은지 확인한다. raster를 재계산할 때는 전개 record의 recipe로 전개를 다시 계산해 receipt와 payload 해시가 맞아야만 탁본을 그린다. 전개가 STALE이면 탁본도 STALE이다.
 
-내보내기는 같은 `.amr-rubbing` package를 쓴다. sidecar schema 1.2.0부터 `raster_receipt`에 여섯 뷰 receipt(`rubbing_receipt-1.0.0`)와 전개 receipt(`developed_rubbing_receipt-1.0.0`) 중 하나를 허용하고, `recipe.kind`가 `developed_rubbing`이면 receipt는 전개 receipt, provenance record type은 `raster.developed_rubbing.v1`이어야 한다. 1.0.0·1.1.0 package는 그대로 검증되며, 전개 탁본은 1.2.0 이상에, 종이 기저 농담을 깐 탁본은 1.3.0에만 들어간다 — 1.2.0의 여섯 뷰 recipe 정의는 고정된 1.0.0에서 오므로 그 열쇠들을 담지 못한다. writer는 전개를 재계산해 receipt·payload 해시를 맞춘 뒤에야 raster를 다시 그리고 package를 만든다.
+**법선 지도에서 그린 전개 탁본.** 공개 스캔은 흔히 성긴 메쉬에 잔 요철을 그림으로 구워 둔다 — 국립중앙박물관 빗살무늬토기는 면 하나가 1.3 mm라 메쉬에 시문선이 없고, OBJ에 딸린 8192² 물체 공간 법선 지도에 빗살이 전부 있다([`docs/REAL_DATA_TRIAL.md`](REAL_DATA_TRIAL.md)). 그런 스캔의 띠 탁본은 같은 record type에 다른 알고리즘으로 그린다: `archmeshrubbing.developed_texture_normal_relief` **1.0.0**, 깊이 측정 `texture_normal_map_height/v1`. recipe에 `texture_relief` 블록이 더 들어가고, 이 블록이 없는 recipe(반지름 깊이, `archmeshrubbing.developed_rubbing`)는 이전과 바이트가 같다.
+
+```text
+recipe.texture_relief
+├── atlas: { kind: wavefront_obj_corner_uv/v1, sha256, byte_length, triangle_count, vertex_count }
+├── normal_map: { sha256, byte_length, width, height, encoding }
+├── sampling: nearest_texel/v1
+├── base_normal: sampled_normal_gaussian_smoothed/v1
+├── integration: frankot_chellappa_on_developed_raster/v1
+└── smoothing_um: 100 - 50,000 (기본 1,000)
+```
+
+계산(`src/core/artifact_texture_relief.py`)은 이렇다. OBJ를 모서리별 텍스처 좌표째 읽어 위치로 용접한 아틀라스를 만들고, 세션의 메쉬가 그 기하와 같은지(꼭짓점 1 µm 안, 면 대응) 증명한 뒤에야 읽는다. 전개 raster의 픽셀마다 어느 전개 삼각형 위인지, 원본 면의 어느 모서리 좌표를 보간하는지를 찾아 법선 지도의 텍셀을 읽고, OBJ 좌표계의 법선을 정치한 좌표계로 돌린다(두 꼭짓점 집합 사이의 강체 회전). 그 법선에서 `smoothing_um`의 가우시안으로 평활한 법선을 빼면 남는 것이 잔 기울기이고, 삼각형마다의 야코비안으로 전개축 (u, v) 방향 기울기로 바꿔 Frankot-Chellappa FFT 적분으로 높이를 얻는다. 높이는 mm로 기존 relief 렌더러(local-mean·접촉 모델·종이 농담)에 그대로 들어간다. 평활 폭보다 넓은 기복은 그래서 사라진다 — 이 탁본은 벽의 굴곡이 아니라 시문선을 담는 것이다.
+
+`encoding`은 텍셀 RGB가 법선의 어느 축을 뒤집어 담았는가다(`object_space_rgb8/v1`, `_x_flipped`, `_y_flipped`, `_xy_flipped`). 파일은 이것을 말하지 않는다 — 박물관 지도는 x가 뒤집혀 있었고, 그대로 읽으면 기울기장이 적분되지 않는다(부적합 0.654 대 0.150). `rank_normal_map_encodings`가 후보마다 적분 부적합을 재어 주고, 고르는 것은 실측자이며 고른 값이 recipe에 남는다. QC는 `texture_relief_covered_pixel_count`·`texture_relief_height_max/min_um_rounded`·`texture_relief_integration_misfit_millionths`·`texture_relief_unmatched_corner_count`·`texture_relief_unreadable_pixel_count`다. 재계산에는 아틀라스와 법선 지도 파일이 있어야 하고(`TextureReliefSource`), 없으면 무엇이 필요한지 말하며 거부한다 — 조용히 반지름 탁본으로 물러나지 않는다. 도판은 이 탁본을 `기복 법선 지도` 캡션 토큰과 `법선 지도에서 계산 · 종이 탁본 아님` 제목란 행으로 구분한다([`docs/DRAWING_CONVENTIONS.md`](DRAWING_CONVENTIONS.md)).
+
+내보내기는 같은 `.amr-rubbing` package를 쓴다. sidecar schema 1.2.0부터 `raster_receipt`에 여섯 뷰 receipt(`rubbing_receipt-1.0.0`)와 전개 receipt(`developed_rubbing_receipt-1.0.0`) 중 하나를 허용하고, `recipe.kind`가 `developed_rubbing`이면 receipt는 전개 receipt, provenance record type은 `raster.developed_rubbing.v1`이어야 한다. 1.0.0·1.1.0 package는 그대로 검증되며, 전개 탁본은 1.2.0 이상에, 종이 기저 농담을 깐 탁본은 1.3.0 이상에, 법선 지도에서 그린 탁본은 **1.4.0**에만 들어간다 — 1.2.0의 여섯 뷰 recipe 정의는 고정된 1.0.0에서 오므로 그 열쇠들을 담지 못하고, 1.3.0의 전개 recipe는 `texture_relief` 블록과 그 알고리즘 이름을 모른다. 현재 writer는 1.4.0이고 1.0.0-1.3.0 schema bytes는 그대로다(1.3.0의 sha256은 `tests/test_rubbing_schemas.py`에 고정). writer는 전개를 재계산해 receipt·payload 해시를 맞춘 뒤에야 raster를 다시 그리고 package를 만든다.
 
 ## 능선 record `measurement.crease.v1`
 

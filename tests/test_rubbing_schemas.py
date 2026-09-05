@@ -179,7 +179,7 @@ class TestRubbingSchemas(unittest.TestCase):
         cls.developed_receipt_schema = _load_schema(
             "developed_rubbing_receipt-1.0.0.schema.json"
         )
-        cls.export_schema = _load_schema("rubbing_export-1.3.0.schema.json")
+        cls.export_schema = _load_schema("rubbing_export-1.4.0.schema.json")
         cls.legacy_export_schema = _load_schema(
             "rubbing_export-1.0.0.schema.json"
         )
@@ -188,6 +188,9 @@ class TestRubbingSchemas(unittest.TestCase):
         )
         cls.legacy_1_2_export_schema = _load_schema(
             "rubbing_export-1.2.0.schema.json"
+        )
+        cls.legacy_1_3_export_schema = _load_schema(
+            "rubbing_export-1.3.0.schema.json"
         )
         cls.mesh_admission_schema = _load_schema(
             "mesh_admission_receipt-1.0.0.schema.json"
@@ -204,6 +207,7 @@ class TestRubbingSchemas(unittest.TestCase):
         jsonschema.Draft202012Validator.check_schema(cls.legacy_export_schema)
         jsonschema.Draft202012Validator.check_schema(cls.legacy_1_1_export_schema)
         jsonschema.Draft202012Validator.check_schema(cls.legacy_1_2_export_schema)
+        jsonschema.Draft202012Validator.check_schema(cls.legacy_1_3_export_schema)
         jsonschema.Draft202012Validator.check_schema(cls.mesh_admission_schema)
         jsonschema.Draft202012Validator.check_schema(cls.import_recipe_schema)
         jsonschema.Draft202012Validator.check_schema(cls.import_recipe_v2_schema)
@@ -230,6 +234,10 @@ class TestRubbingSchemas(unittest.TestCase):
         registry = registry.with_resource(
             cls.legacy_1_2_export_schema["$id"],
             referencing.Resource.from_contents(cls.legacy_1_2_export_schema),
+        )
+        registry = registry.with_resource(
+            cls.legacy_1_3_export_schema["$id"],
+            referencing.Resource.from_contents(cls.legacy_1_3_export_schema),
         )
         registry = registry.with_resource(
             cls.mesh_admission_schema["$id"],
@@ -270,12 +278,19 @@ class TestRubbingSchemas(unittest.TestCase):
             hashlib.sha256(payload).hexdigest(),
             "7bc4edda8ec1dc0044457f7a494a6ec3056b7c972627ee1f7e4943b0d5de9707",
         )
+        # 1.3.0 shipped before a rubbing could be drawn from a texture normal
+        # map; its developed recipe names one algorithm and one depth measure.
+        payload = (ROOT / "schemas" / "rubbing_export-1.3.0.schema.json").read_bytes()
+        self.assertEqual(
+            hashlib.sha256(payload).hexdigest(),
+            "8194165c7744e90cc6f83669c58e079c37d107086e0cd1bc57b05ae2f6b559d1",
+        )
 
     def test_developed_rubbing_receipt_and_sidecar_validate(self) -> None:
         self.assert_schema_valid(self.developed_receipt_validator, self.developed_receipt)
         self.assert_schema_invalid(self.receipt_validator, self.developed_receipt)
         self.assert_schema_valid(self.export_validator, self.developed_sidecar)
-        self.assertEqual(self.developed_sidecar["schema_version"], "1.3.0")
+        self.assertEqual(self.developed_sidecar["schema_version"], "1.4.0")
         recipe = self.developed_sidecar["recipe"]
         assert isinstance(recipe, dict)
         self.assertEqual(recipe["kind"], "developed_rubbing")
@@ -317,7 +332,7 @@ class TestRubbingSchemas(unittest.TestCase):
     def test_generated_receipt_and_export_sidecar_validate(self) -> None:
         self.assert_schema_valid(self.receipt_validator, self.receipt)
         self.assert_schema_valid(self.export_validator, self.sidecar)
-        self.assertEqual(self.sidecar["schema_version"], "1.3.0")
+        self.assertEqual(self.sidecar["schema_version"], "1.4.0")
         provenance = self.sidecar["provenance"]
         assert isinstance(provenance, dict)
         geometry = provenance["geometry_revision"]

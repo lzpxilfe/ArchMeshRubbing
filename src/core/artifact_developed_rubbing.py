@@ -59,6 +59,18 @@ from .artifact_rubbing_extractor import (
 )
 from .artifact_scene_adapter import ArtifactProjectionSnapshot
 from .artifact_session import ArtifactSession, ArtifactSessionError
+from .artifact_texture_relief import (
+    DEFAULT_TEXTURE_RELIEF_SMOOTHING_UM,
+    ArtifactTextureReliefError,
+    NormalMap,
+    TextureAtlas,
+    TEXTURE_RELIEF_DEPTH_MEASURE,
+    require_texture_relief_sources,
+    rigid_rotation_between,
+    texture_relief_block,
+    texture_relief_depth_field,
+    validate_texture_relief_block,
+)
 from .artifact_tile_unwrap_extractor import (
     ArtifactTileUnwrapError,
     TileUnwrapMesh,
@@ -77,6 +89,12 @@ DEVELOPED_RUBBING_RECORD_TYPE = "raster.developed_rubbing.v1"
 DEVELOPED_RUBBING_OPERATION_KIND = "developed_rubbing"
 DEVELOPED_RUBBING_ALGORITHM = "archmeshrubbing.developed_local_mean_relief"
 DEVELOPED_RUBBING_ALGORITHM_VERSION = "1.0.0"
+#: The same raster, drawn from the relief a texture normal map carries rather
+#: than from the mesh's own radius (artifact_texture_relief).  A recipe that
+#: names this algorithm carries a ``texture_relief`` block and needs the two
+#: files it names to be recomputed.
+DEVELOPED_TEXTURE_RUBBING_ALGORITHM = "archmeshrubbing.developed_texture_normal_relief"
+DEVELOPED_TEXTURE_RUBBING_ALGORITHM_VERSION = "1.0.0"
 DEVELOPED_RUBBING_RASTER_SCHEMA_VERSION = "1.0.0"
 DEVELOPED_RUBBING_COORDINATE_SPACE = "canonical_mm_developed_raster/v1"
 DEVELOPED_RUBBING_RASTER_HASH_SCOPE = "header-rfc8785+pixels-ga8-row-major/v1"
@@ -178,10 +196,23 @@ def developed_rubbing_recipe(
     relief_model: str = DEFAULT_RUBBING_RELIEF_MODEL,
     contact_ink_percent: int = DEFAULT_RUBBING_CONTACT_INK_PERCENT,
     artboard_policy: str = ARTBOARD_LARGEST_COVERED_RECTANGLE,
+    texture_relief: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Resolve every option before context capture, naming the development."""
+    """Resolve every option before context capture, naming the development.
+
+    ``texture_relief`` names a texture atlas and a normal map (the block
+    ``texture_relief_block`` builds); with it the depth the relief is drawn
+    from is the height the normal map implies, not the mesh's radius, and
+    the recipe says so in its algorithm and depth measure.
+    """
 
     policy = _artboard_policy(artboard_policy)
+    relief_block: dict[str, Any] | None = None
+    if texture_relief is not None:
+        try:
+            relief_block = validate_texture_relief_block(texture_relief)
+        except ArtifactTextureReliefError as exc:
+            raise ArtifactDevelopedRubbingError(str(exc)) from exc
     record_id = _record_id(development_record_id, name="development record ID")
     unwrap_sha = _sha256(development_sha256, name="development unwrap_sha256")
     recipe_hash = _sha256(development_recipe_hash, name="development recipe_hash")
@@ -202,7 +233,9 @@ def developed_rubbing_recipe(
     except ArtifactRubbingError as exc:
         raise ArtifactDevelopedRubbingError(str(exc)) from exc
     depth_policy = dict(blocks["depth_policy"])
-    depth_policy["measure"] = DEVELOPED_RUBBING_DEPTH_MEASURE
+    depth_policy["measure"] = (
+        DEVELOPED_RUBBING_DEPTH_MEASURE if relief_block is None else TEXTURE_RELIEF_DEPTH_MEASURE
+    )
     pixel_policy = blocks["pixel_policy"]
     if (
         policy == ARTBOARD_LARGEST_COVERED_RECTANGLE
@@ -214,9 +247,17 @@ def developed_rubbing_recipe(
             "a rubbing cropped to its covered rectangle cannot also carry a "
             "margin; set margin_um to 0 or use the development-bounds artboard"
         )
-    return {
-        "algorithm": DEVELOPED_RUBBING_ALGORITHM,
-        "algorithm_version": DEVELOPED_RUBBING_ALGORITHM_VERSION,
+    recipe: dict[str, Any] = {
+        "algorithm": (
+            DEVELOPED_RUBBING_ALGORITHM
+            if relief_block is None
+            else DEVELOPED_TEXTURE_RUBBING_ALGORITHM
+        ),
+        "algorithm_version": (
+            DEVELOPED_RUBBING_ALGORITHM_VERSION
+            if relief_block is None
+            else DEVELOPED_TEXTURE_RUBBING_ALGORITHM_VERSION
+        ),
         "artboard_policy": policy,
         "coordinate_space": DEVELOPED_RUBBING_COORDINATE_SPACE,
         "depth_policy": depth_policy,
@@ -239,6 +280,11 @@ def developed_rubbing_recipe(
         "relief_policy": blocks["relief_policy"],
         "resource_limits": blocks["resource_limits"],
     }
+    if relief_block is not None:
+        # Present exactly when the relief comes from a texture, so a recipe
+        # drawn from the mesh keeps the bytes it always had.
+        recipe["texture_relief"] = relief_block
+    return recipe
 
 
 def validate_developed_rubbing_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
@@ -285,6 +331,7 @@ def validate_developed_rubbing_recipe(recipe: Mapping[str, Any]) -> dict[str, An
         contact_ink_percent=relief_policy.get(  # type: ignore[arg-type]
             "contact_ink_percent", DEFAULT_RUBBING_CONTACT_INK_PERCENT
         ),
+        texture_relief=recipe.get("texture_relief"),
     )
     try:
         actual_hash = canonical_recipe_hash(recipe)
@@ -620,12 +667,38 @@ def _largest_covered_rectangle(covered: np.ndarray) -> tuple[int, int, int, int]
     return best
 
 
+@dataclass(frozen=True, slots=True)
+class TextureReliefSource:
+    """The two files a texture-relief rubbing is drawn from, at hand."""
+
+    atlas: TextureAtlas
+    normal_map: NormalMap
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.atlas, TextureAtlas):
+            raise ArtifactDevelopedRubbingError("atlas must be a TextureAtlas")
+        if not isinstance(self.normal_map, NormalMap):
+            raise ArtifactDevelopedRubbingError("normal_map must be a NormalMap")
+
+
+@dataclass(frozen=True, slots=True)
+class TextureReliefGeometry:
+    """What the texture relief needs of the mesh besides the development: each
+    developed vertex's canonical position and the rotation that carries the
+    atlas's frame into the canonical one."""
+
+    points_mm: np.ndarray
+    source_to_canonical_rotation: np.ndarray
+
+
 def extract_developed_rubbing(
     unwrap: TileUnwrapMesh,
     radius_mm: object,
     recipe: Mapping[str, Any],
     *,
     height_mm: object | None = None,
+    texture_relief: TextureReliefSource | None = None,
+    texture_geometry: TextureReliefGeometry | None = None,
     cancellation_probe: CancellationProbe | None = None,
 ) -> tuple[DevelopedRubbingRaster, dict[str, Any]]:
     """Draw the relief of ``radius_mm`` on the developed triangles of ``unwrap``.
@@ -634,6 +707,12 @@ def extract_developed_rubbing(
     axis.  When it is given, the QC also says at what height on the artifact
     the artboard's bottom and top rows sit, which is what lets a sheet paste
     the rubbing beside the elevation at the place it was taken from.
+
+    A recipe with a ``texture_relief`` block draws the height the normal map
+    implies instead of the radius; it needs ``texture_relief`` (the files)
+    and ``texture_geometry`` (the developed points and the frame rotation),
+    and refuses without them rather than drawing the mesh's relief under a
+    texture recipe's name.
     """
 
     raise_if_cancelled(cancellation_probe)
@@ -672,16 +751,55 @@ def extract_developed_rubbing(
     # every reader.
     projected = np.asarray(unwrap.uv_um, dtype=np.float64) / 1000.0
     faces = np.asarray(unwrap.faces, dtype=np.int64)
+    relief_block = validated.get("texture_relief")
+    texture_qc: dict[str, Any] = {}
     try:
-        depth, minimum_u, minimum_v, raster_qc = _rasterize_depth_field(
-            projected,
-            radius,
-            faces,
-            pixels_per_mm=pixels_per_mm,
-            margin_pixels=int(pixel_policy["margin_pixels"]),
-            layer_separation_mm=float(depth_policy["quantization_um"]) / 1000.0,
-            cancellation_probe=cancellation_probe,
-        )
+        if relief_block is None:
+            depth, minimum_u, minimum_v, raster_qc = _rasterize_depth_field(
+                projected,
+                radius,
+                faces,
+                pixels_per_mm=pixels_per_mm,
+                margin_pixels=int(pixel_policy["margin_pixels"]),
+                layer_separation_mm=float(depth_policy["quantization_um"]) / 1000.0,
+                cancellation_probe=cancellation_probe,
+            )
+        else:
+            if texture_relief is None or texture_geometry is None:
+                raise ArtifactDevelopedRubbingError(
+                    "this rubbing is drawn from a texture normal map and needs its "
+                    "texture atlas and normal map at hand (recipe texture_relief names "
+                    f"atlas {relief_block['atlas']['sha256'][:12]}... and normal map "
+                    f"{relief_block['normal_map']['sha256'][:12]}...)"
+                )
+            assert isinstance(relief_block, Mapping)
+            require_texture_relief_sources(
+                relief_block, texture_relief.atlas, texture_relief.normal_map
+            )
+            depth, minimum_u, minimum_v, texture_qc = texture_relief_depth_field(
+                developed_uv_mm=projected,
+                developed_faces=faces,
+                developed_points_mm=texture_geometry.points_mm,
+                source_face_indices=np.asarray(unwrap.source_face_indices, dtype=np.int64),
+                source_vertex_indices=np.asarray(unwrap.source_vertex_indices, dtype=np.int64),
+                atlas=texture_relief.atlas,
+                normal_map=texture_relief.normal_map,
+                source_to_canonical_rotation=texture_geometry.source_to_canonical_rotation,
+                pixels_per_mm=pixels_per_mm,
+                margin_pixels=int(pixel_policy["margin_pixels"]),
+                smoothing_um=int(relief_block["smoothing_um"]),
+                cancellation_probe=cancellation_probe,
+            )
+            raster_qc = {
+                "artboard_height_pixels": int(depth.shape[0]),
+                "artboard_width_pixels": int(depth.shape[1]),
+                "covered_pixel_count": int(np.count_nonzero(np.isfinite(depth))),
+                "maximum_second_layer_gap_um_rounded": 0,
+                "multi_layer_pixel_count": 0,
+                "projected_zero_area_face_count": 0,
+                "projected_nonzero_area_face_count": int(faces.shape[0]),
+                "triangle_pixel_test_count": 0,
+            }
         pixels, relief_qc = _render_local_relief(
             depth,
             depth_quantization_um=int(depth_policy["quantization_um"]),
@@ -699,7 +817,7 @@ def extract_developed_rubbing(
             contact_ink_level=int(relief_policy.get("contact_ink_level", 0)),
             cancellation_probe=cancellation_probe,
         )
-    except ArtifactRubbingError as exc:
+    except (ArtifactRubbingError, ArtifactTextureReliefError) as exc:
         raise ArtifactDevelopedRubbingError(str(exc)) from exc
     raise_if_cancelled(cancellation_probe)
 
@@ -778,7 +896,8 @@ def extract_developed_rubbing(
     qc = {
         "all_developed_faces_included": True,
         **placement,
-        "depth_measure": DEVELOPED_RUBBING_DEPTH_MEASURE,
+        "depth_measure": str(depth_policy["measure"]),
+        **texture_qc,
         "development_face_count": unwrap.face_count,
         "development_vertex_count": unwrap.vertex_count,
         "radius_max_um_rounded": int(round(float(np.max(radius)) * 1000.0)),
@@ -864,6 +983,7 @@ def developed_rubbing_recipe_for_record(
     relief_model: str = DEFAULT_RUBBING_RELIEF_MODEL,
     contact_ink_percent: int = DEFAULT_RUBBING_CONTACT_INK_PERCENT,
     artboard_policy: str = ARTBOARD_LARGEST_COVERED_RECTANGLE,
+    texture_relief: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Name a READY + FRESH development by hash and resolve the raster options."""
 
@@ -887,6 +1007,7 @@ def developed_rubbing_recipe_for_record(
         relief_model=relief_model,
         contact_ink_percent=contact_ink_percent,
         artboard_policy=artboard_policy,
+        texture_relief=texture_relief,
     )
 
 
@@ -975,6 +1096,7 @@ def derive_developed_rubbing(
     mesh: MeshData,
     recipe: Mapping[str, Any],
     *,
+    texture_relief: TextureReliefSource | None = None,
     cancellation_probe: CancellationProbe | None = None,
 ) -> tuple[DevelopedRubbingRaster, dict[str, Any]]:
     """Recompute the named development from canonical-mm triangles, prove it,
@@ -1012,11 +1134,38 @@ def derive_developed_rubbing(
     height = np.asarray(mesh.vertices, dtype=np.float64)[
         np.asarray(unwrap.source_vertex_indices, dtype=np.int64), axis_index
     ]
+    texture_geometry: TextureReliefGeometry | None = None
+    if validated.get("texture_relief") is not None and texture_relief is not None:
+        # The canonical mesh must be the atlas's geometry moved rigidly: the
+        # same triangles in the same order, and one rotation carrying every
+        # welded vertex onto its canonical position.
+        canonical_vertices = np.asarray(mesh.vertices, dtype=np.float64)
+        canonical_faces = np.asarray(mesh.faces, dtype=np.int64)
+        atlas = texture_relief.atlas
+        if canonical_faces.shape != atlas.triangles.shape or not np.array_equal(
+            canonical_faces, atlas.triangles
+        ):
+            raise ArtifactDevelopedRubbingError(
+                "the mesh is not the texture atlas's geometry: its triangles differ; "
+                "open the geometry the atlas welds to (write_atlas_geometry)"
+            )
+        try:
+            rotation = rigid_rotation_between(atlas.vertices, canonical_vertices)
+        except ArtifactTextureReliefError as exc:
+            raise ArtifactDevelopedRubbingError(str(exc)) from exc
+        texture_geometry = TextureReliefGeometry(
+            points_mm=canonical_vertices[
+                np.asarray(unwrap.source_vertex_indices, dtype=np.int64)
+            ],
+            source_to_canonical_rotation=rotation,
+        )
     raster, qc = extract_developed_rubbing(
         unwrap,
         radius,
         validated,
         height_mm=height,
+        texture_relief=texture_relief,
+        texture_geometry=texture_geometry,
         cancellation_probe=cancellation_probe,
     )
     qc = {
@@ -1091,6 +1240,7 @@ def _compute_with_recipe(
     session: ArtifactSession,
     recipe: Mapping[str, Any],
     *,
+    texture_relief: TextureReliefSource | None = None,
     cancellation_probe: CancellationProbe | None,
 ) -> DevelopedRubbingComputation:
     try:
@@ -1103,6 +1253,7 @@ def _compute_with_recipe(
         session.document,
         projection.mesh,
         recipe,
+        texture_relief=texture_relief,
         cancellation_probe=cancellation_probe,
     )
     raise_if_cancelled(cancellation_probe)
@@ -1131,11 +1282,28 @@ def compute_developed_rubbing(
     relief_model: str = DEFAULT_RUBBING_RELIEF_MODEL,
     contact_ink_percent: int = DEFAULT_RUBBING_CONTACT_INK_PERCENT,
     artboard_policy: str = ARTBOARD_LARGEST_COVERED_RECTANGLE,
+    texture_relief: TextureReliefSource | None = None,
+    texture_smoothing_um: int = DEFAULT_TEXTURE_RELIEF_SMOOTHING_UM,
     cancellation_probe: CancellationProbe | None = None,
 ) -> DevelopedRubbingComputation:
+    """Draw a rubbing on a development; with ``texture_relief`` the ink comes
+    from the normal map's relief rather than the mesh's radius."""
+
     if not isinstance(session, ArtifactSession):
         raise ArtifactDevelopedRubbingError("session must be an ArtifactSession")
     raise_if_cancelled(cancellation_probe)
+    relief_block: dict[str, Any] | None = None
+    if texture_relief is not None:
+        if not isinstance(texture_relief, TextureReliefSource):
+            raise ArtifactDevelopedRubbingError("texture_relief must be a TextureReliefSource")
+        try:
+            relief_block = texture_relief_block(
+                texture_relief.atlas,
+                texture_relief.normal_map,
+                smoothing_um=texture_smoothing_um,
+            )
+        except ArtifactTextureReliefError as exc:
+            raise ArtifactDevelopedRubbingError(str(exc)) from exc
     recipe = developed_rubbing_recipe_for_record(
         session.document,
         development_record_id,
@@ -1151,14 +1319,21 @@ def compute_developed_rubbing(
         relief_model=relief_model,
         contact_ink_percent=contact_ink_percent,
         artboard_policy=artboard_policy,
+        texture_relief=relief_block,
     )
-    return _compute_with_recipe(session, recipe, cancellation_probe=cancellation_probe)
+    return _compute_with_recipe(
+        session,
+        recipe,
+        texture_relief=texture_relief,
+        cancellation_probe=cancellation_probe,
+    )
 
 
 def compute_developed_rubbing_from_recipe(
     session: ArtifactSession,
     recipe: Mapping[str, Any],
     *,
+    texture_relief: TextureReliefSource | None = None,
     cancellation_probe: CancellationProbe | None = None,
 ) -> DevelopedRubbingComputation:
     if not isinstance(session, ArtifactSession):
@@ -1167,6 +1342,7 @@ def compute_developed_rubbing_from_recipe(
     return _compute_with_recipe(
         session,
         validated,
+        texture_relief=texture_relief,
         cancellation_probe=cancellation_probe,
     )
 
@@ -1460,6 +1636,10 @@ __all__ = [
     "commit_developed_rubbing",
     "compute_developed_rubbing",
     "compute_developed_rubbing_from_recipe",
+    "DEVELOPED_TEXTURE_RUBBING_ALGORITHM",
+    "DEVELOPED_TEXTURE_RUBBING_ALGORITHM_VERSION",
+    "TextureReliefGeometry",
+    "TextureReliefSource",
     "derive_developed_rubbing",
     "developed_rubbing_computation_matches_active_projection",
     "development_record_for_recipe",

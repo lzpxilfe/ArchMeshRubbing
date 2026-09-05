@@ -478,7 +478,7 @@ def test_the_same_package_carries_a_developed_rubbing(corded: ArtifactSession) -
         computation.raster.width_pixels,
         computation.raster.height_pixels,
     )
-    assert sidecar["schema_version"] == "1.3.0"
+    assert sidecar["schema_version"] == "1.4.0"
     assert sidecar["recipe"]["kind"] == "developed_rubbing"
     assert sidecar["raster_receipt"]["coordinate_space"] == "canonical_mm_developed_raster/v1"
     assert sidecar["provenance"]["record"]["type"] == DEVELOPED_RUBBING_RECORD_TYPE

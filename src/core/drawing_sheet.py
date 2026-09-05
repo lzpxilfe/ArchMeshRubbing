@@ -183,6 +183,29 @@ _FOOTER_GAP_MM = 4.0
 # the program's, and printed where the reader looks.  Neither can be
 # switched off.
 COMPUTED_RUBBING_NOTE = "3D 메쉬에서 계산 · 종이 탁본 아님"
+#: The same row when the relief was read from a texture normal map rather
+#: than the mesh (artifact_texture_relief), and when a sheet carries both.
+#: What the map was baked from is not in the file, so the reader is told the
+#: ink came from a map and not from the surface the sheet draws.
+TEXTURE_RUBBING_NOTE = "법선 지도에서 계산 · 종이 탁본 아님"
+MIXED_RUBBING_NOTE = "3D 메쉬·법선 지도에서 계산 · 종이 탁본 아님"
+RUBBING_NOTES = frozenset({COMPUTED_RUBBING_NOTE, TEXTURE_RUBBING_NOTE, MIXED_RUBBING_NOTE})
+#: The caption token that says a rubbing's relief came from a normal map.
+TEXTURE_RELIEF_CAPTION_TOKEN = "기복 법선 지도"
+
+
+def rubbing_source_note(captions: Sequence[str]) -> str | None:
+    """The title-block row for the rubbings whose captions these are, or
+    None when the sheet carries no rubbing."""
+
+    texture = [TEXTURE_RELIEF_CAPTION_TOKEN in caption for caption in captions]
+    if not texture:
+        return None
+    if all(texture):
+        return TEXTURE_RUBBING_NOTE
+    if any(texture):
+        return MIXED_RUBBING_NOTE
+    return COMPUTED_RUBBING_NOTE
 #: The title-block label of the row that says a section closed into more
 #: than one loop.  A section through the axis of a whole vessel is one closed
 #: ring; two or more means the plane met something a drafter has to look at -
@@ -260,6 +283,10 @@ def computed_rubbing_caption(recipe: Mapping[str, Any], *, developed: bool) -> s
         raise DrawingSheetError(f"rubbing recipe relief policy is malformed: {exc}") from exc
     if developed:
         prefix = f"{COMPUTED_RUBBING_CAPTION_PREFIX} · {DEVELOPED_WIDTH_NOTE}"
+        if isinstance(recipe.get("texture_relief"), Mapping):
+            # The relief was read from a normal map, not from the mesh: the
+            # caption says so where the reader looks.
+            prefix = f"{prefix} · {TEXTURE_RELIEF_CAPTION_TOKEN}"
     else:
         prefix = PROJECTED_RELIEF_CAPTION_PREFIX
     return f"{prefix} · {model} · 창 {window} · 검정 {black} · {ink}"
@@ -1357,6 +1384,7 @@ def _title_block_elements(
     *,
     document_manifest_sha256: str,
     computed_rubbing: bool = False,
+    computed_rubbing_note: str = COMPUTED_RUBBING_NOTE,
     section_loop_counts: Sequence[int] = (),
 ) -> tuple[list[str], list[dict[str, str]]]:
     """Return the title block, and the rows it prints."""
@@ -1369,7 +1397,9 @@ def _title_block_elements(
     if computed_rubbing:
         # So is this: a sheet with a rubbing on it says where the rubbing came
         # from, and no caller can leave that out.
-        rows.append(("탁본", COMPUTED_RUBBING_NOTE))
+        if computed_rubbing_note not in RUBBING_NOTES:
+            raise DrawingSheetError("the rubbing note must be one the validator knows")
+        rows.append(("탁본", computed_rubbing_note))
     if section_loop_counts:
         # And a section that closed into several loops says so on the page,
         # where the reader of the drawing will look for one ring.
@@ -2359,10 +2389,13 @@ def _sheet_provenance(
         # Present exactly when something was interpreted, so a sheet that is
         # only measurement keeps its bytes and says nothing it need not.
         provenance["interpretation"] = options.interpretation.to_dict()
-    if any(figure.caption is not None for figure in placed):
+    rubbing_note = rubbing_source_note(
+        [figure.caption for figure in placed if figure.caption is not None]
+    )
+    if rubbing_note is not None:
         # Present exactly when a rubbing is on the sheet, like the title block
         # row it mirrors; a sheet of line work keeps its bytes.
-        provenance["computed_rubbing_note"] = COMPUTED_RUBBING_NOTE
+        provenance["computed_rubbing_note"] = rubbing_note
     if condition is not None:
         # Added only when the caller asked for condition records, so a sheet
         # composed without them keeps the exact bytes it had before.
@@ -3012,6 +3045,9 @@ def compose_drawing_sheet(
         )
 
     computed_rubbing = any(figure.caption is not None for figure in prepared)
+    computed_rubbing_note = rubbing_source_note(
+        [figure.caption for figure in prepared if figure.caption is not None]
+    )
     section_loop_counts = [int(entry["closed_path_count"]) for entry in section_loops]
     layout: dict[str, str] | None = None
     try:
@@ -3031,6 +3067,7 @@ def compose_drawing_sheet(
             options,
             document_manifest_sha256=document.canonical_sha256,
             computed_rubbing=computed_rubbing,
+            computed_rubbing_note=computed_rubbing_note or COMPUTED_RUBBING_NOTE,
             section_loop_counts=section_loop_counts,
         )
         provenance = _sheet_provenance(
@@ -3312,8 +3349,13 @@ def validate_drawing_sheet_bytes(svg_bytes: bytes, sidecar_bytes: bytes) -> None
         and ("raster_sha256" in figure or "rubbing_on_axis" in figure)
     ]
     if rubbing_figures:
+        stated_note = sidecar.get("computed_rubbing_note")
+        if stated_note not in RUBBING_NOTES:
+            raise DrawingSheetError(
+                "sheet carries a rubbing but its sidecar does not say what it was computed from"
+            )
         if not any(
-            isinstance(row, Mapping) and row.get("value") == COMPUTED_RUBBING_NOTE
+            isinstance(row, Mapping) and row.get("value") == stated_note
             for row in rows
         ):
             raise DrawingSheetError(
@@ -3358,6 +3400,11 @@ def validate_drawing_sheet_bytes(svg_bytes: bytes, sidecar_bytes: bytes) -> None
 __all__ = [
     "COMPUTED_RUBBING_CAPTION_PREFIX",
     "COMPUTED_RUBBING_NOTE",
+    "MIXED_RUBBING_NOTE",
+    "RUBBING_NOTES",
+    "TEXTURE_RELIEF_CAPTION_TOKEN",
+    "TEXTURE_RUBBING_NOTE",
+    "rubbing_source_note",
     "SECTION_LOOP_NOTE_LABEL",
     "section_loop_note",
     "DEVELOPED_WIDTH_NOTE",

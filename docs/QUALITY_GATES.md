@@ -145,7 +145,8 @@ python -m pytest -q ^
 - versioned tile unwrap receipt 1.1/current export 1.5 Draft 2020-12 schema, byte-preserved export 1.1·1.2·1.3·1.4와 axis·seam·fallback·privacy closed contract; 1.4 이전 sidecar는 면 최대 distortion 25%를 넘는 record를, 1.5 이전 sidecar는 mean 7.5%·p95 15%를 넘는 record를 정책과 무관하게 담지 못한다
 - 회전축 정치 문서에서만 자르고, 법선의 바깥 방향과 두 겹의 반지름 대소가 어긋나면(뒤집힌 메쉬) 안쪽 벽을 내주는 대신 거부하며, 방향이 뒤섞이거나 복제된 면이 있거나 여러 조각으로 갈린 띠는 각 조각 크기를 알리고 멈추는 외면 띠 선택
 - `READY + FRESH` 전개 record를 payload 해시·recipe 해시로 이름 짓고, 재계산한 전개가 receipt·payload 해시와 다르거나 전개가 STALE이면 그리지 않는 `raster.developed_rubbing.v1`; 전개 record를 항상 dependency로 갖고, 같은 recipe에서 raster SHA-256이 같으며, Digital Rubbing과 같은 raster/pixel/dimension 상한과 admission 예산을 공유
-- `.amr-rubbing` sidecar 1.3.0: `recipe.kind`가 receipt 종류(여섯 뷰 / 전개)와 provenance record type을 강제하고, 전개 receipt는 1.2.0 이상, 종이 기저 농담은 1.3.0에만 허용되며, 1.0.0·1.1.0·1.2.0 schema bytes는 그대로 보존
+- `.amr-rubbing` sidecar 1.4.0: `recipe.kind`가 receipt 종류(여섯 뷰 / 전개)와 provenance record type을 강제하고, 전개 receipt는 1.2.0 이상, 종이 기저 농담은 1.3.0 이상, 법선 지도 기복(`texture_relief`)은 1.4.0에만 허용되며, 1.0.0·1.1.0·1.2.0·1.3.0 schema bytes는 그대로 보존
+- 법선 지도 기복 탁본: 세션 메쉬가 recipe가 이름한 OBJ의 용접 기하와 같음을 꼭짓점 1 µm·면 대응으로 증명한 뒤에야 지도를 읽고, 아틀라스·법선 지도 파일의 sha256·byte 수·크기·`encoding`이 recipe와 다르거나 파일이 없으면 무엇이 필요한지 말하며 거부(반지름 탁본으로 물러나지 않음); 적분 부적합·읽지 못한 픽셀·짝 없는 모서리를 QC로 보고
 - exact Git commit/tree의 regular blob만 허용하는 결정적 corresponding-source ZIP, 내부 manifest·외부 sidecar·Git blob ID·SHA-256·라이선스 결합과 저장소 삭제 뒤 offline 검증
 - portable/source/evidence exact hash와 실제 payload file set, GitHub repository/workflow/run attempt/Windows X64 hosted-runner identity를 결합하는 canonical unsigned provenance, 한글 추출본 offline 재검증, closed `authentication=none` 계약과 변조·source mismatch 거부
 - vector/rubbing/survey/tile-unwrap worker의 hidden same-parent staging·전체 검증·prepared inode/fingerprint capability, 빠른 final Workbench record-authority fence, same-Align append 허용, Align/Open stale 정리와 pending Open GUI 취소 정책
