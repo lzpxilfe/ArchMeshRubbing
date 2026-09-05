@@ -76,6 +76,10 @@ TECHNIQUE_FINGER_MARK = "technique_finger_mark"
 TECHNIQUE_PADDLING = "technique_paddling"
 TECHNIQUE_WATER_SMOOTHING = "technique_water_smoothing"
 TECHNIQUE_WOOD_GRAIN = "technique_wood_grain"
+TECHNIQUE_BOARD_FINISHING = "technique_board_finishing"
+TECHNIQUE_BURNISHING = "technique_burnishing"
+TECHNIQUE_INTERIOR_ANVIL = "technique_interior_anvil"
+TECHNIQUE_PARING = "technique_paring"
 CENTER_AXIS = "center_axis"
 
 LINE_KINDS: tuple[str, ...] = (
@@ -93,6 +97,13 @@ LINE_KINDS: tuple[str, ...] = (
     TECHNIQUE_PADDLING,
     TECHNIQUE_WATER_SMOOTHING,
     TECHNIQUE_WOOD_GRAIN,
+    # The four 정면 kinds added with technique payload 1.2.0.  They go after
+    # the first five so that the earlier drawings keep the layer order they
+    # were written with, and among themselves in the vocabulary's own order.
+    TECHNIQUE_BOARD_FINISHING,
+    TECHNIQUE_BURNISHING,
+    TECHNIQUE_INTERIOR_ANVIL,
+    TECHNIQUE_PARING,
     # Condition sits between the outline and the centre axis: it is drawn over
     # the shape it describes, and under the axis, which is a construction line
     # and has to stay readable across everything.  Within the group the three
@@ -120,6 +131,10 @@ LINE_KIND_LABELS_KO: Mapping[str, str] = {
     TECHNIQUE_PADDLING: "타날흔",
     TECHNIQUE_WATER_SMOOTHING: "물손질흔",
     TECHNIQUE_WOOD_GRAIN: "목리조정흔",
+    TECHNIQUE_BOARD_FINISHING: "목판정면",
+    TECHNIQUE_BURNISHING: "마연흔",
+    TECHNIQUE_INTERIOR_ANVIL: "내박자흔",
+    TECHNIQUE_PARING: "깎기",
     CONDITION_MISSING: "결실",
     CONDITION_RESTORED: "복원",
     CONDITION_WORN: "마모",
@@ -175,6 +190,10 @@ TECHNIQUE_LINE_KINDS: Mapping[str, str] = {
     "paddling": TECHNIQUE_PADDLING,
     "water_smoothing": TECHNIQUE_WATER_SMOOTHING,
     "wood_grain_smoothing": TECHNIQUE_WOOD_GRAIN,
+    "board_finishing": TECHNIQUE_BOARD_FINISHING,
+    "burnishing": TECHNIQUE_BURNISHING,
+    "interior_anvil": TECHNIQUE_INTERIOR_ANVIL,
+    "paring": TECHNIQUE_PARING,
 }
 
 
@@ -692,6 +711,10 @@ _PRESETS: dict[str, DrawingStylePreset] = {
             TECHNIQUE_PADDLING: LineStyle(stroke_width_mm=0.13),
             TECHNIQUE_WATER_SMOOTHING: LineStyle(stroke_width_mm=0.13),
             TECHNIQUE_WOOD_GRAIN: LineStyle(stroke_width_mm=0.13),
+            TECHNIQUE_BOARD_FINISHING: LineStyle(stroke_width_mm=0.13),
+            TECHNIQUE_BURNISHING: LineStyle(stroke_width_mm=0.13),
+            TECHNIQUE_INTERIOR_ANVIL: LineStyle(stroke_width_mm=0.13),
+            TECHNIQUE_PARING: LineStyle(stroke_width_mm=0.13),
             CENTER_AXIS: LineStyle(
                 stroke_width_mm=0.13,
                 dash_pattern_mm=(4.0, 1.0, 1.0, 1.0),
@@ -727,6 +750,10 @@ _PRESETS: dict[str, DrawingStylePreset] = {
             TECHNIQUE_PADDLING: LineStyle(stroke_width_mm=0.1),
             TECHNIQUE_WATER_SMOOTHING: LineStyle(stroke_width_mm=0.1),
             TECHNIQUE_WOOD_GRAIN: LineStyle(stroke_width_mm=0.1),
+            TECHNIQUE_BOARD_FINISHING: LineStyle(stroke_width_mm=0.1),
+            TECHNIQUE_BURNISHING: LineStyle(stroke_width_mm=0.1),
+            TECHNIQUE_INTERIOR_ANVIL: LineStyle(stroke_width_mm=0.1),
+            TECHNIQUE_PARING: LineStyle(stroke_width_mm=0.1),
             # The centre line is the fine pen; a dotted centre line marks a
             # drawing reconstructed from a fragment ([K3] p.49).
             CENTER_AXIS: LineStyle(

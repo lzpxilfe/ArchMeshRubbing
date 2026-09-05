@@ -42,9 +42,13 @@ from shapely.geometry.base import BaseGeometry
 
 from .drawing_style import (
     DrawingStyleError,
+    TECHNIQUE_BOARD_FINISHING,
+    TECHNIQUE_BURNISHING,
     TECHNIQUE_COIL_JOINT,
     TECHNIQUE_FINGER_MARK,
+    TECHNIQUE_INTERIOR_ANVIL,
     TECHNIQUE_PADDLING,
+    TECHNIQUE_PARING,
     TECHNIQUE_WATER_SMOOTHING,
     TECHNIQUE_WOOD_GRAIN,
 )
@@ -82,9 +86,15 @@ REPRESENTATIONS = (
 #: So the seam goes on the section half whatever faces were painted - the
 #: painted region says where round the pot the seam runs, not which wall it
 #: was read on.  A kind absent here is placed by its record's own faces.
+#: An anvil (내박자) is held against the inside of the wall while the paddle
+#: strikes the outside, so its mark is on the inner wall by definition - it
+#: cannot be anywhere else, whatever faces the drafter happened to paint.
 MARK_INTERIOR = "interior"
 MARK_EXTERIOR = "exterior"
-MARK_OBSERVED_SIDES: Mapping[str, str] = {TECHNIQUE_COIL_JOINT: MARK_INTERIOR}
+MARK_OBSERVED_SIDES: Mapping[str, str] = {
+    TECHNIQUE_COIL_JOINT: MARK_INTERIOR,
+    TECHNIQUE_INTERIOR_ANVIL: MARK_INTERIOR,
+}
 
 #: A region that would need more strokes than this is asking for a texture,
 #: not a drawing; the caller should paint a smaller region or widen the
@@ -246,6 +256,60 @@ TECHNIQUE_MARK_STYLES: Mapping[str, MarkStyle] = {
         width_mm=4.0,
         gap_mm=1.5,
         jitter=0.2,
+    ),
+    # The four 정면 kinds.  Their shapes follow what the tool does to the
+    # wall, not a figure in a source: no page of [K1][K2][K3] in hand shows
+    # 마연흔, 목판정면, 내박자흔 or 깎기 drawn, so these are the provisional
+    # preset's own and docs/DRAWING_CONVENTIONS.md lists them as owing a
+    # citation.  What is not provisional is the vocabulary: an archaeologist
+    # who reads one of these off the wall can now record it.
+    #
+    # 목판정면: a board held flat against a turning wall leaves broad, even,
+    # nearly straight striations - wider apart than a wet hand's and without
+    # its wobble.
+    TECHNIQUE_BOARD_FINISHING: MarkStyle(
+        representation=PARALLEL_LINES,
+        angle_deg=0.0,
+        spacing_mm=2.2,
+        waviness_mm=0.04,
+        wave_period_mm=12.0,
+        break_every_mm=18.0,
+        gap_mm=1.2,
+        jitter=0.1,
+    ),
+    # 마연: a pebble worked over leather-hard clay in short overlapping
+    # passes.  Fine, close, short strokes in patches, laid obliquely because
+    # a burnishing hand does not follow the wheel.
+    TECHNIQUE_BURNISHING: MarkStyle(
+        representation=STROKE_PATCHES,
+        angle_deg=60.0,
+        spacing_mm=0.3,
+        length_mm=7.0,
+        width_mm=3.0,
+        gap_mm=1.0,
+        jitter=0.25,
+    ),
+    # 내박자: the anvil's face pressed into the inner wall, one rounded
+    # depression per blow, in the rows the paddling followed outside.  Drawn
+    # as the depression's rim, closed, because that is what is seen from
+    # inside - and on the section half, since it is an inner-wall mark.
+    TECHNIQUE_INTERIOR_ANVIL: MarkStyle(
+        representation=PRESS_OVALS,
+        length_mm=22.0,
+        width_mm=4.5,
+        jitter=0.1,
+    ),
+    # 깎기: a blade takes a facet off the wall and leaves its edge.  Long,
+    # straight, well separated strokes - the edges between facets, not a
+    # texture - steeply set, as paring near a foot ring runs.
+    TECHNIQUE_PARING: MarkStyle(
+        representation=STROKE_PATCHES,
+        angle_deg=75.0,
+        spacing_mm=1.6,
+        length_mm=16.0,
+        width_mm=5.0,
+        gap_mm=2.5,
+        jitter=0.15,
     ),
 }
 

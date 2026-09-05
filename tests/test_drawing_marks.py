@@ -213,11 +213,19 @@ def test_only_a_press_offers_a_choice_of_how_it_is_drawn() -> None:
 
 
 def test_the_coil_seam_is_read_on_the_inner_wall() -> None:
-    """A kind whose convention names the wall settles where the mark is drawn."""
+    """A kind whose convention names the wall settles where the mark is drawn.
 
-    assert observed_side_for_line_kind(TECHNIQUE_COIL_JOINT) == MARK_INTERIOR
+    Two kinds do: a coil seam, which the potter smoothed over outside, and an
+    anvil mark, which is made against the inner wall and can be nowhere else.
+    """
+
+    from src.core.drawing_style import TECHNIQUE_INTERIOR_ANVIL
+
+    named = {TECHNIQUE_COIL_JOINT, TECHNIQUE_INTERIOR_ANVIL}
+    for kind in named:
+        assert observed_side_for_line_kind(kind) == MARK_INTERIOR
     for kind in TECHNIQUE_LINE_KINDS.values():
-        if kind != TECHNIQUE_COIL_JOINT:
+        if kind not in named:
             assert observed_side_for_line_kind(kind) is None
 
 
@@ -321,3 +329,26 @@ def test_region_polygons_rebuilds_the_region_from_outline_paths() -> None:
     assert polygons[0].area == pytest.approx(100.0 - 4.0)
     with pytest.raises(DrawingMarkError, match="role"):
         region_polygons([VectorPath(id="s", role="section", closed=True, points_mm=exterior.points_mm)])
+
+
+def test_every_technique_kind_draws_something_inside_the_region() -> None:
+    """A kind in the vocabulary is a kind the sheet can put on paper.
+
+    Four 정면 kinds joined the vocabulary with technique payload 1.2.0 -
+    목판정면, 마연흔, 내박자흔, 깎기 - and the point of adding them is that a
+    drafter who reads one off the wall can record it and see it drawn.  So
+    every kind but the paddle, whose mark is the rubbing's to show, must draw
+    strokes, and every stroke must stay inside the painted region.
+    """
+
+    band = _band(90.0, 24.0)
+    for kind in sorted(TECHNIQUE_LINE_KINDS.values()):
+        style = mark_style_for_line_kind(kind)
+        if style.representation == RUBBING:
+            assert kind == TECHNIQUE_PADDLING
+            continue
+        strokes = generate_marks([band], style, seed=f"seed:{kind}")
+        assert strokes, kind
+        _inside(strokes, band)
+        for stroke in strokes:
+            assert len(stroke.points_mm) >= 2, kind

@@ -94,19 +94,25 @@ def _committed(technique: str = "finger_mark", faces: object = (0, 2)) -> Artifa
 
 def test_the_technique_vocabulary_is_closed_and_named() -> None:
     assert TECHNIQUE_KINDS == (
+        "board_finishing",
+        "burnishing",
         "coil_joint",
         "finger_mark",
+        "interior_anvil",
         "paddling",
+        "paring",
         "water_smoothing",
         "wood_grain_smoothing",
     )
     assert set(TECHNIQUE_KIND_LABELS_KO) == set(TECHNIQUE_KINDS)
     assert TECHNIQUE_KIND_LABELS_KO["finger_mark"] == "지두흔"
     assert TECHNIQUE_KIND_LABELS_KO["coil_joint"] == "테쌓기흔"
+    assert TECHNIQUE_KIND_LABELS_KO["burnishing"] == "마연흔"
+    assert TECHNIQUE_KIND_LABELS_KO["interior_anvil"] == "내박자흔"
 
     selection = technique_selection(total_face_count=4, face_indices=(0,))
     with pytest.raises(ArtifactTechniqueAnnotationError, match="technique must be one of"):
-        technique_recipe(technique="burnishing", precision_grid_mm=0.01, selection=selection)
+        technique_recipe(technique="slipping", precision_grid_mm=0.01, selection=selection)
     # A condition kind is not a technique, whatever the two have in common.
     with pytest.raises(ArtifactTechniqueAnnotationError, match="technique must be one of"):
         technique_recipe(technique="missing", precision_grid_mm=0.01, selection=selection)
@@ -282,7 +288,7 @@ def test_the_record_says_which_side_of_the_wall_a_mark_is_on() -> None:
     # The committed payload carries it, digests it, and reports it in QC.
     session = _committed("coil_joint")
     payload = technique_payload_from_record(session.document.record_index[RECORD_ID])
-    assert payload.schema_version == "1.1.0"
+    assert payload.schema_version == "1.2.0"
     assert payload.surface_side == SURFACE_EXTERIOR
     assert payload.interior_face_fraction_millionths == 0
     assert payload.direction_deg is None
@@ -319,6 +325,69 @@ def test_a_direction_the_drafter_observed_travels_in_the_recipe_and_payload() ->
     payload = technique_payload_from_record(committed.document.record_index[RECORD_ID])
     assert payload.direction_deg == 45.0
     assert committed.document.record_index[RECORD_ID].recipe["direction_deg"] == 45.0
+
+
+def test_the_four_surface_finishing_kinds_need_a_1_2_0_payload() -> None:
+    """A new kind is a new closed value set, so it needs its own version.
+
+    The keys do not change - a 1.2.0 payload has the shape of a 1.1.0 one -
+    but a reader that knows only 1.1.0 would be handed 마연흔 and left to
+    guess what it is.  So the four are refused in an older payload, and every
+    payload already written reads and digests as it was written.
+    """
+
+    from src.core.artifact_technique_annotation import (
+        TECHNIQUE_KINDS_SINCE_1_2,
+        TechniqueAnnotationPayload,
+    )
+
+    assert TECHNIQUE_KINDS_SINCE_1_2 == (
+        "board_finishing",
+        "burnishing",
+        "interior_anvil",
+        "paring",
+    )
+    assert set(TECHNIQUE_KINDS_SINCE_1_2) <= set(TECHNIQUE_KINDS)
+
+    current = technique_payload_from_record(
+        _committed("burnishing").document.record_index[RECORD_ID]
+    )
+    assert current.schema_version == "1.2.0"
+    assert current.technique == "burnishing"
+
+    for kind in TECHNIQUE_KINDS_SINCE_1_2:
+        with pytest.raises(ArtifactTechniqueAnnotationError, match="needs a 1.2.0 payload"):
+            TechniqueAnnotationPayload(
+                schema_version="1.1.0",
+                technique=kind,
+                selection=current.selection,
+                views=current.views,
+                skipped_views=current.skipped_views,
+                surface_side=current.surface_side,
+                interior_face_fraction_millionths=(
+                    current.interior_face_fraction_millionths
+                ),
+            )
+        with pytest.raises(ArtifactTechniqueAnnotationError, match="needs a 1.2.0 payload"):
+            TechniqueAnnotationPayload(
+                schema_version="1.0.0",
+                technique=kind,
+                selection=current.selection,
+                views=current.views,
+                skipped_views=current.skipped_views,
+            )
+
+    # A kind the older versions always knew still writes in an older payload.
+    older = TechniqueAnnotationPayload(
+        schema_version="1.1.0",
+        technique="coil_joint",
+        selection=current.selection,
+        views=current.views,
+        skipped_views=current.skipped_views,
+        surface_side=current.surface_side,
+        interior_face_fraction_millionths=current.interior_face_fraction_millionths,
+    )
+    assert older.schema_version == "1.1.0"
 
 
 def test_a_1_0_0_payload_still_reads_and_digests_as_it_was_written() -> None:

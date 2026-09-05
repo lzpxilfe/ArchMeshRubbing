@@ -106,21 +106,26 @@ from .source_identity import PRIMARY_FILE_IDENTITY_SCOPE
 
 
 VECTOR_EXPORT_FORMAT = "archmeshrubbing_vector_export"
-_CURRENT_VECTOR_EXPORT_SCHEMA_VERSION = "1.4.0"
+_CURRENT_VECTOR_EXPORT_SCHEMA_VERSION = "1.5.0"
 VECTOR_EXPORT_SCHEMA_VERSION = _CURRENT_VECTOR_EXPORT_SCHEMA_VERSION
 #: 1.1.0 introduced the current provenance contract (import admission, axis
 #: Align); 1.2.0 is 1.1.0 plus outline algorithm 1.1.0 - the grid closing -
 #: and its four QC keys; 1.3.0 is 1.2.0 plus a user drawing style preset's
 #: definition in the presentation claim; 1.4.0 is 1.3.0 with the five
-#: technique line kinds in that definition's closed key set.  All four carry
-#: the current contract; 1.0.0 is legacy.
+#: technique line kinds in that definition's closed key set; 1.5.0 adds the
+#: four 정면 kinds that came with technique payload 1.2.0 - 목판정면, 마연흔,
+#: 내박자흔, 깎기.  A user preset styles every line kind there is, so each
+#: time the vocabulary grows its definition needs a sidecar whose closed key
+#: set can hold it.  All five carry the current contract; 1.0.0 is legacy.
 _CURRENT_CONTRACT_VECTOR_EXPORT_SCHEMA_VERSIONS = frozenset(
-    {"1.1.0", "1.2.0", "1.3.0", "1.4.0"}
+    {"1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0"}
 )
 #: The sidecars that can carry an outline computed with the grid closing.
-_GRID_CLOSING_VECTOR_EXPORT_SCHEMA_VERSIONS = frozenset({"1.2.0", "1.3.0", "1.4.0"})
+_GRID_CLOSING_VECTOR_EXPORT_SCHEMA_VERSIONS = frozenset(
+    {"1.2.0", "1.3.0", "1.4.0", "1.5.0"}
+)
 SUPPORTED_VECTOR_EXPORT_SCHEMA_VERSIONS = frozenset(
-    {"1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0"}
+    {"1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0"}
 )
 VECTOR_EXPORT_DIRECTORY_SUFFIX = ".amr-vector"
 VECTOR_EXPORT_SVG_NAME = "artifact.svg"

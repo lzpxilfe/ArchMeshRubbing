@@ -1,7 +1,7 @@
 """Manufacturing technique marks as a durable set of faces.
 
-목리조정흔, 지두흔, 타날흔, 테쌓기흔, 물손질흔 - the marks a potter's tools and
-hands left on the wall - are read off the surface by the archaeologist and
+목리조정흔, 지두흔, 타날흔, 테쌓기흔, 물손질흔, 마연흔, 목판정면, 내박자흔, 깎기 -
+the marks a potter's tools and hands left on the wall - are read off the surface by the archaeologist and
 drawn on the elevation.  The program does not find them; it records where the
 archaeologist painted them, projects that region into the six views the way
 a condition region is projected, and draws each kind by its convention.
@@ -92,8 +92,14 @@ _REGION_UNION_FOR_TECHNIQUE: Mapping[str, bool] = {
 #: usually seen inside, where the wall was not smoothed over) and, when the
 #: drafter observed it, the direction the tool moved.  A 1.0.0 payload reads
 #: and digests exactly as it was written.
-TECHNIQUE_PAYLOAD_SCHEMA_VERSION = "1.1.0"
-TECHNIQUE_PAYLOAD_SCHEMA_VERSIONS = ("1.0.0", TECHNIQUE_PAYLOAD_SCHEMA_VERSION)
+#: 1.2.0 adds four kinds to the vocabulary.  The keys do not change - a
+#: 1.2.0 payload has exactly the shape of a 1.1.0 one - but the closed set of
+#: values `technique` may take does, and a reader that only knows 1.1.0 must
+#: not be handed 마연흔 and left to guess.  So the new kinds are refused in a
+#: 1.0.0 or 1.1.0 payload, and every payload already written reads and
+#: digests exactly as it was written.
+TECHNIQUE_PAYLOAD_SCHEMA_VERSION = "1.2.0"
+TECHNIQUE_PAYLOAD_SCHEMA_VERSIONS = ("1.0.0", "1.1.0", TECHNIQUE_PAYLOAD_SCHEMA_VERSION)
 #: Which side of the wall a painted face set is on.  Decided from the mesh:
 #: a face whose normal points away from the mesh's centroid is exterior, one
 #: whose normal points toward it is interior; a region that mixes the two by
@@ -108,24 +114,48 @@ TECHNIQUE_PAYLOAD_EXTENSION_KEY = "org.archmeshrubbing:technique-annotation-v1"
 TECHNIQUE_PAYLOAD_MEDIA_TYPE = "application/vnd.archmeshrubbing.technique-annotation+json"
 TECHNIQUE_GEOMETRY_REF_PREFIX = "urn:archmeshrubbing:technique-annotation:sha256:"
 
+#: 목판정면: the wall finished with a wooden board held against it.
+TECHNIQUE_BOARD_FINISHING = "board_finishing"
+#: 마연흔: the leather-hard wall compacted and glossed with a smooth tool.
+TECHNIQUE_BURNISHING = "burnishing"
 TECHNIQUE_COIL_JOINT = "coil_joint"
 TECHNIQUE_FINGER_MARK = "finger_mark"
+#: 내박자흔: the anvil held inside the wall while the paddle struck outside.
+TECHNIQUE_INTERIOR_ANVIL = "interior_anvil"
 TECHNIQUE_PADDLING = "paddling"
+#: 깎기: material pared away with a blade, leaving facets and their edges.
+TECHNIQUE_PARING = "paring"
 TECHNIQUE_WATER_SMOOTHING = "water_smoothing"
 TECHNIQUE_WOOD_GRAIN = "wood_grain_smoothing"
 #: Closed vocabulary, in canonical (sorted) order.
 TECHNIQUE_KINDS: tuple[str, ...] = (
+    TECHNIQUE_BOARD_FINISHING,
+    TECHNIQUE_BURNISHING,
     TECHNIQUE_COIL_JOINT,
     TECHNIQUE_FINGER_MARK,
+    TECHNIQUE_INTERIOR_ANVIL,
     TECHNIQUE_PADDLING,
+    TECHNIQUE_PARING,
     TECHNIQUE_WATER_SMOOTHING,
     TECHNIQUE_WOOD_GRAIN,
 )
+#: The four a 1.1.0 payload cannot name.  Sorted, so the refusal reads the
+#: same way every time.
+TECHNIQUE_KINDS_SINCE_1_2: tuple[str, ...] = (
+    TECHNIQUE_BOARD_FINISHING,
+    TECHNIQUE_BURNISHING,
+    TECHNIQUE_INTERIOR_ANVIL,
+    TECHNIQUE_PARING,
+)
 #: What the drafter calls each kind.
 TECHNIQUE_KIND_LABELS_KO: Mapping[str, str] = {
+    TECHNIQUE_BOARD_FINISHING: "목판정면",
+    TECHNIQUE_BURNISHING: "마연흔",
     TECHNIQUE_COIL_JOINT: "테쌓기흔",
     TECHNIQUE_FINGER_MARK: "지두흔",
+    TECHNIQUE_INTERIOR_ANVIL: "내박자흔",
     TECHNIQUE_PADDLING: "타날흔",
+    TECHNIQUE_PARING: "깎기",
     TECHNIQUE_WATER_SMOOTHING: "물손질흔",
     TECHNIQUE_WOOD_GRAIN: "목리조정흔",
 }
@@ -190,6 +220,14 @@ class TechniqueAnnotationPayload:
         if self.schema_version not in TECHNIQUE_PAYLOAD_SCHEMA_VERSIONS:
             raise ArtifactTechniqueAnnotationError(
                 f"unsupported technique payload schema: {self.schema_version!r}"
+            )
+        if (
+            self.schema_version != TECHNIQUE_PAYLOAD_SCHEMA_VERSION
+            and self.technique in TECHNIQUE_KINDS_SINCE_1_2
+        ):
+            raise ArtifactTechniqueAnnotationError(
+                f"technique {self.technique!r} needs a "
+                f"{TECHNIQUE_PAYLOAD_SCHEMA_VERSION} payload"
             )
         if self.schema_version == "1.0.0":
             if (
@@ -818,13 +856,18 @@ __all__ = [
     "TECHNIQUE_ALGORITHM_VERSION",
     "TECHNIQUE_ALGORITHM_VERSIONS",
     "TECHNIQUE_GRAZING_COSINE_MIN",
+    "TECHNIQUE_BOARD_FINISHING",
+    "TECHNIQUE_BURNISHING",
     "TECHNIQUE_COIL_JOINT",
     "TECHNIQUE_FINGER_MARK",
+    "TECHNIQUE_INTERIOR_ANVIL",
     "TECHNIQUE_GEOMETRY_REF_PREFIX",
     "TECHNIQUE_KINDS",
+    "TECHNIQUE_KINDS_SINCE_1_2",
     "TECHNIQUE_KIND_LABELS_KO",
     "TECHNIQUE_OPERATION_KIND",
     "TECHNIQUE_PADDLING",
+    "TECHNIQUE_PARING",
     "TECHNIQUE_PAYLOAD_EXTENSION_KEY",
     "TECHNIQUE_PAYLOAD_MEDIA_TYPE",
     "TECHNIQUE_PAYLOAD_SCHEMA_VERSION",

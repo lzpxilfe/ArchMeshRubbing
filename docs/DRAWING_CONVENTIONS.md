@@ -32,6 +32,10 @@
 | `technique_paddling` | 타날흔 | 두드림판 자국. 입면에는 긋지 않고 탁본 띠에 맡긴다 | `annotation.technique.v1`, kind `paddling` |
 | `technique_water_smoothing` | 물손질흔 | 물 묻힌 손으로 문지른 자국. 회전 방향의 가늘고 끊긴 평행선 | `annotation.technique.v1`, kind `water_smoothing` |
 | `technique_wood_grain` | 목리조정흔 | 나무 도구로 긁어 고른 자국. 방향을 가진 가는 평행선의 군집 | `annotation.technique.v1`, kind `wood_grain_smoothing` |
+| `technique_board_finishing` | 목판정면 | 나무판을 대고 고른 자국. 회전 방향의 넓고 고른, 거의 곧은 평행선 | `annotation.technique.v1`, kind `board_finishing` |
+| `technique_burnishing` | 마연흔 | 매끄러운 도구로 문질러 다진 자국. 짧고 촘촘한 획이 비스듬히 겹친 군집 | `annotation.technique.v1`, kind `burnishing` |
+| `technique_interior_anvil` | 내박자흔 | 안쪽에 받친 내박자 자국. 내면에서만 보이므로 단면 쪽에 눌린 자리의 테두리로 | `annotation.technique.v1`, kind `interior_anvil` |
+| `technique_paring` | 깎기 | 칼로 깎아낸 면과 그 경계. 길고 곧은 획이 사이를 두고 비스듬히 | `annotation.technique.v1`, kind `paring` |
 | `center_axis` | 중심선 | 회전축·대칭축의 일점쇄선 | `rotation_axis_from_circle_records/v1` Align (record가 아니라 정치의 결과) |
 
 새 선 종류는 **그것을 실제로 만들어내는 것이 생긴 뒤에** 추가한다. 만들 수 없는 종류를 먼저 이름 붙이면 모든 도면에 빈 레이어가 생기고, preset이 아무도 지키지 않는 관례를 서술하게 된다.
@@ -39,6 +43,8 @@
 record의 role 이름(`section`, `exterior`, `hole`)은 payload 해시의 일부라 절대 바뀌지 않는다. role에서 선 종류로 가는 매핑은 표현이므로 `RECORD_ROLE_LINE_KINDS`에 있다.
 
 상태 표기는 role이 아니라 **record의 kind**로 선 종류가 정해진다(`CONDITION_LINE_KINDS`). 상태 경계도 outline payload로 저장되어 path의 role이 `exterior`·`hole`이기 때문에, role로 그리면 결실부가 유물의 외형선으로 인쇄된다.
+
+**정면 수법 네 가지의 획은 아직 출처가 없다.** 목판정면·마연흔·내박자흔·깎기는 technique payload 1.2.0에서 어휘에 들어왔고, 그 자체는 잠정값이 아니다 — 벽에서 이 넷을 읽은 고고학자가 이제 그것을 기록할 수 있다. 잠정인 것은 종이 위의 모양이다. 손에 있는 [K1][K2][K3]의 어느 쪽에도 이 넷을 그린 도면이 없어서, 지금의 획은 도구가 벽에 하는 일에서 끌어낸 것이다: 나무판은 넓고 고른 줄을, 마연구는 짧고 촘촘한 겹친 획을, 내박자는 안쪽에 눌린 자리의 테두리를, 칼은 면과 면 사이의 곧은 경계를 남긴다. 이 넷의 관례 수치와 모양은 위 4단계 절차로 공개 지침에서 옮겨와야 하고, 그 전까지 모든 도면은 preset의 `provisional`로 그렇게 말한다. 내박자흔만은 관례가 아니라 사실로 벽이 정해진다 — 내박자는 내면에 대는 것이므로 칠한 면이 무엇이든 단면 쪽에 그린다(`MARK_OBSERVED_SIDES`).
 
 기법 선 종류는 외형선 뒤, 상태 앞에 놓았다. 기법은 표면 위에 있으므로 외형선 위에 그려지고, 상태는 그 도면을 어디까지 읽을 수 있는지를 말하므로 기법 위에 그려진다. 복원된 부분에 기법 선이 가려지는 것은 옳은 결과다 — 현대의 복원면에서 제작 기법을 읽어서는 안 된다.
 
@@ -126,6 +132,10 @@ record의 role 이름(`section`, `exterior`, `hole`)은 payload 해시의 일부
 | `technique_paddling` | 0.13 | - (획으로 구분) | - |
 | `technique_water_smoothing` | 0.13 | - (획으로 구분) | - |
 | `technique_wood_grain` | 0.13 | - (획으로 구분) | - |
+| `technique_board_finishing` | 0.13 | - (획으로 구분) | - |
+| `technique_burnishing` | 0.13 | - (획으로 구분) | - |
+| `technique_interior_anvil` | 0.13 | - (획으로 구분) | - |
+| `technique_paring` | 0.13 | - (획으로 구분) | - |
 | `center_axis` | 0.13 | 4 - 1 - 1 - 1 (일점쇄선) | - |
 
 해칭: 45°, 간격 1.0 mm, 선 굵기 0.13 mm.

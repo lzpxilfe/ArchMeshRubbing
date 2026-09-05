@@ -332,7 +332,7 @@ def test_a_styled_sidecar_validates_against_the_shipped_schema() -> None:
         ]
     )
     export_schema = json.loads(
-        (root / "schemas/vector_export-1.4.0.schema.json").read_text(encoding="utf-8")
+        (root / "schemas/vector_export-1.5.0.schema.json").read_text(encoding="utf-8")
     )
     validator = jsonschema.Draft202012Validator(export_schema, registry=registry)
 
@@ -414,8 +414,8 @@ def test_the_technique_vocabulary_matches_the_record_layer_exactly() -> None:
     for kind in TECHNIQUE_KINDS:
         assert line_kind_for_technique(kind) in LINE_KINDS
         assert line_kind_for_technique(kind).startswith("technique_")
-    with pytest.raises(DrawingStyleError, match="burnishing"):
-        line_kind_for_technique("burnishing")
+    with pytest.raises(DrawingStyleError, match="slipping"):
+        line_kind_for_technique("slipping")
 
 
 def test_technique_marks_are_drawn_over_the_outline_and_under_condition() -> None:

@@ -354,11 +354,11 @@ class TestArtifactVectorExportScaleAndProvenance(unittest.TestCase):
         self.assertEqual(first.sidecar_sha256, second.sidecar_sha256)
         self.assertEqual(
             first.svg_sha256,
-            "78372dac6274dbe05ae58ac7507a26bbe12d99f3eaa9cca137cbb5a28ef9771c",
+            "a393ce1ce22cdab206f7545a18af4e59c22c22bdc075a79185a5d5ea9a1520e8",
         )
         self.assertEqual(
             first.sidecar_sha256,
-            "4ec6d478a7071bd1ccd802416f1eb126809810f1cf0532adf8b04e270ddfce93",
+            "9663a8dab9f8b957f6f7264cebe2ad35fc8b9479163daa8bcfc3130c0540520c",
         )
 
     def test_multiple_cutline_components_survive_without_world_xy_collapse(self):
