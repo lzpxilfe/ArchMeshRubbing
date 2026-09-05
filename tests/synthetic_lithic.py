@@ -409,6 +409,48 @@ def flaked_tool(
     return np.asarray(vertices, dtype=np.float64), np.asarray(faces, dtype=np.int32)
 
 
+def dorsal_sheet(
+    shape: LithicShape = BIFACE_SHAPE, *, pitch_mm: float = 0.5
+) -> tuple[np.ndarray, np.ndarray]:
+    """The dorsal face alone, meshed the way a scan meshes it: a regular
+    grid of small triangles, ``pitch_mm`` apart, with no regard for where
+    the ridges are.
+
+    ``flaked_tool`` puts a vertex on every ridge and long needle triangles
+    between them, which is the mesh a generator makes and no scanner does.
+    A reading meant for scans is tested on this sheet, against the same
+    ``dorsal_creases``.  Open at the margin; wound upward (+z outward).
+    """
+
+    if pitch_mm <= 0.0:
+        raise ValueError("pitch_mm must be positive")
+    half_x = shape.half_length_mm + pitch_mm
+    half_y = shape.half_width_mm + pitch_mm
+    xs = np.arange(-half_x, half_x + pitch_mm * 0.5, pitch_mm)
+    ys = np.arange(-half_y, half_y + pitch_mm * 0.5, pitch_mm)
+    columns, rows = xs.shape[0], ys.shape[0]
+    index = -np.ones((rows, columns), dtype=np.int64)
+    vertices: list[tuple[float, float, float]] = []
+    for row, y in enumerate(ys.tolist()):
+        for column, x in enumerate(xs.tolist()):
+            r = math.hypot(x, y)
+            if r > plan_radius(shape, math.atan2(y, x)) - 1e-9:
+                continue
+            index[row, column] = len(vertices)
+            vertices.append((x, y, _dorsal_z(shape, (x, y, False))))
+    faces: list[tuple[int, int, int]] = []
+    for row in range(rows - 1):
+        for column in range(columns - 1):
+            a, b = index[row, column], index[row, column + 1]
+            c, d = index[row + 1, column], index[row + 1, column + 1]
+            if min(a, b, c, d) < 0:
+                continue
+            # Counter-clockwise seen from +z.
+            faces.append((int(a), int(b), int(d)))
+            faces.append((int(a), int(d), int(c)))
+    return np.asarray(vertices, dtype=np.float64), np.asarray(faces, dtype=np.int64)
+
+
 def plan_area_mm2(shape: LithicShape, *, steps: int = 20000) -> float:
     """The plan's area, by quadrature, to compare an outline against."""
 
@@ -470,6 +512,7 @@ __all__ = [
     "Facet",
     "LithicShape",
     "dorsal_creases",
+    "dorsal_sheet",
     "dorsal_height",
     "flaked_tool",
     "lithic_session",

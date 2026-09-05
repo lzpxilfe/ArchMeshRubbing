@@ -8,6 +8,7 @@ import tempfile
 
 import pytest
 
+from src.core.artifact_crease_lines import detect_convex_creases
 from src.core.artifact_crease_record import (
     CREASE_PAYLOAD_EXTENSION_KEY,
     CREASE_RECORD_TYPE,
@@ -72,6 +73,68 @@ def test_the_recipe_carries_the_thresholds_and_rebuilds_from_them() -> None:
         validate_crease_recipe({**recipe, "visibility": "anything"})
     with pytest.raises(ArtifactCreaseRecordError, match="inclusive range"):
         crease_recipe(dihedral_min_deg=0.0)
+
+
+def test_the_first_algorithm_keeps_its_bytes_and_the_second_names_what_it_adds() -> None:
+    """A record written under 1.0.0 must rebuild to the same bytes, or
+    every such record would fail to open; 1.1.0 carries the curvature crest,
+    the linking and its distance, and nothing else moves."""
+
+    from src.core.artifact_crease_lines import CREST_RULE_CURVATURE_V2, CREST_RULE_TURNING_V1
+    from src.core.artifact_crease_record import (
+        CREASE_ALGORITHM_VERSION,
+        CREASE_LEGACY_ALGORITHM_VERSION,
+        read_creases,
+    )
+    from src.core.canonical_json import canonical_json_sha256
+
+    legacy = crease_recipe(algorithm_version=CREASE_LEGACY_ALGORITHM_VERSION)
+    assert legacy["algorithm_version"] == "1.0.0"
+    assert legacy["detection_policy"]["crest"] == CREST_RULE_TURNING_V1
+    assert "link_um" not in legacy["detection_policy"]
+    # The bytes 1.0.0 wrote, frozen.
+    assert canonical_json_sha256(legacy) == (
+        "990dfc44bf9401ca0bc3d136e768369161d28d0e74fedd421a4e82a1d6ddb26c"
+    )
+    assert validate_crease_recipe(legacy) == legacy
+
+    current = crease_recipe(link_mm=4.0)
+    assert current["algorithm_version"] == CREASE_ALGORITHM_VERSION == "1.1.0"
+    policy = current["detection_policy"]
+    assert policy["crest"] == CREST_RULE_CURVATURE_V2
+    assert policy["link_um"] == 4_000
+    assert policy["sample"] == "area_weighted_normals_within_half_scale/v1"
+    assert set(policy) - set(legacy["detection_policy"]) == {"link", "link_um", "sample"}
+    assert validate_crease_recipe(current) == current
+
+    with pytest.raises(ArtifactCreaseRecordError, match="does not join"):
+        crease_recipe(link_mm=1.0, algorithm_version=CREASE_LEGACY_ALGORITHM_VERSION)
+    with pytest.raises(ArtifactCreaseRecordError, match="algorithm_version"):
+        crease_recipe(algorithm_version="2.0.0")
+    with pytest.raises(ArtifactCreaseRecordError, match="algorithm_version"):
+        validate_crease_recipe({**legacy, "algorithm_version": "0.9.0"})
+    with pytest.raises(ArtifactCreaseRecordError, match="does not match"):
+        validate_crease_recipe(
+            {**legacy, "detection_policy": {**legacy["detection_policy"], "link_um": 0}}
+        )
+
+    # A reading under the first algorithm is the first algorithm's reading.
+    from synthetic_lithic import dorsal_sheet
+
+    vertices, faces = dorsal_sheet(pitch_mm=1.0)
+    first = crease_recipe(
+        dihedral_min_deg=15.0, scale_mm=4.0, algorithm_version=CREASE_LEGACY_ALGORITHM_VERSION
+    )
+    second = crease_recipe(dihedral_min_deg=15.0, scale_mm=4.0)
+    assert read_creases(vertices, faces, first).chain_count == len(
+        detect_convex_creases(
+            vertices, faces, dihedral_min_deg=15.0, scale_mm=4.0, crest_rule=CREST_RULE_TURNING_V1
+        )
+    )
+    assert read_creases(vertices, faces, second).chain_count == len(
+        detect_convex_creases(vertices, faces, dihedral_min_deg=15.0, scale_mm=4.0)
+    )
+    assert read_creases(vertices, faces, first).sha256 != read_creases(vertices, faces, second).sha256
 
 
 def test_a_reading_is_a_record_that_reopens_to_the_same_bytes(recorded) -> None:

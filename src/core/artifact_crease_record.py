@@ -22,7 +22,11 @@ import numpy as np
 
 from .artifact_cancellation import CancellationProbe, raise_if_cancelled
 from .artifact_crease_lines import (
+    CREASE_LINK_ANGLE_DEG,
+    CREASE_LINK_ROUNDS,
     CREASE_WELD_MM,
+    CREST_RULE_CURVATURE_V2,
+    CREST_RULE_TURNING_V1,
     DEFAULT_CREASE_DIHEDRAL_MIN_DEG,
     DEFAULT_CREASE_MIN_LENGTH_MM,
     ArtifactCreaseError,
@@ -48,7 +52,15 @@ from .canonical_json import (
 CREASE_RECORD_TYPE = "measurement.crease.v1"
 CREASE_OPERATION_KIND = "crease"
 CREASE_ALGORITHM = "archmeshrubbing.convex_dihedral_crease"
-CREASE_ALGORITHM_VERSION = "1.0.0"
+#: 1.0.0 picked the crest of a rounded ridge by each edge's own turning
+#: against every neighbour within half the scale, which on a scanned mesh
+#: leaves a ridge in fragments; 1.1.0 reads each side's normal over a patch,
+#: scores the crest by its height above the chord, lets only edges across
+#: the ridge compete, and can join chain ends (``link_um``).  A reading
+#: taken under 1.0.0 is recomputed under 1.0.0 (docs/LITHIC_TRIAL.md).
+CREASE_LEGACY_ALGORITHM_VERSION = "1.0.0"
+CREASE_ALGORITHM_VERSION = "1.1.0"
+CREASE_ALGORITHM_VERSIONS = frozenset({CREASE_LEGACY_ALGORITHM_VERSION, CREASE_ALGORITHM_VERSION})
 CREASE_COORDINATE_SPACE = "canonical_um_planar_per_view/v1"
 CREASE_PAYLOAD_SCHEMA_VERSION = "1.0.0"
 CREASE_PAYLOAD_EXTENSION_KEY = "org.archmeshrubbing:crease-v1"
@@ -95,21 +107,30 @@ def crease_recipe(
     dihedral_min_deg: float = DEFAULT_CREASE_DIHEDRAL_MIN_DEG,
     min_length_mm: float = DEFAULT_CREASE_MIN_LENGTH_MM,
     scale_mm: float = 0.0,
+    link_mm: float = 0.0,
+    algorithm_version: str = CREASE_ALGORITHM_VERSION,
 ) -> dict[str, Any]:
     """Resolve the numbers that decide what counts as a ridge.
 
     ``scale_mm`` at zero reads the bend between the two faces of an edge;
     above zero it reads the bend between the surface that far to either
-    side, for ridges a scan has rounded over.
+    side, for ridges a scan has rounded over.  ``link_mm`` above zero joins
+    chain ends that point at each other within that distance; it belongs to
+    1.1.0, and the 1.0.0 recipe has no place for it.
     """
 
+    if algorithm_version not in CREASE_ALGORITHM_VERSIONS:
+        raise ArtifactCreaseRecordError(
+            f"crease algorithm_version must be one of {sorted(CREASE_ALGORITHM_VERSIONS)}"
+        )
     try:
         dihedral = float(dihedral_min_deg)
         length = float(min_length_mm)
         scale = float(scale_mm)
+        link = float(link_mm)
     except (TypeError, ValueError) as exc:
         raise ArtifactCreaseRecordError("crease thresholds must be numbers") from exc
-    if not np.isfinite(dihedral) or not np.isfinite(length) or not np.isfinite(scale):
+    if not all(np.isfinite(value) for value in (dihedral, length, scale, link)):
         raise ArtifactCreaseRecordError("crease thresholds must be finite")
     scale_um = _strict_int(
         int(round(scale * 1000.0)),
@@ -117,6 +138,17 @@ def crease_recipe(
         minimum=0,
         maximum=MAX_CREASE_LENGTH_UM,
     )
+    link_um = _strict_int(
+        int(round(link * 1000.0)),
+        name="link_mm (in micrometres)",
+        minimum=0,
+        maximum=MAX_CREASE_LENGTH_UM,
+    )
+    if algorithm_version == CREASE_LEGACY_ALGORITHM_VERSION and link_um != 0:
+        raise ArtifactCreaseRecordError(
+            f"crease algorithm {CREASE_LEGACY_ALGORITHM_VERSION} does not join chains; "
+            "link_mm must be 0"
+        )
     dihedral_millideg = _strict_int(
         int(round(dihedral * 1000.0)),
         name="dihedral_min_deg (in millidegrees)",
@@ -129,19 +161,28 @@ def crease_recipe(
         minimum=MIN_CREASE_LENGTH_UM,
         maximum=MAX_CREASE_LENGTH_UM,
     )
+    policy: dict[str, Any] = {
+        "convexity": "far_corner_below_neighbour_plane/v1",
+        "crest": CREST_RULE_TURNING_V1,
+        "dihedral_min_millideg": dihedral_millideg,
+        "min_length_um": length_um,
+        "scale_um": scale_um,
+        "weld_um": int(round(CREASE_WELD_MM * 1000.0)),
+    }
+    if algorithm_version == CREASE_ALGORITHM_VERSION:
+        policy["crest"] = CREST_RULE_CURVATURE_V2
+        policy["link"] = (
+            f"ends_facing_within_{int(round(CREASE_LINK_ANGLE_DEG))}deg_"
+            f"{CREASE_LINK_ROUNDS}_rounds/v1"
+        )
+        policy["link_um"] = link_um
+        policy["sample"] = "area_weighted_normals_within_half_scale/v1"
     return {
         "algorithm": CREASE_ALGORITHM,
-        "algorithm_version": CREASE_ALGORITHM_VERSION,
+        "algorithm_version": algorithm_version,
         "chain_order": "longest_first_then_start_point/v1",
         "coordinate_space": CREASE_COORDINATE_SPACE,
-        "detection_policy": {
-            "convexity": "far_corner_below_neighbour_plane/v1",
-            "crest": "turning_per_mm_maximum_within_half_scale/v1",
-            "dihedral_min_millideg": dihedral_millideg,
-            "min_length_um": length_um,
-            "scale_um": scale_um,
-            "weld_um": int(round(CREASE_WELD_MM * 1000.0)),
-        },
+        "detection_policy": policy,
         "kind": CREASE_OPERATION_KIND,
         "resource_limits": {
             "max_chains": MAX_CREASE_CHAINS,
@@ -160,17 +201,30 @@ def validate_crease_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
     policy = recipe.get("detection_policy")
     if not isinstance(policy, Mapping):
         raise ArtifactCreaseRecordError("crease recipe detection_policy is invalid")
+    version = recipe.get("algorithm_version")
+    if not isinstance(version, str) or version not in CREASE_ALGORITHM_VERSIONS:
+        raise ArtifactCreaseRecordError(
+            f"crease recipe algorithm_version must be one of {sorted(CREASE_ALGORITHM_VERSIONS)}"
+        )
     dihedral = policy.get("dihedral_min_millideg")
     length = policy.get("min_length_um")
     scale = policy.get("scale_um")
-    for value in (dihedral, length, scale):
+    link = policy.get("link_um", 0)
+    for value in (dihedral, length, scale, link):
         if isinstance(value, bool) or not isinstance(value, int):
             raise ArtifactCreaseRecordError("crease recipe thresholds must be integers")
-    assert isinstance(dihedral, int) and isinstance(length, int) and isinstance(scale, int)
+    assert (
+        isinstance(dihedral, int)
+        and isinstance(length, int)
+        and isinstance(scale, int)
+        and isinstance(link, int)
+    )
     expected = crease_recipe(
         dihedral_min_deg=dihedral / 1000.0,
         min_length_mm=length / 1000.0,
         scale_mm=scale / 1000.0,
+        link_mm=link / 1000.0,
+        algorithm_version=version,
     )
     try:
         same = canonical_json_bytes(dict(recipe)) == canonical_json_bytes(expected)
@@ -363,6 +417,8 @@ def read_creases(
     dihedral_min_deg = int(policy["dihedral_min_millideg"]) / 1000.0
     min_length_mm = int(policy["min_length_um"]) / 1000.0
     scale_mm = int(policy["scale_um"]) / 1000.0
+    link_mm = int(policy.get("link_um", 0)) / 1000.0
+    crest_rule = str(policy["crest"])
     raise_if_cancelled(cancellation_probe)
     try:
         chains = detect_convex_creases(
@@ -371,6 +427,8 @@ def read_creases(
             dihedral_min_deg=dihedral_min_deg,
             min_length_mm=min_length_mm,
             scale_mm=scale_mm,
+            link_mm=link_mm,
+            crest_rule=crest_rule,
         )
     except ArtifactCreaseError as exc:
         raise ArtifactCreaseRecordError(str(exc)) from exc
@@ -424,6 +482,7 @@ def compute_crease_reading(
     dihedral_min_deg: float = DEFAULT_CREASE_DIHEDRAL_MIN_DEG,
     min_length_mm: float = DEFAULT_CREASE_MIN_LENGTH_MM,
     scale_mm: float = 0.0,
+    link_mm: float = 0.0,
     cancellation_probe: CancellationProbe | None = None,
 ) -> CreaseComputation:
     """Read the ridges of the artifact as positioned by its active Align."""
@@ -431,7 +490,10 @@ def compute_crease_reading(
     if not isinstance(session, ArtifactSession):
         raise ArtifactCreaseRecordError("session must be an ArtifactSession")
     recipe = crease_recipe(
-        dihedral_min_deg=dihedral_min_deg, min_length_mm=min_length_mm, scale_mm=scale_mm
+        dihedral_min_deg=dihedral_min_deg,
+        min_length_mm=min_length_mm,
+        scale_mm=scale_mm,
+        link_mm=link_mm,
     )
     try:
         context = session.capture_operation(recipe=recipe)
@@ -596,6 +658,8 @@ __all__ = [
     "ArtifactCreaseRecordError",
     "CREASE_ALGORITHM",
     "CREASE_ALGORITHM_VERSION",
+    "CREASE_ALGORITHM_VERSIONS",
+    "CREASE_LEGACY_ALGORITHM_VERSION",
     "CREASE_PAYLOAD_EXTENSION_KEY",
     "CREASE_PAYLOAD_MEDIA_TYPE",
     "CREASE_PAYLOAD_SCHEMA_VERSION",

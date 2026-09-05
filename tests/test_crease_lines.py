@@ -3,9 +3,11 @@
 The generated biface carries its scars as planes meeting at edges, and it
 knows where those edges are (``dorsal_creases``), so the detector can be
 held to them: every crease it reports on the dorsal face must lie on a
-true ridge, and it must find most of the ridge length.  What it does on a
-real scan, where a ridge is rounded and the mesh is noisy, is not known
-yet - docs/LITHIC_TRIAL.md.
+true ridge, and it must find most of the ridge length.  The edge reading
+is held to the generator's own mesh, whose ridges are edges; the readings
+at a scale, meant for scans, are held to the same face meshed as a scan
+meshes it (``dorsal_sheet``).  What a real scan gave is in
+docs/LITHIC_TRIAL.md.
 """
 
 from __future__ import annotations
@@ -14,13 +16,16 @@ import numpy as np
 import pytest
 
 from src.core.artifact_crease_lines import (
+    CREST_RULE_TURNING_V1,
     DEFAULT_CREASE_DIHEDRAL_MIN_DEG,
     ArtifactCreaseError,
+    CreaseChain,
     crease_summary,
     creases_seen_from,
     detect_convex_creases,
+    link_chains,
 )
-from synthetic_lithic import BIFACE_SHAPE, dorsal_creases, flaked_tool, plan_radius
+from synthetic_lithic import BIFACE_SHAPE, dorsal_creases, dorsal_sheet, flaked_tool, plan_radius
 
 
 def _sampled(polyline: np.ndarray, step_mm: float = 0.5) -> np.ndarray:
@@ -100,103 +105,114 @@ def test_every_dorsal_crease_found_is_a_ridge_and_most_ridge_length_is_found(bif
     assert on_axis[:, 0].max() - on_axis[:, 0].min() > 0.6 * BIFACE_SHAPE.half_length_mm
 
 
-def test_a_rounded_ridge_needs_the_scale_and_is_found_at_it_with_some_invention() -> None:
-    """The ridge a scan has: rounded over a millimetre or two.
+def _sheet_scores(chains, *, tolerance_mm: float = 0.6) -> tuple[float, float, float]:
+    """Precision and recall of a reading on the dorsal sheet, by sample
+    point, ignoring the 5 mm bevel at the margin where the sheet's taper
+    bends the surface without any scar; and the longest chain."""
 
-    No single edge of it bends much, so the edge-by-edge reading finds next
-    to nothing.  Read at a scale of 4 mm - the bend between the surface
-    4 mm to either side, the crest picked as the edge that turns most per
-    millimetre among its neighbours - it finds most of the ridge length on
-    a tool rounded over 1.5 mm, and also invents lines the sharp reading
-    never did: a rounded surface bends at that scale in places that are
-    not ridges.  A tool rounded over 3 mm defeats it.  These are the
-    numbers, not a claim; docs/LITHIC_TRIAL.md.
-    """
-
-    from dataclasses import replace
+    import math
 
     truth = dorsal_creases()
     truth_points = np.vstack([_sampled(np.vstack([p, q])) for p, q in truth])
-    up = np.array([0.0, 0.0, 1.0])
 
-    def dorsal_of(chains):
-        return [
-            chain
-            for chain in chains
-            if (chain.left_normals @ up > 0.0).all() and (chain.right_normals @ up > 0.0).all()
-        ]
+    def inner(points: np.ndarray) -> np.ndarray:
+        edge = np.array([plan_radius(BIFACE_SHAPE, math.atan2(y, x)) for x, y in points[:, :2]])
+        return points[np.hypot(points[:, 0], points[:, 1]) < edge - 5.0]
 
-    def measure(chains, tolerance_mm: float = 0.6) -> tuple[float, float, float]:
-        on, off = 0.0, 0.0
-        for chain in chains:
-            nearest = np.min(
-                [_distance_to_segment(_sampled(chain.points_mm), p, q) for p, q in truth],
-                axis=0,
-            )
-            if float((nearest < tolerance_mm).mean()) >= 0.9:
-                on += chain.length_mm
-            else:
-                off += chain.length_mm
-        if not chains:
-            return on, off, 0.0
-        found = np.vstack([_sampled(chain.points_mm) for chain in chains])
-        gaps = np.min(np.linalg.norm(truth_points[:, None, :] - found[None, :, :], axis=2), axis=1)
-        return on, off, float((gaps < tolerance_mm).mean())
+    truth_points = inner(truth_points)
+    if not chains:
+        return 0.0, 0.0, 0.0
+    found = inner(np.vstack([_sampled(chain.points_mm) for chain in chains]))
+    if found.shape[0] == 0:
+        return 0.0, 0.0, 0.0
+    nearest = np.min([_distance_to_segment(found, p, q) for p, q in truth], axis=0)
+    gaps = np.min(np.linalg.norm(truth_points[:, None, :] - found[None, :, :], axis=2), axis=1)
+    longest = max(chain.length_mm for chain in chains)
+    return float((nearest < tolerance_mm).mean()), float((gaps < tolerance_mm).mean()), longest
 
-    vertices, faces = flaked_tool(replace(BIFACE_SHAPE, rounding_mm=1.5))
-    _on, _off, sharp_recall = measure(dorsal_of(detect_convex_creases(vertices, faces)))
-    assert sharp_recall < 0.1
 
-    on, off, recall = measure(
-        dorsal_of(detect_convex_creases(vertices, faces, dihedral_min_deg=15.0, scale_mm=4.0))
+def test_on_a_scan_like_mesh_the_curvature_rule_draws_the_ridges_and_the_first_rule_fragments() -> None:
+    """The dorsal face meshed as a scanner meshes it: a 0.5 mm grid with no
+    vertex on any ridge.
+
+    The edge reading sees a third of the ridge length (the grid's own
+    edges rarely lie on a ridge).  The first crest rule, picking edges by
+    their turning against every neighbour, lets the edges along one ridge
+    suppress each other and leaves fragments no longer than the mesh's
+    triangles strung a few together; a fifth of the ridge length, and most
+    of what it reports is off any ridge.  The curvature rule draws nine
+    tenths of the ridge length as a handful of chains, nine tenths of it
+    on a ridge; the rest is the gentlest ridges and where the taper lays
+    every ridge flat toward the margin.  docs/LITHIC_TRIAL.md has the table.
+    """
+
+    vertices, faces = dorsal_sheet(pitch_mm=0.5)
+    _precision, edge_recall, _longest = _sheet_scores(detect_convex_creases(vertices, faces))
+    assert 0.15 <= edge_recall <= 0.5
+
+    precision, recall, longest = _sheet_scores(
+        detect_convex_creases(
+            vertices, faces, dihedral_min_deg=15.0, scale_mm=4.0, crest_rule=CREST_RULE_TURNING_V1
+        )
     )
-    assert recall >= 0.6
-    assert on > off
-    assert off > 0.0
+    assert precision < 0.5 and recall < 0.35 and longest < 35.0
+
+    chains = detect_convex_creases(vertices, faces, dihedral_min_deg=15.0, scale_mm=4.0)
+    precision, recall, longest = _sheet_scores(chains)
+    assert precision >= 0.85 and recall >= 0.75 and longest >= 40.0
+    assert len(chains) <= 12
+    # Linking the ends closes the small gaps into fewer, longer chains.
+    linked = detect_convex_creases(vertices, faces, dihedral_min_deg=15.0, scale_mm=4.0, link_mm=4.0)
+    _precision, linked_recall, linked_longest = _sheet_scores(linked)
+    assert linked_recall >= recall and linked_longest > longest and len(linked) < len(chains)
+
+
+def test_a_rounded_ridge_is_partly_found_at_the_scale_and_a_broader_one_defeats_it() -> None:
+    """Ridges rounded over 1.5 mm: the curvature rule draws about half the
+    ridge length, and about six tenths of what it draws lies on a ridge -
+    the rest runs on past a ridge's end over the smooth surface.  Rounded
+    over 3 mm the ridges bend too little at any scale and what is drawn
+    lies nowhere near them.  Numbers, not claims; docs/LITHIC_TRIAL.md."""
+
+    from dataclasses import replace
+
+    vertices, faces = dorsal_sheet(replace(BIFACE_SHAPE, rounding_mm=1.5), pitch_mm=0.5)
+    assert detect_convex_creases(vertices, faces) == ()
+    precision, recall, longest = _sheet_scores(
+        detect_convex_creases(vertices, faces, dihedral_min_deg=15.0, scale_mm=4.0)
+    )
+    assert 0.5 <= precision <= 0.8 and 0.4 <= recall <= 0.7 and longest >= 60.0
+
+    vertices, faces = dorsal_sheet(replace(BIFACE_SHAPE, rounding_mm=3.0), pitch_mm=0.5)
+    _precision, recall, _longest = _sheet_scores(
+        detect_convex_creases(vertices, faces, dihedral_min_deg=15.0, scale_mm=4.0)
+    )
+    assert recall < 0.1
 
 
 def test_scanner_noise_floods_the_edge_reading_and_the_scale_reading_holds() -> None:
-    """With 0.05 mm of noise on every vertex, the edge-by-edge reading
-    reports several times the ridge length, most of it invented, while the
-    reading at a 4 mm scale keeps its invented share near what it was on
-    the clean tool.  On a scan the scale reading is the one to use."""
+    """With 0.15 mm of noise on every vertex of the sheet - three tenths of
+    its 0.5 mm pitch - the edge reading is nine tenths invented, the first
+    crest rule finds nothing at all, and the curvature reading at a 4 mm
+    scale is what it was on the clean sheet.  On a scan the scale reading
+    is the one to use."""
 
     from scan_defects import roughen
 
-    truth = dorsal_creases()
-    truth_length = sum(float(np.linalg.norm(q - p)) for p, q in truth)
-    up = np.array([0.0, 0.0, 1.0])
-
-    def dorsal_length(chains) -> float:
-        return sum(
-            chain.length_mm
-            for chain in chains
-            if (chain.left_normals @ up > 0.0).all() and (chain.right_normals @ up > 0.0).all()
+    vertices, faces = dorsal_sheet(pitch_mm=0.5)
+    noisy = roughen(vertices, faces, amplitude_mm=0.15)
+    edge_precision, _recall, _longest = _sheet_scores(detect_convex_creases(noisy, faces))
+    assert edge_precision < 0.3
+    assert (
+        detect_convex_creases(
+            noisy, faces, dihedral_min_deg=15.0, scale_mm=4.0, crest_rule=CREST_RULE_TURNING_V1
         )
-
-    def invented(chains, tolerance_mm: float = 0.6) -> float:
-        off = 0.0
-        for chain in chains:
-            if not ((chain.left_normals @ up > 0.0).all() and (chain.right_normals @ up > 0.0).all()):
-                continue
-            nearest = np.min(
-                [_distance_to_segment(_sampled(chain.points_mm), p, q) for p, q in truth],
-                axis=0,
-            )
-            if float((nearest < tolerance_mm).mean()) < 0.9:
-                off += chain.length_mm
-        return off
-
-    vertices, faces = flaked_tool()
-    noisy = roughen(vertices, faces, amplitude_mm=0.05)
-    sharp = detect_convex_creases(noisy, faces)
-    assert dorsal_length(sharp) > 2.0 * truth_length
-    assert invented(sharp) > 0.5 * truth_length
-
-    scaled_clean = detect_convex_creases(vertices, faces, dihedral_min_deg=15.0, scale_mm=4.0)
-    scaled_noisy = detect_convex_creases(noisy, faces, dihedral_min_deg=15.0, scale_mm=4.0)
-    assert invented(scaled_noisy) < 0.5 * truth_length
-    assert invented(scaled_noisy) < 3.0 * max(invented(scaled_clean), 10.0)
+        == ()
+    )
+    precision, recall, longest = _sheet_scores(
+        detect_convex_creases(noisy, faces, dihedral_min_deg=15.0, scale_mm=4.0)
+    )
+    assert precision >= 0.85 and recall >= 0.75 and longest >= 30.0
 
 
 def test_the_margin_is_a_crease_but_not_an_inner_line(biface) -> None:
@@ -221,6 +237,51 @@ def test_the_margin_is_a_crease_but_not_an_inner_line(biface) -> None:
     assert creases_seen_from(chains, "bottom") == []
 
 
+def _chain(*points, normal=(0.0, 0.0, 1.0)) -> CreaseChain:
+    p = np.asarray(points, dtype=np.float64)
+    n = np.tile(np.asarray(normal, dtype=np.float64), (len(p) - 1, 1))
+    return CreaseChain(points_mm=p, dihedral_deg=np.full(len(p) - 1, 30.0), left_normals=n, right_normals=n)
+
+
+def test_linking_joins_ends_that_point_at_each_other_and_leaves_the_rest() -> None:
+    """A ridge broken by a gap or a fork is one line again; a corner and a
+    parallel neighbour are not, and the branch at a fork stays its own."""
+
+    straight_a = _chain((0, 0, 0), (2, 0, 0), (4, 0, 0))
+    straight_b = _chain((5, 0.2, 0), (7, 0.2, 0), (9, 0.2, 0))  # 1 mm gap, nearly collinear
+    corner = _chain((9, 0.2, 0), (9, 3, 0), (9, 6, 0))  # shares an end, turns 90 degrees
+    parallel = _chain((0, 1.5, 0), (2, 1.5, 0), (4, 1.5, 0))  # beside straight_a, never meets it
+    fork = _chain((4, 0, 0), (5, 1.5, 0), (6, 3, 0))  # leaves straight_a's end at 37 degrees
+
+    linked = link_chains([straight_a, straight_b, corner, parallel, fork], gap_mm=2.0)
+    lengths = sorted(round(chain.length_mm, 3) for chain in linked)
+    # straight_a + bridge + straight_b: 4 + 1.02 + 4; the corner, the
+    # parallel line and the fork's branch each stay as they were.
+    assert lengths == [3.606, 4.0, 5.8, pytest.approx(9.02, abs=0.001)]
+    joined = max(linked, key=lambda chain: chain.length_mm)
+    assert joined.points_mm.shape == (6, 3)
+    assert joined.dihedral_deg.shape == (5,)
+    assert joined.left_normals.shape == (5, 3)
+    # The bridge borrows the dihedral of the edge it continues.
+    assert float(joined.dihedral_deg[2]) == 30.0
+
+    # A shared end at a fork: the straighter continuation wins the join.
+    straighter = _chain((4, 0, 0), (6, 0.3, 0), (8, 0.6, 0))
+    linked = link_chains([straight_a, fork, straighter], gap_mm=1.0)
+    assert sorted(round(chain.length_mm, 1) for chain in linked) == [3.6, 8.0]
+
+    # Nothing within reach, nothing changes; and a chain never joins itself.
+    ring = _chain((0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0), (0, 0, 0))
+    assert [chain.points_mm.shape for chain in link_chains([ring, parallel], gap_mm=0.5)] == [
+        (5, 3),
+        (3, 3),
+    ]
+    with pytest.raises(ArtifactCreaseError, match="gap_mm"):
+        link_chains([ring], gap_mm=-1.0)
+    with pytest.raises(ArtifactCreaseError, match="angle_deg"):
+        link_chains([ring], gap_mm=1.0, angle_deg=90.0)
+
+
 def test_a_reading_is_the_same_twice_and_refuses_bad_input(biface) -> None:
     vertices, faces, chains = biface
     again = detect_convex_creases(vertices, faces)
@@ -232,4 +293,12 @@ def test_a_reading_is_the_same_twice_and_refuses_bad_input(biface) -> None:
         detect_convex_creases(vertices, faces, dihedral_min_deg=0.0)
     with pytest.raises(ArtifactCreaseError, match="degenerate"):
         detect_convex_creases(vertices, np.array([[0, 0, 1]]))
+    with pytest.raises(ArtifactCreaseError, match="link_mm"):
+        detect_convex_creases(vertices, faces, link_mm=-1.0)
+    with pytest.raises(ArtifactCreaseError, match="crest_rule"):
+        detect_convex_creases(vertices, faces, crest_rule="anything")
     assert detect_convex_creases(vertices, np.zeros((0, 3), dtype=np.int64)) == ()
+    # The edge reading does not touch the crest rule.
+    assert crease_summary(
+        detect_convex_creases(vertices, faces, crest_rule=CREST_RULE_TURNING_V1)
+    ) == crease_summary(chains)
