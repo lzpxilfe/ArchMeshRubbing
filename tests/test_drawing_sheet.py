@@ -27,6 +27,7 @@ from src.core.artifact_vector_record import PlanarFrame
 from src.core.canonical_json import canonical_json_bytes
 from src.core.drawing_sheet import (
     COMPUTED_RUBBING_NOTE,
+    SECTION_LOOP_NOTE_LABEL,
     DrawingSheetError,
     DrawingSheetOptions,
     SheetPage,
@@ -35,6 +36,7 @@ from src.core.drawing_sheet import (
     computed_rubbing_caption,
     scale_bar_label,
     scale_bar_length_mm,
+    section_loop_note,
     validate_drawing_sheet_bytes,
 )
 from src.core.drawing_style import PROVISIONAL_PRESET_ID, get_preset
@@ -107,6 +109,112 @@ def _session(half_extent_mm: float = 1.0) -> ArtifactSession:
         created_at="2026-09-03T00:00:02Z",
         operator="tester",
     )
+
+
+def _split_section_session() -> ArtifactSession:
+    """A vessel with a join meshed across its wall, and a section through it.
+
+    The museum's 빗살무늬토기 draws two closed loops where its section crosses
+    a restoration join; this is the generated version of that mesh.
+    """
+
+    from scan_defects import bridge_the_wall
+    from synthetic_vessel import HEIGHT_MM, hollow_vessel
+
+    vertices, faces, _rim, _floor = hollow_vessel(segments=48, rings=16)
+    vertices, faces = bridge_the_wall(
+        np.asarray(vertices, dtype=np.float64),
+        np.asarray(faces, dtype=np.int64),
+        z_mm=HEIGHT_MM * 0.5,
+        from_angle_deg=-25.0,
+        to_angle_deg=25.0,
+    )
+    mesh = MeshData(
+        vertices=vertices,
+        faces=faces.astype(np.int32),
+        unit="mm",
+        source_identity=SourceFingerprint(
+            sha256="d" * 64,
+            size_bytes=64,
+            mtime_ns=1,
+            original_name="joined.ply",
+            format="ply",
+        ),
+        source_format="ply",
+        source_import_recipe=current_mesh_import_recipe("ply"),
+    )
+    session = ArtifactSession.create_from_source(
+        mesh,
+        resolved_source_path="/source/joined.ply",
+        unit="mm",
+        axes={"source_x": "+X", "source_y": "+Y", "source_z": "+Z"},
+        handedness="right",
+        software_version="sheet-test",
+        operator="tester",
+        created_at="2026-09-03T00:00:00Z",
+        document_id="artifact:sheet-joined",
+        metadata_revision_id="metadata:sheet-joined",
+        align_revision_id="align:sheet-joined",
+    )
+    cutline = compute_artifact_cutline(
+        session,
+        PlanarFrame(
+            origin_world_mm=(0.0, 0.37, 0.0),
+            u_axis_world=(1.0, 0.0, 0.0),
+            v_axis_world=(0.0, 0.0, 1.0),
+            normal_world=(0.0, -1.0, 0.0),
+        ),
+    )
+    return commit_vector_computation(
+        session,
+        cutline,
+        record_id=CUTLINE_ID,
+        created_at="2026-09-03T00:00:01Z",
+        operator="tester",
+    )
+
+
+def test_a_section_in_several_loops_is_said_in_the_title_block() -> None:
+    """A whole vessel's axial section is one ring; two is something to look at.
+
+    The sheet still draws what was measured, and says on the page that the
+    section closed into two loops - a join, a hole, a handle - so the reader
+    does not take two bars across the wall for the wall.  A sheet whose
+    sections are whole says nothing and keeps its bytes.
+    """
+
+    document = _split_section_session().document
+    options = _options(scale_denominator=2.0)
+    bundle = compose_drawing_sheet(document, [CUTLINE_ID], options=options)
+    sidecar = json.loads(bundle.sidecar_bytes)
+
+    assert sidecar["section_loops"] == [
+        {"closed_path_count": 2, "drawn_as": "figure", "record_id": CUTLINE_ID}
+    ]
+    note = section_loop_note([2])
+    assert note == "닫힌 고리 2개 · 접합면·구멍인지 확인"
+    assert {"label": SECTION_LOOP_NOTE_LABEL, "value": note} in sidecar["title_block"]
+    assert note in bundle.svg_bytes.decode("utf-8")
+    assert len(sidecar["title_block"]) == options.title_block_row_count(section_loops=True)
+    validate_drawing_sheet_bytes(bundle.svg_bytes, bundle.sidecar_bytes)
+
+    # The row and the key stand or fall together.
+    without_row = dict(sidecar)
+    without_row["title_block"] = [
+        row for row in sidecar["title_block"] if row["label"] != SECTION_LOOP_NOTE_LABEL
+    ]
+    with pytest.raises(DrawingSheetError, match="does not say so"):
+        validate_drawing_sheet_bytes(bundle.svg_bytes, canonical_json_bytes(without_row))
+    without_key = {key: value for key, value in sidecar.items() if key != "section_loops"}
+    with pytest.raises(DrawingSheetError, match="does not carry"):
+        validate_drawing_sheet_bytes(bundle.svg_bytes, canonical_json_bytes(without_key))
+
+    # A whole section: no row, no key, and the same rows as before.
+    whole = json.loads(
+        compose_drawing_sheet(_session().document, [CUTLINE_ID], options=_options()).sidecar_bytes
+    )
+    assert "section_loops" not in whole
+    assert not any(row["label"] == SECTION_LOOP_NOTE_LABEL for row in whole["title_block"])
 
 
 def _options(**overrides) -> DrawingSheetOptions:

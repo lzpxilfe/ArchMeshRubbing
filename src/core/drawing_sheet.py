@@ -174,6 +174,22 @@ _FOOTER_GAP_MM = 4.0
 # the program's, and printed where the reader looks.  Neither can be
 # switched off.
 COMPUTED_RUBBING_NOTE = "3D 메쉬에서 계산 · 종이 탁본 아님"
+#: The title-block label of the row that says a section closed into more
+#: than one loop.  A section through the axis of a whole vessel is one closed
+#: ring; two or more means the plane met something a drafter has to look at -
+#: a restoration join meshed across the wall, a hole, a handle - and the
+#: museum's 빗살무늬토기 draws two loops at one join.  The sheet still draws
+#: what was measured; it says so on the page rather than deciding.
+SECTION_LOOP_NOTE_LABEL = "단면"
+
+
+def section_loop_note(closed_path_counts: Sequence[int]) -> str:
+    """The title-block value for sections that closed into several loops."""
+
+    counts = [int(count) for count in closed_path_counts]
+    if not counts or any(count < 2 for count in counts):
+        raise DrawingSheetError("a section loop note needs counts of two or more")
+    return f"닫힌 고리 {'·'.join(str(count) for count in counts)}개 · 접합면·구멍인지 확인"
 _CAPTION_FONT_MM = 2.2
 _CAPTION_GAP_MM = 1.0
 # Paper millimetres reserved beneath a rubbing for its caption.
@@ -761,16 +777,20 @@ class DrawingSheetOptions:
     def physical_scale(self) -> str:
         return f"1:{_scale_token(self.scale_denominator)}"
 
-    def title_block_row_count(self, *, computed_rubbing: bool = False) -> int:
+    def title_block_row_count(
+        self, *, computed_rubbing: bool = False, section_loops: bool = False
+    ) -> int:
         """Artifact label, the mandatory scale row, the caller's rows, document.
 
         A sheet carrying a rubbing computed from the mesh gets one more
-        mandatory row saying so; the composer decides that, not the caller.
+        mandatory row saying so, and so does one whose section closed into
+        several loops; the composer decides both, not the caller.
         """
 
         return (
             2
             + int(computed_rubbing)
+            + int(section_loops)
             + int(self.interpretation.is_stated)
             + len(self.title_block.rows)
             + 1
@@ -780,16 +800,20 @@ class DrawingSheetOptions:
     def title_block_rows(self) -> int:
         return self.title_block_row_count()
 
-    def title_block_height(self, *, computed_rubbing: bool = False) -> float:
+    def title_block_height(
+        self, *, computed_rubbing: bool = False, section_loops: bool = False
+    ) -> float:
         return _TITLE_BLOCK_ROW_MM * self.title_block_row_count(
-            computed_rubbing=computed_rubbing
+            computed_rubbing=computed_rubbing, section_loops=section_loops
         )
 
     @property
     def title_block_height_mm(self) -> float:
         return self.title_block_height()
 
-    def footer_height(self, *, computed_rubbing: bool = False) -> float:
+    def footer_height(
+        self, *, computed_rubbing: bool = False, section_loops: bool = False
+    ) -> float:
         """Height of the band the sheet reserves for its own annotations.
 
         The title block and the scale bar sit side by side, but the band is
@@ -801,7 +825,9 @@ class DrawingSheetOptions:
         """
 
         return max(
-            self.title_block_height(computed_rubbing=computed_rubbing),
+            self.title_block_height(
+                computed_rubbing=computed_rubbing, section_loops=section_loops
+            ),
             _SCALE_BAR_BAND_MM,
         )
 
@@ -809,13 +835,17 @@ class DrawingSheetOptions:
     def footer_height_mm(self) -> float:
         return self.footer_height()
 
-    def content_height(self, *, computed_rubbing: bool = False) -> float:
+    def content_height(
+        self, *, computed_rubbing: bool = False, section_loops: bool = False
+    ) -> float:
         """Drawable height, with the footer band and its clearance removed."""
 
         return (
             self.page.height_mm
             - 2.0 * self.page.margin_mm
-            - self.footer_height(computed_rubbing=computed_rubbing)
+            - self.footer_height(
+                computed_rubbing=computed_rubbing, section_loops=section_loops
+            )
             - _FOOTER_GAP_MM
         )
 
@@ -950,6 +980,7 @@ def _lay_out(
     figures: Sequence[_Prepared],
     *,
     options: DrawingSheetOptions,
+    section_loops: bool = False,
 ) -> list[_Figure]:
     """Place figures left to right, wrapping into rows, and refuse to overflow.
 
@@ -961,7 +992,8 @@ def _lay_out(
     denominator = options.scale_denominator
     available_width = page.content_width_mm
     available_height = options.content_height(
-        computed_rubbing=any(figure.caption is not None for figure in figures)
+        computed_rubbing=any(figure.caption is not None for figure in figures),
+        section_loops=section_loops,
     )
 
     placed: list[_Figure] = []
@@ -1132,6 +1164,7 @@ def _title_block_elements(
     *,
     document_manifest_sha256: str,
     computed_rubbing: bool = False,
+    section_loop_counts: Sequence[int] = (),
 ) -> tuple[list[str], list[dict[str, str]]]:
     """Return the title block, and the rows it prints."""
 
@@ -1144,6 +1177,10 @@ def _title_block_elements(
         # So is this: a sheet with a rubbing on it says where the rubbing came
         # from, and no caller can leave that out.
         rows.append(("탁본", COMPUTED_RUBBING_NOTE))
+    if section_loop_counts:
+        # And a section that closed into several loops says so on the page,
+        # where the reader of the drawing will look for one ring.
+        rows.append((SECTION_LOOP_NOTE_LABEL, section_loop_note(section_loop_counts)))
     if options.interpretation.is_stated:
         # And so is this: a line drawn past what was measured is disclosed on
         # the page, not only to whoever opens the sidecar.
@@ -1152,8 +1189,13 @@ def _title_block_elements(
     rows.append(("문서", document_manifest_sha256[:12]))
 
     page = options.page
-    assert len(rows) == options.title_block_row_count(computed_rubbing=computed_rubbing)
-    height = options.title_block_height(computed_rubbing=computed_rubbing)
+    section_loops = bool(section_loop_counts)
+    assert len(rows) == options.title_block_row_count(
+        computed_rubbing=computed_rubbing, section_loops=section_loops
+    )
+    height = options.title_block_height(
+        computed_rubbing=computed_rubbing, section_loops=section_loops
+    )
     left = page.width_mm - page.margin_mm - _TITLE_BLOCK_WIDTH_MM
     top = page.height_mm - page.margin_mm - height
 
@@ -1199,6 +1241,12 @@ def _title_block_elements(
         )
     lines.append("  </g>")
     return lines, [{"label": label, "value": value} for label, value in rows]
+
+
+def _closed_loop_count(payload: VectorGeometryPayload) -> int:
+    """How many closed rings a section payload draws."""
+
+    return sum(1 for path in payload.paths if bool(path.closed))
 
 
 def _require_drawable_condition_record(
@@ -1971,6 +2019,7 @@ def _sheet_provenance(
     mirrored: Sequence[Mapping[str, str]],
     technique: Mapping[str, Any] | None = None,
     rubbings_on_axis: Sequence[Mapping[str, str]] = (),
+    section_loops: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     preset = resolve_drawing_style_preset(options.style_preset)
     provenance: dict[str, Any] = {
@@ -2056,6 +2105,10 @@ def _sheet_provenance(
         provenance["mirrored_figures"] = [dict(entry) for entry in mirrored]
     if rubbings_on_axis:
         provenance["rubbings_on_axis"] = [dict(entry) for entry in rubbings_on_axis]
+    if section_loops:
+        # Present exactly when a section closed into several loops, like the
+        # title block row it mirrors; a sheet of whole sections keeps its bytes.
+        provenance["section_loops"] = [dict(entry) for entry in section_loops]
     return provenance
 
 
@@ -2430,6 +2483,7 @@ def compose_drawing_sheet(
     groove_drawn: list[dict[str, str]] = []
     attached_drawn: list[dict[str, str]] = []
     mirrored: list[dict[str, str]] = []
+    section_loops: list[dict[str, Any]] = []
 
     prepared: list[_Prepared] = []
     rubbing_notes = dict(options.rubbing_notes)
@@ -2471,6 +2525,16 @@ def compose_drawing_sheet(
             record, payload, _record_qc = _require_exportable_record(document, record_id)
         except ArtifactVectorExportError as exc:
             raise DrawingSheetError(str(exc)) from exc
+        if record.type == VectorRecordKind.CUTLINE.record_type:
+            loops = _closed_loop_count(payload)
+            if loops > 1:
+                section_loops.append(
+                    {
+                        "closed_path_count": loops,
+                        "drawn_as": "figure",
+                        "record_id": record.id,
+                    }
+                )
         by_kind: dict[str, list[Any]] = {}
         for path in payload.paths:
             try:
@@ -2617,6 +2681,21 @@ def compose_drawing_sheet(
                 "section_side": "right",
             }
         )
+        try:
+            _section, section_payload, _section_qc = _require_exportable_record(
+                document, section.id
+            )
+        except ArtifactVectorExportError as exc:
+            raise DrawingSheetError(str(exc)) from exc
+        loops = _closed_loop_count(section_payload)
+        if loops > 1:
+            section_loops.append(
+                {
+                    "closed_path_count": loops,
+                    "drawn_as": "section_half",
+                    "record_id": section.id,
+                }
+            )
         prepared.append(
             _Prepared(
                 record_id=record.id,
@@ -2643,13 +2722,17 @@ def compose_drawing_sheet(
         )
 
     computed_rubbing = any(figure.caption is not None for figure in prepared)
+    section_loop_counts = [int(entry["closed_path_count"]) for entry in section_loops]
     try:
-        placed = _lay_out(prepared, options=options)
+        placed = _lay_out(
+            prepared, options=options, section_loops=bool(section_loop_counts)
+        )
         scale_bar_lines, scale_bar = _scale_bar_elements(options)
         title_block_lines, title_rows = _title_block_elements(
             options,
             document_manifest_sha256=document.canonical_sha256,
             computed_rubbing=computed_rubbing,
+            section_loop_counts=section_loop_counts,
         )
         provenance = _sheet_provenance(
             document,
@@ -2657,6 +2740,7 @@ def compose_drawing_sheet(
             options=options,
             scale_bar=scale_bar,
             title_rows=title_rows,
+            section_loops=sorted(section_loops, key=lambda entry: entry["record_id"]),
             center_axis={
                 "align_recipe_kind": align_recipe_kind,
                 "align_revision_id": str(align_id or ""),
@@ -2867,6 +2951,36 @@ def validate_drawing_sheet_bytes(svg_bytes: bytes, sidecar_bytes: bytes) -> None
                 "does not say so"
             )
 
+    # A section that closed into several loops is said on the page, and the
+    # page does not say it of a sheet whose sections are whole.
+    loop_entries = sidecar.get("section_loops")
+    loop_rows = [
+        row
+        for row in rows
+        if isinstance(row, Mapping) and row.get("label") == SECTION_LOOP_NOTE_LABEL
+    ]
+    if loop_entries is not None:
+        if not isinstance(loop_entries, Sequence) or not loop_entries:
+            raise DrawingSheetError("sheet section_loops must be a non-empty list")
+        counts: list[int] = []
+        for entry in loop_entries:
+            count = entry.get("closed_path_count") if isinstance(entry, Mapping) else None
+            if not isinstance(count, int) or isinstance(count, bool) or count < 2:
+                raise DrawingSheetError(
+                    "sheet section_loops entries must count two or more closed paths"
+                )
+            counts.append(count)
+        expected = section_loop_note(counts)
+        if not any(row.get("value") == expected for row in loop_rows):
+            raise DrawingSheetError(
+                "a section on this sheet closed into several loops but the "
+                "title block does not say so"
+            )
+    elif loop_rows:
+        raise DrawingSheetError(
+            "sheet title block reports section loops its sidecar does not carry"
+        )
+
     # And a sheet with a rubbing on it must say where the rubbing came from,
     # in the title block and under each rubbing.
     figures = sidecar.get("figures")
@@ -2925,6 +3039,8 @@ def validate_drawing_sheet_bytes(svg_bytes: bytes, sidecar_bytes: bytes) -> None
 __all__ = [
     "COMPUTED_RUBBING_CAPTION_PREFIX",
     "COMPUTED_RUBBING_NOTE",
+    "SECTION_LOOP_NOTE_LABEL",
+    "section_loop_note",
     "DEVELOPED_WIDTH_NOTE",
     "INTERPRETATION_LABEL",
     "Interpretation",
