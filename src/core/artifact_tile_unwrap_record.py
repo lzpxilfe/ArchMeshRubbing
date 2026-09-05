@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import re
 from typing import Any, Mapping, Sequence
 
@@ -38,10 +39,9 @@ TILE_UNWRAP_RECEIPT_MEDIA_TYPE = (
 )
 MAX_TILE_UNWRAP_RECEIPT_BYTES = 64 * 1024
 
-#: Per-face distortion a fitted-centre record may not exceed anywhere.  A
-#: record unrolled about the measured axis reports its maximum and is gated
-#: on the mean and the 95th percentile alone: there a steep face is relief on
-#: the wall, not a centre in the wrong place.
+#: Distortion a fitted-centre record may not exceed.  A record unrolled about
+#: the measured axis reports all three and is gated on none of them: there
+#: they measure relief on the wall, not a centre in the wrong place.
 TILE_UNWRAP_DISTORTION_FACE_MAX_MILLIONTHS = 250_000
 TILE_UNWRAP_DISTORTION_MEAN_MAX_MILLIONTHS = 75_000
 TILE_UNWRAP_DISTORTION_P95_MAX_MILLIONTHS = 150_000
@@ -664,6 +664,68 @@ def tile_unwrap_receipt_from_record(record: DerivedRecord) -> dict[str, Any]:
     return receipt
 
 
+@dataclass(frozen=True, slots=True)
+class DevelopedCylinder:
+    """The cylinder a developed wall was measured to lie on.
+
+    A 기와 was formed on a 와통, and the wall that touched it - the 내면 of a
+    암키와, carrying the 포목흔 - still has the mould's radius.  Unrolling that
+    wall fits a circle to every section, so the radius is already measured
+    and this only reads it back.
+
+    It is the radius of *the wall that was developed*, and nothing else: the
+    same reading taken from a tile's 등면 gives the outer form, one wall
+    thickness larger, which is not the 와통.  Which wall was developed is the
+    drafter's to know from the selection they made, so the number is offered
+    for the title block rather than written onto the drawing.
+    """
+
+    #: Radius of the fitted section circles, and twice it.
+    radius_um: int
+    diameter_um: int
+    #: How the reading was made, so a reader can weigh it: a diameter fitted
+    #: from twelve sections of a small fragment is not the one fitted from
+    #: ninety-six of a whole tile.
+    section_count: int
+    section_fit_valid_count: int
+    section_mean_span_microdegrees: int
+    developed_length_um: int
+
+    @property
+    def radius_mm(self) -> float:
+        return self.radius_um / 1000.0
+
+    @property
+    def diameter_mm(self) -> float:
+        return self.diameter_um / 1000.0
+
+
+def developed_cylinder_from_record(record: DerivedRecord) -> DevelopedCylinder:
+    """Read back the cylinder one tile unwrap record was developed from.
+
+    The record is validated first, so the reading cannot come from a receipt
+    that does not hold.
+    """
+
+    tile_unwrap_receipt_from_record(record)
+    qc = record.to_dict()["qc"]
+    assert isinstance(qc, Mapping)
+    radius_um = _strict_int(
+        qc["section_mean_radius_um"],
+        name="qc.section_mean_radius_um",
+        minimum=1,
+        maximum=MAX_TILE_UNWRAP_COORDINATE_UM,
+    )
+    return DevelopedCylinder(
+        radius_um=radius_um,
+        diameter_um=2 * radius_um,
+        section_count=int(qc["section_count"]),
+        section_fit_valid_count=int(qc["section_fit_valid_count"]),
+        section_mean_span_microdegrees=int(qc["section_mean_span_microdegrees"]),
+        developed_length_um=int(qc["section_centerline_length_um"]),
+    )
+
+
 def validate_tile_unwrap_records(document: ArtifactDocument) -> None:
     if not isinstance(document, ArtifactDocument):
         raise ArtifactTileUnwrapRecordError("document must be an ArtifactDocument")
@@ -699,11 +761,13 @@ def validate_tile_unwrap_records(document: ArtifactDocument) -> None:
 
 __all__ = [
     "ArtifactTileUnwrapRecordError",
+    "DevelopedCylinder",
     "MAX_TILE_UNWRAP_RECEIPT_BYTES",
     "TILE_UNWRAP_RECEIPT_EXTENSION_KEY",
     "TILE_UNWRAP_RECEIPT_MEDIA_TYPE",
     "TILE_UNWRAP_RECORD_TYPE",
     "append_tile_unwrap_record_from_context",
+    "developed_cylinder_from_record",
     "tile_unwrap_receipt_from_record",
     "validate_tile_unwrap_qc",
     "validate_tile_unwrap_receipt",
