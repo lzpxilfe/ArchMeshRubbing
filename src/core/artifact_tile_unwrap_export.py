@@ -35,6 +35,8 @@ from .artifact_tile_unwrap_extractor import (
 )
 from .artifact_tile_unwrap_record import (
     TILE_UNWRAP_DISTORTION_FACE_MAX_MILLIONTHS,
+    TILE_UNWRAP_DISTORTION_MEAN_MAX_MILLIONTHS,
+    TILE_UNWRAP_DISTORTION_P95_MAX_MILLIONTHS,
     TILE_UNWRAP_RECORD_TYPE,
     ArtifactTileUnwrapRecordError,
     tile_unwrap_receipt_from_record,
@@ -58,7 +60,7 @@ from .canonical_json import (
 
 
 TILE_UNWRAP_EXPORT_FORMAT = "archmeshrubbing_tile_unwrap_export"
-TILE_UNWRAP_EXPORT_SCHEMA_VERSION = "1.4.0"
+TILE_UNWRAP_EXPORT_SCHEMA_VERSION = "1.5.0"
 TILE_UNWRAP_LEGACY_EXPORT_SCHEMA_VERSION = "1.1.0"
 #: The 1.2 sidecar predates the section centre and station policies, so it
 #: can carry a 1.1 or 1.2 recipe but never a 1.3 one.
@@ -67,6 +69,12 @@ TILE_UNWRAP_1_2_EXPORT_SCHEMA_VERSION = "1.2.0"
 #: record unrolled about the measured axis may report more, and only the
 #: 1.4 sidecar can carry it.
 TILE_UNWRAP_1_3_EXPORT_SCHEMA_VERSION = "1.3.0"
+#: The 1.4 sidecar lifted only the per-face maximum for an axis-centred
+#: record and still bounds its mean at 7.5% and its 95th percentile at 15%.
+#: A tile whose back is meshed finely enough to carry its cord passes both
+#: of those, so the 1.5 sidecar reports all three there and bounds none;
+#: under a fitted centre every bound is exactly what it was.
+TILE_UNWRAP_1_4_EXPORT_SCHEMA_VERSION = "1.4.0"
 TILE_UNWRAP_EXPORT_DIRECTORY_SUFFIX = ".amr-unwrap"
 TILE_UNWRAP_EXPORT_PAYLOAD_NAME = "artifact.amr-unwrap.bin"
 TILE_UNWRAP_EXPORT_OBJ_NAME = "artifact.obj"
@@ -632,6 +640,7 @@ def validate_tile_unwrap_export_bytes(
     sidecar_schema_version = root["schema_version"]
     if sidecar_schema_version not in {
         TILE_UNWRAP_EXPORT_SCHEMA_VERSION,
+        TILE_UNWRAP_1_4_EXPORT_SCHEMA_VERSION,
         TILE_UNWRAP_1_3_EXPORT_SCHEMA_VERSION,
         TILE_UNWRAP_1_2_EXPORT_SCHEMA_VERSION,
         TILE_UNWRAP_LEGACY_EXPORT_SCHEMA_VERSION,
@@ -782,7 +791,10 @@ def validate_tile_unwrap_export_bytes(
         )
     except ArtifactTileUnwrapRecordError as exc:
         raise ArtifactTileUnwrapExportError(str(exc)) from exc
-    if sidecar_schema_version != TILE_UNWRAP_EXPORT_SCHEMA_VERSION and (
+    if sidecar_schema_version not in {
+        TILE_UNWRAP_EXPORT_SCHEMA_VERSION,
+        TILE_UNWRAP_1_4_EXPORT_SCHEMA_VERSION,
+    } and (
         int(qc["record"]["distortion_max_millionths"])
         > TILE_UNWRAP_DISTORTION_FACE_MAX_MILLIONTHS
     ):
@@ -791,6 +803,20 @@ def validate_tile_unwrap_export_bytes(
         raise ArtifactTileUnwrapExportError(
             "a tile unwrap export before 1.4 cannot carry a face over the "
             "distortion gate"
+        )
+    if sidecar_schema_version != TILE_UNWRAP_EXPORT_SCHEMA_VERSION and (
+        int(qc["record"]["distortion_mean_millionths"])
+        > TILE_UNWRAP_DISTORTION_MEAN_MAX_MILLIONTHS
+        or int(qc["record"]["distortion_p95_millionths"])
+        > TILE_UNWRAP_DISTORTION_P95_MAX_MILLIONTHS
+    ):
+        # And every sidecar before 1.5 bounds the mean and the 95th percentile
+        # whatever the centre policy, 1.4 included: it lifted the per-face
+        # maximum alone.  Only a 1.5 sidecar can carry an axis-centred record
+        # whose relief pushes those two past their gates.
+        raise ArtifactTileUnwrapExportError(
+            "a tile unwrap export before 1.5 cannot carry a mean or 95th "
+            "percentile over the distortion gate"
         )
     try:
         recomputed_payload_qc = recompute_tile_unwrap_payload_qc(unwrap)
@@ -1366,6 +1392,7 @@ __all__ = [
     "TILE_UNWRAP_EXPORT_SCHEMA_VERSION",
     "TILE_UNWRAP_1_2_EXPORT_SCHEMA_VERSION",
     "TILE_UNWRAP_1_3_EXPORT_SCHEMA_VERSION",
+    "TILE_UNWRAP_1_4_EXPORT_SCHEMA_VERSION",
     "TILE_UNWRAP_LEGACY_EXPORT_SCHEMA_VERSION",
     "TILE_UNWRAP_EXPORT_SIDECAR_NAME",
     "TILE_UNWRAP_EXPORT_SVG_NAME",

@@ -397,18 +397,32 @@ def _validate_qc_against_receipt(
         key: _strict_int(value[key], name=f"qc.{key}", minimum=0, maximum=1_000_000)
         for key in distortion_fields
     }
+    # A fitted centre is estimated, so the three distortion numbers report
+    # how well it was estimated and all three gate.  Unrolled about the
+    # measured axis nothing is estimated - the arc and the station both come
+    # from the axis - so what the numbers measure is the surface's own
+    # relief: a corded tile's back has more area than the cylinder it
+    # develops onto, and the finer the mesh the more of it is resolved.  All
+    # three are reported and none of them gates there; the topology, the
+    # orientation, the overlap and the section rules are untouched.
+    axis_centred = section_center_policy == SECTION_CENTER_CANONICAL_AXIS
     if (
-        section_center_policy != SECTION_CENTER_CANONICAL_AXIS
+        not axis_centred
         and distortion["distortion_max_millionths"]
         > TILE_UNWRAP_DISTORTION_FACE_MAX_MILLIONTHS
     ):
         raise ArtifactTileUnwrapRecordError("tile unwrap max distortion exceeds gate")
     if (
-        distortion["distortion_mean_millionths"]
+        not axis_centred
+        and distortion["distortion_mean_millionths"]
         > TILE_UNWRAP_DISTORTION_MEAN_MAX_MILLIONTHS
     ):
         raise ArtifactTileUnwrapRecordError("tile unwrap mean distortion exceeds gate")
-    if distortion["distortion_p95_millionths"] > TILE_UNWRAP_DISTORTION_P95_MAX_MILLIONTHS:
+    if (
+        not axis_centred
+        and distortion["distortion_p95_millionths"]
+        > TILE_UNWRAP_DISTORTION_P95_MAX_MILLIONTHS
+    ):
         raise ArtifactTileUnwrapRecordError("tile unwrap p95 distortion exceeds gate")
     if (
         distortion["distortion_median_millionths"]

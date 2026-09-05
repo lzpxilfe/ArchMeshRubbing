@@ -203,7 +203,7 @@ def test_one_steep_face_is_reported_on_the_measured_axis_and_refused_on_a_fit() 
         bundle.sidecar_bytes,
         document=committed.document,
     )
-    assert sidecar["schema_version"] == "1.4.0"
+    assert sidecar["schema_version"] == "1.5.0"
     assert sidecar["qc"]["record"]["distortion_max_millionths"] > 250_000
 
     # The same grain under the tile's fitted centre is a failed fit.  The

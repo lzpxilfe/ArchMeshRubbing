@@ -115,6 +115,54 @@ class TestFlattenerSectionwise(unittest.TestCase):
         np.testing.assert_allclose(center, expected_center, atol=1e-6, rtol=0.0)
         self.assertAlmostEqual(radius, expected_radius, places=6)
 
+    def test_relief_on_the_measured_axis_is_reported_not_refused(self):
+        """A corded tile's back is steep everywhere, and that is the point.
+
+        Under a fitted centre the three distortion numbers say how well the
+        centre was fitted, so all three refuse.  On the measured axis nothing
+        is fitted and they say how steeply the wall stands - a cord 0.35 mm
+        proud at a 3 mm pitch carries about a quarter more area than the
+        cylinder - so all three are reported and none refuses.  Every other
+        rule here is untouched.
+        """
+
+        meta = {
+            "section_fit_valid_count": 12,
+            "section_count": 12,
+            "section_spacing": 1.0,
+            "section_centerline_length": 10.0,
+            "section_mean_span": float(np.deg2rad(30.0)),
+        }
+        steep = {"max": 0.30, "p95": 0.20, "mean": 0.09, "median": 0.05}
+
+        needs_fallback, reason = sectionwise_quality_gate(
+            meta, distortion_summary=steep
+        )
+        self.assertTrue(needs_fallback)
+        self.assertEqual(reason, "section_distortion_max")
+
+        on_axis = dict(meta, section_center_policy="axis_origin")
+        needs_fallback, reason = sectionwise_quality_gate(
+            on_axis, distortion_summary=steep
+        )
+        self.assertFalse(needs_fallback)
+        self.assertEqual(reason, "")
+
+        # A degenerate trace is not relief, and the axis does not excuse it.
+        collapsed = dict(on_axis, section_centerline_length=0.0)
+        needs_fallback, reason = sectionwise_quality_gate(
+            collapsed, distortion_summary=steep
+        )
+        self.assertTrue(needs_fallback)
+        self.assertEqual(reason, "section_trace_degenerate")
+
+        sparse = dict(on_axis, section_fit_valid_count=3)
+        needs_fallback, reason = sectionwise_quality_gate(
+            sparse, distortion_summary=steep
+        )
+        self.assertTrue(needs_fallback)
+        self.assertEqual(reason, "section_fit_too_sparse")
+
     def test_sectionwise_quality_gate_uses_radian_arc_span(self):
         meta = {
             "section_fit_valid_count": 12,

@@ -315,9 +315,9 @@ def _estimate_section_longitudinal_axis(
 
 #: Per-face distortion a fitted-centre unwrap may not exceed anywhere.
 SECTION_DISTORTION_FACE_MAX = 0.25
-#: Distortion the 95th-percentile face may not exceed under either centre.
+#: Distortion the 95th-percentile face of a fitted-centre unwrap may not exceed.
 SECTION_DISTORTION_P95_MAX = 0.15
-#: Distortion the mean face may not exceed under either centre.
+#: Distortion the mean face of a fitted-centre unwrap may not exceed.
 SECTION_DISTORTION_MEAN_MAX = 0.075
 
 
@@ -345,7 +345,10 @@ def sectionwise_quality_gate(
         return True, "section_trace_degenerate"
     # A narrow arc cannot support a circle fit; when the centre is the
     # measured axis no fit is made, and a 10 mm strip on a pot is exactly the
-    # narrow arc this exists to refuse.  Distortion still gates it below.
+    # narrow arc this exists to refuse.  What still holds an axis-centred
+    # development to account is the trace and the fit count here, and then
+    # topology, orientation, foldover and global UV overlap downstream -
+    # not the distortion numbers, which on the axis are the wall's relief.
     if str(info.get("section_center_policy", "fit")) != "axis_origin" and (
         mean_span_rad < float(np.deg2rad(20.0))
     ):
@@ -355,20 +358,31 @@ def sectionwise_quality_gate(
     p95 = float(dist.get("p95", 0.0) or 0.0)
     mean = float(dist.get("mean", 0.0) or 0.0)
     maximum = float(dist.get("max", 0.0) or 0.0)
-    # A fitted centre can put a whole face in the wrong place, and one such
-    # face is a failed fit.  With the centre on the measured axis every
-    # vertex lands where the axis says, and a face's distortion is only how
-    # steeply it stands off the surface of revolution - a temper grain, a
-    # scan spike, the wall of an incised line.  That is what a rubbing
-    # records, and a finer mesh resolves more of it; the maximum is reported
-    # as it is, and the mean and the 95th percentile keep gating the whole.
-    if maximum > SECTION_DISTORTION_FACE_MAX and (
-        str(info.get("section_center_policy", "fit")) != "axis_origin"
-    ):
+    # A fitted centre is estimated from the section's own points, so it can
+    # land in the wrong place and take the whole section with it.  There the
+    # three distortion numbers are the fit's own report card and all three
+    # gate.
+    #
+    # With the centre on the measured axis there is nothing to estimate: u is
+    # the arc at the axis, v is the station along it, and every vertex lands
+    # where the axis says.  What is left is not the mapping's error but the
+    # surface's own relief - a corded tile's back really does have more area
+    # than the cylinder it is developed onto.  A cord 0.35 mm proud at a 3 mm
+    # pitch has a slope of 2*pi*a/p, so its flanks carry about a quarter more
+    # area, and a mesh fine enough to resolve the cord finds all of it: the
+    # same 암키와 measures 0.017 mean at a 2 mm step and past 0.15 at the 95th
+    # percentile when the step is fine enough to carry the cord.  Refusing
+    # that would refuse exactly the surfaces a rubbing exists for.  So with
+    # the axis as the centre all three are reported and none of them gates;
+    # every other rule here - the fit's own sparsity, a degenerate trace, the
+    # arc's span - still applies, and the numbers travel in the QC and the
+    # receipt for a reader to weigh.
+    axis_centred = str(info.get("section_center_policy", "fit")) == "axis_origin"
+    if maximum > SECTION_DISTORTION_FACE_MAX and not axis_centred:
         return True, "section_distortion_max"
-    if p95 > SECTION_DISTORTION_P95_MAX:
+    if p95 > SECTION_DISTORTION_P95_MAX and not axis_centred:
         return True, "section_distortion_p95"
-    if mean > SECTION_DISTORTION_MEAN_MAX:
+    if mean > SECTION_DISTORTION_MEAN_MAX and not axis_centred:
         return True, "section_distortion_mean"
     return False, ""
 

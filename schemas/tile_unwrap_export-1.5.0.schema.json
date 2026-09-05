@@ -1,0 +1,1016 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:archmeshrubbing:schema:tile-unwrap-export:1.5.0",
+  "title": "ArchMeshRubbing Tile Unwrap Export Sidecar 1.5.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "artifacts",
+    "claims_sha256",
+    "format",
+    "geometry",
+    "presentation",
+    "privacy",
+    "provenance",
+    "qc",
+    "recipe",
+    "schema_version"
+  ],
+  "properties": {
+    "artifacts": {
+      "$ref": "#/$defs/artifacts"
+    },
+    "claims_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "format": {
+      "const": "archmeshrubbing_tile_unwrap_export"
+    },
+    "geometry": {
+      "$ref": "urn:archmeshrubbing:schema:tile-unwrap-receipt:1.1.0"
+    },
+    "presentation": {
+      "$ref": "#/$defs/presentation"
+    },
+    "privacy": {
+      "$ref": "#/$defs/privacy"
+    },
+    "provenance": {
+      "$ref": "#/$defs/provenance"
+    },
+    "qc": {
+      "$ref": "#/$defs/qc"
+    },
+    "recipe": {
+      "$ref": "#/$defs/recipe"
+    },
+    "schema_version": {
+      "const": "1.5.0"
+    }
+  },
+  "if": {
+    "properties": {
+      "recipe": {
+        "properties": {
+          "section_center_policy": {
+            "const": "canonical_axis_origin"
+          }
+        },
+        "required": [
+          "section_center_policy"
+        ]
+      }
+    }
+  },
+  "else": {
+    "properties": {
+      "qc": {
+        "properties": {
+          "record": {
+            "properties": {
+              "distortion_max_millionths": {
+                "maximum": 250000
+              },
+              "distortion_mean_millionths": {
+                "maximum": 75000
+              },
+              "distortion_p95_millionths": {
+                "maximum": 150000
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "artifactDescriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "byte_length",
+        "media_type",
+        "name",
+        "sha256"
+      ],
+      "properties": {
+        "byte_length": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 268435456
+        },
+        "media_type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "canonical_payload",
+        "flat_mesh",
+        "outline"
+      ],
+      "properties": {
+        "canonical_payload": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/artifactDescriptor"
+            },
+            {
+              "properties": {
+                "media_type": {
+                  "const": "application/vnd.archmeshrubbing.tile-unwrap-payload"
+                },
+                "name": {
+                  "const": "artifact.amr-unwrap.bin"
+                }
+              }
+            }
+          ]
+        },
+        "flat_mesh": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/artifactDescriptor"
+            },
+            {
+              "properties": {
+                "media_type": {
+                  "const": "model/obj"
+                },
+                "name": {
+                  "const": "artifact.obj"
+                }
+              }
+            }
+          ]
+        },
+        "outline": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/artifactDescriptor"
+            },
+            {
+              "properties": {
+                "media_type": {
+                  "const": "image/svg+xml"
+                },
+                "name": {
+                  "const": "artifact.svg"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "presentation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "boundary_definition",
+        "boundary_loop_count",
+        "height_mm_exact",
+        "physical_scale",
+        "unit",
+        "width_mm_exact",
+        "y_axis"
+      ],
+      "properties": {
+        "boundary_definition": {
+          "const": "single_incident_face_edges"
+        },
+        "boundary_loop_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2000000
+        },
+        "height_mm_exact": {
+          "$ref": "urn:archmeshrubbing:schema:tile-unwrap-receipt:1.1.0#/$defs/exactDimensionMm"
+        },
+        "physical_scale": {
+          "const": "1:1"
+        },
+        "unit": {
+          "const": "mm"
+        },
+        "width_mm_exact": {
+          "$ref": "urn:archmeshrubbing:schema:tile-unwrap-receipt:1.1.0#/$defs/exactDimensionMm"
+        },
+        "y_axis": {
+          "const": "up"
+        }
+      }
+    },
+    "privacy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "absolute_paths_embedded",
+        "canonical_source_geometry_embedded",
+        "operator_annotations_embedded"
+      ],
+      "properties": {
+        "absolute_paths_embedded": {
+          "const": false
+        },
+        "canonical_source_geometry_embedded": {
+          "const": false
+        },
+        "operator_annotations_embedded": {
+          "const": false
+        }
+      }
+    },
+    "selectionRange": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "prefixItems": [
+        {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1999999
+        },
+        {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2000000
+        }
+      ],
+      "items": false
+    },
+    "selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "face_ranges",
+        "kind",
+        "schema_version",
+        "selected_face_count",
+        "selection_sha256",
+        "total_face_count"
+      ],
+      "properties": {
+        "face_ranges": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 250000,
+          "items": {
+            "$ref": "#/$defs/selectionRange"
+          }
+        },
+        "kind": {
+          "const": "canonical_face_ranges"
+        },
+        "schema_version": {
+          "const": "1.0.0"
+        },
+        "selected_face_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 250000
+        },
+        "selection_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "total_face_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2000000
+        }
+      }
+    },
+    "recipe": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/recipeV11"
+        },
+        {
+          "$ref": "#/$defs/recipeV12"
+        },
+        {
+          "$ref": "#/$defs/recipeV13"
+        }
+      ]
+    },
+    "recipeV11": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "algorithm",
+        "algorithm_version",
+        "coordinate_quantum_um",
+        "coordinate_space",
+        "fallback_policy",
+        "kind",
+        "longitudinal_axis",
+        "n_sections",
+        "record_view",
+        "schema_version",
+        "seam_policy",
+        "selection",
+        "smoothing_iterations"
+      ],
+      "properties": {
+        "algorithm": {
+          "const": "archmeshrubbing.sectionwise_tile_unwrap"
+        },
+        "algorithm_version": {
+          "const": "1.1.0"
+        },
+        "coordinate_quantum_um": {
+          "const": 1
+        },
+        "coordinate_space": {
+          "const": "canonical_mm_tile_unwrap/v1"
+        },
+        "fallback_policy": {
+          "const": "reject"
+        },
+        "kind": {
+          "const": "tile_unwrap"
+        },
+        "longitudinal_axis": {
+          "enum": [
+            "x",
+            "y",
+            "z"
+          ]
+        },
+        "n_sections": {
+          "type": "integer",
+          "minimum": 12,
+          "maximum": 96
+        },
+        "record_view": {
+          "enum": [
+            "top",
+            "bottom"
+          ]
+        },
+        "schema_version": {
+          "const": "1.1.0"
+        },
+        "seam_policy": {
+          "const": "minimum_angular_range_auto"
+        },
+        "selection": {
+          "$ref": "#/$defs/selection"
+        },
+        "smoothing_iterations": {
+          "const": 0
+        }
+      }
+    },
+    "recipeV12": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "algorithm",
+        "algorithm_version",
+        "coordinate_quantum_um",
+        "coordinate_space",
+        "fallback_policy",
+        "kind",
+        "longitudinal_axis",
+        "n_sections",
+        "record_view",
+        "schema_version",
+        "seam_angle_microdegrees",
+        "seam_policy",
+        "selection",
+        "smoothing_iterations"
+      ],
+      "properties": {
+        "algorithm": {
+          "const": "archmeshrubbing.sectionwise_tile_unwrap"
+        },
+        "algorithm_version": {
+          "const": "1.2.0"
+        },
+        "coordinate_quantum_um": {
+          "const": 1
+        },
+        "coordinate_space": {
+          "const": "canonical_mm_tile_unwrap/v1"
+        },
+        "fallback_policy": {
+          "const": "reject"
+        },
+        "kind": {
+          "const": "tile_unwrap"
+        },
+        "longitudinal_axis": {
+          "enum": [
+            "x",
+            "y",
+            "z"
+          ]
+        },
+        "n_sections": {
+          "type": "integer",
+          "minimum": 12,
+          "maximum": 96
+        },
+        "record_view": {
+          "enum": [
+            "top",
+            "bottom"
+          ]
+        },
+        "schema_version": {
+          "const": "1.2.0"
+        },
+        "seam_angle_microdegrees": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": -180000000,
+          "maximum": 179999999
+        },
+        "seam_policy": {
+          "enum": [
+            "minimum_angular_range_auto",
+            "fixed_angle_microdegrees"
+          ]
+        },
+        "selection": {
+          "$ref": "#/$defs/selection"
+        },
+        "smoothing_iterations": {
+          "const": 0
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "seam_angle_microdegrees": {
+              "const": null
+            },
+            "seam_policy": {
+              "const": "minimum_angular_range_auto"
+            }
+          }
+        },
+        {
+          "properties": {
+            "seam_angle_microdegrees": {
+              "type": "integer",
+              "minimum": -180000000,
+              "maximum": 179999999
+            },
+            "seam_policy": {
+              "const": "fixed_angle_microdegrees"
+            }
+          }
+        }
+      ]
+    },
+    "recipeV13": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "algorithm",
+        "algorithm_version",
+        "coordinate_quantum_um",
+        "coordinate_space",
+        "fallback_policy",
+        "kind",
+        "longitudinal_axis",
+        "n_sections",
+        "record_view",
+        "schema_version",
+        "seam_angle_microdegrees",
+        "seam_policy",
+        "section_center_policy",
+        "selection",
+        "smoothing_iterations",
+        "station_policy"
+      ],
+      "properties": {
+        "algorithm": {
+          "const": "archmeshrubbing.sectionwise_tile_unwrap"
+        },
+        "algorithm_version": {
+          "const": "1.3.0"
+        },
+        "coordinate_quantum_um": {
+          "const": 1
+        },
+        "coordinate_space": {
+          "const": "canonical_mm_tile_unwrap/v1"
+        },
+        "fallback_policy": {
+          "const": "reject"
+        },
+        "kind": {
+          "const": "tile_unwrap"
+        },
+        "longitudinal_axis": {
+          "enum": [
+            "x",
+            "y",
+            "z"
+          ]
+        },
+        "n_sections": {
+          "type": "integer",
+          "minimum": 12,
+          "maximum": 96
+        },
+        "record_view": {
+          "enum": [
+            "top",
+            "bottom"
+          ]
+        },
+        "schema_version": {
+          "const": "1.3.0"
+        },
+        "seam_angle_microdegrees": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": -180000000,
+          "maximum": 179999999
+        },
+        "seam_policy": {
+          "enum": [
+            "minimum_angular_range_auto",
+            "fixed_angle_microdegrees"
+          ]
+        },
+        "section_center_policy": {
+          "enum": [
+            "fit_per_section",
+            "canonical_axis_origin"
+          ]
+        },
+        "selection": {
+          "$ref": "#/$defs/selection"
+        },
+        "smoothing_iterations": {
+          "const": 0
+        },
+        "station_policy": {
+          "enum": [
+            "centerline_arc",
+            "meridian_arc"
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "seam_angle_microdegrees": {
+              "const": null
+            },
+            "seam_policy": {
+              "const": "minimum_angular_range_auto"
+            }
+          }
+        },
+        {
+          "properties": {
+            "seam_angle_microdegrees": {
+              "type": "integer",
+              "minimum": -180000000,
+              "maximum": 179999999
+            },
+            "seam_policy": {
+              "const": "fixed_angle_microdegrees"
+            }
+          }
+        }
+      ]
+    },
+    "exportGate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "payload_verified",
+        "record_freshness",
+        "record_lifecycle_status"
+      ],
+      "properties": {
+        "payload_verified": {
+          "const": true
+        },
+        "record_freshness": {
+          "const": "fresh"
+        },
+        "record_lifecycle_status": {
+          "const": "ready"
+        }
+      }
+    },
+    "recordQc": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "boundary_loop_count",
+        "connected_component_count",
+        "degenerate_uv_face_count",
+        "distortion_max_millionths",
+        "distortion_mean_millionths",
+        "distortion_median_millionths",
+        "distortion_p95_millionths",
+        "face_count",
+        "foldover_face_count",
+        "height_um",
+        "duplicate_face_count",
+        "inconsistent_oriented_edge_count",
+        "negative_orientation_face_count",
+        "nonmanifold_edge_count",
+        "positive_orientation_face_count",
+        "section_centerline_length_um",
+        "section_count",
+        "section_fit_valid_count",
+        "section_mean_radius_um",
+        "section_mean_span_microdegrees",
+        "section_row_shift_applied",
+        "section_row_shift_max_um",
+        "section_row_shift_station_count",
+        "selected_face_count",
+        "selection_sha256",
+        "unwrap_sha256",
+        "uv_overlap_pair_count",
+        "vertex_count",
+        "width_um"
+      ],
+      "properties": {
+        "boundary_loop_count": {
+          "$ref": "#/$defs/count"
+        },
+        "connected_component_count": {
+          "const": 1
+        },
+        "degenerate_uv_face_count": {
+          "const": 0
+        },
+        "distortion_max_millionths": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "distortion_mean_millionths": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "distortion_median_millionths": {
+          "$ref": "#/$defs/distortion"
+        },
+        "distortion_p95_millionths": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "face_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 250000
+        },
+        "foldover_face_count": {
+          "const": 0
+        },
+        "height_um": {
+          "$ref": "#/$defs/positiveExactInteger"
+        },
+        "duplicate_face_count": {
+          "const": 0
+        },
+        "inconsistent_oriented_edge_count": {
+          "const": 0
+        },
+        "negative_orientation_face_count": {
+          "$ref": "#/$defs/nonnegativeCount"
+        },
+        "nonmanifold_edge_count": {
+          "const": 0
+        },
+        "positive_orientation_face_count": {
+          "$ref": "#/$defs/nonnegativeCount"
+        },
+        "section_centerline_length_um": {
+          "$ref": "#/$defs/positiveExactInteger"
+        },
+        "section_count": {
+          "type": "integer",
+          "minimum": 12,
+          "maximum": 96
+        },
+        "section_fit_valid_count": {
+          "type": "integer",
+          "minimum": 4,
+          "maximum": 96
+        },
+        "section_mean_radius_um": {
+          "$ref": "#/$defs/positiveExactInteger"
+        },
+        "section_mean_span_microdegrees": {
+          "type": "integer",
+          "minimum": 20000000,
+          "maximum": 360000000
+        },
+        "section_row_shift_applied": {
+          "type": "boolean"
+        },
+        "section_row_shift_max_um": {
+          "$ref": "#/$defs/nonnegativeExactInteger"
+        },
+        "section_row_shift_station_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 96
+        },
+        "selected_face_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 250000
+        },
+        "selection_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "unwrap_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "uv_overlap_pair_count": {
+          "const": 0
+        },
+        "vertex_count": {
+          "type": "integer",
+          "minimum": 3,
+          "maximum": 2000000
+        },
+        "width_um": {
+          "$ref": "#/$defs/positiveExactInteger"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "section_row_shift_applied"
+            ],
+            "properties": {
+              "section_row_shift_applied": {
+                "const": false
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "section_row_shift_max_um": {
+                "const": 0
+              },
+              "section_row_shift_station_count": {
+                "const": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "section_row_shift_applied"
+            ],
+            "properties": {
+              "section_row_shift_applied": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "section_row_shift_max_um": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "section_row_shift_station_count": {
+                "type": "integer",
+                "minimum": 12
+              }
+            }
+          }
+        }
+      ]
+    },
+    "distortion": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1000000
+    },
+    "count": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2000000
+    },
+    "nonnegativeCount": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 2000000
+    },
+    "nonnegativeExactInteger": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4503599627370496
+    },
+    "positiveExactInteger": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4503599627370496
+    },
+    "tileRecordReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "align_revision_id",
+        "created_at",
+        "depends_on_record_ids",
+        "geometry_revision_id",
+        "geometry_ref",
+        "id",
+        "lifecycle_status",
+        "operator",
+        "recipe_hash",
+        "selection_hash",
+        "type"
+      ],
+      "properties": {
+        "align_revision_id": {
+          "$ref": "urn:archmeshrubbing:schema:rubbing-export:1.1.0#/$defs/nonEmptyString"
+        },
+        "created_at": {
+          "$ref": "urn:archmeshrubbing:schema:rubbing-export:1.1.0#/$defs/timestamp"
+        },
+        "depends_on_record_ids": {
+          "$ref": "urn:archmeshrubbing:schema:rubbing-export:1.1.0#/$defs/stringArray"
+        },
+        "geometry_revision_id": {
+          "$ref": "urn:archmeshrubbing:schema:rubbing-export:1.1.0#/$defs/nonEmptyString"
+        },
+        "geometry_ref": {
+          "type": "string",
+          "pattern": "^urn:archmeshrubbing:tile-unwrap:sha256:[0-9a-f]{64}$"
+        },
+        "id": {
+          "$ref": "urn:archmeshrubbing:schema:rubbing-export:1.1.0#/$defs/nonEmptyString"
+        },
+        "lifecycle_status": {
+          "const": "ready"
+        },
+        "operator": {
+          "$ref": "urn:archmeshrubbing:schema:rubbing-export:1.1.0#/$defs/nonEmptyString"
+        },
+        "recipe_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "selection_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "type": {
+          "const": "surface.tile_unwrap.v1"
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "align_ancestry",
+        "align_revision",
+        "dependency_closure",
+        "document",
+        "geometry_revision",
+        "record",
+        "source_assets",
+        "source_metadata_revision"
+      ],
+      "properties": {
+        "align_ancestry": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4096,
+          "uniqueItems": true,
+          "prefixItems": [
+            {
+              "allOf": [
+                {
+                  "$ref": "urn:archmeshrubbing:schema:rubbing-export:1.1.0#/$defs/alignRevision"
+                },
+                {
+                  "properties": {
+                    "matrix4x4": {
+                      "const": [
+                        [
+                          1,
+                          0,
+                          0,
+                          0
+                        ],
+                        [
+                          0,
+                          1,
+                          0,
+                          0
+                        ],
+                        [
+                          0,
+                          0,
+                          1,
+                          0
+                        ],
+                        [
+                          0,
+                          0,
+                          0,
+                          1
+                        ]
+                      ]
+                    },
+                    "parent_id": {
+                      "type": "null"
+                    },
+                    "recipe": {
+                      "const": {
+                        "kind": "initial_identity"
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          ],
+          "items": {
+            "$ref": "urn:archmeshrubbing:schema:rubbing-export:1.1.0#/$defs/alignRevision"
+          }
+        },
+        "align_revision": {
+          "$ref": "urn:archmeshrubbing:schema:rubbing-export:1.1.0#/$defs/alignRevision"
+        },
+        "dependency_closure": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "urn:archmeshrubbing:schema:rubbing-export:1.1.0#/$defs/dependencyReceipt"
+          }
+        },
+        "document": {
+          "$ref": "urn:archmeshrubbing:schema:rubbing-export:1.1.0#/$defs/documentReceipt"
+        },
+        "geometry_revision": {
+          "$ref": "urn:archmeshrubbing:schema:rubbing-export:1.1.0#/$defs/geometryRevision"
+        },
+        "record": {
+          "$ref": "#/$defs/tileRecordReceipt"
+        },
+        "source_assets": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "urn:archmeshrubbing:schema:rubbing-export:1.1.0#/$defs/sourceAsset"
+          }
+        },
+        "source_metadata_revision": {
+          "$ref": "urn:archmeshrubbing:schema:rubbing-export:1.1.0#/$defs/metadataRevision"
+        }
+      }
+    },
+    "qc": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "export_gate",
+        "record"
+      ],
+      "properties": {
+        "export_gate": {
+          "$ref": "#/$defs/exportGate"
+        },
+        "record": {
+          "$ref": "#/$defs/recordQc"
+        }
+      }
+    }
+  }
+}

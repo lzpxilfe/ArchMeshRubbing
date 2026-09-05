@@ -486,13 +486,15 @@ def test_known_record_validation_enforces_current_distortion_gates(
 
 
 def test_qc_gate_reports_but_does_not_refuse_a_steep_face_on_the_measured_axis() -> None:
-    """A fitted centre may not leave a face over 25%; the measured axis may.
+    """A fitted centre may not distort; on the measured axis it is not distortion.
 
-    With the centre fitted, one such face means the fit put it in the wrong
-    place.  With the centre on the measured axis every vertex lands where the
-    axis says, and a steep face is relief on the wall - what a rubbing records
-    and what a finer mesh resolves more of.  The mean and the 95th percentile
-    still gate the whole.
+    With the centre fitted, a steep face means the fit put it in the wrong
+    place, and all three numbers are the fit's own report card.  With the
+    centre on the measured axis every vertex lands where the axis says, and
+    what the numbers measure is the wall itself - relief, which is what a
+    rubbing records and what a finer mesh resolves more of.  A whole tile
+    back carrying a cord pushes the mean and the 95th percentile as surely as
+    the maximum, so on the axis all three are reported and none refuses.
     """
 
     session, _truth = _recorded_session(seed=9)
@@ -516,9 +518,32 @@ def test_qc_gate_reports_but_does_not_refuse_a_steep_face_on_the_measured_axis()
     assert validated["distortion_max_millionths"] == 300_000
 
     qc["distortion_p95_millionths"] = 150_001
+    qc["distortion_mean_millionths"] = 75_001
+    fitted = dict(qc)
+    fitted["distortion_max_millionths"] = 200_000
+    fitted["distortion_p95_millionths"] = 0
+    with pytest.raises(ArtifactTileUnwrapRecordError, match="mean distortion"):
+        validate_tile_unwrap_qc(
+            fitted, receipt, section_center_policy=SECTION_CENTER_FIT_PER_SECTION
+        )
+    fitted["distortion_mean_millionths"] = 0
+    fitted["distortion_p95_millionths"] = 150_001
     with pytest.raises(ArtifactTileUnwrapRecordError, match="p95 distortion"):
         validate_tile_unwrap_qc(
-            qc, receipt, section_center_policy=SECTION_CENTER_CANONICAL_AXIS
+            fitted, receipt, section_center_policy=SECTION_CENTER_FIT_PER_SECTION
+        )
+    validated = validate_tile_unwrap_qc(
+        qc, receipt, section_center_policy=SECTION_CENTER_CANONICAL_AXIS
+    )
+    assert validated["distortion_p95_millionths"] == 150_001
+    assert validated["distortion_mean_millionths"] == 75_001
+    # What the axis exempts is distortion alone: a p95 above the maximum is
+    # still arithmetic that cannot be, and it is still refused.
+    inconsistent = dict(qc)
+    inconsistent["distortion_p95_millionths"] = 400_000
+    with pytest.raises(ArtifactTileUnwrapRecordError, match="distortion QC is inconsistent"):
+        validate_tile_unwrap_qc(
+            inconsistent, receipt, section_center_policy=SECTION_CENTER_CANONICAL_AXIS
         )
     with pytest.raises(ArtifactTileUnwrapRecordError, match="section centre policy"):
         validate_tile_unwrap_qc(qc, receipt, section_center_policy="guess")

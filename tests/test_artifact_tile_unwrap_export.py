@@ -474,7 +474,8 @@ def test_generated_sidecar_matches_closed_public_json_schema() -> None:
         assert isinstance(value, dict)
         return value
 
-    export_schema = load_schema("tile_unwrap_export-1.4.0.schema.json")
+    export_schema = load_schema("tile_unwrap_export-1.5.0.schema.json")
+    v14_export_schema = load_schema("tile_unwrap_export-1.4.0.schema.json")
     v13_export_schema = load_schema("tile_unwrap_export-1.3.0.schema.json")
     v12_export_schema = load_schema("tile_unwrap_export-1.2.0.schema.json")
     legacy_export_schema = load_schema("tile_unwrap_export-1.1.0.schema.json")
@@ -486,6 +487,7 @@ def test_generated_sidecar_matches_closed_public_json_schema() -> None:
     import_recipe_v2_schema = load_schema("mesh_import_recipe-2.0.0.schema.json")
     for schema in (
         export_schema,
+        v14_export_schema,
         v13_export_schema,
         v12_export_schema,
         legacy_export_schema,
@@ -530,6 +532,10 @@ def test_generated_sidecar_matches_closed_public_json_schema() -> None:
         v13_export_schema,
         registry=registry,
     )
+    v14_validator = jsonschema.Draft202012Validator(
+        v14_export_schema,
+        registry=registry,
+    )
     session, computation = _recorded()
     bundle = build_tile_unwrap_export(
         session.document,
@@ -538,7 +544,7 @@ def test_generated_sidecar_matches_closed_public_json_schema() -> None:
     )
     sidecar = json.loads(bundle.sidecar_bytes)
     assert isinstance(sidecar, dict)
-    assert sidecar["schema_version"] == "1.4.0"
+    assert sidecar["schema_version"] == "1.5.0"
     assert list(validator.iter_errors(sidecar)) == []
     # A 1.3 recipe carries the policies, which the 1.2 sidecar never knew.
     assert list(v12_validator.iter_errors(sidecar))
@@ -549,6 +555,10 @@ def test_generated_sidecar_matches_closed_public_json_schema() -> None:
     v13_shaped["schema_version"] = "1.3.0"
     assert list(v13_validator.iter_errors(v13_shaped)) == []
     assert list(validator.iter_errors(v13_shaped))
+    v14_shaped = copy.deepcopy(sidecar)
+    v14_shaped["schema_version"] = "1.4.0"
+    assert list(v14_validator.iter_errors(v14_shaped)) == []
+    assert list(validator.iter_errors(v14_shaped))
     steep_fitted = copy.deepcopy(sidecar)
     steep_fitted["qc"]["record"]["distortion_max_millionths"] = 300_000
     assert list(validator.iter_errors(steep_fitted))
@@ -557,6 +567,22 @@ def test_generated_sidecar_matches_closed_public_json_schema() -> None:
     assert list(validator.iter_errors(steep_on_axis)) == []
     steep_on_axis["schema_version"] = "1.3.0"
     assert list(v13_validator.iter_errors(steep_on_axis))
+
+    # And 1.5 differs from 1.4 in the other two bounds.  A tile's back meshed
+    # finely enough to carry its cord reports a mean and a 95th percentile
+    # that are the cord's own steepness, not a bad unrolling, so an
+    # axis-centred record may carry them and a fitted one may not.
+    rough_on_axis = copy.deepcopy(sidecar)
+    rough_on_axis["recipe"]["section_center_policy"] = "canonical_axis_origin"
+    rough_on_axis["qc"]["record"]["distortion_mean_millionths"] = 90_000
+    rough_on_axis["qc"]["record"]["distortion_p95_millionths"] = 200_000
+    assert list(validator.iter_errors(rough_on_axis)) == []
+    rough_under_1_4 = copy.deepcopy(rough_on_axis)
+    rough_under_1_4["schema_version"] = "1.4.0"
+    assert list(v14_validator.iter_errors(rough_under_1_4))
+    rough_fitted = copy.deepcopy(rough_on_axis)
+    rough_fitted["recipe"]["section_center_policy"] = "fit_per_section"
+    assert list(validator.iter_errors(rough_fitted))
 
     fixed_session, fixed_computation = _recorded(
         seam_angle_microdegrees=90_000_000
@@ -682,6 +708,10 @@ def test_experimental_legacy_schema_files_remain_byte_exact(
             "tile_unwrap_export-1.3.0.schema.json",
             "df896f8053e45b43c039167428bd1d02f975e9c47a7b95b5bf7776a76b219bc0",
         ),
+        (
+            "tile_unwrap_export-1.4.0.schema.json",
+            "bf2ebeb5918065b29c884c582347661eb712e9a9ee60f06380e18f340f2b8509",
+        ),
     ],
 )
 def test_published_export_schemas_remain_byte_exact(
@@ -691,6 +721,92 @@ def test_published_export_schemas_remain_byte_exact(
     schema_bytes = (ROOT / "schemas" / name).read_bytes()
 
     assert hashlib.sha256(schema_bytes).hexdigest() == expected_sha256
+
+
+def _resigned(sidecar: dict, computation: ArtifactTileUnwrapComputation) -> bytes:
+    """Re-sign an edited sidecar so only the edit under test is what fails."""
+
+    sidecar["provenance"]["record"]["recipe_hash"] = tile_export.canonical_recipe_hash(
+        sidecar["recipe"]
+    )
+    sidecar["claims_sha256"] = tile_export.canonical_json_sha256(
+        tile_export._sidecar_claims(sidecar)
+    )
+    svg_bytes, _loops = tile_export._render_svg(
+        computation.unwrap,
+        sidecar["geometry"],
+        sidecar["provenance"],
+        sidecar_claims_sha256=sidecar["claims_sha256"],
+    )
+    sidecar["artifacts"]["outline"] = tile_export._artifact_descriptor(
+        name=tile_export.TILE_UNWRAP_EXPORT_SVG_NAME,
+        media_type=tile_export.TILE_UNWRAP_SVG_MEDIA_TYPE,
+        payload=svg_bytes,
+    )
+    return svg_bytes
+
+
+def test_only_a_1_5_sidecar_carries_an_axis_centred_records_own_relief() -> None:
+    """A tile's cord is not an unrolling error, and the sidecar says which.
+
+    Developed about the measured axis, the distortion numbers stop being the
+    fit's report card and become the surface's own steepness: a cord standing
+    0.35 mm proud at a 3 mm pitch really does carry about a quarter more area
+    than the cylinder it develops onto, and a mesh fine enough to draw the
+    cord finds all of it.  1.4 lifted the per-face maximum there, 1.5 lifts
+    the mean and the 95th percentile with it - and every older sidecar still
+    refuses to carry them, whatever the centre.
+    """
+
+    session, computation = _recorded()
+    bundle = build_tile_unwrap_export(
+        session.document,
+        "record:tile-export",
+        computation.unwrap,
+    )
+    base = json.loads(bundle.sidecar_bytes)
+    base["recipe"]["section_center_policy"] = "canonical_axis_origin"
+    record_qc = base["qc"]["record"]
+    record_qc["distortion_max_millionths"] = 400_000
+    record_qc["distortion_p95_millionths"] = 200_000
+    record_qc["distortion_mean_millionths"] = 90_000
+
+    current = copy.deepcopy(base)
+    svg_bytes = _resigned(current, computation)
+    validate_tile_unwrap_export_bytes(
+        bundle.payload_bytes,
+        bundle.obj_bytes,
+        svg_bytes,
+        tile_export.canonical_json_bytes(current) + b"\n",
+    )
+
+    older = copy.deepcopy(base)
+    older["schema_version"] = "1.4.0"
+    older_svg = _resigned(older, computation)
+    with pytest.raises(
+        ArtifactTileUnwrapExportError,
+        match="before 1.5 cannot carry a mean or 95th percentile",
+    ):
+        validate_tile_unwrap_export_bytes(
+            bundle.payload_bytes,
+            bundle.obj_bytes,
+            older_svg,
+            tile_export.canonical_json_bytes(older) + b"\n",
+        )
+
+    oldest = copy.deepcopy(base)
+    oldest["schema_version"] = "1.3.0"
+    oldest_svg = _resigned(oldest, computation)
+    with pytest.raises(
+        ArtifactTileUnwrapExportError,
+        match="before 1.4 cannot carry a face",
+    ):
+        validate_tile_unwrap_export_bytes(
+            bundle.payload_bytes,
+            bundle.obj_bytes,
+            oldest_svg,
+            tile_export.canonical_json_bytes(oldest) + b"\n",
+        )
 
 
 def test_canonical_payload_roundtrips_and_rejects_trailing_bytes() -> None:
