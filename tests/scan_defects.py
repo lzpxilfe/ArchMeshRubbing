@@ -129,6 +129,105 @@ def bite_the_rim(
     return points, triangles[~bitten]
 
 
+def bridge_the_wall(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    *,
+    z_mm: float,
+    from_angle_deg: float,
+    to_angle_deg: float,
+    band_mm: float = 8.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Put a break across the wall, with both fracture faces scanned.
+
+    The museum's 빗살무늬토기 is mended from sherds, and at one join the scanner
+    meshed the inside of the wall: between z -250 and -240 mm the gap between
+    the outer and inner surfaces, 7 to 11 mm everywhere else, is filled with
+    vertices 1 to 2 mm apart, and the scan's 11 boundary and 28 non-manifold
+    edges all sit there.  A section through it closes into two loops - the
+    wall looks cut through at that height - and the drawing shows two bars
+    across the wall where the drafter expects one line.
+
+    This makes that: over the angle span the wall's skin between the mesh
+    ring just below ``z_mm`` and the ring just above it is taken away, and
+    each of those rings is stitched across the wall thickness, so the lower
+    part of the wall is closed by one fracture face and the upper part by
+    the other.  The sides of the window are left open, as the real join's
+    edges are.  No vertex is added or moved.
+    """
+
+    points = np.asarray(vertices, dtype=np.float64)
+    triangles = np.asarray(faces, dtype=np.int64)
+    radius = np.hypot(points[:, 0], points[:, 1])
+    angle = np.degrees(np.arctan2(points[:, 1], points[:, 0]))
+    span = (angle - float(from_angle_deg)) % 360.0
+    width = (float(to_angle_deg) - float(from_angle_deg)) % 360.0
+    in_span = span <= width
+    near = np.abs(points[:, 2] - float(z_mm)) <= float(band_mm)
+    candidates = np.flatnonzero(in_span & near & (radius > 1e-9))
+    if candidates.size < 4:
+        raise ValueError("no wall within the band to bridge")
+    # The outer surface is the larger radius in the band, the inner the
+    # smaller; on each, the ring just below z_mm and the ring just above.
+    mid_radius = (radius[candidates].max() + radius[candidates].min()) / 2.0
+    rings: dict[tuple[str, str], np.ndarray] = {}
+    for side, on_side in (
+        ("outer", radius[candidates] > mid_radius),
+        ("inner", radius[candidates] < mid_radius),
+    ):
+        on = candidates[on_side]
+        heights = np.unique(np.round(points[on, 2], 6))
+        below = heights[heights <= float(z_mm)]
+        above = heights[heights > float(z_mm)]
+        if below.size == 0 or above.size == 0:
+            raise ValueError(f"the band holds no ring on both sides of z on the {side} wall")
+        for level, height in (("low", below.max()), ("high", above.min())):
+            ring = on[np.abs(points[on, 2] - height) < 1e-6]
+            rings[(side, level)] = ring[np.argsort(span[ring])]
+
+    def stitch(outer: np.ndarray, inner: np.ndarray) -> list[list[int]]:
+        # Walk both rings by angle, always advancing the one that lags, so
+        # the face between them is a fan of triangles with no crossing.
+        added: list[list[int]] = []
+        i = j = 0
+        while i < outer.size - 1 or j < inner.size - 1:
+            advance_outer = j >= inner.size - 1 or (
+                i < outer.size - 1 and span[outer[i + 1]] <= span[inner[j + 1]]
+            )
+            if advance_outer:
+                added.append([int(outer[i]), int(outer[i + 1]), int(inner[j])])
+                i += 1
+            else:
+                added.append([int(outer[i]), int(inner[j + 1]), int(inner[j])])
+                j += 1
+        return added
+
+    added = stitch(rings[("outer", "low")], rings[("inner", "low")]) + stitch(
+        rings[("outer", "high")], rings[("inner", "high")]
+    )
+    # The skin between the two rings, on both surfaces, within the span.
+    centroids = points[triangles].mean(axis=1)
+    centroid_span = (np.degrees(np.arctan2(centroids[:, 1], centroids[:, 0])) - float(from_angle_deg)) % 360.0
+    centroid_radius = np.hypot(centroids[:, 0], centroids[:, 1])
+    window = np.zeros(triangles.shape[0], dtype=bool)
+    for side, on_side in (
+        ("outer", centroid_radius > mid_radius),
+        ("inner", centroid_radius < mid_radius),
+    ):
+        low = float(points[rings[(side, "low")][0], 2])
+        high = float(points[rings[(side, "high")][0], 2])
+        window |= (
+            on_side
+            & (centroid_span <= width)
+            & (centroids[:, 2] > low)
+            & (centroids[:, 2] < high)
+            & (np.abs(centroids[:, 2] - float(z_mm)) <= float(band_mm))
+        )
+    if not window.any():
+        raise ValueError("no skin between the rings to take away")
+    return points, np.vstack([triangles[~window], np.asarray(added, dtype=np.int64)])
+
+
 def stand_it_wrong(
     vertices: np.ndarray,
     *,
@@ -233,6 +332,7 @@ def mesh_report(vertices: np.ndarray, faces: np.ndarray) -> dict[str, int]:
 __all__ = [
     "add_loose_crumb",
     "bite_the_rim",
+    "bridge_the_wall",
     "mesh_report",
     "punch_hole",
     "stand_it_wrong",

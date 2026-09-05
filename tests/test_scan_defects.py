@@ -19,6 +19,7 @@ import pytest
 from scan_defects import (
     add_loose_crumb,
     bite_the_rim,
+    bridge_the_wall,
     mesh_report,
     punch_hole,
     stand_it_wrong,
@@ -164,6 +165,57 @@ def test_warping_takes_the_pot_off_being_a_surface_of_revolution() -> None:
     # Warping is the artifact's shape, so it does not break the mesh.
     assert mesh_report(ovalled, faces)["connected_piece_count"] == 1
     assert mesh_report(leaning, faces)["boundary_edge_count"] == 0
+
+
+def test_a_join_meshed_across_the_wall_splits_the_section_and_not_the_outline() -> None:
+    """The museum pot's broken section wall, reproduced.
+
+    At one restoration join the scan meshes the inside of the wall, so a
+    section through it closes into two loops - the wall looks cut through at
+    that height - while the silhouette, which the join sits inside, does not
+    change at all.  The generated join is the tidy version of the real one:
+    two fracture faces and an open window between them, without the real
+    scan's tangle of non-manifold edges.
+    """
+
+    from src.core.artifact_outline_extractor import extract_outline_geometry
+    from src.core.artifact_vector_extractor import extract_cutline_geometry
+    from src.core.artifact_vector_record import PlanarFrame
+
+    vertices, faces = _vessel(segments=48, rings=16)
+    assert mesh_report(vertices, faces)["boundary_edge_count"] == 0
+    bridged = bridge_the_wall(
+        vertices, faces, z_mm=HEIGHT_MM * 0.5, from_angle_deg=-25.0, to_angle_deg=25.0
+    )
+    report = mesh_report(*bridged)
+    assert report["connected_piece_count"] == 1
+    # The window's sides are open edges, as the real join has.
+    assert report["boundary_edge_count"] > 0
+
+    # A section through the join: one closed loop becomes two.
+    plane = PlanarFrame(
+        origin_world_mm=(0.0, 0.37, 0.0),
+        u_axis_world=(1.0, 0.0, 0.0),
+        v_axis_world=(0.0, 0.0, 1.0),
+        normal_world=(0.0, -1.0, 0.0),
+    )
+    whole = extract_cutline_geometry(vertices, faces, plane)
+    assert [path.closed for path in whole.payload.paths] == [True]
+    split = extract_cutline_geometry(*bridged, plane)
+    assert [path.closed for path in split.payload.paths] == [True, True]
+    # One loop is the whole pot less the wall above the break; the other is
+    # the piece of wall above it, which reaches down only to the break.
+    lowest = sorted(
+        min(point[1] for point in path.points_mm) for path in split.payload.paths
+    )
+    assert lowest[0] < 1.0
+    assert abs(lowest[1] - HEIGHT_MM * 0.5) < 8.0
+
+    # The join faces +X, so the right view looks straight at it and its
+    # silhouette does not see it: the outline is the same bytes.
+    plain = extract_outline_geometry(vertices, faces, "right", precision_grid_mm=0.2)
+    joined = extract_outline_geometry(*bridged, "right", precision_grid_mm=0.2)
+    assert joined.payload.sha256 == plain.payload.sha256
 
 
 def test_every_defect_is_the_same_mesh_twice() -> None:
