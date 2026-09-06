@@ -68,6 +68,12 @@ from .artifact_document import (
     RecordFreshness,
     RecordLifecycleStatus,
 )
+from .artifact_profile_break import (
+    PROFILE_BREAK_RECORD_TYPE,
+    ArtifactProfileBreakError,
+    ProfileBreakPayload,
+    profile_break_payload_from_record,
+)
 from .artifact_profile_groove import (
     ArtifactProfileGrooveError,
     PROFILE_GROOVE_RECORD_TYPE,
@@ -131,6 +137,7 @@ from .drawing_svg import (
     Placement,
     SVG_NAMESPACE,
     SVGRenderError,
+    axis_profile_chord,
     center_axis_line,
     center_axis_segment,
     clip_closed_ring,
@@ -780,6 +787,14 @@ class DrawingSheetOptions:
     record the sheet is not drawing as a rubbing is refused rather than
     quietly dropped.
     """
+    break_records: tuple[str, ...] = ()
+    """Profile break readings to draw on the figures, by record id.
+
+    A corner of the profile runs right round the artifact, so like a groove
+    it is drawn only on a figure whose plane contains the rotation axis: one
+    straight line at its height, from the silhouette in to the axis, as an
+    inner line.
+    """
     groove_records: tuple[str, ...] = ()
     """Groove readings to draw on the figures, by record id.
 
@@ -1053,6 +1068,16 @@ class DrawingSheetOptions:
                 "groove records"
             )
         object.__setattr__(self, "groove_records", groove_records)
+        break_records = tuple(self.break_records)
+        if any(not isinstance(record_id, str) or not record_id.strip() for record_id in break_records):
+            raise DrawingSheetError("break_records must be record ids")
+        if len(set(break_records)) != len(break_records):
+            raise DrawingSheetError("the same break record cannot be drawn twice on one sheet")
+        if len(break_records) > MAX_DRAWING_SHEET_CONDITION_RECORDS:
+            raise DrawingSheetError(
+                f"a sheet draws at most {MAX_DRAWING_SHEET_CONDITION_RECORDS} break records"
+            )
+        object.__setattr__(self, "break_records", break_records)
         on_axis: list[tuple[str, str]] = []
         for pair in self.rubbings_on_axis:
             if not isinstance(pair, (tuple, list)) or len(pair) != 2:
@@ -2304,6 +2329,80 @@ def _require_drawable_groove_record(
     return record, payload
 
 
+def _require_drawable_break_record(
+    document: ArtifactDocument,
+    record_id: str,
+) -> tuple[DerivedRecord, ProfileBreakPayload]:
+    """Resolve one break reading under the same rules a groove answers to."""
+
+    record = document.record_index.get(record_id)
+    if record is None:
+        raise DrawingSheetError(f"break record {record_id!r} does not exist")
+    if record.type != PROFILE_BREAK_RECORD_TYPE:
+        raise DrawingSheetError(f"record {record_id!r} is not a profile break reading")
+    if record.lifecycle_status is not RecordLifecycleStatus.READY:
+        raise DrawingSheetError("only READY break records may be drawn")
+    try:
+        freshness = document.record_freshness(record.id)
+    except ArtifactDocumentError as exc:
+        raise DrawingSheetError(str(exc)) from exc
+    if freshness is not RecordFreshness.FRESH:
+        raise DrawingSheetError(
+            "only FRESH break records may be drawn "
+            f"(got {freshness.value}); a corner read under a superseded "
+            "alignment names a height on an artifact standing somewhere else"
+        )
+    try:
+        payload = profile_break_payload_from_record(record)
+    except ArtifactProfileBreakError as exc:
+        raise DrawingSheetError(str(exc)) from exc
+    return record, payload
+
+
+def _break_paths_for_figure(
+    figure_payload: Any,
+    breaks: Sequence[tuple[DerivedRecord, ProfileBreakPayload]],
+) -> tuple[dict[str, list[Any]], list[dict[str, str]]]:
+    """Return the break lines that belong on one figure, and what they are.
+
+    A corner of the profile is a fact about the artifact's own axis: any
+    figure whose plane contains that axis shows it as the chord of its
+    circle at its height, an inner line from silhouette to silhouette that
+    a mirrored figure then cuts at the axis.  A plan view gets nothing.
+    """
+
+    by_kind: dict[str, list[Any]] = {}
+    drawn: list[dict[str, str]] = []
+    frame = figure_payload.frame.to_dict()
+    for record, payload in breaks:
+        paths: list[Any] = []
+        for index, item in enumerate(payload.breaks):
+            try:
+                chord = axis_profile_chord(
+                    frame,
+                    height_mm=float(item.height_um) / 1000.0,
+                    radius_mm=float(item.radius_um) / 1000.0,
+                )
+            except SVGRenderError as exc:
+                raise DrawingSheetError(str(exc)) from exc
+            if chord is None:
+                paths = []
+                break
+            paths.append(
+                VectorPath(
+                    id=f"profile-break:{record.id}:{index:03d}",
+                    role="profile_break",
+                    closed=False,
+                    points_mm=(chord[0], chord[1]),
+                )
+            )
+        if not paths:
+            continue
+        by_kind.setdefault(OUTLINE_HOLE, []).extend(paths)
+        drawn.append({"break_count": str(len(payload.breaks)), "record_id": record.id})
+    return by_kind, drawn
+
+
 def _groove_paths_for_figure(
     figure_payload: Any,
     grooves: Sequence[tuple[DerivedRecord, ProfileGroovePayload]],
@@ -3262,6 +3361,7 @@ def _sheet_provenance(
     crease: Mapping[str, Any] | None = None,
     layout: Mapping[str, str] | None = None,
     texture_lines: Mapping[str, Any] | None = None,
+    profile_breaks: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     preset = resolve_drawing_style_preset(options.style_preset)
     provenance: dict[str, Any] = {
@@ -3356,6 +3456,8 @@ def _sheet_provenance(
         provenance["layout"] = dict(layout)
     if groove is not None:
         provenance["groove"] = dict(groove)
+    if profile_breaks is not None:
+        provenance["profile_breaks"] = dict(profile_breaks)
     if technique is not None:
         provenance["technique"] = dict(technique)
     if mirrored:
@@ -3728,6 +3830,10 @@ def compose_drawing_sheet(
         _require_drawable_groove_record(document, record_id)
         for record_id in options.groove_records
     ]
+    breaks = [
+        _require_drawable_break_record(document, record_id)
+        for record_id in options.break_records
+    ]
     condition_drawn: list[dict[str, str]] = []
     technique_drawn: list[dict[str, Any]] = []
     technique_not_drawn: list[dict[str, str]] = []
@@ -3750,6 +3856,7 @@ def compose_drawing_sheet(
         except (DrawingStyleError, DrawingMarkError) as exc:
             raise DrawingSheetError(str(exc)) from exc
     groove_drawn: list[dict[str, str]] = []
+    break_drawn: list[dict[str, str]] = []
     attached_drawn: list[dict[str, str]] = []
     mirrored: list[dict[str, str]] = []
     section_loops: list[dict[str, Any]] = []
@@ -3902,6 +4009,10 @@ def compose_drawing_sheet(
         groove_drawn.extend(
             {"figure_record_id": record.id, **entry} for entry in grooves_drawn
         )
+        break_by_kind, breaks_drawn = _break_paths_for_figure(payload, breaks)
+        for kind, break_paths in break_by_kind.items():
+            by_kind.setdefault(kind, []).extend(break_paths)
+        break_drawn.extend({"figure_record_id": record.id, **entry} for entry in breaks_drawn)
         attached: _AttachedRaster | None = None
         caption: str | None = None
         attached_rubbing_id = attached_by_elevation.get(record.id)
@@ -4234,6 +4345,26 @@ def compose_drawing_sheet(
                     ],
                 }
                 if grooves
+                else None
+            ),
+            profile_breaks=(
+                {
+                    "drawn": sorted(
+                        break_drawn,
+                        key=lambda entry: (entry["figure_record_id"], entry["record_id"]),
+                    ),
+                    "records": [
+                        {
+                            "break_count": len(payload.breaks),
+                            "break_heights_um": [item.height_um for item in payload.breaks],
+                            "payload_sha256": payload.sha256,
+                            "recipe_hash": record.recipe_hash,
+                            "record_id": record.id,
+                        }
+                        for record, payload in sorted(breaks, key=lambda item: item[0].id)
+                    ],
+                }
+                if breaks
                 else None
             ),
             mirrored=sorted(
