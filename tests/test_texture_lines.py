@@ -534,16 +534,29 @@ def test_a_pattern_stroke_is_drawn_as_the_clean_segment_it_is_when_asked() -> No
     hook = wobbly(20.0, 0.0, 45.0, 6.0, 0.0)
     hook = hook + [(hook[-1][0] + 400, hook[-1][1] - 300)]  # a hook off the end
     curve = [(30_000 + int(2_000 * math.cos(t)), int(2_000 * math.sin(t))) for t in np.linspace(0.0, 2.0, 15)]
+    # One stroke the tracer dropped for half a millimetre: two fragments
+    # on one line at 45 degrees, 3 mm each, 0.5 mm apart along it.
+    fragments = [wobbly(40.0, 0.0, 45.0, 3.0, 0.0), wobbly(40.0 + 3.5 / math.sqrt(2.0), 3.5 / math.sqrt(2.0), 45.0, 3.0, 0.0)]
     payload = TextureLinesPayload(
         schema_version="1.1.0",
         view="front",
-        polylines=tuple(tuple(line) for line in lines) + (tuple(hook), tuple(curve)),
-        pattern_of=(0,) * 8,
-        patterns=({"direction_deg": 45, "line_count": 8},),
+        polylines=tuple(tuple(line) for line in lines) + (tuple(hook), tuple(curve)) + tuple(tuple(f) for f in fragments),
+        pattern_of=(0,) * 10,
+        patterns=({"direction_deg": 45, "line_count": 10},),
         bands=({"directions_deg": [45], "height_um_max": 10_000, "height_um_min": -1_000, "patterns": [0]},),
     )
     segments = _straightened_strokes(payload, angle_deg=15.0)
-    assert set(segments) == set(range(7))  # the six strokes and the hooked one; not the curve
+    assert set(segments) == set(range(7)) | {8, 9}  # the strokes and the fragments; not the curve
+    from src.core.drawing_sheet import _joined_strokes
+
+    joined, absorbed = _joined_strokes(payload, segments)
+    # The six strokes a millimetre apart stay six; the fragments become one
+    # stroke from end to end, 6.5 mm long, and the second is absorbed.
+    assert absorbed == {9} and set(joined) == set(range(7)) | {8}
+    (x0, y0), (x1, y1) = joined[8]
+    assert abs(math.hypot(x1 - x0, y1 - y0) - 6.5) < 0.1
+    assert abs(math.degrees(math.atan2(y1 - y0, x1 - x0)) % 180.0 - 45.0) < 0.5
+    segments = {index: segments[index] for index in range(7)}
     angles = []
     for index in range(6):
         (x0, y0), (x1, y1) = segments[index]

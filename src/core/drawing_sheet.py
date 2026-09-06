@@ -413,6 +413,11 @@ MAX_INTERPRETATION_NOTE_LENGTH = 60
 MAX_STROKE_STRAIGHTENING_DEG = 30.0
 STROKE_STRAIGHTEN_TOLERANCE_MM = 0.3
 STROKE_NEIGHBOUR_MM = 6.0
+#: Fragments of one stroke are drawn as one: two straightened segments of
+#: a pattern on one line, pointing the same way within this angle, with a
+#: gap along it no wider than this.
+STROKE_JOIN_GAP_MM = 1.0
+STROKE_JOIN_ANGLE_DEG = 5.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -2015,6 +2020,87 @@ def _straightened_strokes(
     return segments
 
 
+def _joined_strokes(
+    payload: TextureLinesPayload,
+    segments: Mapping[int, tuple[tuple[float, float], tuple[float, float]]],
+) -> tuple[dict[int, tuple[tuple[float, float], tuple[float, float]]], set[int]]:
+    """Fragments of one stroke drawn as one stroke: two straightened
+    segments of one pattern that lie on one line (each middle within
+    ``STROKE_STRAIGHTEN_TOLERANCE_MM`` of the other's line), point the same
+    way (within ``STROKE_JOIN_ANGLE_DEG``) and leave a gap along it no
+    wider than ``STROKE_JOIN_GAP_MM`` are drawn as one segment from end to
+    end.  Returns the segments to draw and the indices absorbed into
+    another's."""
+
+    by_pattern: dict[int, list[int]] = {}
+    for index in segments:
+        by_pattern.setdefault(payload.pattern_index(index), []).append(index)
+    parent = {index: index for index in segments}
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    limit = math.radians(STROKE_JOIN_ANGLE_DEG)
+    for members in by_pattern.values():
+        if len(members) < 2:
+            continue
+        ends = np.array([segments[index] for index in members], dtype=np.float64)  # (n, 2, 2)
+        middles = ends.mean(axis=1)
+        chords = ends[:, 1] - ends[:, 0]
+        halves = 0.5 * np.linalg.norm(chords, axis=1)
+        directions = chords / np.maximum(2.0 * halves, 1e-12)[:, None]
+        angles = np.arctan2(directions[:, 1], directions[:, 0]) % math.pi
+        for a in range(len(members) - 1):
+            offset = middles[a + 1 :] - middles[a]
+            reach = halves[a] + halves[a + 1 :] + STROKE_JOIN_GAP_MM
+            near = np.linalg.norm(offset, axis=1) <= reach
+            if not near.any():
+                continue
+            turn = np.abs(angles[a + 1 :] - angles[a]) % math.pi
+            turn = np.minimum(turn, math.pi - turn)
+            across_a = np.abs(directions[a, 0] * offset[:, 1] - directions[a, 1] * offset[:, 0])
+            across_b = np.abs(directions[a + 1 :, 0] * offset[:, 1] - directions[a + 1 :, 1] * offset[:, 0])
+            along = np.abs(offset @ directions[a]) - halves[a] - halves[a + 1 :]
+            joins = (
+                near
+                & (turn <= limit)
+                & (across_a <= STROKE_STRAIGHTEN_TOLERANCE_MM)
+                & (across_b <= STROKE_STRAIGHTEN_TOLERANCE_MM)
+                & (along <= STROKE_JOIN_GAP_MM)
+            )
+            for b in np.flatnonzero(joins):
+                root_a, root_b = find(members[a]), find(members[a + 1 + int(b)])
+                if root_a != root_b:
+                    parent[max(root_a, root_b)] = min(root_a, root_b)
+    groups: dict[int, list[int]] = {}
+    for index in segments:
+        groups.setdefault(find(index), []).append(index)
+    joined: dict[int, tuple[tuple[float, float], tuple[float, float]]] = dict(segments)
+    absorbed: set[int] = set()
+    for root, members in groups.items():
+        if len(members) < 2:
+            continue
+        ends = np.array([segments[index] for index in members], dtype=np.float64)
+        chords = ends[:, 1] - ends[:, 0]
+        lengths = np.linalg.norm(chords, axis=1)
+        doubled = 2.0 * np.arctan2(chords[:, 1], chords[:, 0])
+        angle = 0.5 * math.atan2(float((lengths * np.sin(doubled)).sum()), float((lengths * np.cos(doubled)).sum()))
+        direction = np.array([math.cos(angle), math.sin(angle)])
+        middle = (ends.mean(axis=1) * lengths[:, None]).sum(axis=0) / max(float(lengths.sum()), 1e-12)
+        along = (ends.reshape(-1, 2) - middle) @ direction
+        start = middle + direction * float(along.min())
+        end = middle + direction * float(along.max())
+        joined[root] = ((float(start[0]), float(start[1])), (float(end[0]), float(end[1])))
+        for index in members:
+            if index != root:
+                absorbed.add(index)
+                del joined[index]
+    return joined, absorbed
+
+
 def _texture_line_paths_for_figure(
     figure_record_type: str,
     figure_payload_frame: Any,
@@ -2043,11 +2129,12 @@ def _texture_line_paths_for_figure(
             continue
         hidden = sorted(index for record_id, index in hidden_patterns if record_id == record.id)
         grouped = payload.patterns is not None
-        straightened = (
-            _straightened_strokes(payload, angle_deg=straightening_deg)
-            if grouped and straightening_deg > 0.0
-            else {}
-        )
+        straightened: dict[int, tuple[tuple[float, float], tuple[float, float]]] = {}
+        absorbed: set[int] = set()
+        if grouped and straightening_deg > 0.0:
+            straightened, absorbed = _joined_strokes(
+                payload, _straightened_strokes(payload, angle_deg=straightening_deg)
+            )
         order = sorted(
             range(payload.line_count),
             key=lambda index: (
@@ -2059,7 +2146,7 @@ def _texture_line_paths_for_figure(
         shown = 0
         for index in order:
             pattern = payload.pattern_index(index)
-            if grouped and pattern in hidden:
+            if (grouped and pattern in hidden) or index in absorbed:
                 continue
             shown += 1
             path_id = (
@@ -2091,7 +2178,8 @@ def _texture_line_paths_for_figure(
                     {
                         "band_count": str(payload.band_count),
                         "drawn_polyline_count": str(shown),
-                        "straightened_polyline_count": str(len(straightened)),
+                        "straightened_polyline_count": str(len(straightened) + len(absorbed)),
+                        "joined_polyline_count": str(len(absorbed)),
                         "hidden_patterns": ",".join(str(index) for index in hidden),
                         "pattern_count": str(payload.pattern_count),
                         "seam_line_count": str(
