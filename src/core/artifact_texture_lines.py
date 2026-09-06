@@ -116,13 +116,13 @@ TEXTURE_LINES_ORIENTATION_COHERENCE_MIN = 0.5
 #: under ``straightness_min_percent`` of its length) is not a stroke of
 #: this pattern either.  Both are dropped and counted.
 #: Strokes are then grouped as the eye groups them: two strokes are of one
-#: pattern when their middles lie within ``TEXTURE_LINES_PATTERN_GAP_MM``
+#: pattern when their middles lie within ``pattern_gap_um``
 #: and their directions within ``TEXTURE_LINES_PATTERN_ANGLE_DEG``; a
 #: group of fewer than ``TEXTURE_LINES_PATTERN_MIN_STROKES`` is loose
 #: (pattern -1).  Each pattern goes on the sheet as its own group, so a
 #: reader can strike out what was read but is not a pattern.
 TEXTURE_LINES_PATTERN_RULE = "strokes_by_direction_neighbourhood/v1"
-TEXTURE_LINES_PATTERN_GAP_MM = 4.0
+DEFAULT_TEXTURE_LINES_PATTERN_GAP_UM = 6_000
 TEXTURE_LINES_PATTERN_ANGLE_DEG = 20.0
 TEXTURE_LINES_PATTERN_MIN_STROKES = 4
 TEXTURE_LINES_PATTERNS_SCHEMA_VERSION = "1.1.0"
@@ -157,11 +157,11 @@ DEFAULT_TEXTURE_LINES_LINE_SMOOTHING_MM = 0.3
 DEFAULT_TEXTURE_LINES_INCISION_SIGN = -1
 
 DEFAULT_TEXTURE_LINES_STROKE_WINDOW_UM = 2_500
-DEFAULT_TEXTURE_LINES_STROKE_DEPTH_UM = 120
+DEFAULT_TEXTURE_LINES_STROKE_DEPTH_UM = 150
 DEFAULT_TEXTURE_LINES_STROKE_CLOSE_UM = 500
 DEFAULT_TEXTURE_LINES_STROKE_SPUR_UM = 800
-DEFAULT_TEXTURE_LINES_ORIENTATION_UM = 1_500
-DEFAULT_TEXTURE_LINES_STRAIGHTNESS_MIN_PERCENT = 50
+DEFAULT_TEXTURE_LINES_ORIENTATION_UM = 2_500
+DEFAULT_TEXTURE_LINES_STRAIGHTNESS_MIN_PERCENT = 70
 
 MIN_TEXTURE_LINES_PIXELS_PER_MM = 1
 MAX_TEXTURE_LINES_PIXELS_PER_MM = 50
@@ -253,6 +253,7 @@ def texture_lines_recipe(
     spur_mm: float = DEFAULT_TEXTURE_LINES_STROKE_SPUR_UM / 1000.0,
     orientation_mm: float = DEFAULT_TEXTURE_LINES_ORIENTATION_UM / 1000.0,
     straightness_min_percent: int = DEFAULT_TEXTURE_LINES_STRAIGHTNESS_MIN_PERCENT,
+    pattern_gap_mm: float = DEFAULT_TEXTURE_LINES_PATTERN_GAP_UM / 1000.0,
 ) -> dict[str, Any]:
     """The recipe: the two files, the view, and every number that decides a line.
 
@@ -302,6 +303,7 @@ def texture_lines_recipe(
             **common,
             "orientation_um": _um(orientation_mm, name="orientation_mm", minimum=0, maximum=20_000),
             "pattern": TEXTURE_LINES_PATTERN_RULE,
+            "pattern_gap_um": _um(pattern_gap_mm, name="pattern_gap_mm", minimum=0, maximum=100_000),
             "spur_um": _um(spur_mm, name="spur_mm", minimum=0, maximum=10_000),
             "straightness_min_percent": _strict_int(
                 straightness_min_percent, name="straightness_min_percent", minimum=0, maximum=100
@@ -384,6 +386,7 @@ def validate_texture_lines_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
                 "min_length_um",
                 "orientation_um",
                 "pattern",
+                "pattern_gap_um",
                 "spur_um",
                 "straightness_min_percent",
                 "valley",
@@ -433,6 +436,9 @@ def validate_texture_lines_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
                 detection["orientation_um"], name="orientation_um", minimum=0, maximum=20_000
             ),
             "pattern": TEXTURE_LINES_PATTERN_RULE,
+            "pattern_gap_um": _strict_int(
+                detection["pattern_gap_um"], name="pattern_gap_um", minimum=0, maximum=100_000
+            ),
             "spur_um": _strict_int(detection["spur_um"], name="spur_um", minimum=0, maximum=10_000),
             "straightness_min_percent": _strict_int(
                 detection["straightness_min_percent"],
@@ -811,35 +817,58 @@ def _thinning_tables() -> tuple[np.ndarray, np.ndarray]:
 _THINNING_TABLES = _thinning_tables()
 
 
+def _thinning_tables() -> tuple[np.ndarray, np.ndarray]:
+    """Zhang-Suen's two deletion tests over the 256 neighbourhood codes:
+    bit i of the code is ring pixel i (north first, clockwise)."""
+
+    tables = (np.zeros(256, dtype=bool), np.zeros(256, dtype=bool))
+    for code in range(256):
+        ring = [(code >> index) & 1 for index in range(8)]
+        neighbours = sum(ring)
+        transitions = sum(1 for index in range(8) if ring[index] == 0 and ring[(index + 1) % 8] == 1)
+        if not (2 <= neighbours <= 6 and transitions == 1):
+            continue
+        north, east, south, west = ring[0], ring[2], ring[4], ring[6]
+        tables[0][code] = north * east * south == 0 and east * south * west == 0
+        tables[1][code] = north * east * west == 0 and north * south * west == 0
+    return tables
+
+
+_THINNING_TABLES = _thinning_tables()
+
+
 def _thin(mask: np.ndarray) -> np.ndarray:
     """Zhang-Suen thinning: the ribbon down to a one-pixel skeleton.
 
-    Each pass packs every pixel's eight neighbours into one byte and looks
-    the deletion test up in a table, so a pass is a dozen byte operations
-    over the raster however wide the ribbons are.
+    Each pass encodes every pixel's 8-ring as one byte and looks the two
+    deletion tests up in a table, so a pass is a dozen whole-array
+    operations however wide the ribbon; the work is confined to the box
+    the ribbon occupies.
     """
 
-    height, width = mask.shape
-    padded = np.pad(mask.astype(np.uint8), 1)
-    core = padded[1:-1, 1:-1]
-    code = np.zeros((height, width), dtype=np.uint8)
+    rows, cols = np.nonzero(mask)
+    if rows.size == 0:
+        return np.zeros(mask.shape, dtype=bool)
+    top, bottom = int(rows.min()), int(rows.max()) + 1
+    left, right = int(cols.min()), int(cols.max()) + 1
+    image = np.pad(mask[top:bottom, left:right].astype(np.uint8), 1)
+    height, width = image.shape
+    inner = (slice(1, height - 1), slice(1, width - 1))
     while True:
         changed = False
         for table in _THINNING_TABLES:
-            code.fill(0)
+            code = np.zeros((height - 2, width - 2), dtype=np.uint8)
             for index, (dr, dc) in enumerate(_RING):
-                np.bitwise_or(
-                    code,
-                    np.left_shift(padded[1 + dr : 1 + dr + height, 1 + dc : 1 + dc + width], index),
-                    out=code,
-                )
-            remove = table[code]
-            remove &= core == 1
+                code |= image[1 + dr : height - 1 + dr, 1 + dc : width - 1 + dc] << index
+            remove = table[code] & (image[inner] == 1)
             if remove.any():
-                core[remove] = 0
+                image[inner][remove] = 0
                 changed = True
         if not changed:
-            return core.astype(bool)
+            break
+    result = np.zeros(mask.shape, dtype=bool)
+    result[top:bottom, left:right] = image[inner].astype(bool)
+    return result
 
 
 def _crossing_number(mask: np.ndarray) -> np.ndarray:
@@ -931,9 +960,8 @@ def _stroke_points(
         binary_closing,
         binary_erosion,
         binary_fill_holes,
+        grey_closing,
         label,
-        maximum_filter,
-        uniform_filter,
     )
 
     radius = max(1, int(round(window_mm * float(pixels_per_mm))))
@@ -942,14 +970,16 @@ def _stroke_points(
     # runs off the coverage, the envelope is not the paper's and nothing is
     # read.
     good = binary_erosion(good, iterations=max(1, radius // 2)) if good.any() else good
-    field = np.where(good, signed_mm, 0.0)
-    # Detrended against the local mean of the covered pixels, as the rubbing
-    # is, so a sloping wall does not lie under its own upper side.
-    weight = uniform_filter(good.astype(np.float64), size=size, mode="constant")
-    mean = uniform_filter(field, size=size, mode="constant") / np.maximum(weight, 1e-9)
-    residual = np.where(good, field - mean, -np.inf)
-    envelope = maximum_filter(residual, size=size, mode="constant", cval=-np.inf)
-    under = np.where(good, envelope, 0.0) - np.where(good, residual, 0.0)
+    # The paper is a grey closing of the height with a flat window: a plane
+    # or a gentle bulge is its own closing, and only a hollow narrower than
+    # the window fills - the sheet bridges it and does not reach its floor.
+    # A local maximum would not do: over the sloping, drifting height a
+    # normal map integrates to, half the wall lies below the highest point
+    # a window away.  Outside the coverage the height is bottomless, so the
+    # closing there falls away and nothing near the edge is read.
+    field = np.where(good, signed_mm, -np.inf)
+    envelope = grey_closing(field, size=(size, size), mode="nearest")
+    under = np.where(good & np.isfinite(envelope), envelope - np.where(good, signed_mm, 0.0), 0.0)
     stroke = good & (under >= depth_mm)
     stroke_count = int(np.count_nonzero(stroke))
     close = int(round(close_mm * float(pixels_per_mm)))
@@ -1044,7 +1074,7 @@ def _is_open_stroke(chain: Sequence[tuple[int, int]], *, straightness_min: float
 def _group_strokes(
     strokes: Sequence[np.ndarray],
     *,
-    gap_mm: float = TEXTURE_LINES_PATTERN_GAP_MM,
+    gap_mm: float = DEFAULT_TEXTURE_LINES_PATTERN_GAP_UM / 1000.0,
     angle_deg: float = TEXTURE_LINES_PATTERN_ANGLE_DEG,
     min_strokes: int = TEXTURE_LINES_PATTERN_MIN_STROKES,
 ) -> tuple[list[int], list[dict[str, int]]]:
@@ -1494,7 +1524,9 @@ def extract_texture_lines(
     if grouped:
         # Grouped where the strokes were read, on the developed wall, before
         # the view foreshortens their directions.
-        pattern_of_traced, patterns = _group_strokes(traced)
+        pattern_of_traced, patterns = _group_strokes(
+            traced, gap_mm=int(detection["pattern_gap_um"]) / 1000.0
+        )
     polylines: list[Polyline] = []
     pattern_of: list[int] = []
     for traced_index, developed in enumerate(traced):
@@ -1632,6 +1664,7 @@ def compute_texture_lines(
     spur_mm: float = DEFAULT_TEXTURE_LINES_STROKE_SPUR_UM / 1000.0,
     orientation_mm: float = DEFAULT_TEXTURE_LINES_ORIENTATION_UM / 1000.0,
     straightness_min_percent: int = DEFAULT_TEXTURE_LINES_STRAIGHTNESS_MIN_PERCENT,
+    pattern_gap_mm: float = DEFAULT_TEXTURE_LINES_PATTERN_GAP_UM / 1000.0,
     cancellation_probe: CancellationProbe | None = None,
 ) -> TextureLinesComputation:
     """Trace the wall's incisions as positioned by the session's active Align."""
@@ -1684,6 +1717,7 @@ def compute_texture_lines(
         spur_mm=spur_mm,
         orientation_mm=orientation_mm,
         straightness_min_percent=straightness_min_percent,
+        pattern_gap_mm=pattern_gap_mm,
     )
     try:
         context = session.capture_operation(recipe=recipe)

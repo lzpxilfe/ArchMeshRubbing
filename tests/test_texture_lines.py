@@ -335,10 +335,10 @@ def test_the_stroke_rule_reads_the_grooves_as_the_paper_would(grooved) -> None:
         assert detection["pattern"] == TEXTURE_LINES_PATTERN_RULE
         assert set(detection) == {
             "close_um", "depth_um", "incision_sign", "line_smoothing_um", "link_um",
-            "min_length_um", "orientation_um", "pattern", "spur_um",
+            "min_length_um", "orientation_um", "pattern", "pattern_gap_um", "spur_um",
             "straightness_min_percent", "valley", "window_um",
         }
-        assert detection["window_um"] == 2500 and detection["depth_um"] == 120
+        assert detection["window_um"] == 2500 and detection["depth_um"] == 150
         assert validate_texture_lines_recipe(strokes.recipe) == strokes.recipe
         payload = strokes.payload
         assert payload.schema_version == TEXTURE_LINES_PATTERNS_SCHEMA_VERSION

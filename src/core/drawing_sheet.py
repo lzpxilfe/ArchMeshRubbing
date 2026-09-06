@@ -1872,7 +1872,9 @@ def _require_drawable_texture_lines_record(
     return record, payload
 
 
-_TEXTURE_PATTERN_ID = re.compile(r"^(.*texture-line:.+?):(p\d{2}|loose):\d{5}$")
+#: A pattern line's id, with the piece suffix a mirrored figure's clip
+#: appends when it cuts a line at the axis.
+_TEXTURE_PATTERN_ID = re.compile(r"^(.*texture-line:.+?):(p\d{2}|loose):\d{5}(?::\d+)?$")
 
 
 def _texture_pattern_token(pattern: int) -> str:
