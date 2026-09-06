@@ -104,6 +104,40 @@ def test_the_three_grooves_come_out_as_three_lines_where_they_were_cut(grooved) 
     assert -350 < qc["texture_relief_height_min_um_rounded"] < -200
 
 
+def test_unrolled_about_the_axis_the_lines_reach_the_silhouette(grooved) -> None:
+    """Traced on the view the wall foreshortens towards its edges; unrolled
+    about the axis every stroke is seen face on, as the rubbing's paper sees
+    it, and each line comes back through its triangle onto the elevation.
+    Same grooves, same heights, longer lines - out to where the wall turns
+    past the facing threshold."""
+
+    session, atlas, normal_map, on_view = grooved
+    unrolled = compute_texture_lines(
+        session, atlas, normal_map, view="front", domain="axis_development"
+    )
+    assert unrolled.recipe["domain"] == "axis_development"
+    assert unrolled.qc["domain"] == "axis_development"
+    lines = _lines_mm(unrolled.payload)
+    assert len(lines) == 3
+    by_height = {round(float(np.median(line[:, 1]))): line for line in lines}
+    view_by_height = {round(float(np.median(line[:, 1]))): line for line in _lines_mm(on_view.payload)}
+    assert set(by_height) == set(view_by_height) == {round(v) for v in CANONICAL_GROOVE_V_MM}
+    for height, line in by_height.items():
+        assert float(line[:, 1].max() - line[:, 1].min()) < 0.1
+        seen = view_by_height[height]
+        # The same groove, and no shorter than the view saw it.
+        assert abs(float(np.median(line[:, 1])) - float(np.median(seen[:, 1]))) < 0.1
+        assert float(line[:, 0].max()) >= float(seen[:, 0].max()) - 0.5
+        assert float(line[:, 0].min()) <= float(seen[:, 0].min()) + 0.5
+    # It is a reading of the outside about the axis: a view along the axis
+    # has no meridian to unroll from, and a session not positioned on its
+    # axis cannot unroll at all.
+    with pytest.raises(ArtifactTextureLinesError, match="side view"):
+        compute_texture_lines(session, atlas, normal_map, view="top", domain="axis_development")
+    with pytest.raises(ArtifactTextureLinesError, match="domain must be one of"):
+        compute_texture_lines(session, atlas, normal_map, view="front", domain="paper")
+
+
 def test_the_recipe_names_every_number_and_rebuilds_byte_for_byte(grooved) -> None:
     _session, atlas, normal_map, computation = grooved
     recipe = computation.recipe

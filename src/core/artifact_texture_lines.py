@@ -74,6 +74,18 @@ TEXTURE_LINES_PAINTER = "far_to_near_by_centroid/v1"
 #: eigenvalue the curvature across the valley, the floor where the slope
 #: along that direction crosses zero within half a pixel (Steger's line).
 TEXTURE_LINES_VALLEY_RULE = "hessian_largest_eigenvalue_zero_crossing/v1"
+#: Where the height is integrated and the valleys traced.  ``view`` works on
+#: the orthographic view itself, which foreshortens the wall towards the
+#: silhouette until a millimetre-wide incision is a pixel wide; ``axis_development``
+#: unrolls every face that faces the view about the measured rotation axis -
+#: u the arc r x (theta - theta_view), v the axial height - traces there,
+#: where the pattern is seen the way the rubbing's paper sees it, and carries
+#: each line back through its triangle onto the view.  That is how the
+#: drawing is made by hand: the pattern is traced from the rubbing, not
+#: from the elevation, and the two agree because they are the same reading.
+TEXTURE_LINES_DOMAIN_VIEW = "view"
+TEXTURE_LINES_DOMAIN_AXIS = "axis_development"
+TEXTURE_LINES_DOMAINS: tuple[str, ...] = (TEXTURE_LINES_DOMAIN_VIEW, TEXTURE_LINES_DOMAIN_AXIS)
 
 DEFAULT_TEXTURE_LINES_PIXELS_PER_MM = 5
 #: The base the map's tilt is measured against is the sampled normal
@@ -135,6 +147,14 @@ def _view_name(view: object) -> str:
         ) from exc
 
 
+def _domain(value: object) -> str:
+    if value not in TEXTURE_LINES_DOMAINS:
+        raise ArtifactTextureLinesError(
+            f"domain must be one of {', '.join(TEXTURE_LINES_DOMAINS)}"
+        )
+    return str(value)
+
+
 def _incision_sign(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or int(value) not in (-1, 1):
         raise ArtifactTextureLinesError("incision_sign must be -1 or 1")
@@ -164,6 +184,7 @@ def texture_lines_recipe(
     min_length_mm: float = DEFAULT_TEXTURE_LINES_MIN_LENGTH_MM,
     line_smoothing_mm: float = DEFAULT_TEXTURE_LINES_LINE_SMOOTHING_MM,
     incision_sign: int = DEFAULT_TEXTURE_LINES_INCISION_SIGN,
+    domain: str = TEXTURE_LINES_DOMAIN_VIEW,
 ) -> dict[str, Any]:
     """The recipe: the two files, the view, and every number that decides a line."""
 
@@ -202,6 +223,7 @@ def texture_lines_recipe(
                 maximum=MAX_TEXTURE_LINES_PIXELS_PER_MM,
             ),
         },
+        "domain": _domain(domain),
         "source_face_count": _strict_int(
             source_face_count, name="source_face_count", minimum=1, maximum=10**9
         ),
@@ -219,6 +241,7 @@ _RECIPE_KEYS = frozenset(
         "algorithm_version",
         "coordinate_space",
         "detection_policy",
+        "domain",
         "raster_policy",
         "source_face_count",
         "source_vertex_count",
@@ -298,6 +321,7 @@ def validate_texture_lines_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
                 maximum=MAX_TEXTURE_LINES_PIXELS_PER_MM,
             ),
         },
+        "domain": _domain(block["domain"]),
         "source_face_count": _strict_int(
             block["source_face_count"], name="source_face_count", minimum=1, maximum=10**9
         ),
@@ -560,6 +584,52 @@ def _trace_chains(valley: np.ndarray) -> list[list[tuple[int, int]]]:
     return chains
 
 
+class _DevelopedLocator:
+    """Find, for a point of the developed plane, the developed triangle it
+    lies in and the canonical position that triangle carries it to."""
+
+    def __init__(
+        self,
+        uv_mm: np.ndarray,
+        developed_faces: np.ndarray,
+        vertices_mm: np.ndarray,
+        face_facing: np.ndarray,
+    ) -> None:
+        from scipy.spatial import cKDTree  # noqa: PLC0415
+
+        self.uv = np.asarray(uv_mm, dtype=np.float64)
+        self.faces = np.asarray(developed_faces, dtype=np.int64)
+        self.vertices = np.asarray(vertices_mm, dtype=np.float64)
+        self.facing = np.asarray(face_facing, dtype=np.float64)
+        self.tree = cKDTree(self.uv[self.faces].mean(axis=1))
+
+    def locate(self, points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        count = min(12, self.faces.shape[0])
+        _distances, nearest = self.tree.query(points, k=count)
+        nearest = np.asarray(nearest, dtype=np.int64).reshape(points.shape[0], -1)
+        world = np.zeros((points.shape[0], 3), dtype=np.float64)
+        facing = np.zeros(points.shape[0], dtype=np.float64)
+        for index, point in enumerate(points):
+            chosen = int(nearest[index, 0])
+            weights = np.array([1.0 / 3.0] * 3)
+            for candidate in nearest[index]:
+                a, b, c = self.uv[self.faces[candidate]]
+                denominator = (b[1] - c[1]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[1] - c[1])
+                if denominator == 0.0:
+                    continue
+                w0 = ((b[1] - c[1]) * (point[0] - c[0]) + (c[0] - b[0]) * (point[1] - c[1])) / denominator
+                w1 = ((c[1] - a[1]) * (point[0] - c[0]) + (a[0] - c[0]) * (point[1] - c[1])) / denominator
+                w2 = 1.0 - w0 - w1
+                if w0 >= -1e-6 and w1 >= -1e-6 and w2 >= -1e-6:
+                    chosen = int(candidate)
+                    weights = np.clip(np.array([w0, w1, w2]), 0.0, 1.0)
+                    weights /= weights.sum()
+                    break
+            world[index] = weights @ self.vertices[self.faces[chosen]]
+            facing[index] = self.facing[chosen]
+        return world, facing
+
+
 def extract_texture_lines(
     canonical_vertices_mm: object,
     faces: object,
@@ -611,20 +681,62 @@ def extract_texture_lines(
     facing = np.zeros(triangles.shape[0], dtype=np.float64)
     nonzero = lengths > 0.0
     facing[nonzero] = (normals[nonzero] @ toward_viewer) / lengths[nonzero]
-    visible = np.flatnonzero(facing >= facing_cos)
-    if visible.size == 0:
-        raise ArtifactTextureLinesError("no face of the mesh faces the view; nothing to read")
-    # Far to near: the nearest wall is painted last and wins its pixels.
-    depth = corners[visible].mean(axis=1) @ toward_viewer
-    order = visible[np.argsort(depth, kind="stable")]
-    uv = np.column_stack([(vertices - origin) @ u_axis, (vertices - origin) @ v_axis])
+    domain = validated["domain"]
+    view_uv = np.column_stack([(vertices - origin) @ u_axis, (vertices - origin) @ v_axis])
+    if domain == TEXTURE_LINES_DOMAIN_VIEW:
+        visible = np.flatnonzero(facing >= facing_cos)
+        if visible.size == 0:
+            raise ArtifactTextureLinesError("no face of the mesh faces the view; nothing to read")
+        # Far to near: the nearest wall is painted last and wins its pixels.
+        depth = corners[visible].mean(axis=1) @ toward_viewer
+        order = visible[np.argsort(depth, kind="stable")]
+        uv = view_uv
+    else:
+        if abs(float(toward_viewer[2])) > 1e-9:
+            raise ArtifactTextureLinesError(
+                "axis_development reads a side view; the top and bottom look along the axis"
+            )
+        # Every outer-wall face that faces the view at all, unrolled about
+        # the axis: u the arc from the view's own meridian at that vertex's
+        # radius, v the axial height.  The inner wall of the far side faces
+        # the view too, but it is behind the near wall and this is a reading
+        # of the outside, so only faces whose normal leaves the axis are
+        # taken; among those, faces are painted from the axis outward and
+        # the outermost wins its pixels where a chip folds under.
+        centroids = corners.mean(axis=1)
+        outward = np.einsum("ij,ij->i", normals[:, :2], centroids[:, :2]) > 0.0
+        view_angle = math.atan2(float(toward_viewer[1]), float(toward_viewer[0]))
+        centroid_turn = (
+            np.arctan2(centroids[:, 1], centroids[:, 0]) - view_angle + math.pi
+        ) % (2.0 * math.pi) - math.pi
+        # And on the near half by position: a facet on the far side that
+        # happens to tilt towards the view would unroll a second sheet of
+        # paper beyond the silhouette.
+        near = np.abs(centroid_turn) <= math.pi / 2.0
+        visible = np.flatnonzero((facing > 0.0) & outward & near)
+        if visible.size == 0:
+            raise ArtifactTextureLinesError(
+                "no outer-wall face of the mesh faces the view; nothing to read"
+            )
+        radius_of = np.linalg.norm(centroids[visible][:, :2], axis=1)
+        order = visible[np.argsort(radius_of, kind="stable")]
+        theta = np.arctan2(vertices[:, 1], vertices[:, 0])
+        turn = (theta - view_angle + math.pi) % (2.0 * math.pi) - math.pi
+        uv = np.column_stack([np.hypot(vertices[:, 0], vertices[:, 1]) * turn, vertices[:, 2]])
+    # Only the vertices the painted faces use: the raster is sized from the
+    # developed coordinates it is given, and the far side of a pot unrolled
+    # about its axis would otherwise double the paper for nothing.
+    used = np.unique(triangles[order])
+    compact = np.full(vertices.shape[0], -1, dtype=np.int64)
+    compact[used] = np.arange(used.size, dtype=np.int64)
+    developed_faces = compact[triangles[order]]
     try:
         height, minimum_u, minimum_v, relief_qc = texture_relief_depth_field(
-            developed_uv_mm=uv,
-            developed_faces=triangles[order],
-            developed_points_mm=vertices,
+            developed_uv_mm=uv[used],
+            developed_faces=developed_faces,
+            developed_points_mm=vertices[used],
             source_face_indices=order,
-            source_vertex_indices=np.arange(vertices.shape[0], dtype=np.int64),
+            source_vertex_indices=used,
             atlas=atlas,
             normal_map=normal_map,
             source_to_canonical_rotation=rotation,
@@ -659,6 +771,11 @@ def extract_texture_lines(
     chains = _trace_chains(valley)
     min_length = detection["min_length_um"] / 1000.0
     smoothing = detection["line_smoothing_um"] / 1000.0
+    locator = (
+        None
+        if domain == TEXTURE_LINES_DOMAIN_VIEW
+        else _DevelopedLocator(uv[used], developed_faces, vertices[used], facing[order])
+    )
     polylines: list[Polyline] = []
     total_raw = 0
     for chain in chains:
@@ -667,28 +784,50 @@ def extract_texture_lines(
             continue
         rows = np.asarray([r for r, _c in chain], dtype=np.int64)
         cols = np.asarray([c for _r, c in chain], dtype=np.int64)
-        # Pixel centre plus the sub-pixel offset to the floor, in view mm;
-        # row 0 is the lowest v, as the relief raster has it.
-        points = np.column_stack(
+        # Pixel centre plus the sub-pixel offset to the floor, in developed
+        # mm; row 0 is the lowest v, as the relief raster has it.
+        developed = np.column_stack(
             [
                 (minimum_u + cols + 0.5 + du[rows, cols]) / float(pixels_per_mm),
                 (minimum_v + rows + 0.5 + dv[rows, cols]) / float(pixels_per_mm),
             ]
         )
-        length = float(np.sum(np.linalg.norm(np.diff(points, axis=0), axis=1)))
-        if length < min_length:
-            continue
-        smoothed = smooth_polyline(points, closed=False, sigma_mm=smoothing) if smoothing > 0.0 else tuple(
-            (float(x), float(y)) for x, y in points
-        )
-        as_um: list[tuple[int, int]] = []
-        for x, y in smoothed:
-            point = (int(round(x * 1000.0)), int(round(y * 1000.0)))
-            if as_um and as_um[-1] == point:
+        if locator is None:
+            runs = [developed]
+        else:
+            # Back through the triangle each point lies in to its canonical
+            # position, then onto the view; a line is cut where the wall
+            # turns past the facing threshold, so nothing is drawn round the
+            # silhouette onto the far side.
+            world, face_facing = locator.locate(developed)
+            projected = np.column_stack([(world - origin) @ u_axis, (world - origin) @ v_axis])
+            keep = face_facing >= facing_cos
+            runs = []
+            start = None
+            for index, flag in enumerate(keep.tolist() + [False]):
+                if flag and start is None:
+                    start = index
+                elif not flag and start is not None:
+                    if index - start >= 2:
+                        runs.append(projected[start:index])
+                    start = None
+        for points in runs:
+            length = float(np.sum(np.linalg.norm(np.diff(points, axis=0), axis=1)))
+            if length < min_length:
                 continue
-            as_um.append(point)
-        if len(as_um) >= 2:
-            polylines.append(tuple(as_um))
+            smoothed = (
+                smooth_polyline(points, closed=False, sigma_mm=smoothing)
+                if smoothing > 0.0
+                else tuple((float(x), float(y)) for x, y in points)
+            )
+            as_um: list[tuple[int, int]] = []
+            for x, y in smoothed:
+                point = (int(round(x * 1000.0)), int(round(y * 1000.0)))
+                if as_um and as_um[-1] == point:
+                    continue
+                as_um.append(point)
+            if len(as_um) >= 2:
+                polylines.append(tuple(as_um))
         raise_if_cancelled(cancellation_probe)
     if not polylines:
         raise ArtifactTextureLinesError(
@@ -708,6 +847,7 @@ def extract_texture_lines(
     qc = {
         **payload.qc_summary(),
         "chain_count_before_filter": total_raw,
+        "domain": domain,
         "texture_relief_covered_pixel_count": relief_qc["texture_relief_covered_pixel_count"],
         "texture_relief_height_max_um_rounded": relief_qc["texture_relief_height_max_um_rounded"],
         "texture_relief_height_min_um_rounded": relief_qc["texture_relief_height_min_um_rounded"],
@@ -744,12 +884,27 @@ def compute_texture_lines(
     min_length_mm: float = DEFAULT_TEXTURE_LINES_MIN_LENGTH_MM,
     line_smoothing_mm: float = DEFAULT_TEXTURE_LINES_LINE_SMOOTHING_MM,
     incision_sign: int = DEFAULT_TEXTURE_LINES_INCISION_SIGN,
+    domain: str = TEXTURE_LINES_DOMAIN_VIEW,
     cancellation_probe: CancellationProbe | None = None,
 ) -> TextureLinesComputation:
     """Trace the wall's incisions as positioned by the session's active Align."""
 
     if not isinstance(session, ArtifactSession):
         raise ArtifactTextureLinesError("session must be an ArtifactSession")
+    if _domain(domain) == TEXTURE_LINES_DOMAIN_AXIS:
+        from .artifact_axis_alignment import AXIS_ALIGN_RECIPE_KIND  # noqa: PLC0415
+
+        align_id = session.document.active_align_revision_id
+        align = (
+            session.document.align_revision_index.get(align_id)
+            if isinstance(align_id, str)
+            else None
+        )
+        if align is None or align.recipe.get("kind") != AXIS_ALIGN_RECIPE_KIND:
+            raise ArtifactTextureLinesError(
+                "unrolling about the axis needs an artifact positioned on its "
+                "measured rotation axis; the active Align was not made from one"
+            )
     if not isinstance(atlas, TextureAtlas) or not isinstance(normal_map, NormalMap):
         raise ArtifactTextureLinesError("atlas and normal_map must be TextureAtlas and NormalMap")
     try:
@@ -772,6 +927,7 @@ def compute_texture_lines(
         min_length_mm=min_length_mm,
         line_smoothing_mm=line_smoothing_mm,
         incision_sign=incision_sign,
+        domain=domain,
     )
     try:
         context = session.capture_operation(recipe=recipe)
@@ -913,6 +1069,9 @@ __all__ = [
     "DEFAULT_TEXTURE_LINES_SMOOTHING_UM",
     "TEXTURE_LINES_ALGORITHM",
     "TEXTURE_LINES_ALGORITHM_VERSION",
+    "TEXTURE_LINES_DOMAINS",
+    "TEXTURE_LINES_DOMAIN_AXIS",
+    "TEXTURE_LINES_DOMAIN_VIEW",
     "TEXTURE_LINES_PAYLOAD_EXTENSION_KEY",
     "TEXTURE_LINES_RECORD_TYPE",
     "TextureLinesComputation",
