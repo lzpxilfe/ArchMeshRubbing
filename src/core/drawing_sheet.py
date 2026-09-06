@@ -97,6 +97,7 @@ from .artifact_vector_record import (
 from .canonical_json import canonical_json_bytes
 from .artifact_outline_extractor import outline_frame
 from .drawing_style import (
+    CONDITION_CRACK,
     CENTER_AXIS,
     OUTLINE_HOLE,
     DrawingStyleError,
@@ -121,6 +122,7 @@ from .drawing_marks import (
 from .artifact_texture_lines import (
     ArtifactTextureLinesError,
     TEXTURE_LINES_RECORD_TYPE,
+    TEXTURE_LINES_SEAM_PATTERN,
     TextureLinesPayload,
     texture_lines_payload_from_record,
 )
@@ -847,11 +849,11 @@ class DrawingSheetOptions:
                 or not entry[0].strip()
                 or isinstance(entry[1], bool)
                 or not isinstance(entry[1], int)
-                or entry[1] < -1
+                or entry[1] < TEXTURE_LINES_SEAM_PATTERN
             ):
                 raise DrawingSheetError(
                     "texture_line_hidden_patterns must be (record id, pattern index) "
-                    "pairs, the index -1 for loose lines"
+                    "pairs, the index -1 for loose lines and -2 for seams"
                 )
             if entry[0] not in texture_line_records:
                 raise DrawingSheetError(
@@ -1874,10 +1876,12 @@ def _require_drawable_texture_lines_record(
 
 #: A pattern line's id, with the piece suffix a mirrored figure's clip
 #: appends when it cuts a line at the axis.
-_TEXTURE_PATTERN_ID = re.compile(r"^(.*texture-line:.+?):(p\d{2}|loose):\d{5}(?::\d+)?$")
+_TEXTURE_PATTERN_ID = re.compile(r"^(.*texture-line:.+?):(p\d{2}|loose|seam):\d{5}(?::\d+)?$")
 
 
 def _texture_pattern_token(pattern: int) -> str:
+    if pattern == TEXTURE_LINES_SEAM_PATTERN:
+        return "seam"
     return "loose" if pattern < 0 else f"p{pattern:02d}"
 
 
@@ -1888,7 +1892,7 @@ def _pattern_groups(paths_by_kind: Mapping[str, Sequence[Any]]) -> dict[str, str
     before patterns were read - name no group and are drawn as before."""
 
     groups: dict[str, str] = {}
-    for path in paths_by_kind.get(OUTLINE_HOLE, ()):
+    for path in (*paths_by_kind.get(OUTLINE_HOLE, ()), *paths_by_kind.get(CONDITION_CRACK, ())):
         match = _TEXTURE_PATTERN_ID.match(path.id)
         if match is not None:
             prefix, token = match.group(1), match.group(2)
@@ -1909,7 +1913,9 @@ def _texture_line_paths_for_figure(
     and not the wall, and not another view, where the same incision would be
     somewhere else.  Drawn as 내선, like a ridge.  A reading that groups its
     strokes into patterns is drawn pattern by pattern, the loose strokes
-    last, and a pattern struck out on review is left off and named.
+    last, and a pattern struck out on review is left off and named.  A line
+    the reading marked as across the pattern - a sherd join, a crack - is
+    drawn as a crack, never as an inner line.
     """
 
     by_kind: dict[str, list[Any]] = {}
@@ -1940,7 +1946,8 @@ def _texture_line_paths_for_figure(
                 if grouped
                 else f"texture-line:{record.id}:{index:05d}"
             )
-            by_kind.setdefault(OUTLINE_HOLE, []).append(
+            kind = CONDITION_CRACK if pattern == TEXTURE_LINES_SEAM_PATTERN else OUTLINE_HOLE
+            by_kind.setdefault(kind, []).append(
                 VectorPath(
                     id=path_id,
                     role="texture_line",
@@ -1956,9 +1963,17 @@ def _texture_line_paths_for_figure(
                 "view": payload.view,
                 **(
                     {
+                        "band_count": str(payload.band_count),
                         "drawn_polyline_count": str(shown),
                         "hidden_patterns": ",".join(str(index) for index in hidden),
                         "pattern_count": str(payload.pattern_count),
+                        "seam_line_count": str(
+                            sum(
+                                1
+                                for index in range(payload.line_count)
+                                if payload.pattern_index(index) == TEXTURE_LINES_SEAM_PATTERN
+                            )
+                        ),
                     }
                     if grouped
                     else {}
@@ -3697,7 +3712,7 @@ def compose_drawing_sheet(
                         {
                             "line_count": payload.line_count,
                             **(
-                                {"pattern_count": payload.pattern_count}
+                                {"band_count": payload.band_count, "pattern_count": payload.pattern_count}
                                 if payload.patterns is not None
                                 else {}
                             ),

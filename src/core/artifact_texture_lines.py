@@ -123,7 +123,20 @@ TEXTURE_LINES_ORIENTATION_COHERENCE_MIN = 0.5
 #: reader can strike out what was read but is not a pattern.
 #: A chain that turns more than this over this span is cut at the bend.
 TEXTURE_LINES_CORNER_ANGLE_DEG = 60.0
-TEXTURE_LINES_CORNER_SPAN_MM = 0.6
+TEXTURE_LINES_CORNER_SPAN_MM = 1.2
+#: A loose line this long that wanders is not a stroke of any pattern: it
+#: is the join between two sherds of a restored pot, a crack, a scratch -
+#: a line across the pattern, not of it.  It is kept, as pattern -2, so a
+#: reviewer sees it, and it is drawn as a crack, never as an inner line.
+TEXTURE_LINES_SEAM_PATTERN = -2
+TEXTURE_LINES_SEAM_MIN_MM = 12.0
+TEXTURE_LINES_SEAM_STRAIGHTNESS_MAX = 0.6
+#: Patterns whose heights overlap or lie within this gap of one another
+#: form one band (문양대): the register of the wall on which one way of
+#: decorating runs.  A band records its heights, its patterns and the
+#: directions among them, so two pots can be compared by composition -
+#: which bands, in which order down the wall - and not by strokes.
+TEXTURE_LINES_BAND_GAP_MM = 3.0
 TEXTURE_LINES_PATTERN_RULE = "strokes_by_direction_neighbourhood/v1"
 DEFAULT_TEXTURE_LINES_PATTERN_GAP_UM = 6_000
 TEXTURE_LINES_PATTERN_ANGLE_DEG = 20.0
@@ -524,6 +537,10 @@ class TextureLinesPayload:
     """Schema 1.1.0: the pattern each line belongs to, -1 for a loose line."""
     patterns: tuple[Mapping[str, int], ...] | None = None
     """Schema 1.1.0: each pattern's ``direction_deg`` and ``line_count``."""
+    bands: tuple[Mapping[str, Any], ...] | None = None
+    """Schema 1.1.0: the bands the patterns form down the wall, each with
+    ``height_um_min``, ``height_um_max``, ``patterns`` (indices, ascending)
+    and ``directions_deg`` (the patterns' directions, ascending, unique)."""
 
     def __post_init__(self) -> None:
         if self.schema_version not in TEXTURE_LINES_PAYLOAD_SCHEMA_VERSIONS:
@@ -559,14 +576,14 @@ class TextureLinesPayload:
         object.__setattr__(self, "polylines", tuple(cleaned))
         grouped = self.schema_version == TEXTURE_LINES_PATTERNS_SCHEMA_VERSION
         if not grouped:
-            if self.pattern_of is not None or self.patterns is not None:
+            if self.pattern_of is not None or self.patterns is not None or self.bands is not None:
                 raise ArtifactTextureLinesError(
                     "a schema 1.0.0 texture lines payload carries no patterns"
                 )
             return
-        if self.pattern_of is None or self.patterns is None:
+        if self.pattern_of is None or self.patterns is None or self.bands is None:
             raise ArtifactTextureLinesError(
-                "a schema 1.1.0 texture lines payload names the pattern of every line"
+                "a schema 1.1.0 texture lines payload names the pattern of every line and the bands"
             )
         patterns: list[Mapping[str, int]] = []
         for pattern in self.patterns:
@@ -582,7 +599,9 @@ class TextureLinesPayload:
                 }
             )
         pattern_of = tuple(
-            _strict_int(index, name="pattern_of", minimum=-1, maximum=len(patterns) - 1)
+            _strict_int(
+                index, name="pattern_of", minimum=TEXTURE_LINES_SEAM_PATTERN, maximum=len(patterns) - 1
+            )
             for index in self.pattern_of
         )
         if len(pattern_of) != len(cleaned):
@@ -590,8 +609,52 @@ class TextureLinesPayload:
         for index, pattern in enumerate(patterns):
             if sum(1 for member in pattern_of if member == index) != pattern["line_count"]:
                 raise ArtifactTextureLinesError("a pattern's line_count is the lines that name it")
+        bands: list[Mapping[str, Any]] = []
+        claimed: set[int] = set()
+        limit = 10**9
+        for band in self.bands:
+            block = _exact_keys(
+                band,
+                frozenset({"directions_deg", "height_um_max", "height_um_min", "patterns"}),
+                name="band",
+            )
+            members = block["patterns"]
+            directions = block["directions_deg"]
+            if not isinstance(members, (list, tuple)) or not isinstance(directions, (list, tuple)):
+                raise ArtifactTextureLinesError("a band's patterns and directions_deg are arrays")
+            members = tuple(
+                _strict_int(index, name="band pattern", minimum=0, maximum=len(patterns) - 1)
+                for index in members
+            )
+            directions = tuple(
+                _strict_int(value, name="band direction", minimum=0, maximum=179) for value in directions
+            )
+            if not members or list(members) != sorted(set(members)):
+                raise ArtifactTextureLinesError("a band names its patterns once each, ascending")
+            if list(directions) != sorted(set(directions)) or set(directions) != {
+                patterns[index]["direction_deg"] for index in members
+            }:
+                raise ArtifactTextureLinesError("a band's directions are its patterns' directions")
+            if claimed & set(members):
+                raise ArtifactTextureLinesError("a pattern is in one band only")
+            claimed |= set(members)
+            low = _strict_int(block["height_um_min"], name="height_um_min", minimum=-limit, maximum=limit)
+            high = _strict_int(block["height_um_max"], name="height_um_max", minimum=-limit, maximum=limit)
+            if high < low:
+                raise ArtifactTextureLinesError("a band's height_um_max is not below its height_um_min")
+            bands.append(
+                {
+                    "directions_deg": list(directions),
+                    "height_um_max": high,
+                    "height_um_min": low,
+                    "patterns": list(members),
+                }
+            )
+        if claimed != set(range(len(patterns))):
+            raise ArtifactTextureLinesError("every pattern is in a band")
         object.__setattr__(self, "pattern_of", pattern_of)
         object.__setattr__(self, "patterns", tuple(patterns))
+        object.__setattr__(self, "bands", tuple(bands))
 
     @property
     def line_count(self) -> int:
@@ -601,8 +664,13 @@ class TextureLinesPayload:
     def pattern_count(self) -> int:
         return 0 if self.patterns is None else len(self.patterns)
 
+    @property
+    def band_count(self) -> int:
+        return 0 if self.bands is None else len(self.bands)
+
     def pattern_index(self, line_index: int) -> int:
-        """The pattern of one line, -1 when loose or when the reading has none."""
+        """The pattern of one line: -1 when loose, -2 when a line across
+        the pattern (a seam or crack), -1 when the reading has none."""
 
         return -1 if self.pattern_of is None else self.pattern_of[line_index]
 
@@ -624,7 +692,16 @@ class TextureLinesPayload:
             "schema_version": self.schema_version,
             "view": self.view,
         }
-        if self.pattern_of is not None and self.patterns is not None:
+        if self.pattern_of is not None and self.patterns is not None and self.bands is not None:
+            block["bands"] = [
+                {
+                    "directions_deg": list(band["directions_deg"]),
+                    "height_um_max": band["height_um_max"],
+                    "height_um_min": band["height_um_min"],
+                    "patterns": list(band["patterns"]),
+                }
+                for band in self.bands
+            ]
             block["pattern_of"] = list(self.pattern_of)
             block["patterns"] = [dict(pattern) for pattern in self.patterns]
         return block
@@ -633,7 +710,7 @@ class TextureLinesPayload:
     def from_dict(cls, data: Mapping[str, object]) -> "TextureLinesPayload":
         keys = {"polylines", "schema_version", "view"}
         if isinstance(data, Mapping) and data.get("schema_version") == TEXTURE_LINES_PATTERNS_SCHEMA_VERSION:
-            keys |= {"pattern_of", "patterns"}
+            keys |= {"bands", "pattern_of", "patterns"}
         block = _exact_keys(data, frozenset(keys), name="texture lines payload")
         raw = block["polylines"]
         if not isinstance(raw, (list, tuple)):
@@ -652,19 +729,21 @@ class TextureLinesPayload:
         view = block["view"]
         pattern_of = block.get("pattern_of")
         patterns = block.get("patterns")
+        bands = block.get("bands")
         if pattern_of is not None and not isinstance(pattern_of, (list, tuple)):
             raise ArtifactTextureLinesError("texture lines payload pattern_of must be an array")
-        if patterns is not None and (
-            not isinstance(patterns, (list, tuple))
-            or any(not isinstance(pattern, Mapping) for pattern in patterns)
-        ):
-            raise ArtifactTextureLinesError("texture lines payload patterns must be an array of objects")
+        for name, value in (("patterns", patterns), ("bands", bands)):
+            if value is not None and (
+                not isinstance(value, (list, tuple)) or any(not isinstance(item, Mapping) for item in value)
+            ):
+                raise ArtifactTextureLinesError(f"texture lines payload {name} must be an array of objects")
         return cls(
             schema_version=schema_version if isinstance(schema_version, str) else "",
             view=view if isinstance(view, str) else "",
             polylines=tuple(polylines),
             pattern_of=None if pattern_of is None else tuple(pattern_of),
             patterns=None if patterns is None else tuple(patterns),
+            bands=None if bands is None else tuple(bands),
         )
 
     def canonical_json_bytes(self) -> bytes:
@@ -692,8 +771,12 @@ class TextureLinesPayload:
             "view": self.view,
         }
         if self.patterns is not None:
-            summary["loose_line_count"] = sum(1 for index in self.pattern_of or () if index < 0)
+            summary["band_count"] = self.band_count
+            summary["loose_line_count"] = sum(1 for index in self.pattern_of or () if index == -1)
             summary["pattern_count"] = self.pattern_count
+            summary["seam_line_count"] = sum(
+                1 for index in self.pattern_of or () if index == TEXTURE_LINES_SEAM_PATTERN
+            )
         return summary
 
 
@@ -1187,6 +1270,50 @@ def _group_strokes(
     return pattern_of, patterns
 
 
+def _is_seam(stroke: np.ndarray, *, min_length_mm: float, straightness_max: float) -> bool:
+    """A line across the pattern rather than of it: long and wandering."""
+
+    points = np.asarray(stroke, dtype=np.float64)
+    if points.shape[0] < 3:
+        return False
+    length = float(np.sum(np.linalg.norm(np.diff(points, axis=0), axis=1)))
+    if length < min_length_mm:
+        return False
+    return float(np.linalg.norm(points[-1] - points[0])) < straightness_max * length
+
+
+def _bands_of(
+    patterns: Sequence[Mapping[str, int]],
+    heights_um: Sequence[tuple[int, int]],
+    *,
+    gap_um: int,
+) -> list[dict[str, Any]]:
+    """Group patterns into bands by height: patterns whose height ranges
+    overlap, or lie within ``gap_um`` of one another, are one band.  Bands
+    are listed from the top of the wall down."""
+
+    order = sorted(range(len(patterns)), key=lambda index: (-heights_um[index][1], index))
+    bands: list[dict[str, Any]] = []
+    for index in order:
+        low, high = heights_um[index]
+        if bands and low <= bands[-1]["height_um_min"] + gap_um and high >= bands[-1]["height_um_min"] - gap_um:
+            band = bands[-1]
+            band["height_um_min"] = min(band["height_um_min"], low)
+            band["height_um_max"] = max(band["height_um_max"], high)
+            band["patterns"].append(index)
+        else:
+            bands.append({"height_um_max": high, "height_um_min": low, "patterns": [index]})
+    return [
+        {
+            "directions_deg": sorted({int(patterns[index]["direction_deg"]) for index in band["patterns"]}),
+            "height_um_max": int(band["height_um_max"]),
+            "height_um_min": int(band["height_um_min"]),
+            "patterns": sorted(band["patterns"]),
+        }
+        for band in bands
+    ]
+
+
 def _trace_chains(valley: np.ndarray) -> list[list[tuple[int, int]]]:
     """Walk the valley pixels into chains: from every end inward, then round
     whatever closed on itself.  At a junction the walk keeps the straightest
@@ -1498,12 +1625,23 @@ def extract_texture_lines(
         straightness = int(detection["straightness_min_percent"]) / 100.0
         # A zigzag is one chain to the tracer and a row of strokes to the
         # eye: cut at the corners first, then ask each piece to be a stroke.
+        # A chain with no corner to cut at that is long and wanders is not
+        # a stroke at all but a line across the pattern - the join between
+        # two sherds, a crack - and is kept whole, apart, as a seam.
         span = max(2, int(round(TEXTURE_LINES_CORNER_SPAN_MM * pixels_per_mm)))
-        chains = [
-            piece
-            for chain in chains
-            for piece in _split_at_corners(chain, span_px=span, angle_deg=TEXTURE_LINES_CORNER_ANGLE_DEG)
-        ]
+        seam_chains: list[list[tuple[int, int]]] = []
+        stroke_chains: list[list[tuple[int, int]]] = []
+        for chain in chains:
+            pieces = _split_at_corners(chain, span_px=span, angle_deg=TEXTURE_LINES_CORNER_ANGLE_DEG)
+            if len(pieces) <= 2 and _is_seam(
+                chain,
+                min_length_mm=TEXTURE_LINES_SEAM_MIN_MM * pixels_per_mm,
+                straightness_max=TEXTURE_LINES_SEAM_STRAIGHTNESS_MAX,
+            ):
+                seam_chains.append(chain)
+            else:
+                stroke_chains.extend(pieces)
+        chains = stroke_chains
         open_chains = [chain for chain in chains if _is_open_stroke(chain, straightness_min=straightness)]
         reading_qc["closed_or_wandering_chain_count"] = len(chains) - len(open_chains)
         chains = open_chains
@@ -1527,6 +1665,7 @@ def extract_texture_lines(
             chains = kept
         raise_if_cancelled(cancellation_probe)
     else:
+        seam_chains = []
         scale_mm = detection["scale_um"] / 1000.0
         curvature_min = detection["curvature_min_per_m"] / 1000.0
         curvature_seed = detection["curvature_seed_per_m"] / 1000.0
@@ -1582,10 +1721,24 @@ def extract_texture_lines(
     patterns: list[dict[str, int]] = []
     if grouped:
         # Grouped where the strokes were read, on the developed wall, before
-        # the view foreshortens their directions.
-        pattern_of_traced, patterns = _group_strokes(
-            traced, gap_mm=int(detection["pattern_gap_um"]) / 1000.0
-        )
+        # the view foreshortens their directions.  The seams were set apart
+        # at the chain stage, so a seam neither joins a pattern nor bridges
+        # two; they follow the strokes as pattern -2, unlinked, as traced.
+        gap_mm = int(detection["pattern_gap_um"]) / 1000.0
+        pattern_of_traced, patterns = _group_strokes(traced, gap_mm=gap_mm)
+        seam_lines = [
+            np.column_stack(
+                [
+                    (minimum_u + np.asarray([c for _r, c in chain], dtype=np.float64) + 0.5)
+                    / float(pixels_per_mm),
+                    (minimum_v + np.asarray([r for r, _c in chain], dtype=np.float64) + 0.5)
+                    / float(pixels_per_mm),
+                ]
+            )
+            for chain in seam_chains
+        ]
+        traced = list(traced) + seam_lines
+        pattern_of_traced = list(pattern_of_traced) + [TEXTURE_LINES_SEAM_PATTERN] * len(seam_lines)
     polylines: list[Polyline] = []
     pattern_of: list[int] = []
     for traced_index, developed in enumerate(traced):
@@ -1633,11 +1786,16 @@ def extract_texture_lines(
         # is gone; the rest are renumbered without gaps, in their order.
         surviving = sorted({index for index in pattern_of if index >= 0})
         renumber = {old: new for new, old in enumerate(surviving)}
-        pattern_of = [renumber.get(index, -1) for index in pattern_of]
+        pattern_of = [renumber.get(index, index if index < 0 else -1) for index in pattern_of]
         patterns = [
             {**patterns[old], "line_count": sum(1 for index in pattern_of if index == new)}
             for old, new in renumber.items()
         ]
+        heights: list[tuple[int, int]] = []
+        for new in range(len(patterns)):
+            ys = [y for line, index in zip(polylines, pattern_of) if index == new for _x, y in line]
+            heights.append((min(ys), max(ys)))
+        bands = _bands_of(patterns, heights, gap_um=int(round(TEXTURE_LINES_BAND_GAP_MM * 1000.0)))
     if not polylines:
         raise ArtifactTextureLinesError(
             "no incision was traced in this view; lower curvature_min_per_mm or "
@@ -1658,6 +1816,7 @@ def extract_texture_lines(
             polylines=tuple(polylines),
             pattern_of=tuple(pattern_of),
             patterns=tuple(patterns),
+            bands=tuple(bands),
         )
         if grouped
         else TextureLinesPayload(
@@ -1919,6 +2078,7 @@ __all__ = [
     "TEXTURE_LINES_PATTERN_RULE",
     "TEXTURE_LINES_PATTERNS_SCHEMA_VERSION",
     "TEXTURE_LINES_RULES",
+    "TEXTURE_LINES_SEAM_PATTERN",
     "TEXTURE_LINES_STROKE_RULE",
     "DEFAULT_TEXTURE_LINES_CURVATURE_MIN_PER_MM",
     "DEFAULT_TEXTURE_LINES_CURVATURE_SEED_PER_MM",

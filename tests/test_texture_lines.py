@@ -343,8 +343,9 @@ def test_the_stroke_rule_reads_the_grooves_as_the_paper_would(grooved) -> None:
         payload = strokes.payload
         assert payload.schema_version == TEXTURE_LINES_PATTERNS_SCHEMA_VERSION
         assert payload.pattern_of == (-1, -1, -1)
-        assert payload.patterns == ()
+        assert payload.patterns == () and payload.bands == ()
         assert strokes.qc["pattern_count"] == 0 and strokes.qc["loose_line_count"] == 3
+        assert strokes.qc["seam_line_count"] == 0 and strokes.qc["band_count"] == 0
         assert strokes.qc["closed_or_wandering_chain_count"] == 0
         assert strokes.qc["stroke_pixel_count"] > strokes.qc["skeleton_pixel_count"] > 0
     # A stroke recipe with a curvature key, or a valley recipe with a paper
@@ -397,6 +398,25 @@ def test_strokes_are_grouped_into_patterns_by_direction_and_neighbourhood() -> N
     assert pattern_of == [0] * 6 + [1] * 6 + [-1, -1]
     assert [pattern["line_count"] for pattern in patterns] == [6, 6]
     assert patterns[0]["direction_deg"] == 60 and patterns[1]["direction_deg"] == 120
+    # Patterns lying at one height form one band; the bands run down the
+    # wall, and a pattern belongs to exactly one.
+    from src.core.artifact_texture_lines import _bands_of, _is_seam
+
+    bands = _bands_of(patterns, [(38_000, 42_000), (18_000, 22_000)], gap_um=3_000)
+    assert bands == [
+        {"directions_deg": [60], "height_um_max": 42_000, "height_um_min": 38_000, "patterns": [0]},
+        {"directions_deg": [120], "height_um_max": 22_000, "height_um_min": 18_000, "patterns": [1]},
+    ]
+    merged = _bands_of(patterns, [(38_000, 42_000), (36_000, 40_000)], gap_um=3_000)
+    assert merged == [
+        {"directions_deg": [60, 120], "height_um_max": 42_000, "height_um_min": 36_000, "patterns": [0, 1]}
+    ]
+    # A long loose line that wanders is a seam or a crack, not a stroke;
+    # a long straight one is a stroke, and a short wanderer is just loose.
+    wander = np.array([[0.0, 0.0], [2.0, 5.0], [4.0, 0.0], [6.0, 5.0], [8.0, 0.0], [10.0, 5.0], [12.0, 0.0]])
+    assert _is_seam(wander, min_length_mm=12.0, straightness_max=0.6)
+    assert not _is_seam(np.array([[0.0, 0.0], [8.0, 0.0], [16.0, 0.0]]), min_length_mm=12.0, straightness_max=0.6)
+    assert not _is_seam(wander[:3], min_length_mm=12.0, straightness_max=0.6)
     # A ring is never a stroke, and a wanderer is not one of this pattern.
     ring = [(0, 0), (0, 1), (1, 2), (2, 2), (3, 1), (3, 0), (2, -1), (1, -1), (0, 0)]
     assert not _is_open_stroke(ring, straightness_min=0.0)
@@ -465,9 +485,18 @@ def test_each_pattern_is_its_own_group_on_the_sheet_and_can_be_struck_out(groove
             title_block=TitleBlock(artifact_label="시험 토기", rows=()),
             texture_line_hidden_patterns=(("record:strokes:front", 0),),
         )
+    # -2 names the seams; below that nothing is named.
+    DrawingSheetOptions(
+        title_block=TitleBlock(artifact_label="시험 토기", rows=()),
+        texture_line_records=("record:strokes:front",),
+        texture_line_hidden_patterns=(("record:strokes:front", -2),),
+    )
     with pytest.raises(DrawingSheetError, match="pattern index"):
         DrawingSheetOptions(
             title_block=TitleBlock(artifact_label="시험 토기", rows=()),
             texture_line_records=("record:strokes:front",),
-            texture_line_hidden_patterns=(("record:strokes:front", -2),),
+            texture_line_hidden_patterns=(("record:strokes:front", -3),),
         )
+    assert sidecar["texture_lines"]["drawn"][0]["seam_line_count"] == "0"
+    assert sidecar["texture_lines"]["drawn"][0]["band_count"] == "0"
+    assert sidecar["texture_lines"]["records"][0]["band_count"] == 0
