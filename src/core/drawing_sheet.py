@@ -115,6 +115,7 @@ from .drawing_marks import (
     observed_side_for_line_kind,
     region_polygons,
 )
+from .drawing_smoothing import MAX_LINE_SMOOTHING_MM, smooth_polyline
 from .drawing_svg import (
     Placement,
     SVG_NAMESPACE,
@@ -400,6 +401,17 @@ class Interpretation:
     how deep the groove goes is measurement, and what is exaggerated is how
     far the ridges either side of it stand proud.
     """
+    line_smoothing_mm: float = 0.0
+    """Width of the Gaussian the measured lines are smoothed with on the page.
+
+    0.0 draws every grid step and mesh facet the record has.  1.0 averages
+    each point of an outline, a section or a condition boundary with its
+    neighbours within about a millimetre along the line, the way a pen
+    passes over a jitter it cannot follow.  The record is not touched; the
+    sheet says the width it drew with.  Derived lines - the axis, a groove's
+    chords, a technique mark, a ridge - are not smoothed: they are already
+    drawn from numbers, not traced from a mesh.
+    """
     note: str = ""
     """What the drafter interpreted, in their own words, printed on the sheet."""
 
@@ -410,6 +422,11 @@ class Interpretation:
                 field_name="groove_edge_emphasis",
                 minimum=0.0,
             )
+            smoothing = finite_number(
+                self.line_smoothing_mm,
+                field_name="line_smoothing_mm",
+                minimum=0.0,
+            )
         except SVGRenderError as exc:
             raise DrawingSheetError(str(exc)) from exc
         if emphasis > MAX_GROOVE_EDGE_EMPHASIS:
@@ -418,7 +435,13 @@ class Interpretation:
                 f"{MAX_GROOVE_EDGE_EMPHASIS}; past that the line is not an "
                 "emphasis of a measurement but a different measurement"
             )
+        if smoothing > MAX_LINE_SMOOTHING_MM:
+            raise DrawingSheetError(
+                f"line_smoothing_mm must be at most {MAX_LINE_SMOOTHING_MM:g}; "
+                "past that the pen is not smoothing the line but redrawing the form"
+            )
         object.__setattr__(self, "groove_edge_emphasis", emphasis)
+        object.__setattr__(self, "line_smoothing_mm", smoothing)
         note = str(self.note).strip()
         if len(note) > MAX_INTERPRETATION_NOTE_LENGTH:
             raise DrawingSheetError(
@@ -429,10 +452,16 @@ class Interpretation:
 
     @property
     def is_stated(self) -> bool:
-        return self.groove_edge_emphasis > 0.0 or bool(self.note)
+        return (
+            self.groove_edge_emphasis > 0.0
+            or self.line_smoothing_mm > 0.0
+            or bool(self.note)
+        )
 
     def title_row(self) -> tuple[str, str]:
         parts: list[str] = []
+        if self.line_smoothing_mm > 0.0:
+            parts.append(f"선 평활 {self.line_smoothing_mm:g} mm")
         if self.groove_edge_emphasis > 0.0:
             parts.append(f"홈 능선 강조 {self.groove_edge_emphasis * 100.0:g}%")
         if self.note:
@@ -442,6 +471,7 @@ class Interpretation:
     def to_dict(self) -> dict[str, Any]:
         return {
             "groove_edge_emphasis": self.groove_edge_emphasis,
+            "line_smoothing_mm": self.line_smoothing_mm,
             "note": self.note,
         }
 
@@ -1667,6 +1697,21 @@ def _require_drawable_crease_record(
     return record, payload
 
 
+def _smoothed_path(path: VectorPath, sigma_mm: float) -> VectorPath:
+    """The record's path as the pen draws it: smoothed by the stated width.
+
+    Zero width returns the path itself, object and all, so a sheet that
+    smooths nothing is built from exactly what it was built from before.
+    """
+
+    if sigma_mm <= 0.0:
+        return path
+    points = smooth_polyline(path.points_mm, closed=path.closed, sigma_mm=sigma_mm)
+    if len(points) < (3 if path.closed else 2):
+        return path
+    return VectorPath(id=path.id, role=path.role, closed=path.closed, points_mm=points)
+
+
 def _crease_paths_for_figure(
     figure_record_type: str,
     figure_payload_frame: Any,
@@ -2344,6 +2389,7 @@ def _mirrored_figure(
     axis_ready: bool,
     preset: DrawingStylePreset,
     interior_by_kind: Mapping[str, Sequence[Any]] = {},
+    line_smoothing_mm: float = 0.0,
 ) -> tuple[
     DerivedRecord,
     dict[str, list[Any]],
@@ -2408,7 +2454,7 @@ def _mirrored_figure(
             kind = line_kind_for_record_role(path.role)
         except DrawingStyleError as exc:
             raise DrawingSheetError(str(exc)) from exc
-        section_by_kind.setdefault(kind, []).append(path)
+        section_by_kind.setdefault(kind, []).append(_smoothed_path(path, line_smoothing_mm))
     # The inside of the far wall shows through the cut, so marks on the
     # inside are drawn on the section's side of the axis.  They were
     # projected in the same frame as the elevation, so the same cut applies.
@@ -2965,6 +3011,7 @@ def compose_drawing_sheet(
     frames: dict[str, PlanarFrame] = {}
 
     prepared: list[_Prepared] = []
+    line_smoothing = options.interpretation.line_smoothing_mm
     rubbing_notes = dict(options.rubbing_notes)
     noted: set[str] = set()
     for record_id in ids:
@@ -3021,12 +3068,14 @@ def compose_drawing_sheet(
                 kind = line_kind_for_record_role(path.role)
             except DrawingStyleError as exc:
                 raise DrawingSheetError(str(exc)) from exc
-            by_kind.setdefault(kind, []).append(path)
+            by_kind.setdefault(kind, []).append(_smoothed_path(path, line_smoothing))
         condition_by_kind, drawn = _condition_paths_for_figure(
             record.type, payload.frame, conditions
         )
         for kind, condition_paths in condition_by_kind.items():
-            by_kind.setdefault(kind, []).extend(condition_paths)
+            by_kind.setdefault(kind, []).extend(
+                _smoothed_path(path, line_smoothing) for path in condition_paths
+            )
         condition_drawn.extend(
             {"figure_record_id": record.id, **entry} for entry in drawn
         )
@@ -3165,6 +3214,7 @@ def compose_drawing_sheet(
             axis_ready=align_recipe_kind == AXIS_ALIGN_RECIPE_KIND,
             preset=resolve_drawing_style_preset(options.style_preset),
             interior_by_kind=interior_by_kind,
+            line_smoothing_mm=line_smoothing,
         )
         mirrored.append(
             {
@@ -3465,6 +3515,7 @@ def validate_drawing_sheet_bytes(svg_bytes: bytes, sidecar_bytes: bytes) -> None
         try:
             stated = Interpretation(
                 groove_edge_emphasis=interpretation.get("groove_edge_emphasis", 0.0),
+                line_smoothing_mm=interpretation.get("line_smoothing_mm", 0.0),
                 note=str(interpretation.get("note", "")),
             )
         except DrawingSheetError as exc:

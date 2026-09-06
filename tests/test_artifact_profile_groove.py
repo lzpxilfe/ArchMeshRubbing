@@ -440,6 +440,7 @@ def test_the_ridges_may_be_drawn_past_what_was_measured_if_the_sheet_says_so(
     sidecar = json.loads(emphasised.sidecar_bytes)
     assert sidecar["interpretation"] == {
         "groove_edge_emphasis": 0.5,
+        "line_smoothing_mm": 0.0,
         "note": "구연부 마무리",
     }
     (row,) = [
