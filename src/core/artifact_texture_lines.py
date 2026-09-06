@@ -86,6 +86,50 @@ TEXTURE_LINES_VALLEY_RULE = "hessian_largest_eigenvalue_zero_crossing/v1"
 TEXTURE_LINES_DOMAIN_VIEW = "view"
 TEXTURE_LINES_DOMAIN_AXIS = "axis_development"
 TEXTURE_LINES_DOMAINS: tuple[str, ...] = (TEXTURE_LINES_DOMAIN_VIEW, TEXTURE_LINES_DOMAIN_AXIS)
+#: The other way to read a stroke: as the rubbing's paper reads it.  A
+#: sheet of paper wider than the incision lies across it and does not
+#: reach its floor, so under the paper the incision is one ribbon of
+#: depth, and the stroke is the centre line of that ribbon - the ribbon
+#: thinned to a pixel, its short spurs pruned.  What the valley rule reads
+#: with curvature, pixel by pixel, this reads with the paper's window: the
+#: grain the paper bridges is not seen at all, and a stroke is one thing
+#: from end to end however faint its floor.  ``window_um`` is the paper's
+#: half-width, ``depth_um`` how far under the paper a pixel must lie to be
+#: in the stroke - the same two numbers as the rubbing's reference radius
+#: and black point - ``close_um`` the gap a ribbon closes over its own
+#: grey floor, ``spur_um`` the longest side branch pruned off the skeleton.
+TEXTURE_LINES_STROKE_RULE = "contact_envelope_stroke_centerline/v1"
+TEXTURE_LINES_RULES: tuple[str, ...] = (TEXTURE_LINES_VALLEY_RULE, TEXTURE_LINES_STROKE_RULE)
+#: How a run of strokes is grouped the way the eye groups it: the
+#: structure tensor of the depth, smoothed this wide, gives at each pixel
+#: the direction strokes run there and how much they agree (coherence).
+#: A traced stroke that crosses that direction by more than
+#: ``TEXTURE_LINES_ORIENTATION_ANGLE_DEG`` where the field is coherent is
+#: not one of the run - a scratch, a chip's edge, a seam - and is dropped.
+#: Zero turns the prior off.
+TEXTURE_LINES_ORIENTATION_RULE = "structure_tensor_coherence/v1"
+TEXTURE_LINES_ORIENTATION_ANGLE_DEG = 40.0
+TEXTURE_LINES_ORIENTATION_COHERENCE_MIN = 0.5
+#: A stroke is an open line.  A skeleton that closes on itself is the
+#: outline of a blob - a chip, a lump, a stamp's cavity - not a stroke, and
+#: is never forced into one; a chain that wanders (end-to-end distance
+#: under ``straightness_min_percent`` of its length) is not a stroke of
+#: this pattern either.  Both are dropped and counted.
+#: Strokes are then grouped as the eye groups them: two strokes are of one
+#: pattern when their middles lie within ``TEXTURE_LINES_PATTERN_GAP_MM``
+#: and their directions within ``TEXTURE_LINES_PATTERN_ANGLE_DEG``; a
+#: group of fewer than ``TEXTURE_LINES_PATTERN_MIN_STROKES`` is loose
+#: (pattern -1).  Each pattern goes on the sheet as its own group, so a
+#: reader can strike out what was read but is not a pattern.
+TEXTURE_LINES_PATTERN_RULE = "strokes_by_direction_neighbourhood/v1"
+TEXTURE_LINES_PATTERN_GAP_MM = 4.0
+TEXTURE_LINES_PATTERN_ANGLE_DEG = 20.0
+TEXTURE_LINES_PATTERN_MIN_STROKES = 4
+TEXTURE_LINES_PATTERNS_SCHEMA_VERSION = "1.1.0"
+TEXTURE_LINES_PAYLOAD_SCHEMA_VERSIONS = (
+    TEXTURE_LINES_PAYLOAD_SCHEMA_VERSION,
+    TEXTURE_LINES_PATTERNS_SCHEMA_VERSION,
+)
 
 DEFAULT_TEXTURE_LINES_PIXELS_PER_MM = 5
 #: The base the map's tilt is measured against is the sampled normal
@@ -111,6 +155,13 @@ DEFAULT_TEXTURE_LINES_LINE_SMOOTHING_MM = 0.3
 #: in, so the same cut comes out a ridge.  The file does not say which; the
 #: QC counts both so the drafter chooses with numbers, as for the encoding.
 DEFAULT_TEXTURE_LINES_INCISION_SIGN = -1
+
+DEFAULT_TEXTURE_LINES_STROKE_WINDOW_UM = 2_500
+DEFAULT_TEXTURE_LINES_STROKE_DEPTH_UM = 120
+DEFAULT_TEXTURE_LINES_STROKE_CLOSE_UM = 500
+DEFAULT_TEXTURE_LINES_STROKE_SPUR_UM = 800
+DEFAULT_TEXTURE_LINES_ORIENTATION_UM = 1_500
+DEFAULT_TEXTURE_LINES_STRAIGHTNESS_MIN_PERCENT = 50
 
 MIN_TEXTURE_LINES_PIXELS_PER_MM = 1
 MAX_TEXTURE_LINES_PIXELS_PER_MM = 50
@@ -195,10 +246,21 @@ def texture_lines_recipe(
     domain: str = TEXTURE_LINES_DOMAIN_VIEW,
     curvature_seed_per_mm: float | None = None,
     link_mm: float = DEFAULT_TEXTURE_LINES_LINK_MM,
+    rule: str = TEXTURE_LINES_VALLEY_RULE,
+    window_mm: float = DEFAULT_TEXTURE_LINES_STROKE_WINDOW_UM / 1000.0,
+    depth_mm: float = DEFAULT_TEXTURE_LINES_STROKE_DEPTH_UM / 1000.0,
+    close_mm: float = DEFAULT_TEXTURE_LINES_STROKE_CLOSE_UM / 1000.0,
+    spur_mm: float = DEFAULT_TEXTURE_LINES_STROKE_SPUR_UM / 1000.0,
+    orientation_mm: float = DEFAULT_TEXTURE_LINES_ORIENTATION_UM / 1000.0,
+    straightness_min_percent: int = DEFAULT_TEXTURE_LINES_STRAIGHTNESS_MIN_PERCENT,
 ) -> dict[str, Any]:
     """The recipe: the two files, the view, and every number that decides a line.
 
     ``curvature_seed_per_mm`` defaults to twice ``curvature_min_per_mm``.
+    With the valley rule the detection policy carries the curvature numbers
+    and nothing of the paper; with the stroke rule it carries the paper's
+    numbers and nothing of the curvature, so a recipe written before the
+    stroke rule existed is the same bytes it always was.
     """
 
     try:
@@ -208,11 +270,18 @@ def texture_lines_recipe(
     if isinstance(facing_cos, bool) or not isinstance(facing_cos, (int, float)) or not math.isfinite(facing_cos):
         raise ArtifactTextureLinesError("facing_cos must be a finite number")
     facing = int(round(float(facing_cos) * 1_000_000))
-    return {
-        "algorithm": TEXTURE_LINES_ALGORITHM,
-        "algorithm_version": TEXTURE_LINES_ALGORITHM_VERSION,
-        "coordinate_space": TEXTURE_LINES_COORDINATE_SPACE,
-        "detection_policy": {
+    if rule not in TEXTURE_LINES_RULES:
+        raise ArtifactTextureLinesError(f"rule must be one of {', '.join(TEXTURE_LINES_RULES)}")
+    common = {
+        "incision_sign": _incision_sign(incision_sign),
+        "line_smoothing_um": _um(
+            line_smoothing_mm, name="line_smoothing_mm", minimum=0, maximum=3_000
+        ),
+        "link_um": _um(link_mm, name="link_mm", minimum=0, maximum=10_000),
+        "min_length_um": _um(min_length_mm, name="min_length_mm", minimum=0, maximum=1_000_000),
+    }
+    if rule == TEXTURE_LINES_VALLEY_RULE:
+        detection = {
             "curvature_min_per_m": _um(
                 curvature_min_per_mm, name="curvature_min_per_mm", minimum=1, maximum=1_000_000
             ),
@@ -222,15 +291,29 @@ def texture_lines_recipe(
                 minimum=1,
                 maximum=1_000_000,
             ),
-            "incision_sign": _incision_sign(incision_sign),
-            "line_smoothing_um": _um(
-                line_smoothing_mm, name="line_smoothing_mm", minimum=0, maximum=3_000
-            ),
-            "link_um": _um(link_mm, name="link_mm", minimum=0, maximum=10_000),
-            "min_length_um": _um(min_length_mm, name="min_length_mm", minimum=0, maximum=1_000_000),
+            **common,
             "scale_um": _um(scale_mm, name="scale_mm", minimum=50, maximum=5_000),
             "valley": TEXTURE_LINES_VALLEY_RULE,
-        },
+        }
+    else:
+        detection = {
+            "close_um": _um(close_mm, name="close_mm", minimum=0, maximum=5_000),
+            "depth_um": _um(depth_mm, name="depth_mm", minimum=1, maximum=10_000),
+            **common,
+            "orientation_um": _um(orientation_mm, name="orientation_mm", minimum=0, maximum=20_000),
+            "pattern": TEXTURE_LINES_PATTERN_RULE,
+            "spur_um": _um(spur_mm, name="spur_mm", minimum=0, maximum=10_000),
+            "straightness_min_percent": _strict_int(
+                straightness_min_percent, name="straightness_min_percent", minimum=0, maximum=100
+            ),
+            "valley": TEXTURE_LINES_STROKE_RULE,
+            "window_um": _um(window_mm, name="window_mm", minimum=100, maximum=20_000),
+        }
+    return {
+        "algorithm": TEXTURE_LINES_ALGORITHM,
+        "algorithm_version": TEXTURE_LINES_ALGORITHM_VERSION,
+        "coordinate_space": TEXTURE_LINES_COORDINATE_SPACE,
+        "detection_policy": detection,
         "raster_policy": {
             "facing_cos_millionths": _strict_int(
                 facing, name="facing_cos", minimum=50_000, maximum=1_000_000
@@ -281,10 +364,33 @@ def validate_texture_lines_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
         raise ArtifactTextureLinesError("texture lines recipe names another algorithm version")
     if block["coordinate_space"] != TEXTURE_LINES_COORDINATE_SPACE:
         raise ArtifactTextureLinesError("texture lines recipe names another coordinate space")
+    if not isinstance(block["detection_policy"], Mapping):
+        raise ArtifactTextureLinesError("detection_policy must be an object")
+    rule = block["detection_policy"].get("valley")
+    if rule not in TEXTURE_LINES_RULES:
+        raise ArtifactTextureLinesError("texture lines recipe names another valley rule")
+    stroke = rule == TEXTURE_LINES_STROKE_RULE
+    if stroke and block["detection_policy"].get("pattern") != TEXTURE_LINES_PATTERN_RULE:
+        raise ArtifactTextureLinesError("texture lines recipe names another pattern rule")
     detection = _exact_keys(
         block["detection_policy"],
         frozenset(
             {
+                "close_um",
+                "depth_um",
+                "incision_sign",
+                "line_smoothing_um",
+                "link_um",
+                "min_length_um",
+                "orientation_um",
+                "pattern",
+                "spur_um",
+                "straightness_min_percent",
+                "valley",
+                "window_um",
+            }
+            if stroke
+            else {
                 "curvature_min_per_m",
                 "curvature_seed_per_m",
                 "incision_sign",
@@ -297,8 +403,6 @@ def validate_texture_lines_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
         ),
         name="detection_policy",
     )
-    if detection["valley"] != TEXTURE_LINES_VALLEY_RULE:
-        raise ArtifactTextureLinesError("texture lines recipe names another valley rule")
     raster = _exact_keys(
         block["raster_policy"],
         frozenset({"facing_cos_millionths", "painter", "pixels_per_mm"}),
@@ -310,28 +414,54 @@ def validate_texture_lines_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
         relief = validate_texture_relief_block(block["texture_relief"])
     except ArtifactTextureReliefError as exc:
         raise ArtifactTextureLinesError(str(exc)) from exc
-    rebuilt = {
-        "algorithm": TEXTURE_LINES_ALGORITHM,
-        "algorithm_version": TEXTURE_LINES_ALGORITHM_VERSION,
-        "coordinate_space": TEXTURE_LINES_COORDINATE_SPACE,
-        "detection_policy": {
+    common = {
+        "incision_sign": _incision_sign(detection["incision_sign"]),
+        "line_smoothing_um": _strict_int(
+            detection["line_smoothing_um"], name="line_smoothing_um", minimum=0, maximum=3_000
+        ),
+        "link_um": _strict_int(detection["link_um"], name="link_um", minimum=0, maximum=10_000),
+        "min_length_um": _strict_int(
+            detection["min_length_um"], name="min_length_um", minimum=0, maximum=1_000_000
+        ),
+    }
+    if stroke:
+        rebuilt_detection = {
+            "close_um": _strict_int(detection["close_um"], name="close_um", minimum=0, maximum=5_000),
+            "depth_um": _strict_int(detection["depth_um"], name="depth_um", minimum=1, maximum=10_000),
+            **common,
+            "orientation_um": _strict_int(
+                detection["orientation_um"], name="orientation_um", minimum=0, maximum=20_000
+            ),
+            "pattern": TEXTURE_LINES_PATTERN_RULE,
+            "spur_um": _strict_int(detection["spur_um"], name="spur_um", minimum=0, maximum=10_000),
+            "straightness_min_percent": _strict_int(
+                detection["straightness_min_percent"],
+                name="straightness_min_percent",
+                minimum=0,
+                maximum=100,
+            ),
+            "valley": TEXTURE_LINES_STROKE_RULE,
+            "window_um": _strict_int(
+                detection["window_um"], name="window_um", minimum=100, maximum=20_000
+            ),
+        }
+    else:
+        rebuilt_detection = {
             "curvature_min_per_m": _strict_int(
                 detection["curvature_min_per_m"], name="curvature_min_per_m", minimum=1, maximum=1_000_000
             ),
             "curvature_seed_per_m": _strict_int(
                 detection["curvature_seed_per_m"], name="curvature_seed_per_m", minimum=1, maximum=1_000_000
             ),
-            "incision_sign": _incision_sign(detection["incision_sign"]),
-            "line_smoothing_um": _strict_int(
-                detection["line_smoothing_um"], name="line_smoothing_um", minimum=0, maximum=3_000
-            ),
-            "link_um": _strict_int(detection["link_um"], name="link_um", minimum=0, maximum=10_000),
-            "min_length_um": _strict_int(
-                detection["min_length_um"], name="min_length_um", minimum=0, maximum=1_000_000
-            ),
+            **common,
             "scale_um": _strict_int(detection["scale_um"], name="scale_um", minimum=50, maximum=5_000),
             "valley": TEXTURE_LINES_VALLEY_RULE,
-        },
+        }
+    rebuilt = {
+        "algorithm": TEXTURE_LINES_ALGORITHM,
+        "algorithm_version": TEXTURE_LINES_ALGORITHM_VERSION,
+        "coordinate_space": TEXTURE_LINES_COORDINATE_SPACE,
+        "detection_policy": rebuilt_detection,
         "raster_policy": {
             "facing_cos_millionths": _strict_int(
                 raster["facing_cos_millionths"],
@@ -357,7 +487,11 @@ def validate_texture_lines_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
         "texture_relief": relief,
         "view": _view_name(block["view"]),
     }
-    if rebuilt["detection_policy"]["curvature_seed_per_m"] < rebuilt["detection_policy"]["curvature_min_per_m"]:
+    if (
+        not stroke
+        and rebuilt["detection_policy"]["curvature_seed_per_m"]
+        < rebuilt["detection_policy"]["curvature_min_per_m"]
+    ):
         raise ArtifactTextureLinesError("curvature_seed_per_m must not be below curvature_min_per_m")
     try:
         if canonical_json_bytes(rebuilt) != canonical_json_bytes(dict(block)):
@@ -377,9 +511,13 @@ class TextureLinesPayload:
     schema_version: str
     view: str
     polylines: tuple[Polyline, ...]
+    pattern_of: tuple[int, ...] | None = None
+    """Schema 1.1.0: the pattern each line belongs to, -1 for a loose line."""
+    patterns: tuple[Mapping[str, int], ...] | None = None
+    """Schema 1.1.0: each pattern's ``direction_deg`` and ``line_count``."""
 
     def __post_init__(self) -> None:
-        if self.schema_version != TEXTURE_LINES_PAYLOAD_SCHEMA_VERSION:
+        if self.schema_version not in TEXTURE_LINES_PAYLOAD_SCHEMA_VERSIONS:
             raise ArtifactTextureLinesError(
                 f"unsupported texture lines payload schema: {self.schema_version!r}"
             )
@@ -410,10 +548,54 @@ class TextureLinesPayload:
                 f"a texture lines payload holds at most {MAX_TEXTURE_LINE_POINTS} points"
             )
         object.__setattr__(self, "polylines", tuple(cleaned))
+        grouped = self.schema_version == TEXTURE_LINES_PATTERNS_SCHEMA_VERSION
+        if not grouped:
+            if self.pattern_of is not None or self.patterns is not None:
+                raise ArtifactTextureLinesError(
+                    "a schema 1.0.0 texture lines payload carries no patterns"
+                )
+            return
+        if self.pattern_of is None or self.patterns is None:
+            raise ArtifactTextureLinesError(
+                "a schema 1.1.0 texture lines payload names the pattern of every line"
+            )
+        patterns: list[Mapping[str, int]] = []
+        for pattern in self.patterns:
+            block = _exact_keys(pattern, frozenset({"direction_deg", "line_count"}), name="pattern")
+            patterns.append(
+                {
+                    "direction_deg": _strict_int(
+                        block["direction_deg"], name="direction_deg", minimum=0, maximum=179
+                    ),
+                    "line_count": _strict_int(
+                        block["line_count"], name="line_count", minimum=1, maximum=MAX_TEXTURE_LINES
+                    ),
+                }
+            )
+        pattern_of = tuple(
+            _strict_int(index, name="pattern_of", minimum=-1, maximum=len(patterns) - 1)
+            for index in self.pattern_of
+        )
+        if len(pattern_of) != len(cleaned):
+            raise ArtifactTextureLinesError("pattern_of names a pattern for every line, in order")
+        for index, pattern in enumerate(patterns):
+            if sum(1 for member in pattern_of if member == index) != pattern["line_count"]:
+                raise ArtifactTextureLinesError("a pattern's line_count is the lines that name it")
+        object.__setattr__(self, "pattern_of", pattern_of)
+        object.__setattr__(self, "patterns", tuple(patterns))
 
     @property
     def line_count(self) -> int:
         return len(self.polylines)
+
+    @property
+    def pattern_count(self) -> int:
+        return 0 if self.patterns is None else len(self.patterns)
+
+    def pattern_index(self, line_index: int) -> int:
+        """The pattern of one line, -1 when loose or when the reading has none."""
+
+        return -1 if self.pattern_of is None else self.pattern_of[line_index]
 
     @property
     def point_count(self) -> int:
@@ -428,17 +610,22 @@ class TextureLinesPayload:
         return int(round(total))
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        block: dict[str, Any] = {
             "polylines": [[list(point) for point in polyline] for polyline in self.polylines],
             "schema_version": self.schema_version,
             "view": self.view,
         }
+        if self.pattern_of is not None and self.patterns is not None:
+            block["pattern_of"] = list(self.pattern_of)
+            block["patterns"] = [dict(pattern) for pattern in self.patterns]
+        return block
 
     @classmethod
     def from_dict(cls, data: Mapping[str, object]) -> "TextureLinesPayload":
-        block = _exact_keys(
-            data, frozenset({"polylines", "schema_version", "view"}), name="texture lines payload"
-        )
+        keys = {"polylines", "schema_version", "view"}
+        if isinstance(data, Mapping) and data.get("schema_version") == TEXTURE_LINES_PATTERNS_SCHEMA_VERSION:
+            keys |= {"pattern_of", "patterns"}
+        block = _exact_keys(data, frozenset(keys), name="texture lines payload")
         raw = block["polylines"]
         if not isinstance(raw, (list, tuple)):
             raise ArtifactTextureLinesError("texture lines payload polylines must be an array")
@@ -454,10 +641,21 @@ class TextureLinesPayload:
             polylines.append(tuple(points))
         schema_version = block["schema_version"]
         view = block["view"]
+        pattern_of = block.get("pattern_of")
+        patterns = block.get("patterns")
+        if pattern_of is not None and not isinstance(pattern_of, (list, tuple)):
+            raise ArtifactTextureLinesError("texture lines payload pattern_of must be an array")
+        if patterns is not None and (
+            not isinstance(patterns, (list, tuple))
+            or any(not isinstance(pattern, Mapping) for pattern in patterns)
+        ):
+            raise ArtifactTextureLinesError("texture lines payload patterns must be an array of objects")
         return cls(
             schema_version=schema_version if isinstance(schema_version, str) else "",
             view=view if isinstance(view, str) else "",
             polylines=tuple(polylines),
+            pattern_of=None if pattern_of is None else tuple(pattern_of),
+            patterns=None if patterns is None else tuple(patterns),
         )
 
     def canonical_json_bytes(self) -> bytes:
@@ -478,12 +676,16 @@ class TextureLinesPayload:
         return f"{TEXTURE_LINES_GEOMETRY_REF_PREFIX}{self.sha256}"
 
     def qc_summary(self) -> dict[str, Any]:
-        return {
+        summary = {
             "line_count": self.line_count,
             "point_count": self.point_count,
             "total_length_um": self.total_length_um,
             "view": self.view,
         }
+        if self.patterns is not None:
+            summary["loose_line_count"] = sum(1 for index in self.pattern_of or () if index < 0)
+            summary["pattern_count"] = self.pattern_count
+        return summary
 
 
 def _valley_points(
@@ -568,6 +770,340 @@ def _valley_points(
 
 
 _NEIGHBOURS = ((-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1))
+#: The 8-ring in order round the pixel, for crossing numbers and thinning.
+_RING = ((-1, 0), (-1, 1), (0, 1), (1, 1), (1, 0), (1, -1), (0, -1), (-1, -1))
+
+
+def _ring_views(mask: np.ndarray) -> list[np.ndarray]:
+    """The eight neighbours of every pixel as shifted views, in ring order;
+    outside the array counts as empty."""
+
+    padded = np.pad(mask.astype(np.uint8), 1)
+    height, width = mask.shape
+    return [padded[1 + dr : 1 + dr + height, 1 + dc : 1 + dc + width] for dr, dc in _RING]
+
+
+def _thinning_tables() -> tuple[np.ndarray, np.ndarray]:
+    """Zhang-Suen's two deletion tests as 256-entry tables over the packed
+    8-neighbourhood (bit i is ring position i: N, NE, E, SE, S, SW, W, NW)."""
+
+    tables = []
+    for step in (0, 1):
+        table = np.zeros(256, dtype=bool)
+        for code in range(256):
+            ring = [(code >> index) & 1 for index in range(8)]
+            neighbours = sum(ring)
+            transitions = sum(
+                1 for index in range(8) if ring[index] == 0 and ring[(index + 1) % 8] == 1
+            )
+            north, east, south, west = ring[0], ring[2], ring[4], ring[6]
+            if step == 0:
+                first = north * east * south == 0
+                second = east * south * west == 0
+            else:
+                first = north * east * west == 0
+                second = north * south * west == 0
+            table[code] = 2 <= neighbours <= 6 and transitions == 1 and first and second
+        tables.append(table)
+    return tables[0], tables[1]
+
+
+_THINNING_TABLES = _thinning_tables()
+
+
+def _thin(mask: np.ndarray) -> np.ndarray:
+    """Zhang-Suen thinning: the ribbon down to a one-pixel skeleton.
+
+    Each pass packs every pixel's eight neighbours into one byte and looks
+    the deletion test up in a table, so a pass is a dozen byte operations
+    over the raster however wide the ribbons are.
+    """
+
+    height, width = mask.shape
+    padded = np.pad(mask.astype(np.uint8), 1)
+    core = padded[1:-1, 1:-1]
+    code = np.zeros((height, width), dtype=np.uint8)
+    while True:
+        changed = False
+        for table in _THINNING_TABLES:
+            code.fill(0)
+            for index, (dr, dc) in enumerate(_RING):
+                np.bitwise_or(
+                    code,
+                    np.left_shift(padded[1 + dr : 1 + dr + height, 1 + dc : 1 + dc + width], index),
+                    out=code,
+                )
+            remove = table[code]
+            remove &= core == 1
+            if remove.any():
+                core[remove] = 0
+                changed = True
+        if not changed:
+            return core.astype(bool)
+
+
+def _crossing_number(mask: np.ndarray) -> np.ndarray:
+    """Branches leaving each skeleton pixel: 0-to-1 transitions round the ring."""
+
+    ring = _ring_views(mask)
+    crossings = sum(
+        ((ring[index] == 0) & (ring[(index + 1) % 8] == 1)).astype(np.int64) for index in range(8)
+    )
+    return np.where(mask, crossings, 0)
+
+
+def _reduce_staircases(skeleton: np.ndarray) -> np.ndarray:
+    """Drop the corner pixel of every staircase step whose two 4-neighbours
+    already touch diagonally, so a thinned line is 8-connected and no wider:
+    a step corner would otherwise count as a junction."""
+
+    result = skeleton.copy()
+    height, width = result.shape
+    rows, cols = np.nonzero(result)
+    for r, c in zip(rows.tolist(), cols.tolist()):
+        if r == 0 or c == 0 or r == height - 1 or c == width - 1:
+            continue
+        north, east, south, west = result[r - 1, c], result[r, c + 1], result[r + 1, c], result[r, c - 1]
+        if not ((north and east) or (east and south) or (south and west) or (west and north)):
+            continue
+        ring = [bool(result[r + dr, c + dc]) for dr, dc in _RING]
+        transitions = sum(1 for index in range(8) if not ring[index] and ring[(index + 1) % 8])
+        if transitions == 1 and sum(ring) >= 2:
+            result[r, c] = False
+    return result
+
+
+def _prune_spurs(skeleton: np.ndarray, *, max_length_px: int, rounds: int = 3) -> np.ndarray:
+    """Cut side branches shorter than ``max_length_px`` off the skeleton: a
+    branch is walked from its free end, and if it reaches a junction within
+    that length it is not a stroke but the thinning's hair."""
+
+    result = skeleton.copy()
+    height, width = result.shape
+    for _round in range(rounds):
+        crossings = _crossing_number(result)
+        ends = np.argwhere(crossings == 1)
+        pruned = 0
+        for r, c in ends.tolist():
+            path = [(r, c)]
+            current = (r, c)
+            spur = False
+            for _step in range(max_length_px):
+                rr, cc = current
+                following = [
+                    (rr + dr, cc + dc)
+                    for dr, dc in _NEIGHBOURS
+                    if 0 <= rr + dr < height
+                    and 0 <= cc + dc < width
+                    and result[rr + dr, cc + dc]
+                    and (rr + dr, cc + dc) not in path
+                ]
+                if len(following) != 1:
+                    spur = len(following) > 1
+                    break
+                current = following[0]
+                path.append(current)
+            if spur:
+                for pr, pc in path[:-1]:
+                    result[pr, pc] = False
+                pruned += 1
+        if not pruned:
+            break
+    return result
+
+
+def _stroke_points(
+    signed_mm: np.ndarray,
+    good: np.ndarray,
+    *,
+    pixels_per_mm: int,
+    window_mm: float,
+    depth_mm: float,
+    close_mm: float,
+    spur_mm: float,
+) -> tuple[np.ndarray, dict[str, int]]:
+    """Where the rubbing's paper would leave a stroke white: the skeleton of
+    the pixels that lie ``depth_mm`` or more under a sheet ``window_mm`` wide
+    laid over the detrended height, closed across the stroke's own floor.
+    Returns the skeleton mask and counts of what was read."""
+
+    from scipy.ndimage import (  # noqa: PLC0415
+        binary_closing,
+        binary_erosion,
+        binary_fill_holes,
+        label,
+        maximum_filter,
+        uniform_filter,
+    )
+
+    radius = max(1, int(round(window_mm * float(pixels_per_mm))))
+    size = 2 * radius + 1
+    # The paper must lie on the wall on both sides of a stroke; where it
+    # runs off the coverage, the envelope is not the paper's and nothing is
+    # read.
+    good = binary_erosion(good, iterations=max(1, radius // 2)) if good.any() else good
+    field = np.where(good, signed_mm, 0.0)
+    # Detrended against the local mean of the covered pixels, as the rubbing
+    # is, so a sloping wall does not lie under its own upper side.
+    weight = uniform_filter(good.astype(np.float64), size=size, mode="constant")
+    mean = uniform_filter(field, size=size, mode="constant") / np.maximum(weight, 1e-9)
+    residual = np.where(good, field - mean, -np.inf)
+    envelope = maximum_filter(residual, size=size, mode="constant", cval=-np.inf)
+    under = np.where(good, envelope, 0.0) - np.where(good, residual, 0.0)
+    stroke = good & (under >= depth_mm)
+    stroke_count = int(np.count_nonzero(stroke))
+    close = int(round(close_mm * float(pixels_per_mm)))
+    if close > 0 and stroke_count:
+        span = 2 * (close // 2) + 1
+        yy, xx = np.mgrid[-(span // 2) : span // 2 + 1, -(span // 2) : span // 2 + 1]
+        disk = (yy**2 + xx**2) <= (span / 2.0) ** 2
+        stroke = (stroke | binary_closing(stroke, structure=disk)) & good
+        stroke = binary_fill_holes(stroke) & good
+    # A stroke narrower than the paper's own quantum is grain.
+    labels, count = label(stroke, structure=np.ones((3, 3), dtype=bool))
+    if count:
+        sizes = np.bincount(labels.ravel())
+        keep = sizes >= max(4, pixels_per_mm)
+        keep[0] = False
+        stroke = keep[labels]
+    skeleton = _reduce_staircases(_thin(stroke)) if stroke.any() else stroke
+    spur = int(round(spur_mm * float(pixels_per_mm)))
+    if spur > 0 and skeleton.any():
+        skeleton = _prune_spurs(skeleton, max_length_px=spur)
+    return skeleton, {
+        "stroke_pixel_count": stroke_count,
+        "skeleton_pixel_count": int(np.count_nonzero(skeleton)),
+    }
+
+
+def _orientation_field(
+    signed_mm: np.ndarray, good: np.ndarray, *, sigma_px: float
+) -> tuple[np.ndarray, np.ndarray]:
+    """The direction strokes run at each pixel and how much they agree:
+    the structure tensor of the depth, smoothed ``sigma_px`` wide.  Returns
+    the tangent angle (radians, mod pi) and the coherence in 0..1."""
+
+    from scipy.ndimage import gaussian_filter  # noqa: PLC0415
+
+    field = np.where(good, signed_mm, 0.0)
+    gx = gaussian_filter(field, 1.0, order=(0, 1))
+    gy = gaussian_filter(field, 1.0, order=(1, 0))
+    jxx = gaussian_filter(gx * gx, sigma_px)
+    jyy = gaussian_filter(gy * gy, sigma_px)
+    jxy = gaussian_filter(gx * gy, sigma_px)
+    discriminant = np.sqrt(np.maximum((jxx - jyy) ** 2 + 4.0 * jxy**2, 0.0))
+    coherence = discriminant / np.maximum(jxx + jyy, 1e-12)
+    # The gradient's dominant direction is across the strokes; the tangent
+    # is a quarter turn from it.
+    gradient_angle = 0.5 * np.arctan2(2.0 * jxy, jxx - jyy)
+    tangent = (gradient_angle + math.pi / 2.0) % math.pi
+    return tangent, np.clip(coherence, 0.0, 1.0)
+
+
+def _crosses_the_run(
+    chain: Sequence[tuple[int, int]],
+    tangent: np.ndarray,
+    coherence: np.ndarray,
+    *,
+    angle_deg: float,
+    coherence_min: float,
+) -> bool:
+    """Whether a traced chain runs against the direction its neighbourhood
+    agrees on: the field is read at the chain's middle pixel."""
+
+    if len(chain) < 3:
+        return False
+    middle = chain[len(chain) // 2]
+    if float(coherence[middle]) < coherence_min:
+        return False
+    first, last = chain[0], chain[-1]
+    own = math.atan2(last[0] - first[0], last[1] - first[1]) % math.pi
+    difference = abs(own - float(tangent[middle]))
+    difference = min(difference, math.pi - difference)
+    return difference > math.radians(angle_deg)
+
+
+def _is_open_stroke(chain: Sequence[tuple[int, int]], *, straightness_min: float) -> bool:
+    """Not a ring, and not a wanderer: a stroke's ends are apart, and the
+    distance between them is at least ``straightness_min`` of its length."""
+
+    if len(chain) < 3:
+        return True
+    first, last = chain[0], chain[-1]
+    if len(chain) >= 8 and abs(first[0] - last[0]) <= 1 and abs(first[1] - last[1]) <= 1:
+        return False
+    if straightness_min <= 0.0:
+        return True
+    points = np.asarray(chain, dtype=np.float64)
+    length = float(np.sum(np.linalg.norm(np.diff(points, axis=0), axis=1)))
+    if length <= 0.0:
+        return True
+    return float(np.linalg.norm(points[-1] - points[0])) >= straightness_min * length
+
+
+def _group_strokes(
+    strokes: Sequence[np.ndarray],
+    *,
+    gap_mm: float = TEXTURE_LINES_PATTERN_GAP_MM,
+    angle_deg: float = TEXTURE_LINES_PATTERN_ANGLE_DEG,
+    min_strokes: int = TEXTURE_LINES_PATTERN_MIN_STROKES,
+) -> tuple[list[int], list[dict[str, int]]]:
+    """Group strokes into patterns by direction and neighbourhood.
+
+    Two strokes are neighbours when their middles lie within ``gap_mm`` and
+    their directions (mod 180) within ``angle_deg``; the connected groups of
+    that relation with at least ``min_strokes`` members are the patterns,
+    numbered from the highest on the wall downwards, then left to right.
+    Returns each stroke's pattern (-1 when loose) and the patterns' summary.
+    """
+
+    from scipy.spatial import cKDTree  # noqa: PLC0415
+
+    count = len(strokes)
+    if count == 0:
+        return [], []
+    middles = np.zeros((count, 2), dtype=np.float64)
+    angles = np.zeros(count, dtype=np.float64)
+    for index, stroke in enumerate(strokes):
+        middles[index] = stroke.mean(axis=0)
+        # Principal direction of the points, mod pi.
+        centred = stroke - middles[index]
+        covariance = centred.T @ centred
+        angles[index] = 0.5 * math.atan2(2.0 * covariance[0, 1], covariance[0, 0] - covariance[1, 1])
+    parent = list(range(count))
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    tree = cKDTree(middles)
+    limit = math.radians(angle_deg)
+    for a, b in sorted(tree.query_pairs(r=gap_mm)):
+        difference = abs(angles[a] - angles[b]) % math.pi
+        if min(difference, math.pi - difference) <= limit:
+            parent[find(a)] = find(b)
+    members: dict[int, list[int]] = {}
+    for index in range(count):
+        members.setdefault(find(index), []).append(index)
+    groups = [group for group in members.values() if len(group) >= min_strokes]
+    # Highest on the wall first, then left to right: v descends, u ascends.
+    groups.sort(key=lambda group: (-float(np.median(middles[group, 1])), float(np.median(middles[group, 0]))))
+    pattern_of = [-1] * count
+    patterns: list[dict[str, int]] = []
+    for pattern_index, group in enumerate(groups):
+        for index in group:
+            pattern_of[index] = pattern_index
+        doubled = np.array([2.0 * angles[index] for index in group])
+        mean_angle = 0.5 * math.atan2(float(np.mean(np.sin(doubled))), float(np.mean(np.cos(doubled))))
+        patterns.append(
+            {
+                "direction_deg": int(round(math.degrees(mean_angle) % 180.0)) % 180,
+                "line_count": len(group),
+            }
+        )
+    return pattern_of, patterns
 
 
 def _trace_chains(valley: np.ndarray) -> list[list[tuple[int, int]]]:
@@ -857,32 +1393,73 @@ def extract_texture_lines(
     raise_if_cancelled(cancellation_probe)
     good = np.isfinite(height)
     sign = int(detection["incision_sign"])
-    scale_mm = detection["scale_um"] / 1000.0
-    curvature_min = detection["curvature_min_per_m"] / 1000.0
     # An incision is a valley of the height when the map's normals point out
     # of the wall and a ridge when they point in; the recipe says which, and
     # both counts are reported so the choice can be checked.
-    curvature_seed = detection["curvature_seed_per_m"] / 1000.0
     signed = np.where(good, -sign * height, -np.inf)
-    valley, du, dv = _valley_points(
-        signed,
-        good,
-        pixels_per_mm=pixels_per_mm,
-        scale_mm=scale_mm,
-        curvature_min_per_mm=curvature_min,
-        curvature_seed_per_mm=curvature_seed,
-    )
-    raise_if_cancelled(cancellation_probe)
-    opposite, _du, _dv = _valley_points(
-        np.where(good, sign * height, -np.inf),
-        good,
-        pixels_per_mm=pixels_per_mm,
-        scale_mm=scale_mm,
-        curvature_min_per_mm=curvature_min,
-        curvature_seed_per_mm=curvature_seed,
-    )
-    raise_if_cancelled(cancellation_probe)
-    chains = _trace_chains(valley)
+    reading_qc: dict[str, int] = {}
+    orientation_dropped = 0
+    if detection["valley"] == TEXTURE_LINES_STROKE_RULE:
+        paper = dict(
+            pixels_per_mm=pixels_per_mm,
+            window_mm=detection["window_um"] / 1000.0,
+            depth_mm=detection["depth_um"] / 1000.0,
+            close_mm=detection["close_um"] / 1000.0,
+            spur_mm=detection["spur_um"] / 1000.0,
+        )
+        valley, reading_qc = _stroke_points(signed, good, **paper)
+        raise_if_cancelled(cancellation_probe)
+        opposite, _opposite_qc = _stroke_points(np.where(good, sign * height, -np.inf), good, **paper)
+        raise_if_cancelled(cancellation_probe)
+        du = np.zeros(valley.shape, dtype=np.float64)
+        dv = np.zeros(valley.shape, dtype=np.float64)
+        chains = _trace_chains(valley)
+        straightness = int(detection["straightness_min_percent"]) / 100.0
+        open_chains = [chain for chain in chains if _is_open_stroke(chain, straightness_min=straightness)]
+        reading_qc["closed_or_wandering_chain_count"] = len(chains) - len(open_chains)
+        chains = open_chains
+        orientation_um = int(detection["orientation_um"])
+        if orientation_um > 0 and chains:
+            tangent, coherence = _orientation_field(
+                signed, good, sigma_px=orientation_um / 1000.0 * float(pixels_per_mm)
+            )
+            kept = [
+                chain
+                for chain in chains
+                if not _crosses_the_run(
+                    chain,
+                    tangent,
+                    coherence,
+                    angle_deg=TEXTURE_LINES_ORIENTATION_ANGLE_DEG,
+                    coherence_min=TEXTURE_LINES_ORIENTATION_COHERENCE_MIN,
+                )
+            ]
+            orientation_dropped = len(chains) - len(kept)
+            chains = kept
+        raise_if_cancelled(cancellation_probe)
+    else:
+        scale_mm = detection["scale_um"] / 1000.0
+        curvature_min = detection["curvature_min_per_m"] / 1000.0
+        curvature_seed = detection["curvature_seed_per_m"] / 1000.0
+        valley, du, dv = _valley_points(
+            signed,
+            good,
+            pixels_per_mm=pixels_per_mm,
+            scale_mm=scale_mm,
+            curvature_min_per_mm=curvature_min,
+            curvature_seed_per_mm=curvature_seed,
+        )
+        raise_if_cancelled(cancellation_probe)
+        opposite, _du, _dv = _valley_points(
+            np.where(good, sign * height, -np.inf),
+            good,
+            pixels_per_mm=pixels_per_mm,
+            scale_mm=scale_mm,
+            curvature_min_per_mm=curvature_min,
+            curvature_seed_per_mm=curvature_seed,
+        )
+        raise_if_cancelled(cancellation_probe)
+        chains = _trace_chains(valley)
     min_length = detection["min_length_um"] / 1000.0
     smoothing = detection["line_smoothing_um"] / 1000.0
     locator = (
@@ -911,8 +1488,16 @@ def extract_texture_lines(
     traced = _link_polylines(
         traced, gap_mm=detection["link_um"] / 1000.0, angle_deg=DEFAULT_TEXTURE_LINES_LINK_ANGLE_DEG
     )
+    grouped = detection["valley"] == TEXTURE_LINES_STROKE_RULE
+    pattern_of_traced: list[int] = []
+    patterns: list[dict[str, int]] = []
+    if grouped:
+        # Grouped where the strokes were read, on the developed wall, before
+        # the view foreshortens their directions.
+        pattern_of_traced, patterns = _group_strokes(traced)
     polylines: list[Polyline] = []
-    for developed in traced:
+    pattern_of: list[int] = []
+    for traced_index, developed in enumerate(traced):
         if locator is None:
             runs = [developed]
         else:
@@ -949,27 +1534,58 @@ def extract_texture_lines(
                 as_um.append(point)
             if len(as_um) >= 2:
                 polylines.append(tuple(as_um))
+                if grouped:
+                    pattern_of.append(pattern_of_traced[traced_index])
         raise_if_cancelled(cancellation_probe)
+    if grouped:
+        # A pattern whose strokes all fell to the length or facing filters
+        # is gone; the rest are renumbered without gaps, in their order.
+        surviving = sorted({index for index in pattern_of if index >= 0})
+        renumber = {old: new for new, old in enumerate(surviving)}
+        pattern_of = [renumber.get(index, -1) for index in pattern_of]
+        patterns = [
+            {**patterns[old], "line_count": sum(1 for index in pattern_of if index == new)}
+            for old, new in renumber.items()
+        ]
     if not polylines:
         raise ArtifactTextureLinesError(
             "no incision was traced in this view; lower curvature_min_per_mm or "
             "min_length_mm, or do not take the reading"
+            if detection["valley"] == TEXTURE_LINES_VALLEY_RULE
+            else "no stroke was traced in this view; lower depth_mm or min_length_mm, "
+            "or do not take the reading"
         )
     if len(polylines) > MAX_TEXTURE_LINES:
         raise ArtifactTextureLinesError(
             f"a texture lines reading holds at most {MAX_TEXTURE_LINES} lines; raise "
             "min_length_mm or curvature_min_per_mm"
         )
-    payload = TextureLinesPayload(
-        schema_version=TEXTURE_LINES_PAYLOAD_SCHEMA_VERSION,
-        view=validated["view"],
-        polylines=tuple(polylines),
+    payload = (
+        TextureLinesPayload(
+            schema_version=TEXTURE_LINES_PATTERNS_SCHEMA_VERSION,
+            view=validated["view"],
+            polylines=tuple(polylines),
+            pattern_of=tuple(pattern_of),
+            patterns=tuple(patterns),
+        )
+        if grouped
+        else TextureLinesPayload(
+            schema_version=TEXTURE_LINES_PAYLOAD_SCHEMA_VERSION,
+            view=validated["view"],
+            polylines=tuple(polylines),
+        )
     )
     qc = {
         **payload.qc_summary(),
         "chain_count_before_filter": total_raw,
         "chain_count_after_link": len(traced),
         "domain": domain,
+        **reading_qc,
+        **(
+            {"orientation_dropped_chain_count": orientation_dropped}
+            if detection["valley"] == TEXTURE_LINES_STROKE_RULE
+            else {}
+        ),
         "texture_relief_covered_pixel_count": relief_qc["texture_relief_covered_pixel_count"],
         "texture_relief_height_max_um_rounded": relief_qc["texture_relief_height_max_um_rounded"],
         "texture_relief_height_min_um_rounded": relief_qc["texture_relief_height_min_um_rounded"],
@@ -1009,6 +1625,13 @@ def compute_texture_lines(
     domain: str = TEXTURE_LINES_DOMAIN_VIEW,
     curvature_seed_per_mm: float | None = None,
     link_mm: float = DEFAULT_TEXTURE_LINES_LINK_MM,
+    rule: str = TEXTURE_LINES_VALLEY_RULE,
+    window_mm: float = DEFAULT_TEXTURE_LINES_STROKE_WINDOW_UM / 1000.0,
+    depth_mm: float = DEFAULT_TEXTURE_LINES_STROKE_DEPTH_UM / 1000.0,
+    close_mm: float = DEFAULT_TEXTURE_LINES_STROKE_CLOSE_UM / 1000.0,
+    spur_mm: float = DEFAULT_TEXTURE_LINES_STROKE_SPUR_UM / 1000.0,
+    orientation_mm: float = DEFAULT_TEXTURE_LINES_ORIENTATION_UM / 1000.0,
+    straightness_min_percent: int = DEFAULT_TEXTURE_LINES_STRAIGHTNESS_MIN_PERCENT,
     cancellation_probe: CancellationProbe | None = None,
 ) -> TextureLinesComputation:
     """Trace the wall's incisions as positioned by the session's active Align."""
@@ -1054,6 +1677,13 @@ def compute_texture_lines(
         domain=domain,
         curvature_seed_per_mm=curvature_seed_per_mm,
         link_mm=link_mm,
+        rule=rule,
+        window_mm=window_mm,
+        depth_mm=depth_mm,
+        close_mm=close_mm,
+        spur_mm=spur_mm,
+        orientation_mm=orientation_mm,
+        straightness_min_percent=straightness_min_percent,
     )
     try:
         context = session.capture_operation(recipe=recipe)
@@ -1106,7 +1736,7 @@ def commit_texture_lines(
             "byte_length": len(payload_bytes),
             "media_type": TEXTURE_LINES_PAYLOAD_MEDIA_TYPE,
             "payload": payload.to_dict(),
-            "schema_version": TEXTURE_LINES_PAYLOAD_SCHEMA_VERSION,
+            "schema_version": payload.schema_version,
             "sha256": payload.sha256,
         }
     }
@@ -1148,12 +1778,14 @@ def texture_lines_payload_from_record(record: DerivedRecord) -> TextureLinesPayl
     )
     if descriptor["media_type"] != TEXTURE_LINES_PAYLOAD_MEDIA_TYPE:
         raise ArtifactTextureLinesError("texture lines payload media_type is invalid")
-    if descriptor["schema_version"] != TEXTURE_LINES_PAYLOAD_SCHEMA_VERSION:
+    if descriptor["schema_version"] not in TEXTURE_LINES_PAYLOAD_SCHEMA_VERSIONS:
         raise ArtifactTextureLinesError("texture lines payload descriptor schema is invalid")
     raw_payload = descriptor["payload"]
     if not isinstance(raw_payload, Mapping):
         raise ArtifactTextureLinesError("texture lines payload descriptor payload must be an object")
     payload = TextureLinesPayload.from_dict(raw_payload)
+    if payload.schema_version != descriptor["schema_version"]:
+        raise ArtifactTextureLinesError("texture lines payload descriptor and payload name different schemas")
     payload_bytes = payload.canonical_json_bytes()
     byte_length = descriptor["byte_length"]
     if type(byte_length) is not int or byte_length != len(payload_bytes):
@@ -1185,6 +1817,16 @@ def validate_texture_lines_records(document: ArtifactDocument) -> None:
 
 __all__ = [
     "ArtifactTextureLinesError",
+    "DEFAULT_TEXTURE_LINES_ORIENTATION_UM",
+    "DEFAULT_TEXTURE_LINES_STROKE_CLOSE_UM",
+    "DEFAULT_TEXTURE_LINES_STROKE_DEPTH_UM",
+    "DEFAULT_TEXTURE_LINES_STROKE_SPUR_UM",
+    "DEFAULT_TEXTURE_LINES_STROKE_WINDOW_UM",
+    "TEXTURE_LINES_ORIENTATION_RULE",
+    "TEXTURE_LINES_PATTERN_RULE",
+    "TEXTURE_LINES_PATTERNS_SCHEMA_VERSION",
+    "TEXTURE_LINES_RULES",
+    "TEXTURE_LINES_STROKE_RULE",
     "DEFAULT_TEXTURE_LINES_CURVATURE_MIN_PER_MM",
     "DEFAULT_TEXTURE_LINES_CURVATURE_SEED_PER_MM",
     "DEFAULT_TEXTURE_LINES_LINK_MM",

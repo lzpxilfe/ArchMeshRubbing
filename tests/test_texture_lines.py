@@ -300,3 +300,174 @@ def test_the_lines_go_on_the_elevation_and_on_no_other_figure(grooved) -> None:
                 texture_line_records=("record:outline:front",),
             ),
         )
+
+
+def test_the_stroke_rule_reads_the_grooves_as_the_paper_would(grooved) -> None:
+    """The other reading: a sheet of paper wider than the incision lies
+    across it and never reaches its floor, so under the paper the incision
+    is one ribbon, and the stroke is that ribbon's centre line.  Same three
+    grooves, same heights, on the view and unrolled; the recipe carries the
+    paper's numbers and none of the curvature's, and the payload names each
+    line's pattern (schema 1.1.0) - three lone rings are loose, not a
+    pattern."""
+
+    from src.core.artifact_texture_lines import (
+        TEXTURE_LINES_PATTERN_RULE,
+        TEXTURE_LINES_PATTERNS_SCHEMA_VERSION,
+        TEXTURE_LINES_STROKE_RULE,
+    )
+
+    session, atlas, normal_map, _valley = grooved
+    for domain in ("view", "axis_development"):
+        strokes = compute_texture_lines(
+            session, atlas, normal_map, view="front", domain=domain, rule=TEXTURE_LINES_STROKE_RULE
+        )
+        lines = _lines_mm(strokes.payload)
+        assert len(lines) == 3
+        heights = sorted(float(np.median(line[:, 1])) for line in lines)
+        for found, cut in zip(heights, sorted(CANONICAL_GROOVE_V_MM)):
+            assert abs(found - cut) < 0.15
+        for line in lines:
+            assert float(line[:, 1].max() - line[:, 1].min()) < 0.25
+            assert float(line[:, 0].max() - line[:, 0].min()) > 50.0
+        detection = strokes.recipe["detection_policy"]
+        assert detection["valley"] == TEXTURE_LINES_STROKE_RULE
+        assert detection["pattern"] == TEXTURE_LINES_PATTERN_RULE
+        assert set(detection) == {
+            "close_um", "depth_um", "incision_sign", "line_smoothing_um", "link_um",
+            "min_length_um", "orientation_um", "pattern", "spur_um",
+            "straightness_min_percent", "valley", "window_um",
+        }
+        assert detection["window_um"] == 2500 and detection["depth_um"] == 120
+        assert validate_texture_lines_recipe(strokes.recipe) == strokes.recipe
+        payload = strokes.payload
+        assert payload.schema_version == TEXTURE_LINES_PATTERNS_SCHEMA_VERSION
+        assert payload.pattern_of == (-1, -1, -1)
+        assert payload.patterns == ()
+        assert strokes.qc["pattern_count"] == 0 and strokes.qc["loose_line_count"] == 3
+        assert strokes.qc["closed_or_wandering_chain_count"] == 0
+        assert strokes.qc["stroke_pixel_count"] > strokes.qc["skeleton_pixel_count"] > 0
+    # A stroke recipe with a curvature key, or a valley recipe with a paper
+    # key, is not the recipe it claims to be.
+    forged = json.loads(json.dumps(strokes.recipe))
+    forged["detection_policy"]["scale_um"] = 300
+    with pytest.raises(ArtifactTextureLinesError, match="exactly"):
+        validate_texture_lines_recipe(forged)
+    with pytest.raises(ArtifactTextureLinesError, match="rule must be one of"):
+        texture_lines_recipe(
+            atlas, normal_map, view="front", source_vertex_count=10, source_face_count=10, rule="paper"
+        )
+    # Nothing under a paper that must be a metre deep: refused, and it says
+    # which number to lower.
+    with pytest.raises(ArtifactTextureLinesError, match="no stroke was traced"):
+        compute_texture_lines(
+            session, atlas, normal_map, view="front", rule=TEXTURE_LINES_STROKE_RULE, depth_mm=9.0
+        )
+    # The record reopens with its patterns.
+    session = commit_texture_lines(
+        session, strokes, record_id="record:strokes:front", created_at=STAMP, operator="tester"
+    )
+    reopened = texture_lines_payload_from_record(session.document.record_index["record:strokes:front"])
+    assert reopened == strokes.payload
+    directory = tempfile.mkdtemp()
+    path = Path(directory) / "strokes.amr"
+    save_artifact_project(path, session.document)
+    again = load_artifact_project(path)
+    validate_known_records(again)
+    assert texture_lines_payload_from_record(again.record_index["record:strokes:front"]) == strokes.payload
+
+
+def test_strokes_are_grouped_into_patterns_by_direction_and_neighbourhood() -> None:
+    """The eye's grouping, as a rule: strokes that run the same way within
+    a few millimetres of one another are one pattern; a stroke across them
+    is not, and neither is a stroke off by itself.  Patterns are numbered
+    from the top of the wall down."""
+
+    from src.core.artifact_texture_lines import _group_strokes, _is_open_stroke
+
+    def stroke(x: float, y: float, angle_deg: float, length: float = 3.0) -> np.ndarray:
+        direction = np.array([np.cos(np.radians(angle_deg)), np.sin(np.radians(angle_deg))])
+        return np.array([x, y]) + np.outer(np.linspace(-0.5, 0.5, 7) * length, direction)
+
+    upper = [stroke(2.0 * i, 40.0, 60.0) for i in range(6)]  # a row leaning right, high up
+    lower = [stroke(2.0 * i, 20.0, 120.0) for i in range(6)]  # a row leaning left, lower
+    across = [stroke(6.0, 20.5, 30.0)]  # one stroke across the lower row
+    alone = [stroke(40.0, 30.0, 60.0)]  # far from everything
+    pattern_of, patterns = _group_strokes(upper + lower + across + alone)
+    assert pattern_of == [0] * 6 + [1] * 6 + [-1, -1]
+    assert [pattern["line_count"] for pattern in patterns] == [6, 6]
+    assert patterns[0]["direction_deg"] == 60 and patterns[1]["direction_deg"] == 120
+    # A ring is never a stroke, and a wanderer is not one of this pattern.
+    ring = [(0, 0), (0, 1), (1, 2), (2, 2), (3, 1), (3, 0), (2, -1), (1, -1), (0, 0)]
+    assert not _is_open_stroke(ring, straightness_min=0.0)
+    hook = [(0, 0), (0, 1), (0, 2), (0, 3), (1, 3), (2, 3), (2, 2), (2, 1)]
+    assert _is_open_stroke(hook, straightness_min=0.0)
+    assert not _is_open_stroke(hook, straightness_min=0.8)
+    straight = [(0, i) for i in range(9)]
+    assert _is_open_stroke(straight, straightness_min=0.95)
+
+
+def test_each_pattern_is_its_own_group_on_the_sheet_and_can_be_struck_out(grooved) -> None:
+    """The program reads, the archaeologist decides: on the sheet every
+    pattern of a reading is one `<g>` inside the 내선 layer, the loose
+    strokes another, so a reviewer can strike one out as a whole; and a
+    pattern struck out at composition is left off and named in the sidecar."""
+
+    from src.core.artifact_texture_lines import TEXTURE_LINES_STROKE_RULE
+
+    session, atlas, normal_map, _valley = grooved
+    strokes = compute_texture_lines(
+        session, atlas, normal_map, view="front", rule=TEXTURE_LINES_STROKE_RULE
+    )
+    session = commit_texture_lines(
+        session, strokes, record_id="record:strokes:front", created_at=STAMP, operator="tester"
+    )
+    outline = compute_artifact_outline(session, "front", precision_grid_mm=0.05)
+    session = commit_vector_computation(
+        session, outline, record_id="record:outline:front", created_at=STAMP, operator="tester"
+    )
+    options = DrawingSheetOptions(
+        title_block=TitleBlock(artifact_label="시험 토기", rows=()),
+        texture_line_records=("record:strokes:front",),
+    )
+    bundle = compose_drawing_sheet(session.document, ["record:outline:front"], options=options)
+    validate_drawing_sheet_bytes(bundle.svg_bytes, bundle.sidecar_bytes)
+    svg = bundle.svg_bytes.decode("utf-8")
+    sidecar = json.loads(bundle.sidecar_bytes)
+    # Three loose lines in one group, each still its own path.
+    assert svg.count('<g id="texture-pattern:record:strokes:front:loose">') == 1
+    assert svg.count('id="texture-line:record:strokes:front:loose:') == 3
+    assert svg.index('<g id="texture-pattern:') < svg.index('id="texture-line:record:strokes:front:loose:00000"')
+    assert sidecar["texture_lines"]["records"][0]["pattern_count"] == 0
+    assert sidecar["texture_lines"]["drawn"][0]["hidden_patterns"] == ""
+    assert sidecar["texture_lines"]["drawn"][0]["drawn_polyline_count"] == "3"
+    assert "hidden_patterns" not in sidecar["texture_lines"]
+
+    struck = compose_drawing_sheet(
+        session.document,
+        ["record:outline:front"],
+        options=DrawingSheetOptions(
+            title_block=TitleBlock(artifact_label="시험 토기", rows=()),
+            texture_line_records=("record:strokes:front",),
+            texture_line_hidden_patterns=(("record:strokes:front", -1),),
+        ),
+    )
+    validate_drawing_sheet_bytes(struck.svg_bytes, struck.sidecar_bytes)
+    assert "texture-line:" not in struck.svg_bytes.decode("utf-8")
+    struck_sidecar = json.loads(struck.sidecar_bytes)
+    assert struck_sidecar["texture_lines"]["hidden_patterns"] == [
+        {"pattern": -1, "record_id": "record:strokes:front"}
+    ]
+    assert struck_sidecar["texture_lines"]["drawn"][0]["hidden_patterns"] == "-1"
+    assert struck_sidecar["texture_lines"]["drawn"][0]["drawn_polyline_count"] == "0"
+    with pytest.raises(DrawingSheetError, match="not among texture_line_records"):
+        DrawingSheetOptions(
+            title_block=TitleBlock(artifact_label="시험 토기", rows=()),
+            texture_line_hidden_patterns=(("record:strokes:front", 0),),
+        )
+    with pytest.raises(DrawingSheetError, match="pattern index"):
+        DrawingSheetOptions(
+            title_block=TitleBlock(artifact_label="시험 토기", rows=()),
+            texture_line_records=("record:strokes:front",),
+            texture_line_hidden_patterns=(("record:strokes:front", -2),),
+        )

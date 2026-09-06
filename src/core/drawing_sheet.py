@@ -633,6 +633,10 @@ class DrawingSheetOptions:
     contour - so no new convention is claimed for them.
     """
     texture_line_records: tuple[str, ...] = ()
+    texture_line_hidden_patterns: tuple[tuple[str, int], ...] = ()
+    """Patterns of a texture lines reading struck out on review: (record id,
+    pattern index), -1 for the reading's loose lines.  The program reads,
+    the archaeologist decides; what was struck out is named in the sidecar."""
     """Pattern readings (문양, the incisions traced from a normal map) to draw
     as inner lines on the elevation whose plane is the reading's view.
 
@@ -834,6 +838,30 @@ class DrawingSheetOptions:
                 "texture lines records"
             )
         object.__setattr__(self, "texture_line_records", texture_line_records)
+        hidden: list[tuple[str, int]] = []
+        for entry in self.texture_line_hidden_patterns:
+            if (
+                not isinstance(entry, (tuple, list))
+                or len(entry) != 2
+                or not isinstance(entry[0], str)
+                or not entry[0].strip()
+                or isinstance(entry[1], bool)
+                or not isinstance(entry[1], int)
+                or entry[1] < -1
+            ):
+                raise DrawingSheetError(
+                    "texture_line_hidden_patterns must be (record id, pattern index) "
+                    "pairs, the index -1 for loose lines"
+                )
+            if entry[0] not in texture_line_records:
+                raise DrawingSheetError(
+                    f"texture_line_hidden_patterns names {entry[0]!r}, which is not "
+                    "among texture_line_records"
+                )
+            hidden.append((entry[0], int(entry[1])))
+        if len(set(hidden)) != len(hidden):
+            raise DrawingSheetError("texture_line_hidden_patterns names a pattern twice")
+        object.__setattr__(self, "texture_line_hidden_patterns", tuple(hidden))
         if self.plan_with_sections is not None:
             trio = tuple(self.plan_with_sections)
             if len(trio) != 3 or any(
@@ -1844,17 +1872,42 @@ def _require_drawable_texture_lines_record(
     return record, payload
 
 
+_TEXTURE_PATTERN_ID = re.compile(r"^(.*texture-line:.+?):(p\d{2}|loose):\d{5}$")
+
+
+def _texture_pattern_token(pattern: int) -> str:
+    return "loose" if pattern < 0 else f"p{pattern:02d}"
+
+
+def _pattern_groups(paths_by_kind: Mapping[str, Sequence[Any]]) -> dict[str, str]:
+    """The sub-group of every pattern-line path, from its id: the strokes of
+    one pattern of one reading go in one `<g>` so a reader can strike the
+    pattern out as one thing.  Ids without a pattern token - readings made
+    before patterns were read - name no group and are drawn as before."""
+
+    groups: dict[str, str] = {}
+    for path in paths_by_kind.get(OUTLINE_HOLE, ()):
+        match = _TEXTURE_PATTERN_ID.match(path.id)
+        if match is not None:
+            prefix, token = match.group(1), match.group(2)
+            groups[path.id] = f"{prefix.replace('texture-line:', 'texture-pattern:', 1)}:{token}"
+    return groups
+
+
 def _texture_line_paths_for_figure(
     figure_record_type: str,
     figure_payload_frame: Any,
     readings: Sequence[tuple[DerivedRecord, TextureLinesPayload]],
+    hidden_patterns: Sequence[tuple[str, int]] = (),
 ) -> tuple[dict[str, list[Any]], list[dict[str, str]]]:
     """Return the pattern lines that belong on one figure, and what they are.
 
     A reading is of one view, so it goes onto the outline figure whose plane
     is that view's and onto nothing else: not a section, which shows the cut
     and not the wall, and not another view, where the same incision would be
-    somewhere else.  Drawn as 내선, like a ridge.
+    somewhere else.  Drawn as 내선, like a ridge.  A reading that groups its
+    strokes into patterns is drawn pattern by pattern, the loose strokes
+    last, and a pattern struck out on review is left off and named.
     """
 
     by_kind: dict[str, list[Any]] = {}
@@ -1864,13 +1917,33 @@ def _texture_line_paths_for_figure(
     for record, payload in readings:
         if outline_frame(payload.view) != figure_payload_frame:
             continue
-        for index, polyline in enumerate(payload.polylines):
+        hidden = sorted(index for record_id, index in hidden_patterns if record_id == record.id)
+        grouped = payload.patterns is not None
+        order = sorted(
+            range(payload.line_count),
+            key=lambda index: (
+                (payload.pattern_index(index) < 0, payload.pattern_index(index), index)
+                if grouped
+                else (False, 0, index)
+            ),
+        )
+        shown = 0
+        for index in order:
+            pattern = payload.pattern_index(index)
+            if grouped and pattern in hidden:
+                continue
+            shown += 1
+            path_id = (
+                f"texture-line:{record.id}:{_texture_pattern_token(pattern)}:{index:05d}"
+                if grouped
+                else f"texture-line:{record.id}:{index:05d}"
+            )
             by_kind.setdefault(OUTLINE_HOLE, []).append(
                 VectorPath(
-                    id=f"texture-line:{record.id}:{index:05d}",
+                    id=path_id,
                     role="texture_line",
                     closed=False,
-                    points_mm=tuple((x / 1000.0, y / 1000.0) for x, y in polyline),
+                    points_mm=tuple((x / 1000.0, y / 1000.0) for x, y in payload.polylines[index]),
                 )
             )
         drawn.append(
@@ -1879,6 +1952,15 @@ def _texture_line_paths_for_figure(
                 "polyline_count": str(payload.line_count),
                 "record_id": record.id,
                 "view": payload.view,
+                **(
+                    {
+                        "drawn_polyline_count": str(shown),
+                        "hidden_patterns": ",".join(str(index) for index in hidden),
+                        "pattern_count": str(payload.pattern_count),
+                    }
+                    if grouped
+                    else {}
+                ),
             }
         )
     return by_kind, drawn
@@ -3053,6 +3135,7 @@ def _render_sheet(
                     hatched=hatched_kinds(figure.paths_by_kind, preset=preset),
                     indent="      ",
                     fill_only_ids=figure.fill_only_ids,
+                    groups=_pattern_groups(figure.paths_by_kind),
                 )
             )
         else:
@@ -3079,6 +3162,7 @@ def _render_sheet(
                     hatched=hatched,
                     indent="      ",
                     fill_only_ids=figure.fill_only_ids,
+                    groups=_pattern_groups(under),
                 )
             )
             lines.extend(
@@ -3337,7 +3421,7 @@ def compose_drawing_sheet(
             {"figure_record_id": record.id, **entry} for entry in ridges_drawn
         )
         pattern_by_kind, pattern_drawn = _texture_line_paths_for_figure(
-            record.type, payload.frame, texture_lines
+            record.type, payload.frame, texture_lines, options.texture_line_hidden_patterns
         )
         for kind, pattern_paths in pattern_by_kind.items():
             by_kind.setdefault(kind, []).extend(pattern_paths)
@@ -3595,9 +3679,26 @@ def compose_drawing_sheet(
                         texture_lines_drawn,
                         key=lambda entry: (entry["figure_record_id"], entry["record_id"]),
                     ),
+                    **(
+                        {
+                            "hidden_patterns": [
+                                {"pattern": index, "record_id": record_id}
+                                for record_id, index in sorted(
+                                    options.texture_line_hidden_patterns
+                                )
+                            ]
+                        }
+                        if options.texture_line_hidden_patterns
+                        else {}
+                    ),
                     "records": [
                         {
                             "line_count": payload.line_count,
+                            **(
+                                {"pattern_count": payload.pattern_count}
+                                if payload.patterns is not None
+                                else {}
+                            ),
                             "payload_sha256": payload.sha256,
                             "recipe_hash": record.recipe_hash,
                             "record_id": record.id,

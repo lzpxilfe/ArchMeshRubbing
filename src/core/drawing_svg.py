@@ -642,12 +642,18 @@ def layer_elements(
     hatched: Sequence[str],
     indent: str,
     fill_only_ids: AbstractSet[str] = frozenset(),
+    groups: Mapping[str, str] | None = None,
 ) -> list[str]:
     """Return one `<g>` per line kind, in the vocabulary's own order.
 
     The order is fixed by the vocabulary rather than by the record, so two
     renders of the same drawing cannot disagree.  A kind with no paths is
     omitted: an empty layer is noise in the layer panel.
+
+    ``groups`` names, by path id, a sub-group some paths belong to inside
+    their layer - the strokes of one pattern, say.  Consecutive paths of one
+    group are wrapped in a `<g>` of that id, so an editor can select or
+    strike out the group as one thing.  Without it the output is as before.
     """
 
     lines: list[str] = []
@@ -668,7 +674,15 @@ def layer_elements(
             attributes += f' stroke-dasharray="{dashes}"'
         lines.append(f'{indent}<g id="{layer_id(kind)}" {attributes}>')
         fill = f"url(#{hatch_pattern_id(kind)})" if kind in hatched else None
+        open_group: str | None = None
         for path in paths:
+            group = None if groups is None else groups.get(path.id)
+            if group != open_group:
+                if open_group is not None:
+                    lines.append(f"{indent}  </g>")
+                if group is not None:
+                    lines.append(f'{indent}  <g id="{xml_attribute(group)}">')
+                open_group = group
             # An open path has no interior, so filling it would shade the area
             # under its implicit closing chord.
             # A fill-only path carries an area whose boundary is drawn
@@ -677,7 +691,7 @@ def layer_elements(
             fill_only = path.id in fill_only_ids
             lines.append(
                 indent
-                + "  "
+                + ("    " if group is not None else "  ")
                 + path_element(
                     path_id=path.id,
                     role=path.role,
@@ -688,6 +702,8 @@ def layer_elements(
                     stroke="none" if fill_only else None,
                 )
             )
+        if open_group is not None:
+            lines.append(f"{indent}  </g>")
         lines.append(f"{indent}</g>")
     return lines
 
