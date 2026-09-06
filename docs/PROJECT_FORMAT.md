@@ -643,6 +643,16 @@ recipe.texture_relief
 - **도판**: `DrawingSheetOptions.crease_records`. record의 뷰와 frame이 같은 외곽선 도형에만 그리고 단면에는 그리지 않는다. 선 종류는 내선(`outline_hole`)을 쓴다 — 지침의 이름이 내선이고 능선만의 굵기를 말하는 출처가 없다. sidecar `crease.records`(record ID·recipe hash·payload sha256·사슬 수)와 `crease.drawn`(도형·뷰·선 종류·줄 수). 옵션이 비면 sidecar에 키가 없고 바이트가 그대로다.
 - 완료 게이트(3/6/6)와 `.amr-survey`에는 들어가지 않는다. 상태·기법 표기와 같이 덧붙이는 정보다.
 
+## 문양 내선 record `measurement.texture_lines.v1`
+
+토기 외면의 시문선을 입면에 내선으로 그리기 위한 record다. 스캔이 요철을 메쉬가 아니라 법선 지도에 구워 둔 경우([`docs/REAL_DATA_TRIAL.md`](REAL_DATA_TRIAL.md)) 그 지도에서 읽는다: 한 뷰의 외벽을 그 뷰 좌표 (u, v)를 전개 좌표 삼아 `texture_relief_depth_field`에 넣으면(뷰를 향한 면만, 먼 면부터 가까운 면 순으로 칠해 가까운 벽이 이긴다) 띠 탁본과 같은 높이장이 나오고, 시문선은 그 높이의 골이다. 활성 Align 아래에서 한 번 계산하고(`compute_texture_lines` → `commit_texture_lines`) 다시 그릴 때 재계산하지 않는다 — 능선 record와 같은 규율이다.
+
+- **recipe**: `archmeshrubbing.texture_normal_map_valleys` **1.0.0**. `view`(여섯 뷰 중 하나), `texture_relief`(탁본과 같은 블록 — 아틀라스·법선 지도의 sha256, `encoding`, `smoothing_um` 기본 2,000: 1 mm 폭 시문선은 1 mm 기저에 제 기울기의 대부분을 잃는다), `raster_policy`(`pixels_per_mm` 기본 5, `facing_cos_millionths` 기본 350,000 — 뷰 방향과 70° 넘게 기운 면은 읽지 않는다, `painter`), `detection_policy`(`scale_um` 기본 300 — 헤시안을 구하는 가우시안 폭, `curvature_min_per_m` 기본 300 — 골로 치는 최소 곡률 1/mm의 천분율, `incision_sign` 기본 −1 — 지도의 법선이 벽 밖을 향하면 시문선은 높이의 골(−1)이고 안을 향하면 마루(+1)인데 파일은 어느 쪽인지 말하지 않으므로 QC가 두 부호의 픽셀 수를 모두 세어 준다(박물관 지도는 +1), `min_length_um` 기본 1,500, `line_smoothing_um` 기본 300 — 추적한 선의 평활 폭, `valley` = `hessian_largest_eigenvalue_zero_crossing/v1`). `validate_texture_lines_recipe`는 수들로 recipe를 다시 만들어 같은 바이트를 요구한다.
+- **골 규칙**: 평활한 높이의 헤시안에서 가장 큰 고유값이 골을 가로지르는 곡률이고 그 고유벡터가 가로 방향이다. 곡률이 문턱 이상이고, 가로 방향 기울기가 한 픽셀 안에서 0을 지나며(Steger의 선점), 가로 방향 두 이웃보다 곡률이 작지 않은(비최대 억제) 픽셀이 골이다. 골 픽셀을 끝점에서부터 이어 사슬로 만들고(갈림에서는 가장 곧게 잇는 쪽을 따라가고 남은 가지는 제 사슬이 된다), 길이 문턱을 넘긴 사슬을 `drawing_smoothing.smooth_polyline`으로 평활·단순화해 뷰 frame µm 정수 폴리라인으로 적는다.
+- **payload** (`org.archmeshrubbing:texture-lines-v1`, schema 1.0.0): `view`와 `polylines`. 선 하나 없는 읽기는 record가 되지 않는다. 상한은 선 20,000, 점 500,000. `geometry_ref`는 payload sha256이고 QC는 `line_count`·`point_count`·`total_length_um`·`view`에 더해 골 픽셀 수, 보이는 면 수, 높이 범위, 적분 부적합이다. 읽어 들일 때 descriptor의 byte_length·sha256·geometry_ref·recipe·QC를 대조한다(`texture_lines_payload_from_record`, `validate_known_records`).
+- **도판**: `DrawingSheetOptions.texture_line_records`. record의 뷰와 frame이 같은 외곽선 도형에만 그리고 단면에는 그리지 않는다. 미러 도형에서는 입면 반쪽에 떨어진다. 선 종류는 능선과 같이 내선(`outline_hole`)이다. sidecar `texture_lines.records`(record ID·recipe hash·payload sha256·선 수·뷰)와 `texture_lines.drawn`. 옵션이 비면 sidecar에 키가 없고 바이트가 그대로다. 시트의 `line_smoothing_mm`은 이 선에 걸리지 않는다 — recipe의 `line_smoothing_um`으로 이미 평활된 선이다.
+- 완료 게이트(3/6/6)와 `.amr-survey`에는 들어가지 않는다.
+
 ## 완료 3/6/6 원자 묶음 `.amr-survey`
 
 `*.amr-survey`는 새 알고리즘 결과를 만드는 포맷이 아니라, 한 active Align 아래에서 dependency-valid `READY + FRESH`인 Cutline 3면, Outline 6면, Digital Rubbing 6면의 기존 권위 package를 한 번에 전달하는 non-overwriting directory다. GUI의 `완료 실측 15개 원자 묶음 내보내기`는 세 단계가 모두 완료된 경우에만 활성화된다.

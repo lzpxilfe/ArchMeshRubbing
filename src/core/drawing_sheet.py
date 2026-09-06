@@ -115,6 +115,12 @@ from .drawing_marks import (
     observed_side_for_line_kind,
     region_polygons,
 )
+from .artifact_texture_lines import (
+    ArtifactTextureLinesError,
+    TEXTURE_LINES_RECORD_TYPE,
+    TextureLinesPayload,
+    texture_lines_payload_from_record,
+)
 from .drawing_smoothing import MAX_LINE_SMOOTHING_MM, smooth_polyline
 from .drawing_svg import (
     Placement,
@@ -611,6 +617,15 @@ class DrawingSheetOptions:
     the reading was taken in, as 내선 - the same line kind as an inner
     contour - so no new convention is claimed for them.
     """
+    texture_line_records: tuple[str, ...] = ()
+    """Pattern readings (문양, the incisions traced from a normal map) to draw
+    as inner lines on the elevation whose plane is the reading's view.
+
+    Empty by default, and an empty tuple changes nothing.  Like a crease
+    reading the lines are drawn as 내선, and only on the outline figure whose
+    frame is the reading's view; on a mirrored figure they fall on the
+    elevation half, where the pattern of a pot is drawn.
+    """
     condition_records: tuple[str, ...] = ()
     """Condition annotations to draw over the figures, by record id.
 
@@ -784,6 +799,22 @@ class DrawingSheetOptions:
                 "crease records"
             )
         object.__setattr__(self, "crease_records", crease_records)
+        texture_line_records = tuple(self.texture_line_records)
+        if any(
+            not isinstance(record_id, str) or not record_id.strip()
+            for record_id in texture_line_records
+        ):
+            raise DrawingSheetError("texture_line_records must be record ids")
+        if len(set(texture_line_records)) != len(texture_line_records):
+            raise DrawingSheetError(
+                "the same texture lines record cannot be drawn twice on one sheet"
+            )
+        if len(texture_line_records) > MAX_DRAWING_SHEET_CONDITION_RECORDS:
+            raise DrawingSheetError(
+                f"a sheet draws at most {MAX_DRAWING_SHEET_CONDITION_RECORDS} "
+                "texture lines records"
+            )
+        object.__setattr__(self, "texture_line_records", texture_line_records)
         if self.plan_with_sections is not None:
             trio = tuple(self.plan_with_sections)
             if len(trio) != 3 or any(
@@ -1757,6 +1788,76 @@ def _crease_paths_for_figure(
     return by_kind, drawn
 
 
+def _require_drawable_texture_lines_record(
+    document: ArtifactDocument,
+    record_id: str,
+) -> tuple[DerivedRecord, TextureLinesPayload]:
+    """Resolve one pattern reading under the same rules a figure answers to."""
+
+    record = document.record_index.get(record_id)
+    if record is None:
+        raise DrawingSheetError(f"texture lines record {record_id!r} does not exist")
+    if record.type != TEXTURE_LINES_RECORD_TYPE:
+        raise DrawingSheetError(f"record {record_id!r} is not a texture lines reading")
+    if record.lifecycle_status is not RecordLifecycleStatus.READY:
+        raise DrawingSheetError("only READY texture lines records may be drawn")
+    try:
+        freshness = document.record_freshness(record.id)
+    except ArtifactDocumentError as exc:
+        raise DrawingSheetError(str(exc)) from exc
+    if freshness is not RecordFreshness.FRESH:
+        raise DrawingSheetError(
+            "only FRESH texture lines records may be drawn "
+            f"(got {freshness.value}); a pattern traced under a superseded "
+            "alignment would sit somewhere the artifact no longer is"
+        )
+    try:
+        payload = texture_lines_payload_from_record(record)
+    except ArtifactTextureLinesError as exc:
+        raise DrawingSheetError(str(exc)) from exc
+    return record, payload
+
+
+def _texture_line_paths_for_figure(
+    figure_record_type: str,
+    figure_payload_frame: Any,
+    readings: Sequence[tuple[DerivedRecord, TextureLinesPayload]],
+) -> tuple[dict[str, list[Any]], list[dict[str, str]]]:
+    """Return the pattern lines that belong on one figure, and what they are.
+
+    A reading is of one view, so it goes onto the outline figure whose plane
+    is that view's and onto nothing else: not a section, which shows the cut
+    and not the wall, and not another view, where the same incision would be
+    somewhere else.  Drawn as 내선, like a ridge.
+    """
+
+    by_kind: dict[str, list[Any]] = {}
+    drawn: list[dict[str, str]] = []
+    if figure_record_type != VectorRecordKind.OUTLINE.record_type:
+        return by_kind, drawn
+    for record, payload in readings:
+        if outline_frame(payload.view) != figure_payload_frame:
+            continue
+        for index, polyline in enumerate(payload.polylines):
+            by_kind.setdefault(OUTLINE_HOLE, []).append(
+                VectorPath(
+                    id=f"texture-line:{record.id}:{index:05d}",
+                    role="texture_line",
+                    closed=False,
+                    points_mm=tuple((x / 1000.0, y / 1000.0) for x, y in polyline),
+                )
+            )
+        drawn.append(
+            {
+                "line_kind": OUTLINE_HOLE,
+                "polyline_count": str(payload.line_count),
+                "record_id": record.id,
+                "view": payload.view,
+            }
+        )
+    return by_kind, drawn
+
+
 def _require_drawable_technique_record(
     document: ArtifactDocument,
     record_id: str,
@@ -2530,6 +2631,7 @@ def _sheet_provenance(
     section_loops: Sequence[Mapping[str, Any]] = (),
     crease: Mapping[str, Any] | None = None,
     layout: Mapping[str, str] | None = None,
+    texture_lines: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     preset = resolve_drawing_style_preset(options.style_preset)
     provenance: dict[str, Any] = {
@@ -2612,6 +2714,8 @@ def _sheet_provenance(
         provenance["condition"] = dict(condition)
     if crease is not None:
         provenance["crease"] = dict(crease)
+    if texture_lines is not None:
+        provenance["texture_lines"] = dict(texture_lines)
     if layout is not None:
         # Present exactly when a layout other than the row was asked for.
         provenance["layout"] = dict(layout)
@@ -2974,6 +3078,11 @@ def compose_drawing_sheet(
         _require_drawable_crease_record(document, record_id)
         for record_id in options.crease_records
     ]
+    texture_lines = [
+        _require_drawable_texture_lines_record(document, record_id)
+        for record_id in options.texture_line_records
+    ]
+    texture_lines_drawn: list[dict[str, str]] = []
     techniques = [
         _require_drawable_technique_record(document, record_id)
         for record_id in options.technique_records
@@ -3086,6 +3195,14 @@ def compose_drawing_sheet(
             by_kind.setdefault(kind, []).extend(crease_paths)
         crease_drawn.extend(
             {"figure_record_id": record.id, **entry} for entry in ridges_drawn
+        )
+        pattern_by_kind, pattern_drawn = _texture_line_paths_for_figure(
+            record.type, payload.frame, texture_lines
+        )
+        for kind, pattern_paths in pattern_by_kind.items():
+            by_kind.setdefault(kind, []).extend(pattern_paths)
+        texture_lines_drawn.extend(
+            {"figure_record_id": record.id, **entry} for entry in pattern_drawn
         )
         technique_by_kind, techniques_drawn, styles_used = _technique_paths_for_figure(
             record.type,
@@ -3329,6 +3446,26 @@ def compose_drawing_sheet(
                     ],
                 }
                 if creases
+                else None
+            ),
+            texture_lines=(
+                {
+                    "drawn": sorted(
+                        texture_lines_drawn,
+                        key=lambda entry: (entry["figure_record_id"], entry["record_id"]),
+                    ),
+                    "records": [
+                        {
+                            "line_count": payload.line_count,
+                            "payload_sha256": payload.sha256,
+                            "recipe_hash": record.recipe_hash,
+                            "record_id": record.id,
+                            "view": payload.view,
+                        }
+                        for record, payload in sorted(texture_lines, key=lambda item: item[0].id)
+                    ],
+                }
+                if texture_lines
                 else None
             ),
             condition=(
