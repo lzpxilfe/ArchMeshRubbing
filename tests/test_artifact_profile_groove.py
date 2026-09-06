@@ -442,6 +442,7 @@ def test_the_ridges_may_be_drawn_past_what_was_measured_if_the_sheet_says_so(
         "groove_edge_emphasis": 0.5,
         "line_smoothing_mm": 0.0,
         "note": "구연부 마무리",
+        "stroke_straightening_deg": 0.0,
     }
     (row,) = [
         row for row in sidecar["title_block"] if row["label"] == INTERPRETATION_LABEL

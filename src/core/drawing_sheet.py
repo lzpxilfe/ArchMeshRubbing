@@ -404,6 +404,15 @@ INTERPRETATION_LABEL = "해석"
 #: is a different measurement.
 MAX_GROOVE_EDGE_EMPHASIS = 1.0
 MAX_INTERPRETATION_NOTE_LENGTH = 60
+#: Straightening a pattern's strokes: a traced stroke whose points all lie
+#: within this distance of its own principal axis is drawn as that
+#: segment, and its direction is turned to the median direction of the
+#: strokes of its pattern within ``STROKE_NEIGHBOUR_MM`` when the two are
+#: within the stated angle.  Past 30 degrees the pen is not tidying a
+#: stroke but redirecting it.
+MAX_STROKE_STRAIGHTENING_DEG = 30.0
+STROKE_STRAIGHTEN_TOLERANCE_MM = 0.3
+STROKE_NEIGHBOUR_MM = 6.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -435,6 +444,18 @@ class Interpretation:
     chords, a technique mark, a ridge - are not smoothed: they are already
     drawn from numbers, not traced from a mesh.
     """
+    stroke_straightening_deg: float = 0.0
+    """How far a pattern stroke is turned to run with its neighbours.
+
+    0.0 draws every traced stroke as it was traced, jitter and all.  Above
+    zero a stroke that is straight to within 0.3 mm is drawn as one clean
+    segment of its own length through its own middle, turned to the median
+    direction of its pattern's strokes within 6 mm when that is within this
+    many degrees - the way a draftsman draws a combed row as parallel
+    strokes and not as a tracing of each.  A curved stroke is left as
+    traced; a loose stroke and a seam are not turned.  The record is not
+    touched; the sheet says the angle it drew with.
+    """
     note: str = ""
     """What the drafter interpreted, in their own words, printed on the sheet."""
 
@@ -450,8 +471,19 @@ class Interpretation:
                 field_name="line_smoothing_mm",
                 minimum=0.0,
             )
+            straightening = finite_number(
+                self.stroke_straightening_deg,
+                field_name="stroke_straightening_deg",
+                minimum=0.0,
+            )
         except SVGRenderError as exc:
             raise DrawingSheetError(str(exc)) from exc
+        if straightening > MAX_STROKE_STRAIGHTENING_DEG:
+            raise DrawingSheetError(
+                f"stroke_straightening_deg must be at most {MAX_STROKE_STRAIGHTENING_DEG:g}; "
+                "past that the pen is not tidying a stroke but redirecting it"
+            )
+        object.__setattr__(self, "stroke_straightening_deg", straightening)
         if emphasis > MAX_GROOVE_EDGE_EMPHASIS:
             raise DrawingSheetError(
                 "groove_edge_emphasis must be at most "
@@ -478,6 +510,7 @@ class Interpretation:
         return (
             self.groove_edge_emphasis > 0.0
             or self.line_smoothing_mm > 0.0
+            or self.stroke_straightening_deg > 0.0
             or bool(self.note)
         )
 
@@ -485,6 +518,8 @@ class Interpretation:
         parts: list[str] = []
         if self.line_smoothing_mm > 0.0:
             parts.append(f"선 평활 {self.line_smoothing_mm:g} mm")
+        if self.stroke_straightening_deg > 0.0:
+            parts.append(f"획 직선화 {self.stroke_straightening_deg:g}°")
         if self.groove_edge_emphasis > 0.0:
             parts.append(f"홈 능선 강조 {self.groove_edge_emphasis * 100.0:g}%")
         if self.note:
@@ -496,6 +531,7 @@ class Interpretation:
             "groove_edge_emphasis": self.groove_edge_emphasis,
             "line_smoothing_mm": self.line_smoothing_mm,
             "note": self.note,
+            "stroke_straightening_deg": self.stroke_straightening_deg,
         }
 
 
@@ -1900,11 +1936,91 @@ def _pattern_groups(paths_by_kind: Mapping[str, Sequence[Any]]) -> dict[str, str
     return groups
 
 
+def _fitted_segment(
+    points_mm: np.ndarray, *, tolerance_mm: float
+) -> tuple[np.ndarray, float, float] | None:
+    """The straight segment a stroke is, if it is one: its middle, the
+    angle of its principal axis (radians, mod pi) and its half-length, when
+    every point lies within ``tolerance_mm`` of that axis.  Up to a tenth of
+    the points at either end may be a hook the tracer left and are cut
+    before the test.  None for a stroke that is not straight."""
+
+    count = points_mm.shape[0]
+    if count < 2:
+        return None
+    most = max(1, count // 10)
+    # Fewest points cut first, and either end on its own before both.
+    trims = sorted(
+        ((head, tail) for head in range(most + 1) for tail in range(most + 1)),
+        key=lambda pair: (pair[0] + pair[1], pair),
+    )
+    for head, tail in trims:
+        inner = points_mm[head : count - tail]
+        if inner.shape[0] < 2:
+            continue
+        middle = inner.mean(axis=0)
+        centred = inner - middle
+        covariance = centred.T @ centred
+        angle = 0.5 * math.atan2(2.0 * covariance[0, 1], covariance[0, 0] - covariance[1, 1])
+        direction = np.array([math.cos(angle), math.sin(angle)])
+        along = centred @ direction
+        across = centred @ np.array([-direction[1], direction[0]])
+        if float(np.max(np.abs(across))) <= tolerance_mm:
+            low, high = float(along.min()), float(along.max())
+            if high - low <= 0.0:
+                return None
+            return middle + direction * ((low + high) / 2.0), angle % math.pi, (high - low) / 2.0
+    return None
+
+
+def _straightened_strokes(
+    payload: TextureLinesPayload, *, angle_deg: float
+) -> dict[int, tuple[tuple[float, float], tuple[float, float]]]:
+    """For every stroke of a pattern that is straight, the clean segment it
+    is drawn as: its own length through its own middle, turned to the
+    median direction of the pattern's straight strokes within
+    ``STROKE_NEIGHBOUR_MM`` when its own direction is within ``angle_deg``
+    of that.  Loose strokes and seams are not turned."""
+
+    fits: dict[int, tuple[np.ndarray, float, float]] = {}
+    for index, polyline in enumerate(payload.polylines):
+        if payload.pattern_index(index) < 0:
+            continue
+        fit = _fitted_segment(
+            np.asarray(polyline, dtype=np.float64) / 1000.0, tolerance_mm=STROKE_STRAIGHTEN_TOLERANCE_MM
+        )
+        if fit is not None:
+            fits[index] = fit
+    by_pattern: dict[int, list[int]] = {}
+    for index in fits:
+        by_pattern.setdefault(payload.pattern_index(index), []).append(index)
+    limit = math.radians(angle_deg)
+    segments: dict[int, tuple[tuple[float, float], tuple[float, float]]] = {}
+    for members in by_pattern.values():
+        middles = np.array([fits[index][0] for index in members])
+        angles = np.array([fits[index][1] for index in members])
+        for position, index in enumerate(members):
+            near = np.linalg.norm(middles - middles[position], axis=1) <= STROKE_NEIGHBOUR_MM
+            doubled = 2.0 * angles[near]
+            median = 0.5 * math.atan2(float(np.median(np.sin(doubled))), float(np.median(np.cos(doubled))))
+            own = angles[position]
+            difference = abs(own - median) % math.pi
+            difference = min(difference, math.pi - difference)
+            angle = median if difference <= limit else own
+            middle, _own, half = fits[index]
+            direction = np.array([math.cos(angle), math.sin(angle)])
+            start = middle - direction * half
+            end = middle + direction * half
+            segments[index] = ((float(start[0]), float(start[1])), (float(end[0]), float(end[1])))
+    return segments
+
+
 def _texture_line_paths_for_figure(
     figure_record_type: str,
     figure_payload_frame: Any,
     readings: Sequence[tuple[DerivedRecord, TextureLinesPayload]],
     hidden_patterns: Sequence[tuple[str, int]] = (),
+    straightening_deg: float = 0.0,
 ) -> tuple[dict[str, list[Any]], list[dict[str, str]]]:
     """Return the pattern lines that belong on one figure, and what they are.
 
@@ -1927,6 +2043,11 @@ def _texture_line_paths_for_figure(
             continue
         hidden = sorted(index for record_id, index in hidden_patterns if record_id == record.id)
         grouped = payload.patterns is not None
+        straightened = (
+            _straightened_strokes(payload, angle_deg=straightening_deg)
+            if grouped and straightening_deg > 0.0
+            else {}
+        )
         order = sorted(
             range(payload.line_count),
             key=lambda index: (
@@ -1947,12 +2068,17 @@ def _texture_line_paths_for_figure(
                 else f"texture-line:{record.id}:{index:05d}"
             )
             kind = CONDITION_CRACK if pattern == TEXTURE_LINES_SEAM_PATTERN else OUTLINE_HOLE
+            segment = straightened.get(index)
             by_kind.setdefault(kind, []).append(
                 VectorPath(
                     id=path_id,
                     role="texture_line",
                     closed=False,
-                    points_mm=tuple((x / 1000.0, y / 1000.0) for x, y in payload.polylines[index]),
+                    points_mm=(
+                        segment
+                        if segment is not None
+                        else tuple((x / 1000.0, y / 1000.0) for x, y in payload.polylines[index])
+                    ),
                 )
             )
         drawn.append(
@@ -1965,6 +2091,7 @@ def _texture_line_paths_for_figure(
                     {
                         "band_count": str(payload.band_count),
                         "drawn_polyline_count": str(shown),
+                        "straightened_polyline_count": str(len(straightened)),
                         "hidden_patterns": ",".join(str(index) for index in hidden),
                         "pattern_count": str(payload.pattern_count),
                         "seam_line_count": str(
@@ -3438,7 +3565,11 @@ def compose_drawing_sheet(
             {"figure_record_id": record.id, **entry} for entry in ridges_drawn
         )
         pattern_by_kind, pattern_drawn = _texture_line_paths_for_figure(
-            record.type, payload.frame, texture_lines, options.texture_line_hidden_patterns
+            record.type,
+            payload.frame,
+            texture_lines,
+            options.texture_line_hidden_patterns,
+            straightening_deg=options.interpretation.stroke_straightening_deg,
         )
         for kind, pattern_paths in pattern_by_kind.items():
             by_kind.setdefault(kind, []).extend(pattern_paths)
@@ -3913,6 +4044,7 @@ def validate_drawing_sheet_bytes(svg_bytes: bytes, sidecar_bytes: bytes) -> None
                 groove_edge_emphasis=interpretation.get("groove_edge_emphasis", 0.0),
                 line_smoothing_mm=interpretation.get("line_smoothing_mm", 0.0),
                 note=str(interpretation.get("note", "")),
+                stroke_straightening_deg=interpretation.get("stroke_straightening_deg", 0.0),
             )
         except DrawingSheetError as exc:
             raise DrawingSheetError(f"sheet interpretation block is malformed: {exc}") from exc

@@ -500,3 +500,63 @@ def test_each_pattern_is_its_own_group_on_the_sheet_and_can_be_struck_out(groove
     assert sidecar["texture_lines"]["drawn"][0]["seam_line_count"] == "0"
     assert sidecar["texture_lines"]["drawn"][0]["band_count"] == "0"
     assert sidecar["texture_lines"]["records"][0]["band_count"] == 0
+    assert sidecar["texture_lines"]["drawn"][0]["straightened_polyline_count"] == "0"
+
+
+def test_a_pattern_stroke_is_drawn_as_the_clean_segment_it_is_when_asked() -> None:
+    """The draftsman draws a combed row as parallel strokes, not as a
+    tracing of each.  With stroke_straightening_deg set, a straight stroke
+    of a pattern is drawn as one segment of its own length through its own
+    middle, turned to its neighbours' median direction; a curved stroke, a
+    loose stroke and a seam are left as traced; and the sheet says so."""
+
+    import math
+
+    from src.core.artifact_texture_lines import TextureLinesPayload
+    from src.core.drawing_sheet import (
+        MAX_STROKE_STRAIGHTENING_DEG,
+        Interpretation,
+        _fitted_segment,
+        _straightened_strokes,
+    )
+
+    # A jittery stroke: 6 mm long at 45 degrees, wobbling 0.1 mm.
+    def wobbly(x0: float, y0: float, angle_deg: float, length_mm: float, wobble: float):
+        direction = np.array([math.cos(math.radians(angle_deg)), math.sin(math.radians(angle_deg))])
+        normal = np.array([-direction[1], direction[0]])
+        return [
+            tuple(int(round(v * 1000.0)) for v in np.array([x0, y0]) + direction * t + normal * wobble * math.sin(t * 7.0))
+            for t in np.linspace(0.0, length_mm, 12)
+        ]
+
+    # Six strokes a millimetre apart, so each has the whole row as neighbours.
+    lines = [wobbly(1.0 * i, 0.0, 45.0 + (i % 3 - 1) * 4.0, 6.0, 0.1) for i in range(6)]
+    hook = wobbly(20.0, 0.0, 45.0, 6.0, 0.0)
+    hook = hook + [(hook[-1][0] + 400, hook[-1][1] - 300)]  # a hook off the end
+    curve = [(30_000 + int(2_000 * math.cos(t)), int(2_000 * math.sin(t))) for t in np.linspace(0.0, 2.0, 15)]
+    payload = TextureLinesPayload(
+        schema_version="1.1.0",
+        view="front",
+        polylines=tuple(tuple(line) for line in lines) + (tuple(hook), tuple(curve)),
+        pattern_of=(0,) * 8,
+        patterns=({"direction_deg": 45, "line_count": 8},),
+        bands=({"directions_deg": [45], "height_um_max": 10_000, "height_um_min": -1_000, "patterns": [0]},),
+    )
+    segments = _straightened_strokes(payload, angle_deg=15.0)
+    assert set(segments) == set(range(7))  # the six strokes and the hooked one; not the curve
+    angles = []
+    for index in range(6):
+        (x0, y0), (x1, y1) = segments[index]
+        angles.append(math.degrees(math.atan2(y1 - y0, x1 - x0)) % 180.0)
+        assert abs(math.hypot(x1 - x0, y1 - y0) - 6.0) < 0.3
+    # All six turned to one direction, the row's median.
+    assert max(angles) - min(angles) < 1e-6 and abs(angles[0] - 45.0) < 1.0
+    # The hook was cut off the end before the fit.
+    (x0, y0), (x1, y1) = segments[6]
+    assert abs(math.hypot(x1 - x0, y1 - y0) - 6.0) < 0.5
+    assert _fitted_segment(np.asarray(curve, dtype=np.float64) / 1000.0, tolerance_mm=0.3) is None
+    # Declared on the sheet, bounded, and off by default.
+    assert Interpretation(stroke_straightening_deg=15.0).title_row()[1] == "획 직선화 15°"
+    assert Interpretation().to_dict()["stroke_straightening_deg"] == 0.0
+    with pytest.raises(DrawingSheetError, match="stroke_straightening_deg"):
+        Interpretation(stroke_straightening_deg=MAX_STROKE_STRAIGHTENING_DEG + 1.0)
