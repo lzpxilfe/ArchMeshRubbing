@@ -99,7 +99,27 @@ TEXTURE_LINES_DOMAINS: tuple[str, ...] = (TEXTURE_LINES_DOMAIN_VIEW, TEXTURE_LIN
 #: and black point - ``close_um`` the gap a ribbon closes over its own
 #: grey floor, ``spur_um`` the longest side branch pruned off the skeleton.
 TEXTURE_LINES_STROKE_RULE = "contact_envelope_stroke_centerline/v1"
-TEXTURE_LINES_RULES: tuple[str, ...] = (TEXTURE_LINES_VALLEY_RULE, TEXTURE_LINES_STROKE_RULE)
+#: The same paper, read stroke by stroke where the strokes crowd.  In a
+#: combed row a millimetre apart the ribbons under the paper touch, and a
+#: centre line of what is deeper than a threshold runs between the strokes
+#: and loops round them: the threshold cannot tell two strokes apart that
+#: the depth still can.  This rule takes the stroke to be the line of
+#: greatest depth under the paper across the run - at each pixel the
+#: direction the strokes run there is that of the depth's structure tensor
+#: (``orientation_um`` wide), and a pixel is of a stroke when it is at
+#: least as deep as its two neighbours across that direction.  The line is
+#: followed down to ``TEXTURE_LINES_RIDGE_FOLLOW_PERCENT`` of ``depth_um``
+#: wherever it somewhere reaches ``depth_um`` (hysteresis, as the valley
+#: rule's).  No closing: nothing is filled, so nothing merges.
+TEXTURE_LINES_RIDGE_RULE = "contact_envelope_stroke_ridge/v1"
+TEXTURE_LINES_RIDGE_FOLLOW_PERCENT = 50
+TEXTURE_LINES_RIDGE_ALONG_MM = 0.2
+TEXTURE_LINES_STROKE_RULES: tuple[str, ...] = (TEXTURE_LINES_STROKE_RULE, TEXTURE_LINES_RIDGE_RULE)
+TEXTURE_LINES_RULES: tuple[str, ...] = (
+    TEXTURE_LINES_VALLEY_RULE,
+    TEXTURE_LINES_STROKE_RULE,
+    TEXTURE_LINES_RIDGE_RULE,
+)
 #: How a run of strokes is grouped the way the eye groups it: the
 #: structure tensor of the depth, smoothed this wide, gives at each pixel
 #: the direction strokes run there and how much they agree (coherence).
@@ -314,7 +334,11 @@ def texture_lines_recipe(
         }
     else:
         detection = {
-            "close_um": _um(close_mm, name="close_mm", minimum=0, maximum=5_000),
+            **(
+                {"close_um": _um(close_mm, name="close_mm", minimum=0, maximum=5_000)}
+                if rule == TEXTURE_LINES_STROKE_RULE
+                else {}
+            ),
             "depth_um": _um(depth_mm, name="depth_mm", minimum=1, maximum=10_000),
             **common,
             "orientation_um": _um(orientation_mm, name="orientation_mm", minimum=0, maximum=20_000),
@@ -324,7 +348,7 @@ def texture_lines_recipe(
             "straightness_min_percent": _strict_int(
                 straightness_min_percent, name="straightness_min_percent", minimum=0, maximum=100
             ),
-            "valley": TEXTURE_LINES_STROKE_RULE,
+            "valley": rule,
             "window_um": _um(window_mm, name="window_mm", minimum=100, maximum=20_000),
         }
     return {
@@ -387,14 +411,14 @@ def validate_texture_lines_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
     rule = block["detection_policy"].get("valley")
     if rule not in TEXTURE_LINES_RULES:
         raise ArtifactTextureLinesError("texture lines recipe names another valley rule")
-    stroke = rule == TEXTURE_LINES_STROKE_RULE
+    stroke = rule in TEXTURE_LINES_STROKE_RULES
     if stroke and block["detection_policy"].get("pattern") != TEXTURE_LINES_PATTERN_RULE:
         raise ArtifactTextureLinesError("texture lines recipe names another pattern rule")
     detection = _exact_keys(
         block["detection_policy"],
         frozenset(
             {
-                "close_um",
+                *(("close_um",) if rule == TEXTURE_LINES_STROKE_RULE else ()),
                 "depth_um",
                 "incision_sign",
                 "line_smoothing_um",
@@ -445,7 +469,11 @@ def validate_texture_lines_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
     }
     if stroke:
         rebuilt_detection = {
-            "close_um": _strict_int(detection["close_um"], name="close_um", minimum=0, maximum=5_000),
+            **(
+                {"close_um": _strict_int(detection["close_um"], name="close_um", minimum=0, maximum=5_000)}
+                if rule == TEXTURE_LINES_STROKE_RULE
+                else {}
+            ),
             "depth_um": _strict_int(detection["depth_um"], name="depth_um", minimum=1, maximum=10_000),
             **common,
             "orientation_um": _strict_int(
@@ -462,7 +490,7 @@ def validate_texture_lines_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
                 minimum=0,
                 maximum=100,
             ),
-            "valley": TEXTURE_LINES_STROKE_RULE,
+            "valley": rule,
             "window_um": _strict_int(
                 detection["window_um"], name="window_um", minimum=100, maximum=20_000
             ),
@@ -1029,28 +1057,14 @@ def _prune_spurs(skeleton: np.ndarray, *, max_length_px: int, rounds: int = 3) -
     return result
 
 
-def _stroke_points(
-    signed_mm: np.ndarray,
-    good: np.ndarray,
-    *,
-    pixels_per_mm: int,
-    window_mm: float,
-    depth_mm: float,
-    close_mm: float,
-    spur_mm: float,
-) -> tuple[np.ndarray, dict[str, int]]:
-    """Where the rubbing's paper would leave a stroke white: the skeleton of
-    the pixels that lie ``depth_mm`` or more under a sheet ``window_mm`` wide
-    laid over the detrended height, closed across the stroke's own floor.
-    Returns the skeleton mask and counts of what was read."""
+def _depth_under_paper(
+    signed_mm: np.ndarray, good: np.ndarray, *, pixels_per_mm: int, window_mm: float
+) -> tuple[np.ndarray, np.ndarray]:
+    """How far under the rubbing's paper each pixel lies, counted from the
+    shallowest point within half a window, and where the paper lies on the
+    wall at all."""
 
-    from scipy.ndimage import (  # noqa: PLC0415
-        binary_closing,
-        binary_erosion,
-        grey_closing,
-        label,
-        minimum_filter,
-    )
+    from scipy.ndimage import binary_erosion, grey_closing, minimum_filter  # noqa: PLC0415
 
     radius = max(1, int(round(window_mm * float(pixels_per_mm))))
     size = 2 * radius + 1
@@ -1074,7 +1088,88 @@ def _stroke_points(
     # strokes is still a row.  So the depth counts from the shallowest
     # point within half a window.
     shallowest = minimum_filter(under, size=2 * (radius // 2) + 1, mode="nearest")
-    stroke = good & (under - shallowest >= depth_mm)
+    return np.where(good, under - shallowest, 0.0), good
+
+
+def _ridge_points(
+    signed_mm: np.ndarray,
+    good: np.ndarray,
+    *,
+    pixels_per_mm: int,
+    window_mm: float,
+    depth_mm: float,
+    orientation_mm: float,
+    spur_mm: float,
+) -> tuple[np.ndarray, dict[str, int]]:
+    """Where the depth under the paper is greatest across the run: at each
+    pixel the strokes' direction is that of the depth's structure tensor,
+    and a pixel is of a stroke when it is at least as deep as its two
+    neighbours a pixel away across that direction.  Followed down to
+    ``TEXTURE_LINES_RIDGE_FOLLOW_PERCENT`` of ``depth_mm`` where the line
+    somewhere reaches ``depth_mm``.  Returns the skeleton mask and counts."""
+
+    from scipy.ndimage import gaussian_filter, label, map_coordinates, maximum  # noqa: PLC0415
+
+    depth, good = _depth_under_paper(signed_mm, good, pixels_per_mm=pixels_per_mm, window_mm=window_mm)
+    stroke_count = int(np.count_nonzero(good & (depth >= depth_mm)))
+    if not stroke_count:
+        return np.zeros(depth.shape, dtype=bool), {"stroke_pixel_count": 0, "skeleton_pixel_count": 0}
+    # The direction is asked of the depth under the paper, not of the
+    # height: the wall's own slope is out of it already.
+    sigma = orientation_mm * float(pixels_per_mm) if orientation_mm > 0.0 else float(pixels_per_mm)
+    tangent, _coherence = _orientation_field(np.where(good, -depth, 0.0), good, sigma_px=sigma)
+    smooth = gaussian_filter(depth, 1.0)
+    rows, cols = np.mgrid[0 : depth.shape[0], 0 : depth.shape[1]].astype(np.float64)
+    # Smoothed along the run as well: a stroke's floor rises and falls
+    # along its length, and a dip that would break the line is bridged by
+    # its own neighbours a fraction of a millimetre along the stroke.
+    along = max(1, int(round(TEXTURE_LINES_RIDGE_ALONG_MM * float(pixels_per_mm))))
+    tr, tc = np.sin(tangent), np.cos(tangent)
+    summed = smooth.copy()
+    for step in range(1, along + 1):
+        summed += map_coordinates(smooth, [rows + step * tr, cols + step * tc], order=1, mode="nearest")
+        summed += map_coordinates(smooth, [rows - step * tr, cols - step * tc], order=1, mode="nearest")
+    smooth = summed / float(2 * along + 1)
+    across = tangent + math.pi / 2.0
+    dr, dc = np.sin(across), np.cos(across)
+    ahead = map_coordinates(smooth, [rows + dr, cols + dc], order=1, mode="nearest")
+    behind = map_coordinates(smooth, [rows - dr, cols - dc], order=1, mode="nearest")
+    follow = depth_mm * TEXTURE_LINES_RIDGE_FOLLOW_PERCENT / 100.0
+    ridge = good & (smooth >= follow) & (smooth >= ahead) & (smooth >= behind)
+    labels, count = label(ridge, structure=np.ones((3, 3), dtype=bool))
+    if count:
+        deepest = np.asarray(maximum(smooth, labels, index=np.arange(1, count + 1)), dtype=np.float64)
+        keep = np.concatenate([[False], deepest >= depth_mm])
+        ridge = keep[labels]
+    skeleton = _reduce_staircases(_thin(ridge)) if ridge.any() else ridge
+    spur = int(round(spur_mm * float(pixels_per_mm)))
+    if spur > 0 and skeleton.any():
+        skeleton = _prune_spurs(skeleton, max_length_px=spur)
+    return skeleton, {
+        "stroke_pixel_count": stroke_count,
+        "skeleton_pixel_count": int(np.count_nonzero(skeleton)),
+    }
+
+
+def _stroke_points(
+    signed_mm: np.ndarray,
+    good: np.ndarray,
+    *,
+    pixels_per_mm: int,
+    window_mm: float,
+    depth_mm: float,
+    close_mm: float,
+    spur_mm: float,
+) -> tuple[np.ndarray, dict[str, int]]:
+    """Where the rubbing's paper would leave a stroke white: the skeleton of
+    the pixels that lie ``depth_mm`` or more under a sheet ``window_mm`` wide
+    laid over the detrended height, closed across the stroke's own floor.
+    Returns the skeleton mask and counts of what was read."""
+
+    from scipy.ndimage import binary_closing, label  # noqa: PLC0415
+
+    depth, good = _depth_under_paper(signed_mm, good, pixels_per_mm=pixels_per_mm, window_mm=window_mm)
+    stroke = good & (depth >= depth_mm)
     stroke_count = int(np.count_nonzero(stroke))
     close = int(round(close_mm * float(pixels_per_mm)))
     if close > 0 and stroke_count:
@@ -1609,17 +1704,22 @@ def extract_texture_lines(
     signed = np.where(good, -sign * height, -np.inf)
     reading_qc: dict[str, int] = {}
     orientation_dropped = 0
-    if detection["valley"] == TEXTURE_LINES_STROKE_RULE:
+    if detection["valley"] in TEXTURE_LINES_STROKE_RULES:
         paper = dict(
             pixels_per_mm=pixels_per_mm,
             window_mm=detection["window_um"] / 1000.0,
             depth_mm=detection["depth_um"] / 1000.0,
-            close_mm=detection["close_um"] / 1000.0,
             spur_mm=detection["spur_um"] / 1000.0,
         )
-        valley, reading_qc = _stroke_points(signed, good, **paper)
+        if detection["valley"] == TEXTURE_LINES_STROKE_RULE:
+            paper["close_mm"] = detection["close_um"] / 1000.0
+            read = _stroke_points
+        else:
+            paper["orientation_mm"] = detection["orientation_um"] / 1000.0
+            read = _ridge_points
+        valley, reading_qc = read(signed, good, **paper)
         raise_if_cancelled(cancellation_probe)
-        opposite, _opposite_qc = _stroke_points(np.where(good, sign * height, -np.inf), good, **paper)
+        opposite, _opposite_qc = read(np.where(good, sign * height, -np.inf), good, **paper)
         raise_if_cancelled(cancellation_probe)
         du = np.zeros(valley.shape, dtype=np.float64)
         dv = np.zeros(valley.shape, dtype=np.float64)
@@ -1718,7 +1818,7 @@ def extract_texture_lines(
     traced = _link_polylines(
         traced, gap_mm=detection["link_um"] / 1000.0, angle_deg=DEFAULT_TEXTURE_LINES_LINK_ANGLE_DEG
     )
-    grouped = detection["valley"] == TEXTURE_LINES_STROKE_RULE
+    grouped = detection["valley"] in TEXTURE_LINES_STROKE_RULES
     pattern_of_traced: list[int] = []
     patterns: list[dict[str, int]] = []
     if grouped:
@@ -1837,7 +1937,7 @@ def extract_texture_lines(
         **reading_qc,
         **(
             {"orientation_dropped_chain_count": orientation_dropped}
-            if detection["valley"] == TEXTURE_LINES_STROKE_RULE
+            if detection["valley"] in TEXTURE_LINES_STROKE_RULES
             else {}
         ),
         "texture_relief_covered_pixel_count": relief_qc["texture_relief_covered_pixel_count"],
@@ -2081,9 +2181,11 @@ __all__ = [
     "TEXTURE_LINES_ORIENTATION_RULE",
     "TEXTURE_LINES_PATTERN_RULE",
     "TEXTURE_LINES_PATTERNS_SCHEMA_VERSION",
+    "TEXTURE_LINES_RIDGE_RULE",
     "TEXTURE_LINES_RULES",
     "TEXTURE_LINES_SEAM_PATTERN",
     "TEXTURE_LINES_STROKE_RULE",
+    "TEXTURE_LINES_STROKE_RULES",
     "DEFAULT_TEXTURE_LINES_CURVATURE_MIN_PER_MM",
     "DEFAULT_TEXTURE_LINES_CURVATURE_SEED_PER_MM",
     "DEFAULT_TEXTURE_LINES_LINK_MM",

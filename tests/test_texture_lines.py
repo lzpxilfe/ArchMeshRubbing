@@ -560,3 +560,80 @@ def test_a_pattern_stroke_is_drawn_as_the_clean_segment_it_is_when_asked() -> No
     assert Interpretation().to_dict()["stroke_straightening_deg"] == 0.0
     with pytest.raises(DrawingSheetError, match="stroke_straightening_deg"):
         Interpretation(stroke_straightening_deg=MAX_STROKE_STRAIGHTENING_DEG + 1.0)
+
+
+def test_the_ridge_rule_reads_two_strokes_where_the_threshold_reads_one(grooved) -> None:
+    """In a combed row a millimetre apart the ribbons under the paper touch,
+    and the centre line of what is deeper than a threshold runs between the
+    two strokes as one.  The ridge rule takes the stroke to be the line of
+    greatest depth across the run, so two grooves a millimetre apart are
+    two lines at their own rows; on the grooved vessel it reads the same
+    three rings; and its recipe carries no closing gap."""
+
+    from src.core.artifact_texture_lines import (
+        TEXTURE_LINES_RIDGE_RULE,
+        TEXTURE_LINES_STROKE_RULE,
+        _ridge_points,
+        _stroke_points,
+    )
+
+    # 20 x 20 mm of flat wall at 10 px/mm with two horizontal grooves 1 mm
+    # apart, 0.3 mm deep, each 0.3 mm wide (sigma), running across the middle.
+    rows = np.arange(200, dtype=np.float64)[:, None]
+    cols = np.arange(200, dtype=np.float64)[None, :]
+    profile = np.exp(-((rows - 95.0) ** 2) / 18.0) + np.exp(-((rows - 105.0) ** 2) / 18.0)
+    signed = -0.3 * profile * ((cols >= 30) & (cols <= 170))
+    good = np.ones_like(signed, dtype=bool)
+    paper = dict(pixels_per_mm=10, window_mm=2.5, depth_mm=0.08, spur_mm=0.8)
+    from scipy.ndimage import label
+
+    ridge, ridge_qc = _ridge_points(signed, good, orientation_mm=1.5, **paper)
+    centre, centre_qc = _stroke_points(signed, good, close_mm=0.5, **paper)
+    eight = np.ones((3, 3), dtype=bool)
+    ridge_labels, ridge_count = label(ridge, structure=eight)
+    centre_labels, centre_count = label(centre, structure=eight)
+    assert ridge_count == 2 and centre_count == 1
+    for index in (1, 2):
+        at = np.flatnonzero((ridge_labels == index).any(axis=1))
+        assert at.size <= 3  # one row, give or take the staircase
+        assert abs(float(at.mean()) - 95.0) < 1.5 or abs(float(at.mean()) - 105.0) < 1.5
+        assert (ridge_labels == index).any(axis=0).sum() > 100
+    # The centre line of the merged ribbon lies between the grooves.
+    between = np.flatnonzero((centre_labels == 1).any(axis=1))
+    assert 97.0 < float(between.mean()) < 103.0
+    assert ridge_qc["stroke_pixel_count"] == centre_qc["stroke_pixel_count"] > 0
+    assert 0 < ridge_qc["skeleton_pixel_count"] < ridge_qc["stroke_pixel_count"]
+
+    session, atlas, normal_map, _valley = grooved
+    strokes = compute_texture_lines(
+        session, atlas, normal_map, view="front", rule=TEXTURE_LINES_RIDGE_RULE
+    )
+    lines = _lines_mm(strokes.payload)
+    assert len(lines) == 3
+    heights = sorted(float(np.median(line[:, 1])) for line in lines)
+    for found, cut in zip(heights, sorted(CANONICAL_GROOVE_V_MM)):
+        assert abs(found - cut) < 0.15
+    for line in lines:
+        assert float(line[:, 1].max() - line[:, 1].min()) < 0.25
+        assert float(line[:, 0].max() - line[:, 0].min()) > 50.0
+    detection = strokes.recipe["detection_policy"]
+    assert detection["valley"] == TEXTURE_LINES_RIDGE_RULE
+    assert "close_um" not in detection and detection["orientation_um"] == 2500
+    assert validate_texture_lines_recipe(strokes.recipe) == strokes.recipe
+    assert strokes.payload.pattern_of == (-1, -1, -1)
+    assert strokes.qc["orientation_dropped_chain_count"] == 0
+    # A ridge recipe with a closing gap, or a centre-line recipe without
+    # one, is not the recipe it claims to be.
+    forged = json.loads(json.dumps(strokes.recipe))
+    forged["detection_policy"]["close_um"] = 500
+    with pytest.raises(ArtifactTextureLinesError, match="exactly"):
+        validate_texture_lines_recipe(forged)
+    forged["detection_policy"]["valley"] = TEXTURE_LINES_STROKE_RULE
+    assert validate_texture_lines_recipe(forged) == forged
+    del forged["detection_policy"]["close_um"]
+    with pytest.raises(ArtifactTextureLinesError, match="exactly"):
+        validate_texture_lines_recipe(forged)
+    session = commit_texture_lines(
+        session, strokes, record_id="record:ridge:front", created_at=STAMP, operator="tester"
+    )
+    assert texture_lines_payload_from_record(session.document.record_index["record:ridge:front"]) == strokes.payload
