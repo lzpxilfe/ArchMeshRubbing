@@ -124,16 +124,20 @@ def test_the_shipped_preset_says_it_is_provisional() -> None:
 
 
 def test_the_sourced_preset_carries_the_textbook_pen_widths() -> None:
-    """kcha-2013-pen/v1 follows 그림 27 of [K1]: 단면 0.6, 입면 0.4, 결실부 0.1."""
+    """kcha-2013-pen/v1 follows 그림 27 of [K1]: 단면 0.6, 입면 0.4, 결실부 0.1.
+    v2 keeps those pens and steps the inner lines and the marks of making
+    down to the 0.3 실선, under the outline: 단면 > 외선 > 내선 = 흔적."""
 
     from src.core.drawing_style import (
         CONDITION_MISSING,
         KCHA_2013_PEN_PRESET_ID,
+        KCHA_2013_PEN_V1_PRESET_ID,
         KCHA_2013_SOURCE_ID,
+        TECHNIQUE_FINGER_MARK,
         TECHNIQUE_WOOD_GRAIN,
     )
 
-    preset = get_preset(KCHA_2013_PEN_PRESET_ID)
+    preset = get_preset(KCHA_2013_PEN_V1_PRESET_ID)
     assert preset.provisional is False
     assert preset.source_id == KCHA_2013_SOURCE_ID == "K1"
     assert set(preset.lines) == set(LINE_KINDS)
@@ -145,7 +149,28 @@ def test_the_sourced_preset_carries_the_textbook_pen_widths() -> None:
     assert preset.style(TECHNIQUE_GROOVE_EDGE).stroke_width_mm == 0.3
     assert preset.style(TECHNIQUE_GROOVE_TROUGH).stroke_width_mm == 0.1
     assert preset.style(TECHNIQUE_WOOD_GRAIN).stroke_width_mm == 0.1
-    assert available_presets() == (KCHA_2013_PEN_PRESET_ID, PROVISIONAL_PRESET_ID)
+
+    assert KCHA_2013_PEN_PRESET_ID == "kcha-2013-pen/v2"
+    current = get_preset(KCHA_2013_PEN_PRESET_ID)
+    assert current.provisional is False
+    assert current.source_id == "K1"
+    assert set(current.lines) == set(LINE_KINDS)
+    assert current.style(SECTION_CUT).stroke_width_mm == 0.6
+    assert current.style(OUTLINE_VISIBLE).stroke_width_mm == 0.4
+    assert current.style(OUTLINE_HOLE).stroke_width_mm == 0.3
+    assert current.style(TECHNIQUE_FINGER_MARK).stroke_width_mm == 0.3
+    assert current.style(TECHNIQUE_WOOD_GRAIN).stroke_width_mm == 0.3
+    assert current.style(TECHNIQUE_GROOVE_TROUGH).stroke_width_mm == 0.1
+    assert current.style(CONDITION_MISSING).stroke_width_mm == 0.1
+    for kind in LINE_KINDS:
+        if kind in (OUTLINE_HOLE,) or kind.startswith("technique_") and kind != "technique_groove_trough":
+            continue
+        assert current.style(kind) == preset.style(kind), kind
+    assert available_presets() == (
+        KCHA_2013_PEN_V1_PRESET_ID,
+        KCHA_2013_PEN_PRESET_ID,
+        PROVISIONAL_PRESET_ID,
+    )
     # The source is on the register, so a reader can check the numbers.
     references = (Path(__file__).resolve().parents[1] / "docs" / "REFERENCES.md").read_text(
         encoding="utf-8"

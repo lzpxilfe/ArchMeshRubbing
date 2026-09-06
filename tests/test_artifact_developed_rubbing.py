@@ -993,6 +993,130 @@ def test_a_rubbing_computed_before_heights_were_recorded_is_refused(
         )
 
 
+def test_the_scissors_cut_the_largest_rectangle_and_bridge_a_hairline() -> None:
+    """A rubbing is pasted as a clean rectangle.  A mesh seam leaves a crack
+    a pixel or two wide across the development; the largest all-covered
+    rectangle stops there, though the paper would not.  The sheet's scissors
+    bridge cracks narrower than half a millimetre and stop at wider holes."""
+
+    from src.core.drawing_sheet import _trim_to_rectangle
+
+    pixels = np.zeros((300, 100, 2), dtype=np.uint8)
+    pixels[:, :, 0] = 200
+    pixels[20:280, 10:90, 1] = 255  # the paper, with ragged margins bare
+    pixels[20:40, 10:30, 1] = 0  # a corner missing, as on a pointed base
+    pixels[150, :, 1] = 0  # a one-pixel crack across the whole strip
+    pixels[151, 40:60, 1] = 0  # two pixels wide in the middle
+    pixels[150, :, 0] = 0  # and its pixels carry no tone
+    pixels[151, 40:60, 0] = 0
+
+    cropped, crop = _trim_to_rectangle(pixels, pixels_per_meter=10_000)
+
+    # The rectangle spans the crack: 240 rows tall below the missing corner,
+    # not the 130 above or below the crack.
+    assert cropped.shape == (240, 80, 2)
+    assert crop["cropped_top_pixels"] == 40
+    assert crop["cropped_bottom_pixels"] == 20
+    assert crop["cropped_left_pixels"] == 10
+    assert crop["cropped_right_pixels"] == 10
+    assert crop["policy"] == "largest_rectangle_bridging_cracks/v1"
+    assert crop["bridge_mm"] == 0.5
+    # Every pixel of the cut paper is paper, and the bridged ones took the
+    # tone of their neighbours rather than printing as a white thread.
+    assert bool((cropped[:, :, 1] == 255).all())
+    assert crop["bridged_pixel_count"] == 80 + 20
+    assert bool((cropped[:, :, 0] == 200).all())
+    # The record's own raster is untouched.
+    assert int(pixels[150, 50, 1]) == 0
+
+    # A hole a millimetre wide is a hole: the rectangle stops at it.
+    pixels[150:160, :, 1] = 0
+    cropped, crop = _trim_to_rectangle(pixels, pixels_per_meter=10_000)
+    assert cropped.shape[0] == 120
+    assert crop["bridged_pixel_count"] == 0
+
+
+def test_the_trimmed_strip_is_pasted_as_a_rectangle_at_the_heights_it_kept(
+    axis_sheet: tuple[ArtifactSession, Any],
+) -> None:
+    """Whole developments narrow towards a base; the sheet may cut the pasted
+    paper to the rectangle it holds, and says so.  The record and its receipt
+    are untouched, the sidecar names both rasters, and the bands are read off
+    the record's height profile between the edges the scissors left."""
+
+    session, _computation = axis_sheet
+    computation = _rubbing(
+        session,
+        artboard_policy=ARTBOARD_DEVELOPMENT_BOUNDS,
+        margin_um=1_000,
+        relief_polarity="raised",
+        paper_tone_percent=20,
+    )
+    session = commit_developed_rubbing(
+        session, computation, record_id="record:rubbing:whole",
+        created_at=STAMP, operator="tester",
+    )
+    options = _axis_options(
+        rubbings_on_axis=(("record:rubbing:whole", "record:elevation:front"),),
+        rubbing_on_axis_trim="rectangle",
+        rubbing_on_axis_fit="axis_height",
+    )
+    bundle = compose_drawing_sheet(
+        session.document,
+        ["record:elevation:front"],
+        options=options,
+        rasters={"record:rubbing:whole": computation.raster},
+    )
+    validate_drawing_sheet_bytes(bundle.svg_bytes, bundle.sidecar_bytes)
+    pasted = json.loads(bundle.sidecar_bytes.decode("utf-8"))["figures"][0][
+        "rubbing_on_axis"
+    ]
+    trim = pasted["trim"]
+    whole = computation.raster
+    assert trim["policy"] == "largest_rectangle_bridging_cracks/v1"
+    assert trim["source_raster_sha256"] == whole.raster_sha256
+    assert pasted["raster_sha256"] != whole.raster_sha256
+    assert trim["uncropped_width_pixels"] == whole.width_pixels
+    assert trim["uncropped_height_pixels"] == whole.height_pixels
+    assert (
+        trim["cropped_left_pixels"] + pasted["raster_width_pixels"]
+        + trim["cropped_right_pixels"]
+    ) == whole.width_pixels
+    assert (
+        trim["cropped_top_pixels"] + pasted["raster_height_pixels"]
+        + trim["cropped_bottom_pixels"]
+    ) == whole.height_pixels
+    assert pasted["raster_width_pixels"] < whole.width_pixels
+    # The cut paper still ends on the axis, and its heights lie within the
+    # record's, base to top.
+    qc = computation.qc_dict()
+    left, bottom, right, top = pasted["rectangle_mm"]
+    assert right == 0.0
+    assert left == pytest.approx(-pasted["raster_width_pixels"] / 10.0)
+    assert qc["artboard_base_height_um"] <= pasted["artboard_base_height_um"]
+    assert pasted["artboard_top_height_um"] <= qc["artboard_top_height_um"]
+    assert pasted["artboard_base_height_um"] < pasted["artboard_top_height_um"]
+    assert len(pasted["band_heights_mm"]) == ARTBOARD_HEIGHT_PROFILE_BANDS + 1
+    assert top == pytest.approx(pasted["artboard_top_height_um"] / 1000.0)
+    # The record itself says nothing of the cut.
+    stored = session.document.record_index["record:rubbing:whole"].qc
+    assert json.loads(json.dumps(dict(stored))) == json.loads(json.dumps(qc))
+    # Uncut, the same sheet pastes the record's raster and carries no trim.
+    plain = compose_drawing_sheet(
+        session.document,
+        ["record:elevation:front"],
+        options=_axis_options(
+            rubbings_on_axis=(("record:rubbing:whole", "record:elevation:front"),),
+        ),
+        rasters={"record:rubbing:whole": computation.raster},
+    )
+    figure = json.loads(plain.sidecar_bytes.decode("utf-8"))["figures"][0]
+    assert "trim" not in figure["rubbing_on_axis"]
+    assert figure["rubbing_on_axis"]["raster_sha256"] == whole.raster_sha256
+    with pytest.raises(DrawingSheetError, match="rubbing_on_axis_trim"):
+        _axis_options(rubbing_on_axis_trim="oval")
+
+
 CONTACT: dict[str, Any] = {
     "relief_model": RELIEF_MODEL_CONTACT,
     "reference_radius_um": 700,

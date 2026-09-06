@@ -32,11 +32,14 @@ import math
 import re
 from typing import Any, Mapping, Sequence
 
+import numpy as np
+
 from .artifact_axis_alignment import AXIS_ALIGN_RECIPE_KIND
 from .artifact_developed_rubbing import (
     ArtifactDevelopedRubbingError,
     DEVELOPED_RUBBING_RECORD_TYPE,
     DevelopedRubbingRaster,
+    _largest_covered_rectangle,
     developed_rubbing_receipt_from_record,
 )
 from .artifact_rubbing_extractor import DigitalRubbingRaster
@@ -153,6 +156,18 @@ RUBBING_RECORD_TYPES = frozenset({RUBBING_RECORD_TYPE, DEVELOPED_RUBBING_RECORD_
 RUBBING_ON_AXIS_FIT_HEIGHT = "axis_height"
 RUBBING_ON_AXIS_FIT_PAPER = "paper"
 RUBBING_ON_AXIS_FITS = (RUBBING_ON_AXIS_FIT_HEIGHT, RUBBING_ON_AXIS_FIT_PAPER)
+#: How the pasted strip's paper is cut.  ``none`` pastes the raster as the
+#: record made it; ``rectangle`` cuts it with scissors to the largest
+#: rectangle its coverage holds, treating a crack in the coverage narrower
+#: than ``RUBBING_ON_AXIS_TRIM_BRIDGE_MM`` as paper - a mesh seam a pixel
+#: wide is not a hole the paper would fall through.  Bridged pixels print
+#: as bare paper.  The record and its raster are not touched; the sidecar
+#: says what was cut.
+RUBBING_ON_AXIS_TRIM_NONE = "none"
+RUBBING_ON_AXIS_TRIM_RECTANGLE = "rectangle"
+RUBBING_ON_AXIS_TRIMS = (RUBBING_ON_AXIS_TRIM_NONE, RUBBING_ON_AXIS_TRIM_RECTANGLE)
+RUBBING_ON_AXIS_TRIM_BRIDGE_MM = 0.5
+RUBBING_ON_AXIS_TRIM_POLICY = "largest_rectangle_bridging_cracks/v1"
 DRAWING_SHEET_PNG_METADATA_FORMAT = "archmeshrubbing_drawing_sheet_png_metadata"
 
 # ISO 216 sizes as portrait width x height in millimetres.
@@ -645,6 +660,10 @@ class DrawingSheetOptions:
     also be listed as a figure of its own.
     """
     rubbing_on_axis_fit: str = "paper"
+    rubbing_on_axis_trim: str = RUBBING_ON_AXIS_TRIM_NONE
+    """``none`` pastes the strip's raster whole; ``rectangle`` cuts it to the
+    largest rectangle its coverage holds, bridging cracks narrower than half
+    a millimetre.  The record is untouched; the sidecar names the cut."""
     """How a pasted rubbing meets the elevation's heights.
 
     ``paper`` pastes the sheet whole, at its own length, from the height its
@@ -949,6 +968,11 @@ class DrawingSheetOptions:
                 "rubbing_on_axis_fit must be one of "
                 f"{', '.join(RUBBING_ON_AXIS_FITS)}"
             )
+        if self.rubbing_on_axis_trim not in RUBBING_ON_AXIS_TRIMS:
+            raise DrawingSheetError(
+                "rubbing_on_axis_trim must be one of "
+                f"{', '.join(RUBBING_ON_AXIS_TRIMS)}"
+            )
         try:
             denominator = finite_number(
                 self.scale_denominator,
@@ -1161,6 +1185,8 @@ class _AttachedRaster:
     fit: str
     band_heights_mm: tuple[float, ...]
     """Record-mm v of each band boundary, bottom to top, in the figure's frame."""
+    trim: Mapping[str, Any] | None = None
+    """How the paper was cut before pasting, or None for the raster whole."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -1959,6 +1985,101 @@ def _groove_paths_for_figure(
     return by_kind, drawn
 
 
+def _encode_raster_image(
+    document: ArtifactDocument,
+    record: DerivedRecord,
+    pixels: np.ndarray,
+    *,
+    pixels_per_meter: int,
+    raster_sha256: str,
+) -> _RasterImage:
+    """Embed GA8 pixels as one canonical PNG that names what it is."""
+
+    metadata = {
+        "document_id": document.document_id,
+        "format": DRAWING_SHEET_PNG_METADATA_FORMAT,
+        "raster_sha256": raster_sha256,
+        "recipe_hash": record.recipe_hash,
+        "record_id": record.id,
+        "record_type": record.type,
+        "schema_version": DRAWING_SHEET_SCHEMA_VERSION,
+    }
+    try:
+        png_bytes = encode_canonical_ga8_png(
+            pixels,
+            pixels_per_meter=pixels_per_meter,
+            metadata=metadata,
+        )
+    except CanonicalPNGError as exc:
+        raise DrawingSheetError(str(exc)) from exc
+    encoded = base64.b64encode(png_bytes).decode("ascii")
+    if len(encoded) > MAX_DRAWING_SHEET_RASTER_BYTES:
+        raise DrawingSheetError(
+            f"record {record.id!r} embeds {len(encoded)} bytes of raster, above "
+            f"the {MAX_DRAWING_SHEET_RASTER_BYTES}-byte sheet limit; compute the "
+            "rubbing at a lower physical resolution"
+        )
+    return _RasterImage(
+        data_uri=f"data:image/png;base64,{encoded}",
+        raster_sha256=raster_sha256,
+        pixels_per_meter=pixels_per_meter,
+        width_pixels=int(pixels.shape[1]),
+        height_pixels=int(pixels.shape[0]),
+    )
+
+
+def _trim_to_rectangle(
+    pixels: np.ndarray,
+    *,
+    pixels_per_meter: int,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Cut a developed raster to the largest rectangle its paper holds.
+
+    The scissors treat a crack in the coverage narrower than
+    ``RUBBING_ON_AXIS_TRIM_BRIDGE_MM`` as paper: a mesh seam one pixel wide
+    across a strip is not a hole the rectangle should stop at.  A bridged
+    pixel takes the tone of the nearest covered pixel, so the hairline does
+    not print as a white thread through the rubbing; the count of such pixels
+    is reported.  The record's raster is not touched.
+    """
+
+    from scipy import ndimage  # noqa: PLC0415
+
+    covered = pixels[:, :, 1] == 255
+    bridge = max(1, int(round(RUBBING_ON_AXIS_TRIM_BRIDGE_MM * pixels_per_meter / 1000.0)))
+    structure = np.ones((bridge, bridge), dtype=bool)
+    # A closing is extensive away from the border but SciPy's erodes against
+    # the image edge, so the original coverage is kept by hand.
+    closed = covered | ndimage.binary_closing(covered, structure=structure)
+    try:
+        top, left, height, width = _largest_covered_rectangle(closed)
+    except ArtifactDevelopedRubbingError as exc:
+        raise DrawingSheetError(str(exc)) from exc
+    window = (slice(top, top + height), slice(left, left + width))
+    cropped = np.ascontiguousarray(pixels[window])
+    bridged = closed[window] & ~covered[window]
+    bridged_count = int(np.count_nonzero(bridged))
+    if bridged_count:
+        _distance, nearest = ndimage.distance_transform_edt(
+            ~covered[window], return_distances=True, return_indices=True
+        )
+        rows, columns = np.nonzero(bridged)
+        cropped[rows, columns, 0] = pixels[window][nearest[0][rows, columns], nearest[1][rows, columns], 0]
+        cropped[rows, columns, 1] = 255
+    uncropped_height = int(pixels.shape[0])
+    uncropped_width = int(pixels.shape[1])
+    crop = {
+        "bridge_mm": RUBBING_ON_AXIS_TRIM_BRIDGE_MM,
+        "bridged_pixel_count": bridged_count,
+        "cropped_bottom_pixels": uncropped_height - top - height,
+        "cropped_left_pixels": left,
+        "cropped_right_pixels": uncropped_width - left - width,
+        "cropped_top_pixels": top,
+        "policy": RUBBING_ON_AXIS_TRIM_POLICY,
+    }
+    return cropped, crop
+
+
 def _proven_raster_image(
     document: ArtifactDocument,
     record: DerivedRecord,
@@ -1988,37 +2109,13 @@ def _proven_raster_image(
             "receipt describes"
         )
     pixels_per_meter = int(receipt["pixels_per_meter"])
-    metadata = {
-        "document_id": document.document_id,
-        "format": DRAWING_SHEET_PNG_METADATA_FORMAT,
-        "raster_sha256": receipt["raster_sha256"],
-        "recipe_hash": record.recipe_hash,
-        "record_id": record.id,
-        "record_type": record.type,
-        "schema_version": DRAWING_SHEET_SCHEMA_VERSION,
-    }
-    try:
-        png_bytes = encode_canonical_ga8_png(
+    return (
+        _encode_raster_image(
+            document,
+            record,
             raster.pixels,
             pixels_per_meter=pixels_per_meter,
-            metadata=metadata,
-        )
-    except CanonicalPNGError as exc:
-        raise DrawingSheetError(str(exc)) from exc
-    encoded = base64.b64encode(png_bytes).decode("ascii")
-    if len(encoded) > MAX_DRAWING_SHEET_RASTER_BYTES:
-        raise DrawingSheetError(
-            f"record {record.id!r} embeds {len(encoded)} bytes of raster, above "
-            f"the {MAX_DRAWING_SHEET_RASTER_BYTES}-byte sheet limit; compute the "
-            "rubbing at a lower physical resolution"
-        )
-    return (
-        _RasterImage(
-            data_uri=f"data:image/png;base64,{encoded}",
             raster_sha256=str(receipt["raster_sha256"]),
-            pixels_per_meter=pixels_per_meter,
-            width_pixels=int(receipt["width_pixels"]),
-            height_pixels=int(receipt["height_pixels"]),
         ),
         receipt,
     )
@@ -2084,6 +2181,7 @@ def _attach_rubbing_on_axis(
     elevation: DerivedRecord,
     elevation_payload: VectorGeometryPayload,
     fit: str,
+    trim: str = RUBBING_ON_AXIS_TRIM_NONE,
 ) -> _AttachedRaster:
     """Paste a strip rubbing flush against the elevation's centre line.
 
@@ -2153,13 +2251,49 @@ def _attach_rubbing_on_axis(
         )
     base, _direction = line
     pixels_per_meter = int(receipt["pixels_per_meter"])
-    width_mm = float(receipt["width_pixels"]) * 1000.0 / float(pixels_per_meter)
-    height_mm = float(receipt["height_pixels"]) * 1000.0 / float(pixels_per_meter)
+    heights_um: tuple[int, ...] = tuple(int(value) for value in profile)
+    trim_block: dict[str, Any] | None = None
+    if trim == RUBBING_ON_AXIS_TRIM_RECTANGLE:
+        cropped, crop = _trim_to_rectangle(
+            raster.pixels, pixels_per_meter=pixels_per_meter
+        )
+        uncropped_rows = int(raster.pixels.shape[0])
+        if cropped.shape[:2] != raster.pixels.shape[:2]:
+            # The profile samples the uncropped paper evenly from its bottom
+            # edge to its top edge; the cut paper's bands are read off that
+            # curve between the edges the scissors left.
+            stations = np.linspace(0.0, 1.0, len(heights_um))
+            bottom_fraction = float(crop["cropped_bottom_pixels"]) / uncropped_rows
+            top_fraction = 1.0 - float(crop["cropped_top_pixels"]) / uncropped_rows
+            resampled = np.interp(
+                np.linspace(bottom_fraction, top_fraction, len(heights_um)),
+                stations,
+                np.asarray(heights_um, dtype=np.float64),
+            )
+            heights_um = tuple(int(round(float(value))) for value in resampled)
+            base_height = heights_um[0]
+            top_height = heights_um[-1]
+        trimmed_sha256 = hashlib.sha256(cropped.tobytes(order="C")).hexdigest()
+        image = _encode_raster_image(
+            document,
+            record,
+            cropped,
+            pixels_per_meter=pixels_per_meter,
+            raster_sha256=trimmed_sha256,
+        )
+        trim_block = {
+            **crop,
+            "source_raster_sha256": str(receipt["raster_sha256"]),
+            "uncropped_height_pixels": uncropped_rows,
+            "uncropped_width_pixels": int(raster.pixels.shape[1]),
+        }
+    width_mm = float(image.width_pixels) * 1000.0 / float(pixels_per_meter)
+    height_mm = float(image.height_pixels) * 1000.0 / float(pixels_per_meter)
     bottom = base[1] + float(base_height) / 1000.0
     if fit == RUBBING_ON_AXIS_FIT_PAPER:
         band_heights = (bottom, bottom + height_mm)
     else:
-        band_heights = tuple(base[1] + float(value) / 1000.0 for value in profile)
+        band_heights = tuple(base[1] + float(value) / 1000.0 for value in heights_um)
     rectangle = (base[0] - width_mm, band_heights[0], base[0], band_heights[-1])
     return _AttachedRaster(
         record_id=record.id,
@@ -2170,6 +2304,7 @@ def _attach_rubbing_on_axis(
         top_height_um=int(top_height),
         fit=fit,
         band_heights_mm=band_heights,
+        trim=trim_block,
     )
 
 
@@ -2679,6 +2814,11 @@ def _sheet_provenance(
                             "fit": figure.attached.fit,
                             "band_heights_mm": list(figure.attached.band_heights_mm),
                             "side": "elevation",
+                            **(
+                                {}
+                                if figure.attached.trim is None
+                                else {"trim": dict(figure.attached.trim)}
+                            ),
                         }
                     }
                 ),
@@ -3272,6 +3412,7 @@ def compose_drawing_sheet(
                 elevation=record,
                 elevation_payload=payload,
                 fit=options.rubbing_on_axis_fit,
+                trim=options.rubbing_on_axis_trim,
             )
             # A strip on the axis is by construction a developed rubbing.
             attached_note = rubbing_notes.get(attached.record_id)

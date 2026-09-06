@@ -669,7 +669,13 @@ PROVISIONAL_PRESET_ID = "provisional/v1"
 #: Pen widths from 그림 27 of the 2013 한국문화유산협회 (then
 #: 한국문화재조사연구기관협회) measured-drawing course text, docs/REFERENCES.md
 #: [K1].  Named for what it follows, as docs/DRAWING_CONVENTIONS.md asks.
-KCHA_2013_PEN_PRESET_ID = "kcha-2013-pen/v1"
+KCHA_2013_PEN_V1_PRESET_ID = "kcha-2013-pen/v1"
+#: The same pens, with the inner lines and the technique marks one step
+#: lighter than the outline: 단면 > 외선 > 내선 = 흔적 표시.  An incised
+#: pattern line is drawn with the 0.3 실선 pen of 그림 27, not the 0.4 of
+#: the outline, so the vessel's edge stays the heavier line on the page.
+#: v1 is kept frozen for drawings that were made with it.
+KCHA_2013_PEN_PRESET_ID = "kcha-2013-pen/v2"
 KCHA_2013_SOURCE_ID = "K1"
 
 _PRESETS: dict[str, DrawingStylePreset] = {
@@ -723,8 +729,8 @@ _PRESETS: dict[str, DrawingStylePreset] = {
         hatch=HatchStyle(spacing_mm=1.0, stroke_width_mm=0.13, angle_deg=45.0),
         source_id=None,
     ),
-    KCHA_2013_PEN_PRESET_ID: DrawingStylePreset(
-        preset_id=KCHA_2013_PEN_PRESET_ID,
+    KCHA_2013_PEN_V1_PRESET_ID: DrawingStylePreset(
+        preset_id=KCHA_2013_PEN_V1_PRESET_ID,
         lines={
             # 그림 27 (유물제도 펜 굵기), [K1] p.25: 단면 0.6, 평면·입면 0.4,
             # 결실부 0.1; the figure marks 0.3 on the emphasised lines
@@ -762,6 +768,43 @@ _PRESETS: dict[str, DrawingStylePreset] = {
         },
         # The source does not give the hatch; these are the provisional
         # preset's, with the pen thinned to the source's fine line.
+        hatch=HatchStyle(spacing_mm=1.0, stroke_width_mm=0.1, angle_deg=45.0),
+        source_id=KCHA_2013_SOURCE_ID,
+    ),
+    KCHA_2013_PEN_PRESET_ID: DrawingStylePreset(
+        preset_id=KCHA_2013_PEN_PRESET_ID,
+        lines={
+            SECTION_CUT: LineStyle(stroke_width_mm=0.6, hatch=True),
+            OUTLINE_VISIBLE: LineStyle(stroke_width_mm=0.4),
+            # An inner line - a hole's edge, an incised pattern line traced
+            # from the wall - is the 0.3 실선 pen of 그림 27 ([K1] p.19),
+            # one step under the 0.4 outline, so the edge of the vessel
+            # reads heavier than what is drawn on its surface.
+            OUTLINE_HOLE: LineStyle(stroke_width_mm=0.3),
+            CONDITION_MISSING: LineStyle(stroke_width_mm=0.1),
+            CONDITION_RESTORED: LineStyle(
+                stroke_width_mm=0.1, dash_pattern_mm=(3.0, 1.0, 0.5, 1.0)
+            ),
+            CONDITION_WORN: LineStyle(stroke_width_mm=0.1, dash_pattern_mm=(0.5, 0.5)),
+            CONDITION_CRACK: LineStyle(stroke_width_mm=0.1),
+            TECHNIQUE_GROOVE_EDGE: LineStyle(stroke_width_mm=0.3),
+            TECHNIQUE_GROOVE_TROUGH: LineStyle(stroke_width_mm=0.1),
+            # Marks of making on the wall are drawn with the same pen as the
+            # inner lines: what is observed on the surface is one weight,
+            # under the outline and the section.
+            TECHNIQUE_COIL_JOINT: LineStyle(stroke_width_mm=0.3),
+            TECHNIQUE_FINGER_MARK: LineStyle(stroke_width_mm=0.3),
+            TECHNIQUE_PADDLING: LineStyle(stroke_width_mm=0.3),
+            TECHNIQUE_WATER_SMOOTHING: LineStyle(stroke_width_mm=0.3),
+            TECHNIQUE_WOOD_GRAIN: LineStyle(stroke_width_mm=0.3),
+            TECHNIQUE_BOARD_FINISHING: LineStyle(stroke_width_mm=0.3),
+            TECHNIQUE_BURNISHING: LineStyle(stroke_width_mm=0.3),
+            TECHNIQUE_INTERIOR_ANVIL: LineStyle(stroke_width_mm=0.3),
+            TECHNIQUE_PARING: LineStyle(stroke_width_mm=0.3),
+            CENTER_AXIS: LineStyle(
+                stroke_width_mm=0.1, dash_pattern_mm=(4.0, 1.0, 1.0, 1.0)
+            ),
+        },
         hatch=HatchStyle(spacing_mm=1.0, stroke_width_mm=0.1, angle_deg=45.0),
         source_id=KCHA_2013_SOURCE_ID,
     ),
@@ -809,6 +852,7 @@ __all__ = [
     "RECORD_ROLE_LINE_KINDS",
     "SECTION_CUT",
     "KCHA_2013_PEN_PRESET_ID",
+    "KCHA_2013_PEN_V1_PRESET_ID",
     "KCHA_2013_SOURCE_ID",
     "TECHNIQUE_COIL_JOINT",
     "TECHNIQUE_FINGER_MARK",
