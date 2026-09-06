@@ -70,6 +70,10 @@ MAX_TEXTURE_RELIEF_SMOOTHING_UM = 50_000
 DEFAULT_TEXTURE_RELIEF_SMOOTHING_UM = 1_000
 #: The row block the rasteriser works in, as the depth rasteriser does.
 _ROW_BLOCK = 128
+#: The developed raster's pixel budget.  Three float64 vector fields and the
+#: FFT of the slopes over it come to about 150 bytes a pixel, so this is a
+#: few gigabytes: the front half of a 385 mm pot at 10 px/mm.
+MAX_TEXTURE_RELIEF_PIXELS = 20_000_000
 
 
 class ArtifactTextureReliefError(ValueError):
@@ -537,7 +541,7 @@ def texture_relief_depth_field(
     height = maximum_v - minimum_v
     if width <= 0 or height <= 0:
         raise ArtifactTextureReliefError("developed raster has zero extent")
-    if width * height > 8_000_000:
+    if width * height > MAX_TEXTURE_RELIEF_PIXELS:
         raise ArtifactTextureReliefError("developed raster exceeds the pixel limit")
     local = scaled - np.array([minimum_u, minimum_v], dtype=np.float64)
 

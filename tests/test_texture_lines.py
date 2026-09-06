@@ -147,9 +147,17 @@ def test_the_recipe_names_every_number_and_rebuilds_byte_for_byte(grooved) -> No
     assert recipe["texture_relief"]["atlas"]["sha256"] == atlas.sha256
     assert recipe["texture_relief"]["normal_map"]["sha256"] == normal_map.sha256
     assert validate_texture_lines_recipe(recipe) == recipe
+    # The seed curvature defaults to twice the floor, and the link gap to
+    # a millimetre; both are the recipe's numbers.
+    assert recipe["detection_policy"]["curvature_seed_per_m"] == 2 * recipe["detection_policy"]["curvature_min_per_m"]
+    assert recipe["detection_policy"]["link_um"] == 1000
     forged = json.loads(json.dumps(recipe))
-    forged["detection_policy"]["curvature_min_per_m"] = 700
+    forged["detection_policy"]["curvature_min_per_m"] = 200
     assert validate_texture_lines_recipe(forged) != recipe
+    forged["detection_policy"]["curvature_min_per_m"] = 700
+    with pytest.raises(ArtifactTextureLinesError, match="must not be below"):
+        validate_texture_lines_recipe(forged)
+    forged["detection_policy"]["curvature_min_per_m"] = 200
     forged["detection_policy"]["extra"] = 1
     with pytest.raises(ArtifactTextureLinesError, match="exactly"):
         validate_texture_lines_recipe(forged)

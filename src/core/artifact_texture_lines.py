@@ -96,6 +96,14 @@ DEFAULT_TEXTURE_LINES_SMOOTHING_UM = 2_000
 DEFAULT_TEXTURE_LINES_FACING_COS = 0.35
 DEFAULT_TEXTURE_LINES_SCALE_MM = 0.3
 DEFAULT_TEXTURE_LINES_CURVATURE_MIN_PER_MM = 0.3
+#: A valley pixel counts only in a run that somewhere reaches this
+#: curvature: the lower threshold follows a stroke to its faint ends, the
+#: higher one keeps grain from being a stroke (hysteresis, as Canny's).
+DEFAULT_TEXTURE_LINES_CURVATURE_SEED_PER_MM = 0.6
+#: Chain ends within this distance that point at each other are joined:
+#: a stroke the tracer dropped for a pixel or two is one stroke.
+DEFAULT_TEXTURE_LINES_LINK_MM = 1.0
+DEFAULT_TEXTURE_LINES_LINK_ANGLE_DEG = 35.0
 DEFAULT_TEXTURE_LINES_MIN_LENGTH_MM = 1.5
 DEFAULT_TEXTURE_LINES_LINE_SMOOTHING_MM = 0.3
 #: Which way an incision goes in the integrated height: -1 when the map's
@@ -185,8 +193,13 @@ def texture_lines_recipe(
     line_smoothing_mm: float = DEFAULT_TEXTURE_LINES_LINE_SMOOTHING_MM,
     incision_sign: int = DEFAULT_TEXTURE_LINES_INCISION_SIGN,
     domain: str = TEXTURE_LINES_DOMAIN_VIEW,
+    curvature_seed_per_mm: float | None = None,
+    link_mm: float = DEFAULT_TEXTURE_LINES_LINK_MM,
 ) -> dict[str, Any]:
-    """The recipe: the two files, the view, and every number that decides a line."""
+    """The recipe: the two files, the view, and every number that decides a line.
+
+    ``curvature_seed_per_mm`` defaults to twice ``curvature_min_per_mm``.
+    """
 
     try:
         relief = texture_relief_block(atlas, normal_map, smoothing_um=smoothing_um)
@@ -203,10 +216,17 @@ def texture_lines_recipe(
             "curvature_min_per_m": _um(
                 curvature_min_per_mm, name="curvature_min_per_mm", minimum=1, maximum=1_000_000
             ),
+            "curvature_seed_per_m": _um(
+                2.0 * float(curvature_min_per_mm) if curvature_seed_per_mm is None else curvature_seed_per_mm,
+                name="curvature_seed_per_mm",
+                minimum=1,
+                maximum=1_000_000,
+            ),
             "incision_sign": _incision_sign(incision_sign),
             "line_smoothing_um": _um(
                 line_smoothing_mm, name="line_smoothing_mm", minimum=0, maximum=3_000
             ),
+            "link_um": _um(link_mm, name="link_mm", minimum=0, maximum=10_000),
             "min_length_um": _um(min_length_mm, name="min_length_mm", minimum=0, maximum=1_000_000),
             "scale_um": _um(scale_mm, name="scale_mm", minimum=50, maximum=5_000),
             "valley": TEXTURE_LINES_VALLEY_RULE,
@@ -266,8 +286,10 @@ def validate_texture_lines_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
         frozenset(
             {
                 "curvature_min_per_m",
+                "curvature_seed_per_m",
                 "incision_sign",
                 "line_smoothing_um",
+                "link_um",
                 "min_length_um",
                 "scale_um",
                 "valley",
@@ -296,10 +318,14 @@ def validate_texture_lines_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
             "curvature_min_per_m": _strict_int(
                 detection["curvature_min_per_m"], name="curvature_min_per_m", minimum=1, maximum=1_000_000
             ),
+            "curvature_seed_per_m": _strict_int(
+                detection["curvature_seed_per_m"], name="curvature_seed_per_m", minimum=1, maximum=1_000_000
+            ),
             "incision_sign": _incision_sign(detection["incision_sign"]),
             "line_smoothing_um": _strict_int(
                 detection["line_smoothing_um"], name="line_smoothing_um", minimum=0, maximum=3_000
             ),
+            "link_um": _strict_int(detection["link_um"], name="link_um", minimum=0, maximum=10_000),
             "min_length_um": _strict_int(
                 detection["min_length_um"], name="min_length_um", minimum=0, maximum=1_000_000
             ),
@@ -331,6 +357,8 @@ def validate_texture_lines_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
         "texture_relief": relief,
         "view": _view_name(block["view"]),
     }
+    if rebuilt["detection_policy"]["curvature_seed_per_m"] < rebuilt["detection_policy"]["curvature_min_per_m"]:
+        raise ArtifactTextureLinesError("curvature_seed_per_m must not be below curvature_min_per_m")
     try:
         if canonical_json_bytes(rebuilt) != canonical_json_bytes(dict(block)):
             raise ArtifactTextureLinesError("texture lines recipe is not in canonical form")
@@ -465,11 +493,17 @@ def _valley_points(
     pixels_per_mm: int,
     scale_mm: float,
     curvature_min_per_mm: float,
+    curvature_seed_per_mm: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Where the smoothed height has a valley floor: a mask of pixels, and
-    at each the sub-pixel offset (du, dv) to the floor."""
+    at each the sub-pixel offset (du, dv) to the floor.
 
-    from scipy.ndimage import binary_erosion, gaussian_filter  # noqa: PLC0415
+    With ``curvature_seed_per_mm`` a floor pixel is kept only in a connected
+    run that somewhere reaches the seed curvature: the lower threshold
+    follows a stroke to its faint ends, the higher keeps the grain out.
+    """
+
+    from scipy.ndimage import binary_erosion, gaussian_filter, label  # noqa: PLC0415
 
     sigma = scale_mm * float(pixels_per_mm)
     field = np.where(good, height_mm, 0.0)
@@ -522,6 +556,13 @@ def _valley_points(
         & (curvature_per_mm >= curvature_min_per_mm)
         & (np.abs(offset) <= 1.0)
     )
+    if curvature_seed_per_mm is not None and curvature_seed_per_mm > curvature_min_per_mm:
+        labels, count = label(valley, structure=np.ones((3, 3), dtype=bool))
+        if count:
+            seeded = np.zeros(count + 1, dtype=bool)
+            seeded[np.unique(labels[valley & (curvature_per_mm >= curvature_seed_per_mm)])] = True
+            seeded[0] = False
+            valley = seeded[labels]
     offset = np.where(valley, np.clip(offset, -1.0, 1.0), 0.0)
     return valley, offset * nx, offset * ny
 
@@ -582,6 +623,72 @@ def _trace_chains(valley: np.ndarray) -> list[list[tuple[int, int]]]:
         if pixel not in visited:
             walk(pixel)
     return chains
+
+
+def _link_polylines(
+    polylines: Sequence[np.ndarray], *, gap_mm: float, angle_deg: float, rounds: int = 4
+) -> list[np.ndarray]:
+    """Join polylines end to end where two ends lie within ``gap_mm`` and
+    point at each other within ``angle_deg``; the pair that points most
+    directly joins first, ties to the earlier lines.  Repeated until nothing
+    joins, at most ``rounds`` times."""
+
+    from scipy.spatial import cKDTree  # noqa: PLC0415
+
+    lines = [np.asarray(line, dtype=np.float64) for line in polylines]
+    if gap_mm <= 0.0 or len(lines) < 2:
+        return lines
+    cos_min = math.cos(math.radians(angle_deg))
+    for _round in range(rounds):
+        ends: list[tuple[int, int, np.ndarray, np.ndarray]] = []
+        for index, line in enumerate(lines):
+            if line.shape[0] < 2:
+                continue
+            head = line[0] - line[min(3, line.shape[0] - 1)]
+            tail = line[-1] - line[max(-4, -line.shape[0])]
+            ends.append((index, 0, line[0], head / max(float(np.linalg.norm(head)), 1e-12)))
+            ends.append((index, 1, line[-1], tail / max(float(np.linalg.norm(tail)), 1e-12)))
+        if len(ends) < 2:
+            break
+        tree = cKDTree(np.array([end[2] for end in ends]))
+        scored: list[tuple[float, int, int]] = []
+        for a, b in sorted(tree.query_pairs(r=gap_mm)):
+            line_a, _end_a, point_a, direction_a = ends[a]
+            line_b, _end_b, point_b, direction_b = ends[b]
+            if line_a == line_b:
+                continue
+            gap = point_b - point_a
+            distance = float(np.linalg.norm(gap))
+            facing = float(direction_a @ -direction_b)
+            if distance > 1e-9:
+                unit = gap / distance
+                if float(direction_a @ unit) < cos_min or float(direction_b @ -unit) < cos_min:
+                    continue
+            elif facing < cos_min:
+                continue
+            scored.append((distance - facing, a, b))
+        scored.sort()
+        taken: set[int] = set()
+        merged: set[int] = set()
+        joined = 0
+        for _score, a, b in scored:
+            if a in taken or b in taken:
+                continue
+            line_a, end_a, _pa, _da = ends[a]
+            line_b, end_b, _pb, _db = ends[b]
+            if line_a in merged or line_b in merged:
+                continue
+            first = lines[line_a] if end_a == 1 else lines[line_a][::-1]
+            second = lines[line_b] if end_b == 0 else lines[line_b][::-1]
+            lines[line_a] = np.vstack([first, second])
+            lines[line_b] = np.zeros((0, 2), dtype=np.float64)
+            taken.update((a, b))
+            merged.update((line_a, line_b))
+            joined += 1
+        lines = [line for line in lines if line.shape[0] >= 2]
+        if joined == 0:
+            break
+    return lines
 
 
 class _DevelopedLocator:
@@ -755,9 +862,15 @@ def extract_texture_lines(
     # An incision is a valley of the height when the map's normals point out
     # of the wall and a ridge when they point in; the recipe says which, and
     # both counts are reported so the choice can be checked.
+    curvature_seed = detection["curvature_seed_per_m"] / 1000.0
     signed = np.where(good, -sign * height, -np.inf)
     valley, du, dv = _valley_points(
-        signed, good, pixels_per_mm=pixels_per_mm, scale_mm=scale_mm, curvature_min_per_mm=curvature_min
+        signed,
+        good,
+        pixels_per_mm=pixels_per_mm,
+        scale_mm=scale_mm,
+        curvature_min_per_mm=curvature_min,
+        curvature_seed_per_mm=curvature_seed,
     )
     raise_if_cancelled(cancellation_probe)
     opposite, _du, _dv = _valley_points(
@@ -766,6 +879,7 @@ def extract_texture_lines(
         pixels_per_mm=pixels_per_mm,
         scale_mm=scale_mm,
         curvature_min_per_mm=curvature_min,
+        curvature_seed_per_mm=curvature_seed,
     )
     raise_if_cancelled(cancellation_probe)
     chains = _trace_chains(valley)
@@ -776,22 +890,29 @@ def extract_texture_lines(
         if domain == TEXTURE_LINES_DOMAIN_VIEW
         else _DevelopedLocator(uv[used], developed_faces, vertices[used], facing[order])
     )
-    polylines: list[Polyline] = []
-    total_raw = 0
+    total_raw = len(chains)
+    traced: list[np.ndarray] = []
     for chain in chains:
-        total_raw += 1
         if len(chain) < 2:
             continue
         rows = np.asarray([r for r, _c in chain], dtype=np.int64)
         cols = np.asarray([c for _r, c in chain], dtype=np.int64)
         # Pixel centre plus the sub-pixel offset to the floor, in developed
         # mm; row 0 is the lowest v, as the relief raster has it.
-        developed = np.column_stack(
-            [
-                (minimum_u + cols + 0.5 + du[rows, cols]) / float(pixels_per_mm),
-                (minimum_v + rows + 0.5 + dv[rows, cols]) / float(pixels_per_mm),
-            ]
+        traced.append(
+            np.column_stack(
+                [
+                    (minimum_u + cols + 0.5 + du[rows, cols]) / float(pixels_per_mm),
+                    (minimum_v + rows + 0.5 + dv[rows, cols]) / float(pixels_per_mm),
+                ]
+            )
         )
+    raise_if_cancelled(cancellation_probe)
+    traced = _link_polylines(
+        traced, gap_mm=detection["link_um"] / 1000.0, angle_deg=DEFAULT_TEXTURE_LINES_LINK_ANGLE_DEG
+    )
+    polylines: list[Polyline] = []
+    for developed in traced:
         if locator is None:
             runs = [developed]
         else:
@@ -847,6 +968,7 @@ def extract_texture_lines(
     qc = {
         **payload.qc_summary(),
         "chain_count_before_filter": total_raw,
+        "chain_count_after_link": len(traced),
         "domain": domain,
         "texture_relief_covered_pixel_count": relief_qc["texture_relief_covered_pixel_count"],
         "texture_relief_height_max_um_rounded": relief_qc["texture_relief_height_max_um_rounded"],
@@ -885,6 +1007,8 @@ def compute_texture_lines(
     line_smoothing_mm: float = DEFAULT_TEXTURE_LINES_LINE_SMOOTHING_MM,
     incision_sign: int = DEFAULT_TEXTURE_LINES_INCISION_SIGN,
     domain: str = TEXTURE_LINES_DOMAIN_VIEW,
+    curvature_seed_per_mm: float | None = None,
+    link_mm: float = DEFAULT_TEXTURE_LINES_LINK_MM,
     cancellation_probe: CancellationProbe | None = None,
 ) -> TextureLinesComputation:
     """Trace the wall's incisions as positioned by the session's active Align."""
@@ -928,6 +1052,8 @@ def compute_texture_lines(
         line_smoothing_mm=line_smoothing_mm,
         incision_sign=incision_sign,
         domain=domain,
+        curvature_seed_per_mm=curvature_seed_per_mm,
+        link_mm=link_mm,
     )
     try:
         context = session.capture_operation(recipe=recipe)
@@ -1060,6 +1186,8 @@ def validate_texture_lines_records(document: ArtifactDocument) -> None:
 __all__ = [
     "ArtifactTextureLinesError",
     "DEFAULT_TEXTURE_LINES_CURVATURE_MIN_PER_MM",
+    "DEFAULT_TEXTURE_LINES_CURVATURE_SEED_PER_MM",
+    "DEFAULT_TEXTURE_LINES_LINK_MM",
     "DEFAULT_TEXTURE_LINES_FACING_COS",
     "DEFAULT_TEXTURE_LINES_INCISION_SIGN",
     "DEFAULT_TEXTURE_LINES_LINE_SMOOTHING_MM",
