@@ -136,6 +136,7 @@ from .drawing_svg import (
     clip_closed_ring,
     clip_open_path,
     finite_number,
+    half_plane_side,
     hatch_pattern_elements,
     hatched_kinds,
     layer_elements,
@@ -418,6 +419,8 @@ STROKE_NEIGHBOUR_MM = 6.0
 #: gap along it no wider than this.
 STROKE_JOIN_GAP_MM = 1.0
 STROKE_JOIN_ANGLE_DEG = 5.0
+#: How far past the axis a mirrored figure's fold may step round a motif.
+MAX_MIRROR_JOG_REACH_MM = 200.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -646,6 +649,16 @@ class DrawingSheetOptions:
     full, so the sheet can be re-verified without any registry holding it.
     """
     show_center_axis: bool = False
+    mirror_jogs: tuple[tuple[str, float, float, float], ...] = ()
+    """Where the fold of a mirrored figure steps round a motif on the axis.
+
+    (elevation record id, along_from_mm, along_to_mm, reach_mm): between
+    the two heights along the axis the elevation reaches ``reach_mm`` past
+    the axis into the section's side, so a motif the axis would cut is
+    drawn whole, and the centre line is drawn stepping round it.  The
+    section is cut back there; a section cut face inside the step is
+    refused.
+    """
     mirror_sections: tuple[tuple[str, str], ...] = ()
     """(elevation record id, section record id) pairs drawn as one figure.
 
@@ -817,6 +830,37 @@ class DrawingSheetOptions:
                 "a record can be one half of at most one mirrored figure"
             )
         object.__setattr__(self, "mirror_sections", tuple(mirror_sections))
+        elevations = {elevation_id for elevation_id, _section_id in mirror_sections}
+        mirror_jogs: list[tuple[str, float, float, float]] = []
+        for entry in self.mirror_jogs:
+            if not isinstance(entry, (tuple, list)) or len(entry) != 4:
+                raise DrawingSheetError(
+                    "mirror_jogs entries must be (elevation record id, along_from_mm, "
+                    "along_to_mm, reach_mm)"
+                )
+            record_id = str(entry[0]).strip()
+            if record_id not in elevations:
+                raise DrawingSheetError(
+                    f"mirror_jogs names {record_id!r}, which is not the elevation half "
+                    "of any mirrored figure"
+                )
+            numbers: list[float] = []
+            for name, value in zip(("along_from_mm", "along_to_mm", "reach_mm"), entry[1:]):
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                    raise DrawingSheetError(f"mirror_jogs {name} must be a finite number")
+                numbers.append(float(value))
+            along_from, along_to, reach = numbers
+            if not along_from < along_to:
+                raise DrawingSheetError("mirror_jogs along_from_mm must be below along_to_mm")
+            if reach <= 0.0 or reach > MAX_MIRROR_JOG_REACH_MM:
+                raise DrawingSheetError(
+                    f"mirror_jogs reach_mm must be positive and at most {MAX_MIRROR_JOG_REACH_MM:g}"
+                )
+            for other_id, other_from, other_to, _reach in mirror_jogs:
+                if other_id == record_id and along_from < other_to and other_from < along_to:
+                    raise DrawingSheetError("mirror_jogs of one figure must not overlap along the axis")
+            mirror_jogs.append((record_id, along_from, along_to, reach))
+        object.__setattr__(self, "mirror_jogs", tuple(mirror_jogs))
         condition_records = tuple(self.condition_records)
         if any(
             not isinstance(record_id, str) or not record_id.strip()
@@ -2929,6 +2973,60 @@ def _clipped_half(
     return halved, fill_only
 
 
+def _jog_pieces(
+    points: Sequence[Sequence[float]],
+    *,
+    lines: Sequence[tuple[tuple[float, float], tuple[float, float]]],
+    keep_inside: bool,
+) -> list[list[tuple[float, float]]]:
+    """The parts of an open polyline inside, or outside, the rectangle the
+    four oriented lines bound (each keeps its negative side inside).  The
+    polyline is split at every line, so each piece lies wholly on one side
+    of each, and a piece is inside when it is inside all four."""
+
+    pieces: list[tuple[list[tuple[float, float]], bool]] = [
+        ([(float(x), float(y)) for x, y in points], True)
+    ]
+    for base, direction in lines:
+        split: list[tuple[list[tuple[float, float]], bool]] = []
+        for piece, inside in pieces:
+            for negative in (True, False):
+                for part in clip_open_path(piece, base=base, direction=direction, keep_negative=negative):
+                    if len(part) >= 2:
+                        split.append((part, inside and negative))
+        pieces = split
+    return [piece for piece, inside in pieces if inside == keep_inside]
+
+
+def _jog_lines(
+    base: Sequence[float],
+    direction: Sequence[float],
+    across: Sequence[float],
+    jog: tuple[float, float, float],
+) -> list[tuple[tuple[float, float], tuple[float, float]]]:
+    """The four oriented lines bounding a jog's rectangle: from the axis
+    ``reach`` across into the section's side, between ``along_from`` and
+    ``along_to`` along the axis.  Each line's negative side is the inside."""
+
+    along_from, along_to, reach = jog
+    bx, by = float(base[0]), float(base[1])
+    dx, dy = float(direction[0]), float(direction[1])
+    ax, ay = float(across[0]), float(across[1])
+    low = (bx + dx * along_from, by + dy * along_from)
+    high = (bx + dx * along_to, by + dy * along_to)
+    far = (bx + ax * reach, by + ay * reach)
+    # half_plane_side is negative on the left of an oriented line, so each
+    # line runs with the inside on its left: down the axis (the inside is
+    # across, to the right of up), up the far edge, across along the low
+    # edge and back along the high edge.
+    return [
+        (low, (-dx, -dy)),
+        (far, (dx, dy)),
+        (low, (ax, ay)),
+        (high, (-ax, -ay)),
+    ]
+
+
 def _mirrored_figure(
     document: ArtifactDocument,
     *,
@@ -2940,6 +3038,7 @@ def _mirrored_figure(
     preset: DrawingStylePreset,
     interior_by_kind: Mapping[str, Sequence[Any]] = {},
     line_smoothing_mm: float = 0.0,
+    jogs: Sequence[tuple[float, float, float]] = (),
 ) -> tuple[
     DerivedRecord,
     dict[str, list[Any]],
@@ -3011,6 +3110,38 @@ def _mirrored_figure(
     for kind, paths in interior_by_kind.items():
         section_by_kind.setdefault(kind, []).extend(paths)
 
+    # Where the fold steps round a motif, the section is cut back: its open
+    # marks inside the step are left out, and a cut face that reaches into
+    # the step is refused - the drawing would hide part of the wall's cut.
+    across = (float(direction[1]), -float(direction[0]))
+    if half_plane_side((base[0] + across[0], base[1] + across[1]), base=base, direction=direction) < 0.0:
+        across = (-across[0], -across[1])
+    jog_line_sets = [_jog_lines(base, direction, across, jog) for jog in jogs]
+    if jog_line_sets:
+        cut_back: dict[str, list[Any]] = {}
+        for kind, paths in section_by_kind.items():
+            for path in paths:
+                if path.closed:
+                    ring = list(path.points_mm) + [path.points_mm[0]]
+                    for lines in jog_line_sets:
+                        if _jog_pieces(ring, lines=lines, keep_inside=True):
+                            raise DrawingSheetError(
+                                f"the section {section.id!r} has a cut face ({path.id!r}) inside "
+                                "the step the fold takes round the motif; a fold cannot step "
+                                "through the wall's cut"
+                            )
+                    cut_back.setdefault(kind, []).append(path)
+                    continue
+                pieces = [list(path.points_mm)]
+                for lines in jog_line_sets:
+                    pieces = [part for piece in pieces for part in _jog_pieces(piece, lines=lines, keep_inside=False)]
+                for index, piece in enumerate(pieces):
+                    suffix = "" if len(pieces) == 1 else f":cut{index:02d}"
+                    cut_back.setdefault(kind, []).append(
+                        replace(path, id=f"{path.id}{suffix}", points_mm=tuple(piece))
+                    )
+        section_by_kind = cut_back
+
     left, left_fill_only = _clipped_half(
         elevation_by_kind,
         preset=preset,
@@ -3040,6 +3171,23 @@ def _mirrored_figure(
             "axis, so the mirrored figure would be half empty"
         )
 
+    # Inside each step the elevation reaches past the axis: its lines there
+    # are drawn as the open chains they are, so a motif the axis would have
+    # cut is seen whole.
+    for jog_index, lines in enumerate(jog_line_sets):
+        for kind, paths in elevation_by_kind.items():
+            for path in paths:
+                chain = list(path.points_mm) + ([path.points_mm[0]] if path.closed else [])
+                for index, piece in enumerate(_jog_pieces(chain, lines=lines, keep_inside=True)):
+                    left.setdefault(kind, []).append(
+                        replace(
+                            path,
+                            id=f"mirror:jog{jog_index:02d}:{path.id}:{index:04d}",
+                            closed=False,
+                            points_mm=tuple(piece),
+                        )
+                    )
+
     combined: dict[str, list[Any]] = {}
     for half in (left, right):
         for kind, paths in half.items():
@@ -3047,7 +3195,8 @@ def _mirrored_figure(
     bounds = _paths_bounds(combined)
     # The axis is the seam of this convention, not an optional annotation: the
     # two halves meet on it, and without it a reader cannot tell a joined
-    # figure from one drawing of an asymmetric object.
+    # figure from one drawing of an asymmetric object.  Where the fold steps
+    # round a motif the seam is drawn stepping with it.
     try:
         segment = center_axis_segment(elevation_payload.frame.to_dict(), bounds)
     except SVGRenderError as exc:
@@ -3058,10 +3207,42 @@ def _mirrored_figure(
                 id="mirror:center-axis",
                 role=CENTER_AXIS,
                 closed=False,
-                points_mm=segment,
+                points_mm=_stepped_axis(segment, base, direction, across, jogs),
             )
         )
     return section, combined, bounds, left_fill_only | right_fill_only
+
+
+def _stepped_axis(
+    segment: Sequence[Sequence[float]],
+    base: Sequence[float],
+    direction: Sequence[float],
+    across: Sequence[float],
+    jogs: Sequence[tuple[float, float, float]],
+) -> tuple[tuple[float, float], ...]:
+    """The centre line as drawn: the axis segment, stepping across and back
+    round each jog that lies within it."""
+
+    bx, by = float(base[0]), float(base[1])
+    dx, dy = float(direction[0]), float(direction[1])
+    ax, ay = float(across[0]), float(across[1])
+
+    def at(along: float, reach: float = 0.0) -> tuple[float, float]:
+        return (bx + dx * along + ax * reach, by + dy * along + ay * reach)
+
+    ends = sorted(
+        float((point[0] - bx) * dx + (point[1] - by) * dy) for point in segment
+    )
+    low, high = ends[0], ends[-1]
+    points: list[tuple[float, float]] = [at(low)]
+    for along_from, along_to, reach in sorted(jogs):
+        start, stop = max(along_from, low), min(along_to, high)
+        if start >= stop:
+            continue
+        points.extend([at(start), at(start, reach), at(stop, reach), at(stop)])
+    points.append(at(high))
+    # A step that reaches the end of the segment returns to the axis there.
+    return tuple(point for index, point in enumerate(points) if index == 0 or point != points[index - 1])
 
 
 def _sheet_provenance(
@@ -3793,11 +3974,28 @@ def compose_drawing_sheet(
             preset=resolve_drawing_style_preset(options.style_preset),
             interior_by_kind=interior_by_kind,
             line_smoothing_mm=line_smoothing,
+            jogs=[
+                (along_from, along_to, reach)
+                for jog_record_id, along_from, along_to, reach in options.mirror_jogs
+                if jog_record_id == record.id
+            ],
         )
         mirrored.append(
             {
                 "elevation_record_id": record.id,
                 "elevation_side": "left",
+                **(
+                    {
+                        "jogs_um": ";".join(
+                            f"{int(round(along_from * 1000.0))}:{int(round(along_to * 1000.0))}:"
+                            f"{int(round(reach * 1000.0))}"
+                            for jog_record_id, along_from, along_to, reach in options.mirror_jogs
+                            if jog_record_id == record.id
+                        )
+                    }
+                    if any(jog_record_id == record.id for jog_record_id, *_rest in options.mirror_jogs)
+                    else {}
+                ),
                 "section_record_id": section.id,
                 "section_recipe_hash": section.recipe_hash,
                 "section_side": "right",

@@ -916,3 +916,83 @@ def test_a_coil_seam_goes_on_the_section_half_whatever_faces_were_painted() -> N
     assert entry["surface_side"] == "exterior"
     assert entry["side_decided_by"] == "convention"
     assert sidecar["technique"]["not_drawn"] == []
+
+
+# --- the fold steps round a motif on the axis ---------------------------------
+
+
+def _rim_v() -> float:
+    from src.core.artifact_vector_record import vector_payload_from_record
+
+    payload = vector_payload_from_record(_positioned().document.record_index[ELEVATION_ID])
+    return max(float(point[1]) for path in payload.paths for point in path.points_mm)
+
+
+def test_the_fold_steps_round_a_motif_and_the_elevation_shows_whole_there() -> None:
+    """A motif the axis would cut is drawn whole: between two heights the
+    elevation reaches past the axis into the section's side, the section is
+    cut back there, and the centre line is drawn stepping round it - down
+    the axis, across, down, and back - the reverse-ㄷ of the convention."""
+
+    rim = _rim_v()
+    jog = (ELEVATION_ID, rim - 6.0, rim + 2.0, 8.0)
+    bundle = _mirrored_sheet(mirror_jogs=(jog,))
+    validate_drawing_sheet_bytes(bundle.svg_bytes, bundle.sidecar_bytes)
+    figure = _figure(bundle.svg_bytes)
+    axis_x = _axis_x(figure)
+    # The rim's top edge is elevation content inside the step: it is drawn
+    # from the axis across to the step's reach, as its own path.
+    stepped = [
+        path
+        for path in _find(figure, f"{SVG_NS}g[@id='layer-outline-visible']")
+        if path.attrib.get("id", "").startswith("mirror:jog00:")
+    ]
+    assert stepped, "the elevation inside the step was not drawn"
+    xs = [x for path in stepped for x, _y in _points(path)]
+    assert min(xs) >= axis_x - 1e-6 and max(xs) > axis_x + 1.0
+    # The centre line steps out and back by the same reach; a step that
+    # reaches the rim returns to the axis at the rim, so five points here.
+    axis = _points(_find(figure, f"{SVG_NS}g[@id='layer-center-axis']/{SVG_NS}path"))
+    assert len(axis) == 5
+    reach_px = max(x for x, _y in axis) - axis_x
+    assert reach_px > 0.0 and abs(max(xs) - axis_x - reach_px) < 0.5
+    assert all(abs(x - axis_x) < 1e-6 or abs(x - axis_x - reach_px) < 1e-6 for x, _y in axis)
+    # Nothing of the section is drawn inside the step.
+    top_px = min(y for _x, y in axis)
+    step_bottom_px = max(y for x, y in axis if abs(x - axis_x - reach_px) < 1e-6)
+    for layer_id in ("layer-section-cut",):
+        for path in _find(figure, f"{SVG_NS}g[@id='{layer_id}']"):
+            for x, y in _points(path):
+                inside = axis_x < x < axis_x + reach_px and top_px <= y <= step_bottom_px
+                assert not inside, "the section was not cut back inside the step"
+    sidecar = json.loads(bundle.sidecar_bytes.decode("utf-8"))
+    assert sidecar["mirrored_figures"][0]["jogs_um"] == (
+        f"{int(round((rim - 6.0) * 1000))}:{int(round((rim + 2.0) * 1000))}:8000"
+    )
+    # Without a step the sheet is the sheet it was.
+    assert "jogs_um" not in json.loads(_mirrored_sheet().sidecar_bytes.decode("utf-8"))["mirrored_figures"][0]
+
+
+def test_a_step_through_the_walls_cut_is_refused_and_a_bad_step_is_refused_first() -> None:
+    """The fold may step into the empty inside of the section, never through
+    the cut face of the wall: the drawing would hide the thickness it exists
+    to show.  And a step that names no elevation, runs backwards, reaches
+    nowhere or overlaps another is refused before any drawing."""
+
+    # The floor is a cut face across the axis: a step reaching down into it
+    # would cover it.
+    with pytest.raises(DrawingSheetError, match="cut face"):
+        _mirrored_sheet(mirror_jogs=((ELEVATION_ID, -1.0, 6.0, 10.0),))
+    with pytest.raises(DrawingSheetError, match="not the elevation half"):
+        _options(mirror_sections=((ELEVATION_ID, SECTION_ID),), mirror_jogs=(("record:other", 1.0, 2.0, 3.0),))
+    with pytest.raises(DrawingSheetError, match="below along_to_mm"):
+        _options(mirror_sections=((ELEVATION_ID, SECTION_ID),), mirror_jogs=((ELEVATION_ID, 2.0, 1.0, 3.0),))
+    with pytest.raises(DrawingSheetError, match="reach_mm must be positive"):
+        _options(mirror_sections=((ELEVATION_ID, SECTION_ID),), mirror_jogs=((ELEVATION_ID, 1.0, 2.0, 0.0),))
+    with pytest.raises(DrawingSheetError, match="must not overlap"):
+        _options(
+            mirror_sections=((ELEVATION_ID, SECTION_ID),),
+            mirror_jogs=((ELEVATION_ID, 1.0, 5.0, 3.0), (ELEVATION_ID, 4.0, 6.0, 3.0)),
+        )
+    with pytest.raises(DrawingSheetError, match="not the elevation half"):
+        _options(mirror_jogs=((ELEVATION_ID, 1.0, 2.0, 3.0),))
