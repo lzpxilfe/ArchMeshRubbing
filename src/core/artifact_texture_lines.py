@@ -173,7 +173,7 @@ DEFAULT_TEXTURE_LINES_LINE_SMOOTHING_MM = 0.3
 DEFAULT_TEXTURE_LINES_INCISION_SIGN = -1
 
 DEFAULT_TEXTURE_LINES_STROKE_WINDOW_UM = 2_500
-DEFAULT_TEXTURE_LINES_STROKE_DEPTH_UM = 120
+DEFAULT_TEXTURE_LINES_STROKE_DEPTH_UM = 80
 DEFAULT_TEXTURE_LINES_STROKE_CLOSE_UM = 500
 DEFAULT_TEXTURE_LINES_STROKE_SPUR_UM = 800
 DEFAULT_TEXTURE_LINES_ORIENTATION_UM = 2_500
@@ -562,6 +562,8 @@ class TextureLinesPayload:
                 raise ArtifactTextureLinesError("a texture line has at least two points")
             if any(a == b for a, b in zip(points, points[1:])):
                 raise ArtifactTextureLinesError("a texture line repeats a point")
+            if points[0] == points[-1]:
+                raise ArtifactTextureLinesError("a texture line is open; its ends are distinct")
             cleaned.append(points)
         if not cleaned:
             raise ArtifactTextureLinesError("a texture lines payload holds at least one line")
@@ -1776,7 +1778,9 @@ def extract_texture_lines(
                 if as_um and as_um[-1] == point:
                     continue
                 as_um.append(point)
-            if len(as_um) >= 2:
+            # A line whose ends coincide once rounded is a ring the size
+            # of a pixel, not a stroke.
+            if len(as_um) >= 2 and as_um[0] != as_um[-1]:
                 polylines.append(tuple(as_um))
                 if grouped:
                     pattern_of.append(pattern_of_traced[traced_index])
