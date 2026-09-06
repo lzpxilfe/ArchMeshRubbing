@@ -38,6 +38,16 @@ from .artifact_document import (
 )
 from .artifact_outline_extractor import OutlineView, outline_frame
 from .artifact_session import ArtifactSession, ArtifactSessionError
+from .artifact_texture_paint import (
+    DEFAULT_TEXTURE_PAINT_BAND_UM,
+    DEFAULT_TEXTURE_PAINT_CHROMA,
+    ArtifactTexturePaintError,
+    ColourMap,
+    require_texture_paint_sources,
+    texture_paint_block,
+    texture_paint_field,
+    validate_texture_paint_block,
+)
 from .artifact_texture_relief import (
     ArtifactTextureReliefError,
     NormalMap,
@@ -266,7 +276,7 @@ def _um(value: float, *, name: str, minimum: int, maximum: int) -> int:
 
 def texture_lines_recipe(
     atlas: TextureAtlas,
-    normal_map: NormalMap,
+    normal_map: NormalMap | None,
     *,
     view: OutlineView | str,
     source_vertex_count: int,
@@ -290,6 +300,9 @@ def texture_lines_recipe(
     orientation_mm: float = DEFAULT_TEXTURE_LINES_ORIENTATION_UM / 1000.0,
     straightness_min_percent: int = DEFAULT_TEXTURE_LINES_STRAIGHTNESS_MIN_PERCENT,
     pattern_gap_mm: float = DEFAULT_TEXTURE_LINES_PATTERN_GAP_UM / 1000.0,
+    colour_map: ColourMap | None = None,
+    chroma: str = DEFAULT_TEXTURE_PAINT_CHROMA,
+    band_mm: float = DEFAULT_TEXTURE_PAINT_BAND_UM / 1000.0,
 ) -> dict[str, Any]:
     """The recipe: the two files, the view, and every number that decides a line.
 
@@ -298,12 +311,37 @@ def texture_lines_recipe(
     and nothing of the paper; with the stroke rule it carries the paper's
     numbers and nothing of the curvature, so a recipe written before the
     stroke rule existed is the same bytes it always was.
+
+    The source is the normal map's relief unless ``colour_map`` is given, in
+    which case it is the paint the map carries under ``chroma`` and the
+    recipe carries a ``texture_paint`` block in place of ``texture_relief``:
+    the paint stands in for the depth, so ``depth_mm`` is then the paint a
+    pixel needs, in 0..1, and a painted area wider than ``band_mm`` is read
+    by its edge.
     """
 
-    try:
-        relief = texture_relief_block(atlas, normal_map, smoothing_um=smoothing_um)
-    except ArtifactTextureReliefError as exc:
-        raise ArtifactTextureLinesError(str(exc)) from exc
+    if colour_map is None:
+        if normal_map is None:
+            raise ArtifactTextureLinesError("a texture lines recipe needs a normal map or a colour map")
+        try:
+            source = ("texture_relief", texture_relief_block(atlas, normal_map, smoothing_um=smoothing_um))
+        except ArtifactTextureReliefError as exc:
+            raise ArtifactTextureLinesError(str(exc)) from exc
+    else:
+        if not isinstance(colour_map, ColourMap):
+            raise ArtifactTextureLinesError("colour_map must be a ColourMap")
+        try:
+            source = (
+                "texture_paint",
+                texture_paint_block(
+                    atlas,
+                    colour_map,
+                    chroma=chroma,
+                    band_um=_um(band_mm, name="band_mm", minimum=0, maximum=50_000),
+                ),
+            )
+        except ArtifactTexturePaintError as exc:
+            raise ArtifactTextureLinesError(str(exc)) from exc
     if isinstance(facing_cos, bool) or not isinstance(facing_cos, (int, float)) or not math.isfinite(facing_cos):
         raise ArtifactTextureLinesError("facing_cos must be a finite number")
     facing = int(round(float(facing_cos) * 1_000_000))
@@ -375,12 +413,12 @@ def texture_lines_recipe(
         "source_vertex_count": _strict_int(
             source_vertex_count, name="source_vertex_count", minimum=3, maximum=10**9
         ),
-        "texture_relief": relief,
+        source[0]: source[1],
         "view": _view_name(view),
     }
 
 
-_RECIPE_KEYS = frozenset(
+_RECIPE_KEYS_COMMON = frozenset(
     {
         "algorithm",
         "algorithm_version",
@@ -390,16 +428,18 @@ _RECIPE_KEYS = frozenset(
         "raster_policy",
         "source_face_count",
         "source_vertex_count",
-        "texture_relief",
         "view",
     }
 )
+_RECIPE_KEYS = _RECIPE_KEYS_COMMON | {"texture_relief"}
+_RECIPE_KEYS_PAINT = _RECIPE_KEYS_COMMON | {"texture_paint"}
 
 
 def validate_texture_lines_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
     """Rebuild the recipe from its own numbers and require the same bytes."""
 
-    block = _exact_keys(recipe, _RECIPE_KEYS, name="texture lines recipe")
+    painted = isinstance(recipe, Mapping) and "texture_paint" in recipe
+    block = _exact_keys(recipe, _RECIPE_KEYS_PAINT if painted else _RECIPE_KEYS, name="texture lines recipe")
     if block["algorithm"] != TEXTURE_LINES_ALGORITHM:
         raise ArtifactTextureLinesError("texture lines recipe names another algorithm")
     if block["algorithm_version"] != TEXTURE_LINES_ALGORITHM_VERSION:
@@ -454,8 +494,12 @@ def validate_texture_lines_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
     if raster["painter"] != TEXTURE_LINES_PAINTER:
         raise ArtifactTextureLinesError("texture lines recipe names another painter")
     try:
-        relief = validate_texture_relief_block(block["texture_relief"])
-    except ArtifactTextureReliefError as exc:
+        source = (
+            ("texture_paint", validate_texture_paint_block(block["texture_paint"]))
+            if painted
+            else ("texture_relief", validate_texture_relief_block(block["texture_relief"]))
+        )
+    except (ArtifactTextureReliefError, ArtifactTexturePaintError) as exc:
         raise ArtifactTextureLinesError(str(exc)) from exc
     common = {
         "incision_sign": _incision_sign(detection["incision_sign"]),
@@ -534,7 +578,7 @@ def validate_texture_lines_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
         "source_vertex_count": _strict_int(
             block["source_vertex_count"], name="source_vertex_count", minimum=3, maximum=10**9
         ),
-        "texture_relief": relief,
+        source[0]: source[1],
         "view": _view_name(block["view"]),
     }
     if (
@@ -1582,14 +1626,17 @@ def extract_texture_lines(
     canonical_vertices_mm: object,
     faces: object,
     atlas: TextureAtlas,
-    normal_map: NormalMap,
+    normal_map: NormalMap | None,
     recipe: Mapping[str, Any],
     *,
+    colour_map: ColourMap | None = None,
     cancellation_probe: CancellationProbe | None = None,
 ) -> tuple[TextureLinesPayload, dict[str, Any]]:
-    """Trace the incisions the normal map holds, as seen in the recipe's view."""
+    """Trace the incisions the normal map holds - or the lines the colour
+    map paints - as seen in the recipe's view."""
 
     validated = validate_texture_lines_recipe(recipe)
+    painted = "texture_paint" in validated
     vertices = np.asarray(canonical_vertices_mm, dtype=np.float64)
     triangles = np.asarray(faces, dtype=np.int64)
     if vertices.ndim != 2 or vertices.shape[1] != 3 or triangles.ndim != 2 or triangles.shape[1] != 3:
@@ -1599,8 +1646,15 @@ def extract_texture_lines(
     ]:
         raise ArtifactTextureLinesError("mesh does not match the recipe's vertex and face counts")
     try:
-        require_texture_relief_sources(validated["texture_relief"], atlas, normal_map)
-    except ArtifactTextureReliefError as exc:
+        if painted:
+            if colour_map is None:
+                raise ArtifactTextureLinesError("this recipe reads a colour map; none was given")
+            require_texture_paint_sources(validated["texture_paint"], atlas, colour_map)
+        else:
+            if normal_map is None:
+                raise ArtifactTextureLinesError("this recipe reads a normal map; none was given")
+            require_texture_relief_sources(validated["texture_relief"], atlas, normal_map)
+    except (ArtifactTextureReliefError, ArtifactTexturePaintError) as exc:
         raise ArtifactTextureLinesError(str(exc)) from exc
     if triangles.shape != atlas.triangles.shape or not np.array_equal(triangles, atlas.triangles):
         raise ArtifactTextureLinesError(
@@ -1679,21 +1733,43 @@ def extract_texture_lines(
     compact[used] = np.arange(used.size, dtype=np.int64)
     developed_faces = compact[triangles[order]]
     try:
-        height, minimum_u, minimum_v, relief_qc = texture_relief_depth_field(
-            developed_uv_mm=uv[used],
-            developed_faces=developed_faces,
-            developed_points_mm=vertices[used],
-            source_face_indices=order,
-            source_vertex_indices=used,
-            atlas=atlas,
-            normal_map=normal_map,
-            source_to_canonical_rotation=rotation,
-            pixels_per_mm=pixels_per_mm,
-            margin_pixels=2,
-            smoothing_um=int(validated["texture_relief"]["smoothing_um"]),
-            cancellation_probe=cancellation_probe,
-        )
-    except ArtifactTextureReliefError as exc:
+        if painted:
+            assert colour_map is not None
+            # Paint stands in for depth: a painted pixel is low, as an incision
+            # is, so the reader's valley is the painted line.
+            paint, minimum_u, minimum_v, source_qc = texture_paint_field(
+                developed_uv_mm=uv[used],
+                developed_faces=developed_faces,
+                developed_points_mm=vertices[used],
+                source_face_indices=order,
+                source_vertex_indices=used,
+                atlas=atlas,
+                colour_map=colour_map,
+                pixels_per_mm=pixels_per_mm,
+                margin_pixels=2,
+                chroma=str(validated["texture_paint"]["chroma"]),
+                band_um=int(validated["texture_paint"]["band_um"]),
+                threshold=detection["depth_um"] / 1000.0 if "depth_um" in detection else 0.0,
+                cancellation_probe=cancellation_probe,
+            )
+            height = np.where(np.isfinite(paint), -paint, -np.inf)
+        else:
+            assert normal_map is not None
+            height, minimum_u, minimum_v, source_qc = texture_relief_depth_field(
+                developed_uv_mm=uv[used],
+                developed_faces=developed_faces,
+                developed_points_mm=vertices[used],
+                source_face_indices=order,
+                source_vertex_indices=used,
+                atlas=atlas,
+                normal_map=normal_map,
+                source_to_canonical_rotation=rotation,
+                pixels_per_mm=pixels_per_mm,
+                margin_pixels=2,
+                smoothing_um=int(validated["texture_relief"]["smoothing_um"]),
+                cancellation_probe=cancellation_probe,
+            )
+    except (ArtifactTextureReliefError, ArtifactTexturePaintError) as exc:
         raise ArtifactTextureLinesError(str(exc)) from exc
     raise_if_cancelled(cancellation_probe)
     good = np.isfinite(height)
@@ -1940,12 +2016,18 @@ def extract_texture_lines(
             if detection["valley"] in TEXTURE_LINES_STROKE_RULES
             else {}
         ),
-        "texture_relief_covered_pixel_count": relief_qc["texture_relief_covered_pixel_count"],
-        "texture_relief_height_max_um_rounded": relief_qc["texture_relief_height_max_um_rounded"],
-        "texture_relief_height_min_um_rounded": relief_qc["texture_relief_height_min_um_rounded"],
-        "texture_relief_integration_misfit_millionths": relief_qc[
-            "texture_relief_integration_misfit_millionths"
-        ],
+        **(
+            {key: source_qc[key] for key in sorted(source_qc)}
+            if painted
+            else {
+                "texture_relief_covered_pixel_count": source_qc["texture_relief_covered_pixel_count"],
+                "texture_relief_height_max_um_rounded": source_qc["texture_relief_height_max_um_rounded"],
+                "texture_relief_height_min_um_rounded": source_qc["texture_relief_height_min_um_rounded"],
+                "texture_relief_integration_misfit_millionths": source_qc[
+                    "texture_relief_integration_misfit_millionths"
+                ],
+            }
+        ),
         "opposite_sign_pixel_count": int(np.count_nonzero(opposite)),
         "valley_pixel_count": int(np.count_nonzero(valley)),
         "visible_face_count": int(visible.size),
@@ -1987,9 +2069,13 @@ def compute_texture_lines(
     orientation_mm: float = DEFAULT_TEXTURE_LINES_ORIENTATION_UM / 1000.0,
     straightness_min_percent: int = DEFAULT_TEXTURE_LINES_STRAIGHTNESS_MIN_PERCENT,
     pattern_gap_mm: float = DEFAULT_TEXTURE_LINES_PATTERN_GAP_UM / 1000.0,
+    colour_map: ColourMap | None = None,
+    chroma: str = DEFAULT_TEXTURE_PAINT_CHROMA,
+    band_mm: float = DEFAULT_TEXTURE_PAINT_BAND_UM / 1000.0,
     cancellation_probe: CancellationProbe | None = None,
 ) -> TextureLinesComputation:
-    """Trace the wall's incisions as positioned by the session's active Align."""
+    """Trace the wall's incisions - or, given a colour map, its painted
+    lines - as positioned by the session's active Align."""
 
     if not isinstance(session, ArtifactSession):
         raise ArtifactTextureLinesError("session must be an ArtifactSession")
@@ -2007,8 +2093,12 @@ def compute_texture_lines(
                 "unrolling about the axis needs an artifact positioned on its "
                 "measured rotation axis; the active Align was not made from one"
             )
-    if not isinstance(atlas, TextureAtlas) or not isinstance(normal_map, NormalMap):
-        raise ArtifactTextureLinesError("atlas and normal_map must be TextureAtlas and NormalMap")
+    if not isinstance(atlas, TextureAtlas):
+        raise ArtifactTextureLinesError("atlas must be a TextureAtlas")
+    if colour_map is None and not isinstance(normal_map, NormalMap):
+        raise ArtifactTextureLinesError("normal_map must be a NormalMap, or give a colour_map")
+    if colour_map is not None and not isinstance(colour_map, ColourMap):
+        raise ArtifactTextureLinesError("colour_map must be a ColourMap")
     try:
         projection = session.materialize()
     except ArtifactSessionError as exc:
@@ -2040,13 +2130,22 @@ def compute_texture_lines(
         orientation_mm=orientation_mm,
         straightness_min_percent=straightness_min_percent,
         pattern_gap_mm=pattern_gap_mm,
+        colour_map=colour_map,
+        chroma=chroma,
+        band_mm=band_mm,
     )
     try:
         context = session.capture_operation(recipe=recipe)
     except ArtifactSessionError as exc:
         raise ArtifactTextureLinesError(str(exc)) from exc
     payload, qc = extract_texture_lines(
-        vertices, triangles, atlas, normal_map, recipe, cancellation_probe=cancellation_probe
+        vertices,
+        triangles,
+        atlas,
+        normal_map,
+        recipe,
+        colour_map=colour_map,
+        cancellation_probe=cancellation_probe,
     )
     return TextureLinesComputation(
         context=context,

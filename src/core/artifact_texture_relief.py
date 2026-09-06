@@ -476,7 +476,25 @@ def rigid_rotation_between(source_points: np.ndarray, canonical_points: np.ndarr
     return rotation
 
 
-def texture_relief_depth_field(
+@dataclass(frozen=True, slots=True)
+class DevelopedTexelLattice:
+    """Which texel each pixel centre of the developed lattice sees, and where
+    the lattice sits: ``texel_row`` and ``texel_col`` index the map where
+    ``covered``, and are -1 elsewhere.  ``axis_u`` and ``axis_v`` are the
+    world directions of the developed axes over the triangle each pixel lies
+    in, when asked for."""
+
+    texel_row: np.ndarray
+    texel_col: np.ndarray
+    covered: np.ndarray
+    minimum_u: int
+    minimum_v: int
+    unmatched_corners: int
+    axis_u: np.ndarray | None
+    axis_v: np.ndarray | None
+
+
+def rasterise_developed_texels(
     *,
     developed_uv_mm: np.ndarray,
     developed_faces: np.ndarray,
@@ -484,52 +502,35 @@ def texture_relief_depth_field(
     source_face_indices: np.ndarray,
     source_vertex_indices: np.ndarray,
     atlas: TextureAtlas,
-    normal_map: NormalMap,
-    source_to_canonical_rotation: np.ndarray,
+    map_width: int,
+    map_height: int,
     pixels_per_mm: int,
     margin_pixels: int,
-    smoothing_um: int,
+    with_axes: bool,
     cancellation_probe: CancellationProbe | None = None,
-) -> tuple[np.ndarray, int, int, dict[str, Any]]:
-    """The height the normal map implies at every pixel centre of the
-    developed lattice, in millimetres, as a depth field the relief renderer
-    takes: finite where the development covers the pixel, -inf elsewhere.
+) -> DevelopedTexelLattice:
+    """Paint the developed triangles onto the lattice, in the order given,
+    and note at each pixel centre the texel its triangle's barycentric
+    weights point at.  The lattice is the one the mesh-depth rubbing uses -
+    same origin, same margin, same pixel-centre rule.  A later triangle
+    overwrites an earlier one where they overlap, so the caller's order
+    decides which wall wins its pixels."""
 
-    The lattice is the one the mesh-depth rubbing uses - same origin, same
-    margin, same pixel-centre rule - so the two draw on the same paper.  At
-    each pixel the developed triangle's barycentric weights give the texel;
-    the texel's object-space normal, turned into the canonical frame, minus
-    the same normal smoothed over ``smoothing_um`` across the raster, is a
-    small tilt; its components along the developed u and v axes (each
-    triangle's own world directions of those axes) are the slopes of the
-    height, and the slopes are integrated over the whole raster by the
-    Fourier method of Frankot and Chellappa.  The smoothing takes out what
-    the coarse mesh and the map disagree about at large; what is left is
-    the relief the mesh does not have.
-    """
-
-    from scipy.ndimage import gaussian_filter  # noqa: PLC0415
-
-    raise_if_cancelled(cancellation_probe)
     uv = np.asarray(developed_uv_mm, dtype=np.float64)
     faces = np.asarray(developed_faces, dtype=np.int64)
     points = np.asarray(developed_points_mm, dtype=np.float64)
     source_faces = np.asarray(source_face_indices, dtype=np.int64)
     source_vertices = np.asarray(source_vertex_indices, dtype=np.int64)
-    rotation = np.asarray(source_to_canonical_rotation, dtype=np.float64)
     if uv.ndim != 2 or uv.shape[1] != 2 or points.shape != (uv.shape[0], 3):
         raise ArtifactTextureReliefError("developed coordinates and points must match")
     if faces.ndim != 2 or faces.shape[1] != 3 or source_faces.shape != (faces.shape[0],):
         raise ArtifactTextureReliefError("developed faces need one source face each")
     if source_vertices.shape != (uv.shape[0],):
         raise ArtifactTextureReliefError("developed vertices need one source vertex each")
-    if rotation.shape != (3, 3):
-        raise ArtifactTextureReliefError("rotation must be 3 x 3")
     if int(pixels_per_mm) <= 0:
         raise ArtifactTextureReliefError("pixels_per_mm must be positive")
     if (source_faces < 0).any() or (source_faces >= atlas.triangle_count).any():
         raise ArtifactTextureReliefError("a developed face refers to a triangle the atlas lacks")
-
     scaled = uv * float(pixels_per_mm)
     if not np.isfinite(scaled).all():
         raise ArtifactTextureReliefError("developed coordinates are not finite")
@@ -545,11 +546,11 @@ def texture_relief_depth_field(
         raise ArtifactTextureReliefError("developed raster exceeds the pixel limit")
     local = scaled - np.array([minimum_u, minimum_v], dtype=np.float64)
 
-    map_h, map_w = normal_map.height, normal_map.width
-    signs = np.asarray(_ENCODING_SIGNS[normal_map.encoding], dtype=np.float64)
-    sampled = np.zeros((height, width, 3), dtype=np.float64)
-    axis_u = np.zeros((height, width, 3), dtype=np.float64)
-    axis_v = np.zeros((height, width, 3), dtype=np.float64)
+    map_h, map_w = int(map_height), int(map_width)
+    texel_row = np.full((height, width), -1, dtype=np.int32)
+    texel_col = np.full((height, width), -1, dtype=np.int32)
+    axis_u = np.zeros((height, width, 3), dtype=np.float64) if with_axes else None
+    axis_v = np.zeros((height, width, 3), dtype=np.float64) if with_axes else None
     covered = np.zeros((height, width), dtype=bool)
     unmatched_corners = 0
     epsilon = 1e-12
@@ -604,17 +605,110 @@ def texture_relief_depth_field(
             # Texture v runs up the image; row 0 of the array is the top.
             col = np.clip(np.floor(tex_u * map_w).astype(np.int64), 0, map_w - 1)
             row = np.clip(np.floor((1.0 - tex_v) * map_h).astype(np.int64), 0, map_h - 1)
-            normals = (normal_map.rgb[row, col].astype(np.float64) / 127.5 - 1.0) * signs
-            normals = normals @ rotation.T
-            block = sampled[y_start:y_stop, minimum_x : maximum_x + 1]
-            block[inside] = normals[inside]
-            axis_u[y_start:y_stop, minimum_x : maximum_x + 1][inside] = e_u
-            axis_v[y_start:y_stop, minimum_x : maximum_x + 1][inside] = e_v
+            texel_row[y_start:y_stop, minimum_x : maximum_x + 1][inside] = row[inside]
+            texel_col[y_start:y_stop, minimum_x : maximum_x + 1][inside] = col[inside]
+            if axis_u is not None and axis_v is not None:
+                axis_u[y_start:y_stop, minimum_x : maximum_x + 1][inside] = e_u
+                axis_v[y_start:y_stop, minimum_x : maximum_x + 1][inside] = e_v
             covered[y_start:y_stop, minimum_x : maximum_x + 1] |= inside
     raise_if_cancelled(cancellation_probe)
-    covered_count = int(np.count_nonzero(covered))
-    if covered_count == 0:
+    if not covered.any():
         raise ArtifactTextureReliefError("the development covers no pixel centre")
+    return DevelopedTexelLattice(
+        texel_row=texel_row,
+        texel_col=texel_col,
+        covered=covered,
+        minimum_u=int(minimum_u),
+        minimum_v=int(minimum_v),
+        unmatched_corners=int(unmatched_corners),
+        axis_u=axis_u,
+        axis_v=axis_v,
+    )
+
+
+def texture_relief_depth_field(
+    *,
+    developed_uv_mm: np.ndarray,
+    developed_faces: np.ndarray,
+    developed_points_mm: np.ndarray,
+    source_face_indices: np.ndarray,
+    source_vertex_indices: np.ndarray,
+    atlas: TextureAtlas,
+    normal_map: NormalMap,
+    source_to_canonical_rotation: np.ndarray,
+    pixels_per_mm: int,
+    margin_pixels: int,
+    smoothing_um: int,
+    cancellation_probe: CancellationProbe | None = None,
+) -> tuple[np.ndarray, int, int, dict[str, Any]]:
+    """The height the normal map implies at every pixel centre of the
+    developed lattice, in millimetres, as a depth field the relief renderer
+    takes: finite where the development covers the pixel, -inf elsewhere.
+
+    The lattice is the one the mesh-depth rubbing uses - same origin, same
+    margin, same pixel-centre rule - so the two draw on the same paper.  At
+    each pixel the developed triangle's barycentric weights give the texel;
+    the texel's object-space normal, turned into the canonical frame, minus
+    the same normal smoothed over ``smoothing_um`` across the raster, is a
+    small tilt; its components along the developed u and v axes (each
+    triangle's own world directions of those axes) are the slopes of the
+    height, and the slopes are integrated over the whole raster by the
+    Fourier method of Frankot and Chellappa.  The smoothing takes out what
+    the coarse mesh and the map disagree about at large; what is left is
+    the relief the mesh does not have.
+    """
+
+    from scipy.ndimage import gaussian_filter  # noqa: PLC0415
+
+    raise_if_cancelled(cancellation_probe)
+    uv = np.asarray(developed_uv_mm, dtype=np.float64)
+    faces = np.asarray(developed_faces, dtype=np.int64)
+    points = np.asarray(developed_points_mm, dtype=np.float64)
+    source_faces = np.asarray(source_face_indices, dtype=np.int64)
+    source_vertices = np.asarray(source_vertex_indices, dtype=np.int64)
+    rotation = np.asarray(source_to_canonical_rotation, dtype=np.float64)
+    if uv.ndim != 2 or uv.shape[1] != 2 or points.shape != (uv.shape[0], 3):
+        raise ArtifactTextureReliefError("developed coordinates and points must match")
+    if faces.ndim != 2 or faces.shape[1] != 3 or source_faces.shape != (faces.shape[0],):
+        raise ArtifactTextureReliefError("developed faces need one source face each")
+    if source_vertices.shape != (uv.shape[0],):
+        raise ArtifactTextureReliefError("developed vertices need one source vertex each")
+    if rotation.shape != (3, 3):
+        raise ArtifactTextureReliefError("rotation must be 3 x 3")
+    if int(pixels_per_mm) <= 0:
+        raise ArtifactTextureReliefError("pixels_per_mm must be positive")
+    if (source_faces < 0).any() or (source_faces >= atlas.triangle_count).any():
+        raise ArtifactTextureReliefError("a developed face refers to a triangle the atlas lacks")
+
+    lattice = rasterise_developed_texels(
+        developed_uv_mm=uv,
+        developed_faces=faces,
+        developed_points_mm=points,
+        source_face_indices=source_faces,
+        source_vertex_indices=source_vertices,
+        atlas=atlas,
+        map_width=normal_map.width,
+        map_height=normal_map.height,
+        pixels_per_mm=pixels_per_mm,
+        margin_pixels=margin_pixels,
+        with_axes=True,
+        cancellation_probe=cancellation_probe,
+    )
+    minimum_u, minimum_v = lattice.minimum_u, lattice.minimum_v
+    height, width = lattice.covered.shape
+    covered = lattice.covered
+    axis_u = lattice.axis_u
+    axis_v = lattice.axis_v
+    assert axis_u is not None and axis_v is not None
+    unmatched_corners = lattice.unmatched_corners
+    signs = np.asarray(_ENCODING_SIGNS[normal_map.encoding], dtype=np.float64)
+    sampled = np.zeros((height, width, 3), dtype=np.float64)
+    normals = (
+        normal_map.rgb[lattice.texel_row[covered], lattice.texel_col[covered]].astype(np.float64) / 127.5 - 1.0
+    ) * signs
+    sampled[covered] = normals @ rotation.T
+    raise_if_cancelled(cancellation_probe)
+    covered_count = int(np.count_nonzero(covered))
     lengths = np.linalg.norm(sampled, axis=-1)
     valid = covered & (lengths > 0.5)
     sampled[valid] /= lengths[valid][:, None]

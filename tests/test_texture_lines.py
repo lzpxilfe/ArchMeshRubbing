@@ -650,3 +650,105 @@ def test_the_ridge_rule_reads_two_strokes_where_the_threshold_reads_one(grooved)
         session, strokes, record_id="record:ridge:front", created_at=STAMP, operator="tester"
     )
     assert texture_lines_payload_from_record(session.document.record_index["record:ridge:front"]) == strokes.payload
+
+
+def test_a_painted_line_is_drawn_along_its_centre_and_a_painted_band_by_its_edges(grooved) -> None:
+    """Porcelain is not rubbed: its decoration is paint, and the base colour
+    map is to the painted bowl what the normal map is to the incised pot.
+    On the grooved vessel's atlas a colour map paints a thin gold ring at
+    one height and a wide gold band at another.  Read with the ridge rule
+    from the colour map, the ring is one line at its height and the band
+    two lines at its edges; the grooves, which the colour map does not
+    show, are not read.  The recipe carries the paint block and no relief
+    block, and refuses the wrong files."""
+
+    from PIL import Image
+
+    from src.core.artifact_texture_lines import TEXTURE_LINES_RIDGE_RULE
+    from src.core.artifact_texture_paint import (
+        TEXTURE_PAINT_CHROMA_BLUE_OVER_RED,
+        ColourMap,
+        paint_of,
+        read_colour_map,
+    )
+    from synthetic_vessel import HEIGHT_MM
+    from test_texture_relief import MAP_SIDE
+
+    session, atlas, normal_map, _valley = grooved
+    directory = tempfile.mkdtemp()
+    map_path = Path(directory) / "vessel_bc.png"
+    rgb = np.full((MAP_SIDE, MAP_SIDE, 3), 245, dtype=np.uint8)
+    z = HEIGHT_MM * (1.0 - (np.arange(MAP_SIDE) + 0.5) / MAP_SIDE)  # row 0 is the top
+    gold = np.array([200, 160, 60], dtype=np.uint8)
+    line_height, band_low, band_high = 40.0, 18.0, 22.0
+    rgb[np.abs(z - line_height) <= 0.15] = gold  # a 0.3 mm line
+    rgb[(z >= band_low) & (z <= band_high)] = gold  # a 4 mm band
+    Image.fromarray(rgb, mode="RGB").save(map_path)
+    colour_map = read_colour_map(map_path)
+    assert isinstance(colour_map, ColourMap) and colour_map.width == MAP_SIDE
+    painted = compute_texture_lines(
+        session,
+        atlas,
+        None,
+        colour_map=colour_map,
+        view="front",
+        domain="axis_development",
+        rule=TEXTURE_LINES_RIDGE_RULE,
+        depth_mm=0.2,
+        orientation_mm=0.0,
+        straightness_min_percent=0,
+        min_length_mm=5.0,
+        band_mm=0.8,
+    )
+    lines = _lines_mm(painted.payload)
+    heights = sorted(round(float(np.median(line[:, 1])) - 0.0, 1) for line in lines)
+    expected = sorted(v - FLOOR_MM for v in (line_height, band_low, band_high))
+    assert len(lines) == 3, heights
+    for found, cut in zip(heights, expected):
+        assert abs(found - cut) < 0.4, (heights, expected)
+    for line in lines:
+        assert float(line[:, 1].max() - line[:, 1].min()) < 0.5
+        assert float(line[:, 0].max() - line[:, 0].min()) > 40.0
+    recipe = painted.recipe
+    assert "texture_paint" in recipe and "texture_relief" not in recipe
+    assert recipe["texture_paint"]["chroma"] == "red_over_blue/v1"
+    assert recipe["texture_paint"]["band_um"] == 800
+    assert recipe["texture_paint"]["colour_map"]["sha256"] == colour_map.sha256
+    assert validate_texture_lines_recipe(recipe) == recipe
+    qc = painted.qc
+    assert qc["texture_paint_wide_area_count"] == 1
+    assert qc["texture_paint_painted_pixel_count"] > 0
+    assert "texture_relief_covered_pixel_count" not in qc
+    # The chroma is what the map says: gold is red over blue, not the reverse.
+    assert float(paint_of(gold[None, None, :], "red_over_blue/v1")[0, 0]) > 0.5
+    assert float(paint_of(gold[None, None, :], TEXTURE_PAINT_CHROMA_BLUE_OVER_RED)[0, 0]) == 0.0
+    # Both blocks, or the wrong map, are refused.
+    forged = json.loads(json.dumps(recipe))
+    forged["texture_relief"] = _valley.recipe["texture_relief"]
+    with pytest.raises(ArtifactTextureLinesError, match="exactly"):
+        validate_texture_lines_recipe(forged)
+    forged = json.loads(json.dumps(recipe))
+    forged["texture_paint"]["chroma"] = "gold/v1"
+    with pytest.raises(ArtifactTextureLinesError, match="chroma"):
+        validate_texture_lines_recipe(forged)
+    with pytest.raises(ArtifactTextureLinesError, match="none was given"):
+        extract_texture_lines(
+            np.asarray(session.materialize().mesh.vertices), np.asarray(session.materialize().mesh.faces),
+            atlas, normal_map, recipe,
+        )
+    other = ColourMap(rgb=colour_map.rgb, sha256="0" * 64, byte_length=colour_map.byte_length)
+    with pytest.raises(ArtifactTextureLinesError, match="not the one the recipe names"):
+        extract_texture_lines(
+            np.asarray(session.materialize().mesh.vertices), np.asarray(session.materialize().mesh.faces),
+            atlas, None, recipe, colour_map=other,
+        )
+    with pytest.raises(ArtifactTextureLinesError, match="normal map or a colour map"):
+        texture_lines_recipe(atlas, None, view="front", source_vertex_count=10, source_face_count=10)
+    # The record reopens as any texture lines record does.
+    session = commit_texture_lines(
+        session, painted, record_id="record:paint:front", created_at=STAMP, operator="tester"
+    )
+    assert texture_lines_payload_from_record(session.document.record_index["record:paint:front"]) == painted.payload
+    path = Path(directory) / "painted.amr"
+    save_artifact_project(path, session.document)
+    validate_known_records(load_artifact_project(path))
