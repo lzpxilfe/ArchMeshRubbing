@@ -29,6 +29,7 @@ import base64
 from dataclasses import dataclass, field, replace
 import hashlib
 import math
+import re
 from typing import Any, Mapping, Sequence
 
 from .artifact_axis_alignment import AXIS_ALIGN_RECIPE_KIND
@@ -224,8 +225,78 @@ def section_loop_note(closed_path_counts: Sequence[int]) -> str:
     return f"닫힌 고리 {'·'.join(str(count) for count in counts)}개 · 접합면·구멍인지 확인"
 _CAPTION_FONT_MM = 2.2
 _CAPTION_GAP_MM = 1.0
-# Paper millimetres reserved beneath a rubbing for its caption.
+# Paper millimetres reserved beneath a rubbing for a one-line caption.
 _CAPTION_BAND_MM = _CAPTION_GAP_MM + _CAPTION_FONT_MM + 0.6
+# Paper millimetres from one caption line's baseline to the next.
+_CAPTION_LINE_MM = 2.9
+# The caption is a list of facts joined by this; a line breaks only there.
+_CAPTION_SEPARATOR = " · "
+
+
+def _glyph_advance_em(char: str) -> float:
+    """About how wide one glyph of the sheet's font stack sets, in em.
+
+    No font is measured here - the page names a stack and the viewer picks
+    from it - so these are the advances of Noto Sans KR, rounded up a little:
+    Hangul and CJK full-width, Latin and digits about half that.  What they
+    decide is where a caption breaks and whether a title block row fits, and
+    a slightly generous guess errs towards a break, never towards overlap.
+    """
+
+    if char == " ":
+        return 0.27
+    if char in "·.,:;'":
+        return 0.3
+    if char in "()[]|/-":
+        return 0.35
+    if char == "%":
+        return 0.86
+    if char in "°²":
+        return 0.44
+    if char.isdigit():
+        return 0.58
+    if "a" <= char <= "z":
+        return 0.55
+    if "A" <= char <= "Z":
+        return 0.68
+    if ord(char) < 0x2E80:
+        return 0.62
+    return 0.97
+
+
+def _text_width_mm(text: str, size_mm: float, *, bold: bool = False) -> float:
+    width = sum(_glyph_advance_em(char) for char in text) * size_mm
+    return width * 1.05 if bold else width
+
+
+def _caption_lines(caption: str, *, width_mm: float) -> tuple[str, ...]:
+    """Break a caption at its separators so each line fits the paper width.
+
+    A strip pasted on the axis at 1:3 is a dozen millimetres wide and its
+    caption a hundred and forty; right-aligned on the axis in one line it ran
+    off the left edge of the page.  Facts are packed greedily, a fact never
+    split, so a caption that fits in one line is left as the one line it
+    always was.
+    """
+
+    facts = caption.split(_CAPTION_SEPARATOR)
+    lines: list[str] = []
+    current = ""
+    for fact in facts:
+        candidate = fact if not current else f"{current}{_CAPTION_SEPARATOR}{fact}"
+        if not current or _text_width_mm(candidate, _CAPTION_FONT_MM) <= width_mm:
+            current = candidate
+        else:
+            lines.append(current)
+            current = fact
+    lines.append(current)
+    return tuple(lines)
+
+
+def _caption_band_mm(line_count: int) -> float:
+    """Paper millimetres reserved beneath a rubbing for its caption lines."""
+
+    return _CAPTION_BAND_MM + _CAPTION_LINE_MM * (max(1, int(line_count)) - 1)
 
 
 def _millimetre_token(micrometres: object) -> str:
@@ -1047,6 +1118,8 @@ class _Prepared:
     attached: _AttachedRaster | None = None
     caption: str | None = None
     """Printed beneath a rubbing: what it is and what made its ink."""
+    caption_lines: tuple[str, ...] = ()
+    """The caption as it breaks to fit the paper it sits under."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -1062,6 +1135,7 @@ class _Figure:
     raster: _RasterImage | None = None
     attached: _AttachedRaster | None = None
     caption: str | None = None
+    caption_lines: tuple[str, ...] = ()
 
 
 def _lay_out(
@@ -1138,6 +1212,7 @@ def _lay_out(
                 raster=prepared.raster,
                 attached=prepared.attached,
                 caption=prepared.caption,
+                caption_lines=prepared.caption_lines,
             )
         )
         cursor_x += width
@@ -1263,6 +1338,7 @@ def _lay_out_plan_with_sections(
             raster=figure.raster,
             attached=figure.attached,
             caption=figure.caption,
+            caption_lines=figure.caption_lines,
         )
 
     # The plan first, then what lies under it, then what lies beside it: the
@@ -1288,38 +1364,81 @@ def _text_element(
     anchor: str = "start",
     weight: str | None = None,
 ) -> str:
+    # Text is filled, never stroked.  Every group it sits in strokes its lines
+    # - the figures group with the preset's widths, the title block with a
+    # hairline - and a text element that inherits that stroke prints each
+    # glyph outlined a millimetre thick: the caption came out as blots.
     weight_attribute = "" if weight is None else f' font-weight="{weight}"'
     return (
         f'<text x="{number_token(x_mm, field_name="text.x")}" '
         f'y="{number_token(y_mm, field_name="text.y")}" '
         f'font-family="{_FONT_STACK}" '
         f'font-size="{number_token(size_mm, field_name="text.size")}" '
-        f'fill="{color}" text-anchor="{anchor}"{weight_attribute}>'
+        f'fill="{color}" stroke="none" text-anchor="{anchor}"{weight_attribute}>'
         f"{xml_attribute(text)}</text>"
     )
 
 
 def _caption_element(
-    caption: str | None,
+    lines: Sequence[str],
     *,
     right_mm: float,
     below_mm: float,
     color: str,
     index: int,
 ) -> str:
-    """The rubbing's caption, right-aligned under its lower edge."""
+    """The rubbing's caption, right-aligned under its lower edge.
 
-    if caption is None:
+    One line is the plain text element it always was.  More than one is the
+    same element holding a ``tspan`` per line, each on its own baseline, so
+    the caption stays one element with one id and the validator can read it
+    back whole by joining the lines at the separator they broke on.
+    """
+
+    if not lines:
         raise DrawingSheetError("a rubbing on the sheet must carry its caption")
-    element = _text_element(
-        caption,
-        x_mm=right_mm,
-        y_mm=below_mm + _CAPTION_GAP_MM + _CAPTION_FONT_MM,
-        size_mm=_CAPTION_FONT_MM,
-        color=color,
-        anchor="end",
-    )
+    baseline = below_mm + _CAPTION_GAP_MM + _CAPTION_FONT_MM
+    if len(lines) == 1:
+        element = _text_element(
+            lines[0],
+            x_mm=right_mm,
+            y_mm=baseline,
+            size_mm=_CAPTION_FONT_MM,
+            color=color,
+            anchor="end",
+        )
+    else:
+        x_token = number_token(right_mm, field_name="text.x")
+        spans = "".join(
+            f'<tspan x="{x_token}" '
+            f'y="{number_token(baseline + _CAPTION_LINE_MM * row, field_name="text.y")}">'
+            f"{xml_attribute(line)}</tspan>"
+            for row, line in enumerate(lines)
+        )
+        element = (
+            f'<text x="{x_token}" '
+            f'y="{number_token(baseline, field_name="text.y")}" '
+            f'font-family="{_FONT_STACK}" '
+            f'font-size="{number_token(_CAPTION_FONT_MM, field_name="text.size")}" '
+            f'fill="{color}" stroke="none" text-anchor="end">{spans}</text>'
+        )
     return element.replace("<text ", f'<text id="rubbing-caption-{index:04d}" ', 1)
+
+
+_CAPTION_ELEMENT_PATTERN = re.compile(
+    r'<text id="rubbing-caption-\d{4}"[^>]*>(.*?)</text>', re.DOTALL
+)
+_CAPTION_SPAN_PATTERN = re.compile(r"<tspan[^>]*>(.*?)</tspan>", re.DOTALL)
+
+
+def _captions_on_page(svg_text: str) -> set[str]:
+    """Every rubbing caption the SVG prints, wrapped ones joined back whole."""
+
+    captions: set[str] = set()
+    for inner in _CAPTION_ELEMENT_PATTERN.findall(svg_text):
+        spans = _CAPTION_SPAN_PATTERN.findall(inner)
+        captions.add(_CAPTION_SEPARATOR.join(spans) if spans else inner)
+    return captions
 
 
 def _scale_bar_elements(options: DrawingSheetOptions) -> tuple[list[str], dict[str, Any]]:
@@ -1431,6 +1550,20 @@ def _title_block_elements(
         f'height="{number_token(height, field_name="title_block.height")}"/>',
     ]
     for index, (label, value) in enumerate(rows):
+        # A row wider than the block prints its value over its label.  The
+        # caller's rows are the caller's to shorten; the composer's own rows
+        # are short by construction.
+        needed = (
+            3 * _TITLE_BLOCK_PADDING_MM
+            + _text_width_mm(label, _TITLE_BLOCK_FONT_MM, bold=True)
+            + _text_width_mm(value, _TITLE_BLOCK_FONT_MM)
+        )
+        if needed > _TITLE_BLOCK_WIDTH_MM:
+            raise DrawingSheetError(
+                f"title block row {label!r} is about {needed - _TITLE_BLOCK_WIDTH_MM:.1f} mm "
+                f"wider than the {_TITLE_BLOCK_WIDTH_MM:g} mm block; shorten the value "
+                "or split it over two rows"
+            )
         baseline = top + _TITLE_BLOCK_ROW_MM * index + _TITLE_BLOCK_ROW_MM - 1.6
         if index:
             divider_y = top + _TITLE_BLOCK_ROW_MM * index
@@ -1775,20 +1908,25 @@ def _prepare_raster_figure(
     pixels_per_meter = int(receipt["pixels_per_meter"])
     width_mm = float(receipt["width_pixels"]) * 1000.0 / float(pixels_per_meter)
     height_mm = float(receipt["height_pixels"]) * 1000.0 / float(pixels_per_meter)
+    caption = _captioned(
+        computed_rubbing_caption(
+            record.recipe, developed=record.type == DEVELOPED_RUBBING_RECORD_TYPE
+        ),
+        note,
+    )
+    lines = _caption_lines(caption, width_mm=width_mm / float(scale_denominator))
     return _Prepared(
         record_id=record.id,
         record_type=record.type,
         recipe_hash=record.recipe_hash,
         payload_sha256=str(receipt["raster_sha256"]),
-        bounds=_bounds_with_caption((0.0, 0.0, width_mm, height_mm), scale_denominator),
+        bounds=_bounds_with_caption(
+            (0.0, 0.0, width_mm, height_mm), scale_denominator, line_count=len(lines)
+        ),
         paths_by_kind={},
         raster=image,
-        caption=_captioned(
-            computed_rubbing_caption(
-                record.recipe, developed=record.type == DEVELOPED_RUBBING_RECORD_TYPE
-            ),
-            note,
-        ),
+        caption=caption,
+        caption_lines=lines,
     )
 
 
@@ -2039,11 +2177,32 @@ def _technique_paths_for_figure(
     return by_kind, drawn, styles
 
 
+def _attached_caption_lines(
+    bounds: tuple[float, float, float, float],
+    attached: _AttachedRaster | None,
+    caption: str | None,
+    *,
+    scale_denominator: float,
+) -> tuple[str, ...]:
+    """How the caption of a pasted strip breaks under the figure it is in.
+
+    The caption ends on the axis the paper is pasted to, so the width it has
+    is from the figure's left edge to that axis, on the page.
+    """
+
+    if attached is None or caption is None:
+        return ()
+    left = min(bounds[0], attached.rectangle_mm[0])
+    axis = attached.rectangle_mm[2]
+    return _caption_lines(caption, width_mm=(axis - left) / float(scale_denominator))
+
+
 def _bounds_with_attachment(
     bounds: tuple[float, float, float, float],
     attached: _AttachedRaster | None,
     *,
     scale_denominator: float,
+    line_count: int = 1,
 ) -> tuple[float, float, float, float]:
     """Grow a figure's extent to hold the rubbing pasted inside it, captioned."""
 
@@ -2058,22 +2217,27 @@ def _bounds_with_attachment(
             max(bounds[3], top),
         ),
         scale_denominator,
+        line_count=line_count,
     )
 
 
 def _bounds_with_caption(
     bounds: tuple[float, float, float, float],
     scale_denominator: float,
+    *,
+    line_count: int = 1,
 ) -> tuple[float, float, float, float]:
     """Reserve the caption band beneath a figure, in record millimetres.
 
     The band is a paper size, so on a reduced sheet it is that many record
     millimetres times the reduction: the caption stays the same size on the
-    page whatever the scale.
+    page whatever the scale, and a caption that broke into more lines gets
+    a deeper band.
     """
 
     left, bottom, right, top = bounds
-    return (left, bottom - _CAPTION_BAND_MM * float(scale_denominator), right, top)
+    band = _caption_band_mm(line_count) * float(scale_denominator)
+    return (left, bottom - band, right, top)
 
 
 def _paths_bounds(
@@ -2583,7 +2747,7 @@ def _render_sheet(
             lines.append(
                 "      "
                 + _caption_element(
-                    figure.caption,
+                    figure.caption_lines,
                     right_mm=origin_x + paper_width,
                     below_mm=origin_y + paper_height,
                     color=options.stroke_color,
@@ -2650,12 +2814,13 @@ def _render_sheet(
                 (figure.attached.rectangle_mm[2], figure.attached.rectangle_mm[1])
             )
             origin_y = figure.placement.origin_mm[1]
+            band = _caption_band_mm(len(figure.caption_lines))
             lines.append(
                 "      "
                 + _caption_element(
-                    figure.caption,
+                    figure.caption_lines,
                     right_mm=axis_x,
-                    below_mm=origin_y + figure.placement.height_mm - _CAPTION_BAND_MM,
+                    below_mm=origin_y + figure.placement.height_mm - band,
                     color=options.stroke_color,
                     index=index,
                 )
@@ -2966,6 +3131,10 @@ def compose_drawing_sheet(
                     raise DrawingSheetError(str(exc)) from exc
                 if axis_path is not None:
                     by_kind.setdefault(CENTER_AXIS, []).append(axis_path)
+            plain_bounds = _payload_bounds(payload)
+            caption_lines = _attached_caption_lines(
+                plain_bounds, attached, caption, scale_denominator=options.scale_denominator
+            )
             prepared.append(
                 _Prepared(
                     record_id=record.id,
@@ -2973,13 +3142,15 @@ def compose_drawing_sheet(
                     recipe_hash=record.recipe_hash,
                     payload_sha256=payload.sha256,
                     bounds=_bounds_with_attachment(
-                        _payload_bounds(payload),
+                        plain_bounds,
                         attached,
                         scale_denominator=options.scale_denominator,
+                        line_count=len(caption_lines),
                     ),
                     paths_by_kind=by_kind,
                     attached=attached,
                     caption=caption,
+                    caption_lines=caption_lines,
                 )
             )
             continue
@@ -3019,6 +3190,9 @@ def compose_drawing_sheet(
                     "record_id": section.id,
                 }
             )
+        caption_lines = _attached_caption_lines(
+            bounds, attached, caption, scale_denominator=options.scale_denominator
+        )
         prepared.append(
             _Prepared(
                 record_id=record.id,
@@ -3026,13 +3200,17 @@ def compose_drawing_sheet(
                 recipe_hash=record.recipe_hash,
                 payload_sha256=payload.sha256,
                 bounds=_bounds_with_attachment(
-                    bounds, attached, scale_denominator=options.scale_denominator
+                    bounds,
+                    attached,
+                    scale_denominator=options.scale_denominator,
+                    line_count=len(caption_lines),
                 ),
                 paths_by_kind=combined,
                 mirror_section_record_id=section.id,
                 fill_only_ids=frozenset(fill_only_ids),
                 attached=attached,
                 caption=caption,
+                caption_lines=caption_lines,
             )
         )
 
@@ -3391,7 +3569,7 @@ def validate_drawing_sheet_bytes(svg_bytes: bytes, sidecar_bytes: bytes) -> None
                     f"rubbing figure {figure.get('record_id')!r} carries a note "
                     "longer than a caption band holds"
                 )
-            if xml_attribute(caption) not in svg_text:
+            if xml_attribute(caption) not in _captions_on_page(svg_text):
                 raise DrawingSheetError(
                     f"rubbing figure {figure.get('record_id')!r} caption is not on the page"
                 )

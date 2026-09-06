@@ -347,6 +347,40 @@ def test_figures_never_reach_into_the_footer_band() -> None:
         assert bottom <= last_drawable_y
 
 
+def test_a_title_block_row_wider_than_the_block_is_refused() -> None:
+    """A long value right-aligned in a 78 mm block prints over its own label.
+
+    The composer does not shrink the type or let the value run; it refuses
+    and says by how much, so the drafter shortens the row or splits it.
+    """
+
+    document = _session().document
+    long_row = ("자료", "국립중앙박물관 3D 공개 데이터 (OBJ 190,732면 + 법선 지도 8192²)")
+    with pytest.raises(DrawingSheetError, match="wider than the 78 mm block") as caught:
+        compose_drawing_sheet(
+            document,
+            [OUTLINE_ID],
+            options=_options(
+                title_block=TitleBlock(artifact_label="시험 유물 001", rows=(long_row,))
+            ),
+        )
+    assert "'자료'" in str(caught.value)
+    # Split over two rows it fits, and both rows are printed.
+    bundle = compose_drawing_sheet(
+        document,
+        [OUTLINE_ID],
+        options=_options(
+            title_block=TitleBlock(
+                artifact_label="시험 유물 001",
+                rows=(("자료", "국립중앙박물관 3D 공개 데이터"), ("원본", "OBJ 190,732면 + 법선 지도 8192²")),
+            )
+        ),
+    )
+    rows = json.loads(bundle.sidecar_bytes)["title_block"]
+    assert {"label": "자료", "value": "국립중앙박물관 3D 공개 데이터"} in rows
+    assert {"label": "원본", "value": "OBJ 190,732면 + 법선 지도 8192²"} in rows
+
+
 def test_content_that_does_not_fit_is_refused_with_a_usable_scale() -> None:
     """Silently shrinking would print a page that says 1:1 and measures 1:3."""
 

@@ -9,6 +9,7 @@ the raster is the strip a rubber would paste beside the drawing.
 from __future__ import annotations
 
 import json
+import re
 import math
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -876,6 +877,68 @@ def test_the_height_fit_pastes_each_band_where_it_was_taken(
     assert bundle.svg_bytes.decode("utf-8").count("<use xlink:href=") == (
         ARTBOARD_HEIGHT_PROFILE_BANDS
     )
+
+
+def test_a_caption_wider_than_its_paper_breaks_into_lines_that_fit(
+    axis_sheet: tuple[ArtifactSession, Any],
+) -> None:
+    """At 1:4 the pasted strip is a few millimetres wide and its caption a
+    hundred and more; one line right-aligned on the axis ran off the page.
+    The caption breaks at its separators to the width it has, the band under
+    the figure deepens to hold the lines, and the validator reads the lines
+    back as the one caption the sidecar states."""
+
+    session, computation = axis_sheet
+    bundle = compose_drawing_sheet(
+        session.document,
+        ["record:elevation:front"],
+        options=_axis_options(scale_denominator=4.0),
+        rasters={"record:rubbing:axis": computation.raster},
+    )
+    validate_drawing_sheet_bytes(bundle.svg_bytes, bundle.sidecar_bytes)
+    svg = bundle.svg_bytes.decode("utf-8")
+    figure = json.loads(bundle.sidecar_bytes.decode("utf-8"))["figures"][0]
+    caption = figure["caption"]
+    element = re.search(r'<text id="rubbing-caption-0000"[^>]*>(.*?)</text>', svg)
+    assert element is not None
+    spans = re.findall(r'<tspan x="([^"]+)" y="([^"]+)">(.*?)</tspan>', element.group(1))
+    assert len(spans) >= 2
+    # Broken only at separators, nothing lost, nothing reordered.
+    assert " · ".join(text for _x, _y, text in spans) == caption
+    assert all(not text.startswith("·") and not text.endswith("·") for _x, _y, text in spans)
+    # Every line ends on the axis, and the lines step down the page.
+    xs = {x for x, _y, _text in spans}
+    assert len(xs) == 1
+    ys = [float(y) for _x, y, _text in spans]
+    assert ys == sorted(ys)
+    assert all(later - earlier == pytest.approx(2.9) for earlier, later in zip(ys, ys[1:]))
+    # The lines sit inside the figure's own extent, under the paper: the band
+    # grew with them, so nothing below the figure is printed over.
+    origin_x, origin_y = figure["origin_mm"]
+    assert ys[-1] + 0.6 <= origin_y + figure["height_mm"] + 1e-9
+    axis_x = float(next(iter(xs)))
+    assert origin_x < axis_x < origin_x + figure["width_mm"]
+    # Each line fits between the figure's left edge and the axis, by the
+    # measure the composer breaks on - unless it is one fact that alone is
+    # wider than that: a fact is never split.
+    from src.core.drawing_sheet import _text_width_mm
+
+    for _x, _y, text in spans:
+        assert _text_width_mm(text, 2.2) <= axis_x - origin_x + 1e-9 or " · " not in text
+
+    # At 1:1 the paper is four times wider on the page and the caption needs
+    # fewer lines; given room enough it is the one line it always was.
+    from src.core.drawing_sheet import _caption_lines
+
+    plain = compose_drawing_sheet(
+        session.document,
+        ["record:elevation:front"],
+        options=_axis_options(),
+        rasters={"record:rubbing:axis": computation.raster},
+    )
+    assert 0 < plain.svg_bytes.decode("utf-8").count("<tspan") < len(spans)
+    assert _caption_lines(caption, width_mm=200.0) == (caption,)
+    assert " · ".join(_caption_lines(caption, width_mm=1.0)) == caption
 
 
 def test_a_pasted_rubbing_is_not_also_a_figure(
