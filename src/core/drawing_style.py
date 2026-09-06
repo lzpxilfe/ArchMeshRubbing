@@ -670,11 +670,12 @@ PROVISIONAL_PRESET_ID = "provisional/v1"
 #: 한국문화재조사연구기관협회) measured-drawing course text, docs/REFERENCES.md
 #: [K1].  Named for what it follows, as docs/DRAWING_CONVENTIONS.md asks.
 KCHA_2013_PEN_V1_PRESET_ID = "kcha-2013-pen/v1"
-#: The same pens, with the inner lines and the technique marks one step
-#: lighter than the outline: 단면 > 외선 > 내선 = 흔적 표시.  An incised
-#: pattern line is drawn with the 0.3 실선 pen of 그림 27, not the 0.4 of
-#: the outline, so the vessel's edge stays the heavier line on the page.
-#: v1 is kept frozen for drawings that were made with it.
+#: The same pens, with the inner lines as light as the technique marks and
+#: well under the outline: 단면 > 외선 > 내선 = 흔적 표시.  An incised
+#: pattern line is drawn with the 0.1 세부 pen of 그림 27, not the 0.4 of
+#: the outline, so the vessel's edge stays the heavy line on the page and
+#: a dense pattern reads as a pattern, not as a black field.  v1 is kept
+#: frozen for drawings that were made with it.
 KCHA_2013_PEN_PRESET_ID = "kcha-2013-pen/v2"
 KCHA_2013_SOURCE_ID = "K1"
 
@@ -777,10 +778,10 @@ _PRESETS: dict[str, DrawingStylePreset] = {
             SECTION_CUT: LineStyle(stroke_width_mm=0.6, hatch=True),
             OUTLINE_VISIBLE: LineStyle(stroke_width_mm=0.4),
             # An inner line - a hole's edge, an incised pattern line traced
-            # from the wall - is the 0.3 실선 pen of 그림 27 ([K1] p.19),
-            # one step under the 0.4 outline, so the edge of the vessel
-            # reads heavier than what is drawn on its surface.
-            OUTLINE_HOLE: LineStyle(stroke_width_mm=0.3),
+            # from the wall - is the 0.1 세부 pen of 그림 27 ([K1] p.25),
+            # under the 0.4 outline, so the edge of the vessel reads heavy
+            # and what is drawn on its surface reads fine.
+            OUTLINE_HOLE: LineStyle(stroke_width_mm=0.1),
             CONDITION_MISSING: LineStyle(stroke_width_mm=0.1),
             CONDITION_RESTORED: LineStyle(
                 stroke_width_mm=0.1, dash_pattern_mm=(3.0, 1.0, 0.5, 1.0)
@@ -792,15 +793,15 @@ _PRESETS: dict[str, DrawingStylePreset] = {
             # Marks of making on the wall are drawn with the same pen as the
             # inner lines: what is observed on the surface is one weight,
             # under the outline and the section.
-            TECHNIQUE_COIL_JOINT: LineStyle(stroke_width_mm=0.3),
-            TECHNIQUE_FINGER_MARK: LineStyle(stroke_width_mm=0.3),
-            TECHNIQUE_PADDLING: LineStyle(stroke_width_mm=0.3),
-            TECHNIQUE_WATER_SMOOTHING: LineStyle(stroke_width_mm=0.3),
-            TECHNIQUE_WOOD_GRAIN: LineStyle(stroke_width_mm=0.3),
-            TECHNIQUE_BOARD_FINISHING: LineStyle(stroke_width_mm=0.3),
-            TECHNIQUE_BURNISHING: LineStyle(stroke_width_mm=0.3),
-            TECHNIQUE_INTERIOR_ANVIL: LineStyle(stroke_width_mm=0.3),
-            TECHNIQUE_PARING: LineStyle(stroke_width_mm=0.3),
+            TECHNIQUE_COIL_JOINT: LineStyle(stroke_width_mm=0.1),
+            TECHNIQUE_FINGER_MARK: LineStyle(stroke_width_mm=0.1),
+            TECHNIQUE_PADDLING: LineStyle(stroke_width_mm=0.1),
+            TECHNIQUE_WATER_SMOOTHING: LineStyle(stroke_width_mm=0.1),
+            TECHNIQUE_WOOD_GRAIN: LineStyle(stroke_width_mm=0.1),
+            TECHNIQUE_BOARD_FINISHING: LineStyle(stroke_width_mm=0.1),
+            TECHNIQUE_BURNISHING: LineStyle(stroke_width_mm=0.1),
+            TECHNIQUE_INTERIOR_ANVIL: LineStyle(stroke_width_mm=0.1),
+            TECHNIQUE_PARING: LineStyle(stroke_width_mm=0.1),
             CENTER_AXIS: LineStyle(
                 stroke_width_mm=0.1, dash_pattern_mm=(4.0, 1.0, 1.0, 1.0)
             ),

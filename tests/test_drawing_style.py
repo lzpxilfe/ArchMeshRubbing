@@ -125,8 +125,8 @@ def test_the_shipped_preset_says_it_is_provisional() -> None:
 
 def test_the_sourced_preset_carries_the_textbook_pen_widths() -> None:
     """kcha-2013-pen/v1 follows 그림 27 of [K1]: 단면 0.6, 입면 0.4, 결실부 0.1.
-    v2 keeps those pens and steps the inner lines and the marks of making
-    down to the 0.3 실선, under the outline: 단면 > 외선 > 내선 = 흔적."""
+    v2 keeps those pens and draws the inner lines with the 0.1 세부 pen the
+    marks of making use, well under the outline: 단면 > 외선 > 내선 = 흔적."""
 
     from src.core.drawing_style import (
         CONDITION_MISSING,
@@ -157,13 +157,14 @@ def test_the_sourced_preset_carries_the_textbook_pen_widths() -> None:
     assert set(current.lines) == set(LINE_KINDS)
     assert current.style(SECTION_CUT).stroke_width_mm == 0.6
     assert current.style(OUTLINE_VISIBLE).stroke_width_mm == 0.4
-    assert current.style(OUTLINE_HOLE).stroke_width_mm == 0.3
-    assert current.style(TECHNIQUE_FINGER_MARK).stroke_width_mm == 0.3
-    assert current.style(TECHNIQUE_WOOD_GRAIN).stroke_width_mm == 0.3
+    assert current.style(OUTLINE_HOLE).stroke_width_mm == 0.1
+    assert current.style(TECHNIQUE_FINGER_MARK).stroke_width_mm == 0.1
+    assert current.style(TECHNIQUE_WOOD_GRAIN).stroke_width_mm == 0.1
+    assert current.style(OUTLINE_HOLE).stroke_width_mm < current.style(OUTLINE_VISIBLE).stroke_width_mm
     assert current.style(TECHNIQUE_GROOVE_TROUGH).stroke_width_mm == 0.1
     assert current.style(CONDITION_MISSING).stroke_width_mm == 0.1
     for kind in LINE_KINDS:
-        if kind in (OUTLINE_HOLE,) or kind.startswith("technique_") and kind != "technique_groove_trough":
+        if kind == OUTLINE_HOLE:
             continue
         assert current.style(kind) == preset.style(kind), kind
     assert available_presets() == (

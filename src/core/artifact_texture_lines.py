@@ -121,6 +121,9 @@ TEXTURE_LINES_ORIENTATION_COHERENCE_MIN = 0.5
 #: group of fewer than ``TEXTURE_LINES_PATTERN_MIN_STROKES`` is loose
 #: (pattern -1).  Each pattern goes on the sheet as its own group, so a
 #: reader can strike out what was read but is not a pattern.
+#: A chain that turns more than this over this span is cut at the bend.
+TEXTURE_LINES_CORNER_ANGLE_DEG = 60.0
+TEXTURE_LINES_CORNER_SPAN_MM = 0.6
 TEXTURE_LINES_PATTERN_RULE = "strokes_by_direction_neighbourhood/v1"
 DEFAULT_TEXTURE_LINES_PATTERN_GAP_UM = 6_000
 TEXTURE_LINES_PATTERN_ANGLE_DEG = 20.0
@@ -157,7 +160,7 @@ DEFAULT_TEXTURE_LINES_LINE_SMOOTHING_MM = 0.3
 DEFAULT_TEXTURE_LINES_INCISION_SIGN = -1
 
 DEFAULT_TEXTURE_LINES_STROKE_WINDOW_UM = 2_500
-DEFAULT_TEXTURE_LINES_STROKE_DEPTH_UM = 150
+DEFAULT_TEXTURE_LINES_STROKE_DEPTH_UM = 120
 DEFAULT_TEXTURE_LINES_STROKE_CLOSE_UM = 500
 DEFAULT_TEXTURE_LINES_STROKE_SPUR_UM = 800
 DEFAULT_TEXTURE_LINES_ORIENTATION_UM = 2_500
@@ -959,9 +962,9 @@ def _stroke_points(
     from scipy.ndimage import (  # noqa: PLC0415
         binary_closing,
         binary_erosion,
-        binary_fill_holes,
         grey_closing,
         label,
+        minimum_filter,
     )
 
     radius = max(1, int(round(window_mm * float(pixels_per_mm))))
@@ -980,15 +983,23 @@ def _stroke_points(
     field = np.where(good, signed_mm, -np.inf)
     envelope = grey_closing(field, size=(size, size), mode="nearest")
     under = np.where(good & np.isfinite(envelope), envelope - np.where(good, signed_mm, 0.0), 0.0)
-    stroke = good & (under >= depth_mm)
+    # A stroke is deeper than its surroundings, not deeper than a fixed
+    # line: in a dense pattern the ridges between strokes lie under the
+    # paper too, by less than the strokes beside them, and a shallow row of
+    # strokes is still a row.  So the depth counts from the shallowest
+    # point within half a window.
+    shallowest = minimum_filter(under, size=2 * (radius // 2) + 1, mode="nearest")
+    stroke = good & (under - shallowest >= depth_mm)
     stroke_count = int(np.count_nonzero(stroke))
     close = int(round(close_mm * float(pixels_per_mm)))
     if close > 0 and stroke_count:
         span = 2 * (close // 2) + 1
         yy, xx = np.mgrid[-(span // 2) : span // 2 + 1, -(span // 2) : span // 2 + 1]
         disk = (yy**2 + xx**2) <= (span / 2.0) ** 2
+        # Closed across the ribbon's own floor only: a cell that strokes
+        # enclose between them - a chevron's tips meeting the next row's -
+        # is wall, and filling it would make one blob of a row of strokes.
         stroke = (stroke | binary_closing(stroke, structure=disk)) & good
-        stroke = binary_fill_holes(stroke) & good
     # A stroke narrower than the paper's own quantum is grain.
     labels, count = label(stroke, structure=np.ones((3, 3), dtype=bool))
     if count:
@@ -1051,6 +1062,46 @@ def _crosses_the_run(
     difference = abs(own - float(tangent[middle]))
     difference = min(difference, math.pi - difference)
     return difference > math.radians(angle_deg)
+
+
+def _split_at_corners(
+    chain: Sequence[tuple[int, int]], *, span_px: int, angle_deg: float
+) -> list[list[tuple[int, int]]]:
+    """Cut a chain where it turns sharply: the direction over ``span_px``
+    pixels before a point against the direction over the same span after
+    it.  A zigzag traced as one chain is a row of strokes, one per arm,
+    and a draftsman draws them as such; cut, each arm is straight and
+    passes for the stroke it is, where the whole would have been thrown
+    away as a wanderer."""
+
+    if len(chain) < 2 * span_px + 3:
+        return [list(chain)]
+    points = np.asarray(chain, dtype=np.float64)
+    before = points[span_px:-span_px] - points[: -2 * span_px]
+    after = points[2 * span_px :] - points[span_px:-span_px]
+    dot = np.einsum("ij,ij->i", before, after)
+    norms = np.linalg.norm(before, axis=1) * np.linalg.norm(after, axis=1)
+    cosine = dot / np.maximum(norms, 1e-12)
+    turning = cosine < math.cos(math.radians(angle_deg))
+    pieces: list[list[tuple[int, int]]] = []
+    start = 0
+    index = 0
+    while index < turning.size:
+        if turning[index]:
+            # The sharpest point of this bend is the cut.
+            end = index
+            while end + 1 < turning.size and turning[end + 1]:
+                end += 1
+            corner = span_px + index + int(np.argmin(cosine[index : end + 1]))
+            if corner - start >= 2:
+                pieces.append(list(chain[start : corner + 1]))
+            start = corner
+            index = end + 1
+        else:
+            index += 1
+    if len(chain) - start >= 2:
+        pieces.append(list(chain[start:]))
+    return pieces or [list(chain)]
 
 
 def _is_open_stroke(chain: Sequence[tuple[int, int]], *, straightness_min: float) -> bool:
@@ -1445,6 +1496,14 @@ def extract_texture_lines(
         dv = np.zeros(valley.shape, dtype=np.float64)
         chains = _trace_chains(valley)
         straightness = int(detection["straightness_min_percent"]) / 100.0
+        # A zigzag is one chain to the tracer and a row of strokes to the
+        # eye: cut at the corners first, then ask each piece to be a stroke.
+        span = max(2, int(round(TEXTURE_LINES_CORNER_SPAN_MM * pixels_per_mm)))
+        chains = [
+            piece
+            for chain in chains
+            for piece in _split_at_corners(chain, span_px=span, angle_deg=TEXTURE_LINES_CORNER_ANGLE_DEG)
+        ]
         open_chains = [chain for chain in chains if _is_open_stroke(chain, straightness_min=straightness)]
         reading_qc["closed_or_wandering_chain_count"] = len(chains) - len(open_chains)
         chains = open_chains
