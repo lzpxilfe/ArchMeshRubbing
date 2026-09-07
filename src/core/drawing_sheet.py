@@ -465,6 +465,28 @@ DEFAULT_BREAK_REACH = REACH_AXIS
 #: A corner turning this much or more is drawn as a solid line; gentler
 #: bends are drawn broken, once, and twice under half of it.
 DEFAULT_BREAK_SOLID_MIN_DEG = 30
+#: What a corner's line is once the archaeologist has looked.  The rule
+#: (``break_solid_min_deg``) proposes solid, broken once or broken twice
+#: from the turn alone; ``break_styles`` overrides it corner by corner, or
+#: leaves a corner out.  Perfect automation is not the aim - the choice is,
+#: and the sidecar says which lines were the rule's and which were chosen.
+BREAK_STYLE_SOLID = "solid"
+BREAK_STYLE_BROKEN_ONCE = "broken_once"
+BREAK_STYLE_BROKEN_TWICE = "broken_twice"
+BREAK_STYLE_OMIT = "omit"
+BREAK_STYLES: tuple[str, ...] = (
+    BREAK_STYLE_SOLID,
+    BREAK_STYLE_BROKEN_ONCE,
+    BREAK_STYLE_BROKEN_TWICE,
+    BREAK_STYLE_OMIT,
+)
+BREAK_STYLE_GAPS: Mapping[str, int] = {
+    BREAK_STYLE_SOLID: 0,
+    BREAK_STYLE_BROKEN_ONCE: 1,
+    BREAK_STYLE_BROKEN_TWICE: 2,
+}
+BREAK_STYLE_SOURCE_RULE = "rule"
+BREAK_STYLE_SOURCE_CHOICE = "choice"
 
 #: Which side of the fold a mirrored figure's elevation takes.  The common
 #: convention puts the elevation on the left and the section on the right;
@@ -928,6 +950,19 @@ class DrawingSheetOptions:
     straight line at its height, from the silhouette in to the axis, as an
     inner line.
     """
+    break_styles: tuple[tuple[str, int, str], ...] = ()
+    """The archaeologist's word on single corners: ``(record id, corner
+    index, style)`` triples, the index counting the record's corners from
+    the bottom up as the payload lists them.
+
+    The rule draws a corner solid or broken from its turn alone; a hand
+    that has looked at the vessel may see it otherwise - a gentle bend
+    that plainly goes round, a real corner the drawing does not need.
+    ``solid``, ``broken_once`` and ``broken_twice`` set the line;
+    ``omit`` leaves that corner undrawn.  Every named record must be in
+    ``break_records`` and every index must exist, or the sheet refuses:
+    a choice that named nothing would be silently lost.
+    """
     groove_records: tuple[str, ...] = ()
     """Groove readings to draw on the figures, by record id.
 
@@ -1242,6 +1277,30 @@ class DrawingSheetOptions:
                 f"a sheet draws at most {MAX_DRAWING_SHEET_CONDITION_RECORDS} break records"
             )
         object.__setattr__(self, "break_records", break_records)
+        styles: list[tuple[str, int, str]] = []
+        for entry in self.break_styles:
+            if not isinstance(entry, (tuple, list)) or len(entry) != 3:
+                raise DrawingSheetError(
+                    "break_styles entries must be (break record id, corner index, style) triples"
+                )
+            record_id, index, style = entry
+            if not isinstance(record_id, str) or not record_id.strip():
+                raise DrawingSheetError("break_styles entries must name a break record")
+            record_id = record_id.strip()
+            if record_id not in break_records:
+                raise DrawingSheetError(
+                    f"break_styles names {record_id!r}, which is not in break_records"
+                )
+            if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+                raise DrawingSheetError("break_styles corner indices must be integers from 0")
+            if style not in BREAK_STYLES:
+                raise DrawingSheetError(f"break_styles styles must be one of {', '.join(BREAK_STYLES)}")
+            if any(other[0] == record_id and other[1] == index for other in styles):
+                raise DrawingSheetError(
+                    f"break_styles chooses corner {index} of {record_id!r} twice"
+                )
+            styles.append((record_id, index, style))
+        object.__setattr__(self, "break_styles", tuple(styles))
         if self.break_reach not in REACHES:
             raise DrawingSheetError(f"break_reach must be one of {', '.join(REACHES)}")
         solid = self.break_solid_min_deg
@@ -1335,6 +1394,11 @@ class DrawingSheetOptions:
                 f"title block; use a larger page, a smaller margin, or fewer "
                 "title block rows"
             )
+
+    def break_style_choices(self) -> dict[tuple[str, int], str]:
+        """``break_styles`` keyed by (record id, corner index)."""
+
+        return {(record_id, index): style for record_id, index, style in self.break_styles}
 
     @property
     def physical_scale(self) -> str:
@@ -2696,6 +2760,7 @@ def _break_paths_for_figure(
     has_section_half: bool,
     gap_mm: float = 0.0,
     solid_min_deg: int = 0,
+    styles: Mapping[tuple[str, int], str] | None = None,
 ) -> tuple[dict[str, list[Any]], dict[str, list[Any]], list[dict[str, str]], list[dict[str, str]]]:
     """Return the break lines that belong on one figure - on the figure
     itself and, for a mirrored figure, on its section half - with what was
@@ -2716,10 +2781,12 @@ def _break_paths_for_figure(
     ``gap_mm`` short of the wall's cut, never touching it; and a corner that
     really turns - a foot's edge, a groove - is a solid line, while a
     gentler bend, under ``solid_min_deg``, is drawn broken, once, and twice
-    under half of that.  Each line is drawn as two halves from the axis, so
+    under half of that - unless ``styles`` says otherwise for that corner,
+    or leaves it out.  Each line is drawn as two halves from the axis, so
     the breaks fall alike on either side of the fold.
     """
 
+    chosen = dict(styles or {})
     by_kind: dict[str, list[Any]] = {}
     interior_by_kind: dict[str, list[Any]] = {}
     drawn: list[dict[str, str]] = []
@@ -2751,7 +2818,7 @@ def _break_paths_for_figure(
             )
             continue
         paths: list[Any] = []
-        solid_count = broken_count = 0
+        solid_count = broken_count = omitted_count = chosen_count = 0
         for index, item in enumerate(payload.breaks):
             try:
                 chord = axis_profile_chord(
@@ -2764,8 +2831,15 @@ def _break_paths_for_figure(
             if chord is None:
                 paths = []
                 break
-            turn_deg = abs(float(item.turn_millidegrees)) / 1000.0
-            gaps = 0 if turn_deg >= solid_min_deg else (1 if turn_deg >= 0.5 * solid_min_deg else 2)
+            style, source = _break_line_style(
+                item.turn_millidegrees, solid_min_deg=solid_min_deg, chosen=chosen.get((record.id, index))
+            )
+            if source == BREAK_STYLE_SOURCE_CHOICE:
+                chosen_count += 1
+            if style == BREAK_STYLE_OMIT:
+                omitted_count += 1
+                continue
+            gaps = BREAK_STYLE_GAPS[style]
             if gaps:
                 broken_count += 1
             else:
@@ -2784,19 +2858,45 @@ def _break_paths_for_figure(
                         )
                     )
         if not paths:
+            if omitted_count == len(payload.breaks):
+                not_drawn.append(
+                    {"reason": "every_corner_omitted", "record_id": record.id, "surface": surface}
+                )
             continue
         target.setdefault(OUTLINE_HOLE, []).extend(paths)
         drawn.append(
             {
                 "break_count": str(len(payload.breaks)),
                 "broken_count": str(broken_count),
+                "chosen_count": str(chosen_count),
                 "half": half,
+                "omitted_count": str(omitted_count),
                 "record_id": record.id,
                 "solid_count": str(solid_count),
                 "surface": surface,
             }
         )
     return by_kind, interior_by_kind, drawn, not_drawn
+
+
+def _break_line_style(
+    turn_millidegrees: int, *, solid_min_deg: int, chosen: str | None
+) -> tuple[str, str]:
+    """What line a corner gets, and whose word it was.
+
+    The rule reads the turn alone: solid from ``solid_min_deg``, broken
+    once below it, twice below half of it.  A style the archaeologist
+    chose for this corner replaces the rule's, omission included.
+    """
+
+    if chosen is not None:
+        return chosen, BREAK_STYLE_SOURCE_CHOICE
+    turn_deg = abs(float(turn_millidegrees)) / 1000.0
+    if turn_deg >= solid_min_deg:
+        return BREAK_STYLE_SOLID, BREAK_STYLE_SOURCE_RULE
+    if turn_deg >= 0.5 * solid_min_deg:
+        return BREAK_STYLE_BROKEN_ONCE, BREAK_STYLE_SOURCE_RULE
+    return BREAK_STYLE_BROKEN_TWICE, BREAK_STYLE_SOURCE_RULE
 
 
 def _broken_line(
@@ -4609,6 +4709,14 @@ def compose_drawing_sheet(
         _require_drawable_break_record(document, record_id)
         for record_id in options.break_records
     ]
+    break_choices = options.break_style_choices()
+    corner_counts = {record.id: len(payload.breaks) for record, payload in breaks}
+    for record_id, index in break_choices:
+        if index >= corner_counts[record_id]:
+            raise DrawingSheetError(
+                f"break_styles names corner {index} of {record_id!r}, which has "
+                f"{corner_counts[record_id]} corners (0 to {corner_counts[record_id] - 1})"
+            )
     condition_drawn: list[dict[str, str]] = []
     technique_drawn: list[dict[str, Any]] = []
     technique_not_drawn: list[dict[str, str]] = []
@@ -4793,6 +4901,7 @@ def compose_drawing_sheet(
             has_section_half=section_record_id is not None,
             gap_mm=REACH_GAP_PAPER_MM * float(options.scale_denominator),
             solid_min_deg=options.break_solid_min_deg,
+            styles=break_choices,
         )
         for kind, break_paths in break_by_kind.items():
             by_kind.setdefault(kind, []).extend(break_paths)
@@ -5246,6 +5355,23 @@ def compose_drawing_sheet(
                         {
                             "break_count": len(payload.breaks),
                             "break_heights_um": [item.height_um for item in payload.breaks],
+                            "lines": [
+                                {
+                                    "height_um": item.height_um,
+                                    "index": index,
+                                    "source": source,
+                                    "style": style,
+                                    "turn_millidegrees": item.turn_millidegrees,
+                                }
+                                for index, item in enumerate(payload.breaks)
+                                for style, source in (
+                                    _break_line_style(
+                                        item.turn_millidegrees,
+                                        solid_min_deg=options.break_solid_min_deg,
+                                        chosen=break_choices.get((record.id, index)),
+                                    ),
+                                )
+                            ],
                             "payload_sha256": payload.sha256,
                             "recipe_hash": record.recipe_hash,
                             "record_id": record.id,

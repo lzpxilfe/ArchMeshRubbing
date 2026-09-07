@@ -223,9 +223,13 @@ def test_the_reading_is_a_record_that_reopens_and_draws_as_lines_round_the_pot(f
     assert sidecar["profile_breaks"]["records"][0]["surface"] == PROFILE_BREAK_SURFACE_OUTWARD
     assert sidecar["profile_breaks"]["drawn"] == [
         {
-            "break_count": "3", "broken_count": "0", "figure_record_id": "record:front", "half": "elevation",
-            "record_id": "record:breaks", "solid_count": "3", "surface": PROFILE_BREAK_SURFACE_OUTWARD,
+            "break_count": "3", "broken_count": "0", "chosen_count": "0", "figure_record_id": "record:front",
+            "half": "elevation", "omitted_count": "0", "record_id": "record:breaks", "solid_count": "3",
+            "surface": PROFILE_BREAK_SURFACE_OUTWARD,
         }
+    ]
+    assert [(line["index"], line["style"], line["source"]) for line in sidecar["profile_breaks"]["records"][0]["lines"]] == [
+        (0, "solid", "rule"), (1, "solid", "rule"), (2, "solid", "rule"),
     ]
     assert sidecar["profile_breaks"]["not_drawn"] == []
     # Without the option the sheet has no such block.
@@ -396,3 +400,65 @@ def test_the_inside_has_corners_too_and_they_show_through_the_cut(footed) -> Non
     assert len(inner) == 2 and all(abs((max(xs) - min(xs)) - (54.0 / 2.0 - 1.0)) < 0.6 for xs in inner), inner
     sidecar = json.loads(section.sidecar_bytes.decode("utf-8"))
     assert [entry["reason"] for entry in sidecar["profile_breaks"]["not_drawn"]] == ["exterior_needs_elevation"]
+
+
+def test_the_archaeologist_has_the_last_word_on_each_corner(footed) -> None:
+    """The rule proposes a corner's line from its turn; a hand that has
+    looked at the vessel may see it otherwise, and says so corner by
+    corner - solid, broken once or twice, or left out - and the sidecar
+    tells the rule's lines from the chosen ones.  A choice that names
+    nothing is refused rather than lost."""
+
+    outside = compute_artifact_profile_breaks(footed, angle_min_deg=25, span_um=2_000)
+    session = commit_profile_breaks(footed, outside, record_id="record:out", created_at=STAMP, operator="tester")
+    title = TitleBlock(artifact_label="굽 달린 시험 호")
+    page = SheetPage(size="A4", orientation="portrait")
+
+    def sheet(**kwargs):
+        return compose_drawing_sheet(
+            session.document, ["record:front"],
+            options=DrawingSheetOptions(
+                title_block=title, page=page, scale_denominator=2.0,
+                mirror_sections=(("record:front", "record:section"),), break_records=("record:out",), **kwargs,
+            ),
+        )
+
+    # All three corners turn past 30 degrees: solid by the rule.
+    by_rule = sheet()
+    root = ET.fromstring(by_rule.svg_bytes)
+    assert len(_line_xs(root, "profile-break:record:out:")) == 3
+    # The foot's edge broken twice, its root left out, the shoulder as the rule has it.
+    chosen = sheet(break_styles=(("record:out", 0, "broken_twice"), ("record:out", 1, "omit")))
+    validate_drawing_sheet_bytes(chosen.svg_bytes, chosen.sidecar_bytes)
+    root = ET.fromstring(chosen.svg_bytes)
+    assert len(_line_xs(root, "profile-break:record:out:000:")) == 3, "three pieces: broken twice"
+    assert _line_xs(root, "profile-break:record:out:001:") == [], "left out"
+    assert len(_line_xs(root, "profile-break:record:out:002:")) == 1, "solid, by the rule"
+    sidecar = json.loads(chosen.sidecar_bytes.decode("utf-8"))
+    drawn = sidecar["profile_breaks"]["drawn"][0]
+    assert (drawn["solid_count"], drawn["broken_count"], drawn["omitted_count"], drawn["chosen_count"]) == ("1", "1", "1", "2")
+    assert [(line["index"], line["style"], line["source"]) for line in sidecar["profile_breaks"]["records"][0]["lines"]] == [
+        (0, "broken_twice", "choice"), (1, "omit", "choice"), (2, "solid", "rule"),
+    ]
+    assert sidecar["profile_breaks"]["not_drawn"] == []
+    # The same choice, said with the same words, is the same sheet; no
+    # choice at all is the rule's sheet.
+    assert sheet(break_styles=(("record:out", 1, "omit"), ("record:out", 0, "broken_twice"))).svg_bytes == chosen.svg_bytes
+    assert sheet(break_styles=()).svg_bytes == by_rule.svg_bytes
+    # Every corner left out: the record is drawn nowhere, and the sidecar says why.
+    none = sheet(break_styles=tuple(("record:out", index, "omit") for index in range(3)))
+    assert _line_xs(ET.fromstring(none.svg_bytes), "profile-break:record:out:") == []
+    assert [entry["reason"] for entry in json.loads(none.sidecar_bytes.decode("utf-8"))["profile_breaks"]["not_drawn"]] == ["every_corner_omitted"]
+
+    with pytest.raises(DrawingSheetError, match="which has 3 corners"):
+        sheet(break_styles=(("record:out", 3, "solid"),))
+    with pytest.raises(DrawingSheetError, match="not in break_records"):
+        sheet(break_styles=(("record:in", 0, "solid"),))
+    with pytest.raises(DrawingSheetError, match="styles must be one of"):
+        sheet(break_styles=(("record:out", 0, "dotted"),))
+    with pytest.raises(DrawingSheetError, match="twice"):
+        sheet(break_styles=(("record:out", 0, "solid"), ("record:out", 0, "omit")))
+    with pytest.raises(DrawingSheetError, match="corner indices must be integers"):
+        sheet(break_styles=(("record:out", True, "solid"),))
+    with pytest.raises(DrawingSheetError, match="triples"):
+        sheet(break_styles=(("record:out", 0),))
