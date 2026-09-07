@@ -462,6 +462,13 @@ REACH_GAP_PAPER_MM = 1.0
 DEFAULT_OUTLINE_REACH = REACH_SECTION
 DEFAULT_BREAK_REACH = REACH_AXIS
 
+#: Which side of the fold a mirrored figure's elevation takes.  The common
+#: convention puts the elevation on the left and the section on the right;
+#: some institutions draw it the other way round, and a sheet says which.
+MIRROR_ELEVATION_LEFT = "left"
+MIRROR_ELEVATION_RIGHT = "right"
+MIRROR_ELEVATION_SIDES: tuple[str, ...] = (MIRROR_ELEVATION_LEFT, MIRROR_ELEVATION_RIGHT)
+
 
 @dataclass(frozen=True, slots=True)
 class Interpretation:
@@ -830,6 +837,13 @@ class DrawingSheetOptions:
     record the sheet is not drawing as a rubbing is refused rather than
     quietly dropped.
     """
+    mirror_elevation_side: str = MIRROR_ELEVATION_LEFT
+    """Which side of the fold the elevation takes on every mirrored figure:
+    ``left`` (the default: elevation left, section right) or ``right``.
+    Everything that belongs with a half follows it - the section's marks,
+    the steps the fold takes, a rubbing pasted on the axis, a cutout's
+    place - and the sidecar names the sides.
+    """
     outline_reach: str = DEFAULT_OUTLINE_REACH
     """How far the elevation outline's edges that cross the fold run on a
     mirrored figure.
@@ -1166,6 +1180,10 @@ class DrawingSheetOptions:
             raise DrawingSheetError(f"break_reach must be one of {', '.join(REACHES)}")
         if self.outline_reach not in REACHES:
             raise DrawingSheetError(f"outline_reach must be one of {', '.join(REACHES)}")
+        if self.mirror_elevation_side not in MIRROR_ELEVATION_SIDES:
+            raise DrawingSheetError(
+                f"mirror_elevation_side must be one of {', '.join(MIRROR_ELEVATION_SIDES)}"
+            )
         on_axis: list[tuple[str, str]] = []
         for pair in self.rubbings_on_axis:
             if not isinstance(pair, (tuple, list)) or len(pair) != 2:
@@ -1443,6 +1461,7 @@ class _Prepared:
     bounds: tuple[float, float, float, float]
     paths_by_kind: Mapping[str, list[Any]]
     mirror_section_record_id: str | None = None
+    mirror_elevation_side: str = MIRROR_ELEVATION_LEFT
     fill_only_ids: frozenset[str] = frozenset()
     raster: _RasterImage | None = None
     attached: _AttachedRaster | None = None
@@ -1462,6 +1481,7 @@ class _Figure:
     placement: Placement
     paths_by_kind: Mapping[str, list[Any]]
     mirror_section_record_id: str | None = None
+    mirror_elevation_side: str = MIRROR_ELEVATION_LEFT
     fill_only_ids: frozenset[str] = frozenset()
     raster: _RasterImage | None = None
     attached: _AttachedRaster | None = None
@@ -1540,6 +1560,7 @@ def _lay_out(
                 ),
                 paths_by_kind=prepared.paths_by_kind,
                 mirror_section_record_id=prepared.mirror_section_record_id,
+                mirror_elevation_side=prepared.mirror_elevation_side,
                 fill_only_ids=prepared.fill_only_ids,
                 raster=prepared.raster,
                 attached=prepared.attached,
@@ -1667,6 +1688,7 @@ def _lay_out_plan_with_sections(
             ),
             paths_by_kind=figure.paths_by_kind,
             mirror_section_record_id=figure.mirror_section_record_id,
+            mirror_elevation_side=figure.mirror_elevation_side,
             fill_only_ids=figure.fill_only_ids,
             raster=figure.raster,
             attached=figure.attached,
@@ -2787,12 +2809,14 @@ def _attach_rubbing_on_axis(
     elevation_payload: VectorGeometryPayload,
     fit: str,
     trim: str = RUBBING_ON_AXIS_TRIM_NONE,
+    elevation_side: str = MIRROR_ELEVATION_LEFT,
 ) -> _AttachedRaster:
     """Paste a strip rubbing flush against the elevation's centre line.
 
     The strip was taken along the meridian that faces the viewer, so it goes
-    where that meridian appears: on the elevation side of the axis, one edge
-    exactly on the line.  Vertically it sits at the height its bottom row was
+    where that meridian appears: on the elevation side of the axis (the left
+    unless a mirrored figure puts its elevation right), one edge exactly on
+    the line.  Vertically it sits at the height its bottom row was
     taken from, and it keeps its own paper size - the meridian arc - because a
     rubbing is paper and paper does not shrink to the axial height.  On a
     belly the strip is therefore a little taller than the elevation between
@@ -2899,7 +2923,10 @@ def _attach_rubbing_on_axis(
         band_heights = (bottom, bottom + height_mm)
     else:
         band_heights = tuple(base[1] + float(value) / 1000.0 for value in heights_um)
-    rectangle = (base[0] - width_mm, band_heights[0], base[0], band_heights[-1])
+    if elevation_side == MIRROR_ELEVATION_LEFT:
+        rectangle = (base[0] - width_mm, band_heights[0], base[0], band_heights[-1])
+    else:
+        rectangle = (base[0], band_heights[0], base[0] + width_mm, band_heights[-1])
     return _AttachedRaster(
         record_id=record.id,
         recipe_hash=record.recipe_hash,
@@ -2923,6 +2950,7 @@ def _pasted_cutouts(
     options: DrawingSheetOptions,
     fold: tuple[Sequence[float], Sequence[float]] | None,
     jogs: Sequence[tuple[float, float, float]],
+    elevation_side: str = MIRROR_ELEVATION_LEFT,
 ) -> tuple[list[_PastedCutout], tuple[float, float, float, float]]:
     """The cutouts pasted on one figure, and the figure's extent with them.
 
@@ -2985,14 +3013,16 @@ def _pasted_cutouts(
             if fold is not None:
                 base, direction = fold
                 corners = [(rectangle[0], rectangle[1]), (rectangle[2], rectangle[3])]
-                on_elevation = all(
-                    half_plane_side(corner, base=base, direction=direction) <= 1e-9 for corner in corners
-                )
+                # half_plane_side is negative on the left; ``toward_section``
+                # turns it into a distance into the section's side.
+                toward_section = 1.0 if elevation_side == MIRROR_ELEVATION_LEFT else -1.0
+                across = [
+                    toward_section * float(half_plane_side(corner, base=base, direction=direction))
+                    for corner in corners
+                ]
+                on_elevation = all(value <= 1e-9 for value in across)
                 along = [
                     float((x - base[0]) * direction[0] + (y - base[1]) * direction[1]) for x, y in corners
-                ]
-                across = [
-                    float(half_plane_side(corner, base=base, direction=direction)) for corner in corners
                 ]
                 in_step = any(
                     min(along) >= along_from - 1e-9
@@ -3409,12 +3439,15 @@ def _jog_lines(
     # half_plane_side is negative on the left of an oriented line, so each
     # line runs with the inside on its left: down the axis (the inside is
     # across, to the right of up), up the far edge, across along the low
-    # edge and back along the high edge.
+    # edge and back along the high edge.  When ``across`` lies to the left
+    # of ``direction`` instead (the section on the left), every line runs
+    # the other way so the inside stays on its left.
+    handed = -1.0 if (-dy * ax + dx * ay) > 0.0 else 1.0
     return [
-        (low, (-dx, -dy)),
-        (far, (dx, dy)),
-        (low, (ax, ay)),
-        (high, (-ax, -ay)),
+        (low, (-dx * handed, -dy * handed)),
+        (far, (dx * handed, dy * handed)),
+        (low, (ax * handed, ay * handed)),
+        (high, (-ax * handed, -ay * handed)),
     ]
 
 
@@ -3433,6 +3466,7 @@ def _mirrored_figure(
     outline_reach: str = REACH_AXIS,
     break_reach: str = REACH_AXIS,
     reach_gap_mm: float = 0.0,
+    elevation_side: str = MIRROR_ELEVATION_LEFT,
 ) -> tuple[
     DerivedRecord,
     dict[str, list[Any]],
@@ -3507,8 +3541,13 @@ def _mirrored_figure(
     # Where the fold steps round a motif, the section is cut back: its open
     # marks inside the step are left out, and a cut face that reaches into
     # the step is refused - the drawing would hide part of the wall's cut.
+    # ``across`` points from the fold into the section's side: the positive
+    # side of the fold line when the elevation is left, the negative when
+    # it is right.  Everything that reaches into the section's side - the
+    # steps, the lines running on past the fold - is measured along it.
+    elevation_left = elevation_side == MIRROR_ELEVATION_LEFT
     across = (float(direction[1]), -float(direction[0]))
-    if half_plane_side((base[0] + across[0], base[1] + across[1]), base=base, direction=direction) < 0.0:
+    if (half_plane_side((base[0] + across[0], base[1] + across[1]), base=base, direction=direction) < 0.0) == elevation_left:
         across = (-across[0], -across[1])
     # Lines of the elevation that cross the fold may run on past it: across
     # the section's side to a gap short of the first section line they
@@ -3561,13 +3600,14 @@ def _mirrored_figure(
                     )
         section_by_kind = cut_back
 
+    elevation_prefix, section_prefix = ("mirror:left:", "mirror:right:") if elevation_left else ("mirror:right:", "mirror:left:")
     left, left_fill_only = _clipped_half(
         elevation_by_kind,
         preset=preset,
         base=base,
         direction=direction,
-        keep_negative=True,
-        id_prefix="mirror:left:",
+        keep_negative=elevation_left,
+        id_prefix=elevation_prefix,
         half_name="elevation",
     )
     right, right_fill_only = _clipped_half(
@@ -3575,8 +3615,8 @@ def _mirrored_figure(
         preset=preset,
         base=base,
         direction=direction,
-        keep_negative=False,
-        id_prefix="mirror:right:",
+        keep_negative=not elevation_left,
+        id_prefix=section_prefix,
         half_name="section",
     )
     if not left:
@@ -4044,6 +4084,7 @@ def _render_sheet(
             else (
                 " data-mirror-section-record-id="
                 f'"{xml_attribute(figure.mirror_section_record_id)}"'
+                f' data-mirror-elevation-side="{figure.mirror_elevation_side}"'
             )
         )
         lines.append(
@@ -4495,6 +4536,9 @@ def compose_drawing_sheet(
                 elevation_payload=payload,
                 fit=options.rubbing_on_axis_fit,
                 trim=options.rubbing_on_axis_trim,
+                elevation_side=(
+                    options.mirror_elevation_side if section_record_id is not None else MIRROR_ELEVATION_LEFT
+                ),
             )
             # A strip on the axis is by construction a developed rubbing.
             attached_note = rubbing_notes.get(attached.record_id)
@@ -4578,6 +4622,7 @@ def compose_drawing_sheet(
             outline_reach=options.outline_reach,
             break_reach=options.break_reach,
             reach_gap_mm=REACH_GAP_PAPER_MM * float(options.scale_denominator),
+            elevation_side=options.mirror_elevation_side,
             line_smoothing_mm=line_smoothing,
             jogs=[
                 (along_from, along_to, reach)
@@ -4588,7 +4633,7 @@ def compose_drawing_sheet(
         mirrored.append(
             {
                 "elevation_record_id": record.id,
-                "elevation_side": "left",
+                "elevation_side": options.mirror_elevation_side,
                 **(
                     {
                         "jogs_um": ";".join(
@@ -4613,7 +4658,11 @@ def compose_drawing_sheet(
                 "reach_gap_paper_mm": str(REACH_GAP_PAPER_MM),
                 "section_record_id": section.id,
                 "section_recipe_hash": section.recipe_hash,
-                "section_side": "right",
+                "section_side": (
+                    MIRROR_ELEVATION_RIGHT
+                    if options.mirror_elevation_side == MIRROR_ELEVATION_LEFT
+                    else MIRROR_ELEVATION_LEFT
+                ),
             }
         )
         try:
@@ -4648,6 +4697,7 @@ def compose_drawing_sheet(
                 for jog_record_id, along_from, along_to, reach in options.mirror_jogs
                 if jog_record_id == record.id
             ],
+            elevation_side=options.mirror_elevation_side,
         )
         cutout_drawn.extend(
             {
@@ -4676,6 +4726,7 @@ def compose_drawing_sheet(
                 ),
                 paths_by_kind=combined,
                 mirror_section_record_id=section.id,
+                mirror_elevation_side=options.mirror_elevation_side,
                 fill_only_ids=frozenset(fill_only_ids),
                 attached=attached,
                 caption=caption,

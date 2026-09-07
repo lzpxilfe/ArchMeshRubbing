@@ -1002,3 +1002,45 @@ def test_a_step_through_the_walls_cut_is_refused_and_a_bad_step_is_refused_first
         )
     with pytest.raises(DrawingSheetError, match="not the elevation half"):
         _options(mirror_jogs=((ELEVATION_ID, 1.0, 2.0, 3.0),))
+
+
+def test_the_elevation_may_take_the_right_and_the_section_the_left() -> None:
+    """Some institutions draw the halves the other way round.  Asked for
+    the elevation on the right, the outline's chains lie right of the axis
+    and the section's left, the ids and the sidecar say which side is
+    which, and a step the fold takes reaches into the section's side -
+    now the left - with the elevation drawn whole inside it."""
+
+    bundle = _mirrored_sheet(mirror_elevation_side="right")
+    validate_drawing_sheet_bytes(bundle.svg_bytes, bundle.sidecar_bytes)
+    figure = _figure(bundle.svg_bytes)
+    assert figure.attrib["data-mirror-elevation-side"] == "right"
+    axis_x = _axis_x(figure)
+    outline = list(_find(figure, f"{SVG_NS}g[@id='layer-outline-visible']"))
+    section = list(_find(figure, f"{SVG_NS}g[@id='layer-section-cut']"))
+    assert outline and section
+    assert all(path.attrib["id"].startswith("mirror:right:") for path in outline)
+    assert all(path.attrib["id"].startswith("mirror:left:") for path in section)
+    assert min(x for path in outline for x, _y in _points(path)) == pytest.approx(axis_x, abs=1e-9)
+    assert max(x for path in section for x, _y in _points(path)) == pytest.approx(axis_x, abs=1e-9)
+    sidecar = json.loads(bundle.sidecar_bytes.decode("utf-8"))
+    entry = sidecar["mirrored_figures"][0]
+    assert (entry["elevation_side"], entry["section_side"]) == ("right", "left")
+
+    rim = _rim_v()
+    stepped = _mirrored_sheet(mirror_elevation_side="right", mirror_jogs=((ELEVATION_ID, rim - 6.0, rim + 2.0, 8.0),))
+    validate_drawing_sheet_bytes(stepped.svg_bytes, stepped.sidecar_bytes)
+    figure = _figure(stepped.svg_bytes)
+    axis_x = _axis_x(figure)
+    inside = [
+        path
+        for path in _find(figure, f"{SVG_NS}g[@id='layer-outline-visible']")
+        if path.attrib.get("id", "").startswith("mirror:jog00:")
+    ]
+    assert inside, "the elevation inside the step was not drawn"
+    xs = [x for path in inside for x, _y in _points(path)]
+    assert max(xs) <= axis_x + 1e-6 and min(xs) < axis_x - 1.0, "the step reaches into the left, the section's side"
+    axis = _points(_find(figure, f"{SVG_NS}g[@id='layer-center-axis']/{SVG_NS}path"))
+    assert min(x for x, _y in axis) < axis_x - 1.0 and max(x for x, _y in axis) == pytest.approx(axis_x, abs=1e-6)
+    with pytest.raises(DrawingSheetError, match="mirror_elevation_side must be"):
+        _options(mirror_elevation_side="top")
