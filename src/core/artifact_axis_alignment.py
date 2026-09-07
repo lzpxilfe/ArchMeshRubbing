@@ -50,6 +50,17 @@ from .artifact_surface_measurement import (
 AXIS_ALIGN_RECIPE_KIND = "rotation_axis_from_circle_records/v1"
 AXIS_ALIGN_CONVENTION = "delta @ parent"
 
+#: Where the axis's direction comes from.  A tall vessel's two circles are
+#: far enough apart that the line between their centres is the axis.  A flat
+#: artifact - a dish, a lid, a plate - has its circles a few millimetres
+#: apart and a hand's breadth wide: the line between the centres is
+#: dominated by their fit error, but the planes of the circles are fixed all
+#: the better by their width, so the axis is their common normal.  A recipe
+#: without the key is a centre-line recipe from before the choice existed.
+AXIS_SOURCE_CENTER_LINE = "center_line/v1"
+AXIS_SOURCE_CIRCLE_NORMALS = "circle_plane_normals/v1"
+AXIS_SOURCES = (AXIS_SOURCE_CENTER_LINE, AXIS_SOURCE_CIRCLE_NORMALS)
+
 # The canonical axis a positioned artifact stands on.
 CANONICAL_AXIS = (0.0, 0.0, 1.0)
 
@@ -180,7 +191,34 @@ def axis_align_delta_from_recipe(recipe: Mapping[str, Any]) -> np.ndarray:
         raise ArtifactAxisAlignmentError(
             "axis align recipe centres coincide, so it names no axis"
         )
-    return _delta_from_axis(separation, bottom_center)
+    source = recipe.get("axis_source", AXIS_SOURCE_CENTER_LINE)
+    if source not in AXIS_SOURCES:
+        raise ArtifactAxisAlignmentError(
+            f"axis align recipe axis_source must be one of {', '.join(AXIS_SOURCES)}"
+        )
+    if source == AXIS_SOURCE_CENTER_LINE:
+        return _delta_from_axis(separation, bottom_center)
+    top_normal = _decimal_vector(
+        recipe.get("top_normal_unit_decimal"), field_name="recipe.top_normal_unit_decimal"
+    )
+    bottom_normal = _decimal_vector(
+        recipe.get("bottom_normal_unit_decimal"), field_name="recipe.bottom_normal_unit_decimal"
+    )
+    return _delta_from_axis(_common_normal(top_normal, bottom_normal, separation), bottom_center)
+
+
+def _common_normal(top_normal: np.ndarray, bottom_normal: np.ndarray, upward: np.ndarray) -> np.ndarray:
+    """The two circles' common normal, pointing the way ``upward`` does.
+
+    Each fit canonicalises its normal's sign on its own, so the bottom's is
+    first turned to the top's side; the mean of the two is the axis, and
+    its sign is settled by the line from the lower centre to the upper."""
+
+    aligned_bottom = bottom_normal if float(np.dot(top_normal, bottom_normal)) >= 0.0 else -bottom_normal
+    axis = _unit(top_normal + aligned_bottom, field_name="common normal")
+    if float(np.dot(axis, upward)) < 0.0:
+        axis = -axis
+    return axis
 
 
 def _quantized(value: float) -> float:
@@ -246,32 +284,47 @@ def build_axis_alignment(
     separation_vector = top_center - bottom_center
     separation = float(np.linalg.norm(separation_vector))
     largest_radius = max(top_radius, bottom_radius)
-    if separation < MINIMUM_CENTER_SEPARATION_MM or (
-        largest_radius > 0.0
-        and separation < largest_radius * MINIMUM_SEPARATION_TO_RADIUS_RATIO
-    ):
+    if separation < MINIMUM_CENTER_SEPARATION_MM:
         raise ArtifactAxisAlignmentError(
             f"the two circle centres are {separation:.3f} mm apart, which is too "
-            f"close to fix an axis (needs at least "
-            f"{MINIMUM_CENTER_SEPARATION_MM:.3f} mm and at least "
-            f"{MINIMUM_SEPARATION_TO_RADIUS_RATIO:.0%} of the {largest_radius:.3f} mm "
-            "radius). Measure circles further apart, such as the rim and the base."
+            f"close to tell which way is up (needs at least "
+            f"{MINIMUM_CENTER_SEPARATION_MM:.3f} mm). Measure circles further "
+            "apart, such as the rim and the base."
         )
-
-    axis = _unit(separation_vector, field_name="axis")
     normal_disagreement = _undirected_angle_deg(top_normal, bottom_normal)
-    top_axis_disagreement = _undirected_angle_deg(top_normal, axis)
-    bottom_axis_disagreement = _undirected_angle_deg(bottom_normal, axis)
-    worst = max(normal_disagreement, top_axis_disagreement, bottom_axis_disagreement)
-    if worst > MAXIMUM_NORMAL_DISAGREEMENT_DEG:
+    if normal_disagreement > MAXIMUM_NORMAL_DISAGREEMENT_DEG:
         raise ArtifactAxisAlignmentError(
-            f"the two circles are not coaxial: their planes and the line joining "
-            f"their centres disagree by up to {worst:.2f}°, over the "
-            f"{MAXIMUM_NORMAL_DISAGREEMENT_DEG:.2f}° limit. The line between these "
-            "centres is not the rotation axis."
+            f"the two circles are not coaxial: their planes disagree by "
+            f"{normal_disagreement:.2f}°, over the {MAXIMUM_NORMAL_DISAGREEMENT_DEG:.2f}° "
+            "limit. These are not two circles about one axis."
         )
+    center_line = _unit(separation_vector, field_name="axis")
+    center_line_disagreement = max(
+        _undirected_angle_deg(top_normal, center_line),
+        _undirected_angle_deg(bottom_normal, center_line),
+    )
+    # Far enough apart for their shape, the centres fix the axis and the
+    # planes must agree with it.  Closer than that - a flat artifact - the
+    # line between the centres is mostly fit error, and the axis is the
+    # circles' common normal, which their width fixes all the better.
+    if largest_radius > 0.0 and separation < largest_radius * MINIMUM_SEPARATION_TO_RADIUS_RATIO:
+        source = AXIS_SOURCE_CIRCLE_NORMALS
+        axis = _common_normal(top_normal, bottom_normal, separation_vector)
+        worst = normal_disagreement
+    else:
+        source = AXIS_SOURCE_CENTER_LINE
+        axis = center_line
+        worst = max(normal_disagreement, center_line_disagreement)
+        if worst > MAXIMUM_NORMAL_DISAGREEMENT_DEG:
+            raise ArtifactAxisAlignmentError(
+                f"the two circles are not coaxial: their planes and the line joining "
+                f"their centres disagree by up to {worst:.2f}°, over the "
+                f"{MAXIMUM_NORMAL_DISAGREEMENT_DEG:.2f}° limit. The line between these "
+                "centres is not the rotation axis."
+            )
 
     recipe = {
+        "axis_source": source,
         "bottom_center_mm_decimal": bottom_center_decimal,
         "bottom_normal_unit_decimal": bottom_normal_decimal,
         "bottom_record_id": bottom_id,
@@ -285,9 +338,11 @@ def build_axis_alignment(
     matrix = compose_align_matrices(delta, parent.matrix)
 
     qc = {
+        "axis_source": source,
         "axis_tilt_corrected_deg": _quantized(
             _angle_between_deg(axis, np.asarray(CANONICAL_AXIS))
         ),
+        "center_line_disagreement_deg": _quantized(center_line_disagreement),
         "center_separation_mm": _quantized(separation),
         "circle_normal_disagreement_deg": _quantized(worst),
         "proper_rigid": True,
@@ -320,6 +375,9 @@ def verify_axis_alignment_matrix(
 __all__ = [
     "AXIS_ALIGN_CONVENTION",
     "AXIS_ALIGN_RECIPE_KIND",
+    "AXIS_SOURCES",
+    "AXIS_SOURCE_CENTER_LINE",
+    "AXIS_SOURCE_CIRCLE_NORMALS",
     "ArtifactAxisAlignmentError",
     "CANONICAL_AXIS",
     "MAXIMUM_NORMAL_DISAGREEMENT_DEG",

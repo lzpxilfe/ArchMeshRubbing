@@ -35,6 +35,7 @@ from .alignment_utils import (
 )
 from .artifact_axis_alignment import (
     AXIS_ALIGN_RECIPE_KIND,
+    AXIS_SOURCES,
     ArtifactAxisAlignmentError,
     verify_axis_alignment_matrix,
 )
@@ -173,6 +174,10 @@ _AXIS_ALIGN_RECIPE_KEYS = frozenset(
         "top_record_id",
     }
 )
+# Added after the first axis recipes were written: a recipe without it is a
+# centre-line recipe, so the key is optional on the way in and kept on the
+# way out.
+_AXIS_ALIGN_RECIPE_OPTIONAL_KEYS = frozenset({"axis_source"})
 _MANUAL_ALIGN_RECIPE_KIND = "manual_scene_trs_delta"
 _NON_ROOT_ALIGN_RECIPE_KINDS = frozenset(
     {_MANUAL_ALIGN_RECIPE_KIND, AXIS_ALIGN_RECIPE_KIND}
@@ -181,9 +186,11 @@ _NON_ROOT_ALIGN_RECIPE_KINDS = frozenset(
 # filters against this before validation, so a key missing here is dropped in
 # silence rather than rejected: the recipe would then fail its own exact-key
 # check with a confusing "missing field" instead of an unsupported-kind error.
-_PUBLIC_ALIGN_RECIPE_KEYS = frozenset(
-    {"convention", "kind", "pivot_mm", "rotation_deg", "translation_mm"}
-) | _AXIS_ALIGN_RECIPE_KEYS
+_PUBLIC_ALIGN_RECIPE_KEYS = (
+    frozenset({"convention", "kind", "pivot_mm", "rotation_deg", "translation_mm"})
+    | _AXIS_ALIGN_RECIPE_KEYS
+    | _AXIS_ALIGN_RECIPE_OPTIONAL_KEYS
+)
 # Likewise for QC.  A computed alignment records what made it believable, and
 # that evidence has to survive into the package rather than being filtered out
 # on the way.
@@ -195,7 +202,8 @@ _AXIS_ALIGN_QC_KEYS = frozenset(
         "proper_rigid",
     }
 )
-_PUBLIC_ALIGN_QC_KEYS = frozenset({"proper_rigid", "rigid"}) | _AXIS_ALIGN_QC_KEYS
+_AXIS_ALIGN_QC_OPTIONAL_KEYS = frozenset({"axis_source", "center_line_disagreement_deg"})
+_PUBLIC_ALIGN_QC_KEYS = frozenset({"proper_rigid", "rigid"}) | _AXIS_ALIGN_QC_KEYS | _AXIS_ALIGN_QC_OPTIONAL_KEYS
 _PUBLIC_GEOMETRY_RECIPE_KEYS = frozenset(
     {
         "dependency_policy",
@@ -364,12 +372,16 @@ def _exact_keys(
     expected: AbstractSet[str],
     *,
     model_name: str,
+    optional: AbstractSet[str] = frozenset(),
 ) -> Mapping[str, Any]:
+    """Require exactly ``expected``; ``optional`` names keys a later release
+    added, which may be present or absent but nothing else may be."""
+
     if not isinstance(value, Mapping):
         raise ArtifactVectorExportError(f"{model_name} must be an object")
     observed = set(value)
     missing = sorted(expected - observed)
-    unknown = sorted(observed - expected)
+    unknown = sorted(observed - expected - optional)
     if missing:
         raise ArtifactVectorExportError(
             f"{model_name} is missing fields: {', '.join(missing)}"
@@ -2030,6 +2042,7 @@ def _validate_current_vector_provenance(
                     recipe_value,
                     _AXIS_ALIGN_RECIPE_KEYS,
                     model_name=f"{model_name}.recipe",
+                    optional=_AXIS_ALIGN_RECIPE_OPTIONAL_KEYS,
                 )
                 try:
                     verify_axis_alignment_matrix(
@@ -2319,15 +2332,22 @@ def _validate_align_qc(
         if recipe_kind == AXIS_ALIGN_RECIPE_KIND
         else frozenset({"proper_rigid"})
     )
-    qc = _exact_keys(value, expected, model_name=model_name)
+    optional = _AXIS_ALIGN_QC_OPTIONAL_KEYS if recipe_kind == AXIS_ALIGN_RECIPE_KIND else frozenset()
+    qc = _exact_keys(value, expected, model_name=model_name, optional=optional)
     if qc["proper_rigid"] is not True:
         raise ArtifactVectorExportError(f"{model_name}.proper_rigid must be true")
     if recipe_kind != AXIS_ALIGN_RECIPE_KIND:
         return
-    for key in ("axis_tilt_corrected_deg", "circle_normal_disagreement_deg"):
+    for key in ("axis_tilt_corrected_deg", "circle_normal_disagreement_deg", "center_line_disagreement_deg"):
+        if key not in qc:
+            continue
         angle = _finite_number(qc[key], field_name=f"{model_name}.{key}", minimum=0.0)
         if angle > 180.0:
             raise ArtifactVectorExportError(f"{model_name}.{key} must be at most 180")
+    if "axis_source" in qc and qc["axis_source"] not in AXIS_SOURCES:
+        raise ArtifactVectorExportError(
+            f"{model_name}.axis_source must be one of {', '.join(AXIS_SOURCES)}"
+        )
     _finite_number(
         qc["center_separation_mm"],
         field_name=f"{model_name}.center_separation_mm",

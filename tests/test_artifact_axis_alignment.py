@@ -363,12 +363,69 @@ def test_circles_too_close_together_cannot_fix_an_axis() -> None:
         record_id=TOP_ID, created_at="2026-09-03T00:00:02Z",
     )
 
-    with pytest.raises(ArtifactSessionError, match="too\\s+close to fix an axis"):
+    with pytest.raises(ArtifactSessionError, match="too\\s+close to tell which way is up"):
         session.commit_axis_alignment(
             top_record_id=TOP_ID,
             bottom_record_id=BOTTOM_ID,
             operator="tester",
         )
+
+
+def _dish(tilt_deg: float, *, height_mm: float, bottom_radius: float, top_radius: float):
+    """A flat artifact's stand-in: a foot ring and a wide rim a few
+    millimetres above it, about one tilted axis."""
+
+    axis = _tilted_axis(tilt_deg)
+    bottom_center = np.zeros(3, dtype=np.float64)
+    top_center = bottom_center + height_mm * axis
+    bottom_triangle, bottom_points = _circle_geometry(bottom_center, bottom_radius, axis)
+    top_triangle, top_points = _circle_geometry(top_center, top_radius, axis)
+    vertices = np.vstack([bottom_triangle, top_triangle])
+    faces = np.asarray([[0, 1, 2], [3, 4, 5]], dtype=np.int32)
+    return vertices, faces, bottom_points, top_points
+
+
+def test_a_flat_artifact_stands_on_its_circles_common_normal() -> None:
+    """A dish's foot and rim are a hand's breadth wide and a few millimetres
+    apart: the line between their centres is mostly fit error, but the
+    planes of two such circles fix the axis all the better.  Closer than a
+    quarter of the radius the axis is the circles' common normal, the
+    recipe says so, and the recomputation is exact; a doctored source is
+    refused."""
+
+    vertices, faces, bottom_points, top_points = _dish(10.0, height_mm=12.0, bottom_radius=45.0, top_radius=76.0)
+    session = _session(vertices, faces)
+    session = _commit_circle(session, vertices, faces, bottom_points, record_id=BOTTOM_ID, created_at="2026-09-03T00:00:01Z")
+    session = _commit_circle(session, vertices, faces, top_points, record_id=TOP_ID, created_at="2026-09-03T00:00:02Z")
+    aligned = session.commit_axis_alignment(
+        top_record_id=TOP_ID, bottom_record_id=BOTTOM_ID, operator="tester",
+        created_at="2026-09-03T00:00:03Z", revision_id="align:axis",
+    )
+    revision = aligned.document.align_revision_index["align:axis"]
+    assert revision.recipe["axis_source"] == "circle_plane_normals/v1"
+    rotated = revision.matrix[:3, :3] @ _tilted_axis(10.0)
+    assert _angle_to_canonical_axis_deg(rotated) < 0.01
+    origin = revision.matrix @ np.asarray([0.0, 0.0, 0.0, 1.0])
+    np.testing.assert_allclose(origin[:3], [0.0, 0.0, 0.0], rtol=0.0, atol=1e-9)
+    qc = revision.qc
+    assert qc["axis_source"] == "circle_plane_normals/v1"
+    assert qc["center_separation_mm"] == pytest.approx(12.0, abs=0.01)
+    assert qc["circle_normal_disagreement_deg"] < 0.1 and qc["center_line_disagreement_deg"] < 1.0
+    # The derivation is the recipe's alone, and exact.
+    first = axis_align_delta_from_recipe(revision.recipe)
+    assert np.array_equal(first, axis_align_delta_from_recipe(revision.recipe))
+    doctored = dict(revision.recipe)
+    doctored["axis_source"] = "eyeballed/v1"
+    with pytest.raises(ArtifactAxisAlignmentError, match="axis_source must be one of"):
+        axis_align_delta_from_recipe(doctored)
+    # A recipe from before the choice existed is a centre-line recipe.
+    older = {key: value for key, value in revision.recipe.items() if key != "axis_source"}
+    assert not np.array_equal(axis_align_delta_from_recipe(older), first)
+    # A tall vessel still takes the line between its centres.
+    tall = _measured_pot(tilt_deg=10.0).commit_axis_alignment(
+        top_record_id=TOP_ID, bottom_record_id=BOTTOM_ID, operator="tester", revision_id="align:axis",
+    )
+    assert tall.document.align_revision_index["align:axis"].recipe["axis_source"] == "center_line/v1"
 
 
 def test_a_circle_measured_under_another_align_is_refused() -> None:
