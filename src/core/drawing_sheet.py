@@ -482,6 +482,16 @@ CENTER_AXIS_STYLE_DASH_DOT = "dash_dot"
 CENTER_AXIS_STYLES: tuple[str, ...] = (CENTER_AXIS_STYLE_SOLID, CENTER_AXIS_STYLE_DASH_DOT)
 CENTER_AXIS_SOLID_WIDTH_MM = 0.25
 
+#: How a stroke ends.  ``round`` caps read softly and close the joins of a
+#: polyline; but where a heavy line meets a fine one end-on, the heavy
+#: line's round cap stands out past the fine line's edge like a burr, and
+#: a drafter may prefer ``butt`` (cut square at the point) or ``square``
+#: (extended by half its weight).
+LINE_CAP_ROUND = "round"
+LINE_CAP_BUTT = "butt"
+LINE_CAP_SQUARE = "square"
+LINE_CAPS: tuple[str, ...] = (LINE_CAP_ROUND, LINE_CAP_BUTT, LINE_CAP_SQUARE)
+
 
 @dataclass(frozen=True, slots=True)
 class Interpretation:
@@ -871,6 +881,11 @@ class DrawingSheetOptions:
     choice overrides that one kind on the sheet and leaves the preset as
     it is; the sidecar's ``center_axis`` block records it.
     """
+    line_cap: str = LINE_CAP_ROUND
+    """How every stroke on the sheet ends: ``round`` (the default, as
+    before), ``butt`` (cut square at the endpoint, so a heavy line never
+    stands past a fine one it meets) or ``square``.  Joins stay round.
+    """
     mirror_elevation_side: str = MIRROR_ELEVATION_LEFT
     """Which side of the fold the elevation takes on every mirrored figure:
     ``left`` (the default: elevation left, section right) or ``right``.
@@ -1240,6 +1255,8 @@ class DrawingSheetOptions:
             )
         if self.center_axis_style not in CENTER_AXIS_STYLES:
             raise DrawingSheetError(f"center_axis_style must be one of {', '.join(CENTER_AXIS_STYLES)}")
+        if self.line_cap not in LINE_CAPS:
+            raise DrawingSheetError(f"line_cap must be one of {', '.join(LINE_CAPS)}")
         on_axis: list[tuple[str, str]] = []
         for pair in self.rubbings_on_axis:
             if not isinstance(pair, (tuple, list)) or len(pair) != 2:
@@ -4099,6 +4116,7 @@ def _sheet_provenance(
         "center_axis": dict(center_axis),
         "document_id": document.document_id,
         "document_manifest_sha256": document.canonical_sha256,
+        "line_cap": options.line_cap,
         "figures": [
             {
                 "height_mm": figure.placement.height_mm,
@@ -4325,7 +4343,7 @@ def _render_sheet(
     lines.append(
         '  <g id="sheet-figures" fill="none" '
         f'stroke="{options.stroke_color}" '
-        'stroke-linecap="round" stroke-linejoin="round">'
+        f'stroke-linecap="{options.line_cap}" stroke-linejoin="round">'
     )
     for index, figure in enumerate(placed):
         mirror_attribute = (

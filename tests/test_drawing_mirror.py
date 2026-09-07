@@ -1122,3 +1122,20 @@ def test_the_centre_line_is_a_solid_heavier_line_by_default_and_dash_dot_by_choi
     assert outline_default == outline_dashed
     with pytest.raises(DrawingSheetError, match="center_axis_style must be"):
         _options(center_axis_style="double")
+
+
+def test_the_line_cap_is_the_drafters_choice() -> None:
+    """Strokes end round by default, as they always did; asked for butt or
+    square caps the sheet says so on its root, the sidecar records it, and
+    anything else is refused."""
+
+    for cap in ("round", "butt", "square"):
+        bundle = _mirrored_sheet(line_cap=cap)
+        validate_drawing_sheet_bytes(bundle.svg_bytes, bundle.sidecar_bytes)
+        root = ET.fromstring(bundle.svg_bytes)
+        group = next(el for el in root.iter(f"{SVG_NS}g") if "stroke-linecap" in el.attrib)
+        assert group.attrib["stroke-linecap"] == cap and group.attrib["stroke-linejoin"] == "round"
+        assert json.loads(bundle.sidecar_bytes.decode("utf-8"))["line_cap"] == cap
+    assert _mirrored_sheet().svg_bytes == _mirrored_sheet(line_cap="round").svg_bytes
+    with pytest.raises(DrawingSheetError, match="line_cap must be"):
+        _options(line_cap="arrow")
