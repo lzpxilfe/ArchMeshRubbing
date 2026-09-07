@@ -288,7 +288,7 @@ def test_the_inside_has_corners_too_and_they_show_through_the_cut(footed) -> Non
     inner = _line_xs(root, "profile-break:record:in:")
     assert len(outer) == 3 and len(inner) == 1
     for xs in outer:
-        assert max(xs) <= axis_x + 1e-6, "the outside's corners stay on the elevation's half"
+        assert max(xs) <= axis_x + 1e-6, "the outside's corners stop at the fold by default"
     xs = inner[0]
     assert min(xs) >= axis_x - 1e-6, "the inside's corner starts at the axis"
     assert abs((max(xs) - min(xs)) - 54.0 / 2.0) < 1.0, "and reaches the inner wall"
@@ -297,6 +297,41 @@ def test_the_inside_has_corners_too_and_they_show_through_the_cut(footed) -> Non
         ("record:in", "section"), ("record:out", "elevation"),
     ]
     assert sidecar["profile_breaks"]["not_drawn"] == []
+    assert sidecar["profile_breaks"]["reach"] == "axis" and sidecar["profile_breaks"]["reach_gap_paper_mm"] == 1.0
+    # The outline's rim edge, though, runs on past the fold in the outline's
+    # weight: across the cavity to a paper millimetre short of the inner wall
+    # at the rim (42 mm at 1:2, less the gap); the base's edge lies under the
+    # solid foot and stops at the fold.
+    past = [xs for xs in _line_xs(root, ":past-axis:") if True]
+    assert len(past) == 1 and min(past[0]) >= axis_x - 1e-6, past
+    assert abs((max(past[0]) - axis_x) - (42.0 / 2.0 - 1.0)) < 1.0, past
+    figure = sidecar["mirrored_figures"][0]
+    assert figure["outline_reach"] == "section" and figure["outline_past_axis_count"] == "1"
+
+    # Asked, the outside's corner lines run on too: the shoulder's across
+    # the cavity to the inner wall (54 mm, less the gap); the foot's two lie
+    # where the section is solid and stop at the fold.  Asked the other way,
+    # the outline's edges stop at the fold.
+    reaching = compose_drawing_sheet(
+        session.document, ["record:front"],
+        options=DrawingSheetOptions(
+            title_block=title, page=page, scale_denominator=2.0, break_reach="section", outline_reach="axis",
+            mirror_sections=(("record:front", "record:section"),), break_records=("record:out", "record:in"),
+        ),
+    )
+    root = ET.fromstring(reaching.svg_bytes)
+    outer = _line_xs(root, "profile-break:record:out:")
+    past = [xs for xs in outer if max(xs) > axis_x + 1e-6]
+    assert len(outer) == 4 and len(past) == 1 and min(past[0]) >= axis_x - 1e-6
+    assert abs((max(past[0]) - axis_x) - (54.0 / 2.0 - 1.0)) < 1.0, past
+    assert [xs for xs in _line_xs(root, ":past-axis:") if "profile-break" not in str(xs)] == past
+    sidecar = json.loads(reaching.sidecar_bytes.decode("utf-8"))
+    assert sidecar["profile_breaks"]["reach"] == "section"
+    assert sidecar["mirrored_figures"][0]["outline_reach"] == "axis" and sidecar["mirrored_figures"][0]["outline_past_axis_count"] == "0"
+    with pytest.raises(DrawingSheetError, match="break_reach must be"):
+        DrawingSheetOptions(title_block=title, page=page, scale_denominator=2.0, break_reach="rim")
+    with pytest.raises(DrawingSheetError, match="outline_reach must be"):
+        DrawingSheetOptions(title_block=title, page=page, scale_denominator=2.0, outline_reach="rim")
 
     plain = compose_drawing_sheet(
         session.document, ["record:front"],

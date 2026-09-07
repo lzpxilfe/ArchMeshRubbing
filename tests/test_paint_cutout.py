@@ -4,6 +4,7 @@ drawing's own tone."""
 
 from __future__ import annotations
 
+import base64
 import json
 import tempfile
 from pathlib import Path
@@ -15,13 +16,16 @@ from PIL import Image
 
 from src.core.artifact_outline_extractor import compute_artifact_outline
 from src.core.artifact_paint_cutout import (
+    PAINT_CUTOUT_PIXEL_FORMAT_COLOUR,
     PAINT_CUTOUT_RECORD_TYPE,
+    PAINT_CUTOUT_TONE_COLOUR,
     ArtifactPaintCutoutError,
     PaintCutoutRaster,
     commit_paint_cutout,
     compute_paint_cutout,
     extract_paint_cutout,
     paint_cutout_receipt_from_record,
+    paint_cutout_tone,
     require_paint_cutout_raster,
     validate_paint_cutout_recipe,
 )
@@ -200,3 +204,53 @@ def test_a_cutout_is_pasted_in_place_or_below_and_never_across_the_fold(painted)
         _options(paint_cutouts=(("record:cutout:left", "record:front", "beside"),))
     with pytest.raises(DrawingSheetError, match="does not draw for"):
         compose_drawing_sheet(session.document, ["record:front"], options=_options(paint_cutouts=(("record:cutout:left", "record:absent", "in_place"),)), rasters={"record:cutout:left": left_part.raster})
+
+
+def test_a_cutout_can_keep_the_paint_s_own_colour(painted) -> None:
+    """Asked for the paint's colour rather than ink, the cutout is the
+    band's own RGB with the coverage as its alpha - the wand's selection
+    lifted whole - pasted at full strength whatever the sheet's ink
+    percent, as an RGBA image; the receipt names the format, and ink
+    pixels are not the colour record's."""
+
+    session, atlas, colour_map = painted
+    colour = compute_paint_cutout(session, atlas, colour_map, view="front", pixels_per_mm=5, tone=PAINT_CUTOUT_TONE_COLOUR)
+    raster = colour.raster
+    assert raster.channels == 4 and raster.pixel_format == PAINT_CUTOUT_PIXEL_FORMAT_COLOUR
+    solid = raster.pixels[..., 3] == 255
+    assert solid.any()
+    assert (raster.pixels[solid][:, :3] == np.array([200, 160, 60], dtype=np.uint8)).all(), "the band's colour as the map has it"
+    assert (raster.pixels[raster.pixels[..., 3] == 0][:, :3] == 0).all(), "clear pixels carry no colour"
+    ink = compute_paint_cutout(session, atlas, colour_map, view="front", pixels_per_mm=5)
+    assert ink.raster.channels == 2 and ink.raster.rectangle_mm == raster.rectangle_mm
+    assert np.array_equal(ink.raster.alpha, raster.alpha), "the same coverage, whichever tone"
+    assert colour.recipe["ink_policy"]["tone"] == PAINT_CUTOUT_TONE_COLOUR and paint_cutout_tone(colour.recipe) == PAINT_CUTOUT_TONE_COLOUR
+    with pytest.raises(ArtifactPaintCutoutError, match="tone must be one of"):
+        compute_paint_cutout(session, atlas, colour_map, view="front", tone="sepia/v1")
+
+    session = commit_paint_cutout(session, colour, record_id="record:cutout:colour", created_at=STAMP, operator="tester")
+    record = session.document.record_index["record:cutout:colour"]
+    receipt = paint_cutout_receipt_from_record(record)
+    assert receipt["pixel_format"] == PAINT_CUTOUT_PIXEL_FORMAT_COLOUR
+    assert receipt["raw_pixel_byte_length"] == 4 * raster.width_pixels * raster.height_pixels
+    with pytest.raises(ArtifactPaintCutoutError, match="not the one record"):
+        require_paint_cutout_raster(record, ink.raster)
+    with pytest.raises(ArtifactPaintCutoutError, match="HxWx2 .* or HxWx4"):
+        PaintCutoutRaster(pixels=raster.pixels[..., :3].copy(), pixels_per_meter=raster.pixels_per_meter, left_um=0, bottom_um=0, view="front")
+
+    bundle = compose_drawing_sheet(
+        session.document, ["record:front"],
+        options=_options(paint_cutouts=(("record:cutout:colour", "record:front", "in_place"),), paint_cutout_ink_percent=60),
+        rasters={"record:cutout:colour": raster},
+    )
+    validate_drawing_sheet_bytes(bundle.svg_bytes, bundle.sidecar_bytes)
+    root = ET.fromstring(bundle.svg_bytes)
+    image = next(el for el in root.iter(f"{SVG_NS}image") if el.attrib.get("id", "").startswith("paint-cutout-"))
+    assert float(image.attrib["opacity"]) == 1.0, "the paint's own colour is pasted whole"
+    href = image.attrib["xlink:href" if "xlink:href" in image.attrib else "{http://www.w3.org/1999/xlink}href"]
+    png = base64.b64decode(href.split(",", 1)[1])
+    assert png[25] == 6, "an RGBA PNG (colour type 6)"
+    drawn = json.loads(bundle.sidecar_bytes.decode("utf-8"))["paint_cutouts"]["drawn"]
+    assert [(entry["record_id"], entry["tone"], entry["ink_percent"]) for entry in drawn] == [
+        ("record:cutout:colour", PAINT_CUTOUT_TONE_COLOUR, "100"),
+    ]

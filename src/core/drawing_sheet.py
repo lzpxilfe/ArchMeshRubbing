@@ -48,7 +48,7 @@ from .artifact_rubbing_record import (
     RUBBING_RECORD_TYPE,
     rubbing_receipt_from_record,
 )
-from .canonical_png import CanonicalPNGError, encode_canonical_ga8_png
+from .canonical_png import CanonicalPNGError, encode_canonical_ga8_png, encode_canonical_rgba8_png
 from .artifact_condition_annotation import (
     ArtifactConditionAnnotationError,
     CONDITION_RECORD_TYPE,
@@ -72,8 +72,10 @@ from .artifact_paint_cutout import (
     PAINT_CUTOUT_RECORD_TYPE,
     ArtifactPaintCutoutError,
     paint_cutout_receipt_from_record,
+    paint_cutout_tone,
     require_paint_cutout_raster,
 )
+from .artifact_paint_cutout import PAINT_CUTOUT_TONE_COLOUR
 from .artifact_profile_break import (
     PROFILE_BREAK_RECORD_TYPE,
     PROFILE_BREAK_SURFACE_INWARD,
@@ -446,6 +448,20 @@ PAINT_CUTOUT_BELOW_GAP_MM = 3.0
 DEFAULT_PAINT_CUTOUT_INK_PERCENT = 70
 MIN_PAINT_CUTOUT_INK_PERCENT = 20
 
+#: How far a line of the elevation's half reaches on a mirrored figure: to
+#: the fold only, or past it across the section's side up to a gap short of
+#: the section's line - the line runs on to say the edge goes right round,
+#: and stops before it could be read as part of the cut.  The outline's
+#: own edges that cross the fold (the rim's top, the base's underside) run
+#: on by default, in the outline's weight; the corner lines of a break
+#: reading stop at the fold unless asked.
+REACH_SECTION = "section"
+REACH_AXIS = "axis"
+REACHES: tuple[str, ...] = (REACH_SECTION, REACH_AXIS)
+REACH_GAP_PAPER_MM = 1.0
+DEFAULT_OUTLINE_REACH = REACH_SECTION
+DEFAULT_BREAK_REACH = REACH_AXIS
+
 
 @dataclass(frozen=True, slots=True)
 class Interpretation:
@@ -814,6 +830,25 @@ class DrawingSheetOptions:
     record the sheet is not drawing as a rubbing is refused rather than
     quietly dropped.
     """
+    outline_reach: str = DEFAULT_OUTLINE_REACH
+    """How far the elevation outline's edges that cross the fold run on a
+    mirrored figure.
+
+    The rim's top and the base's underside are edges the artifact has all
+    the way round, and through the cut a reader sees their far side.
+    ``section`` (the default) takes each such edge past the fold, in the
+    outline's own weight and along its own direction, to one paper
+    millimetre short of the first section line it meets, so the edge is
+    seen going round without joining the cut; where the section is solid
+    there (the edge would run inside a cut face, as under a solid foot) it
+    stops at the fold.  ``axis`` stops every edge at the fold.
+    """
+    break_reach: str = DEFAULT_BREAK_REACH
+    """How far the outside's corner lines (``break_records``) run on a
+    mirrored figure: ``axis`` (the default) stops each at the fold;
+    ``section`` runs it on like an outline edge, to a paper millimetre
+    short of the section.
+    """
     break_records: tuple[str, ...] = ()
     """Profile break readings to draw on the figures, by record id.
 
@@ -1127,6 +1162,10 @@ class DrawingSheetOptions:
                 f"a sheet draws at most {MAX_DRAWING_SHEET_CONDITION_RECORDS} break records"
             )
         object.__setattr__(self, "break_records", break_records)
+        if self.break_reach not in REACHES:
+            raise DrawingSheetError(f"break_reach must be one of {', '.join(REACHES)}")
+        if self.outline_reach not in REACHES:
+            raise DrawingSheetError(f"outline_reach must be one of {', '.join(REACHES)}")
         on_axis: list[tuple[str, str]] = []
         for pair in self.rubbings_on_axis:
             if not isinstance(pair, (tuple, list)) or len(pair) != 2:
@@ -1390,6 +1429,7 @@ class _PastedCutout:
     rectangle_mm: tuple[float, float, float, float]
     placement: str
     ink_percent: int
+    tone: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -2556,7 +2596,8 @@ def _encode_raster_image(
     pixels_per_meter: int,
     raster_sha256: str,
 ) -> _RasterImage:
-    """Embed GA8 pixels as one canonical PNG that names what it is."""
+    """Embed GA8 (or, for a colour cutout, RGBA8) pixels as one canonical
+    PNG that names what it is."""
 
     metadata = {
         "document_id": document.document_id,
@@ -2567,8 +2608,9 @@ def _encode_raster_image(
         "record_type": record.type,
         "schema_version": DRAWING_SHEET_SCHEMA_VERSION,
     }
+    encode = encode_canonical_rgba8_png if pixels.ndim == 3 and pixels.shape[2] == 4 else encode_canonical_ga8_png
     try:
-        png_bytes = encode_canonical_ga8_png(
+        png_bytes = encode(
             pixels,
             pixels_per_meter=pixels_per_meter,
             metadata=metadata,
@@ -2918,8 +2960,12 @@ def _pasted_cutouts(
         try:
             receipt = paint_cutout_receipt_from_record(record)
             raster = require_paint_cutout_raster(record, rasters[cutout_id])
+            tone = paint_cutout_tone(record.recipe)
         except ArtifactPaintCutoutError as exc:
             raise DrawingSheetError(str(exc)) from exc
+        # Ink takes the sheet's strength; the paint's own colour is pasted
+        # whole, as the wand lifted it.
+        ink_percent = 100 if tone == PAINT_CUTOUT_TONE_COLOUR else int(options.paint_cutout_ink_percent)
         image = _encode_raster_image(
             document,
             record,
@@ -2978,7 +3024,8 @@ def _pasted_cutouts(
                 image=image,
                 rectangle_mm=rectangle,
                 placement=placement,
-                ink_percent=int(options.paint_cutout_ink_percent),
+                ink_percent=ink_percent,
+                tone=tone,
             )
         )
     return pasted, grown
@@ -3383,6 +3430,9 @@ def _mirrored_figure(
     interior_by_kind: Mapping[str, Sequence[Any]] = {},
     line_smoothing_mm: float = 0.0,
     jogs: Sequence[tuple[float, float, float]] = (),
+    outline_reach: str = REACH_AXIS,
+    break_reach: str = REACH_AXIS,
+    reach_gap_mm: float = 0.0,
 ) -> tuple[
     DerivedRecord,
     dict[str, list[Any]],
@@ -3460,6 +3510,31 @@ def _mirrored_figure(
     across = (float(direction[1]), -float(direction[0]))
     if half_plane_side((base[0] + across[0], base[1] + across[1]), base=base, direction=direction) < 0.0:
         across = (-across[0], -across[1])
+    # Lines of the elevation that cross the fold may run on past it: across
+    # the section's side to a gap short of the first section line they
+    # meet, so an edge is seen going right round and never joins the cut.
+    # The outline's own edges (the rim's top, the base's underside) do so
+    # in the outline's weight; a break reading's corner lines when asked.
+    for kind, paths in elevation_by_kind.items():
+        for path in paths:
+            if path.role == "profile_break":
+                if break_reach != REACH_SECTION:
+                    continue
+                crossings = [(_fold_point(path.points_mm, base, direction), across)]
+            elif path.closed and outline_reach == REACH_SECTION:
+                crossings = _fold_crossings(path.points_mm, base=base, direction=direction, across=across)
+            else:
+                continue
+            for index, (origin, unit) in enumerate(crossings):
+                if origin is None:
+                    continue
+                extension = _reach_past_fold(
+                    origin, unit, section_payload.paths, base=base, direction=direction, across=across, gap_mm=reach_gap_mm
+                )
+                if extension is not None:
+                    section_by_kind.setdefault(kind, []).append(
+                        replace(path, id=f"{path.id}:past-axis:{index:02d}", closed=False, points_mm=extension)
+                    )
     jog_line_sets = [_jog_lines(base, direction, across, jog) for jog in jogs]
     if jog_line_sets:
         cut_back: dict[str, list[Any]] = {}
@@ -3555,6 +3630,126 @@ def _mirrored_figure(
             )
         )
     return section, combined, bounds, left_fill_only | right_fill_only
+
+
+def _fold_point(
+    chord: Sequence[Sequence[float]], base: Sequence[float], direction: Sequence[float]
+) -> tuple[float, float] | None:
+    """Where a level chord (a corner's line) meets the fold."""
+
+    if len(chord) != 2:
+        return None
+    bx, by = float(base[0]), float(base[1])
+    dx, dy = float(direction[0]), float(direction[1])
+    along = 0.5 * sum((float(p[0]) - bx) * dx + (float(p[1]) - by) * dy for p in chord)
+    return (bx + dx * along, by + dy * along)
+
+
+def _fold_crossings(
+    ring: Sequence[Sequence[float]],
+    *,
+    base: Sequence[float],
+    direction: Sequence[float],
+    across: Sequence[float],
+) -> list[tuple[tuple[float, float], tuple[float, float]]]:
+    """Where a closed ring's edges cross the fold, each as (the crossing
+    point, the edge's unit direction turned to the section's side)."""
+
+    points = [(float(p[0]), float(p[1])) for p in ring]
+    if len(points) < 3:
+        return []
+    sides = [half_plane_side(p, base=base, direction=direction) for p in points]
+    ax, ay = float(across[0]), float(across[1])
+    crossings: list[tuple[tuple[float, float], tuple[float, float]]] = []
+    for index in range(len(points)):
+        p, q = points[index], points[(index + 1) % len(points)]
+        s, t_side = sides[index], sides[(index + 1) % len(points)]
+        if not ((s < 0.0 < t_side) or (t_side < 0.0 < s)):
+            continue
+        t = s / (s - t_side)
+        origin = (p[0] + t * (q[0] - p[0]), p[1] + t * (q[1] - p[1]))
+        ex, ey = q[0] - p[0], q[1] - p[1]
+        length = math.hypot(ex, ey)
+        if length <= 1e-12:
+            continue
+        unit = (ex / length, ey / length)
+        if unit[0] * ax + unit[1] * ay < 0.0:
+            unit = (-unit[0], -unit[1])
+        crossings.append((origin, unit))
+    return crossings
+
+
+def _reach_past_fold(
+    origin: Sequence[float],
+    unit: Sequence[float],
+    section_paths: Sequence[Any],
+    *,
+    base: Sequence[float],
+    direction: Sequence[float],
+    across: Sequence[float],
+    gap_mm: float,
+) -> tuple[tuple[float, float], tuple[float, float]] | None:
+    """The part of an elevation line past the fold: from ``origin`` on the
+    fold, along ``unit`` into the section's side, to ``gap_mm`` short of
+    the nearest section line.  A section line within ``gap_mm`` of the ray
+    counts as met - the outline sits a grid step outside the cut, so a
+    rim's top edge runs a hair above the cut wall's top and must still
+    stop at it.  None where the section is solid there (the origin lies
+    inside a cut face) or nothing lies ahead to stop short of."""
+
+    ox, oy = float(origin[0]), float(origin[1])
+    ux, uy = float(unit[0]), float(unit[1])
+    nx, ny = -uy, ux  # across the ray
+    band = float(gap_mm)
+    nearest: float | None = None
+    parity = 0
+    bx, by = float(base[0]), float(base[1])
+    dx, dy = float(direction[0]), float(direction[1])
+    ax, ay = float(across[0]), float(across[1])
+    fold_along = (ox - bx) * dx + (oy - by) * dy
+
+    def ray_coords(point: Sequence[float]) -> tuple[float, float]:
+        px, py = float(point[0]) - ox, float(point[1]) - oy
+        return px * ux + py * uy, px * nx + py * ny
+
+    for path in section_paths:
+        points = list(path.points_mm) + ([path.points_mm[0]] if path.closed else [])
+        for start, stop in zip(points, points[1:]):
+            # Solid test: a level ray from the origin to the section's side,
+            # counting the rings it crosses (half-open at vertices).
+            if path.closed:
+                a1 = (float(start[0]) - bx) * dx + (float(start[1]) - by) * dy
+                a2 = (float(stop[0]) - bx) * dx + (float(stop[1]) - by) * dy
+                if (a1 > fold_along) != (a2 > fold_along) and a1 != a2:
+                    t = (fold_along - a1) / (a2 - a1)
+                    c1 = (float(start[0]) - bx) * ax + (float(start[1]) - by) * ay
+                    c2 = (float(stop[0]) - bx) * ax + (float(stop[1]) - by) * ay
+                    if c1 + t * (c2 - c1) > 1e-9:
+                        parity += 1
+            # The nearest section line ahead, within the band about the ray.
+            (d1, n1), (d2, n2) = ray_coords(start), ray_coords(stop)
+            if max(n1, n2) < -band or min(n1, n2) > band:
+                continue
+            if n1 != n2:
+                # Clip the segment to the band.
+                low, high = sorted(((n1, d1), (n2, d2)))
+                lo_n, hi_n = max(low[0], -band), min(high[0], band)
+                if lo_n > hi_n:
+                    continue
+                d_lo = low[1] + (lo_n - low[0]) / (high[0] - low[0]) * (high[1] - low[1])
+                d_hi = low[1] + (hi_n - low[0]) / (high[0] - low[0]) * (high[1] - low[1])
+                d1, d2 = d_lo, d_hi
+            if max(d1, d2) <= 1e-9:
+                continue
+            hit = min(d1, d2) if min(d1, d2) > 1e-9 else 0.0
+            if nearest is None or hit < nearest:
+                nearest = hit
+    if nearest is None or parity % 2 == 1:
+        return None
+    reach = nearest - band
+    if reach <= 1e-9:
+        return None
+    return (ox, oy), (ox + ux * reach, oy + uy * reach)
 
 
 def _stepped_axis(
@@ -4339,7 +4534,7 @@ def compose_drawing_sheet(
             cutout_drawn.extend(
                 {
                     "figure_record_id": record.id,
-                    "ink_percent": str(cutout.ink_percent),
+                    "ink_percent": str(cutout.ink_percent), "tone": cutout.tone,
                     "placement": cutout.placement,
                     "record_id": cutout.record_id,
                     "rectangle_um": ":".join(str(int(round(v * 1000.0))) for v in cutout.rectangle_mm),
@@ -4380,6 +4575,9 @@ def compose_drawing_sheet(
             axis_ready=align_recipe_kind == AXIS_ALIGN_RECIPE_KIND,
             preset=resolve_drawing_style_preset(options.style_preset),
             interior_by_kind=interior_by_kind,
+            outline_reach=options.outline_reach,
+            break_reach=options.break_reach,
+            reach_gap_mm=REACH_GAP_PAPER_MM * float(options.scale_denominator),
             line_smoothing_mm=line_smoothing,
             jogs=[
                 (along_from, along_to, reach)
@@ -4403,6 +4601,16 @@ def compose_drawing_sheet(
                     if any(jog_record_id == record.id for jog_record_id, *_rest in options.mirror_jogs)
                     else {}
                 ),
+                "outline_past_axis_count": str(
+                    sum(
+                        1
+                        for kind_paths in combined.values()
+                        for path in kind_paths
+                        if ":past-axis:" in path.id and "profile-break:" not in path.id
+                    )
+                ),
+                "outline_reach": options.outline_reach,
+                "reach_gap_paper_mm": str(REACH_GAP_PAPER_MM),
                 "section_record_id": section.id,
                 "section_recipe_hash": section.recipe_hash,
                 "section_side": "right",
@@ -4444,7 +4652,7 @@ def compose_drawing_sheet(
         cutout_drawn.extend(
             {
                 "figure_record_id": record.id,
-                "ink_percent": str(cutout.ink_percent),
+                "ink_percent": str(cutout.ink_percent), "tone": cutout.tone,
                 "placement": cutout.placement,
                 "record_id": cutout.record_id,
                 "rectangle_um": ":".join(str(int(round(v * 1000.0))) for v in cutout.rectangle_mm),
@@ -4691,6 +4899,8 @@ def compose_drawing_sheet(
                         break_not_drawn,
                         key=lambda entry: (entry["figure_record_id"], entry["record_id"]),
                     ),
+                    "reach": options.break_reach,
+                    "reach_gap_paper_mm": REACH_GAP_PAPER_MM,
                     "records": [
                         {
                             "break_count": len(payload.breaks),

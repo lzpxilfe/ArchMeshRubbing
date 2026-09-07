@@ -292,6 +292,9 @@ def _options(**overrides: Any) -> DrawingSheetOptions:
 
 
 def _mirrored_sheet(**overrides: Any):
+    # These tests read the halves as cut at the axis; the outline's edges
+    # running on past the fold are covered with the profile break tests.
+    overrides.setdefault("outline_reach", "axis")
     return compose_drawing_sheet(
         _positioned().document,
         [ELEVATION_ID],
@@ -593,6 +596,9 @@ def test_the_sidecar_names_both_records_and_which_side_each_took() -> None:
         {
             "elevation_record_id": ELEVATION_ID,
             "elevation_side": "left",
+            "outline_past_axis_count": "0",
+            "outline_reach": "axis",
+            "reach_gap_paper_mm": "1.0",
             "section_record_id": SECTION_ID,
             "section_recipe_hash": _positioned()
             .document.record_index[SECTION_ID]

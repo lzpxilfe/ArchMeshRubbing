@@ -255,6 +255,46 @@ def texture_paint_field(
     the paint a pixel needs to count as painted when the areas are measured
     - the reader's own threshold, so the two agree."""
 
+    field, _rgb, minimum_u, minimum_v, qc = texture_paint_and_colour_field(
+        developed_uv_mm=developed_uv_mm,
+        developed_faces=developed_faces,
+        developed_points_mm=developed_points_mm,
+        source_face_indices=source_face_indices,
+        source_vertex_indices=source_vertex_indices,
+        atlas=atlas,
+        colour_map=colour_map,
+        pixels_per_mm=pixels_per_mm,
+        margin_pixels=margin_pixels,
+        chroma=chroma,
+        band_um=band_um,
+        threshold=threshold,
+        with_colour=False,
+        cancellation_probe=cancellation_probe,
+    )
+    return field, minimum_u, minimum_v, qc
+
+
+def texture_paint_and_colour_field(
+    *,
+    developed_uv_mm: np.ndarray,
+    developed_faces: np.ndarray,
+    developed_points_mm: np.ndarray,
+    source_face_indices: np.ndarray,
+    source_vertex_indices: np.ndarray,
+    atlas: TextureAtlas,
+    colour_map: ColourMap,
+    pixels_per_mm: int,
+    margin_pixels: int,
+    chroma: str,
+    band_um: int,
+    threshold: float,
+    with_colour: bool = True,
+    cancellation_probe: CancellationProbe | None = None,
+) -> tuple[np.ndarray, np.ndarray | None, int, int, dict[str, Any]]:
+    """As ``texture_paint_field``, and - when ``with_colour`` - the colour the
+    map has at every covered pixel centre, as the file has it (HxWx3 uint8,
+    zero where the development does not cover the pixel)."""
+
     from scipy.ndimage import distance_transform_edt, label, maximum  # noqa: PLC0415
 
     try:
@@ -276,7 +316,12 @@ def texture_paint_field(
         raise ArtifactTexturePaintError(str(exc)) from exc
     covered = lattice.covered
     paint = np.zeros(covered.shape, dtype=np.float64)
-    paint[covered] = paint_of(colour_map.rgb[lattice.texel_row[covered], lattice.texel_col[covered]], chroma)
+    texels = colour_map.rgb[lattice.texel_row[covered], lattice.texel_col[covered]]
+    paint[covered] = paint_of(texels, chroma)
+    rgb: np.ndarray | None = None
+    if with_colour:
+        rgb = np.zeros(covered.shape + (3,), dtype=np.uint8)
+        rgb[covered] = texels
     raise_if_cancelled(cancellation_probe)
     painted = covered & (paint >= float(threshold))
     painted_count = int(np.count_nonzero(painted))
@@ -300,7 +345,7 @@ def texture_paint_field(
         "texture_paint_unmatched_corner_count": lattice.unmatched_corners,
         "texture_paint_wide_area_count": wide_count,
     }
-    return field, lattice.minimum_u, lattice.minimum_v, qc
+    return field, rgb, lattice.minimum_u, lattice.minimum_v, qc
 
 
 __all__ = [
@@ -316,6 +361,7 @@ __all__ = [
     "paint_of",
     "read_colour_map",
     "require_texture_paint_sources",
+    "texture_paint_and_colour_field",
     "texture_paint_block",
     "texture_paint_field",
     "validate_texture_paint_block",

@@ -4,14 +4,17 @@ plum blossom on a bowl's wall, the ink character on a dish's foot.
 Not every painted thing wants tracing.  A brushed character or a dense
 motif is often better shown as it is - cut out of the colour map the way a
 magic wand cuts it in an image editor, only the painted pixels kept, and
-pasted onto the drawing at its own place in a tone that does not shout
-over the line work.  The cutout is a raster on a view's plane: the colour
-map is sampled onto the orthographic lattice of that view, each pixel
-reduced to how much paint it carries under a chroma rule, the coverage
-ramped from ``threshold`` (no ink) to ``full`` (solid ink), and the painted
-extent cropped with a margin.  The record keeps the receipt - what the
-raster is, where it sits in the view, its hash - and the pixels travel
-beside it, as a rubbing's do; the sheet pastes them only when they match.
+pasted onto the drawing at its own place.  The cutout is a raster on a
+view's plane: the colour map is sampled onto the orthographic lattice of
+that view, each pixel reduced to how much paint it carries under a chroma
+rule, the coverage ramped from ``threshold`` (no ink) to ``full`` (solid
+ink), and the painted extent cropped with a margin.  Its tone is the
+reading's choice: ink, one colour at the paint's coverage, in a tone that
+does not shout over the line work; or the paint's own colour as the map
+has it, with the coverage as its alpha - the wand's selection lifted
+whole.  The record keeps the receipt - what the raster is, where it sits
+in the view, its hash - and the pixels travel beside it, as a rubbing's
+do; the sheet pastes them only when they match.
 """
 
 from __future__ import annotations
@@ -38,8 +41,8 @@ from .artifact_texture_paint import (
     ArtifactTexturePaintError,
     ColourMap,
     require_texture_paint_sources,
+    texture_paint_and_colour_field,
     texture_paint_block,
-    texture_paint_field,
     validate_texture_paint_block,
 )
 from .artifact_texture_relief import ArtifactTextureReliefError, TextureAtlas
@@ -53,7 +56,19 @@ PAINT_CUTOUT_COORDINATE_SPACE = "view_plane_mm/v1"
 PAINT_CUTOUT_PAYLOAD_EXTENSION_KEY = "org.archmeshrubbing:paint-cutout-v1"
 PAINT_CUTOUT_RECEIPT_SCHEMA_VERSION = "1.0.0"
 PAINT_CUTOUT_GEOMETRY_REF_PREFIX = "urn:archmeshrubbing:paint-cutout:sha256:"
-PAINT_CUTOUT_PIXEL_FORMAT = "gray8_alpha8_ink_coverage/v1"
+#: Ink: grey 0 with the coverage as alpha.  Colour: the map's own RGB with
+#: the coverage as alpha.  The channel count names the format.
+PAINT_CUTOUT_PIXEL_FORMAT_INK = "gray8_alpha8_ink_coverage/v1"
+PAINT_CUTOUT_PIXEL_FORMAT_COLOUR = "rgb8_alpha8_painted_colour/v1"
+PAINT_CUTOUT_PIXEL_FORMATS: dict[int, str] = {2: PAINT_CUTOUT_PIXEL_FORMAT_INK, 4: PAINT_CUTOUT_PIXEL_FORMAT_COLOUR}
+PAINT_CUTOUT_TONE_INK = "ink/v1"
+PAINT_CUTOUT_TONE_COLOUR = "colour_as_painted/v1"
+PAINT_CUTOUT_TONES = (PAINT_CUTOUT_TONE_INK, PAINT_CUTOUT_TONE_COLOUR)
+PAINT_CUTOUT_TONE_FORMATS: dict[str, str] = {
+    PAINT_CUTOUT_TONE_INK: PAINT_CUTOUT_PIXEL_FORMAT_INK,
+    PAINT_CUTOUT_TONE_COLOUR: PAINT_CUTOUT_PIXEL_FORMAT_COLOUR,
+}
+DEFAULT_PAINT_CUTOUT_TONE = PAINT_CUTOUT_TONE_INK
 PAINT_CUTOUT_PAINTER = "far_to_near_facing_faces/v1"
 PAINT_CUTOUT_ROW_ORDER = "top_row_first/v1"
 
@@ -108,9 +123,10 @@ def _view_name(view: object) -> str:
 
 @dataclass(frozen=True, slots=True)
 class PaintCutoutRaster:
-    """The cutout's pixels on a view's plane: grey 0 (ink) with the alpha
-    the paint's coverage, row 0 the top of the view, and where its left and
-    bottom edges lie in the view's millimetres."""
+    """The cutout's pixels on a view's plane: grey 0 (ink) or the paint's
+    own colour, with the alpha the paint's coverage, row 0 the top of the
+    view, and where its left and bottom edges lie in the view's
+    millimetres."""
 
     pixels: np.ndarray
     pixels_per_meter: int
@@ -120,8 +136,14 @@ class PaintCutoutRaster:
 
     def __post_init__(self) -> None:
         array = np.asarray(self.pixels)
-        if array.dtype != np.uint8 or array.ndim != 3 or array.shape[2] != 2 or array.shape[0] <= 0 or array.shape[1] <= 0:
-            raise ArtifactPaintCutoutError("cutout pixels must be a non-empty HxWx2 uint8 array")
+        if (
+            array.dtype != np.uint8
+            or array.ndim != 3
+            or array.shape[2] not in PAINT_CUTOUT_PIXEL_FORMATS
+            or array.shape[0] <= 0
+            or array.shape[1] <= 0
+        ):
+            raise ArtifactPaintCutoutError("cutout pixels must be a non-empty HxWx2 (ink) or HxWx4 (colour) uint8 array")
         if array.shape[0] * array.shape[1] > MAX_PAINT_CUTOUT_PIXELS:
             raise ArtifactPaintCutoutError("cutout pixels exceed the safety limit")
         ppm = _strict_int(
@@ -136,6 +158,18 @@ class PaintCutoutRaster:
         object.__setattr__(self, "pixels", copied)
         object.__setattr__(self, "pixels_per_meter", ppm)
         object.__setattr__(self, "view", _view_name(self.view))
+
+    @property
+    def channels(self) -> int:
+        return int(self.pixels.shape[2])
+
+    @property
+    def pixel_format(self) -> str:
+        return PAINT_CUTOUT_PIXEL_FORMATS[self.channels]
+
+    @property
+    def alpha(self) -> np.ndarray:
+        return self.pixels[..., self.channels - 1]
 
     @property
     def width_pixels(self) -> int:
@@ -170,7 +204,7 @@ class PaintCutoutRaster:
             "coordinate_space": PAINT_CUTOUT_COORDINATE_SPACE,
             "height_pixels": self.height_pixels,
             "left_um": int(self.left_um),
-            "pixel_format": PAINT_CUTOUT_PIXEL_FORMAT,
+            "pixel_format": self.pixel_format,
             "pixels_per_meter": self.pixels_per_meter,
             "row_order": PAINT_CUTOUT_ROW_ORDER,
             "schema_version": PAINT_CUTOUT_RECEIPT_SCHEMA_VERSION,
@@ -200,12 +234,13 @@ class PaintCutoutRaster:
         }
 
     def qc_summary(self) -> dict[str, Any]:
-        alpha = self.pixels[..., 1].astype(np.float64)
+        alpha = self.alpha.astype(np.float64)
         inked = alpha > 0
         return {
             "coverage_mean_thousandths": int(round(float(alpha[inked].mean()) / 255.0 * 1000.0)) if inked.any() else 0,
             "height_pixels": self.height_pixels,
             "inked_pixel_count": int(np.count_nonzero(inked)),
+            "pixel_format": self.pixel_format,
             "raster_sha256": self.raster_sha256,
             "width_pixels": self.width_pixels,
         }
@@ -234,8 +269,10 @@ def validate_paint_cutout_receipt(value: object) -> dict[str, Any]:
     receipt = _exact_keys(value, _RECEIPT_KEYS, name="paint cutout receipt")
     if receipt["coordinate_space"] != PAINT_CUTOUT_COORDINATE_SPACE:
         raise ArtifactPaintCutoutError("paint cutout receipt names another coordinate space")
-    if receipt["pixel_format"] != PAINT_CUTOUT_PIXEL_FORMAT or receipt["row_order"] != PAINT_CUTOUT_ROW_ORDER:
+    pixel_format = receipt["pixel_format"]
+    if pixel_format not in PAINT_CUTOUT_TONE_FORMATS.values() or receipt["row_order"] != PAINT_CUTOUT_ROW_ORDER:
         raise ArtifactPaintCutoutError("paint cutout receipt names a pixel layout this release does not have")
+    channels = next(count for count, name in PAINT_CUTOUT_PIXEL_FORMATS.items() if name == pixel_format)
     if receipt["schema_version"] != PAINT_CUTOUT_RECEIPT_SCHEMA_VERSION:
         raise ArtifactPaintCutoutError("paint cutout receipt schema is invalid")
     width = _strict_int(receipt["width_pixels"], name="width_pixels", minimum=1, maximum=MAX_PAINT_CUTOUT_PIXELS)
@@ -245,17 +282,20 @@ def validate_paint_cutout_receipt(value: object) -> dict[str, Any]:
     ppm = _strict_int(receipt["pixels_per_meter"], name="pixels_per_meter", minimum=1000, maximum=MAX_PAINT_CUTOUT_PIXELS_PER_MM * 1000)
     if ppm % 1000 != 0:
         raise ArtifactPaintCutoutError("pixels_per_meter must encode an integer pixels/mm")
-    if _strict_int(receipt["raw_pixel_byte_length"], name="raw_pixel_byte_length", minimum=2, maximum=2 * MAX_PAINT_CUTOUT_PIXELS) != 2 * width * height:
-        raise ArtifactPaintCutoutError("paint cutout receipt byte length does not match its size")
+    if (
+        _strict_int(receipt["raw_pixel_byte_length"], name="raw_pixel_byte_length", minimum=2, maximum=4 * MAX_PAINT_CUTOUT_PIXELS)
+        != channels * width * height
+    ):
+        raise ArtifactPaintCutoutError("paint cutout receipt byte length does not match its size and format")
     return {
         "bottom_um": _strict_int(receipt["bottom_um"], name="bottom_um", minimum=-MAX_PAINT_CUTOUT_GRID_INDEX, maximum=MAX_PAINT_CUTOUT_GRID_INDEX),
         "coordinate_space": PAINT_CUTOUT_COORDINATE_SPACE,
         "height_pixels": height,
         "left_um": _strict_int(receipt["left_um"], name="left_um", minimum=-MAX_PAINT_CUTOUT_GRID_INDEX, maximum=MAX_PAINT_CUTOUT_GRID_INDEX),
-        "pixel_format": PAINT_CUTOUT_PIXEL_FORMAT,
+        "pixel_format": pixel_format,
         "pixels_per_meter": ppm,
         "raster_sha256": _sha256(receipt["raster_sha256"], name="raster_sha256"),
-        "raw_pixel_byte_length": 2 * width * height,
+        "raw_pixel_byte_length": channels * width * height,
         "raw_pixel_sha256": _sha256(receipt["raw_pixel_sha256"], name="raw_pixel_sha256"),
         "row_order": PAINT_CUTOUT_ROW_ORDER,
         "schema_version": PAINT_CUTOUT_RECEIPT_SCHEMA_VERSION,
@@ -278,6 +318,7 @@ def paint_cutout_recipe(
     full_thousandths: int = DEFAULT_PAINT_CUTOUT_FULL_THOUSANDTHS,
     margin_um: int = DEFAULT_PAINT_CUTOUT_MARGIN_UM,
     window_mm: Sequence[float] | None = None,
+    tone: str = DEFAULT_PAINT_CUTOUT_TONE,
 ) -> dict[str, Any]:
     """The recipe: the two files, the view, and every number that decides a pixel.
 
@@ -285,9 +326,12 @@ def paint_cutout_recipe(
     nothing is reduced to its edge here, the cutout keeps the paint whole.
     ``window_mm`` is (left, bottom, right, top) in the view's millimetres:
     only paint inside it is cut out - the one motif wanted, not every
-    painted thing the view shows - or None for the whole view.
+    painted thing the view shows - or None for the whole view.  ``tone`` is
+    ink (one colour, the coverage its strength) or the paint's own colour.
     """
 
+    if tone not in PAINT_CUTOUT_TONES:
+        raise ArtifactPaintCutoutError(f"tone must be one of {', '.join(PAINT_CUTOUT_TONES)}; got {tone!r}")
     try:
         paint = texture_paint_block(atlas, colour_map, chroma=chroma, band_um=0)
     except ArtifactTexturePaintError as exc:
@@ -316,6 +360,7 @@ def paint_cutout_recipe(
             "margin_um": _strict_int(margin_um, name="margin_um", minimum=0, maximum=100_000),
             "ramp": "linear_coverage_between_thresholds/v1",
             "threshold_thousandths": threshold,
+            "tone": tone,
         },
         "kind": PAINT_CUTOUT_OPERATION_KIND,
         "raster_policy": {
@@ -373,9 +418,13 @@ def validate_paint_cutout_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
         raise ArtifactPaintCutoutError("paint cutout recipe names another algorithm")
     if block["coordinate_space"] != PAINT_CUTOUT_COORDINATE_SPACE or block["kind"] != PAINT_CUTOUT_OPERATION_KIND:
         raise ArtifactPaintCutoutError("paint cutout recipe names another coordinate space or kind")
-    ink = _exact_keys(block["ink_policy"], frozenset({"full_thousandths", "margin_um", "ramp", "threshold_thousandths"}), name="ink_policy")
+    ink = _exact_keys(
+        block["ink_policy"], frozenset({"full_thousandths", "margin_um", "ramp", "threshold_thousandths", "tone"}), name="ink_policy"
+    )
     if ink["ramp"] != "linear_coverage_between_thresholds/v1":
         raise ArtifactPaintCutoutError("paint cutout recipe names a ramp this release does not have")
+    if ink["tone"] not in PAINT_CUTOUT_TONES:
+        raise ArtifactPaintCutoutError("paint cutout recipe names a tone this release does not have")
     raster = _exact_keys(block["raster_policy"], frozenset({"facing_cos_millionths", "painter", "pixels_per_mm"}), name="raster_policy")
     if raster["painter"] != PAINT_CUTOUT_PAINTER:
         raise ArtifactPaintCutoutError("paint cutout recipe names another painter")
@@ -403,6 +452,7 @@ def validate_paint_cutout_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
             "margin_um": _strict_int(ink["margin_um"], name="margin_um", minimum=0, maximum=100_000),
             "ramp": "linear_coverage_between_thresholds/v1",
             "threshold_thousandths": threshold,
+            "tone": str(ink["tone"]),
         },
         "kind": PAINT_CUTOUT_OPERATION_KIND,
         "raster_policy": {
@@ -478,8 +528,9 @@ def extract_paint_cutout(
     ink = validated["ink_policy"]
     threshold = ink["threshold_thousandths"] / 1000.0
     full = ink["full_thousandths"] / 1000.0
+    in_colour = ink["tone"] == PAINT_CUTOUT_TONE_COLOUR
     try:
-        paint, minimum_u, minimum_v, source_qc = texture_paint_field(
+        paint, rgb, minimum_u, minimum_v, source_qc = texture_paint_and_colour_field(
             developed_uv_mm=uv[used],
             developed_faces=compact[triangles[order]],
             developed_points_mm=vertices[used],
@@ -492,6 +543,7 @@ def extract_paint_cutout(
             chroma=str(validated["texture_paint"]["chroma"]),
             band_um=0,
             threshold=threshold,
+            with_colour=in_colour,
             cancellation_probe=cancellation_probe,
         )
     except (ArtifactTexturePaintError, ArtifactTextureReliefError) as exc:
@@ -523,8 +575,14 @@ def extract_paint_cutout(
     row0, row1 = max(0, int(rows[0]) - margin), min(coverage.shape[0], int(rows[-1]) + margin + 1)
     col0, col1 = max(0, int(cols[0]) - margin), min(coverage.shape[1], int(cols[-1]) + margin + 1)
     alpha = np.rint(coverage[row0:row1, col0:col1] * 255.0).astype(np.uint8)
-    pixels = np.zeros((row1 - row0, col1 - col0, 2), dtype=np.uint8)
-    pixels[..., 1] = alpha
+    if in_colour and rgb is not None:
+        # The paint's own colour where there is paint; clear pixels carry no colour.
+        pixels = np.zeros((row1 - row0, col1 - col0, 4), dtype=np.uint8)
+        pixels[..., :3] = np.where(alpha[..., None] > 0, rgb[row0:row1, col0:col1], 0)
+        pixels[..., 3] = alpha
+    else:
+        pixels = np.zeros((row1 - row0, col1 - col0, 2), dtype=np.uint8)
+        pixels[..., 1] = alpha
     # The lattice's row 0 is the lowest v; the raster's row 0 is the top.
     pixels = np.ascontiguousarray(pixels[::-1])
     raster = PaintCutoutRaster(
@@ -566,6 +624,7 @@ def compute_paint_cutout(
     full_thousandths: int = DEFAULT_PAINT_CUTOUT_FULL_THOUSANDTHS,
     margin_um: int = DEFAULT_PAINT_CUTOUT_MARGIN_UM,
     window_mm: Sequence[float] | None = None,
+    tone: str = DEFAULT_PAINT_CUTOUT_TONE,
     cancellation_probe: CancellationProbe | None = None,
 ) -> PaintCutoutComputation:
     """Cut the paint out as positioned by the session's active Align."""
@@ -593,6 +652,7 @@ def compute_paint_cutout(
         full_thousandths=full_thousandths,
         margin_um=margin_um,
         window_mm=window_mm,
+        tone=tone,
     )
     raster, qc = extract_paint_cutout(vertices, triangles, atlas, colour_map, recipe, cancellation_probe=cancellation_probe)
     try:
@@ -666,7 +726,15 @@ def paint_cutout_receipt_from_record(record: DerivedRecord) -> dict[str, Any]:
         raise ArtifactPaintCutoutError("paint cutout receipt and recipe name different views")
     if receipt["pixels_per_meter"] != int(recipe["raster_policy"]["pixels_per_mm"]) * 1000:
         raise ArtifactPaintCutoutError("paint cutout receipt and recipe name different resolutions")
+    if receipt["pixel_format"] != PAINT_CUTOUT_TONE_FORMATS[str(recipe["ink_policy"]["tone"])]:
+        raise ArtifactPaintCutoutError("paint cutout receipt's pixel format is not its recipe's tone")
     return receipt
+
+
+def paint_cutout_tone(recipe: Mapping[str, Any]) -> str:
+    """The tone a validated cutout recipe asks for: ink or the paint's colour."""
+
+    return str(validate_paint_cutout_recipe(recipe)["ink_policy"]["tone"])
 
 
 def require_paint_cutout_raster(record: DerivedRecord, raster: object) -> PaintCutoutRaster:
@@ -699,8 +767,14 @@ __all__ = [
     "DEFAULT_PAINT_CUTOUT_MARGIN_UM",
     "DEFAULT_PAINT_CUTOUT_PIXELS_PER_MM",
     "DEFAULT_PAINT_CUTOUT_THRESHOLD_THOUSANDTHS",
+    "DEFAULT_PAINT_CUTOUT_TONE",
     "PAINT_CUTOUT_PAYLOAD_EXTENSION_KEY",
+    "PAINT_CUTOUT_PIXEL_FORMAT_COLOUR",
+    "PAINT_CUTOUT_PIXEL_FORMAT_INK",
     "PAINT_CUTOUT_RECORD_TYPE",
+    "PAINT_CUTOUT_TONES",
+    "PAINT_CUTOUT_TONE_COLOUR",
+    "PAINT_CUTOUT_TONE_INK",
     "PaintCutoutComputation",
     "PaintCutoutRaster",
     "commit_paint_cutout",
@@ -709,6 +783,7 @@ __all__ = [
     "paint_cutout_computation_matches_active_projection",
     "paint_cutout_receipt_from_record",
     "paint_cutout_recipe",
+    "paint_cutout_tone",
     "require_paint_cutout_raster",
     "validate_paint_cutout_receipt",
     "validate_paint_cutout_recipe",

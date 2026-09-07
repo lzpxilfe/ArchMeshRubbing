@@ -108,9 +108,39 @@ def encode_canonical_ga8_png(
     pixels_per_meter: int,
     metadata: Mapping[str, Any],
 ) -> bytes:
+    """Grey with alpha (colour type 4), HxWx2."""
+
+    return _encode_canonical_png(
+        pixels, channels=2, color_type=4, layout="GA8", pixels_per_meter=pixels_per_meter, metadata=metadata
+    )
+
+
+def encode_canonical_rgba8_png(
+    pixels: np.ndarray,
+    *,
+    pixels_per_meter: int,
+    metadata: Mapping[str, Any],
+) -> bytes:
+    """Colour with alpha (colour type 6), HxWx4; the same chunks in the same
+    order as the grey file, so the two are one contract."""
+
+    return _encode_canonical_png(
+        pixels, channels=4, color_type=6, layout="RGBA8", pixels_per_meter=pixels_per_meter, metadata=metadata
+    )
+
+
+def _encode_canonical_png(
+    pixels: np.ndarray,
+    *,
+    channels: int,
+    color_type: int,
+    layout: str,
+    pixels_per_meter: int,
+    metadata: Mapping[str, Any],
+) -> bytes:
     array = np.asarray(pixels)
-    if array.dtype != np.uint8 or array.ndim != 3 or array.shape[2] != 2:
-        raise CanonicalPNGError("PNG pixels must be an HxWx2 uint8 GA8 array")
+    if array.dtype != np.uint8 or array.ndim != 3 or array.shape[2] != channels:
+        raise CanonicalPNGError(f"PNG pixels must be an HxWx{channels} uint8 {layout} array")
     height = int(array.shape[0])
     width = int(array.shape[1])
     if width <= 0 or height <= 0 or width * height > MAX_CANONICAL_PNG_PIXELS:
@@ -128,7 +158,7 @@ def encode_canonical_ga8_png(
     for row in contiguous:
         scanlines.append(0)
         scanlines.extend(row.tobytes(order="C"))
-    ihdr = struct.pack(">IIBBBBB", width, height, 8, 4, 0, 0, 0)
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, color_type, 0, 0, 0)
     phys = struct.pack(">IIB", pixels_per_meter, pixels_per_meter, 1)
     international_text = (
         PNG_METADATA_KEYWORD
@@ -270,4 +300,5 @@ __all__ = [
     "PNG_SIGNATURE",
     "decode_canonical_ga8_png",
     "encode_canonical_ga8_png",
+    "encode_canonical_rgba8_png",
 ]
