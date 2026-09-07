@@ -46,10 +46,16 @@ TEXTURE_PAINT_SAMPLING = "nearest_texel/v1"
 TEXTURE_PAINT_CHROMA_RED_OVER_BLUE = "red_over_blue/v1"
 TEXTURE_PAINT_CHROMA_BLUE_OVER_RED = "blue_over_red/v1"
 TEXTURE_PAINT_CHROMA_DARKNESS = "darkness/v1"
+#: Any colour at all on a white or grey ground: the spread between the
+#: strongest and the weakest channel.  The wand's rule for a dish painted
+#: in more than one colour - red fruit, green leaves, an orange band - where
+#: neither red-over-blue nor blue-over-red sees every stroke.
+TEXTURE_PAINT_CHROMA_SATURATION = "saturation/v1"
 TEXTURE_PAINT_CHROMAS: tuple[str, ...] = (
     TEXTURE_PAINT_CHROMA_RED_OVER_BLUE,
     TEXTURE_PAINT_CHROMA_BLUE_OVER_RED,
     TEXTURE_PAINT_CHROMA_DARKNESS,
+    TEXTURE_PAINT_CHROMA_SATURATION,
 )
 DEFAULT_TEXTURE_PAINT_CHROMA = TEXTURE_PAINT_CHROMA_RED_OVER_BLUE
 #: A painted area wider than this is drawn by its edge, not its centre.
@@ -230,6 +236,8 @@ def paint_of(rgb: np.ndarray, chroma: str) -> np.ndarray:
         return np.clip(colour[..., 2] - colour[..., 0], 0.0, 1.0)
     if chroma == TEXTURE_PAINT_CHROMA_DARKNESS:
         return np.clip(1.0 - (0.299 * colour[..., 0] + 0.587 * colour[..., 1] + 0.114 * colour[..., 2]), 0.0, 1.0)
+    if chroma == TEXTURE_PAINT_CHROMA_SATURATION:
+        return np.clip(colour.max(axis=-1) - colour.min(axis=-1), 0.0, 1.0)
     raise ArtifactTexturePaintError(f"chroma must be one of {', '.join(TEXTURE_PAINT_CHROMAS)}")
 
 
@@ -355,6 +363,7 @@ __all__ = [
     "TEXTURE_PAINT_CHROMA_BLUE_OVER_RED",
     "TEXTURE_PAINT_CHROMA_DARKNESS",
     "TEXTURE_PAINT_CHROMA_RED_OVER_BLUE",
+    "TEXTURE_PAINT_CHROMA_SATURATION",
     "TEXTURE_PAINT_SAMPLING",
     "ArtifactTexturePaintError",
     "ColourMap",
