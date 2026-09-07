@@ -439,6 +439,8 @@ DrawingSheetOptions(
 
 **좌우는 기관의 관례다.** 입면을 왼쪽에, 단면을 오른쪽에 두는 것이 흔한 관례이지만 반대로 그리는 기관도 있다. `DrawingSheetOptions.mirror_elevation_side`(`left` 기본, `right`)가 모든 미러 도형의 입면 쪽을 정하고, 반쪽에 딸린 것은 다 따라간다 — 단면 쪽의 내면 표시·안쪽 꺾임선, 가운데선이 문양을 둘러 꺾는 상자(단면 쪽으로 나간다), 축에 붙이는 탁본 띠(입면 쪽에 붙는다), 따 붙인 문양의 자리(입면 쪽이어야 한다), 가운데선 너머로 이어지는 외형선. SVG의 도형 `<g>`에 `data-mirror-elevation-side`가, 경로 id에 `mirror:left:`·`mirror:right:`가 실제 쪽으로 찍히고, sidecar `mirrored_figures[]`의 `elevation_side`·`section_side`가 그것을 적는다.
 
+**접시는 평면 아래에 입면을 세운다.** 접시·뚜껑처럼 문양이 위에 있고 옆에서는 납작한 유물은 위에서 본 평면을 위에, 옆에서 본 입면(또는 좌 반입면·우 반단면)을 그 아래에 두되, 위에서 본 수직과 옆에서 본 수직을 맞춘다 — 평면에서는 점으로 보이는 회전축이 입면의 가운데선 바로 위에 선다. `DrawingSheetOptions.plan_over_elevation=(평면 record, 입면 record)`가 그 배치이고, 두 도형은 가로축을 공유해야 하며 평면은 축을 점으로, 입면은 축을 세로선으로 보아야 한다 — 아니면 맞출 것이 없어 거부한다. sidecar `layout`에 `kind` = `plan_over_elevation/v1`, `plan`, `elevation`, `axis_paper_x_mm`(그 수직의 종이 위 x)가 적힌다. 석기의 평면·단면 정렬 배치(`plan_with_sections`)와 같은 원리다.
+
 **외형선은 가운데선에서 멈추지 않는다.** 구연의 윗선과 굽의 밑선은 그릇을 한 바퀴 도는 가장자리이고, 잘린 벽 너머로 그 건너편이 보인다. 그래서 가운데선을 가로지르는 외형선의 가장자리는 외형선 굵기 그대로 가운데선을 지나 단면 쪽으로 이어지되, 단면선에 닿지 않게 그 방향으로 만나는 첫 단면선의 종이 1 mm 앞에서 멈춘다(`DrawingSheetOptions.outline_reach` 기본 `section`; `axis`는 가운데선에서 자른다). 그 높이에서 단면이 속이 차 있으면(속이 찬 굽 밑처럼 축점이 잘린 면 안에 놓이면) 이을 자리가 없어 가운데선에서 끝나고, 가운데선이 문양을 둘러 꺾인 상자 안은 잘려 나간다. 이어진 조각의 id는 `mirror:right:{외형선}:past-axis:NN`이고 sidecar의 `mirrored_figures[]`에 `outline_reach`·`outline_past_axis_count`·`reach_gap_paper_mm`가 적힌다. 단면 꺾임 record의 바깥 꺾임선은 기본으로 가운데선에서 끝나며(`break_reach` = `axis`), `section`으로 두면 같은 규칙으로 이어진다.
 
 ### 확인하는 것

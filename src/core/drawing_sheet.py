@@ -736,6 +736,20 @@ class DrawingSheetOptions:
     goes to its right, aligned top to bottom.  The sheet must draw exactly
     these three records and nothing else.  None keeps the row layout.
     """
+    plan_over_elevation: tuple[str, str] | None = None
+    """The dish layout: a plan with its elevation under it, in register on
+    the axis.
+
+    ``(plan record id, elevation record id)``.  A dish, a lid, a plate is
+    drawn as its plan - seen from above, where its decoration is - with the
+    elevation, or the half-elevation and half-section, beneath it, the
+    vertical the plan sees end-on standing under the vertical the elevation
+    sees: the plan's axis point over the elevation's centre line.  The two
+    frames must share their horizontal axis and the elevation's plane must
+    hold the rotation axis as its vertical, or there is no register to
+    keep.  The sheet must draw exactly these two records.  None keeps the
+    row layout.
+    """
     crease_records: tuple[str, ...] = ()
     """Crease readings (능선, the ridges between flake scars) to draw as inner
     lines on the projections that see them, by record id.
@@ -1077,6 +1091,15 @@ class DrawingSheetOptions:
                     "plan_with_sections and mirror_sections cannot be used together"
                 )
             object.__setattr__(self, "plan_with_sections", trio)
+        if self.plan_over_elevation is not None:
+            pair = tuple(self.plan_over_elevation)
+            if len(pair) != 2 or any(not isinstance(record_id, str) or not record_id.strip() for record_id in pair):
+                raise DrawingSheetError("plan_over_elevation names a plan record and an elevation record")
+            if pair[0] == pair[1]:
+                raise DrawingSheetError("plan_over_elevation must name two different records")
+            if self.plan_with_sections is not None:
+                raise DrawingSheetError("plan_over_elevation and plan_with_sections cannot be used together")
+            object.__setattr__(self, "plan_over_elevation", pair)
         angles: list[tuple[str, float]] = []
         for pair in self.technique_angles_deg:
             if not isinstance(pair, (tuple, list)) or len(pair) != 2:
@@ -1706,6 +1729,126 @@ def _lay_out_plan_with_sections(
             "kind": "plan_with_sections/v1",
             "plan": plan.record_id,
             "right": right.record_id,
+        },
+    )
+
+
+def _lay_out_plan_over_elevation(
+    figures: Sequence[_Prepared],
+    *,
+    frames: Mapping[str, PlanarFrame],
+    options: DrawingSheetOptions,
+    section_loops: bool = False,
+) -> tuple[list[_Figure], dict[str, str]]:
+    """Place a plan over its elevation, the two in register on the axis.
+
+    A dish is drawn as its plan with the elevation beneath it, and the
+    vertical the plan sees end-on - the rotation axis, a point on the plan -
+    stands under the vertical the elevation sees, its centre line.  The
+    register is read from the frames: they must share their horizontal
+    axis, the plan must see the axis as a point and the elevation as its
+    vertical line, or the two figures have nothing to be aligned on.
+    """
+
+    assert options.plan_over_elevation is not None
+    plan_id, elevation_id = options.plan_over_elevation
+    by_id = {figure.record_id: figure for figure in figures}
+    if set(by_id) != {plan_id, elevation_id}:
+        raise DrawingSheetError(
+            "plan_over_elevation draws exactly its plan and its elevation; "
+            "the sheet's record ids must be those two"
+        )
+    plan = by_id[plan_id]
+    elevation = by_id[elevation_id]
+    for name, figure in (("plan", plan), ("elevation", elevation)):
+        if figure.record_type != VectorRecordKind.OUTLINE.record_type:
+            raise DrawingSheetError(f"record {figure.record_id!r} is not an outline, so it cannot be the {name}")
+    plan_frame = frames[plan_id]
+    elevation_frame = frames[elevation_id]
+    if not _same_axis(plan_frame.u_axis_world, elevation_frame.u_axis_world):
+        raise DrawingSheetError(
+            f"the plan {plan_id!r} and the elevation {elevation_id!r} do not share their "
+            "horizontal axis, so one cannot stand under the other in register"
+        )
+    try:
+        plan_axis = center_axis_line(plan_frame.to_dict())
+        elevation_axis = center_axis_line(elevation_frame.to_dict())
+    except SVGRenderError as exc:
+        raise DrawingSheetError(str(exc)) from exc
+    if plan_axis is not None:
+        raise DrawingSheetError(
+            f"record {plan_id!r} sees the rotation axis as a line, not a point; it is not a plan"
+        )
+    if elevation_axis is None or abs(float(elevation_axis[1][0])) > 1e-9:
+        raise DrawingSheetError(
+            f"the rotation axis is not the vertical of {elevation_id!r}, so the plan has no "
+            "centre line to stand over"
+        )
+    origin = np.asarray(plan_frame.origin_world_mm, dtype=np.float64)
+    plan_axis_x = float(-np.dot(origin, np.asarray(plan_frame.u_axis_world, dtype=np.float64)))
+    elevation_axis_x = float(elevation_axis[0][0])
+
+    denominator = options.scale_denominator
+    gutter = options.gutter_mm
+    plan_probe = Placement(content_bounds_mm=plan.bounds, scale_denominator=denominator)
+    elevation_probe = Placement(content_bounds_mm=elevation.bounds, scale_denominator=denominator)
+    # Relative to the plan's origin: the elevation's origin shifts so that
+    # its centre line lands under the plan's axis point.
+    below_x = ((plan_axis_x - plan.bounds[0]) - (elevation_axis_x - elevation.bounds[0])) / denominator
+    below_y = plan_probe.height_mm + gutter
+    left = min(0.0, below_x)
+    total_width = max(plan_probe.width_mm, below_x + elevation_probe.width_mm) - left
+    total_height = below_y + elevation_probe.height_mm
+
+    page = options.page
+    available_width = page.content_width_mm
+    available_height = options.content_height(
+        computed_rubbing=any(figure.caption is not None for figure in figures),
+        section_loops=section_loops,
+    )
+    if total_width > available_width + 1e-9 or total_height > available_height + 1e-9:
+        overflow = max(total_width / available_width, total_height / available_height)
+        suggestion = math.ceil(denominator * overflow)
+        raise DrawingSheetError(
+            f"the plan over its elevation does not fit {page.size} {page.orientation} "
+            f"at {options.physical_scale}: it needs {total_width:.1f} x "
+            f"{total_height:.1f} mm of the available {available_width:.1f} x "
+            f"{available_height:.1f} mm. Use a scale denominator of {suggestion} "
+            "or more, or a larger page."
+        )
+    origin_x = page.margin_mm - left
+    origin_y = page.margin_mm
+
+    def placed(figure: _Prepared, dx: float, dy: float) -> _Figure:
+        return _Figure(
+            record_id=figure.record_id,
+            record_type=figure.record_type,
+            recipe_hash=figure.recipe_hash,
+            payload_sha256=figure.payload_sha256,
+            placement=Placement(
+                content_bounds_mm=figure.bounds,
+                origin_mm=(origin_x + dx, origin_y + dy),
+                scale_denominator=denominator,
+            ),
+            paths_by_kind=figure.paths_by_kind,
+            mirror_section_record_id=figure.mirror_section_record_id,
+            mirror_elevation_side=figure.mirror_elevation_side,
+            fill_only_ids=figure.fill_only_ids,
+            raster=figure.raster,
+            attached=figure.attached,
+            caption=figure.caption,
+            caption_lines=figure.caption_lines,
+            cutouts=figure.cutouts,
+        )
+
+    axis_paper_x = origin_x + (plan_axis_x - plan.bounds[0]) / denominator
+    return (
+        [placed(plan, 0.0, 0.0), placed(elevation, below_x, below_y)],
+        {
+            "axis_paper_x_mm": f"{axis_paper_x:.3f}",
+            "elevation": elevation.record_id,
+            "kind": "plan_over_elevation/v1",
+            "plan": plan.record_id,
         },
     )
 
@@ -4761,6 +4904,13 @@ def compose_drawing_sheet(
     try:
         if options.plan_with_sections is not None:
             placed, layout = _lay_out_plan_with_sections(
+                prepared,
+                frames=frames,
+                options=options,
+                section_loops=bool(section_loop_counts),
+            )
+        elif options.plan_over_elevation is not None:
+            placed, layout = _lay_out_plan_over_elevation(
                 prepared,
                 frames=frames,
                 options=options,

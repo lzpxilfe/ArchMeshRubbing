@@ -1044,3 +1044,49 @@ def test_the_elevation_may_take_the_right_and_the_section_the_left() -> None:
     assert min(x for x, _y in axis) < axis_x - 1.0 and max(x for x, _y in axis) == pytest.approx(axis_x, abs=1e-6)
     with pytest.raises(DrawingSheetError, match="mirror_elevation_side must be"):
         _options(mirror_elevation_side="top")
+
+
+def test_a_plan_stands_over_its_elevation_on_the_axis() -> None:
+    """A dish is drawn as its plan with the elevation beneath it, the axis
+    the plan sees as a point standing over the elevation's centre line;
+    the sidecar names the layout and the axis, and a plan the sheet is not
+    drawing, or figures that share no horizontal axis, are refused."""
+
+    session = _positioned()
+    session = commit_vector_computation(
+        session,
+        compute_artifact_outline(session, "top", precision_grid_mm=0.5),
+        record_id="record:plan", created_at="2026-09-03T00:03:00Z", operator="tester",
+    )
+    bundle = compose_drawing_sheet(
+        session.document, ["record:plan", ELEVATION_ID],
+        options=_options(
+            mirror_sections=((ELEVATION_ID, SECTION_ID),),
+            plan_over_elevation=("record:plan", ELEVATION_ID),
+        ),
+    )
+    validate_drawing_sheet_bytes(bundle.svg_bytes, bundle.sidecar_bytes)
+    root = ET.fromstring(bundle.svg_bytes)
+    figures = [el for el in root.iter(f"{SVG_NS}g") if el.attrib.get("id", "").startswith("figure-")]
+    assert [f.attrib["data-record-id"] for f in figures] == ["record:plan", ELEVATION_ID]
+    plan_points = [p for path in figures[0].iter(f"{SVG_NS}path") for p in _points(path)]
+    plan_axis_x = 0.5 * (min(x for x, _y in plan_points) + max(x for x, _y in plan_points))
+    axis = _points(next(path for path in figures[1].iter(f"{SVG_NS}path") if path.attrib.get("id") == "mirror:center-axis"))
+    assert abs(axis[0][0] - plan_axis_x) < 0.05, "the plan's axis point stands over the centre line"
+    assert max(y for _x, y in plan_points) < min(y for _x, y in axis), "the plan is above the elevation"
+    sidecar = json.loads(bundle.sidecar_bytes.decode("utf-8"))
+    assert sidecar["layout"]["kind"] == "plan_over_elevation/v1"
+    assert sidecar["layout"]["plan"] == "record:plan" and sidecar["layout"]["elevation"] == ELEVATION_ID
+    assert abs(float(sidecar["layout"]["axis_paper_x_mm"]) - plan_axis_x) < 0.05
+    with pytest.raises(DrawingSheetError, match="exactly its plan and its elevation"):
+        compose_drawing_sheet(
+            session.document, [ELEVATION_ID],
+            options=_options(mirror_sections=((ELEVATION_ID, SECTION_ID),), plan_over_elevation=("record:plan", ELEVATION_ID)),
+        )
+    with pytest.raises(DrawingSheetError, match="is not a plan"):
+        compose_drawing_sheet(
+            session.document, [ELEVATION_ID, "record:plan"],
+            options=_options(mirror_sections=((ELEVATION_ID, SECTION_ID),), plan_over_elevation=(ELEVATION_ID, "record:plan")),
+        )
+    with pytest.raises(DrawingSheetError, match="two different records"):
+        _options(plan_over_elevation=("record:plan", "record:plan"))
