@@ -790,3 +790,46 @@ def test_the_axis_never_appears_in_a_plan_view() -> None:
             assert segment[0][0] == pytest.approx(0.0, abs=1e-12)
             assert segment[1][0] == pytest.approx(0.0, abs=1e-12)
             assert {segment[0][1], segment[1][1]} == {bounds[1], bounds[3]}
+
+
+def test_a_warped_vessel_stands_on_its_foot_when_the_archaeologist_says_so() -> None:
+    """A vessel warped in the kiln has no axis its circles agree on.  The
+    convention is to stand it on a flat floor and cut it as it stands: the
+    foot circle's three anchors are the points it rests on, the axis is
+    that plane's normal through the foot's centre, and the rim's lean off
+    it is reported as the warp, not refused.  The program never chooses
+    this on its own."""
+
+    # A foot ring level in its own plane, and a rim whose centre leans
+    # 6 degrees off the foot's normal: the pot is warped, not tilted.
+    foot_axis = _tilted_axis(0.0)
+    bottom_center = np.zeros(3, dtype=np.float64)
+    lean = _tilted_axis(6.0)
+    top_center = bottom_center + 60.0 * lean
+    bottom_triangle, bottom_points = _circle_geometry(bottom_center, 30.0, foot_axis)
+    top_triangle, top_points = _circle_geometry(top_center, 40.0, foot_axis)
+    vertices = np.vstack([bottom_triangle, top_triangle])
+    faces = np.asarray([[0, 1, 2], [3, 4, 5]], dtype=np.int32)
+    session = _session(vertices, faces)
+    session = _commit_circle(session, vertices, faces, bottom_points, record_id=BOTTOM_ID, created_at="2026-09-03T00:00:01Z")
+    session = _commit_circle(session, vertices, faces, top_points, record_id=TOP_ID, created_at="2026-09-03T00:00:02Z")
+    kwargs = dict(top_record_id=TOP_ID, bottom_record_id=BOTTOM_ID, operator="tester", created_at="2026-09-03T00:00:03Z")
+
+    unasked = session.commit_axis_alignment(revision_id="align:centre", **kwargs)
+    centre = unasked.document.align_revision_index["align:centre"]
+    assert centre.recipe["axis_source"] == "center_line/v1"
+    assert centre.qc["center_line_disagreement_deg"] == pytest.approx(6.0, abs=0.1)
+
+    stood = session.commit_axis_alignment(revision_id="align:foot", axis_source="standing_on_foot/v1", **kwargs)
+    revision = stood.document.align_revision_index["align:foot"]
+    assert revision.recipe["axis_source"] == "standing_on_foot/v1"
+    # The foot's normal goes to +Z exactly; the centre line keeps its lean.
+    rotation = revision.matrix[:3, :3]
+    assert _angle_to_canonical_axis_deg(rotation @ foot_axis) < 0.01
+    assert _angle_to_canonical_axis_deg(rotation @ lean) == pytest.approx(6.0, abs=0.1)
+    assert revision.qc["axis_source"] == "standing_on_foot/v1"
+    assert revision.qc["center_line_disagreement_deg"] == pytest.approx(6.0, abs=0.1)
+    assert revision.qc["axis_tilt_corrected_deg"] < 0.01
+    assert np.array_equal(axis_align_delta_from_recipe(revision.recipe), axis_align_delta_from_recipe(revision.recipe))
+    with pytest.raises(ArtifactSessionError, match="axis_source must be one of"):
+        session.commit_axis_alignment(axis_source="on_its_rim/v1", **kwargs)

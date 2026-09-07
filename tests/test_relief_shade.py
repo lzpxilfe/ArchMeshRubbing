@@ -212,3 +212,15 @@ def test_the_cell_hash_is_uniform_and_the_same_every_time() -> None:
     assert np.array_equal(first, _cell_uniforms(ix.ravel(), iy.ravel()))
     assert abs(first.mean() - 0.5) < 0.02
     assert not np.array_equal(first[:, 0], first[:, 1])
+
+
+def test_the_hollows_between_motifs_can_be_shaded_darker(petalled) -> None:
+    """A hand stipples the ground between raised motifs darker the deeper
+    it lies; the cavity term adds that to the slope's shade and is off by
+    default, so the default shade keeps its bytes."""
+
+    plain = compute_relief_shade(petalled, view="front")
+    hollowed = compute_relief_shade(petalled, view="front", cavity_um=300, cavity_gain_thousandths=800)
+    assert validate_relief_shade_recipe(hollowed.recipe)["shade_policy"]["cavity_um"] == 300
+    assert hollowed.qc["shaded_pixel_count"] > plain.qc["shaded_pixel_count"]
+    assert compute_relief_shade(petalled, view="front").raster.raster_sha256 == plain.raster.raster_sha256

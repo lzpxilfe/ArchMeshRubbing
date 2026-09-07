@@ -759,7 +759,7 @@
                 "top_record_id"
               ],
               "properties": {
-                "axis_source": {"enum": ["center_line/v1", "circle_plane_normals/v1"]},
+                "axis_source": {"enum": ["center_line/v1", "circle_plane_normals/v1", "standing_on_foot/v1"]},
                 "bottom_center_mm_decimal": {
                   "$ref": "#/$defs/vec3Decimal6"
                 },
@@ -930,7 +930,7 @@
         "proper_rigid"
       ],
       "properties": {
-        "axis_source": {"enum": ["center_line/v1", "circle_plane_normals/v1"]},
+        "axis_source": {"enum": ["center_line/v1", "circle_plane_normals/v1", "standing_on_foot/v1"]},
         "axis_tilt_corrected_deg": {
           "type": "number",
           "minimum": 0,

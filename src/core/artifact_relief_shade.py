@@ -86,6 +86,11 @@ DEFAULT_RELIEF_SHADE_LIGHT_THOUSANDTHS: tuple[int, int, int] = (-1000, 1000, 120
 DEFAULT_RELIEF_SHADE_GAIN_THOUSANDTHS = 2000
 #: A shade fainter than this is not a shade: a mesh facet, a scan's grain.
 DEFAULT_RELIEF_SHADE_FLOOR_THOUSANDTHS = 60
+#: The hollows: the ground between raised motifs lies in their shadow, and
+#: a hand stipples it darker the deeper it lies.  Off by default; a depth
+#: in micrometres at which the ground is fully dark, and how dark.
+DEFAULT_RELIEF_SHADE_CAVITY_UM = 0
+DEFAULT_RELIEF_SHADE_CAVITY_GAIN_THOUSANDTHS = 1000
 DEFAULT_RELIEF_SHADE_EDGE_EROSION_PIXELS = 2
 RELIEF_SHADE_LAYER_SEPARATION_UM = 50
 MIN_RELIEF_SHADE_PIXELS_PER_MM = 1
@@ -334,6 +339,8 @@ def relief_shade_recipe(
     light_thousandths: Sequence[int] = DEFAULT_RELIEF_SHADE_LIGHT_THOUSANDTHS,
     gain_thousandths: int = DEFAULT_RELIEF_SHADE_GAIN_THOUSANDTHS,
     floor_thousandths: int = DEFAULT_RELIEF_SHADE_FLOOR_THOUSANDTHS,
+    cavity_um: int = DEFAULT_RELIEF_SHADE_CAVITY_UM,
+    cavity_gain_thousandths: int = DEFAULT_RELIEF_SHADE_CAVITY_GAIN_THOUSANDTHS,
     edge_erosion_pixels: int = DEFAULT_RELIEF_SHADE_EDGE_EROSION_PIXELS,
     window_mm: Sequence[float] | None = None,
 ) -> dict[str, Any]:
@@ -389,6 +396,8 @@ def relief_shade_recipe(
         },
         "relief_policy": {"grain_um": grain, "slow_um": slow},
         "shade_policy": {
+            "cavity_gain_thousandths": _strict_int(cavity_gain_thousandths, name="cavity_gain_thousandths", minimum=0, maximum=100_000),
+            "cavity_um": _strict_int(cavity_um, name="cavity_um", minimum=0, maximum=100_000),
             "edge_erosion_pixels": _strict_int(edge_erosion_pixels, name="edge_erosion_pixels", minimum=0, maximum=100),
             "floor_thousandths": _strict_int(floor_thousandths, name="floor_thousandths", minimum=0, maximum=999),
             "foreshortening": RELIEF_SHADE_FORESHORTENING,
@@ -446,7 +455,7 @@ def validate_relief_shade_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
     relief = _exact_keys(block["relief_policy"], frozenset({"grain_um", "slow_um"}), name="relief_policy")
     shade = _exact_keys(
         block["shade_policy"],
-        frozenset({"edge_erosion_pixels", "floor_thousandths", "foreshortening", "gain_thousandths", "light_thousandths", "model"}),
+        frozenset({"cavity_gain_thousandths", "cavity_um", "edge_erosion_pixels", "floor_thousandths", "foreshortening", "gain_thousandths", "light_thousandths", "model"}),
         name="shade_policy",
     )
     if shade["model"] != RELIEF_SHADE_LIGHT_MODEL or shade["foreshortening"] != RELIEF_SHADE_FORESHORTENING:
@@ -477,6 +486,8 @@ def validate_relief_shade_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
         light_thousandths=light,
         gain_thousandths=shade["gain_thousandths"],
         floor_thousandths=shade["floor_thousandths"],
+        cavity_um=shade["cavity_um"],
+        cavity_gain_thousandths=shade["cavity_gain_thousandths"],
         edge_erosion_pixels=shade["edge_erosion_pixels"],
         window_mm=window_mm,
     )
@@ -624,6 +635,11 @@ def extract_relief_shade(
     flat = light[2]
     gain = shade_policy["gain_thousandths"] / 1000.0
     darkness = np.clip((flat - lit) / flat * gain, 0.0, 1.0)
+    cavity = shade_policy["cavity_um"] / 1000.0
+    if cavity > 0.0:
+        # The ground between the motifs, in their shadow: darker the deeper.
+        hollow = np.clip(-filtered / cavity, 0.0, 1.0) * (shade_policy["cavity_gain_thousandths"] / 1000.0)
+        darkness = np.clip(darkness + hollow, 0.0, 1.0)
     darkness = np.where(darkness >= shade_policy["floor_thousandths"] / 1000.0, darkness, 0.0)
     # The blur that took out the grain leans on nothing past the covered
     # edge, and a slope appears there that the wall does not have: no pixel
@@ -811,6 +827,8 @@ def validate_relief_shade_records(document: ArtifactDocument) -> None:
 
 __all__ = [
     "ArtifactReliefShadeError",
+    "DEFAULT_RELIEF_SHADE_CAVITY_GAIN_THOUSANDTHS",
+    "DEFAULT_RELIEF_SHADE_CAVITY_UM",
     "DEFAULT_RELIEF_SHADE_FLOOR_THOUSANDTHS",
     "DEFAULT_RELIEF_SHADE_GAIN_THOUSANDTHS",
     "DEFAULT_RELIEF_SHADE_GRAIN_UM",

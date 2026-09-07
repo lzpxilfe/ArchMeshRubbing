@@ -659,6 +659,7 @@ class ArtifactSession:
         operator: str,
         created_at: str | None = None,
         revision_id: str | None = None,
+        axis_source: str | None = None,
     ) -> "ArtifactSession":
         """Commit an Align derived from two measured circles.
 
@@ -683,6 +684,7 @@ class ArtifactSession:
                 self.document,
                 top_record_id=top_record_id,
                 bottom_record_id=bottom_record_id,
+                axis_source=axis_source,
             )
         except ArtifactAxisAlignmentError as exc:
             raise ArtifactSessionError(str(exc)) from exc

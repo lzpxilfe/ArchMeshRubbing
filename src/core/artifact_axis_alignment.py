@@ -57,9 +57,17 @@ AXIS_ALIGN_CONVENTION = "delta @ parent"
 #: dominated by their fit error, but the planes of the circles are fixed all
 #: the better by their width, so the axis is their common normal.  A recipe
 #: without the key is a centre-line recipe from before the choice existed.
+#: A third source is the archaeologist's, never chosen by the program: a
+#: vessel that is not round or not level - warped in the kiln - has no
+#: axis its circles agree on, and the convention is to stand it on a flat
+#: floor as it stands on the table and cut it in half as it stands.  The
+#: axis is then the normal of the foot's plane, the foot circle's three
+#: anchors being the points the vessel rests on, through the foot's centre;
+#: the rim only says which way is up.
 AXIS_SOURCE_CENTER_LINE = "center_line/v1"
 AXIS_SOURCE_CIRCLE_NORMALS = "circle_plane_normals/v1"
-AXIS_SOURCES = (AXIS_SOURCE_CENTER_LINE, AXIS_SOURCE_CIRCLE_NORMALS)
+AXIS_SOURCE_STANDING_ON_FOOT = "standing_on_foot/v1"
+AXIS_SOURCES = (AXIS_SOURCE_CENTER_LINE, AXIS_SOURCE_CIRCLE_NORMALS, AXIS_SOURCE_STANDING_ON_FOOT)
 
 # The canonical axis a positioned artifact stands on.
 CANONICAL_AXIS = (0.0, 0.0, 1.0)
@@ -204,7 +212,19 @@ def axis_align_delta_from_recipe(recipe: Mapping[str, Any]) -> np.ndarray:
     bottom_normal = _decimal_vector(
         recipe.get("bottom_normal_unit_decimal"), field_name="recipe.bottom_normal_unit_decimal"
     )
+    if source == AXIS_SOURCE_STANDING_ON_FOOT:
+        return _delta_from_axis(_foot_normal(bottom_normal, separation), bottom_center)
     return _delta_from_axis(_common_normal(top_normal, bottom_normal, separation), bottom_center)
+
+
+def _foot_normal(bottom_normal: np.ndarray, upward: np.ndarray) -> np.ndarray:
+    """The foot's plane normal, pointing the way ``upward`` does: the
+    vessel stood on a flat floor."""
+
+    axis = _unit(bottom_normal, field_name="foot normal")
+    if float(np.dot(axis, upward)) < 0.0:
+        axis = -axis
+    return axis
 
 
 def _common_normal(top_normal: np.ndarray, bottom_normal: np.ndarray, upward: np.ndarray) -> np.ndarray:
@@ -230,16 +250,23 @@ def build_axis_alignment(
     *,
     top_record_id: str,
     bottom_record_id: str,
+    axis_source: str | None = None,
 ) -> tuple[np.ndarray, dict[str, Any], dict[str, Any]]:
     """Return the composed Align matrix, its recipe and its QC.
 
     `top` and `bottom` name which circle sits higher on the finished drawing;
     the axis runs from bottom to top, so the vessel ends up standing rather than
-    inverted.
+    inverted.  ``axis_source`` None lets the circles' geometry choose between
+    the centre line and their common normal; ``standing_on_foot/v1`` is the
+    archaeologist's word for a warped vessel, and is never chosen unasked.
     """
 
     if not isinstance(document, ArtifactDocument):
         raise ArtifactAxisAlignmentError("document must be an ArtifactDocument")
+    if axis_source is not None and axis_source not in AXIS_SOURCES:
+        raise ArtifactAxisAlignmentError(
+            f"axis_source must be one of {', '.join(AXIS_SOURCES)}; got {axis_source!r}"
+        )
     top_id = str(top_record_id)
     bottom_id = str(bottom_record_id)
     if top_id == bottom_id:
@@ -307,7 +334,17 @@ def build_axis_alignment(
     # planes must agree with it.  Closer than that - a flat artifact - the
     # line between the centres is mostly fit error, and the axis is the
     # circles' common normal, which their width fixes all the better.
-    if largest_radius > 0.0 and separation < largest_radius * MINIMUM_SEPARATION_TO_RADIUS_RATIO:
+    if axis_source == AXIS_SOURCE_STANDING_ON_FOOT:
+        # Stood on its foot: the axis is the foot's normal and the centre
+        # line's lean from it is the vessel's warp, reported, not refused.
+        source = AXIS_SOURCE_STANDING_ON_FOOT
+        axis = _foot_normal(bottom_normal, separation_vector)
+        worst = normal_disagreement
+    elif axis_source == AXIS_SOURCE_CIRCLE_NORMALS or (
+        axis_source is None
+        and largest_radius > 0.0
+        and separation < largest_radius * MINIMUM_SEPARATION_TO_RADIUS_RATIO
+    ):
         source = AXIS_SOURCE_CIRCLE_NORMALS
         axis = _common_normal(top_normal, bottom_normal, separation_vector)
         worst = normal_disagreement
@@ -378,6 +415,7 @@ __all__ = [
     "AXIS_SOURCES",
     "AXIS_SOURCE_CENTER_LINE",
     "AXIS_SOURCE_CIRCLE_NORMALS",
+    "AXIS_SOURCE_STANDING_ON_FOOT",
     "ArtifactAxisAlignmentError",
     "CANONICAL_AXIS",
     "MAXIMUM_NORMAL_DISAGREEMENT_DEG",
