@@ -1090,3 +1090,35 @@ def test_a_plan_stands_over_its_elevation_on_the_axis() -> None:
         )
     with pytest.raises(DrawingSheetError, match="two different records"):
         _options(plan_over_elevation=("record:plan", "record:plan"))
+
+
+def test_the_centre_line_is_a_solid_heavier_line_by_default_and_dash_dot_by_choice() -> None:
+    """Hands differ on the centre line.  By default a sheet draws it solid at
+    0.25 mm, whatever the preset; asked for dash_dot it is the preset's own,
+    and the preset itself is untouched either way."""
+
+    from src.core.drawing_style import get_preset
+
+    bundle = _mirrored_sheet()
+    figure = _figure(bundle.svg_bytes)
+    layer = _find(figure, f"{SVG_NS}g[@id='layer-center-axis']")
+    assert layer.attrib["stroke-width"] == "0.25" and "stroke-dasharray" not in layer.attrib
+    sidecar = json.loads(bundle.sidecar_bytes.decode("utf-8"))
+    assert sidecar["center_axis"]["style"] == "solid" and sidecar["center_axis"]["stroke_width_mm"] == 0.25
+    preset_id = sidecar["style"]["preset_id"] if "style" in sidecar else None
+
+    dashed = _mirrored_sheet(center_axis_style="dash_dot")
+    figure = _figure(dashed.svg_bytes)
+    layer = _find(figure, f"{SVG_NS}g[@id='layer-center-axis']")
+    style = get_preset(sidecar["style"]["preset_id"]).style("center_axis") if preset_id else None
+    assert "stroke-dasharray" in layer.attrib
+    if style is not None:
+        assert layer.attrib["stroke-dasharray"].count(",") == len(style.dash_pattern_mm) - 1
+        assert float(layer.attrib["stroke-width"]) == pytest.approx(style.stroke_width_mm)
+    assert json.loads(dashed.sidecar_bytes.decode("utf-8"))["center_axis"]["style"] == "dash_dot"
+    # The outline layer is the preset's either way: only the centre line moved.
+    outline_default = _find(_figure(bundle.svg_bytes), f"{SVG_NS}g[@id='layer-outline-visible']").attrib["stroke-width"]
+    outline_dashed = _find(figure, f"{SVG_NS}g[@id='layer-outline-visible']").attrib["stroke-width"]
+    assert outline_default == outline_dashed
+    with pytest.raises(DrawingSheetError, match="center_axis_style must be"):
+        _options(center_axis_style="double")

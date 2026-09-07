@@ -20,6 +20,7 @@ import numpy as np
 
 from .drawing_style import (
     DrawingStylePreset,
+    LineStyle,
     LINE_KINDS,
     layer_id,
 )
@@ -643,8 +644,12 @@ def layer_elements(
     indent: str,
     fill_only_ids: AbstractSet[str] = frozenset(),
     groups: Mapping[str, str] | None = None,
+    style_overrides: Mapping[str, LineStyle] | None = None,
 ) -> list[str]:
     """Return one `<g>` per line kind, in the vocabulary's own order.
+
+    ``style_overrides`` restyles named kinds for this render only - a
+    sheet's choice of centre line, say - leaving the preset what it is.
 
     The order is fixed by the vocabulary rather than by the record, so two
     renders of the same drawing cannot disagree.  A kind with no paths is
@@ -661,7 +666,7 @@ def layer_elements(
         paths = paths_by_kind.get(kind)
         if not paths:
             continue
-        style = preset.style(kind)
+        style = (style_overrides or {}).get(kind) or preset.style(kind)
         attributes = (
             f'stroke-width="'
             f'{number_token(style.stroke_width_mm, field_name="stroke_width_mm")}"'

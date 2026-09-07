@@ -118,6 +118,7 @@ from .drawing_style import (
     OUTLINE_HOLE,
     DrawingStyleError,
     DrawingStylePreset,
+    LineStyle,
     preset_claim as drawing_style_preset_claim,
     preset_from_claim as drawing_style_preset_from_claim,
     resolve_preset as resolve_drawing_style_preset,
@@ -468,6 +469,15 @@ DEFAULT_BREAK_REACH = REACH_AXIS
 MIRROR_ELEVATION_LEFT = "left"
 MIRROR_ELEVATION_RIGHT = "right"
 MIRROR_ELEVATION_SIDES: tuple[str, ...] = (MIRROR_ELEVATION_LEFT, MIRROR_ELEVATION_RIGHT)
+
+#: How the centre line is drawn on a sheet.  Hands differ: a solid vertical
+#: a little heavier than the fine pen, or the dash-dot the presets carry.
+#: The choice restyles that one kind at render time and leaves the preset
+#: and its digest what they are.
+CENTER_AXIS_STYLE_SOLID = "solid"
+CENTER_AXIS_STYLE_DASH_DOT = "dash_dot"
+CENTER_AXIS_STYLES: tuple[str, ...] = (CENTER_AXIS_STYLE_SOLID, CENTER_AXIS_STYLE_DASH_DOT)
+CENTER_AXIS_SOLID_WIDTH_MM = 0.25
 
 
 @dataclass(frozen=True, slots=True)
@@ -851,6 +861,13 @@ class DrawingSheetOptions:
     record the sheet is not drawing as a rubbing is refused rather than
     quietly dropped.
     """
+    center_axis_style: str = CENTER_AXIS_STYLE_SOLID
+    """How the centre line is drawn: ``solid`` (the default: a 0.25 mm solid
+    line, whatever the preset - heavier than the fine pen, lighter than the
+    outline) or ``dash_dot`` (the preset's own centre-line style).  The
+    choice overrides that one kind on the sheet and leaves the preset as
+    it is; the sidecar's ``center_axis`` block records it.
+    """
     mirror_elevation_side: str = MIRROR_ELEVATION_LEFT
     """Which side of the fold the elevation takes on every mirrored figure:
     ``left`` (the default: elevation left, section right) or ``right``.
@@ -1207,6 +1224,8 @@ class DrawingSheetOptions:
             raise DrawingSheetError(
                 f"mirror_elevation_side must be one of {', '.join(MIRROR_ELEVATION_SIDES)}"
             )
+        if self.center_axis_style not in CENTER_AXIS_STYLES:
+            raise DrawingSheetError(f"center_axis_style must be one of {', '.join(CENTER_AXIS_STYLES)}")
         on_axis: list[tuple[str, str]] = []
         for pair in self.rubbings_on_axis:
             if not isinstance(pair, (tuple, list)) or len(pair) != 2:
@@ -1343,6 +1362,13 @@ class DrawingSheetOptions:
             ),
             _SCALE_BAR_BAND_MM,
         )
+
+    def line_style_overrides(self) -> dict[str, LineStyle]:
+        """The kinds this sheet restyles at render time, over the preset."""
+
+        if self.center_axis_style == CENTER_AXIS_STYLE_SOLID:
+            return {CENTER_AXIS: LineStyle(stroke_width_mm=CENTER_AXIS_SOLID_WIDTH_MM)}
+        return {}
 
     @property
     def footer_height_mm(self) -> float:
@@ -4290,6 +4316,7 @@ def _render_sheet(
                 layer_elements(
                     figure.paths_by_kind,
                     preset=preset,
+                    style_overrides=options.line_style_overrides(),
                     placement=figure.placement,
                     hatched=hatched_kinds(figure.paths_by_kind, preset=preset),
                     indent="      ",
@@ -4317,6 +4344,7 @@ def _render_sheet(
                 layer_elements(
                     under,
                     preset=preset,
+                    style_overrides=options.line_style_overrides(),
                     placement=figure.placement,
                     hatched=hatched,
                     indent="      ",
@@ -4335,6 +4363,7 @@ def _render_sheet(
                 layer_elements(
                     over,
                     preset=preset,
+                    style_overrides=options.line_style_overrides(),
                     placement=figure.placement,
                     hatched=hatched,
                     indent="      ",
@@ -4941,6 +4970,12 @@ def compose_drawing_sheet(
                 "align_revision_id": str(align_id or ""),
                 "drawn": draw_center_axis,
                 "requested": options.show_center_axis,
+                "stroke_width_mm": (
+                    CENTER_AXIS_SOLID_WIDTH_MM
+                    if options.center_axis_style == CENTER_AXIS_STYLE_SOLID
+                    else resolve_drawing_style_preset(options.style_preset).style(CENTER_AXIS).stroke_width_mm
+                ),
+                "style": options.center_axis_style,
             },
             crease=(
                 {

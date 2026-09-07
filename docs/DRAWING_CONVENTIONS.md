@@ -420,6 +420,8 @@ DrawingSheetOptions(title_block=..., show_center_axis=True)
 
 **기본은 꺼짐이고, preset 없이는 켤 수 없다.** 모든 선이 같은 굵기면 중심축선을 외형선과 구분할 수 없으므로 preset 없이 요청하면 거부한다.
 
+**도판의 가운데선은 조금 두꺼운 실선이 기본이고, 선 종류는 고를 수 있다.** 가운데선을 어떻게 긋는지는 사람마다 다르다 — 실측자는 너무 두껍지 않게 조금 두꺼운 실선으로 수직으로 긋는 쪽이고, preset의 일점쇄선을 쓰는 사람도 있다. 그래서 `DrawingSheetOptions.center_axis_style`이 `solid`(기본: preset과 무관하게 0.25 mm 실선 — 세부 펜 0.1보다 두껍고 외형선 0.4보다 가늘다)와 `dash_dot`(preset의 `center_axis` 스타일 그대로) 가운데 하나를 고른다. 이 선택은 preset을 바꾸지 않고 그 선 종류 하나만 도판에서 덮어쓰며, sidecar `center_axis`에 `style`과 `stroke_width_mm`가 적힌다. 단일 record의 벡터 내보내기(`VectorSVGOptions`)는 preset의 선 종류 그대로다.
+
 ---
 
 ## 좌 반입면 · 우 반단면
