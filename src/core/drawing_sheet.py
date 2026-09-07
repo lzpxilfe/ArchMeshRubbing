@@ -76,9 +76,11 @@ from .artifact_paint_cutout import (
 )
 from .artifact_profile_break import (
     PROFILE_BREAK_RECORD_TYPE,
+    PROFILE_BREAK_SURFACE_INWARD,
     ArtifactProfileBreakError,
     ProfileBreakPayload,
     profile_break_payload_from_record,
+    profile_break_surface,
 )
 from .artifact_profile_groove import (
     ArtifactProfileGrooveError,
@@ -2425,21 +2427,58 @@ def _require_drawable_break_record(
 
 
 def _break_paths_for_figure(
+    figure_record_type: str,
     figure_payload: Any,
     breaks: Sequence[tuple[DerivedRecord, ProfileBreakPayload]],
-) -> tuple[dict[str, list[Any]], list[dict[str, str]]]:
-    """Return the break lines that belong on one figure, and what they are.
+    *,
+    has_section_half: bool,
+) -> tuple[dict[str, list[Any]], dict[str, list[Any]], list[dict[str, str]], list[dict[str, str]]]:
+    """Return the break lines that belong on one figure - on the figure
+    itself and, for a mirrored figure, on its section half - with what was
+    drawn and what could not be.
 
-    A corner of the profile is a fact about the artifact's own axis: any
+    A corner of the profile is a fact about the artifact's own axis: a
     figure whose plane contains that axis shows it as the chord of its
-    circle at its height, an inner line from silhouette to silhouette that
-    a mirrored figure then cuts at the axis.  A plan view gets nothing.
+    circle at its height, a straight inner line.  Which side of the wall
+    the reading took decides where the chord belongs.  The outside is seen
+    on an elevation, from silhouette to silhouette, cut at the axis on a
+    mirrored figure.  The inside shows through the cut: on the section's
+    half of a mirrored figure, from the axis out to the inner wall, or
+    across a section drawn on its own; an elevation alone cannot show it,
+    and a section alone does not need the outside's corners, which its cut
+    faces already draw.  A plan view gets nothing.
     """
 
     by_kind: dict[str, list[Any]] = {}
+    interior_by_kind: dict[str, list[Any]] = {}
     drawn: list[dict[str, str]] = []
+    not_drawn: list[dict[str, str]] = []
     frame = figure_payload.frame.to_dict()
+    is_outline = figure_record_type == VectorRecordKind.OUTLINE.record_type
+    is_cutline = figure_record_type == VectorRecordKind.CUTLINE.record_type
     for record, payload in breaks:
+        try:
+            surface = profile_break_surface(record.recipe)
+        except ArtifactProfileBreakError as exc:
+            raise DrawingSheetError(str(exc)) from exc
+        inward = surface == PROFILE_BREAK_SURFACE_INWARD
+        if inward:
+            if has_section_half:
+                target, half = interior_by_kind, "section"
+            elif is_cutline:
+                target, half = by_kind, "figure"
+            else:
+                not_drawn.append(
+                    {"reason": "interior_needs_section_half", "record_id": record.id, "surface": surface}
+                )
+                continue
+        elif is_outline:
+            target, half = by_kind, "elevation" if has_section_half else "figure"
+        else:
+            not_drawn.append(
+                {"reason": "exterior_needs_elevation", "record_id": record.id, "surface": surface}
+            )
+            continue
         paths: list[Any] = []
         for index, item in enumerate(payload.breaks):
             try:
@@ -2463,9 +2502,11 @@ def _break_paths_for_figure(
             )
         if not paths:
             continue
-        by_kind.setdefault(OUTLINE_HOLE, []).extend(paths)
-        drawn.append({"break_count": str(len(payload.breaks)), "record_id": record.id})
-    return by_kind, drawn
+        target.setdefault(OUTLINE_HOLE, []).extend(paths)
+        drawn.append(
+            {"break_count": str(len(payload.breaks)), "half": half, "record_id": record.id, "surface": surface}
+        )
+    return by_kind, interior_by_kind, drawn, not_drawn
 
 
 def _groove_paths_for_figure(
@@ -3272,7 +3313,33 @@ def _jog_pieces(
                     if len(part) >= 2:
                         split.append((part, inside and negative))
         pieces = split
-    return [piece for piece, inside in pieces if inside == keep_inside]
+    kept = [piece for piece, inside in pieces if inside == keep_inside]
+    if keep_inside:
+        return kept
+    # Outside pieces that a line's extension cut apart, but that the
+    # rectangle does not separate, are joined back at the cut.
+    joined: list[list[tuple[float, float]]] = []
+    while kept:
+        chain = kept.pop(0)
+        grew = True
+        while grew:
+            grew = False
+            for index, piece in enumerate(kept):
+                if _same_point(chain[-1], piece[0]):
+                    chain = chain + piece[1:]
+                elif _same_point(piece[-1], chain[0]):
+                    chain = piece[:-1] + chain
+                else:
+                    continue
+                kept.pop(index)
+                grew = True
+                break
+        joined.append(chain)
+    return joined
+
+
+def _same_point(a: tuple[float, float], b: tuple[float, float]) -> bool:
+    return abs(a[0] - b[0]) <= 1e-9 and abs(a[1] - b[1]) <= 1e-9
 
 
 def _jog_lines(
@@ -4058,6 +4125,7 @@ def compose_drawing_sheet(
             raise DrawingSheetError(str(exc)) from exc
     groove_drawn: list[dict[str, str]] = []
     break_drawn: list[dict[str, str]] = []
+    break_not_drawn: list[dict[str, str]] = []
     cutout_drawn: list[dict[str, str]] = []
     attached_drawn: list[dict[str, str]] = []
     mirrored: list[dict[str, str]] = []
@@ -4211,10 +4279,15 @@ def compose_drawing_sheet(
         groove_drawn.extend(
             {"figure_record_id": record.id, **entry} for entry in grooves_drawn
         )
-        break_by_kind, breaks_drawn = _break_paths_for_figure(payload, breaks)
+        break_by_kind, break_interior_by_kind, breaks_drawn, breaks_not_drawn = _break_paths_for_figure(
+            record.type, payload, breaks, has_section_half=section_record_id is not None
+        )
         for kind, break_paths in break_by_kind.items():
             by_kind.setdefault(kind, []).extend(break_paths)
+        for kind, break_paths in break_interior_by_kind.items():
+            interior_by_kind.setdefault(kind, []).extend(break_paths)
         break_drawn.extend({"figure_record_id": record.id, **entry} for entry in breaks_drawn)
+        break_not_drawn.extend({"figure_record_id": record.id, **entry} for entry in breaks_not_drawn)
         attached: _AttachedRaster | None = None
         caption: str | None = None
         attached_rubbing_id = attached_by_elevation.get(record.id)
@@ -4614,6 +4687,10 @@ def compose_drawing_sheet(
                         break_drawn,
                         key=lambda entry: (entry["figure_record_id"], entry["record_id"]),
                     ),
+                    "not_drawn": sorted(
+                        break_not_drawn,
+                        key=lambda entry: (entry["figure_record_id"], entry["record_id"]),
+                    ),
                     "records": [
                         {
                             "break_count": len(payload.breaks),
@@ -4621,6 +4698,7 @@ def compose_drawing_sheet(
                             "payload_sha256": payload.sha256,
                             "recipe_hash": record.recipe_hash,
                             "record_id": record.id,
+                            "surface": profile_break_surface(record.recipe),
                         }
                         for record, payload in sorted(breaks, key=lambda item: item[0].id)
                     ],

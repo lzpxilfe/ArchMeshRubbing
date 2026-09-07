@@ -17,6 +17,8 @@ import pytest
 from src.core.artifact_outline_extractor import compute_artifact_outline
 from src.core.artifact_profile_break import (
     PROFILE_BREAK_RECORD_TYPE,
+    PROFILE_BREAK_SURFACE_INWARD,
+    PROFILE_BREAK_SURFACE_OUTWARD,
     ArtifactProfileBreakError,
     ProfileBreak,
     ProfileBreakPayload,
@@ -24,6 +26,7 @@ from src.core.artifact_profile_break import (
     compute_artifact_profile_breaks,
     profile_break_payload_from_record,
     profile_break_recipe,
+    profile_break_surface,
     validate_profile_break_recipe,
 )
 from src.core.artifact_record_validation import validate_known_records
@@ -62,7 +65,14 @@ def _footed_vessel(segments: int = 48) -> tuple[np.ndarray, np.ndarray, list[np.
     phase = math.pi / segments
     # The outside, then the inside 4 mm in, joined at the rim and the floor.
     outside = [(r, z) for r, z in PROFILE]
-    inside = [(r - 4.0, z) for r, z in reversed(PROFILE) if z >= FOOT_ROOT_Z + 0.5]
+    inside_corners = [(r - 4.0, z) for r, z in reversed(PROFILE) if z >= FOOT_ROOT_Z + 0.5]
+    # The inside's straight runs are subdivided so the inner wall has rings
+    # enough to read a profile up; no corner is added.
+    inside: list[tuple[float, float]] = []
+    for (r0, z0), (r1, z1) in zip(inside_corners, inside_corners[1:]):
+        for t in np.linspace(0.0, 1.0, 4, endpoint=False):
+            inside.append((r0 + (r1 - r0) * float(t), z0 + (z1 - z0) * float(t)))
+    inside.append(inside_corners[-1])
     rings = outside + inside
     vertices: list[list[float]] = []
     for r, z in rings:
@@ -210,9 +220,14 @@ def test_the_reading_is_a_record_that_reopens_and_draws_as_lines_round_the_pot(f
         assert max(xs) - min(xs) > 5.0
     sidecar = json.loads(bundle.sidecar_bytes.decode("utf-8"))
     assert sidecar["profile_breaks"]["records"][0]["break_count"] == 3
+    assert sidecar["profile_breaks"]["records"][0]["surface"] == PROFILE_BREAK_SURFACE_OUTWARD
     assert sidecar["profile_breaks"]["drawn"] == [
-        {"break_count": "3", "figure_record_id": "record:front", "record_id": "record:breaks"}
+        {
+            "break_count": "3", "figure_record_id": "record:front", "half": "elevation",
+            "record_id": "record:breaks", "surface": PROFILE_BREAK_SURFACE_OUTWARD,
+        }
     ]
+    assert sidecar["profile_breaks"]["not_drawn"] == []
     # Without the option the sheet has no such block.
     plain = compose_drawing_sheet(session.document, ["record:front"], options=DrawingSheetOptions(
         title_block=TitleBlock(artifact_label="굽 달린 시험 호"), page=SheetPage(size="A4", orientation="portrait"),
@@ -222,3 +237,89 @@ def test_the_reading_is_a_record_that_reopens_and_draws_as_lines_round_the_pot(f
         compose_drawing_sheet(session.document, ["record:front"], options=DrawingSheetOptions(
             title_block=TitleBlock(artifact_label="굽 달린 시험 호"), page=SheetPage(size="A4", orientation="portrait"),
             scale_denominator=2.0, break_records=("record:front",)))
+
+
+def _line_xs(root: ET.Element, id_part: str) -> list[list[float]]:
+    out = []
+    for el in root.iter():
+        if id_part in el.attrib.get("id", "") and "d" in el.attrib:
+            tokens = el.attrib["d"].replace("M", " ").replace("L", " ").split()
+            out.append([float(tokens[i]) for i in range(0, len(tokens), 2)])
+    return out
+
+
+def test_the_inside_has_corners_too_and_they_show_through_the_cut(footed) -> None:
+    """Read up the inner wall, the footed vessel has one corner: the fold
+    inside the shoulder, a root seen from within.  On a mirrored figure it
+    is drawn on the section's half, from the axis out to the inner wall,
+    while the outside's corners stay on the elevation's half; an elevation
+    on its own cannot show it and says so; a section on its own draws it
+    across, wall to wall, and leaves the outside's corners to its cut."""
+
+    inside = compute_artifact_profile_breaks(
+        footed, angle_min_deg=25, span_um=2_000, surface=PROFILE_BREAK_SURFACE_INWARD
+    )
+    offset = _floor_offset(footed)
+    found = [(item.height_um / 1000.0 + offset, item.radius_um / 1000.0, item.convex) for item in inside.payload.breaks]
+    assert len(found) == 1, found
+    assert abs(found[0][0] - SHOULDER_Z) < 1.0 and abs(found[0][1] - 54.0) < 1.5, found
+    assert found[0][2] is False, "the fold inside the shoulder is a root, not an edge"
+    assert profile_break_surface(inside.recipe) == PROFILE_BREAK_SURFACE_INWARD
+    with pytest.raises(ArtifactProfileBreakError, match="surface must be"):
+        profile_break_recipe(surface="both/v1")
+
+    outside = compute_artifact_profile_breaks(footed, angle_min_deg=25, span_um=2_000)
+    session = commit_profile_breaks(footed, outside, record_id="record:out", created_at=STAMP, operator="tester")
+    session = commit_profile_breaks(session, inside, record_id="record:in", created_at=STAMP, operator="tester")
+    title = TitleBlock(artifact_label="굽 달린 시험 호")
+    page = SheetPage(size="A4", orientation="portrait")
+
+    bundle = compose_drawing_sheet(
+        session.document, ["record:front"],
+        options=DrawingSheetOptions(
+            title_block=title, page=page, scale_denominator=2.0,
+            mirror_sections=(("record:front", "record:section"),), break_records=("record:out", "record:in"),
+        ),
+    )
+    validate_drawing_sheet_bytes(bundle.svg_bytes, bundle.sidecar_bytes)
+    root = ET.fromstring(bundle.svg_bytes)
+    axis_x = _line_xs(root, "mirror:center-axis")[0][0]
+    outer = _line_xs(root, "profile-break:record:out:")
+    inner = _line_xs(root, "profile-break:record:in:")
+    assert len(outer) == 3 and len(inner) == 1
+    for xs in outer:
+        assert max(xs) <= axis_x + 1e-6, "the outside's corners stay on the elevation's half"
+    xs = inner[0]
+    assert min(xs) >= axis_x - 1e-6, "the inside's corner starts at the axis"
+    assert abs((max(xs) - min(xs)) - 54.0 / 2.0) < 1.0, "and reaches the inner wall"
+    sidecar = json.loads(bundle.sidecar_bytes.decode("utf-8"))
+    assert [(entry["record_id"], entry["half"]) for entry in sidecar["profile_breaks"]["drawn"]] == [
+        ("record:in", "section"), ("record:out", "elevation"),
+    ]
+    assert sidecar["profile_breaks"]["not_drawn"] == []
+
+    plain = compose_drawing_sheet(
+        session.document, ["record:front"],
+        options=DrawingSheetOptions(title_block=title, page=page, scale_denominator=2.0, break_records=("record:out", "record:in")),
+    )
+    root = ET.fromstring(plain.svg_bytes)
+    assert len(_line_xs(root, "profile-break:record:out:")) == 3
+    assert _line_xs(root, "profile-break:record:in:") == []
+    sidecar = json.loads(plain.sidecar_bytes.decode("utf-8"))
+    assert sidecar["profile_breaks"]["not_drawn"] == [
+        {
+            "figure_record_id": "record:front", "reason": "interior_needs_section_half",
+            "record_id": "record:in", "surface": PROFILE_BREAK_SURFACE_INWARD,
+        }
+    ]
+
+    section = compose_drawing_sheet(
+        session.document, ["record:section"],
+        options=DrawingSheetOptions(title_block=title, page=page, scale_denominator=2.0, break_records=("record:out", "record:in")),
+    )
+    root = ET.fromstring(section.svg_bytes)
+    assert _line_xs(root, "profile-break:record:out:") == []
+    inner = _line_xs(root, "profile-break:record:in:")
+    assert len(inner) == 1 and abs((max(inner[0]) - min(inner[0])) - 54.0) < 1.0, "wall to wall"
+    sidecar = json.loads(section.sidecar_bytes.decode("utf-8"))
+    assert [entry["reason"] for entry in sidecar["profile_breaks"]["not_drawn"]] == ["exterior_needs_elevation"]

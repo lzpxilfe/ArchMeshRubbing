@@ -13,9 +13,15 @@ to a view.
 A break is where the profile's direction, taken over ``span_um`` on either
 side, turns by ``angle_min_deg`` or more; the reading keeps the sharpest
 point of each bend and reports its height, the radius there and the signed
-turn - positive where the wall turns away from the axis going up (a convex
-edge, standing proud), negative where it turns towards it (a concave root).
-The rim and the base are the profile's ends and are not breaks.
+turn - positive where the corner stands proud of the surface read (a convex
+edge), negative where it is a root the surface folds into (concave).  The
+rim and the base are the profile's ends and are not breaks.
+
+The inside has a profile too, and a reading names which it takes: the
+outward-facing surface, drawn on the elevation from the silhouette in to
+the axis; or the inward-facing one - the inner wall where the floor meets
+it, a ledge inside a lid's seating, the fold inside a shoulder - which shows
+through the cut on the section's side, from the axis out to the inner wall.
 """
 
 from __future__ import annotations
@@ -62,6 +68,17 @@ MIN_BREAK_SPAN_UM = 100
 MAX_BREAK_SPAN_UM = 100_000
 MAX_BREAK_COUNT = 512
 
+#: The surfaces a profile can be read up: every face whose normal leaves
+#: the axis (the outside, seen on the elevation) or every face whose normal
+#: points at it (the inner wall, seen through the cut on the section's side).
+PROFILE_BREAK_SURFACE_OUTWARD = "outward_facing_every_shell/v1"
+PROFILE_BREAK_SURFACE_INWARD = "inward_facing_every_shell/v1"
+PROFILE_BREAK_SURFACES = (PROFILE_BREAK_SURFACE_OUTWARD, PROFILE_BREAK_SURFACE_INWARD)
+#: The grazing angle: a face counts for a surface when its normal leans that
+#: way by more than this cosine, so a floor, a rim's top or an underside
+#: belongs to neither.
+PROFILE_BREAK_FACING_COS = 0.25
+
 
 class ArtifactProfileBreakError(ValueError):
     pass
@@ -91,9 +108,15 @@ def profile_break_recipe(
     height_bin_um: int = DEFAULT_BREAK_HEIGHT_BIN_UM,
     angle_min_deg: int = DEFAULT_BREAK_ANGLE_MIN_DEG,
     span_um: int = DEFAULT_BREAK_SPAN_UM,
+    surface: str = PROFILE_BREAK_SURFACE_OUTWARD,
 ) -> dict[str, Any]:
-    """Resolve the three numbers that decide what counts as a break."""
+    """Resolve the three numbers that decide what counts as a break, and
+    which surface the profile is read up."""
 
+    if surface not in PROFILE_BREAK_SURFACES:
+        raise ArtifactProfileBreakError(
+            f"surface must be one of {', '.join(PROFILE_BREAK_SURFACES)}; got {surface!r}"
+        )
     bin_um = _strict_int(
         height_bin_um, name="height_bin_um", minimum=MIN_GROOVE_HEIGHT_BIN_UM, maximum=MAX_GROOVE_HEIGHT_BIN_UM
     )
@@ -120,7 +143,7 @@ def profile_break_recipe(
             "height_bin_um": bin_um,
             "minimum_bin_sample_count": GROOVE_MINIMUM_BIN_SAMPLE_COUNT,
             "radius_statistic": "median_across_revolution/v1",
-            "surface": "outward_facing_every_shell/v1",
+            "surface": surface,
         },
         "resource_limits": {
             "max_break_count": MAX_BREAK_COUNT,
@@ -142,6 +165,7 @@ def validate_profile_break_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
         height_bin_um=profile_policy.get("height_bin_um"),  # type: ignore[arg-type]
         angle_min_deg=detection_policy.get("angle_min_deg"),  # type: ignore[arg-type]
         span_um=detection_policy.get("span_um"),  # type: ignore[arg-type]
+        surface=profile_policy.get("surface"),  # type: ignore[arg-type]
     )
     try:
         same = canonical_json_bytes(dict(recipe)) == canonical_json_bytes(expected)
@@ -152,11 +176,18 @@ def validate_profile_break_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
     return expected
 
 
+def profile_break_surface(recipe: Mapping[str, Any]) -> str:
+    """The surface a validated break recipe reads: outward or inward."""
+
+    return str(validate_profile_break_recipe(recipe)["profile_policy"]["surface"])
+
+
 @dataclass(frozen=True, slots=True)
 class ProfileBreak:
     """One corner of the profile: where it is, how far from the axis, and
     which way and how far the wall turns there.  ``turn_millidegrees`` is
-    positive where the wall turns away from the axis going up."""
+    positive where the corner stands proud of the surface the reading took
+    (convex, an edge), negative where the surface folds in (a root)."""
 
     height_um: int
     radius_um: int
@@ -314,32 +345,40 @@ class ProfileBreakPayload:
         }
 
 
-def _outward_profile(
+def _facing_profile(
     vertices: np.ndarray,
     faces: np.ndarray,
     *,
     height_bin_um: int,
+    inward: bool,
     cancellation_probe: CancellationProbe | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return (height mm, median radius mm, spread mm) up the outside of the
-    artifact: every face whose normal leaves the axis, of every shell.  A
-    foot ring is often its own shell, and the corner where it meets the body
-    is exactly a break, so the profile must not stop at a shell's edge; the
-    inner wall, the rim's top and the underside face the other way and do
-    not reach it."""
+    """Return (height mm, median radius mm, spread mm) up one surface of the
+    artifact: every face whose normal leaves the axis (the outside) or, for
+    ``inward``, every face whose normal points at it (the inner wall), of
+    every shell.  A foot ring is often its own shell, and the corner where
+    it meets the body is exactly a break, so the profile must not stop at a
+    shell's edge; the rim's top, the floor and the underside face neither
+    way and reach neither profile."""
 
     raise_if_cancelled(cancellation_probe)
+    side = "inside" if inward else "outside"
     corners = vertices[faces]
     normals = np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0])
     centroids = corners.mean(axis=1)
     radial = np.einsum("ij,ij->i", normals[:, :2], centroids[:, :2])
     lengths = np.linalg.norm(normals, axis=1) * np.maximum(np.hypot(centroids[:, 0], centroids[:, 1]), 1e-12)
-    # Outward by more than the grazing angle: a face standing near enough
-    # upright, or leaning, that its normal points away from the axis.
-    outward = np.flatnonzero(radial > 0.25 * lengths)
-    if outward.size == 0:
-        raise ArtifactProfileBreakError("no face of the mesh faces away from the axis; nothing to read")
-    used = np.unique(faces[outward].reshape(-1))
+    # By more than the grazing angle: a face standing near enough upright,
+    # or leaning, that its normal points the way asked.
+    if inward:
+        facing = np.flatnonzero(radial < -PROFILE_BREAK_FACING_COS * lengths)
+    else:
+        facing = np.flatnonzero(radial > PROFILE_BREAK_FACING_COS * lengths)
+    if facing.size == 0:
+        raise ArtifactProfileBreakError(
+            f"no face of the mesh faces {'towards' if inward else 'away from'} the axis; nothing to read"
+        )
+    used = np.unique(faces[facing].reshape(-1))
     points = vertices[used]
     heights = points[:, 2]
     radii = np.hypot(points[:, 0], points[:, 1])
@@ -347,7 +386,7 @@ def _outward_profile(
     bin_mm = float(height_bin_um) / 1000.0
     span = highest - lowest
     if span <= 0.0:
-        raise ArtifactProfileBreakError("the outside has no height to read a profile along")
+        raise ArtifactProfileBreakError(f"the {side} has no height to read a profile along")
     count = int(math.ceil(span / bin_mm))
     if count > MAX_GROOVE_PROFILE_BINS:
         raise ArtifactProfileBreakError(
@@ -374,7 +413,7 @@ def _outward_profile(
         spreads.append(float(high - low))
     if len(centres) < 8:
         raise ArtifactProfileBreakError(
-            "the outside gave too few height bins to read a profile; use a coarser "
+            f"the {side} gave too few height bins to read a profile; use a coarser "
             "height_bin_um or a denser mesh"
         )
     return (
@@ -391,19 +430,24 @@ def detect_profile_breaks(
     *,
     cancellation_probe: CancellationProbe | None = None,
 ) -> ProfileBreakPayload:
-    """Find the corners of the outer wall's profile under a validated recipe."""
+    """Find the corners of one wall's profile under a validated recipe."""
 
     validated = validate_profile_break_recipe(recipe)
     bin_um = int(validated["profile_policy"]["height_bin_um"])
+    inward = validated["profile_policy"]["surface"] == PROFILE_BREAK_SURFACE_INWARD
     angle_min = math.radians(float(validated["detection_policy"]["angle_min_deg"]))
     span_mm = float(validated["detection_policy"]["span_um"]) / 1000.0
     points = np.asarray(vertices, dtype=np.float64)
     triangles = np.asarray(faces, dtype=np.int64)
     if points.ndim != 2 or points.shape[1] != 3 or triangles.ndim != 2 or triangles.shape[1] != 3:
         raise ArtifactProfileBreakError("mesh must be (n, 3) vertices and (m, 3) faces")
-    heights, radii, spreads = _outward_profile(
-        points, triangles, height_bin_um=bin_um, cancellation_probe=cancellation_probe
+    heights, radii, spreads = _facing_profile(
+        points, triangles, height_bin_um=bin_um, inward=inward, cancellation_probe=cancellation_probe
     )
+    # A left turn going up the (r, z) half-plane is a corner standing proud
+    # of the outside; the inside has its material on the other hand, so the
+    # same turn is a root there.  The sign is kept relative to the surface.
+    proud = -1.0 if inward else 1.0
     raise_if_cancelled(cancellation_probe)
     count = int(heights.size)
     # The direction the wall runs, below and above each sample: the chord
@@ -423,9 +467,7 @@ def detect_profile_breaks(
         after = np.array([radii[high] - radii[index], heights[high] - heights[index]])
         if float(np.linalg.norm(before)) <= 0.0 or float(np.linalg.norm(after)) <= 0.0:
             continue
-        # Positive is a left turn going up in the (r, z) half-plane: the wall
-        # bends away from the axis, an edge standing proud.
-        turns[index] = math.atan2(
+        turns[index] = proud * math.atan2(
             float(before[0] * after[1] - before[1] * after[0]), float(before @ after)
         )
         has_turn[index] = True
@@ -477,9 +519,11 @@ def compute_artifact_profile_breaks(
     height_bin_um: int = DEFAULT_BREAK_HEIGHT_BIN_UM,
     angle_min_deg: int = DEFAULT_BREAK_ANGLE_MIN_DEG,
     span_um: int = DEFAULT_BREAK_SPAN_UM,
+    surface: str = PROFILE_BREAK_SURFACE_OUTWARD,
     cancellation_probe: CancellationProbe | None = None,
 ) -> ProfileBreakComputation:
-    """Read the profile's corners of an artifact stood on its rotation axis."""
+    """Read the corners of one surface's profile on an artifact stood on its
+    rotation axis."""
 
     from .artifact_axis_alignment import AXIS_ALIGN_RECIPE_KIND  # noqa: PLC0415
 
@@ -496,7 +540,9 @@ def compute_artifact_profile_breaks(
         projection = session.materialize()
     except ArtifactSessionError as exc:
         raise ArtifactProfileBreakError(str(exc)) from exc
-    recipe = profile_break_recipe(height_bin_um=height_bin_um, angle_min_deg=angle_min_deg, span_um=span_um)
+    recipe = profile_break_recipe(
+        height_bin_um=height_bin_um, angle_min_deg=angle_min_deg, span_um=span_um, surface=surface
+    )
     payload = detect_profile_breaks(
         projection.mesh.vertices, projection.mesh.faces, recipe, cancellation_probe=cancellation_probe
     )
@@ -652,6 +698,9 @@ __all__ = [
     "PROFILE_BREAK_PAYLOAD_EXTENSION_KEY",
     "PROFILE_BREAK_PAYLOAD_SCHEMA_VERSION",
     "PROFILE_BREAK_RECORD_TYPE",
+    "PROFILE_BREAK_SURFACES",
+    "PROFILE_BREAK_SURFACE_INWARD",
+    "PROFILE_BREAK_SURFACE_OUTWARD",
     "ProfileBreak",
     "ProfileBreakComputation",
     "ProfileBreakPayload",
@@ -662,6 +711,7 @@ __all__ = [
     "profile_break_computation_matches_active_projection",
     "profile_break_payload_from_record",
     "profile_break_recipe",
+    "profile_break_surface",
     "validate_profile_break_recipe",
     "validate_profile_break_records",
 ]
