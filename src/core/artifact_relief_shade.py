@@ -13,8 +13,10 @@ the front-most depth at every pixel of the view's lattice; the surface of
 revolution the relief stands on - the radius the wall has at every row,
 read off the same raster as the median radius the near wall's depth
 implies - is taken away, so what is left is the relief alone.  Two
-filters follow: a wide one takes out what is slower than any motif (an
-oval rim, a scan's slight lean), a narrow one the scan's grain.  The
+filters follow: a running median across the view, a few motifs wide,
+takes out what runs round the vessel slower than any motif (an oval rim,
+a scan's slight lean) without the halo a blur would leave round each
+motif; a narrow blur takes out the scan's grain.  The
 relief is then lit as a height field, the slope across the view corrected
 for the wall's foreshortening round the axis, and where a slope faces
 away from the light the shade is that much darker than a flat wall's.
@@ -77,8 +79,10 @@ DEFAULT_RELIEF_SHADE_ROW_SMOOTHING_UM = 300
 #: A pixel further than this from the base is not relief: the far wall
 #: seen over a rim that is not level, a stray triangle.
 DEFAULT_RELIEF_SHADE_OUTLIER_UM = 10_000
-#: What is slower than any motif is not relief either.
-DEFAULT_RELIEF_SHADE_SLOW_UM = 8_000
+#: What runs round the vessel slower than any motif is not relief either:
+#: an oval rim or a lean varies once round the circumference, a motif in a
+#: hand's breadth.  The width sits between the two.
+DEFAULT_RELIEF_SHADE_SLOW_UM = 40_000
 #: What is finer than the scan can carry is its grain.
 DEFAULT_RELIEF_SHADE_GRAIN_UM = 400
 #: Light from the upper left, raised: (across, up, towards the viewer).
@@ -499,18 +503,35 @@ def validate_relief_shade_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
     return rebuilt
 
 
-def _masked_blur(field: np.ndarray, ok: np.ndarray, sigma_pixels: float) -> np.ndarray:
+def _masked_blur(field: np.ndarray, ok: np.ndarray, sigma_pixels: float | tuple[float, float]) -> np.ndarray:
     """A Gaussian blur that does not let the uncovered pixels pull the
     covered ones towards zero: the blur of the field over the blur of the
-    mask."""
+    mask.  ``sigma_pixels`` may be one width or (down the view, across)."""
 
     from scipy.ndimage import gaussian_filter  # noqa: PLC0415
 
-    if sigma_pixels <= 0.0:
+    if max(sigma_pixels) <= 0.0 if isinstance(sigma_pixels, tuple) else sigma_pixels <= 0.0:
         return np.where(ok, field, 0.0)
     weight = gaussian_filter(ok.astype(np.float64), sigma_pixels)
     smoothed = gaussian_filter(np.where(ok, field, 0.0), sigma_pixels)
     return np.where(weight > 1e-3, smoothed / np.maximum(weight, 1e-3), 0.0)
+
+
+def _masked_running_median(field: np.ndarray, ok: np.ndarray, width_pixels: float) -> np.ndarray:
+    """The running median across each row over a window ``width_pixels``
+    wide; uncovered pixels do not vote, and a window with fewer than a
+    quarter of its pixels covered takes the row's median instead."""
+
+    from scipy.ndimage import median_filter, uniform_filter1d  # noqa: PLC0415
+
+    width = max(3, int(round(width_pixels)) | 1)
+    # Uncovered pixels are filled with the row's own median so they pull
+    # the window towards the wall's level rather than towards zero.
+    row_median = np.array([np.median(row[mask]) if mask.any() else 0.0 for row, mask in zip(field, ok)])
+    filled = np.where(ok, field, row_median[:, None])
+    slow = median_filter(filled, size=(1, width), mode="nearest")
+    coverage = uniform_filter1d(ok.astype(np.float64), width, axis=1, mode="constant")
+    return np.where(coverage >= 0.25, slow, row_median[:, None])
 
 
 def extract_relief_shade(
@@ -614,7 +635,14 @@ def extract_relief_shade(
     raise_if_cancelled(cancellation_probe)
     relief_policy = validated["relief_policy"]
     grain = _masked_blur(relief, ok, relief_policy["grain_um"] / 1000.0 * pixels_per_mm)
-    slow = _masked_blur(relief, ok, relief_policy["slow_um"] / 1000.0 * pixels_per_mm) if relief_policy["slow_um"] else 0.0
+    # The slow unevenness runs round the vessel - an oval rim, a lean - so
+    # it is taken out across the view only; up and down the wall the base
+    # has already taken the profile, and a blur across a lip or a foot's
+    # root would smear that step into a band of false relief.
+    # A median, not a blur: a blur of a petal leaves a halo of false hollow
+    # round it, the median of a window a few petals wide is the level the
+    # wall stands at there and the petals stand on.
+    slow = _masked_running_median(relief, ok, relief_policy["slow_um"] / 1000.0 * pixels_per_mm) if relief_policy["slow_um"] else 0.0
     filtered = np.where(ok, grain - slow, 0.0)
     raise_if_cancelled(cancellation_probe)
 
