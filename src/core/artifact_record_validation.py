@@ -38,6 +38,10 @@ def validate_known_records(document: ArtifactDocument) -> None:
         ArtifactPaintCutoutError,
         validate_paint_cutout_records,
     )
+    from .artifact_relief_shade import (  # noqa: PLC0415
+        ArtifactReliefShadeError,
+        validate_relief_shade_records,
+    )
     from .artifact_technique_annotation import (  # noqa: PLC0415
         ArtifactTechniqueAnnotationError,
         validate_technique_annotation_records,
@@ -78,6 +82,7 @@ def validate_known_records(document: ArtifactDocument) -> None:
         validate_profile_groove_records(document)
         validate_profile_break_records(document)
         validate_paint_cutout_records(document)
+        validate_relief_shade_records(document)
         validate_technique_annotation_records(document)
         validate_crease_records(document)
         validate_texture_lines_records(document)
@@ -94,6 +99,7 @@ def validate_known_records(document: ArtifactDocument) -> None:
         ArtifactProfileGrooveError,
         ArtifactProfileBreakError,
         ArtifactPaintCutoutError,
+        ArtifactReliefShadeError,
         ArtifactTechniqueAnnotationError,
     ) as exc:
         raise ArtifactKnownRecordError(str(exc)) from exc

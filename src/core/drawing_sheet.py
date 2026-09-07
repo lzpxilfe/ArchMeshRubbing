@@ -76,6 +76,12 @@ from .artifact_paint_cutout import (
     require_paint_cutout_raster,
 )
 from .artifact_paint_cutout import PAINT_CUTOUT_TONE_COLOUR
+from .artifact_relief_shade import (
+    RELIEF_SHADE_RECORD_TYPE,
+    ArtifactReliefShadeError,
+    relief_shade_receipt_from_record,
+    require_relief_shade_raster,
+)
 from .artifact_profile_break import (
     PROFILE_BREAK_RECORD_TYPE,
     PROFILE_BREAK_SURFACE_INWARD,
@@ -449,6 +455,19 @@ PAINT_CUTOUT_BELOW_GAP_MM = 3.0
 DEFAULT_PAINT_CUTOUT_INK_PERCENT = 70
 MIN_PAINT_CUTOUT_INK_PERCENT = 20
 
+#: Stippling: the dots that show a relief's bulk.  The record holds the
+#: shade; the sheet lays the dots at its own scale, one chance per cell of a
+#: paper grid, the chance the shade's darkness there, the dot jittered
+#: inside its cell so the grid does not show.  The chance and the jitter
+#: come from a hash of the cell's index, so the same shade at the same
+#: scale gives the same dots on every sheet.  Both sizes are provisional:
+#: a fine pen's dot and the spacing a hand keeps between them.
+DEFAULT_STIPPLE_PITCH_MM = 0.15
+DEFAULT_STIPPLE_DOT_MM = 0.12
+MIN_STIPPLE_PITCH_MM = 0.05
+MAX_STIPPLE_PITCH_MM = 2.0
+STIPPLE_HASH = "splitmix64_cell/v1"
+
 #: How far a line of the elevation's half reaches on a mirrored figure: to
 #: the fold only, or past it across the section's side up to a gap short of
 #: the section's line - the line runs on to say the edge goes right round,
@@ -761,6 +780,22 @@ class DrawingSheetOptions:
     paint_cutout_ink_percent: int = DEFAULT_PAINT_CUTOUT_INK_PERCENT
     """How dark a cutout prints: its coverage times this, so a pasted mark
     sits in the drawing's tone instead of shouting over the line work."""
+    relief_stipples: tuple[tuple[str, str], ...] = ()
+    """(relief shade record id, figure record id) - a relief's shade
+    stippled onto a figure of the shade's own view, in its own place.
+
+    A motif carved in relief is not drawn in lines: its bulk is shown by
+    stippling, the dots denser where the surface turns from the light.  On
+    a mirrored figure only the dots on the elevation's side of the fold
+    are laid; the section half shows the cut, not the wall.  The shade's
+    pixels are passed in ``rasters`` under its record id and used only
+    when they match the record's receipt.
+    """
+    stipple_pitch_mm: float = DEFAULT_STIPPLE_PITCH_MM
+    """The paper grid the dots are laid on, in millimetres: one dot at most
+    per cell.  Provisional."""
+    stipple_dot_mm: float = DEFAULT_STIPPLE_DOT_MM
+    """A dot's diameter on paper, in millimetres.  Provisional."""
     mirror_sections: tuple[tuple[str, str], ...] = ()
     """(elevation record id, section record id) pairs drawn as one figure.
 
@@ -1066,6 +1101,27 @@ class DrawingSheetOptions:
             raise DrawingSheetError(
                 f"paint_cutout_ink_percent must be an integer from {MIN_PAINT_CUTOUT_INK_PERCENT} to 100"
             )
+        stipples: list[tuple[str, str]] = []
+        for entry in self.relief_stipples:
+            if not isinstance(entry, (tuple, list)) or len(entry) != 2:
+                raise DrawingSheetError(
+                    "relief_stipples entries must be (relief shade record id, figure record id)"
+                )
+            shade_id, figure_id = (str(item).strip() for item in entry)
+            if not shade_id or not figure_id:
+                raise DrawingSheetError("relief_stipples entries must be record ids")
+            if any(existing[0] == shade_id for existing in stipples):
+                raise DrawingSheetError("the same relief shade cannot be stippled twice on one sheet")
+            stipples.append((shade_id, figure_id))
+        object.__setattr__(self, "relief_stipples", tuple(stipples))
+        for name, value, low, high in (
+            ("stipple_pitch_mm", self.stipple_pitch_mm, MIN_STIPPLE_PITCH_MM, MAX_STIPPLE_PITCH_MM),
+            ("stipple_dot_mm", self.stipple_dot_mm, 0.01, MAX_STIPPLE_PITCH_MM),
+        ):
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not low <= value <= high:
+                raise DrawingSheetError(f"{name} must be a number from {low:g} to {high:g} mm")
+        object.__setattr__(self, "stipple_pitch_mm", float(self.stipple_pitch_mm))
+        object.__setattr__(self, "stipple_dot_mm", float(self.stipple_dot_mm))
         condition_records = tuple(self.condition_records)
         if any(
             not isinstance(record_id, str) or not record_id.strip()
@@ -1595,6 +1651,22 @@ class _PastedCutout:
 
 
 @dataclass(frozen=True, slots=True)
+class _Stipple:
+    """A relief's shade laid as dots on a figure: where each dot falls in
+    the figure's own millimetres, and what was left off."""
+
+    record_id: str
+    recipe_hash: str
+    raster_sha256: str
+    view: str
+    width_pixels: int
+    height_pixels: int
+    dots_mm: tuple[tuple[float, float], ...]
+    half: str
+    dropped_section_side_count: int
+
+
+@dataclass(frozen=True, slots=True)
 class _Prepared:
     """One figure's content, before it knows where on the page it goes."""
 
@@ -1614,6 +1686,7 @@ class _Prepared:
     caption_lines: tuple[str, ...] = ()
     """The caption as it breaks to fit the paper it sits under."""
     cutouts: tuple[_PastedCutout, ...] = ()
+    stipples: tuple[_Stipple, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1632,6 +1705,7 @@ class _Figure:
     caption: str | None = None
     caption_lines: tuple[str, ...] = ()
     cutouts: tuple[_PastedCutout, ...] = ()
+    stipples: tuple[_Stipple, ...] = ()
 
 
 def _lay_out(
@@ -1711,6 +1785,7 @@ def _lay_out(
                 caption=prepared.caption,
                 caption_lines=prepared.caption_lines,
                 cutouts=prepared.cutouts,
+                stipples=prepared.stipples,
             )
         )
         cursor_x += width
@@ -1839,6 +1914,7 @@ def _lay_out_plan_with_sections(
             caption=figure.caption,
             caption_lines=figure.caption_lines,
             cutouts=figure.cutouts,
+            stipples=figure.stipples,
         )
 
     # The plan first, then what lies under it, then what lies beside it: the
@@ -1960,6 +2036,7 @@ def _lay_out_plan_over_elevation(
             caption=figure.caption,
             caption_lines=figure.caption_lines,
             cutouts=figure.cutouts,
+            stipples=figure.stipples,
         )
 
     axis_paper_x = origin_x + (plan_axis_x - plan.bounds[0]) / denominator
@@ -3421,6 +3498,128 @@ def _pasted_cutouts(
     return pasted, grown
 
 
+def _cell_uniforms(ix: np.ndarray, iy: np.ndarray) -> np.ndarray:
+    """Three uniforms in [0, 1) for every cell, from a hash of its index
+    (splitmix64 over the two indices and the uniform's number), so the
+    dots a shade gets are the same on every sheet drawn at that scale."""
+
+    a = np.asarray(ix, dtype=np.int64).astype(np.uint64)
+    b = np.asarray(iy, dtype=np.int64).astype(np.uint64)
+    out = np.empty((a.size, 3), dtype=np.float64)
+    golden = np.uint64(0x9E3779B97F4A7C15)
+    mix_one = np.uint64(0xBF58476D1CE4E5B9)
+    mix_two = np.uint64(0x94D049BB133111EB)
+    salts = np.arange(1, 4, dtype=np.uint64) * mix_two
+    for which in range(3):
+        z = a * golden + b * mix_one + salts[which]
+        z = (z ^ (z >> np.uint64(30))) * mix_one
+        z = (z ^ (z >> np.uint64(27))) * mix_two
+        z = z ^ (z >> np.uint64(31))
+        out[:, which] = (z >> np.uint64(11)).astype(np.float64) / float(1 << 53)
+    return out
+
+
+def _stippled_reliefs(
+    document: ArtifactDocument,
+    *,
+    figure: DerivedRecord,
+    figure_payload: Any,
+    rasters: Mapping[str, Any],
+    options: DrawingSheetOptions,
+    fold: tuple[Sequence[float], Sequence[float]] | None,
+    elevation_side: str = MIRROR_ELEVATION_LEFT,
+) -> list[_Stipple]:
+    """The relief shades stippled on one figure.
+
+    The dots are laid on a grid of ``stipple_pitch_mm`` on paper, one chance
+    per cell: the chance is the shade's darkness under the cell's jittered
+    point, so dots crowd where the surface turns from the light and thin
+    out where it faces it.  On a mirrored figure the dots on the section's
+    side of the fold are left off - the section shows the cut, not the wall
+    - and counted.
+    """
+
+    stipples: list[_Stipple] = []
+    for shade_id, figure_id in options.relief_stipples:
+        if figure_id != figure.id:
+            continue
+        record = document.record_index.get(shade_id)
+        if record is None:
+            raise DrawingSheetError(f"relief shade record {shade_id!r} does not exist")
+        if record.type != RELIEF_SHADE_RECORD_TYPE:
+            raise DrawingSheetError(f"record {shade_id!r} is not a relief shade")
+        if record.lifecycle_status is not RecordLifecycleStatus.READY:
+            raise DrawingSheetError("only READY relief shade records may be stippled")
+        try:
+            freshness = document.record_freshness(record.id)
+        except ArtifactDocumentError as exc:
+            raise DrawingSheetError(str(exc)) from exc
+        if freshness is not RecordFreshness.FRESH:
+            raise DrawingSheetError(
+                f"only FRESH relief shade records may be stippled (got {freshness.value})"
+            )
+        if shade_id not in rasters:
+            raise DrawingSheetError(
+                f"relief shade {shade_id!r} needs its raster passed in rasters under its id"
+            )
+        try:
+            receipt = relief_shade_receipt_from_record(record)
+            raster = require_relief_shade_raster(record, rasters[shade_id])
+        except ArtifactReliefShadeError as exc:
+            raise DrawingSheetError(str(exc)) from exc
+        if outline_frame(raster.view) != figure_payload.frame:
+            raise DrawingSheetError(
+                f"relief shade {shade_id!r} was read in the {raster.view} view, which is not "
+                f"the plane of {figure.id!r}"
+            )
+        pitch = float(options.stipple_pitch_mm) * float(options.scale_denominator)
+        left, bottom, right, top = raster.rectangle_mm
+        columns = np.arange(math.floor(left / pitch), math.ceil(right / pitch) + 1, dtype=np.int64)
+        rows = np.arange(math.floor(bottom / pitch), math.ceil(top / pitch) + 1, dtype=np.int64)
+        cell_x, cell_y = np.meshgrid(columns, rows)
+        cell_x = cell_x.ravel()
+        cell_y = cell_y.ravel()
+        uniforms = _cell_uniforms(cell_x, cell_y)
+        xs = (cell_x.astype(np.float64) + uniforms[:, 0]) * pitch
+        ys = (cell_y.astype(np.float64) + uniforms[:, 1]) * pitch
+        pixels_per_mm = raster.pixels_per_meter / 1000.0
+        col = np.floor((xs - left) * pixels_per_mm).astype(np.int64)
+        row_up = np.floor((ys - bottom) * pixels_per_mm).astype(np.int64)
+        inside = (col >= 0) & (col < raster.width_pixels) & (row_up >= 0) & (row_up < raster.height_pixels)
+        darkness = np.zeros(xs.shape, dtype=np.float64)
+        darkness[inside] = raster.darkness[raster.height_pixels - 1 - row_up[inside], col[inside]] / 255.0
+        keep = uniforms[:, 2] < darkness
+        xs = xs[keep]
+        ys = ys[keep]
+        dropped = 0
+        half = "figure"
+        if fold is not None:
+            base, direction = fold
+            toward_section = 1.0 if elevation_side == MIRROR_ELEVATION_LEFT else -1.0
+            side = toward_section * (
+                (xs - float(base[0])) * float(direction[1]) - (ys - float(base[1])) * float(direction[0])
+            )
+            on_elevation = side < 0.0
+            dropped = int(np.count_nonzero(~on_elevation))
+            xs = xs[on_elevation]
+            ys = ys[on_elevation]
+            half = "elevation"
+        stipples.append(
+            _Stipple(
+                record_id=record.id,
+                recipe_hash=record.recipe_hash,
+                raster_sha256=str(receipt["raster_sha256"]),
+                view=raster.view,
+                width_pixels=raster.width_pixels,
+                height_pixels=raster.height_pixels,
+                dots_mm=tuple((round(float(x), 4), round(float(y), 4)) for x, y in zip(xs, ys)),
+                half=half,
+                dropped_section_side_count=dropped,
+            )
+        )
+    return stipples
+
+
 def _condition_paths_for_figure(
     figure_record_type: str,
     figure_payload_frame: Any,
@@ -4210,6 +4409,7 @@ def _sheet_provenance(
     texture_lines: Mapping[str, Any] | None = None,
     profile_breaks: Mapping[str, Any] | None = None,
     paint_cutouts: Mapping[str, Any] | None = None,
+    relief_stipples: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     preset = resolve_drawing_style_preset(options.style_preset)
     provenance: dict[str, Any] = {
@@ -4309,6 +4509,8 @@ def _sheet_provenance(
         provenance["profile_breaks"] = dict(profile_breaks)
     if paint_cutouts is not None:
         provenance["paint_cutouts"] = dict(paint_cutouts)
+    if relief_stipples is not None:
+        provenance["relief_stipples"] = dict(relief_stipples)
     if technique is not None:
         provenance["technique"] = dict(technique)
     if mirrored:
@@ -4478,6 +4680,23 @@ def _render_sheet(
                 'preserveAspectRatio="none" image-rendering="pixelated" '
                 f'xlink:href="{xml_attribute(cutout.image.data_uri)}"/>'
             )
+        # A relief's stipple is ink like the lines, laid before them so the
+        # line work prints over the dots.
+        for stipple_index, stipple in enumerate(figure.stipples):
+            radius = number_token(options.stipple_dot_mm / 2.0, field_name="stipple.radius")
+            lines.append(
+                f'      <g id="relief-stipple-{index:04d}-{stipple_index:02d}" '
+                f'data-record-id="{xml_attribute(stipple.record_id)}" '
+                f'data-half="{stipple.half}" '
+                f'fill="{options.stroke_color}" stroke="none">'
+            )
+            for x, y in stipple.dots_mm:
+                paper_x, paper_y = figure.placement.paper_xy((x, y))
+                lines.append(
+                    f'        <circle cx="{number_token(round(paper_x, 4), field_name="stipple.x")}" '
+                    f'cy="{number_token(round(paper_y, 4), field_name="stipple.y")}" r="{radius}"/>'
+                )
+            lines.append("      </g>")
         if figure.raster is not None:
             placement = figure.placement
             origin_x, origin_y = placement.origin_mm
@@ -4629,6 +4848,7 @@ def compose_drawing_sheet(
         - set(ids)
         - set(attached_by_elevation.values())
         - {cutout_id for cutout_id, _figure_id, _placement in options.paint_cutouts}
+        - {shade_id for shade_id, _figure_id in options.relief_stipples}
     )
     if unplaced_rasters:
         raise DrawingSheetError(
@@ -4742,6 +4962,7 @@ def compose_drawing_sheet(
     break_drawn: list[dict[str, str]] = []
     break_not_drawn: list[dict[str, str]] = []
     cutout_drawn: list[dict[str, str]] = []
+    stipple_drawn: list[dict[str, str]] = []
     attached_drawn: list[dict[str, str]] = []
     mirrored: list[dict[str, str]] = []
     section_loops: list[dict[str, Any]] = []
@@ -4960,6 +5181,19 @@ def compose_drawing_sheet(
                 fold=None,
                 jogs=(),
             )
+            stipples = _stippled_reliefs(
+                document, figure=record, figure_payload=payload, rasters=rasters, options=options, fold=None
+            )
+            stipple_drawn.extend(
+                {
+                    "dot_count": str(len(stipple.dots_mm)),
+                    "dropped_section_side_count": str(stipple.dropped_section_side_count),
+                    "figure_record_id": record.id,
+                    "half": stipple.half,
+                    "record_id": stipple.record_id,
+                }
+                for stipple in stipples
+            )
             cutout_drawn.extend(
                 {
                     "figure_record_id": record.id,
@@ -4990,6 +5224,7 @@ def compose_drawing_sheet(
                     caption=caption,
                     caption_lines=caption_lines,
                     cutouts=tuple(cutouts),
+                    stipples=tuple(stipples),
                 )
             )
             continue
@@ -5094,6 +5329,25 @@ def compose_drawing_sheet(
             }
             for cutout in cutouts
         )
+        stipples = _stippled_reliefs(
+            document,
+            figure=record,
+            figure_payload=payload,
+            rasters=rasters,
+            options=options,
+            fold=fold,
+            elevation_side=options.mirror_elevation_side,
+        )
+        stipple_drawn.extend(
+            {
+                "dot_count": str(len(stipple.dots_mm)),
+                "dropped_section_side_count": str(stipple.dropped_section_side_count),
+                "figure_record_id": record.id,
+                "half": stipple.half,
+                "record_id": stipple.record_id,
+            }
+            for stipple in stipples
+        )
         caption_lines = _attached_caption_lines(
             bounds, attached, caption, scale_denominator=options.scale_denominator
         )
@@ -5117,6 +5371,7 @@ def compose_drawing_sheet(
                 caption=caption,
                 caption_lines=caption_lines,
                 cutouts=tuple(cutouts),
+                stipples=tuple(stipples),
             )
         )
 
@@ -5400,6 +5655,28 @@ def compose_drawing_sheet(
                     ],
                 }
                 if cutout_drawn
+                else None
+            ),
+            relief_stipples=(
+                {
+                    "dot_paper_mm": options.stipple_dot_mm,
+                    "drawn": sorted(stipple_drawn, key=lambda entry: (entry["figure_record_id"], entry["record_id"])),
+                    "hash": STIPPLE_HASH,
+                    "pitch_paper_mm": options.stipple_pitch_mm,
+                    "records": [
+                        {
+                            "height_pixels": stipple.height_pixels,
+                            "raster_sha256": stipple.raster_sha256,
+                            "recipe_hash": stipple.recipe_hash,
+                            "record_id": stipple.record_id,
+                            "view": stipple.view,
+                            "width_pixels": stipple.width_pixels,
+                        }
+                        for figure in sorted(placed, key=lambda item: item.record_id)
+                        for stipple in figure.stipples
+                    ],
+                }
+                if stipple_drawn
                 else None
             ),
             mirrored=sorted(
