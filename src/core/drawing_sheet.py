@@ -462,6 +462,9 @@ REACHES: tuple[str, ...] = (REACH_SECTION, REACH_AXIS)
 REACH_GAP_PAPER_MM = 1.0
 DEFAULT_OUTLINE_REACH = REACH_SECTION
 DEFAULT_BREAK_REACH = REACH_AXIS
+#: A corner turning this much or more is drawn as a solid line; gentler
+#: bends are drawn broken, once, and twice under half of it.
+DEFAULT_BREAK_SOLID_MIN_DEG = 30
 
 #: Which side of the fold a mirrored figure's elevation takes.  The common
 #: convention puts the elevation on the left and the section on the right;
@@ -888,6 +891,14 @@ class DrawingSheetOptions:
     there (the edge would run inside a cut face, as under a solid foot) it
     stops at the fold.  ``axis`` stops every edge at the fold.
     """
+    break_solid_min_deg: int = DEFAULT_BREAK_SOLID_MIN_DEG
+    """The turn, in degrees, from which a corner's line is drawn solid.
+
+    A corner that really turns - a foot's edge, a groove's lip - is a
+    solid line; a gentler bend is drawn broken: once below this angle,
+    twice below half of it.  The archaeologist decides where "really
+    turns" begins; 30 degrees is where the bowl's foot and rim fell.
+    """
     break_reach: str = DEFAULT_BREAK_REACH
     """How far the outside's corner lines (``break_records``) run on a
     mirrored figure: ``axis`` (the default) stops each at the fold;
@@ -1218,6 +1229,9 @@ class DrawingSheetOptions:
         object.__setattr__(self, "break_records", break_records)
         if self.break_reach not in REACHES:
             raise DrawingSheetError(f"break_reach must be one of {', '.join(REACHES)}")
+        solid = self.break_solid_min_deg
+        if isinstance(solid, bool) or not isinstance(solid, int) or not 0 <= solid <= 180:
+            raise DrawingSheetError("break_solid_min_deg must be an integer from 0 to 180")
         if self.outline_reach not in REACHES:
             raise DrawingSheetError(f"outline_reach must be one of {', '.join(REACHES)}")
         if self.mirror_elevation_side not in MIRROR_ELEVATION_SIDES:
@@ -2663,6 +2677,8 @@ def _break_paths_for_figure(
     breaks: Sequence[tuple[DerivedRecord, ProfileBreakPayload]],
     *,
     has_section_half: bool,
+    gap_mm: float = 0.0,
+    solid_min_deg: int = 0,
 ) -> tuple[dict[str, list[Any]], dict[str, list[Any]], list[dict[str, str]], list[dict[str, str]]]:
     """Return the break lines that belong on one figure - on the figure
     itself and, for a mirrored figure, on its section half - with what was
@@ -2678,6 +2694,13 @@ def _break_paths_for_figure(
     across a section drawn on its own; an elevation alone cannot show it,
     and a section alone does not need the outside's corners, which its cut
     faces already draw.  A plan view gets nothing.
+
+    Two conventions of the pen: an inner line on the section's side stops
+    ``gap_mm`` short of the wall's cut, never touching it; and a corner that
+    really turns - a foot's edge, a groove - is a solid line, while a
+    gentler bend, under ``solid_min_deg``, is drawn broken, once, and twice
+    under half of that.  Each line is drawn as two halves from the axis, so
+    the breaks fall alike on either side of the fold.
     """
 
     by_kind: dict[str, list[Any]] = {}
@@ -2711,6 +2734,7 @@ def _break_paths_for_figure(
             )
             continue
         paths: list[Any] = []
+        solid_count = broken_count = 0
         for index, item in enumerate(payload.breaks):
             try:
                 chord = axis_profile_chord(
@@ -2723,21 +2747,71 @@ def _break_paths_for_figure(
             if chord is None:
                 paths = []
                 break
-            paths.append(
-                VectorPath(
-                    id=f"profile-break:{record.id}:{index:03d}",
-                    role="profile_break",
-                    closed=False,
-                    points_mm=(chord[0], chord[1]),
-                )
-            )
+            turn_deg = abs(float(item.turn_millidegrees)) / 1000.0
+            gaps = 0 if turn_deg >= solid_min_deg else (1 if turn_deg >= 0.5 * solid_min_deg else 2)
+            if gaps:
+                broken_count += 1
+            else:
+                solid_count += 1
+            centre = (0.5 * (chord[0][0] + chord[1][0]), 0.5 * (chord[0][1] + chord[1][1]))
+            for side, end in enumerate(chord):
+                # The inside's line stops short of the wall's cut.
+                pieces = _broken_line(centre, end, gaps=gaps, gap_mm=gap_mm, trim_end_mm=gap_mm if inward else 0.0)
+                for piece_index, piece in enumerate(pieces):
+                    paths.append(
+                        VectorPath(
+                            id=f"profile-break:{record.id}:{index:03d}:{'lr'[side]}{piece_index:02d}",
+                            role="profile_break",
+                            closed=False,
+                            points_mm=piece,
+                        )
+                    )
         if not paths:
             continue
         target.setdefault(OUTLINE_HOLE, []).extend(paths)
         drawn.append(
-            {"break_count": str(len(payload.breaks)), "half": half, "record_id": record.id, "surface": surface}
+            {
+                "break_count": str(len(payload.breaks)),
+                "broken_count": str(broken_count),
+                "half": half,
+                "record_id": record.id,
+                "solid_count": str(solid_count),
+                "surface": surface,
+            }
         )
     return by_kind, interior_by_kind, drawn, not_drawn
+
+
+def _broken_line(
+    start: tuple[float, float],
+    end: tuple[float, float],
+    *,
+    gaps: int,
+    gap_mm: float,
+    trim_end_mm: float,
+) -> list[tuple[tuple[float, float], tuple[float, float]]]:
+    """A straight line from ``start`` towards ``end``, ``trim_end_mm``
+    short of it, drawn in ``gaps + 1`` pieces separated by ``gap_mm``;
+    nothing when there is no room for the pieces."""
+
+    dx, dy = end[0] - start[0], end[1] - start[1]
+    length = math.hypot(dx, dy) - max(0.0, float(trim_end_mm))
+    if length <= 1e-9:
+        return []
+    ux, uy = dx / math.hypot(dx, dy), dy / math.hypot(dx, dy)
+    piece = (length - gaps * float(gap_mm)) / (gaps + 1)
+    if piece <= 1e-9:
+        return []
+    pieces: list[tuple[tuple[float, float], tuple[float, float]]] = []
+    for index in range(gaps + 1):
+        at = index * (piece + float(gap_mm))
+        pieces.append(
+            (
+                (start[0] + ux * at, start[1] + uy * at),
+                (start[0] + ux * (at + piece), start[1] + uy * (at + piece)),
+            )
+        )
+    return pieces
 
 
 def _groove_paths_for_figure(
@@ -3728,6 +3802,13 @@ def _mirrored_figure(
             if path.role == "profile_break":
                 if break_reach != REACH_SECTION:
                     continue
+                # Only the elevation's own half, where it reaches the fold,
+                # runs on past it.
+                sides = [half_plane_side(p, base=base, direction=direction) for p in path.points_mm]
+                if min(abs(side) for side in sides) > 1e-6:
+                    continue
+                if (min(sides) > -1e-6) if elevation_left else (max(sides) < 1e-6):
+                    continue
                 crossings = [(_fold_point(path.points_mm, base, direction), across)]
             elif path.closed and outline_reach == REACH_SECTION:
                 crossings = _fold_crossings(path.points_mm, base=base, direction=direction, across=across)
@@ -4688,7 +4769,12 @@ def compose_drawing_sheet(
             {"figure_record_id": record.id, **entry} for entry in grooves_drawn
         )
         break_by_kind, break_interior_by_kind, breaks_drawn, breaks_not_drawn = _break_paths_for_figure(
-            record.type, payload, breaks, has_section_half=section_record_id is not None
+            record.type,
+            payload,
+            breaks,
+            has_section_half=section_record_id is not None,
+            gap_mm=REACH_GAP_PAPER_MM * float(options.scale_denominator),
+            solid_min_deg=options.break_solid_min_deg,
         )
         for kind, break_paths in break_by_kind.items():
             by_kind.setdefault(kind, []).extend(break_paths)
@@ -5137,6 +5223,7 @@ def compose_drawing_sheet(
                     ),
                     "reach": options.break_reach,
                     "reach_gap_paper_mm": REACH_GAP_PAPER_MM,
+                    "solid_min_deg": options.break_solid_min_deg,
                     "records": [
                         {
                             "break_count": len(payload.breaks),

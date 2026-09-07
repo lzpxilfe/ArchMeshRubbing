@@ -223,8 +223,8 @@ def test_the_reading_is_a_record_that_reopens_and_draws_as_lines_round_the_pot(f
     assert sidecar["profile_breaks"]["records"][0]["surface"] == PROFILE_BREAK_SURFACE_OUTWARD
     assert sidecar["profile_breaks"]["drawn"] == [
         {
-            "break_count": "3", "figure_record_id": "record:front", "half": "elevation",
-            "record_id": "record:breaks", "surface": PROFILE_BREAK_SURFACE_OUTWARD,
+            "break_count": "3", "broken_count": "0", "figure_record_id": "record:front", "half": "elevation",
+            "record_id": "record:breaks", "solid_count": "3", "surface": PROFILE_BREAK_SURFACE_OUTWARD,
         }
     ]
     assert sidecar["profile_breaks"]["not_drawn"] == []
@@ -291,13 +291,48 @@ def test_the_inside_has_corners_too_and_they_show_through_the_cut(footed) -> Non
         assert max(xs) <= axis_x + 1e-6, "the outside's corners stop at the fold by default"
     xs = inner[0]
     assert min(xs) >= axis_x - 1e-6, "the inside's corner starts at the axis"
-    assert abs((max(xs) - min(xs)) - 54.0 / 2.0) < 1.0, "and reaches the inner wall"
+    # An inner line does not touch the cut: it stops a paper millimetre
+    # short of the inner wall (54 mm at 1:2 is 27 mm on paper).
+    assert abs((max(xs) - min(xs)) - (54.0 / 2.0 - 1.0)) < 0.6, "and stops short of the inner wall"
     sidecar = json.loads(bundle.sidecar_bytes.decode("utf-8"))
-    assert [(entry["record_id"], entry["half"]) for entry in sidecar["profile_breaks"]["drawn"]] == [
-        ("record:in", "section"), ("record:out", "elevation"),
+    assert [(entry["record_id"], entry["half"], entry["solid_count"], entry["broken_count"]) for entry in sidecar["profile_breaks"]["drawn"]] == [
+        ("record:in", "section", "1", "0"), ("record:out", "elevation", "3", "0"),
     ]
     assert sidecar["profile_breaks"]["not_drawn"] == []
     assert sidecar["profile_breaks"]["reach"] == "axis" and sidecar["profile_breaks"]["reach_gap_paper_mm"] == 1.0
+    assert sidecar["profile_breaks"]["solid_min_deg"] == 30
+
+    # A corner that turns less than the threshold is drawn broken - once
+    # under it, twice under half of it - with a paper millimetre of gap.
+    # The fold inside the shoulder turns about 39 degrees: once under 60,
+    # twice under 180.
+    broken = compose_drawing_sheet(
+        session.document, ["record:front"],
+        options=DrawingSheetOptions(
+            title_block=title, page=page, scale_denominator=2.0, break_solid_min_deg=60,
+            mirror_sections=(("record:front", "record:section"),), break_records=("record:out", "record:in"),
+        ),
+    )
+    root = ET.fromstring(broken.svg_bytes)
+    pieces = _line_xs(root, "profile-break:record:in:000:")
+    assert len(pieces) == 2, pieces
+    ends = sorted((min(xs), max(xs)) for xs in pieces)
+    assert abs((ends[1][0] - ends[0][1]) - 1.0) < 1e-6, "one paper millimetre of gap"
+    assert ends[0][0] >= axis_x - 1e-6 and abs(ends[1][1] - (axis_x + 54.0 / 2.0 - 1.0)) < 0.6
+    sidecar = json.loads(broken.sidecar_bytes.decode("utf-8"))
+    assert [(entry["record_id"], entry["solid_count"], entry["broken_count"]) for entry in sidecar["profile_breaks"]["drawn"]] == [
+        ("record:in", "0", "1"), ("record:out", "0", "3"),
+    ]
+    twice = compose_drawing_sheet(
+        session.document, ["record:front"],
+        options=DrawingSheetOptions(
+            title_block=title, page=page, scale_denominator=2.0, break_solid_min_deg=180,
+            mirror_sections=(("record:front", "record:section"),), break_records=("record:in",),
+        ),
+    )
+    assert len(_line_xs(ET.fromstring(twice.svg_bytes), "profile-break:record:in:000:")) == 3
+    with pytest.raises(DrawingSheetError, match="break_solid_min_deg must be"):
+        DrawingSheetOptions(title_block=title, page=page, scale_denominator=2.0, break_solid_min_deg=200)
     # The outline's rim edge, though, runs on past the fold in the outline's
     # weight: across the cavity to a paper millimetre short of the inner wall
     # at the rim (42 mm at 1:2, less the gap); the base's edge lies under the
@@ -338,7 +373,8 @@ def test_the_inside_has_corners_too_and_they_show_through_the_cut(footed) -> Non
         options=DrawingSheetOptions(title_block=title, page=page, scale_denominator=2.0, break_records=("record:out", "record:in")),
     )
     root = ET.fromstring(plain.svg_bytes)
-    assert len(_line_xs(root, "profile-break:record:out:")) == 3
+    # Three corners, each drawn as two halves from the axis outward.
+    assert len(_line_xs(root, "profile-break:record:out:")) == 6
     assert _line_xs(root, "profile-break:record:in:") == []
     sidecar = json.loads(plain.sidecar_bytes.decode("utf-8"))
     assert sidecar["profile_breaks"]["not_drawn"] == [
@@ -355,6 +391,8 @@ def test_the_inside_has_corners_too_and_they_show_through_the_cut(footed) -> Non
     root = ET.fromstring(section.svg_bytes)
     assert _line_xs(root, "profile-break:record:out:") == []
     inner = _line_xs(root, "profile-break:record:in:")
-    assert len(inner) == 1 and abs((max(inner[0]) - min(inner[0])) - 54.0) < 1.0, "wall to wall"
+    # Wall to wall as two halves from the axis, each stopping a paper
+    # millimetre short of its wall.
+    assert len(inner) == 2 and all(abs((max(xs) - min(xs)) - (54.0 / 2.0 - 1.0)) < 0.6 for xs in inner), inner
     sidecar = json.loads(section.sidecar_bytes.decode("utf-8"))
     assert [entry["reason"] for entry in sidecar["profile_breaks"]["not_drawn"]] == ["exterior_needs_elevation"]
