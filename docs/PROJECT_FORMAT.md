@@ -667,6 +667,16 @@ recipe.texture_relief
 - **도판**: `DrawingSheetOptions.break_records`. 꺾임마다 그 높이·반지름의 원을 도형 frame에 사영한 현(`axis_profile_chord`)을 내선(`outline_hole`)으로 `profile-break:{record}:000` id로 긋는다. 축이 놓인 평면의 도형(입면·단면)에만 그리고 평면도에는 아무것도 그리지 않으며, 미러 도형에서는 입면 반쪽에 잘린다. sidecar `profile_breaks.records`(record ID·recipe hash·payload sha256·`break_count`·`break_heights_um`)와 `profile_breaks.drawn`. 옵션이 비면 sidecar에 키가 없다.
 - 완료 게이트(3/6/6)와 `.amr-survey`에는 들어가지 않는다.
 
+## 채색 문양 이미지 record `measurement.paint_cutout.v1`
+
+그린 것을 모두 선으로 옮기지는 않는다. 붓으로 쓴 묵서, 촘촘한 문양은 있는 그대로 보이는 편이 낫다 — 이미지 편집기의 완드로 그 자리만 따내듯 base colour에서 **채색된 픽셀만** 오려, 도면의 톤에 맞춰 제자리에 붙인다. 백자 굽 안의 묵서 '天'을 도면 아래에 따 붙인 보고서 도판이 그 관례다.
+
+- **recipe**: `archmeshrubbing.view_paint_cutout` **1.0.0**, 좌표계 `view_plane_mm/v1`. `view`(여섯 뷰 중 하나 — 이화문은 `front`, 굽 안 묵서는 `bottom`), `raster_policy`(`pixels_per_mm` 기본 10, `facing_cos_millionths` 기본 350,000, `painter` = `far_to_near_facing_faces/v1` — 뷰를 향한 면을 먼 것부터 칠해 가까운 벽이 이긴다), `texture_paint`(내선 record의 채색 블록과 같되 `band_um`은 0 — 면을 가장자리로 줄이지 않고 채색을 통째로 둔다), `ink_policy`(`threshold_thousandths` 기본 60 — 여기서 먹이 시작, `full_thousandths` 기본 250 — 여기서 먹이 꽉 참, 그 사이는 선형 `ramp`; `margin_um` 기본 1,000 — 채색 범위 둘레의 여백), `window`(null이거나 `left_um`·`bottom_um`·`right_um`·`top_um` — 뷰 mm의 상자 안 채색만 따낸다: 원하는 문양 하나만, 뷰에 보이는 채색 전부가 아니라), `source_vertex_count`·`source_face_count`. `validate_paint_cutout_recipe`는 수들로 다시 만들어 같은 바이트를 요구한다.
+- **raster**(`PaintCutoutRaster`, 문서 밖에서 record 곁을 따라다닌다 — 띠 탁본과 같다): GA8, 회색 0(먹)에 알파가 채색량의 덮임, 행 0이 뷰의 위. `left_um`·`bottom_um`이 뷰 mm에서 종이의 왼쪽·아래 모서리. `raster_sha256`은 의미 헤더와 픽셀의 해시.
+- **record**: extension `org.archmeshrubbing:paint-cutout-v1`에 **receipt**(헤더 + `raster_sha256` + `raw_pixel_sha256` + 바이트 길이)만 든다. `geometry_ref`는 raster sha256. 도판을 만들 때 `rasters={record: PaintCutoutRaster}`로 픽셀을 주면 `require_paint_cutout_raster`가 receipt와 대조하고 다르면 거부한다. QC는 `inked_pixel_count`, `coverage_mean_thousandths`, 크기, `texture_paint_*` 수, `visible_face_count`.
+- **도판**: `DrawingSheetOptions.paint_cutouts=((cutout record, 도형 record, 자리),…)`, 자리는 `in_place`(뷰가 같은 도형의 제자리 — 미러 도형에서는 입면 반쪽 안이거나 꺾음 상자 안이어야 하고, 아니면 거부: 단면 반쪽 위에 채색이 놓이면 안 된다) 또는 `below`(도형 아래 3 mm 띄워 가운데 — 저부 묵서처럼 다른 뷰의 세부). `paint_cutout_ink_percent`(기본 70, 20-100)가 `<image opacity>`로 먹의 진하기를 정한다 — 선 위에 튀지 않게. 이미지는 선 layer보다 먼저 놓여 선이 그 위에 그려지며 id는 `paint-cutout-{도형}-{n}`, `data-placement`. sidecar `paint_cutouts.records`(record ID·recipe hash·raster sha256·뷰·크기)와 `paint_cutouts.drawn`(도형·자리·먹·`rectangle_um`). 옵션이 비면 sidecar에 키가 없다.
+- 완료 게이트(3/6/6)와 `.amr-survey`에는 들어가지 않는다.
+
 ## 완료 3/6/6 원자 묶음 `.amr-survey`
 
 `*.amr-survey`는 새 알고리즘 결과를 만드는 포맷이 아니라, 한 active Align 아래에서 dependency-valid `READY + FRESH`인 Cutline 3면, Outline 6면, Digital Rubbing 6면의 기존 권위 package를 한 번에 전달하는 non-overwriting directory다. GUI의 `완료 실측 15개 원자 묶음 내보내기`는 세 단계가 모두 완료된 경우에만 활성화된다.

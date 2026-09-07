@@ -68,6 +68,12 @@ from .artifact_document import (
     RecordFreshness,
     RecordLifecycleStatus,
 )
+from .artifact_paint_cutout import (
+    PAINT_CUTOUT_RECORD_TYPE,
+    ArtifactPaintCutoutError,
+    paint_cutout_receipt_from_record,
+    require_paint_cutout_raster,
+)
 from .artifact_profile_break import (
     PROFILE_BREAK_RECORD_TYPE,
     ArtifactProfileBreakError,
@@ -428,6 +434,15 @@ STROKE_JOIN_GAP_MM = 1.0
 STROKE_JOIN_ANGLE_DEG = 5.0
 #: How far past the axis a mirrored figure's fold may step round a motif.
 MAX_MIRROR_JOG_REACH_MM = 200.0
+#: Where a painted cutout goes on its figure: at its own place in the view,
+#: or beneath the figure as a detail (an inscription on the base, seen from
+#: below).
+PAINT_CUTOUT_IN_PLACE = "in_place"
+PAINT_CUTOUT_BELOW = "below"
+PAINT_CUTOUT_PLACEMENTS: tuple[str, ...] = (PAINT_CUTOUT_IN_PLACE, PAINT_CUTOUT_BELOW)
+PAINT_CUTOUT_BELOW_GAP_MM = 3.0
+DEFAULT_PAINT_CUTOUT_INK_PERCENT = 70
+MIN_PAINT_CUTOUT_INK_PERCENT = 20
 
 
 @dataclass(frozen=True, slots=True)
@@ -666,6 +681,16 @@ class DrawingSheetOptions:
     section is cut back there; a section cut face inside the step is
     refused.
     """
+    paint_cutouts: tuple[tuple[str, str, str], ...] = ()
+    """(cutout record id, figure record id, placement) - painted marks cut
+    out of the colour map and pasted as images: ``in_place`` at the mark's
+    own place on a figure of the same view, ``below`` centred beneath the
+    figure as a detail.  The cutout's pixels are passed in ``rasters`` under
+    its record id and pasted only when they match the record's receipt.
+    """
+    paint_cutout_ink_percent: int = DEFAULT_PAINT_CUTOUT_INK_PERCENT
+    """How dark a cutout prints: its coverage times this, so a pasted mark
+    sits in the drawing's tone instead of shouting over the line work."""
     mirror_sections: tuple[tuple[str, str], ...] = ()
     """(elevation record id, section record id) pairs drawn as one figure.
 
@@ -876,6 +901,28 @@ class DrawingSheetOptions:
                     raise DrawingSheetError("mirror_jogs of one figure must not overlap along the axis")
             mirror_jogs.append((record_id, along_from, along_to, reach))
         object.__setattr__(self, "mirror_jogs", tuple(mirror_jogs))
+        cutouts: list[tuple[str, str, str]] = []
+        for entry in self.paint_cutouts:
+            if not isinstance(entry, (tuple, list)) or len(entry) != 3:
+                raise DrawingSheetError(
+                    "paint_cutouts entries must be (cutout record id, figure record id, placement)"
+                )
+            cutout_id, figure_id, placement = (str(item).strip() for item in entry)
+            if not cutout_id or not figure_id:
+                raise DrawingSheetError("paint_cutouts entries must be record ids")
+            if placement not in PAINT_CUTOUT_PLACEMENTS:
+                raise DrawingSheetError(
+                    f"paint_cutouts placement must be one of {', '.join(PAINT_CUTOUT_PLACEMENTS)}"
+                )
+            if any(existing[0] == cutout_id for existing in cutouts):
+                raise DrawingSheetError("the same cutout cannot be pasted twice on one sheet")
+            cutouts.append((cutout_id, figure_id, placement))
+        object.__setattr__(self, "paint_cutouts", tuple(cutouts))
+        ink = self.paint_cutout_ink_percent
+        if isinstance(ink, bool) or not isinstance(ink, int) or not MIN_PAINT_CUTOUT_INK_PERCENT <= ink <= 100:
+            raise DrawingSheetError(
+                f"paint_cutout_ink_percent must be an integer from {MIN_PAINT_CUTOUT_INK_PERCENT} to 100"
+            )
         condition_records = tuple(self.condition_records)
         if any(
             not isinstance(record_id, str) or not record_id.strip()
@@ -1330,6 +1377,20 @@ class _AttachedRaster:
 
 
 @dataclass(frozen=True, slots=True)
+class _PastedCutout:
+    """A painted mark's image pasted on a figure, and where."""
+
+    record_id: str
+    recipe_hash: str
+    raster_sha256: str
+    view: str
+    image: _RasterImage
+    rectangle_mm: tuple[float, float, float, float]
+    placement: str
+    ink_percent: int
+
+
+@dataclass(frozen=True, slots=True)
 class _Prepared:
     """One figure's content, before it knows where on the page it goes."""
 
@@ -1347,6 +1408,7 @@ class _Prepared:
     """Printed beneath a rubbing: what it is and what made its ink."""
     caption_lines: tuple[str, ...] = ()
     """The caption as it breaks to fit the paper it sits under."""
+    cutouts: tuple[_PastedCutout, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1363,6 +1425,7 @@ class _Figure:
     attached: _AttachedRaster | None = None
     caption: str | None = None
     caption_lines: tuple[str, ...] = ()
+    cutouts: tuple[_PastedCutout, ...] = ()
 
 
 def _lay_out(
@@ -1440,6 +1503,7 @@ def _lay_out(
                 attached=prepared.attached,
                 caption=prepared.caption,
                 caption_lines=prepared.caption_lines,
+                cutouts=prepared.cutouts,
             )
         )
         cursor_x += width
@@ -1566,6 +1630,7 @@ def _lay_out_plan_with_sections(
             attached=figure.attached,
             caption=figure.caption,
             caption_lines=figure.caption_lines,
+            cutouts=figure.cutouts,
         )
 
     # The plan first, then what lies under it, then what lies beside it: the
@@ -2765,6 +2830,119 @@ def _attach_rubbing_on_axis(
     )
 
 
+def _pasted_cutouts(
+    document: ArtifactDocument,
+    *,
+    figure: DerivedRecord,
+    figure_payload: Any,
+    bounds: tuple[float, float, float, float],
+    rasters: Mapping[str, Any],
+    options: DrawingSheetOptions,
+    fold: tuple[Sequence[float], Sequence[float]] | None,
+    jogs: Sequence[tuple[float, float, float]],
+) -> tuple[list[_PastedCutout], tuple[float, float, float, float]]:
+    """The cutouts pasted on one figure, and the figure's extent with them.
+
+    A cutout in place goes where it was cut, so its view must be the
+    figure's plane; on a mirrored figure it must lie on the elevation's side
+    of the fold, or inside a step the fold takes - a cutout under the
+    section half would show paint where the drawing shows the cut.  A cutout
+    below hangs centred beneath the figure, a detail of another view.
+    """
+
+    pasted: list[_PastedCutout] = []
+    grown = bounds
+    for cutout_id, figure_id, placement in options.paint_cutouts:
+        if figure_id != figure.id:
+            continue
+        record = document.record_index.get(cutout_id)
+        if record is None:
+            raise DrawingSheetError(f"paint cutout record {cutout_id!r} does not exist")
+        if record.type != PAINT_CUTOUT_RECORD_TYPE:
+            raise DrawingSheetError(f"record {cutout_id!r} is not a paint cutout")
+        if record.lifecycle_status is not RecordLifecycleStatus.READY:
+            raise DrawingSheetError("only READY paint cutout records may be pasted")
+        try:
+            freshness = document.record_freshness(record.id)
+        except ArtifactDocumentError as exc:
+            raise DrawingSheetError(str(exc)) from exc
+        if freshness is not RecordFreshness.FRESH:
+            raise DrawingSheetError(
+                f"only FRESH paint cutout records may be pasted (got {freshness.value})"
+            )
+        if cutout_id not in rasters:
+            raise DrawingSheetError(
+                f"paint cutout {cutout_id!r} needs its raster passed in rasters under its id"
+            )
+        try:
+            receipt = paint_cutout_receipt_from_record(record)
+            raster = require_paint_cutout_raster(record, rasters[cutout_id])
+        except ArtifactPaintCutoutError as exc:
+            raise DrawingSheetError(str(exc)) from exc
+        image = _encode_raster_image(
+            document,
+            record,
+            raster.pixels,
+            pixels_per_meter=raster.pixels_per_meter,
+            raster_sha256=raster.raster_sha256,
+        )
+        width_mm = raster.width_um / 1000.0
+        height_mm = raster.height_um / 1000.0
+        if placement == PAINT_CUTOUT_IN_PLACE:
+            if outline_frame(raster.view) != figure_payload.frame:
+                raise DrawingSheetError(
+                    f"paint cutout {cutout_id!r} was cut in the {raster.view} view, which is not "
+                    f"the plane of {figure.id!r}; paste it below instead"
+                )
+            rectangle = raster.rectangle_mm
+            if fold is not None:
+                base, direction = fold
+                corners = [(rectangle[0], rectangle[1]), (rectangle[2], rectangle[3])]
+                on_elevation = all(
+                    half_plane_side(corner, base=base, direction=direction) <= 1e-9 for corner in corners
+                )
+                along = [
+                    float((x - base[0]) * direction[0] + (y - base[1]) * direction[1]) for x, y in corners
+                ]
+                across = [
+                    float(half_plane_side(corner, base=base, direction=direction)) for corner in corners
+                ]
+                in_step = any(
+                    min(along) >= along_from - 1e-9
+                    and max(along) <= along_to + 1e-9
+                    and max(across) <= reach + 1e-9
+                    for along_from, along_to, reach in jogs
+                )
+                if not (on_elevation or in_step):
+                    raise DrawingSheetError(
+                        f"paint cutout {cutout_id!r} crosses the fold of {figure.id!r} into the "
+                        "section half; step the fold round it with mirror_jogs, or paste it below"
+                    )
+        else:
+            centre = 0.5 * (grown[0] + grown[2])
+            top = grown[1] - PAINT_CUTOUT_BELOW_GAP_MM
+            rectangle = (centre - 0.5 * width_mm, top - height_mm, centre + 0.5 * width_mm, top)
+        grown = (
+            min(grown[0], rectangle[0]),
+            min(grown[1], rectangle[1]),
+            max(grown[2], rectangle[2]),
+            max(grown[3], rectangle[3]),
+        )
+        pasted.append(
+            _PastedCutout(
+                record_id=record.id,
+                recipe_hash=record.recipe_hash,
+                raster_sha256=str(receipt["raster_sha256"]),
+                view=raster.view,
+                image=image,
+                rectangle_mm=rectangle,
+                placement=placement,
+                ink_percent=int(options.paint_cutout_ink_percent),
+            )
+        )
+    return pasted, grown
+
+
 def _condition_paths_for_figure(
     figure_record_type: str,
     figure_payload_frame: Any,
@@ -3362,6 +3540,7 @@ def _sheet_provenance(
     layout: Mapping[str, str] | None = None,
     texture_lines: Mapping[str, Any] | None = None,
     profile_breaks: Mapping[str, Any] | None = None,
+    paint_cutouts: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     preset = resolve_drawing_style_preset(options.style_preset)
     provenance: dict[str, Any] = {
@@ -3458,6 +3637,8 @@ def _sheet_provenance(
         provenance["groove"] = dict(groove)
     if profile_breaks is not None:
         provenance["profile_breaks"] = dict(profile_breaks)
+    if paint_cutouts is not None:
+        provenance["paint_cutouts"] = dict(paint_cutouts)
     if technique is not None:
         provenance["technique"] = dict(technique)
     if mirrored:
@@ -3550,7 +3731,7 @@ def _render_sheet(
     xlink_declaration = (
         ' xmlns:xlink="http://www.w3.org/1999/xlink"'
         if any(
-            figure.raster is not None or figure.attached is not None
+            figure.raster is not None or figure.attached is not None or figure.cutouts
             for figure in placed
         )
         else ""
@@ -3609,6 +3790,23 @@ def _render_sheet(
             f'data-record-type="{xml_attribute(figure.record_type)}"'
             f"{mirror_attribute}>"
         )
+        # A pasted mark lies under the line work: the lines are drawn over it.
+        for cutout_index, cutout in enumerate(figure.cutouts):
+            left, _bottom, right, top = cutout.rectangle_mm
+            paper_x, paper_y = figure.placement.paper_xy((left, top))
+            denominator = figure.placement.scale_denominator
+            lines.append(
+                f'      <image id="paint-cutout-{index:04d}-{cutout_index:02d}" '
+                f'data-record-id="{xml_attribute(cutout.record_id)}" '
+                f'data-placement="{cutout.placement}" '
+                f'x="{number_token(paper_x, field_name="cutout.x")}" '
+                f'y="{number_token(paper_y, field_name="cutout.y")}" '
+                f'width="{number_token((right - left) / denominator, field_name="cutout.width")}" '
+                f'height="{number_token((top - _bottom) / denominator, field_name="cutout.height")}" '
+                f'opacity="{number_token(cutout.ink_percent / 100.0, field_name="cutout.opacity")}" '
+                'preserveAspectRatio="none" image-rendering="pixelated" '
+                f'xlink:href="{xml_attribute(cutout.image.data_uri)}"/>'
+            )
         if figure.raster is not None:
             placement = figure.placement
             origin_x, origin_y = placement.origin_mm
@@ -3753,7 +3951,10 @@ def compose_drawing_sheet(
         for rubbing_id, elevation_id in options.rubbings_on_axis
     }
     unplaced_rasters = sorted(
-        set(rasters) - set(ids) - set(attached_by_elevation.values())
+        set(rasters)
+        - set(ids)
+        - set(attached_by_elevation.values())
+        - {cutout_id for cutout_id, _figure_id, _placement in options.paint_cutouts}
     )
     if unplaced_rasters:
         raise DrawingSheetError(
@@ -3857,6 +4058,7 @@ def compose_drawing_sheet(
             raise DrawingSheetError(str(exc)) from exc
     groove_drawn: list[dict[str, str]] = []
     break_drawn: list[dict[str, str]] = []
+    cutout_drawn: list[dict[str, str]] = []
     attached_drawn: list[dict[str, str]] = []
     mirrored: list[dict[str, str]] = []
     section_loops: list[dict[str, Any]] = []
@@ -4051,6 +4253,26 @@ def compose_drawing_sheet(
                 if axis_path is not None:
                     by_kind.setdefault(CENTER_AXIS, []).append(axis_path)
             plain_bounds = _payload_bounds(payload)
+            cutouts, plain_bounds = _pasted_cutouts(
+                document,
+                figure=record,
+                figure_payload=payload,
+                bounds=plain_bounds,
+                rasters=rasters,
+                options=options,
+                fold=None,
+                jogs=(),
+            )
+            cutout_drawn.extend(
+                {
+                    "figure_record_id": record.id,
+                    "ink_percent": str(cutout.ink_percent),
+                    "placement": cutout.placement,
+                    "record_id": cutout.record_id,
+                    "rectangle_um": ":".join(str(int(round(v * 1000.0))) for v in cutout.rectangle_mm),
+                }
+                for cutout in cutouts
+            )
             caption_lines = _attached_caption_lines(
                 plain_bounds, attached, caption, scale_denominator=options.scale_denominator
             )
@@ -4070,6 +4292,7 @@ def compose_drawing_sheet(
                     attached=attached,
                     caption=caption,
                     caption_lines=caption_lines,
+                    cutouts=tuple(cutouts),
                 )
             )
             continue
@@ -4127,6 +4350,34 @@ def compose_drawing_sheet(
                     "record_id": section.id,
                 }
             )
+        try:
+            fold = center_axis_line(payload.frame.to_dict())
+        except SVGRenderError as exc:
+            raise DrawingSheetError(str(exc)) from exc
+        cutouts, bounds = _pasted_cutouts(
+            document,
+            figure=record,
+            figure_payload=payload,
+            bounds=bounds,
+            rasters=rasters,
+            options=options,
+            fold=fold,
+            jogs=[
+                (along_from, along_to, reach)
+                for jog_record_id, along_from, along_to, reach in options.mirror_jogs
+                if jog_record_id == record.id
+            ],
+        )
+        cutout_drawn.extend(
+            {
+                "figure_record_id": record.id,
+                "ink_percent": str(cutout.ink_percent),
+                "placement": cutout.placement,
+                "record_id": cutout.record_id,
+                "rectangle_um": ":".join(str(int(round(v * 1000.0))) for v in cutout.rectangle_mm),
+            }
+            for cutout in cutouts
+        )
         caption_lines = _attached_caption_lines(
             bounds, attached, caption, scale_denominator=options.scale_denominator
         )
@@ -4148,9 +4399,19 @@ def compose_drawing_sheet(
                 attached=attached,
                 caption=caption,
                 caption_lines=caption_lines,
+                cutouts=tuple(cutouts),
             )
         )
 
+    pasted_ids = {entry["record_id"] for entry in cutout_drawn}
+    missing_cutouts = sorted(
+        cutout_id for cutout_id, _figure_id, _placement in options.paint_cutouts if cutout_id not in pasted_ids
+    )
+    if missing_cutouts:
+        raise DrawingSheetError(
+            "paint_cutouts names a figure this sheet does not draw for "
+            + ", ".join(repr(cutout_id) for cutout_id in missing_cutouts)
+        )
     unplaced = sorted(set(rubbing_notes) - noted)
     if unplaced:
         raise DrawingSheetError(
@@ -4365,6 +4626,25 @@ def compose_drawing_sheet(
                     ],
                 }
                 if breaks
+                else None
+            ),
+            paint_cutouts=(
+                {
+                    "drawn": sorted(cutout_drawn, key=lambda entry: (entry["figure_record_id"], entry["record_id"])),
+                    "records": [
+                        {
+                            "raster_sha256": cutout.raster_sha256,
+                            "recipe_hash": cutout.recipe_hash,
+                            "record_id": cutout.record_id,
+                            "view": cutout.view,
+                            "width_pixels": cutout.image.width_pixels,
+                            "height_pixels": cutout.image.height_pixels,
+                        }
+                        for figure in sorted(placed, key=lambda item: item.record_id)
+                        for cutout in figure.cutouts
+                    ],
+                }
+                if cutout_drawn
                 else None
             ),
             mirrored=sorted(
