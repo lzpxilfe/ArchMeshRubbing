@@ -456,9 +456,13 @@ def detect_profile_breaks(
     # sample near an end of the profile has no direction and is no break.
     turns = np.zeros(count, dtype=np.float64)
     has_turn = np.zeros(count, dtype=bool)
+    # Bin centres sit at exact multiples of the bin from the lowest, so a
+    # sample exactly a span away must count as a span away: the comparison
+    # carries a nanometre of slack against floating-point rounding.
+    slack = 1e-6
     for index in range(count):
-        below = np.flatnonzero(heights <= heights[index] - span_mm)
-        above = np.flatnonzero(heights >= heights[index] + span_mm)
+        below = np.flatnonzero(heights <= heights[index] - span_mm + slack)
+        above = np.flatnonzero(heights >= heights[index] + span_mm - slack)
         if below.size == 0 or above.size == 0:
             continue
         low = int(below[-1])
