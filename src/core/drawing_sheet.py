@@ -130,6 +130,7 @@ from .drawing_style import (
     CENTER_AXIS,
     OUTLINE_HOLE,
     OUTLINE_VISIBLE,
+    SECTION_CUT,
     DrawingStyleError,
     DrawingStylePreset,
     LineStyle,
@@ -460,6 +461,17 @@ PAINT_CUTOUT_IN_PLACE = "in_place"
 PAINT_CUTOUT_BELOW = "below"
 PAINT_CUTOUT_PLACEMENTS: tuple[str, ...] = (PAINT_CUTOUT_IN_PLACE, PAINT_CUTOUT_BELOW)
 PAINT_CUTOUT_BELOW_GAP_MM = 3.0
+#: Presumed lines on the section's side, where the scan did not reach: a
+#: wall the archaeologist knows goes on, a floor a ruler found.  Drawn
+#: dashed, in the cut's weight, from numbers the archaeologist gives; the
+#: title block says so.  The dash is the pen's, paper millimetres.
+PRESUMED_LABEL = "추정"
+PRESUMED_FLOOR = "floor"
+PRESUMED_WALL_ON = "wall_on"
+PRESUMED_KINDS: tuple[str, ...] = (PRESUMED_FLOOR, PRESUMED_WALL_ON)
+PRESUMED_DASH_PAPER_MM = 1.2
+PRESUMED_GAP_PAPER_MM = 0.8
+MAX_PRESUMED_LENGTH_MM = 500.0
 DEFAULT_PAINT_CUTOUT_INK_PERCENT = 70
 MIN_PAINT_CUTOUT_INK_PERCENT = 20
 
@@ -811,6 +823,22 @@ class DrawingSheetOptions:
     paint_cutout_ink_percent: int = DEFAULT_PAINT_CUTOUT_INK_PERCENT
     """How dark a cutout prints: its coverage times this, so a pasted mark
     sits in the drawing's tone instead of shouting over the line work."""
+    presumed_lines: tuple[tuple[str, str, float, float], ...] = ()
+    """(elevation record id, kind, height_mm, length_mm) - lines on the
+    section's side of a mirrored figure that the scan did not measure and
+    the archaeologist presumes or found with a ruler, drawn dashed in the
+    cut's weight.
+
+    A bottle scanned from outside has no wall thickness: the section is a
+    profile line, and the inside is known only where the scanner reached
+    in through the mouth.  ``wall_on`` continues the open end of the
+    measured inner wall nearest ``height_mm`` by ``length_mm`` along its
+    own direction, after one gap - the archaeologist's word that the wall
+    goes on.  ``floor`` draws a level line at ``height_mm`` from the axis
+    across to a paper millimetre short of the wall (``length_mm`` 0), or
+    ``length_mm`` long - the floor's height a ruler through the mouth
+    found.  Every entry prints in the title block's ``추정`` row.
+    """
     relief_stipples: tuple[tuple[str, str], ...] = ()
     """(relief shade record id, figure record id) - a relief's shade
     stippled onto a figure of the shade's own view, in its own place.
@@ -1146,6 +1174,31 @@ class DrawingSheetOptions:
             raise DrawingSheetError(
                 f"paint_cutout_ink_percent must be an integer from {MIN_PAINT_CUTOUT_INK_PERCENT} to 100"
             )
+        presumed: list[tuple[str, str, float, float]] = []
+        for entry in self.presumed_lines:
+            if not isinstance(entry, (tuple, list)) or len(entry) != 4:
+                raise DrawingSheetError(
+                    "presumed_lines entries must be (elevation record id, kind, height_mm, length_mm)"
+                )
+            record_id, kind = str(entry[0]).strip(), str(entry[1]).strip()
+            if record_id not in elevations:
+                raise DrawingSheetError(
+                    f"presumed_lines names {record_id!r}, which is not the elevation half of any mirrored figure"
+                )
+            if kind not in PRESUMED_KINDS:
+                raise DrawingSheetError(f"presumed_lines kind must be one of {', '.join(PRESUMED_KINDS)}")
+            values: list[float] = []
+            for name, value in zip(("height_mm", "length_mm"), entry[2:]):
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                    raise DrawingSheetError(f"presumed_lines {name} must be a finite number")
+                values.append(float(value))
+            height, length = values
+            if length < 0.0 or length > MAX_PRESUMED_LENGTH_MM:
+                raise DrawingSheetError(f"presumed_lines length_mm must be from 0 to {MAX_PRESUMED_LENGTH_MM:g}")
+            if kind == PRESUMED_WALL_ON and length <= 0.0:
+                raise DrawingSheetError("a presumed wall_on line needs a positive length_mm")
+            presumed.append((record_id, kind, height, length))
+        object.__setattr__(self, "presumed_lines", tuple(presumed))
         stipples: list[tuple[str, str]] = []
         for entry in self.relief_stipples:
             if not isinstance(entry, (tuple, list)) or len(entry) != 2:
@@ -1552,6 +1605,7 @@ class DrawingSheetOptions:
             + int(computed_rubbing)
             + int(section_loops)
             + int(self.interpretation.is_stated)
+            + int(bool(self.presumed_lines))
             + len(self.title_block.rows)
             + 1
         )
@@ -2302,6 +2356,10 @@ def _title_block_elements(
         # And so is this: a line drawn past what was measured is disclosed on
         # the page, not only to whoever opens the sidecar.
         rows.append(options.interpretation.title_row())
+    if options.presumed_lines:
+        # A line the scan did not measure says so on the page, beside the
+        # interpretation row and under the same discipline.
+        rows.append((PRESUMED_LABEL, presumed_title_value(options.presumed_lines)))
     rows.extend(block.rows)
     rows.append(("문서", document_manifest_sha256[:12]))
 
@@ -3674,6 +3732,14 @@ def _pasted_cutouts(
                     and max(across) <= reach + 1e-9
                     for along_from, along_to, reach in jogs
                 )
+                if not (on_elevation or in_step) and jogs:
+                    # The paper may cross a step's edge as long as no ink
+                    # does: every inked pixel on the section's side must
+                    # lie inside a step - a staircase of steps round a
+                    # motif is several, and the ink may span them.
+                    in_step = _ink_within_steps(
+                        raster, base=base, direction=direction, toward_section=toward_section, jogs=jogs
+                    )
                 if not (on_elevation or in_step):
                     raise DrawingSheetError(
                         f"paint cutout {cutout_id!r} crosses the fold of {figure.id!r} into the "
@@ -4225,6 +4291,41 @@ def _clipped_half(
     return halved, fill_only
 
 
+def _ink_within_steps(
+    raster: Any,
+    *,
+    base: Sequence[float],
+    direction: Sequence[float],
+    toward_section: float,
+    jogs: Sequence[tuple[float, float, float]],
+) -> bool:
+    """Whether every inked pixel of a cutout that lies on the section's
+    side of the fold lies inside one of the fold's steps."""
+
+    pixels = np.asarray(raster.pixels)
+    alpha = pixels[:, :, -1]
+    rows, cols = np.nonzero(alpha > 0)
+    if rows.size == 0:
+        return True
+    left, bottom, right, top = raster.rectangle_mm
+    pitch = 1000.0 / float(raster.pixels_per_meter)
+    xs = left + (cols + 0.5) * pitch
+    ys = top - (rows + 0.5) * pitch
+    bx, by = float(base[0]), float(base[1])
+    dx, dy = float(direction[0]), float(direction[1])
+    # half_plane_side(p) = (p - base) x direction, negative on the left.
+    across = toward_section * ((xs - bx) * dy - (ys - by) * dx)
+    along = (xs - bx) * dx + (ys - by) * dy
+    on_section = across > 1e-9
+    if not on_section.any():
+        return True
+    covered = np.zeros(on_section.sum(), dtype=bool)
+    along_s, across_s = along[on_section], across[on_section]
+    for along_from, along_to, reach in jogs:
+        covered |= (along_s >= along_from - 1e-9) & (along_s <= along_to + 1e-9) & (across_s <= reach + 1e-9)
+    return bool(covered.all())
+
+
 def _jog_pieces(
     points: Sequence[Sequence[float]],
     *,
@@ -4326,6 +4427,10 @@ def _mirrored_figure(
     elevation_side: str = MIRROR_ELEVATION_LEFT,
     far_silhouette: tuple[DerivedRecord, VectorGeometryPayload] | None = None,
     straight_far_edges: bool = False,
+    presumed: Sequence[tuple[str, float, float]] = (),
+    presumed_drawn: list[dict[str, Any]] | None = None,
+    presumed_dash_mm: float = 0.0,
+    presumed_gap_mm: float = 0.0,
 ) -> tuple[
     DerivedRecord,
     dict[str, list[Any]],
@@ -4467,6 +4572,22 @@ def _mirrored_figure(
                 straight=straight_far_edges,
             )
         )
+    # What the scan did not measure and the archaeologist presumes: dashed,
+    # in the cut's weight, on the section's side.
+    if presumed:
+        presumed_paths, presumed_entries = _presumed_lines_past_fold(
+            presumed,
+            section_payload.paths,
+            base=base,
+            direction=direction,
+            across=across,
+            gap_mm=reach_gap_mm,
+            dash_mm=presumed_dash_mm,
+            dash_gap_mm=presumed_gap_mm,
+        )
+        section_by_kind.setdefault(SECTION_CUT, []).extend(presumed_paths)
+        if presumed_drawn is not None:
+            presumed_drawn.extend(presumed_entries)
     jog_line_sets = [_jog_lines(base, direction, across, jog) for jog in jogs]
     if jog_line_sets:
         cut_back: dict[str, list[Any]] = {}
@@ -4563,6 +4684,124 @@ def _mirrored_figure(
             )
         )
     return section, combined, bounds, left_fill_only | right_fill_only
+
+
+def presumed_title_value(entries: Sequence[Sequence[Any]]) -> str:
+    """The title block's word on the presumed lines: what and where."""
+
+    parts: list[str] = []
+    for entry in entries:
+        kind, height, length = str(entry[-3]), float(entry[-2]), float(entry[-1])
+        if kind == PRESUMED_FLOOR:
+            parts.append(f"바닥 {height:g} mm" + (f" · {length:g} mm 길이" if length > 0.0 else ""))
+        else:
+            parts.append(f"안벽 {height:g} mm에서 {length:g} mm 더")
+    return " · ".join(parts)
+
+
+def _dashes(
+    start: Sequence[float], end: Sequence[float], *, dash_mm: float, gap_mm: float
+) -> list[tuple[tuple[float, float], tuple[float, float]]]:
+    """A dashed straight line from ``start`` to ``end``: a dash first, then
+    gap and dash to the end, the last dash cut to fit; nothing when there
+    is no room for a quarter of a dash."""
+
+    sx, sy = float(start[0]), float(start[1])
+    dx, dy = float(end[0]) - sx, float(end[1]) - sy
+    length = math.hypot(dx, dy)
+    if length <= 1e-9 or dash_mm <= 0.0:
+        return []
+    ux, uy = dx / length, dy / length
+    pieces: list[tuple[tuple[float, float], tuple[float, float]]] = []
+    at = 0.0
+    while at < length - 0.25 * dash_mm:
+        stop = min(at + dash_mm, length)
+        pieces.append(((sx + ux * at, sy + uy * at), (sx + ux * stop, sy + uy * stop)))
+        at = stop + gap_mm
+    return pieces
+
+
+def _presumed_lines_past_fold(
+    presumed: Sequence[tuple[str, float, float]],
+    section_paths: Sequence[Any],
+    *,
+    base: Sequence[float],
+    direction: Sequence[float],
+    across: Sequence[float],
+    gap_mm: float,
+    dash_mm: float,
+    dash_gap_mm: float,
+) -> tuple[list[VectorPath], list[dict[str, Any]]]:
+    """The presumed lines as drawn on the section's side, and what became of
+    each.  A ``floor`` runs level from the fold at its height to a gap short
+    of the wall, or its own length; a ``wall_on`` picks the open end of the
+    measured section nearest its height on the section's side and goes on
+    from it, after one gap, in the end's own direction."""
+
+    bx, by = float(base[0]), float(base[1])
+    dx, dy = float(direction[0]), float(direction[1])
+    ax, ay = float(across[0]), float(across[1])
+    paths: list[VectorPath] = []
+    entries: list[dict[str, Any]] = []
+    for index, (kind, height, length) in enumerate(presumed):
+        entry: dict[str, Any] = {
+            "height_um": int(round(height * 1000.0)),
+            "kind": kind,
+            "length_um": int(round(length * 1000.0)),
+        }
+        pieces: list[tuple[tuple[float, float], tuple[float, float]]] = []
+        if abs(dy) < 1e-9:
+            entry["not_drawn"] = "the axis is level in this figure, so a height names no point on it"
+        elif kind == PRESUMED_FLOOR:
+            along = (height - by) / dy
+            origin = (bx + dx * along, by + dy * along)
+            segment = _reach_past_fold(
+                origin, (ax, ay), section_paths, base=base, direction=direction, across=across, gap_mm=gap_mm
+            )
+            if segment is None:
+                entry["not_drawn"] = "no wall lies across from the axis at that height, or the cut is solid there"
+            else:
+                reach = math.hypot(segment[1][0] - origin[0], segment[1][1] - origin[1])
+                if length > 0.0:
+                    reach = min(reach, length)
+                pieces = _dashes(origin, (origin[0] + ax * reach, origin[1] + ay * reach), dash_mm=dash_mm, gap_mm=dash_gap_mm)
+                entry["reach_um"] = int(round(reach * 1000.0))
+        else:
+            best: tuple[float, tuple[float, float], tuple[float, float]] | None = None
+            for path in section_paths:
+                if path.closed or len(path.points_mm) < 2:
+                    continue
+                points = [(float(x), float(y)) for x, y in path.points_mm]
+                for end, inward in ((points[-1], points[::-1]), (points[0], points)):
+                    if (end[0] - bx) * ax + (end[1] - by) * ay <= gap_mm:
+                        continue  # on or beside the fold: not an end inside the section
+                    back = next((q for q in inward[1:] if math.hypot(q[0] - end[0], q[1] - end[1]) >= 2.0), inward[-1])
+                    miss = abs((end[0] - bx) * dx + (end[1] - by) * dy - (height - by) / dy)
+                    if best is None or miss < best[0]:
+                        best = (miss, end, back)
+            if best is None:
+                entry["not_drawn"] = "the section has no open end on its side of the fold to go on from"
+            else:
+                _miss, end, back = best
+                ux, uy = end[0] - back[0], end[1] - back[1]
+                norm = math.hypot(ux, uy)
+                if norm <= 1e-9:
+                    entry["not_drawn"] = "the open end has no direction to go on in"
+                else:
+                    ux, uy = ux / norm, uy / norm
+                    start = (end[0] + ux * dash_gap_mm, end[1] + uy * dash_gap_mm)
+                    stop = (end[0] + ux * (dash_gap_mm + length), end[1] + uy * (dash_gap_mm + length))
+                    pieces = _dashes(start, stop, dash_mm=dash_mm, gap_mm=dash_gap_mm)
+                    entry["from_um"] = [int(round(end[0] * 1000.0)), int(round(end[1] * 1000.0))]
+        for piece_index, (a, b) in enumerate(pieces):
+            paths.append(
+                VectorPath(
+                    id=f"presumed:{kind}:{index:02d}:{piece_index:03d}", role="section", closed=False, points_mm=(a, b)
+                )
+            )
+        entry["piece_count"] = len(pieces)
+        entries.append(entry)
+    return paths, entries
 
 
 def _fold_point(
@@ -4707,11 +4946,20 @@ def _stepped_axis(
     )
     low, high = ends[0], ends[-1]
     points: list[tuple[float, float]] = [at(low)]
+    previous_stop: float | None = None
     for along_from, along_to, reach in sorted(jogs):
         start, stop = max(along_from, low), min(along_to, high)
         if start >= stop:
             continue
-        points.extend([at(start), at(start, reach), at(stop, reach), at(stop)])
+        if previous_stop is not None and abs(start - previous_stop) < 1e-9:
+            # Two steps that meet along the axis are one staircase: the
+            # line goes from the lower reach straight to the next, not
+            # back to the axis and out again.
+            points.pop()
+            points.extend([at(start, reach), at(stop, reach), at(stop)])
+        else:
+            points.extend([at(start), at(start, reach), at(stop, reach), at(stop)])
+        previous_stop = stop
     points.append(at(high))
     # A step that reaches the end of the segment returns to the axis there.
     return tuple(point for index, point in enumerate(points) if index == 0 or point != points[index - 1])
@@ -4737,6 +4985,7 @@ def _sheet_provenance(
     profile_breaks: Mapping[str, Any] | None = None,
     paint_cutouts: Mapping[str, Any] | None = None,
     relief_stipples: Mapping[str, Any] | None = None,
+    presumed_lines: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     preset = resolve_drawing_style_preset(options.style_preset)
     provenance: dict[str, Any] = {
@@ -4838,6 +5087,8 @@ def _sheet_provenance(
         provenance["paint_cutouts"] = dict(paint_cutouts)
     if relief_stipples is not None:
         provenance["relief_stipples"] = dict(relief_stipples)
+    if presumed_lines is not None:
+        provenance["presumed_lines"] = dict(presumed_lines)
     if technique is not None:
         provenance["technique"] = dict(technique)
     if mirrored:
@@ -5313,6 +5564,7 @@ def compose_drawing_sheet(
     stipple_drawn: list[dict[str, str]] = []
     attached_drawn: list[dict[str, str]] = []
     mirrored: list[dict[str, str]] = []
+    presumed_entries: list[dict[str, Any]] = []
     section_loops: list[dict[str, Any]] = []
     crease_drawn: list[dict[str, str]] = []
     frames: dict[str, PlanarFrame] = {}
@@ -5597,6 +5849,7 @@ def compose_drawing_sheet(
             if record.id in far_by_elevation
             else None
         )
+        presumed_here: list[dict[str, Any]] = []
         section, combined, bounds, fill_only_ids = _mirrored_figure(
             document,
             elevation=record,
@@ -5608,6 +5861,14 @@ def compose_drawing_sheet(
             interior_by_kind=interior_by_kind,
             far_silhouette=far_silhouette,
             straight_far_edges=options.interpretation.straight_far_edges,
+            presumed=[
+                (kind, height, length)
+                for presumed_record_id, kind, height, length in options.presumed_lines
+                if presumed_record_id == record.id
+            ],
+            presumed_drawn=presumed_here,
+            presumed_dash_mm=PRESUMED_DASH_PAPER_MM * float(options.scale_denominator),
+            presumed_gap_mm=PRESUMED_GAP_PAPER_MM * float(options.scale_denominator),
             outline_reach=options.outline_reach,
             break_reach=options.break_reach,
             reach_gap_mm=REACH_GAP_PAPER_MM * float(options.scale_denominator),
@@ -5619,6 +5880,7 @@ def compose_drawing_sheet(
                 if jog_record_id == record.id
             ],
         )
+        presumed_entries.extend({"figure_record_id": record.id, **entry} for entry in presumed_here)
         mirrored.append(
             {
                 "elevation_record_id": record.id,
@@ -6071,6 +6333,16 @@ def compose_drawing_sheet(
             rubbings_on_axis=sorted(
                 attached_drawn, key=lambda entry: entry["figure_record_id"]
             ),
+            presumed_lines=(
+                {
+                    "dash_paper_mm": PRESUMED_DASH_PAPER_MM,
+                    "entries": presumed_entries,
+                    "gap_paper_mm": PRESUMED_GAP_PAPER_MM,
+                    "source": "archaeologist",
+                }
+                if options.presumed_lines
+                else None
+            ),
         )
         svg_bytes = _render_sheet(
             placed,
@@ -6179,6 +6451,28 @@ def validate_drawing_sheet_bytes(svg_bytes: bytes, sidecar_bytes: bytes) -> None
                 "sheet was drawn past what was measured but its title block "
                 "does not say so"
             )
+
+    # A line the scan did not measure is said on the page too.
+    presumed_block = sidecar.get("presumed_lines")
+    if presumed_block is not None:
+        if not isinstance(presumed_block, Mapping) or not isinstance(presumed_block.get("entries"), Sequence):
+            raise DrawingSheetError("sheet presumed_lines block must carry its entries")
+        entries = list(presumed_block["entries"])
+        if not entries or any(
+            not isinstance(entry, Mapping) or entry.get("kind") not in PRESUMED_KINDS for entry in entries
+        ):
+            raise DrawingSheetError("sheet presumed_lines entries must name a known kind")
+        try:
+            value = presumed_title_value(
+                [(str(entry["kind"]), int(entry["height_um"]) / 1000.0, int(entry["length_um"]) / 1000.0) for entry in entries]
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise DrawingSheetError(f"sheet presumed_lines entries are malformed: {exc}") from exc
+        if not any(
+            isinstance(row, Mapping) and row.get("label") == PRESUMED_LABEL and row.get("value") == value
+            for row in rows
+        ):
+            raise DrawingSheetError("sheet draws presumed lines but its title block does not say so")
 
     # A section that closed into several loops is said on the page, and the
     # page does not say it of a sheet whose sections are whole.
