@@ -696,6 +696,16 @@ recipe.texture_relief
 - **도판**: `DrawingSheetOptions.far_silhouettes=((입면 record, 실루엣 record),…)`와 `outline_reach="far"`가 함께 간다 — 하나만 주면 거부(그리지 않을 실루엣은 이름하지 않고, 그릴 것 없이 `far`를 청하지 않는다). 미러 도형마다 실루엣을 가운데선에서 자르고 단면 쪽 사슬을 걸으며, 모든 단면선에서 간격(종이 1 mm × 축척)보다 멀리 선 점의 연속을 열린 path(`far-edge:{record}:{고리}:NN:NN`, 외형선 굵기)로 긋는다: 뒤로 도는 구연, 오목한 저부 밑의 뒤쪽 굽 바닥. 잘린 벽을 따라 놓인 곳은 간격 안이라 단면선에 맡기고, 뒤가 잘린 벽보다 간격 넘게 부푼 곳은 있는 그대로 긋는다. 각 사슬은 가운데선에서 바깥으로 읽고, 간격 안에 드는 첫 점에서 끝나 단면선에 닿지 않는다. sidecar `mirrored_figures[]`에 `far_silhouette_record_id`·`far_silhouette_recipe_hash`·`far_edge_count`·`far_edges`(`measured` 또는, 해석 항목 `Interpretation.straight_far_edges`로 양 끝 사이를 직선으로 그었으면 `straight` — 제목란 `해석` 행에 `뒷선 직선`). record는 READY·FRESH여야 하고 입면과 같은 평면이어야 한다.
 - 완료 게이트(3/6/6)와 `.amr-survey`에는 들어가지 않는다.
 
+## 도판 명세 `plate_spec` (`archmeshrubbing.plate-spec/v1`)
+
+도판은 문서와 **결정**의 곱이다 — 어느 record를, 어느 축척으로, 접힘을 어디서 어떻게 꺾고, 어떤 추정선을 더하고, 어떤 채색을 붙이고, 어떤 선을 지웠는가. 그 결정은 `DrawingSheetOptions`에 있었고, 그동안은 그 옵션을 만든 코드에만 있어서 도판을 검증할 수는 있어도 **다시 만들** 수는 없었다. 명세는 그 결정 전체를 닫힌 JSON 하나로 적는다(`src/core/drawing_sheet_spec.py`).
+
+- `format` = `archmeshrubbing.plate-spec/v1`, `schema_version` = `1.0.0`, `records` = 도판에 그리는 record id 순서, `title_block` = `{artifact_label, rows}`. 나머지 키는 `DrawingSheetOptions`의 필드와 이름이 같고 **모두** 적힌다(기본값도) — 어떤 옵션을 기본값으로 두었든 손대지 않았든 같은 바이트다. 벽까지 가는 계단의 도달(`math.inf`)은 낱말 `wall`로 적는다. 등록된 preset은 id로, 사용자 preset은 정의 전체로 간다(다른 어디에도 없으므로).
+- 읽기는 닫혀 있다: 모르는 키는 거부(오타가 조용히 기본값이 되지 않게), 빠진 키는 그 옵션의 기본값, 값은 전부 `DrawingSheetOptions` 자신의 검증을 거친다. 참·거짓 자리에 1, 숫자 자리에 `true`나 `"2"`는 거부. `plate_spec(*plate_spec_options(s)) == s`가 composer가 쓴 모든 명세에서 성립한다.
+- 도판 sidecar는 `plate_spec` 블록으로 명세를 **동봉**한다. 오프라인 검증기는 그 블록을 다시 읽어 정규형인지(빠진 키·여분 키 없음), 그리고 이 sidecar의 도판을 말하는지(records가 figures에 있고 축척·페이지·선 끝·제목이 일치) 확인한다. 위조된 블록은 sidecar 다이제스트에서 먼저 걸리고, 다이제스트를 맞춘 위조는 이 검사에서 걸린다.
+- **패널이 곧 명세다.** `src/gui/plate_panel.py`의 도판 패널은 이 명세를 양방향으로 말한다: 여섯 탭(도면·종이·반쪽·내선·문양·해석)이 옵션 전부를 덮고, `spec()`이 이 명세를 내놓고 `set_spec()`이 그대로 채운다. 그래서 패널과 완성된 도판의 sidecar와 디스크의 파일이 같은 문서다 — 도판의 명세를 열어 숫자 하나를 고치고 다시 그린다. 패널이 편집하지 않는 항목(상태·기법은 창의 다른 자리에서 고른다)은 받은 그대로 실어 나른다: 건드리지 않는 결정을 조용히 잃지 않는다. 계단의 무한 도달은 표에 `벽`으로 쓰고 읽는다.
+- `python main.py --plate PROJECT.amr SPEC.json OUT.svg`가 프로젝트와 명세만으로 도판을 다시 만든다(`src/application/plate_from_spec.py`). 선 도면은 문서만 있으면 되고, 탁본은 record가 픽셀을 저장하지 않으므로 GUI의 내보내기와 똑같이 recipe로 다시 계산해 영수증과 맞지 않으면 거부한다 — 그래서 탁본이 있는 도판은 원본이 동봉된 프로젝트가 필요하다. 채색 따 붙이기와 양각 점묘의 픽셀은 프로젝트에 없는 색 지도와 음영에서 오므로 명령줄은 거부하고, 그것을 계산한 자리에서 만들라고 말한다. `write_plate_spec`은 사람이 읽게 들여쓴 파일로 쓰되 정규 순서로 쓰고, 읽을 수 없는 것은 쓰지 않는다.
+
 ## 완료 3/6/6 원자 묶음 `.amr-survey`
 
 `*.amr-survey`는 새 알고리즘 결과를 만드는 포맷이 아니라, 한 active Align 아래에서 dependency-valid `READY + FRESH`인 Cutline 3면, Outline 6면, Digital Rubbing 6면의 기존 권위 package를 한 번에 전달하는 non-overwriting directory다. GUI의 `완료 실측 15개 원자 묶음 내보내기`는 세 단계가 모두 완료된 경우에만 활성화된다.

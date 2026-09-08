@@ -592,7 +592,8 @@ def test_a_sheet_without_condition_records_is_the_sheet_it_always_was() -> None:
     )
 
     assert plain.svg_bytes == explicit.svg_bytes
-    assert b"condition" not in plain.svg_bytes
+    # The plate spec in the sheet names the (empty) option; no layer draws it.
+    assert b"layer-condition" not in plain.svg_bytes
     assert "condition" not in json.loads(plain.sidecar_bytes.decode("utf-8"))
 
 
@@ -696,7 +697,7 @@ def test_a_sheet_without_technique_records_is_the_sheet_it_always_was() -> None:
     )
     assert explicit.svg_bytes == plain.svg_bytes
     assert explicit.sidecar_bytes == plain.sidecar_bytes
-    assert b"technique" not in plain.svg_bytes
+    assert b"layer-technique" not in plain.svg_bytes
     assert "technique" not in json.loads(plain.sidecar_bytes.decode("utf-8"))
 
 

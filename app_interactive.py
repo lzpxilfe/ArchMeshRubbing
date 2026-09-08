@@ -402,6 +402,16 @@ from src.core.artifact_vector_export import (  # noqa: E402
     VECTOR_EXPORT_DIRECTORY_SUFFIX,
     VectorSVGOptions,
 )
+from src.application.plate_from_spec import (  # noqa: E402
+    PlateFromSpecError,
+    write_plate_files,
+)
+from src.core.drawing_sheet_spec import (  # noqa: E402
+    PlateSpecError,
+    read_plate_spec,
+    write_plate_spec,
+)
+from src.gui.plate_panel import PlatePanel  # noqa: E402
 from src.core.drawing_style import (  # noqa: E402
     KCHA_2013_PEN_PRESET_ID as DRAWING_KCHA_PRESET_ID,
     LINE_KINDS as DRAWING_LINE_KINDS,
@@ -5877,6 +5887,30 @@ class MainWindow(QMainWindow):
         section_scroll.setWidget(section_content)
         self.section_dock.setWidget(section_scroll)
 
+        # 6-2) 도판: 도면이 취하는 결정 전부를 한 곳에.
+        self.plate_dock = QDockWidget("실측 도판", self)
+        self.plate_dock.setObjectName("dock_plate")
+        plate_scroll = QScrollArea()
+        plate_scroll.setWidgetResizable(True)
+        self.plate_panel = PlatePanel()
+        self.plate_panel.set_presets(
+            [
+                (
+                    preset_id,
+                    f"{preset_id} (잠정)"
+                    if drawing_style_preset(preset_id).provisional
+                    else preset_id,
+                )
+                for preset_id in drawing_style_presets()
+            ],
+            current=DRAWING_KCHA_PRESET_ID,
+        )
+        self.plate_panel.plateRequested.connect(self.on_plate_panel_requested)
+        self.plate_panel.loadRequested.connect(self.on_plate_spec_load_requested)
+        self.plate_panel.saveRequested.connect(self.on_plate_spec_save_requested)
+        plate_scroll.setWidget(self.plate_panel)
+        self.plate_dock.setWidget(plate_scroll)
+
         # 7) 레이어
         self.scene_dock = QDockWidget("레이어", self)
         self.scene_dock.setObjectName("dock_scene")
@@ -5900,6 +5934,7 @@ class MainWindow(QMainWindow):
             self.flatten_dock,
             self.tile_dock,
             self.section_dock,
+            self.plate_dock,
             self.export_dock,
             self.measure_dock,
             self.scene_dock,
@@ -5927,6 +5962,7 @@ class MainWindow(QMainWindow):
             self.flatten_dock,
             self.tile_dock,
             self.section_dock,
+            self.plate_dock,
             self.export_dock,
             self.measure_dock,
             self.scene_dock,
@@ -5952,6 +5988,7 @@ class MainWindow(QMainWindow):
             self.flatten_dock,
             self.tile_dock,
             self.section_dock,
+            self.plate_dock,
             self.export_dock,
             self.measure_dock,
         ]:
@@ -7198,6 +7235,7 @@ class MainWindow(QMainWindow):
             panels_menu.addAction(self.flatten_dock.toggleViewAction())
             panels_menu.addAction(self.export_dock.toggleViewAction())
             panels_menu.addAction(self.section_dock.toggleViewAction())
+            panels_menu.addAction(self.plate_dock.toggleViewAction())
             panels_menu.addAction(self.measure_dock.toggleViewAction())
         
         # 도움말 메뉴
@@ -18992,6 +19030,17 @@ class MainWindow(QMainWindow):
         button = getattr(panel, "btn_drawing_sheet", None)
         if button is not None:
             button.setEnabled(widget.count() > 0)
+        # The plate panel offers the same records, with their type beside the
+        # label: it names records in tables (a section, a far silhouette, a
+        # cutout) and the reader has to be able to tell which is which.
+        plate_panel = getattr(self, "plate_panel", None)
+        if plate_panel is not None:
+            plate_panel.set_records(
+                [
+                    (str(record.id), str(record.type), self._native_record_choice_label(record))
+                    for record in sorted(records, key=lambda item: (str(item.created_at), str(item.id)))
+                ]
+            )
 
     def on_drawing_sheet_item_changed(self, item: QListWidgetItem) -> None:
         """Track the order the user checked records in.
@@ -20959,6 +21008,132 @@ class MainWindow(QMainWindow):
             )
             return
 
+        self._save_plate_bundle(bundle)
+
+    # --- the plate panel: every decision the composer takes ----------------
+
+    def on_plate_spec_load_requested(self) -> None:
+        """Fill the plate panel from a specification file."""
+
+        selected, _filter = QFileDialog.getOpenFileName(
+            self, "도판 명세 열기", str(Path.cwd()), "Plate spec (*.json)"
+        )
+        if not selected:
+            return
+        try:
+            self.plate_panel.set_spec(read_plate_spec(selected))
+        except (PlateSpecError, OSError) as exc:
+            QMessageBox.warning(self, "명세를 읽지 못했습니다", str(exc))
+            return
+        self.status_info.setText(f"도판 명세를 읽었습니다: {Path(selected).name}")
+
+    def on_plate_spec_save_requested(self) -> None:
+        """Write what the panel says as a specification file."""
+
+        try:
+            spec = self.plate_panel.spec()
+        except PlateSpecError as exc:
+            QMessageBox.warning(self, "명세를 만들지 못했습니다", str(exc))
+            return
+        source_path = Path(str(self.current_filepath or "artifact"))
+        selected, _filter = QFileDialog.getSaveFileName(
+            self,
+            "도판 명세 저장",
+            str(source_path.with_name(f"{source_path.stem}-도판.json")),
+            "Plate spec (*.json)",
+        )
+        if not selected:
+            return
+        try:
+            written = write_plate_spec(selected, spec)
+        except (PlateSpecError, OSError) as exc:
+            QMessageBox.warning(self, "명세를 저장하지 못했습니다", str(exc))
+            return
+        self.status_info.setText(f"도판 명세를 저장했습니다: {written.name}")
+
+    def on_plate_panel_requested(self) -> None:
+        """Compose the plate the panel describes, and save it.
+
+        The panel names records; the rasters a rubbing needs are recomputed
+        from their recipes exactly as the older path does, and a cutout or a
+        stipple whose pixels this session does not hold is refused by name
+        rather than quietly left off the drawing.
+        """
+
+        session = getattr(self, "_artifact_session", None)
+        if not isinstance(session, ArtifactSession):
+            QMessageBox.warning(self, "도판 만들기 실패", "열린 ArtifactDocument 세션이 없습니다.")
+            return
+        try:
+            self._artifact_workbench_controller().require_stable_session(session, measurement=True)
+        except ArtifactWorkbenchError as exc:
+            QMessageBox.warning(self, "도판 만들기 실패", str(exc))
+            return
+        try:
+            record_ids, options = self.plate_panel.options()
+        except PlateSpecError as exc:
+            QMessageBox.warning(self, "도판 만들기 실패", str(exc))
+            return
+
+        rasters: dict[str, Any] = {}
+        wanted = [
+            *record_ids,
+            *(rubbing_id for rubbing_id, _elevation in options.rubbings_on_axis),
+        ]
+        for record_id in wanted:
+            record = session.document.record_index.get(record_id)
+            if record is None or str(getattr(record, "type", "")) not in RUBBING_RECORD_TYPES:
+                continue
+            self.status_info.setText(f"도판의 탁본 {record_id}을 recipe로 다시 계산 중...")
+            QCoreApplication.processEvents()
+            try:
+                rasters[record_id] = MainWindow._recompute_native_rubbing_record(session, record)
+            except Exception as exc:
+                QMessageBox.warning(
+                    self,
+                    "도판 만들기 실패",
+                    f"탁본 기록 {record_id}을 다시 계산할 수 없습니다.\n{type(exc).__name__}: {exc}",
+                )
+                return
+        held = getattr(self, "_plate_panel_rasters", {})
+        for record_id in [
+            *(cutout_id for cutout_id, _figure, _placement in options.paint_cutouts),
+            *(shade_id for shade_id, _figure in options.relief_stipples),
+        ]:
+            raster = held.get(record_id)
+            if raster is None:
+                QMessageBox.warning(
+                    self,
+                    "도판 만들기 실패",
+                    f"{record_id}의 픽셀이 이 세션에 없습니다.\n"
+                    "채색 따 붙이기와 양각 점묘는 그 기록을 계산한 자리에서 도판을 만들어야 합니다.",
+                )
+                return
+            rasters[record_id] = raster
+
+        # The document may have moved while the rubbings were recomputed; the
+        # plate must be composed from the document that is authoritative now.
+        try:
+            self._artifact_workbench_controller().require_stable_session(session, measurement=True)
+        except ArtifactWorkbenchError as exc:
+            QMessageBox.warning(self, "도판 만들기 실패", str(exc))
+            return
+        try:
+            bundle = compose_drawing_sheet(
+                session.document, record_ids, options=options, rasters=rasters
+            )
+        except DrawingSheetError as exc:
+            self.status_info.setText(f"도판 만들기 실패: {exc}")
+            QMessageBox.warning(self, "도판 만들기 실패", str(exc))
+            return
+        except Exception as exc:
+            QMessageBox.warning(self, "도판 만들기 실패", f"{type(exc).__name__}: {exc}")
+            return
+        self._save_plate_bundle(bundle)
+
+    def _save_plate_bundle(self, bundle: Any) -> None:
+        """Ask where the plate goes, and write its two files as one."""
+
         source_path = Path(str(self.current_filepath or "artifact"))
         default_path = source_path.with_name(f"{source_path.stem}-도판.svg")
         selected, _filter = QFileDialog.getSaveFileName(
@@ -20971,19 +21146,19 @@ class MainWindow(QMainWindow):
             return
         if not selected.lower().endswith(".svg"):
             selected += ".svg"
-        svg_path = Path(selected)
-        sidecar_path = svg_path.with_suffix(".provenance.json")
         try:
-            svg_path.write_bytes(bundle.svg_bytes)
-            sidecar_path.write_bytes(bundle.sidecar_bytes)
-        except OSError as exc:
+            # The drawing and its sidecar are one statement: both are staged
+            # and only then renamed, so a failure never leaves a new drawing
+            # beside the previous run's provenance.
+            svg_path, sidecar_path = write_plate_files(
+                bundle.svg_bytes, bundle.sidecar_bytes, selected
+            )
+        except (PlateFromSpecError, OSError) as exc:
             self.status_info.setText("도판 저장 실패")
             QMessageBox.warning(self, "도판 저장 실패", str(exc))
             return
         self.status_info.setText(
-            f"도판 저장 완료: {svg_path.name} "
-            f"({options.physical_scale}, {page_size} {orientation}, "
-            f"기록 {len(record_ids)}개)"
+            f"도판 저장 완료: {svg_path.name} · {sidecar_path.name}"
         )
 
     def on_native_vector_export_requested(self) -> None:

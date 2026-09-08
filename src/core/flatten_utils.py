@@ -338,15 +338,21 @@ def _similarity_align_2d(source: np.ndarray, target: np.ndarray) -> np.ndarray:
         return src2
 
     r = u @ vt
+    singular = s.copy()
     if float(np.linalg.det(r)) < 0:
         u[:, -1] *= -1.0
         r = u @ vt
+        # The reflected fit trades the smallest singular value for its
+        # negative; the scale must be read from the fit that was taken.
+        singular[-1] = -singular[-1]
 
-    scale = float(np.sum(s)) / denom
+    scale = float(np.sum(singular)) / denom
     if not np.isfinite(scale) or abs(scale) < 1e-12:
         scale = 1.0
 
-    aligned = (src2 - a_mean) @ r.T
+    # Row vectors: the rotation that best carries a onto b is applied on the
+    # right as ``a0 @ r``.  Transposing it turns the fit the wrong way round.
+    aligned = (src2 - a_mean) @ r
     aligned *= scale
     aligned += b_mean
     return aligned

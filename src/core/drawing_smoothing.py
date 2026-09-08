@@ -74,9 +74,15 @@ def _blur(samples: np.ndarray, *, closed: bool, sigma_samples: float) -> np.ndar
         padded = np.concatenate([samples[-radius:], samples, samples[:radius]])
     else:
         # Mirror the line through each end point: the average at the end is
-        # the end itself, and a straight run stays straight.
-        head = 2.0 * samples[:1] - samples[1 : radius + 1][::-1]
-        tail = 2.0 * samples[-1:] - samples[-radius - 1 : -1][::-1]
+        # the end itself, and a straight run stays straight.  The mirror is
+        # taken by index, folded back at the far end, so a line shorter than
+        # the kernel is padded to the kernel's width all the same - a short
+        # line must be smoothed, not collapsed.
+        count = samples.shape[0]
+        ahead = np.minimum(np.arange(radius, 0, -1), count - 1)
+        behind = np.maximum(count - 1 - np.arange(1, radius + 1), 0)
+        head = 2.0 * samples[:1] - samples[ahead]
+        tail = 2.0 * samples[-1:] - samples[behind]
         padded = np.concatenate([head, samples, tail])
     out = np.column_stack(
         [np.convolve(padded[:, axis], kernel, mode="valid") for axis in range(2)]

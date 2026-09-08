@@ -950,34 +950,6 @@ def _ring_views(mask: np.ndarray) -> list[np.ndarray]:
 
 
 def _thinning_tables() -> tuple[np.ndarray, np.ndarray]:
-    """Zhang-Suen's two deletion tests as 256-entry tables over the packed
-    8-neighbourhood (bit i is ring position i: N, NE, E, SE, S, SW, W, NW)."""
-
-    tables = []
-    for step in (0, 1):
-        table = np.zeros(256, dtype=bool)
-        for code in range(256):
-            ring = [(code >> index) & 1 for index in range(8)]
-            neighbours = sum(ring)
-            transitions = sum(
-                1 for index in range(8) if ring[index] == 0 and ring[(index + 1) % 8] == 1
-            )
-            north, east, south, west = ring[0], ring[2], ring[4], ring[6]
-            if step == 0:
-                first = north * east * south == 0
-                second = east * south * west == 0
-            else:
-                first = north * east * west == 0
-                second = north * south * west == 0
-            table[code] = 2 <= neighbours <= 6 and transitions == 1 and first and second
-        tables.append(table)
-    return tables[0], tables[1]
-
-
-_THINNING_TABLES = _thinning_tables()
-
-
-def _thinning_tables() -> tuple[np.ndarray, np.ndarray]:
     """Zhang-Suen's two deletion tests over the 256 neighbourhood codes:
     bit i of the code is ring pixel i (north first, clockwise)."""
 

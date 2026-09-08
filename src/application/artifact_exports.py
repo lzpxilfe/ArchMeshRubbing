@@ -677,7 +677,9 @@ class ArtifactExportController:
                 f"{estimate.estimated_peak_bytes} bytes exceeds the configured "
                 f"budget {self._rubbing_memory_budget_bytes} bytes"
             )
-        computation = compute_artifact_rubbing_from_recipe(session, record.recipe)
+        computation = compute_artifact_rubbing_from_recipe(
+            session, record.recipe, cancellation_probe=cancellation_probe
+        )
         require_current_rubbing_computation(session, computation)
         if computation.raster.receipt() != rubbing_receipt_from_record(record):
             raise ArtifactExportError(

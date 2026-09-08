@@ -619,7 +619,7 @@ def test_a_sheet_without_mirror_sections_is_the_sheet_it_always_was() -> None:
     )
 
     assert plain.svg_bytes == explicit.svg_bytes
-    assert b"mirror" not in plain.svg_bytes
+    assert b"mirror:" not in plain.svg_bytes, "no element of a mirrored figure is drawn"
     assert "mirrored_figures" not in json.loads(plain.sidecar_bytes.decode("utf-8"))
 
 

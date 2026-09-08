@@ -749,7 +749,9 @@ def append_technique_record_from_context(
             "byte_length": len(payload_bytes),
             "media_type": TECHNIQUE_PAYLOAD_MEDIA_TYPE,
             "payload": payload.to_dict(),
-            "schema_version": TECHNIQUE_PAYLOAD_SCHEMA_VERSION,
+            # The payload's own version, not the current one: a descriptor
+            # that named a version its payload is not would prove nothing.
+            "schema_version": payload.schema_version,
             "sha256": payload.sha256,
         }
     }
@@ -816,7 +818,7 @@ def technique_payload_from_record(record: DerivedRecord) -> TechniqueAnnotationP
     )
     if descriptor["media_type"] != TECHNIQUE_PAYLOAD_MEDIA_TYPE:
         raise ArtifactTechniqueAnnotationError("technique payload media_type is invalid")
-    if descriptor["schema_version"] != TECHNIQUE_PAYLOAD_SCHEMA_VERSION:
+    if descriptor["schema_version"] not in TECHNIQUE_PAYLOAD_SCHEMA_VERSIONS:
         raise ArtifactTechniqueAnnotationError(
             "technique payload descriptor schema is invalid"
         )

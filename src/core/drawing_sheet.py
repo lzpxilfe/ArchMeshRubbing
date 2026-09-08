@@ -2342,8 +2342,16 @@ def _title_block_elements(
     computed_rubbing: bool = False,
     computed_rubbing_note: str = COMPUTED_RUBBING_NOTE,
     section_loop_counts: Sequence[int] = (),
+    presumed_entries: Sequence[Mapping[str, Any]] | None = None,
 ) -> tuple[list[str], list[dict[str, str]]]:
-    """Return the title block, and the rows it prints."""
+    """Return the title block, and the rows it prints.
+
+    ``presumed_entries`` are the lines as the sidecar will record them, in
+    the sidecar's own order: the printed row and the recorded block are one
+    statement, and the offline validator reads the row back from the block.
+    Without them the options' order is used, which is the same list when a
+    sheet draws one mirrored figure.
+    """
 
     block = options.title_block
     rows: list[tuple[str, str]] = [("유물", block.artifact_label)]
@@ -2367,7 +2375,19 @@ def _title_block_elements(
     if options.presumed_lines:
         # A line the scan did not measure says so on the page, beside the
         # interpretation row and under the same discipline.
-        rows.append((PRESUMED_LABEL, presumed_title_value(options.presumed_lines)))
+        rows.append(
+            (
+                PRESUMED_LABEL,
+                presumed_title_value(options.presumed_lines)
+                if presumed_entries is None
+                else presumed_title_value(
+                    [
+                        (str(entry["kind"]), int(entry["height_um"]) / 1000.0, int(entry["length_um"]) / 1000.0)
+                        for entry in presumed_entries
+                    ]
+                ),
+            )
+        )
     rows.extend(block.rows)
     rows.append(("문서", document_manifest_sha256[:12]))
 
@@ -5310,10 +5330,16 @@ def _sheet_provenance(
     paint_cutouts: Mapping[str, Any] | None = None,
     relief_stipples: Mapping[str, Any] | None = None,
     presumed_lines: Mapping[str, Any] | None = None,
+    record_ids: Sequence[str] = (),
 ) -> dict[str, Any]:
+    from .drawing_sheet_spec import plate_spec  # noqa: PLC0415
+
     preset = resolve_drawing_style_preset(options.style_preset)
     provenance: dict[str, Any] = {
         "center_axis": dict(center_axis),
+        # Everything the composer was told, so the plate can be made again
+        # from its document and this block alone.
+        "plate_spec": plate_spec(record_ids, options),
         "document_id": document.document_id,
         "document_manifest_sha256": document.canonical_sha256,
         "line_cap": options.line_cap,
@@ -6356,6 +6382,17 @@ def compose_drawing_sheet(
             "paint_cutouts names a figure this sheet does not draw for "
             + ", ".join(repr(cutout_id) for cutout_id in missing_cutouts)
         )
+    stippled_ids = {entry["record_id"] for entry in stipple_drawn}
+    missing_stipples = sorted(
+        shade_id for shade_id, _figure_id in options.relief_stipples if shade_id not in stippled_ids
+    )
+    if missing_stipples:
+        # As for a cutout: a shade that named nothing the sheet draws would
+        # otherwise be a motif the archaeologist asked for and did not get.
+        raise DrawingSheetError(
+            "relief_stipples names a figure this sheet does not draw for "
+            + ", ".join(repr(shade_id) for shade_id in missing_stipples)
+        )
     unplaced = sorted(set(rubbing_notes) - noted)
     if unplaced:
         raise DrawingSheetError(
@@ -6368,6 +6405,10 @@ def compose_drawing_sheet(
     computed_rubbing_note = rubbing_source_note(
         [figure.caption for figure in prepared if figure.caption is not None]
     )
+    # One order for both: the row the sheet prints and the block the sidecar
+    # records are the same statement, and the validator reads one from the
+    # other.  Sort here, before either is made, not at the sidecar alone.
+    section_loops.sort(key=lambda entry: str(entry["record_id"]))
     section_loop_counts = [int(entry["closed_path_count"]) for entry in section_loops]
     layout: dict[str, str] | None = None
     try:
@@ -6396,14 +6437,16 @@ def compose_drawing_sheet(
             computed_rubbing=computed_rubbing,
             computed_rubbing_note=computed_rubbing_note or COMPUTED_RUBBING_NOTE,
             section_loop_counts=section_loop_counts,
+            presumed_entries=presumed_entries or None,
         )
         provenance = _sheet_provenance(
             document,
             placed,
             options=options,
+            record_ids=ids,
             scale_bar=scale_bar,
             title_rows=title_rows,
-            section_loops=sorted(section_loops, key=lambda entry: entry["record_id"]),
+            section_loops=section_loops,
             layout=layout,
             center_axis={
                 "align_recipe_kind": align_recipe_kind,
@@ -6736,6 +6779,28 @@ def validate_drawing_sheet_bytes(svg_bytes: bytes, sidecar_bytes: bytes) -> None
         drawing_style_preset_from_claim(preset_claim)
     except DrawingStyleError as exc:
         raise DrawingSheetError(str(exc)) from exc
+
+    # The plate's specification must be one the composer would accept again,
+    # and must be the plate this sidecar describes.
+    spec = sidecar.get("plate_spec")
+    if spec is not None:
+        from .drawing_sheet_spec import PlateSpecError, plate_spec, plate_spec_options  # noqa: PLC0415
+
+        try:
+            spec_ids, spec_options = plate_spec_options(spec)
+        except PlateSpecError as exc:
+            raise DrawingSheetError(f"sheet plate spec is malformed: {exc}") from exc
+        if plate_spec(spec_ids, spec_options) != spec:
+            raise DrawingSheetError("sheet plate spec is not in its canonical form")
+        figures = sidecar.get("figures")
+        drawn = [figure.get("record_id") for figure in figures] if isinstance(figures, Sequence) else []
+        if any(record_id not in drawn for record_id in spec_ids) or (
+            spec_options.scale_denominator != sidecar.get("scale_denominator")
+            or spec_options.page.to_dict() != sidecar.get("page")
+            or spec_options.line_cap != sidecar.get("line_cap")
+            or spec_options.title != sidecar.get("title")
+        ):
+            raise DrawingSheetError("sheet plate spec does not describe this sheet")
 
     # The scale must be on the page, not only in the metadata.
     rows = sidecar.get("title_block")

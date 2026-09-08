@@ -24,8 +24,14 @@ _QT_DEPENDENT_MODULES = (
 )
 
 
+#: What counts as "yes, skip the Qt modules".  A plain truthiness test would
+#: read ``0`` as yes, and the header below tells the reader to set exactly
+#: that when they want the modules to run.
+_TRUE_WORDS = frozenset({"1", "true", "yes", "on"})
+
+
 def _qt_is_importable() -> bool:
-    if os.environ.get("ARCHMESHRUBBING_SKIP_QT_TESTS"):
+    if os.environ.get("ARCHMESHRUBBING_SKIP_QT_TESTS", "").strip().lower() in _TRUE_WORDS:
         return False
     try:  # pragma: no cover - depends on the host, not on branch logic
         import PyQt6.QtWidgets  # noqa: F401
@@ -48,6 +54,6 @@ def pytest_report_header(config: object) -> str | None:
     names = ", ".join(sorted(Path(name).stem for name in collect_ignore))
     return (
         "Qt is unavailable: skipping GUI/OpenGL modules "
-        f"({names}). Set ARCHMESHRUBBING_SKIP_QT_TESTS=0 and install PyQt6 to "
+        f"({names}). Unset ARCHMESHRUBBING_SKIP_QT_TESTS and install PyQt6 to "
         "run them; the Windows CI job always does."
     )

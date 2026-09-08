@@ -245,6 +245,29 @@ def run_cli() -> int | None:
                 except Exception:
                     return 2
             return 0 if bool(report.get("ok")) else 1
+        if release_command == "--plate":
+            # python main.py --plate PROJECT.amr SPEC.json OUT.svg
+            # Make a plate again from a project and its specification (the
+            # sidecar's plate_spec block, or a spec file edited by hand).
+            if len(sys.argv) != 5:
+                print("usage: main.py --plate PROJECT.amr SPEC.json OUT.svg", file=sys.stderr)
+                return 2
+            from src.application.plate_from_spec import (
+                PlateFromSpecError,
+                compose_plate_from_project,
+                write_plate,
+            )
+            from src.core.drawing_sheet_spec import PlateSpecError, read_plate_spec
+
+            try:
+                spec = read_plate_spec(sys.argv[3])
+                bundle = compose_plate_from_project(sys.argv[2], spec)
+                svg_path, sidecar_path = write_plate(bundle, sys.argv[4])
+            except (PlateSpecError, PlateFromSpecError, OSError) as exc:
+                print(f"plate failed: {exc}", file=sys.stderr)
+                return 1
+            print(f"{svg_path}\n{sidecar_path}")
+            return 0
         if release_command == "--opengl-driver-smoke-report":
             if len(sys.argv) != 3:
                 return 2
@@ -376,6 +399,7 @@ def print_help():
     print("    [--review REVIEW.json] [--opengl-report OPENGL.json]")
     print("  python main.py --verify-field-pilot PILOT.json [--report RECEIPT.json]")
     print("  python main.py --opengl-driver-smoke-report PATH  # Verify a native OpenGL frame")
+    print("  python main.py --plate PROJECT.amr SPEC.json OUT.svg  # Make a plate again from its spec")
     print("  python main.py <mesh_file>              # Launch GUI and open mesh")
     print("  python main.py --info <mesh_file>       # Show file info")
     print("  python main.py --open-mesh <mesh_file>  # Launch GUI and open mesh")
