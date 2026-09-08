@@ -60,9 +60,10 @@ def test_a_dashed_line_is_dashes_with_gaps_and_a_cut_last_dash() -> None:
 
 
 def test_a_presumed_floor_is_a_dashed_level_line_from_the_axis_and_the_sheet_says_so() -> None:
-    """On the hollow vessel a floor at 30 mm runs from the axis across the
-    cavity, dashed, to a paper millimetre short of the inner wall; the
-    title block carries the 추정 row and the sidecar the entry."""
+    """On the hollow vessel a floor at 30 mm is the flat base lifted by
+    30 mm: level, from the axis, dashed, ending where the base turns up
+    into the wall; the title block carries the 추정 row and the sidecar
+    the entry."""
 
     floor = 30.0
     bundle = _mirrored_sheet(presumed_lines=((ELEVATION_ID, "floor", floor, 0.0),))
@@ -75,9 +76,10 @@ def test_a_presumed_floor_is_a_dashed_level_line_from_the_axis_and_the_sheet_say
     assert len(ys) == 1, "the floor is level"
     xs = sorted(x for dash in dashes for x, _y in dash)
     assert abs(xs[0] - axis_x) < 1e-6, "it starts on the axis"
-    # The inner wall at 30 mm is 37.7 mm from the axis on the vessel; at
-    # 1:2 that is 18.9 paper mm, and the line stops a paper millimetre short.
-    assert 14.0 < xs[-1] - axis_x < 18.0, xs[-1] - axis_x
+    # The base is 25 mm across from the axis, where it turns up into the
+    # wall; at 1:2 the floor runs 12.5 paper mm and no further, the last
+    # dash cut to fit or dropped.
+    assert 11.0 < xs[-1] - axis_x < 13.0, xs[-1] - axis_x
     # Dashes are in the cut's layer, with gaps between them.
     layer = _find(figure, f"{SVG_NS}g[@id='layer-section-cut']")
     assert any("presumed:floor" in el.attrib.get("id", "") for el in layer.iter())
@@ -171,11 +173,12 @@ def _open_shell_session():
     return commit_vector_computation(session, cut, record_id=SECTION_ID, created_at="2026-09-09T00:02:00Z", operator="tester")
 
 
-def test_the_measured_inner_wall_goes_on_as_a_dashed_line_from_its_open_end() -> None:
-    """The open shell's cut ends inside the lip.  wall_on continues that end
-    downward, after one gap, in the end's own direction, for the length
-    the archaeologist gives; the floor line still runs from the axis to the
-    outer wall, which is the only wall there is."""
+def test_the_measured_inner_wall_goes_on_down_the_outer_wall_at_its_thickness() -> None:
+    """The open shell's cut ends at the lip's inner edge.  wall_on reads the
+    wall's thickness there - the lip is 7 mm wide - and goes on down the
+    outer wall at that thickness, after one gap, for the length given; the
+    floor is the base lifted by its thickness, from the axis out to a gap
+    short of the wall, which is the only wall there is."""
 
     session = _open_shell_session()
     rim = _rim_v()
@@ -193,20 +196,61 @@ def test_the_measured_inner_wall_goes_on_as_a_dashed_line_from_its_open_end() ->
     assert len(on) >= 3
     points = [p for dash in on for p in dash]
     assert all(x > axis_x + 1.0 for x, _y in points), "it goes on inside the section's side"
-    # This shell's lip is a flat band, so the measured wall ends running
-    # level toward the axis, and the presumed line goes on that way.
-    assert max(y for _x, y in points) - min(y for _x, y in points) < 0.05, "level, like the lip it continues"
-    left = min(x for x, _y in points)
-    right = max(x for x, _y in points)
-    assert 5.0 < right - left <= 6.05, "12 mm at 1:2 is 6 paper mm, less nothing"
+    top = min(y for _x, y in points)
+    bottom = max(y for _x, y in points)
+    assert 4.0 < bottom - top <= 6.05, "12 mm down the wall at 1:2 is up to 6 paper mm"
+    # Seven millimetres inside the outer wall all the way: 3.5 paper mm.
+    outer = _paths(figure, "mirror:right:cutline")
+    wall_x = max(x for path in outer for x, _y in path)
+    assert all(wall_x - x > 2.5 for x, _y in points), "inside the wall by its thickness"
     floor = _paths(figure, "presumed:floor:01:")
     assert floor and abs(min(x for dash in floor for x, _y in dash) - axis_x) < 1e-6
     sidecar = json.loads(bundle.sidecar_bytes.decode("utf-8"))
     kinds = [(entry["kind"], entry["piece_count"] > 0, "not_drawn" in entry) for entry in sidecar["presumed_lines"]["entries"]]
     assert kinds == [("wall_on", True, False), ("floor", True, False)]
-    assert sidecar["presumed_lines"]["entries"][0]["from_um"][1] > (rim - 12.0) * 1000
+    assert 6000 < sidecar["presumed_lines"]["entries"][0]["thickness_um"] < 8000
     (row,) = [row for row in sidecar["title_block"] if row["label"] == PRESUMED_LABEL]
     assert row["value"] == f"안벽 {rim - 2.0:g} mm에서 12 mm 더 · 바닥 8 mm"
+
+
+def test_a_step_to_the_silhouette_leaves_the_section_out_and_breaks_the_centre_line() -> None:
+    """A jog whose reach is infinite goes to the outline: in its band the
+    section is not drawn, the elevation's outline shows on the section's
+    side, and the centre line runs across to the outline and stops - the
+    outline is the step's edge - and resumes below.  Only an open profile
+    can be stepped through; the hollow vessel's closed cut refuses."""
+
+    import math  # noqa: PLC0415
+
+    rim = _rim_v()
+    with pytest.raises(DrawingSheetError, match="cut face .* inside the step"):
+        _mirrored_sheet(mirror_jogs=((ELEVATION_ID, rim - 30.0, rim - 10.0, math.inf),))
+    session = _open_shell_session()
+    bundle = compose_drawing_sheet(
+        session.document, [ELEVATION_ID],
+        options=_options(
+            mirror_sections=((ELEVATION_ID, SECTION_ID),), outline_reach="axis",
+            mirror_jogs=((ELEVATION_ID, rim - 30.0, rim - 10.0, math.inf),),
+        ),
+    )
+    validate_drawing_sheet_bytes(bundle.svg_bytes, bundle.sidecar_bytes)
+    figure = _figure(bundle.svg_bytes)
+    axes = [path for path in _find(figure, f"{SVG_NS}g[@id='layer-center-axis']") if path.attrib.get("id", "").startswith("mirror:center-axis")]
+    assert len(axes) == 2, "the centre line breaks at the wall"
+    axis_x = _axis_x(figure)
+    lower, upper = sorted((_points(path) for path in axes), key=lambda pts: -max(y for _x, y in pts))
+    assert max(x for x, _y in lower) - axis_x > 15.0 and max(x for x, _y in upper) - axis_x > 15.0, "each runs out to the wall"
+    # The band lies between the upper piece's lower end and the lower piece's upper end.
+    band_top = max(y for _x, y in upper)
+    band_bottom = min(y for _x, y in lower)
+    assert band_bottom - band_top > 8.0, "20 mm at 1:2"
+    # No section line in the band on the section's side; the outline is there instead.
+    for path in _find(figure, f"{SVG_NS}g[@id='layer-section-cut']"):
+        for x, y in _points(path):
+            assert not (x > axis_x + 0.1 and band_top + 0.1 < y < band_bottom - 0.1), "the section was not left out of the band"
+    assert any(path.attrib.get("id", "").startswith("mirror:jog00:") for path in _find(figure, f"{SVG_NS}g[@id='layer-outline-visible']"))
+    sidecar = json.loads(bundle.sidecar_bytes.decode("utf-8"))
+    assert sidecar["mirrored_figures"][0]["jogs_um"].endswith(":wall")
 
 
 def test_two_steps_that_meet_are_one_staircase() -> None:

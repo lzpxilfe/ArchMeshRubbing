@@ -811,7 +811,10 @@ class DrawingSheetOptions:
     the axis into the section's side, so a motif the axis would cut is
     drawn whole, and the centre line is drawn stepping round it.  The
     section is cut back there; a section cut face inside the step is
-    refused.
+    refused.  ``reach_mm`` may be ``math.inf``: the step goes to the
+    silhouette, the section is left out of that band altogether, the
+    elevation shows whole there, and the centre line's step has no edge
+    of its own - the outline is the edge.
     """
     paint_cutouts: tuple[tuple[str, str, str], ...] = ()
     """(cutout record id, figure record id, placement) - painted marks cut
@@ -1137,15 +1140,17 @@ class DrawingSheetOptions:
                 )
             numbers: list[float] = []
             for name, value in zip(("along_from_mm", "along_to_mm", "reach_mm"), entry[1:]):
-                if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or math.isnan(value):
+                    raise DrawingSheetError(f"mirror_jogs {name} must be a number")
+                if name != "reach_mm" and not math.isfinite(value):
                     raise DrawingSheetError(f"mirror_jogs {name} must be a finite number")
                 numbers.append(float(value))
             along_from, along_to, reach = numbers
             if not along_from < along_to:
                 raise DrawingSheetError("mirror_jogs along_from_mm must be below along_to_mm")
-            if reach <= 0.0 or reach > MAX_MIRROR_JOG_REACH_MM:
+            if reach <= 0.0 or (math.isfinite(reach) and reach > MAX_MIRROR_JOG_REACH_MM):
                 raise DrawingSheetError(
-                    f"mirror_jogs reach_mm must be positive and at most {MAX_MIRROR_JOG_REACH_MM:g}"
+                    f"mirror_jogs reach_mm must be positive and at most {MAX_MIRROR_JOG_REACH_MM:g}, or math.inf"
                 )
             for other_id, other_from, other_to, _reach in mirror_jogs:
                 if other_id == record_id and along_from < other_to and other_from < along_to:
@@ -4588,7 +4593,23 @@ def _mirrored_figure(
         section_by_kind.setdefault(SECTION_CUT, []).extend(presumed_paths)
         if presumed_drawn is not None:
             presumed_drawn.extend(presumed_entries)
-    jog_line_sets = [_jog_lines(base, direction, across, jog) for jog in jogs]
+    # A step to the silhouette cuts the section back to beyond the outline
+    # in its band, so nothing of the cut is left there.
+    outline_rings = [path.points_mm for path in elevation_by_kind.get(OUTLINE_VISIBLE, ()) if path.closed]
+    elevation_extent = max(
+        (
+            (float(p[0]) - base[0]) * across[0] + (float(p[1]) - base[1]) * across[1]
+            for paths in elevation_by_kind.values()
+            for path in paths
+            for p in path.points_mm
+        ),
+        default=0.0,
+    )
+    boxes = [
+        (along_from, along_to, reach if math.isfinite(reach) else abs(elevation_extent) + 10.0)
+        for along_from, along_to, reach in jogs
+    ]
+    jog_line_sets = [_jog_lines(base, direction, across, box) for box in boxes]
     if jog_line_sets:
         cut_back: dict[str, list[Any]] = {}
         for kind, paths in section_by_kind.items():
@@ -4675,14 +4696,23 @@ def _mirrored_figure(
     except SVGRenderError as exc:
         raise DrawingSheetError(str(exc)) from exc
     if segment is not None:
-        combined.setdefault(CENTER_AXIS, []).append(
-            VectorPath(
-                id="mirror:center-axis",
-                role=CENTER_AXIS,
-                closed=False,
-                points_mm=_stepped_axis(segment, base, direction, across, jogs),
-            )
+        polylines = _stepped_axis(
+            segment,
+            base,
+            direction,
+            across,
+            jogs,
+            wall_reach=lambda along: _silhouette_reach(outline_rings, base=base, direction=direction, across=across, along=along),
         )
+        for index, points in enumerate(polylines):
+            combined.setdefault(CENTER_AXIS, []).append(
+                VectorPath(
+                    id="mirror:center-axis" if index == 0 else f"mirror:center-axis:{index:02d}",
+                    role=CENTER_AXIS,
+                    closed=False,
+                    points_mm=points,
+                )
+            )
     return section, combined, bounds, left_fill_only | right_fill_only
 
 
@@ -4721,6 +4751,43 @@ def _dashes(
     return pieces
 
 
+def _dashed_polyline(
+    points: Sequence[tuple[float, float]], *, dash_mm: float, gap_mm: float, lead_gap: bool = False
+) -> list[tuple[tuple[float, float], ...]]:
+    """A polyline drawn dashed: pieces ``dash_mm`` long along it with
+    ``gap_mm`` between, each piece keeping the vertices it passes, the last
+    cut to fit; ``lead_gap`` starts with a gap instead of a dash."""
+
+    if len(points) < 2 or dash_mm <= 0.0:
+        return []
+    lengths = [math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(points, points[1:])]
+    total = sum(lengths)
+    pieces: list[tuple[tuple[float, float], ...]] = []
+    at = gap_mm if lead_gap else 0.0
+
+    def point_at(distance: float) -> tuple[float, float]:
+        run = 0.0
+        for (a, b), length in zip(zip(points, points[1:]), lengths):
+            if distance <= run + length or length == lengths[-1] and (a, b) == (points[-2], points[-1]):
+                t = 0.0 if length <= 1e-12 else max(0.0, min(1.0, (distance - run) / length))
+                return (a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1]))
+            run += length
+        return points[-1]
+
+    while at < total - 0.25 * dash_mm:
+        stop = min(at + dash_mm, total)
+        piece = [point_at(at)]
+        run = 0.0
+        for vertex, length in zip(points[1:], lengths):
+            run += length
+            if at < run < stop:
+                piece.append(vertex)
+        piece.append(point_at(stop))
+        pieces.append(tuple(piece))
+        at = stop + gap_mm
+    return pieces
+
+
 def _presumed_lines_past_fold(
     presumed: Sequence[tuple[str, float, float]],
     section_paths: Sequence[Any],
@@ -4733,14 +4800,77 @@ def _presumed_lines_past_fold(
     dash_gap_mm: float,
 ) -> tuple[list[VectorPath], list[dict[str, Any]]]:
     """The presumed lines as drawn on the section's side, and what became of
-    each.  A ``floor`` runs level from the fold at its height to a gap short
-    of the wall, or its own length; a ``wall_on`` picks the open end of the
-    measured section nearest its height on the section's side and goes on
-    from it, after one gap, in the end's own direction."""
+    each.  Both follow the outside, which is measured, at the thickness the
+    archaeologist states: a ``wall_on`` picks the open end of the measured
+    section nearest its height, reads the wall's thickness there as the
+    distance from that end to the outer wall, and goes on down the outer
+    wall at that thickness for its length, after one gap; a ``floor`` is
+    the underside of the base lifted by the floor's thickness, from the axis
+    outward until it comes a gap short of the cut, or its own length."""
 
     bx, by = float(base[0]), float(base[1])
     dx, dy = float(direction[0]), float(direction[1])
     ax, ay = float(across[0]), float(across[1])
+    rings = [list(path.points_mm) + ([path.points_mm[0]] if path.closed else []) for path in section_paths]
+    # Open paths are walked as chains, not rings: their closing edge is not a wall.
+    chains = [[(float(x), float(y)) for x, y in ring] for ring in rings]
+    segments = np.asarray(
+        [(a, b) for chain in chains for a, b in zip(chain, chain[1:])], dtype=np.float64
+    ).reshape(-1, 2, 2)
+
+    def to_frame(point: tuple[float, float]) -> tuple[float, float]:
+        return ((point[0] - bx) * dx + (point[1] - by) * dy, (point[0] - bx) * ax + (point[1] - by) * ay)
+
+    def to_plane(along: float, reach: float) -> tuple[float, float]:
+        return (bx + dx * along + ax * reach, by + dy * along + ay * reach)
+
+    def crossings(*, along: float | None = None, at_across: float | None = None) -> list[tuple[float, float]]:
+        found: list[tuple[float, float]] = []
+        for chain in chains:
+            coords = [to_frame(p) for p in chain]
+            for (a1, c1), (a2, c2) in zip(coords, coords[1:]):
+                if along is not None and (a1 - along) * (a2 - along) <= 0.0 and a1 != a2:
+                    t = (along - a1) / (a2 - a1)
+                    found.append((along, c1 + t * (c2 - c1)))
+                if at_across is not None and (c1 - at_across) * (c2 - at_across) <= 0.0 and c1 != c2:
+                    t = (at_across - c1) / (c2 - c1)
+                    found.append((a1 + t * (a2 - a1), at_across))
+        return found
+
+    def outer_at(along: float) -> float | None:
+        reaches = [c for _a, c in crossings(along=along) if c > 0.0]
+        return max(reaches) if reaches else None
+
+    def underside_at(reach: float) -> float | None:
+        alongs = [a for a, _c in crossings(at_across=reach)]
+        return min(alongs) if alongs else None
+
+    def distance_to_cut(point: tuple[float, float]) -> float:
+        if segments.shape[0] == 0:
+            return math.inf
+        p = np.asarray(point, dtype=np.float64)
+        a, b = segments[:, 0, :], segments[:, 1, :]
+        ab = b - a
+        t = np.clip(((p - a) * ab).sum(axis=1) / np.maximum((ab * ab).sum(axis=1), 1e-18), 0.0, 1.0)
+        nearest = a + t[:, None] * ab
+        return float(np.sqrt(((nearest - p) ** 2).sum(axis=1)).min())
+
+    def crosses_cut(start: tuple[float, float], stop: tuple[float, float]) -> bool:
+        if segments.shape[0] == 0:
+            return False
+        p = np.asarray(start, dtype=np.float64)
+        r = np.asarray(stop, dtype=np.float64) - p
+        a, b = segments[:, 0, :], segments[:, 1, :]
+        s = b - a
+        denominator = r[0] * s[:, 1] - r[1] * s[:, 0]
+        parallel = np.abs(denominator) < 1e-12
+        safe = np.where(parallel, 1.0, denominator)
+        qp = a - p
+        t = (qp[:, 0] * s[:, 1] - qp[:, 1] * s[:, 0]) / safe
+        u = (qp[:, 0] * r[1] - qp[:, 1] * r[0]) / safe
+        return bool(np.any(~parallel & (t >= 0.0) & (t <= 1.0) & (u >= 0.0) & (u <= 1.0)))
+
+    step = 0.5
     paths: list[VectorPath] = []
     entries: list[dict[str, Any]] = []
     for index, (kind, height, length) in enumerate(presumed):
@@ -4749,54 +4879,92 @@ def _presumed_lines_past_fold(
             "kind": kind,
             "length_um": int(round(length * 1000.0)),
         }
-        pieces: list[tuple[tuple[float, float], tuple[float, float]]] = []
+        pieces: list[tuple[tuple[float, float], ...]] = []
         if abs(dy) < 1e-9:
             entry["not_drawn"] = "the axis is level in this figure, so a height names no point on it"
         elif kind == PRESUMED_FLOOR:
-            along = (height - by) / dy
-            origin = (bx + dx * along, by + dy * along)
-            segment = _reach_past_fold(
-                origin, (ax, ay), section_paths, base=base, direction=direction, across=across, gap_mm=gap_mm
-            )
-            if segment is None:
-                entry["not_drawn"] = "no wall lies across from the axis at that height, or the cut is solid there"
+            # The ruler through the mouth read the floor's height above the
+            # plane the vessel stands on; the floor's thickness is that less
+            # the underside's height at the axis.  The floor is the underside
+            # lifted by the thickness, from the axis out, for as long as the
+            # underside is a floor: where it turns up into the wall, or drops
+            # into a foot, the floor ends.
+            curve: list[tuple[float, float]] = []
+            reach = 0.0
+            arc = 0.0
+            last_bottom: float | None = None
+            at_axis = underside_at(1e-6)
+            thickness = None if at_axis is None else height - at_axis
+            if thickness is not None and thickness <= 1e-6:
+                entry["not_drawn"] = "the floor's height is not above the underside at the axis"
+                thickness = None
+            while thickness is not None:
+                bottom = underside_at(reach) if reach > 1e-9 else at_axis
+                # Steeper than one in two between samples is a wall or a foot.
+                if bottom is None or (last_bottom is not None and abs(bottom - last_bottom) > 0.5 * step):
+                    break
+                last_bottom = bottom
+                point = to_plane(bottom + thickness, reach)
+                if curve and (distance_to_cut(point) <= gap_mm or crosses_cut(curve[-1], point)):
+                    break
+                if curve:
+                    arc += math.hypot(point[0] - curve[-1][0], point[1] - curve[-1][1])
+                    if length > 0.0 and arc > length:
+                        break
+                curve.append(point)
+                reach += step
+            if "not_drawn" in entry:
+                pass
+            elif len(curve) < 2:
+                entry["not_drawn"] = "no underside lies below the axis to lift a floor from"
             else:
-                reach = math.hypot(segment[1][0] - origin[0], segment[1][1] - origin[1])
-                if length > 0.0:
-                    reach = min(reach, length)
-                pieces = _dashes(origin, (origin[0] + ax * reach, origin[1] + ay * reach), dash_mm=dash_mm, gap_mm=dash_gap_mm)
-                entry["reach_um"] = int(round(reach * 1000.0))
+                pieces = _dashed_polyline(curve, dash_mm=dash_mm, gap_mm=dash_gap_mm)
+                entry["reach_um"] = int(round(arc * 1000.0))
+                entry["thickness_um"] = int(round((thickness or 0.0) * 1000.0))
         else:
-            best: tuple[float, tuple[float, float], tuple[float, float]] | None = None
-            for path in section_paths:
-                if path.closed or len(path.points_mm) < 2:
+            best: tuple[float, tuple[float, float]] | None = None
+            for chain, path in zip(chains, section_paths):
+                if path.closed or len(chain) < 2:
                     continue
-                points = [(float(x), float(y)) for x, y in path.points_mm]
-                for end, inward in ((points[-1], points[::-1]), (points[0], points)):
-                    if (end[0] - bx) * ax + (end[1] - by) * ay <= gap_mm:
+                for end in (chain[0], chain[-1]):
+                    along, reach = to_frame(end)
+                    if reach <= gap_mm:
                         continue  # on or beside the fold: not an end inside the section
-                    back = next((q for q in inward[1:] if math.hypot(q[0] - end[0], q[1] - end[1]) >= 2.0), inward[-1])
-                    miss = abs((end[0] - bx) * dx + (end[1] - by) * dy - (height - by) / dy)
+                    miss = abs(along - (height - by) / dy)
                     if best is None or miss < best[0]:
-                        best = (miss, end, back)
+                        best = (miss, end)
             if best is None:
                 entry["not_drawn"] = "the section has no open end on its side of the fold to go on from"
             else:
-                _miss, end, back = best
-                ux, uy = end[0] - back[0], end[1] - back[1]
-                norm = math.hypot(ux, uy)
-                if norm <= 1e-9:
-                    entry["not_drawn"] = "the open end has no direction to go on in"
+                _miss, end = best
+                along_end, reach_end = to_frame(end)
+                outer = outer_at(along_end)
+                thickness = None if outer is None else outer - reach_end
+                if thickness is None or thickness <= 1e-6:
+                    entry["not_drawn"] = "no outer wall lies across from the open end to take a thickness from"
                 else:
-                    ux, uy = ux / norm, uy / norm
-                    start = (end[0] + ux * dash_gap_mm, end[1] + uy * dash_gap_mm)
-                    stop = (end[0] + ux * (dash_gap_mm + length), end[1] + uy * (dash_gap_mm + length))
-                    pieces = _dashes(start, stop, dash_mm=dash_mm, gap_mm=dash_gap_mm)
-                    entry["from_um"] = [int(round(end[0] * 1000.0)), int(round(end[1] * 1000.0))]
-        for piece_index, (a, b) in enumerate(pieces):
+                    # Down the outer wall at that thickness, the first gap left open.
+                    curve = [end]
+                    arc = 0.0
+                    along = along_end
+                    while arc < length + dash_gap_mm:
+                        along -= step
+                        outer_here = outer_at(along)
+                        if outer_here is None:
+                            break
+                        point = to_plane(along, outer_here - thickness)
+                        arc += math.hypot(point[0] - curve[-1][0], point[1] - curve[-1][1])
+                        curve.append(point)
+                    if len(curve) < 2:
+                        entry["not_drawn"] = "the outer wall does not go on below the open end"
+                    else:
+                        pieces = _dashed_polyline(curve, dash_mm=dash_mm, gap_mm=dash_gap_mm, lead_gap=True)
+                        entry["from_um"] = [int(round(end[0] * 1000.0)), int(round(end[1] * 1000.0))]
+                        entry["thickness_um"] = int(round(thickness * 1000.0))
+        for piece_index, piece in enumerate(pieces):
             paths.append(
                 VectorPath(
-                    id=f"presumed:{kind}:{index:02d}:{piece_index:03d}", role="section", closed=False, points_mm=(a, b)
+                    id=f"presumed:{kind}:{index:02d}:{piece_index:03d}", role="section", closed=False, points_mm=piece
                 )
             )
         entry["piece_count"] = len(pieces)
@@ -4924,15 +5092,66 @@ def _reach_past_fold(
     return (ox, oy), (ox + ux * reach, oy + uy * reach)
 
 
+def _line_crossings(
+    rings: Sequence[Sequence[Sequence[float]]],
+    *,
+    base: Sequence[float],
+    direction: Sequence[float],
+    across: Sequence[float],
+    along: float | None = None,
+    at_across: float | None = None,
+) -> list[tuple[float, float]]:
+    """Where the level line at ``along`` (or the line at ``at_across``)
+    crosses the edges of closed rings, as (along, across) pairs."""
+
+    bx, by = float(base[0]), float(base[1])
+    dx, dy = float(direction[0]), float(direction[1])
+    ax, ay = float(across[0]), float(across[1])
+    found: list[tuple[float, float]] = []
+    for ring in rings:
+        coords = [((float(p[0]) - bx) * dx + (float(p[1]) - by) * dy, (float(p[0]) - bx) * ax + (float(p[1]) - by) * ay) for p in ring]
+        for (a1, c1), (a2, c2) in zip(coords, coords[1:] + coords[:1]):
+            if along is not None:
+                if (a1 - along) * (a2 - along) > 0.0 or a1 == a2:
+                    continue
+                t = (along - a1) / (a2 - a1)
+                found.append((along, c1 + t * (c2 - c1)))
+            elif at_across is not None:
+                if (c1 - at_across) * (c2 - at_across) > 0.0 or c1 == c2:
+                    continue
+                t = (at_across - c1) / (c2 - c1)
+                found.append((a1 + t * (a2 - a1), at_across))
+    return found
+
+
+def _silhouette_reach(
+    rings: Sequence[Sequence[Sequence[float]]],
+    *,
+    base: Sequence[float],
+    direction: Sequence[float],
+    across: Sequence[float],
+    along: float,
+) -> float | None:
+    """How far the elevation's outline reaches into the section's side at
+    one height along the axis: the outermost crossing there, or None."""
+
+    reaches = [c for _a, c in _line_crossings(rings, base=base, direction=direction, across=across, along=along) if c > 0.0]
+    return max(reaches) if reaches else None
+
+
 def _stepped_axis(
     segment: Sequence[Sequence[float]],
     base: Sequence[float],
     direction: Sequence[float],
     across: Sequence[float],
     jogs: Sequence[tuple[float, float, float]],
-) -> tuple[tuple[float, float], ...]:
+    wall_reach: Any = None,
+) -> list[tuple[tuple[float, float], ...]]:
     """The centre line as drawn: the axis segment, stepping across and back
-    round each jog that lies within it."""
+    round each jog that lies within it.  A jog whose reach is infinite goes
+    to the silhouette: its step runs across to the outline (``wall_reach``
+    says how far at each height) and the line breaks there, because the
+    outline is that step's edge.  Several polylines come back then."""
 
     bx, by = float(base[0]), float(base[1])
     dx, dy = float(direction[0]), float(direction[1])
@@ -4941,28 +5160,47 @@ def _stepped_axis(
     def at(along: float, reach: float = 0.0) -> tuple[float, float]:
         return (bx + dx * along + ax * reach, by + dy * along + ay * reach)
 
+    def to_wall(along: float) -> float:
+        reach = wall_reach(along) if wall_reach is not None else None
+        return float(reach) if reach is not None else 0.0
+
     ends = sorted(
         float((point[0] - bx) * dx + (point[1] - by) * dy) for point in segment
     )
     low, high = ends[0], ends[-1]
-    points: list[tuple[float, float]] = [at(low)]
+    lines: list[list[tuple[float, float]]] = [[at(low)]]
     previous_stop: float | None = None
+    previous_wall = False
     for along_from, along_to, reach in sorted(jogs):
         start, stop = max(along_from, low), min(along_to, high)
         if start >= stop:
             continue
-        if previous_stop is not None and abs(start - previous_stop) < 1e-9:
+        wall = not math.isfinite(reach)
+        touching = previous_stop is not None and abs(start - previous_stop) < 1e-9
+        if touching and not previous_wall:
             # Two steps that meet along the axis are one staircase: the
             # line goes from the lower reach straight to the next, not
             # back to the axis and out again.
-            points.pop()
-            points.extend([at(start, reach), at(stop, reach), at(stop)])
+            lines[-1].pop()
+        elif touching and previous_wall:
+            # Off the wall onto a step: the line resumes at the next reach.
+            lines.append([])
         else:
-            points.extend([at(start), at(start, reach), at(stop, reach), at(stop)])
-        previous_stop = stop
-    points.append(at(high))
+            lines[-1].append(at(start))
+        if wall:
+            lines[-1].append(at(start, to_wall(start)))
+            lines.append([at(stop, to_wall(stop)), at(stop)])
+        else:
+            lines[-1].extend([at(start, reach), at(stop, reach), at(stop)])
+        previous_stop, previous_wall = stop, wall
+    lines[-1].append(at(high))
     # A step that reaches the end of the segment returns to the axis there.
-    return tuple(point for index, point in enumerate(points) if index == 0 or point != points[index - 1])
+    cleaned: list[tuple[tuple[float, float], ...]] = []
+    for line in lines:
+        points = tuple(point for index, point in enumerate(line) if index == 0 or point != line[index - 1])
+        if len(points) >= 2:
+            cleaned.append(points)
+    return cleaned
 
 
 def _sheet_provenance(
@@ -5906,7 +6144,7 @@ def compose_drawing_sheet(
                     {
                         "jogs_um": ";".join(
                             f"{int(round(along_from * 1000.0))}:{int(round(along_to * 1000.0))}:"
-                            f"{int(round(reach * 1000.0))}"
+                            f"{'wall' if not math.isfinite(reach) else int(round(reach * 1000.0))}"
                             for jog_record_id, along_from, along_to, reach in options.mirror_jogs
                             if jog_record_id == record.id
                         )
