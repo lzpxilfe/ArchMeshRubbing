@@ -51,7 +51,7 @@ from .canonical_json import CanonicalJSONError, canonical_json_bytes
 RELIEF_SHADE_RECORD_TYPE = "measurement.relief_shade.v1"
 RELIEF_SHADE_OPERATION_KIND = "relief_shade"
 RELIEF_SHADE_ALGORITHM = "archmeshrubbing.view_relief_shade"
-RELIEF_SHADE_ALGORITHM_VERSION = "1.0.0"
+RELIEF_SHADE_ALGORITHM_VERSION = "1.1.0"
 RELIEF_SHADE_COORDINATE_SPACE = "view_plane_mm/v1"
 RELIEF_SHADE_PAYLOAD_EXTENSION_KEY = "org.archmeshrubbing:relief-shade-v1"
 RELIEF_SHADE_RECEIPT_SCHEMA_VERSION = "1.0.0"
@@ -60,6 +60,11 @@ RELIEF_SHADE_PIXEL_FORMAT = "gray8_alpha8_shade/v1"
 RELIEF_SHADE_ROW_ORDER = "top_row_first/v1"
 RELIEF_SHADE_PAINTER = "front_most_depth/v1"
 RELIEF_SHADE_BASE_MODEL = "revolution_row_median/v1"
+#: How far round the wall a view pixel is, is measured against the
+#: silhouette on its own side of the row, not the row's median radius: a
+#: warped vessel stands past its median on the wide side, and measuring
+#: there against the median cut the whole outer band off as grazing.
+RELIEF_SHADE_SILHOUETTE = "each_side_of_row/v1"
 RELIEF_SHADE_LIGHT_MODEL = "lambert_height_field/v1"
 RELIEF_SHADE_FORESHORTENING = "arc_cos_corrected/v1"
 #: The base is a surface of revolution about the canonical axis, which the
@@ -102,7 +107,10 @@ DEFAULT_RELIEF_SHADE_MARGIN_UM = 1_000
 DEFAULT_RELIEF_SHADE_INNER_FRACTION_THOUSANDTHS = 600
 #: Beyond this fraction of the silhouette the wall is seen edge-on and the
 #: depth says nothing about relief.
-DEFAULT_RELIEF_SHADE_GRAZING_FRACTION_THOUSANDTHS = 920
+DEFAULT_RELIEF_SHADE_GRAZING_FRACTION_THOUSANDTHS = 980
+#: How far up and down the wall the slow level is blended, so the row-wise
+#: median does not print as streaks: a millimetre, well under a motif.
+DEFAULT_RELIEF_SHADE_SLOW_BLEND_UM = 1_000
 DEFAULT_RELIEF_SHADE_ROW_SMOOTHING_UM = 300
 #: A pixel further than this from the base is not relief: the far wall
 #: seen over a rim that is not level, a stray triangle.
@@ -389,6 +397,7 @@ def relief_shade_recipe(
     row_smoothing_um: int = DEFAULT_RELIEF_SHADE_ROW_SMOOTHING_UM,
     outlier_um: int = DEFAULT_RELIEF_SHADE_OUTLIER_UM,
     slow_um: int = DEFAULT_RELIEF_SHADE_SLOW_UM,
+    slow_blend_um: int = DEFAULT_RELIEF_SHADE_SLOW_BLEND_UM,
     grain_um: int = DEFAULT_RELIEF_SHADE_GRAIN_UM,
     light_thousandths: Sequence[int] = DEFAULT_RELIEF_SHADE_LIGHT_THOUSANDTHS,
     gain_thousandths: int = DEFAULT_RELIEF_SHADE_GAIN_THOUSANDTHS,
@@ -442,6 +451,7 @@ def relief_shade_recipe(
     if grazing < inner:
         raise ArtifactReliefShadeError("grazing_fraction_thousandths must not be below inner_fraction_thousandths")
     slow = _strict_int(slow_um, name="slow_um", minimum=0, maximum=1_000_000)
+    slow_blend = _strict_int(slow_blend_um, name="slow_blend_um", minimum=0, maximum=100_000)
     grain = _strict_int(grain_um, name="grain_um", minimum=0, maximum=100_000)
     if slow and grain and slow <= grain:
         raise ArtifactReliefShadeError("slow_um must be wider than grain_um")
@@ -452,6 +462,7 @@ def relief_shade_recipe(
             "grazing_fraction_thousandths": grazing,
             "inner_fraction_thousandths": inner,
             "model": RELIEF_SHADE_BASE_MODEL,
+            "silhouette": RELIEF_SHADE_SILHOUETTE,
             "outlier_um": _strict_int(outlier_um, name="outlier_um", minimum=1, maximum=1_000_000),
             "row_smoothing_um": _strict_int(row_smoothing_um, name="row_smoothing_um", minimum=0, maximum=100_000),
         },
@@ -470,7 +481,7 @@ def relief_shade_recipe(
                 pixels_per_mm, name="pixels_per_mm", minimum=MIN_RELIEF_SHADE_PIXELS_PER_MM, maximum=MAX_RELIEF_SHADE_PIXELS_PER_MM
             ),
         },
-        "relief_policy": {"grain_um": grain, "slow_um": slow},
+        "relief_policy": {"grain_um": grain, "slow_blend_um": slow_blend, "slow_um": slow},
         "shade_policy": {
             "cavity_gain_thousandths": _strict_int(cavity_gain_thousandths, name="cavity_gain_thousandths", minimum=0, maximum=100_000),
             "cavity_um": _strict_int(cavity_um, name="cavity_um", minimum=0, maximum=100_000),
@@ -538,12 +549,12 @@ def validate_relief_shade_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
         raise ArtifactReliefShadeError("relief shade recipe names another painter")
     base = _exact_keys(
         block["base_policy"],
-        frozenset({"grazing_fraction_thousandths", "inner_fraction_thousandths", "model", "outlier_um", "row_smoothing_um"}),
+        frozenset({"grazing_fraction_thousandths", "inner_fraction_thousandths", "model", "outlier_um", "row_smoothing_um", "silhouette"}),
         name="base_policy",
     )
-    if base["model"] != RELIEF_SHADE_BASE_MODEL:
+    if base["model"] != RELIEF_SHADE_BASE_MODEL or base["silhouette"] != RELIEF_SHADE_SILHOUETTE:
         raise ArtifactReliefShadeError("relief shade recipe names a base this release does not have")
-    relief = _exact_keys(block["relief_policy"], frozenset({"grain_um", "slow_um"}), name="relief_policy")
+    relief = _exact_keys(block["relief_policy"], frozenset({"grain_um", "slow_blend_um", "slow_um"}), name="relief_policy")
     shade = _exact_keys(
         block["shade_policy"],
         frozenset({"cavity_gain_thousandths", "cavity_um", "edge_erosion_pixels", "floor_thousandths", "foreshortening", "gain_thousandths", "light_thousandths", "model"}),
@@ -575,6 +586,7 @@ def validate_relief_shade_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
         row_smoothing_um=base["row_smoothing_um"],
         outlier_um=base["outlier_um"],
         slow_um=relief["slow_um"],
+        slow_blend_um=relief["slow_blend_um"],
         grain_um=relief["grain_um"],
         light_thousandths=light,
         gain_thousandths=shade["gain_thousandths"],
@@ -604,6 +616,19 @@ def _masked_blur(field: np.ndarray, ok: np.ndarray, sigma_pixels: float | tuple[
     weight = gaussian_filter(ok.astype(np.float64), sigma_pixels)
     smoothed = gaussian_filter(np.where(ok, field, 0.0), sigma_pixels)
     return np.where(weight > 1e-3, smoothed / np.maximum(weight, 1e-3), 0.0)
+
+
+def _blend_rows(field: np.ndarray, row_valid: np.ndarray, sigma_pixels: float) -> np.ndarray:
+    """A Gaussian blend of a field down its rows; rows with nothing covered
+    do not vote, so a window's edge does not pull the level to zero."""
+
+    from scipy.ndimage import gaussian_filter1d  # noqa: PLC0415
+
+    if sigma_pixels <= 0.0:
+        return field
+    weight = gaussian_filter1d(row_valid.astype(np.float64), sigma_pixels, mode="nearest")
+    blended = gaussian_filter1d(field * row_valid[:, None], sigma_pixels, axis=0, mode="nearest")
+    return np.where(weight[:, None] > 1e-3, blended / np.maximum(weight[:, None], 1e-3), field)
 
 
 def _masked_running_median(field: np.ndarray, ok: np.ndarray, width_pixels: float) -> np.ndarray:
@@ -801,7 +826,13 @@ def extract_relief_shade(
         inner = base_policy["inner_fraction_thousandths"] / 1000.0
         grazing = base_policy["grazing_fraction_thousandths"] / 1000.0
         abs_x = np.abs(xs)[None, :]
-        silhouette = np.where(covered, abs_x, 0.0).max(axis=1)
+        # Each row's silhouette on either side: how far the wall reaches
+        # left and right of the axis there.  A warped vessel reaches
+        # farther on one side than its median radius says.
+        reach_left = np.where(covered & (xs[None, :] < 0.0), -xs[None, :], 0.0).max(axis=1)
+        reach_right = np.where(covered & (xs[None, :] > 0.0), xs[None, :], 0.0).max(axis=1)
+        silhouette = np.maximum(reach_left, reach_right)
+        own_reach = np.where(xs[None, :] < 0.0, reach_left[:, None], reach_right[:, None])
         depth_near = np.where(covered, depth, np.nan)
         with np.errstate(invalid="ignore"):
             implied = np.sqrt(depth_near**2 + abs_x**2)
@@ -815,11 +846,16 @@ def extract_relief_shade(
         row_radius = np.interp(rows, rows[known], row_radius[known])
         if smoothing_pixels > 0.0:
             row_radius = gaussian_filter1d(row_radius, smoothing_pixels)
-        base = np.sqrt(np.maximum(row_radius[:, None] ** 2 - abs_x**2, 0.0))
-        relief = np.where(covered, depth, 0.0) - base
-        ok = covered & (abs_x <= grazing * row_radius[:, None]) & (np.abs(relief) <= base_policy["outlier_um"] / 1000.0)
-        # The slope across the view is what the wall's turn round the axis makes it.
-        cos_round = np.sqrt(np.clip(1.0 - (abs_x / np.maximum(row_radius[:, None], 1e-6)) ** 2, 0.0, 1.0))
+        # The relief is radial - how far the wall stands from the base
+        # radius at that height - read as the implied radius less the base,
+        # not as depth less a base depth: a depth difference blows up at
+        # the silhouette, where the base depth falls away steeply, and a
+        # radial one does not.
+        relief = np.where(covered, implied, row_radius[:, None]) - row_radius[:, None]
+        ok = covered & (abs_x <= grazing * own_reach) & (np.abs(relief) <= base_policy["outlier_um"] / 1000.0)
+        # The slope across the view is what the wall's turn round the axis
+        # makes it, measured to the silhouette on the pixel's own side.
+        cos_round = np.sqrt(np.clip(1.0 - (abs_x / np.maximum(own_reach, 1e-6)) ** 2, 0.0, 1.0))
     window = validated["window"]
     if window is not None:
         bottom_mm = window["bottom_um"] / 1000.0
@@ -851,6 +887,11 @@ def extract_relief_shade(
     # round it, the median of a window a few petals wide is the level the
     # wall stands at there and the petals stand on.
     slow = _masked_running_median(relief, ok, relief_policy["slow_um"] / 1000.0 * pixels_per_mm) if relief_policy["slow_um"] else 0.0
+    if relief_policy["slow_um"] and relief_policy["slow_blend_um"]:
+        # Row by row the median steps, and the steps print as streaks
+        # across the shade; the wall's slow level does not step between
+        # one row and the next, so it is blended a little up and down.
+        slow = _blend_rows(np.asarray(slow), ok.any(axis=1), relief_policy["slow_blend_um"] / 1000.0 * pixels_per_mm)
     filtered = np.where(ok, grain - slow, 0.0)
     raise_if_cancelled(cancellation_probe)
 

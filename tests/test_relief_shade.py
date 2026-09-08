@@ -86,7 +86,7 @@ def test_the_shade_falls_on_the_side_of_the_petal_that_turns_from_the_light(peta
     assert validate_relief_shade_recipe(computation.recipe) == computation.recipe
     left, bottom, right, top = raster.rectangle_mm
     # The shade lies about the petal, not the whole wall: a margin round it.
-    assert -30.0 < left < -8.0 and 8.0 < right < 30.0, raster.rectangle_mm
+    assert -30.0 < left < -5.0 and 5.0 < right < 30.0, raster.rectangle_mm
     # The floor circle stands at canonical height zero, so the petal's middle is at 40.
     assert 20.0 < bottom < 35.0 and 48.0 < top < 62.0, raster.rectangle_mm
     darkness = raster.darkness.astype(np.float64)
