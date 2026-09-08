@@ -687,6 +687,15 @@ recipe.texture_relief
 - **도판**: 뷰 domain은 `DrawingSheetOptions.relief_stipples=((shade record, 도형 record),…)` — 같은 뷰의 도형에 제자리로. 전개 domain은 도판의 record 목록에 shade record ID를 넣어 **제 도형**으로 그린다(띠 전체를 점으로, 아래에 캡션 `양각 음영 전개 · 이음매 90° · 이득 · 골 · 높이`; 뷰 도형에 붙이면 거부, 뷰 domain을 제 도형으로 그리면 거부). QC `development_reference_radius_um`·`development_circumference_um`·`development_arc_um`·`seam_millideg`. 점은 종이 격자 `stipple_pitch_mm`(기본 0.15, 잠정) 칸마다 한 번의 기회로 놓인다: 칸 번호의 해시(`splitmix64_cell/v1`)에서 나온 균등수 셋으로 칸 안의 자리 둘과 기회 하나를 얻고, 그 자리의 어둡기보다 기회가 작으면 점이 선다 — 같은 음영은 같은 축척에서 언제나 같은 점이다. 미러 도형에서는 접힌 선의 입면 쪽 점만 남고 단면 쪽은 세어서 뺀다. 점은 `<g id="relief-stipple-{도형}-{n}">` 안의 `<circle>`(지름 `stipple_dot_mm`, 기본 0.12, 잠정)로 선 layer보다 먼저 놓인다. sidecar `relief_stipples`(`pitch_paper_mm`, `dot_paper_mm`, `hash`, `drawn[]`의 `dot_count`·`dropped_section_side_count`·`half`, `records[]`). 옵션이 비면 sidecar에 키가 없고 SVG 바이트가 같다.
 - 완료 게이트(3/6/6)와 `.amr-survey`에는 들어가지 않는다.
 
+## 뒷면 실루엣 record `measurement.far_silhouette.v1`
+
+좌 반입면·우 반단면 도형은 뷰 평면으로 유물을 자르고, 잘린 벽 너머로 **뒤쪽 절반의 안쪽**이 보인다. 그 가장자리 — 뒤로 돌아가는 구연, 뒤쪽 굽의 바닥 — 는 뒤쪽 절반이 끝나는 자리다. 수평인 그릇에서는 구연 높이의 수평선이고 입면 가장자리를 곧게 이은 것(`outline_reach` = `section`)이 그것을 그린다. 뒤틀린 그릇에서는 구연이 수평이 아니라서 뒤로 도는 선이 기울고, 그 선은 뒤쪽 절반의 **실루엣 자체**다. 이 record가 그것을 잰다: 뷰 평면 뒤에 중심이 놓인 면들만의 외곽선을 외곽선 추출기와 같은 고정 격자로 뜬다 — 앞쪽 가장자리를 재는 방법 그대로 뒤쪽을 잰다.
+
+- **recipe**: `archmeshrubbing.far_silhouette` **1.0.0**, 좌표계 `canonical_mm_planar/v1`. `view`(여섯 뷰 중 하나), `face_scope`(`side` = `behind_view_plane/v1`, `membership` = `face_centroid_strictly_behind_plane/v1`, `plane` = 뷰 frame의 원점과 법선 — 법선은 보는 사람 쪽을 향하므로 뒤는 법선의 반대쪽, 평면 위에 정확히 중심이 놓인 면은 앞쪽의 것), `outline`(그 면들이 통과한 외곽선 recipe 전체 — 격자·닫힘·조각 게이트·구멍 게이트가 그대로 적용된다). 검증은 `view`와 격자로 recipe를 다시 만들어 바이트를 대조한다.
+- **payload** (`org.archmeshrubbing:far-silhouette-v1`): 벡터 payload 1.0.0의 외곽선 payload 그대로(닫힌 exterior·hole 고리, 뷰 frame). `geometry_ref`는 `urn:archmeshrubbing:far-silhouette:sha256:` + payload sha256. 다시 열 때 외곽선 계약(`validate_outline_record_contract`)으로 격자·정규형·위상을 다시 증명한다. QC는 외곽선 QC 전부에 `far_face_count`·`near_face_count`·`payload_sha256`.
+- **도판**: `DrawingSheetOptions.far_silhouettes=((입면 record, 실루엣 record),…)`와 `outline_reach="far"`가 함께 간다 — 하나만 주면 거부(그리지 않을 실루엣은 이름하지 않고, 그릴 것 없이 `far`를 청하지 않는다). 미러 도형마다 실루엣을 가운데선에서 자르고 단면 쪽 사슬을 걸으며, 모든 단면선에서 간격(종이 1 mm × 축척)보다 멀리 선 점의 연속을 열린 path(`far-edge:{record}:{고리}:NN:NN`, 외형선 굵기)로 긋는다: 뒤로 도는 구연, 오목한 저부 밑의 뒤쪽 굽 바닥. 잘린 벽을 따라 놓인 곳은 간격 안이라 단면선에 맡기고, 뒤가 잘린 벽보다 간격 넘게 부푼 곳은 있는 그대로 긋는다. 각 사슬은 가운데선에서 바깥으로 읽고, 간격 안에 드는 첫 점에서 끝나 단면선에 닿지 않는다. sidecar `mirrored_figures[]`에 `far_silhouette_record_id`·`far_silhouette_recipe_hash`·`far_edge_count`. record는 READY·FRESH여야 하고 입면과 같은 평면이어야 한다.
+- 완료 게이트(3/6/6)와 `.amr-survey`에는 들어가지 않는다.
+
 ## 완료 3/6/6 원자 묶음 `.amr-survey`
 
 `*.amr-survey`는 새 알고리즘 결과를 만드는 포맷이 아니라, 한 active Align 아래에서 dependency-valid `READY + FRESH`인 Cutline 3면, Outline 6면, Digital Rubbing 6면의 기존 권위 package를 한 번에 전달하는 non-overwriting directory다. GUI의 `완료 실측 15개 원자 묶음 내보내기`는 세 단계가 모두 완료된 경우에만 활성화된다.

@@ -84,6 +84,11 @@ from .artifact_relief_shade import (
     require_relief_shade_raster,
     validate_relief_shade_recipe,
 )
+from .artifact_far_silhouette import (
+    FAR_SILHOUETTE_RECORD_TYPE,
+    ArtifactFarSilhouetteError,
+    far_silhouette_payload_from_record,
+)
 from .artifact_profile_break import (
     PROFILE_BREAK_RECORD_TYPE,
     PROFILE_BREAK_SURFACE_INWARD,
@@ -124,6 +129,7 @@ from .drawing_style import (
     CONDITION_CRACK,
     CENTER_AXIS,
     OUTLINE_HOLE,
+    OUTLINE_VISIBLE,
     DrawingStyleError,
     DrawingStylePreset,
     LineStyle,
@@ -479,7 +485,14 @@ STIPPLE_HASH = "splitmix64_cell/v1"
 #: reading stop at the fold unless asked.
 REACH_SECTION = "section"
 REACH_AXIS = "axis"
-REACHES: tuple[str, ...] = (REACH_SECTION, REACH_AXIS)
+#: ``far`` draws the far half's own silhouette past the fold instead of a
+#: straight run of the near edge: on a warped vessel the rim's far side is
+#: not level, and only its measured silhouette (a far silhouette record)
+#: says where it goes.  Every edge of that silhouette that stands clear of
+#: the cut by more than the gap is drawn, in the outline's weight.
+REACH_FAR = "far"
+REACHES: tuple[str, ...] = (REACH_SECTION, REACH_AXIS, REACH_FAR)
+BREAK_REACHES: tuple[str, ...] = (REACH_SECTION, REACH_AXIS)
 REACH_GAP_PAPER_MM = 1.0
 DEFAULT_OUTLINE_REACH = REACH_SECTION
 DEFAULT_BREAK_REACH = REACH_AXIS
@@ -952,6 +965,14 @@ class DrawingSheetOptions:
     the steps the fold takes, a rubbing pasted on the axis, a cutout's
     place - and the sidecar names the sides.
     """
+    far_silhouettes: tuple[tuple[str, str], ...] = ()
+    """(elevation record id, far silhouette record id) pairs: for each
+    mirrored figure, the measured silhouette of the half behind the view
+    plane (``measurement.far_silhouette.v1``), drawn on the section's side
+    when ``outline_reach`` is ``far``.  Every mirrored figure needs one then,
+    and none may be named otherwise: a silhouette that would not be drawn
+    is a claim the sheet does not make.
+    """
     outline_reach: str = DEFAULT_OUTLINE_REACH
     """How far the elevation outline's edges that cross the fold run on a
     mirrored figure.
@@ -963,7 +984,13 @@ class DrawingSheetOptions:
     millimetre short of the first section line it meets, so the edge is
     seen going round without joining the cut; where the section is solid
     there (the edge would run inside a cut face, as under a solid foot) it
-    stops at the fold.  ``axis`` stops every edge at the fold.
+    stops at the fold.  ``axis`` stops every edge at the fold.  ``far``
+    draws, instead of the straight run, the far half's own silhouette
+    (``far_silhouettes``): every edge of it that stands more than the gap
+    clear of the section's lines, so a rim that is not level goes round
+    the back the way it was measured, and a far foot's floor shows under
+    a recessed base.  Where the far half bulges past the cut wall by more
+    than the gap, that bulge is drawn too - it is there.
     """
     break_solid_min_deg: int = DEFAULT_BREAK_SOLID_MIN_DEG
     """The turn, in degrees, from which a corner's line is drawn solid.
@@ -1359,13 +1386,45 @@ class DrawingSheetOptions:
                 )
             styles.append((record_id, index, style))
         object.__setattr__(self, "break_styles", tuple(styles))
-        if self.break_reach not in REACHES:
-            raise DrawingSheetError(f"break_reach must be one of {', '.join(REACHES)}")
+        if self.break_reach not in BREAK_REACHES:
+            raise DrawingSheetError(f"break_reach must be one of {', '.join(BREAK_REACHES)}")
         solid = self.break_solid_min_deg
         if isinstance(solid, bool) or not isinstance(solid, int) or not 0 <= solid <= 180:
             raise DrawingSheetError("break_solid_min_deg must be an integer from 0 to 180")
         if self.outline_reach not in REACHES:
             raise DrawingSheetError(f"outline_reach must be one of {', '.join(REACHES)}")
+        far_silhouettes: list[tuple[str, str]] = []
+        for pair in self.far_silhouettes:
+            if not isinstance(pair, (tuple, list)) or len(pair) != 2:
+                raise DrawingSheetError(
+                    "far_silhouettes entries must be (elevation record id, far silhouette record id) pairs"
+                )
+            elevation_id, far_id = (str(item).strip() for item in pair)
+            if not elevation_id or not far_id:
+                raise DrawingSheetError("far_silhouettes entries must be record ids")
+            if elevation_id not in elevations:
+                raise DrawingSheetError(
+                    f"far_silhouettes names {elevation_id!r}, which is not the elevation half of a "
+                    "mirrored figure"
+                )
+            if far_id in halves or any(far_id == other_far for _other, other_far in far_silhouettes):
+                raise DrawingSheetError(f"far silhouette {far_id!r} is already a half of a figure")
+            if any(elevation_id == other for other, _other_far in far_silhouettes):
+                raise DrawingSheetError(f"far_silhouettes names {elevation_id!r} twice")
+            far_silhouettes.append((elevation_id, far_id))
+        object.__setattr__(self, "far_silhouettes", tuple(far_silhouettes))
+        if far_silhouettes and self.outline_reach != REACH_FAR:
+            raise DrawingSheetError(
+                f"far_silhouettes are drawn only with outline_reach={REACH_FAR!r}; a silhouette that "
+                "would not be drawn is not named"
+            )
+        if self.outline_reach == REACH_FAR:
+            missing = sorted(elevations - {elevation_id for elevation_id, _far in far_silhouettes})
+            if missing:
+                raise DrawingSheetError(
+                    f"outline_reach={REACH_FAR!r} needs a far silhouette for every mirrored figure; "
+                    f"none is named for: {', '.join(missing)}"
+                )
         if self.mirror_elevation_side not in MIRROR_ELEVATION_SIDES:
             raise DrawingSheetError(
                 f"mirror_elevation_side must be one of {', '.join(MIRROR_ELEVATION_SIDES)}"
@@ -2832,6 +2891,131 @@ def _require_drawable_break_record(
     return record, payload
 
 
+def _require_drawable_far_silhouette(
+    document: ArtifactDocument,
+    record_id: str,
+) -> tuple[DerivedRecord, VectorGeometryPayload]:
+    """Resolve one far silhouette under the rules a break reading answers to:
+    READY, FRESH under the active alignment, and re-verified."""
+
+    record = document.record_index.get(record_id)
+    if record is None:
+        raise DrawingSheetError(f"far silhouette record {record_id!r} does not exist")
+    if record.type != FAR_SILHOUETTE_RECORD_TYPE:
+        raise DrawingSheetError(f"record {record_id!r} is not a far silhouette")
+    if record.lifecycle_status is not RecordLifecycleStatus.READY:
+        raise DrawingSheetError("only READY far silhouette records may be drawn")
+    try:
+        freshness = document.record_freshness(record.id)
+    except ArtifactDocumentError as exc:
+        raise DrawingSheetError(str(exc)) from exc
+    if freshness is not RecordFreshness.FRESH:
+        raise DrawingSheetError(
+            "only FRESH far silhouette records may be drawn "
+            f"(got {freshness.value}); a far half cut under a superseded "
+            "alignment is the far half of an artifact standing somewhere else"
+        )
+    try:
+        payload = far_silhouette_payload_from_record(record)
+    except ArtifactFarSilhouetteError as exc:
+        raise DrawingSheetError(str(exc)) from exc
+    return record, payload
+
+
+def _true_runs(mask: np.ndarray) -> list[tuple[int, int]]:
+    """The [start, stop) index ranges where a boolean array is true."""
+
+    flags = np.asarray(mask, dtype=bool)
+    if flags.size == 0:
+        return []
+    padded = np.concatenate([[False], flags, [False]])
+    edges = np.flatnonzero(padded[1:] != padded[:-1])
+    return [(int(edges[index]), int(edges[index + 1])) for index in range(0, len(edges), 2)]
+
+
+def _far_edges_past_fold(
+    far_payload: VectorGeometryPayload,
+    section_paths: Sequence[Any],
+    *,
+    base: Sequence[float],
+    direction: Sequence[float],
+    keep_negative: bool,
+    gap_mm: float,
+    line_smoothing_mm: float,
+    far_record_id: str,
+) -> list[VectorPath]:
+    """The edges of the far half's silhouette that show through the cut.
+
+    The silhouette is cut at the fold and its section-side chains walked;
+    every run of points that stands more than ``gap_mm`` clear of every
+    section line is an edge the reader sees beyond the cut wall - the rim
+    going round the back, the far foot's floor under a recessed base - and
+    is drawn as an open path.  Where the silhouette lies along the cut
+    (the far wall behind the cut wall, the foot's underside) it is within
+    the gap and left to the section's own line, and where it stands off
+    the cut by more than the gap (a back that bulges past the cut) it is
+    drawn, because it is there.  Each run ends where it first comes
+    within the gap, so nothing joins the cut.
+    """
+
+    import shapely  # noqa: PLC0415
+    from shapely.geometry import LineString, MultiLineString  # noqa: PLC0415
+
+    lines = []
+    for path in section_paths:
+        points = list(path.points_mm) + ([path.points_mm[0]] if path.closed else [])
+        if len(points) >= 2:
+            lines.append(LineString(points))
+    cut = MultiLineString(lines) if lines else None
+    edges: list[VectorPath] = []
+    for path in far_payload.paths:
+        if not path.closed:
+            continue
+        smoothed = _smoothed_path(path, line_smoothing_mm)
+        try:
+            ring = clip_closed_ring(
+                smoothed.points_mm,
+                base=base,
+                direction=direction,
+                keep_negative=keep_negative,
+                label=f"far silhouette, path {path.id!r}",
+            )
+        except SVGRenderError as exc:
+            raise DrawingSheetError(str(exc)) from exc
+        if ring is None:
+            continue
+        chains = split_ring_off_line(ring, base=base, direction=direction)
+        pieces: list[list[tuple[float, float]]] = (
+            chains if chains is not None else [list(ring) + [tuple(ring[0])]]
+        )
+        for piece_index, piece in enumerate(pieces):
+            coords = np.asarray(piece, dtype=np.float64)
+            if coords.shape[0] < 2:
+                continue
+            if cut is None:
+                clear = np.ones(coords.shape[0], dtype=bool)
+            else:
+                clear = shapely.distance(shapely.points(coords), cut) > gap_mm
+            for run_index, (start, stop) in enumerate(_true_runs(clear)):
+                if stop - start < 2:
+                    continue
+                run = coords[start:stop]
+                # Read from the fold outward, whichever way the ring ran.
+                if abs(half_plane_side(run[-1], base=base, direction=direction)) < abs(
+                    half_plane_side(run[0], base=base, direction=direction)
+                ):
+                    run = run[::-1]
+                edges.append(
+                    VectorPath(
+                        id=f"far-edge:{far_record_id}:{path.id}:{piece_index:02d}:{run_index:02d}",
+                        role="exterior",
+                        closed=False,
+                        points_mm=tuple((float(x), float(y)) for x, y in run),
+                    )
+                )
+    return edges
+
+
 def _break_paths_for_figure(
     figure_record_type: str,
     figure_payload: Any,
@@ -4120,6 +4304,7 @@ def _mirrored_figure(
     break_reach: str = REACH_AXIS,
     reach_gap_mm: float = 0.0,
     elevation_side: str = MIRROR_ELEVATION_LEFT,
+    far_silhouette: tuple[DerivedRecord, VectorGeometryPayload] | None = None,
 ) -> tuple[
     DerivedRecord,
     dict[str, list[Any]],
@@ -4234,6 +4419,32 @@ def _mirrored_figure(
                     section_by_kind.setdefault(kind, []).append(
                         replace(path, id=f"{path.id}:past-axis:{index:02d}", closed=False, points_mm=extension)
                     )
+    # The far half's own silhouette, where the drafter asked for it: the
+    # edges seen through the cut are the ones it measured, not a straight
+    # run of the near edge.
+    if outline_reach == REACH_FAR:
+        if far_silhouette is None:
+            raise DrawingSheetError(
+                f"outline_reach={REACH_FAR!r} needs the far silhouette of {elevation.id!r}"
+            )
+        far_record, far_payload = far_silhouette
+        if far_payload.frame != elevation_payload.frame:
+            raise DrawingSheetError(
+                f"far silhouette {far_record.id!r} is not in the plane of {elevation.id!r}, "
+                "so it is not the far half of that figure"
+            )
+        section_by_kind.setdefault(OUTLINE_VISIBLE, []).extend(
+            _far_edges_past_fold(
+                far_payload,
+                section_payload.paths,
+                base=base,
+                direction=direction,
+                keep_negative=not elevation_left,
+                gap_mm=reach_gap_mm,
+                line_smoothing_mm=line_smoothing_mm,
+                far_record_id=far_record.id,
+            )
+        )
     jog_line_sets = [_jog_lines(base, direction, across, jog) for jog in jogs]
     if jog_line_sets:
         cut_back: dict[str, list[Any]] = {}
@@ -4998,6 +5209,13 @@ def compose_drawing_sheet(
             "the section half of a mirrored figure is drawn inside that figure, "
             f"so it must not also be a figure of its own: {', '.join(listed_sections)}"
         )
+    far_by_elevation = dict(options.far_silhouettes)
+    listed_far = sorted(set(far_by_elevation.values()) & set(ids))
+    if listed_far:
+        raise DrawingSheetError(
+            "a far silhouette is drawn inside its mirrored figure, so it must not also "
+            f"be a figure of its own: {', '.join(listed_far)}"
+        )
 
     unplaced = sorted(set(attached_by_elevation) - set(ids))
     if unplaced:
@@ -5352,6 +5570,11 @@ def compose_drawing_sheet(
             continue
         # A mirrored figure draws its own axis, so the caller's centre-axis
         # switch is not consulted: the two halves meet on that line.
+        far_silhouette = (
+            _require_drawable_far_silhouette(document, far_by_elevation[record.id])
+            if record.id in far_by_elevation
+            else None
+        )
         section, combined, bounds, fill_only_ids = _mirrored_figure(
             document,
             elevation=record,
@@ -5361,6 +5584,7 @@ def compose_drawing_sheet(
             axis_ready=align_recipe_kind == AXIS_ALIGN_RECIPE_KIND,
             preset=resolve_drawing_style_preset(options.style_preset),
             interior_by_kind=interior_by_kind,
+            far_silhouette=far_silhouette,
             outline_reach=options.outline_reach,
             break_reach=options.break_reach,
             reach_gap_mm=REACH_GAP_PAPER_MM * float(options.scale_denominator),
@@ -5376,6 +5600,22 @@ def compose_drawing_sheet(
             {
                 "elevation_record_id": record.id,
                 "elevation_side": options.mirror_elevation_side,
+                **(
+                    {
+                        "far_edge_count": str(
+                            sum(
+                                1
+                                for kind_paths in combined.values()
+                                for path in kind_paths
+                                if ":far-edge:" in path.id
+                            )
+                        ),
+                        "far_silhouette_record_id": far_silhouette[0].id,
+                        "far_silhouette_recipe_hash": far_silhouette[0].recipe_hash,
+                    }
+                    if far_silhouette is not None
+                    else {}
+                ),
                 **(
                     {
                         "jogs_um": ";".join(
