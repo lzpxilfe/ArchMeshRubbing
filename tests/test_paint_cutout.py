@@ -195,6 +195,19 @@ def test_a_cutout_is_pasted_in_place_or_below_and_never_across_the_fold(painted)
     )
     validate_drawing_sheet_bytes(stepped.svg_bytes, stepped.sidecar_bytes)
     assert mirrored is not None
+    # The steps go round the motif, not through it: a second step whose
+    # bottom edge runs across the ink's top row is refused; a millimetre
+    # above it, it is not.
+    ink_top = wt - (np.nonzero(np.asarray(middle.raster.pixels)[:, :, -1].any(axis=1))[0][0] + 0.5) * (1000.0 / middle.raster.pixels_per_meter)
+    for lift, ok in ((0.2, False), (1.0, True)):
+        edge = ink_top + lift
+        jogs = (("record:front", wb - 1.0, edge, wr + 1.0), ("record:front", edge, wt + 10.0, 2.0))
+        options = _options(mirror_sections=(("record:front", "record:section"),), mirror_jogs=jogs, paint_cutouts=(("record:cutout:middle", "record:front", "in_place"),))
+        if ok:
+            compose_drawing_sheet(session.document, ["record:front"], options=options, rasters={"record:cutout:middle": middle.raster})
+        else:
+            with pytest.raises(DrawingSheetError, match="steps through the ink"):
+                compose_drawing_sheet(session.document, ["record:front"], options=options, rasters={"record:cutout:middle": middle.raster})
     # The raster must be the record's, be given, and the view must match the figure's plane.
     with pytest.raises(DrawingSheetError, match="needs its raster"):
         compose_drawing_sheet(session.document, ["record:front"], options=_options(paint_cutouts=(("record:cutout:left", "record:front", "in_place"),)))

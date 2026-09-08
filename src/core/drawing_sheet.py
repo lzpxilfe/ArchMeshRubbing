@@ -461,6 +461,9 @@ PAINT_CUTOUT_IN_PLACE = "in_place"
 PAINT_CUTOUT_BELOW = "below"
 PAINT_CUTOUT_PLACEMENTS: tuple[str, ...] = (PAINT_CUTOUT_IN_PLACE, PAINT_CUTOUT_BELOW)
 PAINT_CUTOUT_BELOW_GAP_MM = 3.0
+#: How close (artifact mm) a step's edge may come to a pasted cutout's ink
+#: before it is running through the motif rather than round it.
+PAINT_CUTOUT_STEP_CLEARANCE_MM = 0.5
 #: Presumed lines on the section's side, where the scan did not reach: a
 #: wall the archaeologist knows goes on, a floor a ruler found.  Drawn
 #: dashed, in the cut's weight, from numbers the archaeologist gives; the
@@ -3750,6 +3753,19 @@ def _pasted_cutouts(
                         f"paint cutout {cutout_id!r} crosses the fold of {figure.id!r} into the "
                         "section half; step the fold round it with mirror_jogs, or paste it below"
                     )
+                if not on_elevation and jogs:
+                    # The steps go round the motif, not through it: no edge
+                    # the centre line draws may run through the ink.
+                    through = _ink_on_step_edges(
+                        raster, base=base, direction=direction, toward_section=toward_section, jogs=jogs,
+                        clearance_mm=PAINT_CUTOUT_STEP_CLEARANCE_MM,
+                    )
+                    if through is not None:
+                        raise DrawingSheetError(
+                            f"the fold of {figure.id!r} steps through the ink of paint cutout "
+                            f"{cutout_id!r} at {through:.1f} mm along the axis; move that step's "
+                            "edge off the motif"
+                        )
         else:
             centre = 0.5 * (grown[0] + grown[2])
             top = grown[1] - PAINT_CUTOUT_BELOW_GAP_MM
@@ -4329,6 +4345,76 @@ def _ink_within_steps(
     for along_from, along_to, reach in jogs:
         covered |= (along_s >= along_from - 1e-9) & (along_s <= along_to + 1e-9) & (across_s <= reach + 1e-9)
     return bool(covered.all())
+
+
+def _ink_on_step_edges(
+    raster: Any,
+    *,
+    base: Sequence[float],
+    direction: Sequence[float],
+    toward_section: float,
+    jogs: Sequence[tuple[float, float, float]],
+    clearance_mm: float,
+) -> float | None:
+    """The height (along the axis) of the first step edge that runs through
+    the cutout's ink on the section's side, or None when every edge is clear
+    of it by ``clearance_mm``.  The edges are the ones the centre line will
+    draw: each step's side at its reach, and its bottom and top from the
+    neighbouring step's reach (or the axis) out to its own.  A step to the
+    wall has no side of its own: the outline is its edge."""
+
+    pixels = np.asarray(raster.pixels)
+    alpha = pixels[:, :, -1]
+    rows, cols = np.nonzero(alpha > 0)
+    if rows.size == 0 or not jogs:
+        return None
+    left, _bottom, _right, top = raster.rectangle_mm
+    pitch = 1000.0 / float(raster.pixels_per_meter)
+    xs = left + (cols + 0.5) * pitch
+    ys = top - (rows + 0.5) * pitch
+    bx, by = float(base[0]), float(base[1])
+    dx, dy = float(direction[0]), float(direction[1])
+    across = toward_section * ((xs - bx) * dy - (ys - by) * dx)
+    along = (xs - bx) * dx + (ys - by) * dy
+    on_section = across > 1e-9
+    if not on_section.any():
+        return None
+    along_s, across_s = along[on_section], across[on_section]
+    ordered = sorted((float(a), float(b), float(r)) for a, b, r in jogs)
+    far = float(max(across_s.max(), 0.0)) + 1.0  # past every inked pixel: the wall's side
+
+    def reach_of(index: int) -> float:
+        reach = ordered[index][2]
+        return far if math.isinf(reach) else reach
+
+    def touched(a1: float, c1: float, a2: float, c2: float) -> bool:
+        # Distance from every inked pixel to the segment (a1,c1)-(a2,c2) in
+        # the fold's frame: along and across.
+        va, vc = a2 - a1, c2 - c1
+        length_sq = va * va + vc * vc
+        if length_sq <= 1e-18:
+            t = np.zeros_like(along_s)
+        else:
+            t = np.clip(((along_s - a1) * va + (across_s - c1) * vc) / length_sq, 0.0, 1.0)
+        da = along_s - (a1 + t * va)
+        dc = across_s - (c1 + t * vc)
+        return bool((da * da + dc * dc < clearance_mm * clearance_mm).any())
+
+    for index, (along_from, along_to, reach) in enumerate(ordered):
+        own = reach_of(index)
+        below = reach_of(index - 1) if index > 0 and abs(ordered[index - 1][1] - along_from) <= 1e-9 else 0.0
+        above = (
+            reach_of(index + 1)
+            if index + 1 < len(ordered) and abs(ordered[index + 1][0] - along_to) <= 1e-9
+            else 0.0
+        )
+        if touched(along_from, min(below, own), along_from, max(below, own)):
+            return along_from
+        if touched(along_to, min(above, own), along_to, max(above, own)):
+            return along_to
+        if math.isfinite(reach) and touched(along_from, own, along_to, own):
+            return along_from
+    return None
 
 
 def _jog_pieces(
