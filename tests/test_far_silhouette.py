@@ -255,6 +255,31 @@ def test_the_rim_goes_round_the_back_the_way_it_was_measured(tilted) -> None:
     assert all(len(run) == 2 for run in _paths(straight_root, ":past-axis:"))
     assert "far_silhouette_record_id" not in json.loads(straight.sidecar_bytes.decode("utf-8"))["mirrored_figures"][0]
 
+    # Asked for straight far edges, the same edge is the one segment between
+    # its measured ends, the title block says so, and the sidecar names it.
+    from src.core.drawing_sheet import INTERPRETATION_LABEL, Interpretation  # noqa: PLC0415
+
+    ruled = compose_drawing_sheet(
+        session.document, ["record:front"],
+        options=DrawingSheetOptions(
+            title_block=title, page=page, scale_denominator=2.0,
+            mirror_sections=(("record:front", "record:section"),),
+            far_silhouettes=(("record:front", "record:far"),), outline_reach="far",
+            interpretation=Interpretation(straight_far_edges=True),
+        ),
+    )
+    validate_drawing_sheet_bytes(ruled.svg_bytes, ruled.sidecar_bytes)
+    (segment,) = _paths(ET.fromstring(ruled.svg_bytes), ":far-edge:record:far:")
+    assert len(segment) == 2 and len(edge) > 2
+    assert all(abs(a - b) < 1e-6 for a, b in zip(segment[0], edge[0])) and all(abs(a - b) < 1e-6 for a, b in zip(segment[-1], edge[-1]))
+    ruled_sidecar = json.loads(ruled.sidecar_bytes.decode("utf-8"))
+    assert ruled_sidecar["mirrored_figures"][0]["far_edges"] == "straight" and figure["far_edges"] == "measured"
+    assert ruled_sidecar["interpretation"]["straight_far_edges"] is True
+    (row,) = [row for row in ruled_sidecar["title_block"] if row["label"] == INTERPRETATION_LABEL]
+    assert row["value"] == "뒷선 직선"
+    with pytest.raises(DrawingSheetError, match="straight_far_edges must be a boolean"):
+        Interpretation(straight_far_edges=1)  # type: ignore[arg-type]
+
     # The options refuse a silhouette that would not be drawn, a reach
     # with nothing to draw it from, and a silhouette listed as a figure.
     with pytest.raises(DrawingSheetError, match="drawn only with outline_reach='far'"):

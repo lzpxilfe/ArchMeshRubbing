@@ -590,10 +590,22 @@ class Interpretation:
     traced; a loose stroke and a seam are not turned.  The record is not
     touched; the sheet says the angle it drew with.
     """
+    straight_far_edges: bool = False
+    """Whether the far half's edges seen through the cut are drawn straight.
+
+    False draws each far edge (``outline_reach`` = ``far``) as the far
+    silhouette measured it, wobble and all.  True draws it as one straight
+    segment between its two measured ends - the rim's far line from the
+    axis to the tip, the far foot's floor from the axis to the foot - the
+    way a pen draws an edge it knows goes round.  The ends are measured;
+    the line between them is the drafter's.  The record is not touched.
+    """
     note: str = ""
     """What the drafter interpreted, in their own words, printed on the sheet."""
 
     def __post_init__(self) -> None:
+        if not isinstance(self.straight_far_edges, bool):
+            raise DrawingSheetError("straight_far_edges must be a boolean")
         try:
             emphasis = finite_number(
                 self.groove_edge_emphasis,
@@ -645,6 +657,7 @@ class Interpretation:
             self.groove_edge_emphasis > 0.0
             or self.line_smoothing_mm > 0.0
             or self.stroke_straightening_deg > 0.0
+            or self.straight_far_edges
             or bool(self.note)
         )
 
@@ -656,6 +669,8 @@ class Interpretation:
             parts.append(f"획 직선화 {self.stroke_straightening_deg:g}°")
         if self.groove_edge_emphasis > 0.0:
             parts.append(f"홈 능선 강조 {self.groove_edge_emphasis * 100.0:g}%")
+        if self.straight_far_edges:
+            parts.append("뒷선 직선")
         if self.note:
             parts.append(self.note)
         return (INTERPRETATION_LABEL, " · ".join(parts))
@@ -665,6 +680,7 @@ class Interpretation:
             "groove_edge_emphasis": self.groove_edge_emphasis,
             "line_smoothing_mm": self.line_smoothing_mm,
             "note": self.note,
+            "straight_far_edges": self.straight_far_edges,
             "stroke_straightening_deg": self.stroke_straightening_deg,
         }
 
@@ -2943,6 +2959,7 @@ def _far_edges_past_fold(
     gap_mm: float,
     line_smoothing_mm: float,
     far_record_id: str,
+    straight: bool = False,
 ) -> list[VectorPath]:
     """The edges of the far half's silhouette that show through the cut.
 
@@ -2955,7 +2972,8 @@ def _far_edges_past_fold(
     the gap and left to the section's own line, and where it stands off
     the cut by more than the gap (a back that bulges past the cut) it is
     drawn, because it is there.  Each run ends where it first comes
-    within the gap, so nothing joins the cut.
+    within the gap, so nothing joins the cut.  ``straight`` draws each
+    run as the one segment between its measured ends.
     """
 
     import shapely  # noqa: PLC0415
@@ -3005,6 +3023,8 @@ def _far_edges_past_fold(
                     half_plane_side(run[0], base=base, direction=direction)
                 ):
                     run = run[::-1]
+                if straight:
+                    run = run[[0, -1]]
                 edges.append(
                     VectorPath(
                         id=f"far-edge:{far_record_id}:{path.id}:{piece_index:02d}:{run_index:02d}",
@@ -4305,6 +4325,7 @@ def _mirrored_figure(
     reach_gap_mm: float = 0.0,
     elevation_side: str = MIRROR_ELEVATION_LEFT,
     far_silhouette: tuple[DerivedRecord, VectorGeometryPayload] | None = None,
+    straight_far_edges: bool = False,
 ) -> tuple[
     DerivedRecord,
     dict[str, list[Any]],
@@ -4443,6 +4464,7 @@ def _mirrored_figure(
                 gap_mm=reach_gap_mm,
                 line_smoothing_mm=line_smoothing_mm,
                 far_record_id=far_record.id,
+                straight=straight_far_edges,
             )
         )
     jog_line_sets = [_jog_lines(base, direction, across, jog) for jog in jogs]
@@ -5585,6 +5607,7 @@ def compose_drawing_sheet(
             preset=resolve_drawing_style_preset(options.style_preset),
             interior_by_kind=interior_by_kind,
             far_silhouette=far_silhouette,
+            straight_far_edges=options.interpretation.straight_far_edges,
             outline_reach=options.outline_reach,
             break_reach=options.break_reach,
             reach_gap_mm=REACH_GAP_PAPER_MM * float(options.scale_denominator),
@@ -5610,6 +5633,7 @@ def compose_drawing_sheet(
                                 if ":far-edge:" in path.id
                             )
                         ),
+                        "far_edges": "straight" if options.interpretation.straight_far_edges else "measured",
                         "far_silhouette_record_id": far_silhouette[0].id,
                         "far_silhouette_recipe_hash": far_silhouette[0].recipe_hash,
                     }
@@ -6135,6 +6159,7 @@ def validate_drawing_sheet_bytes(svg_bytes: bytes, sidecar_bytes: bytes) -> None
                 groove_edge_emphasis=interpretation.get("groove_edge_emphasis", 0.0),
                 line_smoothing_mm=interpretation.get("line_smoothing_mm", 0.0),
                 note=str(interpretation.get("note", "")),
+                straight_far_edges=interpretation.get("straight_far_edges", False),
                 stroke_straightening_deg=interpretation.get("stroke_straightening_deg", 0.0),
             )
         except DrawingSheetError as exc:

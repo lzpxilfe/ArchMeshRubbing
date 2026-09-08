@@ -122,6 +122,7 @@ def test_the_sheet_declares_the_width_and_its_bytes_move_only_then() -> None:
         "groove_edge_emphasis": 0.0,
         "line_smoothing_mm": 0.5,
         "note": "",
+        "straight_far_edges": False,
         "stroke_straightening_deg": 0.0,
     }
     (row,) = [row for row in sidecar["title_block"] if row["label"] == INTERPRETATION_LABEL]
