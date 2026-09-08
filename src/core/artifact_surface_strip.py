@@ -325,6 +325,43 @@ def _inconsistent_oriented_edge_count(faces: np.ndarray) -> int:
     return int(np.count_nonzero(counts > 1))
 
 
+_SHEET_LEVEL_COUNT = 20
+
+
+def _sheets_compared_by_level(
+    *, heights: np.ndarray, radii: np.ndarray, outer: np.ndarray, inner: np.ndarray
+) -> tuple[int, int]:
+    """Compare the two sheets' median radii level by level.
+
+    The height range the two sheets share is cut into levels; at each level
+    holding faces of both, the sheet with the larger median radius is the
+    outer one there.  Returned are the face counts of the levels where the
+    outward-facing sheet is the outer, and where it is the inner.
+    """
+
+    both = outer | inner
+    low = float(heights[both].min())
+    high = float(heights[both].max())
+    span = max(high - low, 1e-9)
+    level = np.clip(
+        np.floor((heights - low) / span * _SHEET_LEVEL_COUNT).astype(np.int64), 0, _SHEET_LEVEL_COUNT - 1
+    )
+    nearer_out = 0
+    nearer_in = 0
+    for index in range(_SHEET_LEVEL_COUNT):
+        at_level = level == index
+        outer_here = outer & at_level
+        inner_here = inner & at_level
+        if not outer_here.any() or not inner_here.any():
+            continue
+        count = int(np.count_nonzero(outer_here) + np.count_nonzero(inner_here))
+        if float(np.median(radii[outer_here])) > float(np.median(radii[inner_here])):
+            nearer_out += count
+        else:
+            nearer_in += count
+    return nearer_out, nearer_in
+
+
 def select_surface_strip(
     vertices_world_mm: object,
     faces: object,
@@ -437,16 +474,26 @@ def select_surface_strip(
 
     outer_radius_mean = float(np.mean(radii[outer]))
     inner_radius_mean = float(np.mean(radii[inner])) if inner_count else float("nan")
-    if inner_count and inner_radius_mean >= outer_radius_mean:
-        # Both sheets are here and the outward-facing one is the nearer to the
-        # axis.  That is an inside-out mesh, and taking the rubbing from it
-        # would put the wrong surface on the drawing.
-        raise ArtifactSurfaceStripError(
-            "the outward-facing faces of this strip sit closer to the axis "
-            f"({outer_radius_mean:.3f} mm) than the inward-facing ones "
-            f"({inner_radius_mean:.3f} mm); this mesh appears to be wound "
-            "inside out, so its outer surface cannot be told from its inner"
+    if inner_count:
+        # Both sheets are here.  Which is the nearer to the axis is a
+        # question asked at one height: on a flaring dish the inner wall up
+        # by the rim is wider than the outer wall down by the foot, and a
+        # mean over every face says the wrong thing.  So the radii are
+        # compared level by level, each level's verdict weighted by its
+        # faces, and an outward-facing sheet that is the nearer at most
+        # levels is an inside-out mesh: taking the rubbing from it would
+        # put the wrong surface on the drawing.
+        nearer_out, nearer_in = _sheets_compared_by_level(
+            heights=heights, radii=radii, outer=outer, inner=inner
         )
+        if nearer_in > nearer_out:
+            raise ArtifactSurfaceStripError(
+                "the outward-facing faces of this strip sit closer to the axis "
+                "than the inward-facing ones at the same heights (at levels holding "
+                f"{nearer_in} of the faces, against {nearer_out}); this mesh appears "
+                "to be wound inside out, so its outer surface cannot be told from "
+                "its inner"
+            )
 
     selected_faces = triangles[outer]
     inconsistent = _inconsistent_oriented_edge_count(selected_faces)

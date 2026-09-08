@@ -368,3 +368,66 @@ def test_the_cut_strip_unrolls_the_way_the_painted_one_did() -> None:
         )
     )
     assert abs(int(qc["height_um"]) / 1000.0 - meridian) / meridian < 0.03
+
+
+def _flaring_dish(*, segments: int = 72) -> tuple[np.ndarray, np.ndarray]:
+    """A dish whose outer wall is meshed densely near the foot and whose
+    inner wall is meshed densely near the rim: the outward-facing sheet's
+    mean radius is then the smaller, though at every height it is the
+    larger, as on a scan whose triangles follow the relief."""
+
+    def radius(z: float) -> float:
+        return 30.0 + 1.3 * z
+
+    outer_z = np.concatenate([np.linspace(0.0, 12.0, 40), np.linspace(13.0, 40.0, 6)])
+    inner_z = np.concatenate([np.linspace(3.0, 28.0, 6), np.linspace(29.0, 40.0, 40)])
+    vertices: list[list[float]] = []
+    faces: list[list[int]] = []
+
+    def ring(r: float, z: float) -> int:
+        start = len(vertices)
+        for k in range(segments):
+            a = 2.0 * math.pi * (k + 0.5) / segments
+            vertices.append([r * math.cos(a), r * math.sin(a), z])
+        return start
+
+    def band(lower: int, upper: int, *, inward: bool) -> None:
+        for k in range(segments):
+            n = (k + 1) % segments
+            first = [lower + k, lower + n, upper + n]
+            second = [lower + k, upper + n, upper + k]
+            if inward:
+                first.reverse()
+                second.reverse()
+            faces.append(first)
+            faces.append(second)
+
+    outer = [ring(radius(z), z) for z in outer_z]
+    inner = [ring(radius(z) - 3.0, z) for z in inner_z]
+    for a, b in zip(outer, outer[1:]):
+        band(a, b, inward=False)
+    for a, b in zip(inner, inner[1:]):
+        band(a, b, inward=True)
+    band(outer[-1], inner[-1], inward=False)  # the rim's top
+    band(inner[0], outer[0], inward=False)  # the floor, closing the foot
+    return np.asarray(vertices, dtype=np.float64), np.asarray(faces, dtype=np.int32)
+
+
+def test_the_sheets_are_told_apart_at_the_same_height_not_by_their_means() -> None:
+    """A flaring dish meshed unevenly has an outer wall whose mean radius is
+    below the inner wall's, though it is the outer at every height; the
+    inside-out test compares level by level, so the outer wall is found -
+    and a mesh that really is inside out is still refused."""
+
+    vertices, faces = _flaring_dish()
+    centroids = vertices[faces].mean(axis=1)
+    normals = np.cross(vertices[faces][:, 1] - vertices[faces][:, 0], vertices[faces][:, 2] - vertices[faces][:, 0])
+    radial = np.einsum("ij,ij->i", normals[:, :2], centroids[:, :2])
+    radii = np.hypot(centroids[:, 0], centroids[:, 1])
+    assert radii[radial > 0].mean() < radii[radial < 0].mean(), "the means say the wrong thing"
+    selection = select_surface_strip(vertices, faces, strip_parameters(minimum_height_um=1_000, maximum_height_um=39_000))
+    chosen = vertices[faces[selection.face_indices]].mean(axis=1)
+    # Every chosen face is on the outer wall: its radius is the outer radius at its height.
+    assert np.all(np.abs(np.hypot(chosen[:, 0], chosen[:, 1]) - (30.0 + 1.3 * chosen[:, 2])) < 1.5)
+    with pytest.raises(ArtifactSurfaceStripError, match="at the same heights"):
+        select_surface_strip(vertices, np.ascontiguousarray(faces[:, ::-1]), strip_parameters(minimum_height_um=1_000, maximum_height_um=39_000))

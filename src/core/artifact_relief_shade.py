@@ -65,6 +65,34 @@ RELIEF_SHADE_FORESHORTENING = "arc_cos_corrected/v1"
 #: The base is a surface of revolution about the canonical axis, which the
 #: four side views hold as their v axis; a plan view has no such base.
 RELIEF_SHADE_VIEWS: tuple[str, ...] = ("front", "back", "left", "right")
+#: Where the shade is read.  A side view shows the petals a viewer sees,
+#: three or four of them, foreshortened towards the silhouette; the axis
+#: development unrolls the wall about its axis so every petal round the
+#: vessel lies flat on one strip, the way a drafter draws a band of
+#: ornament as a 전개도.  On the development u is the arc r(z) * theta
+#: from a seam meridian and v the meridian arc length up the wall, both
+#: read off the outside's own median profile, so the strip is undistorted
+#: and the relief is the radius above that profile.
+RELIEF_SHADE_DOMAIN_VIEW = "view/v1"
+RELIEF_SHADE_DOMAIN_DEVELOPMENT = "axis_development/v1"
+RELIEF_SHADE_DOMAINS: tuple[str, ...] = (RELIEF_SHADE_DOMAIN_VIEW, RELIEF_SHADE_DOMAIN_DEVELOPMENT)
+RELIEF_SHADE_DEVELOPMENT_LABEL = "development"
+RELIEF_SHADE_DEVELOPMENT_SPACE = "axis_development_mm/v1"
+RELIEF_SHADE_DEVELOPMENT_DIRECTION = "counterclockwise_from_seam/v1"
+#: A flaring wall's true development is a fan; a drafter's strip is
+#: straight, the way a band of ornament is read, so the strip is the wall
+#: seen as a cylinder of one reference radius - the profile's radius at
+#: the middle of the window's height - and the pattern keeps its
+#: verticals while its widths scale with the wall's own radius over that.
+RELIEF_SHADE_DEVELOPMENT_MODEL = "cylindrical_at_window_middle/v1"
+#: The seam: where the strip is cut.  The back of the front view - the
+#: meridian at +90 degrees - so the front the elevation shows lies whole
+#: in the middle of the strip.
+DEFAULT_RELIEF_SHADE_SEAM_MILLIDEG = 90_000
+DEFAULT_RELIEF_SHADE_PROFILE_BIN_UM = 250
+#: A face whose normal leaves the axis by at least this cosine is the
+#: outer wall; the rim's top, the floor and the foot's underside are not.
+DEFAULT_RELIEF_SHADE_OUTWARD_COS_THOUSANDTHS = 250
 
 DEFAULT_RELIEF_SHADE_PIXELS_PER_MM = 10
 DEFAULT_RELIEF_SHADE_FACING_COS = 0.05
@@ -138,6 +166,19 @@ def _view_name(view: object) -> str:
     return name
 
 
+def _space_label(value: object) -> str:
+    """A raster's label: the view it was read in, or ``development``."""
+
+    name = value.value if isinstance(value, OutlineView) else value
+    if isinstance(name, str) and name == RELIEF_SHADE_DEVELOPMENT_LABEL:
+        return name
+    return _view_name(name)
+
+
+def _coordinate_space(label: str) -> str:
+    return RELIEF_SHADE_DEVELOPMENT_SPACE if label == RELIEF_SHADE_DEVELOPMENT_LABEL else RELIEF_SHADE_COORDINATE_SPACE
+
+
 @dataclass(frozen=True, slots=True)
 class ReliefShadeRaster:
     """The shade on a view's plane: grey 0 with the alpha the darkness,
@@ -167,7 +208,7 @@ class ReliefShadeRaster:
         copied.setflags(write=False)
         object.__setattr__(self, "pixels", copied)
         object.__setattr__(self, "pixels_per_meter", ppm)
-        object.__setattr__(self, "view", _view_name(self.view))
+        object.__setattr__(self, "view", _space_label(self.view))
 
     @property
     def darkness(self) -> np.ndarray:
@@ -200,10 +241,14 @@ class ReliefShadeRaster:
             (self.bottom_um + self.height_um) / 1000.0,
         )
 
+    @property
+    def is_development(self) -> bool:
+        return self.view == RELIEF_SHADE_DEVELOPMENT_LABEL
+
     def semantic_header(self) -> dict[str, Any]:
         return {
             "bottom_um": int(self.bottom_um),
-            "coordinate_space": RELIEF_SHADE_COORDINATE_SPACE,
+            "coordinate_space": _coordinate_space(self.view),
             "height_pixels": self.height_pixels,
             "left_um": int(self.left_um),
             "pixel_format": RELIEF_SHADE_PIXEL_FORMAT,
@@ -268,7 +313,8 @@ _RECEIPT_KEYS = frozenset(
 
 def validate_relief_shade_receipt(value: object) -> dict[str, Any]:
     receipt = _exact_keys(value, _RECEIPT_KEYS, name="relief shade receipt")
-    if receipt["coordinate_space"] != RELIEF_SHADE_COORDINATE_SPACE:
+    label = _space_label(receipt["view"])
+    if receipt["coordinate_space"] != _coordinate_space(label):
         raise ArtifactReliefShadeError("relief shade receipt names another coordinate space")
     if receipt["pixel_format"] != RELIEF_SHADE_PIXEL_FORMAT or receipt["row_order"] != RELIEF_SHADE_ROW_ORDER:
         raise ArtifactReliefShadeError("relief shade receipt names a pixel layout this release does not have")
@@ -288,7 +334,7 @@ def validate_relief_shade_receipt(value: object) -> dict[str, Any]:
         raise ArtifactReliefShadeError("relief shade receipt byte length does not match its size")
     return {
         "bottom_um": _strict_int(receipt["bottom_um"], name="bottom_um", minimum=-MAX_RELIEF_SHADE_GRID_INDEX, maximum=MAX_RELIEF_SHADE_GRID_INDEX),
-        "coordinate_space": RELIEF_SHADE_COORDINATE_SPACE,
+        "coordinate_space": _coordinate_space(label),
         "height_pixels": height,
         "left_um": _strict_int(receipt["left_um"], name="left_um", minimum=-MAX_RELIEF_SHADE_GRID_INDEX, maximum=MAX_RELIEF_SHADE_GRID_INDEX),
         "pixel_format": RELIEF_SHADE_PIXEL_FORMAT,
@@ -298,7 +344,7 @@ def validate_relief_shade_receipt(value: object) -> dict[str, Any]:
         "raw_pixel_sha256": _sha256(receipt["raw_pixel_sha256"], name="raw_pixel_sha256"),
         "row_order": RELIEF_SHADE_ROW_ORDER,
         "schema_version": RELIEF_SHADE_RECEIPT_SCHEMA_VERSION,
-        "view": _view_name(receipt["view"]),
+        "view": label,
         "width_pixels": width,
     }
 
@@ -328,9 +374,13 @@ def _light_block(light: Sequence[int]) -> list[int]:
 
 def relief_shade_recipe(
     *,
-    view: OutlineView | str,
     source_vertex_count: int,
     source_face_count: int,
+    view: OutlineView | str | None = None,
+    domain: str = RELIEF_SHADE_DOMAIN_VIEW,
+    seam_millideg: int = DEFAULT_RELIEF_SHADE_SEAM_MILLIDEG,
+    profile_bin_um: int = DEFAULT_RELIEF_SHADE_PROFILE_BIN_UM,
+    outward_cos_thousandths: int = DEFAULT_RELIEF_SHADE_OUTWARD_COS_THOUSANDTHS,
     pixels_per_mm: int = DEFAULT_RELIEF_SHADE_PIXELS_PER_MM,
     facing_cos: float = DEFAULT_RELIEF_SHADE_FACING_COS,
     margin_um: int = DEFAULT_RELIEF_SHADE_MARGIN_UM,
@@ -348,14 +398,34 @@ def relief_shade_recipe(
     edge_erosion_pixels: int = DEFAULT_RELIEF_SHADE_EDGE_EROSION_PIXELS,
     window_mm: Sequence[float] | None = None,
 ) -> dict[str, Any]:
-    """The recipe: the view and every number that decides a pixel.
+    """The recipe: where the shade is read and every number that decides a pixel.
 
-    ``window_mm`` is (left, bottom, right, top) in the view's millimetres:
-    only relief inside it is shaded - the band the motif occupies, not the
-    lip's underside or the foot's root, which the line work already draws
-    - or None for the whole view.
+    ``domain`` is a side ``view`` (then ``view`` names it) or the axis
+    development (then ``view`` is None and ``seam_millideg`` says where
+    the strip is cut, ``profile_bin_um`` how finely the outside's profile
+    is read, ``outward_cos_thousandths`` which faces are the outer wall).
+    ``window_mm`` is (left, bottom, right, top): in a view, the view's
+    millimetres; on the development, left and right along the strip and
+    bottom and top as heights on the artifact - only relief inside it is
+    shaded, the band the motif occupies, not the lip's underside or the
+    foot's root, which the line work already draws - or None for all.
     """
 
+    if domain not in RELIEF_SHADE_DOMAINS:
+        raise ArtifactReliefShadeError(f"domain must be one of {', '.join(RELIEF_SHADE_DOMAINS)}; got {domain!r}")
+    development: dict[str, Any] | None = None
+    if domain == RELIEF_SHADE_DOMAIN_DEVELOPMENT:
+        if view is not None:
+            raise ArtifactReliefShadeError("a development shade is read round the axis, not in a view; leave view None")
+        development = {
+            "direction": RELIEF_SHADE_DEVELOPMENT_DIRECTION,
+            "model": RELIEF_SHADE_DEVELOPMENT_MODEL,
+            "outward_cos_thousandths": _strict_int(outward_cos_thousandths, name="outward_cos_thousandths", minimum=50, maximum=1000),
+            "profile_bin_um": _strict_int(profile_bin_um, name="profile_bin_um", minimum=10, maximum=10_000),
+            "seam_millideg": _strict_int(seam_millideg, name="seam_millideg", minimum=-180_000, maximum=180_000),
+        }
+    elif view is None:
+        raise ArtifactReliefShadeError("a view shade needs its view")
     if isinstance(facing_cos, bool) or not isinstance(facing_cos, (int, float)) or not math.isfinite(facing_cos):
         raise ArtifactReliefShadeError("facing_cos must be a finite number")
     window: dict[str, int] | None = None
@@ -385,7 +455,9 @@ def relief_shade_recipe(
             "outlier_um": _strict_int(outlier_um, name="outlier_um", minimum=1, maximum=1_000_000),
             "row_smoothing_um": _strict_int(row_smoothing_um, name="row_smoothing_um", minimum=0, maximum=100_000),
         },
-        "coordinate_space": RELIEF_SHADE_COORDINATE_SPACE,
+        "coordinate_space": _coordinate_space(RELIEF_SHADE_DEVELOPMENT_LABEL if development else "front"),
+        "development_policy": development,
+        "domain": domain,
         "kind": RELIEF_SHADE_OPERATION_KIND,
         "raster_policy": {
             "facing_cos_millionths": _strict_int(
@@ -411,7 +483,7 @@ def relief_shade_recipe(
         },
         "source_face_count": _strict_int(source_face_count, name="source_face_count", minimum=1, maximum=10**9),
         "source_vertex_count": _strict_int(source_vertex_count, name="source_vertex_count", minimum=3, maximum=10**9),
-        "view": _view_name(view),
+        "view": None if development else _view_name(view),
         "window": window,
     }
 
@@ -422,6 +494,8 @@ _RECIPE_KEYS = frozenset(
         "algorithm_version",
         "base_policy",
         "coordinate_space",
+        "development_policy",
+        "domain",
         "kind",
         "raster_policy",
         "relief_policy",
@@ -440,8 +514,21 @@ def validate_relief_shade_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
     block = _exact_keys(recipe, _RECIPE_KEYS, name="relief shade recipe")
     if block["algorithm"] != RELIEF_SHADE_ALGORITHM or block["algorithm_version"] != RELIEF_SHADE_ALGORITHM_VERSION:
         raise ArtifactReliefShadeError("relief shade recipe names another algorithm")
-    if block["coordinate_space"] != RELIEF_SHADE_COORDINATE_SPACE or block["kind"] != RELIEF_SHADE_OPERATION_KIND:
-        raise ArtifactReliefShadeError("relief shade recipe names another coordinate space or kind")
+    if block["kind"] != RELIEF_SHADE_OPERATION_KIND or block["domain"] not in RELIEF_SHADE_DOMAINS:
+        raise ArtifactReliefShadeError("relief shade recipe names another kind or domain")
+    development = block["development_policy"]
+    dev_kwargs: dict[str, Any] = {}
+    if development is not None:
+        dev = _exact_keys(
+            development, frozenset({"direction", "model", "outward_cos_thousandths", "profile_bin_um", "seam_millideg"}), name="development_policy"
+        )
+        if dev["direction"] != RELIEF_SHADE_DEVELOPMENT_DIRECTION or dev["model"] != RELIEF_SHADE_DEVELOPMENT_MODEL:
+            raise ArtifactReliefShadeError("relief shade recipe names a development this release does not have")
+        dev_kwargs = {
+            "seam_millideg": dev["seam_millideg"],
+            "profile_bin_um": dev["profile_bin_um"],
+            "outward_cos_thousandths": dev["outward_cos_thousandths"],
+        }
     raster = _exact_keys(
         block["raster_policy"],
         frozenset({"facing_cos_millionths", "layer_separation_um", "margin_um", "painter", "pixels_per_mm"}),
@@ -476,6 +563,8 @@ def validate_relief_shade_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
         raise ArtifactReliefShadeError("light_thousandths must be a list of three integers")
     rebuilt = relief_shade_recipe(
         view=block["view"],
+        domain=block["domain"],
+        **dev_kwargs,
         source_vertex_count=block["source_vertex_count"],
         source_face_count=block["source_face_count"],
         pixels_per_mm=raster["pixels_per_mm"],
@@ -534,25 +623,15 @@ def _masked_running_median(field: np.ndarray, ok: np.ndarray, width_pixels: floa
     return np.where(coverage >= 0.25, slow, row_median[:, None])
 
 
-def extract_relief_shade(
-    canonical_vertices_mm: object,
-    faces: object,
-    recipe: Mapping[str, Any],
+def _view_depth_field(
+    vertices: np.ndarray,
+    triangles: np.ndarray,
+    validated: Mapping[str, Any],
     *,
-    cancellation_probe: CancellationProbe | None = None,
-) -> tuple[ReliefShadeRaster, dict[str, Any]]:
-    """Read the relief's shade in the recipe's view."""
+    cancellation_probe: CancellationProbe | None,
+) -> tuple[np.ndarray, int, int, dict[str, Any], int]:
+    """The front-most depth of the wall on a side view's lattice."""
 
-    from scipy.ndimage import binary_erosion, gaussian_filter1d  # noqa: PLC0415
-
-    validated = validate_relief_shade_recipe(recipe)
-    vertices = np.asarray(canonical_vertices_mm, dtype=np.float64)
-    triangles = np.asarray(faces, dtype=np.int64)
-    if vertices.ndim != 2 or vertices.shape[1] != 3 or triangles.ndim != 2 or triangles.shape[1] != 3:
-        raise ArtifactReliefShadeError("mesh must be (n, 3) vertices and (m, 3) faces")
-    if int(vertices.shape[0]) != validated["source_vertex_count"] or int(triangles.shape[0]) != validated["source_face_count"]:
-        raise ArtifactReliefShadeError("mesh does not match the recipe's vertex and face counts")
-    raise_if_cancelled(cancellation_probe)
     frame = outline_frame(validated["view"])
     origin = np.asarray(frame.origin_world_mm, dtype=np.float64)
     u_axis = np.asarray(frame.u_axis_world, dtype=np.float64)
@@ -585,48 +664,177 @@ def extract_relief_shade(
         )
     except ArtifactRubbingError as exc:
         raise ArtifactReliefShadeError(str(exc)) from exc
+    return depth, minimum_u, minimum_v, raster_qc, int(visible.size)
+
+
+def _development_depth_field(
+    vertices: np.ndarray,
+    triangles: np.ndarray,
+    validated: Mapping[str, Any],
+    *,
+    cancellation_probe: CancellationProbe | None,
+) -> tuple[np.ndarray, int, int, dict[str, Any], int, tuple[np.ndarray, np.ndarray, float]]:
+    """The wall's radius on the axis development's lattice.
+
+    The outside's median profile r(z) gives every vertex its station: u is
+    the reference radius times its angle from the seam, v the meridian arc
+    up the profile to its height; the depth is its own radius, so what
+    stands proud of the profile stands proud on the strip.  An undercut face is behind the
+    wall's face at the same station and loses its pixels to it, as it
+    would to a viewer.  Returned with the field is the profile's height
+    and arc, for turning a height window into rows.
+    """
+
+    from .artifact_profile_break import ArtifactProfileBreakError, _facing_profile  # noqa: PLC0415
+
+    policy = validated["development_policy"]
+    raster_policy = validated["raster_policy"]
+    pixels_per_mm = int(raster_policy["pixels_per_mm"])
+    try:
+        heights, radii, _spread = _facing_profile(
+            vertices, triangles, height_bin_um=int(policy["profile_bin_um"]), inward=False, cancellation_probe=cancellation_probe
+        )
+    except ArtifactProfileBreakError as exc:
+        raise ArtifactReliefShadeError(str(exc)) from exc
+    arc = np.concatenate([[0.0], np.cumsum(np.hypot(np.diff(heights), np.diff(radii)))])
+    z = vertices[:, 2]
+    radius = np.hypot(vertices[:, 0], vertices[:, 1])
+    station = np.interp(z, heights, arc)
+    window = validated["window"]
+    middle = (
+        0.5 * (window["bottom_um"] + window["top_um"]) / 1000.0
+        if window is not None
+        else 0.5 * float(heights[0] + heights[-1])
+    )
+    reference_radius = float(np.interp(middle, heights, radii))
+    seam = math.radians(policy["seam_millideg"] / 1000.0)
+    theta = np.mod(np.arctan2(vertices[:, 1], vertices[:, 0]) - seam, 2.0 * math.pi)
+    corners = vertices[triangles]
+    normals = np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0])
+    centroids = corners.mean(axis=1)
+    radial = np.einsum("ij,ij->i", normals[:, :2], centroids[:, :2])
+    lengths = np.linalg.norm(normals, axis=1) * np.maximum(np.hypot(centroids[:, 0], centroids[:, 1]), 1e-12)
+    outward = radial > (policy["outward_cos_thousandths"] / 1000.0) * lengths
+    # A face across the seam would stretch the whole strip's width.
+    corner_theta = theta[triangles]
+    across_seam = (corner_theta.max(axis=1) - corner_theta.min(axis=1)) > math.pi
+    visible = np.flatnonzero(outward & ~across_seam)
+    if visible.size == 0:
+        raise ArtifactReliefShadeError("no face of the mesh faces away from the axis; nothing to develop")
+    projected = np.column_stack([reference_radius * theta, station])
+    try:
+        depth, minimum_u, minimum_v, raster_qc = _rasterize_depth_field(
+            projected,
+            radius,
+            triangles[visible],
+            pixels_per_mm=pixels_per_mm,
+            margin_pixels=int(round(raster_policy["margin_um"] / 1000.0 * pixels_per_mm)),
+            layer_separation_mm=raster_policy["layer_separation_um"] / 1000.0,
+            cancellation_probe=cancellation_probe,
+        )
+    except ArtifactRubbingError as exc:
+        raise ArtifactReliefShadeError(str(exc)) from exc
+    return depth, minimum_u, minimum_v, raster_qc, int(visible.size), (heights, arc, reference_radius)
+
+
+def extract_relief_shade(
+    canonical_vertices_mm: object,
+    faces: object,
+    recipe: Mapping[str, Any],
+    *,
+    cancellation_probe: CancellationProbe | None = None,
+) -> tuple[ReliefShadeRaster, dict[str, Any]]:
+    """Read the relief's shade where the recipe looks: a side view, or the
+    wall unrolled about its axis."""
+
+    from scipy.ndimage import binary_erosion, gaussian_filter1d  # noqa: PLC0415
+
+    validated = validate_relief_shade_recipe(recipe)
+    vertices = np.asarray(canonical_vertices_mm, dtype=np.float64)
+    triangles = np.asarray(faces, dtype=np.int64)
+    if vertices.ndim != 2 or vertices.shape[1] != 3 or triangles.ndim != 2 or triangles.shape[1] != 3:
+        raise ArtifactReliefShadeError("mesh must be (n, 3) vertices and (m, 3) faces")
+    if int(vertices.shape[0]) != validated["source_vertex_count"] or int(triangles.shape[0]) != validated["source_face_count"]:
+        raise ArtifactReliefShadeError("mesh does not match the recipe's vertex and face counts")
+    raise_if_cancelled(cancellation_probe)
+    raster_policy = validated["raster_policy"]
+    base_policy = validated["base_policy"]
+    pixels_per_mm = int(raster_policy["pixels_per_mm"])
+    on_development = validated["domain"] == RELIEF_SHADE_DOMAIN_DEVELOPMENT
+    smoothing_pixels = base_policy["row_smoothing_um"] / 1000.0 * pixels_per_mm
+    profile: tuple[np.ndarray, np.ndarray, float] | None = None
+    if on_development:
+        depth, minimum_u, minimum_v, raster_qc, visible_count, profile = _development_depth_field(
+            vertices, triangles, validated, cancellation_probe=cancellation_probe
+        )
+    else:
+        depth, minimum_u, minimum_v, raster_qc, visible_count = _view_depth_field(
+            vertices, triangles, validated, cancellation_probe=cancellation_probe
+        )
     raise_if_cancelled(cancellation_probe)
     # The depth lattice's row 0 is its lowest v; the shade's row 0 will be the top.
     height, width = depth.shape
     xs = (minimum_u + np.arange(width) + 0.5) / pixels_per_mm
-    covered = np.isfinite(depth) & (depth > 0.0)
-    if not covered.any():
-        raise ArtifactReliefShadeError("the view sees no wall on the viewer's side of the axis; nothing to shade")
-
-    # The base: the radius that explains the near wall's depth at each row,
-    # read where the wall faces the viewer squarely.
-    base_policy = validated["base_policy"]
-    inner = base_policy["inner_fraction_thousandths"] / 1000.0
-    grazing = base_policy["grazing_fraction_thousandths"] / 1000.0
-    abs_x = np.abs(xs)[None, :]
-    silhouette = np.where(covered, abs_x, 0.0).max(axis=1)
-    depth_near = np.where(covered, depth, np.nan)
-    with np.errstate(invalid="ignore"):
-        implied = np.sqrt(depth_near**2 + abs_x**2)
-    with warnings.catch_warnings():
-        # A row with no squarely seen pixel is all NaN, and is interpolated below.
-        warnings.simplefilter("ignore", RuntimeWarning)
-        row_radius = np.nanmedian(np.where(abs_x <= inner * silhouette[:, None], implied, np.nan), axis=1)
-    known = np.isfinite(row_radius)
-    if not known.any():
-        raise ArtifactReliefShadeError("no row of the view shows the wall squarely enough to read its base radius")
+    rows_mm = (minimum_v + np.arange(height) + 0.5) / pixels_per_mm
     rows = np.arange(height, dtype=np.float64)
-    row_radius = np.interp(rows, rows[known], row_radius[known])
-    smoothing_pixels = base_policy["row_smoothing_um"] / 1000.0 * pixels_per_mm
-    if smoothing_pixels > 0.0:
-        row_radius = gaussian_filter1d(row_radius, smoothing_pixels)
-    base = np.sqrt(np.maximum(row_radius[:, None] ** 2 - abs_x**2, 0.0))
-    relief = np.where(covered, depth, 0.0) - base
-    ok = covered & (abs_x <= grazing * row_radius[:, None]) & (np.abs(relief) <= base_policy["outlier_um"] / 1000.0)
+    if on_development:
+        covered = np.isfinite(depth)
+        if not covered.any():
+            raise ArtifactReliefShadeError("the development covers no pixel; nothing to shade")
+        # The base: the wall's median radius round the vessel at each row.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            row_radius = np.nanmedian(np.where(covered, depth, np.nan), axis=1)
+        known = np.isfinite(row_radius)
+        row_radius = np.interp(rows, rows[known], row_radius[known])
+        if smoothing_pixels > 0.0:
+            row_radius = gaussian_filter1d(row_radius, smoothing_pixels)
+        relief = np.where(covered, depth, 0.0) - row_radius[:, None]
+        ok = covered & (np.abs(relief) <= base_policy["outlier_um"] / 1000.0)
+        cos_round = None
+    else:
+        covered = np.isfinite(depth) & (depth > 0.0)
+        if not covered.any():
+            raise ArtifactReliefShadeError("the view sees no wall on the viewer's side of the axis; nothing to shade")
+        # The base: the radius that explains the near wall's depth at each
+        # row, read where the wall faces the viewer squarely.
+        inner = base_policy["inner_fraction_thousandths"] / 1000.0
+        grazing = base_policy["grazing_fraction_thousandths"] / 1000.0
+        abs_x = np.abs(xs)[None, :]
+        silhouette = np.where(covered, abs_x, 0.0).max(axis=1)
+        depth_near = np.where(covered, depth, np.nan)
+        with np.errstate(invalid="ignore"):
+            implied = np.sqrt(depth_near**2 + abs_x**2)
+        with warnings.catch_warnings():
+            # A row with no squarely seen pixel is all NaN, and is interpolated below.
+            warnings.simplefilter("ignore", RuntimeWarning)
+            row_radius = np.nanmedian(np.where(abs_x <= inner * silhouette[:, None], implied, np.nan), axis=1)
+        known = np.isfinite(row_radius)
+        if not known.any():
+            raise ArtifactReliefShadeError("no row of the view shows the wall squarely enough to read its base radius")
+        row_radius = np.interp(rows, rows[known], row_radius[known])
+        if smoothing_pixels > 0.0:
+            row_radius = gaussian_filter1d(row_radius, smoothing_pixels)
+        base = np.sqrt(np.maximum(row_radius[:, None] ** 2 - abs_x**2, 0.0))
+        relief = np.where(covered, depth, 0.0) - base
+        ok = covered & (abs_x <= grazing * row_radius[:, None]) & (np.abs(relief) <= base_policy["outlier_um"] / 1000.0)
+        # The slope across the view is what the wall's turn round the axis makes it.
+        cos_round = np.sqrt(np.clip(1.0 - (abs_x / np.maximum(row_radius[:, None], 1e-6)) ** 2, 0.0, 1.0))
     window = validated["window"]
     if window is not None:
-        cols_mm = xs
-        rows_mm = (minimum_v + np.arange(height) + 0.5) / pixels_per_mm
+        bottom_mm = window["bottom_um"] / 1000.0
+        top_mm = window["top_um"] / 1000.0
+        if profile is not None:
+            # On the development the window's bottom and top are heights on
+            # the artifact; the rows are meridian arc, so they are converted.
+            heights, arc, _reference = profile
+            bottom_mm = float(np.interp(bottom_mm, heights, arc))
+            top_mm = float(np.interp(top_mm, heights, arc))
         ok &= (
-            (cols_mm[None, :] >= window["left_um"] / 1000.0)
-            & (cols_mm[None, :] <= window["right_um"] / 1000.0)
-            & (rows_mm[:, None] >= window["bottom_um"] / 1000.0)
-            & (rows_mm[:, None] <= window["top_um"] / 1000.0)
+            (xs[None, :] >= window["left_um"] / 1000.0)
+            & (xs[None, :] <= window["right_um"] / 1000.0)
+            & (rows_mm[:, None] >= bottom_mm)
+            & (rows_mm[:, None] <= top_mm)
         )
     if not ok.any():
         raise ArtifactReliefShadeError(
@@ -646,15 +854,14 @@ def extract_relief_shade(
     filtered = np.where(ok, grain - slow, 0.0)
     raise_if_cancelled(cancellation_probe)
 
-    # The light on a height field whose normal is (-dh/dx, -dh/dy, 1); the
-    # slope across the view is what the wall's turn round the axis makes it.
+    # The light on a height field whose normal is (-dh/dx, -dh/dy, 1).
     shade_policy = validated["shade_policy"]
     gradient_x = np.zeros_like(filtered)
     gradient_y = np.zeros_like(filtered)
     gradient_x[:, 1:-1] = (filtered[:, 2:] - filtered[:, :-2]) * pixels_per_mm / 2.0
     gradient_y[1:-1, :] = (filtered[2:, :] - filtered[:-2, :]) * pixels_per_mm / 2.0
-    cos_round = np.sqrt(np.clip(1.0 - (abs_x / np.maximum(row_radius[:, None], 1e-6)) ** 2, 0.0, 1.0))
-    gradient_x *= cos_round
+    if cos_round is not None:
+        gradient_x *= cos_round
     normal_x, normal_y, normal_z = -gradient_x, -gradient_y, np.ones_like(filtered)
     norm = np.sqrt(normal_x**2 + normal_y**2 + 1.0)
     light = np.asarray(shade_policy["light_thousandths"], dtype=np.float64) / 1000.0
@@ -702,7 +909,7 @@ def extract_relief_shade(
         pixels_per_meter=pixels_per_mm * 1000,
         left_um=int(round((minimum_u + col0) / pixels_per_mm * 1000.0)),
         bottom_um=int(round((minimum_v + row0) / pixels_per_mm * 1000.0)),
-        view=validated["view"],
+        view=relief_shade_label(validated),
     )
     percentiles = np.percentile(filtered[ok], [5, 50, 95])
     qc = {
@@ -710,6 +917,7 @@ def extract_relief_shade(
         "base_radius_max_um": int(round(float(row_radius.max()) * 1000.0)),
         "base_radius_min_um": int(round(float(row_radius.min()) * 1000.0)),
         "covered_pixel_count": int(raster_qc["covered_pixel_count"]),
+        "domain": validated["domain"],
         "relief_max_um": int(round(float(filtered[ok].max()) * 1000.0)),
         "relief_min_um": int(round(float(filtered[ok].min()) * 1000.0)),
         "relief_p05_um": int(round(float(percentiles[0]) * 1000.0)),
@@ -717,9 +925,24 @@ def extract_relief_shade(
         "relief_p95_um": int(round(float(percentiles[2]) * 1000.0)),
         "trusted_pixel_count": int(np.count_nonzero(trusted)),
         "view": validated["view"],
-        "visible_face_count": int(visible.size),
+        "visible_face_count": visible_count,
     }
+    if profile is not None:
+        heights, arc, reference_radius = profile
+        qc["development_arc_um"] = int(round(float(arc[-1]) * 1000.0))
+        qc["development_reference_radius_um"] = int(round(reference_radius * 1000.0))
+        qc["development_circumference_um"] = int(round(float(np.nanmax(np.where(covered, xs[None, :], np.nan))) * 1000.0))
+        qc["profile_bin_count"] = int(heights.size)
+        qc["seam_millideg"] = int(validated["development_policy"]["seam_millideg"])
     return raster, qc
+
+
+def relief_shade_label(recipe: Mapping[str, Any]) -> str:
+    """The label a recipe's raster carries: its view, or ``development``."""
+
+    if recipe.get("domain") == RELIEF_SHADE_DOMAIN_DEVELOPMENT:
+        return RELIEF_SHADE_DEVELOPMENT_LABEL
+    return str(recipe["view"])
 
 
 @dataclass(frozen=True, slots=True)
@@ -734,7 +957,7 @@ class ReliefShadeComputation:
 def compute_relief_shade(
     session: ArtifactSession,
     *,
-    view: OutlineView | str,
+    view: OutlineView | str | None = None,
     cancellation_probe: CancellationProbe | None = None,
     **recipe_options: Any,
 ) -> ReliefShadeComputation:
@@ -822,7 +1045,7 @@ def relief_shade_receipt_from_record(record: DerivedRecord) -> dict[str, Any]:
     if record.geometry_ref != f"{RELIEF_SHADE_GEOMETRY_REF_PREFIX}{receipt['raster_sha256']}":
         raise ArtifactReliefShadeError("relief shade record geometry_ref does not match its receipt")
     recipe = validate_relief_shade_recipe(record.recipe)
-    if receipt["view"] != recipe["view"]:
+    if receipt["view"] != relief_shade_label(recipe):
         raise ArtifactReliefShadeError("relief shade receipt and recipe name different views")
     if receipt["pixels_per_meter"] != int(recipe["raster_policy"]["pixels_per_mm"]) * 1000:
         raise ArtifactReliefShadeError("relief shade receipt and recipe name different resolutions")
@@ -863,6 +1086,10 @@ __all__ = [
     "DEFAULT_RELIEF_SHADE_LIGHT_THOUSANDTHS",
     "DEFAULT_RELIEF_SHADE_PIXELS_PER_MM",
     "DEFAULT_RELIEF_SHADE_SLOW_UM",
+    "RELIEF_SHADE_DEVELOPMENT_LABEL",
+    "RELIEF_SHADE_DOMAINS",
+    "RELIEF_SHADE_DOMAIN_DEVELOPMENT",
+    "RELIEF_SHADE_DOMAIN_VIEW",
     "RELIEF_SHADE_PAYLOAD_EXTENSION_KEY",
     "RELIEF_SHADE_PIXEL_FORMAT",
     "RELIEF_SHADE_RECORD_TYPE",
@@ -873,6 +1100,7 @@ __all__ = [
     "compute_relief_shade",
     "extract_relief_shade",
     "relief_shade_computation_matches_active_projection",
+    "relief_shade_label",
     "relief_shade_receipt_from_record",
     "relief_shade_recipe",
     "require_relief_shade_raster",

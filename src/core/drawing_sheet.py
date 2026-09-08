@@ -79,8 +79,10 @@ from .artifact_paint_cutout import PAINT_CUTOUT_TONE_COLOUR
 from .artifact_relief_shade import (
     RELIEF_SHADE_RECORD_TYPE,
     ArtifactReliefShadeError,
+    ReliefShadeRaster,
     relief_shade_receipt_from_record,
     require_relief_shade_raster,
+    validate_relief_shade_recipe,
 )
 from .artifact_profile_break import (
     PROFILE_BREAK_RECORD_TYPE,
@@ -1664,6 +1666,7 @@ class _Stipple:
     dots_mm: tuple[tuple[float, float], ...]
     half: str
     dropped_section_side_count: int
+    rectangle_mm: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -3567,30 +3570,17 @@ def _stippled_reliefs(
             raster = require_relief_shade_raster(record, rasters[shade_id])
         except ArtifactReliefShadeError as exc:
             raise DrawingSheetError(str(exc)) from exc
+        if raster.is_development:
+            raise DrawingSheetError(
+                f"relief shade {shade_id!r} was read on the axis development, which lies on no "
+                "view; draw it as a figure of its own by listing its record id with the sheet's records"
+            )
         if outline_frame(raster.view) != figure_payload.frame:
             raise DrawingSheetError(
                 f"relief shade {shade_id!r} was read in the {raster.view} view, which is not "
                 f"the plane of {figure.id!r}"
             )
-        pitch = float(options.stipple_pitch_mm) * float(options.scale_denominator)
-        left, bottom, right, top = raster.rectangle_mm
-        columns = np.arange(math.floor(left / pitch), math.ceil(right / pitch) + 1, dtype=np.int64)
-        rows = np.arange(math.floor(bottom / pitch), math.ceil(top / pitch) + 1, dtype=np.int64)
-        cell_x, cell_y = np.meshgrid(columns, rows)
-        cell_x = cell_x.ravel()
-        cell_y = cell_y.ravel()
-        uniforms = _cell_uniforms(cell_x, cell_y)
-        xs = (cell_x.astype(np.float64) + uniforms[:, 0]) * pitch
-        ys = (cell_y.astype(np.float64) + uniforms[:, 1]) * pitch
-        pixels_per_mm = raster.pixels_per_meter / 1000.0
-        col = np.floor((xs - left) * pixels_per_mm).astype(np.int64)
-        row_up = np.floor((ys - bottom) * pixels_per_mm).astype(np.int64)
-        inside = (col >= 0) & (col < raster.width_pixels) & (row_up >= 0) & (row_up < raster.height_pixels)
-        darkness = np.zeros(xs.shape, dtype=np.float64)
-        darkness[inside] = raster.darkness[raster.height_pixels - 1 - row_up[inside], col[inside]] / 255.0
-        keep = uniforms[:, 2] < darkness
-        xs = xs[keep]
-        ys = ys[keep]
+        xs, ys = _stipple_dots(raster, options)
         dropped = 0
         half = "figure"
         if fold is not None:
@@ -3615,9 +3605,113 @@ def _stippled_reliefs(
                 dots_mm=tuple((round(float(x), 4), round(float(y), 4)) for x, y in zip(xs, ys)),
                 half=half,
                 dropped_section_side_count=dropped,
+                rectangle_mm=raster.rectangle_mm,
             )
         )
     return stipples
+
+
+def _stipple_dots(raster: ReliefShadeRaster, options: DrawingSheetOptions) -> tuple[np.ndarray, np.ndarray]:
+    """Where the dots fall for one shade at this sheet's scale, in the
+    raster's own millimetres: one chance per cell of the paper grid, the
+    chance the darkness under the cell's jittered point."""
+
+    pitch = float(options.stipple_pitch_mm) * float(options.scale_denominator)
+    left, bottom, right, top = raster.rectangle_mm
+    columns = np.arange(math.floor(left / pitch), math.ceil(right / pitch) + 1, dtype=np.int64)
+    rows = np.arange(math.floor(bottom / pitch), math.ceil(top / pitch) + 1, dtype=np.int64)
+    cell_x, cell_y = np.meshgrid(columns, rows)
+    cell_x = cell_x.ravel()
+    cell_y = cell_y.ravel()
+    uniforms = _cell_uniforms(cell_x, cell_y)
+    xs = (cell_x.astype(np.float64) + uniforms[:, 0]) * pitch
+    ys = (cell_y.astype(np.float64) + uniforms[:, 1]) * pitch
+    pixels_per_mm = raster.pixels_per_meter / 1000.0
+    col = np.floor((xs - left) * pixels_per_mm).astype(np.int64)
+    row_up = np.floor((ys - bottom) * pixels_per_mm).astype(np.int64)
+    inside = (col >= 0) & (col < raster.width_pixels) & (row_up >= 0) & (row_up < raster.height_pixels)
+    darkness = np.zeros(xs.shape, dtype=np.float64)
+    darkness[inside] = raster.darkness[raster.height_pixels - 1 - row_up[inside], col[inside]] / 255.0
+    keep = uniforms[:, 2] < darkness
+    return xs[keep], ys[keep]
+
+
+def relief_shade_caption(recipe: Mapping[str, Any]) -> str:
+    """What a developed shade's strip says beneath itself: where it was cut,
+    how it was lit, and which heights it covers."""
+
+    validated = validate_relief_shade_recipe(recipe)
+    development = validated["development_policy"]
+    shade = validated["shade_policy"]
+    facts = ["양각 음영 전개"]
+    if development is not None:
+        facts.append(f"이음매 {development['seam_millideg'] / 1000.0:g}°")
+    facts.append(f"이득 {shade['gain_thousandths'] / 1000.0:g}")
+    if shade["cavity_um"]:
+        facts.append(f"골 {shade['cavity_um'] / 1000.0:g} mm")
+    window = validated["window"]
+    if window is not None:
+        facts.append(f"높이 {window['bottom_um'] / 1000.0:g}-{window['top_um'] / 1000.0:g} mm")
+    return _CAPTION_SEPARATOR.join(facts)
+
+
+def _prepare_stipple_figure(
+    document: ArtifactDocument,
+    record: DerivedRecord,
+    rasters: Mapping[str, Any],
+    options: DrawingSheetOptions,
+) -> tuple[_Prepared, _Stipple]:
+    """A developed shade as a figure of its own: the wall unrolled, its
+    relief stippled, every petal round the vessel on one strip, with a
+    caption beneath saying how it was read."""
+
+    if record.lifecycle_status is not RecordLifecycleStatus.READY:
+        raise DrawingSheetError(f"only READY records may be drawn (record {record.id!r})")
+    if document.record_freshness(record.id) is not RecordFreshness.FRESH:
+        raise DrawingSheetError(f"only FRESH records may be drawn (record {record.id!r})")
+    if record.id not in rasters:
+        raise DrawingSheetError(
+            f"record {record.id!r} is a relief shade, so its recomputed raster must be given "
+            "to the sheet; a shade record stores a receipt, not pixels"
+        )
+    try:
+        receipt = relief_shade_receipt_from_record(record)
+        raster = require_relief_shade_raster(record, rasters[record.id])
+    except ArtifactReliefShadeError as exc:
+        raise DrawingSheetError(str(exc)) from exc
+    if not raster.is_development:
+        raise DrawingSheetError(
+            f"relief shade {record.id!r} was read in the {raster.view} view; paste it on that "
+            "view's figure with relief_stipples rather than drawing it on its own"
+        )
+    xs, ys = _stipple_dots(raster, options)
+    stipple = _Stipple(
+        record_id=record.id,
+        recipe_hash=record.recipe_hash,
+        raster_sha256=str(receipt["raster_sha256"]),
+        view=raster.view,
+        width_pixels=raster.width_pixels,
+        height_pixels=raster.height_pixels,
+        dots_mm=tuple((round(float(x), 4), round(float(y), 4)) for x, y in zip(xs, ys)),
+        half="development",
+        dropped_section_side_count=0,
+        rectangle_mm=raster.rectangle_mm,
+    )
+    left, bottom, right, top = raster.rectangle_mm
+    caption = relief_shade_caption(record.recipe)
+    lines = _caption_lines(caption, width_mm=(right - left) / float(options.scale_denominator))
+    prepared = _Prepared(
+        record_id=record.id,
+        record_type=record.type,
+        recipe_hash=record.recipe_hash,
+        payload_sha256=str(receipt["raster_sha256"]),
+        bounds=_bounds_with_caption((left, bottom, right, top), options.scale_denominator, line_count=len(lines)),
+        paths_by_kind={},
+        caption=caption,
+        caption_lines=lines,
+        stipples=(stipple,),
+    )
+    return prepared, stipple
 
 
 def _condition_paths_for_figure(
@@ -4697,6 +4791,20 @@ def _render_sheet(
                     f'cy="{number_token(round(paper_y, 4), field_name="stipple.y")}" r="{radius}"/>'
                 )
             lines.append("      </g>")
+            if figure.raster is None and figure.attached is None and not figure.paths_by_kind and figure.caption_lines:
+                # A strip of its own: the caption hangs under its lower edge.
+                left, bottom, right, _top = stipple.rectangle_mm
+                right_x, below_y = figure.placement.paper_xy((right, bottom))
+                lines.append(
+                    "      "
+                    + _caption_element(
+                        figure.caption_lines,
+                        right_mm=right_x,
+                        below_mm=below_y,
+                        color=options.stroke_color,
+                        index=index,
+                    )
+                )
         if figure.raster is not None:
             placement = figure.placement
             origin_x, origin_y = placement.origin_mm
@@ -5004,6 +5112,20 @@ def compose_drawing_sheet(
                     scale_denominator=options.scale_denominator,
                     note=note,
                 )
+            )
+            continue
+        shade_record = document.record_index.get(record_id)
+        if shade_record is not None and shade_record.type == RELIEF_SHADE_RECORD_TYPE:
+            figure_prepared, figure_stipple = _prepare_stipple_figure(document, shade_record, rasters, options)
+            prepared.append(figure_prepared)
+            stipple_drawn.append(
+                {
+                    "dot_count": str(len(figure_stipple.dots_mm)),
+                    "dropped_section_side_count": "0",
+                    "figure_record_id": shade_record.id,
+                    "half": figure_stipple.half,
+                    "record_id": shade_record.id,
+                }
             )
             continue
         try:

@@ -224,3 +224,71 @@ def test_the_hollows_between_motifs_can_be_shaded_darker(petalled) -> None:
     assert validate_relief_shade_recipe(hollowed.recipe)["shade_policy"]["cavity_um"] == 300
     assert hollowed.qc["shaded_pixel_count"] > plain.qc["shaded_pixel_count"]
     assert compute_relief_shade(petalled, view="front").raster.raster_sha256 == plain.raster.raster_sha256
+
+
+def test_the_wall_unrolled_puts_every_petal_on_one_strip(petalled) -> None:
+    """A side view shows a few petals; the axis development unrolls the
+    wall from a seam at the back, so the whole revolution lies on one
+    strip and the front's petal sits in its middle, at the reference
+    radius times half a turn.  The strip is a figure of its own, stippled,
+    with its caption; it cannot be pasted on a view, and a view's shade
+    cannot be drawn as a strip."""
+
+    computation = compute_relief_shade(petalled, domain="axis_development/v1")
+    raster = computation.raster
+    assert raster.is_development and raster.view == "development"
+    assert validate_relief_shade_recipe(computation.recipe) == computation.recipe
+    assert computation.recipe["view"] is None and computation.recipe["development_policy"]["seam_millideg"] == 90_000
+    reference = computation.qc["development_reference_radius_um"] / 1000.0
+    darkness = raster.darkness.astype(np.float64)
+    columns = raster.rectangle_mm[0] + (np.arange(raster.width_pixels) + 0.5) * 1000.0 / raster.pixels_per_meter
+    centre = float((darkness.sum(axis=0) * columns).sum() / darkness.sum())
+    assert abs(centre - math.pi * reference) < 8.0, (centre, reference)
+    assert computation.qc["development_circumference_um"] > 2.0 * math.pi * reference * 900
+    assert computation.qc["relief_max_um"] > 800
+    with pytest.raises(ArtifactReliefShadeError, match="leave view None"):
+        compute_relief_shade(petalled, view="front", domain="axis_development/v1")
+    with pytest.raises(ArtifactReliefShadeError, match="needs its view"):
+        compute_relief_shade(petalled)
+
+    session = commit_relief_shade(petalled, computation, record_id="record:strip", created_at=STAMP, operator="tester")
+    validate_known_records(session.document)
+    title = TitleBlock(artifact_label="양각 시험 호")
+    page = SheetPage(size="A4", orientation="landscape")
+    bundle = compose_drawing_sheet(
+        session.document, ["record:strip"],
+        options=DrawingSheetOptions(title_block=title, page=page, scale_denominator=2.0),
+        rasters={"record:strip": raster},
+    )
+    validate_drawing_sheet_bytes(bundle.svg_bytes, bundle.sidecar_bytes)
+    root = ET.fromstring(bundle.svg_bytes)
+    figure = next(el for el in root.iter() if el.attrib.get("id") == "figure-0000")
+    assert figure.attrib["data-record-type"] == RELIEF_SHADE_RECORD_TYPE
+    circles = [el for el in root.iter() if el.tag.endswith("circle")]
+    assert len(circles) > 50
+    caption = next(el for el in root.iter() if el.attrib.get("id", "").startswith("rubbing-caption-"))
+    assert "양각 음영 전개" in "".join(caption.itertext()) and "이음매 90°" in "".join(caption.itertext())
+    sidecar = json.loads(bundle.sidecar_bytes.decode("utf-8"))
+    assert sidecar["figures"][0]["record_type"] == RELIEF_SHADE_RECORD_TYPE
+    (drawn,) = sidecar["relief_stipples"]["drawn"]
+    assert drawn["half"] == "development" and int(drawn["dot_count"]) == len(circles)
+    again = compose_drawing_sheet(
+        session.document, ["record:strip"],
+        options=DrawingSheetOptions(title_block=title, page=page, scale_denominator=2.0),
+        rasters={"record:strip": raster},
+    )
+    assert again.svg_bytes == bundle.svg_bytes
+    with pytest.raises(DrawingSheetError, match="draw it as a figure of its own"):
+        compose_drawing_sheet(
+            session.document, ["record:front"],
+            options=DrawingSheetOptions(title_block=title, page=page, scale_denominator=2.0, relief_stipples=(("record:strip", "record:front"),)),
+            rasters={"record:strip": raster},
+        )
+    view_shade = compute_relief_shade(petalled, view="front")
+    with_view = commit_relief_shade(petalled, view_shade, record_id="record:shade", created_at=STAMP, operator="tester")
+    with pytest.raises(DrawingSheetError, match="paste it on that"):
+        compose_drawing_sheet(
+            with_view.document, ["record:shade"],
+            options=DrawingSheetOptions(title_block=title, page=page, scale_denominator=2.0),
+            rasters={"record:shade": view_shade.raster},
+        )
