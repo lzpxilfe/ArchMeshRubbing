@@ -454,6 +454,11 @@ from src.core.artifact_mesh_bodies import (  # noqa: E402
     describe_mesh_bodies,
     diagnose_mesh_bodies,
 )
+from src.core.artifact_mesh_fills import (  # noqa: E402
+    ArtifactMeshFillsError,
+    describe_filled_holes,
+    find_filled_holes,
+)
 from src.core.artifact_technique_annotation import (  # noqa: E402
     TECHNIQUE_FINGER_MARK,
     TECHNIQUE_KIND_LABELS_KO,
@@ -11542,6 +11547,43 @@ class MainWindow(QMainWindow):
             "실물을 보고 이 몸들이 한 기물인지 정한 뒤 작업하세요.",
         )
 
+    def _report_filled_holes(self, session) -> None:
+        """Say which surfaces the file arrived with were computed, not measured.
+
+        Most scans reach a drafter watertight, because a print or a viewer
+        wants them that way, and closing a hole leaves surface that looks
+        exactly like the rest.  Drawn without comment it becomes a statement
+        about the artifact - on 24ET0021 the two lids over the knob put a
+        solid 2.6 mm slab across the section where the pot has a hole - so
+        the finding is put in front of the drafter while it can still change
+        what they do.  Whether to take a fill away or keep it and draw it
+        presumed is theirs to decide.
+        """
+
+        try:
+            projection = session.materialize()
+            report = find_filled_holes(
+                np.asarray(projection.mesh.vertices, dtype=np.float64),
+                np.asarray(projection.mesh.faces, dtype=np.int64),
+            )
+        except ArtifactMeshFillsError as exc:
+            self.status_info.setText(f"{self.status_info.text()} | 메우기 진단 못 함: {exc}")
+            return
+        except Exception:
+            _LOGGER.debug("filled hole search failed", exc_info=True)
+            return
+
+        if not report.needs_decision:
+            return
+        self.status_info.setText(
+            f"{self.status_info.text()} | 메우기 {len(report.fills)}곳 · 실측자 확인 필요"
+        )
+        QMessageBox.warning(
+            self,
+            "채워 넣은 면",
+            "\n".join(describe_filled_holes(report)),
+        )
+
     def _finish_artifact_source_loaded(
         self,
         mesh_data,
@@ -11608,6 +11650,7 @@ class MainWindow(QMainWindow):
             )
             self._clear_artifact_pending_load(cancel_workbench=False)
             self._report_mesh_bodies(session)
+            self._report_filled_holes(session)
         except Exception as exc:
             if isinstance(artifact_ticket, ArtifactLoadTicket):
                 try:
