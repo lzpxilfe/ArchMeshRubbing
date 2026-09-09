@@ -5983,6 +5983,7 @@ class MainWindow(QMainWindow):
         readings_scroll.setWidgetResizable(True)
         self.readings_panel = ReadingsPanel()
         self.readings_panel.readingRequested.connect(self.on_reading_requested)
+        self.readings_panel.fileRequested.connect(self.on_reading_file_requested)
         readings_scroll.setWidget(self.readings_panel)
         self.readings_dock.setWidget(readings_scroll)
 
@@ -10327,6 +10328,16 @@ class MainWindow(QMainWindow):
             for mesh_data, filepath, obj_state, _verification, _binding in staged:
                 self.current_mesh = mesh_data
                 self.current_filepath = filepath
+                # An OBJ carries its own texture coordinates, so it is the
+                # atlas a pattern reading would ask for.  Offering it saves
+                # the archaeologist naming the file they just opened.
+                try:
+                    if str(filepath).lower().endswith(".obj"):
+                        self.readings_panel.set_path("atlas", str(filepath))
+                except Exception:
+                    logging.getLogger(__name__).info(
+                        "readings panel could not be offered the atlas", exc_info=True
+                    )
                 obj_name = str(obj_state.get("name", "")).strip() or Path(filepath).name
                 self.viewport.add_mesh_object(mesh_data, name=obj_name)
                 obj_loaded = self.viewport.selected_obj
@@ -21244,6 +21255,31 @@ class MainWindow(QMainWindow):
         self._save_plate_bundle(bundle)
 
     # --- the plate panel: every decision the composer takes ----------------
+
+    def on_reading_file_requested(self, which: str) -> None:
+        """Pick the OBJ or the map image a texture reading reads from.
+
+        The panel owns the path and the window owns the dialogue, the same
+        division the plate specification uses.  The search starts beside the
+        mesh that is open, because the maps a scanner writes sit next to it.
+        """
+
+        wanted = str(which)
+        beside = ""
+        try:
+            current = str(self.current_filepath or "")
+            beside = str(Path(current).parent) if current else ""
+        except Exception:
+            logging.getLogger(__name__).info("no folder to start from", exc_info=True)
+        if wanted == "atlas":
+            title = "텍스처 좌표가 있는 OBJ 고르기"
+            filters = "OBJ (*.obj);;모든 파일 (*)"
+        else:
+            title = "법선 지도 고르기" if wanted == "normal" else "색 지도 고르기"
+            filters = "이미지 (*.png *.jpg *.jpeg *.tif *.tiff);;모든 파일 (*)"
+        path, _ = QFileDialog.getOpenFileName(self, title, beside, filters)
+        if path:
+            self.readings_panel.set_path(wanted, path)
 
     def on_reading_requested(self, kind: str, record_id: str, options: dict) -> None:
         """Take the reading the panel asks for and record it.

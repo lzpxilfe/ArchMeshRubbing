@@ -1,7 +1,8 @@
 """The readings panel: make what the plate can draw.
 
-The plate draws a corner, a groove, a ridge, a far silhouette and the
-shade of a relief.  This is where they are made.  Each reading has its own
+The plate draws a corner, a groove, a ridge, a far silhouette, the shade
+of a relief, the lines of a pattern and the paint cut out of the colour.
+This is where they are made.  Each reading has its own
 few numbers - the least angle a corner must turn, how deep a groove is a
 groove - and each is taken on the artifact as the active Align stands it,
 then recorded under the archaeologist's name.
@@ -33,15 +34,25 @@ from PyQt6.QtWidgets import (
 from src.application.artifact_readings import (
     CREASE,
     FAR_SILHOUETTE,
+    PAINT_CUTOUT,
     PROFILE_BREAK,
     PROFILE_GROOVE,
     READING_KINDS,
     READING_LABELS,
     RELIEF_SHADE,
+    TEXTURE_LINES,
+    TEXTURE_READINGS,
 )
 from src.core.artifact_profile_break import (
     PROFILE_BREAK_SURFACE_INWARD,
     PROFILE_BREAK_SURFACE_OUTWARD,
+)
+from src.core.artifact_texture_lines import (
+    TEXTURE_LINES_DOMAIN_AXIS,
+    TEXTURE_LINES_DOMAIN_VIEW,
+    TEXTURE_LINES_RIDGE_RULE,
+    TEXTURE_LINES_STROKE_RULE,
+    TEXTURE_LINES_VALLEY_RULE,
 )
 
 #: The six views a silhouette or a shade may be read in.
@@ -65,6 +76,9 @@ class ReadingsPanel(QWidget):
     """
 
     readingRequested = pyqtSignal(str, str, dict)
+    #: Which file the archaeologist wants to pick: "atlas", "normal" or
+    #: "colour".  The window owns the dialogue; this panel owns the path.
+    fileRequested = pyqtSignal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -99,6 +113,7 @@ class ReadingsPanel(QWidget):
         outer.addWidget(self._groove_group())
         outer.addWidget(self._crease_group())
         outer.addWidget(self._view_group())
+        outer.addWidget(self._texture_group())
 
         self.btn_take = QPushButton("이 판독 읽고 기록하기")
         self.btn_take.setStyleSheet("font-weight: bold;")
@@ -180,14 +195,98 @@ class ReadingsPanel(QWidget):
         form.addRow("격자", self.spin_grid)
         return self.group_view
 
+    def _texture_group(self) -> QGroupBox:
+        """The two readings that read the scanner's images, not the mesh.
+
+        The pattern is in the texture and nowhere else in the file, so
+        these need the OBJ's texture coordinates and one map beside them.
+        A normal map gives the incised or raised lines; a colour map gives
+        the painted ones, and is the only thing a cutout can be read from.
+        """
+
+        self.group_texture = QGroupBox("텍스처에서 읽기")
+        form = QFormLayout(self.group_texture)
+
+        self.edit_atlas_path = QLineEdit()
+        self.edit_atlas_path.setPlaceholderText("텍스처 좌표가 있는 OBJ")
+        self.btn_atlas_path = QPushButton("OBJ 고르기")
+        self.btn_atlas_path.clicked.connect(lambda: self.fileRequested.emit("atlas"))
+        form.addRow(self.edit_atlas_path, self.btn_atlas_path)
+
+        self.combo_texture_map = QComboBox()
+        self.combo_texture_map.addItem("법선 지도 (음각·양각)", "normal")
+        self.combo_texture_map.addItem("색 지도 (채색)", "colour")
+        self.combo_texture_map.setToolTip(
+            "법선 지도는 파이거나 솟은 선을, 색 지도는 칠해진 선을 읽습니다."
+        )
+        self.combo_texture_map.currentIndexChanged.connect(self._kind_changed)
+        form.addRow("무엇에서", self.combo_texture_map)
+
+        self.edit_map_path = QLineEdit()
+        self.edit_map_path.setPlaceholderText("지도 이미지 (PNG 등)")
+        self.btn_map_path = QPushButton("이미지 고르기")
+        self.btn_map_path.clicked.connect(
+            lambda: self.fileRequested.emit(self.current_map_kind())
+        )
+        form.addRow(self.edit_map_path, self.btn_map_path)
+
+        self.combo_texture_rule = QComboBox()
+        self.combo_texture_rule.addItem("곡률 골 (파인 선)", TEXTURE_LINES_VALLEY_RULE)
+        self.combo_texture_rule.addItem("종이 획 (솟은 자리를 덮는 종이)", TEXTURE_LINES_STROKE_RULE)
+        self.combo_texture_rule.addItem("획 능선 (조밀한 문양·채색)", TEXTURE_LINES_RIDGE_RULE)
+        self.combo_texture_rule.setToolTip(
+            "곡률 골: 파인 시문선을 곡률로 읽습니다.\n"
+            "종이 획: 탁본의 종이가 읽듯 획 하나를 끝까지 한 줄로 읽습니다.\n"
+            "획 능선: 획이 서로 닿을 만큼 조밀할 때, 그리고 채색선을 읽을 때."
+        )
+        form.addRow("규칙", self.combo_texture_rule)
+
+        self.combo_texture_domain = QComboBox()
+        self.combo_texture_domain.addItem("뷰에서", TEXTURE_LINES_DOMAIN_VIEW)
+        self.combo_texture_domain.addItem("축 전개에서 (탁본처럼)", TEXTURE_LINES_DOMAIN_AXIS)
+        self.combo_texture_domain.setToolTip(
+            "뷰에서 읽으면 실루엣 쪽으로 갈수록 문양이 눌립니다.\n"
+            "축 전개는 회전축으로 정치한 기물을 펴서 읽으므로, 탁본의 종이가 보는 대로 읽습니다."
+        )
+        form.addRow("어디서", self.combo_texture_domain)
+
+        self.spin_texture_ppmm = QSpinBox()
+        self.spin_texture_ppmm.setRange(1, 200)
+        self.spin_texture_ppmm.setValue(20)
+        self.spin_texture_ppmm.setSuffix(" px/mm")
+        self.spin_texture_ppmm.setToolTip("텍스처를 뷰에 옮길 때의 해상도.  높을수록 느립니다.")
+        form.addRow("해상도", self.spin_texture_ppmm)
+        return self.group_texture
+
+    def current_map_kind(self) -> str:
+        """Which map this reading is being taken from."""
+
+        if self.current_kind() == PAINT_CUTOUT:
+            return "colour"
+        return str(self.combo_texture_map.currentData() or "normal")
+
+    def set_path(self, which: str, path: str) -> None:
+        """Put a path the window chose into the row it belongs to."""
+
+        if str(which) == "atlas":
+            self.edit_atlas_path.setText(str(path))
+        else:
+            self.edit_map_path.setText(str(path))
+
     def _kind_changed(self, *_args: object) -> None:
         kind = self.current_kind()
         self.about.setText(READING_LABELS[kind][1])
         self.group_break.setVisible(kind == PROFILE_BREAK)
         self.group_groove.setVisible(kind == PROFILE_GROOVE)
         self.group_crease.setVisible(kind == CREASE)
-        self.group_view.setVisible(kind in {FAR_SILHOUETTE, RELIEF_SHADE})
+        self.group_view.setVisible(kind in {FAR_SILHOUETTE, RELIEF_SHADE} | TEXTURE_READINGS)
         self.spin_grid.setVisible(kind == FAR_SILHOUETTE)
+        self.group_texture.setVisible(kind in TEXTURE_READINGS)
+        # A cutout is read from colour and nothing else, so there is no
+        # choice to offer for it.
+        self.combo_texture_map.setVisible(kind == TEXTURE_LINES)
+        self.combo_texture_rule.setVisible(kind == TEXTURE_LINES)
+        self.combo_texture_domain.setVisible(kind == TEXTURE_LINES)
         if not self.edit_record_id.text().strip():
             self.edit_record_id.setPlaceholderText(f"record id (예: record:{kind})")
 
@@ -219,6 +318,21 @@ class ReadingsPanel(QWidget):
                 "view": str(self.combo_view.currentData()),
                 "precision_grid_mm": float(self.spin_grid.value()),
             }
+        if kind in TEXTURE_READINGS:
+            options: dict[str, Any] = {
+                "view": str(self.combo_view.currentData()),
+                "atlas_path": self.edit_atlas_path.text().strip(),
+                "pixels_per_mm": int(self.spin_texture_ppmm.value()),
+            }
+            path = self.edit_map_path.text().strip()
+            if self.current_map_kind() == "colour":
+                options["colour_map_path"] = path
+            else:
+                options["normal_map_path"] = path
+            if kind == TEXTURE_LINES:
+                options["rule"] = str(self.combo_texture_rule.currentData())
+                options["domain"] = str(self.combo_texture_domain.currentData())
+            return options
         return {"view": str(self.combo_view.currentData())}
 
     def record_id(self) -> str:
@@ -242,6 +356,24 @@ class ReadingsPanel(QWidget):
             self.spin_crease_link.setValue(float(options["link_mm"]))
         if "precision_grid_mm" in options:
             self.spin_grid.setValue(float(options["precision_grid_mm"]))
+        if "pixels_per_mm" in options:
+            self.spin_texture_ppmm.setValue(int(options["pixels_per_mm"]))
+        if "atlas_path" in options:
+            self.edit_atlas_path.setText(str(options["atlas_path"]))
+        for key, combo in (
+            ("rule", self.combo_texture_rule),
+            ("domain", self.combo_texture_domain),
+        ):
+            if key in options:
+                index = combo.findData(str(options[key]))
+                if index >= 0:
+                    combo.setCurrentIndex(index)
+        for key, which in (("normal_map_path", "normal"), ("colour_map_path", "colour")):
+            if key in options:
+                self.edit_map_path.setText(str(options[key]))
+                index = self.combo_texture_map.findData(which)
+                if index >= 0:
+                    self.combo_texture_map.setCurrentIndex(index)
         if "view" in options:
             index = self.combo_view.findData(str(options["view"]))
             if index >= 0:

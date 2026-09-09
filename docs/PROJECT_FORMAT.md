@@ -706,14 +706,15 @@ recipe.texture_relief
 - **패널이 곧 명세다.** `src/gui/plate_panel.py`의 도판 패널은 이 명세를 양방향으로 말한다: 여섯 탭(도면·종이·반쪽·내선·문양·해석)이 옵션 전부를 덮고, `spec()`이 이 명세를 내놓고 `set_spec()`이 그대로 채운다. 그래서 패널과 완성된 도판의 sidecar와 디스크의 파일이 같은 문서다 — 도판의 명세를 열어 숫자 하나를 고치고 다시 그린다. 패널이 편집하지 않는 항목(상태·기법은 창의 다른 자리에서 고른다)은 받은 그대로 실어 나른다: 건드리지 않는 결정을 조용히 잃지 않는다. 계단의 무한 도달은 표에 `벽`으로 쓰고 읽는다.
 - `python main.py --plate PROJECT.amr SPEC.json OUT.svg`가 프로젝트와 명세만으로 도판을 다시 만든다(`src/application/plate_from_spec.py`). 선 도면은 문서만 있으면 되고, 탁본은 record가 픽셀을 저장하지 않으므로 GUI의 내보내기와 똑같이 recipe로 다시 계산해 영수증과 맞지 않으면 거부한다 — 그래서 탁본이 있는 도판은 원본이 동봉된 프로젝트가 필요하다. 채색 따 붙이기와 양각 점묘의 픽셀은 프로젝트에 없는 색 지도와 음영에서 오므로 명령줄은 거부하고, 그것을 계산한 자리에서 만들라고 말한다. `write_plate_spec`은 사람이 읽게 들여쓴 파일로 쓰되 정규 순서로 쓰고, 읽을 수 없는 것은 쓰지 않는다.
 
-## 판독 다섯 가지와 실측자 이름
+## 판독 일곱 가지와 실측자 이름
 
-도판은 오래전부터 꺾임·홈·능선·뒷면 실루엣·양각 음영을 그렸지만, **응용 계층에는 그것을 만드는 길이 없었다** — record 종류도 있고 composer도 그렸는데, 하나 만들려면 파이썬을 써야 했다. `src/application/artifact_readings.py`가 그 구멍을 메운다.
+도판은 오래전부터 꺾임·홈·능선·뒷면 실루엣·양각 음영·문양 내선·채색 따내기를 그렸지만, **응용 계층에는 그것을 만드는 길이 없었다** — record 종류도 있고 composer도 그렸는데, 하나 만들려면 파이썬을 써야 했다. `src/application/artifact_readings.py`가 그 구멍을 메운다.
 
-- 다섯 가지가 한 모양이다: `take_reading(session, kind, *, record_id, created_at, operator, options, depends_on_record_ids, cancellation_probe) -> ReadingOutcome`. `kind`는 `profile_break` · `profile_groove` · `crease` · `far_silhouette` · `relief_shade`. `options`는 그 판독 자신의 것(꺾임의 최소 각, 홈의 최소 깊이, 실루엣의 격자, 음영의 뷰)이고 **core에 손대지 않고 그대로 넘긴다** — 이 층이 판독의 뜻을 조용히 바꿀 수 없다.
+- 일곱 가지가 한 모양이다: `take_reading(session, kind, *, record_id, created_at, operator, options, depends_on_record_ids, cancellation_probe) -> ReadingOutcome`. `kind`는 `profile_break` · `profile_groove` · `crease` · `far_silhouette` · `relief_shade` · `texture_lines` · `paint_cutout`. `options`는 그 판독 자신의 것(꺾임의 최소 각, 홈의 최소 깊이, 실루엣의 격자, 음영의 뷰)이고 **core에 손대지 않고 그대로 넘긴다** — 이 층이 판독의 뜻을 조용히 바꿀 수 없다.
 - 계산은 활성 Align이 세운 그대로의 세션에서 하고, 커밋은 실측자 이름과 시각과 함께 한다. 결과 record는 그 Align에 대해 `READY`이고 `FRESH`다. 판독이 아무것도 찾지 못하면 **빈 기록을 남기지 않고 거부한다** — 빈 것은 발견이 아니다. 거부문은 어느 판독인지 이름으로 말한다.
 - 세션은 새것을 돌려준다(`ReadingOutcome.session`). 원래 문서는 건드리지 않는다. 양각 음영의 픽셀은 record가 영수증만 저장하므로 `ReadingOutcome.raster`로 따로 온다.
-- `src/gui/readings_panel.py`가 그 패널이다. 판독을 고르면 그 판독의 숫자 칸만 보이고, `readingRequested(kind, record_id, options)`만 낸다 — 문서는 창이 쥔다.
+- **텍스처를 읽는 둘은 파일이 더 필요하다.** 문양은 메쉬가 아니라 스캐너의 이미지에 있으므로, `texture_lines`와 `paint_cutout`은 `atlas_path`(텍스처 좌표가 있는 OBJ)와 지도 하나를 받는다: `normal_map_path`(파이거나 솟은 선) 또는 `colour_map_path`(칠해진 선). 채색 따내기는 색 지도에서만 읽는다. 이 층이 하는 파일 읽기는 그것뿐이고, core가 요구하는 그대로다. 파일이 빠지면 **무엇이 없는지 이름을 대고 거부한다**. recipe에는 두 파일의 해시가 그대로 남으므로 어떤 이미지에서 읽은 판독인지 나중에 검산할 수 있다.
+- `src/gui/readings_panel.py`가 그 패널이다. 판독을 고르면 그 판독의 숫자 칸만 보이고, `readingRequested(kind, record_id, options)`만 낸다 — 문서는 창이 쥔다. 파일을 고를 때도 마찬가지다: 패널은 `fileRequested(which)`로 물을 뿐이고 대화상자는 창이 연다. 문양 내선은 규칙(곡률 골·종이 획·획 능선)과 읽는 자리(뷰·축 전개)도 함께 고른다 — 채색선은 종이가 획을 읽듯 축 전개에서 읽어야 나온다.
 - **실측자 이름은 한 번 묻고 기억한다.** 창은 `QSettings`의 `operator/name`에 두고 모든 커밋에 같은 이름을 싣는다(메뉴에서 언제든 고친다). 그전에는 자리마다 다른 문자열이 들어가 같은 사람이 만든 기록이 서로 다른 사람의 것처럼 보였다.
 
 ## 완료 3/6/6 원자 묶음 `.amr-survey`
