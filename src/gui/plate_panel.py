@@ -175,6 +175,10 @@ class PlatePanel(QWidget):
     #: lose work nobody asked it to lose.
     CARRIED_KEYS: tuple[str, ...] = (
         "condition_records",
+        # A presumed stretch of the cut is the section of the faces the
+        # program supplied, not a number anybody types: it is computed
+        # where the repair is known and carried through this panel whole.
+        "presumed_section",
         "technique_records",
         "technique_angles_deg",
         "technique_representations",

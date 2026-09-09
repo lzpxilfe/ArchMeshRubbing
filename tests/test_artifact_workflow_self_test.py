@@ -21,7 +21,8 @@ from src.application.artifact_workflow_self_test import (
 #: an export embeds the document's.  Outlines written at 1.3.0 and earlier
 #: still recompute to the bytes they were written with.  They moved again
 #: with vector sidecar 1.9.0, which holds the section mark in the line-kind
-#: vocabulary: every export names the schema it was written under.
+#: vocabulary, and again with 1.10.0, which holds the presumed stretch of the
+#: cut: every export names the schema it was written under.
 def test_complete_workflow_self_test_has_deterministic_offline_receipts() -> None:
     result = run_artifact_workflow_self_test()
     repeated = run_artifact_workflow_self_test()
@@ -45,7 +46,7 @@ def test_complete_workflow_self_test_has_deterministic_offline_receipts() -> Non
     assert (result.vector_export_count, result.rubbing_export_count) == (9, 6)
     assert (result.tile_unwrap_count, result.tile_unwrap_export_count) == (1, 1)
     assert result.vector_set_sha256 == (
-        "a5558bca7075dc024c21ca8fe4423898365f42ea0a198f2daff148da9b769ef7"
+        "34f1f0c05423938b0f671da3d8c2a9f0ea92eebf05253fc0b58795f4ac72879e"
     )
     assert result.rubbing_set_sha256 == (
         "93812c3f10b9e8a0d720412b4ceb77efcf2d441c3beb9b329eeeaadfca01300a"
@@ -65,10 +66,10 @@ def test_complete_workflow_self_test_has_deterministic_offline_receipts() -> Non
         == result.tile_unwrap_export_sha256
     )
     assert result.survey_manifest_sha256 == (
-        "4d076382400e080df89d23b8fb5301a84348dd1b14957f568247215a0d21912b"
+        "deb7767551f2057613812d9044a062cad2fdb08b79175837f5111bedc2c9aaba"
     )
     assert result.survey_artifact_set_sha256 == (
-        "556d5fe13878a3271cbb328677f02cbf7fcad59fbc6ec1ce43d251c3e5da2d67"
+        "47738969f8d1d1899d1d8c332044a3d2cdef4dfbf3ccb4a24b0a9cf6b5a1e6b3"
     )
     for digest in (
         result.document_sha256,
@@ -85,7 +86,7 @@ def test_complete_workflow_self_test_has_deterministic_offline_receipts() -> Non
         assert set(digest) <= set("0123456789abcdef")
     assert result.field_pilot_contract == "artifact-pass-human-driver-pending"
     assert result.svg_sha256 == (
-        "ded79618a2d48d08c9eb48160400f3aa338488721c7ad8a1ea26783901b9a013"
+        "4014b98cd877015fb649f0722c14b605fd55b169c9a636509d9fe4109c5d2578"
     )
     assert result.png_sha256 == (
         "68fda651bbfe7edb779a49fff44fe4bc8c9fa1886a92d08477248a30b10620fd"
@@ -130,7 +131,7 @@ def test_complete_workflow_accepts_explicit_committed_directory_fsync_warning(
 
     assert result.record_count == 18
     assert result.survey_manifest_sha256 == (
-        "4d076382400e080df89d23b8fb5301a84348dd1b14957f568247215a0d21912b"
+        "deb7767551f2057613812d9044a062cad2fdb08b79175837f5111bedc2c9aaba"
     )
     assert (
         result.tile_unwrap_sha256

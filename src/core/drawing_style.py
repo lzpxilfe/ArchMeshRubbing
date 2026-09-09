@@ -61,6 +61,12 @@ def mm_to_pt(millimetres: float) -> float:
 # kinds the pipeline cannot yet draw would put empty layers in every drawing and
 # invite a preset to describe conventions nothing honours.
 SECTION_CUT = "section_cut"
+#: The stretch of a cut face that lies on surface the program supplied rather
+#: than the scanner measured - a hole someone closed before the file arrived,
+#: or the band a repair sewed across a joint.  It is drawn in the cut's own
+#: weight so the section reads as one line, and dashed, because the wall's
+#: thickness there is not a thing anybody has measured.
+SECTION_PRESUMED = "section_presumed"
 OUTLINE_VISIBLE = "outline_visible"
 OUTLINE_HOLE = "outline_hole"
 CONDITION_MISSING = "condition_missing"
@@ -87,6 +93,10 @@ SECTION_MARK = "section_mark"
 
 LINE_KINDS: tuple[str, ...] = (
     SECTION_CUT,
+    # The presumed stretch of the cut goes immediately after the cut it
+    # belongs to: the two make one line round the section, and nothing may
+    # come between them in the layer order.
+    SECTION_PRESUMED,
     OUTLINE_VISIBLE,
     OUTLINE_HOLE,
     # Technique sits on the surface, so it is drawn over the outline; and it is
@@ -129,6 +139,7 @@ LINE_KINDS: tuple[str, ...] = (
 # line broken a few times, 직선 a continuous technique line, 중심선 the axis.
 LINE_KIND_LABELS_KO: Mapping[str, str] = {
     SECTION_CUT: "단면선",
+    SECTION_PRESUMED: "추정 단면선 (점선)",
     OUTLINE_VISIBLE: "외선 (외곽선)",
     OUTLINE_HOLE: "내선 (구멍·안쪽 윤곽)",
     TECHNIQUE_GROOVE_EDGE: "직선 (홈 가장자리)",
@@ -692,6 +703,17 @@ _PRESETS: dict[str, DrawingStylePreset] = {
         preset_id=PROVISIONAL_PRESET_ID,
         lines={
             SECTION_CUT: LineStyle(stroke_width_mm=0.35, hatch=True),
+            # The presumed stretch of the cut: the cut's own weight, so the
+            # section reads as one line round the wall, broken so that a
+            # reader sees at a glance where it stops being measured.  The
+            # dash is shorter than the one the presumed inner surfaces use
+            # (1.2 - 0.8) because what it breaks is short: the sewn edge of
+            # a foot or a knob is two or three millimetres of wall, and a
+            # 1.2 mm dash puts one nick in it that reads as a solid line.
+            SECTION_PRESUMED: LineStyle(
+                stroke_width_mm=0.35,
+                dash_pattern_mm=(0.8, 0.6),
+            ),
             OUTLINE_VISIBLE: LineStyle(stroke_width_mm=0.25),
             OUTLINE_HOLE: LineStyle(stroke_width_mm=0.25),
             # Four dashes chosen only to stay apart from one another and from
@@ -751,6 +773,10 @@ _PRESETS: dict[str, DrawingStylePreset] = {
             # 결실부 0.1; the figure marks 0.3 on the emphasised lines
             # (돌대·실선) and 0.1 on the fine ones (허선, 내부 세부).
             SECTION_CUT: LineStyle(stroke_width_mm=0.6, hatch=True),
+            SECTION_PRESUMED: LineStyle(
+                stroke_width_mm=0.6,
+                dash_pattern_mm=(0.8, 0.6),
+            ),
             OUTLINE_VISIBLE: LineStyle(stroke_width_mm=0.4),
             OUTLINE_HOLE: LineStyle(stroke_width_mm=0.4),
             # 결실부 0.1 ([K1] p.25).  A restored form is drawn dashed
@@ -793,6 +819,10 @@ _PRESETS: dict[str, DrawingStylePreset] = {
         preset_id=KCHA_2013_PEN_PRESET_ID,
         lines={
             SECTION_CUT: LineStyle(stroke_width_mm=0.6, hatch=True),
+            SECTION_PRESUMED: LineStyle(
+                stroke_width_mm=0.6,
+                dash_pattern_mm=(0.8, 0.6),
+            ),
             OUTLINE_VISIBLE: LineStyle(stroke_width_mm=0.4),
             # An inner line - a hole's edge, an incised pattern line traced
             # from the wall - is the 0.1 세부 pen of 그림 27 ([K1] p.25),
@@ -872,6 +902,7 @@ __all__ = [
     "PROVISIONAL_PRESET_ID",
     "RECORD_ROLE_LINE_KINDS",
     "SECTION_CUT",
+    "SECTION_PRESUMED",
     "KCHA_2013_PEN_PRESET_ID",
     "KCHA_2013_PEN_V1_PRESET_ID",
     "KCHA_2013_SOURCE_ID",

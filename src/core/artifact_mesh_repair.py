@@ -804,6 +804,41 @@ def _edge_health(faces: np.ndarray) -> tuple[int, int]:
     )
 
 
+def invented_face_indices(before: np.ndarray, after: np.ndarray) -> np.ndarray:
+    """Which faces of a repaired mesh the repair made, rather than the file.
+
+    A repair writes triangles and never points, so a face is the program's
+    work exactly when its three corners were not already a face of the mesh
+    the repair started from.  Comparing content rather than tracking indices
+    survives the steps that renumber - a fill dropped in one step and a band
+    sewn in the next - and needs nothing carried between them.
+
+    What it is for is the drawing.  A sewn band is surface the section plane
+    cuts like any other, and drawn solid it says the wall is there and this
+    thick; the archaeologist asked for those stretches dashed, because the
+    thickness there is the program's and not a measurement.
+    """
+
+    first = np.asarray(before, dtype=np.int64)
+    second = np.asarray(after, dtype=np.int64)
+    for name, array in (("before", first), ("after", second)):
+        if array.ndim != 2 or array.shape[1] != 3:
+            raise ArtifactMeshRepairError(
+                f"{name} must be an (m, 3) array of triangles"
+            )
+    if first.shape[0] == 0:
+        return np.arange(second.shape[0], dtype=np.int64)
+    known = {tuple(sorted(int(corner) for corner in face)) for face in first}
+    return np.asarray(
+        [
+            index
+            for index, face in enumerate(second)
+            if tuple(sorted(int(corner) for corner in face)) not in known
+        ],
+        dtype=np.int64,
+    )
+
+
 def apply_mesh_repair(
     vertices_mm: np.ndarray,
     faces: np.ndarray,

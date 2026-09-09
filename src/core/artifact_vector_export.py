@@ -110,7 +110,7 @@ from .source_identity import PRIMARY_FILE_IDENTITY_SCOPE
 
 
 VECTOR_EXPORT_FORMAT = "archmeshrubbing_vector_export"
-_CURRENT_VECTOR_EXPORT_SCHEMA_VERSION = "1.9.0"
+_CURRENT_VECTOR_EXPORT_SCHEMA_VERSION = "1.10.0"
 VECTOR_EXPORT_SCHEMA_VERSION = _CURRENT_VECTOR_EXPORT_SCHEMA_VERSION
 #: 1.1.0 introduced the current provenance contract (import admission, axis
 #: Align); 1.2.0 is 1.1.0 plus outline algorithm 1.1.0 - the grid closing -
@@ -126,23 +126,29 @@ VECTOR_EXPORT_SCHEMA_VERSION = _CURRENT_VECTOR_EXPORT_SCHEMA_VERSION
 #: punched, and carries its recipe key and one QC key; 1.8.0 admits outline
 #: algorithm 1.4.0, which refuses a fragment the closing welded to the
 #: artifact, and carries the one QC key that gate judges; 1.9.0 holds the
-#: section mark in the line-kind vocabulary a user preset must cover.  All
-#: nine carry the current contract; 1.0.0 is legacy.
+#: section mark in the line-kind vocabulary a user preset must cover, and
+#: 1.10.0 the presumed stretch of the cut.  All ten carry the current
+#: contract; 1.0.0 is legacy.
 _CURRENT_CONTRACT_VECTOR_EXPORT_SCHEMA_VERSIONS = frozenset(
-    {"1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0", "1.8.0", "1.9.0"}
+    {"1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0", "1.8.0", "1.9.0", "1.10.0"}
 )
 #: The sidecars that can carry an outline computed with the grid closing.
 _GRID_CLOSING_VECTOR_EXPORT_SCHEMA_VERSIONS = frozenset(
-    {"1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0", "1.8.0", "1.9.0"}
+    {"1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0", "1.8.0", "1.9.0", "1.10.0"}
 )
 #: The sidecars whose recipe enum names outline algorithm 1.2.0.
-_PIECE_GATE_VECTOR_EXPORT_SCHEMA_VERSIONS = frozenset({"1.6.0", "1.7.0", "1.8.0", "1.9.0"})
+_PIECE_GATE_VECTOR_EXPORT_SCHEMA_VERSIONS = frozenset(
+    {"1.6.0", "1.7.0", "1.8.0", "1.9.0", "1.10.0"}
+)
 #: The sidecars whose recipe enum names outline algorithm 1.3.0.
-_HOLE_GATE_VECTOR_EXPORT_SCHEMA_VERSIONS = frozenset({"1.7.0", "1.8.0", "1.9.0"})
+_HOLE_GATE_VECTOR_EXPORT_SCHEMA_VERSIONS = frozenset({"1.7.0", "1.8.0", "1.9.0", "1.10.0"})
 #: The sidecars whose recipe enum names outline algorithm 1.4.0.
-_WELDED_GATE_VECTOR_EXPORT_SCHEMA_VERSIONS = frozenset({"1.8.0", "1.9.0"})
+_WELDED_GATE_VECTOR_EXPORT_SCHEMA_VERSIONS = frozenset({"1.8.0", "1.9.0", "1.10.0"})
 SUPPORTED_VECTOR_EXPORT_SCHEMA_VERSIONS = frozenset(
-    {"1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0", "1.8.0", "1.9.0"}
+    {
+        "1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0",
+        "1.8.0", "1.9.0", "1.10.0",
+    }
 )
 VECTOR_EXPORT_DIRECTORY_SUFFIX = ".amr-vector"
 VECTOR_EXPORT_SVG_NAME = "artifact.svg"

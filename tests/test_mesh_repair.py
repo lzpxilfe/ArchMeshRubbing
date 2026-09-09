@@ -31,6 +31,7 @@ from src.core.artifact_mesh_repair import (
     apply_mesh_repair,
     body_sha256,
     face_set_sha256,
+    invented_face_indices,
     ring_sha256,
     sew_ring_pair_to_body,
 )
@@ -536,3 +537,53 @@ def test_the_whole_chain_leaves_one_closed_body() -> None:
     assert report.one_body
     assert report.bodies[0].closed
     assert not report.needs_decision
+
+
+def test_the_faces_the_repair_made_are_the_ones_it_did_not_get_from_the_file() -> None:
+    """What the drawing needs dashed: the band, and nothing but the band.
+
+    A sewn band is surface like any other, and the section cuts it like any
+    other; only this tells the drawing that its thickness is the program's
+    work.  So the answer is checked both ways - every face named is new, and
+    no face left out is.
+    """
+
+    vertices, faces = _open_footed_drum()
+    rings = boundary_rings(faces)
+    foot = [ring for ring in rings if vertices[ring, 2].mean() < 2.0]
+    sewn, receipt = apply_mesh_repair(
+        vertices,
+        faces,
+        [
+            RingToRingJoin(
+                first_ring_sha256=ring_sha256(foot[0]),
+                second_ring_sha256=ring_sha256(foot[1]),
+                reach_um=2_000,
+            )
+        ],
+    )
+
+    invented = invented_face_indices(faces, sewn)
+    assert invented.size == receipt.added_face_count
+    before = {tuple(sorted(int(c) for c in face)) for face in faces}
+    for index in invented:
+        assert tuple(sorted(int(c) for c in sewn[index])) not in before
+    kept = np.delete(np.arange(sewn.shape[0]), invented)
+    for index in kept:
+        assert tuple(sorted(int(c) for c in sewn[index])) in before
+    # The band lies at the foot, which is where the scanner could not see
+    # over the rim: nothing on the wall is claimed as invented.
+    assert float(vertices[sewn[invented], 2].max()) < 2.0
+
+
+def test_a_repair_that_only_took_faces_away_invented_nothing() -> None:
+    vertices, faces = _capped_drum()
+    dropped, _ = apply_mesh_repair(vertices, faces, [_drop_step(vertices, faces)])
+    assert invented_face_indices(faces, dropped).size == 0
+
+
+def test_faces_that_are_not_triangles_are_refused_by_the_comparison() -> None:
+    with pytest.raises(ArtifactMeshRepairError, match="before"):
+        invented_face_indices(np.zeros((4, 2), dtype=np.int64), np.zeros((4, 3), dtype=np.int64))
+    with pytest.raises(ArtifactMeshRepairError, match="after"):
+        invented_face_indices(np.zeros((4, 3), dtype=np.int64), np.zeros((4, 4), dtype=np.int64))

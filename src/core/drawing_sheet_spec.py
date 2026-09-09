@@ -129,6 +129,10 @@ def plate_spec(record_ids: Sequence[str], options: DrawingSheetOptions) -> dict[
             [record_id, kind, float(height), float(length)]
             for record_id, kind, height, length in options.presumed_lines
         ],
+        "presumed_section": [
+            [record_id, [[float(u), float(v)] for u, v in points]]
+            for record_id, points in options.presumed_section
+        ],
         "records": ids,
         "relief_stipples": [list(pair) for pair in options.relief_stipples],
         "rubbing_notes": _decisions(options.rubbing_notes),
@@ -188,7 +192,7 @@ _KNOWN_KEYS = frozenset(
         "condition_records", "crease_records", "far_silhouettes", "format", "groove_records", "gutter_mm",
         "interpretation", "line_cap", "mirror_elevation_side", "mirror_jogs", "mirror_sections",
         "outline_reach", "page", "paint_cutout_ink_percent", "paint_cutouts", "plan_over_elevation",
-        "plan_with_sections", "presumed_lines", "records", "relief_stipples", "rubbing_notes",
+        "plan_with_sections", "presumed_lines", "presumed_section", "records", "relief_stipples", "rubbing_notes",
         "rubbing_on_axis_fit", "rubbing_on_axis_trim", "rubbings_on_axis", "scale_denominator",
         "schema_version", "show_center_axis", "stipple_dot_mm", "stipple_pitch_mm", "stroke_color",
         "section_marks", "sherd_breaks", "style_preset", "technique_angles_deg", "technique_records",
@@ -391,6 +395,24 @@ def plate_spec_options(spec: object) -> tuple[list[str], DrawingSheetOptions]:
                 _number(length, field_name="presumed_lines length_mm"),
             )
             for record_id, kind, height, length in _rows(spec["presumed_lines"], field_name="presumed_lines", width=4)
+        )
+    if given("presumed_section"):
+        kwargs["presumed_section"] = tuple(
+            (
+                _text(record_id, field_name="presumed_section"),
+                tuple(
+                    (
+                        _number(point[0], field_name="presumed_section u_mm"),
+                        _number(point[1], field_name="presumed_section v_mm"),
+                    )
+                    for point in _rows(
+                        points, field_name="presumed_section polyline", width=2
+                    )
+                ),
+            )
+            for record_id, points in _rows(
+                spec["presumed_section"], field_name="presumed_section", width=2
+            )
         )
     if given("break_styles"):
         kwargs["break_styles"] = tuple(

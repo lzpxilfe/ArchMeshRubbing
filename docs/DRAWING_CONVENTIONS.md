@@ -19,6 +19,7 @@
 | 선 종류 | 부르는 이름 (`LINE_KIND_LABELS_KO`) | 뜻 | 지금 만드는 곳 |
 |---|---|---|---|
 | `section_cut` | 단면선 | 단면 절단선. 닫힌 경우 내부를 해칭한다 | `vector.cutline.v1`의 `section` role |
+| `section_presumed` | 추정 단면선 (점선) | 단면선 가운데 **스캐너가 잰 면이 아니라 프로그램이 준 면** 위에 놓인 구간 — 파일이 오기 전에 누가 덮어 놓은 구멍, 이음이 꿰맨 띠. 벽의 두께를 아무도 재지 않은 자리다 | 도판 옵션 `presumed_section` (보정이 만든 면을 단면으로 잘라 넘긴다) |
 | `outline_visible` | 외선 (외곽선) | 보이는 외형선 | `vector.outline.v1`의 `exterior` role |
 | `outline_hole` | 내선 (구멍·안쪽 윤곽) | 유물 내부의 구멍 경계 | `vector.outline.v1`의 `hole` role |
 | `condition_missing` | 결실 | 결실부 경계 | `annotation.condition.v1`, kind `missing` |
@@ -88,6 +89,7 @@ record의 role 이름(`section`, `exterior`, `hole`)은 payload 해시의 일부
 | 선 종류 | 굵기 (mm) | 근거 |
 |---|---|---|
 | `section_cut` | 0.6 | 단면 0.6 ([K1] p.25) |
+| `section_presumed` | 0.6, 파선 | 단면과 같은 펜([K1] p.25). 추정은 점선으로([K1] p.12) — 파선 길이는 출처에 없어 잠정. 끊는 구간이 굽·꼭지 테두리처럼 2-3 mm로 짧아 추정 내면선(1.2 - 0.8)보다 잘게 끊는다 |
 | `outline_visible` · `outline_hole` | 0.4 | 평면 및 입면 0.4 ([K1] p.25) |
 | `condition_missing` | 0.1 | 결실부 0.1 ([K1] p.25) |
 | `condition_restored` | 0.1, 파선 | 복원선은 점선으로([K1] p.12, [K2] 도면 2의 복원 구연). 파선 길이는 출처에 없어 잠정 preset의 것 |
@@ -132,6 +134,7 @@ record의 role 이름(`section`, `exterior`, `hole`)은 payload 해시의 일부
 | 선 종류 | 굵기 (mm) | 파선 (mm) | 채움 |
 |---|---|---|---|
 | `section_cut` | 0.35 | - | 해칭 |
+| `section_presumed` | 0.35 | 0.8 - 0.6 | - |
 | `outline_visible` | 0.25 | - | - |
 | `outline_hole` | 0.25 | - | - |
 | `condition_missing` | 0.25 | 1.5 - 1.5 | - |

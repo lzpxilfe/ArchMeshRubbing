@@ -209,7 +209,7 @@ class TestVectorSchemas(unittest.TestCase):
             )
         )
         export_schema = json.loads(
-            (ROOT / "schemas/vector_export-1.9.0.schema.json").read_text(
+            (ROOT / "schemas/vector_export-1.10.0.schema.json").read_text(
                 encoding="utf-8"
             )
         )
@@ -281,7 +281,7 @@ class TestVectorSchemas(unittest.TestCase):
             sidecar["provenance"]["geometry_revision"]["import_recipe"],
             document.geometry_revisions[0].to_dict()["import_recipe"],
         )
-        self.assertEqual(sidecar["schema_version"], "1.9.0")
+        self.assertEqual(sidecar["schema_version"], "1.10.0")
         self.assertIn(
             "import_admission",
             sidecar["provenance"]["geometry_revision"]["qc"],
@@ -527,7 +527,7 @@ def test_the_export_schema_accepts_exactly_the_reviewed_backends() -> None:
     from src.core.artifact_outline_extractor import REVIEWED_OUTLINE_BACKENDS
 
     schema = json.loads(
-        (ROOT / "schemas/vector_export-1.9.0.schema.json").read_text(encoding="utf-8")
+        (ROOT / "schemas/vector_export-1.10.0.schema.json").read_text(encoding="utf-8")
     )
     properties = schema["$defs"]["recordQc"]["properties"]
 

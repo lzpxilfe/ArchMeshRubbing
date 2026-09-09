@@ -131,6 +131,7 @@ from .drawing_style import (
     OUTLINE_HOLE,
     OUTLINE_VISIBLE,
     SECTION_CUT,
+    SECTION_PRESUMED,
     SECTION_MARK,
     DrawingStyleError,
     DrawingStylePreset,
@@ -491,12 +492,25 @@ PAINT_CUTOUT_STEP_CLEARANCE_MM = 0.5
 #: dashed, in the cut's weight, from numbers the archaeologist gives; the
 #: title block says so.  The dash is the pen's, paper millimetres.
 PRESUMED_LABEL = "추정"
+#: The title block's word on a cut that was broken where it ran over surface
+#: the program supplied.  Kept apart from ``추정``: that row is about lines
+#: the archaeologist added, this one about lines the drawing took away.
+PRESUMED_SECTION_LABEL = "추정 단면"
 PRESUMED_FLOOR = "floor"
 PRESUMED_WALL_ON = "wall_on"
 PRESUMED_KINDS: tuple[str, ...] = (PRESUMED_FLOOR, PRESUMED_WALL_ON)
 PRESUMED_DASH_PAPER_MM = 1.2
 PRESUMED_GAP_PAPER_MM = 0.8
 MAX_PRESUMED_LENGTH_MM = 500.0
+#: A presumed stretch of the cut is the section of a handful of invented
+#: triangles, so it is a short chain.  The cap is here to keep a mistaken
+#: argument - a whole section handed in by accident - out of the options.
+MAX_PRESUMED_SECTION_POINTS = 4096
+#: How near a piece of the cut must lie to a presumed stretch to be drawn as
+#: one.  Both are sections of the same triangles on the same plane, so they
+#: coincide to the stitch tolerance; a twentieth of a millimetre is loose
+#: enough for that and far tighter than any feature of a pot.
+PRESUMED_SECTION_TOLERANCE_MM = 0.05
 DEFAULT_PAINT_CUTOUT_INK_PERCENT = 70
 MIN_PAINT_CUTOUT_INK_PERCENT = 20
 
@@ -901,6 +915,24 @@ class DrawingSheetOptions:
     ``length_mm`` long - the floor's height a ruler through the mouth
     found.  Every entry prints in the title block's ``추정`` row.
     """
+    presumed_section: tuple[tuple[str, tuple[tuple[float, float], ...]], ...] = ()
+    """(elevation record id, polyline in the figure's own millimetres) - the
+    stretches of the cut that lie on surface the program supplied rather
+    than the scanner measured, drawn dashed instead of solid.
+
+    Most scans reach a drafter watertight: the holes the scanner left have
+    been closed by software, and a repair that sews a joint adds a band of
+    its own.  Both are surface, both are cut by the section plane, and both
+    draw as an ordinary solid line that says the wall is there and this
+    thick.  Passing the stretch here makes the section break where that
+    stops being true.
+
+    Each polyline is the section of the presumed faces alone, taken on the
+    same plane as the figure's own section - cut the same triangles a second
+    time with the invented ones only - so the two lie on top of each other
+    and the split is a fact about the mesh rather than a hand-drawn guess.
+    Every entry prints in the title block's ``추정`` row.
+    """
     relief_stipples: tuple[tuple[str, str], ...] = ()
     """(relief shade record id, figure record id) - a relief's shade
     stippled onto a figure of the shade's own view, in its own place.
@@ -1290,6 +1322,47 @@ class DrawingSheetOptions:
                 raise DrawingSheetError("a presumed wall_on line needs a positive length_mm")
             presumed.append((record_id, kind, height, length))
         object.__setattr__(self, "presumed_lines", tuple(presumed))
+        stretches: list[tuple[str, tuple[tuple[float, float], ...]]] = []
+        for entry in self.presumed_section:
+            if not isinstance(entry, (tuple, list)) or len(entry) != 2:
+                raise DrawingSheetError(
+                    "presumed_section entries must be (elevation record id, polyline)"
+                )
+            record_id = str(entry[0]).strip()
+            if record_id not in elevations:
+                raise DrawingSheetError(
+                    f"presumed_section names {record_id!r}, which is not the elevation half "
+                    "of any mirrored figure"
+                )
+            points = entry[1]
+            if not isinstance(points, (tuple, list)) or len(points) < 2:
+                raise DrawingSheetError(
+                    "a presumed_section polyline needs at least two points"
+                )
+            if len(points) > MAX_PRESUMED_SECTION_POINTS:
+                raise DrawingSheetError(
+                    f"a presumed_section polyline is limited to {MAX_PRESUMED_SECTION_POINTS} points"
+                )
+            walked: list[tuple[float, float]] = []
+            for point in points:
+                if not isinstance(point, (tuple, list)) or len(point) != 2:
+                    raise DrawingSheetError(
+                        "presumed_section polyline points must be (u_mm, v_mm) pairs"
+                    )
+                pair: list[float] = []
+                for value in point:
+                    if (
+                        isinstance(value, bool)
+                        or not isinstance(value, (int, float))
+                        or not math.isfinite(value)
+                    ):
+                        raise DrawingSheetError(
+                            "presumed_section polyline points must be finite numbers"
+                        )
+                    pair.append(float(value))
+                walked.append((pair[0], pair[1]))
+            stretches.append((record_id, tuple(walked)))
+        object.__setattr__(self, "presumed_section", tuple(stretches))
         stipples: list[tuple[str, str]] = []
         for entry in self.relief_stipples:
             if not isinstance(entry, (tuple, list)) or len(entry) != 2:
@@ -1750,6 +1823,7 @@ class DrawingSheetOptions:
             + int(section_loops)
             + int(self.interpretation.is_stated)
             + int(bool(self.presumed_lines))
+            + int(bool(self.presumed_section))
             + int(bool(self.sherd_breaks))
             + len(self.title_block.rows)
             + 1
@@ -2576,6 +2650,15 @@ def _title_block_elements(
                         for entry in presumed_entries
                     ]
                 ),
+            )
+        )
+    if options.presumed_section:
+        # And where the cut itself stops being a measurement, the page says
+        # so: the dashes are visible, but only this row says what they mean.
+        rows.append(
+            (
+                PRESUMED_SECTION_LABEL,
+                presumed_section_title_value(options.presumed_section),
             )
         )
     if options.sherd_breaks:
@@ -4527,6 +4610,105 @@ def _clipped_half(
     return halved, fill_only
 
 
+def _presumed_section_runs(
+    half: Mapping[str, list[Any]],
+    fill_only: set[str],
+    *,
+    presumed: Sequence[Sequence[tuple[float, float]]],
+    tolerance_mm: float,
+    preset: DrawingStylePreset,
+) -> tuple[dict[str, list[Any]], set[str], int]:
+    """Break the cut where it runs over surface nobody measured.
+
+    The stretches come in as their own section of the invented triangles, so
+    a piece of the cut belongs to one when its middle lies on it.  Middles,
+    not ends: two runs meet at a point, and a test on the ends would claim
+    the piece on either side of every join.
+
+    A ring that has to be broken keeps a closed, unstroked copy of itself, so
+    the cut face is still hatched: the shading says where the wall is, and the
+    dashes say how much of that wall was measured.  The two are different
+    statements and the drawing makes both.
+    """
+
+    if not presumed:
+        return {kind: list(paths) for kind, paths in half.items()}, set(fill_only), 0
+
+    chains = [
+        np.asarray(polyline, dtype=np.float64)
+        for polyline in presumed
+        if len(polyline) >= 2
+    ]
+    starts = np.concatenate([chain[:-1] for chain in chains]) if chains else None
+    ends = np.concatenate([chain[1:] for chain in chains]) if chains else None
+    if starts is None or ends is None or starts.shape[0] == 0:
+        return {kind: list(paths) for kind, paths in half.items()}, set(fill_only), 0
+
+    span = ends - starts
+    length_squared = np.maximum((span * span).sum(axis=1), 1e-18)
+
+    def on_presumed(point: tuple[float, float]) -> bool:
+        p = np.asarray(point, dtype=np.float64)
+        t = np.clip(((p - starts) * span).sum(axis=1) / length_squared, 0.0, 1.0)
+        nearest = starts + t[:, None] * span
+        return bool(
+            np.sqrt(((nearest - p) ** 2).sum(axis=1)).min() <= tolerance_mm
+        )
+
+    out: dict[str, list[Any]] = {kind: list(paths) for kind, paths in half.items()}
+    result_fill_only = set(fill_only)
+    cut_paths = out.get(SECTION_CUT, [])
+    if not cut_paths:
+        return out, result_fill_only, 0
+    hatched = preset.style(SECTION_CUT).hatch
+    kept: list[Any] = []
+    dashed: list[Any] = []
+    split_count = 0
+    for path in cut_paths:
+        points = [(float(x), float(y)) for x, y in path.points_mm]
+        walk = points + [points[0]] if path.closed else points
+        if path.id in result_fill_only or len(walk) < 2:
+            kept.append(path)
+            continue
+        flags = [
+            on_presumed(
+                ((first[0] + second[0]) / 2.0, (first[1] + second[1]) / 2.0)
+            )
+            for first, second in zip(walk, walk[1:])
+        ]
+        if not any(flags):
+            kept.append(path)
+            continue
+        split_count += 1
+        if path.closed and hatched:
+            kept.append(replace(path, id=f"{path.id}:fill"))
+            result_fill_only.add(f"{path.id}:fill")
+        run_start = 0
+        piece_index = 0
+        for index in range(len(flags) + 1):
+            if index < len(flags) and flags[index] == flags[run_start]:
+                continue
+            piece = tuple(walk[run_start : index + 1])
+            supplied = flags[run_start]
+            target = dashed if supplied else kept
+            name = "presumed" if supplied else "measured"
+            target.append(
+                replace(
+                    path,
+                    id=f"{path.id}:{name}{piece_index:04d}",
+                    closed=False,
+                    points_mm=piece,
+                )
+            )
+            piece_index += 1
+            run_start = index
+    if split_count:
+        out[SECTION_CUT] = kept
+        if dashed:
+            out.setdefault(SECTION_PRESUMED, []).extend(dashed)
+    return out, result_fill_only, split_count
+
+
 def _ink_within_steps(
     raster: Any,
     *,
@@ -4737,6 +4919,8 @@ def _mirrored_figure(
     presumed_drawn: list[dict[str, Any]] | None = None,
     presumed_dash_mm: float = 0.0,
     presumed_gap_mm: float = 0.0,
+    presumed_section: Sequence[Sequence[tuple[float, float]]] = (),
+    presumed_section_tolerance_mm: float = PRESUMED_SECTION_TOLERANCE_MM,
 ) -> tuple[
     DerivedRecord,
     dict[str, list[Any]],
@@ -4965,6 +5149,20 @@ def _mirrored_figure(
             f"the section {section.id!r} has nothing right of the rotation "
             "axis, so the mirrored figure would be half empty"
         )
+    if presumed_section:
+        right, right_fill_only, broken = _presumed_section_runs(
+            right,
+            right_fill_only,
+            presumed=presumed_section,
+            tolerance_mm=presumed_section_tolerance_mm,
+            preset=preset,
+        )
+        if not broken:
+            raise DrawingSheetError(
+                f"the presumed stretch given for {elevation.id!r} lies on no part of "
+                f"the cut of {section.id!r} on the section's side of the fold; it was "
+                "not taken on this figure's plane, or it falls on the elevation's half"
+            )
 
     # Inside each step the elevation reaches past the axis: its lines there
     # are drawn as the open chains they are, so a motif the axis would have
@@ -5015,6 +5213,14 @@ def _mirrored_figure(
                 )
             )
     return section, combined, bounds, left_fill_only | right_fill_only
+
+
+def presumed_section_title_value(
+    stretches: Sequence[tuple[str, Sequence[tuple[float, float]]]],
+) -> str:
+    """The title block's word on the broken cut: how much of it, and why."""
+
+    return f"잰 면이 아닌 자리 {len(stretches)}곳 점선"
 
 
 def presumed_title_value(entries: Sequence[Sequence[Any]]) -> str:
@@ -5695,6 +5901,7 @@ def _sheet_provenance(
     paint_cutouts: Mapping[str, Any] | None = None,
     relief_stipples: Mapping[str, Any] | None = None,
     presumed_lines: Mapping[str, Any] | None = None,
+    presumed_section: Mapping[str, Any] | None = None,
     sherd_breaks: Sequence[Mapping[str, Any]] = (),
     section_marks: Sequence[Mapping[str, Any]] = (),
     record_ids: Sequence[str] = (),
@@ -5806,6 +6013,8 @@ def _sheet_provenance(
         provenance["relief_stipples"] = dict(relief_stipples)
     if presumed_lines is not None:
         provenance["presumed_lines"] = dict(presumed_lines)
+    if presumed_section is not None:
+        provenance["presumed_section"] = dict(presumed_section)
     if technique is not None:
         provenance["technique"] = dict(technique)
     if mirrored:
@@ -6650,6 +6859,11 @@ def compose_drawing_sheet(
             presumed_drawn=presumed_here,
             presumed_dash_mm=PRESUMED_DASH_PAPER_MM * float(options.scale_denominator),
             presumed_gap_mm=PRESUMED_GAP_PAPER_MM * float(options.scale_denominator),
+            presumed_section=[
+                points
+                for presumed_record_id, points in options.presumed_section
+                if presumed_record_id == record.id
+            ],
             outline_reach=options.outline_reach,
             break_reach=options.break_reach,
             reach_gap_mm=REACH_GAP_PAPER_MM * float(options.scale_denominator),
@@ -7205,6 +7419,22 @@ def compose_drawing_sheet(
                 if options.presumed_lines
                 else None
             ),
+            presumed_section=(
+                {
+                    "entries": [
+                        {
+                            "elevation_record_id": record_id,
+                            "point_count": len(points),
+                        }
+                        for record_id, points in options.presumed_section
+                    ],
+                    "line_kind": SECTION_PRESUMED,
+                    "source": "surface_not_measured",
+                    "tolerance_mm": PRESUMED_SECTION_TOLERANCE_MM,
+                }
+                if options.presumed_section
+                else None
+            ),
             section_marks=section_mark_entries,
             sherd_breaks=[
                 {
@@ -7367,6 +7597,32 @@ def validate_drawing_sheet_bytes(svg_bytes: bytes, sidecar_bytes: bytes) -> None
             for row in rows
         ):
             raise DrawingSheetError("sheet draws presumed lines but its title block does not say so")
+
+    # And a cut broken where it ran over surface nobody measured says so too.
+    presumed_cut = sidecar.get("presumed_section")
+    presumed_cut_rows = [
+        row
+        for row in rows
+        if isinstance(row, Mapping) and row.get("label") == PRESUMED_SECTION_LABEL
+    ]
+    if presumed_cut is not None:
+        entries = presumed_cut.get("entries") if isinstance(presumed_cut, Mapping) else None
+        if not isinstance(entries, Sequence) or not entries:
+            raise DrawingSheetError("sheet presumed_section must carry its entries")
+        if presumed_cut.get("line_kind") != SECTION_PRESUMED:
+            raise DrawingSheetError(
+                f"sheet presumed_section must be drawn as {SECTION_PRESUMED!r}"
+            )
+        expected = presumed_section_title_value([("", ())] * len(entries))
+        if not any(row.get("value") == expected for row in presumed_cut_rows):
+            raise DrawingSheetError(
+                "sheet breaks a cut where it was not measured but its title block "
+                "does not say so"
+            )
+    elif presumed_cut_rows:
+        raise DrawingSheetError(
+            "sheet title block reports a presumed cut its sidecar does not carry"
+        )
 
     # A section that closed into several loops is said on the page, and the
     # page does not say it of a sheet whose sections are whole.
