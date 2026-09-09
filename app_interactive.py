@@ -449,6 +449,11 @@ from src.core.artifact_condition_annotation import (  # noqa: E402
     CONDITION_RECORD_TYPE,
     ConditionAnnotationComputation,
 )
+from src.core.artifact_mesh_bodies import (  # noqa: E402
+    ArtifactMeshBodiesError,
+    describe_mesh_bodies,
+    diagnose_mesh_bodies,
+)
 from src.core.artifact_technique_annotation import (  # noqa: E402
     TECHNIQUE_FINGER_MARK,
     TECHNIQUE_KIND_LABELS_KO,
@@ -11498,6 +11503,45 @@ class MainWindow(QMainWindow):
         except Exception:
             _LOGGER.debug("Artifact projection UI refresh failed", exc_info=True)
 
+    def _report_mesh_bodies(self, session) -> None:
+        """Say how many bodies the scan came in as, before anything is measured.
+
+        A scan that arrived in pieces measures, aligns and draws exactly like
+        a whole one; the only place it shows is a section that closes into
+        several loops, and by then the drawing is made.  So the count is put
+        in front of the drafter at the one moment it can still change what
+        they do, with what each open edge lies against and how far away.  It
+        does not choose for them and it does not stop the work: a pot the
+        scanner cut open and a pot with a joint it could not see look the
+        same from here, and only the artifact on the table tells them apart.
+        """
+
+        try:
+            projection = session.materialize()
+            report = diagnose_mesh_bodies(
+                np.asarray(projection.mesh.vertices, dtype=np.float64),
+                np.asarray(projection.mesh.faces, dtype=np.int64),
+            )
+        except ArtifactMeshBodiesError as exc:
+            self.status_info.setText(f"{self.status_info.text()} | 몸 개수 진단 못 함: {exc}")
+            return
+        except Exception:
+            _LOGGER.debug("mesh body diagnosis failed", exc_info=True)
+            return
+
+        if not report.needs_decision:
+            return
+        self.status_info.setText(
+            f"{self.status_info.text()} | 몸 {len(report.bodies)}개 · 실측자 확인 필요"
+        )
+        QMessageBox.warning(
+            self,
+            "갈라져 들어온 스캔",
+            "\n".join(describe_mesh_bodies(report))
+            + "\n\n이대로도 도면은 나옵니다. 다만 갈라진 대로 나옵니다.\n"
+            "실물을 보고 이 몸들이 한 기물인지 정한 뒤 작업하세요.",
+        )
+
     def _finish_artifact_source_loaded(
         self,
         mesh_data,
@@ -11563,6 +11607,7 @@ class MainWindow(QMainWindow):
                 workflow_transition=transition,
             )
             self._clear_artifact_pending_load(cancel_workbench=False)
+            self._report_mesh_bodies(session)
         except Exception as exc:
             if isinstance(artifact_ticket, ArtifactLoadTicket):
                 try:
