@@ -53,12 +53,6 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 from scipy.spatial import cKDTree
 
-from .artifact_condition_annotation import (
-    MAX_CONDITION_TOTAL_FACES,
-    ArtifactConditionAnnotationError,
-    face_indices_from_ranges,
-    validate_face_ranges,
-)
 from .artifact_mesh_bodies import (
     boundary_rings,
     face_bodies,
@@ -84,9 +78,10 @@ SEW_RING_TO_RING = "sew_ring_to_ring/v1"
 #: Not a join at all: taking out a patch that is not surface of the artifact.
 #: A modelling tool asked to close a scan caps whatever it could not see with
 #: a fan of large flat triangles, and on 24ET0021 two such fans - one over
-#: each skin of the foot - are what made the 대각 read as solid.  Removing it is a decision about the pot, so it is
-#: declared and its evidence - how much coarser the patch is than the surface
-#: around it - goes in the receipt beside it.
+#: each skin of the foot - are what made the 대각 read as solid.  Removing one
+#: is a decision about the pot, so it is declared, and its evidence - how much
+#: coarser the patch is than the surface around it - goes in the receipt
+#: beside it.
 DROP_FACES = "drop_faces/v1"
 REPAIR_KINDS: tuple[str, ...] = (
     SEW_RING_PAIR_TO_BODY,
@@ -106,6 +101,20 @@ MAX_REPAIR_STEPS = 64
 
 class ArtifactMeshRepairError(ValueError):
     """The repair cannot be carried out as declared."""
+
+
+def _face_range_tools() -> Any:
+    """The run-length face-set encoding, imported where it is used.
+
+    A patch is written the way a condition region is - `annotation.condition
+    .v1` settled that encoding, and a second one would hash the same set two
+    ways.  The import is deferred because that module reaches the outline
+    extractor and so back to the session, which imports this one.
+    """
+
+    from . import artifact_condition_annotation  # noqa: PLC0415
+
+    return artifact_condition_annotation
 
 
 def _positive_int(value: object, *, name: str, minimum: int, maximum: int) -> int:
@@ -303,23 +312,24 @@ class DropFaces:
             raise ArtifactMeshRepairError("selection_sha256 must be a sha256 digest")
         if self.kind != DROP_FACES:
             raise ArtifactMeshRepairError(f"unsupported repair kind: {self.kind!r}")
+        tools = _face_range_tools()
         total = _positive_int(
             self.total_face_count,
             name="total_face_count",
             minimum=1,
-            maximum=MAX_CONDITION_TOTAL_FACES,
+            maximum=tools.MAX_CONDITION_TOTAL_FACES,
         )
         object.__setattr__(self, "total_face_count", total)
         try:
-            canonical = validate_face_ranges(
+            canonical = tools.validate_face_ranges(
                 [tuple(pair) for pair in self.face_ranges], total_face_count=total
             )
-        except ArtifactConditionAnnotationError as exc:
+        except tools.ArtifactConditionAnnotationError as exc:
             raise ArtifactMeshRepairError(f"the patch is not a face set: {exc}") from exc
         object.__setattr__(self, "face_ranges", canonical)
 
     def indices(self) -> np.ndarray:
-        return face_indices_from_ranges(
+        return _face_range_tools().face_indices_from_ranges(
             [list(pair) for pair in self.face_ranges],
             total_face_count=self.total_face_count,
         )
@@ -918,6 +928,71 @@ def apply_mesh_repair(
     return triangles, receipt
 
 
+def join_from_dict(data: Mapping[str, object]) -> RingPairJoin | RingToRingJoin | DropFaces:
+    """Read back one declared step, whichever kind it is."""
+
+    kind = data.get("kind")
+    if kind == SEW_RING_PAIR_TO_BODY:
+        return RingPairJoin.from_dict(data)
+    if kind == SEW_RING_TO_RING:
+        return RingToRingJoin.from_dict(data)
+    if kind == DROP_FACES:
+        return DropFaces.from_dict(data)
+    raise ArtifactMeshRepairError(f"unsupported repair kind: {kind!r}")
+
+
+def mesh_repair_extension(
+    *,
+    parent_geometry_revision_id: str,
+    joins: Sequence[RingPairJoin | RingToRingJoin | DropFaces],
+    receipt: MeshRepairReceipt,
+) -> dict[str, Any]:
+    """The durable form: what was decided, and what it did.
+
+    `joins` is the instruction and is enough to reproduce the mesh from the
+    source; `receipt` is the evidence, and is there so a reader can see what
+    changed without running anything.  Neither holds the repaired mesh - a
+    repaired geometry is derived and checked against its hash like any other,
+    not stored.
+    """
+
+    if not isinstance(parent_geometry_revision_id, str) or not parent_geometry_revision_id:
+        raise ArtifactMeshRepairError("parent_geometry_revision_id must be text")
+    if not joins:
+        raise ArtifactMeshRepairError("a repair with no joins changes nothing")
+    return {
+        "joins": [dict(join.to_dict()) for join in joins],
+        "parent_geometry_revision_id": parent_geometry_revision_id,
+        "receipt": receipt.to_dict(),
+        "schema_version": MESH_REPAIR_SCHEMA_VERSION,
+    }
+
+
+def validate_mesh_repair_extension(
+    value: object,
+) -> tuple[str, tuple[RingPairJoin | RingToRingJoin | DropFaces, ...]]:
+    """Read a stored repair back, or refuse to act on it."""
+
+    if not isinstance(value, Mapping):
+        raise ArtifactMeshRepairError("a stored repair must be a mapping")
+    expected = {"joins", "parent_geometry_revision_id", "receipt", "schema_version"}
+    if set(value) != expected:
+        raise ArtifactMeshRepairError(
+            f"a stored repair is written with exactly {sorted(expected)}"
+        )
+    if value["schema_version"] != MESH_REPAIR_SCHEMA_VERSION:
+        raise ArtifactMeshRepairError(
+            f"unsupported repair schema version: {value['schema_version']!r}"
+        )
+    parent = value["parent_geometry_revision_id"]
+    if not isinstance(parent, str) or not parent:
+        raise ArtifactMeshRepairError("parent_geometry_revision_id must be text")
+    joins = value["joins"]
+    if not isinstance(joins, Sequence) or isinstance(joins, (str, bytes)) or not joins:
+        raise ArtifactMeshRepairError("a stored repair must carry at least one join")
+    return parent, tuple(join_from_dict(item) for item in joins)
+
+
 __all__ = [
     "ArtifactMeshRepairError",
     "DEFAULT_REACH_UM",
@@ -936,6 +1011,9 @@ __all__ = [
     "ring_sha256",
     "drop_faces",
     "face_set_sha256",
+    "join_from_dict",
+    "mesh_repair_extension",
+    "validate_mesh_repair_extension",
     "sew_ring_pair_to_body",
     "sew_ring_to_ring",
 ]

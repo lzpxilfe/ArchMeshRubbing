@@ -31,6 +31,16 @@ from .artifact_document import (
     SourceMetadataRevision,
     source_to_canonical_mm_matrix,
 )
+from .artifact_mesh_repair import (
+    MESH_REPAIR_EXTENSION_KEY,
+    ArtifactMeshRepairError,
+    DropFaces,
+    RingPairJoin,
+    RingToRingJoin,
+    apply_mesh_repair,
+    mesh_repair_extension,
+    validate_mesh_repair_extension,
+)
 from .artifact_scene_adapter import (
     ArtifactProjectionSnapshot,
     ArtifactSceneAdapter,
@@ -114,6 +124,134 @@ def immutable_source_mesh(mesh: MeshData) -> MeshData:
         if value is not None:
             value.setflags(write=False)
     return snapshot
+
+
+def _canonical_vertices(matrix: object, source: MeshData) -> np.ndarray:
+    """Source vertices in canonical millimetres.
+
+    A repair measures in millimetres - how wide the scanner's shadow is, how
+    far an edge rests from a wall - so it cannot be run on source arrays that
+    might be in centimetres.  The align on top of this is rigid and changes
+    no distance, so the metadata mapping alone is enough and the answer does
+    not depend on which Align happens to be active.
+    """
+
+    transform = np.asarray(matrix, dtype=np.float64).reshape(4, 4)
+    vertices = np.asarray(source.vertices, dtype=np.float64)
+    homogeneous = np.column_stack([vertices, np.ones(vertices.shape[0])])
+    return (homogeneous @ transform.T)[:, :3]
+
+
+def repaired_source_mesh(source: MeshData, faces: np.ndarray) -> MeshData:
+    """The same scan carrying a repair's triangles, still tied to the same file.
+
+    Vertices, texture coordinates and the parser receipt belong to the file
+    and are untouched - a repair writes triangles, never points - so what
+    changes is the triangle table alone.  It is put back through admission so
+    that derived geometry is checked exactly as imported geometry is, rather
+    than being trusted because the program made it.
+    """
+
+    repaired = MeshData(
+        vertices=np.asarray(source.vertices, dtype=np.float64).copy(),
+        faces=np.asarray(faces, dtype=np.int32).copy(),
+        normals=None,
+        face_normals=None,
+        uv_coords=_clone_optional_array(source.uv_coords),
+        texture=_clone_optional_array(source.texture),
+        unit=str(source.unit),
+        filepath=Path(source.filepath) if source.filepath is not None else None,
+        source_identity=source.source_identity,
+        source_format=source.source_format,
+        source_import_recipe=source.source_import_recipe,
+        source_admission_receipt=None,
+        source_resources=source.source_resources,
+    )
+    snapshot = immutable_source_mesh(repaired)
+    fingerprint = snapshot.source_identity
+    if fingerprint is None:
+        raise ArtifactSessionError(
+            "a repair needs a source mesh that still carries its file identity"
+        )
+    source_format = str(snapshot.source_format or "").strip().lower().removeprefix(".")
+    try:
+        snapshot.source_admission_receipt = mesh_admission_receipt_for_arrays(
+            snapshot.vertices,
+            snapshot.faces,
+            source_format=source_format,
+            source_size_bytes=fingerprint.size_bytes,
+            optional_arrays=(snapshot.uv_coords, snapshot.texture),
+        )
+    except MeshAdmissionError as exc:
+        raise ArtifactSessionError(str(exc)) from exc
+    return snapshot
+
+
+def _replay_mesh_repairs(
+    document: ArtifactDocument,
+    geometry: GeometryRevision,
+    metadata: SourceMetadataRevision,
+    source: MeshData,
+) -> MeshData:
+    """Redo a document's declared repairs on the file it was decided from.
+
+    A repaired geometry is not stored anywhere; it is the file plus a list of
+    decisions.  Reopening therefore parses the file and does them again, and
+    the hash the document recorded is what says the answer is the same mesh.
+    A repair that no longer applies - because the parser changed, or because
+    the steps name edges this file does not have - stops the open rather than
+    quietly handing back a different pot.
+    """
+
+    chain: list[GeometryRevision] = []
+    cursor = geometry
+    seen: set[str] = set()
+    while MESH_REPAIR_EXTENSION_KEY in cursor.extensions:
+        if cursor.id in seen:
+            raise ArtifactSessionError("the geometry revisions form a loop")
+        seen.add(cursor.id)
+        chain.append(cursor)
+        try:
+            parent_id, _ = validate_mesh_repair_extension(
+                cursor.extensions[MESH_REPAIR_EXTENSION_KEY]
+            )
+        except ArtifactMeshRepairError as exc:
+            raise ArtifactSessionError(str(exc)) from exc
+        parent = document.geometry_revision_index.get(parent_id)
+        if parent is None:
+            raise ArtifactSessionError(
+                f"the repaired geometry names a parent {parent_id!r} the document "
+                "does not carry"
+            )
+        cursor = parent
+    if not chain:
+        return source
+
+    matrix = np.asarray(metadata.source_to_canonical_mm, dtype=np.float64).reshape(4, 4)
+    mesh = source
+    for revision in reversed(chain):
+        _parent_id, joins = validate_mesh_repair_extension(
+            revision.extensions[MESH_REPAIR_EXTENSION_KEY]
+        )
+        try:
+            faces, _receipt = apply_mesh_repair(
+                _canonical_vertices(matrix, mesh),
+                np.asarray(mesh.faces, dtype=np.int64),
+                list(joins),
+            )
+        except ArtifactMeshRepairError as exc:
+            raise ArtifactSessionError(
+                f"the repair recorded in {revision.id!r} no longer applies to this "
+                f"source: {exc}"
+            ) from exc
+        mesh = repaired_source_mesh(mesh, faces)
+        computed = mesh_geometry_sha256(mesh, scope=revision.geometry_hash_scope)
+        if computed != revision.geometry_sha256:
+            raise ArtifactSessionError(
+                f"replaying the repair recorded in {revision.id!r} did not reproduce "
+                "its geometry SHA-256; the document and this source disagree"
+            )
+    return mesh
 
 
 def _media_type(source_format: str | None) -> str:
@@ -537,6 +675,7 @@ class ArtifactSession:
             raise ArtifactSessionError(
                 "loaded source parser format does not match the ArtifactDocument import recipe"
             )
+        source = _replay_mesh_repairs(document, geometry, metadata, source)
         computed = mesh_geometry_sha256(source, scope=geometry.geometry_hash_scope)
         verified = VerifiedGeometryIdentity(
             source_asset_id=geometry.source_asset_ids[0],
@@ -699,6 +838,141 @@ class ArtifactSession:
             operator=operator,
         )
         return self.with_document(self.document.append_align_revision(revision))
+
+    def commit_mesh_repair(
+        self,
+        joins: "list[RingPairJoin | RingToRingJoin | DropFaces]",
+        *,
+        operator: str,
+        created_at: str | None = None,
+        geometry_revision_id: str | None = None,
+        metadata_revision_id: str | None = None,
+        align_revision_id: str | None = None,
+    ) -> "ArtifactSession":
+        """Make a declared repair into geometry the document can be reopened on.
+
+        The repaired mesh is never stored.  What is stored is the decision -
+        which edges, onto which body - beside the hash of what applying it to
+        this same source produces, so reopening the document parses the file
+        again, replays the steps, and refuses if the answer is not the same
+        mesh.  That is the discipline every other geometry in here follows,
+        and a mesh someone had edited by hand could not follow it at all.
+
+        It refuses on a document that already carries records.  A repair
+        changes the geometry each of them was measured on, and carrying them
+        over would quietly re-attribute a measurement of a split pot to a
+        whole one.  Repair the scan when it is opened, before measuring.
+        """
+
+        if self.document.records:
+            raise ArtifactSessionError(
+                f"this document already carries {len(self.document.records)} records, "
+                "and a repair changes the geometry every one of them was measured on; "
+                "repair the scan when it is opened, before anything is measured"
+            )
+        metadata_id = self.document.active_source_metadata_revision_id
+        align_id = self.document.active_align_revision_id
+        if metadata_id is None or align_id is None:
+            raise ArtifactSessionError("an active metadata and Align revision are required")
+        metadata = self.document.source_metadata_revision_index[metadata_id]
+        align = self.document.align_revision_index[align_id]
+        geometry = self.document.geometry_revision_index[metadata.geometry_revision_id]
+
+        matrix = np.asarray(metadata.source_to_canonical_mm, dtype=np.float64).reshape(4, 4)
+        if float(np.linalg.det(matrix[:3, :3])) <= 0.0:
+            raise ArtifactSessionError(
+                "this document's axis mapping turns the artifact inside out, so which "
+                "way its faces point cannot be read; a repair needs that and refuses"
+            )
+        try:
+            faces, receipt = apply_mesh_repair(
+                _canonical_vertices(matrix, self.source_mesh),
+                np.asarray(self.source_mesh.faces, dtype=np.int64),
+                joins,
+            )
+        except ArtifactMeshRepairError as exc:
+            raise ArtifactSessionError(str(exc)) from exc
+
+        repaired = repaired_source_mesh(self.source_mesh, faces)
+        admission = repaired.source_admission_receipt
+        if not isinstance(admission, Mapping):
+            raise ArtifactSessionError("the repaired mesh has no admission receipt")
+        accepted = admission["accepted"]
+        if not isinstance(accepted, Mapping):
+            raise ArtifactSessionError("the repaired mesh's admission receipt is malformed")
+        geometry_sha256 = str(accepted["geometry_sha256"])
+        timestamp = str(created_at or _utc_now())
+        new_geometry = GeometryRevision(
+            id=geometry_revision_id or f"geometry:sha256:{geometry_sha256}",
+            source_asset_ids=geometry.source_asset_ids,
+            geometry_sha256=geometry_sha256,
+            geometry_hash_scope=geometry.geometry_hash_scope,
+            import_recipe=dict(geometry.import_recipe),
+            topology_map_ref=None,
+            qc={
+                "face_count": int(repaired.faces.shape[0]),
+                "finite_vertices": True,
+                "import_admission": admission,
+                "vertex_count": int(repaired.vertices.shape[0]),
+            },
+            created_at=timestamp,
+            operator=operator,
+            extensions={
+                MESH_REPAIR_EXTENSION_KEY: mesh_repair_extension(
+                    parent_geometry_revision_id=geometry.id,
+                    joins=joins,
+                    receipt=receipt,
+                )
+            },
+        )
+        # A metadata or Align revision's parent chain runs inside one
+        # geometry - the document requires a parent to name the same geometry
+        # - so these start fresh, and what links the two geometries is the
+        # repair the new one carries.
+        new_metadata = SourceMetadataRevision(
+            id=metadata_revision_id or _new_id("metadata"),
+            parent_id=None,
+            geometry_revision_id=new_geometry.id,
+            unit=metadata.unit,
+            axes=dict(metadata.axes),
+            handedness=metadata.handedness,
+            confirmation_status=metadata.confirmation_status,
+            source_to_canonical_mm=metadata.source_to_canonical_mm,
+            created_at=timestamp,
+            operator=operator,
+        )
+        # The repair moved no vertex, so the standing on its axis is as true
+        # after it as before and is carried rather than thrown away.
+        new_align = AlignRevision(
+            id=align_revision_id or _new_id("align"),
+            parent_id=None,
+            source_metadata_revision_id=new_metadata.id,
+            matrix4x4=align.matrix4x4,
+            recipe={
+                "kind": "carried_through_mesh_repair",
+                "parent_align_revision_id": align.id,
+                "geometry_revision_id": new_geometry.id,
+            },
+            qc={"proper_rigid": True, "vertices_unchanged": True},
+            created_at=timestamp,
+            operator=operator,
+        )
+        document = (
+            self.document.append_geometry_revision(new_geometry)
+            .append_source_metadata_revision(new_metadata)
+            .append_align_revision(new_align)
+        )
+        return ArtifactSession(
+            document=document,
+            source_mesh=repaired,
+            verified_geometry=VerifiedGeometryIdentity(
+                source_asset_id=new_geometry.source_asset_ids[0],
+                geometry_revision_id=new_geometry.id,
+                geometry_sha256=new_geometry.geometry_sha256,
+                geometry_hash_scope=new_geometry.geometry_hash_scope,
+            ),
+            resolved_source_path=self.resolved_source_path,
+        )
 
     def activate_align(self, revision_id: str) -> "ArtifactSession":
         try:
