@@ -1480,8 +1480,13 @@ class UnitSelectionDialog(QDialog):
             axis_layout.addRow(label_text, axis_combo)
         layout.addWidget(axis_group)
 
+        self.handedness_warning = QLabel("")
+        self.handedness_warning.setWordWrap(True)
+        self.handedness_warning.setStyleSheet("color: #c53030; font-size: 11px;")
+        layout.addWidget(self.handedness_warning)
+
         self.confirm_metadata = QCheckBox(
-            "위 단위와 축 매핑을 확인했습니다 (오른손/왼손은 매핑에서 계산)"
+            "위 단위와 축 매핑을 확인했습니다 (매핑은 유물을 돌리기만 합니다)"
         )
         self.confirm_metadata.setChecked(False)
         self.confirm_metadata.toggled.connect(self._update_accept_enabled)
@@ -1509,10 +1514,50 @@ class UnitSelectionDialog(QDialog):
         values = list(self._axes().values())
         return len({value[-1] for value in values if value}) == 3
 
-    def _update_accept_enabled(self, *_args) -> None:
-        self.ok_btn.setEnabled(
-            bool(self.confirm_metadata.isChecked()) and self._axes_are_bijective()
+    def _axes_keep_handedness(self) -> bool:
+        """Whether this mapping turns the artifact rather than mirroring it.
+
+        Three distinct axes are not enough: swapping two of them (원본 Y → +Z
+        with 원본 Z → +Y, the obvious-looking way to stand a Y-up scan on its
+        base) has determinant -1, and the artifact comes in left for right.
+        A mirrored pot's drawing is wrong, not differently labelled, and on a
+        vessel turned on a wheel nothing on screen says so - so the mapping
+        that does it is refused rather than recorded.
+        """
+
+        if not self._axes_are_bijective():
+            return False
+        return float(np.linalg.det(self._axis_matrix())) > 0.0
+
+    def _axis_matrix(self) -> "np.ndarray":
+        vectors = {
+            "+X": np.array([1.0, 0.0, 0.0]),
+            "-X": np.array([-1.0, 0.0, 0.0]),
+            "+Y": np.array([0.0, 1.0, 0.0]),
+            "-Y": np.array([0.0, -1.0, 0.0]),
+            "+Z": np.array([0.0, 0.0, 1.0]),
+            "-Z": np.array([0.0, 0.0, -1.0]),
+        }
+        axes = self._axes()
+        return np.column_stack(
+            [vectors[axes[key]] for key in ("source_x", "source_y", "source_z")]
         )
+
+    def _update_accept_enabled(self, *_args) -> None:
+        allowed = (
+            bool(self.confirm_metadata.isChecked())
+            and self._axes_are_bijective()
+            and self._axes_keep_handedness()
+        )
+        self.ok_btn.setEnabled(allowed)
+        if self._axes_are_bijective() and not self._axes_keep_handedness():
+            self.handedness_warning.setText(
+                "이 매핑은 유물을 돌리는 것이 아니라 좌우를 뒤집습니다 "
+                "(왼손 좌표계).  축 하나의 부호를 바꾸세요 - 예를 들어 "
+                "원본 Y → +Z, 원본 Z → -Y."
+            )
+        else:
+            self.handedness_warning.setText("")
 
     def accept_and_save(self):
         if not self._axes_are_bijective():
@@ -1520,6 +1565,16 @@ class UnitSelectionDialog(QDialog):
                 self,
                 "좌표축 확인",
                 "원본 X/Y/Z는 canonical X/Y/Z에 각각 한 번씩 대응해야 합니다.",
+            )
+            return
+        if not self._axes_keep_handedness():
+            QMessageBox.warning(
+                self,
+                "좌표축 확인",
+                "이 매핑은 유물의 좌우를 뒤집습니다(왼손 좌표계).\n"
+                "거울상이 된 유물은 도면이 틀린 것이므로 받지 않습니다.\n"
+                "축 하나의 부호를 바꾸세요 - 예를 들어 원본 Y → +Z 라면 "
+                "원본 Z → -Y.",
             )
             return
         if not self.confirm_metadata.isChecked():

@@ -27,6 +27,8 @@ from src.core.artifact_vector_record import PlanarFrame
 from src.core.canonical_json import canonical_json_bytes
 from src.core.drawing_sheet import (
     COMPUTED_RUBBING_NOTE,
+    CONVENTIONAL_SCALE_DENOMINATORS,
+    conventional_scale_at_least,
     SECTION_LOOP_NOTE_LABEL,
     DrawingSheetError,
     DrawingSheetOptions,
@@ -1300,3 +1302,41 @@ def test_a_rubbing_left_stale_by_a_new_align_is_not_drawn() -> None:
             options=_options(),
             rasters={RUBBING_ID: raster},
         )
+
+
+def test_the_conventional_scales_are_a_sorted_list_of_whole_reductions() -> None:
+    scales = CONVENTIONAL_SCALE_DENOMINATORS
+    assert scales == tuple(sorted(scales))
+    assert len(set(scales)) == len(scales)
+    assert scales[0] == 1.0
+    # A reduction a reader cannot divide in their head is not conventional.
+    assert all(float(value).is_integer() for value in scales)
+    # Every one of them is a scale the composer will actually accept.
+    for value in scales:
+        assert _options(scale_denominator=value).scale_denominator == value
+
+
+def test_the_conventional_scale_is_the_smallest_one_that_is_not_tighter() -> None:
+    assert conventional_scale_at_least(1.0) == 1.0
+    assert conventional_scale_at_least(2.0) == 2.0
+    # 7 is not on the list; 8 is the first that reduces at least as much.
+    assert conventional_scale_at_least(7.0) == 8.0
+    assert conventional_scale_at_least(0.5) == 1.0
+    # Past the end of the list there is no answer to give.
+    assert conventional_scale_at_least(21.0) is None
+
+
+def test_a_figure_too_big_for_the_page_is_told_which_conventional_scale_fits() -> None:
+    # 400 mm across will not go on A5 at 1:1, and the refusal has to say what
+    # scale the drafter should reach for, in the vocabulary a report uses.
+    document = _session(half_extent_mm=200.0).document
+
+    with pytest.raises(DrawingSheetError) as raised:
+        compose_drawing_sheet(
+            document,
+            [OUTLINE_ID],
+            options=_options(scale_denominator=1.0, page=SheetPage(size="A5")),
+        )
+    message = str(raised.value)
+    assert "does not fit" in message
+    assert "conventional" in message

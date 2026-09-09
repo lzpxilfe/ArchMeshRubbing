@@ -54,6 +54,7 @@ from src.core.drawing_sheet import (
     BREAK_REACHES,
     BREAK_STYLES,
     CENTER_AXIS_STYLES,
+    CONVENTIONAL_SCALE_DENOMINATORS,
     LINE_CAPS,
     MIRROR_ELEVATION_SIDES,
     PAINT_CUTOUT_PLACEMENTS,
@@ -337,6 +338,21 @@ class PlatePanel(QWidget):
         self.combo_page.currentIndexChanged.connect(self._changed)
         form.addRow("용지", self.combo_page)
 
+        # The scale is two widgets: the list a report actually uses, and the
+        # box for the case it does not cover.  Picking from the list sets the
+        # box; typing in the box moves the list to 직접 입력.  The spec only
+        # ever carries the number, so the pair is a convenience and never a
+        # second source of truth.
+        self.combo_scale = QComboBox()
+        for denominator in CONVENTIONAL_SCALE_DENOMINATORS:
+            self.combo_scale.addItem(f"1 : {denominator:g}", float(denominator))
+        self.combo_scale.addItem("직접 입력", None)
+        self.combo_scale.setToolTip(
+            "보고서가 보통 쓰는 축척입니다.  고르면 아래 칸이 따라옵니다.\n"
+            "목록에 없는 값이 필요하면 직접 입력을 고르고 칸에 적으세요."
+        )
+        form.addRow("축척", self.combo_scale)
+
         self.spin_scale = QSpinBox()
         self.spin_scale.setRange(1, 1000)
         self.spin_scale.setValue(1)
@@ -345,8 +361,11 @@ class PlatePanel(QWidget):
             "선 굵기는 축척과 무관하게 종이 mm 그대로입니다.\n"
             "도판에 들어가지 않으면 쓸 수 있는 축척을 알려주고 거부합니다."
         )
+        self.combo_scale.currentIndexChanged.connect(self._scale_template_chosen)
+        self.spin_scale.valueChanged.connect(self._sync_scale_template)
         self.spin_scale.valueChanged.connect(self._changed)
-        form.addRow("축척", self.spin_scale)
+        self._sync_scale_template()
+        form.addRow("", self.spin_scale)
 
         self.combo_preset = QComboBox()
         self.combo_preset.setToolTip("선 굵기 preset.  고른 것이 도판 provenance에 그대로 남습니다.")
@@ -1076,6 +1095,25 @@ class PlatePanel(QWidget):
         self._changed()
 
     # --- the summary ------------------------------------------------------
+
+    def _sync_scale_template(self, *_args: object) -> None:
+        """Move the template list to whatever the box now says."""
+
+        index = self.combo_scale.findData(float(self.spin_scale.value()))
+        if index < 0:
+            index = self.combo_scale.findData(None)
+        if index >= 0 and index != self.combo_scale.currentIndex():
+            blocked = self.combo_scale.blockSignals(True)
+            self.combo_scale.setCurrentIndex(index)
+            self.combo_scale.blockSignals(blocked)
+
+    def _scale_template_chosen(self, *_args: object) -> None:
+        """A template puts its denominator in the box; 직접 입력 changes nothing."""
+
+        chosen = self.combo_scale.currentData()
+        if chosen is None:
+            return
+        self.spin_scale.setValue(int(round(float(chosen))))
 
     def _changed(self, *_args: object) -> None:
         self.summary.setText(self._summary_text())

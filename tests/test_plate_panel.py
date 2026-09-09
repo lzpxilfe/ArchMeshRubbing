@@ -265,3 +265,37 @@ def test_rows_a_loaded_spec_adds_get_the_same_controls(panel: PlatePanel) -> Non
         assert isinstance(side_widget, QComboBox), "the side is a closed choice on every row"
         assert side_widget.currentData() == side
     assert panel.spec()["sherd_breaks"] == [list(row) for row in sorted(rows)]
+
+
+def test_the_scale_list_and_the_scale_box_stay_the_same_number(panel: PlatePanel) -> None:
+    """Two widgets, one decision.  Picking 1:3 has to put 3 in the box, and
+    typing 7 - which no report on the list uses - has to move the list to
+    직접 입력 rather than leave it pointing at a scale the plate is not at."""
+
+    index = panel.combo_scale.findData(3.0)
+    assert index >= 0, "the list a report uses has 1:3 on it"
+    panel.combo_scale.setCurrentIndex(index)
+    assert panel.spin_scale.value() == 3
+    assert panel.spec()["scale_denominator"] == 3.0
+
+    panel.spin_scale.setValue(7)
+    assert panel.combo_scale.currentData() is None, "7 is not on the list"
+    assert panel.spec()["scale_denominator"] == 7.0
+
+    # Choosing 직접 입력 itself changes nothing: it is a label, not a value.
+    panel.combo_scale.setCurrentIndex(panel.combo_scale.findData(None))
+    assert panel.spin_scale.value() == 7
+
+
+def test_a_loaded_spec_moves_the_scale_list_to_what_it_says(panel: PlatePanel) -> None:
+    panel.set_spec(
+        plate_spec(
+            [ELEVATION],
+            DrawingSheetOptions(
+                title_block=TitleBlock(artifact_label="축척 시험"),
+                scale_denominator=6.0,
+            ),
+        )
+    )
+    assert panel.spin_scale.value() == 6
+    assert panel.combo_scale.currentData() == 6.0

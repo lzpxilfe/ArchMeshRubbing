@@ -42,17 +42,37 @@ NORMAL_MAP_ENCODING = "object_space_rgb8/v1"
 NORMAL_MAP_ENCODING_X_FLIPPED = "object_space_rgb8_x_flipped/v1"
 NORMAL_MAP_ENCODING_Y_FLIPPED = "object_space_rgb8_y_flipped/v1"
 NORMAL_MAP_ENCODING_XY_FLIPPED = "object_space_rgb8_xy_flipped/v1"
+#: The other family: a map baked in the surface's own frame rather than the
+#: artifact's.  Almost every scan delivered as a game-ready asset is one of
+#: these - 24ET0021's is, and its stamped band could not be read at all
+#: while this module knew only object space.  A texel says how the surface
+#: tilts against the triangle it sits on, so reading it needs the triangle's
+#: own axes, which the atlas already has: the two edges and the texture
+#: coordinates at their ends give the direction u runs in and the direction
+#: v runs in, and their cross product is the surface's normal.  The two
+#: variants are the green channel's two conventions (OpenGL's v upward,
+#: Direct3D's downward); nothing in the file says which, so the drafter
+#: chooses by ``rank_normal_map_encodings`` as with the object-space four.
+NORMAL_MAP_ENCODING_TANGENT = "tangent_space_rgb8/v1"
+NORMAL_MAP_ENCODING_TANGENT_Y_FLIPPED = "tangent_space_rgb8_y_flipped/v1"
+TANGENT_SPACE_ENCODINGS: frozenset[str] = frozenset(
+    {NORMAL_MAP_ENCODING_TANGENT, NORMAL_MAP_ENCODING_TANGENT_Y_FLIPPED}
+)
 NORMAL_MAP_ENCODINGS: tuple[str, ...] = (
     NORMAL_MAP_ENCODING,
     NORMAL_MAP_ENCODING_X_FLIPPED,
     NORMAL_MAP_ENCODING_Y_FLIPPED,
     NORMAL_MAP_ENCODING_XY_FLIPPED,
+    NORMAL_MAP_ENCODING_TANGENT,
+    NORMAL_MAP_ENCODING_TANGENT_Y_FLIPPED,
 )
 _ENCODING_SIGNS: dict[str, tuple[float, float, float]] = {
     NORMAL_MAP_ENCODING: (1.0, 1.0, 1.0),
     NORMAL_MAP_ENCODING_X_FLIPPED: (-1.0, 1.0, 1.0),
     NORMAL_MAP_ENCODING_Y_FLIPPED: (1.0, -1.0, 1.0),
     NORMAL_MAP_ENCODING_XY_FLIPPED: (-1.0, -1.0, 1.0),
+    NORMAL_MAP_ENCODING_TANGENT: (1.0, 1.0, 1.0),
+    NORMAL_MAP_ENCODING_TANGENT_Y_FLIPPED: (1.0, -1.0, 1.0),
 }
 TEXTURE_RELIEF_INTEGRATION = "frankot_chellappa_on_developed_raster/v1"
 TEXTURE_RELIEF_BASE = "sampled_normal_gaussian_smoothed/v1"
@@ -492,6 +512,62 @@ class DevelopedTexelLattice:
     unmatched_corners: int
     axis_u: np.ndarray | None
     axis_v: np.ndarray | None
+    #: The surface's own axes at each pixel - the world direction texture u
+    #: runs in, the direction v runs in, and the outward normal - which is
+    #: the frame a tangent-space map's texels are written in.  Filled only
+    #: when asked for; ``None`` otherwise, since an object-space map has no
+    #: use for them and they cost three more arrays.
+    surface_u: np.ndarray | None = None
+    surface_v: np.ndarray | None = None
+    surface_normal: np.ndarray | None = None
+    #: Triangles whose texture coordinates are degenerate, so no frame could
+    #: be built there.  Their pixels are left out of a tangent-space read.
+    frameless_faces: int = 0
+
+
+#: A frame that could not be built, so its pixels read as unreadable.
+_ZERO3 = np.zeros((3,), dtype=np.float64)
+
+
+def _surface_frame(
+    world: np.ndarray, corner_uv: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    """The triangle's own axes: where u runs, where v runs, and outward.
+
+    A tangent-space texel says how the surface tilts against the triangle it
+    sits on, in that triangle's frame, so the frame has to be rebuilt from
+    what the atlas holds - the corners' positions and their texture
+    coordinates.  Solving the two edges against the two texture-coordinate
+    differences gives the world direction each texture axis runs in; their
+    cross product is the surface's normal, and the sign of that follows the
+    unwrap's handedness, which is the convention every baker writes.
+
+    Returns ``None`` where the texture coordinates are degenerate, since a
+    triangle with no area in the map has no axes to read a texel in.
+    """
+
+    duv1 = corner_uv[1] - corner_uv[0]
+    duv2 = corner_uv[2] - corner_uv[0]
+    determinant = float(duv1[0] * duv2[1] - duv2[0] * duv1[1])
+    if abs(determinant) < 1e-12:
+        return None
+    edge1 = world[1] - world[0]
+    edge2 = world[2] - world[0]
+    tangent = (edge1 * duv2[1] - edge2 * duv1[1]) / determinant
+    bitangent = (edge2 * duv1[0] - edge1 * duv2[0]) / determinant
+    facing = np.cross(tangent, bitangent)
+    length = float(np.linalg.norm(facing))
+    if length < 1e-12:
+        return None
+    facing = facing / length
+    # Straighten the frame: the two texture axes need not be perpendicular
+    # on a stretched unwrap, and a texel is written in a square frame.
+    tangent = tangent - facing * float(np.dot(tangent, facing))
+    tangent_length = float(np.linalg.norm(tangent))
+    if tangent_length < 1e-12:
+        return None
+    tangent = tangent / tangent_length
+    return tangent, np.cross(facing, tangent), facing
 
 
 def rasterise_developed_texels(
@@ -507,6 +583,7 @@ def rasterise_developed_texels(
     pixels_per_mm: int,
     margin_pixels: int,
     with_axes: bool,
+    with_surface_frame: bool = False,
     cancellation_probe: CancellationProbe | None = None,
 ) -> DevelopedTexelLattice:
     """Paint the developed triangles onto the lattice, in the order given,
@@ -551,8 +628,12 @@ def rasterise_developed_texels(
     texel_col = np.full((height, width), -1, dtype=np.int32)
     axis_u = np.zeros((height, width, 3), dtype=np.float64) if with_axes else None
     axis_v = np.zeros((height, width, 3), dtype=np.float64) if with_axes else None
+    surface_u = np.zeros((height, width, 3), dtype=np.float64) if with_surface_frame else None
+    surface_v = np.zeros((height, width, 3), dtype=np.float64) if with_surface_frame else None
+    surface_n = np.zeros((height, width, 3), dtype=np.float64) if with_surface_frame else None
     covered = np.zeros((height, width), dtype=bool)
     unmatched_corners = 0
+    frameless_faces = 0
     epsilon = 1e-12
     for face_index in range(faces.shape[0]):
         poll_cancellation(cancellation_probe, face_index)
@@ -584,6 +665,13 @@ def rasterise_developed_texels(
             continue
         e_u = jacobian[0] / max(float(np.linalg.norm(jacobian[0])), 1e-12)
         e_v = jacobian[1] / max(float(np.linalg.norm(jacobian[1])), 1e-12)
+        frame: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
+        if with_surface_frame:
+            frame = _surface_frame(world, corner_uv)
+            if frame is None:
+                # No texture area to take axes from; a tangent-space texel
+                # read here would be read in no frame at all.
+                frameless_faces += 1
         minimum_x = max(0, int(math.floor(min(ax, bx, cx) - 0.5)))
         maximum_x = min(width - 1, int(math.ceil(max(ax, bx, cx) - 0.5)))
         minimum_y = max(0, int(math.floor(min(ay, by, cy) - 0.5)))
@@ -610,6 +698,15 @@ def rasterise_developed_texels(
             if axis_u is not None and axis_v is not None:
                 axis_u[y_start:y_stop, minimum_x : maximum_x + 1][inside] = e_u
                 axis_v[y_start:y_stop, minimum_x : maximum_x + 1][inside] = e_v
+            if surface_u is not None and surface_v is not None and surface_n is not None:
+                # A triangle with no frame leaves zeros, and a zero frame is
+                # what marks its pixels unreadable further down.
+                tangent, bitangent, facing = (
+                    frame if frame is not None else (_ZERO3, _ZERO3, _ZERO3)
+                )
+                surface_u[y_start:y_stop, minimum_x : maximum_x + 1][inside] = tangent
+                surface_v[y_start:y_stop, minimum_x : maximum_x + 1][inside] = bitangent
+                surface_n[y_start:y_stop, minimum_x : maximum_x + 1][inside] = facing
             covered[y_start:y_stop, minimum_x : maximum_x + 1] |= inside
     raise_if_cancelled(cancellation_probe)
     if not covered.any():
@@ -623,6 +720,10 @@ def rasterise_developed_texels(
         unmatched_corners=int(unmatched_corners),
         axis_u=axis_u,
         axis_v=axis_v,
+        surface_u=surface_u,
+        surface_v=surface_v,
+        surface_normal=surface_n,
+        frameless_faces=int(frameless_faces),
     )
 
 
@@ -680,6 +781,7 @@ def texture_relief_depth_field(
     if (source_faces < 0).any() or (source_faces >= atlas.triangle_count).any():
         raise ArtifactTextureReliefError("a developed face refers to a triangle the atlas lacks")
 
+    tangent_space = normal_map.encoding in TANGENT_SPACE_ENCODINGS
     lattice = rasterise_developed_texels(
         developed_uv_mm=uv,
         developed_faces=faces,
@@ -692,6 +794,7 @@ def texture_relief_depth_field(
         pixels_per_mm=pixels_per_mm,
         margin_pixels=margin_pixels,
         with_axes=True,
+        with_surface_frame=tangent_space,
         cancellation_probe=cancellation_probe,
     )
     minimum_u, minimum_v = lattice.minimum_u, lattice.minimum_v
@@ -706,7 +809,22 @@ def texture_relief_depth_field(
     normals = (
         normal_map.rgb[lattice.texel_row[covered], lattice.texel_col[covered]].astype(np.float64) / 127.5 - 1.0
     ) * signs
-    sampled[covered] = normals @ rotation.T
+    if tangent_space:
+        # The texel is written in the surface's own frame, which is already
+        # in the canonical frame the development was built in, so there is
+        # nothing left to rotate: turn the three components onto the three
+        # axes and the normal is where it belongs.
+        surface_u = lattice.surface_u
+        surface_v = lattice.surface_v
+        surface_normal = lattice.surface_normal
+        assert surface_u is not None and surface_v is not None and surface_normal is not None
+        sampled[covered] = (
+            normals[:, 0:1] * surface_u[covered]
+            + normals[:, 1:2] * surface_v[covered]
+            + normals[:, 2:3] * surface_normal[covered]
+        )
+    else:
+        sampled[covered] = normals @ rotation.T
     raise_if_cancelled(cancellation_probe)
     covered_count = int(np.count_nonzero(covered))
     lengths = np.linalg.norm(sampled, axis=-1)
@@ -764,6 +882,9 @@ def texture_relief_depth_field(
         "texture_relief_unmatched_corner_count": unmatched_corners,
         "texture_relief_unreadable_pixel_count": int(np.count_nonzero(covered & ~good)),
     }
+    if tangent_space:
+        # Only a tangent-space read needs a frame, so only it can lack one.
+        qc["texture_relief_frameless_face_count"] = int(lattice.frameless_faces)
     return depth, minimum_u, minimum_v, qc
 
 
@@ -830,6 +951,9 @@ __all__ = [
     "TextureAtlas",
     "read_normal_map",
     "rank_normal_map_encodings",
+    "NORMAL_MAP_ENCODING_TANGENT",
+    "NORMAL_MAP_ENCODING_TANGENT_Y_FLIPPED",
+    "TANGENT_SPACE_ENCODINGS",
     "read_obj_texture_atlas",
     "require_atlas_matches",
     "require_texture_relief_sources",

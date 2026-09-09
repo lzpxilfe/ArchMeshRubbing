@@ -38,7 +38,14 @@ import numpy as np
 from .artifact_cancellation import CancellationProbe, raise_if_cancelled
 
 
-STRIP_SELECTION_SCHEMA_VERSION = "1.0.0"
+#: 1.1.0 adds the radius window.  A vessel with something standing inside it
+#: - a lamp's socket, a stand's column - has two outward-facing sheets at the
+#: same heights, and until the drafter could say which radius they meant, the
+#: strip took whichever had more faces.  On 24ET0021 that was the socket, and
+#: the rubbing came back showing the wrong surface with nothing said.
+STRIP_SELECTION_SCHEMA_VERSION = "1.1.0"
+#: Parameters stored by an earlier release, which named no radius window.
+STRIP_SELECTION_SCHEMA_VERSION_WITHOUT_RADII = "1.0.0"
 STRIP_SELECTION_KIND = "meridional_outer_strip/v1"
 
 # A wall whose profile slope is 3.7 still faces outwards by this much, while a
@@ -50,6 +57,7 @@ MAX_STRIP_NORMAL_ANGLE_MICRODEGREES = 89_000_000
 MIN_STRIP_WIDTH_UM = 100
 MAX_STRIP_WIDTH_UM = 10_000_000
 MAX_STRIP_HEIGHT_UM = 100_000_000
+MAX_STRIP_RADIUS_UM = 100_000_000
 MIN_STRIP_ANGLE_MICRODEGREES = -180_000_000
 MAX_STRIP_ANGLE_MICRODEGREES_EXCLUSIVE = 180_000_000
 
@@ -91,6 +99,8 @@ def strip_parameters(
     width_um: int | None = None,
     minimum_height_um: int | None = None,
     maximum_height_um: int | None = None,
+    minimum_radius_um: int | None = None,
+    maximum_radius_um: int | None = None,
     maximum_normal_angle_microdegrees: int = DEFAULT_STRIP_NORMAL_ANGLE_MICRODEGREES,
 ) -> dict[str, Any]:
     """Resolve the three numbers a rubber would decide, in exact integers.
@@ -99,6 +109,12 @@ def strip_parameters(
     angular half-width narrows as the body swells.  ``None`` means the whole
     revolution.  The height range is measured along the axis; ``None`` on
     either end means the artifact's own extent there.
+
+    The radius range is measured from the axis, and is what tells two
+    outward-facing sheets apart when they share their heights: on a lamp the
+    socket's wall and the pan's wall both face away from the axis over the
+    same run of the axis, and only their distance from it says which is the
+    outside of the vessel.  ``None`` on either end means no bound there.
     """
 
     axis = _axis(longitudinal_axis)
@@ -146,10 +162,39 @@ def strip_parameters(
         raise ArtifactSurfaceStripError(
             "minimum_height_um must be below maximum_height_um"
         )
+    minimum_radius = (
+        None
+        if minimum_radius_um is None
+        else _strict_int(
+            minimum_radius_um,
+            name="minimum_radius_um",
+            minimum=0,
+            maximum=MAX_STRIP_RADIUS_UM,
+        )
+    )
+    maximum_radius = (
+        None
+        if maximum_radius_um is None
+        else _strict_int(
+            maximum_radius_um,
+            name="maximum_radius_um",
+            minimum=0,
+            maximum=MAX_STRIP_RADIUS_UM,
+        )
+    )
+    if (
+        minimum_radius is not None
+        and maximum_radius is not None
+        and minimum_radius >= maximum_radius
+    ):
+        raise ArtifactSurfaceStripError(
+            "minimum_radius_um must be below maximum_radius_um"
+        )
     return {
         "kind": STRIP_SELECTION_KIND,
         "longitudinal_axis": axis,
         "maximum_height_um": maximum_height,
+        "maximum_radius_um": maximum_radius,
         "maximum_normal_angle_microdegrees": _strict_int(
             maximum_normal_angle_microdegrees,
             name="maximum_normal_angle_microdegrees",
@@ -157,6 +202,7 @@ def strip_parameters(
             maximum=MAX_STRIP_NORMAL_ANGLE_MICRODEGREES,
         ),
         "minimum_height_um": minimum_height,
+        "minimum_radius_um": minimum_radius,
         "reference_angle_microdegrees": angle,
         "schema_version": STRIP_SELECTION_SCHEMA_VERSION,
         "width_um": width,
@@ -166,6 +212,14 @@ def strip_parameters(
 def validate_strip_parameters(value: object) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise ArtifactSurfaceStripError("strip parameters must be an object")
+    if value.get("kind") != STRIP_SELECTION_KIND:
+        raise ArtifactSurfaceStripError("strip parameter kind is unsupported")
+    version = value.get("schema_version")
+    if version not in (
+        STRIP_SELECTION_SCHEMA_VERSION,
+        STRIP_SELECTION_SCHEMA_VERSION_WITHOUT_RADII,
+    ):
+        raise ArtifactSurfaceStripError("strip parameter schema is unsupported")
     expected = {
         "kind",
         "longitudinal_axis",
@@ -176,6 +230,10 @@ def validate_strip_parameters(value: object) -> dict[str, Any]:
         "schema_version",
         "width_um",
     }
+    # Parameters stored before the radius window named no radii, and a strip
+    # cut then had none: reading them back as "no bound" is what they meant.
+    if version == STRIP_SELECTION_SCHEMA_VERSION:
+        expected |= {"maximum_radius_um", "minimum_radius_um"}
     keys = set(value.keys())
     if keys != expected:
         missing = sorted(expected - keys)
@@ -183,16 +241,14 @@ def validate_strip_parameters(value: object) -> dict[str, Any]:
         raise ArtifactSurfaceStripError(
             f"strip parameter keys are invalid (missing={missing}, unknown={unknown})"
         )
-    if value["kind"] != STRIP_SELECTION_KIND:
-        raise ArtifactSurfaceStripError("strip parameter kind is unsupported")
-    if value["schema_version"] != STRIP_SELECTION_SCHEMA_VERSION:
-        raise ArtifactSurfaceStripError("strip parameter schema is unsupported")
     return strip_parameters(
         longitudinal_axis=value["longitudinal_axis"],  # type: ignore[arg-type]
         reference_angle_microdegrees=value["reference_angle_microdegrees"],  # type: ignore[arg-type]
         width_um=value["width_um"],  # type: ignore[arg-type]
         minimum_height_um=value["minimum_height_um"],  # type: ignore[arg-type]
         maximum_height_um=value["maximum_height_um"],  # type: ignore[arg-type]
+        minimum_radius_um=value.get("minimum_radius_um"),  # type: ignore[arg-type]
+        maximum_radius_um=value.get("maximum_radius_um"),  # type: ignore[arg-type]
         maximum_normal_angle_microdegrees=value[  # type: ignore[arg-type]
             "maximum_normal_angle_microdegrees"
         ],
@@ -362,6 +418,73 @@ def _sheets_compared_by_level(
     return nearer_out, nearer_in
 
 
+def _refuse_sheets_at_other_radii(
+    *,
+    heights: np.ndarray,
+    radii: np.ndarray,
+    indices: np.ndarray,
+    labels: np.ndarray,
+    bounded: bool,
+) -> None:
+    """Refuse to pick by size between sheets that stand at different radii.
+
+    Keeping the largest piece is right when the pieces are one surface cut
+    apart - a hole across the band leaves an upper piece and a lower one,
+    and on a flaring body those sit at different radii simply because they
+    sit at different heights.  It is wrong when they are different surfaces:
+    a lamp's socket and the pan around it face away from the axis over the
+    same run of the axis, and the socket, being a closed ring, has the more
+    faces.  So the question is asked where it means something - over the
+    heights the two pieces share.  Apart there, they are two surfaces, and
+    which one the rubbing is of is the drafter's to say.
+    """
+
+    if bounded:
+        return
+    names = np.unique(labels)
+    if names.size < 2:
+        return
+    largest = names[np.argmax([int(np.count_nonzero(labels == name)) for name in names])]
+    kept = labels == largest
+    kept_heights = heights[indices[kept]]
+    kept_radii = radii[indices[kept]]
+    kept_low, kept_high = float(kept_heights.min()), float(kept_heights.max())
+    elsewhere: list[tuple[float, float, int]] = []
+    for name in names:
+        if name == largest:
+            continue
+        other = indices[labels == name]
+        other_heights = heights[other]
+        low = max(kept_low, float(other_heights.min()))
+        high = min(kept_high, float(other_heights.max()))
+        if high <= low:
+            continue
+        here = (kept_heights >= low) & (kept_heights <= high)
+        there = (other_heights >= low) & (other_heights <= high)
+        if not here.any() or not there.any():
+            continue
+        mine = kept_radii[here]
+        theirs = radii[other][there]
+        if float(theirs.max()) < float(mine.min()) or float(theirs.min()) > float(mine.max()):
+            elsewhere.append(
+                (float(theirs.min()), float(theirs.max()), int(other.size))
+            )
+    if not elsewhere:
+        return
+    listed = "; ".join(
+        f"{count} faces at {low:.1f}-{high:.1f} mm"
+        for low, high, count in sorted(elsewhere, key=lambda item: -item[2])[:4]
+    )
+    raise ArtifactSurfaceStripError(
+        "this strip holds more than one outward-facing surface, standing at "
+        "different distances from the axis over the same heights: "
+        f"{int(np.count_nonzero(kept))} faces at {float(kept_radii.min()):.1f}-"
+        f"{float(kept_radii.max()):.1f} mm, and {listed}. Choosing between them "
+        "by counting faces would decide which surface the rubbing is of; say "
+        "which with minimum_radius_um and maximum_radius_um instead"
+    )
+
+
 def select_surface_strip(
     vertices_world_mm: object,
     faces: object,
@@ -426,6 +549,12 @@ def select_surface_strip(
         inside &= vertex_heights >= float(minimum_height) / 1000.0
     if maximum_height is not None:
         inside &= vertex_heights <= float(maximum_height) / 1000.0
+    minimum_radius = validated["minimum_radius_um"]
+    maximum_radius = validated["maximum_radius_um"]
+    if minimum_radius is not None:
+        inside &= vertex_radii >= float(minimum_radius) / 1000.0
+    if maximum_radius is not None:
+        inside &= vertex_radii <= float(maximum_radius) / 1000.0
     width = validated["width_um"]
     if width is not None:
         reference = math.radians(
@@ -472,6 +601,30 @@ def select_surface_strip(
             "the mesh may be wound inside out"
         )
 
+    # Which of the outward faces are one surface is asked before anything is
+    # compared with the inward ones.  A vessel with something standing inside
+    # it has two outward sheets, and until it is known which is meant, "the
+    # outer surface" names two different things and every later comparison is
+    # between the wrong pair.
+    outer_indices = np.flatnonzero(outer).astype(np.int64)
+    if int(outer_indices.size) > MAX_STRIP_FACES:
+        raise ArtifactSurfaceStripError(
+            f"this strip selects {int(outer_indices.size)} faces, above the "
+            f"{MAX_STRIP_FACES}-face limit an unwrap can carry; narrow the "
+            "width or the height range"
+        )
+    outer_labels = _component_labels(
+        triangles[outer_indices],
+        cancellation_probe=cancellation_probe,
+    )
+    _refuse_sheets_at_other_radii(
+        heights=heights,
+        radii=radii,
+        indices=outer_indices,
+        labels=outer_labels,
+        bounded=minimum_radius is not None or maximum_radius is not None,
+    )
+
     outer_radius_mean = float(np.mean(radii[outer]))
     inner_radius_mean = float(np.mean(radii[inner])) if inner_count else float("nan")
     if inner_count:
@@ -505,17 +658,8 @@ def select_surface_strip(
         )
     raise_if_cancelled(cancellation_probe)
 
-    indices = np.flatnonzero(outer).astype(np.int64)
-    if indices.size > MAX_STRIP_FACES:
-        raise ArtifactSurfaceStripError(
-            f"this strip selects {indices.size} faces, above the "
-            f"{MAX_STRIP_FACES}-face limit an unwrap can carry; narrow the "
-            "width or the height range"
-        )
-    labels = _component_labels(
-        selected_faces,
-        cancellation_probe=cancellation_probe,
-    )
+    indices = outer_indices
+    labels = outer_labels
     unique_labels, sizes = np.unique(labels, return_counts=True)
     components = int(unique_labels.size)
     dropped = 0

@@ -38,6 +38,8 @@ from src.core.artifact_rubbing_extractor import RELIEF_MODEL_CONTACT
 from src.core.artifact_surface_strip import select_positioned_surface_strip, strip_parameters
 from src.core.artifact_texture_relief import (
     NORMAL_MAP_ENCODING,
+    NORMAL_MAP_ENCODING_TANGENT,
+    NORMAL_MAP_ENCODING_TANGENT_Y_FLIPPED,
     NORMAL_MAP_ENCODING_X_FLIPPED,
     NORMAL_MAP_ENCODINGS,
     TEXTURE_RELIEF_DEPTH_MEASURE,
@@ -427,3 +429,102 @@ def test_the_sheet_says_the_ink_came_from_a_map(textured) -> None:
     assert any(row["value"] == TEXTURE_RUBBING_NOTE for row in sidecar["title_block"])
     captions = [figure["caption"] for figure in sidecar["figures"] if "caption" in figure]
     assert captions and all(TEXTURE_RELIEF_CAPTION_TOKEN in caption for caption in captions)
+
+
+def _write_tangent_normal_map(path: Path) -> None:
+    """The same grooves, written the way a baked game asset writes them.
+
+    A tangent-space texel says how the surface tilts against the triangle it
+    sits on, so the wall's own slope is not in it at all - only the relief.
+    Here u runs round the axis and v up the wall, so a groove tilts the
+    normal in v alone, and the reader has to rebuild the frame from the
+    OBJ's corners to put that tilt back where it belongs.
+    """
+
+    from PIL import Image
+
+    v = 1.0 - (np.arange(MAP_SIDE) + 0.5) / MAP_SIDE  # row 0 is the top
+    z = HEIGHT_MM * v[:, None]
+    _depth, d_depth = _groove_relief(z)
+    # Along v the surface runs up the wall, and the relief is measured
+    # outward, so the tilt against the surface is minus its slope.
+    normal = np.zeros((MAP_SIDE, MAP_SIDE, 3), dtype=np.float64)
+    normal[:, :, 0] = 0.0
+    normal[:, :, 1] = -d_depth
+    normal[:, :, 2] = 1.0
+    normal /= np.linalg.norm(normal, axis=-1, keepdims=True)
+    rgb = np.clip(np.rint((normal + 1.0) * 127.5), 0, 255).astype(np.uint8)
+    Image.fromarray(rgb, mode="RGB").save(path)
+
+
+def test_a_tangent_space_map_puts_the_grooves_where_the_object_space_one_does(
+    textured,
+) -> None:
+    """Almost every scan handed over as a game-ready asset carries a
+    tangent-space map, and until this the module could only read object
+    space, so those artifacts had no rubbing at all.  The two conventions
+    must put the same grooves at the same heights."""
+
+    session, _vertices, _faces, atlas, object_map, _obj_path, map_path = textured
+    tangent_path = map_path.with_name("vessel_tangent.png")
+    _write_tangent_normal_map(tangent_path)
+    tangent_map = read_normal_map(tangent_path, encoding=NORMAL_MAP_ENCODING_TANGENT)
+
+    computation = _rubbing(
+        session, TextureReliefSource(atlas=atlas, normal_map=tangent_map)
+    )
+    qc = computation.qc_dict()
+    assert qc["texture_relief_unmatched_corner_count"] == 0
+    # Every triangle of the strip has texture area, so every one has a frame.
+    assert qc["texture_relief_frameless_face_count"] == 0
+    assert 150 <= -qc["texture_relief_height_min_um_rounded"] <= 600
+
+    raster = computation.raster.pixels[:, :, 0].astype(np.float64).mean(axis=1)
+    bands = np.asarray(qc["artboard_height_profile_um"], dtype=np.float64) / 1000.0
+    rows = np.arange(raster.shape[0]) + 0.5
+    stations = np.linspace(0.0, float(raster.shape[0]), bands.shape[0])
+    heights = np.interp(rows, stations, bands)
+    on_groove = np.zeros(heights.shape, dtype=bool)
+    off_groove = np.ones(heights.shape, dtype=bool)
+    for centre in GROOVE_HEIGHTS_MM:
+        on_groove |= np.abs(heights - centre) < 0.4
+        off_groove &= np.abs(heights - centre) > 2.5
+    assert on_groove.sum() >= 3 and off_groove.sum() > 100
+    assert float(raster[on_groove].mean()) > float(raster[off_groove].mean()) + 40.0
+
+    # The recipe says which convention was read, and the object-space map is
+    # still read as object space: the two families do not mix.
+    recipe = computation.recipe_dict()
+    assert recipe["texture_relief"]["normal_map"]["encoding"] == NORMAL_MAP_ENCODING_TANGENT
+    assert object_map.encoding == NORMAL_MAP_ENCODING
+
+
+def test_the_numbers_pick_the_tangent_convention_for_a_tangent_map(textured) -> None:
+    """Nothing in the file says whether green runs up or down, so the
+    drafter chooses by the same misfit that chooses among the object-space
+    four - and the winner for a tangent map has to be a tangent reading."""
+
+    session, _vertices, _faces, atlas, _object_map, _obj_path, map_path = textured
+    tangent_path = map_path.with_name("vessel_tangent.png")
+    _write_tangent_normal_map(tangent_path)
+    tangent_map = read_normal_map(tangent_path, encoding=NORMAL_MAP_ENCODING_TANGENT)
+
+    record = session.document.record_index["record:unwrap:strip"]
+    mesh = session.materialize().mesh
+    unwrap, _qc, _radius = extract_tile_unwrap_development(mesh, record.recipe)
+    canonical = np.asarray(mesh.vertices, dtype=np.float64)
+    misfits = rank_normal_map_encodings(
+        developed_uv_mm=np.asarray(unwrap.uv_um, dtype=np.float64) / 1000.0,
+        developed_faces=np.asarray(unwrap.faces, dtype=np.int64),
+        developed_points_mm=canonical[np.asarray(unwrap.source_vertex_indices, dtype=np.int64)],
+        source_face_indices=np.asarray(unwrap.source_face_indices, dtype=np.int64),
+        source_vertex_indices=np.asarray(unwrap.source_vertex_indices, dtype=np.int64),
+        atlas=atlas,
+        normal_map=tangent_map,
+        source_to_canonical_rotation=rigid_rotation_between(atlas.vertices, canonical),
+        pixels_per_mm=10,
+        smoothing_um=1_000,
+    )
+    assert set(misfits) == set(NORMAL_MAP_ENCODINGS)
+    best = min(misfits, key=misfits.__getitem__)
+    assert best in (NORMAL_MAP_ENCODING_TANGENT, NORMAL_MAP_ENCODING_TANGENT_Y_FLIPPED)

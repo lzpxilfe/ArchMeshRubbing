@@ -431,3 +431,119 @@ def test_the_sheets_are_told_apart_at_the_same_height_not_by_their_means() -> No
     assert np.all(np.abs(np.hypot(chosen[:, 0], chosen[:, 1]) - (30.0 + 1.3 * chosen[:, 2])) < 1.5)
     with pytest.raises(ArtifactSurfaceStripError, match="at the same heights"):
         select_surface_strip(vertices, np.ascontiguousarray(faces[:, ::-1]), strip_parameters(minimum_height_um=1_000, maximum_height_um=39_000))
+
+
+def _lamp(vessel: tuple[np.ndarray, np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
+    """The vessel with a socket standing up its middle, as a lamp has.
+
+    The socket's wall faces away from the axis over the same heights as the
+    body's does, and being a closed ring it has the more faces.  That is the
+    shape that made 24ET0021's rubbing come back showing the wrong surface.
+    """
+
+    vertices, faces = vessel
+    segments, rings = 48, 24
+    radius = 8.0
+    base, top = 20.0, 60.0
+    angles = np.linspace(0.0, 2.0 * math.pi, segments, endpoint=False)
+    levels = np.linspace(base, top, rings)
+    grid = np.stack(
+        [
+            np.stack(
+                [radius * np.cos(angles), radius * np.sin(angles), np.full(segments, z)],
+                axis=1,
+            )
+            for z in levels
+        ]
+    ).reshape(-1, 3)
+    tube_faces: list[tuple[int, int, int]] = []
+    offset = int(vertices.shape[0])
+    for ring in range(rings - 1):
+        for step in range(segments):
+            a = offset + ring * segments + step
+            b = offset + ring * segments + (step + 1) % segments
+            c = a + segments
+            d = b + segments
+            # Wound so the normals point away from the axis, as the body's do.
+            tube_faces.append((a, b, c))
+            tube_faces.append((b, d, c))
+    return (
+        np.vstack([vertices, grid]),
+        np.vstack([faces, np.asarray(tube_faces, dtype=faces.dtype)]),
+    )
+
+
+def test_two_outward_sheets_at_one_height_are_refused_not_counted(
+    vessel: tuple[np.ndarray, np.ndarray],
+) -> None:
+    vertices, faces = _lamp(vessel)
+    parameters = strip_parameters(
+        reference_angle_microdegrees=QUARTER_TURN,
+        width_um=40_000,
+        minimum_height_um=25_000,
+        maximum_height_um=55_000,
+    )
+
+    with pytest.raises(ArtifactSurfaceStripError) as raised:
+        select_surface_strip(vertices, faces, parameters, largest_component=True)
+    message = str(raised.value)
+    assert "different distances from the axis" in message
+    # The refusal has to name the radii, because those are what the drafter
+    # answers it with.
+    assert "minimum_radius_um" in message
+
+
+def test_the_radius_window_says_which_of_the_two_sheets_is_meant(
+    vessel: tuple[np.ndarray, np.ndarray],
+) -> None:
+    vertices, faces = _lamp(vessel)
+    body = select_surface_strip(
+        vertices,
+        faces,
+        strip_parameters(
+            reference_angle_microdegrees=QUARTER_TURN,
+            width_um=40_000,
+            minimum_height_um=25_000,
+            maximum_height_um=55_000,
+            minimum_radius_um=20_000,
+        ),
+        largest_component=True,
+    )
+    assert body.qc["minimum_radius_um"] >= 20_000
+
+    socket = select_surface_strip(
+        vertices,
+        faces,
+        strip_parameters(
+            reference_angle_microdegrees=QUARTER_TURN,
+            width_um=40_000,
+            minimum_height_um=25_000,
+            maximum_height_um=55_000,
+            maximum_radius_um=15_000,
+        ),
+        largest_component=True,
+    )
+    assert socket.qc["maximum_radius_um"] <= 15_000
+    assert set(body.face_indices.tolist()).isdisjoint(socket.face_indices.tolist())
+
+
+def test_a_radius_window_survives_the_round_trip_and_1_0_0_still_reads() -> None:
+    parameters = strip_parameters(
+        reference_angle_microdegrees=QUARTER_TURN,
+        width_um=20_000,
+        minimum_radius_um=20_000,
+        maximum_radius_um=90_000,
+    )
+    assert validate_strip_parameters(parameters) == parameters
+
+    # Parameters stored before the radius window named none, and meant none.
+    older = {
+        key: value
+        for key, value in parameters.items()
+        if key not in ("minimum_radius_um", "maximum_radius_um")
+    }
+    older["schema_version"] = "1.0.0"
+    read = validate_strip_parameters(older)
+    assert read["minimum_radius_um"] is None
+    assert read["maximum_radius_um"] is None
+    assert read["kind"] == STRIP_SELECTION_KIND

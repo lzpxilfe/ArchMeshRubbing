@@ -217,6 +217,27 @@ PAGE_SIZES_MM: Mapping[str, tuple[float, float]] = {
 }
 ORIENTATIONS = ("portrait", "landscape")
 
+#: The reductions a report is normally drawn at, smallest denominator first.
+#: A measured drawing is read against a ruler, so the reduction has to be one
+#: the reader can divide in their head: at 1:3 a centimetre on the paper is
+#: three on the artifact and nothing else.  These are the ones the
+#: archaeologist named (잠정 · 고고학자 지시 2026-09-09); they are a list to
+#: pick from, not a rule - ``scale_denominator`` still takes any value from 1
+#: to 1000, because a sheet that will not hold the artifact at 1:6 has to be
+#: allowed to say 1:7.
+CONVENTIONAL_SCALE_DENOMINATORS: tuple[float, ...] = (
+    1.0,
+    2.0,
+    3.0,
+    4.0,
+    5.0,
+    6.0,
+    8.0,
+    10.0,
+    15.0,
+    20.0,
+)
+
 _TITLE_BLOCK_WIDTH_MM = 78.0
 _TITLE_BLOCK_ROW_MM = 5.0
 _TITLE_BLOCK_FONT_MM = 2.6
@@ -1815,6 +1836,40 @@ def _scale_token(denominator: float) -> str:
     return number_token(denominator, field_name="scale_denominator")
 
 
+def conventional_scale_at_least(denominator: float) -> float | None:
+    """The smallest reduction on the report's list that is not tighter than this.
+
+    A refusal that says "use 7 or more" leaves the drafter to work out which
+    of the scales their report actually uses will do.  This names it.  There
+    is no answer above the last one on the list, and then the caller has only
+    the raw number and a larger page to offer.
+    """
+
+    for candidate in CONVENTIONAL_SCALE_DENOMINATORS:
+        if candidate >= float(denominator) - 1e-9:
+            return candidate
+    return None
+
+
+def _scale_advice(suggestion: float) -> str:
+    """How a refusal tells the drafter what to set the scale to."""
+
+    conventional = conventional_scale_at_least(suggestion)
+    token = _scale_token(float(suggestion))
+    if conventional is None:
+        return f"Use a scale denominator of {token} or more, or a larger page."
+    if abs(float(conventional) - float(suggestion)) < 1e-9:
+        return (
+            f"Use a scale denominator of {token} or more "
+            f"(1:{token} is on the conventional list), or a larger page."
+        )
+    return (
+        f"Use a scale denominator of {token} or more "
+        f"(the conventional 1:{_scale_token(float(conventional))} fits), "
+        "or a larger page."
+    )
+
+
 def scale_bar_length_mm(scale_denominator: float) -> float:
     """Return the artifact length a scale bar should span, in millimetres.
 
@@ -2022,8 +2077,8 @@ def _lay_out(
                 f"record {record_id!r} does not fit {page.size} "
                 f"{page.orientation} at {options.physical_scale}: it needs "
                 f"{width:.1f} x {height:.1f} mm of the available "
-                f"{available_width:.1f} x {available_height:.1f} mm. Use a scale "
-                f"denominator of {suggestion} or more, or a larger page."
+                f"{available_width:.1f} x {available_height:.1f} mm. "
+                + _scale_advice(suggestion)
             )
         gutter = options.gutter_mm if row_count else 0.0
         if cursor_x + gutter + width > page.margin_mm + available_width + 1e-9:
@@ -2163,8 +2218,7 @@ def _lay_out_plan_with_sections(
             f"the plan with its sections does not fit {page.size} {page.orientation} "
             f"at {options.physical_scale}: it needs {total_width:.1f} x "
             f"{total_height:.1f} mm of the available {available_width:.1f} x "
-            f"{available_height:.1f} mm. Use a scale denominator of {suggestion} "
-            "or more, or a larger page."
+            f"{available_height:.1f} mm. " + _scale_advice(suggestion)
         )
     origin_x = page.margin_mm - left
     origin_y = page.margin_mm - top
@@ -2286,8 +2340,7 @@ def _lay_out_plan_over_elevation(
             f"the plan over its elevation does not fit {page.size} {page.orientation} "
             f"at {options.physical_scale}: it needs {total_width:.1f} x "
             f"{total_height:.1f} mm of the available {available_width:.1f} x "
-            f"{available_height:.1f} mm. Use a scale denominator of {suggestion} "
-            "or more, or a larger page."
+            f"{available_height:.1f} mm. " + _scale_advice(suggestion)
         )
     origin_x = page.margin_mm - left
     origin_y = page.margin_mm
@@ -7442,6 +7495,8 @@ def validate_drawing_sheet_bytes(svg_bytes: bytes, sidecar_bytes: bytes) -> None
 
 
 __all__ = [
+    "CONVENTIONAL_SCALE_DENOMINATORS",
+    "conventional_scale_at_least",
     "COMPUTED_RUBBING_CAPTION_PREFIX",
     "COMPUTED_RUBBING_NOTE",
     "MIXED_RUBBING_NOTE",
