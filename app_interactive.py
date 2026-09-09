@@ -11525,7 +11525,7 @@ class MainWindow(QMainWindow):
             projection = session.materialize()
             report = diagnose_mesh_bodies(
                 np.asarray(projection.mesh.vertices, dtype=np.float64),
-                np.asarray(projection.mesh.faces, dtype=np.int64),
+                session.topology_faces(),
             )
         except ArtifactMeshBodiesError as exc:
             self.status_info.setText(f"{self.status_info.text()} | 몸 개수 진단 못 함: {exc}")
@@ -11564,7 +11564,7 @@ class MainWindow(QMainWindow):
             projection = session.materialize()
             report = find_filled_holes(
                 np.asarray(projection.mesh.vertices, dtype=np.float64),
-                np.asarray(projection.mesh.faces, dtype=np.int64),
+                session.topology_faces(),
             )
         except ArtifactMeshFillsError as exc:
             self.status_info.setText(f"{self.status_info.text()} | 메우기 진단 못 함: {exc}")

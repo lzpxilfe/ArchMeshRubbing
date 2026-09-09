@@ -723,6 +723,25 @@ class ArtifactSession:
             raise ArtifactSessionError(str(exc)) from exc
         return execution.reopened_under_runtime
 
+    def topology_faces(self) -> np.ndarray:
+        """The faces as topology reads them: coincident corners named once.
+
+        STL stores three vertices per facet and shares none, so read as
+        written every edge belongs to one face and every face is a body of
+        its own - a scan of one pot comes back as two hundred thousand.
+        The stored arrays are untouched, because the geometry digest is of
+        the bytes that were parsed; what changes is which vertex a corner is
+        called by, and only where the question is a topological one.  A file
+        that already shares its corners is unaffected.
+
+        Anything that counts bodies, walks boundary rings or looks for a fan
+        asks for the faces here.  Anything that measures - the section, the
+        outline, the rubbing - does not: those read positions, and positions
+        are the same either way.
+        """
+
+        return np.asarray(self.source_mesh.welded_faces(), dtype=np.int64)
+
     def projection_snapshot(self) -> ArtifactProjectionSnapshot:
         """Validate source geometry and return the current immutable binding."""
 

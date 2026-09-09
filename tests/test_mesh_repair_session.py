@@ -317,3 +317,60 @@ class TestMeshRepairSession(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTopologyFaces(unittest.TestCase):
+    """A file that shares no corners is still one pot.
+
+    STL writes three vertices per facet and shares none between them, so read
+    as written every edge belongs to one face and every face is a body of its
+    own: the drum below comes back as 1,152 bodies instead of one.  Counting
+    bodies, walking a boundary ring and looking for a filler's fan are all
+    questions about how the surface is joined, so they read the faces with
+    coincident corners named once.
+    """
+
+    def _unshared(self) -> MeshData:
+        vertices, faces = _defective_scan()
+        exploded = vertices[np.asarray(faces, dtype=np.int64).reshape(-1)]
+        mesh = _mesh()
+        mesh.vertices = exploded
+        mesh.faces = np.arange(exploded.shape[0], dtype=np.int32).reshape(-1, 3)
+        return mesh
+
+    def test_a_scan_that_shares_no_corners_still_counts_its_bodies(self):
+        mesh = self._unshared()
+        raw = np.asarray(mesh.faces, dtype=np.int64)
+        # As written: every face alone.
+        self.assertEqual(len(np.unique(face_bodies(raw))), raw.shape[0])
+
+        session = ArtifactSession.create_from_source(
+            mesh,
+            resolved_source_path="/source/split.stl",
+            unit="cm",
+            axes={"source_x": "+X", "source_y": "+Y", "source_z": "+Z"},
+            handedness="right",
+            software_version="0.7.0",
+            operator="tester",
+            created_at=STAMP,
+            document_id="artifact:unshared",
+            metadata_revision_id="metadata:m1",
+            align_revision_id="align:a1",
+        )
+        welded = session.topology_faces()
+        self.assertEqual(welded.shape, raw.shape)
+        report = diagnose_mesh_bodies(
+            np.asarray(session.materialize().mesh.vertices, dtype=np.float64), welded
+        )
+        # The same three bodies the shared-corner fixture has.
+        self.assertEqual(len(report.bodies), 3)
+        self.assertTrue(report.needs_decision)
+
+    def test_a_file_that_already_shares_its_corners_is_unaffected(self):
+        session = _session()
+        self.assertTrue(
+            np.array_equal(
+                session.topology_faces(),
+                np.asarray(session.source_mesh.faces, dtype=np.int64),
+            )
+        )
