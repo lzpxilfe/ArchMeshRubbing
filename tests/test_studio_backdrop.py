@@ -22,7 +22,6 @@ from src.gui.studio_backdrop import (
     floor_grid,
     grid_step_mm,
     ground_shadow,
-    height_ruler,
     origin_axes,
     stands_on_origin,
     surface_shade,
@@ -159,7 +158,6 @@ def test_the_viewport_is_handed_plain_numbers_it_can_draw() -> None:
         "grid",
         "grid_colour",
         "grid_major_colour",
-        "height_ruler",
         "horizon_colour",
         "origin_axes",
         "origin_axis_colours",
@@ -175,50 +173,6 @@ def test_the_viewport_is_handed_plain_numbers_it_can_draw() -> None:
         assert len(channels) == 3
         assert all(0.0 <= channel <= 1.0 for channel in channels), key
     assert all(math.isfinite(value) for value in description["grid"].values())
-
-
-def test_the_room_has_a_z_as_well_as_an_x_and_a_y() -> None:
-    """The floor says how wide; the ruler says how tall.
-
-    Height is what tells a rim from a foot, so a room with only a floor
-    leaves the reading the eye most needs to a guess.  The ruler is the
-    floor's own step stood upright, so the two read as one measure.
-    """
-
-    bounds = (-40.0, -40.0, 0.0, 40.0, 40.0, 120.0)
-    ruler = height_ruler(bounds)
-    grid = floor_grid(bounds)
-    assert ruler.step_mm == grid.step_mm, "one step for the room, not two"
-    assert ruler.floor_z_mm == grid.floor_z_mm
-    assert ruler.top_z_mm == 120.0, "it stops at the artifact, never above it"
-    ticks = ruler.ticks_mm()
-    assert ticks[0] == 0.0
-    assert max(ticks) <= 120.0
-    gaps = {round(b - a, 9) for a, b in zip(ticks, ticks[1:])}
-    assert gaps == {round(ruler.step_mm, 9)}
-    assert ruler.is_major(0.0)
-    assert ruler.is_major(ruler.step_mm * GRID_MAJOR_EVERY)
-    assert not ruler.is_major(ruler.step_mm)
-
-
-def test_the_ruler_stands_clear_of_the_artifact() -> None:
-    """It is beside the artifact, not through it: a line crossing the form
-    would read as an edge of the form."""
-
-    bounds = (-30.0, -20.0, 4.0, 50.0, 20.0, 120.0)
-    ruler = height_ruler(bounds)
-    assert ruler.base_mm[0] < -30.0, "clear of the footprint on x"
-    assert ruler.base_mm[1] > 20.0, "and behind it on y"
-    assert ruler.floor_z_mm == 4.0, "it stands on the floor the artifact stands on"
-
-
-def test_a_flat_artifact_still_gets_a_ruler_that_says_nothing_false() -> None:
-    """A dish 8 mm tall has a ruler 8 mm tall - one that reached higher would
-    be a height the artifact does not have."""
-
-    ruler = height_ruler((-60.0, -60.0, 0.0, 60.0, 60.0, 8.0))
-    assert ruler.top_z_mm == 8.0
-    assert all(tick <= 8.0 for tick in ruler.ticks_mm())
 
 
 def test_the_three_axes_cross_at_the_origin() -> None:

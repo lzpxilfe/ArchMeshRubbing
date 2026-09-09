@@ -19,7 +19,9 @@ from src.application.artifact_workflow_self_test import (
 #: Only the outline payload changed - the source, the tile unwrap and its
 #: document are byte-identical - and every other digest here moved because
 #: an export embeds the document's.  Outlines written at 1.3.0 and earlier
-#: still recompute to the bytes they were written with.
+#: still recompute to the bytes they were written with.  They moved again
+#: with vector sidecar 1.9.0, which holds the section mark in the line-kind
+#: vocabulary: every export names the schema it was written under.
 def test_complete_workflow_self_test_has_deterministic_offline_receipts() -> None:
     result = run_artifact_workflow_self_test()
     repeated = run_artifact_workflow_self_test()
@@ -43,7 +45,7 @@ def test_complete_workflow_self_test_has_deterministic_offline_receipts() -> Non
     assert (result.vector_export_count, result.rubbing_export_count) == (9, 6)
     assert (result.tile_unwrap_count, result.tile_unwrap_export_count) == (1, 1)
     assert result.vector_set_sha256 == (
-        "a964d8ae20f41380b077dd1fc762064c828f6defaefdefc41c8f2d17784a1b67"
+        "a5558bca7075dc024c21ca8fe4423898365f42ea0a198f2daff148da9b769ef7"
     )
     assert result.rubbing_set_sha256 == (
         "93812c3f10b9e8a0d720412b4ceb77efcf2d441c3beb9b329eeeaadfca01300a"
@@ -63,10 +65,10 @@ def test_complete_workflow_self_test_has_deterministic_offline_receipts() -> Non
         == result.tile_unwrap_export_sha256
     )
     assert result.survey_manifest_sha256 == (
-        "21c7f674850357512d1521f461786b25d19f164ba924dd22c3d851ab144f6ebf"
+        "4d076382400e080df89d23b8fb5301a84348dd1b14957f568247215a0d21912b"
     )
     assert result.survey_artifact_set_sha256 == (
-        "3c474fa898e57080bf322e8e9d24746560b8f58b67581b7d32297953461b5ab0"
+        "556d5fe13878a3271cbb328677f02cbf7fcad59fbc6ec1ce43d251c3e5da2d67"
     )
     for digest in (
         result.document_sha256,
@@ -83,7 +85,7 @@ def test_complete_workflow_self_test_has_deterministic_offline_receipts() -> Non
         assert set(digest) <= set("0123456789abcdef")
     assert result.field_pilot_contract == "artifact-pass-human-driver-pending"
     assert result.svg_sha256 == (
-        "1355ef259e70f690f76070dab1d955bf71a7699513e22dca5a62ec2ad9084f48"
+        "ded79618a2d48d08c9eb48160400f3aa338488721c7ad8a1ea26783901b9a013"
     )
     assert result.png_sha256 == (
         "68fda651bbfe7edb779a49fff44fe4bc8c9fa1886a92d08477248a30b10620fd"
@@ -128,7 +130,7 @@ def test_complete_workflow_accepts_explicit_committed_directory_fsync_warning(
 
     assert result.record_count == 18
     assert result.survey_manifest_sha256 == (
-        "21c7f674850357512d1521f461786b25d19f164ba924dd22c3d851ab144f6ebf"
+        "4d076382400e080df89d23b8fb5301a84348dd1b14957f568247215a0d21912b"
     )
     assert (
         result.tile_unwrap_sha256

@@ -81,6 +81,9 @@ TECHNIQUE_BURNISHING = "technique_burnishing"
 TECHNIQUE_INTERIOR_ANVIL = "technique_interior_anvil"
 TECHNIQUE_PARING = "technique_paring"
 CENTER_AXIS = "center_axis"
+#: Where a section was taken, drawn on the figure it was taken from: a
+#: construction line, not part of the artifact, with a letter at each end.
+SECTION_MARK = "section_mark"
 
 LINE_KINDS: tuple[str, ...] = (
     SECTION_CUT,
@@ -114,6 +117,10 @@ LINE_KINDS: tuple[str, ...] = (
     CONDITION_WORN,
     CONDITION_CRACK,
     CENTER_AXIS,
+    # The section mark is drawn last, over everything: it says where a cut
+    # was taken and has to stay readable across whatever it crosses.  Being
+    # last also leaves every earlier drawing's layer order as it was.
+    SECTION_MARK,
 )
 
 # What the drafter calls each kind.  The ids above are the contract; these are
@@ -140,6 +147,7 @@ LINE_KIND_LABELS_KO: Mapping[str, str] = {
     CONDITION_WORN: "마모",
     CONDITION_CRACK: "균열",
     CENTER_AXIS: "중심선",
+    SECTION_MARK: "단면 위치선",
 }
 
 # 간선: the recessed line at the bottom of a groove is drawn as a straight line
@@ -726,6 +734,12 @@ _PRESETS: dict[str, DrawingStylePreset] = {
                 stroke_width_mm=0.13,
                 dash_pattern_mm=(4.0, 1.0, 1.0, 1.0),
             ),
+            # The section mark is the axis's chain line, a shade heavier, so
+            # it reads as a construction line and not as an edge.
+            SECTION_MARK: LineStyle(
+                stroke_width_mm=0.18,
+                dash_pattern_mm=(6.0, 1.5, 1.5, 1.5),
+            ),
         },
         hatch=HatchStyle(spacing_mm=1.0, stroke_width_mm=0.13, angle_deg=45.0),
         source_id=None,
@@ -766,6 +780,9 @@ _PRESETS: dict[str, DrawingStylePreset] = {
             CENTER_AXIS: LineStyle(
                 stroke_width_mm=0.1, dash_pattern_mm=(4.0, 1.0, 1.0, 1.0)
             ),
+            SECTION_MARK: LineStyle(
+                stroke_width_mm=0.15, dash_pattern_mm=(6.0, 1.5, 1.5, 1.5)
+            ),
         },
         # The source does not give the hatch; these are the provisional
         # preset's, with the pen thinned to the source's fine line.
@@ -804,6 +821,9 @@ _PRESETS: dict[str, DrawingStylePreset] = {
             TECHNIQUE_PARING: LineStyle(stroke_width_mm=0.1),
             CENTER_AXIS: LineStyle(
                 stroke_width_mm=0.1, dash_pattern_mm=(4.0, 1.0, 1.0, 1.0)
+            ),
+            SECTION_MARK: LineStyle(
+                stroke_width_mm=0.15, dash_pattern_mm=(6.0, 1.5, 1.5, 1.5)
             ),
         },
         hatch=HatchStyle(spacing_mm=1.0, stroke_width_mm=0.1, angle_deg=45.0),

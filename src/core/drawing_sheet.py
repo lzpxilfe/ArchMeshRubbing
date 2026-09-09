@@ -131,6 +131,7 @@ from .drawing_style import (
     OUTLINE_HOLE,
     OUTLINE_VISIBLE,
     SECTION_CUT,
+    SECTION_MARK,
     DrawingStyleError,
     DrawingStylePreset,
     LineStyle,
@@ -563,6 +564,12 @@ SHERD_SIDE_WORDS: Mapping[str, str] = {
 }
 #: How far short of the break the drawing stops, on the paper.
 SHERD_TRIM_PAPER_MM = 1.5
+#: How far a section mark runs past the artifact at each end, on the paper.
+#: On the object the line could be read as an edge; off it, it cannot.
+SECTION_MARK_OVERRUN_PAPER_MM = 3.0
+#: How far the letter sits beyond the end of the mark, on the paper.
+SECTION_MARK_LETTER_PAPER_MM = 2.0
+SECTION_MARK_LETTER_SIZE_MM = 3.0
 SHERD_LABEL = "파편"
 
 #: Which side of the fold a mirrored figure's elevation takes.  The common
@@ -1105,6 +1112,19 @@ class DrawingSheetOptions:
     ``break_records`` and every index must exist, or the sheet refuses:
     a choice that named nothing would be silently lost.
     """
+    section_marks: tuple[tuple[str, str], ...] = ()
+    """Where each section was taken: ``(section record id, figure record id)``.
+
+    A section is a cut at a place the archaeologist chose, and a plate that
+    does not say where cannot be read back onto the artifact.  Naming a pair
+    draws the cut plane's trace on that figure as a chain line running a
+    little past the artifact at both ends, with a letter at each end (A and
+    A′, then B, in the order given) to match the section figure.
+
+    Both records must be on the sheet, and the figure's plane must actually
+    meet the cut: a plan and a cut parallel to it have no trace, and asking
+    for one is refused rather than drawn as nothing.
+    """
     sherd_breaks: tuple[tuple[str, str], ...] = ()
     """Where a figure's artifact is broken: ``(record id, side)`` pairs.
 
@@ -1525,6 +1545,28 @@ class DrawingSheetOptions:
                 )
             sherd.append((record_id, side))
         object.__setattr__(self, "sherd_breaks", tuple(sherd))
+        marks: list[tuple[str, str]] = []
+        for entry in self.section_marks:
+            if not isinstance(entry, (tuple, list)) or len(entry) != 2:
+                raise DrawingSheetError(
+                    "section_marks entries must be (section record id, figure record id) pairs"
+                )
+            section_id, figure_id = entry
+            if not isinstance(section_id, str) or not section_id.strip():
+                raise DrawingSheetError("section_marks entries must name a section record")
+            if not isinstance(figure_id, str) or not figure_id.strip():
+                raise DrawingSheetError("section_marks entries must name a figure record")
+            section_id, figure_id = section_id.strip(), figure_id.strip()
+            if section_id == figure_id:
+                raise DrawingSheetError(
+                    "a section cannot mark where it was taken on itself"
+                )
+            if (section_id, figure_id) in marks:
+                raise DrawingSheetError(
+                    f"section_marks draws {section_id!r} on {figure_id!r} twice"
+                )
+            marks.append((section_id, figure_id))
+        object.__setattr__(self, "section_marks", tuple(marks))
         if self.break_reach not in BREAK_REACHES:
             raise DrawingSheetError(f"break_reach must be one of {', '.join(BREAK_REACHES)}")
         solid = self.break_solid_min_deg
@@ -1881,6 +1923,22 @@ class _Stipple:
 
 
 @dataclass(frozen=True, slots=True)
+class _SectionMark:
+    """Where a section was taken, drawn on the figure it was taken from.
+
+    The line is the cut plane's trace on that figure's plane; the letters
+    are what the reader matches to the section figure.  It is a construction
+    line, so it runs a little past the artifact at both ends: on the object
+    it could be read as an edge, and off it, it cannot.
+    """
+
+    section_record_id: str
+    letter: str
+    start_mm: tuple[float, float]
+    end_mm: tuple[float, float]
+
+
+@dataclass(frozen=True, slots=True)
 class _Prepared:
     """One figure's content, before it knows where on the page it goes."""
 
@@ -1901,6 +1959,7 @@ class _Prepared:
     """The caption as it breaks to fit the paper it sits under."""
     cutouts: tuple[_PastedCutout, ...] = ()
     stipples: tuple[_Stipple, ...] = ()
+    section_marks: tuple[_SectionMark, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1920,6 +1979,7 @@ class _Figure:
     caption_lines: tuple[str, ...] = ()
     cutouts: tuple[_PastedCutout, ...] = ()
     stipples: tuple[_Stipple, ...] = ()
+    section_marks: tuple[_SectionMark, ...] = ()
 
 
 def _lay_out(
@@ -2000,6 +2060,7 @@ def _lay_out(
                 caption_lines=prepared.caption_lines,
                 cutouts=prepared.cutouts,
                 stipples=prepared.stipples,
+                section_marks=prepared.section_marks,
             )
         )
         cursor_x += width
@@ -2129,6 +2190,7 @@ def _lay_out_plan_with_sections(
             caption_lines=figure.caption_lines,
             cutouts=figure.cutouts,
             stipples=figure.stipples,
+            section_marks=figure.section_marks,
         )
 
     # The plan first, then what lies under it, then what lies beside it: the
@@ -2251,6 +2313,7 @@ def _lay_out_plan_over_elevation(
             caption_lines=figure.caption_lines,
             cutouts=figure.cutouts,
             stipples=figure.stipples,
+            section_marks=figure.section_marks,
         )
 
     axis_paper_x = origin_x + (plan_axis_x - plan.bounds[0]) / denominator
@@ -4914,6 +4977,65 @@ def presumed_title_value(entries: Sequence[Sequence[Any]]) -> str:
     return " · ".join(parts)
 
 
+def _section_mark_line(
+    figure_frame: PlanarFrame,
+    section_frame: PlanarFrame,
+    *,
+    bounds: tuple[float, float, float, float],
+    overrun_mm: float,
+) -> tuple[tuple[float, float], tuple[float, float]] | None:
+    """The cut plane's trace on a figure, in that figure's millimetres.
+
+    A point of the figure's plane is ``origin + u * u_axis + v * v_axis``, and
+    it lies on the cut when ``(point - cut origin) . cut normal`` is zero;
+    that is one straight line in (u, v).  It is clipped to the figure's own
+    box grown by ``overrun_mm``, so the mark runs past the artifact at both
+    ends where it cannot be read as an edge.  ``None`` when the figure's
+    plane is parallel to the cut - there is no trace to draw.
+    """
+
+    normal = np.asarray(section_frame.normal_world, dtype=np.float64)
+    origin = np.asarray(figure_frame.origin_world_mm, dtype=np.float64)
+    u_axis = np.asarray(figure_frame.u_axis_world, dtype=np.float64)
+    v_axis = np.asarray(figure_frame.v_axis_world, dtype=np.float64)
+    cut_origin = np.asarray(section_frame.origin_world_mm, dtype=np.float64)
+    a = float(np.dot(u_axis, normal))
+    b = float(np.dot(v_axis, normal))
+    c = float(np.dot(cut_origin - origin, normal))
+    if abs(a) < 1e-9 and abs(b) < 1e-9:
+        return None
+    min_u, min_v, max_u, max_v = (float(value) for value in bounds)
+    min_u -= overrun_mm
+    min_v -= overrun_mm
+    max_u += overrun_mm
+    max_v += overrun_mm
+    hits: list[tuple[float, float]] = []
+    if abs(a) >= 1e-9:
+        for v in (min_v, max_v):
+            u = (c - b * v) / a
+            if min_u - 1e-9 <= u <= max_u + 1e-9:
+                hits.append((u, v))
+    if abs(b) >= 1e-9:
+        for u in (min_u, max_u):
+            v = (c - a * u) / b
+            if min_v - 1e-9 <= v <= max_v + 1e-9:
+                hits.append((u, v))
+    if len(hits) < 2:
+        return None
+    start = min(hits)
+    end = max(hits)
+    if math.hypot(end[0] - start[0], end[1] - start[1]) < 1e-6:
+        return None
+    return start, end
+
+
+def section_mark_letters(index: int) -> tuple[str, str]:
+    """The pair of letters for the nth mark on a sheet: A and A', then B."""
+
+    letter = chr(ord("A") + (int(index) % 26))
+    return letter, f"{letter}′"
+
+
 def sherd_title_value(entries: Sequence[Sequence[str]]) -> str:
     """The title block's word on the breaks: which sides, and how many.
 
@@ -5521,6 +5643,7 @@ def _sheet_provenance(
     relief_stipples: Mapping[str, Any] | None = None,
     presumed_lines: Mapping[str, Any] | None = None,
     sherd_breaks: Sequence[Mapping[str, Any]] = (),
+    section_marks: Sequence[Mapping[str, Any]] = (),
     record_ids: Sequence[str] = (),
 ) -> dict[str, Any]:
     from .drawing_sheet_spec import plate_spec  # noqa: PLC0415
@@ -5644,6 +5767,9 @@ def _sheet_provenance(
         # Present exactly when a figure was drawn as a piece of something,
         # like the title block row it mirrors.
         provenance["sherd_breaks"] = [dict(entry) for entry in sherd_breaks]
+    if section_marks:
+        # Present exactly when a sheet says where its sections were taken.
+        provenance["section_marks"] = [dict(entry) for entry in section_marks]
     return provenance
 
 
@@ -5942,6 +6068,35 @@ def _render_sheet(
                     index=index,
                 )
             )
+        for mark_index, mark in enumerate(figure.section_marks):
+            # The letters the reader matches to the section figure, one at
+            # each end of the mark and clear of it, so neither sits on the
+            # artifact.
+            start_x, start_y = figure.placement.paper_xy(mark.start_mm)
+            end_x, end_y = figure.placement.paper_xy(mark.end_mm)
+            run = math.hypot(end_x - start_x, end_y - start_y)
+            step_x = 0.0 if run <= 0.0 else (end_x - start_x) / run
+            step_y = 0.0 if run <= 0.0 else (end_y - start_y) / run
+            lines.append(
+                f'      <g id="section-mark-{index:04d}-{mark_index:02d}" '
+                f'data-record-id="{xml_attribute(mark.section_record_id)}">'
+            )
+            for (x, y), label, sign in (
+                ((start_x, start_y), mark.letter, -1.0),
+                ((end_x, end_y), f"{mark.letter}\u2032", 1.0),
+            ):
+                lines.append(
+                    "        "
+                    + _text_element(
+                        label,
+                        x_mm=round(x + step_x * sign * SECTION_MARK_LETTER_PAPER_MM, 4),
+                        y_mm=round(y + step_y * sign * SECTION_MARK_LETTER_PAPER_MM, 4),
+                        size_mm=SECTION_MARK_LETTER_SIZE_MM,
+                        color=options.stroke_color,
+                        anchor="middle",
+                    )
+                )
+            lines.append("      </g>")
         lines.append("    </g>")
     lines.append("  </g>")
 
@@ -6624,6 +6779,70 @@ def compose_drawing_sheet(
             + ", which this sheet does not draw as a rubbing"
         )
 
+    # Where each section was taken, drawn on the figure it was taken from.
+    # This waits until every figure has been prepared: the section may come
+    # after the figure it marks, and both frames have to be known.
+    section_mark_entries: list[dict[str, Any]] = []
+    if options.section_marks:
+        by_record = {figure.record_id: figure for figure in prepared}
+        for index, (section_id, figure_id) in enumerate(options.section_marks):
+            for record_id in (section_id, figure_id):
+                if record_id not in frames:
+                    raise DrawingSheetError(
+                        f"section_marks names {record_id!r}, which this sheet does not draw"
+                    )
+            figure = by_record.get(figure_id)
+            if figure is None:
+                raise DrawingSheetError(
+                    f"section_marks draws on {figure_id!r}, which is not a figure of its own"
+                )
+            trace = _section_mark_line(
+                frames[figure_id],
+                frames[section_id],
+                bounds=figure.bounds,
+                overrun_mm=SECTION_MARK_OVERRUN_PAPER_MM * float(options.scale_denominator),
+            )
+            if trace is None:
+                raise DrawingSheetError(
+                    f"the cut of {section_id!r} does not cross {figure_id!r}: a plane "
+                    "parallel to the figure leaves no trace to draw"
+                )
+            start, end = trace
+            letter, prime = section_mark_letters(index)
+            paths = dict(figure.paths_by_kind)
+            paths.setdefault(SECTION_MARK, []).append(
+                VectorPath(
+                    id=f"section-mark:{letter}",
+                    role="section_mark",
+                    closed=False,
+                    points_mm=(start, end),
+                )
+            )
+            replacement = replace(
+                figure,
+                paths_by_kind=paths,
+                section_marks=(
+                    *figure.section_marks,
+                    _SectionMark(
+                        section_record_id=section_id,
+                        letter=letter,
+                        start_mm=start,
+                        end_mm=end,
+                    ),
+                ),
+            )
+            prepared[prepared.index(figure)] = replacement
+            by_record[figure_id] = replacement
+            section_mark_entries.append(
+                {
+                    "figure_record_id": figure_id,
+                    "from_mm": [round(start[0], 6), round(start[1], 6)],
+                    "letters": [letter, prime],
+                    "section_record_id": section_id,
+                    "to_mm": [round(end[0], 6), round(end[1], 6)],
+                }
+            )
+
     computed_rubbing = any(figure.caption is not None for figure in prepared)
     computed_rubbing_note = rubbing_source_note(
         [figure.caption for figure in prepared if figure.caption is not None]
@@ -6933,6 +7152,7 @@ def compose_drawing_sheet(
                 if options.presumed_lines
                 else None
             ),
+            section_marks=section_mark_entries,
             sherd_breaks=[
                 {
                     "cut_path_count": sherd_cut_counts.get(record_id, 0),

@@ -499,6 +499,7 @@ def _check_resources() -> str:
         "vector_export-1.6.0.schema.json",
         "vector_export-1.7.0.schema.json",
         "vector_export-1.8.0.schema.json",
+        "vector_export-1.9.0.schema.json",
         "rubbing_receipt-1.0.0.schema.json",
         "rubbing_export-1.0.0.schema.json",
         "rubbing_export-1.1.0.schema.json",

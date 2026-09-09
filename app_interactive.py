@@ -1898,13 +1898,21 @@ class WorkflowPanel(QWidget):
         btn_fit.clicked.connect(lambda: self.workflowRequested.emit("fit_view", None))
         align_layout.addWidget(btn_fit)
         view_grid = QGridLayout()
+        view_grid.setHorizontalSpacing(6)
+        view_grid.setVerticalSpacing(6)
         views = [
             ("상면", "top"), ("정면", "front"), ("우측", "right"),
             ("하면", "bottom"), ("후면", "back"), ("좌측", "left"),
         ]
+        # The six standard views are one row of buttons folded in two, so they
+        # get the height a button in this panel has.  Left to the layout they
+        # are the first thing squeezed when the panel is short, and squashed
+        # buttons read as a different, lesser control than the ones above.
+        view_button_height = max(btn_fit.sizeHint().height(), 28)
         for idx, (label, key) in enumerate(views):
             btn = QPushButton(label)
             set_pixel_icon(btn, f"view_{key}")
+            btn.setMinimumHeight(view_button_height)
             btn.clicked.connect(
                 lambda _checked=False, view_key=key: self.workflowRequested.emit("canonical_view", {"view": view_key})
             )
@@ -5496,6 +5504,29 @@ class SectionPanel(QWidget):
             return drawing_user_preset({}, base_preset_id=choice, hatch_cut_faces=hatch)
         return choice
 
+
+def _scrolled(panel: QWidget) -> QScrollArea:
+    """Put a panel in a dock without letting the dock squash it.
+
+    A dock shorter than its panel does not clip - it compresses whatever the
+    layout will give, and buttons are the first to go, so a row of controls
+    ends up half the height of the identical row above it.  Worse, what the
+    layout will not give becomes the window's minimum height: with every
+    detail panel open the window could not be made shorter than 1607 px,
+    which is taller than the screen of the laptop this is drawn on.  Scrolled,
+    each panel keeps the height it asked for and the dock scrolls to it.
+    """
+
+    scroll = QScrollArea()
+    scroll.setWidgetResizable(True)
+    scroll.setFrameShape(QFrame.Shape.NoFrame)
+    # Vertical only: these panels are a column of full-width controls, and the
+    # vertical bar's own width must not be what puts a horizontal bar under them.
+    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    scroll.setWidget(panel)
+    return scroll
+
+
 class MainWindow(QMainWindow):
     """메인 윈도우"""
 
@@ -5732,20 +5763,20 @@ class MainWindow(QMainWindow):
         self.workflow_dock.setObjectName("dock_workflow")
         self.workflow_panel = WorkflowPanel(self.help_widget)
         self.workflow_panel.workflowRequested.connect(self.on_workflow_action)
-        self.workflow_dock.setWidget(self.workflow_panel)
+        self.workflow_dock.setWidget(_scrolled(self.workflow_panel))
 
         # 2) 정치(변환)
         self.transform_dock = QDockWidget("세부 · 정위치", self)
         self.transform_dock.setObjectName("dock_transform")
         self.transform_panel = TransformPanel(self.viewport, self.help_widget)
-        self.transform_dock.setWidget(self.transform_panel)
+        self.transform_dock.setWidget(_scrolled(self.transform_panel))
 
         # 3) 펼침
         self.selection_dock = QDockWidget("보조 · 탁본 표면 보정", self)
         self.selection_dock.setObjectName("dock_selection")
         self.selection_panel = SelectionPanel(self.help_widget)
         self.selection_panel.selectionChanged.connect(self.on_selection_action)
-        self.selection_dock.setWidget(self.selection_panel)
+        self.selection_dock.setWidget(_scrolled(self.selection_panel))
 
         # 4) 기록면 전개
         self.flatten_dock = QDockWidget("세부 · 탁본", self)
@@ -5759,7 +5790,7 @@ class MainWindow(QMainWindow):
         self.flatten_panel.btn_fit_arc.clicked.connect(self.fit_curvature_arc)
         self.flatten_panel.btn_clear_points.clicked.connect(self.clear_curvature_points)
         self.flatten_panel.btn_clear_arcs.clicked.connect(self.clear_all_arcs)
-        self.flatten_dock.setWidget(self.flatten_panel)
+        self.flatten_dock.setWidget(_scrolled(self.flatten_panel))
         try:
             self.flatten_dock.visibilityChanged.connect(self._on_flatten_dock_visibility_changed)
         except Exception:
@@ -5770,14 +5801,14 @@ class MainWindow(QMainWindow):
         self.tile_dock.setObjectName("dock_tile")
         self.tile_panel = TileInterpretationPanel(self.help_widget)
         self.tile_panel.interpretationChanged.connect(self.on_tile_interpretation_action)
-        self.tile_dock.setWidget(self.tile_panel)
+        self.tile_dock.setWidget(_scrolled(self.tile_panel))
 
         # 5) 내보내기
         self.export_dock = QDockWidget("세부 · 실측/탁본 출력", self)
         self.export_dock.setObjectName("dock_export")
         self.export_panel = ExportPanel()
         self.export_panel.exportRequested.connect(self.on_export_requested)
-        self.export_dock.setWidget(self.export_panel)
+        self.export_dock.setWidget(_scrolled(self.export_panel))
 
         # 5.5) 치수 측정
         self.measure_dock = QDockWidget("세부 · 제원측정", self)
@@ -5790,7 +5821,7 @@ class MainWindow(QMainWindow):
         self.measure_panel.clearResultsRequested.connect(self.clear_measure_results)
         self.measure_panel.computeVolumeRequested.connect(self.compute_volume_stats)
         self.measure_panel.modeChanged.connect(self.on_measure_mode_changed)
-        self.measure_dock.setWidget(self.measure_panel)
+        self.measure_dock.setWidget(_scrolled(self.measure_panel))
 
         # 6) 단면/2D 지정 도구 (슬라이싱 + 십자선 + 라인 + ROI)
         self.section_dock = QDockWidget("검증된 실측 · 전개", self)

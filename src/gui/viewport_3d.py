@@ -140,8 +140,6 @@ from ..core.alignment_utils import (
 )
 from .studio_backdrop import (
     AMBIENT,
-    GRID_COLOUR,
-    GRID_MAJOR_COLOUR,
     FILL_LIGHT,
     FILL_STRENGTH,
     HORIZON_COLOUR,
@@ -150,7 +148,6 @@ from .studio_backdrop import (
     SHADOW_COLOUR,
     backdrop_bands,
     ground_shadow,
-    height_ruler,
     origin_axes,
     shadow_outline,
 )
@@ -3100,7 +3097,6 @@ class Viewport3D(QOpenGLWidget):
         self.draw_ground_plane()  # 諛섑닾紐?諛붾떏
         self.draw_ground_shadow()
         self.draw_grid()
-        self.draw_height_ruler()
         self.draw_origin_axes()
         glDepthMask(GL_TRUE)
         
@@ -3346,49 +3342,6 @@ class Viewport3D(QOpenGLWidget):
             glEnd()
         finally:
             glLineWidth(1.0)
-            glColor4f(1.0, 1.0, 1.0, 1.0)
-            glEnable(GL_LIGHTING)
-
-    def draw_height_ruler(self):
-        """The room's z: a ticked line standing beside the artifact.
-
-        The floor grid gives x and y.  Height is what tells a rim from a foot,
-        so the room needs a z as well, at the floor's own step and stopping at
-        the artifact's top - never above it, which would be a height the
-        artifact does not have.
-        """
-
-        if not bool(getattr(self, "studio_backdrop", True)):
-            return
-        bounds = self._studio_bounds_world_mm()
-        if bounds is None:
-            return
-        ruler = height_ruler(bounds)
-        if ruler.top_z_mm <= ruler.floor_z_mm:
-            return
-        base_x, base_y = ruler.base_mm
-        glDisable(GL_LIGHTING)
-        glEnable(GL_BLEND)
-        glDisable(GL_LINE_SMOOTH)
-        try:
-            glLineWidth(1.0)
-            glColor4f(GRID_MAJOR_COLOUR[0], GRID_MAJOR_COLOUR[1], GRID_MAJOR_COLOUR[2], 0.85)
-            glBegin(GL_LINES)
-            self._submit_world_vertex([base_x, base_y, ruler.floor_z_mm])
-            self._submit_world_vertex([base_x, base_y, ruler.top_z_mm])
-            glEnd()
-            # Ticks run back along +y so they read as rungs, not as a second
-            # outline of the artifact.
-            for height in ruler.ticks_mm():
-                major = ruler.is_major(height)
-                reach = ruler.step_mm * (0.6 if major else 0.3)
-                colour = GRID_MAJOR_COLOUR if major else GRID_COLOUR
-                glColor4f(colour[0], colour[1], colour[2], 0.9 if major else 0.6)
-                glBegin(GL_LINES)
-                self._submit_world_vertex([base_x, base_y, ruler.floor_z_mm + height])
-                self._submit_world_vertex([base_x, base_y + reach, ruler.floor_z_mm + height])
-                glEnd()
-        finally:
             glColor4f(1.0, 1.0, 1.0, 1.0)
             glEnable(GL_LIGHTING)
 

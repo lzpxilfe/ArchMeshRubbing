@@ -297,64 +297,6 @@ def stands_on_origin(
     )
 
 
-@dataclass(frozen=True, slots=True)
-class HeightRuler:
-    """The room's z: a vertical line beside the artifact, ticked in mm."""
-
-    base_mm: tuple[float, float]
-    floor_z_mm: float
-    top_z_mm: float
-    step_mm: float
-
-    def ticks_mm(self) -> list[float]:
-        """The heights above the floor a tick is drawn at."""
-
-        if self.step_mm <= 0.0:
-            return []
-        count = int((self.top_z_mm - self.floor_z_mm) // self.step_mm)
-        return [index * self.step_mm for index in range(count + 1)]
-
-    def is_major(self, height_mm: float) -> bool:
-        index = int(round(height_mm / self.step_mm))
-        return index % GRID_MAJOR_EVERY == 0
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "base_mm": list(self.base_mm),
-            "floor_z_mm": self.floor_z_mm,
-            "major_every": GRID_MAJOR_EVERY,
-            "step_mm": self.step_mm,
-            "tick_count": len(self.ticks_mm()),
-            "top_z_mm": self.top_z_mm,
-        }
-
-
-def height_ruler(bounds_mm: tuple[float, float, float, float, float, float]) -> HeightRuler:
-    """The vertical companion to the floor grid.
-
-    The floor says how wide the artifact is and nothing about how tall.  A
-    rim is a rim and a neck is a neck by their height, so the room needs a z
-    as much as an x and a y: one line standing on the floor at the back
-    corner of the artifact's footprint, ticked at the floor's own step so
-    the two read as one ruler bent upright.  It stops at the artifact's top,
-    not above it, so it never suggests a size the artifact does not have.
-    """
-
-    min_x, min_y, min_z, max_x, max_y, max_z = (float(value) for value in bounds_mm)
-    if not all(math.isfinite(value) for value in (min_x, min_y, min_z, max_x, max_y, max_z)):
-        raise ValueError("bounds must be finite")
-    grid = floor_grid(bounds_mm)
-    step = grid.step_mm
-    return HeightRuler(
-        # Behind and to the left of the footprint, one square clear of it, so
-        # the ruler never crosses the artifact it stands beside.
-        base_mm=(min_x - step, max_y + step),
-        floor_z_mm=min_z,
-        top_z_mm=max(max_z, min_z),
-        step_mm=step,
-    )
-
-
 def backdrop_bands() -> tuple[tuple[float, Colour], ...]:
     """The gradient as stops, bottom to top, for whatever draws it.
 
@@ -388,7 +330,6 @@ def backdrop_description(bounds_mm: tuple[float, float, float, float, float, flo
     grid = floor_grid(bounds_mm)
     return {
         "grid": grid.to_dict(),
-        "height_ruler": height_ruler(bounds_mm).to_dict(),
         "origin_axes": origin_axes(bounds_mm).to_dict(),
         "origin_axis_colours": [list(colour) for colour in ORIGIN_AXIS_COLOURS],
         "stands_on_origin": stands_on_origin(bounds_mm),
@@ -422,7 +363,6 @@ __all__ = [
     "SKY_COLOUR",
     "FloorGrid",
     "GroundShadow",
-    "HeightRuler",
     "OriginAxes",
     "backdrop_bands",
     "backdrop_description",
@@ -430,7 +370,6 @@ __all__ = [
     "floor_grid",
     "grid_step_mm",
     "ground_shadow",
-    "height_ruler",
     "origin_axes",
     "shadow_outline",
     "stands_on_origin",

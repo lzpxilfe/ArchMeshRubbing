@@ -21,9 +21,14 @@ from typing import Any
 import pytest
 
 from src.core.artifact_outline_extractor import compute_artifact_outline
-from src.core.artifact_vector_extractor import commit_vector_computation
+from src.core.artifact_vector_extractor import (
+    commit_vector_computation,
+    compute_artifact_cutline,
+)
+from src.core.artifact_vector_record import PlanarFrame
 from src.core.canonical_json import canonical_json_bytes
 from src.core.drawing_sheet import (
+    SECTION_MARK_OVERRUN_PAPER_MM,
     SHERD_LABEL,
     SHERD_TRIM_PAPER_MM,
     DrawingSheetError,
@@ -38,7 +43,11 @@ from synthetic_tile import AMKIWA_SHAPE, tile_session
 
 SVG_NS = "{http://www.w3.org/2000/svg}"
 PLAN_ID = "record:sherd-plan"
+SECTION_ID = "record:sherd-section"
+LEVEL_ID = "record:sherd-level"
 SCALE = 4.0
+#: Where the cut was taken along the piece, as a share of its length.
+CUT_SHARE = 0.35
 
 
 def _sherd_document():
@@ -53,11 +62,47 @@ def _sherd_document():
         document_id="artifact:sherd",
     )
     outline = compute_artifact_outline(session, "top", precision_grid_mm=0.5)
-    return commit_vector_computation(
+    session = commit_vector_computation(
         session,
         outline,
         record_id=PLAN_ID,
         created_at="2026-09-09T00:00:00Z",
+        operator="tester",
+    )
+    low = _vertices.min(axis=0)
+    high = _vertices.max(axis=0)
+    station = float(low[1] + (high[1] - low[1]) * CUT_SHARE)
+    section = compute_artifact_cutline(
+        session,
+        PlanarFrame(
+            origin_world_mm=(0.0, station, 0.0),
+            u_axis_world=(1.0, 0.0, 0.0),
+            v_axis_world=(0.0, 0.0, 1.0),
+            normal_world=(0.0, -1.0, 0.0),
+        ),
+    )
+    session = commit_vector_computation(
+        session,
+        section,
+        record_id=SECTION_ID,
+        created_at="2026-09-09T00:00:01Z",
+        operator="tester",
+    )
+    # A cut level with the plan: parallel to it, so it leaves no trace there.
+    level = compute_artifact_cutline(
+        session,
+        PlanarFrame(
+            origin_world_mm=(0.0, 0.0, float(low[2] + (high[2] - low[2]) * 0.5)),
+            u_axis_world=(1.0, 0.0, 0.0),
+            v_axis_world=(0.0, 1.0, 0.0),
+            normal_world=(0.0, 0.0, 1.0),
+        ),
+    )
+    return commit_vector_computation(
+        session,
+        level,
+        record_id=LEVEL_ID,
+        created_at="2026-09-09T00:00:02Z",
         operator="tester",
     ).document
 
@@ -207,5 +252,83 @@ def test_the_break_travels_in_the_plate_specification(document) -> None:
     assert restored.sherd_breaks == ((PLAN_ID, "top"),)
     assert plate_spec(records, restored) == spec
     first = compose_drawing_sheet(document, [PLAN_ID], options=options)
+    again = compose_drawing_sheet(document, list(records), options=restored)
+    assert first.svg_bytes == again.svg_bytes
+
+
+def test_the_plate_says_where_the_section_was_taken(document) -> None:
+    """A cut at a place the archaeologist chose, said on the figure.
+
+    The mark is the cut plane's trace on the plan: a straight line at the
+    cut's own station, running past the artifact at both ends so it cannot
+    be read as an edge, with A and A′ at the ends to match the section.
+    """
+
+    bundle = compose_drawing_sheet(
+        document,
+        [PLAN_ID, SECTION_ID],
+        options=_options(section_marks=((SECTION_ID, PLAN_ID),)),
+    )
+    sidecar = json.loads(bundle.sidecar_bytes)
+    validate_drawing_sheet_bytes(bundle.svg_bytes, bundle.sidecar_bytes)
+
+    entry = sidecar["section_marks"][0]
+    assert entry == {
+        "figure_record_id": PLAN_ID,
+        "from_mm": entry["from_mm"],
+        "letters": ["A", "A′"],
+        "section_record_id": SECTION_ID,
+        "to_mm": entry["to_mm"],
+    }
+    # The mark lies at the cut's own station, level across the plan.
+    assert entry["from_mm"][1] == pytest.approx(entry["to_mm"][1], abs=1e-6)
+
+    figure = _figure(bundle.svg_bytes)
+    layer = figure.find(f"{SVG_NS}g[@id='layer-section-mark']")
+    assert layer is not None, "the mark has a layer of its own"
+    points = [point for path in layer for point in _points(path)]
+    assert len(points) == 2
+    # It runs past the artifact at both ends.
+    plan_points = [point for path in _outline_paths(bundle.svg_bytes) for point in _points(path)]
+    left = min(x for x, _y in plan_points)
+    right = max(x for x, _y in plan_points)
+    assert min(x for x, _y in points) < left - SECTION_MARK_OVERRUN_PAPER_MM + 0.5
+    assert max(x for x, _y in points) > right + SECTION_MARK_OVERRUN_PAPER_MM - 0.5
+
+    letters = [
+        element.text
+        for element in figure.iter()
+        if element.tag.endswith("}text") and element.text in {"A", "A′"}
+    ]
+    assert sorted(letters) == ["A", "A′"]
+
+
+def test_a_cut_that_does_not_cross_the_figure_is_refused(document) -> None:
+    """A plan and a cut parallel to it have no trace, and asking for one is
+    refused rather than drawn as nothing."""
+
+    with pytest.raises(DrawingSheetError, match="does not cross"):
+        compose_drawing_sheet(
+            document,
+            [PLAN_ID, LEVEL_ID],
+            options=_options(section_marks=((LEVEL_ID, PLAN_ID),)),
+        )
+    with pytest.raises(DrawingSheetError, match="does not draw"):
+        compose_drawing_sheet(
+            document,
+            [PLAN_ID, SECTION_ID],
+            options=_options(section_marks=((SECTION_ID, "record:absent"),)),
+        )
+    with pytest.raises(DrawingSheetError, match="on itself"):
+        _options(section_marks=((SECTION_ID, SECTION_ID),))
+
+
+def test_the_mark_travels_in_the_plate_specification(document) -> None:
+    options = _options(section_marks=((SECTION_ID, PLAN_ID),))
+    spec = plate_spec([PLAN_ID, SECTION_ID], options)
+    assert spec["section_marks"] == [[SECTION_ID, PLAN_ID]]
+    records, restored = plate_spec_options(spec)
+    assert restored.section_marks == ((SECTION_ID, PLAN_ID),)
+    first = compose_drawing_sheet(document, [PLAN_ID, SECTION_ID], options=options)
     again = compose_drawing_sheet(document, list(records), options=restored)
     assert first.svg_bytes == again.svg_bytes

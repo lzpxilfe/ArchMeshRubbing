@@ -65,9 +65,11 @@
 | 완료 실측 묶음 | 3/6/6 record를 자식 패키지 15개와 aggregate manifest로 원자 게시 | - | engineering contract | native | `src/core/artifact_survey_export.py` |
 | 오프라인 검증 | `.amr`과 네 export 종류의 hash·단위·Align·record·QC 재검증 | - | engineering contract | native | `src/core/artifact_verification.py` |
 | 깊이 픽 좌표 | float64 world → render origin 재기준 → 24-bit depth unproject → CPU ray/triangle | - | engineering contract | native | `src/gui/render_coordinates.py`, `src/core/artifact_surface_measurement.py` |
+| 단면 위치 표시 | 절단면과 도형 평면이 만나는 직선을 그 도형 위에 일점쇄선으로 긋고 양끝에 A-A′; 유물 밖으로 종이 3 mm 더 나가고, 나란한 평면은 거부 | - | engineering contract (잠정) | native | `src/core/drawing_sheet.py` (`section_marks`) |
 | 파편의 깨진 자리 | 실측자가 댄 쪽에서 도형 자신의 선을 종이 1.5 mm 앞에 멈추고 가로질러 아무것도 긋지 않음; 제목란 `파편` 행과 sidecar 블록이 함께 서고, 이름만 대고 자른 것이 없으면 거부 | - | engineering contract (잠정, 실측자 지시) | native | `src/core/drawing_sheet.py` (`sherd_breaks`) |
 | 판독 다섯 가지 | 도판이 그리는 꺾임·홈·능선·뒷면 실루엣·양각 음영을 한 가지 호출로 읽고 실측자 이름으로 기록; 판독의 뜻과 거부는 전부 core의 것이고 이 층은 규칙을 더하지 않는다 | - | engineering contract | native | `src/application/artifact_readings.py`, `src/gui/readings_panel.py` |
-| 스튜디오 배경 | 유물을 굴려 보는 방 — 바닥·하늘 그러데이션, 실제 밀리미터 격자, 같은 눈금의 높이자(z), 바닥 그림자, 실측자 왼쪽 어깨 위의 광원. **화면에만 있고 record·export·도판에는 들어가지 않는다** | - | engineering contract | native | `src/gui/studio_backdrop.py`, `src/gui/viewport_3d.py` |
+| 스튜디오 배경 | 유물을 굴려 보는 방 — 바닥·하늘 그러데이션, 실제 밀리미터 격자, 원점에서 교차하는 세 축, 바닥 그림자, 실측자 왼쪽 어깨 위의 광원. **화면에만 있고 record·export·도판에는 들어가지 않는다** (세로 높이자는 실측자 판단으로 뺐다, 2026-09-09) | - | engineering contract | native | `src/gui/studio_backdrop.py`, `src/gui/viewport_3d.py` |
+| 패널은 눌리지 않는다 | 세부 패널을 도크에 스크롤로 넣어, 도크가 짧아도 패널이 제 높이를 지키고 도크가 스크롤한다. 여섯 기준 시점 버튼은 최소 높이를 못박아 눌리지 않는다. 세부 패널을 다 열어도 창 최소 높이 1607 px → 419 px | - | engineering contract | native | `app_interactive.py` (`_scrolled`) |
 
 ---
 

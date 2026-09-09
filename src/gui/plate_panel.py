@@ -299,6 +299,17 @@ class PlatePanel(QWidget):
         )
         self.table_sherd.itemChanged.connect(self._changed)
         layout.addWidget(self.table_sherd)
+
+        layout.addWidget(QLabel("단면 위치 표시 (단면 record, 그 단면을 뜬 도형 record)"))
+        self.table_section_marks = _table(
+            ("단면 record", "표시할 도형 record"),
+            tip=(
+                "그 도형 위에 절단면의 자취를 일점쇄선으로 긋고 양끝에 A-A′를 붙입니다.\n"
+                "도형 평면이 절단면과 나란하면 자취가 없으므로 도판이 거부합니다."
+            ),
+        )
+        self.table_section_marks.itemChanged.connect(self._changed)
+        layout.addWidget(self.table_section_marks)
         return page
 
     def _paper_tab(self) -> QWidget:
@@ -758,6 +769,9 @@ class PlatePanel(QWidget):
             spec["sherd_breaks"] = [
                 [row[0], row[1]] for row in self._rows(self.table_sherd, columns=2)
             ]
+            spec["section_marks"] = [
+                [row[0], row[1]] for row in self._rows(self.table_section_marks, columns=2)
+            ]
             spec["break_styles"] = [
                 [row[0], int(row[1]), row[2]] for row in self._rows(self.table_break_styles, columns=3)
             ]
@@ -890,6 +904,9 @@ class PlatePanel(QWidget):
             self._set_table(self.table_break_styles, spec.get("break_styles") or [], columns=3)
             self._fill_kind_column(self.table_break_styles, column=2, values=BREAK_STYLES, default="solid")
             self._set_table(self.table_break_styles, spec.get("break_styles") or [], columns=3)
+            self._set_table(
+                self.table_section_marks, spec.get("section_marks") or [], columns=2
+            )
             self._set_table(self.table_sherd, spec.get("sherd_breaks") or [], columns=2)
             self._fill_kind_column(
                 self.table_sherd, column=1, values=SHERD_SIDES, default=SHERD_SIDES[0]
