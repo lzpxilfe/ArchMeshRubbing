@@ -120,6 +120,89 @@ def add_loose_crumb(
     )
 
 
+def snap_it_off(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    *,
+    axis: int = 1,
+    keep_below_mm: float | None = None,
+    keep_share: float = 0.55,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Break the artifact across and keep one piece, break face and all.
+
+    Most of what a site yields is a piece of something: a tile snapped in
+    half, a sherd of a pot.  The break is not an edge the maker cut - it is
+    where the object stopped being whole - and a drawing has to say so.
+
+    Faces whose centroid lies past the plane are taken away, and the ring
+    they leave open is closed by a fan from its own centroid: a flat break
+    face, so the piece is a solid whose section is one closed loop, like a
+    real sherd's.  ``keep_share`` places the plane by share of the extent
+    along ``axis``; ``keep_below_mm`` places it at a millimetre instead.
+    """
+
+    points = np.asarray(vertices, dtype=np.float64)
+    triangles = np.asarray(faces, dtype=np.int64)
+    low = float(points[:, axis].min())
+    high = float(points[:, axis].max())
+    cut = (
+        float(keep_below_mm)
+        if keep_below_mm is not None
+        else low + (high - low) * float(keep_share)
+    )
+    centroids = points[triangles].mean(axis=1)
+    kept = triangles[centroids[:, axis] <= cut]
+    if kept.shape[0] == 0 or kept.shape[0] == triangles.shape[0]:
+        raise ValueError("the break would take every face or none")
+
+    edges = np.sort(
+        np.stack([kept[:, [0, 1]], kept[:, [1, 2]], kept[:, [2, 0]]]).reshape(-1, 2),
+        axis=1,
+    )
+    unique_edges, counts = np.unique(edges, axis=0, return_counts=True)
+    rim = unique_edges[counts == 1]
+    if rim.shape[0] < 3:
+        raise ValueError("the break left no open ring to close")
+
+    # Walk the open ring so the fan winds one way round it.
+    neighbours: dict[int, list[int]] = {}
+    for a, b in rim:
+        neighbours.setdefault(int(a), []).append(int(b))
+        neighbours.setdefault(int(b), []).append(int(a))
+    start = int(rim[0][0])
+    loop = [start]
+    previous = -1
+    current = start
+    while True:
+        options = [n for n in neighbours[current] if n != previous]
+        if not options:
+            break
+        following = options[0]
+        if following == start:
+            break
+        loop.append(following)
+        previous, current = current, following
+        if len(loop) > rim.shape[0] + 2:
+            break
+    if len(loop) < 3:
+        raise ValueError("the break's ring does not close")
+
+    centre = points[loop].mean(axis=0)
+    points = np.vstack([points, centre[None, :]])
+    hub = points.shape[0] - 1
+    fan = np.asarray(
+        [[loop[index], loop[(index + 1) % len(loop)], hub] for index in range(len(loop))],
+        dtype=np.int64,
+    )
+    broken = np.vstack([kept, fan])
+    # The piece is what is left, so the vertices the piece does not use go
+    # with the part that broke away: a sherd's bounds are the sherd's.
+    used = np.unique(broken)
+    remap = np.full(points.shape[0], -1, dtype=np.int64)
+    remap[used] = np.arange(used.size, dtype=np.int64)
+    return points[used], remap[broken]
+
+
 def punch_hole(
     vertices: np.ndarray,
     faces: np.ndarray,
@@ -552,6 +635,7 @@ __all__ = [
     "mesh_report",
     "punch_hole",
     "roughen",
+    "snap_it_off",
     "sharpen_the_base",
     "stand_it_wrong",
     "warp",

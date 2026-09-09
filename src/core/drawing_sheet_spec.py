@@ -95,6 +95,7 @@ def plate_spec(record_ids: Sequence[str], options: DrawingSheetOptions) -> dict[
         "break_reach": options.break_reach,
         "break_records": list(options.break_records),
         "break_solid_min_deg": int(options.break_solid_min_deg),
+        "sherd_breaks": _decisions(options.sherd_breaks),
         "break_styles": _decisions(
             [record_id, int(index), style] for record_id, index, style in options.break_styles
         ),
@@ -189,7 +190,8 @@ _KNOWN_KEYS = frozenset(
         "plan_with_sections", "presumed_lines", "records", "relief_stipples", "rubbing_notes",
         "rubbing_on_axis_fit", "rubbing_on_axis_trim", "rubbings_on_axis", "scale_denominator",
         "schema_version", "show_center_axis", "stipple_dot_mm", "stipple_pitch_mm", "stroke_color",
-        "style_preset", "technique_angles_deg", "technique_records", "technique_representations",
+        "sherd_breaks", "style_preset", "technique_angles_deg", "technique_records",
+        "technique_representations",
         "texture_line_hidden_patterns", "texture_line_records", "title", "title_block",
     }
 )
@@ -397,6 +399,14 @@ def plate_spec_options(spec: object) -> tuple[list[str], DrawingSheetOptions]:
                 _text(style, field_name="break_styles style"),
             )
             for record_id, index, style in _rows(spec["break_styles"], field_name="break_styles", width=3)
+        )
+    if given("sherd_breaks"):
+        kwargs["sherd_breaks"] = tuple(
+            (
+                _text(record_id, field_name="sherd_breaks"),
+                _text(side, field_name="sherd_breaks side"),
+            )
+            for record_id, side in _rows(spec["sherd_breaks"], field_name="sherd_breaks", width=2)
         )
     if given("technique_angles_deg"):
         kwargs["technique_angles_deg"] = tuple(

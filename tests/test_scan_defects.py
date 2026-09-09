@@ -29,6 +29,7 @@ from scan_defects import (
     punch_hole,
     roughen,
     sharpen_the_base,
+    snap_it_off,
     stand_it_wrong,
     warp,
 )
@@ -630,6 +631,44 @@ def test_a_crumb_the_closing_welded_on_is_refused_too() -> None:
     assert outline_recipe("front", precision_grid_mm=0.2)["algorithm_version"] == (
         OUTLINE_ALGORITHM_VERSION
     )
+
+
+def test_a_snapped_off_piece_is_a_solid_with_a_break_face() -> None:
+    """Most of what a site yields is a piece of something.
+
+    The piece has to be a solid like the whole was - watertight, one piece,
+    a section that closes - or nothing downstream can measure it.  What is
+    new is the break face: a flat face where the object stopped being whole,
+    which the drawing has to say is a break and not an edge the maker cut.
+    """
+
+    from synthetic_tile import AMKIWA_SHAPE, hollow_tile
+
+    vertices, faces = hollow_tile(
+        AMKIWA_SHAPE, axial_step_mm=4.0, angular_step_mm=4.0, relief=False
+    )
+    whole = mesh_report(vertices, faces)
+    assert whole["boundary_edge_count"] == 0
+
+    piece_vertices, piece_faces = snap_it_off(vertices, faces, axis=1, keep_share=0.55)
+    piece = mesh_report(piece_vertices, piece_faces)
+    assert piece["boundary_edge_count"] == 0, "a sherd is still a solid"
+    assert piece["nonmanifold_edge_count"] == 0
+    assert piece["connected_piece_count"] == 1
+    assert piece["face_count"] < whole["face_count"]
+
+    # The piece's bounds are the piece's: what broke away is gone, not
+    # carried along as unused vertices that would inflate every dimension.
+    whole_length = float(vertices[:, 1].max() - vertices[:, 1].min())
+    piece_length = float(piece_vertices[:, 1].max() - piece_vertices[:, 1].min())
+    assert 0.4 * whole_length < piece_length < 0.7 * whole_length
+    for axis in (0, 2):
+        assert float(piece_vertices[:, axis].max() - piece_vertices[:, axis].min()) == pytest.approx(
+            float(vertices[:, axis].max() - vertices[:, axis].min()), abs=1e-6
+        ), "breaking across the length leaves the other two directions alone"
+
+    with pytest.raises(ValueError, match="every face or none"):
+        snap_it_off(vertices, faces, axis=1, keep_share=1.0)
 
 
 def test_a_hole_or_a_broken_rim_does_not_confuse_the_outline() -> None:

@@ -537,6 +537,34 @@ BREAK_STYLE_GAPS: Mapping[str, int] = {
 BREAK_STYLE_SOURCE_RULE = "rule"
 BREAK_STYLE_SOURCE_CHOICE = "choice"
 
+#: A fragment's break, and the sides of a figure it can be on.  Most of
+#: what a site yields is a piece of something, and the place where it
+#: stopped being whole is not an edge the maker made.  A drawing that
+#: closes the figure there says the artifact ended there, which is a claim
+#: nobody measured: so the lines stop short of the break, and nothing is
+#: drawn across it.  Which side is broken is the archaeologist's to say -
+#: no reading tells a break from a cut end for certain - and the sheet then
+#: draws it and prints it in the title block.
+SHERD_SIDE_LEFT = "left"
+SHERD_SIDE_RIGHT = "right"
+SHERD_SIDE_TOP = "top"
+SHERD_SIDE_BOTTOM = "bottom"
+SHERD_SIDES: tuple[str, ...] = (
+    SHERD_SIDE_LEFT,
+    SHERD_SIDE_RIGHT,
+    SHERD_SIDE_TOP,
+    SHERD_SIDE_BOTTOM,
+)
+SHERD_SIDE_WORDS: Mapping[str, str] = {
+    SHERD_SIDE_LEFT: "좌",
+    SHERD_SIDE_RIGHT: "우",
+    SHERD_SIDE_TOP: "상",
+    SHERD_SIDE_BOTTOM: "하",
+}
+#: How far short of the break the drawing stops, on the paper.
+SHERD_TRIM_PAPER_MM = 1.5
+SHERD_LABEL = "파편"
+
 #: Which side of the fold a mirrored figure's elevation takes.  The common
 #: convention puts the elevation on the left and the section on the right;
 #: some institutions draw it the other way round, and a sheet says which.
@@ -1077,6 +1105,20 @@ class DrawingSheetOptions:
     ``break_records`` and every index must exist, or the sheet refuses:
     a choice that named nothing would be silently lost.
     """
+    sherd_breaks: tuple[tuple[str, str], ...] = ()
+    """Where a figure's artifact is broken: ``(record id, side)`` pairs.
+
+    A sherd is a piece of something, and the break is not an edge the maker
+    made.  Naming a side (``left``, ``right``, ``top``, ``bottom``, in the
+    figure's own frame) stops that figure's own lines a paper millimetre and
+    a half short of it and draws nothing across it, so the drawing says the
+    piece continues rather than that the artifact ended there.  Only the
+    record's own outline or section lines are cut; readings drawn on the
+    figure are their own statements and are left alone.
+
+    Empty by default, and an empty tuple changes nothing - a sheet that
+    names no break has the bytes it always had.
+    """
     groove_records: tuple[str, ...] = ()
     """Groove readings to draw on the figures, by record id.
 
@@ -1463,6 +1505,26 @@ class DrawingSheetOptions:
                 )
             styles.append((record_id, index, style))
         object.__setattr__(self, "break_styles", tuple(styles))
+        sherd: list[tuple[str, str]] = []
+        for entry in self.sherd_breaks:
+            if not isinstance(entry, (tuple, list)) or len(entry) != 2:
+                raise DrawingSheetError(
+                    "sherd_breaks entries must be (figure record id, side) pairs"
+                )
+            record_id, side = entry
+            if not isinstance(record_id, str) or not record_id.strip():
+                raise DrawingSheetError("sherd_breaks entries must name a figure record")
+            record_id = record_id.strip()
+            if side not in SHERD_SIDES:
+                raise DrawingSheetError(
+                    f"sherd_breaks sides must be one of {', '.join(SHERD_SIDES)}"
+                )
+            if (record_id, side) in sherd:
+                raise DrawingSheetError(
+                    f"sherd_breaks names the {side} side of {record_id!r} twice"
+                )
+            sherd.append((record_id, side))
+        object.__setattr__(self, "sherd_breaks", tuple(sherd))
         if self.break_reach not in BREAK_REACHES:
             raise DrawingSheetError(f"break_reach must be one of {', '.join(BREAK_REACHES)}")
         solid = self.break_solid_min_deg
@@ -1594,6 +1656,17 @@ class DrawingSheetOptions:
 
         return {(record_id, index): style for record_id, index, style in self.break_styles}
 
+    def sherd_break_sides(self) -> dict[str, tuple[str, ...]]:
+        """``sherd_breaks`` keyed by figure record id, sides in a fixed order."""
+
+        sides: dict[str, list[str]] = {}
+        for record_id, side in self.sherd_breaks:
+            sides.setdefault(record_id, []).append(side)
+        return {
+            record_id: tuple(side for side in SHERD_SIDES if side in chosen)
+            for record_id, chosen in sides.items()
+        }
+
     @property
     def physical_scale(self) -> str:
         return f"1:{_scale_token(self.scale_denominator)}"
@@ -1614,6 +1687,7 @@ class DrawingSheetOptions:
             + int(section_loops)
             + int(self.interpretation.is_stated)
             + int(bool(self.presumed_lines))
+            + int(bool(self.sherd_breaks))
             + len(self.title_block.rows)
             + 1
         )
@@ -2388,6 +2462,11 @@ def _title_block_elements(
                 ),
             )
         )
+    if options.sherd_breaks:
+        # A piece of something says so on the page.  Where the drawing stops
+        # short, it stops because the artifact was broken there, and that is
+        # a fact about the artifact rather than a choice about the pen.
+        rows.append((SHERD_LABEL, sherd_title_value(options.sherd_breaks)))
     rows.extend(block.rows)
     rows.append(("문서", document_manifest_sha256[:12]))
 
@@ -4835,6 +4914,117 @@ def presumed_title_value(entries: Sequence[Sequence[Any]]) -> str:
     return " · ".join(parts)
 
 
+def sherd_title_value(entries: Sequence[Sequence[str]]) -> str:
+    """The title block's word on the breaks: which sides, and how many.
+
+    One figure prints its sides; several print the count, because a title
+    block row is one line and a plate of sherds would not fit.
+    """
+
+    pairs = [(str(record_id), str(side)) for record_id, side in entries]
+    records = sorted({record_id for record_id, _side in pairs})
+    if len(records) == 1:
+        sides = [side for _record_id, side in pairs]
+        ordered = [SHERD_SIDE_WORDS[side] for side in SHERD_SIDES if side in sides]
+        return f"{'·'.join(ordered)} {len(ordered)}곳"
+    return f"도형 {len(records)}개 · {len(pairs)}곳"
+
+
+def _sherd_open_paths(
+    paths: Sequence[VectorPath],
+    *,
+    sides: Sequence[str],
+    bounds: tuple[float, float, float, float],
+    trim_mm: float,
+) -> tuple[list[VectorPath], int]:
+    """The figure's own lines, stopped short of the sides that are broken.
+
+    Every point within ``trim_mm`` of a named side is dropped and the run of
+    points that stays becomes an open path, cut exactly on the trim line so
+    the two lines end level.  Nothing is drawn across the break: a line
+    there would say the artifact ended there, and it did not.
+    """
+
+    if not sides:
+        return list(paths), 0
+    min_u, min_v, max_u, max_v = (float(value) for value in bounds)
+    limits: list[tuple[int, float, int]] = []
+    for side in sides:
+        if side == SHERD_SIDE_LEFT:
+            limits.append((0, min_u + trim_mm, +1))
+        elif side == SHERD_SIDE_RIGHT:
+            limits.append((0, max_u - trim_mm, -1))
+        elif side == SHERD_SIDE_BOTTOM:
+            limits.append((1, min_v + trim_mm, +1))
+        else:
+            limits.append((1, max_v - trim_mm, -1))
+
+    def keeps(point: Sequence[float]) -> bool:
+        return all(
+            (float(point[axis]) - limit) * sign >= 0.0 for axis, limit, sign in limits
+        )
+
+    def crossing(inside: Sequence[float], outside: Sequence[float]) -> tuple[float, float]:
+        """Where the segment leaves the kept side, on the first limit it crosses."""
+
+        best = 1.0
+        for axis, limit, sign in limits:
+            near, far = float(inside[axis]), float(outside[axis])
+            if (far - limit) * sign >= 0.0 or near == far:
+                continue
+            best = min(best, (limit - near) / (far - near))
+        best = min(1.0, max(0.0, best))
+        return (
+            float(inside[0]) + (float(outside[0]) - float(inside[0])) * best,
+            float(inside[1]) + (float(outside[1]) - float(inside[1])) * best,
+        )
+
+    kept_paths: list[VectorPath] = []
+    cut_count = 0
+    for path in paths:
+        points = [(float(u), float(v)) for u, v in path.points_mm]
+        mask = [keeps(point) for point in points]
+        if all(mask):
+            kept_paths.append(path)
+            continue
+        cut_count += 1
+        if not any(mask):
+            continue
+        order = list(range(len(points)))
+        if path.closed:
+            # Start the walk at a dropped point so the ring's runs do not
+            # wrap: a ring cut open is one or more open lines.
+            start = mask.index(False)
+            order = order[start:] + order[:start]
+        runs: list[list[tuple[float, float]]] = []
+        current: list[tuple[float, float]] = []
+        previous_index: int | None = None
+        for index in order:
+            if mask[index]:
+                if not current and previous_index is not None:
+                    current.append(crossing(points[index], points[previous_index]))
+                current.append(points[index])
+            elif current:
+                current.append(crossing(current[-1], points[index]))
+                runs.append(current)
+                current = []
+            previous_index = index
+        if current:
+            runs.append(current)
+        for piece, run in enumerate(runs):
+            if len(run) < 2:
+                continue
+            kept_paths.append(
+                VectorPath(
+                    id=f"{path.id}:sherd{piece}",
+                    role=path.role,
+                    closed=False,
+                    points_mm=tuple(run),
+                )
+            )
+    return kept_paths, cut_count
+
+
 def _dashes(
     start: Sequence[float], end: Sequence[float], *, dash_mm: float, gap_mm: float
 ) -> list[tuple[tuple[float, float], tuple[float, float]]]:
@@ -5330,6 +5520,7 @@ def _sheet_provenance(
     paint_cutouts: Mapping[str, Any] | None = None,
     relief_stipples: Mapping[str, Any] | None = None,
     presumed_lines: Mapping[str, Any] | None = None,
+    sherd_breaks: Sequence[Mapping[str, Any]] = (),
     record_ids: Sequence[str] = (),
 ) -> dict[str, Any]:
     from .drawing_sheet_spec import plate_spec  # noqa: PLC0415
@@ -5449,6 +5640,10 @@ def _sheet_provenance(
         # Present exactly when a section closed into several loops, like the
         # title block row it mirrors; a sheet of whole sections keeps its bytes.
         provenance["section_loops"] = [dict(entry) for entry in section_loops]
+    if sherd_breaks:
+        # Present exactly when a figure was drawn as a piece of something,
+        # like the title block row it mirrors.
+        provenance["sherd_breaks"] = [dict(entry) for entry in sherd_breaks]
     return provenance
 
 
@@ -5886,6 +6081,13 @@ def compose_drawing_sheet(
                 f"break_styles names corner {index} of {record_id!r}, which has "
                 f"{corner_counts[record_id]} corners (0 to {corner_counts[record_id] - 1})"
             )
+    sherd_sides = options.sherd_break_sides()
+    for record_id in sherd_sides:
+        if record_id not in set(ids):
+            raise DrawingSheetError(
+                f"sherd_breaks names {record_id!r}, which this sheet does not draw"
+            )
+    sherd_cut_counts: dict[str, int] = {}
     condition_drawn: list[dict[str, str]] = []
     technique_drawn: list[dict[str, Any]] = []
     technique_not_drawn: list[dict[str, str]] = []
@@ -5992,6 +6194,27 @@ def compose_drawing_sheet(
             except DrawingStyleError as exc:
                 raise DrawingSheetError(str(exc)) from exc
             by_kind.setdefault(kind, []).append(_smoothed_path(path, line_smoothing))
+        figure_sherd_sides = sherd_sides.get(record.id, ())
+        if figure_sherd_sides:
+            # The artifact's own lines stop short of a break; the readings
+            # drawn on the figure are separate statements and are left alone,
+            # so this happens before any of them is added.
+            figure_bounds = _payload_bounds(payload)
+            trim_mm = SHERD_TRIM_PAPER_MM * float(options.scale_denominator)
+            for kind, kind_paths in list(by_kind.items()):
+                opened, cut = _sherd_open_paths(
+                    kind_paths,
+                    sides=figure_sherd_sides,
+                    bounds=figure_bounds,
+                    trim_mm=trim_mm,
+                )
+                by_kind[kind] = opened
+                sherd_cut_counts[record.id] = sherd_cut_counts.get(record.id, 0) + cut
+            if not sherd_cut_counts.get(record.id):
+                raise DrawingSheetError(
+                    f"sherd_breaks names the {', '.join(figure_sherd_sides)} of "
+                    f"{record.id!r}, but no line of that figure reaches it"
+                )
         condition_by_kind, drawn = _condition_paths_for_figure(
             record.type, payload.frame, conditions
         )
@@ -6710,6 +6933,15 @@ def compose_drawing_sheet(
                 if options.presumed_lines
                 else None
             ),
+            sherd_breaks=[
+                {
+                    "cut_path_count": sherd_cut_counts.get(record_id, 0),
+                    "record_id": record_id,
+                    "side": side,
+                    "trim_paper_mm": SHERD_TRIM_PAPER_MM,
+                }
+                for record_id, side in sorted(options.sherd_breaks)
+            ],
         )
         svg_bytes = _render_sheet(
             placed,
@@ -6891,6 +7123,42 @@ def validate_drawing_sheet_bytes(svg_bytes: bytes, sidecar_bytes: bytes) -> None
     elif loop_rows:
         raise DrawingSheetError(
             "sheet title block reports section loops its sidecar does not carry"
+        )
+
+    # A drawing that stops short because the artifact is broken says so on
+    # the page, and the page does not say it of a whole artifact.
+    sherd_entries = sidecar.get("sherd_breaks")
+    sherd_rows = [
+        row for row in rows if isinstance(row, Mapping) and row.get("label") == SHERD_LABEL
+    ]
+    if sherd_entries is not None:
+        if not isinstance(sherd_entries, Sequence) or not sherd_entries:
+            raise DrawingSheetError("sheet sherd_breaks must be a non-empty list")
+        pairs: list[tuple[str, str]] = []
+        for entry in sherd_entries:
+            if not isinstance(entry, Mapping):
+                raise DrawingSheetError("sheet sherd_breaks entries must be objects")
+            record_id = entry.get("record_id")
+            side = entry.get("side")
+            if not isinstance(record_id, str) or side not in SHERD_SIDES:
+                raise DrawingSheetError(
+                    "sheet sherd_breaks entries must name a figure and a side"
+                )
+            cut = entry.get("cut_path_count")
+            if not isinstance(cut, int) or isinstance(cut, bool) or cut < 1:
+                raise DrawingSheetError(
+                    "sheet sherd_breaks entries must have cut at least one line: a "
+                    "break that cut nothing was not drawn"
+                )
+            pairs.append((record_id, side))
+        expected = sherd_title_value(pairs)
+        if not any(row.get("value") == expected for row in sherd_rows):
+            raise DrawingSheetError(
+                "this sheet draws a fragment but its title block does not say so"
+            )
+    elif sherd_rows:
+        raise DrawingSheetError(
+            "sheet title block reports a fragment its sidecar does not carry"
         )
 
     # And a sheet with a rubbing on it must say where the rubbing came from,

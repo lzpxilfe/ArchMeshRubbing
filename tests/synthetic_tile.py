@@ -432,6 +432,7 @@ def tile_session(
     angular_step_mm: float = 2.0,
     relief: bool = True,
     on_canonical_axis: bool = False,
+    broken_at_share: float | None = None,
     document_id: str | None = None,
 ) -> tuple[ArtifactSession, np.ndarray, np.ndarray]:
     """One tile in a session, with its arrays.
@@ -441,6 +442,10 @@ def tile_session(
     needs the tile to arrive already standing on it: pass
     ``on_canonical_axis``, which is the fixture standing in for the Align a
     real tile would be given.
+
+    ``broken_at_share`` snaps the tile across its length and keeps that
+    share of it, break face and all - a sherd, which is what a site
+    usually yields.
     """
 
     vertices, faces = hollow_tile(
@@ -450,6 +455,12 @@ def tile_session(
         relief=relief,
         on_canonical_axis=on_canonical_axis,
     )
+    if broken_at_share is not None:
+        from scan_defects import snap_it_off  # noqa: PLC0415
+
+        vertices, faces = snap_it_off(
+            vertices, faces, axis=1, keep_share=float(broken_at_share)
+        )
     name = document_id or f"artifact:{shape.kind}"
     mesh = MeshData(
         vertices=vertices,

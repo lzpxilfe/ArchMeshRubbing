@@ -62,6 +62,7 @@ from src.core.drawing_sheet import (
     REACHES,
     RUBBING_ON_AXIS_FITS,
     RUBBING_ON_AXIS_TRIMS,
+    SHERD_SIDES,
     PAGE_SIZES_MM,
 )
 from src.core.drawing_sheet_spec import (
@@ -283,6 +284,21 @@ class PlatePanel(QWidget):
         self.table_title_rows.setRowCount(3)
         self.table_title_rows.itemChanged.connect(self._changed)
         layout.addWidget(self.table_title_rows)
+
+        layout.addWidget(QLabel("파편 — 깨진 자리 (도형 record, 어느 쪽)"))
+        self.table_sherd = _table(
+            ("도형 record", "깨진 쪽"),
+            tip=(
+                "그 쪽은 만든 사람이 낸 가장자리가 아니라 깨진 자리입니다.\n"
+                "그 앞 1.5 mm에서 선을 멈추고, 가로질러 아무것도 긋지 않습니다.\n"
+                "제목란에 '파편' 줄이 함께 인쇄됩니다."
+            ),
+        )
+        self._fill_kind_column(
+            self.table_sherd, column=1, values=SHERD_SIDES, default=SHERD_SIDES[0]
+        )
+        self.table_sherd.itemChanged.connect(self._changed)
+        layout.addWidget(self.table_sherd)
         return page
 
     def _paper_tab(self) -> QWidget:
@@ -739,6 +755,9 @@ class PlatePanel(QWidget):
                 [row[0], row[1], float(row[2]), float(row[3])]
                 for row in self._rows(self.table_presumed, columns=4)
             ]
+            spec["sherd_breaks"] = [
+                [row[0], row[1]] for row in self._rows(self.table_sherd, columns=2)
+            ]
             spec["break_styles"] = [
                 [row[0], int(row[1]), row[2]] for row in self._rows(self.table_break_styles, columns=3)
             ]
@@ -871,6 +890,11 @@ class PlatePanel(QWidget):
             self._set_table(self.table_break_styles, spec.get("break_styles") or [], columns=3)
             self._fill_kind_column(self.table_break_styles, column=2, values=BREAK_STYLES, default="solid")
             self._set_table(self.table_break_styles, spec.get("break_styles") or [], columns=3)
+            self._set_table(self.table_sherd, spec.get("sherd_breaks") or [], columns=2)
+            self._fill_kind_column(
+                self.table_sherd, column=1, values=SHERD_SIDES, default=SHERD_SIDES[0]
+            )
+            self._set_table(self.table_sherd, spec.get("sherd_breaks") or [], columns=2)
             self._set_table(self.table_hidden, spec.get("texture_line_hidden_patterns") or [], columns=2)
             self._set_table(self.table_cutouts, spec.get("paint_cutouts") or [], columns=3)
             self._fill_kind_column(self.table_cutouts, column=2, values=PAINT_CUTOUT_PLACEMENTS, default="in_place")
