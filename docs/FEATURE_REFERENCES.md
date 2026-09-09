@@ -69,6 +69,10 @@
 | 파편의 깨진 자리 | 실측자가 댄 쪽에서 도형 자신의 선을 종이 1.5 mm 앞에 멈추고 가로질러 아무것도 긋지 않음; 제목란 `파편` 행과 sidecar 블록이 함께 서고, 이름만 대고 자른 것이 없으면 거부 | - | engineering contract (잠정, 실측자 지시) | native | `src/core/drawing_sheet.py` (`sherd_breaks`) |
 | 판독 다섯 가지 | 도판이 그리는 꺾임·홈·능선·뒷면 실루엣·양각 음영을 한 가지 호출로 읽고 실측자 이름으로 기록; 판독의 뜻과 거부는 전부 core의 것이고 이 층은 규칙을 더하지 않는다 | - | engineering contract | native | `src/application/artifact_readings.py`, `src/gui/readings_panel.py` |
 | 스튜디오 배경 | 유물을 굴려 보는 방 — 바닥·하늘 그러데이션, 실제 밀리미터 격자, 원점에서 교차하는 세 축, 바닥 그림자, 실측자 왼쪽 어깨 위의 광원. **화면에만 있고 record·export·도판에는 들어가지 않는다** (세로 높이자는 실측자 판단으로 뺐다, 2026-09-09) | - | engineering contract | native | `src/gui/studio_backdrop.py`, `src/gui/viewport_3d.py` |
+| 텍스처 (스캔 색) | 스캐너가 찍은 색을 표면에 그대로 올린다(고정 기능 GL, MODULATE로 방의 광원을 유지). 보기 메뉴에서 켜고 끄며(T), 기본은 켬. 이미지는 아래 행부터 올리고(UV의 v와 맞춤), 실수형 이미지는 바이트로, 드라이버 한계보다 크면 줄이고 그 사실을 남긴다. UV가 도형의 모서리 수와 다르면 **거부**한다 — 엉뚱한 삼각형에 문양이 얹히는 것은 조용한 오답이다. **화면에만 있고 record·export·도판에는 들어가지 않는다** | - | engineering contract | native | `src/gui/mesh_texture.py`, `src/gui/viewport_3d.py` |
+| 표에서 record 고르기 | 도판 패널의 표 열 가운데 record를 가리키는 칸은 세션이 가진 기록에서 고른다(`record:cutline:<uuid4>` 45자를 손으로 옮겨 적지 않는다). 명세가 이 세션에 없는 기록을 가리키면 값은 지키고 '이 세션에 없음'으로 표시한다 | - | engineering contract | native | `src/gui/plate_panel.py` |
+| 회전축 고르기 | 두 지름 기록에서 축을 뽑는 방법을 실측자가 고른다 — 원 중심선(기본) · 두 원의 공통 법선(납작한 유물) · 굽으로 서기(뒤틀린 그릇). core의 `axis_source`가 정치 패널에 올라온 것 | - | engineering contract | native | `app_interactive.py`, `src/core/artifact_axis_alignment.py` |
+| 상태·기법이 도판에 오른다 | 단면/외곽 도구에서 고른 상태(결실·복원·균열·마모)·기법 기록을 도판 패널이 옮겨 담아 도판과 명세에 싣는다 | - | engineering contract | native | `app_interactive.py` (`_push_annotation_choices_to_plate_panel`) |
 | 패널은 눌리지 않는다 | 세부 패널을 도크에 스크롤로 넣어, 도크가 짧아도 패널이 제 높이를 지키고 도크가 스크롤한다. 여섯 기준 시점 버튼은 최소 높이를 못박아 눌리지 않는다. 세부 패널을 다 열어도 창 최소 높이 1607 px → 419 px | - | engineering contract | native | `app_interactive.py` (`_scrolled`) |
 
 ---

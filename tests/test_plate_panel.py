@@ -16,7 +16,7 @@ import pytest
 
 pytest.importorskip("PyQt6.QtWidgets")
 
-from PyQt6.QtWidgets import QApplication  # noqa: E402
+from PyQt6.QtWidgets import QApplication, QComboBox  # noqa: E402
 
 from src.core.drawing_sheet import DrawingSheetOptions, TitleBlock  # noqa: E402
 from src.core.drawing_sheet_spec import (  # noqa: E402
@@ -32,6 +32,20 @@ ELEVATION = "record:front"
 SECTION = "record:section"
 FAR = "record:far"
 CUTOUT = "record:peony"
+
+
+def _set_record(table, row: int, column: int, value: str) -> None:
+    """Choose a record in a table cell, the way the panel now offers it."""
+
+    widget = table.cellWidget(row, column)
+    assert isinstance(widget, QComboBox), "a record column is chosen, not typed"
+    PlatePanel._select_record(widget, value)
+
+
+def _record_text(table, row: int, column: int) -> str:
+    widget = table.cellWidget(row, column)
+    assert isinstance(widget, QComboBox), "a record column is chosen, not typed"
+    return str(widget.currentData() or "")
 
 
 @pytest.fixture(scope="module")
@@ -119,7 +133,7 @@ def test_a_half_filled_row_is_not_a_decision_and_a_bad_number_is_named(panel: Pl
     # A row with a record id but no heights is someone part way through
     # typing, not a jog: it is left out rather than guessed at.
     row = panel.table_jogs.rowCount() - 1
-    panel.table_jogs.item(row, 0).setText(ELEVATION)
+    _set_record(panel.table_jogs, row, 0, ELEVATION)
     assert len(panel.spec()["mirror_jogs"]) == 1
     panel.table_jogs.item(row, 1).setText("여기")
     panel.table_jogs.item(row, 2).setText("40")
@@ -169,4 +183,85 @@ def test_the_far_silhouette_column_is_used_only_when_the_outline_reaches_that_fa
     assert panel.spec()["far_silhouettes"] == []
     panel.options()
     # The record is still in the table, ready for the reach to go back.
-    assert panel.table_mirror.item(0, 2).text() == FAR
+    assert _record_text(panel.table_mirror, 0, 2) == FAR
+
+
+def test_a_record_is_chosen_from_the_session_not_typed_out(panel: PlatePanel) -> None:
+    """`record:cutline:<uuid4>` is forty-five characters.  Retyping it into
+    ten tables is not a smaller version of the job - it is a different job,
+    and one no reader can check by eye."""
+
+    panel.combo_layout.setCurrentIndex(panel.combo_layout.findData("mirror"))
+    widget = panel.table_mirror.cellWidget(0, 0)
+    assert isinstance(widget, QComboBox)
+    offered = [widget.itemData(index) for index in range(widget.count())]
+    assert offered[0] == "", "a row can be left empty"
+    assert ELEVATION in offered and SECTION in offered
+    assert widget.itemText(offered.index(ELEVATION)).startswith("정면 외형선")
+
+    _set_record(panel.table_mirror, 0, 0, ELEVATION)
+    _set_record(panel.table_mirror, 0, 1, SECTION)
+    assert panel.spec()["mirror_sections"] == [[ELEVATION, SECTION]]
+
+
+def test_a_record_this_session_does_not_hold_is_kept_and_marked(panel: PlatePanel) -> None:
+    """A spec written on another machine, or before a re-import, names
+    records this session has never seen.  Dropping them silently would edit
+    the archaeologist's plate behind their back."""
+
+    stranger = "record:outline:0000-not-here"
+    panel.set_spec(
+        plate_spec(
+            [ELEVATION],
+            DrawingSheetOptions(
+                title_block=TitleBlock(artifact_label="남의 명세"),
+                mirror_sections=((stranger, SECTION),),
+            ),
+        )
+    )
+    assert _record_text(panel.table_mirror, 0, 0) == stranger
+    widget = panel.table_mirror.cellWidget(0, 0)
+    assert "이 세션에 없음" in widget.currentText()
+    assert panel.spec()["mirror_sections"] == [[stranger, SECTION]]
+
+
+def test_reloading_the_record_list_does_not_lose_what_is_chosen(panel: PlatePanel) -> None:
+    """The list refreshes whenever a reading is committed; a chooser that
+    reset itself would undo the row the archaeologist had just filled."""
+
+    _set_record(panel.table_stipples, 0, 0, CUTOUT)
+    _set_record(panel.table_stipples, 0, 1, ELEVATION)
+    panel.set_records(
+        [
+            (ELEVATION, "vector.outline.v1", "정면 외형선"),
+            (SECTION, "vector.cutline.v1", "정면 단면"),
+            (CUTOUT, "measurement.relief_shade.v1", "양각 음영"),
+            ("record:new", "measurement.crease.v1", "새 능선"),
+        ]
+    )
+    assert panel.spec()["relief_stipples"] == [[CUTOUT, ELEVATION]]
+    widget = panel.table_stipples.cellWidget(0, 0)
+    assert "record:new" in [widget.itemData(i) for i in range(widget.count())]
+
+
+def test_rows_a_loaded_spec_adds_get_the_same_controls(panel: PlatePanel) -> None:
+    """A table that grows must grow its choosers too, or exactly the rows a
+    loaded spec added become free text while the first row is a chooser."""
+
+    rows = ((ELEVATION, "top"), (SECTION, "left"), (CUTOUT, "bottom"))
+    panel.set_spec(
+        plate_spec(
+            [ELEVATION],
+            DrawingSheetOptions(
+                title_block=TitleBlock(artifact_label="파편 셋"),
+                sherd_breaks=rows,
+            ),
+        )
+    )
+    # The spec sorts its decisions, so the table shows them in that order.
+    for row, (record_id, side) in enumerate(sorted(rows)):
+        assert _record_text(panel.table_sherd, row, 0) == record_id
+        side_widget = panel.table_sherd.cellWidget(row, 1)
+        assert isinstance(side_widget, QComboBox), "the side is a closed choice on every row"
+        assert side_widget.currentData() == side
+    assert panel.spec()["sherd_breaks"] == [list(row) for row in sorted(rows)]

@@ -8024,6 +8024,14 @@ def test_technique_marks_share_the_condition_chooser_and_reach_the_sheet_separat
         assert window._checked_drawing_sheet_condition_ids() == ("record:condition:gui",)
         assert window._checked_drawing_sheet_technique_ids() == ("record:technique:gui",)
 
+        # The plate panel carries these decisions but does not edit them, so
+        # the window has to hand them over.  Until it did, a condition record
+        # could be made and could never reach a plate made from the panel.
+        window._push_annotation_choices_to_plate_panel()
+        carried = window.plate_panel.spec()
+        assert carried["condition_records"] == ["record:condition:gui"]
+        assert carried["technique_records"] == ["record:technique:gui"]
+
         # 기와의 등면·내면 탁본은 한 장에 함께 실린다.  The record cannot say
         # which wall it is - a face selection carries no such word - so the
         # drafter names it on the row and the sheet prints it.

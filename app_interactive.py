@@ -441,6 +441,9 @@ USER_LINE_WEIGHTS_PRESET = "user"
 TECHNIQUE_COMBO_PREFIX = "technique:"
 from src.core.artifact_axis_alignment import (  # noqa: E402
     AXIS_ALIGN_RECIPE_KIND,
+    AXIS_SOURCE_CENTER_LINE,
+    AXIS_SOURCE_CIRCLE_NORMALS,
+    AXIS_SOURCE_STANDING_ON_FOOT,
 )
 from src.core.artifact_condition_annotation import (  # noqa: E402
     CONDITION_RECORD_TYPE,
@@ -4593,6 +4596,27 @@ class SectionPanel(QWidget):
         self.combo_axis_bottom_record.setToolTip("아래쪽 원. 보통 저부입니다.")
         native_layout.addWidget(self.combo_axis_bottom_record)
 
+        # Which line the two circles make an axis of.  A tall pot's axis is the
+        # line through the two centres; a dish so flat that its two circles
+        # nearly share a plane has no reliable centre line, and a warped bowl
+        # stands on its foot rather than on its own axis.  The choice belongs
+        # to the archaeologist looking at the artifact, so it is offered here
+        # rather than guessed from the geometry.
+        self.combo_axis_source = QComboBox()
+        for value, label in (
+            (AXIS_SOURCE_CENTER_LINE, "원 중심선 (기본)"),
+            (AXIS_SOURCE_CIRCLE_NORMALS, "두 원의 공통 법선 · 납작한 유물"),
+            (AXIS_SOURCE_STANDING_ON_FOOT, "굽으로 서기 · 뒤틀린 그릇"),
+        ):
+            self.combo_axis_source.addItem(label, value)
+        self.combo_axis_source.setToolTip(
+            "원 중심선: 두 원의 중심을 잇는 선을 축으로 씁니다.  기물 대부분.\n"
+            "두 원의 공통 법선: 두 원이 거의 같은 평면에 있어 중심선이 믿을 수 없을 때"
+            " (접시처럼 납작한 유물).\n"
+            "굽으로 서기: 굽이 놓이는 평면을 기준으로 세웁니다 (뒤틀린 그릇)."
+        )
+        native_layout.addWidget(self.combo_axis_source)
+
         self.btn_axis_align = QPushButton("회전축으로 정치")
         set_pixel_icon(self.btn_axis_align, "align")
         self.btn_axis_align.setEnabled(False)
@@ -7299,6 +7323,18 @@ class MainWindow(QMainWindow):
 
         # The room the artifact is turned in.  It is backdrop only: it never
         # reaches an exported picture, a record, or a drawing.
+        self.action_show_texture = QAction("텍스처 (스캔 색)", self)
+        self.action_show_texture.setCheckable(True)
+        self.action_show_texture.setChecked(bool(getattr(self.viewport, "show_texture", True)))
+        self.action_show_texture.setShortcut("T")
+        self.action_show_texture.setToolTip(
+            "스캐너가 찍은 색을 표면에 그대로 올립니다.  시문선·채색·유약은 이 이미지에만 "
+            "있으므로, 문양을 찾을 때는 켜고 형태(실루엣)를 볼 때는 끕니다.  "
+            "도면·기록·내보내기에는 들어가지 않습니다."
+        )
+        self.action_show_texture.toggled.connect(self.on_show_texture_toggled)
+        view_menu.addAction(self.action_show_texture)
+
         self.action_studio_backdrop = QAction("스튜디오 배경", self)
         self.action_studio_backdrop.setCheckable(True)
         self.action_studio_backdrop.setChecked(bool(getattr(self.viewport, "studio_backdrop", True)))
@@ -17139,6 +17175,32 @@ class MainWindow(QMainWindow):
         self.viewport.studio_shadow = bool(enabled)
         self.viewport.update()
 
+    def on_show_texture_toggled(self, enabled: bool) -> None:
+        """Lay the scanner's colour on the surface, or take it off.
+
+        Nothing measured changes: the texture is a way of looking, like the
+        backdrop, and no record, drawing or export reads it from here.  The
+        status line says when there was no texture to show, because a menu
+        item that appears to do nothing is worse than one that explains.
+        """
+
+        wanted = bool(enabled)
+        self.viewport.set_show_texture(wanted)
+        try:
+            textured = int(self.viewport.textured_object_count())
+        except Exception:
+            logging.getLogger(__name__).info("texture count unavailable", exc_info=True)
+            textured = 0
+        if wanted and textured <= 0:
+            self.status_info.setText(
+                "텍스처를 켰지만 지금 열린 메쉬에는 텍스처와 UV가 함께 있지 않습니다."
+            )
+        else:
+            self.status_info.setText(
+                f"텍스처를 {'켰습니다' if wanted else '껐습니다'}."
+                + (f"  ({textured}개 메쉬)" if wanted else "")
+            )
+
     def reset_view(self):
         self.viewport._front_back_ortho_enabled = False
         self.viewport._canonical_view_key = None
@@ -19024,6 +19086,45 @@ class MainWindow(QMainWindow):
                 widget.addItem(item)
         finally:
             widget.blockSignals(False)
+        self._push_annotation_choices_to_plate_panel()
+
+    def _push_annotation_choices_to_plate_panel(self) -> None:
+        """Hand the plate panel the 상태·기법 the drafter chose.
+
+        The panel holds a slot for these four decisions and does not edit
+        them, because the choosing happens in the 단면/외곽 tools where the
+        faces were painted.  Until this ran, that slot was never filled: a
+        condition record could be made and could never reach a plate made
+        from the panel.  So the choice is pushed whenever the list is
+        rebuilt, and again before a plate or a spec is written.
+        """
+
+        plate_panel = getattr(self, "plate_panel", None)
+        if plate_panel is None:
+            return
+        try:
+            technique_ids = self._checked_drawing_sheet_technique_ids()
+            panel = getattr(self, "section_panel", None)
+            checkbox = getattr(panel, "check_drawing_sheet_technique_angle", None)
+            angle_on = bool(checkbox is not None and checkbox.isChecked())
+            angle = (
+                float(panel.spin_drawing_sheet_technique_angle.value()) if angle_on else 0.0
+            )
+            plate_panel.set_carried(
+                condition_records=list(self._checked_drawing_sheet_condition_ids()),
+                technique_records=list(technique_ids),
+                technique_angles_deg=(
+                    [[record_id, angle] for record_id in technique_ids] if angle_on else []
+                ),
+                technique_representations=[
+                    list(pair)
+                    for pair in self._drawing_sheet_technique_representations(technique_ids)
+                ],
+            )
+        except Exception:
+            logging.getLogger(__name__).info(
+                "annotation choices could not be handed to the plate panel", exc_info=True
+            )
 
     def _checked_drawing_sheet_condition_ids(self) -> tuple[str, ...]:
         """Checked condition records; technique records are listed alongside
@@ -20795,6 +20896,7 @@ class MainWindow(QMainWindow):
 
         try:
             aligned = session.commit_axis_alignment(
+                axis_source=str(panel.combo_axis_source.currentData() or AXIS_SOURCE_CENTER_LINE),
                 top_record_id=top_id,
                 bottom_record_id=bottom_id,
                 operator=self._current_operator(),
@@ -21218,6 +21320,7 @@ class MainWindow(QMainWindow):
     def on_plate_spec_save_requested(self) -> None:
         """Write what the panel says as a specification file."""
 
+        self._push_annotation_choices_to_plate_panel()
         try:
             spec = self.plate_panel.spec()
         except PlateSpecError as exc:
@@ -21257,6 +21360,9 @@ class MainWindow(QMainWindow):
         except ArtifactWorkbenchError as exc:
             QMessageBox.warning(self, "도판 만들기 실패", str(exc))
             return
+        # The 상태·기법 the drafter chose in the 단면/외곽 tools belong to this
+        # plate too; the panel carries them but does not edit them.
+        self._push_annotation_choices_to_plate_panel()
         try:
             record_ids, options = self.plate_panel.options()
         except PlateSpecError as exc:

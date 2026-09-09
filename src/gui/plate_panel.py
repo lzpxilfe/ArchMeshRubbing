@@ -183,6 +183,11 @@ class PlatePanel(QWidget):
         super().__init__(parent)
         self._records: list[tuple[str, str, str]] = []
         self._carried: dict[str, Any] = {}
+        # Which table columns name a record, and which hold a closed choice.
+        # Both are re-applied whenever a table grows, so a row added by a
+        # loaded spec gets the same control as the rows built with the panel.
+        self._record_columns: list[tuple[QTableWidget, int]] = []
+        self._kind_columns: list[tuple[QTableWidget, int, tuple[str, ...], str]] = []
         self._build()
 
     # --- building ---------------------------------------------------------
@@ -297,6 +302,7 @@ class PlatePanel(QWidget):
         self._fill_kind_column(
             self.table_sherd, column=1, values=SHERD_SIDES, default=SHERD_SIDES[0]
         )
+        self._fill_record_column(self.table_sherd, column=0)
         self.table_sherd.itemChanged.connect(self._changed)
         layout.addWidget(self.table_sherd)
 
@@ -308,6 +314,8 @@ class PlatePanel(QWidget):
                 "도형 평면이 절단면과 나란하면 자취가 없으므로 도판이 거부합니다."
             ),
         )
+        for column in (0, 1):
+            self._fill_record_column(self.table_section_marks, column=column)
         self.table_section_marks.itemChanged.connect(self._changed)
         layout.addWidget(self.table_section_marks)
         return page
@@ -408,6 +416,8 @@ class PlatePanel(QWidget):
             ("입면 record", "단면 record", "뒷면 실루엣 record"),
             tip="한 줄이 한 도형입니다.  뒷면 실루엣은 외형선을 '뒷면 실루엣'으로 둘 때만 씁니다.",
         )
+        for column in (0, 1, 2):
+            self._fill_record_column(self.table_mirror, column=column)
         self.table_mirror.itemChanged.connect(self._changed)
         layout.addWidget(self.table_mirror)
 
@@ -420,6 +430,7 @@ class PlatePanel(QWidget):
                 "계단 모서리가 문양의 먹을 지나가면 도판이 거부합니다."
             ),
         )
+        self._fill_record_column(self.table_jogs, column=0)
         self.table_jogs.itemChanged.connect(self._changed)
         layout.addWidget(self.table_jogs)
 
@@ -431,6 +442,7 @@ class PlatePanel(QWidget):
                 "바닥: 자를 꽂아 잰 정치면 위 높이.  길이 0이면 벽 앞까지."
             ),
         )
+        self._fill_record_column(self.table_presumed, column=0)
         self.table_presumed.itemChanged.connect(self._changed)
         self._fill_kind_column(self.table_presumed, column=1, values=PRESUMED_KINDS, default=PRESUMED_FLOOR)
         layout.addWidget(self.table_presumed)
@@ -450,6 +462,8 @@ class PlatePanel(QWidget):
             ),
         )
         self.table_inner.setRowCount(3)
+        for column in (0, 1, 2, 3):
+            self._fill_record_column(self.table_inner, column=column)
         self.table_inner.itemChanged.connect(self._changed)
         layout.addWidget(self.table_inner)
 
@@ -476,6 +490,7 @@ class PlatePanel(QWidget):
             ("꺾임 record", "번호", "어떻게"),
             tip="번호는 아래에서부터 0.  규칙이 정한 것과 달리 보고 싶을 때만 적습니다.",
         )
+        self._fill_record_column(self.table_break_styles, column=0)
         self.table_break_styles.itemChanged.connect(self._changed)
         self._fill_kind_column(self.table_break_styles, column=2, values=BREAK_STYLES, default="solid")
         layout.addWidget(self.table_break_styles)
@@ -485,6 +500,7 @@ class PlatePanel(QWidget):
             ("문양 record", "패턴 번호"),
             tip="-1은 흩어진 획, -2는 이음매.  나머지는 패턴 번호입니다.",
         )
+        self._fill_record_column(self.table_hidden, column=0)
         self.table_hidden.itemChanged.connect(self._changed)
         layout.addWidget(self.table_hidden)
         return page
@@ -500,6 +516,8 @@ class PlatePanel(QWidget):
             ("채색 record", "붙일 도형", "자리"),
             tip="제자리에: 도형 위 제 위치에.  도면 아래: 굽 안 묵서처럼 다른 뷰의 것.",
         )
+        for column in (0, 1):
+            self._fill_record_column(self.table_cutouts, column=column)
         self.table_cutouts.itemChanged.connect(self._changed)
         self._fill_kind_column(self.table_cutouts, column=2, values=PAINT_CUTOUT_PLACEMENTS, default="in_place")
         paint_layout.addWidget(self.table_cutouts)
@@ -522,6 +540,8 @@ class PlatePanel(QWidget):
             ("양각 음영 record", "얹을 도형"),
             tip="양각은 선이 아니라 점입니다.  미러 도형에서는 입면 쪽에만 찍습니다.",
         )
+        for column in (0, 1):
+            self._fill_record_column(self.table_stipples, column=column)
         self.table_stipples.itemChanged.connect(self._changed)
         relief_layout.addWidget(self.table_stipples)
         dot_row = QHBoxLayout()
@@ -543,6 +563,8 @@ class PlatePanel(QWidget):
             ("탁본 record", "붙일 입면", "어느 면인지"),
             tip="한 변을 중심선에 딱 붙여 붙입니다.  '어느 면인지'는 캡션 앞에 인쇄됩니다.",
         )
+        for column in (0, 1):
+            self._fill_record_column(self.table_rubbings, column=column)
         self.table_rubbings.itemChanged.connect(self._changed)
         rubbing_layout.addWidget(self.table_rubbings)
         fit_row = QHBoxLayout()
@@ -610,6 +632,9 @@ class PlatePanel(QWidget):
     ) -> None:
         """Put a closed choice in one column of every row of ``table``."""
 
+        entry = (table, int(column), tuple(str(value) for value in values), str(default))
+        if entry not in self._kind_columns:
+            self._kind_columns.append(entry)
         for row in range(table.rowCount()):
             if table.cellWidget(row, column) is None:
                 combo = _combo(values)
@@ -618,6 +643,87 @@ class PlatePanel(QWidget):
                     combo.setCurrentIndex(index)
                 combo.currentIndexChanged.connect(self._changed)
                 table.setCellWidget(row, column, combo)
+
+    def _fill_record_column(self, table: QTableWidget, *, column: int) -> None:
+        """Make one column of ``table`` a chooser over the session's records.
+
+        A record is named `record:cutline:<uuid4>` - forty-five characters
+        the archaeologist would otherwise have to copy by hand into every
+        table that mentions it.  Typing it is not a smaller version of the
+        job; it is a different job, and one nobody can check by eye.
+        """
+
+        entry = (table, int(column))
+        if entry not in self._record_columns:
+            self._record_columns.append(entry)
+        self._ensure_row_widgets(table)
+
+    def _record_combo(self) -> QComboBox:
+        combo = QComboBox()
+        combo.setToolTip("이 세션이 가진 기록에서 고릅니다.")
+        combo.addItem("", "")
+        for record_id, kind, label in self._records:
+            combo.addItem(f"{label}  ·  {kind}", record_id)
+        combo.currentIndexChanged.connect(self._changed)
+        return combo
+
+    @staticmethod
+    def _select_record(combo: QComboBox, value: str) -> None:
+        """Show ``value`` even when this session does not hold that record.
+
+        A spec written elsewhere - another operator, another machine, the
+        same artifact before a re-import - names records this session may
+        not have.  Dropping them silently would edit the archaeologist's
+        plate; so the id stays, marked as missing.
+        """
+
+        wanted = str(value or "")
+        index = combo.findData(wanted)
+        if index < 0 and wanted:
+            combo.addItem(f"{wanted}  ·  이 세션에 없음", wanted)
+            index = combo.findData(wanted)
+        combo.setCurrentIndex(max(index, 0))
+
+    def _ensure_row_widgets(self, table: QTableWidget) -> None:
+        """Give every row of ``table`` the controls its columns call for."""
+
+        for owner, column, values, default in self._kind_columns:
+            if owner is not table:
+                continue
+            for row in range(table.rowCount()):
+                if table.cellWidget(row, column) is None:
+                    combo = _combo(values)
+                    index = combo.findData(default)
+                    if index >= 0:
+                        combo.setCurrentIndex(index)
+                    combo.currentIndexChanged.connect(self._changed)
+                    table.setCellWidget(row, column, combo)
+        for owner, column in self._record_columns:
+            if owner is not table:
+                continue
+            for row in range(table.rowCount()):
+                if table.cellWidget(row, column) is None:
+                    table.setCellWidget(row, column, self._record_combo())
+
+    def _refresh_record_columns(self) -> None:
+        """Re-offer every record chooser, keeping what each one already holds."""
+
+        for table, column in self._record_columns:
+            self._ensure_row_widgets(table)
+            for row in range(table.rowCount()):
+                widget = table.cellWidget(row, column)
+                if not isinstance(widget, QComboBox):
+                    continue
+                kept = str(widget.currentData() or "")
+                widget.blockSignals(True)
+                try:
+                    widget.clear()
+                    widget.addItem("", "")
+                    for record_id, kind, label in self._records:
+                        widget.addItem(f"{label}  ·  {kind}", record_id)
+                    self._select_record(widget, kept)
+                finally:
+                    widget.blockSignals(False)
 
     # --- what the window gives it ----------------------------------------
 
@@ -642,6 +748,7 @@ class PlatePanel(QWidget):
             item.setToolTip(record_id)
             self.list_records.addItem(item)
         self.list_records.blockSignals(False)
+        self._refresh_record_columns()
         self._changed()
 
     def set_presets(self, presets: Sequence[tuple[str, str]], *, current: str = "") -> None:
@@ -823,6 +930,10 @@ class PlatePanel(QWidget):
     def _set_table(self, table: QTableWidget, rows: Sequence[Sequence[Any]], *, columns: int) -> None:
         table.blockSignals(True)
         table.setRowCount(max(len(rows) + 1, _TABLE_MIN_ROWS))
+        # A grown table's new rows have no controls yet; without this the
+        # choices a column stands for become free text on exactly the rows a
+        # loaded spec added.
+        self._ensure_row_widgets(table)
         for row in range(table.rowCount()):
             for column in range(columns):
                 value = ""
@@ -831,9 +942,12 @@ class PlatePanel(QWidget):
                     value = raw if isinstance(raw, str) else f"{raw:g}" if isinstance(raw, float) else str(raw)
                 widget = table.cellWidget(row, column)
                 if isinstance(widget, QComboBox):
-                    index = widget.findData(value)
-                    if index >= 0:
-                        widget.setCurrentIndex(index)
+                    if (table, column) in self._record_columns:
+                        self._select_record(widget, value)
+                    else:
+                        index = widget.findData(value)
+                        if index >= 0:
+                            widget.setCurrentIndex(index)
                 else:
                     table.setItem(row, column, QTableWidgetItem(value))
         table.blockSignals(False)

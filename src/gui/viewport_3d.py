@@ -66,6 +66,24 @@ from OpenGL.GL import (
     GL_SPECULAR,
     GL_SRC_ALPHA,
     GL_STATIC_DRAW,
+    GL_REPEAT,
+    GL_RGB,
+    GL_RGBA,
+    GL_LINEAR,
+    GL_LUMINANCE,
+    GL_LUMINANCE_ALPHA,
+    GL_MAX_TEXTURE_SIZE,
+    GL_MODULATE,
+    GL_UNPACK_ALIGNMENT,
+    GL_UNSIGNED_BYTE,
+    GL_TEXTURE_2D,
+    GL_TEXTURE_COORD_ARRAY,
+    GL_TEXTURE_ENV,
+    GL_TEXTURE_ENV_MODE,
+    GL_TEXTURE_MAG_FILTER,
+    GL_TEXTURE_MIN_FILTER,
+    GL_TEXTURE_WRAP_S,
+    GL_TEXTURE_WRAP_T,
     GL_TRIANGLE_FAN,
     GL_TRIANGLES,
     GL_UNSIGNED_INT,
@@ -94,6 +112,14 @@ from OpenGL.GL import (
     glEnd,
     glFlush,
     glGenBuffers,
+    glGenTextures,
+    glBindTexture,
+    glDeleteTextures,
+    glPixelStorei,
+    glTexCoordPointer,
+    glTexEnvi,
+    glTexImage2D,
+    glTexParameteri,
     glGetDoublev,
     glGetIntegerv,
     glLightfv,
@@ -150,6 +176,12 @@ from .studio_backdrop import (
     ground_shadow,
     origin_axes,
     shadow_outline,
+)
+from .mesh_texture import (
+    MAX_TEXTURE_SIDE_DEFAULT,
+    can_show_texture,
+    texture_corner_uv,
+    texture_image,
 )
 from .render_coordinates import (
     RenderFrameSnapshot,
@@ -274,6 +306,14 @@ MOUSE_DELTA_SPIKE_CLAMP_PX = 120.0
 CAMERA_ROTATE_SENSITIVITY_DEFAULT = 0.35
 VBO_UPLOAD_VERTEX_CHUNK = 131_072
 CAMERA_PAN_SENSITIVITY_DEFAULT = 0.22
+
+#: `mesh_texture` names layouts without importing GL; this is the translation.
+_GL_PIXEL_FORMATS = {
+    "luminance": GL_LUMINANCE,
+    "luminance_alpha": GL_LUMINANCE_ALPHA,
+    "rgb": GL_RGB,
+    "rgba": GL_RGBA,
+}
 
 
 def _log_ignored_exception(context: str = "Ignored exception", *, level: int = logging.INFO) -> None:
@@ -1941,6 +1981,13 @@ class SceneObject:
         # ?뚮뜑留?由ъ냼??
         self.vbo_id: int | None = None
         self.vertex_count: int = 0
+        # The scanner's own colour, uploaded on demand.  The pattern the
+        # archaeologist has to read lives in this image, so it is kept beside
+        # the geometry rather than rebuilt every frame.  Renderer-only: like
+        # the vertex buffer, none of this may enter a document or an export.
+        self.texture_id: int | None = None
+        self.uv_vbo_id: int | None = None
+        self.texture_upload_failed: bool = False
         # Renderer-only cache metadata.  Canonical mesh vertices remain absolute
         # float64 coordinates; only the uploaded GL_FLOAT payload is local to
         # this origin.  This value must never enter a document, record, or export.
@@ -2047,11 +2094,25 @@ class SceneObject:
                 glDeleteBuffers(1, [vbo_id])
         except Exception:
             _log_ignored_exception()
+        try:
+            texture_id = int(self.texture_id or 0)
+            if texture_id > 0:
+                glDeleteTextures([texture_id])
+        except Exception:
+            _log_ignored_exception()
+        try:
+            uv_vbo_id = int(self.uv_vbo_id or 0)
+            if uv_vbo_id > 0:
+                glDeleteBuffers(1, [uv_vbo_id])
+        except Exception:
+            _log_ignored_exception()
         finally:
             # cleanup() is a terminal, idempotent transition.  Never leave a
             # deleted buffer id available for undo or later rendering code.
             self.vbo_id = None
             self.vertex_count = 0
+            self.texture_id = None
+            self.uv_vbo_id = None
             self._amr_vbo_origin_local_mm = np.zeros(3, dtype=np.float64)
 
 
@@ -2116,7 +2177,13 @@ class Viewport3D(QOpenGLWidget):
         # and are never rendered into an exported picture or a drawing.
         self.studio_backdrop = True
         self.studio_shadow = True
-        
+        # The scanner's colour, laid back on the surface.  The incised line,
+        # the painted flower and the glaze are in that image and in no other
+        # part of the file, so a viewer that always draws grey shows the shape
+        # and hides the evidence.  It goes off when the shape is what is being
+        # judged - a silhouette reads better without a pattern over it.
+        self.show_texture = True
+
         # 湲곗쫰紐??ㅼ젙
         self.show_gizmo = True
         self.active_gizmo_axis = None
@@ -8486,8 +8553,35 @@ class Viewport3D(QOpenGLWidget):
             glVertexPointer(3, GL_FLOAT, 24, ctypes.c_void_p(0))
             glNormalPointer(GL_FLOAT, 24, ctypes.c_void_p(12))
 
+            # The scanner's colour, if this object has it and it is wanted.
+            # Only the base pass is textured: the overlays drawn after it say
+            # which faces are chosen or unresolved, and a pattern under those
+            # colours would make a reading of the mesh look like a reading of
+            # the pattern.  MODULATE keeps the room's light on the surface, so
+            # the form still reads while the pattern shows.
+            textured = False
+            if bool(getattr(self, "show_texture", True)) and self.upload_texture(obj):
+                try:
+                    glEnable(GL_TEXTURE_2D)
+                    glBindTexture(GL_TEXTURE_2D, int(obj.texture_id or 0))
+                    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE)
+                    glEnableClientState(GL_TEXTURE_COORD_ARRAY)
+                    glBindBuffer(GL_ARRAY_BUFFER, int(obj.uv_vbo_id or 0))
+                    glTexCoordPointer(2, GL_FLOAT, 8, ctypes.c_void_p(0))
+                    glBindBuffer(GL_ARRAY_BUFFER, vbo_id)
+                    # White under the texture: any other colour tints the
+                    # artifact's own colour, and then the reading is no longer
+                    # the scanner's.
+                    glColor4f(1.0, 1.0, 1.0, float(alpha_f))
+                    textured = True
+                except Exception:
+                    _log_ignored_exception()
+                    textured = False
+                    self._end_textured_pass(obj, col, alpha_f)
             # 1) 湲곕낯 ?됱긽 ?뚮뜑留?
             glDrawArrays(GL_TRIANGLES, 0, obj.vertex_count)
+            if textured:
+                self._end_textured_pass(obj, col, alpha_f)
 
             # 2) 諛붾떏 愿??z<0) ?곸뿭??珥덈줉?됱쑝濡???뼱?곌린(?대━???됰㈃ ?댁슜, CPU ?ㅼ틪 ?놁쓬)
             if self.floor_penetration_highlight:
@@ -9898,6 +9992,12 @@ class Viewport3D(QOpenGLWidget):
             obj.vertex_count = vertex_count
             obj._amr_vbo_origin_local_mm = candidate_vbo_origin.copy()
 
+            # The uv buffer is one entry per corner of the geometry just
+            # uploaded.  New geometry makes the old one wrong by definition,
+            # so it goes now and is rebuilt on the next textured draw.
+            self.release_texture(obj)
+            obj.texture_upload_failed = False
+
             # Picking cache invalidate (mesh vertices may have changed)
             try:
                 obj._face_centroid_kdtree = None
@@ -9936,7 +10036,190 @@ class Viewport3D(QOpenGLWidget):
                     self.doneCurrent()
                 except Exception:
                     _log_ignored_exception()
-    
+
+    # --- the scanner's colour -------------------------------------------
+
+    def _max_texture_side(self) -> int:
+        """What this driver will take, or the safe default if it will not say."""
+
+        try:
+            reported = int(glGetIntegerv(GL_MAX_TEXTURE_SIZE))
+        except Exception:
+            return MAX_TEXTURE_SIDE_DEFAULT
+        if reported < 64:
+            return MAX_TEXTURE_SIDE_DEFAULT
+        return min(reported, MAX_TEXTURE_SIDE_DEFAULT)
+
+    def upload_texture(self, obj: SceneObject) -> bool:
+        """Put this object's texture and its UVs where the draw can reach them.
+
+        Returns whether the object can be drawn textured.  A failure is
+        remembered, so a mesh whose image the driver refuses is tried once
+        and then drawn plain instead of failing every frame.
+        """
+
+        if obj is None or not bool(getattr(self, "show_texture", True)):
+            return False
+        if bool(getattr(obj, "texture_upload_failed", False)):
+            return False
+        if int(getattr(obj, "texture_id", 0) or 0) > 0 and int(getattr(obj, "uv_vbo_id", 0) or 0) > 0:
+            return True
+        mesh = getattr(obj, "mesh", None)
+        if not can_show_texture(mesh):
+            return False
+
+        made_current = False
+        try:
+            try:
+                ctx = self.context()
+                if ctx is not None and QOpenGLContext.currentContext() != ctx:
+                    self.makeCurrent()
+                    made_current = True
+            except Exception:
+                _log_ignored_exception()
+
+            prepared = texture_image(mesh.texture, max_side=self._max_texture_side())
+            corners = texture_corner_uv(mesh.uv_coords, mesh.faces)
+            if int(corners.shape[0]) != int(getattr(obj, "vertex_count", 0) or 0):
+                # The geometry buffer decides the corner order; a UV buffer of
+                # a different length would texture the wrong triangles.
+                raise RuntimeError(
+                    "uv corners do not match the uploaded geometry "
+                    f"({corners.shape[0]} vs {getattr(obj, 'vertex_count', 0)})"
+                )
+
+            texture_id = int(getattr(obj, "texture_id", 0) or 0)
+            if texture_id <= 0:
+                texture_id = int(glGenTextures(1) or 0)
+                if texture_id <= 0:
+                    raise RuntimeError("glGenTextures returned 0 (invalid texture id)")
+                obj.texture_id = texture_id
+            gl_format = _GL_PIXEL_FORMATS[prepared.layout]
+            glBindTexture(GL_TEXTURE_2D, texture_id)
+            # Rows of an odd-width RGB image are not 4-byte aligned; without
+            # this every row after the first is shifted and the pattern shears.
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT)
+            glTexImage2D(
+                GL_TEXTURE_2D,
+                0,
+                gl_format,
+                int(prepared.width),
+                int(prepared.height),
+                0,
+                gl_format,
+                GL_UNSIGNED_BYTE,
+                prepared.pixels,
+            )
+            glBindTexture(GL_TEXTURE_2D, 0)
+
+            uv_vbo_id = int(getattr(obj, "uv_vbo_id", 0) or 0)
+            if uv_vbo_id <= 0:
+                uv_vbo_id = int(glGenBuffers(1) or 0)
+                if uv_vbo_id <= 0:
+                    raise RuntimeError("glGenBuffers returned 0 (invalid uv buffer id)")
+                obj.uv_vbo_id = uv_vbo_id
+            glBindBuffer(GL_ARRAY_BUFFER, uv_vbo_id)
+            glBufferData(GL_ARRAY_BUFFER, corners.nbytes, corners, GL_STATIC_DRAW)
+            glBindBuffer(GL_ARRAY_BUFFER, 0)
+            if prepared.shrunk_from is not None:
+                log_once(
+                    _LOGGER,
+                    f"texture-shrunk:{getattr(obj, 'name', '')}",
+                    "texture %s shrunk from %s to %d x %d for this driver",
+                    getattr(obj, "name", "<unknown>"),
+                    prepared.shrunk_from,
+                    prepared.width,
+                    prepared.height,
+                )
+            return True
+        except Exception:
+            try:
+                _LOGGER.exception(
+                    "texture upload failed for %s", getattr(obj, "name", "<unknown>")
+                )
+            except Exception:
+                pass
+            obj.texture_upload_failed = True
+            self.release_texture(obj)
+            return False
+        finally:
+            try:
+                glBindBuffer(GL_ARRAY_BUFFER, 0)
+            except Exception:
+                _log_ignored_exception()
+            if made_current:
+                try:
+                    self.doneCurrent()
+                except Exception:
+                    _log_ignored_exception()
+
+    def release_texture(self, obj: SceneObject) -> None:
+        """Give the driver back this object's texture and UV buffer."""
+
+        if obj is None:
+            return
+        try:
+            texture_id = int(getattr(obj, "texture_id", 0) or 0)
+            if texture_id > 0:
+                glDeleteTextures([texture_id])
+        except Exception:
+            _log_ignored_exception()
+        try:
+            uv_vbo_id = int(getattr(obj, "uv_vbo_id", 0) or 0)
+            if uv_vbo_id > 0:
+                glDeleteBuffers(1, [uv_vbo_id])
+        except Exception:
+            _log_ignored_exception()
+        obj.texture_id = None
+        obj.uv_vbo_id = None
+
+    def _end_textured_pass(self, obj: SceneObject, colour, alpha: float) -> None:
+        """Leave the texture unit as the rest of the frame expects it.
+
+        Everything drawn after the base pass - the overlays, the room, the
+        gizmo - assumes texturing is off.  Left on, the last artifact's image
+        would be smeared over all of it, so this runs whether the pass
+        finished or failed.
+        """
+
+        try:
+            glDisableClientState(GL_TEXTURE_COORD_ARRAY)
+            glBindTexture(GL_TEXTURE_2D, 0)
+            glDisable(GL_TEXTURE_2D)
+            glColor4f(float(colour[0]), float(colour[1]), float(colour[2]), float(alpha))
+        except Exception:
+            _log_ignored_exception()
+
+    def set_show_texture(self, enabled: bool) -> None:
+        """Lay the scanner's colour on the surface, or take it off."""
+
+        wanted = bool(enabled)
+        if wanted == bool(getattr(self, "show_texture", True)):
+            return
+        self.show_texture = wanted
+        if not wanted:
+            for obj in list(getattr(self, "objects", None) or []):
+                self.release_texture(obj)
+        else:
+            # A mesh whose upload failed under the old setting deserves the
+            # one retry the archaeologist just asked for.
+            for obj in list(getattr(self, "objects", None) or []):
+                obj.texture_upload_failed = False
+        self.update()
+
+    def textured_object_count(self) -> int:
+        """How many shown objects carry a texture this program can lay down."""
+
+        return sum(
+            1
+            for obj in (getattr(self, "objects", None) or [])
+            if getattr(obj, "visible", False) and can_show_texture(getattr(obj, "mesh", None))
+        )
+
     def fit_view_to_selected_object(self):
         """?좏깮??媛앹껜??移대찓??珥덉젏 留욎땄"""
         obj = self.selected_obj
