@@ -33,6 +33,49 @@ def _hash01(*values: int) -> float:
     return (h & 0xFFFFFFFF) / 4294967296.0
 
 
+def add_welded_crumb(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    *,
+    size_mm: float = 0.6,
+    gap_mm: float = 0.05,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Put a crumb so close to the artifact that the grid closing joins it.
+
+    The same tetrahedron as `add_loose_crumb`, but beside the widest point of
+    the body rather than out past the bounding box, and a fraction of a
+    millimetre away.  Snapped to the grid the two are still separate; the
+    one-cell closing then welds them, and a gate that counts the pieces only
+    after the closing sees one piece and passes.  What reaches the paper is
+    the artifact with a bump on its side.
+    """
+
+    points = np.asarray(vertices, dtype=np.float64)
+    triangles = np.asarray(faces, dtype=np.int64)
+    widest = int(np.argmax(points[:, 0]))
+    origin = np.array(
+        [
+            float(points[widest, 0]) + float(gap_mm),
+            float(points[widest, 1]),
+            float(points[widest, 2]),
+        ]
+    )
+    s = float(size_mm)
+    crumb = origin + np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [s, 0.0, 0.0],
+            [s * 0.5, s * 0.87, 0.0],
+            [s * 0.5, s * 0.29, s * 0.82],
+        ]
+    )
+    base = points.shape[0]
+    crumb_faces = np.asarray(
+        [[0, 2, 1], [0, 1, 3], [1, 2, 3], [2, 0, 3]], dtype=np.int64
+    ) + base
+    return np.vstack([points, crumb]), np.vstack([triangles, crumb_faces])
+
+
 def add_loose_crumb(
     vertices: np.ndarray,
     faces: np.ndarray,
@@ -501,6 +544,7 @@ def mesh_report(vertices: np.ndarray, faces: np.ndarray) -> dict[str, int]:
 
 __all__ = [
     "add_loose_crumb",
+    "add_welded_crumb",
     "bite_the_rim",
     "bridge_the_wall",
     "dent_the_wall",

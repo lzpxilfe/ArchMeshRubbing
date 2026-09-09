@@ -28,6 +28,9 @@ class ARAPFlattener:
     def __init__(self, max_iterations: int = 50, tolerance: float = 1e-6):
         self.max_iterations = max_iterations
         self.tolerance = tolerance
+        #: Why this run is not what its method name says, when a size guard
+        #: made it something else.  Empty when the fit ran as asked.
+        self._degraded_reason = ""
 
     def flatten(
         self,
@@ -53,7 +56,11 @@ class ARAPFlattener:
                 scale=1.0,
             )
 
-        components = self._face_connected_components(mesh.faces)
+        # Read the faces with coincident corners welded: an STL shares no
+        # vertices, and taken literally every one of its facets is its own
+        # component - the flattening would pack loose triangles.
+        welded = getattr(mesh, "welded_faces", None)
+        components = self._face_connected_components(welded() if callable(welded) else mesh.faces)
         if len(components) <= 1:
             if initial_uv is None:
                 initial_uv = self._safe_initial_parameterization(mesh, initial_method)
@@ -199,6 +206,13 @@ class ARAPFlattener:
                 "Initial UV fallback to PCA projection (verts=%d, faces=%d)",
                 n_verts,
                 n_faces,
+            )
+            # A projection is not a parameterisation: a curved wall comes out
+            # as its chord, and the development measures short.  Say so where
+            # the result can be read, not only in a log line seen once.
+            self._degraded_reason = (
+                f"initial UV fell back to a plane projection at {n_verts} vertices "
+                f"and {n_faces} faces; the unrolled width is the chord, not the arc"
             )
             basis = self._compute_reference_basis(mesh)
             vertices = np.asarray(mesh.vertices, dtype=np.float64)
@@ -495,6 +509,13 @@ class ARAPFlattener:
                 "Skipping ARAP optimize (verts=%d, faces=%d)",
                 int(n),
                 int(faces.shape[0]),
+            )
+            reason = (
+                f"ARAP was skipped at {int(n)} vertices and {int(faces.shape[0])} faces; "
+                "the result is the initial parameterisation, not an as-rigid-as-possible fit"
+            )
+            self._degraded_reason = (
+                f"{self._degraded_reason}; {reason}" if getattr(self, "_degraded_reason", "") else reason
             )
             return uv
 

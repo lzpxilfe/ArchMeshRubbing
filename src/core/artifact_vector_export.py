@@ -45,6 +45,7 @@ from .artifact_outline_extractor import (
     OUTLINE_CLOSING_ALGORITHM_VERSION,
     OUTLINE_GRID_CLOSING_RADIUS_CELLS,
     OUTLINE_LEGACY_ALGORITHM_VERSION,
+    OUTLINE_HOLE_GATE_ALGORITHM_VERSION,
     OUTLINE_PIECE_GATE_ALGORITHM_VERSION,
     REVIEWED_OUTLINE_BACKENDS,
 )
@@ -109,7 +110,7 @@ from .source_identity import PRIMARY_FILE_IDENTITY_SCOPE
 
 
 VECTOR_EXPORT_FORMAT = "archmeshrubbing_vector_export"
-_CURRENT_VECTOR_EXPORT_SCHEMA_VERSION = "1.7.0"
+_CURRENT_VECTOR_EXPORT_SCHEMA_VERSION = "1.8.0"
 VECTOR_EXPORT_SCHEMA_VERSION = _CURRENT_VECTOR_EXPORT_SCHEMA_VERSION
 #: 1.1.0 introduced the current provenance contract (import admission, axis
 #: Align); 1.2.0 is 1.1.0 plus outline algorithm 1.1.0 - the grid closing -
@@ -122,21 +123,25 @@ VECTOR_EXPORT_SCHEMA_VERSION = _CURRENT_VECTOR_EXPORT_SCHEMA_VERSION
 #: set can hold it; 1.6.0 admits outline algorithm 1.2.0, which refuses a
 #: silhouette in more than one piece and is otherwise 1.1.0 byte for byte;
 #: 1.7.0 admits outline algorithm 1.3.0, which refuses a hole the grid
-#: punched, and carries its recipe key and one QC key.  All seven carry the
-#: current contract; 1.0.0 is legacy.
+#: punched, and carries its recipe key and one QC key; 1.8.0 admits outline
+#: algorithm 1.4.0, which refuses a fragment the closing welded to the
+#: artifact, and carries the one QC key that gate judges.  All eight carry
+#: the current contract; 1.0.0 is legacy.
 _CURRENT_CONTRACT_VECTOR_EXPORT_SCHEMA_VERSIONS = frozenset(
-    {"1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0"}
+    {"1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0", "1.8.0"}
 )
 #: The sidecars that can carry an outline computed with the grid closing.
 _GRID_CLOSING_VECTOR_EXPORT_SCHEMA_VERSIONS = frozenset(
-    {"1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0"}
+    {"1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0", "1.8.0"}
 )
 #: The sidecars whose recipe enum names outline algorithm 1.2.0.
-_PIECE_GATE_VECTOR_EXPORT_SCHEMA_VERSIONS = frozenset({"1.6.0", "1.7.0"})
+_PIECE_GATE_VECTOR_EXPORT_SCHEMA_VERSIONS = frozenset({"1.6.0", "1.7.0", "1.8.0"})
 #: The sidecars whose recipe enum names outline algorithm 1.3.0.
-_HOLE_GATE_VECTOR_EXPORT_SCHEMA_VERSIONS = frozenset({"1.7.0"})
+_HOLE_GATE_VECTOR_EXPORT_SCHEMA_VERSIONS = frozenset({"1.7.0", "1.8.0"})
+#: The sidecars whose recipe enum names outline algorithm 1.4.0.
+_WELDED_GATE_VECTOR_EXPORT_SCHEMA_VERSIONS = frozenset({"1.8.0"})
 SUPPORTED_VECTOR_EXPORT_SCHEMA_VERSIONS = frozenset(
-    {"1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0"}
+    {"1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0", "1.8.0"}
 )
 VECTOR_EXPORT_DIRECTORY_SUFFIX = ".amr-vector"
 VECTOR_EXPORT_SVG_NAME = "artifact.svg"
@@ -311,6 +316,9 @@ _OUTLINE_CLOSING_QC_KEYS = frozenset(
 #: Present exactly when the outline was computed with the hole gate (outline
 #: algorithm 1.3.0), which only a 1.7.0 sidecar can carry.
 _OUTLINE_HOLE_GATE_QC_KEYS = frozenset({"grid_hole_unsnapped_cover_max"})
+#: Present exactly when the outline was computed with the welded-fragment
+#: gate (outline algorithm 1.4.0), which only a 1.8.0 sidecar can carry.
+_OUTLINE_WELDED_GATE_QC_KEYS = frozenset({"grid_pre_closing_component_count"})
 _PRODUCTION_CUTLINE_ALGORITHM = "archmeshrubbing.triangle_plane_cutline"
 _PRODUCTION_OUTLINE_ALGORITHM = "archmeshrubbing.projected_triangle_union"
 _PRODUCTION_VECTOR_ALGORITHM_VERSION = "1.0.0"
@@ -2442,12 +2450,25 @@ def _validate_current_record_qc(
     hole_gate = (
         kind is VectorRecordKind.OUTLINE
         and is_production
-        and algorithm_version == OUTLINE_ALGORITHM_VERSION
+        and algorithm_version
+        in (OUTLINE_HOLE_GATE_ALGORITHM_VERSION, OUTLINE_ALGORITHM_VERSION)
     )
     if hole_gate and schema_version not in _HOLE_GATE_VECTOR_EXPORT_SCHEMA_VERSIONS:
         raise ArtifactVectorExportError(
             "a vector export before 1.7.0 cannot carry an outline computed with "
             "the hole gate"
+        )
+    # The welded-fragment gate arrived with outline 1.4.0 and the 1.8.0
+    # sidecar, the first whose QC key set holds the count it judges.
+    welded_gate = (
+        kind is VectorRecordKind.OUTLINE
+        and is_production
+        and algorithm_version == OUTLINE_ALGORITHM_VERSION
+    )
+    if welded_gate and schema_version not in _WELDED_GATE_VECTOR_EXPORT_SCHEMA_VERSIONS:
+        raise ArtifactVectorExportError(
+            "a vector export before 1.8.0 cannot carry an outline computed with "
+            "the welded-fragment gate"
         )
     optional_keys = (
         _CUTLINE_RECORD_QC_KEYS
@@ -2455,6 +2476,7 @@ def _validate_current_record_qc(
         else _OUTLINE_RECORD_QC_KEYS
         | (_OUTLINE_CLOSING_QC_KEYS if closing else frozenset())
         | (_OUTLINE_HOLE_GATE_QC_KEYS if hole_gate else frozenset())
+        | (_OUTLINE_WELDED_GATE_QC_KEYS if welded_gate else frozenset())
     )
     always_kind_keys = (
         frozenset()
@@ -2503,6 +2525,7 @@ def _validate_current_record_qc(
     nullable_count_keys = {
         "grid_component_merge_count",
         "grid_component_split_count",
+        "grid_pre_closing_component_count",
         "unsnapped_component_count",
     }
     for key in sorted(nullable_count_keys & set(value)):
@@ -2597,7 +2620,13 @@ def _validate_current_record_qc(
         raise ArtifactVectorExportError("qc.record.view is invalid")
     if "unsnapped_comparison_status" in value:
         status = value["unsnapped_comparison_status"]
-        if status not in {"available", "unavailable_geos_union_failure"}:
+        if status not in {
+            "available",
+            "unavailable_geos_union_failure",
+            # The safety limits on the intermediate geometry are their own
+            # reason: telling a reader GEOS failed when it did not is wrong.
+            "unavailable_intermediate_limit",
+        }:
             raise ArtifactVectorExportError(
                 "qc.record.unsnapped_comparison_status is invalid"
             )

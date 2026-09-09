@@ -20,6 +20,7 @@ import pytest
 
 from scan_defects import (
     add_loose_crumb,
+    add_welded_crumb,
     bite_the_rim,
     bridge_the_wall,
     dent_the_wall,
@@ -554,6 +555,81 @@ def test_a_crumb_beside_the_pot_is_refused_and_named_rather_than_drawn() -> None
         algorithm_version=OUTLINE_CLOSING_ALGORITHM_VERSION,
     )
     assert closing.payload.sha256 == clean.payload.sha256
+
+
+def test_a_crumb_the_closing_welded_on_is_refused_too() -> None:
+    """The gate counts the pieces before the closing, not only after.
+
+    A crumb far from the artifact is two pieces at every stage and 1.2.0
+    refuses it.  A crumb a twentieth of a millimetre away is not: snapped to
+    a 0.2 mm grid it is still its own piece, and then the one-cell closing
+    welds it to the body.  A gate that looks only after the closing sees one
+    piece and passes, and the drawing gets the artifact with a bump on its
+    side - the outline's perimeter grows by 1.29 mm while its area barely
+    moves, which is exactly the shape of a defect nobody notices.  1.4.0
+    also counts what the grid made before the closing, and refuses when the
+    closing was what made it one piece and the unsnapped projection is not
+    one piece either.  The count is in the QC, so a drawing says what the
+    closing was asked to mend.
+    """
+
+    from src.core.artifact_outline_extractor import (
+        OUTLINE_ALGORITHM_VERSION,
+        OUTLINE_HOLE_GATE_ALGORITHM_VERSION,
+        extract_outline_geometry,
+        outline_recipe,
+    )
+    from src.core.artifact_vector_extractor import ArtifactVectorExtractionError
+
+    vertices, faces = _vessel(segments=64, rings=20)
+    clean = extract_outline_geometry(vertices, faces, "front", precision_grid_mm=0.2)
+    assert clean.qc["grid_pre_closing_component_count"] == 1
+
+    welded_vertices, welded_faces = add_welded_crumb(vertices, faces)
+
+    # What 1.3.0 does: one piece after the closing, so it draws it.
+    drawn = extract_outline_geometry(
+        welded_vertices,
+        welded_faces,
+        "front",
+        precision_grid_mm=0.2,
+        algorithm_version=OUTLINE_HOLE_GATE_ALGORITHM_VERSION,
+    )
+    assert drawn.qc["component_count"] == 1
+    assert drawn.qc["unsnapped_component_count"] == 2
+    assert "grid_pre_closing_component_count" not in drawn.qc, (
+        "the count is 1.4.0's, so a 1.3.0 record keeps its QC bytes"
+    )
+    grew = float(drawn.qc["outline_perimeter_mm"]) - float(
+        clean.qc["outline_perimeter_mm"]
+    )
+    assert 1.0 < grew < 1.6, f"the crumb added {grew:.2f} mm of drawn outline"
+
+    # What 1.4.0 does: refuse, and say the closing is what welded it.
+    with pytest.raises(ArtifactVectorExtractionError) as refusal:
+        extract_outline_geometry(
+            welded_vertices, welded_faces, "front", precision_grid_mm=0.2
+        )
+    message = str(refusal.value)
+    assert "the closing welded them into one" in message
+    assert "the unsnapped projection is more than one piece too" in message
+
+    # An artifact that was one piece before the closing is untouched: the
+    # gate moves no vertex, so the paths are 1.3.0's paths.
+    as_written = extract_outline_geometry(
+        vertices,
+        faces,
+        "front",
+        precision_grid_mm=0.2,
+        algorithm_version=OUTLINE_HOLE_GATE_ALGORITHM_VERSION,
+    )
+    assert as_written.payload.paths == clean.payload.paths
+    assert extract_outline_geometry(
+        vertices, faces, "front", precision_grid_mm=0.2
+    ).qc["outline_area_mm2"] == clean.qc["outline_area_mm2"]
+    assert outline_recipe("front", precision_grid_mm=0.2)["algorithm_version"] == (
+        OUTLINE_ALGORITHM_VERSION
+    )
 
 
 def test_a_hole_or_a_broken_rim_does_not_confuse_the_outline() -> None:

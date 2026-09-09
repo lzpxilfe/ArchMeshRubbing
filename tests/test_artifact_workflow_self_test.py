@@ -12,6 +12,14 @@ from src.application.artifact_workflow_self_test import (
 )
 
 
+#: The pinned digests below moved once, when outline algorithm 1.4.0 and the
+#: 1.8.0 sidecar arrived: the welded-fragment gate refuses a crumb the
+#: closing joined to the artifact, and its record names the new version and
+#: carries the count that gate judges (`grid_pre_closing_component_count`).
+#: Only the outline payload changed - the source, the tile unwrap and its
+#: document are byte-identical - and every other digest here moved because
+#: an export embeds the document's.  Outlines written at 1.3.0 and earlier
+#: still recompute to the bytes they were written with.
 def test_complete_workflow_self_test_has_deterministic_offline_receipts() -> None:
     result = run_artifact_workflow_self_test()
     repeated = run_artifact_workflow_self_test()
@@ -21,7 +29,7 @@ def test_complete_workflow_self_test_has_deterministic_offline_receipts() -> Non
         "60b5dca0fcef8346eea22a944ce0faa160e350cb97bd028b4a319c3e26883eb5"
     )
     assert result.document_sha256 == (
-        "34f4c817b03da2186062e711075c647cd53b5b633a1d5974bd4a1497a59dce4f"
+        "4f9ed0a08f5754f36e58281cc0df425d7cc3e5d6246ebb9627bebecbcd83cf03"
     )
     assert result.align_revision_id == "align:workflow-self-test-explicit"
     assert (result.cutline_count, result.outline_count, result.rubbing_count) == (
@@ -35,10 +43,10 @@ def test_complete_workflow_self_test_has_deterministic_offline_receipts() -> Non
     assert (result.vector_export_count, result.rubbing_export_count) == (9, 6)
     assert (result.tile_unwrap_count, result.tile_unwrap_export_count) == (1, 1)
     assert result.vector_set_sha256 == (
-        "de3a189ee6ac148c72fb3c404d6352ab5ea7f7eae53f7329556da80f420a4f07"
+        "a964d8ae20f41380b077dd1fc762064c828f6defaefdefc41c8f2d17784a1b67"
     )
     assert result.rubbing_set_sha256 == (
-        "f4dc507a6d0fccdc1274769419a2ccb7c53a4d365a03504b5474924c3bd3eccb"
+        "93812c3f10b9e8a0d720412b4ceb77efcf2d441c3beb9b329eeeaadfca01300a"
     )
     assert result.tile_unwrap_source_sha256 == (
         "5d1432cc1c6fe601cd2777da86a255f07689fcbfa775d0c38ae3178b28661eb6"
@@ -55,10 +63,10 @@ def test_complete_workflow_self_test_has_deterministic_offline_receipts() -> Non
         == result.tile_unwrap_export_sha256
     )
     assert result.survey_manifest_sha256 == (
-        "9c4b2ed35a88eef563fd06d0459d009331c14b44deeee43eed95065b7e7f0adc"
+        "21c7f674850357512d1521f461786b25d19f164ba924dd22c3d851ab144f6ebf"
     )
     assert result.survey_artifact_set_sha256 == (
-        "629edc357fb0a4fe7d926d43f58107908c62746a7d6770c08afb3a985de49198"
+        "3c474fa898e57080bf322e8e9d24746560b8f58b67581b7d32297953461b5ab0"
     )
     for digest in (
         result.document_sha256,
@@ -75,10 +83,10 @@ def test_complete_workflow_self_test_has_deterministic_offline_receipts() -> Non
         assert set(digest) <= set("0123456789abcdef")
     assert result.field_pilot_contract == "artifact-pass-human-driver-pending"
     assert result.svg_sha256 == (
-        "32eb25ba8b32af58aaa29e8845c987ffe8b75f1f907042d58ea8e267b74f8238"
+        "1355ef259e70f690f76070dab1d955bf71a7699513e22dca5a62ec2ad9084f48"
     )
     assert result.png_sha256 == (
-        "57babb0d033d4fe0ceedfe15c1f01f529ba28eff14ba44196f2f12ce79d34d3a"
+        "68fda651bbfe7edb779a49fff44fe4bc8c9fa1886a92d08477248a30b10620fd"
     )
     assert result.tile_unwrap_row_shift_max_um == 6364
     assert result.tile_unwrap_row_shift_station_count == 13
@@ -120,7 +128,7 @@ def test_complete_workflow_accepts_explicit_committed_directory_fsync_warning(
 
     assert result.record_count == 18
     assert result.survey_manifest_sha256 == (
-        "9c4b2ed35a88eef563fd06d0459d009331c14b44deeee43eed95065b7e7f0adc"
+        "21c7f674850357512d1521f461786b25d19f164ba924dd22c3d851ab144f6ebf"
     )
     assert (
         result.tile_unwrap_sha256

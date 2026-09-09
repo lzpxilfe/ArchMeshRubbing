@@ -65,6 +65,8 @@
 | 완료 실측 묶음 | 3/6/6 record를 자식 패키지 15개와 aggregate manifest로 원자 게시 | - | engineering contract | native | `src/core/artifact_survey_export.py` |
 | 오프라인 검증 | `.amr`과 네 export 종류의 hash·단위·Align·record·QC 재검증 | - | engineering contract | native | `src/core/artifact_verification.py` |
 | 깊이 픽 좌표 | float64 world → render origin 재기준 → 24-bit depth unproject → CPU ray/triangle | - | engineering contract | native | `src/gui/render_coordinates.py`, `src/core/artifact_surface_measurement.py` |
+| 판독 다섯 가지 | 도판이 그리는 꺾임·홈·능선·뒷면 실루엣·양각 음영을 한 가지 호출로 읽고 실측자 이름으로 기록; 판독의 뜻과 거부는 전부 core의 것이고 이 층은 규칙을 더하지 않는다 | - | engineering contract | native | `src/application/artifact_readings.py`, `src/gui/readings_panel.py` |
+| 스튜디오 배경 | 유물을 굴려 보는 방 — 바닥·하늘 그러데이션, 실제 밀리미터 격자, 같은 눈금의 높이자(z), 바닥 그림자, 실측자 왼쪽 어깨 위의 광원. **화면에만 있고 record·export·도판에는 들어가지 않는다** | - | engineering contract | native | `src/gui/studio_backdrop.py`, `src/gui/viewport_3d.py` |
 
 ---
 

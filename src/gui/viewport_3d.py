@@ -138,6 +138,22 @@ from ..core.alignment_utils import (
     transform_plane_world_to_local,
     transform_points,
 )
+from .studio_backdrop import (
+    AMBIENT,
+    GRID_COLOUR,
+    GRID_MAJOR_COLOUR,
+    FILL_LIGHT,
+    FILL_STRENGTH,
+    HORIZON_COLOUR,
+    KEY_LIGHT,
+    KEY_STRENGTH,
+    SHADOW_COLOUR,
+    backdrop_bands,
+    ground_shadow,
+    height_ruler,
+    origin_axes,
+    shadow_outline,
+)
 from .render_coordinates import (
     RenderFrameSnapshot,
     absolute_modelview_from_render,
@@ -2098,6 +2114,11 @@ class Viewport3D(QOpenGLWidget):
         self.grid_size = 500.0  # cm (???ш쾶 ?뺤옣)
         self.grid_spacing = 1.0  # cm (1.0 = 1cm)
         self.bg_color = [0.96, 0.96, 0.94, 1.0] # #F5F5F0 (Cream/Beige)
+        # The room the artifact is turned in: a gradient behind it and the
+        # shadow it casts on the floor it stands on.  Both are backdrop only
+        # and are never rendered into an exported picture or a drawing.
+        self.studio_backdrop = True
+        self.studio_shadow = True
         
         # 湲곗쫰紐??ㅼ젙
         self.show_gizmo = True
@@ -2603,7 +2624,9 @@ class Viewport3D(QOpenGLWidget):
     
     def initializeGL(self):
         """OpenGL 珥덇린??"""
-        glClearColor(0.95, 0.95, 0.95, 1.0) # 諛앹? 諛곌꼍 (CloudCompare ?ㅽ???
+        # The window clears to the horizon tone, so a frame that exits before
+        # the backdrop is drawn still shows the room and not a grey field.
+        glClearColor(HORIZON_COLOUR[0], HORIZON_COLOUR[1], HORIZON_COLOUR[2], 1.0)
         # 湲곕낯 ?ㅼ젙
         glEnable(GL_DEPTH_TEST)
         glEnable(GL_LIGHTING)
@@ -3009,6 +3032,8 @@ class Viewport3D(QOpenGLWidget):
         glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
         glColor4f(1.0, 1.0, 1.0, 1.0)
         glClear(int(GL_COLOR_BUFFER_BIT) | int(GL_DEPTH_BUFFER_BIT))
+        # The room goes down first, behind every depth the scene writes.
+        self.draw_studio_backdrop()
         glLoadIdentity()
         
         # Keep all GPU coordinates near zero.  CPU/document coordinates remain
@@ -3040,20 +3065,31 @@ class Viewport3D(QOpenGLWidget):
         # 0. 愿묒썝 ?꾩튂 ?낅뜲?댄듃 (諛앷퀬 洹좎씪??議곕챸)
         if not self.flat_shading:
             glEnable(GL_LIGHTING)
-            
-            # ?섍꼍愿??믪엫 (?꾩껜?곸쑝濡?諛앷쾶)
-            glLightModelfv(GL_LIGHT_MODEL_AMBIENT, [0.4, 0.4, 0.4, 1.0])
-            
-            # GL_LIGHT0: ?뺣㈃ 二?議곕챸 (Headlight - 移대찓??諛⑺뼢)
-            glLightfv(GL_LIGHT0, GL_POSITION, [0.0, 0.0, 1.0, 0.0])
-            glLightfv(GL_LIGHT0, GL_DIFFUSE, [0.6, 0.6, 0.6, 1.0])
-            glLightfv(GL_LIGHT0, GL_SPECULAR, [0.2, 0.2, 0.2, 1.0])
-            
-            # GL_LIGHT1: 蹂댁“ 議곕챸 (?ㅼそ?먯꽌 - 洹몃┝???꾪솕)
             glEnable(GL_LIGHT1)
-            glLightfv(GL_LIGHT1, GL_POSITION, [0.0, 0.0, -1.0, 0.0])
-            glLightfv(GL_LIGHT1, GL_DIFFUSE, [0.3, 0.3, 0.3, 1.0])
-            glLightfv(GL_LIGHT1, GL_SPECULAR, [0.0, 0.0, 0.0, 1.0])
+            if bool(getattr(self, "studio_backdrop", True)):
+                # The studio's own light, set in eye coordinates so it stays
+                # over the recorder's left shoulder as the artifact is turned.
+                # These are `studio_backdrop`'s numbers, so the window and any
+                # offscreen picture of the same artifact are the same room.
+                glMatrixMode(GL_MODELVIEW)
+                glPushMatrix()
+                glLoadIdentity()
+                glLightModelfv(GL_LIGHT_MODEL_AMBIENT, [AMBIENT, AMBIENT, AMBIENT, 1.0])
+                glLightfv(GL_LIGHT0, GL_POSITION, [KEY_LIGHT[0], KEY_LIGHT[1], KEY_LIGHT[2], 0.0])
+                glLightfv(GL_LIGHT0, GL_DIFFUSE, [KEY_STRENGTH, KEY_STRENGTH, KEY_STRENGTH, 1.0])
+                glLightfv(GL_LIGHT0, GL_SPECULAR, [0.12, 0.12, 0.12, 1.0])
+                glLightfv(GL_LIGHT1, GL_POSITION, [FILL_LIGHT[0], FILL_LIGHT[1], FILL_LIGHT[2], 0.0])
+                glLightfv(GL_LIGHT1, GL_DIFFUSE, [FILL_STRENGTH, FILL_STRENGTH, FILL_STRENGTH, 1.0])
+                glLightfv(GL_LIGHT1, GL_SPECULAR, [0.0, 0.0, 0.0, 1.0])
+                glPopMatrix()
+            else:
+                glLightModelfv(GL_LIGHT_MODEL_AMBIENT, [0.4, 0.4, 0.4, 1.0])
+                glLightfv(GL_LIGHT0, GL_POSITION, [0.0, 0.0, 1.0, 0.0])
+                glLightfv(GL_LIGHT0, GL_DIFFUSE, [0.6, 0.6, 0.6, 1.0])
+                glLightfv(GL_LIGHT0, GL_SPECULAR, [0.2, 0.2, 0.2, 1.0])
+                glLightfv(GL_LIGHT1, GL_POSITION, [0.0, 0.0, -1.0, 0.0])
+                glLightfv(GL_LIGHT1, GL_DIFFUSE, [0.3, 0.3, 0.3, 1.0])
+                glLightfv(GL_LIGHT1, GL_SPECULAR, [0.0, 0.0, 0.0, 1.0])
         else:
             glDisable(GL_LIGHTING)
             # Flat shading ?쒖뿉??紐⑤뱺 硫댁씠 ?쇱젙 諛앷린濡?蹂댁씠寃?
@@ -3062,7 +3098,10 @@ class Viewport3D(QOpenGLWidget):
         # 1. 寃⑹옄 諛?異?(Depth buffer?먮뒗 湲곕줉?섏? ?딆쓬: 硫붿돩 ?쇳궧/源딆씠 ?덉젙??
         glDepthMask(GL_FALSE)
         self.draw_ground_plane()  # 諛섑닾紐?諛붾떏
+        self.draw_ground_shadow()
         self.draw_grid()
+        self.draw_height_ruler()
+        self.draw_origin_axes()
         glDepthMask(GL_TRUE)
         
         # 2. 紐⑤뱺 硫붿돩 媛앹껜 ?뚮뜑留?
@@ -3238,6 +3277,187 @@ class Viewport3D(QOpenGLWidget):
         except Exception:
             _log_ignored_exception()
     
+    def draw_studio_backdrop(self):
+        """Fill the window with the studio gradient, behind everything.
+
+        Two bands meeting at the horizon, drawn in window coordinates with
+        depth writing off, so a silhouette reads against the light above and
+        the darker floor below wherever the artifact is turned to.  The
+        colours are `studio_backdrop`'s; nothing here decides a tone.
+        """
+
+        if not bool(getattr(self, "studio_backdrop", True)):
+            return
+        glDisable(GL_DEPTH_TEST)
+        glDisable(GL_LIGHTING)
+        glDepthMask(GL_FALSE)
+        glMatrixMode(GL_PROJECTION)
+        glPushMatrix()
+        glLoadIdentity()
+        glOrtho(0.0, 1.0, 0.0, 1.0, -1.0, 1.0)
+        glMatrixMode(GL_MODELVIEW)
+        glPushMatrix()
+        glLoadIdentity()
+        try:
+            bands = backdrop_bands()
+            glBegin(GL_QUADS)
+            for (low_y, low_colour), (high_y, high_colour) in zip(bands, bands[1:]):
+                glColor4f(low_colour[0], low_colour[1], low_colour[2], 1.0)
+                glVertex3f(0.0, float(low_y), 0.0)
+                glVertex3f(1.0, float(low_y), 0.0)
+                glColor4f(high_colour[0], high_colour[1], high_colour[2], 1.0)
+                glVertex3f(1.0, float(high_y), 0.0)
+                glVertex3f(0.0, float(high_y), 0.0)
+            glEnd()
+        finally:
+            glMatrixMode(GL_PROJECTION)
+            glPopMatrix()
+            glMatrixMode(GL_MODELVIEW)
+            glPopMatrix()
+            glColor4f(1.0, 1.0, 1.0, 1.0)
+            glDepthMask(GL_TRUE)
+            glEnable(GL_DEPTH_TEST)
+
+    def draw_origin_axes(self):
+        """The three axes crossing at the world origin.
+
+        Positioning an artifact is putting its own axis onto this point, so
+        the room draws it where it is: at (0, 0, 0), not at the scene's
+        render origin and not under the artifact.  A cross the artifact does
+        not stand on is the answer to the question the recorder is asking.
+        """
+
+        if not bool(getattr(self, "studio_backdrop", True)):
+            return
+        bounds = self._studio_bounds_world_mm()
+        if bounds is None:
+            return
+        axes = origin_axes(bounds)
+        glDisable(GL_LIGHTING)
+        glEnable(GL_BLEND)
+        glDisable(GL_LINE_SMOOTH)
+        try:
+            glLineWidth(2.0)
+            glBegin(GL_LINES)
+            for _name, start, stop, colour in axes.segments():
+                glColor4f(colour[0], colour[1], colour[2], 0.95)
+                self._submit_world_vertex(list(start))
+                self._submit_world_vertex(list(stop))
+            glEnd()
+        finally:
+            glLineWidth(1.0)
+            glColor4f(1.0, 1.0, 1.0, 1.0)
+            glEnable(GL_LIGHTING)
+
+    def draw_height_ruler(self):
+        """The room's z: a ticked line standing beside the artifact.
+
+        The floor grid gives x and y.  Height is what tells a rim from a foot,
+        so the room needs a z as well, at the floor's own step and stopping at
+        the artifact's top - never above it, which would be a height the
+        artifact does not have.
+        """
+
+        if not bool(getattr(self, "studio_backdrop", True)):
+            return
+        bounds = self._studio_bounds_world_mm()
+        if bounds is None:
+            return
+        ruler = height_ruler(bounds)
+        if ruler.top_z_mm <= ruler.floor_z_mm:
+            return
+        base_x, base_y = ruler.base_mm
+        glDisable(GL_LIGHTING)
+        glEnable(GL_BLEND)
+        glDisable(GL_LINE_SMOOTH)
+        try:
+            glLineWidth(1.0)
+            glColor4f(GRID_MAJOR_COLOUR[0], GRID_MAJOR_COLOUR[1], GRID_MAJOR_COLOUR[2], 0.85)
+            glBegin(GL_LINES)
+            self._submit_world_vertex([base_x, base_y, ruler.floor_z_mm])
+            self._submit_world_vertex([base_x, base_y, ruler.top_z_mm])
+            glEnd()
+            # Ticks run back along +y so they read as rungs, not as a second
+            # outline of the artifact.
+            for height in ruler.ticks_mm():
+                major = ruler.is_major(height)
+                reach = ruler.step_mm * (0.6 if major else 0.3)
+                colour = GRID_MAJOR_COLOUR if major else GRID_COLOUR
+                glColor4f(colour[0], colour[1], colour[2], 0.9 if major else 0.6)
+                glBegin(GL_LINES)
+                self._submit_world_vertex([base_x, base_y, ruler.floor_z_mm + height])
+                self._submit_world_vertex([base_x, base_y + reach, ruler.floor_z_mm + height])
+                glEnd()
+        finally:
+            glColor4f(1.0, 1.0, 1.0, 1.0)
+            glEnable(GL_LIGHTING)
+
+    def _studio_bounds_world_mm(self):
+        """The visible objects' world bounds, or None when nothing is shown."""
+
+        bounds_list = []
+        for obj in self.objects:
+            if not getattr(obj, "visible", False):
+                continue
+            try:
+                bounds = np.asarray(obj.get_world_bounds(), dtype=np.float64)
+            except Exception:
+                continue
+            if bounds.shape == (2, 3) and np.all(np.isfinite(bounds)):
+                bounds_list.append(bounds)
+        if not bounds_list:
+            return None
+        stacked = np.vstack(bounds_list)
+        low = stacked.min(axis=0)
+        high = stacked.max(axis=0)
+        if float(high[0] - low[0]) <= 0.0 and float(high[1] - low[1]) <= 0.0:
+            return None
+        return (
+            float(low[0]),
+            float(low[1]),
+            float(low[2]),
+            float(high[0]),
+            float(high[1]),
+            float(high[2]),
+        )
+
+    def draw_ground_shadow(self):
+        """The artifact's shadow on the floor it stands on.
+
+        Without it a vessel floats: the eye has nothing that says the foot
+        touches.  The shadow is the visible objects' footprint, so tipping
+        the artifact moves the shadow with it and lifting it off the floor
+        shows as a shadow the artifact no longer sits in.
+        """
+
+        if not bool(getattr(self, "studio_shadow", True)):
+            return
+        bounds = self._studio_bounds_world_mm()
+        if bounds is None:
+            return
+        shadow = ground_shadow(bounds)
+        rim = shadow_outline(shadow)
+        centre = (shadow.centre_mm[0], shadow.centre_mm[1], shadow.floor_z_mm)
+
+        glDisable(GL_LIGHTING)
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        glDisable(GL_CULL_FACE)
+        try:
+            glBegin(GL_TRIANGLE_FAN)
+            glColor4f(SHADOW_COLOUR[0], SHADOW_COLOUR[1], SHADOW_COLOUR[2], float(shadow.opacity))
+            self._submit_world_vertex(list(centre))
+            # The rim fades out, so the shadow has no drawn edge that could be
+            # mistaken for an outline of the artifact.
+            glColor4f(SHADOW_COLOUR[0], SHADOW_COLOUR[1], SHADOW_COLOUR[2], 0.0)
+            for point in rim:
+                self._submit_world_vertex(list(point))
+            self._submit_world_vertex(list(rim[0]))
+            glEnd()
+        finally:
+            glColor4f(1.0, 1.0, 1.0, 1.0)
+            glEnable(GL_LIGHTING)
+
     def draw_ground_plane(self):
         """諛섑닾紐?諛붾떏硫?洹몃━湲?(Z=0, XY ?됰㈃) - Z-up 醫뚰몴怨?"""
         # ?섑룊 酉??뺣㈃/痢〓㈃ ???먯꽌??諛붾떏硫댁씠 ?좎쑝濡?蹂댁뿬 ?쒖빞瑜?諛⑺빐?섎?濡??④?

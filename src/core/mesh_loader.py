@@ -1298,17 +1298,61 @@ class MeshData:
                 edges.add(edge)
         return np.array(list(edges), dtype=np.int32)
 
+    #: How close two vertices must be to be the same corner of the surface,
+    #: in millimetres.  A micrometre is finer than any scanner resolves and
+    #: coarser than the float noise of a re-export.
+    TOPOLOGY_WELD_MM = 1e-3
+
+    def welded_vertex_map(self) -> np.ndarray:
+        """A representative vertex for each vertex, by position.
+
+        STL stores three vertices per facet and shares none, so read as
+        written every edge belongs to one face and every face is its own
+        component: a closed box comes back as a fully open surface in twelve
+        pieces.  The stored arrays are not touched - the geometry digest and
+        the admission receipt are of the bytes that were parsed - so the
+        welding is a reading of them, computed where topology is asked for.
+        """
+
+        cached = getattr(self, "_welded_vertex_map", None)
+        if cached is not None:
+            return cached
+        vertices = np.asarray(self.vertices, dtype=np.float64)
+        if vertices.size == 0:
+            mapping = np.zeros(0, dtype=np.int64)
+        else:
+            lattice = np.rint(vertices / self.TOPOLOGY_WELD_MM).astype(np.int64)
+            # numpy returns (unique, first_index, inverse) in that order.
+            _unique, first, inverse = np.unique(
+                lattice, axis=0, return_index=True, return_inverse=True
+            )
+            mapping = np.asarray(first, dtype=np.int64)[np.asarray(inverse).reshape(-1)]
+        self._welded_vertex_map = mapping
+        return mapping
+
+    def welded_faces(self) -> np.ndarray:
+        """The faces with coincident corners named by one vertex each."""
+
+        faces = np.asarray(self.faces, dtype=np.int64)
+        if faces.size == 0:
+            return faces
+        return self.welded_vertex_map()[faces]
+
     def get_boundary_edges(self) -> np.ndarray:
         """
         경계 엣지 목록 반환 (K, 2)
 
         열린 메쉬(open surface)에서 한 면에만 속하는 엣지를 경계로 간주합니다.
+        같은 자리의 정점은 한 정점으로 보고 셉니다 - STL처럼 정점을 공유하지
+        않는 포맷에서도 닫힌 면은 닫힌 것으로 읽혀야 합니다.
         """
         edge_count: dict[tuple[int, int], int] = {}
-        for face in self.faces:
+        for face in self.welded_faces():
             for i in range(3):
                 a = int(face[i])
                 b = int(face[(i + 1) % 3])
+                if a == b:
+                    continue
                 edge = (a, b) if a < b else (b, a)
                 edge_count[edge] = edge_count.get(edge, 0) + 1
 

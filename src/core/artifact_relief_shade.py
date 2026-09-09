@@ -740,13 +740,32 @@ def _development_depth_field(
     radial = np.einsum("ij,ij->i", normals[:, :2], centroids[:, :2])
     lengths = np.linalg.norm(normals, axis=1) * np.maximum(np.hypot(centroids[:, 0], centroids[:, 1]), 1e-12)
     outward = radial > (policy["outward_cos_thousandths"] / 1000.0) * lengths
-    # A face across the seam would stretch the whole strip's width.
+    # A face across the seam is not a distorted face: it is the wedge that
+    # closes the round, and dropping it leaves the strip one facet short and
+    # the motif on the seam cut by that much.  It is unwrapped instead - its
+    # low corners lifted a full turn - so it is drawn once, past the seam,
+    # where the cut through the cylinder actually puts it.
     corner_theta = theta[triangles]
     across_seam = (corner_theta.max(axis=1) - corner_theta.min(axis=1)) > math.pi
-    visible = np.flatnonzero(outward & ~across_seam)
+    unwrapped = np.where(
+        across_seam[:, None] & (corner_theta < math.pi), corner_theta + 2.0 * math.pi, corner_theta
+    )
+    visible = np.flatnonzero(outward)
     if visible.size == 0:
         raise ArtifactReliefShadeError("no face of the mesh faces away from the axis; nothing to develop")
-    projected = np.column_stack([reference_radius * theta, station])
+    seam_face_count = int(np.count_nonzero(across_seam[visible]))
+    # Each drawn face gets its own three corners, so a corner lifted past the
+    # seam keeps the height and radius of the vertex it still is.
+    corner_index = triangles[visible]
+    projected = np.column_stack(
+        [
+            (reference_radius * unwrapped[visible]).reshape(-1),
+            station[corner_index].reshape(-1),
+        ]
+    )
+    radius = radius[corner_index].reshape(-1)
+    triangles = np.arange(projected.shape[0], dtype=np.int64).reshape(-1, 3)
+    visible = np.arange(triangles.shape[0], dtype=np.int64)
     try:
         depth, minimum_u, minimum_v, raster_qc = _rasterize_depth_field(
             projected,
@@ -759,6 +778,7 @@ def _development_depth_field(
         )
     except ArtifactRubbingError as exc:
         raise ArtifactReliefShadeError(str(exc)) from exc
+    raster_qc = {**raster_qc, "seam_face_count": seam_face_count}
     return depth, minimum_u, minimum_v, raster_qc, int(visible.size), (heights, arc, reference_radius)
 
 
@@ -972,8 +992,15 @@ def extract_relief_shade(
         heights, arc, reference_radius = profile
         qc["development_arc_um"] = int(round(float(arc[-1]) * 1000.0))
         qc["development_reference_radius_um"] = int(round(reference_radius * 1000.0))
-        qc["development_circumference_um"] = int(round(float(np.nanmax(np.where(covered, xs[None, :], np.nan))) * 1000.0))
+        # The circumference is the round the strip was cut from, not the
+        # rightmost pixel that happened to be inked: a reader who measures a
+        # vessel's girth off this number must get the girth.
+        qc["development_circumference_um"] = int(round(2.0 * math.pi * reference_radius * 1000.0))
+        qc["development_inked_width_um"] = int(
+            round(float(np.nanmax(np.where(covered, xs[None, :], np.nan))) * 1000.0)
+        )
         qc["profile_bin_count"] = int(heights.size)
+        qc["seam_face_count"] = int(raster_qc.get("seam_face_count", 0))
         qc["seam_millideg"] = int(validated["development_policy"]["seam_millideg"])
     return raster, qc
 

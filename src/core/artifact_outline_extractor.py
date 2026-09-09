@@ -79,11 +79,26 @@ OUTLINE_PIECE_GATE_ALGORITHM_VERSION = "1.2.0"
 #: outline is refused with the hole's size in millimetres.  Nothing else
 #: changes: an outline whose holes are the artifact's has the same bytes at
 #: 1.3.0 as at 1.2.0, and every earlier version still recomputes as written.
-OUTLINE_ALGORITHM_VERSION = "1.3.0"
+OUTLINE_HOLE_GATE_ALGORITHM_VERSION = "1.3.0"
+#: The hole-gated union, refused when the closing welded a loose fragment to
+#: the artifact.  1.2.0's piece gate counts the pieces *after* the closing,
+#: so a crumb lying within one cell of the body is joined to it and passes
+#: as one piece - with the crumb's area added to the drawing.  1.4.0 counts
+#: the pieces before the closing as well: more than one there, one after,
+#: and an unsnapped projection that is not one piece either, is a fragment
+#: the grid welded on, and the drawing is refused.  A 0.15 mm crumb beside a
+#: test vessel passed at 1.3.0 with the outline area at 2504.40 mm2 and is
+#: refused at 1.4.0.  Nothing else changes: an outline that was one piece
+#: before the closing has the same paths at 1.4.0 as at 1.3.0, and every
+#: earlier version still recomputes as written.  The count itself is new in
+#: the QC (`grid_pre_closing_component_count`), so 1.4.0 needs a 1.8.0
+#: sidecar to carry it and a 1.3.0 recomputation keeps its QC bytes.
+OUTLINE_ALGORITHM_VERSION = "1.4.0"
 OUTLINE_ALGORITHM_VERSIONS = (
     OUTLINE_LEGACY_ALGORITHM_VERSION,
     OUTLINE_CLOSING_ALGORITHM_VERSION,
     OUTLINE_PIECE_GATE_ALGORITHM_VERSION,
+    OUTLINE_HOLE_GATE_ALGORITHM_VERSION,
     OUTLINE_ALGORITHM_VERSION,
 )
 OUTLINE_GRID_CLOSING_RADIUS_CELLS = 1.0
@@ -102,9 +117,13 @@ _SNAP_CONTRACTS: Mapping[str, tuple[str, float]] = {
         "axis<=1.5*grid;radial<=1.5*grid*sqrt(2)",
         OUTLINE_GRID_CLOSING_RADIUS_CELLS + 0.5,
     ),
-    # The piece gate and the hole gate move no vertex, so 1.2.0 and 1.3.0
-    # keep 1.1.0's contract.
+    # The piece gate, the hole gate and the welded-fragment gate move no
+    # vertex, so 1.2.0, 1.3.0 and 1.4.0 keep 1.1.0's contract.
     OUTLINE_PIECE_GATE_ALGORITHM_VERSION: (
+        "axis<=1.5*grid;radial<=1.5*grid*sqrt(2)",
+        OUTLINE_GRID_CLOSING_RADIUS_CELLS + 0.5,
+    ),
+    OUTLINE_HOLE_GATE_ALGORITHM_VERSION: (
         "axis<=1.5*grid;radial<=1.5*grid*sqrt(2)",
         OUTLINE_GRID_CLOSING_RADIUS_CELLS + 0.5,
     ),
@@ -233,8 +252,27 @@ def outline_recipe(
     *,
     precision_grid_mm: float,
     algorithm_version: str = OUTLINE_ALGORITHM_VERSION,
+    backend: tuple[str, str] | None = None,
 ) -> dict[str, Any]:
-    _require_outline_backend()
+    """The recipe a computation writes, or the one a record claims.
+
+    Computing a new outline requires the pinned backend, because that pin is
+    what the grid contract was proved against.  Reading a record back does
+    not: the record names the backend it was computed with, and that pair is
+    checked against `REVIEWED_OUTLINE_BACKENDS` instead.  Without the
+    distinction, raising the pin would make every outline ever recorded fail
+    its own validation - which is exactly what that table is for.
+    """
+
+    if backend is None:
+        _require_outline_backend()
+        backend = (shapely.__version__, shapely.geos_version_string)
+    elif tuple(backend) not in REVIEWED_OUTLINE_BACKENDS:
+        raise ArtifactVectorExtractionError(
+            f"outline record was computed with Shapely {backend[0]} and GEOS {backend[1]}, "
+            "which this build has not reviewed for the fixed-grid contract"
+        )
+    shapely_version, geos_version = backend
     resolved = _outline_view(view)
     grid = _precision_grid(precision_grid_mm)
     version = _outline_algorithm_version(algorithm_version)
@@ -244,12 +282,12 @@ def outline_recipe(
         "algorithm_version": version,
         "backend": {
             "name": "shapely",
-            "geos_version": shapely.geos_version_string,
+            "geos_version": geos_version,
             "normalized_grid_size": 1.0,
             "operation": (
                 "set_precision+union_all+buffer" if closing else "set_precision+union_all"
             ),
-            "shapely_version": shapely.__version__,
+            "shapely_version": shapely_version,
         },
         "coordinate_space": VECTOR_COORDINATE_SPACE,
         "face_scope": "all_geometry_faces",
@@ -277,7 +315,7 @@ def outline_recipe(
                     "operation": "hole_area_covered_by_unsnapped_union/v1",
                 }
             }
-            if version == OUTLINE_ALGORITHM_VERSION
+            if version in (OUTLINE_HOLE_GATE_ALGORITHM_VERSION, OUTLINE_ALGORITHM_VERSION)
             else {}
         ),
         "kind": VectorRecordKind.OUTLINE.value,
@@ -332,10 +370,17 @@ def validate_outline_record_contract(
         raise ArtifactVectorExtractionError("outline record recipe must be an object")
     view = _outline_view(recipe.get("view"))
     grid = _precision_grid(recipe.get("precision_grid_mm"))
+    # Rebuild the recipe with the backend the record itself names, so a
+    # record outlives the pin it was computed under as long as that backend
+    # is one this build has reviewed.
+    claimed = recipe.get("backend")
+    if not isinstance(claimed, Mapping):
+        raise ArtifactVectorExtractionError("outline record recipe has no backend block")
     expected_recipe = outline_recipe(
         view,
         precision_grid_mm=grid,
         algorithm_version=_outline_algorithm_version(recipe.get("algorithm_version")),
+        backend=(str(claimed.get("shapely_version", "")), str(claimed.get("geos_version", ""))),
     )
     if canonical_recipe_hash(recipe) != canonical_recipe_hash(expected_recipe):
         raise ArtifactVectorExtractionError(
@@ -1103,7 +1148,13 @@ def extract_outline_geometry(
         OUTLINE_LEGACY_ALGORITHM_VERSION,
         OUTLINE_CLOSING_ALGORITHM_VERSION,
     )
-    hole_gate = version == OUTLINE_ALGORITHM_VERSION
+    hole_gate = version in (
+        OUTLINE_HOLE_GATE_ALGORITHM_VERSION,
+        OUTLINE_ALGORITHM_VERSION,
+    )
+    # The welded-fragment gate, and the count it judges, are 1.4.0's alone:
+    # an older version recomputes with the QC bytes it was written with.
+    welded_gate = version == OUTLINE_ALGORITHM_VERSION
     snap_contract, snap_cells = _SNAP_CONTRACTS[version]
     vertices, face_array = _validated_mesh_arrays(
         vertices_world_mm,
@@ -1259,6 +1310,10 @@ def extract_outline_geometry(
             f"outline polygon union is invalid: {is_valid_reason(snapped_union)}"
         )
     closing_qc: dict[str, Any] = {}
+    # What the grid made, before the closing heals anything: the closing is
+    # there to mend a neck the grid cut, and it must not be able to weld two
+    # pieces of the mesh into one silhouette behind the gate's back.
+    pre_closing_component_count = _polygon_count(snapped_union)
     if closing:
         snapped_union, closing_cells = _close_grid_slivers(
             snapped_union, cancellation_probe=cancellation_probe
@@ -1291,13 +1346,44 @@ def extract_outline_geometry(
             float(unsnapped_union.area) * grid * grid,
             12,
         )
-    except ArtifactVectorExtractionError:
-        unsnapped_status = "unavailable_geos_union_failure"
+    except ArtifactVectorExtractionError as exc:
+        # Name the reason, not the exception type: the safety limits on the
+        # intermediate geometry are not a GEOS failure, and telling a reader
+        # to use a finer grid when the union was too large is no help.
+        reason = str(exc) or raw_comparison_failure or ""
+        unsnapped_status = (
+            "unavailable_intermediate_limit"
+            if "exceeds" in reason or "limit" in reason
+            else "unavailable_geos_union_failure"
+        )
+        raw_comparison_failure = reason or raw_comparison_failure
         unsnapped_union = None
         unsnapped_component_count = None
         unsnapped_area_mm2 = None
 
-    if piece_gate and snapped_component_count > 1:
+    # A piece the closing welded is still a piece.  Refuse when the drawing
+    # would hold more than the artifact after the closing, and when the grid
+    # found more than one piece that the unsnapped projection also holds -
+    # that is a loose fragment, and the closing merely hid it.
+    welded_fragment = (
+        welded_gate
+        and pre_closing_component_count > 1
+        and snapped_component_count == 1
+        and unsnapped_component_count != 1
+    )
+    if piece_gate and (snapped_component_count > 1 or welded_fragment):
+        if welded_fragment:
+            raise ArtifactVectorExtractionError(
+                "outline is more than one piece, and a drawing may hold only the "
+                f"artifact: the grid found {pre_closing_component_count} pieces and the "
+                "closing welded them into one, but the unsnapped projection is "
+                + (
+                    "more than one piece too"
+                    if unsnapped_component_count is not None
+                    else "unavailable"
+                )
+                + ". Remove the loose fragment from the mesh"
+            )
         # A connected mesh has a connected silhouette.  Two pieces here are a
         # loose fragment in the mesh or a snap that cut the artifact in two,
         # and neither belongs on a measured drawing - so say which it looks
@@ -1371,6 +1457,14 @@ def extract_outline_geometry(
         **hole_gate_qc,
         "grid_component_merge_count": component_merge_count,
         "grid_component_split_count": component_split_count,
+        # What the grid made before the closing: the number the welded-fragment
+        # gate judges, so a reader can see what the closing was asked to mend.
+        # 1.4.0's key alone, so every earlier version keeps its QC bytes.
+        **(
+            {"grid_pre_closing_component_count": pre_closing_component_count}
+            if welded_gate
+            else {}
+        ),
         "grid_snap_axis_upper_bound_mm": grid * snap_cells,
         "grid_snap_error_contract": snap_contract,
         "grid_snap_radial_upper_bound_squared_mm2": 2.0 * (grid * snap_cells) ** 2,
@@ -1575,6 +1669,7 @@ __all__ = [
     "OUTLINE_GRID_CLOSING_RADIUS_CELLS",
     "OUTLINE_GRID_HOLE_COVER_FRACTION_MAX",
     "OUTLINE_PIECE_GATE_ALGORITHM_VERSION",
+    "OUTLINE_HOLE_GATE_ALGORITHM_VERSION",
     "OUTLINE_LEGACY_ALGORITHM_VERSION",
     "OUTLINE_UNION_BATCH_SIZE",
     "OutlineGeometryResult",

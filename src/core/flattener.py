@@ -161,6 +161,14 @@ def _run_single_method(
         out_meta["iterations"] = int(iterations)
         out_meta["smooth_iters"] = int(smooth_iters_val)
         out_meta["smooth_strength"] = float(smooth_strength_val)
+        # A run that hit a size guard did not do what its name says.  Carry
+        # the reason out with the result: a development whose width is the
+        # chord and not the arc must not be read as a measurement.
+        degraded = str(getattr(flattener, "_degraded_reason", "") or "")
+        if degraded:
+            out_meta["degraded"] = True
+            out_meta["degraded_reason"] = degraded
+            out_meta["iterations"] = 0 if "ARAP was skipped" in degraded else int(iterations)
         if init_meta:
             out_meta.update(init_meta)
         return _build_result(

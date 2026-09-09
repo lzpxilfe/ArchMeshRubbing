@@ -756,6 +756,33 @@ def _log_exception(context: str) -> None:
         _log_ignored_exception(context)
 
 
+#: How close two corners must be to be one corner of the surface, in
+#: millimetres.  Finer than any scanner resolves, coarser than the float
+#: noise a re-export leaves behind.
+WELD_TOLERANCE_MM = 1e-3
+
+
+def _weld_face_corners(vertices: np.ndarray, faces: np.ndarray) -> np.ndarray | None:
+    """Faces renamed onto one vertex per position, or None when unchanged.
+
+    Returns None when nothing is coincident, so a mesh that already shares
+    its vertices is not copied and not perturbed.  Faces that collapse to a
+    line under the weld are dropped: they were a facet of zero area held
+    open only by duplicate coordinates.
+    """
+
+    if vertices.shape[0] == 0 or faces.shape[0] == 0:
+        return None
+    lattice = np.rint(vertices / WELD_TOLERANCE_MM).astype(np.int64)
+    _unique, first, inverse = np.unique(lattice, axis=0, return_index=True, return_inverse=True)
+    if first.shape[0] == vertices.shape[0]:
+        return None
+    mapping = np.asarray(first, dtype=np.int32)[np.asarray(inverse).reshape(-1)]
+    welded = mapping[faces]
+    keep = (welded[:, 0] != welded[:, 1]) & (welded[:, 1] != welded[:, 2]) & (welded[:, 0] != welded[:, 2])
+    return welded[keep].astype(np.int32, copy=False)
+
+
 def sanitize_mesh(mesh: MeshData) -> MeshData:
     """Remove invalid/degenerate faces and compact used vertices."""
     if mesh is None:
@@ -804,6 +831,16 @@ def sanitize_mesh(mesh: MeshData) -> MeshData:
             unit=mesh.unit,
             filepath=mesh.filepath,
         )
+
+    # Weld corners that sit on the same point.  A format that stores three
+    # vertices per facet and shares none - STL is the common one - otherwise
+    # arrives as a cloud of loose triangles: every edge a boundary, every
+    # face its own island, and a flattening that packs facets instead of
+    # unrolling a surface.  The source arrays are untouched; this is the
+    # working copy the solver reads.
+    welded_faces = _weld_face_corners(vertices, faces)
+    if welded_faces is not None:
+        faces = welded_faces
 
     unique_verts = np.unique(faces.reshape(-1)).astype(np.int32, copy=False)
     new_vertices = vertices[unique_verts]

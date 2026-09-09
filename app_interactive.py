@@ -411,7 +411,12 @@ from src.core.drawing_sheet_spec import (  # noqa: E402
     read_plate_spec,
     write_plate_spec,
 )
+from src.application.artifact_readings import (  # noqa: E402
+    ArtifactReadingError,
+    take_reading,
+)
 from src.gui.plate_panel import PlatePanel  # noqa: E402
+from src.gui.readings_panel import ReadingsPanel  # noqa: E402
 from src.core.drawing_style import (  # noqa: E402
     KCHA_2013_PEN_PRESET_ID as DRAWING_KCHA_PRESET_ID,
     LINE_KINDS as DRAWING_LINE_KINDS,
@@ -423,6 +428,11 @@ from src.core.drawing_style import (  # noqa: E402
     pt_to_mm as drawing_pt_to_mm,
     user_preset as drawing_user_preset,
 )
+
+#: What a record says about who made it when nobody has said who they are.
+#: Not a person: the drawing prints it, and a reader must be able to see
+#: that the recorder went unnamed rather than read a name that is not one.
+DEFAULT_OPERATOR = "이름 없는 실측자"
 
 #: The combo entry that means "the weights in the panel's own table".
 USER_LINE_WEIGHTS_PRESET = "user"
@@ -5911,6 +5921,16 @@ class MainWindow(QMainWindow):
         plate_scroll.setWidget(self.plate_panel)
         self.plate_dock.setWidget(plate_scroll)
 
+        # 6-3) 판독: 도판이 그릴 수 있는 것을 만드는 자리.
+        self.readings_dock = QDockWidget("판독", self)
+        self.readings_dock.setObjectName("dock_readings")
+        readings_scroll = QScrollArea()
+        readings_scroll.setWidgetResizable(True)
+        self.readings_panel = ReadingsPanel()
+        self.readings_panel.readingRequested.connect(self.on_reading_requested)
+        readings_scroll.setWidget(self.readings_panel)
+        self.readings_dock.setWidget(readings_scroll)
+
         # 7) 레이어
         self.scene_dock = QDockWidget("레이어", self)
         self.scene_dock.setObjectName("dock_scene")
@@ -5935,6 +5955,7 @@ class MainWindow(QMainWindow):
             self.tile_dock,
             self.section_dock,
             self.plate_dock,
+            self.readings_dock,
             self.export_dock,
             self.measure_dock,
             self.scene_dock,
@@ -5952,6 +5973,46 @@ class MainWindow(QMainWindow):
     def _settings(self) -> QSettings:
         return QSettings("ArchMeshRubbing", "ArchMeshRubbing")
 
+    #: Where the recorder's name is kept between sessions.
+    OPERATOR_SETTING = "operator/name"
+
+    def _current_operator(self) -> str:
+        """Who is recording.  Every record and every Align revision says so.
+
+        The name is printed in the title block's 작성 row and travels in the
+        document with each revision, so a measurement can be answered for
+        later.  This only ever *reads* it: a commit is not the moment to ask
+        a question, and a dialog raised from inside one would stop the
+        commit until somebody answered - forever, where nobody can.  The
+        asking is the menu's job (`on_operator_name_requested`), and until a
+        name is given records carry the stated default, which is what the
+        drawing then prints.
+        """
+
+        try:
+            stored = str(self._settings().value(self.OPERATOR_SETTING, "") or "").strip()
+        except Exception:
+            # An unreadable settings store is not a reason to refuse a
+            # commit; the record then says the default, and says it plainly.
+            logging.getLogger(__name__).info("operator name unreadable", exc_info=True)
+            stored = ""
+        return stored[:120] or DEFAULT_OPERATOR
+
+    def on_operator_name_requested(self) -> None:
+        """Change the recorder's name from the menu."""
+
+        current = str(self._settings().value(self.OPERATOR_SETTING, "") or "")
+        name, accepted = QInputDialog.getText(
+            self, "실측자 이름", "이름 (제목란과 모든 기록에 남습니다)", text=current
+        )
+        if not accepted:
+            return
+        cleaned = str(name or "").strip()[:120]
+        self._settings().setValue(self.OPERATOR_SETTING, cleaned)
+        self.status_info.setText(
+            f"실측자: {cleaned}" if cleaned else "실측자 이름을 비웠습니다. 앞으로의 기록은 기본값으로 남습니다."
+        )
+
     def _apply_default_dock_layout(self):
         """기본 도킹 레이아웃 적용: 작업 흐름 중심 화면"""
         for dock in [
@@ -5963,6 +6024,7 @@ class MainWindow(QMainWindow):
             self.tile_dock,
             self.section_dock,
             self.plate_dock,
+            self.readings_dock,
             self.export_dock,
             self.measure_dock,
             self.scene_dock,
@@ -5989,6 +6051,7 @@ class MainWindow(QMainWindow):
             self.tile_dock,
             self.section_dock,
             self.plate_dock,
+            self.readings_dock,
             self.export_dock,
             self.measure_dock,
         ]:
@@ -7203,6 +7266,24 @@ class MainWindow(QMainWindow):
 
         view_menu.addSeparator()
 
+        # The room the artifact is turned in.  It is backdrop only: it never
+        # reaches an exported picture, a record, or a drawing.
+        self.action_studio_backdrop = QAction("스튜디오 배경", self)
+        self.action_studio_backdrop.setCheckable(True)
+        self.action_studio_backdrop.setChecked(bool(getattr(self.viewport, "studio_backdrop", True)))
+        self.action_studio_backdrop.setToolTip("바닥과 하늘의 그러데이션 배경.  도면·내보내기에는 들어가지 않습니다.")
+        self.action_studio_backdrop.toggled.connect(self.on_studio_backdrop_toggled)
+        view_menu.addAction(self.action_studio_backdrop)
+
+        self.action_studio_shadow = QAction("바닥 그림자", self)
+        self.action_studio_shadow.setCheckable(True)
+        self.action_studio_shadow.setChecked(bool(getattr(self.viewport, "studio_shadow", True)))
+        self.action_studio_shadow.setToolTip("유물이 바닥에 닿았는지 눈으로 보이게 하는 그림자.")
+        self.action_studio_shadow.toggled.connect(self.on_studio_shadow_toggled)
+        view_menu.addAction(self.action_studio_shadow)
+
+        view_menu.addSeparator()
+
         action_show_advanced = QAction("정위치/실측/탁본 도구 열기", self)
         action_show_advanced.triggered.connect(self._show_advanced_panels)
         view_menu.addAction(action_show_advanced)
@@ -7236,7 +7317,14 @@ class MainWindow(QMainWindow):
             panels_menu.addAction(self.export_dock.toggleViewAction())
             panels_menu.addAction(self.section_dock.toggleViewAction())
             panels_menu.addAction(self.plate_dock.toggleViewAction())
+            panels_menu.addAction(self.readings_dock.toggleViewAction())
             panels_menu.addAction(self.measure_dock.toggleViewAction())
+        # Who is recording: printed in the title block and saved with every
+        # record, so it belongs on a menu, not buried in a dialogue.
+        action_operator = QAction("실측자 이름(&O)...", self)
+        action_operator.triggered.connect(self.on_operator_name_requested)
+        view_menu.addSeparator()
+        view_menu.addAction(action_operator)
         
         # 도움말 메뉴
         help_menu = menubar.addMenu("도움말(&H)")
@@ -8661,7 +8749,7 @@ class MainWindow(QMainWindow):
                 filepath,
                 source_metadata,
                 software_version=APP_VERSION,
-                operator="local-user",
+                operator=self._current_operator(),
             )
         except (ArtifactWorkbenchError, WorkflowBusyError) as exc:
             QMessageBox.warning(self, "원본 열기 차단", str(exc))
@@ -11325,7 +11413,7 @@ class MainWindow(QMainWindow):
                     axes=dict(pending_metadata.get("axes", {})),
                     handedness=str(pending_metadata.get("handedness", "unknown")),
                     software_version=APP_VERSION,
-                    operator="local-user",
+                    operator=self._current_operator(),
                 )
                 status = (
                     f"원본 등록 완료: {Path(filepath).name} | canonical mm | "
@@ -14590,7 +14678,7 @@ class MainWindow(QMainWindow):
                             rotation_deg=capture.rotation_deg,
                             scale=capture.scale,
                             pivot_mm=capture.pivot_mm,
-                            operator="local-user",
+                            operator=self._current_operator(),
                         ),
                     ),
                     on_done=on_done,
@@ -17008,6 +17096,18 @@ class MainWindow(QMainWindow):
         self.viewport.update()
         self.status_info.setText("카메라 원점 복귀")
             
+    def on_studio_backdrop_toggled(self, enabled: bool) -> None:
+        """Turn the studio's gradient on or off.  Nothing measured changes."""
+
+        self.viewport.studio_backdrop = bool(enabled)
+        self.viewport.update()
+
+    def on_studio_shadow_toggled(self, enabled: bool) -> None:
+        """Turn the artifact's ground shadow on or off."""
+
+        self.viewport.studio_shadow = bool(enabled)
+        self.viewport.update()
+
     def reset_view(self):
         self.viewport._front_back_ortho_enabled = False
         self.viewport._canonical_view_key = None
@@ -17639,7 +17739,7 @@ class MainWindow(QMainWindow):
                     coordinate_grid_um=1,
                     record_id=f"record:surface-distance:{uuid.uuid4()}",
                     created_at=self._utc_seconds_now(),
-                    operator="local-user",
+                    operator=self._current_operator(),
                 )
             elif key == "diameter":
                 if len(anchors) < 3 or len(anchors) > 64:
@@ -17651,7 +17751,7 @@ class MainWindow(QMainWindow):
                     coordinate_grid_um=1,
                     record_id=f"record:surface-diameter:{uuid.uuid4()}",
                     created_at=self._utc_seconds_now(),
-                    operator="local-user",
+                    operator=self._current_operator(),
                 )
             else:
                 raise ArtifactWorkbenchError(
@@ -17909,7 +18009,7 @@ class MainWindow(QMainWindow):
                 coordinate_grid_um=1,
                 record_id=f"record:geometry-metrics:{uuid.uuid4()}",
                 created_at=self._utc_seconds_now(),
-                operator="local-user",
+                operator=self._current_operator(),
             )
         except Exception as exc:
             self.status_info.setText("검증 제원 준비 실패 | 기존 문서 유지")
@@ -20180,7 +20280,7 @@ class MainWindow(QMainWindow):
         offset_mm: float,
         record_id: str | None = None,
         created_at: str | None = None,
-        operator: str = "local-user",
+        operator: str = DEFAULT_OPERATOR,
     ) -> str:
         obj = self.viewport.selected_obj
         session = self._require_native_measurement_session(obj)
@@ -20213,7 +20313,7 @@ class MainWindow(QMainWindow):
                 _native_cutline_frame(view, offset),
                 record_id=f"record:cutline:{uuid.uuid4()}",
                 created_at=self._utc_seconds_now(),
-                operator="local-user",
+                operator=self._current_operator(),
             )
         except Exception as exc:
             self.status_info.setText("검증 단면 준비 실패 | 기존 문서 유지")
@@ -20306,7 +20406,7 @@ class MainWindow(QMainWindow):
         precision_grid_mm: float,
         record_id: str | None = None,
         created_at: str | None = None,
-        operator: str = "local-user",
+        operator: str = DEFAULT_OPERATOR,
     ) -> str:
         obj = self.viewport.selected_obj
         session = self._require_native_measurement_session(obj)
@@ -20348,7 +20448,7 @@ class MainWindow(QMainWindow):
                 precision_grid_mm=precision_grid_mm,
                 record_id=f"record:outline:{view}:{uuid.uuid4()}",
                 created_at=self._utc_seconds_now(),
-                operator="local-user",
+                operator=self._current_operator(),
             )
         except Exception as exc:
             self.status_info.setText("검증 외곽 준비 실패 | 기존 문서 유지")
@@ -20666,7 +20766,7 @@ class MainWindow(QMainWindow):
             aligned = session.commit_axis_alignment(
                 top_record_id=top_id,
                 bottom_record_id=bottom_id,
-                operator="local-user",
+                operator=self._current_operator(),
             )
         except ArtifactSessionError as exc:
             # These messages name the measured angle or distance that failed,
@@ -20742,7 +20842,7 @@ class MainWindow(QMainWindow):
                     direction_deg=direction,
                     record_id=f"record:technique:{technique}:{uuid.uuid4()}",
                     created_at=self._utc_seconds_now(),
-                    operator="local-user",
+                    operator=self._current_operator(),
                 )
             else:
                 what = "상태"
@@ -20752,7 +20852,7 @@ class MainWindow(QMainWindow):
                     precision_grid_mm=float(panel.spin_native_outline_grid.value()),
                     record_id=f"record:condition:{choice}:{uuid.uuid4()}",
                     created_at=self._utc_seconds_now(),
-                    operator="local-user",
+                    operator=self._current_operator(),
                 )
         except Exception as exc:
             self.status_info.setText("상태·기법 기록 준비 실패 | 기존 문서 유지")
@@ -21011,6 +21111,63 @@ class MainWindow(QMainWindow):
         self._save_plate_bundle(bundle)
 
     # --- the plate panel: every decision the composer takes ----------------
+
+    def on_reading_requested(self, kind: str, record_id: str, options: dict) -> None:
+        """Take the reading the panel asks for and record it.
+
+        The reading is the core's; the window's part is to hold the session
+        still while it is taken, to name who is recording, and to say what
+        came of it.  A refusal is shown as the reading itself worded it.
+        """
+
+        session = getattr(self, "_artifact_session", None)
+        if not isinstance(session, ArtifactSession):
+            QMessageBox.warning(self, "판독 실패", "열린 ArtifactDocument 세션이 없습니다.")
+            return
+        try:
+            self._artifact_workbench_controller().require_stable_session(session, measurement=True)
+        except ArtifactWorkbenchError as exc:
+            QMessageBox.warning(self, "판독 실패", str(exc))
+            return
+        self.status_info.setText(f"{record_id}을 읽는 중...")
+        QCoreApplication.processEvents()
+        try:
+            outcome = take_reading(
+                session,
+                str(kind),
+                record_id=str(record_id),
+                created_at=self._utc_seconds_now(),
+                operator=self._current_operator(),
+                options=dict(options or {}),
+            )
+        except ArtifactReadingError as exc:
+            self.status_info.setText("판독 실패")
+            QMessageBox.warning(self, "판독 실패", str(exc))
+            return
+        except Exception as exc:
+            self.status_info.setText("판독 실패")
+            QMessageBox.warning(self, "판독 실패", f"{type(exc).__name__}: {exc}")
+            return
+        self._artifact_session = outcome.session
+        if outcome.raster is not None:
+            # A shade's record keeps a receipt, not the pixels; the plate
+            # needs the pixels, and this session is where they exist.
+            held = dict(getattr(self, "_plate_panel_rasters", {}))
+            held[outcome.record_id] = outcome.raster
+            self._plate_panel_rasters = held
+        self.status_info.setText(f"{outcome.summary} → {outcome.record_id}")
+        self._refresh_native_record_views()
+
+    def _refresh_native_record_views(self) -> None:
+        """Rebuild the record choosers after the document changed."""
+
+        session = getattr(self, "_artifact_session", None)
+        try:
+            self._refresh_native_record_selectors(
+                session if isinstance(session, ArtifactSession) else None
+            )
+        except Exception:
+            _LOGGER.debug("record selectors could not be refreshed", exc_info=True)
 
     def on_plate_spec_load_requested(self) -> None:
         """Fill the plate panel from a specification file."""
@@ -21380,7 +21537,7 @@ class MainWindow(QMainWindow):
         options: dict[str, Any],
         record_id: str | None = None,
         created_at: str | None = None,
-        operator: str = "local-user",
+        operator: str = DEFAULT_OPERATOR,
     ) -> str:
         obj = self.viewport.selected_obj
         session = self._require_native_measurement_session(obj)
@@ -21419,7 +21576,7 @@ class MainWindow(QMainWindow):
                 **options,
                 record_id=record_id,
                 created_at=created_at,
-                operator="local-user",
+                operator=self._current_operator(),
             )
         except Exception as exc:
             self.status_info.setText("Digital Rubbing 준비 실패 | 기존 문서 유지")
@@ -21746,7 +21903,7 @@ class MainWindow(QMainWindow):
                 **options,
                 record_id=record_id,
                 created_at=created_at,
-                operator="local-user",
+                operator=self._current_operator(),
             )
         except Exception as exc:
             self.status_info.setText("전개 탁본 준비 실패 | 기존 문서 유지")
@@ -22291,7 +22448,7 @@ class MainWindow(QMainWindow):
         station_policy: str = STATION_CENTERLINE_ARC,
         record_id: str | None = None,
         created_at: str | None = None,
-        operator: str = "local-user",
+        operator: str = DEFAULT_OPERATOR,
     ) -> str:
         obj = self.viewport.selected_obj
         session = self._require_native_measurement_session(obj)
@@ -22338,7 +22495,7 @@ class MainWindow(QMainWindow):
                 **options,
                 record_id=record_id,
                 created_at=self._utc_seconds_now(),
-                operator="local-user",
+                operator=self._current_operator(),
             )
         except Exception as exc:
             self.status_info.setText("기와 전개 준비 실패 | 기존 문서 유지")
