@@ -235,7 +235,7 @@ def test_reloading_the_record_list_does_not_lose_what_is_chosen(panel: PlatePane
         [
             (ELEVATION, "vector.outline.v1", "정면 외형선"),
             (SECTION, "vector.cutline.v1", "정면 단면"),
-            (CUTOUT, "measurement.relief_shade.v1", "양각 음영"),
+            (CUTOUT, "measurement.relief_shade.v1", "요철 음영"),
             ("record:new", "measurement.crease.v1", "새 능선"),
         ]
     )

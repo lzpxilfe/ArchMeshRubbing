@@ -1,4 +1,4 @@
-"""양각 음영: a motif carved in relief is not drawn in lines.  Its shade is
+"""요철 음영: a motif carved in relief is not drawn in lines.  Its shade is
 read off the wall as a drafter sees it from the side, lit from the upper
 left, and the sheet shows its bulk by stippling - dots denser where the
 surface turns from the light."""
@@ -267,7 +267,7 @@ def test_the_wall_unrolled_puts_every_petal_on_one_strip(petalled) -> None:
     circles = [el for el in root.iter() if el.tag.endswith("circle")]
     assert len(circles) > 50
     caption = next(el for el in root.iter() if el.attrib.get("id", "").startswith("rubbing-caption-"))
-    assert "양각 음영 전개" in "".join(caption.itertext()) and "이음매 90°" in "".join(caption.itertext())
+    assert "요철 음영 전개" in "".join(caption.itertext()) and "이음매 90°" in "".join(caption.itertext())
     sidecar = json.loads(bundle.sidecar_bytes.decode("utf-8"))
     assert sidecar["figures"][0]["record_type"] == RELIEF_SHADE_RECORD_TYPE
     (drawn,) = sidecar["relief_stipples"]["drawn"]

@@ -557,11 +557,11 @@ class PlatePanel(QWidget):
         paint_layout.addLayout(ink_row)
         layout.addWidget(paint)
 
-        relief = QGroupBox("양각 점묘")
+        relief = QGroupBox("요철 점묘")
         relief_layout = QVBoxLayout(relief)
         self.table_stipples = _table(
-            ("양각 음영 record", "얹을 도형"),
-            tip="양각은 선이 아니라 점입니다.  미러 도형에서는 입면 쪽에만 찍습니다.",
+            ("요철 음영 record", "얹을 도형"),
+            tip="도드라진 문양은 선이 아니라 점입니다.  미러 도형에서는 입면 쪽에만 찍습니다.",
         )
         for column in (0, 1):
             self._fill_record_column(self.table_stipples, column=column)

@@ -1,4 +1,4 @@
-"""양각 음영: the relief of a vessel's wall as a drafter sees it from the
+"""요철 음영: the relief of a vessel's wall as a drafter sees it from the
 side, lit from the upper left, kept as a shade the sheet stipples.
 
 A lotus petal carved in relief on a celadon dish is not a line.  The
@@ -7,6 +7,11 @@ the surface turns away from the light, none where it faces it, so the
 petal stands out of the wall on paper as it does in the hand.  This record
 reads the shade those dots follow, and only the shade; how the dots fall
 is the sheet's business, at the sheet's scale.
+
+The reading does not ask which way the surface departs from the wall.  A
+pot pressed with rows of dots shades under it exactly as a raised petal
+does - a slope is a slope to the light - so what is read is 요철, relief
+and hollow together, and nothing here says which one an artifact carries.
 
 The reading is on one of the four side views.  The wall is rasterised as
 the front-most depth at every pixel of the view's lattice; the surface of

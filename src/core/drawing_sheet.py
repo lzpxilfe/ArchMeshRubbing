@@ -4232,7 +4232,11 @@ def relief_shade_caption(recipe: Mapping[str, Any]) -> str:
     validated = validate_relief_shade_recipe(recipe)
     development = validated["development_policy"]
     shade = validated["shade_policy"]
-    facts = ["양각 음영 전개"]
+    # 요철, not 양각: the shade measures how far the wall stands from its own
+    # profile and does not ask which way.  A pot pressed with rows of dots
+    # inks under this reading exactly as a raised petal does, so a caption
+    # that says 양각 tells the reader something the reading never established.
+    facts = ["요철 음영 전개"]
     if development is not None:
         facts.append(f"이음매 {development['seam_millideg'] / 1000.0:g}°")
     facts.append(f"이득 {shade['gain_thousandths'] / 1000.0:g}")
@@ -4921,11 +4925,14 @@ def _mirrored_figure(
     presumed_gap_mm: float = 0.0,
     presumed_section: Sequence[Sequence[tuple[float, float]]] = (),
     presumed_section_tolerance_mm: float = PRESUMED_SECTION_TOLERANCE_MM,
+    sherd_sides: Sequence[str] = (),
+    sherd_trim_mm: float = 0.0,
 ) -> tuple[
     DerivedRecord,
     dict[str, list[Any]],
     tuple[float, float, float, float],
     set[str],
+    int,
 ]:
     """Join an elevation's left half and a section's right half into one figure.
 
@@ -5149,6 +5156,24 @@ def _mirrored_figure(
             f"the section {section.id!r} has nothing right of the rotation "
             "axis, so the mirrored figure would be half empty"
         )
+    # A break is a fact about the artifact, not about one half of a figure.
+    # The elevation's own lines were already stopped short where the sheet
+    # named a broken side; the cut through the same wall ends at the same
+    # break, so it is stopped here too.  It is done after the fold, on the
+    # half's own paths, so the hatched face keeps the closed, unstroked copy
+    # the fold made of it: the shading still says the wall is solid, and the
+    # two wall lines ending short say the piece continues.
+    section_cut = 0
+    if sherd_sides:
+        section_bounds = _payload_bounds(section_payload)
+        for kind, kind_paths in list(right.items()):
+            drawn = [path for path in kind_paths if path.id not in right_fill_only]
+            filled = [path for path in kind_paths if path.id in right_fill_only]
+            opened, cut = _sherd_open_paths(
+                drawn, sides=sherd_sides, bounds=section_bounds, trim_mm=sherd_trim_mm
+            )
+            right[kind] = filled + opened
+            section_cut += cut
     if presumed_section:
         right, right_fill_only, broken = _presumed_section_runs(
             right,
@@ -5212,7 +5237,7 @@ def _mirrored_figure(
                     points_mm=points,
                 )
             )
-    return section, combined, bounds, left_fill_only | right_fill_only
+    return section, combined, bounds, left_fill_only | right_fill_only, section_cut
 
 
 def presumed_section_title_value(
@@ -6840,7 +6865,7 @@ def compose_drawing_sheet(
             else None
         )
         presumed_here: list[dict[str, Any]] = []
-        section, combined, bounds, fill_only_ids = _mirrored_figure(
+        section, combined, bounds, fill_only_ids, section_cut = _mirrored_figure(
             document,
             elevation=record,
             elevation_payload=payload,
@@ -6874,7 +6899,11 @@ def compose_drawing_sheet(
                 for jog_record_id, along_from, along_to, reach in options.mirror_jogs
                 if jog_record_id == record.id
             ],
+            sherd_sides=sherd_sides.get(record.id, ()),
+            sherd_trim_mm=SHERD_TRIM_PAPER_MM * float(options.scale_denominator),
         )
+        if section_cut:
+            sherd_cut_counts[record.id] = sherd_cut_counts.get(record.id, 0) + section_cut
         presumed_entries.extend({"figure_record_id": record.id, **entry} for entry in presumed_here)
         mirrored.append(
             {

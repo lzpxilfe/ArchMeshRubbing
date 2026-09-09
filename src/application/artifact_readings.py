@@ -106,7 +106,7 @@ READING_LABELS: dict[str, tuple[str, str]] = {
     PROFILE_GROOVE: ("홈 (침선)", "벽을 한 바퀴 도는 홈을 골과 두 능선으로"),
     CREASE: ("능선", "석기의 격지면 사이 볼록 주름을 내선으로"),
     FAR_SILHOUETTE: ("뒷면 실루엣", "뷰 평면 뒤 반쪽의 윤곽 — 단면 쪽 뒷선에 씀"),
-    RELIEF_SHADE: ("양각 음영", "양각 문양의 음영 — 도판에서 점묘로 찍음"),
+    RELIEF_SHADE: ("요철 음영", "도드라지거나 눌린 문양의 음영 — 도판에서 점묘로 찍음"),
     TEXTURE_LINES: (
         "문양 내선",
         "법선 지도의 시문선(음각·양각), 또는 색 지도의 채색선 — 입면의 내선으로",
@@ -147,7 +147,7 @@ class ReadingOutcome:
         if self.kind == PAINT_CUTOUT:
             painted = self.qc.get("texture_paint_painted_pixel_count", 0)
             return f"채색 따내기: 채색 픽셀 {painted}개"
-        return f"양각 음영: 먹이 닿은 픽셀 {self.qc.get('trusted_pixel_count', 0)}개"
+        return f"요철 음영: 먹이 닿은 픽셀 {self.qc.get('trusted_pixel_count', 0)}개"
 
 
 def _computer(kind: str) -> Callable[..., Any]:
