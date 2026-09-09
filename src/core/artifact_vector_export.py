@@ -46,6 +46,7 @@ from .artifact_outline_extractor import (
     OUTLINE_GRID_CLOSING_RADIUS_CELLS,
     OUTLINE_LEGACY_ALGORITHM_VERSION,
     OUTLINE_HOLE_GATE_ALGORITHM_VERSION,
+    OUTLINE_WELDED_GATE_ALGORITHM_VERSION,
     OUTLINE_PIECE_GATE_ALGORITHM_VERSION,
     REVIEWED_OUTLINE_BACKENDS,
 )
@@ -110,7 +111,7 @@ from .source_identity import PRIMARY_FILE_IDENTITY_SCOPE
 
 
 VECTOR_EXPORT_FORMAT = "archmeshrubbing_vector_export"
-_CURRENT_VECTOR_EXPORT_SCHEMA_VERSION = "1.10.0"
+_CURRENT_VECTOR_EXPORT_SCHEMA_VERSION = "1.11.0"
 VECTOR_EXPORT_SCHEMA_VERSION = _CURRENT_VECTOR_EXPORT_SCHEMA_VERSION
 #: 1.1.0 introduced the current provenance contract (import admission, axis
 #: Align); 1.2.0 is 1.1.0 plus outline algorithm 1.1.0 - the grid closing -
@@ -127,27 +128,41 @@ VECTOR_EXPORT_SCHEMA_VERSION = _CURRENT_VECTOR_EXPORT_SCHEMA_VERSION
 #: algorithm 1.4.0, which refuses a fragment the closing welded to the
 #: artifact, and carries the one QC key that gate judges; 1.9.0 holds the
 #: section mark in the line-kind vocabulary a user preset must cover, and
-#: 1.10.0 the presumed stretch of the cut.  All ten carry the current
-#: contract; 1.0.0 is legacy.
+#: 1.10.0 the presumed stretch of the cut, and 1.11.0 outline algorithm
+#: 1.5.0, which settles the grid's holes against the mesh and carries the
+#: two counts it does that by.  All eleven carry the current contract;
+#: 1.0.0 is legacy.
 _CURRENT_CONTRACT_VECTOR_EXPORT_SCHEMA_VERSIONS = frozenset(
-    {"1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0", "1.8.0", "1.9.0", "1.10.0"}
+    {
+        "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0", "1.8.0",
+        "1.9.0", "1.10.0", "1.11.0",
+    }
 )
 #: The sidecars that can carry an outline computed with the grid closing.
 _GRID_CLOSING_VECTOR_EXPORT_SCHEMA_VERSIONS = frozenset(
-    {"1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0", "1.8.0", "1.9.0", "1.10.0"}
+    {
+        "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0", "1.8.0", "1.9.0",
+        "1.10.0", "1.11.0",
+    }
 )
 #: The sidecars whose recipe enum names outline algorithm 1.2.0.
 _PIECE_GATE_VECTOR_EXPORT_SCHEMA_VERSIONS = frozenset(
-    {"1.6.0", "1.7.0", "1.8.0", "1.9.0", "1.10.0"}
+    {"1.6.0", "1.7.0", "1.8.0", "1.9.0", "1.10.0", "1.11.0"}
 )
 #: The sidecars whose recipe enum names outline algorithm 1.3.0.
-_HOLE_GATE_VECTOR_EXPORT_SCHEMA_VERSIONS = frozenset({"1.7.0", "1.8.0", "1.9.0", "1.10.0"})
+_HOLE_GATE_VECTOR_EXPORT_SCHEMA_VERSIONS = frozenset(
+    {"1.7.0", "1.8.0", "1.9.0", "1.10.0", "1.11.0"}
+)
 #: The sidecars whose recipe enum names outline algorithm 1.4.0.
-_WELDED_GATE_VECTOR_EXPORT_SCHEMA_VERSIONS = frozenset({"1.8.0", "1.9.0", "1.10.0"})
+_WELDED_GATE_VECTOR_EXPORT_SCHEMA_VERSIONS = frozenset(
+    {"1.8.0", "1.9.0", "1.10.0", "1.11.0"}
+)
+#: The sidecars whose QC key set holds the mesh-asked hole test's counts.
+_MESH_HOLE_VECTOR_EXPORT_SCHEMA_VERSIONS = frozenset({"1.11.0"})
 SUPPORTED_VECTOR_EXPORT_SCHEMA_VERSIONS = frozenset(
     {
         "1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0",
-        "1.8.0", "1.9.0", "1.10.0",
+        "1.8.0", "1.9.0", "1.10.0", "1.11.0",
     }
 )
 VECTOR_EXPORT_DIRECTORY_SUFFIX = ".amr-vector"
@@ -324,8 +339,15 @@ _OUTLINE_CLOSING_QC_KEYS = frozenset(
 #: algorithm 1.3.0), which only a 1.7.0 sidecar can carry.
 _OUTLINE_HOLE_GATE_QC_KEYS = frozenset({"grid_hole_unsnapped_cover_max"})
 #: Present exactly when the outline was computed with the welded-fragment
-#: gate (outline algorithm 1.4.0), which only a 1.8.0 sidecar can carry.
+#: gate (outline algorithm 1.4.0 and after), which only a 1.8.0 sidecar can
+#: carry.
 _OUTLINE_WELDED_GATE_QC_KEYS = frozenset({"grid_pre_closing_component_count"})
+#: Present exactly when the grid's holes were settled against the mesh
+#: (outline algorithm 1.5.0), which only a 1.11.0 sidecar can carry.  It
+#: replaces the hole gate's key: 1.5.0 does not compare two projections.
+_OUTLINE_MESH_HOLE_QC_KEYS = frozenset(
+    {"grid_punched_hole_count", "grid_punched_hole_max_mm2"}
+)
 _PRODUCTION_CUTLINE_ALGORITHM = "archmeshrubbing.triangle_plane_cutline"
 _PRODUCTION_OUTLINE_ALGORITHM = "archmeshrubbing.projected_triangle_union"
 _PRODUCTION_VECTOR_ALGORITHM_VERSION = "1.0.0"
@@ -2458,7 +2480,10 @@ def _validate_current_record_qc(
         kind is VectorRecordKind.OUTLINE
         and is_production
         and algorithm_version
-        in (OUTLINE_HOLE_GATE_ALGORITHM_VERSION, OUTLINE_ALGORITHM_VERSION)
+        in (
+            OUTLINE_HOLE_GATE_ALGORITHM_VERSION,
+            OUTLINE_WELDED_GATE_ALGORITHM_VERSION,
+        )
     )
     if hole_gate and schema_version not in _HOLE_GATE_VECTOR_EXPORT_SCHEMA_VERSIONS:
         raise ArtifactVectorExportError(
@@ -2470,12 +2495,28 @@ def _validate_current_record_qc(
     welded_gate = (
         kind is VectorRecordKind.OUTLINE
         and is_production
-        and algorithm_version == OUTLINE_ALGORITHM_VERSION
+        and algorithm_version
+        in (OUTLINE_WELDED_GATE_ALGORITHM_VERSION, OUTLINE_ALGORITHM_VERSION)
     )
     if welded_gate and schema_version not in _WELDED_GATE_VECTOR_EXPORT_SCHEMA_VERSIONS:
         raise ArtifactVectorExportError(
             "a vector export before 1.8.0 cannot carry an outline computed with "
             "the welded-fragment gate"
+        )
+    # Settling the grid's holes against the mesh arrived with outline 1.5.0
+    # and the 1.11.0 sidecar, the first whose QC key set holds its two counts.
+    mesh_hole_test = (
+        kind is VectorRecordKind.OUTLINE
+        and is_production
+        and algorithm_version == OUTLINE_ALGORITHM_VERSION
+    )
+    if (
+        mesh_hole_test
+        and schema_version not in _MESH_HOLE_VECTOR_EXPORT_SCHEMA_VERSIONS
+    ):
+        raise ArtifactVectorExportError(
+            "a vector export before 1.11.0 cannot carry an outline whose grid "
+            "holes were settled against the mesh"
         )
     optional_keys = (
         _CUTLINE_RECORD_QC_KEYS
@@ -2484,6 +2525,7 @@ def _validate_current_record_qc(
         | (_OUTLINE_CLOSING_QC_KEYS if closing else frozenset())
         | (_OUTLINE_HOLE_GATE_QC_KEYS if hole_gate else frozenset())
         | (_OUTLINE_WELDED_GATE_QC_KEYS if welded_gate else frozenset())
+        | (_OUTLINE_MESH_HOLE_QC_KEYS if mesh_hole_test else frozenset())
     )
     always_kind_keys = (
         frozenset()

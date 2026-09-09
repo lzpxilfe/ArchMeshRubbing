@@ -93,12 +93,35 @@ OUTLINE_HOLE_GATE_ALGORITHM_VERSION = "1.3.0"
 #: earlier version still recomputes as written.  The count itself is new in
 #: the QC (`grid_pre_closing_component_count`), so 1.4.0 needs a 1.8.0
 #: sidecar to carry it and a 1.3.0 recomputation keeps its QC bytes.
-OUTLINE_ALGORITHM_VERSION = "1.4.0"
+OUTLINE_WELDED_GATE_ALGORITHM_VERSION = "1.4.0"
+#: The same union, with the grid's holes closed instead of refused, and the
+#: question put to the mesh rather than to a second projection.  1.3.0 asked
+#: how much of a hole the unsnapped union covers and refused a hole it
+#: covered, advising a finer grid.  On a dense scan that advice does not
+#: terminate: a netfabb lid came back with a hole 1.5 mm wide at a 0.3 mm
+#: grid, 0.8 mm at 0.15 and 0.4 mm at 0.08 - always about five cells, never
+#: the same place twice - because it is not a size the artifact has but a
+#: place where the lattice keeps snapping small triangles apart.  That file
+#: could not be drawn at any grid.
+#:
+#: 1.5.0 sends a ray along the view instead.  A hole in the artifact is a
+#: hole you can see through, so the ray meets no triangle; a hole the grid
+#: punched is one the ray goes straight into the surface at.  Projected,
+#: that is a point-in-triangle test over the mesh as it is - no tolerance,
+#: no fraction, and nothing to choose.  Where the surface is there the hole
+#: is closed, because a drawing that shows a hole says something about the
+#: pot that is not true; where it is not, the hole stays.  How many were
+#: closed and the largest of them are QC (`grid_punched_hole_count`,
+#: `grid_punched_hole_max_mm2`), which is what a reader judges the grid by.
+#: An outline whose holes are all the artifact's has the same paths at 1.5.0
+#: as at 1.4.0, and every earlier version still recomputes as written.
+OUTLINE_ALGORITHM_VERSION = "1.5.0"
 OUTLINE_ALGORITHM_VERSIONS = (
     OUTLINE_LEGACY_ALGORITHM_VERSION,
     OUTLINE_CLOSING_ALGORITHM_VERSION,
     OUTLINE_PIECE_GATE_ALGORITHM_VERSION,
     OUTLINE_HOLE_GATE_ALGORITHM_VERSION,
+    OUTLINE_WELDED_GATE_ALGORITHM_VERSION,
     OUTLINE_ALGORITHM_VERSION,
 )
 OUTLINE_GRID_CLOSING_RADIUS_CELLS = 1.0
@@ -117,13 +140,19 @@ _SNAP_CONTRACTS: Mapping[str, tuple[str, float]] = {
         "axis<=1.5*grid;radial<=1.5*grid*sqrt(2)",
         OUTLINE_GRID_CLOSING_RADIUS_CELLS + 0.5,
     ),
-    # The piece gate, the hole gate and the welded-fragment gate move no
-    # vertex, so 1.2.0, 1.3.0 and 1.4.0 keep 1.1.0's contract.
+    # The piece gate, the hole gate, the welded-fragment gate and the
+    # mesh-asked hole test move no vertex, so 1.2.0 through 1.5.0 keep
+    # 1.1.0's contract.  Closing a hole the grid punched changes the ring
+    # count, never a coordinate.
     OUTLINE_PIECE_GATE_ALGORITHM_VERSION: (
         "axis<=1.5*grid;radial<=1.5*grid*sqrt(2)",
         OUTLINE_GRID_CLOSING_RADIUS_CELLS + 0.5,
     ),
     OUTLINE_HOLE_GATE_ALGORITHM_VERSION: (
+        "axis<=1.5*grid;radial<=1.5*grid*sqrt(2)",
+        OUTLINE_GRID_CLOSING_RADIUS_CELLS + 0.5,
+    ),
+    OUTLINE_WELDED_GATE_ALGORITHM_VERSION: (
         "axis<=1.5*grid;radial<=1.5*grid*sqrt(2)",
         OUTLINE_GRID_CLOSING_RADIUS_CELLS + 0.5,
     ),
@@ -881,6 +910,118 @@ def _component_summary(
     )
 
 
+def _hole_is_open_in_the_mesh(
+    point: tuple[float, float],
+    lattice_vertices: np.ndarray,
+    faces: np.ndarray,
+    *,
+    cancellation_probe: CancellationProbe | None = None,
+) -> bool:
+    """Whether a ray along the view meets no surface at this point.
+
+    A hole in the artifact is a hole you can see through - a lug's eye, a
+    window cut in a pedestal - and a ray sent along the view direction comes
+    out the other side without meeting a triangle.  A hole the grid punched
+    is a place where the ray does meet the surface: the triangles are there,
+    the lattice snapped them apart.  Projected, "the ray meets a triangle"
+    is "the point lies in a projected triangle", so the test is a
+    point-in-triangle over the mesh as it is, with no tolerance and no
+    fraction in it.
+
+    Triangles the view sees exactly edge-on project to a segment and hold no
+    interior point; they are not the surface a drawing shows, and a ray that
+    only grazes them is a ray through a hole.
+    """
+
+    px, py = float(point[0]), float(point[1])
+    for start in range(0, faces.shape[0], OUTLINE_UNION_BATCH_SIZE):
+        raise_if_cancelled(cancellation_probe)
+        corners = lattice_vertices[faces[start : start + OUTLINE_UNION_BATCH_SIZE]]
+        ax, ay = corners[:, 0, 0], corners[:, 0, 1]
+        bx, by = corners[:, 1, 0], corners[:, 1, 1]
+        cx, cy = corners[:, 2, 0], corners[:, 2, 1]
+        first = (bx - ax) * (py - ay) - (by - ay) * (px - ax)
+        second = (cx - bx) * (py - by) - (cy - by) * (px - bx)
+        third = (ax - cx) * (py - cy) - (ay - cy) * (px - cx)
+        inside = ((first >= 0.0) & (second >= 0.0) & (third >= 0.0)) | (
+            (first <= 0.0) & (second <= 0.0) & (third <= 0.0)
+        )
+        # A triangle with no projected area holds no point, however the
+        # signs come out: the three cross products are all zero there.
+        area = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+        if bool(np.any(inside & (area != 0.0))):
+            return False
+    return True
+
+
+def _settle_grid_holes(
+    geometry: BaseGeometry,
+    *,
+    lattice_vertices: np.ndarray,
+    faces: np.ndarray,
+    grid: float,
+    cancellation_probe: CancellationProbe | None = None,
+) -> tuple[BaseGeometry, dict[str, Any]]:
+    """Close the holes the mesh says are not there; keep the artifact's.
+
+    1.3.0 asked two projections about each hole and refused when they
+    disagreed, with the advice to use a finer grid.  On a dense scan that
+    advice does not terminate: the hole shrinks exactly with the grid and
+    never goes, because it is not a size the mesh has but a place where the
+    lattice keeps snapping small triangles apart.  A netfabb scan of one lid
+    came back with a 1.5 mm hole at 0.3 mm, 0.8 mm at 0.15, 0.4 mm at 0.08 -
+    always about five cells - and could not be drawn at all.
+
+    So the question goes to the mesh instead, where it is decisive: a ray
+    along the view either meets the surface or it does not.  Where it does,
+    the hole is the grid's and the drawing closes it, because the surface is
+    continuous there and a drawing that shows a hole says something about the
+    pot that is not true.  Where it does not, the hole is the artifact's and
+    it stays.  Nothing is refused on this account any more; how much was
+    closed, and the largest piece of it, are QC for a reader to judge the
+    grid by.
+    """
+
+    raise_if_cancelled(cancellation_probe)
+    kept: list[Polygon] = []
+    punched_areas: list[float] = []
+    changed = False
+    for polygon_index, polygon in enumerate(_polygon_sequence(geometry)):
+        poll_cancellation(cancellation_probe, polygon_index)
+        holes = []
+        for interior in polygon.interiors:
+            ring = Polygon(interior.coords)
+            point = ring.representative_point()
+            if _hole_is_open_in_the_mesh(
+                (point.x, point.y),
+                lattice_vertices,
+                faces,
+                cancellation_probe=cancellation_probe,
+            ):
+                holes.append(interior.coords)
+                continue
+            punched_areas.append(float(ring.area) * grid * grid)
+            changed = True
+        kept.append(Polygon(polygon.exterior.coords, holes))
+    if not kept:
+        return geometry, {
+            "grid_punched_hole_count": 0,
+            "grid_punched_hole_max_mm2": 0.0,
+        }
+    settled = geometry
+    if changed:
+        settled = kept[0] if len(kept) == 1 else MultiPolygon(kept)
+        if not settled.is_valid:
+            raise ArtifactVectorExtractionError(
+                "closing the grid's holes left an invalid outline: "
+                f"{is_valid_reason(settled)}"
+            )
+    return settled, {
+        "grid_punched_hole_count": len(punched_areas),
+        "grid_punched_hole_max_mm2": round(max(punched_areas, default=0.0), 12),
+    }
+
+
 def _refuse_grid_holes(
     geometry: BaseGeometry,
     unsnapped: BaseGeometry | None,
@@ -1148,13 +1289,18 @@ def extract_outline_geometry(
         OUTLINE_LEGACY_ALGORITHM_VERSION,
         OUTLINE_CLOSING_ALGORITHM_VERSION,
     )
+    # 1.3.0 and 1.4.0 refuse the grid's holes; 1.5.0 asks the mesh and
+    # closes them.  An older version recomputes as it was written.
     hole_gate = version in (
         OUTLINE_HOLE_GATE_ALGORITHM_VERSION,
+        OUTLINE_WELDED_GATE_ALGORITHM_VERSION,
+    )
+    mesh_hole_test = version == OUTLINE_ALGORITHM_VERSION
+    # The welded-fragment gate, and the count it judges, arrived with 1.4.0.
+    welded_gate = version in (
+        OUTLINE_WELDED_GATE_ALGORITHM_VERSION,
         OUTLINE_ALGORITHM_VERSION,
     )
-    # The welded-fragment gate, and the count it judges, are 1.4.0's alone:
-    # an older version recomputes with the QC bytes it was written with.
-    welded_gate = version == OUTLINE_ALGORITHM_VERSION
     snap_contract, snap_cells = _SNAP_CONTRACTS[version]
     vertices, face_array = _validated_mesh_arrays(
         vertices_world_mm,
@@ -1417,6 +1563,14 @@ def extract_outline_geometry(
             unsnapped_union,
             grid=grid,
             unsnapped_status=unsnapped_status,
+            cancellation_probe=cancellation_probe,
+        )
+    if mesh_hole_test:
+        snapped_union, hole_gate_qc = _settle_grid_holes(
+            snapped_union,
+            lattice_vertices=lattice_vertices,
+            faces=face_array,
+            grid=grid,
             cancellation_probe=cancellation_probe,
         )
 

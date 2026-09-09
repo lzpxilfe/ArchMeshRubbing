@@ -355,15 +355,15 @@ class TestArtifactVectorExportScaleAndProvenance(unittest.TestCase):
         # The bytes move whenever the sidecar's version does, because the SVG
         # names the schema it was written under: 1.8.0 for outline algorithm
         # 1.4.0's welded-fragment gate, 1.9.0 for the section mark in the
-        # line-kind vocabulary, then 1.10.0 for the presumed stretch of the
-        # cut.
+        # line-kind vocabulary, 1.10.0 for the presumed stretch of the cut,
+        # then 1.11.0 for outline algorithm 1.5.0.
         self.assertEqual(
             first.svg_sha256,
-            "c63706a1347a25c95b5eb48d913c4b729b7e81aa87651ab248dd6670f189a572",
+            "3c898a50834d448e0fbafa29597adcdcc322d9d13ac08732b50b26137dc5cbd5",
         )
         self.assertEqual(
             first.sidecar_sha256,
-            "561d054cf81914e9254ab19b0c812d8f78ca8326905e51f57658f43db9590b6d",
+            "60b436a0d44d277c1b2a21b75b7518c4035a235feb8073135116e44ceafdde4f",
         )
 
     def test_multiple_cutline_components_survive_without_world_xy_collapse(self):

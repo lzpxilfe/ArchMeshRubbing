@@ -32,7 +32,7 @@ def test_complete_workflow_self_test_has_deterministic_offline_receipts() -> Non
         "60b5dca0fcef8346eea22a944ce0faa160e350cb97bd028b4a319c3e26883eb5"
     )
     assert result.document_sha256 == (
-        "4f9ed0a08f5754f36e58281cc0df425d7cc3e5d6246ebb9627bebecbcd83cf03"
+        "91aa4360a2fd005bbe2e1009c9d52ca352137ecb035ad3362ba76b9e161e3a91"
     )
     assert result.align_revision_id == "align:workflow-self-test-explicit"
     assert (result.cutline_count, result.outline_count, result.rubbing_count) == (
@@ -46,10 +46,10 @@ def test_complete_workflow_self_test_has_deterministic_offline_receipts() -> Non
     assert (result.vector_export_count, result.rubbing_export_count) == (9, 6)
     assert (result.tile_unwrap_count, result.tile_unwrap_export_count) == (1, 1)
     assert result.vector_set_sha256 == (
-        "34f1f0c05423938b0f671da3d8c2a9f0ea92eebf05253fc0b58795f4ac72879e"
+        "9516e4813185faf0781686871678400b83c9a9a6e5aaf74d1def42e93994fb03"
     )
     assert result.rubbing_set_sha256 == (
-        "93812c3f10b9e8a0d720412b4ceb77efcf2d441c3beb9b329eeeaadfca01300a"
+        "4b81e1a1a408f34252c79d84b140d871bc21fbc0e4178dfff0fd92844a3bbb5a"
     )
     assert result.tile_unwrap_source_sha256 == (
         "5d1432cc1c6fe601cd2777da86a255f07689fcbfa775d0c38ae3178b28661eb6"
@@ -66,10 +66,10 @@ def test_complete_workflow_self_test_has_deterministic_offline_receipts() -> Non
         == result.tile_unwrap_export_sha256
     )
     assert result.survey_manifest_sha256 == (
-        "deb7767551f2057613812d9044a062cad2fdb08b79175837f5111bedc2c9aaba"
+        "ced818d9715fc152db5631d58d4751b1cd16b40a3011c399b10881cc59e609e3"
     )
     assert result.survey_artifact_set_sha256 == (
-        "47738969f8d1d1899d1d8c332044a3d2cdef4dfbf3ccb4a24b0a9cf6b5a1e6b3"
+        "8785d1fba01168bbb2c500a5c67c853421d3198268c8bec9a0db0539464ea1ca"
     )
     for digest in (
         result.document_sha256,
@@ -86,10 +86,10 @@ def test_complete_workflow_self_test_has_deterministic_offline_receipts() -> Non
         assert set(digest) <= set("0123456789abcdef")
     assert result.field_pilot_contract == "artifact-pass-human-driver-pending"
     assert result.svg_sha256 == (
-        "4014b98cd877015fb649f0722c14b605fd55b169c9a636509d9fe4109c5d2578"
+        "110eef61b0e33cbc936152b0ea338210a4e847caee07e0bb7cab34abdf72fd17"
     )
     assert result.png_sha256 == (
-        "68fda651bbfe7edb779a49fff44fe4bc8c9fa1886a92d08477248a30b10620fd"
+        "b03ebe131be472d43145f66e59a26b6d3787a6ea5a1e019e05d5f180d446d68f"
     )
     assert result.tile_unwrap_row_shift_max_um == 6364
     assert result.tile_unwrap_row_shift_station_count == 13
@@ -131,7 +131,7 @@ def test_complete_workflow_accepts_explicit_committed_directory_fsync_warning(
 
     assert result.record_count == 18
     assert result.survey_manifest_sha256 == (
-        "deb7767551f2057613812d9044a062cad2fdb08b79175837f5111bedc2c9aaba"
+        "ced818d9715fc152db5631d58d4751b1cd16b40a3011c399b10881cc59e609e3"
     )
     assert (
         result.tile_unwrap_sha256

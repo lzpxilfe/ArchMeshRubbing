@@ -724,13 +724,15 @@ def test_a_hole_through_the_artifact_is_drawn_and_measured() -> None:
     """A hole the artifact has stays a hole, at any grid.
 
     The front view looks along Y, so a hole through both walls on the Y axis
-    is a hole in the silhouette.  The unsnapped union has it too, and covers
-    only the snap error at its rim - well under the fraction the gate
-    refuses at - and the outline records how much.
+    is a hole in the silhouette: a ray along the view meets no triangle
+    there, and 1.5.0 leaves it alone.  1.3.0's measurement of the same hole
+    - how much of it the unsnapped union covers - is still what a record
+    written at 1.3.0 recomputes.
     """
 
     from src.core.artifact_outline_extractor import (
         OUTLINE_GRID_HOLE_COVER_FRACTION_MAX,
+        OUTLINE_HOLE_GATE_ALGORITHM_VERSION,
         OUTLINE_PIECE_GATE_ALGORITHM_VERSION,
         extract_outline_geometry,
     )
@@ -740,10 +742,10 @@ def test_a_hole_through_the_artifact_is_drawn_and_measured() -> None:
         holed = extract_outline_geometry(vertices, faces, "front", precision_grid_mm=grid)
         assert holed.qc["hole_count"] == 1
         assert holed.qc["component_count"] == 1
-        cover = holed.qc["grid_hole_unsnapped_cover_max"]
-        assert 0.0 < cover < OUTLINE_GRID_HOLE_COVER_FRACTION_MAX / 4.0, (grid, cover)
-        # The gate moves no vertex: 1.2.0 draws the same bytes, without the
-        # measurement.
+        assert holed.qc["grid_punched_hole_count"] == 0
+        assert holed.qc["grid_punched_hole_max_mm2"] == 0.0
+        # Nothing was closed, so the bytes are 1.2.0's: the test moves no
+        # vertex, and only adds what it found to the QC.
         as_1_2 = extract_outline_geometry(
             vertices,
             faces,
@@ -752,42 +754,70 @@ def test_a_hole_through_the_artifact_is_drawn_and_measured() -> None:
             algorithm_version=OUTLINE_PIECE_GATE_ALGORITHM_VERSION,
         )
         assert as_1_2.payload.sha256 == holed.payload.sha256
-        assert "grid_hole_unsnapped_cover_max" not in as_1_2.qc
+        assert "grid_punched_hole_count" not in as_1_2.qc
+        as_1_3 = extract_outline_geometry(
+            vertices,
+            faces,
+            "front",
+            precision_grid_mm=grid,
+            algorithm_version=OUTLINE_HOLE_GATE_ALGORITHM_VERSION,
+        )
+        cover = as_1_3.qc["grid_hole_unsnapped_cover_max"]
+        assert 0.0 < cover < OUTLINE_GRID_HOLE_COVER_FRACTION_MAX / 4.0, (grid, cover)
 
-    # No hole at all: the measurement is zero, and the key is still there.
+    # No hole at all: the counts are zero, and the keys are still there.
     plain = extract_outline_geometry(*_vessel(), "front", precision_grid_mm=0.5)
     assert plain.qc["hole_count"] == 0
-    assert plain.qc["grid_hole_unsnapped_cover_max"] == 0.0
+    assert plain.qc["grid_punched_hole_count"] == 0
 
 
-def test_a_hole_the_grid_punched_is_refused_by_size_rather_than_drawn() -> None:
+def test_a_hole_the_grid_punched_is_closed_and_the_artifact_s_is_kept() -> None:
     """A grid coarser than the mesh opens holes the artifact does not have.
 
     On a vessel meshed at 200 x 60 a 0.5 mm grid collapses a fifth of the
     projected triangles, and four holes 3 to 4 mm wide open in the lattice
     union where the wall is seen edge-on - beside the one hole the artifact
-    really has.  Outline 1.2.0 drew all five.  The unsnapped union covers the
-    four entirely and the real one by under 3 %, so 1.3.0 refuses, says four
-    of five are the grid's, and gives the size of the largest in
-    millimetres.  The museum pot's top view at 1.0 mm is the same case with
-    ten holes.
+    really has.  Outline 1.2.0 drew all five; 1.3.0 and 1.4.0 refused the
+    drawing and asked for a finer grid.
+
+    1.5.0 asks the mesh instead.  A ray along the view goes clean through the
+    artifact's hole and into the wall at each of the other four, so the four
+    are closed and the one is kept - and the drawing comes out, at this grid,
+    saying in its QC how much was closed.
     """
 
     from src.core.artifact_outline_extractor import (
         OUTLINE_PIECE_GATE_ALGORITHM_VERSION,
+        OUTLINE_WELDED_GATE_ALGORITHM_VERSION,
         extract_outline_geometry,
     )
     from src.core.artifact_vector_extractor import ArtifactVectorExtractionError
 
     vertices, faces = _through_hole(*_vessel(segments=200, rings=60))
-    with pytest.raises(ArtifactVectorExtractionError) as refusal:
-        extract_outline_geometry(vertices, faces, "front", precision_grid_mm=0.5)
-    message = str(refusal.value)
-    assert "4 of 5 holes in the outline are the grid's" in message
-    assert "covers 100% of a hole" in message
-    assert "mm" in message and "finer precision_grid_mm" in message
+    settled = extract_outline_geometry(
+        vertices, faces, "front", precision_grid_mm=0.5
+    )
+    assert settled.qc["hole_count"] == 1, "only the artifact's hole is drawn"
+    assert settled.qc["grid_punched_hole_count"] == 4
+    assert 1.0 < settled.qc["grid_punched_hole_max_mm2"] < 30.0
 
-    # As written under 1.2.0 the same outline passed, holes and all.
+    # The one hole that stays is the one the artifact has: at a grid fine
+    # enough for the mesh, nothing is closed and the same hole is there.
+    fine = extract_outline_geometry(vertices, faces, "front", precision_grid_mm=0.1)
+    assert fine.qc["hole_count"] == 1
+    assert fine.qc["grid_punched_hole_count"] == 0
+
+    # As written under 1.4.0 the same outline is refused, and under 1.2.0 it
+    # passed with all five holes drawn.
+    with pytest.raises(ArtifactVectorExtractionError) as refusal:
+        extract_outline_geometry(
+            vertices,
+            faces,
+            "front",
+            precision_grid_mm=0.5,
+            algorithm_version=OUTLINE_WELDED_GATE_ALGORITHM_VERSION,
+        )
+    assert "4 of 5 holes in the outline are the grid's" in str(refusal.value)
     drawn = extract_outline_geometry(
         vertices,
         faces,
