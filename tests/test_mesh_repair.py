@@ -14,6 +14,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from src.core.artifact_condition_annotation import face_ranges_from_indices
 from src.core.artifact_mesh_bodies import (
     boundary_rings,
     diagnose_mesh_bodies,
@@ -21,10 +22,15 @@ from src.core.artifact_mesh_bodies import (
 )
 from src.core.artifact_mesh_repair import (
     DEFAULT_REACH_UM,
+    SEW_RING_PAIR_TO_BODY,
+    SEW_RING_TO_RING,
     ArtifactMeshRepairError,
+    DropFaces,
     RingPairJoin,
+    RingToRingJoin,
     apply_mesh_repair,
     body_sha256,
+    face_set_sha256,
     ring_sha256,
     sew_ring_pair_to_body,
 )
@@ -45,6 +51,7 @@ def _hollow_drum(
     top: float = 20.0,
     rows: int = 40,
     columns: int = 24,
+    bottom_rim: bool = True,
 ) -> tuple[np.ndarray, np.ndarray]:
     """A wall with two skins and a rim at each end - a pot, in miniature.
 
@@ -84,12 +91,13 @@ def _hollow_drum(
             )
     for i in range(columns):
         j = (i + 1) % columns
-        quad(  # bottom rim
-            outer_base + j,
-            outer_base + i,
-            inner_base + i,
-            inner_base + j,
-        )
+        if bottom_rim:
+            quad(
+                outer_base + j,
+                outer_base + i,
+                inner_base + i,
+                inner_base + j,
+            )
         quad(  # top rim
             outer_base + rows * columns + i,
             outer_base + rows * columns + j,
@@ -300,3 +308,231 @@ def test_sewing_takes_the_rings_and_the_body_as_given() -> None:
     )
     assert stats["added_face_count"] > 0
     assert len(boundary_rings(after)) == 0
+
+
+def _open_footed_drum(**kwargs) -> tuple[np.ndarray, np.ndarray]:
+    """A wall the scanner saw either side of but could not get over.
+
+    The foot's rim of 24ET0021 in miniature: both faces are real surface and
+    nothing is buried between them, so the repair sews and cuts nothing.
+    """
+
+    return _hollow_drum(bottom_rim=False, **kwargs)
+
+
+def test_two_edges_facing_each_other_are_sewn_and_nothing_is_cut() -> None:
+    vertices, faces = _open_footed_drum()
+    rings = boundary_rings(faces)
+    assert len(rings) == 2
+
+    join = RingToRingJoin(
+        first_ring_sha256=ring_sha256(rings[0]),
+        second_ring_sha256=ring_sha256(rings[1]),
+        reach_um=2_000,
+    )
+    after, receipt = apply_mesh_repair(vertices, faces, [join])
+
+    assert receipt.removed_face_count == 0
+    assert receipt.added_face_count > 0
+    assert receipt.open_ring_count_before == 2
+    assert receipt.open_ring_count_after == 0
+    assert receipt.non_manifold_edge_count_after == 0
+    assert receipt.steps[0]["kind"] == SEW_RING_TO_RING
+    # The two faces of a 0.5 mm wall: the gap it reports is that thickness.
+    assert 400 <= receipt.steps[0]["median_gap_um"] <= 600
+
+    report = diagnose_mesh_bodies(vertices, after)
+    assert report.one_body
+    assert not report.needs_decision
+
+
+def test_edges_that_do_not_face_each_other_are_refused() -> None:
+    vertices, faces = _open_footed_drum()
+    rings = boundary_rings(faces)
+    join = RingToRingJoin(
+        first_ring_sha256=ring_sha256(rings[0]),
+        second_ring_sha256=ring_sha256(rings[1]),
+        reach_um=100,
+    )
+    with pytest.raises(ArtifactMeshRepairError, match="do not face each other"):
+        apply_mesh_repair(vertices, faces, [join])
+
+
+def test_the_two_kinds_do_not_borrow_each_other_s_name() -> None:
+    with pytest.raises(ArtifactMeshRepairError, match="unsupported repair kind"):
+        RingPairJoin(
+            first_ring_sha256="a" * 64,
+            second_ring_sha256="b" * 64,
+            body_sha256="c" * 64,
+            kind=SEW_RING_TO_RING,
+        )
+    with pytest.raises(ArtifactMeshRepairError, match="unsupported repair kind"):
+        RingToRingJoin(
+            first_ring_sha256="a" * 64,
+            second_ring_sha256="b" * 64,
+            kind=SEW_RING_PAIR_TO_BODY,
+        )
+
+
+def test_a_ring_to_ring_join_is_written_and_read_back_whole() -> None:
+    join = RingToRingJoin(
+        first_ring_sha256="a" * 64, second_ring_sha256="b" * 64, reach_um=1_500
+    )
+    assert RingToRingJoin.from_dict(join.to_dict()) == join
+    with pytest.raises(ArtifactMeshRepairError, match="written with exactly"):
+        RingToRingJoin.from_dict({**join.to_dict(), "body_sha256": "c" * 64})
+
+
+def test_one_edge_sewn_to_itself_is_not_a_join() -> None:
+    with pytest.raises(ArtifactMeshRepairError, match="cannot be sewn to itself"):
+        RingToRingJoin(first_ring_sha256="a" * 64, second_ring_sha256="a" * 64)
+
+
+def _capped_drum(**kwargs) -> tuple[np.ndarray, np.ndarray]:
+    """An open-footed drum with a modeller's cap over each skin's opening.
+
+    A fan of a few large triangles from one apex, which is what a tool that
+    was asked to close a scan writes over what the head could not see.
+    """
+
+    vertices, faces = _open_footed_drum(**kwargs)
+    rings = boundary_rings(faces)
+    parts: list[tuple[np.ndarray, np.ndarray]] = [(vertices, faces)]
+    offset = vertices.shape[0]
+    extra_vertices: list[np.ndarray] = []
+    extra_faces: list[np.ndarray] = []
+    for ring in rings:
+        apex = offset + len(extra_vertices)
+        extra_vertices.append(np.array([0.0, 0.0, float(vertices[ring, 2].mean())]))
+        extra_faces.extend(
+            [apex, ring[i], ring[(i + 1) % len(ring)]] for i in range(len(ring))
+        )
+    del parts
+    return (
+        np.concatenate([vertices, np.asarray(extra_vertices)]),
+        np.concatenate([faces, np.asarray(extra_faces, dtype=np.int64)]),
+    )
+
+
+def _coarse_patch(vertices: np.ndarray, faces: np.ndarray) -> np.ndarray:
+    corners = vertices[faces]
+    area = 0.5 * np.linalg.norm(
+        np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0]), axis=1
+    )
+    coarse = np.flatnonzero(area > 8.0 * float(np.median(area)))
+    labels = face_bodies(faces[coarse])
+    return coarse[labels == labels[0]]
+
+
+def _drop_step(vertices: np.ndarray, faces: np.ndarray) -> DropFaces:
+    patch = _coarse_patch(vertices, faces)
+    return DropFaces(
+        face_ranges=face_ranges_from_indices(patch, total_face_count=faces.shape[0]),
+        total_face_count=int(faces.shape[0]),
+        selection_sha256=face_set_sha256(faces, patch),
+    )
+
+
+def test_a_cap_is_taken_out_and_its_coarseness_recorded() -> None:
+    vertices, faces = _capped_drum()
+    assert len(boundary_rings(faces)) == 0
+
+    after, receipt = apply_mesh_repair(vertices, faces, [_drop_step(vertices, faces)])
+
+    assert receipt.added_face_count == 0
+    assert receipt.removed_face_count > 0
+    assert receipt.open_ring_count_before == 0
+    assert receipt.open_ring_count_after == 1
+    step = receipt.steps[0]
+    assert step["kind"] == "drop_faces/v1"
+    assert step["border_face_count"] > 0
+    # The cap really is coarser than the wall it was laid over, and the
+    # receipt says by how much rather than the rule deciding on it.
+    assert step["median_area_ratio_millionths"] > 1_000_000
+    assert int(after.max()) < vertices.shape[0]
+
+
+def test_a_patch_in_several_pieces_is_refused() -> None:
+    vertices, faces = _capped_drum()
+    corners = vertices[faces]
+    area = 0.5 * np.linalg.norm(
+        np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0]), axis=1
+    )
+    both = np.flatnonzero(area > 8.0 * float(np.median(area)))
+    step = DropFaces(
+        face_ranges=face_ranges_from_indices(both, total_face_count=faces.shape[0]),
+        total_face_count=int(faces.shape[0]),
+        selection_sha256=face_set_sha256(faces, both),
+    )
+    with pytest.raises(ArtifactMeshRepairError, match="more than one piece"):
+        apply_mesh_repair(vertices, faces, [step])
+
+
+def test_a_patch_chosen_on_another_mesh_is_refused() -> None:
+    vertices, faces = _capped_drum()
+    step = _drop_step(vertices, faces)
+    patch = _coarse_patch(vertices, faces)
+
+    # A mesh of a different size: the count the patch was chosen against no
+    # longer holds, and nothing is read at those indices at all.
+    bigger = DropFaces(
+        face_ranges=step.face_ranges,
+        total_face_count=step.total_face_count + 1,
+        selection_sha256=step.selection_sha256,
+    )
+    with pytest.raises(ArtifactMeshRepairError, match="different mesh"):
+        apply_mesh_repair(vertices, faces, [bigger])
+
+    # The same size, but the triangles at those indices have moved: this is
+    # what happens to a repair replayed after an earlier step renumbered the
+    # faces, and it is the case a bare index would sew through in silence.
+    moved = faces.copy()
+    moved[[patch[0], patch[-1]]] = moved[[patch[-1], patch[0]]]
+    moved[patch[0]] = moved[patch[0]][::-1]
+    with pytest.raises(ArtifactMeshRepairError, match="not the declared patch"):
+        apply_mesh_repair(vertices, moved, [step])
+
+
+def test_the_whole_chain_leaves_one_closed_body() -> None:
+    # A cap over each skin, a piece standing inside, and the foot's rim: the
+    # four decisions 24ET0021 needs, in the order they can be taken.
+    vertices, drum = _capped_drum()
+    piece = _merge(
+        (vertices, drum),
+        _skin(radius=9.4, height=10.6, apex=13.0, upward=True),
+        _skin(radius=9.4, height=9.4, apex=12.0, upward=False),
+    )
+    vertices, faces = piece
+    for _ in range(2):
+        faces, _ = apply_mesh_repair(vertices, faces, [_drop_step(vertices, faces)])
+    rings = boundary_rings(faces)
+    labels = face_bodies(faces)
+    wall = int(np.argmax(np.bincount(labels)))
+    standing = [ring for ring in rings if abs(vertices[ring, 2].mean() - 10.0) < 2.0]
+    faces, _ = apply_mesh_repair(
+        vertices,
+        faces,
+        [
+            RingPairJoin(
+                first_ring_sha256=ring_sha256(standing[0]),
+                second_ring_sha256=ring_sha256(standing[1]),
+                body_sha256=body_sha256(faces, np.flatnonzero(labels == wall)),
+            )
+        ],
+    )
+    foot = [ring for ring in boundary_rings(faces) if vertices[ring, 2].mean() < 2.0]
+    faces, receipt = apply_mesh_repair(
+        vertices,
+        faces,
+        [
+            RingToRingJoin(
+                first_ring_sha256=ring_sha256(foot[0]),
+                second_ring_sha256=ring_sha256(foot[1]),
+                reach_um=2_000,
+            )
+        ],
+    )
+    report = diagnose_mesh_bodies(vertices, faces)
+    assert report.one_body
+    assert report.bodies[0].closed
+    assert not report.needs_decision
