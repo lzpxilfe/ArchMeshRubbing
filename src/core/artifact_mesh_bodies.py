@@ -446,8 +446,21 @@ def _surface(vertices: np.ndarray, triangles: np.ndarray) -> _Surface:
 GAP_NEIGHBOUR_VERTICES = 12
 
 
-def _gap(points: np.ndarray, surface: _Surface) -> tuple[int, int]:
-    """Median and worst distance from a ring's points to a body's surface."""
+def ring_as_triangles(ring: np.ndarray) -> np.ndarray:
+    """A closed ring of vertices written as triangles, for distance work.
+
+    Each segment becomes a triangle with two corners the same, which the
+    point-to-triangle routine reduces to the point-to-segment case, so a ring
+    and a surface are measured against by one piece of code.
+    """
+
+    indices = np.asarray(ring, dtype=np.int64).reshape(-1)
+    rolled = np.roll(indices, -1)
+    return np.column_stack([indices, rolled, rolled])
+
+
+def _distances(points: np.ndarray, surface: _Surface) -> np.ndarray:
+    """Distance from each point to the nearest point on the surface."""
 
     neighbours = min(GAP_NEIGHBOUR_VERTICES, surface.vertex_ids.shape[0])
     _, found = surface.tree.query(points, k=neighbours)
@@ -468,6 +481,33 @@ def _gap(points: np.ndarray, surface: _Surface) -> tuple[int, int]:
                 points[index], a[candidates], b[candidates], c[candidates]
             ).min()
         )
+    return distances
+
+
+def surface_distances(
+    points: np.ndarray, vertices: np.ndarray, triangles: np.ndarray
+) -> np.ndarray:
+    """Distance from each point to the nearest point on those triangles.
+
+    Public because a repair needs the same measurement the diagnosis makes:
+    which faces of a wall lie between two edges resting against it is a
+    question about distance to the edges, not about any axis the artifact may
+    or may not have.
+    """
+
+    return _distances(
+        np.asarray(points, dtype=np.float64).reshape(-1, 3),
+        _surface(
+            np.asarray(vertices, dtype=np.float64),
+            np.asarray(triangles, dtype=np.int64).reshape(-1, 3),
+        ),
+    )
+
+
+def _gap(points: np.ndarray, surface: _Surface) -> tuple[int, int]:
+    """Median and worst distance from a ring's points to a body's surface."""
+
+    distances = _distances(points, surface)
     return (
         int(round(float(np.median(distances)) * 1000.0)),
         int(round(float(np.max(distances)) * 1000.0)),
@@ -510,19 +550,7 @@ def diagnose_mesh_bodies(
     ring_body = [int(labels[face]) for face in ring_owner_faces]
     # A ring is measured against as a chain of segments, written as triangles
     # with two corners the same so that one distance routine serves both.
-    ring_surfaces = [
-        _surface(
-            vertices,
-            np.column_stack(
-                [
-                    np.asarray(ring, dtype=np.int64),
-                    np.roll(np.asarray(ring, dtype=np.int64), -1),
-                    np.roll(np.asarray(ring, dtype=np.int64), -1),
-                ]
-            ),
-        )
-        for ring in rings
-    ]
+    ring_surfaces = [_surface(vertices, ring_as_triangles(ring)) for ring in rings]
 
     targets = max(body_count - 1, 0) + max(len(ring_points) - 1, 0)
     tests = sum(points.shape[0] for points in ring_points) * targets
