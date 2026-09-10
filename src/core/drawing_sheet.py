@@ -252,8 +252,10 @@ _SCALE_BAR_MAX_PAPER_MM = 90.0
 _HAIRLINE_MM = 0.13
 _FONT_STACK = "'Noto Sans KR', 'Malgun Gothic', sans-serif"
 
-# The scale bar's band: the bar itself plus the row of labels beneath it.
-_SCALE_BAR_BAND_MM = _SCALE_BAR_HEIGHT_MM + _SCALE_BAR_LABEL_MM
+# A stepped bar is two rows of half height, offset, which comes to the same
+# height as one row; a plain rule is shorter than either.  The band a style
+# needs is stated here so the footer reserves the paper the bar will use.
+_SCALE_BAR_LINE_HEIGHT_MM = 1.6
 # Clear space between the last figure and the footer band, so a drawing never
 # appears to touch the sheet's own annotations.
 _FOOTER_GAP_MM = 4.0
@@ -633,6 +635,40 @@ LINE_CAP_ROUND = "round"
 LINE_CAP_BUTT = "butt"
 LINE_CAP_SQUARE = "square"
 LINE_CAPS: tuple[str, ...] = (LINE_CAP_ROUND, LINE_CAP_BUTT, LINE_CAP_SQUARE)
+
+#: 축척바의 생김새.  A scale bar has one job - let a reader lay a finger on
+#: the paper and name a length - and drawing traditions have settled on
+#: several ways of doing it.  None is more correct than another; which one
+#: reads best depends on the plate.  The bar's span and its label are the
+#: same whichever is chosen, so the choice never changes what the bar says.
+#:
+#: ``alternating`` fills every other cell, so the eye counts blocks; it is
+#: the most common bar in excavation reports and the default here.
+SCALE_BAR_ALTERNATING = "alternating"
+#: ``divided`` fills the same cells but cuts the first one into fifths, so a
+#: reader can measure a small feature against the fine end without a ruler.
+SCALE_BAR_DIVIDED = "divided"
+#: ``open`` draws no fill at all: an outlined bar with ticks, like a ruler.
+#: It is the quietest on a crowded plate and the one to use where a filled
+#: bar would compete with a dark rubbing beside it.
+SCALE_BAR_OPEN = "open"
+#: ``stepped`` staggers two rows - the whole span below, its halves above -
+#: which survey drawings use because the offset makes the midpoint legible
+#: at a glance without a label for it.
+SCALE_BAR_STEPPED = "stepped"
+#: ``line`` is a single rule with a serif at each end and nothing between.
+#: It claims the least paper and is what a small plate or a figure inset
+#: usually wants.
+SCALE_BAR_LINE = "line"
+SCALE_BAR_STYLES: tuple[str, ...] = (
+    SCALE_BAR_ALTERNATING,
+    SCALE_BAR_DIVIDED,
+    SCALE_BAR_OPEN,
+    SCALE_BAR_STEPPED,
+    SCALE_BAR_LINE,
+)
+#: How many fine divisions the leading cell of a ``divided`` bar carries.
+_SCALE_BAR_FINE_DIVISIONS = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -1118,6 +1154,14 @@ class DrawingSheetOptions:
     """How every stroke on the sheet ends: ``round`` (the default, as
     before), ``butt`` (cut square at the endpoint, so a heavy line never
     stands past a fine one it meets) or ``square``.  Joins stay round.
+    """
+    scale_bar_style: str = SCALE_BAR_ALTERNATING
+    """어떤 축척바를 그릴지: ``alternating`` (기본), ``divided``, ``open``,
+    ``stepped``, ``line``.  Which one reads best is the drafter's call and
+    depends on the plate; the span the bar covers and the length it is
+    labelled with are worked out the same way for all of them, so the choice
+    changes how the bar looks and never what it says.  The sidecar's
+    ``scale_bar`` block records it.
     """
     mirror_elevation_side: str = MIRROR_ELEVATION_LEFT
     """Which side of the fold the elevation takes on every mirrored figure:
@@ -1821,6 +1865,10 @@ class DrawingSheetOptions:
             raise DrawingSheetError(f"center_axis_style must be one of {', '.join(CENTER_AXIS_STYLES)}")
         if self.line_cap not in LINE_CAPS:
             raise DrawingSheetError(f"line_cap must be one of {', '.join(LINE_CAPS)}")
+        if self.scale_bar_style not in SCALE_BAR_STYLES:
+            raise DrawingSheetError(
+                f"scale_bar_style must be one of {', '.join(SCALE_BAR_STYLES)}"
+            )
 
     def _settle_rubbings_on_axis(self) -> None:
         """A rubbing laid against the centre line of its own elevation."""
@@ -1984,7 +2032,7 @@ class DrawingSheetOptions:
             self.title_block_height(
                 computed_rubbing=computed_rubbing, section_loops=section_loops
             ),
-            _SCALE_BAR_BAND_MM,
+            scale_bar_height_mm(self.scale_bar_style) + _SCALE_BAR_LABEL_MM,
         )
 
     def line_style_overrides(self) -> dict[str, LineStyle]:
@@ -2669,32 +2717,127 @@ def _captions_on_page(svg_text: str) -> set[str]:
     return captions
 
 
+def scale_bar_height_mm(style: str) -> float:
+    """How tall the bar of this style is drawn.
+
+    A plain rule is shorter than a bar with cells to count; a stepped bar is
+    two rows of half height, which comes to the same as one.  The footer
+    reserves the band from here, so a style never crowds the drawing above
+    it or leaves a gap it does not use.
+    """
+
+    return _SCALE_BAR_LINE_HEIGHT_MM if style == SCALE_BAR_LINE else _SCALE_BAR_HEIGHT_MM
+
+
+def _bar_rect(x: float, y: float, width: float, height: float, fill: str) -> str:
+    return (
+        f'    <rect x="{number_token(x, field_name="scale_bar.x")}" '
+        f'y="{number_token(y, field_name="scale_bar.y")}" '
+        f'width="{number_token(width, field_name="scale_bar.width")}" '
+        f'height="{number_token(height, field_name="scale_bar.height")}" '
+        f'fill="{fill}"/>'
+    )
+
+
+def _bar_line(x0: float, y0: float, x1: float, y1: float) -> str:
+    return (
+        f'    <line x1="{number_token(x0, field_name="scale_bar.x")}" '
+        f'y1="{number_token(y0, field_name="scale_bar.y")}" '
+        f'x2="{number_token(x1, field_name="scale_bar.x")}" '
+        f'y2="{number_token(y1, field_name="scale_bar.y")}"/>'
+    )
+
+
+def _scale_bar_marks(
+    style: str, *, left: float, top: float, paper_mm: float, ink: str
+) -> list[str]:
+    """The bar itself, in whichever tradition the drafter chose.
+
+    Every style spans exactly ``paper_mm`` from ``left``, so the two labels
+    printed under its ends mean the same thing in all of them.  What differs
+    is only how the span is made countable.
+    """
+
+    height = scale_bar_height_mm(style)
+    segment = paper_mm / _SCALE_BAR_SEGMENTS
+    marks: list[str] = []
+
+    if style in (SCALE_BAR_ALTERNATING, SCALE_BAR_DIVIDED):
+        first = 1 if style == SCALE_BAR_DIVIDED else 0
+        if style == SCALE_BAR_DIVIDED:
+            # The leading cell is not one block but five, so a small feature
+            # can be measured at the fine end of the bar without a ruler.  It
+            # is built out of fine cells rather than painted over, because
+            # painting over assumes what colour the paper is.
+            fine = segment / _SCALE_BAR_FINE_DIVISIONS
+            for index in range(_SCALE_BAR_FINE_DIVISIONS):
+                fill = ink if index % 2 == 0 else "none"
+                marks.append(_bar_rect(left + index * fine, top, fine, height, fill))
+        for index in range(first, _SCALE_BAR_SEGMENTS):
+            # Alternating solid and empty cells are what makes a bar readable
+            # at a glance; the outline alone gives the reader nothing to count.
+            fill = ink if index % 2 == 0 else "none"
+            marks.append(_bar_rect(left + index * segment, top, segment, height, fill))
+        return marks
+
+    if style == SCALE_BAR_OPEN:
+        marks.append(_bar_rect(left, top, paper_mm, height, "none"))
+        for index in range(1, _SCALE_BAR_SEGMENTS):
+            x = left + index * segment
+            # Full-height ticks at the quarters, half-height between them: the
+            # bar is read like a ruler rather than counted like blocks.
+            marks.append(_bar_line(x, top, x, top + height))
+        for index in range(_SCALE_BAR_SEGMENTS):
+            x = left + (index + 0.5) * segment
+            marks.append(_bar_line(x, top + height / 2.0, x, top + height))
+        return marks
+
+    if style == SCALE_BAR_STEPPED:
+        # Two rows of half height with the fills swapped between them, so
+        # every division is bounded by ink on one row and paper on the other.
+        # A reader finds a cell edge by the step rather than by counting, and
+        # the bar keeps its meaning when the plate is reduced.
+        half = height / 2.0
+        for row in range(2):
+            y = top + row * half
+            for index in range(_SCALE_BAR_SEGMENTS):
+                filled = (index % 2 == 0) if row else (index % 2 == 1)
+                marks.append(
+                    _bar_rect(
+                        left + index * segment, y, segment, half, ink if filled else "none"
+                    )
+                )
+        return marks
+
+    # SCALE_BAR_LINE: one rule with a serif at each end, and nothing between.
+    middle = top + height / 2.0
+    marks.append(_bar_line(left, middle, left + paper_mm, middle))
+    for x in (left, left + paper_mm):
+        marks.append(_bar_line(x, top, x, top + height))
+    return marks
+
+
 def _scale_bar_elements(options: DrawingSheetOptions) -> tuple[list[str], dict[str, Any]]:
     """Return the scale bar, and what the sidecar records about it."""
 
     page = options.page
+    style = options.scale_bar_style
     length_mm = scale_bar_length_mm(options.scale_denominator)
     paper_mm = length_mm / options.scale_denominator
-    segment = paper_mm / _SCALE_BAR_SEGMENTS
-    # Bottom-aligned with the title block, so the two read as one footer row.
-    top = page.height_mm - page.margin_mm - _SCALE_BAR_BAND_MM
+    height = scale_bar_height_mm(style)
+    # Bottom-aligned with the title block, so the two read as one footer row:
+    # whatever the style's own height, its labels sit on the same line.
+    top = page.height_mm - page.margin_mm - _SCALE_BAR_LABEL_MM - height
     left = page.margin_mm
 
     lines = [f'  <g id="scale-bar" stroke="{options.stroke_color}" '
              f'stroke-width="{number_token(_HAIRLINE_MM, field_name="hairline")}">']
-    for index in range(_SCALE_BAR_SEGMENTS):
-        x = left + index * segment
-        # Alternating solid and empty cells are what makes a bar readable at a
-        # glance; the outline alone gives the reader nothing to count.
-        fill = options.stroke_color if index % 2 == 0 else "none"
-        lines.append(
-            f'    <rect x="{number_token(x, field_name="scale_bar.x")}" '
-            f'y="{number_token(top, field_name="scale_bar.y")}" '
-            f'width="{number_token(segment, field_name="scale_bar.width")}" '
-            f'height="{number_token(_SCALE_BAR_HEIGHT_MM, field_name="scale_bar.height")}" '
-            f'fill="{fill}"/>'
+    lines.extend(
+        _scale_bar_marks(
+            style, left=left, top=top, paper_mm=paper_mm, ink=options.stroke_color
         )
-    label_y = top + _SCALE_BAR_HEIGHT_MM + _SCALE_BAR_LABEL_MM
+    )
+    label_y = top + height + _SCALE_BAR_LABEL_MM
     lines.append(
         "    "
         + _text_element(
@@ -2723,6 +2866,7 @@ def _scale_bar_elements(options: DrawingSheetOptions) -> tuple[list[str], dict[s
         "label": label,
         "paper_length_mm": paper_mm,
         "segments": _SCALE_BAR_SEGMENTS,
+        "style": style,
     }
 
 
@@ -8359,10 +8503,17 @@ __all__ = [
     "MAX_DRAWING_SHEET_FIGURES",
     "ORIENTATIONS",
     "PAGE_SIZES_MM",
+    "SCALE_BAR_ALTERNATING",
+    "SCALE_BAR_DIVIDED",
+    "SCALE_BAR_LINE",
+    "SCALE_BAR_OPEN",
+    "SCALE_BAR_STEPPED",
+    "SCALE_BAR_STYLES",
     "SheetPage",
     "TitleBlock",
     "compose_drawing_sheet",
     "computed_rubbing_caption",
+    "scale_bar_height_mm",
     "scale_bar_label",
     "scale_bar_length_mm",
     "validate_drawing_sheet_bytes",

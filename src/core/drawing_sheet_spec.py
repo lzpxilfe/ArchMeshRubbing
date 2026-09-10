@@ -142,6 +142,7 @@ def plate_spec(record_ids: Sequence[str], options: DrawingSheetOptions) -> dict[
         "rubbing_on_axis_fit": options.rubbing_on_axis_fit,
         "rubbing_on_axis_trim": options.rubbing_on_axis_trim,
         "rubbings_on_axis": [list(pair) for pair in options.rubbings_on_axis],
+        "scale_bar_style": options.scale_bar_style,
         "scale_denominator": float(options.scale_denominator),
         "schema_version": PLATE_SPEC_SCHEMA_VERSION,
         "show_center_axis": bool(options.show_center_axis),
@@ -196,7 +197,7 @@ _KNOWN_KEYS = frozenset(
         "interpretation", "line_cap", "mirror_elevation_side", "mirror_jogs", "mirror_sections",
         "outline_reach", "page", "paint_cutout_ink_percent", "paint_cutouts", "plan_over_elevation",
         "plan_with_sections", "presumed_lines", "presumed_section", "records", "relief_developments_on_axis", "relief_stipples", "rubbing_notes",
-        "rubbing_on_axis_fit", "rubbing_on_axis_trim", "rubbings_on_axis", "scale_denominator",
+        "rubbing_on_axis_fit", "rubbing_on_axis_trim", "rubbings_on_axis", "scale_bar_style", "scale_denominator",
         "schema_version", "show_center_axis", "stipple_dot_mm", "stipple_pitch_mm", "stroke_color",
         "section_marks", "sherd_breaks", "style_preset", "technique_angles_deg", "technique_records",
         "technique_representations",
@@ -351,7 +352,7 @@ def plate_spec_options(spec: object) -> tuple[list[str], DrawingSheetOptions]:
 
     for key in (
         "break_reach", "center_axis_style", "line_cap", "mirror_elevation_side", "outline_reach",
-        "rubbing_on_axis_fit", "rubbing_on_axis_trim", "stroke_color", "title",
+        "rubbing_on_axis_fit", "rubbing_on_axis_trim", "scale_bar_style", "stroke_color", "title",
     ):
         if given(key):
             kwargs[key] = _text(spec[key], field_name=key)

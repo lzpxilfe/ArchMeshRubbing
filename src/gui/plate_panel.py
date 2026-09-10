@@ -63,6 +63,7 @@ from src.core.drawing_sheet import (
     REACHES,
     RUBBING_ON_AXIS_FITS,
     RUBBING_ON_AXIS_TRIMS,
+    SCALE_BAR_STYLES,
     SHERD_SIDES,
     PAGE_SIZES_MM,
 )
@@ -100,6 +101,11 @@ _WORDS: dict[str, str] = {
     "wall_on": "안벽 연장",
     "portrait": "세로",
     "landscape": "가로",
+    "alternating": "번갈아 칠하기",
+    "divided": "첫 칸 잘게",
+    "open": "눈금만",
+    "stepped": "두 단 엇갈리기",
+    "line": "한 줄",
 }
 
 #: The rows a table starts with, so an empty table is still a table.
@@ -402,6 +408,18 @@ class PlatePanel(QWidget):
         )
         self.combo_line_cap.currentIndexChanged.connect(self._changed)
         form.addRow("선 끝", self.combo_line_cap)
+
+        self.combo_scale_bar_style = _combo(
+            SCALE_BAR_STYLES,
+            tip="축척바의 생김새.  어느 것이든 재는 길이와 적히는 숫자는 같습니다.\n"
+            "번갈아 칠하기: 칸을 세는 기본.\n"
+            "첫 칸 잘게: 왼쪽 한 칸을 다섯으로 나눠 잔 것을 잽니다.\n"
+            "눈금만: 채우지 않은 자.  탁본 옆처럼 진한 그림이 있을 때.\n"
+            "두 단 엇갈리기: 위아래 두 줄의 칠을 뒤집어 칸 경계가 늘 보입니다.\n"
+            "한 줄: 종이를 가장 적게 씁니다.",
+        )
+        self.combo_scale_bar_style.currentIndexChanged.connect(self._changed)
+        form.addRow("축척바", self.combo_scale_bar_style)
 
         self.edit_stroke_color = QLineEdit("#111111")
         self.edit_stroke_color.setMaxLength(7)
@@ -854,6 +872,7 @@ class PlatePanel(QWidget):
             "gutter_mm": float(self.spin_gutter.value()),
             "show_center_axis": bool(self.check_center_axis.isChecked()),
             "center_axis_style": str(self.combo_center_axis_style.currentData()),
+            "scale_bar_style": str(self.combo_scale_bar_style.currentData()),
             "line_cap": str(self.combo_line_cap.currentData()),
             "stroke_color": self.edit_stroke_color.text().strip() or "#111111",
             "title": self.edit_title.text(),
@@ -1004,6 +1023,7 @@ class PlatePanel(QWidget):
             self.edit_title.setText(str(spec.get("title", self.edit_title.text())))
             for combo, key, fallback in (
                 (self.combo_center_axis_style, "center_axis_style", "solid"),
+                (self.combo_scale_bar_style, "scale_bar_style", "alternating"),
                 (self.combo_line_cap, "line_cap", "round"),
                 (self.combo_elevation_side, "mirror_elevation_side", "left"),
                 (self.combo_outline_reach, "outline_reach", "section"),

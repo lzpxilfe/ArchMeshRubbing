@@ -26,6 +26,13 @@ from src.core.artifact_vector_extractor import (
 from src.core.artifact_vector_record import PlanarFrame
 from src.core.canonical_json import canonical_json_bytes
 from src.core.drawing_sheet import (
+    SCALE_BAR_ALTERNATING,
+    SCALE_BAR_DIVIDED,
+    SCALE_BAR_LINE,
+    SCALE_BAR_OPEN,
+    SCALE_BAR_STEPPED,
+    SCALE_BAR_STYLES,
+    scale_bar_height_mm,
     COMPUTED_RUBBING_NOTE,
     CONVENTIONAL_SCALE_DENOMINATORS,
     conventional_scale_at_least,
@@ -1340,3 +1347,102 @@ def test_a_figure_too_big_for_the_page_is_told_which_conventional_scale_fits() -
     message = str(raised.value)
     assert "does not fit" in message
     assert "conventional" in message
+
+
+def _scale_bar_marks(svg_bytes: bytes) -> tuple[list, list]:
+    root = ET.fromstring(svg_bytes)
+    group = f"{SVG_NS}g[@id='scale-bar']"
+    return (
+        root.findall(f"{group}/{SVG_NS}rect"),
+        root.findall(f"{group}/{SVG_NS}line"),
+    )
+
+
+def test_every_scale_bar_style_says_the_same_length() -> None:
+    """축척바는 생김새를 고르는 것이지 말을 고르는 것이 아니다.
+
+    A drafter picks the bar that reads best on the plate in hand, and five
+    traditions are offered.  Whichever is chosen, the bar spans the same
+    paper and carries the same two numbers - so the choice can never change
+    what a reader measures off it."""
+
+    document = _session().document
+    spans: set[tuple[float, float, str]] = set()
+    labels: set[tuple[str, ...]] = set()
+    for style in SCALE_BAR_STYLES:
+        bundle = compose_drawing_sheet(
+            document, [OUTLINE_ID], options=_options(scale_bar_style=style)
+        )
+        sidecar = json.loads(bundle.sidecar_bytes)
+        bar = sidecar["scale_bar"]
+        assert bar["style"] == style
+        spans.add((bar["artifact_length_mm"], bar["paper_length_mm"], bar["label"]))
+
+        root = ET.fromstring(bundle.svg_bytes)
+        texts = root.findall(f"{SVG_NS}g[@id='scale-bar']/{SVG_NS}text")
+        labels.add(tuple(text.text or "" for text in texts))
+
+        rects, lines = _scale_bar_marks(bundle.svg_bytes)
+        left = min(
+            [float(rect.attrib["x"]) for rect in rects]
+            + [float(line.attrib["x1"]) for line in lines]
+        )
+        right = max(
+            [float(rect.attrib["x"]) + float(rect.attrib["width"]) for rect in rects]
+            + [float(line.attrib["x2"]) for line in lines]
+        )
+        assert right - left == pytest.approx(bar["paper_length_mm"]), style
+
+    assert len(spans) == 1, "the same artifact length, however the bar is drawn"
+    assert len(labels) == 1, "and the same two labels under it"
+
+
+def test_each_scale_bar_style_is_drawn_the_way_its_tradition_draws_it() -> None:
+    document = _session().document
+
+    def marks(style: str) -> tuple[int, int]:
+        bundle = compose_drawing_sheet(
+            document, [OUTLINE_ID], options=_options(scale_bar_style=style)
+        )
+        rects, lines = _scale_bar_marks(bundle.svg_bytes)
+        return len(rects), len(lines)
+
+    # Four cells to count.
+    assert marks(SCALE_BAR_ALTERNATING) == (4, 0)
+    # The leading cell is five fine cells instead of one, so 3 + 5.
+    assert marks(SCALE_BAR_DIVIDED) == (8, 0)
+    # One outlined bar, three ticks at the quarters, four half ticks between.
+    assert marks(SCALE_BAR_OPEN) == (1, 7)
+    # Four cells on each of two rows, the fills swapped between them.
+    assert marks(SCALE_BAR_STEPPED) == (8, 0)
+    # A rule and a serif at each end; nothing to fill.
+    assert marks(SCALE_BAR_LINE) == (0, 3)
+
+
+def test_the_plain_rule_asks_for_less_paper_than_a_bar_with_cells() -> None:
+    """The band a style needs is the band it gets - though on any real sheet
+    the title block beside it is the taller of the two, and that is what the
+    footer ends up reserving."""
+
+    assert scale_bar_height_mm(SCALE_BAR_LINE) < scale_bar_height_mm(SCALE_BAR_ALTERNATING)
+
+    tall = _options(scale_bar_style=SCALE_BAR_ALTERNATING)
+    short = _options(scale_bar_style=SCALE_BAR_LINE)
+    # A title block of any useful size stands taller than either bar, so the
+    # footer is the title block's and the choice of bar moves no drawing.
+    assert short.footer_height() == tall.footer_height()
+    assert short.footer_height() == tall.title_block_height()
+
+
+def test_naming_the_default_style_changes_nothing() -> None:
+    document = _session().document
+    plain = compose_drawing_sheet(document, [OUTLINE_ID], options=_options())
+    named = compose_drawing_sheet(
+        document, [OUTLINE_ID], options=_options(scale_bar_style=SCALE_BAR_ALTERNATING)
+    )
+    assert plain.svg_bytes == named.svg_bytes
+
+
+def test_a_scale_bar_style_the_sheet_does_not_draw_is_refused() -> None:
+    with pytest.raises(DrawingSheetError, match="scale_bar_style must be one of"):
+        _options(scale_bar_style="ruler")
