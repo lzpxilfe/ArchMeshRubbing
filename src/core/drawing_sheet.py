@@ -3517,7 +3517,8 @@ def _break_paths_for_figure(
             )
             continue
         paths: list[Any] = []
-        solid_count = broken_count = omitted_count = chosen_count = 0
+        solid_count = broken_count = omitted_count = chosen_count = clamped_count = 0
+        clamped_max_mm = 0.0
         for index, item in enumerate(payload.breaks):
             try:
                 chord = axis_profile_chord(
@@ -3530,6 +3531,22 @@ def _break_paths_for_figure(
             if chord is None:
                 paths = []
                 break
+            # The chord's middle is on the axis and stays there: the two
+            # halves are drawn from it, and a middle that drifted off the
+            # fold would leave a sliver of the far half on this one.
+            centre = (0.5 * (chord[0][0] + chord[1][0]), 0.5 * (chord[0][1] + chord[1][1]))
+            if not inward:
+                # The corner's radius is the artifact's, read right round its
+                # axis; the outline is this one view's silhouette, and the
+                # widest meridian need not face the viewer.  On a wall that
+                # is not truly round the first is the larger, and the inner
+                # line then stands outside the pot.  It is a chord of the
+                # artifact, so it ends where the drawn edge is.
+                chord, pulled = _chord_inside_outline(chord, figure_payload.paths)
+                if pulled > clamped_max_mm:
+                    clamped_max_mm = pulled
+                if pulled > 1e-9:
+                    clamped_count += 1
             style, source = _break_line_style(
                 item.turn_millidegrees, solid_min_deg=solid_min_deg, chosen=chosen.get((record.id, index))
             )
@@ -3543,7 +3560,6 @@ def _break_paths_for_figure(
                 broken_count += 1
             else:
                 solid_count += 1
-            centre = (0.5 * (chord[0][0] + chord[1][0]), 0.5 * (chord[0][1] + chord[1][1]))
             for side, end in enumerate(chord):
                 # The inside's line stops short of the wall's cut.
                 pieces = _broken_line(centre, end, gaps=gaps, gap_mm=gap_mm, trim_end_mm=gap_mm if inward else 0.0)
@@ -3568,6 +3584,17 @@ def _break_paths_for_figure(
                 "break_count": str(len(payload.breaks)),
                 "broken_count": str(broken_count),
                 "chosen_count": str(chosen_count),
+                # What the outline took back off the reading's own radius, so
+                # a disagreement between the two is on the record and not
+                # quietly drawn away.
+                **(
+                    {
+                        "clamped_count": str(clamped_count),
+                        "clamped_max_um": str(int(round(clamped_max_mm * 1000.0))),
+                    }
+                    if clamped_count
+                    else {}
+                ),
                 "half": half,
                 "omitted_count": str(omitted_count),
                 "record_id": record.id,
@@ -3576,6 +3603,59 @@ def _break_paths_for_figure(
             }
         )
     return by_kind, interior_by_kind, drawn, not_drawn
+
+
+def _chord_inside_outline(
+    chord: tuple[tuple[float, float], tuple[float, float]],
+    outline_paths: Sequence[Any],
+) -> tuple[tuple[tuple[float, float], tuple[float, float]], float]:
+    """The chord with each end pulled back to the drawn edge, and by how much.
+
+    Returns the chord unchanged where the outline does not cross that end's
+    ray - there is then nothing to measure it against, and a line shortened
+    to a guess is worse than one drawn to what was read.
+    """
+
+    (lx, ly), (rx, ry) = chord
+    centre = (0.5 * (lx + rx), 0.5 * (ly + ry))
+    half = math.hypot(rx - lx, ry - ly) / 2.0
+    if half <= 1e-9:
+        return chord, 0.0
+    unit = ((rx - lx) / (2.0 * half), (ry - ly) / (2.0 * half))
+    ends: list[tuple[float, float]] = []
+    pulled = 0.0
+    for sign in (-1.0, +1.0):
+        direction = (unit[0] * sign, unit[1] * sign)
+        reach = _outline_reach_along(centre, direction, outline_paths)
+        kept = half if reach is None else min(half, reach)
+        pulled = max(pulled, half - kept)
+        ends.append((centre[0] + direction[0] * kept, centre[1] + direction[1] * kept))
+    return (ends[0], ends[1]), pulled
+
+
+def _outline_reach_along(
+    centre: Sequence[float], direction: Sequence[float], paths: Sequence[Any]
+) -> float | None:
+    """How far the outline lies from ``centre`` along ``direction``: the
+    furthest crossing ahead of it, or None where nothing crosses."""
+
+    ox, oy = float(centre[0]), float(centre[1])
+    ux, uy = float(direction[0]), float(direction[1])
+    nx, ny = -uy, ux
+    furthest: float | None = None
+    for path in paths:
+        points = list(path.points_mm) + ([path.points_mm[0]] if path.closed else [])
+        for start, stop in zip(points, points[1:]):
+            sx, sy = float(start[0]) - ox, float(start[1]) - oy
+            tx, ty = float(stop[0]) - ox, float(stop[1]) - oy
+            n1, n2 = sx * nx + sy * ny, tx * nx + ty * ny
+            if (n1 > 0.0) == (n2 > 0.0) or n1 == n2:
+                continue
+            share = n1 / (n1 - n2)
+            along = (sx + share * (tx - sx)) * ux + (sy + share * (ty - sy)) * uy
+            if along > 0.0 and (furthest is None or along > furthest):
+                furthest = along
+    return furthest
 
 
 def _break_line_style(

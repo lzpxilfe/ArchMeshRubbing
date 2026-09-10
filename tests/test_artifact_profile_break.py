@@ -221,9 +221,14 @@ def test_the_reading_is_a_record_that_reopens_and_draws_as_lines_round_the_pot(f
     sidecar = json.loads(bundle.sidecar_bytes.decode("utf-8"))
     assert sidecar["profile_breaks"]["records"][0]["break_count"] == 3
     assert sidecar["profile_breaks"]["records"][0]["surface"] == PROFILE_BREAK_SURFACE_OUTWARD
+    # The corner's radius is read right round the axis; the outline is this
+    # view's silhouette, and a vessel spun into flat facets is a hair
+    # narrower there than the circle it stands for.  The line ends at the
+    # drawn edge and the sheet says what that cost - here a facet's sagitta.
     assert sidecar["profile_breaks"]["drawn"] == [
         {
-            "break_count": "3", "broken_count": "0", "chosen_count": "0", "figure_record_id": "record:front",
+            "break_count": "3", "broken_count": "0", "chosen_count": "0", "clamped_count": "1",
+            "clamped_max_um": "67", "figure_record_id": "record:front",
             "half": "elevation", "omitted_count": "0", "record_id": "record:breaks", "solid_count": "3",
             "surface": PROFILE_BREAK_SURFACE_OUTWARD,
         }
@@ -400,6 +405,53 @@ def test_the_inside_has_corners_too_and_they_show_through_the_cut(footed) -> Non
     assert len(inner) == 2 and all(abs((max(xs) - min(xs)) - (54.0 / 2.0 - 1.0)) < 0.6 for xs in inner), inner
     sidecar = json.loads(section.sidecar_bytes.decode("utf-8"))
     assert [entry["reason"] for entry in sidecar["profile_breaks"]["not_drawn"]] == ["exterior_needs_elevation"]
+
+
+def test_a_corner_line_ends_at_the_drawn_edge_and_never_outside_it(footed) -> None:
+    """A corner's radius is read right round the axis; the outline is one
+    view's silhouette, and the widest meridian need not face the viewer.  On
+    a wall that is not truly round the reading is the larger of the two, and
+    a line drawn to it stands outside the pot - which is what the drafter
+    saw sticking out.  The line is a chord of the artifact, so it ends where
+    the drawn edge is, and the sheet says by how much it was pulled in."""
+
+    computation = compute_artifact_profile_breaks(footed, angle_min_deg=25, span_um=2_000)
+    session = commit_profile_breaks(
+        footed, computation, record_id="record:breaks", created_at=STAMP, operator="tester"
+    )
+    bundle = compose_drawing_sheet(
+        session.document, ["record:front"],
+        options=DrawingSheetOptions(
+            title_block=TitleBlock(artifact_label="굽 달린 시험 호"),
+            page=SheetPage(size="A4", orientation="portrait"), scale_denominator=2.0,
+            mirror_sections=(("record:front", "record:section"),),
+            break_records=("record:breaks",),
+        ),
+    )
+    validate_drawing_sheet_bytes(bundle.svg_bytes, bundle.sidecar_bytes)
+    root = ET.fromstring(bundle.svg_bytes)
+    outline = next(
+        el for el in root.iter()
+        if el.attrib.get("id", "").startswith("mirror:left:outline") and "d" in el.attrib
+    )
+    edge = [
+        (float(tokens[0]), float(tokens[1]))
+        for tokens in [
+            outline.attrib["d"].replace("M", " ").replace("L", " ").replace("Z", " ").split()[i : i + 2]
+            for i in range(0, len(outline.attrib["d"].replace("M", " ").replace("L", " ").replace("Z", " ").split()), 2)
+        ]
+    ]
+    for element in root.iter():
+        if "profile-break:record:breaks:" not in element.attrib.get("id", ""):
+            continue
+        tokens = element.attrib["d"].replace("M", " ").replace("L", " ").split()
+        points = [(float(tokens[i]), float(tokens[i + 1])) for i in range(0, len(tokens), 2)]
+        for x, y in points:
+            near = [px for px, py in edge if abs(py - y) < 0.4]
+            assert near, "the outline reaches every height a corner was read at"
+            assert x >= min(near) - 1e-6, "no corner line stands outside the drawn edge"
+    drawn = json.loads(bundle.sidecar_bytes.decode("utf-8"))["profile_breaks"]["drawn"][0]
+    assert int(drawn["clamped_count"]) >= 1 and int(drawn["clamped_max_um"]) > 0
 
 
 def test_the_archaeologist_has_the_last_word_on_each_corner(footed) -> None:
