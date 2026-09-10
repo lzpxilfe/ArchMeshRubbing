@@ -56,7 +56,7 @@ from .canonical_json import CanonicalJSONError, canonical_json_bytes
 RELIEF_SHADE_RECORD_TYPE = "measurement.relief_shade.v1"
 RELIEF_SHADE_OPERATION_KIND = "relief_shade"
 RELIEF_SHADE_ALGORITHM = "archmeshrubbing.view_relief_shade"
-RELIEF_SHADE_ALGORITHM_VERSION = "1.1.0"
+RELIEF_SHADE_ALGORITHM_VERSION = "1.2.0"
 RELIEF_SHADE_COORDINATE_SPACE = "view_plane_mm/v1"
 RELIEF_SHADE_PAYLOAD_EXTENSION_KEY = "org.archmeshrubbing:relief-shade-v1"
 RELIEF_SHADE_RECEIPT_SCHEMA_VERSION = "1.0.0"
@@ -65,6 +65,12 @@ RELIEF_SHADE_PIXEL_FORMAT = "gray8_alpha8_shade/v1"
 RELIEF_SHADE_ROW_ORDER = "top_row_first/v1"
 RELIEF_SHADE_PAINTER = "front_most_depth/v1"
 RELIEF_SHADE_BASE_MODEL = "revolution_row_median/v1"
+#: A plan view's base.  Looking down the axis, the drawing plane is the
+#: artifact's own x-y, so a pixel's distance from the centre is its radius
+#: on the artifact and a body of revolution has one height on each ring.
+#: The base is that ring's median height, and the relief is how far the
+#: surface stands above it - which is what a rubbing of a lid's top reads.
+RELIEF_SHADE_RING_BASE_MODEL = "revolution_ring_median/v1"
 #: How far round the wall a view pixel is, is measured against the
 #: silhouette on its own side of the row, not the row's median radius: a
 #: warped vessel stands past its median on the wide side, and measuring
@@ -73,8 +79,11 @@ RELIEF_SHADE_SILHOUETTE = "each_side_of_row/v1"
 RELIEF_SHADE_LIGHT_MODEL = "lambert_height_field/v1"
 RELIEF_SHADE_FORESHORTENING = "arc_cos_corrected/v1"
 #: The base is a surface of revolution about the canonical axis, which the
-#: four side views hold as their v axis; a plan view has no such base.
+#: four side views hold as their v axis.  A plan view holds it as its
+#: normal instead, so its base is read by ring rather than by row, and it
+#: is a domain of its own.
 RELIEF_SHADE_VIEWS: tuple[str, ...] = ("front", "back", "left", "right")
+RELIEF_SHADE_PLAN_VIEWS: tuple[str, ...] = ("top", "bottom")
 #: Where the shade is read.  A side view shows the petals a viewer sees,
 #: three or four of them, foreshortened towards the silhouette; the axis
 #: development unrolls the wall about its axis so every petal round the
@@ -85,7 +94,17 @@ RELIEF_SHADE_VIEWS: tuple[str, ...] = ("front", "back", "left", "right")
 #: and the relief is the radius above that profile.
 RELIEF_SHADE_DOMAIN_VIEW = "view/v1"
 RELIEF_SHADE_DOMAIN_DEVELOPMENT = "axis_development/v1"
-RELIEF_SHADE_DOMAINS: tuple[str, ...] = (RELIEF_SHADE_DOMAIN_VIEW, RELIEF_SHADE_DOMAIN_DEVELOPMENT)
+#: A lid is drawn plan over elevation and its top is rubbed there, the
+#: knob left out - the drafter's rule for a lid.  The plan domain reads
+#: that top: the plan view's own millimetres, the artifact's own profile
+#: read ring by ring as the base, and a ring window that takes the knob
+#: out and stops before the edge turns down.
+RELIEF_SHADE_DOMAIN_PLAN = "axis_plan/v1"
+RELIEF_SHADE_DOMAINS: tuple[str, ...] = (
+    RELIEF_SHADE_DOMAIN_VIEW,
+    RELIEF_SHADE_DOMAIN_DEVELOPMENT,
+    RELIEF_SHADE_DOMAIN_PLAN,
+)
 RELIEF_SHADE_DEVELOPMENT_LABEL = "development"
 RELIEF_SHADE_DEVELOPMENT_SPACE = "axis_development_mm/v1"
 RELIEF_SHADE_DEVELOPMENT_DIRECTION = "counterclockwise_from_seam/v1"
@@ -176,11 +195,11 @@ def _sha256(value: object, *, name: str) -> str:
     return value
 
 
-def _view_name(view: object) -> str:
+def _view_name(view: object, *, allowed: tuple[str, ...] = RELIEF_SHADE_VIEWS) -> str:
     name = view.value if isinstance(view, OutlineView) else view
-    if not isinstance(name, str) or name not in RELIEF_SHADE_VIEWS:
+    if not isinstance(name, str) or name not in allowed:
         raise ArtifactReliefShadeError(
-            f"relief shade view must be one of {', '.join(RELIEF_SHADE_VIEWS)}; got {name!r}"
+            f"relief shade view must be one of {', '.join(allowed)}; got {name!r}"
         )
     return name
 
@@ -191,7 +210,7 @@ def _space_label(value: object) -> str:
     name = value.value if isinstance(value, OutlineView) else value
     if isinstance(name, str) and name == RELIEF_SHADE_DEVELOPMENT_LABEL:
         return name
-    return _view_name(name)
+    return _view_name(name, allowed=RELIEF_SHADE_VIEWS + RELIEF_SHADE_PLAN_VIEWS)
 
 
 def _coordinate_space(label: str) -> str:
@@ -417,6 +436,7 @@ def relief_shade_recipe(
     cavity_gain_thousandths: int = DEFAULT_RELIEF_SHADE_CAVITY_GAIN_THOUSANDTHS,
     edge_erosion_pixels: int = DEFAULT_RELIEF_SHADE_EDGE_EROSION_PIXELS,
     window_mm: Sequence[float] | None = None,
+    ring_window_mm: Sequence[float] | None = None,
 ) -> dict[str, Any]:
     """The recipe: where the shade is read and every number that decides a pixel.
 
@@ -433,6 +453,30 @@ def relief_shade_recipe(
 
     if domain not in RELIEF_SHADE_DOMAINS:
         raise ArtifactReliefShadeError(f"domain must be one of {', '.join(RELIEF_SHADE_DOMAINS)}; got {domain!r}")
+    on_plan = domain == RELIEF_SHADE_DOMAIN_PLAN
+    if ring_window_mm is not None and not on_plan:
+        raise ArtifactReliefShadeError(
+            "a ring window is a band of radius about the axis, which only a plan view has; "
+            "use window_mm in a view or on the development"
+        )
+    plan: dict[str, Any] | None = None
+    if on_plan:
+        inner_um, outer_um = 0, 0
+        if ring_window_mm is not None:
+            values = list(ring_window_mm)
+            if len(values) != 2 or any(
+                isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0.0
+                for v in values
+            ):
+                raise ArtifactReliefShadeError("ring_window_mm must be (inner, outer) finite millimetres, not negative")
+            inner_um, outer_um = (int(round(float(v) * 1000.0)) for v in values)
+            if outer_um and outer_um <= inner_um:
+                raise ArtifactReliefShadeError("ring_window_mm's outer radius must be beyond its inner one")
+        plan = {
+            "model": RELIEF_SHADE_RING_BASE_MODEL,
+            "ring_inner_um": _strict_int(inner_um, name="ring_window inner", minimum=0, maximum=10**9),
+            "ring_outer_um": _strict_int(outer_um, name="ring_window outer", minimum=0, maximum=10**9),
+        }
     development: dict[str, Any] | None = None
     if domain == RELIEF_SHADE_DOMAIN_DEVELOPMENT:
         if view is not None:
@@ -479,6 +523,7 @@ def relief_shade_recipe(
         },
         "coordinate_space": _coordinate_space(RELIEF_SHADE_DEVELOPMENT_LABEL if development else "front"),
         "development_policy": development,
+        "plan_policy": plan,
         "domain": domain,
         "kind": RELIEF_SHADE_OPERATION_KIND,
         "raster_policy": {
@@ -505,7 +550,9 @@ def relief_shade_recipe(
         },
         "source_face_count": _strict_int(source_face_count, name="source_face_count", minimum=1, maximum=10**9),
         "source_vertex_count": _strict_int(source_vertex_count, name="source_vertex_count", minimum=3, maximum=10**9),
-        "view": None if development else _view_name(view),
+        "view": None
+        if development
+        else _view_name(view, allowed=RELIEF_SHADE_PLAN_VIEWS if on_plan else RELIEF_SHADE_VIEWS),
         "window": window,
     }
 
@@ -519,6 +566,7 @@ _RECIPE_KEYS = frozenset(
         "development_policy",
         "domain",
         "kind",
+        "plan_policy",
         "raster_policy",
         "relief_policy",
         "shade_policy",
@@ -538,6 +586,25 @@ def validate_relief_shade_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
         raise ArtifactReliefShadeError("relief shade recipe names another algorithm")
     if block["kind"] != RELIEF_SHADE_OPERATION_KIND or block["domain"] not in RELIEF_SHADE_DOMAINS:
         raise ArtifactReliefShadeError("relief shade recipe names another kind or domain")
+    plan = block["plan_policy"]
+    plan_kwargs: dict[str, Any] = {}
+    if plan is not None:
+        if block["domain"] != RELIEF_SHADE_DOMAIN_PLAN:
+            raise ArtifactReliefShadeError("only a plan shade carries a plan policy")
+        checked_plan = _exact_keys(
+            plan, frozenset({"model", "ring_inner_um", "ring_outer_um"}), name="plan_policy"
+        )
+        if checked_plan["model"] != RELIEF_SHADE_RING_BASE_MODEL:
+            raise ArtifactReliefShadeError("relief shade recipe names a plan base this release does not have")
+        if checked_plan["ring_inner_um"] or checked_plan["ring_outer_um"]:
+            plan_kwargs = {
+                "ring_window_mm": (
+                    checked_plan["ring_inner_um"] / 1000.0,
+                    checked_plan["ring_outer_um"] / 1000.0,
+                )
+            }
+    elif block["domain"] == RELIEF_SHADE_DOMAIN_PLAN:
+        raise ArtifactReliefShadeError("a plan shade needs its plan policy")
     development = block["development_policy"]
     dev_kwargs: dict[str, Any] = {}
     if development is not None:
@@ -587,6 +654,7 @@ def validate_relief_shade_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
         view=block["view"],
         domain=block["domain"],
         **dev_kwargs,
+        **plan_kwargs,
         source_vertex_count=block["source_vertex_count"],
         source_face_count=block["source_face_count"],
         pixels_per_mm=raster["pixels_per_mm"],
@@ -819,8 +887,10 @@ def extract_relief_shade(
     base_policy = validated["base_policy"]
     pixels_per_mm = int(raster_policy["pixels_per_mm"])
     on_development = validated["domain"] == RELIEF_SHADE_DOMAIN_DEVELOPMENT
+    on_plan = validated["domain"] == RELIEF_SHADE_DOMAIN_PLAN
     smoothing_pixels = base_policy["row_smoothing_um"] / 1000.0 * pixels_per_mm
     profile: tuple[np.ndarray, np.ndarray, float, np.ndarray] | None = None
+    plan_rings: tuple[np.ndarray, np.ndarray] | None = None
     if on_development:
         depth, minimum_u, minimum_v, raster_qc, visible_count, profile = _development_depth_field(
             vertices, triangles, validated, cancellation_probe=cancellation_probe
@@ -850,6 +920,50 @@ def extract_relief_shade(
         relief = np.where(covered, depth, 0.0) - row_radius[:, None]
         ok = covered & (np.abs(relief) <= base_policy["outlier_um"] / 1000.0)
         cos_round = None
+    elif on_plan:
+        covered = np.isfinite(depth)
+        if not covered.any():
+            raise ArtifactReliefShadeError("the plan view sees no surface; nothing to shade")
+        # Looking down the axis, the drawing plane is the artifact's own
+        # x-y, so a pixel's distance from the centre is its radius on the
+        # artifact.  A body of revolution has one height on each ring, and
+        # that ring's median is the base the relief stands on.
+        radius = np.hypot(xs[None, :], rows_mm[:, None])
+        rings = np.minimum(
+            (radius * pixels_per_mm).astype(np.int64),
+            int(math.ceil(float(radius.max()) * pixels_per_mm)),
+        )
+        ring_count = int(rings.max()) + 1
+        base_ring = np.full(ring_count, np.nan)
+        flat_rings = rings[covered]
+        flat_depth = depth[covered]
+        order = np.argsort(flat_rings, kind="stable")
+        sorted_rings = flat_rings[order]
+        sorted_depth = flat_depth[order]
+        edges = np.searchsorted(sorted_rings, np.arange(ring_count + 1))
+        for ring in range(ring_count):
+            lo, hi = int(edges[ring]), int(edges[ring + 1])
+            if hi > lo:
+                base_ring[ring] = np.median(sorted_depth[lo:hi])
+        known = np.isfinite(base_ring)
+        if not known.any():
+            raise ArtifactReliefShadeError("no ring of the plan view carries a surface to read a base from")
+        indices = np.arange(ring_count, dtype=np.float64)
+        base_ring = np.interp(indices, indices[known], base_ring[known])
+        if smoothing_pixels > 0.0:
+            base_ring = gaussian_filter1d(base_ring, smoothing_pixels)
+        # A pixel nearer the viewer than its ring stands proud of the wall.
+        relief = np.where(covered, base_ring[rings] - depth, 0.0)
+        ok = covered & (np.abs(relief) <= base_policy["outlier_um"] / 1000.0)
+        plan_policy = validated["plan_policy"]
+        inner_mm = plan_policy["ring_inner_um"] / 1000.0
+        outer_mm = plan_policy["ring_outer_um"] / 1000.0
+        if inner_mm > 0.0:
+            ok &= radius >= inner_mm
+        if outer_mm > 0.0:
+            ok &= radius <= outer_mm
+        cos_round = None
+        plan_rings = (indices / pixels_per_mm, base_ring)
     else:
         covered = np.isfinite(depth) & (depth > 0.0)
         if not covered.any():
@@ -988,8 +1102,24 @@ def extract_relief_shade(
     percentiles = np.percentile(filtered[ok], [5, 50, 95])
     qc = {
         **raster.qc_summary(),
-        "base_radius_max_um": int(round(float(row_radius.max()) * 1000.0)),
-        "base_radius_min_um": int(round(float(row_radius.min()) * 1000.0)),
+        # A plan view's base is a height on each ring, not a radius on each
+        # row, so it is reported under its own keys below.
+        **(
+            {}
+            if plan_rings is None
+            else {
+                "base_height_max_um": int(round(float(plan_rings[1].max()) * 1000.0)),
+                "base_height_min_um": int(round(float(plan_rings[1].min()) * 1000.0)),
+            }
+        ),
+        **(
+            {}
+            if plan_rings is not None
+            else {
+                "base_radius_max_um": int(round(float(row_radius.max()) * 1000.0)),
+                "base_radius_min_um": int(round(float(row_radius.min()) * 1000.0)),
+            }
+        ),
         "covered_pixel_count": int(raster_qc["covered_pixel_count"]),
         "domain": validated["domain"],
         "relief_max_um": int(round(float(filtered[ok].max()) * 1000.0)),
@@ -1001,6 +1131,20 @@ def extract_relief_shade(
         "view": validated["view"],
         "visible_face_count": visible_count,
     }
+    if plan_rings is not None:
+        ring_radius, ring_base = plan_rings
+        plan_policy = validated["plan_policy"]
+        qc["plan_ring_inner_um"] = int(plan_policy["ring_inner_um"])
+        qc["plan_ring_outer_um"] = int(plan_policy["ring_outer_um"])
+        # What the relief was read against: the artifact's own profile, the
+        # height of each ring, over the band the shade covers.  Evenly
+        # spaced so a reader can see the surface it stands on without the
+        # raster.
+        stations = np.linspace(0.0, float(ring_radius[-1]), RELIEF_SHADE_DEVELOPMENT_PROFILE_BANDS + 1)
+        qc["plan_ring_radius_um"] = [int(round(float(value) * 1000.0)) for value in stations]
+        qc["plan_ring_base_um"] = [
+            int(round(float(value) * 1000.0)) for value in np.interp(stations, ring_radius, ring_base)
+        ]
     if profile is not None:
         heights, arc, reference_radius, radii = profile
         qc["development_arc_um"] = int(round(float(arc[-1]) * 1000.0))
@@ -1189,6 +1333,8 @@ __all__ = [
     "RELIEF_SHADE_PAYLOAD_EXTENSION_KEY",
     "RELIEF_SHADE_PIXEL_FORMAT",
     "RELIEF_SHADE_RECORD_TYPE",
+    "RELIEF_SHADE_DOMAIN_PLAN",
+    "RELIEF_SHADE_PLAN_VIEWS",
     "RELIEF_SHADE_VIEWS",
     "ReliefShadeComputation",
     "ReliefShadeRaster",

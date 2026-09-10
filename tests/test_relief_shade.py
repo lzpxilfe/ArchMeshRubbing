@@ -78,7 +78,8 @@ def test_the_shade_falls_on_the_side_of_the_petal_that_turns_from_the_light(peta
     """Lit from the upper left, the petal's right flank and its lower slope
     are in shade and its left flank is not; the smooth wall around it is
     not shaded at all.  The recipe rebuilds to its own bytes, a plan view
-    has no base to read the relief against, and a window that sees no
+    is not one of the side views a view shade is read in - it is read
+    looking down the axis, in its own domain - and a window that sees no
     relief is refused rather than shading nothing."""
 
     computation = compute_relief_shade(petalled, view="front")
@@ -292,6 +293,44 @@ def test_the_wall_unrolled_puts_every_petal_on_one_strip(petalled) -> None:
             options=DrawingSheetOptions(title_block=title, page=page, scale_denominator=2.0),
             rasters={"record:shade": view_shade.raster},
         )
+
+
+def test_a_lid_is_read_looking_down_its_axis(petalled) -> None:
+    """A lid is drawn plan over elevation and its top is rubbed there, the
+    knob left out.  Looking down the axis the drawing plane is the
+    artifact's own x-y, so a pixel's distance from the centre is its radius
+    and a body of revolution has one height on each ring: that ring's
+    median is the base, and what stands above it is the relief.  The ring
+    window is the scissors round the knob."""
+
+    plan = compute_relief_shade(petalled, domain="axis_plan/v1", view="top")
+    assert validate_relief_shade_recipe(plan.recipe) == plan.recipe
+    assert plan.raster.view == "top" and not plan.raster.is_development
+    assert plan.qc["domain"] == "axis_plan/v1"
+    # The base is a height on each ring, not a radius on each row.
+    assert "base_height_min_um" in plan.qc and "base_radius_min_um" not in plan.qc
+    radii = plan.qc["plan_ring_radius_um"]
+    base = plan.qc["plan_ring_base_um"]
+    assert len(radii) == len(base) >= 2 and radii == sorted(radii)
+
+    # A ring window takes the middle out and stops short of the edge, and
+    # what it leaves is a band of the disc, not the whole of it.
+    outer = max(radii) / 1000.0
+    banded = compute_relief_shade(
+        petalled, domain="axis_plan/v1", view="top", ring_window_mm=(0.5 * outer, 0.9 * outer)
+    )
+    assert banded.qc["shaded_pixel_count"] < plan.qc["shaded_pixel_count"]
+    assert banded.qc["plan_ring_inner_um"] == int(round(0.5 * outer * 1000.0))
+
+    # A plan view is not a side view and does not pretend to be one.
+    with pytest.raises(ArtifactReliefShadeError, match="relief shade view must be one of"):
+        compute_relief_shade(petalled, domain="axis_plan/v1", view="front")
+    with pytest.raises(ArtifactReliefShadeError, match="relief shade view must be one of"):
+        compute_relief_shade(petalled, view="top")
+    with pytest.raises(ArtifactReliefShadeError, match="only a plan view has"):
+        compute_relief_shade(petalled, view="front", ring_window_mm=(1.0, 2.0))
+    with pytest.raises(ArtifactReliefShadeError, match="outer radius must be beyond"):
+        compute_relief_shade(petalled, domain="axis_plan/v1", view="top", ring_window_mm=(9.0, 9.0))
 
 
 def test_the_strip_takes_the_band_the_drafter_asks_for(petalled) -> None:
