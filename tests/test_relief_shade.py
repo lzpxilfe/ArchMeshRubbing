@@ -333,6 +333,32 @@ def test_a_lid_is_read_looking_down_its_axis(petalled) -> None:
         compute_relief_shade(petalled, domain="axis_plan/v1", view="top", ring_window_mm=(9.0, 9.0))
 
 
+def test_a_rubbing_inks_what_the_paper_touched_not_what_the_light_finds(petalled) -> None:
+    """탁본의 농담.  A light says which way a slope faces, so a stamped mark
+    shows the one flank that turns from it and the other stays blank.  A
+    rubbing says what the paper lay on: the paper bridges what is narrower
+    than itself, the dabber inks whatever it touches, and the ink falls
+    away with how far the surface sits below it.  The mark then reads
+    whole - the ground dark, the impression pale."""
+
+    lit = compute_relief_shade(petalled, view="front")
+    inked = compute_relief_shade(petalled, view="front", shade_model="contact_envelope_ink/v1")
+    assert validate_relief_shade_recipe(inked.recipe) == inked.recipe
+    assert inked.recipe["shade_policy"]["model"] == "contact_envelope_ink/v1"
+    assert inked.recipe["shade_policy"]["paper_um"] == 700
+    # The paper lies on the wall around the petal and inks it; the light
+    # leaves that flat wall blank and darkens only the petal's far flank.
+    assert inked.qc["darkness_mean_thousandths"] > 3 * lit.qc["darkness_mean_thousandths"]
+    assert inked.qc["shaded_pixel_count"] > lit.qc["shaded_pixel_count"]
+    # Where the wall stands proud of its neighbours the paper touches it,
+    # so the petal's own back is inked rather than left white.
+    darkness = inked.raster.darkness.astype(np.float64)
+    assert darkness.max() > 100
+
+    with pytest.raises(ArtifactReliefShadeError, match="shade_model must be one of"):
+        compute_relief_shade(petalled, view="front", shade_model="lambert/v9")
+
+
 def test_the_strip_takes_the_band_the_drafter_asks_for(petalled) -> None:
     """A window on a development is given in heights on the artifact, not
     in rows of the strip: the drafter says the motif runs from here to

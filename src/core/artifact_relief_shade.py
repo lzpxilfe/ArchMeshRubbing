@@ -77,6 +77,21 @@ RELIEF_SHADE_RING_BASE_MODEL = "revolution_ring_median/v1"
 #: there against the median cut the whole outer band off as grazing.
 RELIEF_SHADE_SILHOUETTE = "each_side_of_row/v1"
 RELIEF_SHADE_LIGHT_MODEL = "lambert_height_field/v1"
+#: 탁본의 농담.  The other way to turn a relief into ink, and the one a
+#: rubbing actually uses: the paper is pressed onto the surface, the dabber
+#: inks whatever the paper lies on, and the ink falls away with how far the
+#: surface sits below it.  A light says which way a slope faces, so a
+#: stamped mark shows one flank; contact says what the paper touched, so
+#: the whole mark reads - the ground dark, the impression pale.  The
+#: numbers are the rubbing extractor's, measured on the corded and grooved
+#: profile: the paper bridges 0.7 mm, the ink is gone 0.12 mm below it,
+#: and 70% contact ink leaves a plain wall dark grey with the relief still
+#: readable inside it.
+RELIEF_SHADE_CONTACT_MODEL = "contact_envelope_ink/v1"
+RELIEF_SHADE_SHADE_MODELS: tuple[str, ...] = (RELIEF_SHADE_LIGHT_MODEL, RELIEF_SHADE_CONTACT_MODEL)
+DEFAULT_RELIEF_SHADE_PAPER_UM = 700
+DEFAULT_RELIEF_SHADE_BLACK_POINT_UM = 120
+DEFAULT_RELIEF_SHADE_CONTACT_INK_THOUSANDTHS = 700
 RELIEF_SHADE_FORESHORTENING = "arc_cos_corrected/v1"
 #: The base is a surface of revolution about the canonical axis, which the
 #: four side views hold as their v axis.  A plan view holds it as its
@@ -211,6 +226,14 @@ def _space_label(value: object) -> str:
     if isinstance(name, str) and name == RELIEF_SHADE_DEVELOPMENT_LABEL:
         return name
     return _view_name(name, allowed=RELIEF_SHADE_VIEWS + RELIEF_SHADE_PLAN_VIEWS)
+
+
+def _shade_model(name: object) -> str:
+    if not isinstance(name, str) or name not in RELIEF_SHADE_SHADE_MODELS:
+        raise ArtifactReliefShadeError(
+            f"shade_model must be one of {', '.join(RELIEF_SHADE_SHADE_MODELS)}; got {name!r}"
+        )
+    return name
 
 
 def _coordinate_space(label: str) -> str:
@@ -437,6 +460,10 @@ def relief_shade_recipe(
     edge_erosion_pixels: int = DEFAULT_RELIEF_SHADE_EDGE_EROSION_PIXELS,
     window_mm: Sequence[float] | None = None,
     ring_window_mm: Sequence[float] | None = None,
+    shade_model: str = RELIEF_SHADE_LIGHT_MODEL,
+    paper_um: int = DEFAULT_RELIEF_SHADE_PAPER_UM,
+    black_point_um: int = DEFAULT_RELIEF_SHADE_BLACK_POINT_UM,
+    contact_ink_thousandths: int = DEFAULT_RELIEF_SHADE_CONTACT_INK_THOUSANDTHS,
 ) -> dict[str, Any]:
     """The recipe: where the shade is read and every number that decides a pixel.
 
@@ -539,6 +566,11 @@ def relief_shade_recipe(
         },
         "relief_policy": {"grain_um": grain, "slow_blend_um": slow_blend, "slow_um": slow},
         "shade_policy": {
+            "black_point_um": _strict_int(black_point_um, name="black_point_um", minimum=1, maximum=100_000),
+            "contact_ink_thousandths": _strict_int(
+                contact_ink_thousandths, name="contact_ink_thousandths", minimum=1, maximum=1000
+            ),
+            "paper_um": _strict_int(paper_um, name="paper_um", minimum=0, maximum=100_000),
             "cavity_gain_thousandths": _strict_int(cavity_gain_thousandths, name="cavity_gain_thousandths", minimum=0, maximum=100_000),
             "cavity_um": _strict_int(cavity_um, name="cavity_um", minimum=0, maximum=100_000),
             "edge_erosion_pixels": _strict_int(edge_erosion_pixels, name="edge_erosion_pixels", minimum=0, maximum=100),
@@ -546,7 +578,7 @@ def relief_shade_recipe(
             "foreshortening": RELIEF_SHADE_FORESHORTENING,
             "gain_thousandths": _strict_int(gain_thousandths, name="gain_thousandths", minimum=1, maximum=100_000),
             "light_thousandths": _light_block(light_thousandths),
-            "model": RELIEF_SHADE_LIGHT_MODEL,
+            "model": _shade_model(shade_model),
         },
         "source_face_count": _strict_int(source_face_count, name="source_face_count", minimum=1, maximum=10**9),
         "source_vertex_count": _strict_int(source_vertex_count, name="source_vertex_count", minimum=3, maximum=10**9),
@@ -635,10 +667,10 @@ def validate_relief_shade_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
     relief = _exact_keys(block["relief_policy"], frozenset({"grain_um", "slow_blend_um", "slow_um"}), name="relief_policy")
     shade = _exact_keys(
         block["shade_policy"],
-        frozenset({"cavity_gain_thousandths", "cavity_um", "edge_erosion_pixels", "floor_thousandths", "foreshortening", "gain_thousandths", "light_thousandths", "model"}),
+        frozenset({"black_point_um", "cavity_gain_thousandths", "cavity_um", "contact_ink_thousandths", "edge_erosion_pixels", "floor_thousandths", "foreshortening", "gain_thousandths", "light_thousandths", "model", "paper_um"}),
         name="shade_policy",
     )
-    if shade["model"] != RELIEF_SHADE_LIGHT_MODEL or shade["foreshortening"] != RELIEF_SHADE_FORESHORTENING:
+    if shade["model"] not in RELIEF_SHADE_SHADE_MODELS or shade["foreshortening"] != RELIEF_SHADE_FORESHORTENING:
         raise ArtifactReliefShadeError("relief shade recipe names a light this release does not have")
     raw_window = block["window"]
     window_mm: list[float] | None = None
@@ -670,6 +702,10 @@ def validate_relief_shade_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
         light_thousandths=light,
         gain_thousandths=shade["gain_thousandths"],
         floor_thousandths=shade["floor_thousandths"],
+        shade_model=shade["model"],
+        paper_um=shade["paper_um"],
+        black_point_um=shade["black_point_um"],
+        contact_ink_thousandths=shade["contact_ink_thousandths"],
         cavity_um=shade["cavity_um"],
         cavity_gain_thousandths=shade["cavity_gain_thousandths"],
         edge_erosion_pixels=shade["edge_erosion_pixels"],
@@ -1039,30 +1075,60 @@ def extract_relief_shade(
         # across the shade; the wall's slow level does not step between
         # one row and the next, so it is blended a little up and down.
         slow = _blend_rows(np.asarray(slow), ok.any(axis=1), relief_policy["slow_blend_um"] / 1000.0 * pixels_per_mm)
+    if on_plan and relief_policy["slow_um"] > 0:
+        # A disc has no rows.  The slow level a plan view has to take out is
+        # the vessel's warp - one side standing proud of the other - which
+        # runs round the axis, not across the view, and a median along x
+        # prints as vertical streaks through the middle.  It is read as a
+        # wide blur over the disc instead, far wider than any stamp.
+        slow = _masked_blur(relief, ok, relief_policy["slow_um"] / 2000.0 * pixels_per_mm)
     filtered = np.where(ok, grain - slow, 0.0)
     raise_if_cancelled(cancellation_probe)
 
-    # The light on a height field whose normal is (-dh/dx, -dh/dy, 1).
     shade_policy = validated["shade_policy"]
-    gradient_x = np.zeros_like(filtered)
-    gradient_y = np.zeros_like(filtered)
-    gradient_x[:, 1:-1] = (filtered[:, 2:] - filtered[:, :-2]) * pixels_per_mm / 2.0
-    gradient_y[1:-1, :] = (filtered[2:, :] - filtered[:-2, :]) * pixels_per_mm / 2.0
-    if cos_round is not None:
-        gradient_x *= cos_round
-    normal_x, normal_y, normal_z = -gradient_x, -gradient_y, np.ones_like(filtered)
-    norm = np.sqrt(normal_x**2 + normal_y**2 + 1.0)
-    light = np.asarray(shade_policy["light_thousandths"], dtype=np.float64) / 1000.0
-    light /= np.linalg.norm(light)
-    lit = (normal_x * light[0] + normal_y * light[1] + normal_z * light[2]) / norm
-    flat = light[2]
-    gain = shade_policy["gain_thousandths"] / 1000.0
-    darkness = np.clip((flat - lit) / flat * gain, 0.0, 1.0)
-    cavity = shade_policy["cavity_um"] / 1000.0
-    if cavity > 0.0:
-        # The ground between the motifs, in their shadow: darker the deeper.
-        hollow = np.clip(-filtered / cavity, 0.0, 1.0) * (shade_policy["cavity_gain_thousandths"] / 1000.0)
-        darkness = np.clip(darkness + hollow, 0.0, 1.0)
+    if shade_policy["model"] == RELIEF_SHADE_CONTACT_MODEL:
+        # 탁본: the paper is pressed on and inked where it lies on the
+        # surface.  The paper bridges what is narrower than itself, so what
+        # it rests on is the relief's own upper envelope over that width;
+        # the ink falls away with how far the surface sits below it and is
+        # gone at the black point.  A stamped mark then reads whole - the
+        # ground dark, the impression pale - where a light would show only
+        # the flank that turns from it.
+        from scipy.ndimage import maximum_filter  # noqa: PLC0415
+
+        paper_pixels = int(round(shade_policy["paper_um"] / 1000.0 * pixels_per_mm))
+        surface = np.where(ok, filtered, -np.inf)
+        paper = (
+            maximum_filter(surface, size=2 * paper_pixels + 1, mode="nearest")
+            if paper_pixels > 0
+            else surface
+        )
+        below = np.where(ok, np.maximum(paper - filtered, 0.0), 0.0)
+        ink = shade_policy["contact_ink_thousandths"] / 1000.0
+        darkness = np.where(
+            ok, ink * np.clip(1.0 - below / (shade_policy["black_point_um"] / 1000.0), 0.0, 1.0), 0.0
+        )
+    else:
+        # The light on a height field whose normal is (-dh/dx, -dh/dy, 1).
+        gradient_x = np.zeros_like(filtered)
+        gradient_y = np.zeros_like(filtered)
+        gradient_x[:, 1:-1] = (filtered[:, 2:] - filtered[:, :-2]) * pixels_per_mm / 2.0
+        gradient_y[1:-1, :] = (filtered[2:, :] - filtered[:-2, :]) * pixels_per_mm / 2.0
+        if cos_round is not None:
+            gradient_x *= cos_round
+        normal_x, normal_y, normal_z = -gradient_x, -gradient_y, np.ones_like(filtered)
+        norm = np.sqrt(normal_x**2 + normal_y**2 + 1.0)
+        light = np.asarray(shade_policy["light_thousandths"], dtype=np.float64) / 1000.0
+        light /= np.linalg.norm(light)
+        lit = (normal_x * light[0] + normal_y * light[1] + normal_z * light[2]) / norm
+        flat = light[2]
+        gain = shade_policy["gain_thousandths"] / 1000.0
+        darkness = np.clip((flat - lit) / flat * gain, 0.0, 1.0)
+        cavity = shade_policy["cavity_um"] / 1000.0
+        if cavity > 0.0:
+            # The ground between the motifs, in their shadow: darker the deeper.
+            hollow = np.clip(-filtered / cavity, 0.0, 1.0) * (shade_policy["cavity_gain_thousandths"] / 1000.0)
+            darkness = np.clip(darkness + hollow, 0.0, 1.0)
     darkness = np.where(darkness >= shade_policy["floor_thousandths"] / 1000.0, darkness, 0.0)
     # The blur that took out the grain leans on nothing past the covered
     # edge, and a slope appears there that the wall does not have: no pixel
@@ -1333,6 +1399,7 @@ __all__ = [
     "RELIEF_SHADE_PAYLOAD_EXTENSION_KEY",
     "RELIEF_SHADE_PIXEL_FORMAT",
     "RELIEF_SHADE_RECORD_TYPE",
+    "RELIEF_SHADE_CONTACT_MODEL",
     "RELIEF_SHADE_DOMAIN_PLAN",
     "RELIEF_SHADE_PLAN_VIEWS",
     "RELIEF_SHADE_VIEWS",
