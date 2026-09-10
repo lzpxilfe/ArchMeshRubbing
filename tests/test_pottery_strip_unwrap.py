@@ -20,6 +20,7 @@ from src.application.artifact_measurements import (
 from src.application.artifact_workbench import ArtifactWorkbench
 from src.core.artifact_record_validation import validate_known_records
 from src.core.artifact_tile_unwrap_export import (
+    TILE_UNWRAP_EXPORT_SCHEMA_VERSION,
     build_tile_unwrap_export,
     validate_tile_unwrap_export_bytes,
 )
@@ -160,8 +161,8 @@ def test_one_steep_face_is_reported_on_the_measured_axis_and_refused_on_a_fit() 
     their unrolled shadow.  Under a fitted centre one such face would mean a
     centre in the wrong place, and the gate refuses; about the measured axis
     it is a grain, the record says how steep, and the strip still develops,
-    commits, validates and exports - as a 1.4 sidecar, the first that can
-    carry it.
+    commits, validates and exports.  1.4 was the first sidecar that could
+    carry it; the writer's current one still can.
     """
 
     session, vertices, faces = positioned_vessel_session(
@@ -203,7 +204,11 @@ def test_one_steep_face_is_reported_on_the_measured_axis_and_refused_on_a_fit() 
         bundle.sidecar_bytes,
         document=committed.document,
     )
-    assert sidecar["schema_version"] == "1.5.0"
+    # Which sidecar first carried this face is settled in the export tests,
+    # version by version.  What this test is about is that the writer's own
+    # sidecar carries it, so it asks the writer rather than a literal that
+    # goes stale on the next bound to be lifted.
+    assert sidecar["schema_version"] == TILE_UNWRAP_EXPORT_SCHEMA_VERSION
     assert sidecar["qc"]["record"]["distortion_max_millionths"] > 250_000
 
     # The same grain under the tile's fitted centre is a failed fit.  The

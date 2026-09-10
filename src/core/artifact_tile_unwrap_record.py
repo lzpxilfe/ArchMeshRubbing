@@ -46,6 +46,12 @@ TILE_UNWRAP_DISTORTION_FACE_MAX_MILLIONTHS = 250_000
 TILE_UNWRAP_DISTORTION_MEAN_MAX_MILLIONTHS = 75_000
 TILE_UNWRAP_DISTORTION_P95_MAX_MILLIONTHS = 150_000
 
+#: Narrowest mean section arc a fitted-centre record may carry.  Three points
+#: spread over less than this do not pin a circle, so the fit they produce is
+#: not worth storing.  About the measured axis nothing is fitted and the floor
+#: does not apply.
+TILE_UNWRAP_FITTED_SECTION_MIN_SPAN_MICRODEGREES = 20_000_000
+
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _QC_FIELDS = {
     "boundary_loop_count",
@@ -458,10 +464,20 @@ def _validate_qc_against_receipt(
         minimum=1,
         maximum=MAX_TILE_UNWRAP_COORDINATE_UM,
     )
+    # The 20° floor is the circle fit's, not the development's: an arc that
+    # narrow does not pin a centre, so a fitted section computed from one is
+    # not worth storing.  Unrolled about the measured axis there is no fit to
+    # protect, and the extractor says so in as many words - which left this
+    # check refusing to store a computation the extractor had deliberately
+    # allowed.  A rubbing taken in several sheets is exactly that case: on a
+    # pot 136 mm in radius, 20° is 48 mm of paper, and the sheets that get
+    # past a hole in the scan are narrower than that.
     _strict_int(
         value["section_mean_span_microdegrees"],
         name="qc.section_mean_span_microdegrees",
-        minimum=20_000_000,
+        minimum=(
+            1 if axis_centred else TILE_UNWRAP_FITTED_SECTION_MIN_SPAN_MICRODEGREES
+        ),
         maximum=360_000_000,
     )
     row_shift_applied = value["section_row_shift_applied"]

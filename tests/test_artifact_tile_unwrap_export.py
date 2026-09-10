@@ -474,7 +474,8 @@ def test_generated_sidecar_matches_closed_public_json_schema() -> None:
         assert isinstance(value, dict)
         return value
 
-    export_schema = load_schema("tile_unwrap_export-1.5.0.schema.json")
+    export_schema = load_schema("tile_unwrap_export-1.6.0.schema.json")
+    v15_export_schema = load_schema("tile_unwrap_export-1.5.0.schema.json")
     v14_export_schema = load_schema("tile_unwrap_export-1.4.0.schema.json")
     v13_export_schema = load_schema("tile_unwrap_export-1.3.0.schema.json")
     v12_export_schema = load_schema("tile_unwrap_export-1.2.0.schema.json")
@@ -487,6 +488,7 @@ def test_generated_sidecar_matches_closed_public_json_schema() -> None:
     import_recipe_v2_schema = load_schema("mesh_import_recipe-2.0.0.schema.json")
     for schema in (
         export_schema,
+        v15_export_schema,
         v14_export_schema,
         v13_export_schema,
         v12_export_schema,
@@ -536,6 +538,10 @@ def test_generated_sidecar_matches_closed_public_json_schema() -> None:
         v14_export_schema,
         registry=registry,
     )
+    v15_validator = jsonschema.Draft202012Validator(
+        v15_export_schema,
+        registry=registry,
+    )
     session, computation = _recorded()
     bundle = build_tile_unwrap_export(
         session.document,
@@ -544,7 +550,7 @@ def test_generated_sidecar_matches_closed_public_json_schema() -> None:
     )
     sidecar = json.loads(bundle.sidecar_bytes)
     assert isinstance(sidecar, dict)
-    assert sidecar["schema_version"] == "1.5.0"
+    assert sidecar["schema_version"] == "1.6.0"
     assert list(validator.iter_errors(sidecar)) == []
     # A 1.3 recipe carries the policies, which the 1.2 sidecar never knew.
     assert list(v12_validator.iter_errors(sidecar))
@@ -583,6 +589,27 @@ def test_generated_sidecar_matches_closed_public_json_schema() -> None:
     rough_fitted = copy.deepcopy(rough_on_axis)
     rough_fitted["recipe"]["section_center_policy"] = "fit_per_section"
     assert list(validator.iter_errors(rough_fitted))
+
+    # And 1.6 differs from 1.5 in the arc floor.  20° is what a circle fit
+    # needs to have a centre at all; on the measured axis nothing is fitted,
+    # and a whole turn taken in several sheets is narrower than that on every
+    # sheet.  So an axis-centred record may carry a narrow arc and a fitted
+    # one may not.
+    narrow_on_axis = copy.deepcopy(sidecar)
+    narrow_on_axis["recipe"]["section_center_policy"] = "canonical_axis_origin"
+    narrow_on_axis["qc"]["record"]["section_mean_span_microdegrees"] = 15_000_000
+    assert list(validator.iter_errors(narrow_on_axis)) == []
+    narrow_under_1_5 = copy.deepcopy(narrow_on_axis)
+    narrow_under_1_5["schema_version"] = "1.5.0"
+    assert list(v15_validator.iter_errors(narrow_under_1_5))
+    narrow_fitted = copy.deepcopy(narrow_on_axis)
+    narrow_fitted["recipe"]["section_center_policy"] = "fit_per_section"
+    assert list(validator.iter_errors(narrow_fitted))
+
+    v15_shaped = copy.deepcopy(sidecar)
+    v15_shaped["schema_version"] = "1.5.0"
+    assert list(v15_validator.iter_errors(v15_shaped)) == []
+    assert list(validator.iter_errors(v15_shaped))
 
     fixed_session, fixed_computation = _recorded(
         seam_angle_microdegrees=90_000_000
@@ -712,6 +739,10 @@ def test_experimental_legacy_schema_files_remain_byte_exact(
             "tile_unwrap_export-1.4.0.schema.json",
             "bf2ebeb5918065b29c884c582347661eb712e9a9ee60f06380e18f340f2b8509",
         ),
+        (
+            "tile_unwrap_export-1.5.0.schema.json",
+            "3dbb7be116a3fcf848f80d5e07fd09d2e487b21b57a133d7be570eb1177f7849",
+        ),
     ],
 )
 def test_published_export_schemas_remain_byte_exact(
@@ -806,6 +837,66 @@ def test_only_a_1_5_sidecar_carries_an_axis_centred_records_own_relief() -> None
             bundle.obj_bytes,
             oldest_svg,
             tile_export.canonical_json_bytes(oldest) + b"\n",
+        )
+
+
+def test_only_a_1_6_sidecar_carries_a_strip_narrower_than_the_fit_needs() -> None:
+    """A whole turn is taken in several sheets, and no sheet is 20° wide.
+
+    The 20° arc floor is the circle fit's: three points spread over less than
+    that do not pin a centre.  Unrolled about the measured axis there is no
+    centre to pin - the arc and the station both come from the axis - and the
+    extractor has always said so.  The record and every sidecar through 1.5
+    kept the floor anyway, so a strip of paper narrow enough to get past a
+    hole in a scan computed and then could not be stored.  1.6 lifts it for an
+    axis-centred record and holds it for a fitted one.
+    """
+
+    session, computation = _recorded()
+    bundle = build_tile_unwrap_export(
+        session.document,
+        "record:tile-export",
+        computation.unwrap,
+    )
+    base = json.loads(bundle.sidecar_bytes)
+    base["recipe"]["section_center_policy"] = "canonical_axis_origin"
+    base["qc"]["record"]["section_mean_span_microdegrees"] = 15_000_000
+
+    current = copy.deepcopy(base)
+    svg_bytes = _resigned(current, computation)
+    validate_tile_unwrap_export_bytes(
+        bundle.payload_bytes,
+        bundle.obj_bytes,
+        svg_bytes,
+        tile_export.canonical_json_bytes(current) + b"\n",
+    )
+
+    older = copy.deepcopy(base)
+    older["schema_version"] = "1.5.0"
+    older_svg = _resigned(older, computation)
+    with pytest.raises(
+        ArtifactTileUnwrapExportError,
+        match="before 1.6 cannot carry a section arc",
+    ):
+        validate_tile_unwrap_export_bytes(
+            bundle.payload_bytes,
+            bundle.obj_bytes,
+            older_svg,
+            tile_export.canonical_json_bytes(older) + b"\n",
+        )
+
+    fitted = copy.deepcopy(base)
+    fitted["recipe"]["section_center_policy"] = "fit_per_section"
+    fitted_svg = _resigned(fitted, computation)
+    with pytest.raises(
+        ArtifactTileUnwrapExportError,
+        match="section_mean_span_microdegrees",
+    ):
+        validate_tile_unwrap_export_bytes(
+            bundle.payload_bytes,
+            bundle.obj_bytes,
+            fitted_svg,
+            tile_export.canonical_json_bytes(fitted) + b"\n",
         )
 
 

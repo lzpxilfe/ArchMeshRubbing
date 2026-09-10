@@ -37,6 +37,7 @@ from .artifact_tile_unwrap_record import (
     TILE_UNWRAP_DISTORTION_FACE_MAX_MILLIONTHS,
     TILE_UNWRAP_DISTORTION_MEAN_MAX_MILLIONTHS,
     TILE_UNWRAP_DISTORTION_P95_MAX_MILLIONTHS,
+    TILE_UNWRAP_FITTED_SECTION_MIN_SPAN_MICRODEGREES,
     TILE_UNWRAP_RECORD_TYPE,
     ArtifactTileUnwrapRecordError,
     tile_unwrap_receipt_from_record,
@@ -60,7 +61,7 @@ from .canonical_json import (
 
 
 TILE_UNWRAP_EXPORT_FORMAT = "archmeshrubbing_tile_unwrap_export"
-TILE_UNWRAP_EXPORT_SCHEMA_VERSION = "1.5.0"
+TILE_UNWRAP_EXPORT_SCHEMA_VERSION = "1.6.0"
 TILE_UNWRAP_LEGACY_EXPORT_SCHEMA_VERSION = "1.1.0"
 #: The 1.2 sidecar predates the section centre and station policies, so it
 #: can carry a 1.1 or 1.2 recipe but never a 1.3 one.
@@ -75,6 +76,13 @@ TILE_UNWRAP_1_3_EXPORT_SCHEMA_VERSION = "1.3.0"
 #: of those, so the 1.5 sidecar reports all three there and bounds none;
 #: under a fitted centre every bound is exactly what it was.
 TILE_UNWRAP_1_4_EXPORT_SCHEMA_VERSION = "1.4.0"
+#: Every sidecar through 1.5 holds each section's mean arc at 20° or wider.
+#: That floor belongs to the circle fit - an arc narrower than that does not
+#: pin a centre - and about the measured axis there is no fit to protect.  A
+#: rubbing taken in several sheets is where it bites: on a pot 136 mm in
+#: radius, 20° is 48 mm of paper, and the sheets that get past a hole in the
+#: scan are narrower.  Only the 1.6 sidecar carries them.
+TILE_UNWRAP_1_5_EXPORT_SCHEMA_VERSION = "1.5.0"
 TILE_UNWRAP_EXPORT_DIRECTORY_SUFFIX = ".amr-unwrap"
 TILE_UNWRAP_EXPORT_PAYLOAD_NAME = "artifact.amr-unwrap.bin"
 TILE_UNWRAP_EXPORT_OBJ_NAME = "artifact.obj"
@@ -640,6 +648,7 @@ def validate_tile_unwrap_export_bytes(
     sidecar_schema_version = root["schema_version"]
     if sidecar_schema_version not in {
         TILE_UNWRAP_EXPORT_SCHEMA_VERSION,
+        TILE_UNWRAP_1_5_EXPORT_SCHEMA_VERSION,
         TILE_UNWRAP_1_4_EXPORT_SCHEMA_VERSION,
         TILE_UNWRAP_1_3_EXPORT_SCHEMA_VERSION,
         TILE_UNWRAP_1_2_EXPORT_SCHEMA_VERSION,
@@ -793,6 +802,7 @@ def validate_tile_unwrap_export_bytes(
         raise ArtifactTileUnwrapExportError(str(exc)) from exc
     if sidecar_schema_version not in {
         TILE_UNWRAP_EXPORT_SCHEMA_VERSION,
+        TILE_UNWRAP_1_5_EXPORT_SCHEMA_VERSION,
         TILE_UNWRAP_1_4_EXPORT_SCHEMA_VERSION,
     } and (
         int(qc["record"]["distortion_max_millionths"])
@@ -804,7 +814,10 @@ def validate_tile_unwrap_export_bytes(
             "a tile unwrap export before 1.4 cannot carry a face over the "
             "distortion gate"
         )
-    if sidecar_schema_version != TILE_UNWRAP_EXPORT_SCHEMA_VERSION and (
+    if sidecar_schema_version not in {
+        TILE_UNWRAP_EXPORT_SCHEMA_VERSION,
+        TILE_UNWRAP_1_5_EXPORT_SCHEMA_VERSION,
+    } and (
         int(qc["record"]["distortion_mean_millionths"])
         > TILE_UNWRAP_DISTORTION_MEAN_MAX_MILLIONTHS
         or int(qc["record"]["distortion_p95_millionths"])
@@ -817,6 +830,18 @@ def validate_tile_unwrap_export_bytes(
         raise ArtifactTileUnwrapExportError(
             "a tile unwrap export before 1.5 cannot carry a mean or 95th "
             "percentile over the distortion gate"
+        )
+    if sidecar_schema_version != TILE_UNWRAP_EXPORT_SCHEMA_VERSION and (
+        int(qc["record"]["section_mean_span_microdegrees"])
+        < TILE_UNWRAP_FITTED_SECTION_MIN_SPAN_MICRODEGREES
+    ):
+        # And every sidecar before 1.6 holds the 20° arc floor in its schema
+        # whatever the centre policy, so a strip of paper narrower than that -
+        # one of the several sheets a whole turn has to be taken in - only
+        # goes into a 1.6 sidecar.
+        raise ArtifactTileUnwrapExportError(
+            "a tile unwrap export before 1.6 cannot carry a section arc under "
+            "the fitted-centre floor"
         )
     try:
         recomputed_payload_qc = recompute_tile_unwrap_payload_qc(unwrap)
