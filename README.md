@@ -5,27 +5,71 @@
 # ArchMeshRubbing
 
 <p align="center">
-  <strong>스캔 유물을 기록면과 검증 가능한 연구 산출물 중심으로 다루는 Windows 데스크톱 도구</strong>
+  <strong>3D 스캔한 유물에서 실측 도면을 뜹니다.<br>
+  종이 위의 선 하나까지 어느 계산에서 나왔는지 되짚을 수 있게.</strong>
 </p>
 
-ArchMeshRubbing은 3D 메쉬를 단순한 CG 자산이 아니라 원본, 단위, 정위치, 실측 기록과 결과 파일이 서로 연결된 연구 자료로 다룹니다. 목표 흐름은 다음과 같습니다.
+<p align="center">
+  <a href="#설치하기-windows">설치하기</a> ·
+  <a href="#실행-파일exe-만들기">실행 파일 만들기</a> ·
+  <a href="#내-스캔-파일로-첫-실물-테스트">첫 실물 테스트</a> ·
+  <a href="#지금-할-수-있는-일">기능</a> ·
+  <a href="#결과-파일과-오프라인-검증">결과 검증</a> ·
+  <a href="#문제-해결">문제 해결</a>
+</p>
+
+---
+
+## 왜 만들었나
+
+유물 실측은 고고학의 기초 기록입니다. 그런데 지금도 대부분 손으로 합니다. 유물을 세우고, 축을 잡고, 캘리퍼스로 재고, 모눈종이에 옮기고, 문양은 탁본을 떠서 베낍니다. 유물 하나에 반나절이 가고, 그린 사람이 바뀌면 선도 바뀝니다.
+
+3D 스캐너는 이미 많은 기관에 있습니다. 그런데 스캔 파일을 열어 주는 프로그램들은 대개 **보여 주는** 데까지입니다. 실측 도면은 보기 좋은 그림이 아니라 **기록**이고, 기록에는 규칙이 있습니다 — 단면은 굵게 빗금 쳐서, 외형선은 그보다 가늘게, 꺾이는 자리는 한 바퀴 도는 내선으로, 축척은 1:2나 1:3으로, 어디를 어떻게 쟀는지 제목란에.
+
+**ArchMeshRubbing은 그 규칙을 코드에 넣은 도구입니다.** 재는 것과 그리는 것은 프로그램이 하고, **무엇이 유물이고 무엇이 해석인지는 실측자가 정합니다.** 프로그램은 애매하면 추측하지 않고 멈춰서 왜 멈췄는지 말합니다.
+
+## 이런 것이 나옵니다
+
+<p align="center">
+  <img src="docs/images/dish-plate.png" width="440" alt="백자청화죽문접시 실측도 — 평면 아래에 좌 반입면·우 반단면">
+</p>
+
+<p align="center"><sub><strong>백자청화죽문접시(운현궁)</strong> · A4 1:2 · 평면 + 좌 반입면·우 반단면 · 청화는 스캔의 색 그대로</sub></p>
+
+<p align="center">
+  <img src="docs/images/comb-pot-sheets.png" width="900" alt="빗살무늬토기 외면을 12칸 4단으로 나눠 뜬 탁본 44장">
+</p>
+
+<p align="center"><sub><strong>빗살무늬토기(국립중앙박물관 신수22891)</strong> · 외면 한 바퀴 858 mm를 12칸 x 4단으로 나눠 뜬 전산 탁본 44장</sub></p>
+
+배부른 항아리의 겉면은 **한 장으로는 펼 수 없습니다.** 늘이지 않고 펴지는 면은 가우스 곡률이 0인 면뿐인데(Theorema Egregium) 이 토기는 문양 벽만 해도 −127°가 나옵니다. 한 장으로 누르면 자오선이 96.7% 늘어납니다. 그래서 종이 탁본이 하는 그대로 나눠 뜹니다 — 폭 71.5 mm면 늘어남이 1.5% 안쪽이고, 문양은 이음매를 건너 이어집니다. 빈 칸은 스캔에 뚫린 자리라 종이를 못 댄 곳이고, 프로그램은 그것을 메우지 않고 비워 둡니다.
+
+<p align="center">
+  <img src="docs/images/comb-pot-sheets-detail.png" width="820" alt="이웃한 세 장을 실제 크기로 본 것">
+</p>
+
+<p align="center"><sub>이웃한 세 장을 실제 크기(10 px/mm)로 — 세로선이 장과 장의 이음매</sub></p>
+
+## 무엇이 다른가
+
+**도면 규칙이 코드 안에 있습니다.** 선 굵기는 한국문화유산협회 실측 교재의 펜 굵기(단면 0.6 · 입면 0.4 · 결실부 0.1 mm)로 열리고, 단면 빗금·중심축선·꺾임 내선·축척바·제목란이 관례대로 나옵니다. 범용 메쉬 뷰어에 도면을 그리는 기능이 붙은 것이 아니라, 실측 도면을 만들려고 만든 프로그램입니다.
+
+**모든 선을 검산할 수 있습니다.** 도면과 함께 provenance JSON이 나오고, 거기에는 도형마다의 실측 크기, 배치 종류, 중심축을 그린 근거가 된 Align recipe, 꺾임선마다 실선·간선·생략 중 무엇이었는지가 적힙니다. 종이 위의 선과 sidecar의 숫자는 같은 계산에서 나오므로 서로 어긋날 수 없습니다. 계정도 서버도 없이 오프라인에서 다시 검증됩니다.
+
+**프로그램은 제안하고, 실측자가 정합니다.** 축을 세울 수 없으면 세운 척하지 않고 거부합니다. 메쉬가 뒤집혀 있으면 안쪽 벽을 내주는 대신 멈춥니다. 펼 수 없는 면은 펴지지 않는다고 말합니다. 실패와 fallback을 성공으로 숨기지 않는 것이 이 프로젝트의 첫 번째 원칙입니다.
+
+> **현재 단계:** 실제 유물 파일을 가져와 시험할 수 있는 Windows source 버전입니다. 원본·단위·Align·기록·산출물·오프라인 검증을 잇는 신뢰 기반은 구현됐고, 이제 대표 실물과 고고학자의 현장 검증 및 남은 실무 모듈을 채우는 단계입니다. 완성된 상용 대체품이나 공개 안정판으로 주장하지 않습니다.
+
+작업 흐름은 이렇습니다.
 
 ```text
 Open → 단위·축 확인 → Align 확정 → Cutline → Outline → Digital Rubbing → 1:1 export → offline 검증
                                       └──────── 기와 기록면 전개 ────────┘
 ```
 
-> **현재 단계:** 실제 유물 파일을 가져와 시험할 수 있는 Windows source 버전입니다. 원본·단위·Align·기록·산출물·오프라인 검증을 잇는 신뢰 기반은 구현됐고, 이제 대표 실물과 고고학자의 현장 검증 및 남은 실무 모듈을 채우는 단계입니다. 완성된 상용 대체품이나 공개 안정판으로 주장하지 않습니다.
+## 도판 한 장을 뜯어보면
 
-[실측 도판](#나오는-것-실측-도판-한-장) · [Windows 설치](#windows-설치와-실행) · [첫 실물 테스트](#내-스캔-파일로-첫-실물-테스트) · [기와 전개](#기와-기록면-전개-시험) · [결과 검증](#결과-파일과-오프라인-검증) · [문제 해결](#문제-해결)
-
-## 나오는 것: 실측 도판 한 장
-
-<p align="center">
-  <img src="docs/images/dish-plate.png" width="470" alt="백자청화죽문접시 실측도 — 평면 아래에 좌 반입면·우 반단면">
-</p>
-
-**백자청화죽문접시(운현궁)** 의 A4 1:2 실측도입니다. 위가 평면, 아래가 좌 반입면·우 반단면이고 둘은 회전축으로 세로를 맞춰 쌓았습니다. 이 접시는 옆에서 보면 13 mm밖에 되지 않아 구연과 굽 두 원의 중심을 잇는 선으로는 축이 서지 않습니다 — **두 원의 공통 법선**으로 정치한 것이 제목란의 `정치` 행입니다.
+위의 **백자청화죽문접시(운현궁)** 는 A4 1:2 실측도입니다. 위가 평면, 아래가 좌 반입면·우 반단면이고 둘은 회전축으로 세로를 맞춰 쌓았습니다. 이 접시는 옆에서 보면 13 mm밖에 되지 않아 구연과 굽 두 원의 중심을 잇는 선으로는 축이 서지 않습니다 — **두 원의 공통 법선**으로 정치한 것이 제목란의 `정치` 행입니다.
 
 **청화는 선으로 옮기지 않고 제 색 그대로 따 붙였습니다.** 이미지 편집기의 완드로 그 자리만 따내듯, 스캔의 base colour에서 채색된 픽셀만 오려 평면 뷰에 사영해 제자리에 놓은 것입니다(`colour_as_painted/v1`). 구연을 두르는 청화 띠와 안바닥의 대나무가 평면의 제자리에 있고, 굽 안에서 읽은 도장과 붉은 번호는 다른 뷰의 것이라 도면 **아래에** 따로 붙였습니다 — 평면에 겹쳐 놓으면 그 자리에 있지도 않은 것을 주장하게 됩니다.
 
@@ -43,7 +87,7 @@ python -c "from pathlib import Path; from src.core.drawing_sheet import validate
 
 provenance에는 도형마다의 실측 크기(76.4 × 76.3 mm 평면, 76.1 × 29.5 mm 입면 — 종이 위의 크기, 축척 1:2), 배치 종류(`plan_over_elevation/v1`), 중심축을 그린 근거가 된 Align recipe(`rotation_axis_from_circle_records/v1`), 꺾임선마다 실선·간선·생략 중 무엇이었는지, 그리고 유물 밖으로 나가려다 그려진 가장자리에서 멈춘 내선이 몇 개이고 얼마나 물렸는지까지 적힙니다. 종이 위의 선과 sidecar의 숫자는 같은 계산에서 나오므로 서로 어긋날 수 없습니다.
 
-> **원본 자료에 관하여.** 저장소에는 **도면만** 있습니다. 스캔 메쉬(FBX·OBJ·PLY)와 텍스처 파일은 들어 있지 않고 앞으로도 넣지 않습니다. 다만 도판의 청화는 스캔의 채색에서 따온 픽셀을 도면 위에 사영한 것이므로, 이 SVG 안에는 **유물 채색의 일부가 이미지로 들어 있습니다**(그래서 파일이 12.7 MB입니다). 원본 FBX는 실측자가 제공받은 자료이고, 공개 범위는 자료 제공처가 정합니다.
+> **원본 자료에 관하여.** 저장소에는 **도면과 탁본만** 있습니다. 스캔 메쉬(FBX·OBJ·PLY)와 텍스처 파일은 들어 있지 않고 앞으로도 넣지 않습니다. 다만 접시 도판의 청화는 스캔의 채색에서 따온 픽셀을 도면 위에 사영한 것이므로, 그 SVG 안에는 **유물 채색의 일부가 이미지로 들어 있습니다**(그래서 파일이 12.7 MB입니다). 접시의 원본 FBX는 실측자가 제공받은 자료이고, 공개 범위는 자료 제공처가 정합니다. 빗살무늬토기는 **국립중앙박물관 3D 데이터(신수22891, 공공누리 제1유형 — 출처표시)** 이고, 같은 파일을 [국립중앙박물관 3D 데이터](https://www.museum.go.kr/MUSEUM/contents/M0505000000.do)에서 누구나 받아 위 결과를 그대로 재현할 수 있습니다.
 
 ## 화면
 
@@ -61,7 +105,7 @@ provenance에는 도형마다의 실측 크기(76.4 × 76.3 mm 평면, 76.1 × 2
 | 운영체제 | Windows 10 version 1809(build 17763) 이상 x64, Windows 11 x64 |
 | 실행 환경 | native AMD64 PC, 64-bit CPython 3.12 |
 | 그래픽 | OpenGL 2.1 compatibility profile, 24-bit 이상 depth buffer |
-| 현재 설치 방식 | 저장소를 받은 뒤 source로 실행 |
+| 현재 설치 방식 | 저장소를 받은 뒤 source로 실행, 또는 [직접 만든 unsigned 실행 파일](#실행-파일exe-만들기) |
 | 공개 바이너리 | 서명된 installer 또는 다운로드용 portable ZIP을 아직 제공하지 않음 |
 | 네트워크 | 의존성 설치에는 인터넷이 필요하지만 핵심 기록·저장·검증은 계정과 서버 없이 offline 실행 |
 
@@ -69,68 +113,29 @@ Windows ARM64, x64-on-ARM64 에뮬레이션, 32-bit Windows, Windows Server, mac
 
 저장소 source는 `Apache-2.0`이고, PyQt6를 포함한 바이너리는 결합물로서 `GPL-3.0` 조건으로 전달됩니다. 라이선스상 공개 배포를 막는 요인은 없으며, 남은 것은 서명과 대표 하드웨어 파일럿입니다. 자세한 내용은 [native packaging 정책](docs/NATIVE_PACKAGING.md)을 참고하세요.
 
-## 지금 할 수 있는 일
+## 설치하기 (Windows)
 
-### 검증 기록 경로
+### 어느 쪽으로 설치할까
 
-| 작업 | 현재 가능한 내용 | 주 산출물 |
+두 가지 길이 있고, **처음이라면 A**입니다.
+
+| | A. source로 실행 | B. 실행 파일(EXE)로 만들어 쓰기 |
 |---|---|---|
-| 원본 불러오기 | OBJ, PLY, STL, OFF, glTF, GLB와 허용된 상대 로컬 리소스 검증 | self-contained `.amr` |
-| 단위·좌표축 확인 | `mm/cm/m`, signed X/Y/Z 매핑과 handedness 확인 | metadata revision |
-| 정위치 | 이동·회전 preview를 명시적으로 확정하고 이전 Align revision 복원 | immutable Align 이력 |
-| 단면 | Top, Front, Right의 canonical-mm Cutline | `.amr-vector` 1:1 SVG |
-| 외곽 | 6면 Outline, 정밀도 격자, 오목부·구멍·분리 성분 보존 | `.amr-vector` 1:1 SVG |
-| 디지털 탁본 | 6면, 해상도·여백·깊이·먹 농도·양각/음각 설정 | `.amr-rubbing` 1:1 PNG |
-| 제작 기법 (홈) | 정치한 토기를 한 바퀴 도는 홈을 profile에서 찾아 기록 | 도판에 간선 1줄 + 직선 2줄 |
-| 제작 기법 (흔적) | 메쉬 위에 칠한 면 집합을 테쌓기흔·지두흔·타날흔·물손질흔·목리조정흔으로 기록. 상태 표기와 같은 면 집합 규율 | 도판에 실측 교재 관례대로: 지두흔은 타원, 테쌓기흔은 이음선, 목리조정흔은 방향 있는 획 군집, 물손질흔은 평행선, 타날흔은 탁본 띠에 맡김 |
-| 전개 탁본 | 기와 전개 record의 펴진 좌표 위에 같은 요철을 그린 탁본 (정치한 토기의 외면 띠 포함; 요철이 메쉬가 아니라 법선 지도에 있는 스캔은 그 지도에서) | `.amr-rubbing` 1:1 PNG (sidecar 1.4.0) |
-| 실측 도판 | 입면·단면·탁본을 한 축척으로 배치하고 축척바·제목란을 붙인 페이지. 선 굵기는 한국문화유산협회 실측 교재의 펜 굵기(단면 0.6 · 입면 0.4 · 결실부 0.1 mm)로 열리고, 종류별 굵기는 pt 또는 mm로 직접 넣을 수 있고 그 표가 provenance에 남는다. 탁본이 실리면 제목란과 탁본 아래에 "3D 메쉬에서 계산 · 종이 탁본 아님"과 먹을 만든 수치가 반드시 찍히며, 전개면 위의 탁본과 정사영 요철 그림은 캡션으로 구분된다 | `.svg` + provenance |
-| 완료 실측 | Cutline 3 + Outline 6 + Rubbing 6의 15개 결과 결합 | `.amr-survey` |
-| 제원 측정 | 표면적, 조건부 체적, 두 점 거리, 선택점 best-fit 원 지름 | 검증 가능한 measurement record |
-| 기와 전개 | 전체/선택 면, X/Y/Z 장축, Top/Bottom 해석, 자동/고정 seam, 왜곡 QC | `.amr-unwrap` OBJ·1:1 SVG |
-| 오프라인 검증 | 프로젝트와 네 종류 export의 hash·단위·Align·record·QC 재검증 | JSON receipt |
+| 누구에게 | 직접 써 볼 사람, 고쳐 볼 사람 | Python을 깔 수 없는 PC에 옮겨 쓸 사람 |
+| 필요한 것 | Python 3.12 + Git | 빌드용 PC에 Python 3.12 + Git (쓰는 PC에는 아무것도) |
+| 걸리는 시간 | 명령 몇 줄 + 패키지 내려받는 시간 | 그보다 한참 오래 (PyInstaller + 자체 검사), 그 뒤로는 복사만 |
+| 결과 | 저장소 폴더에서 `main.py --gui` | `ArchMeshRubbing.exe`가 든 폴더 하나 |
+| 절차 | [바로 아래](#1-준비물) | [실행 파일(EXE) 만들기](#실행-파일exe-만들기) |
 
-Open 직후의 identity Align은 계산 기준일 뿐 기록자가 정위치를 확인한 증거가 아닙니다. 변화량이 `0`이어도 `정치 확정`을 한 번 눌러야 실측과 기와 전개가 열립니다.
+내려받아 바로 쓸 수 있는 **서명된 설치 프로그램은 아직 없습니다.** B로 만든 실행 파일도 서명되지 않은 로컬 빌드라, 처음 실행할 때 Windows가 경고를 냅니다([그 경고 넘기기](#처음-실행할-때-windows가-막을-때)).
 
-정식 작업 순서는 `Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6`입니다. 선행 기록이 `READY + FRESH`일 때만 다음 기능이 활성화되고 완료 버튼이 초록색으로 바뀝니다. Align을 변경하면 기존 기록을 삭제하지 않고 이전 revision의 stale 이력으로 보존하며, 현재 완료 판정과 export에서는 제외합니다.
+### 1. 준비물
 
-### 화면·보조 기능
-
-- 6방향 표준 시점, 원근/정사영 보기, 메쉬 맞춤과 뷰 초기화
-- 직접 만든 16×16 pixel icon을 사용하는 Windows UI
-- Flat Shading과 선택 메쉬 투명 X-Ray 보기
-- 클릭·브러시·올가미·가시면 기반 기록면 선택 및 외면/내면/미구 연구용 라벨링
-- 기와 유형·분할 가설, 길이축 힌트, 대표 단면, 와통 피팅과 합성 기와 benchmark
-- 중단된 `.amr` 저장 후보를 검증해 새 파일로 복구하는 기능
-- 파일·메쉬 정보와 디버그 정보 복사
-
-X-Ray는 화면에서 선택 메쉬를 투명하게 보는 보조 기능입니다. CT 데이터 분석이나 내부 구조의 검증 산출물은 아닙니다. 빠른 flatten, review sheet, 일반 6방향 도면 같은 legacy 경로도 남아 있지만 학술적 1:1 결과로 사용할 때는 `검증된 실측 · ArtifactDocument` 패널의 record와 `.amr-*` package를 사용하세요.
-
-## 지원 파일
-
-| 형식 | 비고 |
-|---|---|
-| `.obj` | 상대 경로의 MTL과 texture를 함께 캡처 가능 |
-| `.ply` | ASCII/binary 및 상대 `TextureFile` 처리 |
-| `.stl` | ASCII/binary |
-| `.off` | text mesh |
-| `.gltf` | self-contained 또는 원본 폴더 아래 상대 buffer/image |
-| `.glb` | glTF Binary |
-
-HTTP/file URI, 절대 resource 경로, 원본 폴더 밖으로 나가는 `..`, symlink 탈출은 허용하지 않습니다. OBJ나 glTF처럼 부속 파일이 있는 자료는 파일 하나만 떼지 말고 원래의 상대 폴더 구조 전체를 복사하세요.
-
-UV와 texture bytes의 프로젝트 보존·오프라인 재현은 검증하지만 여러 material/PBR 조합의 화면 렌더링 충실도는 아직 현장 검증 전입니다. 현재 authoritative SVG, PNG와 기와 전개는 geometry 중심 산출물입니다.
-
-현재 import 상한은 주 원본 4 GiB, text parser 입력 256 MiB, 5,000,000 vertices, 2,000,000 triangles입니다. 기와 전개의 선택 기록면은 최대 250,000 faces입니다. 첫 시험은 원본을 보존한 채 충분히 작은 decimated 복사본으로 시작하는 편이 좋습니다. parser는 아직 별도 보안 process sandbox가 아니므로 출처와 내용을 신뢰할 수 있는 스캔만 여세요.
-
-## Windows 설치와 실행
-
-### 1. 준비
-
-- Windows 10/11 x64 PC
-- [CPython 3.12 x64](https://www.python.org/downloads/windows/)와 Python Launcher
+- Windows 10 version 1809(build 17763) 이상 x64 또는 Windows 11 x64
+- [CPython 3.12 x64](https://www.python.org/downloads/windows/) — 설치할 때 **Add python.exe to PATH**와 **py launcher**를 함께 체크하세요
 - [Git for Windows](https://git-scm.com/download/win)
-- 최초 Python package 설치를 위한 인터넷 연결
+- 최초 Python package 설치를 위한 인터넷 연결 (그 뒤로는 필요 없습니다)
+- 디스크 여유 — PyQt6·numpy·scipy가 들어가므로 가상환경이 꽤 큽니다. 실행 파일까지 만든다면 그만큼 더 필요합니다
 
 Python 3.11, 3.13 등 다른 버전을 대신 사용하지 마세요. PowerShell에서 다음 명령으로 3.12 x64가 보이는지 먼저 확인할 수 있습니다.
 
@@ -189,24 +194,114 @@ $result.checks | Where-Object { -not $_.ok }
 
 이후 다시 실행할 때는 저장소 폴더에서 마지막 `--gui` 명령만 사용하면 됩니다.
 
-### 선택 사항: 로컬 unsigned 실행 파일 만들기
+## 실행 파일(EXE) 만들기
 
-이 과정은 설치 프로그램을 만들지 않습니다. 검증된 onedir 폴더와 선택적인 portable ZIP을 만들며, 폴더 안의 파일을 함께 유지해야 합니다. source 실행에 사용한 폴더에는 Python cache나 시험 자료가 생길 수 있으므로 **별도의 fresh clone**에서 빌드하세요.
+Python이 깔려 있지 않은 PC — 발굴 현장 노트북, 기관의 공용 PC — 에서도 쓰려면 실행 파일로 만들어 폴더째 옮기면 됩니다. **쓰는 쪽 PC에는 아무것도 설치하지 않아도 됩니다.**
+
+### 무엇이 만들어지나
+
+설치 프로그램(`setup.exe`)이 아니라 **폴더 하나**가 만들어집니다. PyInstaller의 onedir 방식이라 `.exe` 하나만 떼어 내면 실행되지 않습니다 — 폴더 전체가 한 벌입니다.
+
+```text
+dist\ArchMeshRubbing\
+├─ ArchMeshRubbing.exe          ← 이걸 실행합니다
+├─ _internal\                    ← Python 런타임, Qt, 라이브러리 (건드리지 마세요)
+├─ source\
+│  ├─ ArchMeshRubbing-source.zip   ← 이 실행 파일에 대응하는 정확한 소스
+│  └─ ArchMeshRubbing-source.json  ← 그 ZIP의 hash와 commit
+└─ release-evidence\             ← 무엇으로 만들어졌는지의 기록
+```
+
+`source\` 폴더가 함께 들어가는 데는 이유가 있습니다. 이 실행 파일은 PyQt6를 품고 있어서 **결합물로서 GPL-3.0 조건으로 전달**되고, GPL-3.0은 받는 사람에게 대응하는 소스를 줄 것을 요구합니다. 그래서 빌드가 그 소스를 — live worktree의 복사본이 아니라 **정확히 그 commit의 Git object에서** — 만들어 실행 파일 옆에 넣습니다. **남에게 전달할 때 이 폴더를 빼지 마세요.** 소스만 따로 받는 쪽에는 Apache-2.0만 적용됩니다. 라이선스 판단 자체는 이 문서가 대신하지 않으니, 기관 배포라면 [native packaging 문서](docs/NATIVE_PACKAGING.md)의 정책 절을 함께 보세요.
+
+### 1. 빌드 전용 clone
+
+**source 실행에 쓰던 폴더에서 빌드하지 마세요.** 빌드는 Git worktree가 완전히 깨끗할 것을 요구하는데, 앱을 돌린 폴더에는 `__pycache__`, 시험용 `.amr`, 로그 같은 것이 남아 있어 거의 반드시 거부됩니다. 새로 clone합니다.
 
 ```powershell
 git clone https://github.com/lzpxilfe/ArchMeshRubbing.git ArchMeshRubbing-build
 Set-Location .\ArchMeshRubbing-build
+```
 
+### 2. 정확히 고정된 의존성 설치
+
+```powershell
 py -3.12 -m venv .venv
 $env:PYTHONDONTWRITEBYTECODE = "1"
 .\.venv\Scripts\python.exe -m pip install --require-hashes --only-binary=:all: -r requirements\windows-py312-x64-hashed.lock
 .\.venv\Scripts\python.exe -m pip check
+```
+
+- `PYTHONDONTWRITEBYTECODE = "1"` — Python이 `.pyc` 캐시를 만들지 않게 합니다. 만들면 그것이 untracked 파일이 되어 다음 단계에서 빌드가 거부됩니다.
+- `--require-hashes` — 잠금 파일에 적힌 hash와 맞는 wheel만 받습니다. 같은 commit에서 누가 빌드하든 같은 것이 들어갑니다.
+- 이 잠금 파일은 실행용(numpy, PyQt6 …)과 빌드용(PyInstaller …)을 모두 담고 있어 한 번에 끝납니다.
+
+### 3. 빌드
+
+```powershell
 .\.venv\Scripts\python.exe tools\build_native.py
 ```
 
-빌드가 끝나면 자체 검사를 통과한 실행 파일이 `dist\ArchMeshRubbing\ArchMeshRubbing.exe`에 생깁니다. 이미 `build`/`dist` 결과가 있거나 Git worktree가 깨끗하지 않으면 안전을 위해 중단합니다.
+PyInstaller가 패키징한 뒤 만들어진 실행 파일로 자체 검사까지 돌리므로 source 설치보다 한참 오래 걸립니다. 중간에 출력이 없어도 기다리세요. 끝나면 이렇게 나옵니다.
 
-portable ZIP까지 만들려면 이어서 실행합니다.
+```text
+Local unsigned artifact: ...\dist\ArchMeshRubbing\ArchMeshRubbing.exe
+Embedded build manifest: ...\build\generated\build_info.json
+Verified corresponding source: ...\dist\ArchMeshRubbing\source\ArchMeshRubbing-source.zip
+Verified release evidence: ...\dist\ArchMeshRubbing\release-evidence
+Frozen self-test passed: ...
+No artifact was signed, installed, uploaded, or published.
+```
+
+`Frozen self-test passed`가 중요합니다. 빌드 도구가 **만들어진 실행 파일을 직접 돌려** 프로젝트 왕복·3/6/6 실측·측정·기와 전개까지 통과하는지 확인한 뒤에야 성공이라고 말합니다.
+
+쓸 수 있는 선택지:
+
+| 옵션 | 언제 |
+|---|---|
+| `--replace-existing` | 이미 있는 `build`/`dist` 결과를 지우고 다시 만들 때. 기본은 덮어쓰지 않고 멈춥니다 |
+| `--commit <hash>` | HEAD가 아닌 특정 commit으로 찍을 때 (그 commit이 실제로 checkout돼 있어야 합니다) |
+| `--channel <이름>` | 빌드 기록에 남길 이름. 기본 `local-smoke` |
+| `--clean-cache` | PyInstaller 캐시를 비우고 시작할 때 |
+| `--skip-self-test` | 위의 자체 검사를 건너뛸 때. **권장하지 않습니다** |
+
+### 4. 만들어진 것 확인
+
+```powershell
+.\dist\ArchMeshRubbing\ArchMeshRubbing.exe --version
+.\dist\ArchMeshRubbing\ArchMeshRubbing.exe --gui
+```
+
+GUI-subsystem 실행 파일이라 PowerShell이 종료를 기다리지 않습니다. CLI로 쓰며 종료 코드를 봐야 한다면 이렇게 합니다.
+
+```powershell
+$p = Start-Process -FilePath .\dist\ArchMeshRubbing\ArchMeshRubbing.exe `
+  -ArgumentList "--version" -Wait -PassThru
+$p.ExitCode
+```
+
+### 5. 다른 PC로 옮기기
+
+1. `dist\ArchMeshRubbing` **폴더 전체**를 복사합니다. `.exe` 하나만 떼면 실행되지 않습니다.
+2. 옮긴 PC에 Python도 Git도 필요 없습니다. Windows 10 1809 이상 x64 또는 Windows 11 x64면 됩니다.
+3. `ArchMeshRubbing.exe`를 실행합니다.
+4. 남에게 전달한다면 `source\` 폴더를 빼지 마세요 — 위에 적은 GPL-3.0 조건이 거기에 걸려 있습니다.
+
+#### 처음 실행할 때 Windows가 막을 때
+
+서명하지 않은 실행 파일이라 **"Windows의 PC 보호"** (SmartScreen) 파란 창이 뜰 수 있습니다. 서명 인증서를 아직 붙이지 않아서이지, 파일이 손상됐다는 뜻은 아닙니다. 자기가 빌드한 것이 맞다면 `추가 정보` → `실행`으로 넘어갑니다.
+
+인터넷으로 받은 ZIP을 푼 경우에는 파일마다 차단 표시가 붙어 있을 수 있습니다. 폴더째 풀기 전에 ZIP의 속성에서 `차단 해제`를 체크하거나, 푼 뒤 PowerShell에서 지웁니다.
+
+```powershell
+Get-ChildItem -Recurse .\ArchMeshRubbing | Unblock-File
+```
+
+**출처를 모르는 빌드에는 이렇게 하지 마세요.** 서명이 없다는 것은 누가 만들었는지 파일 스스로 증명하지 못한다는 뜻이고, 그래서 이 저장소도 공개 바이너리를 아직 올리지 않습니다.
+
+### 6. portable ZIP (선택)
+
+폴더째 옮기는 대신 검증 가능한 ZIP 하나로 만들 수도 있습니다. 받는 쪽이 내용물이 온전한지 스스로 확인할 수 있습니다.
 
 ```powershell
 $epoch = [int64]((& git show -s --format=%ct HEAD).Trim())
@@ -221,7 +316,79 @@ $epoch = [int64]((& git show -s --format=%ct HEAD).Trim())
   --manifest build\ArchMeshRubbing-Windows-x64-portable.zip.manifest.json
 ```
 
-생성물은 unsigned 로컬 시험용입니다. 공개 배포, 서명, 설치 등록은 수행하지 않습니다.
+`--source-date-epoch`에 commit 시각을 넣으므로 같은 commit에서 만든 ZIP은 bytes까지 같습니다. ZIP과 manifest를 함께 전달하면 받는 쪽이 `verify`로 다시 검사할 수 있습니다.
+
+### 빌드가 멈출 때
+
+빌드 도구는 애매하면 진행하지 않고 이유를 말하고 멈춥니다. 자주 나오는 것들입니다.
+
+| 멈춘 이유 | 뜻과 해결 |
+|---|---|
+| `require a clean Git worktree; untracked paths exist` | 추적되지 않는 파일이 있습니다. `git status`로 확인해 지우거나, 빌드 전용 clone에서 다시 하세요. `.pyc`가 원인이면 `PYTHONDONTWRITEBYTECODE` 설정을 빠뜨린 것입니다 |
+| `tracked worktree content does not match HEAD` | 추적 파일을 고쳤습니다. commit하거나 되돌리세요 |
+| `environment does not match the exact lock` | 의존성이 잠금 파일과 다릅니다. 메시지가 알려 주는 `pip install -r requirements\build-py312.lock`을 그대로 실행하거나, 위 2단계를 새 venv에서 다시 하세요 |
+| `outputs already exist; refusing to overwrite` | 지난 빌드 결과가 남아 있습니다. `build`/`dist`를 지우거나 `--replace-existing`을 붙이세요 |
+| `require CPython 3.12` | 3.11이나 3.13으로 venv를 만들었습니다. `py -3.12 -m venv`로 다시 만드세요 |
+| `supported only on native AMD64 Windows` | ARM64 PC이거나 32-bit Python입니다. 지원 대상이 아닙니다 |
+| `packaged self-test reported failure` | 실행 파일은 만들어졌지만 자체 검사에서 떨어졌습니다. 메시지가 가리키는 report JSON의 실패 check를 보세요. **이 상태의 실행 파일을 배포하지 마세요** |
+
+### 하지 않는 것
+
+이 절차는 **설치 프로그램을 만들지 않고, 서명하지 않고, 업로드하지 않고, 시작 메뉴에 등록하지 않습니다.** MSIX와 Microsoft Store 패키지도 현재 목표가 아닙니다. 만들어진 것은 로컬에서 쓰고 직접 전달하는 unsigned 빌드입니다. 자세한 정책과 검증 항목은 [native packaging 문서](docs/NATIVE_PACKAGING.md)에 있습니다.
+
+## 지금 할 수 있는 일
+
+### 검증 기록 경로
+
+| 작업 | 현재 가능한 내용 | 주 산출물 |
+|---|---|---|
+| 원본 불러오기 | OBJ, PLY, STL, OFF, glTF, GLB와 허용된 상대 로컬 리소스 검증 | self-contained `.amr` |
+| 단위·좌표축 확인 | `mm/cm/m`, signed X/Y/Z 매핑과 handedness 확인 | metadata revision |
+| 정위치 | 이동·회전 preview를 명시적으로 확정하고 이전 Align revision 복원 | immutable Align 이력 |
+| 단면 | Top, Front, Right의 canonical-mm Cutline | `.amr-vector` 1:1 SVG |
+| 외곽 | 6면 Outline, 정밀도 격자, 오목부·구멍·분리 성분 보존 | `.amr-vector` 1:1 SVG |
+| 디지털 탁본 | 6면, 해상도·여백·깊이·먹 농도·양각/음각 설정 | `.amr-rubbing` 1:1 PNG |
+| 제작 기법 (홈) | 정치한 토기를 한 바퀴 도는 홈을 profile에서 찾아 기록 | 도판에 간선 1줄 + 직선 2줄 |
+| 제작 기법 (흔적) | 메쉬 위에 칠한 면 집합을 테쌓기흔·지두흔·타날흔·물손질흔·목리조정흔으로 기록. 상태 표기와 같은 면 집합 규율 | 도판에 실측 교재 관례대로: 지두흔은 타원, 테쌓기흔은 이음선, 목리조정흔은 방향 있는 획 군집, 물손질흔은 평행선, 타날흔은 탁본 띠에 맡김 |
+| 전개 탁본 | 기와 전개 record의 펴진 좌표 위에 같은 요철을 그린 탁본 (정치한 토기의 외면 띠 포함; 요철이 메쉬가 아니라 법선 지도에 있는 스캔은 그 지도에서) | `.amr-rubbing` 1:1 PNG (sidecar 1.4.0) |
+| 실측 도판 | 입면·단면·탁본을 한 축척으로 배치하고 축척바·제목란을 붙인 페이지. 선 굵기는 한국문화유산협회 실측 교재의 펜 굵기(단면 0.6 · 입면 0.4 · 결실부 0.1 mm)로 열리고, 종류별 굵기는 pt 또는 mm로 직접 넣을 수 있고 그 표가 provenance에 남는다. 탁본이 실리면 제목란과 탁본 아래에 "3D 메쉬에서 계산 · 종이 탁본 아님"과 먹을 만든 수치가 반드시 찍히며, 전개면 위의 탁본과 정사영 요철 그림은 캡션으로 구분된다 | `.svg` + provenance |
+| 완료 실측 | Cutline 3 + Outline 6 + Rubbing 6의 15개 결과 결합 | `.amr-survey` |
+| 제원 측정 | 표면적, 조건부 체적, 두 점 거리, 선택점 best-fit 원 지름 | 검증 가능한 measurement record |
+| 기와 전개 | 전체/선택 면, X/Y/Z 장축, Top/Bottom 해석, 자동/고정 seam, 왜곡 QC | `.amr-unwrap` OBJ·1:1 SVG |
+| 오프라인 검증 | 프로젝트와 네 종류 export의 hash·단위·Align·record·QC 재검증 | JSON receipt |
+
+Open 직후의 identity Align은 계산 기준일 뿐 기록자가 정위치를 확인한 증거가 아닙니다. 변화량이 `0`이어도 `정치 확정`을 한 번 눌러야 실측과 기와 전개가 열립니다.
+
+정식 작업 순서는 `Cutline 3/3 → Outline 6/6 → Digital Rubbing 6/6`입니다. 선행 기록이 `READY + FRESH`일 때만 다음 기능이 활성화되고 완료 버튼이 초록색으로 바뀝니다. Align을 변경하면 기존 기록을 삭제하지 않고 이전 revision의 stale 이력으로 보존하며, 현재 완료 판정과 export에서는 제외합니다.
+
+### 화면·보조 기능
+
+- 6방향 표준 시점, 원근/정사영 보기, 메쉬 맞춤과 뷰 초기화
+- 직접 만든 16×16 pixel icon을 사용하는 Windows UI
+- Flat Shading과 선택 메쉬 투명 X-Ray 보기
+- 클릭·브러시·올가미·가시면 기반 기록면 선택 및 외면/내면/미구 연구용 라벨링
+- 기와 유형·분할 가설, 길이축 힌트, 대표 단면, 와통 피팅과 합성 기와 benchmark
+- 중단된 `.amr` 저장 후보를 검증해 새 파일로 복구하는 기능
+- 파일·메쉬 정보와 디버그 정보 복사
+
+X-Ray는 화면에서 선택 메쉬를 투명하게 보는 보조 기능입니다. CT 데이터 분석이나 내부 구조의 검증 산출물은 아닙니다. 빠른 flatten, review sheet, 일반 6방향 도면 같은 legacy 경로도 남아 있지만 학술적 1:1 결과로 사용할 때는 `검증된 실측 · ArtifactDocument` 패널의 record와 `.amr-*` package를 사용하세요.
+
+## 지원 파일
+
+| 형식 | 비고 |
+|---|---|
+| `.obj` | 상대 경로의 MTL과 texture를 함께 캡처 가능 |
+| `.ply` | ASCII/binary 및 상대 `TextureFile` 처리 |
+| `.stl` | ASCII/binary |
+| `.off` | text mesh |
+| `.gltf` | self-contained 또는 원본 폴더 아래 상대 buffer/image |
+| `.glb` | glTF Binary |
+
+HTTP/file URI, 절대 resource 경로, 원본 폴더 밖으로 나가는 `..`, symlink 탈출은 허용하지 않습니다. OBJ나 glTF처럼 부속 파일이 있는 자료는 파일 하나만 떼지 말고 원래의 상대 폴더 구조 전체를 복사하세요.
+
+UV와 texture bytes의 프로젝트 보존·오프라인 재현은 검증하지만 여러 material/PBR 조합의 화면 렌더링 충실도는 아직 현장 검증 전입니다. 현재 authoritative SVG, PNG와 기와 전개는 geometry 중심 산출물입니다.
+
+현재 import 상한은 주 원본 4 GiB, text parser 입력 256 MiB, 5,000,000 vertices, 2,000,000 triangles입니다. 기와 전개의 선택 기록면은 최대 250,000 faces입니다. 첫 시험은 원본을 보존한 채 충분히 작은 decimated 복사본으로 시작하는 편이 좋습니다. parser는 아직 별도 보안 process sandbox가 아니므로 출처와 내용을 신뢰할 수 있는 스캔만 여세요.
 
 ## 내 스캔 파일로 첫 실물 테스트
 

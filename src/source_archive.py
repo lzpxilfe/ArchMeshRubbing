@@ -34,7 +34,15 @@ SOURCE_ARCHIVE_FILENAME = "ArchMeshRubbing-source.zip"
 SOURCE_ARCHIVE_SIDECAR_FILENAME = "ArchMeshRubbing-source.json"
 SOURCE_ARCHIVE_INTERNAL_MANIFEST = "SOURCE-MANIFEST.json"
 SOURCE_ARCHIVE_REPOSITORY = "https://github.com/lzpxilfe/ArchMeshRubbing"
-SOURCE_ARCHIVE_LICENSE_EXPRESSION = "GPL-2.0-only"
+#: The licence of the source this archive carries.  It is the repository's own
+#: ``LICENSE``, not the combined work's - a binary that bundles PyQt6 is
+#: delivered under GPL-3.0, while the source beside it stays Apache-2.0 - and
+#: it must track that file.  It did not: this said ``GPL-2.0-only`` for some
+#: time after the relicense, so every corresponding-source archive named a
+#: licence the tree it contained was not under, while carrying that tree's
+#: real hash.  ``tests/test_source_archive.py`` now pins it to the release
+#: policy's own declaration so the two cannot drift apart again.
+SOURCE_ARCHIVE_LICENSE_EXPRESSION = "Apache-2.0"
 SOURCE_ARCHIVE_COMMENT = b"ArchMeshRubbing corresponding source v1"
 
 SOURCE_ARCHIVE_MAX_FILES = 20_000

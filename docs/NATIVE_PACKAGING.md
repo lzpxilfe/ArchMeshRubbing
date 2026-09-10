@@ -119,7 +119,7 @@ python -m src.gui.opengl_driver_smoke ^
 
 `source/ArchMeshRubbing-source.zip`은 live worktree 복사본이 아니다. 생성기는 지정한 full commit의 Git object database에서 tree와 blob을 직접 읽고 100644/100755 regular file만 받는다. symlink·submodule·비 UTF-8/비 NFC·Windows 예약명·대소문자 충돌을 거부하고, 각 파일의 Git blob ID·SHA-256·크기·mode를 `SOURCE-MANIFEST.json`에 기록한다. 외부 `ArchMeshRubbing-source.json`은 ZIP exact hash/size와 source commit/tree/file-set hash를 결합한다.
 
-ZIP은 압축 library heuristic에 의존하지 않는 `ZIP_STORED`, commit epoch, 고정 metadata와 정렬된 경로를 사용한다. verifier는 Git이나 원래 저장소 없이도 보존된 raw commit object의 ID와 tree header를 검증하고, file record 전체에서 중첩 Git tree ID를 재구성한 뒤, GPL-2.0-only `LICENSE`, 모든 blob ID와 SHA-256을 다시 계산한다. release evidence와 portable manifest가 이 두 source 파일의 bytes도 함께 hash하므로 실행 payload와 함께 이동한 뒤에도 독립 검증할 수 있다. clean build가 아니면 frozen self-test는 이 archive를 정확한 corresponding source라고 인정하지 않는다.
+ZIP은 압축 library heuristic에 의존하지 않는 `ZIP_STORED`, commit epoch, 고정 metadata와 정렬된 경로를 사용한다. verifier는 Git이나 원래 저장소 없이도 보존된 raw commit object의 ID와 tree header를 검증하고, file record 전체에서 중첩 Git tree ID를 재구성한 뒤, Apache-2.0 `LICENSE`, 모든 blob ID와 SHA-256을 다시 계산한다. release evidence와 portable manifest가 이 두 source 파일의 bytes도 함께 hash하므로 실행 payload와 함께 이동한 뒤에도 독립 검증할 수 있다. clean build가 아니면 frozen self-test는 이 archive를 정확한 corresponding source라고 인정하지 않는다.
 
 ```powershell
 python tools/build_source_archive.py build `

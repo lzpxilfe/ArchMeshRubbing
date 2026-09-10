@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from collections.abc import Callable
+import hashlib
 import importlib
 import json
 import os
@@ -16,6 +17,7 @@ import pytest
 from src.core.canonical_json import canonical_json_bytes
 from src.source_archive import (
     SOURCE_ARCHIVE_INTERNAL_MANIFEST,
+    SOURCE_ARCHIVE_LICENSE_EXPRESSION,
     SourceArchiveError,
     build_source_archive,
     verify_source_archive,
@@ -142,7 +144,7 @@ def test_source_archive_is_deterministic_commit_exact_and_offline(
             manifest["commit_object"]["payload"],
             validate=True,
         ) == _git(repository, "cat-file", "commit", commit)
-        assert manifest["license"]["expression"] == "GPL-2.0-only"
+        assert manifest["license"]["expression"] == SOURCE_ARCHIVE_LICENSE_EXPRESSION
         assert manifest["files"][2]["mode"] == "100755"
         assert archive.read(f"{first.root_directory}/src/main.py") == (
             b'print("committed source")\n'
@@ -223,3 +225,30 @@ def test_generated_source_contract_matches_public_json_schema(tmp_path: Path) ->
 
     manifest["files"][0]["mode"] = "120000"
     assert list(manifest_validator.iter_errors(manifest))
+
+
+def test_source_licence_expression_matches_the_repositorys_own_licence() -> None:
+    """The archive must name the licence of the tree it carries.
+
+    A corresponding-source archive says three things about ``LICENSE``: its
+    path, its SHA-256, and its SPDX expression.  The first two are computed
+    from the file, so they cannot drift; the expression was a literal, and it
+    did drift - it still read ``GPL-2.0-only`` after the tree became
+    Apache-2.0, which is exactly the claim a person receiving a binary relies
+    on.  The release policy declares the same file's expression and is
+    checked against the file's bytes, so pin the two together here.
+    """
+
+    from src.public_release_policy import (
+        PUBLIC_RELEASE_POLICY_PARTS,
+        load_public_release_policy,
+    )
+
+    policy, _raw = load_public_release_policy(ROOT.joinpath(*PUBLIC_RELEASE_POLICY_PARTS))
+
+    assert SOURCE_ARCHIVE_LICENSE_EXPRESSION == policy.project_license.expression
+    assert policy.project_license.path == "LICENSE"
+    assert (
+        policy.project_license.sha256
+        == hashlib.sha256((ROOT / "LICENSE").read_bytes()).hexdigest()
+    )

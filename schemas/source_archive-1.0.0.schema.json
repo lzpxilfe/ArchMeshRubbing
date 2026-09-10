@@ -124,7 +124,7 @@
       "additionalProperties": false,
       "required": ["expression", "path", "sha256"],
       "properties": {
-        "expression": {"const": "GPL-2.0-only"},
+        "expression": {"const": "Apache-2.0"},
         "path": {"const": "LICENSE"},
         "sha256": {"$ref": "#/$defs/sha256"}
       }
