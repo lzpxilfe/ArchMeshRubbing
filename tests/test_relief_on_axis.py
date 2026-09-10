@@ -119,8 +119,10 @@ def test_the_strip_is_laid_from_the_centre_line_and_cut_at_the_wall(pasted) -> N
     # the ink spans no more than the band the rows were read from.
     span = max(y for _x, y in dots) - min(y for _x, y in dots)
     assert span <= (profile[-1] - profile[0]) / 1000.0 / scale + 1e-6
-    # Across, the scissors: no dot stands further from the centre line than
-    # the wall's own radius there.
+    # Across, the scissors cut once, at the artifact's own edge: one
+    # distance from the centre line for the whole band, so the paper is a
+    # rectangle and not the vessel's curve.  The sheet says where it cut.
+    assert int(drawn["cut_radius_um"]) == max(radii)
     reach = max(x for x, _y in dots) - min(x for x, _y in dots)
     assert reach <= max(radii) / 1000.0 / scale + 1e-6
 

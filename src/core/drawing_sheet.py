@@ -954,7 +954,12 @@ class DrawingSheetOptions:
     drawing is the motif at true size over the width the artifact has when
     you look at it.  Each row goes at the height it was read from - the strip
     is meridian arc and the elevation is height, and the record says how the
-    two answer to each other - and is cut at the wall's radius there.
+    two answer to each other.
+
+    The scissors cut a rectangle: paper has straight edges and the cut is
+    made once, at the widest the wall stands from the axis over the band.  A
+    band round a pot is short and its round is wide, so what goes down here
+    is a wide rectangle where a whole vessel's rubbing would be a tall one.
 
     The shade must be a development; a shade read in a view goes on its
     figure in place, with ``relief_stipples``.  A pasted strip is drawn
@@ -2087,6 +2092,10 @@ class _Stipple:
     half: str
     dropped_section_side_count: int
     rectangle_mm: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+    #: Where the scissors went on a strip pasted along the axis: the one
+    #: distance from the centre line the rectangle was cut at, in
+    #: micrometres.  Zero for a shade stippled in place, which is not cut.
+    cut_radius_um: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -4264,8 +4273,9 @@ def _pasted_developments(
     edge is, so the motif stands at true size over the width the artifact
     has.  Rows go where they were read - the strip's rows are meridian arc
     and the elevation's are height, and the record carries the curve that
-    answers one to the other - and each row's dots stop at the wall's radius
-    there, which is that same record's reading of the profile.
+    answers one to the other.  The cut is a rectangle, made once at the
+    widest the wall stands from the axis over the band, because a piece of
+    rubbing paper has straight edges.
     """
 
     pasted: list[_Stipple] = []
@@ -4345,12 +4355,11 @@ def _pasted_developments(
             raise DrawingSheetError(f"relief shade {shade_id!r} covers no arc to paste")
         stations = np.linspace(bottom, top, len(heights_um))
         heights = np.interp(ys, stations, np.asarray(heights_um, dtype=np.float64) / 1000.0)
-        radii = np.interp(ys, stations, np.asarray(radii_um, dtype=np.float64) / 1000.0)
         # The strip is cut at the seam, which is behind the pot; what belongs
         # on this elevation is the wall that faces its viewer.  That meridian
         # stands on the centre line, and the wall turning away from it towards
         # this half's silhouette is what the paper covers - measured along the
-        # strip, at true arc length, and cut where the wall's own radius ends.
+        # strip, at true arc length.
         toward_viewer = np.asarray(figure_payload.frame.normal_world, dtype=np.float64)
         if float(np.hypot(toward_viewer[0], toward_viewer[1])) < 1e-9:
             raise DrawingSheetError(
@@ -4366,7 +4375,14 @@ def _pasted_developments(
         # Left of the axis a viewer sees the meridians the strip reaches
         # before the front one; right of it, the ones after.
         along = ((front_u - xs) if outward < 0.0 else (xs - front_u)) % circumference
-        keep = along <= radii
+        # The scissors cut a rectangle, not the vessel's curve: a piece of
+        # rubbing paper has straight edges, and a drafter cuts it once, at
+        # the artifact's own edge - the widest the wall stands from the axis
+        # over the band.  A pot's band is short and its round is wide, so
+        # what goes down is a wide rectangle where a whole vessel's rubbing
+        # would be a tall one.
+        reach = float(max(radii_um)) / 1000.0
+        keep = along <= reach
         dropped = int(np.count_nonzero(~keep))
         along = along[keep]
         heights = heights[keep]
@@ -4387,6 +4403,7 @@ def _pasted_developments(
                 half="elevation",
                 dropped_section_side_count=dropped,
                 rectangle_mm=raster.rectangle_mm,
+                cut_radius_um=int(round(reach * 1000.0)),
             )
         )
     return pasted
@@ -7037,6 +7054,9 @@ def compose_drawing_sheet(
                     "figure_record_id": record.id,
                     "half": stipple.half,
                     "record_id": stipple.record_id,
+                    # Only a strip pasted along the axis is cut, so a shade
+                    # stippled in place says nothing here.
+                    **({"cut_radius_um": str(stipple.cut_radius_um)} if stipple.cut_radius_um else {}),
                 }
                 for stipple in stipples
             )
@@ -7239,6 +7259,7 @@ def compose_drawing_sheet(
                 "figure_record_id": record.id,
                 "half": stipple.half,
                 "record_id": stipple.record_id,
+                **({"cut_radius_um": str(stipple.cut_radius_um)} if stipple.cut_radius_um else {}),
             }
             for stipple in stipples
         )
