@@ -326,10 +326,8 @@ class ARAPFlattener:
         edge_to_face: dict[tuple[int, int], int] = {}
         for fi, face in enumerate(faces):
             a, b, c = int(face[0]), int(face[1]), int(face[2])
-            for u, v in ((a, b), (b, c), (c, a)):
-                if u > v:
-                    u, v = v, u
-                key = (u, v)
+            for first, second in ((a, b), (b, c), (c, a)):
+                key = (first, second) if first <= second else (second, first)
                 prev = edge_to_face.get(key)
                 if prev is None:
                     edge_to_face[key] = int(fi)
@@ -386,7 +384,7 @@ class ARAPFlattener:
             w1 = (z0 - z2) / (2 * sqrt_area)
             w2 = (z1 - z0) / (2 * sqrt_area)
 
-            for vi, w in zip(face, [w0, w1, w2]):
+            for vi, w in zip(face, [w0, w1, w2], strict=True):
                 rows.extend([2 * fi, 2 * fi, 2 * fi + 1, 2 * fi + 1])
                 cols.extend([2 * vi, 2 * vi + 1, 2 * vi, 2 * vi + 1])
                 vals_real.extend([w.real, -w.imag, w.imag, w.real])
@@ -406,7 +404,7 @@ class ARAPFlattener:
             fixed_cols.extend([2 * idx, 2 * idx + 1])
         A_fixed = A[:, fixed_cols]
         b_fixed = np.zeros(len(fixed_verts) * 2)
-        for i, (_idx, pos) in enumerate(zip(fixed_verts, fixed_pos)):
+        for i, (_idx, pos) in enumerate(zip(fixed_verts, fixed_pos, strict=True)):
             b_fixed[2 * i] = pos[0]
             b_fixed[2 * i + 1] = pos[1]
 
@@ -749,7 +747,8 @@ class ARAPFlattener:
         for axis in (u, v):
             idx = int(np.argmax(np.abs(axis)))
             if axis[idx] < 0:
-                axis *= -1
+                # In place: u and v are what the caller stacks below.
+                axis[:] = -axis
         return np.vstack([u, v])
 
     def _compute_cotangent_edge_weights(self, mesh: MeshData) -> tuple[np.ndarray, np.ndarray, np.ndarray]:

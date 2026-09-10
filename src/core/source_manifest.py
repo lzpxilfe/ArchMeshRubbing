@@ -142,7 +142,7 @@ def resolve_logical_reference(
     if any(ord(character) < 32 or ord(character) == 127 for character in raw):
         raise SourceManifestError("dependency reference must not contain control characters")
     portable = raw.replace("\\", "/")
-    if portable.startswith("/") or portable.startswith("//"):
+    if portable.startswith(("/", "//")):
         raise SourceManifestError("dependency reference must be relative")
     if _URI_SCHEME_RE.match(portable) is not None:
         raise SourceManifestError("dependency reference must not be a URI or drive path")

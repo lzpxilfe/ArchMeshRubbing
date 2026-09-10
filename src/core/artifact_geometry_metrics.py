@@ -335,9 +335,9 @@ def validate_geometry_metrics_receipt(value: object) -> dict[str, Any]:
     )
     minimum = _vec3_int(bounds["minimum"], name="bounds_grid.minimum")
     maximum = _vec3_int(bounds["maximum"], name="bounds_grid.maximum")
-    if any(low > high for low, high in zip(minimum, maximum)):
+    if any(low > high for low, high in zip(minimum, maximum, strict=True)):
         raise ArtifactGeometryMetricsError("geometry metrics bounds are reversed")
-    if any(high - low > MAX_QUANTIZED_AXIS_EXTENT for low, high in zip(minimum, maximum)):
+    if any(high - low > MAX_QUANTIZED_AXIS_EXTENT for low, high in zip(minimum, maximum, strict=True)):
         raise ArtifactGeometryMetricsError("geometry metrics bounds exceed the extent limit")
 
     quantization = _exact_mapping(
@@ -785,7 +785,7 @@ def _topology_audit(
     raise_if_cancelled(cancellation_probe)
 
     union_find = _FaceUnionFind(face_count)
-    for group_index, (start, end) in enumerate(zip(starts, ends)):
+    for group_index, (start, end) in enumerate(zip(starts, ends, strict=True)):
         poll_cancellation(cancellation_probe, group_index, interval=4096)
         incident = sorted_face_ids[int(start) : int(end)]
         if incident.size < 2:

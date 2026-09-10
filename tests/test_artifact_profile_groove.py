@@ -14,6 +14,8 @@ from pathlib import Path
 import tempfile
 from typing import Any
 
+from itertools import pairwise
+
 import numpy as np
 import pytest
 
@@ -164,7 +166,7 @@ def test_grooves_come_back_in_order_and_do_not_overlap() -> None:
     heights = [groove.trough_height_um for groove in payload.grooves]
     assert len(heights) == 3
     assert heights == sorted(heights)
-    for lower, upper in zip(payload.grooves, payload.grooves[1:]):
+    for lower, upper in pairwise(payload.grooves):
         assert lower.upper_edge_height_um <= upper.lower_edge_height_um
     assert payload.qc_summary()["groove_count"] == 3
 
@@ -234,7 +236,7 @@ def test_the_record_keeps_the_reading_across_a_save() -> None:
     ]
     assert all(
         abs(height - (centre - FLOOR_OFFSET_MM)) < 0.5
-        for height, centre in zip(heights, (26.0, 30.0, 34.0))
+        for height, centre in zip(heights, (26.0, 30.0, 34.0), strict=True)
     )
 
     with tempfile.TemporaryDirectory() as temporary:
@@ -429,7 +431,7 @@ def test_the_ridges_may_be_drawn_past_what_was_measured_if_the_sheet_says_so(
     plain_edges = _chords(plain, "layer-technique-groove-edge")
     wide_edges = _chords(emphasised, "layer-technique-groove-edge")
     assert all(
-        wide > plain_width for wide, plain_width in zip(wide_edges, plain_edges)
+        wide > plain_width for wide, plain_width in zip(wide_edges, plain_edges, strict=True)
     ), "the ridges are drawn past the relief measured for them"
     # The trough is measurement and is not moved.
     assert _chords(plain, "layer-technique-groove-trough") == _chords(
@@ -504,6 +506,7 @@ def test_a_groove_line_spans_the_wall_at_its_own_height(
     for groove, edges in zip(
         grooves,
         [paths[TECHNIQUE_GROOVE_EDGE][i : i + 2] for i in range(0, 6, 2)],
+        strict=True,
     ):
         for path in edges:
             points = np.asarray(path.points_mm, dtype=np.float64)

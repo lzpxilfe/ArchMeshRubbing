@@ -252,7 +252,7 @@ class RubbingSheetExporter:
 
         # Rubbing groups
         cursor_x = row_x
-        for side, (side_w, side_h) in zip(rendered_sides, side_sizes):
+        for side, (side_w, side_h) in zip(rendered_sides, side_sizes, strict=True):
             img_uri = _encode_png_data_uri(side.rubbing.to_pil_image())
             svg_parts.append(f'<g id="{side.group_id}" transform="translate({cursor_x:.6f},{row_y:.6f})">')
             svg_parts.append(
@@ -530,7 +530,7 @@ class RubbingSheetExporter:
         # Section profiles (already laid out on floor in world XY)
         if cut_profiles_world:
             parts.append(f'<g id="sections" stroke="{options.section_color}" stroke-width="{sec_sw:.6f}">')
-            for i, line in enumerate(cut_profiles_world):
+            for line in cut_profiles_world:
                 arr = np.asarray(line, dtype=np.float64)
                 if arr.ndim != 2 or arr.shape[0] < 2 or arr.shape[1] < 2:
                     continue

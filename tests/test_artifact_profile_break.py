@@ -11,6 +11,8 @@ import tempfile
 from pathlib import Path
 import xml.etree.ElementTree as ET
 
+from itertools import pairwise
+
 import numpy as np
 import pytest
 
@@ -69,7 +71,7 @@ def _footed_vessel(segments: int = 48) -> tuple[np.ndarray, np.ndarray, list[np.
     # The inside's straight runs are subdivided so the inner wall has rings
     # enough to read a profile up; no corner is added.
     inside: list[tuple[float, float]] = []
-    for (r0, z0), (r1, z1) in zip(inside_corners, inside_corners[1:]):
+    for (r0, z0), (r1, z1) in pairwise(inside_corners):
         for t in np.linspace(0.0, 1.0, 4, endpoint=False):
             inside.append((r0 + (r1 - r0) * float(t), z0 + (z1 - z0) * float(t)))
     inside.append(inside_corners[-1])
@@ -151,7 +153,7 @@ def test_the_foot_and_the_shoulder_come_out_as_the_corners_they_are(footed) -> N
     found = [(item.height_um / 1000.0 + offset, item.radius_um / 1000.0, item.convex) for item in payload.breaks]
     expected = [(FOOT_EDGE_Z, 33.0, True), (FOOT_ROOT_Z, 33.0, False), (SHOULDER_Z, 58.0, True)]
     assert len(found) == 3, found
-    for (height, radius, convex), (want_z, want_r, want_convex) in zip(found, expected):
+    for (height, radius, convex), (want_z, want_r, want_convex) in zip(found, expected, strict=True):
         assert abs(height - want_z) < 1.0, (found, expected)
         assert abs(radius - want_r) < 1.5, (found, expected)
         assert convex is want_convex

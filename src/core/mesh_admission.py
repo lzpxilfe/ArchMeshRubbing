@@ -2024,10 +2024,11 @@ def estimated_texture_bytes(value: object) -> int:
         return 0
     if width < 0 or height < 0:
         raise MeshAdmissionError("decoded texture dimensions must be non-negative")
-    try:
-        bands = tuple(getattr(value, "getbands")())
-    except Exception:
-        bands = ()
+    # The decoded image arrives untyped, so ask whether it can name its bands
+    # rather than assume it and catch the failure.
+    read_bands = getattr(value, "getbands", None)
+    named = read_bands() if callable(read_bands) else ()
+    bands: tuple[Any, ...] = tuple(named) if isinstance(named, (tuple, list)) else ()
     band_count = max(1, len(bands))
     mode = str(getattr(value, "mode", "") or "").upper()
     if mode.startswith("I;16"):

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import math
 
+from itertools import pairwise
+
 import pytest
 from shapely.geometry import LineString, Polygon
 
@@ -146,7 +148,7 @@ def test_a_finger_press_is_one_oval_and_a_row_is_a_row_of_them() -> None:
     assert len(row) == 4
     assert all(stroke.closed for stroke in row)
     centres = sorted(sum(x for x, _ in stroke.points_mm) / len(stroke.points_mm) for stroke in row)
-    gaps = [b - a for a, b in zip(centres, centres[1:])]
+    gaps = [b - a for a, b in pairwise(centres)]
     assert all(12.0 <= gap <= 18.0 for gap in gaps)
 
     # Two separate presses are two ovals whatever the seed.

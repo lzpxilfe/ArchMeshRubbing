@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import math
 
+from itertools import pairwise
+
 import numpy as np
 import pytest
 
@@ -404,9 +406,9 @@ def _flaring_dish(*, segments: int = 72) -> tuple[np.ndarray, np.ndarray]:
 
     outer = [ring(radius(z), z) for z in outer_z]
     inner = [ring(radius(z) - 3.0, z) for z in inner_z]
-    for a, b in zip(outer, outer[1:]):
+    for a, b in pairwise(outer):
         band(a, b, inward=False)
-    for a, b in zip(inner, inner[1:]):
+    for a, b in pairwise(inner):
         band(a, b, inward=True)
     band(outer[-1], inner[-1], inward=False)  # the rim's top
     band(inner[0], outer[0], inward=False)  # the floor, closing the foot

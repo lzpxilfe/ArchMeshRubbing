@@ -216,8 +216,8 @@ def surface_shade(normal: tuple[float, float, float]) -> float:
     """
 
     unit_normal = _unit(normal)
-    key = sum(a * b for a, b in zip(unit_normal, _unit(KEY_LIGHT)))
-    fill = sum(a * b for a, b in zip(unit_normal, _unit(FILL_LIGHT)))
+    key = sum(a * b for a, b in zip(unit_normal, _unit(KEY_LIGHT), strict=True))
+    fill = sum(a * b for a, b in zip(unit_normal, _unit(FILL_LIGHT), strict=True))
     lit = AMBIENT + KEY_STRENGTH * max(0.0, key) + FILL_STRENGTH * max(0.0, fill)
     return min(1.0, max(0.0, lit))
 

@@ -15,6 +15,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from itertools import pairwise
+
 import numpy as np
 import pytest
 
@@ -84,7 +86,7 @@ def test_a_presumed_floor_is_a_dashed_level_line_from_the_axis_and_the_sheet_say
     layer = _find(figure, f"{SVG_NS}g[@id='layer-section-cut']")
     assert any("presumed:floor" in el.attrib.get("id", "") for el in layer.iter())
     starts = sorted(dash[0][0] for dash in dashes)
-    assert all(later - earlier > 0.9 for earlier, later in zip(starts, starts[1:]))
+    assert all(later - earlier > 0.9 for earlier, later in pairwise(starts))
     sidecar = json.loads(bundle.sidecar_bytes.decode("utf-8"))
     (entry,) = sidecar["presumed_lines"]["entries"]
     assert entry["kind"] == "floor" and entry["height_um"] == 30000 and entry["length_um"] == 0

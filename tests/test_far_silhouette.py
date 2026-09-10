@@ -18,6 +18,8 @@ import tempfile
 from pathlib import Path
 import xml.etree.ElementTree as ET
 
+from itertools import pairwise
+
 import numpy as np
 import pytest
 
@@ -107,7 +109,7 @@ def _top_at(payload: VectorGeometryPayload, u: float) -> float:
     best = -math.inf
     for path in payload.paths:
         points = list(path.points_mm) + [path.points_mm[0]]
-        for (x0, y0), (x1, y1) in zip(points, points[1:]):
+        for (x0, y0), (x1, y1) in pairwise(points):
             if (x0 - u) * (x1 - u) > 0.0 or x0 == x1:
                 continue
             best = max(best, y0 + (y1 - y0) * (u - x0) / (x1 - x0))
@@ -232,7 +234,7 @@ def test_the_rim_goes_round_the_back_the_way_it_was_measured(tilted) -> None:
     # the tilt at 1:2, less what the last gap-length hides.
     drop = edge[-1][1] - edge[0][1]
     assert TILT_MM / 2.0 - 1.5 < drop < TILT_MM / 2.0 + 0.3, drop
-    assert all(later[1] >= earlier[1] - 0.05 for earlier, later in zip(edge, edge[1:])), "it comes down all the way"
+    assert all(later[1] >= earlier[1] - 0.05 for earlier, later in pairwise(edge)), "it comes down all the way"
     assert not _paths(root, ":past-axis:"), "no straight run beside it"
     figure = json.loads(far.sidecar_bytes.decode("utf-8"))["mirrored_figures"][0]
     assert figure["outline_reach"] == "far" and figure["far_edge_count"] == "1"
@@ -271,7 +273,7 @@ def test_the_rim_goes_round_the_back_the_way_it_was_measured(tilted) -> None:
     validate_drawing_sheet_bytes(ruled.svg_bytes, ruled.sidecar_bytes)
     (segment,) = _paths(ET.fromstring(ruled.svg_bytes), ":far-edge:record:far:")
     assert len(segment) == 2 and len(edge) > 2
-    assert all(abs(a - b) < 1e-6 for a, b in zip(segment[0], edge[0])) and all(abs(a - b) < 1e-6 for a, b in zip(segment[-1], edge[-1]))
+    assert all(abs(a - b) < 1e-6 for a, b in zip(segment[0], edge[0], strict=True)) and all(abs(a - b) < 1e-6 for a, b in zip(segment[-1], edge[-1], strict=True))
     ruled_sidecar = json.loads(ruled.sidecar_bytes.decode("utf-8"))
     assert ruled_sidecar["mirrored_figures"][0]["far_edges"] == "straight" and figure["far_edges"] == "measured"
     assert ruled_sidecar["interpretation"]["straight_far_edges"] is True

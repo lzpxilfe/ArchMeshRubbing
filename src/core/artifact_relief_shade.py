@@ -756,7 +756,7 @@ def _masked_running_median(field: np.ndarray, ok: np.ndarray, width_pixels: floa
     width = max(3, int(round(width_pixels)) | 1)
     # Uncovered pixels are filled with the row's own median so they pull
     # the window towards the wall's level rather than towards zero.
-    row_median = np.array([np.median(row[mask]) if mask.any() else 0.0 for row, mask in zip(field, ok)])
+    row_median = np.array([np.median(row[mask]) if mask.any() else 0.0 for row, mask in zip(field, ok, strict=True)])
     filled = np.where(ok, field, row_median[:, None])
     slow = median_filter(filled, size=(1, width), mode="nearest")
     coverage = uniform_filter1d(ok.astype(np.float64), width, axis=1, mode="constant")

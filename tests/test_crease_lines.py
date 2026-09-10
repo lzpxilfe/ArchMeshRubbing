@@ -12,6 +12,8 @@ docs/LITHIC_TRIAL.md.
 
 from __future__ import annotations
 
+from itertools import pairwise
+
 import numpy as np
 import pytest
 
@@ -30,7 +32,7 @@ from synthetic_lithic import BIFACE_SHAPE, dorsal_creases, dorsal_sheet, flaked_
 
 def _sampled(polyline: np.ndarray, step_mm: float = 0.5) -> np.ndarray:
     points = []
-    for start, end in zip(polyline[:-1], polyline[1:]):
+    for start, end in pairwise(polyline):
         count = max(1, int(np.linalg.norm(end - start) / step_mm))
         points.extend(start + (end - start) * (k / count) for k in range(count))
     points.append(polyline[-1])
@@ -287,7 +289,7 @@ def test_a_reading_is_the_same_twice_and_refuses_bad_input(biface) -> None:
     again = detect_convex_creases(vertices, faces)
     assert crease_summary(again) == crease_summary(chains)
     assert all(
-        np.array_equal(first.points_mm, second.points_mm) for first, second in zip(chains, again)
+        np.array_equal(first.points_mm, second.points_mm) for first, second in zip(chains, again, strict=True)
     )
     with pytest.raises(ArtifactCreaseError, match="strictly between"):
         detect_convex_creases(vertices, faces, dihedral_min_deg=0.0)

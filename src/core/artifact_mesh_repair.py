@@ -51,7 +51,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 import numpy as np
-from scipy.spatial import cKDTree
+from scipy.spatial import KDTree
 
 from .artifact_mesh_bodies import (
     boundary_rings,
@@ -556,7 +556,7 @@ def _face_neighbourhood(
             corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0]
         )
         lengths = np.linalg.norm(normals, axis=1)
-        _, nearest = cKDTree(vertices[piece_vertices]).query(centroids)
+        _, nearest = KDTree(vertices[piece_vertices]).query(centroids)
         towards = vertices[piece_vertices][nearest] - centroids
         facing = np.einsum("ij,ij->i", normals, towards) > 0.0
         near &= facing & (lengths > 0.0)
@@ -568,10 +568,10 @@ def _face_neighbourhood(
 
     seed_points = vertices[np.concatenate(rings)]
     candidate_vertices = np.unique(faces[target[near]])
-    _, landed = cKDTree(vertices[candidate_vertices]).query(seed_points)
-    landing = np.isin(
-        faces[target], candidate_vertices[np.unique(landed)]
-    ).any(axis=1)
+    _, landed = KDTree(vertices[candidate_vertices]).query(seed_points)
+    landing = np.asarray(
+        np.isin(faces[target], candidate_vertices[np.unique(landed)]).any(axis=1)
+    ).reshape(-1)
 
     selected = np.flatnonzero(near)
     labels = face_bodies(faces[target[selected]])
@@ -709,7 +709,7 @@ def sew_ring_pair_to_body(
             "both new edges of the body came out nearer the same ring; the joint "
             "cannot be told apart at this reach"
         )
-    paired = {side: loop for side, loop in zip(sides, fresh)}
+    paired = dict(zip(sides, fresh, strict=True))
 
     sewn: list[tuple[int, int, int]] = []
     for index, ring in enumerate(rings):

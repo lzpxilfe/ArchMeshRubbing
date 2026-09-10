@@ -633,8 +633,8 @@ def benchmark_synthetic_tiles(output_dir: str, *, seeds_arg: str = "1"):
 
     try:
         seeds: list[int] = []
-        for token in str(seeds_arg or "1").split(","):
-            token = str(token or "").strip()
+        for raw_seed in str(seeds_arg or "1").split(","):
+            token = str(raw_seed or "").strip()
             if not token:
                 continue
             seeds.append(int(token))

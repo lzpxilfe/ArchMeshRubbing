@@ -32,6 +32,7 @@ from typing import Any, Mapping
 import numpy as np
 
 from .artifact_cancellation import CancellationProbe, raise_if_cancelled
+from .ndimage_shims import labelled
 from .artifact_texture_relief import (
     MAX_NORMAL_MAP_BYTES,
     MAX_NORMAL_MAP_SIDE,
@@ -303,7 +304,7 @@ def texture_paint_and_colour_field(
     map has at every covered pixel centre, as the file has it (HxWx3 uint8,
     zero where the development does not cover the pixel)."""
 
-    from scipy.ndimage import distance_transform_edt, label, maximum  # noqa: PLC0415
+    from scipy.ndimage import distance_transform_edt, maximum  # noqa: PLC0415
 
     try:
         lattice = rasterise_developed_texels(
@@ -335,8 +336,8 @@ def texture_paint_and_colour_field(
     painted_count = int(np.count_nonzero(painted))
     wide_count = 0
     if painted_count and band_um > 0:
-        labels, count = label(painted, structure=np.ones((3, 3), dtype=bool))
-        distance = distance_transform_edt(painted)
+        labels, count = labelled(painted, structure=np.ones((3, 3), dtype=bool))
+        distance = np.asarray(distance_transform_edt(painted), dtype=np.float64)
         widest = np.asarray(maximum(distance, labels, index=np.arange(1, count + 1)), dtype=np.float64)
         is_wide = 2.0 * widest / float(pixels_per_mm) > band_um / 1000.0
         wide_count = int(np.count_nonzero(is_wide))

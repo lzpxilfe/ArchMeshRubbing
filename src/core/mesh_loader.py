@@ -70,8 +70,8 @@ _SurfaceAreaCacheStatus = Literal["not_computed", "exact", "unavailable"]
 try:
     import trimesh
     from trimesh.resolvers import Resolver
-except ImportError:
-    raise ImportError("trimesh is required. Install with: pip install trimesh")
+except ImportError as error:
+    raise ImportError("trimesh is required. Install with: pip install trimesh") from error
 
 
 class ExternalMeshDependencyError(ValueError):

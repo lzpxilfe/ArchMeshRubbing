@@ -30,7 +30,7 @@ def _jittered_circle(radius: float, *, count: int = 720, jitter: float = 0.25, s
     rng = np.random.default_rng(seed)
     angles = np.linspace(0.0, 2.0 * math.pi, count, endpoint=False)
     radii = radius + rng.uniform(-jitter, jitter, size=count)
-    return [(float(r * math.cos(a)), float(r * math.sin(a))) for r, a in zip(radii, angles)]
+    return [(float(r * math.cos(a)), float(r * math.sin(a))) for r, a in zip(radii, angles, strict=True)]
 
 
 def _turning_energy(points, *, closed: bool) -> float:

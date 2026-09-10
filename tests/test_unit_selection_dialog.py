@@ -31,7 +31,7 @@ _APP: QApplication | None = None
 
 @pytest.fixture(scope="module", autouse=True)
 def _app():
-    global _APP
+    global _APP  # noqa: PLW0603 - Qt allows one QApplication per process
     _APP = QApplication.instance() or QApplication([])
     yield _APP
 

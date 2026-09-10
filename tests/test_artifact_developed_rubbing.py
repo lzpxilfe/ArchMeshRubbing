@@ -16,6 +16,8 @@ from pathlib import Path
 import tempfile
 from typing import Any
 
+from itertools import pairwise
+
 import numpy as np
 import pytest
 
@@ -911,7 +913,7 @@ def test_a_caption_wider_than_its_paper_breaks_into_lines_that_fit(
     assert len(xs) == 1
     ys = [float(y) for _x, y, _text in spans]
     assert ys == sorted(ys)
-    assert all(later - earlier == pytest.approx(2.9) for earlier, later in zip(ys, ys[1:]))
+    assert all(later - earlier == pytest.approx(2.9) for earlier, later in pairwise(ys))
     # The lines sit inside the figure's own extent, under the paper: the band
     # grew with them, so nothing below the figure is printed over.
     origin_x, origin_y = figure["origin_mm"]

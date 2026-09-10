@@ -200,7 +200,7 @@ def test_the_command_line_makes_the_plate_again_from_the_project_and_the_spec(tm
     out = tmp_path / "out" / "plate.svg"
     run = subprocess.run(
         [sys.executable, str(REPO_ROOT / "main.py"), "--plate", str(project), str(spec_path), str(out)],
-        capture_output=True, text=True, cwd=str(REPO_ROOT), timeout=600,
+        capture_output=True, text=True, cwd=str(REPO_ROOT), timeout=600, check=False,
     )
     assert run.returncode == 0, run.stderr
     assert out.read_bytes() == bundle.svg_bytes, "the command line and the library make the same plate"
@@ -213,6 +213,6 @@ def test_the_command_line_makes_the_plate_again_from_the_project_and_the_spec(tm
         compose_plate_from_project(project, {**spec, "paint_cutouts": [["record:cutout", record_id, "in_place"]]})
     failed = subprocess.run(
         [sys.executable, str(REPO_ROOT / "main.py"), "--plate", str(project), str(tmp_path / "missing.json"), str(out)],
-        capture_output=True, text=True, cwd=str(REPO_ROOT), timeout=600,
+        capture_output=True, text=True, cwd=str(REPO_ROOT), timeout=600, check=False,
     )
     assert failed.returncode == 1 and "plate failed" in failed.stderr

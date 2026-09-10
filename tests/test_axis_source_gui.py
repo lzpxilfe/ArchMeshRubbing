@@ -38,7 +38,7 @@ _APP: QApplication | None = None
 
 
 def _window() -> MainWindow:
-    global _APP
+    global _APP  # noqa: PLW0603 - Qt allows one QApplication per process
     if _APP is None:
         _APP = QApplication.instance() or QApplication([])
     assert _APP is not None

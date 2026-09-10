@@ -358,7 +358,7 @@ def _git_environment() -> dict[str, str]:
         key
         for key, value in os.environ.items()
         if value
-        and (key.startswith("GIT_CONFIG_KEY_") or key.startswith("GIT_CONFIG_VALUE_"))
+        and key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))
     )
     if offenders:
         raise NativeBuildError(

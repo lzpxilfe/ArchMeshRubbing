@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import math
 
+from itertools import pairwise
+
 import pytest
 
 from src.gui.studio_backdrop import (
@@ -66,7 +68,7 @@ def test_the_floor_reaches_past_the_artifact_and_rules_evenly() -> None:
     offsets = grid.offsets_mm()
     assert len(offsets) == grid.line_count
     assert offsets[0] == pytest.approx(-offsets[-1]), "the ruling is centred"
-    gaps = {round(b - a, 9) for a, b in zip(offsets, offsets[1:])}
+    gaps = {round(b - a, 9) for a, b in pairwise(offsets)}
     assert gaps == {round(grid.step_mm, 9)}, "every square is the same square"
     assert grid.is_major(0.0)
     assert grid.is_major(grid.step_mm * GRID_MAJOR_EVERY)
@@ -94,8 +96,8 @@ def test_the_backdrop_is_continuous_from_floor_to_sky() -> None:
     heights = [index / 400.0 for index in range(401)]
     colours = [background_colour(height) for height in heights]
     steps = [
-        max(abs(a - b) for a, b in zip(first, second))
-        for first, second in zip(colours, colours[1:])
+        max(abs(a - b) for a, b in zip(first, second, strict=True))
+        for first, second in pairwise(colours)
     ]
     assert max(steps) < 0.01, "the gradient has no visible step in it"
     assert colours[0] != colours[-1], "the floor end and the sky end differ"

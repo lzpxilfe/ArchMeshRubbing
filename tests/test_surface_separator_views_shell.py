@@ -110,7 +110,7 @@ def _make_wrinkled_shell(
     vertices = (rot @ vertices.T).T
 
     mesh = MeshData(vertices=vertices, faces=faces_arr, unit="mm")
-    true_outer = set(range(0, outer_face_count))
+    true_outer = set(range(outer_face_count))
     true_inner = set(range(outer_face_count, outer_face_count + inner_face_count))
     true_migu = set(range(outer_face_count + inner_face_count, int(faces_arr.shape[0])))
     true_axis = rot @ np.array([0.0, 0.0, 1.0], dtype=np.float64)

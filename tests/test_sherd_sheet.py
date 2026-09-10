@@ -18,6 +18,8 @@ import json
 import xml.etree.ElementTree as ET
 from typing import Any
 
+from itertools import pairwise
+
 import pytest
 
 from src.core.artifact_outline_extractor import compute_artifact_outline
@@ -169,7 +171,7 @@ def test_the_drawing_stops_short_of_the_break_and_nothing_closes_it(document) ->
     assert on_the_line, "the lines do end level, on the trim line"
     for path in broken_paths:
         points = _points(path)
-        for (x1, y1), (x2, y2) in zip(points, points[1:]):
+        for (x1, y1), (x2, y2) in pairwise(points):
             if abs(y1 - broken_top) < 1e-6 and abs(y2 - broken_top) < 1e-6:
                 span = abs(x2 - x1)
                 assert span < 1.0, f"a {span:.1f} mm segment runs along the break"

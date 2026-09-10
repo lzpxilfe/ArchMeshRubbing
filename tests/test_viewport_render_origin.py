@@ -54,7 +54,7 @@ def _direct_call_names(node: ast.FunctionDef) -> list[str]:
 
 def _fake_viewport(origin: np.ndarray) -> SimpleNamespace:
     fake = SimpleNamespace(
-        _scene_render_origin_world_mm=lambda: origin.copy(),
+        _scene_render_origin_world_mm=origin.copy,
     )
     fake._world_to_render_point = MethodType(Viewport3D._world_to_render_point, fake)
     fake._submit_world_vertex = MethodType(Viewport3D._submit_world_vertex, fake)
@@ -376,7 +376,7 @@ def test_ctrl_drag_keeps_press_frame_after_a_new_live_frame_is_published() -> No
     live_frame = {"value": press_frame}
     obj = SimpleNamespace(
         translation=np.zeros(3, dtype=np.float64),
-        world_pivot=lambda: press_origin.copy(),
+        world_pivot=press_origin.copy,
     )
     transform_events: list[float] = []
     fake = SimpleNamespace(
@@ -467,7 +467,7 @@ def test_render_frame_capture_binds_matrices_viewport_origin_and_generation() ->
         _projection_generation=9,
         _amr_render_frame_snapshot=None,
         _amr_render_frame_depth_signature=None,
-        _scene_render_origin_world_mm=lambda: origin.copy(),
+        _scene_render_origin_world_mm=origin.copy,
         objects=[],
         selected_index=-1,
     )
@@ -706,7 +706,7 @@ def test_selection_change_invalidates_frames_and_detaches_surface_workers() -> N
         surface_paint_points=[(np.ones(3), "outer")],
         _surface_grow_state={"old": object()},
         update=lambda: None,
-        selectionChanged=SimpleNamespace(emit=lambda index: selected.append(index)),
+        selectionChanged=SimpleNamespace(emit=selected.append),
         _active_polyline_layer_obj_index=-1,
         _active_polyline_layer_index=-1,
     )
@@ -1110,7 +1110,7 @@ def test_selection_and_floor_diagnostics_never_write_depth() -> None:
         item.start()
     depth_patch = patch(
         "src.gui.viewport_3d.glDepthMask",
-        side_effect=lambda value: depth_masks.append(value),
+        side_effect=depth_masks.append,
     )
     depth_patch.start()
     try:

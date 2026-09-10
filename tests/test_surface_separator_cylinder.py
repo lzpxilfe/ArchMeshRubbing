@@ -106,7 +106,7 @@ def _make_thin_cylinder_patch(
 
     mesh = MeshData(vertices=vertices, faces=faces_arr, unit="mm")
 
-    true_outer = set(range(0, outer_face_count))
+    true_outer = set(range(outer_face_count))
     true_inner = set(range(outer_face_count, outer_face_count + inner_face_count))
     true_migu = set(range(outer_face_count + inner_face_count, int(faces_arr.shape[0])))
     return mesh, true_outer, true_inner, true_migu

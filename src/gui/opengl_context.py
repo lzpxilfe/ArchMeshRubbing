@@ -79,8 +79,9 @@ def install_windows_software_pyopengl_bridge(
     ``OpenGL.GL`` or the viewport module.
     """
 
-    global _WINDOWS_SOFTWARE_GL_DLL
-    global _WINDOWS_SOFTWARE_GL_DIRECTORY
+    # The loaded DLL is the process's, so the record of it is too.
+    global _WINDOWS_SOFTWARE_GL_DLL  # noqa: PLW0603
+    global _WINDOWS_SOFTWARE_GL_DIRECTORY  # noqa: PLW0603
 
     target_environ = os.environ if environ is None else environ
     if sys.platform != "win32":

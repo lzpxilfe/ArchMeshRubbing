@@ -28,9 +28,10 @@ from __future__ import annotations
 import base64
 from dataclasses import dataclass, field, replace
 import hashlib
+from itertools import pairwise
 import math
 import re
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, SupportsInt
 
 import numpy as np
 
@@ -380,7 +381,7 @@ def _caption_band_mm(line_count: int) -> float:
     return _CAPTION_BAND_MM + _CAPTION_LINE_MM * (max(1, int(line_count)) - 1)
 
 
-def _millimetre_token(micrometres: object) -> str:
+def _millimetre_token(micrometres: SupportsInt) -> str:
     return f"{int(micrometres) / 1000.0:g} mm"
 
 
@@ -1239,6 +1240,28 @@ class DrawingSheetOptions:
     title: str = "ArchMeshRubbing measured drawing sheet"
 
     def __post_init__(self) -> None:
+        """Settle every option into its canonical shape, or refuse the sheet.
+
+        The order matters and is the order of the calls below: a phase reads
+        fields the phase before it has already settled.  Each phase either
+        writes back what it read or raises, so an options object that exists
+        at all is one the composer can draw from without checking again.
+        """
+
+        self._reject_wrong_kinds()
+        elevations = self._settle_mirrored_figures()
+        self._settle_pasted_readings(elevations)
+        self._settle_carried_records()
+        self._settle_layout()
+        self._settle_technique_marks()
+        self._settle_break_lines()
+        self._settle_far_edges(elevations)
+        self._settle_rubbings_on_axis()
+        self._settle_page()
+
+    def _reject_wrong_kinds(self) -> None:
+        """The four things a sheet is made of are objects, not mappings."""
+
         if not isinstance(self.title_block, TitleBlock):
             raise DrawingSheetError("title_block must be a TitleBlock")
         if not isinstance(self.interpretation, Interpretation):
@@ -1247,14 +1270,22 @@ class DrawingSheetOptions:
             raise DrawingSheetError("page must be a SheetPage")
         if not isinstance(self.show_center_axis, bool):
             raise DrawingSheetError("show_center_axis must be a boolean")
+
+    def _settle_mirrored_figures(self) -> set[str]:
+        """Which figures are drawn as a half elevation against a half section,
+        and where the centre line steps aside for a pattern that crosses it.
+
+        Hands back the elevation halves: everything pasted onto a mirrored
+        figure below has to name one of them."""
+
         mirror_sections: list[tuple[str, str]] = []
-        for pair in self.mirror_sections:
-            if not isinstance(pair, (tuple, list)) or len(pair) != 2:
+        for section_pair in self.mirror_sections:
+            if not isinstance(section_pair, (tuple, list)) or len(section_pair) != 2:
                 raise DrawingSheetError(
                     "mirror_sections entries must be "
                     "(elevation record id, section record id) pairs"
                 )
-            elevation_id, section_id = (str(item).strip() for item in pair)
+            elevation_id, section_id = (str(item).strip() for item in section_pair)
             if not elevation_id or not section_id:
                 raise DrawingSheetError("mirror_sections entries must be record ids")
             if elevation_id == section_id:
@@ -1283,7 +1314,7 @@ class DrawingSheetOptions:
                     "of any mirrored figure"
                 )
             numbers: list[float] = []
-            for name, value in zip(("along_from_mm", "along_to_mm", "reach_mm"), entry[1:]):
+            for name, value in zip(("along_from_mm", "along_to_mm", "reach_mm"), entry[1:], strict=True):
                 if isinstance(value, bool) or not isinstance(value, (int, float)) or math.isnan(value):
                     raise DrawingSheetError(f"mirror_jogs {name} must be a number")
                 if name != "reach_mm" and not math.isfinite(value):
@@ -1301,6 +1332,13 @@ class DrawingSheetOptions:
                     raise DrawingSheetError("mirror_jogs of one figure must not overlap along the axis")
             mirror_jogs.append((record_id, along_from, along_to, reach))
         object.__setattr__(self, "mirror_jogs", tuple(mirror_jogs))
+        return elevations
+
+    def _settle_pasted_readings(self, elevations: set[str]) -> None:
+        """What is laid onto a figure rather than drawn as lines of its own -
+        cut-out paint, presumed lines, stippled relief, a development pasted
+        along the axis - and how dark and how dense it goes on."""
+
         cutouts: list[tuple[str, str, str]] = []
         for entry in self.paint_cutouts:
             if not isinstance(entry, (tuple, list)) or len(entry) != 3:
@@ -1337,7 +1375,7 @@ class DrawingSheetOptions:
             if kind not in PRESUMED_KINDS:
                 raise DrawingSheetError(f"presumed_lines kind must be one of {', '.join(PRESUMED_KINDS)}")
             values: list[float] = []
-            for name, value in zip(("height_mm", "length_mm"), entry[2:]):
+            for name, value in zip(("height_mm", "length_mm"), entry[2:], strict=True):
                 if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
                     raise DrawingSheetError(f"presumed_lines {name} must be a finite number")
                 values.append(float(value))
@@ -1375,7 +1413,7 @@ class DrawingSheetOptions:
                     raise DrawingSheetError(
                         "presumed_section polyline points must be (u_mm, v_mm) pairs"
                     )
-                pair: list[float] = []
+                coordinates: list[float] = []
                 for value in point:
                     if (
                         isinstance(value, bool)
@@ -1385,8 +1423,8 @@ class DrawingSheetOptions:
                         raise DrawingSheetError(
                             "presumed_section polyline points must be finite numbers"
                         )
-                    pair.append(float(value))
-                walked.append((pair[0], pair[1]))
+                    coordinates.append(float(value))
+                walked.append((coordinates[0], coordinates[1]))
             stretches.append((record_id, tuple(walked)))
         object.__setattr__(self, "presumed_section", tuple(stretches))
         stipples: list[tuple[str, str]] = []
@@ -1431,6 +1469,11 @@ class DrawingSheetOptions:
                 raise DrawingSheetError(f"{name} must be a number from {low:g} to {high:g} mm")
         object.__setattr__(self, "stipple_pitch_mm", float(self.stipple_pitch_mm))
         object.__setattr__(self, "stipple_dot_mm", float(self.stipple_dot_mm))
+
+    def _settle_carried_records(self) -> None:
+        """The readings this sheet carries by name: condition, technique, crease,
+        pattern lines, and the patterns held back from the pattern layer."""
+
         condition_records = tuple(self.condition_records)
         if any(
             not isinstance(record_id, str) or not record_id.strip()
@@ -1519,6 +1562,11 @@ class DrawingSheetOptions:
         if len(set(hidden)) != len(hidden):
             raise DrawingSheetError("texture_line_hidden_patterns names a pattern twice")
         object.__setattr__(self, "texture_line_hidden_patterns", tuple(hidden))
+
+    def _settle_layout(self) -> None:
+        """The two arrangements that stack figures on one axis rather than
+        leaving the sheet to lay them out."""
+
         if self.plan_with_sections is not None:
             trio = tuple(self.plan_with_sections)
             if len(trio) != 3 or any(
@@ -1535,24 +1583,29 @@ class DrawingSheetOptions:
                 )
             object.__setattr__(self, "plan_with_sections", trio)
         if self.plan_over_elevation is not None:
-            pair = tuple(self.plan_over_elevation)
-            if len(pair) != 2 or any(not isinstance(record_id, str) or not record_id.strip() for record_id in pair):
+            stack = tuple(self.plan_over_elevation)
+            if len(stack) != 2 or any(not isinstance(record_id, str) or not record_id.strip() for record_id in stack):
                 raise DrawingSheetError("plan_over_elevation names a plan record and an elevation record")
-            if pair[0] == pair[1]:
+            if stack[0] == stack[1]:
                 raise DrawingSheetError("plan_over_elevation must name two different records")
             if self.plan_with_sections is not None:
                 raise DrawingSheetError("plan_over_elevation and plan_with_sections cannot be used together")
-            object.__setattr__(self, "plan_over_elevation", pair)
+            object.__setattr__(self, "plan_over_elevation", stack)
+
+    def _settle_technique_marks(self) -> None:
+        """What the technique symbols say and which way they face, and the note
+        under a rubbing."""
+
         angles: list[tuple[str, float]] = []
-        for pair in self.technique_angles_deg:
-            if not isinstance(pair, (tuple, list)) or len(pair) != 2:
+        for angle_pair in self.technique_angles_deg:
+            if not isinstance(angle_pair, (tuple, list)) or len(angle_pair) != 2:
                 raise DrawingSheetError(
                     "technique_angles_deg entries must be (record id, degrees) pairs"
                 )
-            record_id, angle = pair
+            record_id, angle = angle_pair
             if not isinstance(record_id, str) or not record_id.strip():
                 raise DrawingSheetError("technique_angles_deg entries must name a record")
-            if record_id not in technique_records:
+            if record_id not in self.technique_records:
                 raise DrawingSheetError(
                     f"technique_angles_deg names {record_id!r}, which is not in "
                     "technique_records"
@@ -1568,18 +1621,18 @@ class DrawingSheetOptions:
             raise DrawingSheetError("a technique record has at most one direction")
         object.__setattr__(self, "technique_angles_deg", tuple(angles))
         representations: list[tuple[str, str]] = []
-        for pair in self.technique_representations:
-            if not isinstance(pair, (tuple, list)) or len(pair) != 2:
+        for representation_pair in self.technique_representations:
+            if not isinstance(representation_pair, (tuple, list)) or len(representation_pair) != 2:
                 raise DrawingSheetError(
                     "technique_representations entries must be "
                     "(record id, representation) pairs"
                 )
-            record_id, representation = pair
+            record_id, representation = representation_pair
             if not isinstance(record_id, str) or not record_id.strip():
                 raise DrawingSheetError(
                     "technique_representations entries must name a record"
                 )
-            if record_id not in technique_records:
+            if record_id not in self.technique_records:
                 raise DrawingSheetError(
                     f"technique_representations names {record_id!r}, which is not in "
                     "technique_records"
@@ -1594,12 +1647,12 @@ class DrawingSheetOptions:
             raise DrawingSheetError("a technique record is drawn one way, not two")
         object.__setattr__(self, "technique_representations", tuple(representations))
         notes: list[tuple[str, str]] = []
-        for pair in self.rubbing_notes:
-            if not isinstance(pair, (tuple, list)) or len(pair) != 2:
+        for note_pair in self.rubbing_notes:
+            if not isinstance(note_pair, (tuple, list)) or len(note_pair) != 2:
                 raise DrawingSheetError(
                     "rubbing_notes entries must be (record id, note) pairs"
                 )
-            record_id, note = pair
+            record_id, note = note_pair
             if not isinstance(record_id, str) or not record_id.strip():
                 raise DrawingSheetError("rubbing_notes entries must name a record")
             if not isinstance(note, str) or not note.strip():
@@ -1616,6 +1669,11 @@ class DrawingSheetOptions:
         if len({record_id for record_id, _ in notes}) != len(notes):
             raise DrawingSheetError("a rubbing carries at most one note")
         object.__setattr__(self, "rubbing_notes", tuple(notes))
+
+    def _settle_break_lines(self) -> None:
+        """The lines that go round the artifact - grooves, profile corners, the
+        break of a sherd, the section mark - and how far each reaches."""
+
         groove_records = tuple(self.groove_records)
         if any(
             not isinstance(record_id, str) or not record_id.strip()
@@ -1715,13 +1773,21 @@ class DrawingSheetOptions:
             raise DrawingSheetError("break_solid_min_deg must be an integer from 0 to 180")
         if self.outline_reach not in REACHES:
             raise DrawingSheetError(f"outline_reach must be one of {', '.join(REACHES)}")
+
+    def _settle_far_edges(self, elevations: set[str]) -> None:
+        """The back silhouette a leaning rim is carried across on, and the three
+        choices about how a line is drawn rather than what it says."""
+
+        # Both halves of every mirrored figure: a back silhouette cannot be a
+        # record that is already drawing one of them.
+        halves = {record_id for pair in self.mirror_sections for record_id in pair}
         far_silhouettes: list[tuple[str, str]] = []
-        for pair in self.far_silhouettes:
-            if not isinstance(pair, (tuple, list)) or len(pair) != 2:
+        for silhouette_pair in self.far_silhouettes:
+            if not isinstance(silhouette_pair, (tuple, list)) or len(silhouette_pair) != 2:
                 raise DrawingSheetError(
                     "far_silhouettes entries must be (elevation record id, far silhouette record id) pairs"
                 )
-            elevation_id, far_id = (str(item).strip() for item in pair)
+            elevation_id, far_id = (str(item).strip() for item in silhouette_pair)
             if not elevation_id or not far_id:
                 raise DrawingSheetError("far_silhouettes entries must be record ids")
             if elevation_id not in elevations:
@@ -1755,14 +1821,18 @@ class DrawingSheetOptions:
             raise DrawingSheetError(f"center_axis_style must be one of {', '.join(CENTER_AXIS_STYLES)}")
         if self.line_cap not in LINE_CAPS:
             raise DrawingSheetError(f"line_cap must be one of {', '.join(LINE_CAPS)}")
+
+    def _settle_rubbings_on_axis(self) -> None:
+        """A rubbing laid against the centre line of its own elevation."""
+
         on_axis: list[tuple[str, str]] = []
-        for pair in self.rubbings_on_axis:
-            if not isinstance(pair, (tuple, list)) or len(pair) != 2:
+        for rubbing_pair in self.rubbings_on_axis:
+            if not isinstance(rubbing_pair, (tuple, list)) or len(rubbing_pair) != 2:
                 raise DrawingSheetError(
                     "rubbings_on_axis entries must be "
                     "(rubbing record id, elevation record id) pairs"
                 )
-            rubbing_id, elevation_id = (str(item).strip() for item in pair)
+            rubbing_id, elevation_id = (str(item).strip() for item in rubbing_pair)
             if not rubbing_id or not elevation_id:
                 raise DrawingSheetError("rubbings_on_axis entries must be record ids")
             if rubbing_id == elevation_id:
@@ -1790,6 +1860,11 @@ class DrawingSheetOptions:
                 "rubbing_on_axis_trim must be one of "
                 f"{', '.join(RUBBING_ON_AXIS_TRIMS)}"
             )
+
+    def _settle_page(self) -> None:
+        """The page itself: scale, gutter, ink colour, title, and whether what is
+        drawn fits above the title block."""
+
         try:
             denominator = finite_number(
                 self.scale_denominator,
@@ -1833,6 +1908,7 @@ class DrawingSheetOptions:
                 f"title block; use a larger page, a smaller margin, or fewer "
                 "title block rows"
             )
+
 
     def break_style_choices(self) -> dict[tuple[str, int], str]:
         """``break_styles`` keyed by (record id, corner index)."""
@@ -2250,7 +2326,7 @@ def _lay_out(
 
 
 def _same_axis(first: Sequence[float], second: Sequence[float]) -> bool:
-    return all(abs(float(a) - float(b)) <= 1e-9 for a, b in zip(first, second))
+    return all(abs(float(a) - float(b)) <= 1e-9 for a, b in zip(first, second, strict=True))
 
 
 def _lay_out_plan_with_sections(
@@ -3418,8 +3494,8 @@ def _far_edges_past_fold(
         if ring is None:
             continue
         chains = split_ring_off_line(ring, base=base, direction=direction)
-        pieces: list[list[tuple[float, float]]] = (
-            chains if chains is not None else [list(ring) + [tuple(ring[0])]]
+        pieces: list[list[tuple[float, ...]]] = (
+            list(chains) if chains is not None else [list(ring) + [tuple(ring[0])]]
         )
         for piece_index, piece in enumerate(pieces):
             coords = np.asarray(piece, dtype=np.float64)
@@ -3428,7 +3504,9 @@ def _far_edges_past_fold(
             if cut is None:
                 clear = np.ones(coords.shape[0], dtype=bool)
             else:
-                clear = shapely.distance(shapely.points(coords), cut) > gap_mm
+                clear = np.asarray(
+                    shapely.distance(shapely.points(coords), cut) > gap_mm, dtype=bool
+                ).reshape(-1)
             for run_index, (start, stop) in enumerate(_true_runs(clear)):
                 if stop - start < 2:
                     continue
@@ -3645,7 +3723,7 @@ def _outline_reach_along(
     furthest: float | None = None
     for path in paths:
         points = list(path.points_mm) + ([path.points_mm[0]] if path.closed else [])
-        for start, stop in zip(points, points[1:]):
+        for start, stop in pairwise(points):
             sx, sy = float(start[0]) - ox, float(start[1]) - oy
             tx, ty = float(stop[0]) - ox, float(stop[1]) - oy
             n1, n2 = sx * nx + sy * ny, tx * nx + ty * ny
@@ -3826,9 +3904,14 @@ def _trim_to_rectangle(
     bridged = closed[window] & ~covered[window]
     bridged_count = int(np.count_nonzero(bridged))
     if bridged_count:
-        _distance, nearest = ndimage.distance_transform_edt(
+        # Only the indices are wanted, but scipy's signature can also
+        # return distances, so the checker cannot see which shape comes back.
+        transform = ndimage.distance_transform_edt(
             ~covered[window], return_distances=True, return_indices=True
         )
+        if transform is None:
+            raise DrawingSheetError("the paper's bridge could not be filled from its own pixels")
+        nearest = transform[1]
         rows, columns = np.nonzero(bridged)
         cropped[rows, columns, 0] = pixels[window][nearest[0][rows, columns], nearest[1][rows, columns], 0]
         cropped[rows, columns, 1] = 255
@@ -3995,7 +4078,7 @@ def _attach_rubbing_on_axis(
         or any(type(value) is not int for value in profile)
         or profile[0] != base_height
         or profile[-1] != top_height
-        or any(later < earlier for earlier, later in zip(profile, profile[1:]))
+        or any(later < earlier for earlier, later in pairwise(profile))
     ):
         raise DrawingSheetError(
             f"rubbing record {rubbing_id!r} does not say what heights its "
@@ -4322,7 +4405,7 @@ def _stippled_reliefs(
                 view=raster.view,
                 width_pixels=raster.width_pixels,
                 height_pixels=raster.height_pixels,
-                dots_mm=tuple((round(float(x), 4), round(float(y), 4)) for x, y in zip(xs, ys)),
+                dots_mm=tuple((round(float(x), 4), round(float(y), 4)) for x, y in zip(xs, ys, strict=True)),
                 half=half,
                 dropped_section_side_count=dropped,
                 rectangle_mm=raster.rectangle_mm,
@@ -4409,7 +4492,7 @@ def _pasted_developments(
             or len(heights_um) != len(radii_um)
             or any(type(value) is not int for value in heights_um)
             or any(type(value) is not int for value in radii_um)
-            or any(later < earlier for earlier, later in zip(heights_um, heights_um[1:]))
+            or any(later < earlier for earlier, later in pairwise(heights_um))
         ):
             raise DrawingSheetError(
                 f"relief shade {shade_id!r} does not say what heights and radii its rows "
@@ -4482,7 +4565,7 @@ def _pasted_developments(
                 height_pixels=raster.height_pixels,
                 dots_mm=tuple(
                     (round(float(x), 4), round(float(y), 4))
-                    for x, y in zip(placed_x, placed_y)
+                    for x, y in zip(placed_x, placed_y, strict=True)
                 ),
                 half="elevation",
                 dropped_section_side_count=dropped,
@@ -4578,7 +4661,7 @@ def _prepare_stipple_figure(
         view=raster.view,
         width_pixels=raster.width_pixels,
         height_pixels=raster.height_pixels,
-        dots_mm=tuple((round(float(x), 4), round(float(y), 4)) for x, y in zip(xs, ys)),
+        dots_mm=tuple((round(float(x), 4), round(float(y), 4)) for x, y in zip(xs, ys, strict=True)),
         half="development",
         dropped_section_side_count=0,
         rectangle_mm=raster.rectangle_mm,
@@ -4971,7 +5054,7 @@ def _presumed_section_runs(
             on_presumed(
                 ((first[0] + second[0]) / 2.0, (first[1] + second[1]) / 2.0)
             )
-            for first, second in zip(walk, walk[1:])
+            for first, second in pairwise(walk)
         ]
         if not any(flags):
             kept.append(path)
@@ -5774,14 +5857,14 @@ def _dashed_polyline(
 
     if len(points) < 2 or dash_mm <= 0.0:
         return []
-    lengths = [math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(points, points[1:])]
+    lengths = [math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in pairwise(points)]
     total = sum(lengths)
     pieces: list[tuple[tuple[float, float], ...]] = []
     at = gap_mm if lead_gap else 0.0
 
     def point_at(distance: float) -> tuple[float, float]:
         run = 0.0
-        for (a, b), length in zip(zip(points, points[1:]), lengths):
+        for (a, b), length in zip(pairwise(points), lengths, strict=True):
             if distance <= run + length or length == lengths[-1] and (a, b) == (points[-2], points[-1]):
                 t = 0.0 if length <= 1e-12 else max(0.0, min(1.0, (distance - run) / length))
                 return (a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1]))
@@ -5792,7 +5875,7 @@ def _dashed_polyline(
         stop = min(at + dash_mm, total)
         piece = [point_at(at)]
         run = 0.0
-        for vertex, length in zip(points[1:], lengths):
+        for vertex, length in zip(points[1:], lengths, strict=True):
             run += length
             if at < run < stop:
                 piece.append(vertex)
@@ -5829,7 +5912,7 @@ def _presumed_lines_past_fold(
     # Open paths are walked as chains, not rings: their closing edge is not a wall.
     chains = [[(float(x), float(y)) for x, y in ring] for ring in rings]
     segments = np.asarray(
-        [(a, b) for chain in chains for a, b in zip(chain, chain[1:])], dtype=np.float64
+        [(a, b) for chain in chains for a, b in pairwise(chain)], dtype=np.float64
     ).reshape(-1, 2, 2)
 
     def to_frame(point: tuple[float, float]) -> tuple[float, float]:
@@ -5842,7 +5925,7 @@ def _presumed_lines_past_fold(
         found: list[tuple[float, float]] = []
         for chain in chains:
             coords = [to_frame(p) for p in chain]
-            for (a1, c1), (a2, c2) in zip(coords, coords[1:]):
+            for (a1, c1), (a2, c2) in pairwise(coords):
                 if along is not None and (a1 - along) * (a2 - along) <= 0.0 and a1 != a2:
                     t = (along - a1) / (a2 - a1)
                     found.append((along, c1 + t * (c2 - c1)))
@@ -5937,7 +6020,7 @@ def _presumed_lines_past_fold(
                 entry["thickness_um"] = int(round((thickness or 0.0) * 1000.0))
         else:
             best: tuple[float, tuple[float, float]] | None = None
-            for chain, path in zip(chains, section_paths):
+            for chain, path in zip(chains, section_paths, strict=True):
                 if path.closed or len(chain) < 2:
                     continue
                 for end in (chain[0], chain[-1]):
@@ -6083,7 +6166,7 @@ def _reach_past_fold(
             # How far the cut gets across the axis along this ray, whether or
             # not any of it lies in the ray's way.
             reaches = max(reaches, ray_coords(point)[0])
-        for start, stop in zip(points, points[1:]):
+        for start, stop in pairwise(points):
             # Solid test: a level ray from the origin to the section's side,
             # counting the rings it crosses (half-open at vertices).
             if path.closed:
@@ -6143,7 +6226,7 @@ def _line_crossings(
     found: list[tuple[float, float]] = []
     for ring in rings:
         coords = [((float(p[0]) - bx) * dx + (float(p[1]) - by) * dy, (float(p[0]) - bx) * ax + (float(p[1]) - by) * ay) for p in ring]
-        for (a1, c1), (a2, c2) in zip(coords, coords[1:] + coords[:1]):
+        for (a1, c1), (a2, c2) in zip(coords, coords[1:] + coords[:1], strict=True):
             if along is not None:
                 if (a1 - along) * (a2 - along) > 0.0 or a1 == a2:
                     continue
@@ -6728,19 +6811,169 @@ def _render_sheet(
     return svg_bytes
 
 
-def compose_drawing_sheet(
+def _draw_section_marks(
+    options: DrawingSheetOptions,
+    *,
+    prepared: list[_Prepared],
+    frames: Mapping[str, PlanarFrame],
+) -> list[dict[str, Any]]:
+    """Where each section was taken, drawn on the figure it was taken from.
+
+    This waits until every figure is prepared: a section may be listed
+    after the figure it marks, and both frames have to be known before the
+    trace of one plane can be laid on the other.  ``prepared`` is edited in
+    place, because the mark becomes part of the figure that carries it.
+    """
+
+    section_mark_entries: list[dict[str, Any]] = []
+    if options.section_marks:
+        by_record = {figure.record_id: figure for figure in prepared}
+        for index, (section_id, figure_id) in enumerate(options.section_marks):
+            for record_id in (section_id, figure_id):
+                if record_id not in frames:
+                    raise DrawingSheetError(
+                        f"section_marks names {record_id!r}, which this sheet does not draw"
+                    )
+            figure = by_record.get(figure_id)
+            if figure is None:
+                raise DrawingSheetError(
+                    f"section_marks draws on {figure_id!r}, which is not a figure of its own"
+                )
+            trace = _section_mark_line(
+                frames[figure_id],
+                frames[section_id],
+                bounds=figure.bounds,
+                overrun_mm=SECTION_MARK_OVERRUN_PAPER_MM * float(options.scale_denominator),
+            )
+            if trace is None:
+                raise DrawingSheetError(
+                    f"the cut of {section_id!r} does not cross {figure_id!r}: a plane "
+                    "parallel to the figure leaves no trace to draw"
+                )
+            start, end = trace
+            letter, prime = section_mark_letters(index)
+            paths = dict(figure.paths_by_kind)
+            paths.setdefault(SECTION_MARK, []).append(
+                VectorPath(
+                    id=f"section-mark:{letter}",
+                    role="section_mark",
+                    closed=False,
+                    points_mm=(start, end),
+                )
+            )
+            replacement = replace(
+                figure,
+                paths_by_kind=paths,
+                section_marks=(
+                    *figure.section_marks,
+                    _SectionMark(
+                        section_record_id=section_id,
+                        letter=letter,
+                        start_mm=start,
+                        end_mm=end,
+                    ),
+                ),
+            )
+            prepared[prepared.index(figure)] = replacement
+            by_record[figure_id] = replacement
+            section_mark_entries.append(
+                {
+                    "figure_record_id": figure_id,
+                    "from_mm": [round(start[0], 6), round(start[1], 6)],
+                    "letters": [letter, prime],
+                    "section_record_id": section_id,
+                    "to_mm": [round(end[0], 6), round(end[1], 6)],
+                }
+            )
+    return section_mark_entries
+
+
+def _refuse_what_named_nothing(
+    options: DrawingSheetOptions,
+    *,
+    cutout_drawn: Sequence[Mapping[str, str]],
+    stipple_drawn: Sequence[Mapping[str, str]],
+    rubbing_notes: Mapping[str, str],
+    noted: set[str],
+) -> None:
+    """Refuse a reading that was asked for and landed on nothing.
+
+    These can only be checked once every figure is prepared, because a
+    cutout or a shade names the figure it is laid on and that figure may
+    come later in the sheet.  Silence here would be the worst outcome: the
+    archaeologist asked for a motif and would get a sheet without it, with
+    nothing saying so.
+    """
+
+    pasted_ids = {entry["record_id"] for entry in cutout_drawn}
+    missing_cutouts = sorted(
+        cutout_id for cutout_id, _figure_id, _placement in options.paint_cutouts if cutout_id not in pasted_ids
+    )
+    if missing_cutouts:
+        raise DrawingSheetError(
+            "paint_cutouts names a figure this sheet does not draw for "
+            + ", ".join(repr(cutout_id) for cutout_id in missing_cutouts)
+        )
+    stippled_ids = {entry["record_id"] for entry in stipple_drawn}
+    missing_stipples = sorted(
+        shade_id for shade_id, _figure_id in options.relief_stipples if shade_id not in stippled_ids
+    )
+    if missing_stipples:
+        # As for a cutout: a shade that named nothing the sheet draws would
+        # otherwise be a motif the archaeologist asked for and did not get.
+        raise DrawingSheetError(
+            "relief_stipples names a figure this sheet does not draw for "
+            + ", ".join(repr(shade_id) for shade_id in missing_stipples)
+        )
+    missing_pasted = sorted(
+        shade_id
+        for shade_id, _figure_id in options.relief_developments_on_axis
+        if shade_id not in stippled_ids
+    )
+    if missing_pasted:
+        raise DrawingSheetError(
+            "relief_developments_on_axis names a figure this sheet does not draw for "
+            + ", ".join(repr(shade_id) for shade_id in missing_pasted)
+        )
+    unplaced = sorted(set(rubbing_notes) - noted)
+    if unplaced:
+        raise DrawingSheetError(
+            "rubbing_notes names "
+            + ", ".join(repr(record_id) for record_id in unplaced)
+            + ", which this sheet does not draw as a rubbing"
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _SheetPlan:
+    """What the sheet will draw, once it is settled that it can be drawn."""
+
+    rasters: dict[str, Any]
+    ids: list[str]
+    #: elevation record -> the rubbing pasted along its axis
+    attached_by_elevation: dict[str, str]
+    #: elevation record -> the section drawn as its other half
+    mirror_by_elevation: dict[str, str]
+    #: elevation record -> the back silhouette carried across it
+    far_by_elevation: dict[str, str]
+    align_recipe_kind: str
+    align_revision_id: str
+    draw_center_axis: bool
+
+
+def _plan_sheet(
     document: ArtifactDocument,
     record_ids: Sequence[str],
-    *,
     options: DrawingSheetOptions,
-    rasters: Mapping[str, Any] | None = None,
-) -> DrawingSheetBundle:
-    """Compose READY and FRESH records into one printable sheet.
+    rasters: Mapping[str, Any] | None,
+) -> _SheetPlan:
+    """Refuse everything that cannot be drawn, before anything is drawn.
 
-    ``record_ids`` may name vector records and rubbing records alike, in the
-    order they should appear.  A rubbing record stores a receipt rather than
-    pixels, so its recomputed raster is passed in ``rasters`` under the same
-    id and is drawn only if it matches that receipt.
+    Every check here is about the sheet as a whole rather than about one
+    figure: a raster given for a record nobody draws, a half of a mirrored
+    figure listed as a figure of its own, a rubbing pasted onto an
+    elevation the sheet does not carry.  Each names what it found, because
+    the drafter has to be able to fix it.
     """
 
     if not isinstance(options, DrawingSheetOptions):
@@ -6836,6 +7069,41 @@ def compose_drawing_sheet(
             "a development pasted on the axis is drawn inside that figure, so it "
             f"must not also be a figure of its own: {', '.join(listed_developments)}"
         )
+    return _SheetPlan(
+        rasters=rasters,
+        ids=ids,
+        attached_by_elevation=attached_by_elevation,
+        mirror_by_elevation=mirror_by_elevation,
+        far_by_elevation=far_by_elevation,
+        align_recipe_kind=align_recipe_kind,
+        align_revision_id=str(align_id or ""),
+        draw_center_axis=draw_center_axis,
+    )
+
+
+def compose_drawing_sheet(
+    document: ArtifactDocument,
+    record_ids: Sequence[str],
+    *,
+    options: DrawingSheetOptions,
+    rasters: Mapping[str, Any] | None = None,
+) -> DrawingSheetBundle:
+    """Compose READY and FRESH records into one printable sheet.
+
+    ``record_ids`` may name vector records and rubbing records alike, in the
+    order they should appear.  A rubbing record stores a receipt rather than
+    pixels, so its recomputed raster is passed in ``rasters`` under the same
+    id and is drawn only if it matches that receipt.
+    """
+
+    plan = _plan_sheet(document, record_ids, options, rasters)
+    rasters = plan.rasters
+    ids = plan.ids
+    attached_by_elevation = plan.attached_by_elevation
+    mirror_by_elevation = plan.mirror_by_elevation
+    far_by_elevation = plan.far_by_elevation
+    align_recipe_kind = plan.align_recipe_kind
+    draw_center_axis = plan.draw_center_axis
 
     conditions = [
         _require_drawable_condition_record(document, record_id)
@@ -7410,107 +7678,18 @@ def compose_drawing_sheet(
             )
         )
 
-    pasted_ids = {entry["record_id"] for entry in cutout_drawn}
-    missing_cutouts = sorted(
-        cutout_id for cutout_id, _figure_id, _placement in options.paint_cutouts if cutout_id not in pasted_ids
+    _refuse_what_named_nothing(
+        options,
+        cutout_drawn=cutout_drawn,
+        stipple_drawn=stipple_drawn,
+        rubbing_notes=rubbing_notes,
+        noted=noted,
     )
-    if missing_cutouts:
-        raise DrawingSheetError(
-            "paint_cutouts names a figure this sheet does not draw for "
-            + ", ".join(repr(cutout_id) for cutout_id in missing_cutouts)
-        )
-    stippled_ids = {entry["record_id"] for entry in stipple_drawn}
-    missing_stipples = sorted(
-        shade_id for shade_id, _figure_id in options.relief_stipples if shade_id not in stippled_ids
-    )
-    if missing_stipples:
-        # As for a cutout: a shade that named nothing the sheet draws would
-        # otherwise be a motif the archaeologist asked for and did not get.
-        raise DrawingSheetError(
-            "relief_stipples names a figure this sheet does not draw for "
-            + ", ".join(repr(shade_id) for shade_id in missing_stipples)
-        )
-    missing_pasted = sorted(
-        shade_id
-        for shade_id, _figure_id in options.relief_developments_on_axis
-        if shade_id not in stippled_ids
-    )
-    if missing_pasted:
-        raise DrawingSheetError(
-            "relief_developments_on_axis names a figure this sheet does not draw for "
-            + ", ".join(repr(shade_id) for shade_id in missing_pasted)
-        )
-    unplaced = sorted(set(rubbing_notes) - noted)
-    if unplaced:
-        raise DrawingSheetError(
-            "rubbing_notes names "
-            + ", ".join(repr(record_id) for record_id in unplaced)
-            + ", which this sheet does not draw as a rubbing"
-        )
 
     # Where each section was taken, drawn on the figure it was taken from.
-    # This waits until every figure has been prepared: the section may come
-    # after the figure it marks, and both frames have to be known.
-    section_mark_entries: list[dict[str, Any]] = []
-    if options.section_marks:
-        by_record = {figure.record_id: figure for figure in prepared}
-        for index, (section_id, figure_id) in enumerate(options.section_marks):
-            for record_id in (section_id, figure_id):
-                if record_id not in frames:
-                    raise DrawingSheetError(
-                        f"section_marks names {record_id!r}, which this sheet does not draw"
-                    )
-            figure = by_record.get(figure_id)
-            if figure is None:
-                raise DrawingSheetError(
-                    f"section_marks draws on {figure_id!r}, which is not a figure of its own"
-                )
-            trace = _section_mark_line(
-                frames[figure_id],
-                frames[section_id],
-                bounds=figure.bounds,
-                overrun_mm=SECTION_MARK_OVERRUN_PAPER_MM * float(options.scale_denominator),
-            )
-            if trace is None:
-                raise DrawingSheetError(
-                    f"the cut of {section_id!r} does not cross {figure_id!r}: a plane "
-                    "parallel to the figure leaves no trace to draw"
-                )
-            start, end = trace
-            letter, prime = section_mark_letters(index)
-            paths = dict(figure.paths_by_kind)
-            paths.setdefault(SECTION_MARK, []).append(
-                VectorPath(
-                    id=f"section-mark:{letter}",
-                    role="section_mark",
-                    closed=False,
-                    points_mm=(start, end),
-                )
-            )
-            replacement = replace(
-                figure,
-                paths_by_kind=paths,
-                section_marks=(
-                    *figure.section_marks,
-                    _SectionMark(
-                        section_record_id=section_id,
-                        letter=letter,
-                        start_mm=start,
-                        end_mm=end,
-                    ),
-                ),
-            )
-            prepared[prepared.index(figure)] = replacement
-            by_record[figure_id] = replacement
-            section_mark_entries.append(
-                {
-                    "figure_record_id": figure_id,
-                    "from_mm": [round(start[0], 6), round(start[1], 6)],
-                    "letters": [letter, prime],
-                    "section_record_id": section_id,
-                    "to_mm": [round(end[0], 6), round(end[1], 6)],
-                }
-            )
+    section_mark_entries = _draw_section_marks(
+        options, prepared=prepared, frames=frames
+    )
 
     computed_rubbing = any(figure.caption is not None for figure in prepared)
     computed_rubbing_note = rubbing_source_note(
@@ -7561,7 +7740,7 @@ def compose_drawing_sheet(
             layout=layout,
             center_axis={
                 "align_recipe_kind": align_recipe_kind,
-                "align_revision_id": str(align_id or ""),
+                "align_revision_id": plan.align_revision_id,
                 "drawn": draw_center_axis,
                 "requested": options.show_center_axis,
                 "stroke_width_mm": (

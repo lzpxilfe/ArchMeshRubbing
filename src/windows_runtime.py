@@ -113,11 +113,9 @@ def _windows_compatibility_layer() -> str | None:
         ntdll: Any = win_dll("ntdll", use_last_error=True)
     except (OSError, TypeError, ValueError):
         return None
-    try:
-        getattr(ntdll, "wine_get_version")
-    except AttributeError:
-        return "none"
-    return "wine"
+    # ctypes resolves an export only when it is asked for, so asking is the
+    # probe: Wine's ntdll carries this one and Windows' does not.
+    return "wine" if hasattr(ntdll, "wine_get_version") else "none"
 
 
 def collect_windows_runtime_claims() -> dict[str, object]:

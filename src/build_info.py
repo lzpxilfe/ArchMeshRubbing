@@ -596,7 +596,7 @@ def _check_source_archive() -> str:
 
 
 def _check_qt_offscreen() -> str:
-    global _SELF_TEST_QT_APP
+    global _SELF_TEST_QT_APP  # noqa: PLW0603 - Qt allows one QApplication per process
 
     from PyQt6.QtGui import QGuiApplication
     from PyQt6.QtWidgets import QApplication

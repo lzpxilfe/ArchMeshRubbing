@@ -48,7 +48,7 @@ def _scanned_drum(
     heights = np.linspace(0.0, 40.0, rows + 1)
     rings = [_ring(20.0, z, columns) for z in heights]
     for ring in rings[1:-1]:
-        ring += rng.normal(0.0, 0.6, ring.shape)
+        ring[:] += rng.normal(0.0, 0.6, ring.shape)
     vertices = np.concatenate(rings)
     faces: list[list[int]] = []
     for row in range(rows):

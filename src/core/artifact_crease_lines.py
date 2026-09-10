@@ -120,10 +120,10 @@ def _crest_edges_at_scale(
     for what a scanned mesh needs.
     """
 
-    from scipy.spatial import cKDTree  # noqa: PLC0415
+    from scipy.spatial import KDTree  # noqa: PLC0415
 
     centroids = corners.mean(axis=1)
-    tree = cKDTree(centroids)
+    tree = KDTree(centroids)
     mid = 0.5 * (points[edge_low] + points[edge_high])
     along_edge = points[edge_high] - points[edge_low]
     along_edge /= np.maximum(np.linalg.norm(along_edge, axis=1), 1e-12)[:, None]
@@ -173,7 +173,7 @@ def _crest_edges_at_scale(
         offset = centroids[face] - points[edge_low]
         span += np.linalg.norm(np.cross(offset, along_edge), axis=1)
     turning = local_dihedral / np.maximum(span, 1e-6)
-    crest_tree = cKDTree(mid[indices])
+    crest_tree = KDTree(mid[indices])
     neighbours = crest_tree.query_ball_point(mid[indices], r=0.5 * scale_mm)
     for position, index in enumerate(indices):
         rivals = indices[np.asarray(neighbours[position], dtype=np.int64)]
@@ -211,7 +211,7 @@ def _ridge_chains_at_scale(
     only where a triangle is crossed three times.
     """
 
-    from scipy.spatial import cKDTree  # noqa: PLC0415
+    from scipy.spatial import KDTree  # noqa: PLC0415
 
     count = points.shape[0]
     # Vertex normals: the area-weighted mean of the faces within half the
@@ -222,7 +222,7 @@ def _ridge_chains_at_scale(
         np.add.at(own, triangles[:, corner], face_normals * face_areas[:, None])
     own /= np.maximum(np.linalg.norm(own, axis=1), 1e-12)[:, None]
     centroids = points[triangles].mean(axis=1)
-    face_tree = cKDTree(centroids)
+    face_tree = KDTree(centroids)
     distances, nearest = face_tree.query(
         points, k=_RIDGE_NEIGHBOURS, distance_upper_bound=0.5 * scale_mm
     )
@@ -247,7 +247,7 @@ def _ridge_chains_at_scale(
     # The shape operator, fitted to the vertices within the scale: the
     # change of normal against the change of position, both in the tangent
     # plane, in the least-squares sense.
-    vertex_tree = cKDTree(points)
+    vertex_tree = KDTree(points)
     distances, nearest = vertex_tree.query(
         points, k=_RIDGE_NEIGHBOURS, distance_upper_bound=scale_mm
     )
@@ -332,7 +332,7 @@ def _ridge_chains_at_scale(
 
     # String the segments into chains through their shared crossings.
     incident: dict[int, list[int]] = {}
-    for index, (a, b) in enumerate(zip(segment_a.tolist(), segment_b.tolist())):
+    for index, (a, b) in enumerate(zip(segment_a.tolist(), segment_b.tolist(), strict=True)):
         incident.setdefault(a, []).append(index)
         incident.setdefault(b, []).append(index)
     used = np.zeros(segment_a.shape[0], dtype=bool)
@@ -398,7 +398,7 @@ def link_chains(
     Deterministic: ties go to the earlier chains.
     """
 
-    from scipy.spatial import cKDTree  # noqa: PLC0415
+    from scipy.spatial import KDTree  # noqa: PLC0415
 
     if float(gap_mm) < 0.0 or not np.isfinite(float(gap_mm)):
         raise ArtifactCreaseError("gap_mm must be zero or a positive length")
@@ -422,7 +422,7 @@ def link_chains(
             ends.append((index, 1, polyline[-1], tail / max(float(np.linalg.norm(tail)), 1e-12)))
         if len(ends) < 2:
             break
-        tree = cKDTree(np.array([end[2] for end in ends]))
+        tree = KDTree(np.array([end[2] for end in ends]))
         scored: list[tuple[float, int, int]] = []
         for a, b in sorted(tree.query_pairs(r=float(gap_mm))):
             chain_a, _end_a, point_a, direction_a = ends[a]
@@ -502,7 +502,7 @@ def link_chains(
         rights = [rights[index] for index in survivors]
     return tuple(
         CreaseChain(points_mm=p, dihedral_deg=d, left_normals=left, right_normals=right)
-        for p, d, left, right in zip(polylines, dihedrals, lefts, rights)
+        for p, d, left, right in zip(polylines, dihedrals, lefts, rights, strict=True)
     )
 
 

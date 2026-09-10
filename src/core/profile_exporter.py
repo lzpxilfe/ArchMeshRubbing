@@ -71,7 +71,7 @@ def _resolve_world_units_per_cm(mesh: Any, override: float | None = None) -> flo
 
 
 def _get_cv2() -> ModuleType | None:
-    global _cv2_checked, _cv2_module
+    global _cv2_checked, _cv2_module  # noqa: PLW0603 - the optional import is tried once
 
     if _cv2_module is not None:
         return _cv2_module
@@ -342,7 +342,7 @@ def _project_world_to_px_segments(
     jump = max_dim * float(jump_factor)
     segments: list[np.ndarray] = []
     current: list[np.ndarray] = []
-    for ok, p in zip(finite, pts):
+    for ok, p in zip(finite, pts, strict=True):
         if bool(ok):
             if current and float(np.linalg.norm(p - current[-1])) > jump:
                 if len(current) >= 2:

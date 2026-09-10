@@ -25,7 +25,17 @@ extend-exclude = ["build", "dist"]
 # to be installed: the repository has no other guard, so a routine tool bump
 # would otherwise turn the blocking lint gate from clean into thousands of
 # findings.  Widen this set deliberately, not by upgrading.
-select = ["E4", "E7", "E9", "F"]
+#
+# What is here catches wrong answers, not untidy ones.  The style families
+# (SIM, RUF, UP, I, N, W) would each rewrite hundreds of lines across the
+# repository without making one drawing more correct, so they are left out on
+# purpose; B, PIE, PLE and PLW each name a way the program can quietly do the
+# wrong thing.  The one that earns its place most is B905 - a zip() whose two
+# sequences disagree in length stops at the shorter one, which in this
+# repository means a drawing missing its last line and nothing said about it.
+# strict=True turns that into a refusal; where the truncation is the point,
+# itertools.pairwise says so by name.
+select = ["E4", "E7", "E9", "F", "B", "PIE", "PLE", "PLW"]
 
 [tool.ruff.lint.per-file-ignores]
 # Import-time side effects are load-bearing in the entry points.

@@ -36,7 +36,7 @@ from typing import Any
 import numpy as np
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
-from scipy.spatial import cKDTree
+from scipy.spatial import KDTree
 
 from .artifact_cancellation import CancellationProbe, raise_if_cancelled
 
@@ -184,7 +184,7 @@ def _rings_from_open_edges(
         return [], []
     nxt: dict[int, int] = {}
     owner_of: dict[int, int] = {}
-    for (tail, head), face in zip(open_edges, owners):
+    for (tail, head), face in zip(open_edges, owners, strict=True):
         tail_index = int(tail)
         if tail_index in nxt:
             raise ArtifactMeshBodiesError(
@@ -414,7 +414,7 @@ class _Surface:
     """A body's triangles, indexed so a point can be dropped onto them."""
 
     corners: tuple[np.ndarray, np.ndarray, np.ndarray]
-    tree: cKDTree
+    tree: KDTree
     vertex_ids: np.ndarray
     incident_starts: np.ndarray
     incident_faces: np.ndarray
@@ -432,7 +432,7 @@ def _surface(vertices: np.ndarray, triangles: np.ndarray) -> _Surface:
             vertices[triangles[:, 1]],
             vertices[triangles[:, 2]],
         ),
-        tree=cKDTree(vertices[used]),
+        tree=KDTree(vertices[used]),
         vertex_ids=used,
         incident_starts=np.concatenate([[0], np.cumsum(counts)]),
         incident_faces=owner[order],
@@ -550,7 +550,10 @@ def diagnose_mesh_bodies(
     ring_body = [int(labels[face]) for face in ring_owner_faces]
     # A ring is measured against as a chain of segments, written as triangles
     # with two corners the same so that one distance routine serves both.
-    ring_surfaces = [_surface(vertices, ring_as_triangles(ring)) for ring in rings]
+    ring_surfaces = [
+        _surface(vertices, ring_as_triangles(np.asarray(ring, dtype=np.int64)))
+        for ring in rings
+    ]
 
     targets = max(body_count - 1, 0) + max(len(ring_points) - 1, 0)
     tests = sum(points.shape[0] for points in ring_points) * targets

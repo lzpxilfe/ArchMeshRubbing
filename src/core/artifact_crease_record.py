@@ -16,6 +16,7 @@ its own result if a later release would choose differently.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import pairwise
 from typing import Any, Mapping, Sequence
 
 import numpy as np
@@ -264,7 +265,7 @@ class CreaseViewLines:
             )
             if len(points) < 2:
                 raise ArtifactCreaseRecordError("a crease polyline has at least two points")
-            if any(a == b for a, b in zip(points, points[1:])):
+            if any(a == b for a, b in pairwise(points)):
                 raise ArtifactCreaseRecordError("a crease polyline repeats a point")
             cleaned.append(points)
         object.__setattr__(self, "polylines", tuple(cleaned))

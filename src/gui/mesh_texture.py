@@ -155,7 +155,7 @@ def texture_description(mesh: Any, *, max_side: int = MAX_TEXTURE_SIDE_DEFAULT) 
     if not can_show_texture(mesh):
         return {"showable": False, "reason": "이 메쉬에는 텍스처와 UV가 함께 있지 않습니다."}
     try:
-        prepared = texture_image(getattr(mesh, "texture"), max_side=max_side)
+        prepared = texture_image(mesh.texture, max_side=max_side)
     except ValueError as exc:
         return {"showable": False, "reason": str(exc)}
     described = {"showable": True, **prepared.to_dict()}

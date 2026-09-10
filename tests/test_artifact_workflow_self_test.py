@@ -155,10 +155,7 @@ def test_complete_workflow_self_test_is_qt_and_opengl_free() -> None:
     }
 
     assert not any(
-        name == "PyQt6"
-        or name.startswith("PyQt6.")
-        or name == "OpenGL"
-        or name.startswith("OpenGL.")
-        or name.startswith("src.gui")
+        name in {"PyQt6", "OpenGL"}
+        or name.startswith(("PyQt6.", "OpenGL.", "src.gui"))
         for name in imported
     )

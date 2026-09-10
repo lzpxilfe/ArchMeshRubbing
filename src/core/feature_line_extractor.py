@@ -98,8 +98,8 @@ def extract_sharp_edges(
             dihedral_deg=np.zeros((0,), dtype=np.float64),
         )
         try:
-            setattr(mesh, "_sharp_edge_cache", {key: result})
-            setattr(mesh, "_sharp_edge_cache_meta", meta)
+            mesh._sharp_edge_cache = {key: result}
+            mesh._sharp_edge_cache_meta = meta
         except Exception:
             pass
         return result
@@ -209,8 +209,8 @@ def extract_sharp_edges(
         if not isinstance(cache, dict) or cache_meta != meta:
             cache = {}
         cache[key] = result
-        setattr(mesh, "_sharp_edge_cache", cache)
-        setattr(mesh, "_sharp_edge_cache_meta", meta)
+        mesh._sharp_edge_cache = cache
+        mesh._sharp_edge_cache_meta = meta
     except Exception:
         pass
 

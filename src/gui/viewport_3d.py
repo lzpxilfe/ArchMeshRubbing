@@ -4,6 +4,7 @@ Copyright (C) 2026 balguljang2 (lzpxilfe)
 Licensed under the GNU General Public License v2.0 (GPL2)
 """
 
+from itertools import pairwise
 import logging
 import sys
 import time
@@ -490,7 +491,7 @@ class _LineSectionProfileThread(QThread):
                 z_sorted = z_f[order]
                 t_sorted = t_sorted - float(t_sorted.min())
 
-                best_profile = list(zip(t_sorted.tolist(), z_sorted.tolist()))
+                best_profile = list(zip(t_sorted.tolist(), z_sorted.tolist(), strict=True))
                 best_span = span
 
             self.computed.emit(
@@ -3364,7 +3365,7 @@ class Viewport3D(QOpenGLWidget):
         try:
             bands = backdrop_bands()
             glBegin(GL_QUADS)
-            for (low_y, low_colour), (high_y, high_colour) in zip(bands, bands[1:]):
+            for (low_y, low_colour), (high_y, high_colour) in pairwise(bands):
                 glColor4f(low_colour[0], low_colour[1], low_colour[2], 1.0)
                 glVertex3f(0.0, float(low_y), 0.0)
                 glVertex3f(1.0, float(low_y), 0.0)
@@ -5076,7 +5077,7 @@ class Viewport3D(QOpenGLWidget):
                 except Exception:
                     flip_s = False
 
-            for si, zi in zip(s.tolist(), z.tolist()):
+            for si, zi in zip(s.tolist(), z.tolist(), strict=True):
                 if axis == "x":
                     pts_world.append([base_x + (float(si) - s_min) * scale_s, base_y + (float(zi) - z_min), 0.0])
                 else:
@@ -6779,7 +6780,7 @@ class Viewport3D(QOpenGLWidget):
             # 洹몃옒?꾨뒗 0遺???쒖옉?섎룄濡?shift
             t_sorted = t_sorted - float(t_sorted.min())
 
-            best_profile = list(zip(t_sorted.tolist(), z_sorted.tolist()))
+            best_profile = list(zip(t_sorted.tolist(), z_sorted.tolist(), strict=True))
             best_span = span
 
         self.line_profile = best_profile
@@ -13337,7 +13338,7 @@ class Viewport3D(QOpenGLWidget):
             return None
         try:
             captured_matrix = np.asarray(
-                getattr(worker, "_local_to_world_matrix"),
+                worker._local_to_world_matrix,
                 dtype=np.float64,
             ).reshape(4, 4)
             if not np.array_equal(obj.local_to_world_matrix(), captured_matrix):

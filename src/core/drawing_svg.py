@@ -305,7 +305,7 @@ def broken_chord(
     unit = ((x1 - x0) / length, (y1 - y0) / length)
     segments: list[tuple[tuple[float, float], tuple[float, float]]] = []
     travelled = 0.0
-    for index in range(break_count + 1):
+    for _index in range(break_count + 1):
         head = travelled
         travelled += piece
         segments.append(

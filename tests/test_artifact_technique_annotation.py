@@ -273,7 +273,7 @@ def test_the_record_says_which_side_of_the_wall_a_mark_is_on() -> None:
 
     vertices, faces, _rim, _floor = hollow_vessel(segments=24, rings=10)
     outer_count = 10 * 24 * 2
-    outer = list(range(0, 48))
+    outer = list(range(48))
     inner = list(range(outer_count, outer_count + 48))
     assert surface_side_of_faces(vertices, faces, outer) == (SURFACE_EXTERIOR, 0)
     assert surface_side_of_faces(vertices, faces, inner) == (SURFACE_INTERIOR, 1_000_000)

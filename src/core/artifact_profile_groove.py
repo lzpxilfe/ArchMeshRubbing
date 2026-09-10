@@ -33,6 +33,7 @@ The two edges have to agree, or the candidate is refused.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import pairwise
 import math
 from typing import Any, Mapping, Sequence
 
@@ -325,7 +326,7 @@ class ProfileGroovePayload:
             raise ArtifactProfileGrooveError(
                 "two grooves cannot share one trough height"
             )
-        for lower, upper in zip(ordered, ordered[1:]):
+        for lower, upper in pairwise(ordered):
             if lower.upper_edge_height_um > upper.lower_edge_height_um:
                 raise ArtifactProfileGrooveError(
                     "grooves must not overlap: one groove's upper edge sits "
@@ -624,7 +625,11 @@ def detect_profile_grooves(
         # its own mouth.
         climb = GROOVE_EDGE_CLIMB_PERCENT * -float(residual[trough]) / 100.0
 
-        def walk(edge: int, step: int) -> int | None:
+        # Bound to this run's own trough and climb rather than read from the
+        # loop when called: the walk is used inside this iteration, but a
+        # closure that reaches back into the loop is one edit away from
+        # walking the next groove's wall.
+        def walk(edge: int, step: int, *, trough: int = trough, climb: float = climb) -> int | None:
             j = edge + step
             if j < 0 or j >= residual.size:
                 return None

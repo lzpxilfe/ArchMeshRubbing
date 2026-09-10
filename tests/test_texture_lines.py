@@ -82,7 +82,7 @@ def test_the_three_grooves_come_out_as_three_lines_where_they_were_cut(grooved) 
     lines = _lines_mm(computation.payload)
     assert len(lines) == 3
     heights = sorted(float(np.median(line[:, 1])) for line in lines)
-    for found, cut in zip(heights, sorted(CANONICAL_GROOVE_V_MM)):
+    for found, cut in zip(heights, sorted(CANONICAL_GROOVE_V_MM), strict=True):
         assert abs(found - cut) < 0.15
     for line in lines:
         # Level to within a tenth of a millimetre along its whole length...
@@ -325,7 +325,7 @@ def test_the_stroke_rule_reads_the_grooves_as_the_paper_would(grooved) -> None:
         lines = _lines_mm(strokes.payload)
         assert len(lines) == 3
         heights = sorted(float(np.median(line[:, 1])) for line in lines)
-        for found, cut in zip(heights, sorted(CANONICAL_GROOVE_V_MM)):
+        for found, cut in zip(heights, sorted(CANONICAL_GROOVE_V_MM), strict=True):
             assert abs(found - cut) < 0.15
         for line in lines:
             assert float(line[:, 1].max() - line[:, 1].min()) < 0.25
@@ -624,7 +624,7 @@ def test_the_ridge_rule_reads_two_strokes_where_the_threshold_reads_one(grooved)
     lines = _lines_mm(strokes.payload)
     assert len(lines) == 3
     heights = sorted(float(np.median(line[:, 1])) for line in lines)
-    for found, cut in zip(heights, sorted(CANONICAL_GROOVE_V_MM)):
+    for found, cut in zip(heights, sorted(CANONICAL_GROOVE_V_MM), strict=True):
         assert abs(found - cut) < 0.15
     for line in lines:
         assert float(line[:, 1].max() - line[:, 1].min()) < 0.25
@@ -704,7 +704,7 @@ def test_a_painted_line_is_drawn_along_its_centre_and_a_painted_band_by_its_edge
     heights = sorted(round(float(np.median(line[:, 1])) - 0.0, 1) for line in lines)
     expected = sorted(v - FLOOR_MM for v in (line_height, band_low, band_high))
     assert len(lines) == 3, heights
-    for found, cut in zip(heights, expected):
+    for found, cut in zip(heights, expected, strict=True):
         assert abs(found - cut) < 0.4, (heights, expected)
     for line in lines:
         assert float(line[:, 1].max() - line[:, 1].min()) < 0.5

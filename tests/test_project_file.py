@@ -952,7 +952,7 @@ class TestProjectFileV2(unittest.TestCase):
                 mock.patch.object(
                     project_file,
                     "_windows_extended_path",
-                    side_effect=lambda candidate: str(candidate),
+                    side_effect=str,
                 ),
                 mock.patch.object(
                     project_file,

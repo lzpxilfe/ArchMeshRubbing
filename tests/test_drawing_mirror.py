@@ -559,7 +559,7 @@ def test_a_condition_region_is_cut_to_the_elevation_half() -> None:
     computation = compute_condition_annotation(
         session,
         condition="missing",
-        face_indices=list(range(0, 40)),
+        face_indices=list(range(40)),
         precision_grid_mm=0.5,
     )
     session = commit_condition_annotation(

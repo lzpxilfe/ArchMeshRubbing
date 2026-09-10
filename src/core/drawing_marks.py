@@ -35,7 +35,7 @@ from dataclasses import dataclass, replace
 import hashlib
 import math
 import random
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, cast
 
 from shapely.geometry import LineString, MultiLineString, Polygon
 from shapely.geometry.base import BaseGeometry
@@ -382,7 +382,7 @@ def region_polygons(paths: Sequence[Any]) -> list[Polygon]:
 def _long_axis(polygon: Polygon) -> tuple[tuple[float, float], float, float, float]:
     """Centre, long length, short length and angle (radians) of the region."""
 
-    box = polygon.minimum_rotated_rectangle
+    box = cast(Polygon, polygon.minimum_rotated_rectangle)
     coords = list(box.exterior.coords)[:4]
     if len(coords) < 4:
         minx, miny, maxx, maxy = polygon.bounds

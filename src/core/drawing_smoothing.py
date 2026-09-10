@@ -126,7 +126,7 @@ def _simplify(points: np.ndarray, *, tolerance_mm: float) -> np.ndarray:
 
 
 def smooth_polyline(
-    points_mm: Sequence[Sequence[float]],
+    points_mm: Sequence[Sequence[float]] | np.ndarray,
     *,
     closed: bool,
     sigma_mm: float,

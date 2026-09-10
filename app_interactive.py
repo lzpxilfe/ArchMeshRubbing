@@ -911,7 +911,7 @@ class MeshLoadThread(QThread):
                 mesh_data._surface_area = None
 
             try:
-                setattr(mesh_data, "_amr_source_scale_factor", float(self._scale_factor))
+                mesh_data._amr_source_scale_factor = float(self._scale_factor)
             except Exception:
                 pass
 
@@ -963,8 +963,8 @@ class MeshLoadThread(QThread):
                             centroids[start:end, :] = (v0 + v1 + v2) / 3.0
 
                         if not self.isInterruptionRequested():
-                            setattr(mesh_data, "_amr_face_centroids", centroids)
-                            setattr(mesh_data, "_amr_face_centroids_faces_count", int(faces.shape[0]))
+                            mesh_data._amr_face_centroids = centroids
+                            mesh_data._amr_face_centroids_faces_count = int(faces.shape[0])
                 except Exception:
                     _LOGGER.debug("Mesh face-centroids precompute failed (continuing)", exc_info=True)
 
@@ -1141,11 +1141,11 @@ def _load_project_open_candidate(filepath: str) -> dict[str, Any]:
 
     try:
         session = load_amr_artifact_session_project(filepath)
-    except EmbeddedSourceRequiredError:
+    except EmbeddedSourceRequiredError as error:
         if package.source_bundle is not None:
             raise ProjectFormatError(
                 "Embedded source bundle was validated but could not be materialized"
-            )
+            ) from error
         return {
             "kind": "artifact_manifest_only",
             "document": package.document,
@@ -1252,10 +1252,7 @@ class HelpWidget(QTextEdit):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setReadOnly(True)
-        try:
-            self.setMinimumHeight(120)
-        except Exception:
-            pass
+        self.setMinimumHeight(120)
         self.setStyleSheet("""
             QTextEdit {
                 background-color: #f8f9fa;
@@ -3720,11 +3717,8 @@ class SlicingPanel(QWidget):
             combo.blockSignals(False)
 
         has = bool(self._presets)
-        try:
-            self.btn_preset_apply.setEnabled(has)
-            self.btn_preset_delete.setEnabled(has)
-        except Exception:
-            pass
+        self.btn_preset_apply.setEnabled(has)
+        self.btn_preset_delete.setEnabled(has)
 
     def _unique_preset_name(self, base: str) -> str:
         base = str(base).strip() or "Preset"
@@ -3765,14 +3759,8 @@ class SlicingPanel(QWidget):
             z = 0.0
 
         # Apply and enable slice mode.
-        try:
-            self.group.setChecked(True)
-        except Exception:
-            pass
-        try:
-            self.spin.setValue(z)
-        except Exception:
-            pass
+        self.group.setChecked(True)
+        self.spin.setValue(z)
 
     def _on_preset_delete_clicked(self) -> None:
         if not (self._presets and getattr(self, "combo_presets", None) is not None):
@@ -4096,10 +4084,7 @@ class MeasurePanel(QWidget):
             pass
 
     def clear_results(self) -> None:
-        try:
-            self.text_results.clear()
-        except Exception:
-            pass
+        self.text_results.clear()
 
     def results_text(self) -> str:
         try:
@@ -4114,10 +4099,7 @@ class MeasurePanel(QWidget):
         except Exception:
             pass
         finally:
-            try:
-                self.btn_measure_mode.blockSignals(False)
-            except Exception:
-                pass
+            self.btn_measure_mode.blockSignals(False)
         try:
             self.btn_measure_mode.setText("측정 모드 중지" if checked else "측정 모드 시작")
         except Exception:
@@ -5836,10 +5818,7 @@ class MainWindow(QMainWindow):
         self.help_dock = QDockWidget("도움말", self)
         self.help_dock.setObjectName("dock_help")
         self.help_dock.setWidget(self.help_widget)
-        try:
-            self.help_dock.setMinimumHeight(100)
-        except Exception:
-            pass
+        self.help_dock.setMinimumHeight(100)
         try:
             self._help_dock_last_floating = True
             self.help_dock.topLevelChanged.connect(self._on_help_dock_top_level_changed)
@@ -6281,14 +6260,8 @@ class MainWindow(QMainWindow):
                 self.removeDockWidget(dock)
             except Exception:
                 pass
-            try:
-                dock.setFloating(False)
-            except Exception:
-                pass
-            try:
-                dock.hide()
-            except Exception:
-                pass
+            dock.setFloating(False)
+            dock.hide()
         try:
             toolbar = getattr(self, "trans_toolbar", None)
             if toolbar is not None:
@@ -6345,10 +6318,7 @@ class MainWindow(QMainWindow):
         settings.remove("ui/state")
         settings.remove("ui/state_version")
         self._apply_default_dock_layout()
-        try:
-            self.status_info.setText("기본 화면으로 복귀했습니다.")
-        except Exception:
-            pass
+        self.status_info.setText("기본 화면으로 복귀했습니다.")
 
     def closeEvent(self, a0):
         if a0 is None:
@@ -6390,12 +6360,9 @@ class MainWindow(QMainWindow):
         if not self._shutdown_active_task_worker():
             self._application_closing = False
             a0.ignore()
-            try:
-                self.status_info.setText(
-                    "종료 보류 | 실행 중 작업의 안전한 종료를 기다리는 중"
-                )
-            except Exception:
-                pass
+            self.status_info.setText(
+                "종료 보류 | 실행 중 작업의 안전한 종료를 기다리는 중"
+            )
             QMessageBox.warning(
                 self,
                 "종료 보류",
@@ -6406,12 +6373,9 @@ class MainWindow(QMainWindow):
         if not self._shutdown_mesh_load_worker():
             self._application_closing = False
             a0.ignore()
-            try:
-                self.status_info.setText(
-                    "종료 보류 | 원본 로더의 안전한 종료를 기다리는 중"
-                )
-            except Exception:
-                pass
+            self.status_info.setText(
+                "종료 보류 | 원본 로더의 안전한 종료를 기다리는 중"
+            )
             QMessageBox.warning(
                 self,
                 "종료 보류",
@@ -6422,12 +6386,9 @@ class MainWindow(QMainWindow):
         if not self._shutdown_project_open_worker():
             self._application_closing = False
             a0.ignore()
-            try:
-                self.status_info.setText(
-                    "종료 보류 | 프로젝트 검증기의 안전한 종료를 기다리는 중"
-                )
-            except Exception:
-                pass
+            self.status_info.setText(
+                "종료 보류 | 프로젝트 검증기의 안전한 종료를 기다리는 중"
+            )
             QMessageBox.warning(
                 self,
                 "종료 보류",
@@ -6480,7 +6441,8 @@ class MainWindow(QMainWindow):
                 return False
         try:
             thread.requestInterruption()
-        except Exception:
+        # The one failure meant here: Qt has already deleted the C++ object.
+        except RuntimeError:
             pass
 
         if not self._wait_for_thread_shutdown(thread, TASK_SHUTDOWN_WAIT_MS):
@@ -6499,7 +6461,10 @@ class MainWindow(QMainWindow):
         for signal_name in ("done", "failed", "finished"):
             try:
                 getattr(thread, signal_name).disconnect()
-            except Exception:
+            # The two failures meant here: Qt has already deleted the C++
+            # object, or the signal had nothing connected to it (PyQt raises
+            # TypeError for that).  Both mean the thread is already let go.
+            except (RuntimeError, TypeError):
                 pass
 
         if getattr(self, "_task_thread", None) is thread:
@@ -6518,7 +6483,8 @@ class MainWindow(QMainWindow):
                     )
         try:
             thread.deleteLater()
-        except Exception:
+        # The one failure meant here: Qt has already deleted the C++ object.
+        except RuntimeError:
             pass
         return True
 
@@ -6541,12 +6507,16 @@ class MainWindow(QMainWindow):
         for signal_name in ("loaded", "failed", "finished"):
             try:
                 getattr(thread, signal_name).disconnect()
-            except Exception:
+            # The two failures meant here: Qt has already deleted the C++
+            # object, or the signal had nothing connected to it (PyQt raises
+            # TypeError for that).  Both mean the thread is already let go.
+            except (RuntimeError, TypeError):
                 pass
 
         try:
             thread.requestInterruption()
-        except Exception:
+        # The one failure meant here: Qt has already deleted the C++ object.
+        except RuntimeError:
             pass
 
         # Roll pending Open authority back to the exact current session.  Legacy
@@ -6566,7 +6536,8 @@ class MainWindow(QMainWindow):
         if dialog is not None:
             try:
                 dialog.close()
-            except Exception:
+            # The one failure meant here: Qt has already deleted the C++ object.
+            except RuntimeError:
                 pass
         try:
             self._status_task_end()
@@ -6582,7 +6553,8 @@ class MainWindow(QMainWindow):
             self._mesh_load_thread = None
         try:
             thread.deleteLater()
-        except Exception:
+        # The one failure meant here: Qt has already deleted the C++ object.
+        except RuntimeError:
             pass
         return True
 
@@ -6598,11 +6570,15 @@ class MainWindow(QMainWindow):
         for signal_name in ("done", "failed", "finished"):
             try:
                 getattr(thread, signal_name).disconnect()
-            except Exception:
+            # The two failures meant here: Qt has already deleted the C++
+            # object, or the signal had nothing connected to it (PyQt raises
+            # TypeError for that).  Both mean the thread is already let go.
+            except (RuntimeError, TypeError):
                 pass
         try:
             thread.requestInterruption()
-        except Exception:
+        # The one failure meant here: Qt has already deleted the C++ object.
+        except RuntimeError:
             pass
         if not self._wait_for_thread_shutdown(thread, TASK_SHUTDOWN_WAIT_MS):
             # Retain the QThread owner while the package parser finishes.  Its
@@ -6612,7 +6588,8 @@ class MainWindow(QMainWindow):
             self._project_open_thread = None
         try:
             thread.deleteLater()
-        except Exception:
+        # The one failure meant here: Qt has already deleted the C++ object.
+        except RuntimeError:
             pass
         return True
 
@@ -7517,10 +7494,7 @@ class MainWindow(QMainWindow):
                 self.help_dock.show()
                 prefer_floating = bool(getattr(self, "_help_dock_last_floating", True))
                 if prefer_floating:
-                    try:
-                        self.help_dock.setFloating(True)
-                    except Exception:
-                        pass
+                    self.help_dock.setFloating(True)
                     try:
                         self.help_dock.resize(560, 260)
                     except Exception:
@@ -7860,7 +7834,7 @@ class MainWindow(QMainWindow):
             )
 
         try:
-            if not identity_triplet(getattr(obj, "translation")):
+            if not identity_triplet(obj.translation):
                 add(
                     "align_translation_preview",
                     "현재 보이는 이동 preview를 먼저 정치 확정하거나 초기화하세요.",
@@ -7871,7 +7845,7 @@ class MainWindow(QMainWindow):
                 "이동 preview 상태를 확인할 수 없어 안전하게 중단해야 합니다.",
             )
         try:
-            if not identity_triplet(getattr(obj, "rotation")):
+            if not identity_triplet(obj.rotation):
                 add(
                     "align_rotation_preview",
                     "현재 보이는 회전 preview를 먼저 정치 확정하거나 초기화하세요.",
@@ -7882,7 +7856,7 @@ class MainWindow(QMainWindow):
                 "회전 preview 상태를 확인할 수 없어 안전하게 중단해야 합니다.",
             )
         try:
-            scale = float(getattr(obj, "scale"))
+            scale = float(obj.scale)
             if not np.isfinite(scale) or not np.isclose(
                 scale,
                 1.0,
@@ -8778,13 +8752,15 @@ class MainWindow(QMainWindow):
         if not self._project_open_worker_is_current(owner, request_id):
             try:
                 owner.deleteLater()
-            except Exception:
+            # The one failure meant here: Qt has already deleted the C++ object.
+            except RuntimeError:
                 pass
             _LOGGER.info("Ignored stale project-open finished signal: %s", request_id)
             return
         try:
             owner.deleteLater()
-        except Exception:
+        # The one failure meant here: Qt has already deleted the C++ object.
+        except RuntimeError:
             pass
         self._project_open_thread = None
         self._project_open_request_id = None
@@ -10664,10 +10640,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         finally:
-            try:
-                self.section_panel.btn_toggle.blockSignals(False)
-            except Exception:
-                pass
+            self.section_panel.btn_toggle.blockSignals(False)
 
         # ROI
         roi_s = vp_state.get("roi", {})
@@ -10707,10 +10680,7 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             finally:
-                try:
-                    self.section_panel.btn_roi.blockSignals(False)
-                except Exception:
-                    pass
+                self.section_panel.btn_roi.blockSignals(False)
 
         # Cutline edit mode button
         try:
@@ -10719,10 +10689,7 @@ class MainWindow(QMainWindow):
                 self.section_panel.combo_cutline.blockSignals(True)
                 self.section_panel.combo_cutline.setCurrentIndex(int(getattr(vp, "cut_line_active", 0) or 0))
             finally:
-                try:
-                    self.section_panel.combo_cutline.blockSignals(False)
-                except Exception:
-                    pass
+                self.section_panel.combo_cutline.blockSignals(False)
         except Exception:
             pass
 
@@ -10853,10 +10820,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         finally:
-            try:
-                self.section_panel.btn_toggle.blockSignals(False)
-            except Exception:
-                pass
+            self.section_panel.btn_toggle.blockSignals(False)
 
         try:
             self.section_panel.btn_roi.blockSignals(True)
@@ -10868,10 +10832,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         finally:
-            try:
-                self.section_panel.btn_roi.blockSignals(False)
-            except Exception:
-                pass
+            self.section_panel.btn_roi.blockSignals(False)
 
         self._sync_cutline_button_state(cut_enabled)
 
@@ -11103,7 +11064,8 @@ class MainWindow(QMainWindow):
         if not self._mesh_load_result_is_current(owner, request_id):
             try:
                 owner.deleteLater()
-            except Exception:
+            # The one failure meant here: Qt has already deleted the C++ object.
+            except RuntimeError:
                 pass
             _LOGGER.info("Ignored stale mesh-load finished signal: %s", request_id)
             return
@@ -11154,10 +11116,7 @@ class MainWindow(QMainWindow):
                     operation_id=operation_id,
                 )
             self._artifact_workbench = fallback
-        try:
-            self.status_info.setText(_ARTIFACT_AUTHORITY_REOPEN_STATUS)
-        except Exception:
-            pass
+        self.status_info.setText(_ARTIFACT_AUTHORITY_REOPEN_STATUS)
 
     def _restore_artifact_authority_fault_status(self) -> bool:
         """Keep the reopen-required banner dominant after a fatal authority fault."""
@@ -11169,10 +11128,7 @@ class MainWindow(QMainWindow):
             self._artifact_authority_faulted = True
         if not faulted:
             return False
-        try:
-            self.status_info.setText(_ARTIFACT_AUTHORITY_REOPEN_STATUS)
-        except Exception:
-            pass
+        self.status_info.setText(_ARTIFACT_AUTHORITY_REOPEN_STATUS)
         return True
 
     def _report_artifact_authority_callback_failure(
@@ -11743,8 +11699,8 @@ class MainWindow(QMainWindow):
                     self._project_has_legacy_bindings = True
                 self._last_source_verification = source_verification
                 try:
-                    setattr(mesh_data, "_amr_source_verification", source_verification)
-                    setattr(mesh_data, "_amr_source_binding_status", binding_status)
+                    mesh_data._amr_source_verification = source_verification
+                    mesh_data._amr_source_binding_status = binding_status
                 except Exception:
                     pass
 
@@ -11922,7 +11878,8 @@ class MainWindow(QMainWindow):
         if thread is not None:
             try:
                 thread.deleteLater()
-            except Exception:
+            # The one failure meant here: Qt has already deleted the C++ object.
+            except RuntimeError:
                 pass
         self._mesh_load_thread = None
         self._mesh_load_request_id = None
@@ -11975,7 +11932,8 @@ class MainWindow(QMainWindow):
         if thread is not None:
             try:
                 thread.deleteLater()
-            except Exception:
+            # The one failure meant here: Qt has already deleted the C++ object.
+            except RuntimeError:
                 pass
         self._profile_export_thread = None
         try:
@@ -12019,10 +11977,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        try:
-            widget.setVisible(True)
-        except Exception:
-            pass
+        widget.setVisible(True)
 
     def _status_task_update(self, *, text: str | None = None, maximum: int | None = None, value: int | None = None) -> None:
         widget = getattr(self, "_status_task_widget", None)
@@ -12168,7 +12123,8 @@ class MainWindow(QMainWindow):
         def _cleanup_thread():
             try:
                 thread.deleteLater()
-            except Exception:
+            # The one failure meant here: Qt has already deleted the C++ object.
+            except RuntimeError:
                 pass
             if getattr(self, "_task_thread", None) is thread:
                 self._task_thread = None
@@ -12190,12 +12146,9 @@ class MainWindow(QMainWindow):
                 on_cancel_requested()
             except Exception:
                 _LOGGER.exception("Task cancellation callback failed: %s", title)
-            try:
-                dlg.setLabelText("취소 요청됨 · 안전한 계산 경계까지 기다리는 중...")
-                dlg.setCancelButton(None)
-                dlg.show()
-            except Exception:
-                pass
+            dlg.setLabelText("취소 요청됨 · 안전한 계산 경계까지 기다리는 중...")
+            dlg.setCancelButton(None)
+            dlg.show()
 
         def _safe_invoke(callback: Callable[[Any], None], arg: Any):
             try:
@@ -12233,7 +12186,8 @@ class MainWindow(QMainWindow):
             if getattr(self, "_task_thread", None) is not thread:
                 try:
                     thread.deleteLater()
-                except Exception:
+                # The one failure meant here: Qt has already deleted the C++ object.
+                except RuntimeError:
                     pass
                 return
             _close_dialog()
@@ -12344,7 +12298,7 @@ class MainWindow(QMainWindow):
         if isinstance(raw_state, TileInterpretationState):
             return raw_state
         state = TileInterpretationState.from_dict(raw_state if isinstance(raw_state, dict) else {})
-        setattr(obj, "tile_interpretation_state", state)
+        obj.tile_interpretation_state = state
         return state
 
     @staticmethod
@@ -12499,9 +12453,9 @@ class MainWindow(QMainWindow):
             note="synthetic_tile_benchmark",
         )
         state.touch()
-        setattr(obj, "tile_interpretation_state", state)
-        setattr(obj, "tile_synthetic_truth", artifact.truth)
-        setattr(obj, "tile_evaluation_report", TileEvaluationReport())
+        obj.tile_interpretation_state = state
+        obj.tile_synthetic_truth = artifact.truth
+        obj.tile_evaluation_report = TileEvaluationReport()
         try:
             obj.selected_faces = set()
         except Exception:
@@ -12592,10 +12546,7 @@ class MainWindow(QMainWindow):
         except Exception:
             return 0
 
-        try:
-            self.viewport.brush_selected_faces.clear()
-        except Exception:
-            pass
+        self.viewport.brush_selected_faces.clear()
         try:
             self.selection_panel.update_selection_count(len(selected))
         except Exception:
@@ -12609,10 +12560,7 @@ class MainWindow(QMainWindow):
                 self.export_panel.set_rubbing_target("selected")
         except Exception:
             pass
-        try:
-            self.viewport.update()
-        except Exception:
-            pass
+        self.viewport.update()
         return int(len(selected))
 
     def _sync_tile_panel(self) -> None:
@@ -12875,14 +12823,8 @@ class MainWindow(QMainWindow):
     def _show_dock_on_right(self, dock: QDockWidget, *, tab_with: QDockWidget | None = None) -> None:
         if dock is None:
             return
-        try:
-            self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
-        except Exception:
-            pass
-        try:
-            dock.show()
-        except Exception:
-            pass
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+        dock.show()
         try:
             if tab_with is not None and tab_with is not dock and tab_with.isVisible():
                 self.tabifyDockWidget(tab_with, dock)
@@ -12901,10 +12843,7 @@ class MainWindow(QMainWindow):
         except Exception:
             anchor = None
         self._show_dock_on_right(self.measure_dock, tab_with=anchor)
-        try:
-            self.status_info.setText("제원측정 도구를 열었습니다. 기본 작업은 4축 작업 흐름 패널에서 이어집니다.")
-        except Exception:
-            pass
+        self.status_info.setText("제원측정 도구를 열었습니다. 기본 작업은 4축 작업 흐름 패널에서 이어집니다.")
 
     def _show_selection_panel(self) -> None:
         anchor = None
@@ -12916,10 +12855,7 @@ class MainWindow(QMainWindow):
         except Exception:
             anchor = None
         self._show_dock_on_right(self.selection_dock, tab_with=anchor)
-        try:
-            self.status_info.setText("탁본 표면 보정 도구를 열었습니다. 기본 작업은 4축 작업 흐름 패널에서 이어집니다.")
-        except Exception:
-            pass
+        self.status_info.setText("탁본 표면 보정 도구를 열었습니다. 기본 작업은 4축 작업 흐름 패널에서 이어집니다.")
 
     def _show_advanced_panels(self) -> None:
         primary = [self.transform_dock, self.tile_dock, self.flatten_dock, self.export_dock]
@@ -12942,10 +12878,7 @@ class MainWindow(QMainWindow):
                 toolbar.show()
         except Exception:
             pass
-        try:
-            self.status_info.setText("정위치/실측/탁본 세부 도구를 열었습니다. 기본 흐름은 오른쪽 4축 작업 패널에 남아 있습니다.")
-        except Exception:
-            pass
+        self.status_info.setText("정위치/실측/탁본 세부 도구를 열었습니다. 기본 흐름은 오른쪽 4축 작업 패널에 남아 있습니다.")
 
     def _sync_workflow_panel(self) -> None:
         panel = getattr(self, "workflow_panel", None)
@@ -13036,31 +12969,19 @@ class MainWindow(QMainWindow):
             self.on_selection_action("select_visible_faces", None)
             return
         if action == "preview_recording_surface":
-            try:
-                self.export_panel.set_rubbing_target("selected")
-            except Exception:
-                pass
+            self.export_panel.set_rubbing_target("selected")
             self.on_flatten_preview_requested()
             return
         if action == "unwrap_recording_surface":
-            try:
-                self.export_panel.set_rubbing_target("selected")
-            except Exception:
-                pass
+            self.export_panel.set_rubbing_target("selected")
             self.on_flatten_requested(self._current_flatten_panel_options(surface_target="selected"))
             return
         if action == "export_review_sheet":
-            try:
-                self.export_panel.set_rubbing_target("selected")
-            except Exception:
-                pass
+            self.export_panel.set_rubbing_target("selected")
             self.on_export_requested({"type": "review_sheet", "target": "selected"})
             return
         if action == "export_flat_svg":
-            try:
-                self.export_panel.set_rubbing_target("selected")
-            except Exception:
-                pass
+            self.export_panel.set_rubbing_target("selected")
             self.on_export_requested({"type": "flat_svg", "target": "selected"})
             return
         if action == "export_profile_package":
@@ -13092,10 +13013,7 @@ class MainWindow(QMainWindow):
 
         export_panel = getattr(self, "export_panel", None)
         if export_panel is not None:
-            try:
-                export_panel.set_rubbing_target("selected")
-            except Exception:
-                pass
+            export_panel.set_rubbing_target("selected")
 
         obj = getattr(self.viewport, "selected_obj", None)
         if obj is not None and getattr(obj, "mesh", None) is not None:
@@ -13993,8 +13911,8 @@ class MainWindow(QMainWindow):
 
             def task_export_synthetic_suite():
                 seeds: list[int] = []
-                for token in str(seeds_arg or "1").split(","):
-                    token = str(token or "").strip()
+                for raw_seed in str(seeds_arg or "1").split(","):
+                    token = str(raw_seed or "").strip()
                     if not token:
                         continue
                     seeds.append(int(token))
@@ -14294,10 +14212,7 @@ class MainWindow(QMainWindow):
                     self.viewport.faceSelectionChanged.emit(0)
                 except Exception:
                     pass
-                try:
-                    self.viewport.update()
-                except Exception:
-                    pass
+                self.viewport.update()
                 self.status_info.setText("기와 해석: 기록면 준비를 해제했습니다.")
             elif action == "save_slot":
                 try:
@@ -14467,7 +14382,7 @@ class MainWindow(QMainWindow):
                 if truth is None:
                     raise ValueError("현재 메쉬에는 연결된 합성 정답이 없습니다.")
                 report = evaluate_tile_interpretation(state, truth)
-                setattr(obj, "tile_evaluation_report", report)
+                obj.tile_evaluation_report = report
                 unit = str(getattr(getattr(obj, "mesh", None), "unit", "") or "mm")
                 self.status_info.setText(
                     f"기와 해석 평가: {report.overall_score * 100.0:.0f}점 "
@@ -14484,7 +14399,7 @@ class MainWindow(QMainWindow):
                 state = restored
                 restored_count = self._set_object_selected_faces(obj, truth.selected_faces)
                 report = evaluate_tile_interpretation(state, truth)
-                setattr(obj, "tile_evaluation_report", report)
+                obj.tile_evaluation_report = report
                 self.status_info.setText(
                     f"기와 해석: 합성 정답 가설 적용 완료 (선택 {restored_count}면, 점수 {report.overall_score * 100.0:.0f})"
                 )
@@ -14502,7 +14417,7 @@ class MainWindow(QMainWindow):
                 if not filepath:
                     return
                 report = evaluate_tile_interpretation(state, truth)
-                setattr(obj, "tile_evaluation_report", report)
+                obj.tile_evaluation_report = report
                 artifact = SyntheticTileArtifact(
                     mesh=obj.mesh,
                     truth=truth,
@@ -14544,7 +14459,7 @@ class MainWindow(QMainWindow):
                 truth = self._coerce_synthetic_truth(getattr(obj, "tile_synthetic_truth", None))
                 if truth is not None:
                     report = evaluate_tile_interpretation(state, truth)
-                    setattr(obj, "tile_evaluation_report", report)
+                    obj.tile_evaluation_report = report
                     self.status_info.setText(
                         f"기와 위저드 자동 진행 완료 ({len(executed_steps)}단계, 평가 {report.overall_score * 100.0:.0f}점)"
                     )
@@ -14567,7 +14482,7 @@ class MainWindow(QMainWindow):
             return
 
         state.touch()
-        setattr(obj, "tile_interpretation_state", state)
+        obj.tile_interpretation_state = state
         self._sync_tile_panel()
         self._refresh_native_save_indicator()
 
@@ -14662,12 +14577,9 @@ class MainWindow(QMainWindow):
                 self.trans_toolbar.scale_spin.blockSignals(True)
                 self.trans_toolbar.scale_spin.setValue(1.0)
                 self.trans_toolbar.scale_spin.blockSignals(False)
-            try:
-                self.status_info.setText(
-                    "정치 preview | 저장 전 '정치 확정'으로 Align revision을 만드세요"
-                )
-            except Exception:
-                pass
+            self.status_info.setText(
+                "정치 preview | 저장 전 '정치 확정'으로 Align revision을 만드세요"
+            )
         else:
             obj.scale = self.trans_toolbar.scale_spin.value()
         self.viewport.update()
@@ -15344,12 +15256,9 @@ class MainWindow(QMainWindow):
                 self._show_dock_on_right(self.section_dock, tab_with=anchor)
             except Exception:
                 pass
-            try:
-                self.status_info.setText(
-                    "검증된 실측·기와 전개 패널을 열었습니다. native 문서는 record 기반 명령과 1:1 export를 사용합니다."
-                )
-            except Exception:
-                pass
+            self.status_info.setText(
+                "검증된 실측·기와 전개 패널을 열었습니다. native 문서는 record 기반 명령과 1:1 export를 사용합니다."
+            )
             return
 
         # 2) Actions that need a selected mesh
@@ -15447,10 +15356,7 @@ class MainWindow(QMainWindow):
                 z_next = float(np.clip(z_cur, lo, hi))
             except Exception:
                 z_next = float(getattr(self.viewport, "slice_z", 0.0) or 0.0)
-            try:
-                panel.spin.setValue(z_next)
-            except Exception:
-                pass
+            panel.spin.setValue(z_next)
             try:
                 panel.group.setChecked(bool(enabled))
             except Exception:
@@ -15462,10 +15368,7 @@ class MainWindow(QMainWindow):
                 )
             else:
                 self.viewport.status_info = "실시간 단면 모드 OFF"
-            try:
-                self.viewport.setFocus()
-            except Exception:
-                pass
+            self.viewport.setFocus()
             self.viewport.update()
             return
 
@@ -15475,10 +15378,7 @@ class MainWindow(QMainWindow):
             except Exception:
                 z_now = 0.0
             self.on_slice_capture_requested(z_now)
-            try:
-                self.viewport.setFocus()
-            except Exception:
-                pass
+            self.viewport.setFocus()
             return
 
         if action == "surface_clear_target":
@@ -16528,10 +16428,7 @@ class MainWindow(QMainWindow):
                 "대신 '기록면 검토 시트 저장', '기록면 전개 SVG 저장', "
                 "또는 '6방향 도면 패키지 내보내기'를 사용하세요.",
             )
-            try:
-                self.status_info.setText("기본 워크플로우에서 제거된 내보내기 방식입니다.")
-            except Exception:
-                pass
+            self.status_info.setText("기본 워크플로우에서 제거된 내보내기 방식입니다.")
             return
         target = _normalize_surface_target(requested_target)
         requested_target_normalized = target
@@ -16561,10 +16458,7 @@ class MainWindow(QMainWindow):
         flatten_options = self._resolve_flatten_options(obj, flatten_options)
         target = _normalize_surface_target(flatten_options.get("surface_target", target))
         if target != requested_target_normalized and hasattr(self, "export_panel"):
-            try:
-                self.export_panel.set_rubbing_target(target)
-            except Exception:
-                pass
+            self.export_panel.set_rubbing_target(target)
 
         target_label = _surface_target_label(target)
         target_face_ids = _surface_target_face_ids(obj, target)
@@ -16757,10 +16651,7 @@ class MainWindow(QMainWindow):
             "현재 기본 워크플로우에서는 이 출력 방식을 사용하지 않습니다.\n\n"
             "실측용 도면 SVG, 기록면 검토 시트, 6방향 도면 패키지를 사용해 주세요.",
         )
-        try:
-            self.status_info.setText("기본 워크플로우에 없는 출력 요청입니다.")
-        except Exception:
-            pass
+        self.status_info.setText("기본 워크플로우에 없는 출력 요청입니다.")
     
     def export_2d_profile(self, view):
         """2D 실측 도면(SVG) 내보내기"""
@@ -17091,10 +16982,7 @@ class MainWindow(QMainWindow):
         dlg = getattr(self, "_profile_package_export_dialog", None)
         if dlg is not None:
             dlg.setLabelText(f"[{idx+1}/{len(views)}] {view} 내보내는 중...")
-            try:
-                dlg.setValue(idx)
-            except Exception:
-                pass
+            dlg.setValue(idx)
 
         view_map = state.get("view_map") or {}
         bounds = np.asarray(state.get("bounds"), dtype=np.float64)
@@ -17262,7 +17150,8 @@ class MainWindow(QMainWindow):
         if dlg is not None:
             try:
                 dlg.close()
-            except Exception:
+            # The one failure meant here: Qt has already deleted the C++ object.
+            except RuntimeError:
                 pass
         self._profile_package_export_dialog = None
 
@@ -17668,11 +17557,8 @@ class MainWindow(QMainWindow):
     def _disable_measure_mode(self) -> None:
         panel = getattr(self, "measure_panel", None)
         if panel is not None:
-            try:
-                panel.set_measure_checked(False)
-                panel.set_points_count(0)
-            except Exception:
-                pass
+            panel.set_measure_checked(False)
+            panel.set_points_count(0)
 
         try:
             if self.viewport.picking_mode == "measure":
@@ -17692,10 +17578,7 @@ class MainWindow(QMainWindow):
         self._invalidate_surface_pick_requests()
         if enabled and self.viewport.selected_obj is None:
             QMessageBox.warning(self, "경고", "먼저 메쉬를 선택하세요.")
-            try:
-                self.measure_panel.set_measure_checked(False)
-            except Exception:
-                pass
+            self.measure_panel.set_measure_checked(False)
             self._disable_measure_mode()
             self.viewport.update()
             return
@@ -18507,17 +18390,11 @@ class MainWindow(QMainWindow):
                         f"  - Convex hull (upper bound): {hull_cm3:.2f} cm³ ({hull_cm3 * 1000.0:.0f} mm³)"
                     )
 
-            try:
-                self.status_info.setText("부피/면적 계산 완료")
-            except Exception:
-                pass
+            self.status_info.setText("부피/면적 계산 완료")
 
         def on_failed(message: str) -> None:
             QMessageBox.critical(self, "오류", self._format_error_message("부피/면적 계산 실패:", message))
-            try:
-                self.status_info.setText("부피/면적 계산 실패")
-            except Exception:
-                pass
+            self.status_info.setText("부피/면적 계산 실패")
 
         self._start_task(
             title="계산",
@@ -18549,21 +18426,15 @@ class MainWindow(QMainWindow):
             # ROI는 바닥 평면 드래그를 사용 -> 다른 입력 모드 비활성화
             if self.viewport.crosshair_enabled:
                 self.viewport.crosshair_enabled = False
-                try:
-                    self.section_panel.btn_toggle.blockSignals(True)
-                    self.section_panel.btn_toggle.setChecked(False)
-                    self.section_panel.btn_toggle.blockSignals(False)
-                except Exception:
-                    pass
+                self.section_panel.btn_toggle.blockSignals(True)
+                self.section_panel.btn_toggle.setChecked(False)
+                self.section_panel.btn_toggle.blockSignals(False)
 
             if getattr(self.viewport, "cut_lines_enabled", False):
                 self.viewport.set_cut_lines_enabled(False)
-                try:
-                    self.section_panel.btn_line.blockSignals(True)
-                    self.section_panel.btn_line.setChecked(False)
-                    self.section_panel.btn_line.blockSignals(False)
-                except Exception:
-                    pass
+                self.section_panel.btn_line.blockSignals(True)
+                self.section_panel.btn_line.setChecked(False)
+                self.section_panel.btn_line.blockSignals(False)
 
             # ROI가 활성화되면 초기 범위를 메쉬 크기에 맞춤
             if self.viewport.selected_obj and self.viewport.selected_obj.mesh:
@@ -20916,12 +20787,9 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             raise
-        try:
-            self.status_info.setText(
-                f"{label} 취소 요청됨 | 임시 패키지 안전 정리 대기"
-            )
-        except Exception:
-            pass
+        self.status_info.setText(
+            f"{label} 취소 요청됨 | 임시 패키지 안전 정리 대기"
+        )
 
     def _native_export_callback_is_cancelled(
         self,
@@ -20938,12 +20806,9 @@ class MainWindow(QMainWindow):
         except Exception:
             return False
         if cancelled:
-            try:
-                self.status_info.setText(
-                    f"{label} 취소 완료 | 목적지에 패키지를 게시하지 않음"
-                )
-            except Exception:
-                pass
+            self.status_info.setText(
+                f"{label} 취소 완료 | 목적지에 패키지를 게시하지 않음"
+            )
         return cancelled
 
     @staticmethod
@@ -23321,24 +23186,18 @@ class MainWindow(QMainWindow):
         # 십자선/선형 단면은 입력(드래그) 충돌 -> 상호 배타로 처리
         if enabled and getattr(self.viewport, "cut_lines_enabled", False):
             self.viewport.set_cut_lines_enabled(False)
-            try:
-                self.section_panel.btn_line.blockSignals(True)
-                self.section_panel.btn_line.setChecked(False)
-                self.section_panel.btn_line.blockSignals(False)
-            except Exception:
-                pass
+            self.section_panel.btn_line.blockSignals(True)
+            self.section_panel.btn_line.setChecked(False)
+            self.section_panel.btn_line.blockSignals(False)
 
         # ROI와도 입력이 충돌하므로 상호 배타로 처리
         if enabled and getattr(self.viewport, "roi_enabled", False):
             self.viewport.roi_enabled = False
             self.viewport.active_roi_edge = None
-            try:
-                self.section_panel.btn_roi.blockSignals(True)
-                self.section_panel.btn_roi.setChecked(False)
-                self.section_panel.btn_roi.blockSignals(False)
-                self.section_panel.btn_silhouette.setEnabled(False)
-            except Exception:
-                pass
+            self.section_panel.btn_roi.blockSignals(True)
+            self.section_panel.btn_roi.setChecked(False)
+            self.section_panel.btn_roi.blockSignals(False)
+            self.section_panel.btn_silhouette.setEnabled(False)
 
         self.viewport.crosshair_enabled = enabled
         if enabled:
@@ -23367,24 +23226,18 @@ class MainWindow(QMainWindow):
         # 십자선/단면선/ROI는 입력 충돌 -> 상호 배타로 처리
         if enabled and self.viewport.crosshair_enabled:
             self.viewport.crosshair_enabled = False
-            try:
-                self.section_panel.btn_toggle.blockSignals(True)
-                self.section_panel.btn_toggle.setChecked(False)
-                self.section_panel.btn_toggle.blockSignals(False)
-            except Exception:
-                pass
+            self.section_panel.btn_toggle.blockSignals(True)
+            self.section_panel.btn_toggle.setChecked(False)
+            self.section_panel.btn_toggle.blockSignals(False)
 
         # ROI와도 입력이 충돌하므로 상호 배타로 처리
         if enabled and getattr(self.viewport, "roi_enabled", False):
             self.viewport.roi_enabled = False
             self.viewport.active_roi_edge = None
-            try:
-                self.section_panel.btn_roi.blockSignals(True)
-                self.section_panel.btn_roi.setChecked(False)
-                self.section_panel.btn_roi.blockSignals(False)
-                self.section_panel.btn_silhouette.setEnabled(False)
-            except Exception:
-                pass
+            self.section_panel.btn_roi.blockSignals(True)
+            self.section_panel.btn_roi.setChecked(False)
+            self.section_panel.btn_roi.blockSignals(False)
+            self.section_panel.btn_silhouette.setEnabled(False)
 
         if enabled:
             # Start cutline mode as a fresh session so stale profiles do not appear.
@@ -23411,10 +23264,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         finally:
-            try:
-                self.section_panel.btn_line.blockSignals(False)
-            except Exception:
-                pass
+            self.section_panel.btn_line.blockSignals(False)
 
     def on_viewport_cut_line_active_changed(self, index: int) -> None:
         """Mirror a viewport-side active cut-line change back into the panel.
@@ -23746,10 +23596,7 @@ class MainWindow(QMainWindow):
         self._slice_capture_pending = True
         self._slice_pending_height = float(getattr(self.viewport, "slice_z", target_z) or target_z)
         self._slice_debounce_timer.start(1)
-        try:
-            self.status_info.setText("단면 계산 완료 후 자동 촬영합니다...")
-        except Exception:
-            pass
+        self.status_info.setText("단면 계산 완료 후 자동 촬영합니다...")
 
     def _on_slice_computed(self, z_height: float, contours):
         if not getattr(self.viewport, "slice_enabled", False):
@@ -23784,7 +23631,8 @@ class MainWindow(QMainWindow):
         if thread is not None:
             try:
                 thread.deleteLater()
-            except Exception:
+            # The one failure meant here: Qt has already deleted the C++ object.
+            except RuntimeError:
                 pass
         self._slice_compute_thread = None
 
@@ -23810,7 +23658,8 @@ class MainWindow(QMainWindow):
         self._slice_capture_pending = False
         try:
             self._slice_debounce_timer.stop()
-        except Exception:
+        # The one failure meant here: Qt has already deleted the C++ object.
+        except RuntimeError:
             pass
         self.viewport.slice_contours = []
         self.viewport.update()
@@ -23915,7 +23764,7 @@ def main():
 
     require_supported_windows_client_runtime()
     try:
-        global _log_path
+        global _log_path  # noqa: PLW0603 - one log file per process
         try:
             from src.core.logging_utils import setup_logging
 

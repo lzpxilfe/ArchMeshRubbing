@@ -22,6 +22,7 @@ reading; it is never recomputed while a sheet is drawn.
 
 from __future__ import annotations
 
+from itertools import pairwise
 import math
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
@@ -29,6 +30,7 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 
 from .artifact_cancellation import CancellationProbe, raise_if_cancelled
+from .ndimage_shims import gaussian_derivative, labelled
 from .artifact_document import (
     ArtifactDocument,
     ArtifactDocumentError,
@@ -632,7 +634,7 @@ class TextureLinesPayload:
             )
             if len(points) < 2:
                 raise ArtifactTextureLinesError("a texture line has at least two points")
-            if any(a == b for a, b in zip(points, points[1:])):
+            if any(a == b for a, b in pairwise(points)):
                 raise ArtifactTextureLinesError("a texture line repeats a point")
             if points[0] == points[-1]:
                 raise ArtifactTextureLinesError("a texture line is open; its ends are distinct")
@@ -871,16 +873,16 @@ def _valley_points(
     follows a stroke to its faint ends, the higher keeps the grain out.
     """
 
-    from scipy.ndimage import binary_erosion, gaussian_filter, label  # noqa: PLC0415
+    from scipy.ndimage import binary_erosion  # noqa: PLC0415
 
     sigma = scale_mm * float(pixels_per_mm)
     field = np.where(good, height_mm, 0.0)
     # Derivatives of the Gaussian-smoothed height, in mm per pixel^n.
-    hx = gaussian_filter(field, sigma, order=(0, 1))
-    hy = gaussian_filter(field, sigma, order=(1, 0))
-    hxx = gaussian_filter(field, sigma, order=(0, 2))
-    hyy = gaussian_filter(field, sigma, order=(2, 0))
-    hxy = gaussian_filter(field, sigma, order=(1, 1))
+    hx = gaussian_derivative(field, sigma, order=(0, 1))
+    hy = gaussian_derivative(field, sigma, order=(1, 0))
+    hxx = gaussian_derivative(field, sigma, order=(0, 2))
+    hyy = gaussian_derivative(field, sigma, order=(2, 0))
+    hxy = gaussian_derivative(field, sigma, order=(1, 1))
     half_trace = 0.5 * (hxx + hyy)
     half_gap = 0.5 * (hxx - hyy)
     root = np.sqrt(half_gap**2 + hxy**2)
@@ -899,7 +901,10 @@ def _valley_points(
     slope_across = hx * nx + hy * ny
     concave = largest > 0.0
     offset = np.where(concave, -slope_across / np.where(concave, largest, 1.0), 2.0)
-    inner = binary_erosion(good, iterations=max(1, int(math.ceil(_BORDER_SIGMAS * sigma))))
+    inner = np.asarray(
+        binary_erosion(good, iterations=max(1, int(math.ceil(_BORDER_SIGMAS * sigma)))),
+        dtype=bool,
+    )
     # One pixel across the valley: keep a pixel only where the curvature is
     # no less than at its two neighbours along the across direction, the
     # direction rounded to the nearest of the four pixel axes.
@@ -916,7 +921,7 @@ def _valley_points(
         backward = padded[1 - dr : 1 - dr + height_px, 1 - dc : 1 - dc + width_px]
         ahead = np.where(mask, forward, ahead)
         behind = np.where(mask, backward, behind)
-    crest = (largest >= ahead) & (largest >= behind)
+    crest = np.asarray(largest >= ahead, dtype=bool) & np.asarray(largest >= behind, dtype=bool)
     valley = (
         inner
         & concave
@@ -925,7 +930,7 @@ def _valley_points(
         & (np.abs(offset) <= 1.0)
     )
     if curvature_seed_per_mm is not None and curvature_seed_per_mm > curvature_min_per_mm:
-        labels, count = label(valley, structure=np.ones((3, 3), dtype=bool))
+        labels, count = labelled(valley, structure=np.ones((3, 3), dtype=bool))
         if count:
             seeded = np.zeros(count + 1, dtype=bool)
             seeded[np.unique(labels[valley & (curvature_per_mm >= curvature_seed_per_mm)])] = True
@@ -1021,7 +1026,7 @@ def _reduce_staircases(skeleton: np.ndarray) -> np.ndarray:
     result = skeleton.copy()
     height, width = result.shape
     rows, cols = np.nonzero(result)
-    for r, c in zip(rows.tolist(), cols.tolist()):
+    for r, c in zip(rows.tolist(), cols.tolist(), strict=True):
         if r == 0 or c == 0 or r == height - 1 or c == width - 1:
             continue
         north, east, south, west = result[r - 1, c], result[r, c + 1], result[r + 1, c], result[r, c - 1]
@@ -1124,7 +1129,7 @@ def _ridge_points(
     ``TEXTURE_LINES_RIDGE_FOLLOW_PERCENT`` of ``depth_mm`` where the line
     somewhere reaches ``depth_mm``.  Returns the skeleton mask and counts."""
 
-    from scipy.ndimage import gaussian_filter, label, map_coordinates, maximum  # noqa: PLC0415
+    from scipy.ndimage import gaussian_filter, map_coordinates, maximum  # noqa: PLC0415
 
     depth, good = _depth_under_paper(signed_mm, good, pixels_per_mm=pixels_per_mm, window_mm=window_mm)
     stroke_count = int(np.count_nonzero(good & (depth >= depth_mm)))
@@ -1152,7 +1157,7 @@ def _ridge_points(
     behind = map_coordinates(smooth, [rows - dr, cols - dc], order=1, mode="nearest")
     follow = depth_mm * TEXTURE_LINES_RIDGE_FOLLOW_PERCENT / 100.0
     ridge = good & (smooth >= follow) & (smooth >= ahead) & (smooth >= behind)
-    labels, count = label(ridge, structure=np.ones((3, 3), dtype=bool))
+    labels, count = labelled(ridge, structure=np.ones((3, 3), dtype=bool))
     if count:
         deepest = np.asarray(maximum(smooth, labels, index=np.arange(1, count + 1)), dtype=np.float64)
         keep = np.concatenate([[False], deepest >= depth_mm])
@@ -1182,7 +1187,7 @@ def _stroke_points(
     laid over the detrended height, closed across the stroke's own floor.
     Returns the skeleton mask and counts of what was read."""
 
-    from scipy.ndimage import binary_closing, label  # noqa: PLC0415
+    from scipy.ndimage import binary_closing  # noqa: PLC0415
 
     depth, good = _depth_under_paper(signed_mm, good, pixels_per_mm=pixels_per_mm, window_mm=window_mm)
     stroke = good & (depth >= depth_mm)
@@ -1195,9 +1200,9 @@ def _stroke_points(
         # Closed across the ribbon's own floor only: a cell that strokes
         # enclose between them - a chevron's tips meeting the next row's -
         # is wall, and filling it would make one blob of a row of strokes.
-        stroke = (stroke | binary_closing(stroke, structure=disk)) & good
+        stroke = (stroke | np.asarray(binary_closing(stroke, structure=disk), dtype=bool)) & good
     # A stroke narrower than the paper's own quantum is grain.
-    labels, count = label(stroke, structure=np.ones((3, 3), dtype=bool))
+    labels, count = labelled(stroke, structure=np.ones((3, 3), dtype=bool))
     if count:
         sizes = np.bincount(labels.ravel())
         keep = sizes >= max(4, pixels_per_mm)
@@ -1223,8 +1228,8 @@ def _orientation_field(
     from scipy.ndimage import gaussian_filter  # noqa: PLC0415
 
     field = np.where(good, signed_mm, 0.0)
-    gx = gaussian_filter(field, 1.0, order=(0, 1))
-    gy = gaussian_filter(field, 1.0, order=(1, 0))
+    gx = gaussian_derivative(field, 1.0, order=(0, 1))
+    gy = gaussian_derivative(field, 1.0, order=(1, 0))
     jxx = gaussian_filter(gx * gx, sigma_px)
     jyy = gaussian_filter(gy * gy, sigma_px)
     jxy = gaussian_filter(gx * gy, sigma_px)
@@ -1334,7 +1339,7 @@ def _group_strokes(
     Returns each stroke's pattern (-1 when loose) and the patterns' summary.
     """
 
-    from scipy.spatial import cKDTree  # noqa: PLC0415
+    from scipy.spatial import KDTree  # noqa: PLC0415
 
     count = len(strokes)
     if count == 0:
@@ -1355,7 +1360,7 @@ def _group_strokes(
             index = parent[index]
         return index
 
-    tree = cKDTree(middles)
+    tree = KDTree(middles)
     limit = math.radians(angle_deg)
     for a, b in sorted(tree.query_pairs(r=gap_mm)):
         difference = abs(angles[a] - angles[b]) % math.pi
@@ -1383,7 +1388,12 @@ def _group_strokes(
     return pattern_of, patterns
 
 
-def _is_seam(stroke: np.ndarray, *, min_length_mm: float, straightness_max: float) -> bool:
+def _is_seam(
+    stroke: Sequence[Sequence[float]] | np.ndarray,
+    *,
+    min_length_mm: float,
+    straightness_max: float,
+) -> bool:
     """A line across the pattern rather than of it: long and wandering."""
 
     points = np.asarray(stroke, dtype=np.float64)
@@ -1434,7 +1444,7 @@ def _trace_chains(valley: np.ndarray) -> list[list[tuple[int, int]]]:
     pixel is in exactly one chain."""
 
     rows, cols = np.nonzero(valley)
-    pixels = set(zip(rows.tolist(), cols.tolist()))
+    pixels = set(zip(rows.tolist(), cols.tolist(), strict=True))
     degree: dict[tuple[int, int], int] = {}
     for pixel in pixels:
         r, c = pixel
@@ -1490,7 +1500,7 @@ def _link_polylines(
     directly joins first, ties to the earlier lines.  Repeated until nothing
     joins, at most ``rounds`` times."""
 
-    from scipy.spatial import cKDTree  # noqa: PLC0415
+    from scipy.spatial import KDTree  # noqa: PLC0415
 
     lines = [np.asarray(line, dtype=np.float64) for line in polylines]
     if gap_mm <= 0.0 or len(lines) < 2:
@@ -1507,7 +1517,7 @@ def _link_polylines(
             ends.append((index, 1, line[-1], tail / max(float(np.linalg.norm(tail)), 1e-12)))
         if len(ends) < 2:
             break
-        tree = cKDTree(np.array([end[2] for end in ends]))
+        tree = KDTree(np.array([end[2] for end in ends]))
         scored: list[tuple[float, int, int]] = []
         for a, b in sorted(tree.query_pairs(r=gap_mm)):
             line_a, _end_a, point_a, direction_a = ends[a]
@@ -1559,13 +1569,13 @@ class _DevelopedLocator:
         vertices_mm: np.ndarray,
         face_facing: np.ndarray,
     ) -> None:
-        from scipy.spatial import cKDTree  # noqa: PLC0415
+        from scipy.spatial import KDTree  # noqa: PLC0415
 
         self.uv = np.asarray(uv_mm, dtype=np.float64)
         self.faces = np.asarray(developed_faces, dtype=np.int64)
         self.vertices = np.asarray(vertices_mm, dtype=np.float64)
         self.facing = np.asarray(face_facing, dtype=np.float64)
-        self.tree = cKDTree(self.uv[self.faces].mean(axis=1))
+        self.tree = KDTree(self.uv[self.faces].mean(axis=1))
 
     def locate(self, points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         count = min(12, self.faces.shape[0])
@@ -1945,7 +1955,7 @@ def extract_texture_lines(
         ]
         heights: list[tuple[int, int]] = []
         for new in range(len(patterns)):
-            ys = [y for line, index in zip(polylines, pattern_of) if index == new for _x, y in line]
+            ys = [y for line, index in zip(polylines, pattern_of, strict=True) if index == new for _x, y in line]
             heights.append((min(ys), max(ys)))
         bands = _bands_of(patterns, heights, gap_um=int(round(TEXTURE_LINES_BAND_GAP_MM * 1000.0)))
     if not polylines:

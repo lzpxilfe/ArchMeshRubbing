@@ -169,13 +169,13 @@ class FlattenedSVGExporter:
             return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
 
         lower: list[int] = []
-        for idx, p in zip(order, pts_sorted):
+        for idx, p in zip(order, pts_sorted, strict=True):
             while len(lower) >= 2 and cross(pts[lower[-2]], pts[lower[-1]], p) <= 0:
                 lower.pop()
             lower.append(int(idx))
 
         upper: list[int] = []
-        for idx, p in zip(order[::-1], pts_sorted[::-1]):
+        for idx, p in zip(order[::-1], pts_sorted[::-1], strict=True):
             while len(upper) >= 2 and cross(pts[upper[-2]], pts[upper[-1]], p) <= 0:
                 upper.pop()
             upper.append(int(idx))

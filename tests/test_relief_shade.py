@@ -388,7 +388,7 @@ def test_the_strip_takes_the_band_the_drafter_asks_for(petalled) -> None:
     # to this, so a radius that is not the artifact's is a wrong cut.
     posed = np.asarray(petalled.materialize().mesh.vertices, dtype=np.float64)
     reach = np.hypot(posed[:, 0], posed[:, 1])
-    for height, radius in zip(heights, radii):
+    for height, radius in zip(heights, radii, strict=True):
         near = reach[np.abs(posed[:, 2] - height / 1000.0) <= 1.0]
         # The outer ring at that height, and its middle value: the wall the
         # motif sits on, not the petal standing proud of it on one side.

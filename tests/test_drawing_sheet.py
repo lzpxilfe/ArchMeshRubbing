@@ -806,7 +806,7 @@ def test_a_finger_mark_is_drawn_as_an_oval_inside_the_region_not_by_its_boundary
     region = Polygon(top.outline.paths[0].points_mm)
     # The oval sits on the region and is about its size.
     numbers = [float(token) for token in paths[0].attrib["d"].replace("M", " ").replace("L", " ").replace("Z", " ").split()]
-    points = list(zip(numbers[0::2], numbers[1::2]))
+    points = list(zip(numbers[0::2], numbers[1::2], strict=True))
     assert len(points) >= 12
 
     sidecar = json.loads(bundle.sidecar_bytes.decode("utf-8"))

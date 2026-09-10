@@ -216,7 +216,7 @@ def _dorsal_cells(shape: LithicShape, *, segments: int) -> list[Cell]:
         polygon, tags = cell
         cleaned: list[tuple[float, float]] = []
         cleaned_tags: list[bool] = []
-        for point, tag in zip(polygon, tags):
+        for point, tag in zip(polygon, tags, strict=True):
             if cleaned and math.hypot(point[0] - cleaned[-1][0], point[1] - cleaned[-1][1]) < 1e-6:
                 cleaned_tags[-1] = tag
                 continue
