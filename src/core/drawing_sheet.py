@@ -5376,15 +5376,25 @@ def _mirrored_figure(
     # wall lines ending short say the piece continues.
     section_cut = 0
     if sherd_sides:
-        section_bounds = _payload_bounds(section_payload)
-        for kind, kind_paths in list(right.items()):
-            drawn = [path for path in kind_paths if path.id not in right_fill_only]
-            filled = [path for path in kind_paths if path.id in right_fill_only]
-            opened, cut = _sherd_open_paths(
-                drawn, sides=sherd_sides, bounds=section_bounds, trim_mm=sherd_trim_mm
-            )
-            right[kind] = filled + opened
-            section_cut += cut
+        # The scissors are laid on the half they cut, so the side they are
+        # measured from is that half's own edge, and only the lines the half
+        # actually draws.  A vessel whose rim is not level - and a break
+        # never is - reaches higher on one side of the axis than the other,
+        # and the whole cut's extent would put the trim line above every
+        # line this half has, cutting nothing.
+        stroked = {
+            kind: [path for path in kind_paths if path.id not in right_fill_only]
+            for kind, kind_paths in right.items()
+        }
+        if any(stroked.values()):
+            section_bounds = _paths_bounds(stroked)
+            for kind, drawn in stroked.items():
+                filled = [path for path in right[kind] if path.id in right_fill_only]
+                opened, cut = _sherd_open_paths(
+                    drawn, sides=sherd_sides, bounds=section_bounds, trim_mm=sherd_trim_mm
+                )
+                right[kind] = filled + opened
+                section_cut += cut
     if presumed_section:
         right, right_fill_only, broken = _presumed_section_runs(
             right,
