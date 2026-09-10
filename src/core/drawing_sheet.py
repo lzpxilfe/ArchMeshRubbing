@@ -5206,6 +5206,10 @@ def _mirrored_figure(
         except DrawingStyleError as exc:
             raise DrawingSheetError(str(exc)) from exc
         section_by_kind.setdefault(kind, []).append(_smoothed_path(path, line_smoothing_mm))
+    # What the cut itself draws, before anything else is laid on that half:
+    # a break ends the cut, and only the cut, so this is what the scissors
+    # are measured from and what they touch.
+    cut_kinds = frozenset(section_by_kind)
     # The inside of the far wall shows through the cut, so marks on the
     # inside are drawn on the section's side of the axis.  They were
     # projected in the same frame as the elevation, so the same cut applies.
@@ -5380,15 +5384,18 @@ def _mirrored_figure(
     # wall lines ending short say the piece continues.
     section_cut = 0
     if sherd_sides:
-        # The scissors are laid on the half they cut, so the side they are
-        # measured from is that half's own edge, and only the lines the half
-        # actually draws.  A vessel whose rim is not level - and a break
-        # never is - reaches higher on one side of the axis than the other,
-        # and the whole cut's extent would put the trim line above every
-        # line this half has, cutting nothing.
+        # The scissors touch the cut and nothing else, and are measured from
+        # the cut's own lines.  Two things would otherwise be cut that are
+        # not the cut: the whole section's extent, which on a vessel whose
+        # rim is not level - and a break never is - reaches higher on the
+        # other side of the axis than this half does, so the trim line lands
+        # above every line here and nothing is cut at all; and the
+        # elevation's own edges running on past the fold, which say the rim
+        # goes round, not that the wall ends.
         stroked = {
             kind: [path for path in kind_paths if path.id not in right_fill_only]
             for kind, kind_paths in right.items()
+            if kind in cut_kinds
         }
         if any(stroked.values()):
             section_bounds = _paths_bounds(stroked)

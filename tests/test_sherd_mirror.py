@@ -104,6 +104,37 @@ def test_the_sheet_counts_the_lines_the_break_cut() -> None:
     assert bottom["cut_path_count"] == 1
 
 
+def test_the_scissors_touch_the_cut_and_not_the_rim_running_past_the_fold() -> None:
+    """An elevation edge that runs on past the fold is the rim seen going
+    round, not the wall ending, so a break leaves it whole - and does not
+    measure itself from it either.  Both go wrong the same way: the run
+    stands at the elevation's height, above the cut's own top, so trimming
+    to it would cut that one line and leave the cut closed."""
+
+    whole = _mirrored_sheet(outline_reach="section")
+    broken = _mirrored_sheet(outline_reach="section", sherd_breaks=((ELEVATION_ID, "top"),))
+    validate_drawing_sheet_bytes(broken.svg_bytes, broken.sidecar_bytes)
+
+    def runs(bundle) -> dict[str, str]:
+        return {
+            element.attrib["id"]: element.attrib["d"]
+            for element in _figure(bundle.svg_bytes).iter()
+            if ":past-axis:" in element.attrib.get("id", "")
+        }
+
+    past = runs(whole)
+    assert past, "the fixture's rim does run past the fold"
+    # The break changed nothing about it: same lines, same points.
+    assert runs(broken) == past
+    # And the cut is what was opened.
+    assert any(
+        ":sherd" in path.attrib["id"]
+        for path in _paths(broken.svg_bytes, "layer-section-cut")
+    )
+    (entry,) = json.loads(broken.sidecar_bytes)["sherd_breaks"]
+    assert entry["cut_path_count"] == 1
+
+
 def test_the_rim_runs_right_across_even_where_the_cut_does_not_rise_to_it() -> None:
     """The elevation is the silhouette of the whole vessel and a break is
     never level, so the highest surviving rim stands above the one meridian
