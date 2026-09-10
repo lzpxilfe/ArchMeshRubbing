@@ -5348,13 +5348,15 @@ def _mirrored_figure(
             f"the section {section.id!r} has nothing right of the rotation "
             "axis, so the mirrored figure would be half empty"
         )
-    # A break is a fact about the artifact, not about one half of a figure.
-    # The elevation's own lines were already stopped short where the sheet
-    # named a broken side; the cut through the same wall ends at the same
-    # break, so it is stopped here too.  It is done after the fold, on the
-    # half's own paths, so the hatched face keeps the closed, unstroked copy
-    # the fold made of it: the shading still says the wall is solid, and the
-    # two wall lines ending short say the piece continues.
+    # A break is a fact about the artifact, and on a mirrored figure it is
+    # the cut that says so.  The elevation half is a silhouette closed
+    # against the centre line - what is left of the vessel, drawn round -
+    # and it keeps that closed line; the cut through the same wall is what
+    # ends at the break, its two wall lines stopping short with nothing
+    # across their ends.  It is done after the fold, on the half's own
+    # paths, so the hatched face keeps the closed, unstroked copy the fold
+    # made of it: the shading still says the wall is solid, and the two
+    # wall lines ending short say the piece continues.
     section_cut = 0
     if sherd_sides:
         section_bounds = _payload_bounds(section_payload)
@@ -6845,7 +6847,14 @@ def compose_drawing_sheet(
                 raise DrawingSheetError(str(exc)) from exc
             by_kind.setdefault(kind, []).append(_smoothed_path(path, line_smoothing))
         figure_sherd_sides = sherd_sides.get(record.id, ())
-        if figure_sherd_sides:
+        # A half elevation is a silhouette closed against the centre line,
+        # and a silhouette has no free end: what the elevation of a broken
+        # vessel shows at the break is the edge that is left, drawn round.
+        # The break is opened on the section half instead, where the cut
+        # through the wall really does end there, so the figure still says
+        # the piece continued.  A figure standing on its own - a sherd of
+        # roof tile drawn as itself - is opened here, as before.
+        if figure_sherd_sides and record.id not in mirror_by_elevation:
             # The artifact's own lines stop short of a break; the readings
             # drawn on the figure are separate statements and are left alone,
             # so this happens before any of them is added.
@@ -7112,6 +7121,11 @@ def compose_drawing_sheet(
         )
         if section_cut:
             sherd_cut_counts[record.id] = sherd_cut_counts.get(record.id, 0) + section_cut
+        if figure_sherd_sides and not sherd_cut_counts.get(record.id):
+            raise DrawingSheetError(
+                f"sherd_breaks names the {', '.join(figure_sherd_sides)} of "
+                f"{record.id!r}, but no line of that figure reaches it"
+            )
         presumed_entries.extend({"figure_record_id": record.id, **entry} for entry in presumed_here)
         mirrored.append(
             {
