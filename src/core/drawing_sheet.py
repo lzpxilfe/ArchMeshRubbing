@@ -944,6 +944,23 @@ class DrawingSheetOptions:
     pixels are passed in ``rasters`` under its record id and used only
     when they match the record's receipt.
     """
+    relief_developments_on_axis: tuple[tuple[str, str], ...] = ()
+    """(development shade record id, elevation record id) - the unrolled wall
+    stippled onto the elevation, from the centre line out to the edge.
+
+    A strip taken right round the pot is longer than any elevation, and the
+    drafter does not draw it whole there: the paper is laid with one edge on
+    the centre line and cut at the vessel's own edge, so what stands on the
+    drawing is the motif at true size over the width the artifact has when
+    you look at it.  Each row goes at the height it was read from - the strip
+    is meridian arc and the elevation is height, and the record says how the
+    two answer to each other - and is cut at the wall's radius there.
+
+    The shade must be a development; a shade read in a view goes on its
+    figure in place, with ``relief_stipples``.  A pasted strip is drawn
+    inside the elevation and must not also be a figure of its own - the
+    whole round is a sheet of its own, where it fits.
+    """
     stipple_pitch_mm: float = DEFAULT_STIPPLE_PITCH_MM
     """The paper grid the dots are laid on, in millimetres: one dot at most
     per cell.  Provisional."""
@@ -1376,6 +1393,27 @@ class DrawingSheetOptions:
                 raise DrawingSheetError("the same relief shade cannot be stippled twice on one sheet")
             stipples.append((shade_id, figure_id))
         object.__setattr__(self, "relief_stipples", tuple(stipples))
+        pasted_strips: list[tuple[str, str]] = []
+        for entry in self.relief_developments_on_axis:
+            if not isinstance(entry, (tuple, list)) or len(entry) != 2:
+                raise DrawingSheetError(
+                    "relief_developments_on_axis entries must be "
+                    "(development shade record id, elevation record id)"
+                )
+            shade_id, figure_id = (str(item).strip() for item in entry)
+            if not shade_id or not figure_id:
+                raise DrawingSheetError("relief_developments_on_axis entries must be record ids")
+            if any(existing[0] == shade_id for existing in pasted_strips):
+                raise DrawingSheetError(
+                    "the same development cannot be pasted twice on one sheet"
+                )
+            if any(existing[0] == shade_id for existing in stipples):
+                raise DrawingSheetError(
+                    f"relief shade {shade_id!r} is both stippled in place and pasted on the "
+                    "axis; a shade is read in a view or on the development, not both"
+                )
+            pasted_strips.append((shade_id, figure_id))
+        object.__setattr__(self, "relief_developments_on_axis", tuple(pasted_strips))
         for name, value, low, high in (
             ("stipple_pitch_mm", self.stipple_pitch_mm, MIN_STIPPLE_PITCH_MM, MAX_STIPPLE_PITCH_MM),
             ("stipple_dot_mm", self.stipple_dot_mm, 0.01, MAX_STIPPLE_PITCH_MM),
@@ -4197,7 +4235,161 @@ def _stippled_reliefs(
                 rectangle_mm=raster.rectangle_mm,
             )
         )
+    stipples.extend(
+        _pasted_developments(
+            document,
+            figure=figure,
+            figure_payload=figure_payload,
+            rasters=rasters,
+            options=options,
+            elevation_side=elevation_side,
+        )
+    )
     return stipples
+
+
+def _pasted_developments(
+    document: ArtifactDocument,
+    *,
+    figure: DerivedRecord,
+    figure_payload: Any,
+    rasters: Mapping[str, Any],
+    options: DrawingSheetOptions,
+    elevation_side: str,
+) -> list[_Stipple]:
+    """The unrolled wall laid back on the elevation, centre line to edge.
+
+    The strip is longer than the elevation and is not squeezed to fit: it is
+    laid with one edge on the centre line and cut where the vessel's own
+    edge is, so the motif stands at true size over the width the artifact
+    has.  Rows go where they were read - the strip's rows are meridian arc
+    and the elevation's are height, and the record carries the curve that
+    answers one to the other - and each row's dots stop at the wall's radius
+    there, which is that same record's reading of the profile.
+    """
+
+    pasted: list[_Stipple] = []
+    for shade_id, figure_id in options.relief_developments_on_axis:
+        if figure_id != figure.id:
+            continue
+        record = document.record_index.get(shade_id)
+        if record is None:
+            raise DrawingSheetError(f"relief shade record {shade_id!r} does not exist")
+        if record.type != RELIEF_SHADE_RECORD_TYPE:
+            raise DrawingSheetError(f"record {shade_id!r} is not a relief shade")
+        if record.lifecycle_status is not RecordLifecycleStatus.READY:
+            raise DrawingSheetError("only READY relief shade records may be pasted")
+        try:
+            freshness = document.record_freshness(record.id)
+        except ArtifactDocumentError as exc:
+            raise DrawingSheetError(str(exc)) from exc
+        if freshness is not RecordFreshness.FRESH:
+            raise DrawingSheetError(
+                f"only FRESH relief shade records may be pasted (got {freshness.value})"
+            )
+        if shade_id not in rasters:
+            raise DrawingSheetError(
+                f"relief shade {shade_id!r} needs its raster passed in rasters under its id"
+            )
+        try:
+            receipt = relief_shade_receipt_from_record(record)
+            raster = require_relief_shade_raster(record, rasters[shade_id])
+        except ArtifactReliefShadeError as exc:
+            raise DrawingSheetError(str(exc)) from exc
+        if not raster.is_development:
+            raise DrawingSheetError(
+                f"relief shade {shade_id!r} was read in the {raster.view} view, not on the axis "
+                "development; paste it on its view's figure with relief_stipples"
+            )
+        if figure.type != VectorRecordKind.OUTLINE.record_type:
+            raise DrawingSheetError(
+                f"record {figure.id!r} is not an outline, so a development cannot be "
+                "pasted on it as an elevation"
+            )
+        heights_um = record.qc.get("development_height_profile_um")
+        radii_um = record.qc.get("development_radius_profile_um")
+        if (
+            not isinstance(heights_um, Sequence)
+            or not isinstance(radii_um, Sequence)
+            or len(heights_um) < 2
+            or len(heights_um) != len(radii_um)
+            or any(type(value) is not int for value in heights_um)
+            or any(type(value) is not int for value in radii_um)
+            or any(later < earlier for earlier, later in zip(heights_um, heights_um[1:]))
+        ):
+            raise DrawingSheetError(
+                f"relief shade {shade_id!r} does not say what heights and radii its rows "
+                "were read at; it was computed before that was recorded, so read the "
+                "shade again"
+            )
+        try:
+            line = center_axis_line(figure_payload.frame.to_dict())
+        except SVGRenderError as exc:
+            raise DrawingSheetError(str(exc)) from exc
+        if line is None or abs(line[1][0]) > 1e-9 or abs(line[1][1] - 1.0) > 1e-9:
+            raise DrawingSheetError(
+                f"the rotation axis is not the vertical of {figure.id!r}, so a development "
+                "cannot be pasted flush against it there"
+            )
+        reference_radius_um = record.qc.get("development_reference_radius_um")
+        seam_millideg = record.qc.get("seam_millideg")
+        if type(reference_radius_um) is not int or type(seam_millideg) is not int:
+            raise DrawingSheetError(
+                f"relief shade {shade_id!r} does not say where its strip was cut or at what "
+                "radius it was unrolled, so it cannot be laid back on an elevation"
+            )
+        base, _direction = line
+        xs, ys = _stipple_dots(raster, options)
+        _left, bottom, _right, top = raster.rectangle_mm
+        if top <= bottom:
+            raise DrawingSheetError(f"relief shade {shade_id!r} covers no arc to paste")
+        stations = np.linspace(bottom, top, len(heights_um))
+        heights = np.interp(ys, stations, np.asarray(heights_um, dtype=np.float64) / 1000.0)
+        radii = np.interp(ys, stations, np.asarray(radii_um, dtype=np.float64) / 1000.0)
+        # The strip is cut at the seam, which is behind the pot; what belongs
+        # on this elevation is the wall that faces its viewer.  That meridian
+        # stands on the centre line, and the wall turning away from it towards
+        # this half's silhouette is what the paper covers - measured along the
+        # strip, at true arc length, and cut where the wall's own radius ends.
+        toward_viewer = np.asarray(figure_payload.frame.normal_world, dtype=np.float64)
+        if float(np.hypot(toward_viewer[0], toward_viewer[1])) < 1e-9:
+            raise DrawingSheetError(
+                f"the view of {figure.id!r} looks along the rotation axis, so no meridian of "
+                "the development faces it"
+            )
+        reference_radius = float(reference_radius_um) / 1000.0
+        circumference = 2.0 * math.pi * reference_radius
+        facing = math.atan2(float(toward_viewer[1]), float(toward_viewer[0]))
+        seam = math.radians(float(seam_millideg) / 1000.0)
+        front_u = reference_radius * ((facing - seam) % (2.0 * math.pi))
+        outward = -1.0 if elevation_side == MIRROR_ELEVATION_LEFT else 1.0
+        # Left of the axis a viewer sees the meridians the strip reaches
+        # before the front one; right of it, the ones after.
+        along = ((front_u - xs) if outward < 0.0 else (xs - front_u)) % circumference
+        keep = along <= radii
+        dropped = int(np.count_nonzero(~keep))
+        along = along[keep]
+        heights = heights[keep]
+        placed_x = float(base[0]) + outward * along
+        placed_y = float(base[1]) + heights
+        pasted.append(
+            _Stipple(
+                record_id=record.id,
+                recipe_hash=record.recipe_hash,
+                raster_sha256=str(receipt["raster_sha256"]),
+                view=raster.view,
+                width_pixels=raster.width_pixels,
+                height_pixels=raster.height_pixels,
+                dots_mm=tuple(
+                    (round(float(x), 4), round(float(y), 4))
+                    for x, y in zip(placed_x, placed_y)
+                ),
+                half="elevation",
+                dropped_section_side_count=dropped,
+                rectangle_mm=raster.rectangle_mm,
+            )
+        )
+    return pasted
 
 
 def _stipple_dots(raster: ReliefShadeRaster, options: DrawingSheetOptions) -> tuple[np.ndarray, np.ndarray]:
@@ -6428,6 +6620,7 @@ def compose_drawing_sheet(
         - set(attached_by_elevation.values())
         - {cutout_id for cutout_id, _figure_id, _placement in options.paint_cutouts}
         - {shade_id for shade_id, _figure_id in options.relief_stipples}
+        - {shade_id for shade_id, _figure_id in options.relief_developments_on_axis}
     )
     if unplaced_rasters:
         raise DrawingSheetError(
@@ -6488,6 +6681,21 @@ def compose_drawing_sheet(
         raise DrawingSheetError(
             "a rubbing pasted on the axis is drawn inside that figure, so it "
             f"must not also be a figure of its own: {', '.join(listed_rubbings)}"
+        )
+    pasted_elevations = {figure_id for _shade_id, figure_id in options.relief_developments_on_axis}
+    unplaced_elevations = sorted(pasted_elevations - set(ids))
+    if unplaced_elevations:
+        raise DrawingSheetError(
+            "a development is pasted on one of the sheet's figures, so its elevation "
+            f"must be one of them: {', '.join(unplaced_elevations)}"
+        )
+    listed_developments = sorted(
+        {shade_id for shade_id, _figure_id in options.relief_developments_on_axis} & set(ids)
+    )
+    if listed_developments:
+        raise DrawingSheetError(
+            "a development pasted on the axis is drawn inside that figure, so it "
+            f"must not also be a figure of its own: {', '.join(listed_developments)}"
         )
 
     conditions = [
@@ -7066,6 +7274,16 @@ def compose_drawing_sheet(
         raise DrawingSheetError(
             "relief_stipples names a figure this sheet does not draw for "
             + ", ".join(repr(shade_id) for shade_id in missing_stipples)
+        )
+    missing_pasted = sorted(
+        shade_id
+        for shade_id, _figure_id in options.relief_developments_on_axis
+        if shade_id not in stippled_ids
+    )
+    if missing_pasted:
+        raise DrawingSheetError(
+            "relief_developments_on_axis names a figure this sheet does not draw for "
+            + ", ".join(repr(shade_id) for shade_id in missing_pasted)
         )
     unplaced = sorted(set(rubbing_notes) - noted)
     if unplaced:

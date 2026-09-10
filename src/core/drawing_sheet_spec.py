@@ -134,6 +134,9 @@ def plate_spec(record_ids: Sequence[str], options: DrawingSheetOptions) -> dict[
             for record_id, points in options.presumed_section
         ],
         "records": ids,
+        "relief_developments_on_axis": [
+            list(pair) for pair in options.relief_developments_on_axis
+        ],
         "relief_stipples": [list(pair) for pair in options.relief_stipples],
         "rubbing_notes": _decisions(options.rubbing_notes),
         "rubbing_on_axis_fit": options.rubbing_on_axis_fit,
@@ -192,7 +195,7 @@ _KNOWN_KEYS = frozenset(
         "condition_records", "crease_records", "far_silhouettes", "format", "groove_records", "gutter_mm",
         "interpretation", "line_cap", "mirror_elevation_side", "mirror_jogs", "mirror_sections",
         "outline_reach", "page", "paint_cutout_ink_percent", "paint_cutouts", "plan_over_elevation",
-        "plan_with_sections", "presumed_lines", "presumed_section", "records", "relief_stipples", "rubbing_notes",
+        "plan_with_sections", "presumed_lines", "presumed_section", "records", "relief_developments_on_axis", "relief_stipples", "rubbing_notes",
         "rubbing_on_axis_fit", "rubbing_on_axis_trim", "rubbings_on_axis", "scale_denominator",
         "schema_version", "show_center_axis", "stipple_dot_mm", "stipple_pitch_mm", "stroke_color",
         "section_marks", "sherd_breaks", "style_preset", "technique_angles_deg", "technique_records",
@@ -368,7 +371,10 @@ def plate_spec_options(spec: object) -> tuple[list[str], DrawingSheetOptions]:
     ):
         if given(key):
             kwargs[key] = _texts(spec[key], field_name=key)
-    for key in ("far_silhouettes", "mirror_sections", "relief_stipples", "rubbing_notes", "rubbings_on_axis", "technique_representations"):
+    for key in (
+        "far_silhouettes", "mirror_sections", "relief_developments_on_axis", "relief_stipples",
+        "rubbing_notes", "rubbings_on_axis", "technique_representations",
+    ):
         if given(key):
             kwargs[key] = _text_pairs(spec[key], field_name=key)
     if given("mirror_jogs"):

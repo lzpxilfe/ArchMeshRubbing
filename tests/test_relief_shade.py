@@ -292,3 +292,40 @@ def test_the_wall_unrolled_puts_every_petal_on_one_strip(petalled) -> None:
             options=DrawingSheetOptions(title_block=title, page=page, scale_denominator=2.0),
             rasters={"record:shade": view_shade.raster},
         )
+
+
+def test_the_strip_takes_the_band_the_drafter_asks_for(petalled) -> None:
+    """A window on a development is given in heights on the artifact, not
+    in rows of the strip: the drafter says the motif runs from here to
+    there up the wall and the rows are found from the meridian the record
+    measured.  The band's own profile of height and wall radius comes back
+    with it, since that is what a paste on an elevation is measured by."""
+
+    banded = compute_relief_shade(
+        petalled,
+        domain="axis_development/v1",
+        window_mm=(-1000.0, PETAL_Z - 12.0, 1000.0, PETAL_Z + 12.0),
+    )
+    whole = compute_relief_shade(petalled, domain="axis_development/v1")
+    assert banded.qc["shaded_pixel_count"] < whole.qc["shaded_pixel_count"]
+    heights = banded.qc["development_height_profile_um"]
+    radii = banded.qc["development_radius_profile_um"]
+    assert len(heights) == len(radii) >= 2
+    assert heights == sorted(heights)
+    # The profile describes the strip that came back, so it lies inside the
+    # window the drafter asked for and nowhere else on the wall.
+    margin = 1.0  # the strip is cut on pixel edges, not on the window's line
+    assert heights[0] / 1000.0 >= PETAL_Z - 12.0 - margin
+    assert heights[-1] / 1000.0 <= PETAL_Z + 12.0 + margin
+    assert heights[-1] - heights[0] > 5_000
+    # And the wall's radius over that band is the vessel's own, read off the
+    # positioned mesh rather than assumed: the scissors on an elevation cut
+    # to this, so a radius that is not the artifact's is a wrong cut.
+    posed = np.asarray(petalled.materialize().mesh.vertices, dtype=np.float64)
+    reach = np.hypot(posed[:, 0], posed[:, 1])
+    for height, radius in zip(heights, radii):
+        near = reach[np.abs(posed[:, 2] - height / 1000.0) <= 1.0]
+        # The outer ring at that height, and its middle value: the wall the
+        # motif sits on, not the petal standing proud of it on one side.
+        outside = near[near >= 0.5 * (near.min() + near.max())]
+        assert abs(radius / 1000.0 - float(np.median(outside))) < 0.6

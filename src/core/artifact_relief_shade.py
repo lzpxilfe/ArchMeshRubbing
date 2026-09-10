@@ -141,6 +141,12 @@ RELIEF_SHADE_LAYER_SEPARATION_UM = 50
 MIN_RELIEF_SHADE_PIXELS_PER_MM = 1
 MAX_RELIEF_SHADE_PIXELS_PER_MM = 50
 MAX_RELIEF_SHADE_PIXELS = 20_000_000
+# How many bands a development's rows are reported in.  The strip's rows are
+# meridian arc and a sheet that pastes the strip on an elevation needs the
+# height each row came from, and how far the wall stood from the axis there:
+# sixteen bands keep the error inside a band second order on any profile a
+# strip is cut from, as they do for a rubbing's artboard.
+RELIEF_SHADE_DEVELOPMENT_PROFILE_BANDS = 16
 MAX_RELIEF_SHADE_GRID_INDEX = 10**9
 
 
@@ -703,7 +709,7 @@ def _development_depth_field(
     validated: Mapping[str, Any],
     *,
     cancellation_probe: CancellationProbe | None,
-) -> tuple[np.ndarray, int, int, dict[str, Any], int, tuple[np.ndarray, np.ndarray, float]]:
+) -> tuple[np.ndarray, int, int, dict[str, Any], int, tuple[np.ndarray, np.ndarray, float, np.ndarray]]:
     """The wall's radius on the axis development's lattice.
 
     The outside's median profile r(z) gives every vertex its station: u is
@@ -711,8 +717,10 @@ def _development_depth_field(
     up the profile to its height; the depth is its own radius, so what
     stands proud of the profile stands proud on the strip.  An undercut face is behind the
     wall's face at the same station and loses its pixels to it, as it
-    would to a viewer.  Returned with the field is the profile's height
-    and arc, for turning a height window into rows.
+    would to a viewer.  Returned with the field is the profile's height,
+    arc and radius: the first two turn a height window into rows, and all
+    three let a sheet say what height a row of the strip came from and how
+    far the wall stood from the axis there.
     """
 
     from .artifact_profile_break import ArtifactProfileBreakError, _facing_profile  # noqa: PLC0415
@@ -784,7 +792,7 @@ def _development_depth_field(
     except ArtifactRubbingError as exc:
         raise ArtifactReliefShadeError(str(exc)) from exc
     raster_qc = {**raster_qc, "seam_face_count": seam_face_count}
-    return depth, minimum_u, minimum_v, raster_qc, int(visible.size), (heights, arc, reference_radius)
+    return depth, minimum_u, minimum_v, raster_qc, int(visible.size), (heights, arc, reference_radius, radii)
 
 
 def extract_relief_shade(
@@ -812,7 +820,7 @@ def extract_relief_shade(
     pixels_per_mm = int(raster_policy["pixels_per_mm"])
     on_development = validated["domain"] == RELIEF_SHADE_DOMAIN_DEVELOPMENT
     smoothing_pixels = base_policy["row_smoothing_um"] / 1000.0 * pixels_per_mm
-    profile: tuple[np.ndarray, np.ndarray, float] | None = None
+    profile: tuple[np.ndarray, np.ndarray, float, np.ndarray] | None = None
     if on_development:
         depth, minimum_u, minimum_v, raster_qc, visible_count, profile = _development_depth_field(
             vertices, triangles, validated, cancellation_probe=cancellation_probe
@@ -888,7 +896,7 @@ def extract_relief_shade(
         if profile is not None:
             # On the development the window's bottom and top are heights on
             # the artifact; the rows are meridian arc, so they are converted.
-            heights, arc, _reference = profile
+            heights, arc, _reference, _radii = profile
             bottom_mm = float(np.interp(bottom_mm, heights, arc))
             top_mm = float(np.interp(top_mm, heights, arc))
         ok &= (
@@ -994,7 +1002,7 @@ def extract_relief_shade(
         "visible_face_count": visible_count,
     }
     if profile is not None:
-        heights, arc, reference_radius = profile
+        heights, arc, reference_radius, radii = profile
         qc["development_arc_um"] = int(round(float(arc[-1]) * 1000.0))
         qc["development_reference_radius_um"] = int(round(reference_radius * 1000.0))
         # The circumference is the round the strip was cut from, not the
@@ -1007,6 +1015,21 @@ def extract_relief_shade(
         qc["profile_bin_count"] = int(heights.size)
         qc["seam_face_count"] = int(raster_qc.get("seam_face_count", 0))
         qc["seam_millideg"] = int(validated["development_policy"]["seam_millideg"])
+        # The strip's rows are meridian arc, so a sheet that lays the strip
+        # back on an elevation cannot read a height off them.  These say it:
+        # the height each of evenly spaced rows came from, from the raster's
+        # bottom edge to its top, and how far the wall stood from the axis
+        # there - which is where the drafter's scissors go when the strip is
+        # pasted from the centre line out to the edge.
+        bottom_v = float(minimum_v + row0) / pixels_per_mm
+        top_v = float(minimum_v + row1) / pixels_per_mm
+        stations = np.linspace(bottom_v, top_v, RELIEF_SHADE_DEVELOPMENT_PROFILE_BANDS + 1)
+        qc["development_height_profile_um"] = [
+            int(round(float(value) * 1000.0)) for value in np.interp(stations, arc, heights)
+        ]
+        qc["development_radius_profile_um"] = [
+            int(round(float(value) * 1000.0)) for value in np.interp(stations, arc, radii)
+        ]
     return raster, qc
 
 

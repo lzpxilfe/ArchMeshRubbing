@@ -179,6 +179,10 @@ class PlatePanel(QWidget):
         # program supplied, not a number anybody types: it is computed
         # where the repair is known and carried through this panel whole.
         "presumed_section",
+        # Which strip is pasted on which elevation is a reading paired
+        # with a figure, not a choice made in this panel; it is carried
+        # through whole so saving here never drops it.
+        "relief_developments_on_axis",
         "technique_records",
         "technique_angles_deg",
         "technique_representations",
@@ -1153,6 +1157,8 @@ class PlatePanel(QWidget):
             parts.append(f"채색 {len(spec['paint_cutouts'])}")
         if spec.get("relief_stipples"):
             parts.append(f"점묘 {len(spec['relief_stipples'])}")
+        if spec.get("relief_developments_on_axis"):
+            parts.append(f"전개 붙임 {len(spec['relief_developments_on_axis'])}")
         if spec.get("rubbings_on_axis"):
             parts.append(f"탁본 {len(spec['rubbings_on_axis'])}")
         interpretation = spec["interpretation"]
