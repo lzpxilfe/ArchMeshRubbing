@@ -7,6 +7,7 @@ Licensed under the GNU General Public License v2.0 (GPL2)
 import sys
 import copy
 import logging
+import math
 import subprocess
 import json
 import time
@@ -444,6 +445,15 @@ from src.core.artifact_axis_alignment import (  # noqa: E402
     AXIS_SOURCE_CENTER_LINE,
     AXIS_SOURCE_CIRCLE_NORMALS,
     AXIS_SOURCE_STANDING_ON_FOOT,
+)
+from src.core.artifact_axis_candidates import (  # noqa: E402
+    MAXIMUM_ROUNDNESS_UM,
+    MINIMUM_COVERED_FRACTION_THOUSANDTHS,
+    ArtifactAxisCandidateError,
+    propose_axis_circle_pairs,
+    propose_axis_circles,
+    propose_up_axis,
+    usable_axis_circles,
 )
 from src.core.artifact_condition_annotation import (  # noqa: E402
     CONDITION_RECORD_TYPE,
@@ -4146,6 +4156,7 @@ class SectionPanel(QWidget):
     nativeVectorExportRequested = pyqtSignal()
     drawingSheetRequested = pyqtSignal()
     axisAlignRequested = pyqtSignal()
+    axisCandidatesRequested = pyqtSignal()
     nativeConditionRequested = pyqtSignal()
     nativeRubbingRequested = pyqtSignal()
     nativeRubbingRecordSelected = pyqtSignal(str)
@@ -4653,6 +4664,25 @@ class SectionPanel(QWidget):
         )
         axis_hint.setWordWrap(True)
         native_layout.addWidget(axis_hint)
+
+        # 어느 높이에 원을 잡을지는 지금까지 실측자가 눈으로 정해야 했고, 잘못
+        # 고른 것은 늦게 — 지름을 다 재고 정치를 눌렀을 때 — 드러났습니다.
+        # 이 단추는 메쉬에게 먼저 물어봅니다.  아무것도 기록하지 않고 아무것도
+        # 옮기지 않습니다: 어디가 둥근지 숫자로 말할 뿐입니다.
+        self.btn_axis_candidates = QPushButton("원 자리 제안 · 어디가 둥근가")
+        set_pixel_icon(self.btn_axis_candidates, "align")
+        self.btn_axis_candidates.setToolTip(
+            "지금 화면에 보이는 메쉬를 높이마다 잘라 얼마나 둥근지, 둘레가 "
+            "얼마나 남아 있는지 읽어 제안합니다.\n"
+            "기록도 정치도 하지 않습니다. 제안한 높이에 앵커를 놓고 지름을 "
+            "재는 것은 실측자의 몫입니다."
+        )
+        self.btn_axis_candidates.clicked.connect(self.axisCandidatesRequested.emit)
+        native_layout.addWidget(self.btn_axis_candidates)
+        self.label_axis_candidates = QLabel("아직 읽지 않았습니다.")
+        self.label_axis_candidates.setWordWrap(True)
+        self.label_axis_candidates.setStyleSheet("color: #4a5568; font-size: 10px;")
+        native_layout.addWidget(self.label_axis_candidates)
 
         self.combo_axis_top_record = QComboBox()
         self.combo_axis_top_record.setToolTip("위쪽 원. 보통 구연부입니다.")
@@ -5965,6 +5995,9 @@ class MainWindow(QMainWindow):
         )
         self.section_panel.axisAlignRequested.connect(
             self.on_axis_align_requested
+        )
+        self.section_panel.axisCandidatesRequested.connect(
+            self.on_axis_candidates_requested
         )
         self.section_panel.nativeConditionRequested.connect(
             self.on_native_condition_requested
@@ -21004,6 +21037,164 @@ class MainWindow(QMainWindow):
             raise ArtifactVectorExportError(str(exc)) from exc
         except ArtifactExportError as exc:
             raise ArtifactVectorExportError(str(exc)) from exc
+
+    @staticmethod
+    def _axis_candidate_report(
+        vertices: np.ndarray,
+    ) -> tuple[str, str, str]:
+        """Read the mesh for where it is round: (short line, message, table).
+
+        Kept apart from the widgets so the wording can be read back in a
+        test.  Nothing here records or moves anything - the two circles an
+        Align is fitted from are measured records, and this only says which
+        heights are worth measuring at.
+        """
+
+        scored = propose_up_axis(vertices)
+        readable = [entry for entry in scored if math.isfinite(entry[1])]
+        if not readable:
+            raise ArtifactAxisCandidateError(
+                "어느 축으로 잘라도 둘레가 12구획을 채우지 못합니다. "
+                "메쉬가 유물 하나인지, 조각이 갈라져 들어오지 않았는지 보세요."
+            )
+        name, wobble, band_count = readable[0]
+        up = {"+X": (1.0, 0.0, 0.0), "+Y": (0.0, 1.0, 0.0), "+Z": (0.0, 0.0, 1.0)}[name]
+        along = vertices @ np.asarray(up, dtype=np.float64)
+        span = float(along.max() - along.min())
+        step = max(1.0, span / 40.0)
+        candidates = propose_axis_circles(vertices, up=up, step_mm=step)
+        offered = usable_axis_circles(candidates)
+
+        lines = [
+            f"위쪽으로 가장 그럴듯한 축: {name}"
+            f" (띠 {band_count}개의 흔들림 중앙값 {wobble:.1f}‰)",
+        ]
+        for other_name, other_wobble, other_bands in readable[1:]:
+            lines.append(f"  다른 축 {other_name}: 흔들림 {other_wobble:.1f}‰ · 띠 {other_bands}개")
+        for other_name, other_wobble, _bands in scored:
+            if not math.isfinite(other_wobble):
+                lines.append(f"  다른 축 {other_name}: 둘레가 읽히지 않습니다")
+        lines.append("")
+        lines.append(
+            f"이 축을 따라 {step:.1f} mm 간격으로 읽은 높이 {len(candidates)}개 가운데"
+            f" 원으로 쓸 만한 것 {len(offered)}개."
+        )
+
+        if not offered:
+            lines.append("")
+            lines.append(
+                f"내놓을 자리가 없습니다. 흔들림 {MAXIMUM_ROUNDNESS_UM / 1000.0:.1f} mm 이하이면서"
+                f" 둘레가 {MINIMUM_COVERED_FRACTION_THOUSANDTHS}‰ 이상 남은 높이가 하나도"
+                " 없습니다. 회전체가 아니거나, 스캔이 한쪽만 들어왔을 수 있습니다."
+            )
+            summary = f"{name} 축 · 쓸 만한 높이 없음"
+        else:
+            pairs = propose_axis_circle_pairs(offered, up=up, limit=3)
+            lines.append("")
+            if not pairs:
+                lines.append("높이는 있으나 짝을 이룰 만큼 떨어진 것이 없습니다.")
+                summary = f"{name} 축 · 짝 없음"
+            else:
+                lines.append("좋은 짝부터:")
+                for index, pair in enumerate(pairs, start=1):
+                    lines.append(
+                        f" {index}. 아래 z {pair.bottom.height_mm:.1f} mm"
+                        f" · 지름 {2.0 * pair.bottom.radius_mm:.1f} mm"
+                        f" · 흔들림 {pair.bottom.roundness_um} µm"
+                        f" · 둘레 {pair.bottom.covered_sectors}/{pair.bottom.sector_count}"
+                    )
+                    lines.append(
+                        f"    위 z {pair.top.height_mm:.1f} mm"
+                        f" · 지름 {2.0 * pair.top.radius_mm:.1f} mm"
+                        f" · 흔들림 {pair.top.roundness_um} µm"
+                        f" · 둘레 {pair.top.covered_sectors}/{pair.top.sector_count}"
+                    )
+                    lines.append(
+                        f"    사이 {pair.separation_mm:.1f} mm"
+                        f" · 기울기 {pair.lean_deg:.2f}°"
+                        + (
+                            " · 원 중심선을 쓸 수 있습니다"
+                            if pair.centre_line_usable
+                            else " · 중심선으로 쓰기에는 너무 가깝습니다"
+                        )
+                    )
+                best = pairs[0]
+                summary = (
+                    f"{name} 축 · z {best.bottom.height_mm:.1f} / {best.top.height_mm:.1f} mm"
+                    f" · 사이 {best.separation_mm:.1f} mm"
+                )
+                if not any(pair.centre_line_usable for pair in pairs):
+                    lines.append("")
+                    lines.append(
+                        "어느 짝도 중심선을 만들 만큼 떨어져 있지 않습니다. 납작한 유물이니"
+                        " 회전축을 `두 원의 공통 법선`으로, 뒤틀린 그릇이면 `굽으로 서기`로"
+                        " 고르세요."
+                    )
+        lines.append("")
+        lines.append(
+            "제안일 뿐입니다. 이 높이에 앵커를 놓고 지름을 재는 것, 그리고 그 기록으로"
+            " 정치하는 것은 실측자가 합니다."
+        )
+
+        table = [
+            "높이 mm · 지름 mm · 흔들림 µm · 둘레 · 점",
+            *(
+                f"{candidate.height_mm:9.2f} · {2.0 * candidate.radius_mm:8.2f}"
+                f" · {candidate.roundness_um:7d}"
+                f" · {candidate.covered_sectors:2d}/{candidate.sector_count}"
+                f" · {candidate.point_count:6d}"
+                + ("" if candidate in offered else "   (내놓지 않음)")
+                for candidate in candidates
+            ),
+        ]
+        return summary, "\n".join(lines), "\n".join(table)
+
+    def on_axis_candidates_requested(self) -> None:
+        """Say where the mesh is round, before the archaeologist measures.
+
+        A reading, not a record: it moves nothing and writes nothing, so it
+        needs no session and no stability gate.  What it reads is the mesh as
+        it stands on screen, transform and all, because that is the mesh the
+        anchors would be placed on.
+        """
+
+        obj = getattr(self.viewport, "selected_obj", None)
+        if obj is None or getattr(obj, "mesh", None) is None:
+            self.status_info.setText("원 자리를 제안할 메쉬가 없습니다. 먼저 메쉬를 선택하세요.")
+            return
+        cursor_set = False
+        try:
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            cursor_set = True
+            mesh = self._build_world_mesh(obj)
+            summary, message, table = self._axis_candidate_report(
+                np.asarray(mesh.vertices, dtype=np.float64)
+            )
+        except ArtifactAxisCandidateError as exc:
+            self.section_panel.label_axis_candidates.setText(f"읽지 못했습니다: {exc}")
+            self.status_info.setText(f"원 자리 제안 실패: {exc}")
+            return
+        except Exception as exc:
+            self.section_panel.label_axis_candidates.setText("읽지 못했습니다.")
+            self.status_info.setText("원 자리 제안 실패")
+            QMessageBox.warning(
+                self,
+                "원 자리 제안 실패",
+                f"{type(exc).__name__}: {exc}",
+            )
+            return
+        finally:
+            if cursor_set:
+                QApplication.restoreOverrideCursor()
+
+        self.section_panel.label_axis_candidates.setText(f"제안: {summary}")
+        self.status_info.setText(f"원 자리 제안 | {summary}")
+        box = QMessageBox(self)
+        box.setWindowTitle("원 자리 제안")
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setText(message)
+        box.setDetailedText(table)
+        box.exec()
 
     def on_axis_align_requested(self) -> None:
         """Commit an Align whose axis comes from two measured circles."""
