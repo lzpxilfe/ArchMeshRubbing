@@ -23,7 +23,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from src.core.drawing_sheet import validate_drawing_sheet_bytes
+from src.core.artifact_vector_record import VectorPath
+from src.core.drawing_sheet import _reach_past_fold, validate_drawing_sheet_bytes
 from test_drawing_mirror import (
     ELEVATION_ID,
     SVG_NS,
@@ -101,6 +102,40 @@ def test_the_sheet_counts_the_lines_the_break_cut() -> None:
     assert entry["cut_path_count"] == 1
     (bottom,) = foot["sherd_breaks"]
     assert bottom["cut_path_count"] == 1
+
+
+def test_the_rim_runs_right_across_even_where_the_cut_does_not_rise_to_it() -> None:
+    """The elevation is the silhouette of the whole vessel and a break is
+    never level, so the highest surviving rim stands above the one meridian
+    the cut was taken on.  A ray level with that rim passes clear over every
+    line the cut has - and the edge is there all the same, so it runs right
+    round to the artifact's own edge and stops a millimetre short of the
+    cut, instead of not being drawn at all."""
+
+    # The axis is the vertical x = 0; the cut is a wall from x 30 to 40,
+    # its top at y 20, and the rim's edge crosses the axis at y 10.
+    wall = VectorPath(
+        id="cut",
+        role="cut",
+        closed=True,
+        points_mm=((30.0, 20.0), (40.0, 20.0), (40.0, 60.0), (30.0, 60.0)),
+    )
+    run = _reach_past_fold(
+        (0.0, 10.0), (1.0, 0.0), [wall],
+        base=(0.0, 0.0), direction=(0.0, 1.0), across=(1.0, 0.0), gap_mm=1.0,
+    )
+    assert run is not None
+    start, end = run
+    assert start == (0.0, 10.0)
+    # Right across to a millimetre short of the cut's own outer edge, and
+    # level: the rim is a circle seen edge on, not a line into the wall.
+    assert abs(end[0] - 39.0) < 1e-9 and abs(end[1] - 10.0) < 1e-9
+    # Where a section line does lie in the way, it still stops at that.
+    lower = _reach_past_fold(
+        (0.0, 30.0), (1.0, 0.0), [wall],
+        base=(0.0, 0.0), direction=(0.0, 1.0), across=(1.0, 0.0), gap_mm=1.0,
+    )
+    assert lower is not None and abs(lower[1][0] - 29.0) < 1e-9
 
 
 def test_a_figure_with_no_break_keeps_its_bytes() -> None:

@@ -1142,7 +1142,11 @@ class DrawingSheetOptions:
     ``section`` (the default) takes each such edge past the fold, in the
     outline's own weight and along its own direction, to one paper
     millimetre short of the first section line it meets, so the edge is
-    seen going round without joining the cut; where the section is solid
+    seen going round without joining the cut; where nothing lies in its
+    way - a pot broken at the rim stands higher in silhouette than the one
+    meridian the cut was taken on - it runs to a millimetre short of how
+    far the cut reaches across the axis instead, since the edge is there
+    whether or not the cut rises to meet it; where the section is solid
     there (the edge would run inside a cut face, as under a solid foot) it
     stops at the fold.  ``axis`` stops every edge at the fold.  ``far``
     draws, instead of the straight run, the far half's own silhouette
@@ -5957,8 +5961,18 @@ def _reach_past_fold(
     the nearest section line.  A section line within ``gap_mm`` of the ray
     counts as met - the outline sits a grid step outside the cut, so a
     rim's top edge runs a hair above the cut wall's top and must still
-    stop at it.  None where the section is solid there (the origin lies
-    inside a cut face) or nothing lies ahead to stop short of."""
+    stop at it.
+
+    Where the ray meets no section line at all it still runs: to ``gap_mm``
+    short of how far the cut reaches across the axis, so the edge is seen
+    going right round to the artifact's own edge and stopping just short of
+    the section.  A pot broken at the rim is why - the elevation is the
+    silhouette of the whole vessel, so its highest surviving rim stands
+    above the one meridian the cut was taken on, and a ray level with it
+    passes clear over every line the cut has.  The edge is still there.
+
+    None where the section is solid there (the origin lies inside a cut
+    face) or the cut reaches no further across than the gap."""
 
     ox, oy = float(origin[0]), float(origin[1])
     ux, uy = float(unit[0]), float(unit[1])
@@ -5975,8 +5989,13 @@ def _reach_past_fold(
         px, py = float(point[0]) - ox, float(point[1]) - oy
         return px * ux + py * uy, px * nx + py * ny
 
+    reaches = 0.0
     for path in section_paths:
         points = list(path.points_mm) + ([path.points_mm[0]] if path.closed else [])
+        for point in points:
+            # How far the cut gets across the axis along this ray, whether or
+            # not any of it lies in the ray's way.
+            reaches = max(reaches, ray_coords(point)[0])
         for start, stop in zip(points, points[1:]):
             # Solid test: a level ray from the origin to the section's side,
             # counting the rings it crosses (half-open at vertices).
@@ -6007,8 +6026,12 @@ def _reach_past_fold(
             hit = min(d1, d2) if min(d1, d2) > 1e-9 else 0.0
             if nearest is None or hit < nearest:
                 nearest = hit
-    if nearest is None or parity % 2 == 1:
+    if parity % 2 == 1:
         return None
+    if nearest is None:
+        # Nothing in the way, so the edge runs right round to the artifact's
+        # own edge and stops a gap short of the cut.
+        nearest = reaches
     reach = nearest - band
     if reach <= 1e-9:
         return None
