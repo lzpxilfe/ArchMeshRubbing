@@ -304,7 +304,7 @@ def test_a_texture_rubbing_reopens_and_exports_and_needs_its_files_to_recompute(
     # The export carries the recipe under the 1.4.0 contract and round-trips.
     bundle = build_rubbing_export(committed.document, "record:rubbing:texture", computation.raster)
     sidecar = json.loads(bundle.sidecar_bytes.decode("utf-8"))
-    assert sidecar["schema_version"] == "1.4.0"
+    assert sidecar["schema_version"] == "1.5.0"
     assert sidecar["recipe"]["texture_relief"]["atlas"]["sha256"] == atlas.sha256
     loaded = validate_rubbing_export_bytes(bundle.png_bytes, bundle.sidecar_bytes, document=committed.document)
     assert loaded.raster_sha256 == computation.raster.raster_sha256

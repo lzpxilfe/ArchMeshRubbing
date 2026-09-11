@@ -58,20 +58,27 @@ from src.core.artifact_rubbing_export import (
     ArtifactRubbingExportError,
     build_rubbing_export,
     export_rubbing_package,
+    validate_rubbing_export_bytes,
     validate_rubbing_export_package,
 )
 from src.core.artifact_rubbing_extractor import (
     MAX_RUBBING_PAPER_TONE_PERCENT,
     RECESS_TONE_RETAINED_PERCENT,
+    RECOMMENDED_RUBBING_CLOSING_BLACK_POINT_UM,
+    RECOMMENDED_RUBBING_CLOSING_REFERENCE_RADIUS_UM,
     RELIEF_MODEL_CONTACT,
+    RELIEF_MODEL_CONTACT_CLOSING,
     DigitalRubbingRaster,
+    _sliding_maximum,
 )
+from src.core.canonical_json import canonical_json_bytes
 from src.core.artifact_session import ArtifactSession
 from src.core.drawing_sheet import (
     DrawingSheetError,
     DrawingSheetOptions,
     TitleBlock,
     compose_drawing_sheet,
+    computed_rubbing_caption,
     validate_drawing_sheet_bytes,
 )
 from src.core.artifact_tile_unwrap_extractor import (
@@ -481,7 +488,7 @@ def test_the_same_package_carries_a_developed_rubbing(corded: ArtifactSession) -
         computation.raster.width_pixels,
         computation.raster.height_pixels,
     )
-    assert sidecar["schema_version"] == "1.4.0"
+    assert sidecar["schema_version"] == "1.5.0"
     assert sidecar["recipe"]["kind"] == "developed_rubbing"
     assert sidecar["raster_receipt"]["coordinate_space"] == "canonical_mm_developed_raster/v1"
     assert sidecar["provenance"]["record"]["type"] == DEVELOPED_RUBBING_RECORD_TYPE
@@ -1203,3 +1210,162 @@ def test_the_contact_model_is_its_own_recipe_and_older_recipes_stay_shading(
 
     with pytest.raises(ArtifactDevelopedRubbingError, match="one side"):
         _rubbing(corded, **{**CONTACT, "relief_polarity": "bidirectional"})
+
+
+PAPER: dict[str, Any] = {
+    "relief_model": RELIEF_MODEL_CONTACT_CLOSING,
+    "reference_radius_um": RECOMMENDED_RUBBING_CLOSING_REFERENCE_RADIUS_UM,
+    "black_point_um": RECOMMENDED_RUBBING_CLOSING_BLACK_POINT_UM,
+    "contact_ink_percent": 70,
+    "relief_polarity": "raised",
+    "paper_tone_percent": 0,
+}
+
+
+def test_the_pressed_paper_inks_a_plain_wall_to_one_tone(plain: ArtifactSession) -> None:
+    """contact_envelope/v2 lies on the whole of a plain wall: every interior
+    pixel takes the contact tone, where the square window's paper, held up on
+    whatever stands highest near it, reads the wall's facets as stripes."""
+
+    contact_grey = 255 - (255 * 70 + 50) // 100
+    paper = _rubbing(plain, **PAPER).raster.pixels[80:-80, 40:-40, 0]
+    square = _rubbing(plain, **CONTACT).raster.pixels[80:-80, 40:-40, 0]
+    assert (paper == contact_grey).all()
+    assert int(square.max()) > contact_grey
+
+
+def test_the_pressed_paper_inks_a_cord_on_its_ridge_only(corded: ArtifactSession) -> None:
+    grey = _rubbing(corded, **PAPER).raster.pixels[:, :, 0].astype(np.int64)
+    band = grey[100:300, 40:-40]
+    contact_grey = 255 - (255 * 70 + 50) // 100
+    # The ridges lie on the paper.  The 2 mm valleys between them are
+    # narrower than the 3 mm disk, which spans them, so they go white.
+    assert int(band.min()) == contact_grey
+    assert int(np.percentile(band, 10)) == contact_grey
+    assert int(np.percentile(band, 90)) >= 200
+    assert int(band.max()) == 255
+
+
+def test_a_wide_pressed_paper_casts_no_halo(corded: ArtifactSession) -> None:
+    """At a 2.5 mm window the square window's paper, held up at the highest
+    cord within reach, whitens the whole corded band - the white margin a
+    wide window was known to leave.  The pressed paper of the same size still
+    comes down onto every ridge."""
+
+    contact_grey = 255 - (255 * 70 + 50) // 100
+    square = _rubbing(corded, **{**CONTACT, "reference_radius_um": 2_500}).raster
+    paper = _rubbing(corded, **{**PAPER, "reference_radius_um": 2_500}).raster
+    square_band = square.pixels[100:300, 40:-40, 0].astype(np.int64)
+    paper_band = paper.pixels[100:300, 40:-40, 0].astype(np.int64)
+    assert int(np.median(square_band)) == 255
+    assert int(np.percentile(paper_band, 10)) == contact_grey
+    assert int(np.median(paper_band)) < 200
+
+
+def test_the_pressed_paper_is_its_own_recipe_and_travels_under_sidecar_1_5(
+    corded: ArtifactSession,
+) -> None:
+    paper = _rubbing(corded, **PAPER)
+    relief = paper.recipe_dict()["relief_policy"]
+    assert relief["model"] == RELIEF_MODEL_CONTACT_CLOSING
+    assert relief["envelope_filter"] == "masked_disk_closing/v1"
+    assert relief["edge_filter"] == "coverage_boundary_ramp_over_reference_radius/v1"
+    assert relief["contact_ink_level"] == (255 * 70 + 50) // 100
+    # Nothing is detrended, so no reference filter is named.
+    for absent in (
+        "minimum_reference_sample_count",
+        "reference_filter",
+        "residual_rounding",
+    ):
+        assert absent not in relief
+    replayed = compute_developed_rubbing_from_recipe(corded, paper.recipe_dict())
+    assert replayed.raster.raster_sha256 == paper.raster.raster_sha256
+    assert paper.raster.raster_sha256 != _rubbing(corded, **CONTACT).raster.raster_sha256
+    with pytest.raises(ArtifactDevelopedRubbingError, match="one side"):
+        _rubbing(corded, **{**PAPER, "relief_polarity": "bidirectional"})
+
+    session = commit_developed_rubbing(
+        corded,
+        paper,
+        record_id="record:developed:paper",
+        created_at="2026-09-11T00:00:00Z",
+        operator="tester",
+    )
+    bundle = build_rubbing_export(session.document, "record:developed:paper", paper.raster)
+    sidecar = json.loads(bundle.sidecar_bytes.decode("utf-8"))
+    assert sidecar["schema_version"] == "1.5.0"
+    verified = validate_rubbing_export_bytes(
+        bundle.png_bytes, bundle.sidecar_bytes, document=session.document
+    )
+    assert verified.raster_sha256 == paper.raster.raster_sha256
+    # 1.4.0 knows only the square window's paper, so a package claiming it
+    # for the pressed paper is refused.
+    sidecar["schema_version"] = "1.4.0"
+    with pytest.raises(ArtifactRubbingExportError, match="pressed paper"):
+        validate_rubbing_export_bytes(bundle.png_bytes, canonical_json_bytes(sidecar))
+
+
+def test_incised_the_pressed_paper_inks_what_it_spans(
+    corded: ArtifactSession, plain: ArtifactSession
+) -> None:
+    """The same paper inked on its other side.  A plain wall, which it lies
+    on everywhere, stays white; the corded sheet is the raised sheet's
+    complement in the same ink - the cords white, the valleys between them
+    dark - and the caption says where the ink went."""
+
+    level = (255 * 70 + 50) // 100
+    wall = _rubbing(plain, **{**PAPER, "relief_polarity": "incised"}).raster.pixels
+    assert (wall[80:-80, 40:-40, 0] == 255).all()
+
+    raised = _rubbing(corded, **PAPER)
+    incised = _rubbing(corded, **{**PAPER, "relief_polarity": "incised"})
+    # Away from the fold over the edge, which both sides take.
+    covered = raised.raster.pixels[:, :, 1] == 255
+    covered[:16, :] = False
+    covered[-16:, :] = False
+    covered[:, :16] = False
+    covered[:, -16:] = False
+    total = raised.raster.pixels[:, :, 0].astype(np.int64) + incised.raster.pixels[
+        :, :, 0
+    ].astype(np.int64)
+    assert int(np.abs(total[covered] - (510 - level)).max()) <= 1
+    band = incised.raster.pixels[100:300, 40:-40, 0].astype(np.int64)
+    assert int(band.max()) == 255
+    assert int(band.min()) <= 255 - level + 1
+    assert "음각에 먹" in computed_rubbing_caption(incised.recipe_dict(), developed=True)
+    assert "음각에 먹" not in computed_rubbing_caption(raised.recipe_dict(), developed=True)
+
+
+def test_the_pressed_paper_keeps_its_wash_and_darkens_the_edge(plain: ArtifactSession) -> None:
+    """A sherd read only through its rubbings needs an even ground where it
+    has no pattern and an outline that stands out: the dabber's wash lies
+    under everything, and the paper folding over the edge takes the full
+    ink there, back to the wash one disk in."""
+
+    wash = (255 * 20 + 50) // 100
+    whole = _rubbing(
+        plain,
+        **{**PAPER, "relief_polarity": "incised", "paper_tone_percent": 20},
+        margin_um=2_000,
+        artboard_policy=ARTBOARD_DEVELOPMENT_BOUNDS,
+    )
+    relief = whole.recipe_dict()["relief_policy"]
+    assert relief["paper_tone_percent"] == 20
+    assert "recess_tone_retained_percent" not in relief
+    assert relief["edge_filter"] == "coverage_boundary_ramp_over_reference_radius/v1"
+    pixels = whole.raster.pixels
+    covered = pixels[:, :, 1] == 255
+    grey = pixels[:, :, 0].astype(np.int64)
+    rows = np.zeros_like(covered)
+    rows[80:-80, :] = True
+    # Past one disk from wherever the paper ends there is only the wash.  The
+    # strip's outline steps with its faces, so that is measured from every
+    # uncovered cell, not from a row's own edge.
+    near_edge = _sliding_maximum((~covered).astype(np.int64), radius=16) > 0
+    assert (grey[covered & rows & ~near_edge] == 255 - wash).all()
+    at_edge = (
+        covered & rows & (np.roll(~covered, 1, axis=1) | np.roll(~covered, -1, axis=1))
+    )
+    assert bool(at_edge.any())
+    assert (grey[at_edge] < 255 - wash).all()
+    assert "기저 20%" in computed_rubbing_caption(whole.recipe_dict(), developed=True)

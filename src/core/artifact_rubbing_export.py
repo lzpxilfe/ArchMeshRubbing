@@ -32,6 +32,7 @@ from .artifact_document import (
     canonical_recipe_hash,
 )
 from .artifact_rubbing_extractor import (
+    RELIEF_MODEL_CONTACT_CLOSING,
     ArtifactRubbingError,
     DigitalRubbingRaster,
     validate_rubbing_recipe,
@@ -72,19 +73,23 @@ RUBBING_EXPORT_FORMAT = "archmeshrubbing_rubbing_export"
 # frozen 1.0.0 six-view recipe definition cannot describe.
 # 1.4.0 admits a developed rubbing drawn from a texture normal map's relief,
 # whose recipe names the atlas and the map it was read from.
-_CURRENT_RUBBING_EXPORT_SCHEMA_VERSION = "1.4.0"
+# 1.5.0 admits the pressed-paper contact model, contact_envelope/v2, whose
+# relief policy names a disk closing and no reference filter.
+_CURRENT_RUBBING_EXPORT_SCHEMA_VERSION = "1.5.0"
 RUBBING_EXPORT_SCHEMA_VERSION = _CURRENT_RUBBING_EXPORT_SCHEMA_VERSION
 SUPPORTED_RUBBING_EXPORT_SCHEMA_VERSIONS = frozenset(
-    {"1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0"}
+    {"1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0"}
 )
 # Versions whose provenance block is the current public shape.
-_CURRENT_PROVENANCE_SCHEMA_VERSIONS = frozenset({"1.2.0", "1.3.0", "1.4.0"})
+_CURRENT_PROVENANCE_SCHEMA_VERSIONS = frozenset({"1.2.0", "1.3.0", "1.4.0", "1.5.0"})
 # Versions that can carry a rubbing drawn on a developed surface.
-_DEVELOPED_SCHEMA_VERSIONS = frozenset({"1.2.0", "1.3.0", "1.4.0"})
+_DEVELOPED_SCHEMA_VERSIONS = frozenset({"1.2.0", "1.3.0", "1.4.0", "1.5.0"})
 # Versions that can carry the paper wash.
-_PAPER_TONE_SCHEMA_VERSIONS = frozenset({"1.3.0", "1.4.0"})
+_PAPER_TONE_SCHEMA_VERSIONS = frozenset({"1.3.0", "1.4.0", "1.5.0"})
 # Versions that can carry a texture-relief developed rubbing.
-_TEXTURE_RELIEF_SCHEMA_VERSIONS = frozenset({"1.4.0"})
+_TEXTURE_RELIEF_SCHEMA_VERSIONS = frozenset({"1.4.0", "1.5.0"})
+# Versions that can carry a rubbing inked by the pressed paper.
+_CONTACT_CLOSING_SCHEMA_VERSIONS = frozenset({"1.5.0"})
 _RUBBING_RECORD_TYPES = frozenset({RUBBING_RECORD_TYPE, DEVELOPED_RUBBING_RECORD_TYPE})
 RubbingRaster: TypeAlias = DigitalRubbingRaster | DevelopedRubbingRaster
 RUBBING_EXPORT_DIRECTORY_SUFFIX = ".amr-rubbing"
@@ -333,6 +338,18 @@ def _recipe_has_texture_relief(recipe: object) -> bool:
     """Whether a developed rubbing was drawn from a texture normal map."""
 
     return isinstance(recipe, Mapping) and isinstance(recipe.get("texture_relief"), Mapping)
+
+
+def _recipe_has_contact_closing(recipe: object) -> bool:
+    """Whether a rubbing was inked by the pressed paper, contact_envelope/v2."""
+
+    if not isinstance(recipe, Mapping):
+        return False
+    relief_policy = recipe.get("relief_policy")
+    return (
+        isinstance(relief_policy, Mapping)
+        and relief_policy.get("model") == RELIEF_MODEL_CONTACT_CLOSING
+    )
 
 
 def _recipe_has_paper_tone(recipe: object) -> bool:
@@ -604,6 +621,14 @@ def validate_rubbing_export_bytes(
     ):
         raise ArtifactRubbingExportError(
             "a rubbing drawn from a texture normal map needs rubbing export schema 1.4.0"
+        )
+    if (
+        _recipe_has_contact_closing(root["recipe"])
+        and schema_version not in _CONTACT_CLOSING_SCHEMA_VERSIONS
+    ):
+        raise ArtifactRubbingExportError(
+            "a rubbing inked by the pressed paper (contact_envelope/v2) needs rubbing "
+            "export schema 1.5.0"
         )
     raster: RubbingRaster
     try:

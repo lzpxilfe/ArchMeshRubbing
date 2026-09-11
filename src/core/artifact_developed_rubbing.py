@@ -808,8 +808,9 @@ def extract_developed_rubbing(
                 relief_policy["effective_black_point_ticks"]
             ),
             relief_polarity=str(relief_policy["polarity"]),
+            # The pressed paper has no reference filter, so no sample floor.
             minimum_reference_sample_count=int(
-                relief_policy["minimum_reference_sample_count"]
+                relief_policy.get("minimum_reference_sample_count", 0)
             ),
             paper_tone_level=int(relief_policy.get("paper_tone_level", 0)),
             ink_gamma=int(relief_policy.get("ink_gamma", DEFAULT_RUBBING_INK_GAMMA)),

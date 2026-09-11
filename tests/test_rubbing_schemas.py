@@ -6,6 +6,7 @@ import importlib
 import json
 import math
 from pathlib import Path
+from typing import Any
 import unittest
 
 import numpy as np
@@ -18,6 +19,7 @@ from src.core.artifact_developed_rubbing import (
 from src.core.artifact_outline_extractor import OutlineView, outline_frame
 from src.core.artifact_rubbing_export import build_rubbing_export
 from src.core.artifact_rubbing_extractor import (
+    RELIEF_MODEL_CONTACT_CLOSING,
     DigitalRubbingRaster,
     commit_artifact_rubbing,
     compute_artifact_rubbing,
@@ -118,8 +120,13 @@ def _generated_receipt_and_sidecar() -> tuple[dict[str, object], dict[str, objec
     return receipt, sidecar
 
 
-def _generated_developed_receipt_and_sidecar() -> tuple[dict[str, object], dict[str, object]]:
-    """A rubbing on the developed strip of a positioned pot, packaged."""
+def _generated_developed_receipt_and_sidecar(
+    **relief: Any,
+) -> tuple[dict[str, object], dict[str, object]]:
+    """A rubbing on the developed strip of a positioned pot, packaged.
+
+    ``relief`` overrides the relief options, for the pressed paper's sidecar.
+    """
 
     session, vertices, faces = positioned_vessel_session(segments=24, rings=12)
     selected = meridional_strip_faces(
@@ -141,17 +148,17 @@ def _generated_developed_receipt_and_sidecar() -> tuple[dict[str, object], dict[
         created_at=STAMP,
         operator="tester",
     )
-    computation = compute_developed_rubbing(
-        session,
-        "record:unwrap:schema",
-        pixels_per_mm=2,
-        margin_um=0,
-        reference_radius_um=3_000,
-        depth_quantization_um=10,
-        black_point_um=250,
-        ink_strength_percent=100,
-        relief_polarity="bidirectional",
-    )
+    options: dict[str, Any] = {
+        "pixels_per_mm": 2,
+        "margin_um": 0,
+        "reference_radius_um": 3_000,
+        "depth_quantization_um": 10,
+        "black_point_um": 250,
+        "ink_strength_percent": 100,
+        "relief_polarity": "bidirectional",
+        **relief,
+    }
+    computation = compute_developed_rubbing(session, "record:unwrap:schema", **options)
     committed = commit_developed_rubbing(
         session,
         computation,
@@ -179,7 +186,7 @@ class TestRubbingSchemas(unittest.TestCase):
         cls.developed_receipt_schema = _load_schema(
             "developed_rubbing_receipt-1.0.0.schema.json"
         )
-        cls.export_schema = _load_schema("rubbing_export-1.4.0.schema.json")
+        cls.export_schema = _load_schema("rubbing_export-1.5.0.schema.json")
         cls.legacy_export_schema = _load_schema(
             "rubbing_export-1.0.0.schema.json"
         )
@@ -191,6 +198,9 @@ class TestRubbingSchemas(unittest.TestCase):
         )
         cls.legacy_1_3_export_schema = _load_schema(
             "rubbing_export-1.3.0.schema.json"
+        )
+        cls.legacy_1_4_export_schema = _load_schema(
+            "rubbing_export-1.4.0.schema.json"
         )
         cls.mesh_admission_schema = _load_schema(
             "mesh_admission_receipt-1.0.0.schema.json"
@@ -208,6 +218,7 @@ class TestRubbingSchemas(unittest.TestCase):
         jsonschema.Draft202012Validator.check_schema(cls.legacy_1_1_export_schema)
         jsonschema.Draft202012Validator.check_schema(cls.legacy_1_2_export_schema)
         jsonschema.Draft202012Validator.check_schema(cls.legacy_1_3_export_schema)
+        jsonschema.Draft202012Validator.check_schema(cls.legacy_1_4_export_schema)
         jsonschema.Draft202012Validator.check_schema(cls.mesh_admission_schema)
         jsonschema.Draft202012Validator.check_schema(cls.import_recipe_schema)
         jsonschema.Draft202012Validator.check_schema(cls.import_recipe_v2_schema)
@@ -240,6 +251,10 @@ class TestRubbingSchemas(unittest.TestCase):
             referencing.Resource.from_contents(cls.legacy_1_3_export_schema),
         )
         registry = registry.with_resource(
+            cls.legacy_1_4_export_schema["$id"],
+            referencing.Resource.from_contents(cls.legacy_1_4_export_schema),
+        )
+        registry = registry.with_resource(
             cls.mesh_admission_schema["$id"],
             referencing.Resource.from_contents(cls.mesh_admission_schema),
         )
@@ -258,6 +273,12 @@ class TestRubbingSchemas(unittest.TestCase):
         cls.receipt, cls.sidecar = _generated_receipt_and_sidecar()
         cls.developed_receipt, cls.developed_sidecar = (
             _generated_developed_receipt_and_sidecar()
+        )
+        cls.paper_receipt, cls.paper_sidecar = _generated_developed_receipt_and_sidecar(
+            relief_model=RELIEF_MODEL_CONTACT_CLOSING,
+            relief_polarity="raised",
+            reference_radius_um=1_500,
+            black_point_um=150,
         )
 
     def test_legacy_export_schema_remains_byte_exact(self) -> None:
@@ -285,12 +306,79 @@ class TestRubbingSchemas(unittest.TestCase):
             hashlib.sha256(payload).hexdigest(),
             "8194165c7744e90cc6f83669c58e079c37d107086e0cd1bc57b05ae2f6b559d1",
         )
+        # 1.4.0 shipped before the pressed paper; the only contact model it
+        # knows is the square window's, which names a reference filter.
+        payload = (ROOT / "schemas" / "rubbing_export-1.4.0.schema.json").read_bytes()
+        self.assertEqual(
+            hashlib.sha256(payload).hexdigest(),
+            "c152eb6dd260cedbf6e5ec4f1e32a8534ca7b4dd2efad6729219e1e0fbd893b8",
+        )
+
+    def test_the_pressed_paper_needs_1_5_and_names_no_reference_filter(self) -> None:
+        self.assert_schema_valid(self.export_validator, self.paper_sidecar)
+        self.assertEqual(self.paper_sidecar["schema_version"], "1.5.0")
+        recipe = self.paper_sidecar["recipe"]
+        assert isinstance(recipe, dict)
+        relief = recipe["relief_policy"]
+        assert isinstance(relief, dict)
+        self.assertEqual(relief["model"], RELIEF_MODEL_CONTACT_CLOSING)
+        self.assertEqual(relief["envelope_filter"], "masked_disk_closing/v1")
+        for absent in (
+            "minimum_reference_sample_count",
+            "reference_filter",
+            "residual_rounding",
+        ):
+            self.assertNotIn(absent, relief)
+
+        def with_relief(**changes: object) -> dict[str, object]:
+            sidecar = copy.deepcopy(self.paper_sidecar)
+            changed_recipe = sidecar["recipe"]
+            assert isinstance(changed_recipe, dict)
+            policy = changed_recipe["relief_policy"]
+            assert isinstance(policy, dict)
+            policy.update(changes)
+            return sidecar
+
+        # It cannot claim the square window's paper, nor a reference filter
+        # it never ran.
+        for claim in (
+            {"envelope_filter": "masked_square_local_max/v1"},
+            {"reference_filter": "masked_square_local_mean_integer_integral/v1"},
+            {"minimum_reference_sample_count": 3},
+            {"residual_rounding": "floor_half_up_integer/v1"},
+            {"recess_tone_retained_percent": 50},
+        ):
+            self.assert_schema_invalid(self.export_validator, with_relief(**claim))
+        # And it must name the fold over the edge it inks.
+        unfolded = copy.deepcopy(self.paper_sidecar)
+        unfolded_recipe = unfolded["recipe"]
+        assert isinstance(unfolded_recipe, dict)
+        unfolded_policy = unfolded_recipe["relief_policy"]
+        assert isinstance(unfolded_policy, dict)
+        del unfolded_policy["edge_filter"]
+        self.assert_schema_invalid(self.export_validator, unfolded)
+        # The square window's paper still has to name its reference filter.
+        self.assert_schema_invalid(
+            self.export_validator,
+            with_relief(
+                model="contact_envelope/v1",
+                envelope_filter="masked_square_local_max/v1",
+            ),
+        )
+        # 1.4.0 knows only the square window.
+        legacy_validator = importlib.import_module("jsonschema").Draft202012Validator(
+            self.legacy_1_4_export_schema,
+            registry=self.export_validator._registry,  # type: ignore[attr-defined]
+        )
+        older = copy.deepcopy(self.paper_sidecar)
+        older["schema_version"] = "1.4.0"
+        self.assert_schema_invalid(legacy_validator, older)
 
     def test_developed_rubbing_receipt_and_sidecar_validate(self) -> None:
         self.assert_schema_valid(self.developed_receipt_validator, self.developed_receipt)
         self.assert_schema_invalid(self.receipt_validator, self.developed_receipt)
         self.assert_schema_valid(self.export_validator, self.developed_sidecar)
-        self.assertEqual(self.developed_sidecar["schema_version"], "1.4.0")
+        self.assertEqual(self.developed_sidecar["schema_version"], "1.5.0")
         recipe = self.developed_sidecar["recipe"]
         assert isinstance(recipe, dict)
         self.assertEqual(recipe["kind"], "developed_rubbing")
@@ -332,7 +420,7 @@ class TestRubbingSchemas(unittest.TestCase):
     def test_generated_receipt_and_export_sidecar_validate(self) -> None:
         self.assert_schema_valid(self.receipt_validator, self.receipt)
         self.assert_schema_valid(self.export_validator, self.sidecar)
-        self.assertEqual(self.sidecar["schema_version"], "1.4.0")
+        self.assertEqual(self.sidecar["schema_version"], "1.5.0")
         provenance = self.sidecar["provenance"]
         assert isinstance(provenance, dict)
         geometry = provenance["geometry_revision"]

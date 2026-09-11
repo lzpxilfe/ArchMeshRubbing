@@ -336,6 +336,11 @@ from src.core.artifact_surface_strip import (  # noqa: E402
     select_positioned_surface_strip,
     strip_parameters,
 )
+from src.core.artifact_unrollable_surface import (  # noqa: E402
+    UnrollableSelectionComputation,
+    unrollable_selection_for_request,
+)
+from src.core.artifact_mandrel import MandrelComputation  # noqa: E402
 from src.core.artifact_rubbing_extractor import (  # noqa: E402
     ArtifactRubbingComputation,
     ArtifactRubbingError,
@@ -356,12 +361,15 @@ from src.core.artifact_rubbing_extractor import (  # noqa: E402
     MAX_RUBBING_CONTACT_INK_PERCENT,
     MAX_RUBBING_INK_GAMMA,
     MAX_RUBBING_PAPER_TONE_PERCENT,
-    RECOMMENDED_RUBBING_CONTACT_BLACK_POINT_UM,
-    RECOMMENDED_RUBBING_CONTACT_REFERENCE_RADIUS_UM,
+    CONTACT_RELIEF_MODELS,
+    RECOMMENDED_RUBBING_CONTACT_POLARITY,
+    RECOMMENDED_RUBBING_CONTACT_SETTINGS,
+    RUBBING_TONE_MEDIUM,
     RECOMMENDED_RUBBING_INK_GAMMA,
     RECOMMENDED_RUBBING_PAPER_TONE_PERCENT,
     RECOMMENDED_RUBBING_RELIEF_MODEL,
     RELIEF_MODEL_CONTACT,
+    RELIEF_MODEL_CONTACT_CLOSING,
     RELIEF_MODEL_LOCAL_MEAN,
     compute_artifact_rubbing_from_recipe,
     estimate_digital_rubbing_resources,
@@ -4149,6 +4157,8 @@ class SectionPanel(QWidget):
     nativeTileUnwrapExportRequested = pyqtSignal()
     nativeDevelopedRubbingRequested = pyqtSignal()
     nativeSurfaceStripRequested = pyqtSignal()
+    nativeUnrollableSurfaceRequested = pyqtSignal()
+    nativeMandrelAlignRequested = pyqtSignal()
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -4704,6 +4714,31 @@ class SectionPanel(QWidget):
         self.btn_axis_align.clicked.connect(self.axisAlignRequested.emit)
         native_layout.addWidget(self.btn_axis_align)
 
+        mandrel_title = QLabel("와통 축 정치 · 기와 기록면으로")
+        mandrel_title.setStyleSheet("font-weight: bold;")
+        native_layout.addWidget(mandrel_title)
+        mandrel_hint = QLabel(
+            "기와에는 구연도 저부도 없어 두 원으로 축이 서지 않습니다. 기와를 만든 "
+            "원통(와통)을 기록면 전체에서 재어 그 축을 +Z로 세웁니다. 와통에 닿았던 "
+            "내면(오목면)을 칠해 선택한 뒤 누르세요."
+        )
+        mandrel_hint.setWordWrap(True)
+        mandrel_hint.setStyleSheet("color: #4a5568; font-size: 10px;")
+        native_layout.addWidget(mandrel_hint)
+        self.btn_mandrel_align = QPushButton("와통 축 측정 · 정치 (현재 선택 면)")
+        set_pixel_icon(self.btn_mandrel_align, "align")
+        self.btn_mandrel_align.setEnabled(False)
+        self.btn_mandrel_align.setToolTip(
+            "선택한 기록면의 모든 점으로 원통을 맞춰 와통의 축과 반지름을 기록하고, "
+            "그 축을 +Z로, 기록면이 시작하는 단면의 중심을 원점으로 보냅니다.\n"
+            "호의 단면 원 두 개는 호가 좁아 중심이 미끄러지지만, 기록면 전체는 "
+            "길이와 둘레가 함께 축을 잡습니다.\n"
+            "잔차(rms)가 기록에 남으니 기록면이 원통에서 얼마나 벗어나는지 읽을 수 "
+            "있습니다. 새 Align이므로 기존 측정 기록은 다시 재야 합니다."
+        )
+        self.btn_mandrel_align.clicked.connect(self.nativeMandrelAlignRequested.emit)
+        native_layout.addWidget(self.btn_mandrel_align)
+
         condition_line = QFrame()
         condition_line.setFrameShape(QFrame.Shape.HLine)
         condition_line.setFrameShadow(QFrame.Shadow.Sunken)
@@ -4908,16 +4943,27 @@ class SectionPanel(QWidget):
         native_rubbing_form.addRow("먹 곡선", self.spin_native_rubbing_ink_gamma)
         self.combo_native_rubbing_model = QComboBox()
         self.combo_native_rubbing_model.addItem(
-            "접촉 · 종이가 닿는 곳에 먹 (탁본)", RELIEF_MODEL_CONTACT
+            "접촉 · 눌러 붙인 종이에 먹 (탁본)", RELIEF_MODEL_CONTACT_CLOSING
+        )
+        self.combo_native_rubbing_model.addItem(
+            "접촉 v1 · 네모 창 최고점에 걸친 종이 (옛 recipe)", RELIEF_MODEL_CONTACT
         )
         self.combo_native_rubbing_model.addItem(
             "높이 · 주변 평균보다 솟은 만큼 (음영)", RELIEF_MODEL_LOCAL_MEAN
         )
         self.combo_native_rubbing_model.setToolTip(
             "접촉: 종이를 눌러 붙이고 두드린 것처럼, 종이가 닿는 면은 접촉 먹 농담으로 "
-            "고르게 먹고 종이 밑으로 들어간 만큼 옅어집니다. 평평한 벽은 고르게, "
-            "침선은 흰 선으로, 승문은 마루만 먹습니다. 기준 반경은 종이가 밀착되는 "
-            "크기(0.7 mm쯤), 검정 기준 깊이는 먹이 사라지는 깊이(0.12 mm쯤)입니다.\n"
+            "고르게 먹고 종이 밑으로 들어간 만큼 옅어집니다. 종이는 기준 반경의 둥근 "
+            "원판으로 위에서 누른 모양이라, 원판보다 좁은 골과 침선은 건너뛰어 희게 "
+            "남고, 넓은 오목면은 바닥까지 따라가며, 튀어나온 알갱이 하나가 주변 종이를 "
+            "들어 올리지 않습니다. 기준 반경은 원판 반경(1.5 mm쯤), 검정 기준 깊이는 "
+            "먹이 사라지는 깊이(0.15 mm쯤)입니다. 표면 극성 '양각'(기본)은 종이가 "
+            "닿는 곳에 먹이 앉는 보통 탁본으로, 보고서 도판의 탁본처럼 바탕이 먹고 "
+            "파인 곳·균열은 흰 종이로 남습니다. '음각'으로 두면 먹이 거꾸로 종이가 "
+            "건너뛴 곳에 들어가 흰 바탕에 음각·균열·자국이 검게 섭니다.\n"
+            "접촉 v1: 네모 창 안의 가장 높은 점에 종이를 걸어 둔 옛 방식입니다. "
+            "튀어나온 알갱이마다 창 크기의 흰 네모가 생기므로 옛 recipe를 다시 뜰 "
+            "때만 쓰십시오.\n"
             "높이: 주변 평균보다 솟은 만큼 먹이 붙는 음영입니다. 홈 옆의 벽이 솟은 "
             "것으로 읽혀 회색 후광이 생기므로 탁본으로는 권하지 않습니다."
         )
@@ -4946,7 +4992,9 @@ class SectionPanel(QWidget):
             if tone is None:
                 return
             settings = rubbing_tone_settings(
-                str(tone), relief_model=self.rubbing_relief_model()
+                str(tone),
+                relief_model=self.rubbing_relief_model(),
+                relief_polarity=self.combo_native_rubbing_polarity.currentData(),
             )
             for field, value in settings.items():
                 spin = self._rubbing_tone_spins[field]
@@ -4963,24 +5011,38 @@ class SectionPanel(QWidget):
         for spin in self._rubbing_tone_spins.values():
             spin.valueChanged.connect(_tone_from_spins)
 
+        def _apply_polarity_tone(_index: int) -> None:
+            # A named tone means the same on either side of the pressed paper
+            # but not the same ink, so the tone stays and its ink goes in.
+            if self.combo_native_rubbing_tone.currentData() is not None:
+                _apply_rubbing_tone(self.combo_native_rubbing_tone.currentIndex())
+            self.sync_rubbing_tone_combo()
+
+        self.combo_native_rubbing_polarity.currentIndexChanged.connect(_apply_polarity_tone)
+
         def _apply_model_defaults(_index: int) -> None:
-            # The two models read the reference radius and the black point
-            # differently, so switching one puts its own recommended pair in.
-            contact = (
-                self.combo_native_rubbing_model.currentData() == RELIEF_MODEL_CONTACT
-            )
+            # The models read the reference radius and the black point
+            # differently, so switching one puts its own recommended pair in -
+            # and a contact model its own side of the paper and middle ink.
+            chosen = str(self.combo_native_rubbing_model.currentData())
+            contact = chosen in CONTACT_RELIEF_MODELS
+            recommended = RECOMMENDED_RUBBING_CONTACT_SETTINGS.get(chosen)
             self.spin_native_rubbing_reference_radius_um.setValue(
-                RECOMMENDED_RUBBING_CONTACT_REFERENCE_RADIUS_UM
-                if contact
-                else DEFAULT_RUBBING_REFERENCE_RADIUS_UM
+                DEFAULT_RUBBING_REFERENCE_RADIUS_UM
+                if recommended is None
+                else recommended["reference_radius_um"]
             )
             self.spin_native_rubbing_black_point_um.setValue(
-                RECOMMENDED_RUBBING_CONTACT_BLACK_POINT_UM
-                if contact
-                else DEFAULT_RUBBING_BLACK_POINT_UM
+                DEFAULT_RUBBING_BLACK_POINT_UM
+                if recommended is None
+                else recommended["black_point_um"]
             )
             self.spin_native_rubbing_contact_ink.setEnabled(contact)
-            self.spin_native_rubbing_paper_tone.setEnabled(not contact)
+            # The pressed paper keeps the dabber's wash under everything; the
+            # square window's paper never used one.
+            self.spin_native_rubbing_paper_tone.setEnabled(
+                not contact or chosen == RELIEF_MODEL_CONTACT_CLOSING
+            )
             # Paper touches one side of the surface, so the contact model
             # refuses the two-sided polarity; offering it would turn every
             # rubbing into a refusal dialog.  Take it off the menu while the
@@ -4990,9 +5052,22 @@ class SectionPanel(QWidget):
             item = polarity.model().item(both_sides)  # type: ignore[union-attr]
             if item is not None:
                 item.setEnabled(not contact)
-            if contact and polarity.currentData() == "bidirectional":
-                polarity.setCurrentIndex(max(0, polarity.findData("raised")))
-            elif not contact and polarity.currentData() == "raised":
+            if contact:
+                side = RECOMMENDED_RUBBING_CONTACT_POLARITY.get(chosen, "raised")
+                polarity.setCurrentIndex(max(0, polarity.findData(side)))
+                middle = rubbing_tone_settings(
+                    RUBBING_TONE_MEDIUM,
+                    relief_model=chosen,
+                    relief_polarity=str(polarity.currentData()),
+                )
+                for field, value in middle.items():
+                    spin = self._rubbing_tone_spins[field]
+                    previous = spin.blockSignals(True)
+                    try:
+                        spin.setValue(int(value))
+                    finally:
+                        spin.blockSignals(previous)
+            else:
                 polarity.setCurrentIndex(max(0, polarity.findData(DEFAULT_RUBBING_POLARITY)))
 
         self.combo_native_rubbing_model.currentIndexChanged.connect(_apply_model_defaults)
@@ -5134,7 +5209,7 @@ class SectionPanel(QWidget):
         tile_form.addRow("단면 수", self.spin_native_tile_sections)
         native_layout.addLayout(tile_form)
         self.check_native_tile_axis_origin = QCheckBox(
-            "회전축 기준 전개 · 정치된 토기의 외면 띠"
+            "측정한 축 기준 전개 · 토기 외면 띠, 와통으로 세운 기와"
         )
         self.check_native_tile_axis_origin.setEnabled(False)
         self.check_native_tile_axis_origin.setToolTip(
@@ -5231,6 +5306,24 @@ class SectionPanel(QWidget):
             self.nativeSurfaceStripRequested.emit
         )
         native_layout.addWidget(self.btn_native_surface_strip)
+        self.btn_native_unrollable_surface = QPushButton(
+            "펼 수 있는 면만 남기기 · 언더컷 제외"
+        )
+        set_pixel_icon(self.btn_native_unrollable_surface, "flatten")
+        self.btn_native_unrollable_surface.setToolTip(
+            "현재 선택 면 가운데 전개가 받아들이지 못하는 면 - 전개에서 뒤집히는 "
+            "언더컷의 벽, 같은 자리에 겹칠 때 종이가 닿지 못하는 뒤쪽 면 - 을 빼고 "
+            "나머지를 선택으로 둡니다. 종이 탁본이 패인 자리를 건너뛰고 그 자리를 "
+            "비워 두는 것과 같습니다.\n"
+            "위의 축·기록면·단면 수로 전개가 할 계산을 그대로 돌려 판단하므로, 남긴 "
+            "면은 같은 설정의 전개를 통과합니다. 뺀 면의 수와 넓이, 위치를 알려줍니다.\n"
+            "측정한 축(와통·회전축)으로 정치하고 '측정한 축 기준 전개'를 켠 뒤, 기록 "
+            "영역을 '현재 선택 면'으로 두고 쓰세요."
+        )
+        self.btn_native_unrollable_surface.clicked.connect(
+            self.nativeUnrollableSurfaceRequested.emit
+        )
+        native_layout.addWidget(self.btn_native_unrollable_surface)
         self.label_native_tile_selection = QLabel("현재 선택 0면 · 전체 사용 가능")
         self.label_native_tile_selection.setStyleSheet(
             "color: #4a5568; font-size: 10px;"
@@ -5567,9 +5660,11 @@ class SectionPanel(QWidget):
         spins = getattr(self, "_rubbing_tone_spins", None)
         if combo is None or not spins:
             return
+        polarity = getattr(self, "combo_native_rubbing_polarity", None)
         tone = rubbing_tone_of(
             {field: int(spin.value()) for field, spin in spins.items()},
             relief_model=self.rubbing_relief_model(),
+            relief_polarity=None if polarity is None else polarity.currentData(),
         )
         index = combo.findData(tone)
         if index >= 0 and index != combo.currentIndex():
@@ -6016,6 +6111,12 @@ class MainWindow(QMainWindow):
         )
         self.section_panel.nativeSurfaceStripRequested.connect(
             self.on_native_surface_strip_requested
+        )
+        self.section_panel.nativeUnrollableSurfaceRequested.connect(
+            self.on_native_unrollable_surface_requested
+        )
+        self.section_panel.nativeMandrelAlignRequested.connect(
+            self.on_native_mandrel_align_requested
         )
 
         self.viewport.lineProfileUpdated.connect(self.section_panel.update_line_profile)
@@ -19838,6 +19939,7 @@ class MainWindow(QMainWindow):
         if not native:
             panel.apply_native_workflow_progress(ArtifactWorkflowProgress.empty())
             panel.btn_native_tile_unwrap.setEnabled(False)
+            panel.btn_mandrel_align.setEnabled(False)
             panel.btn_native_condition.setEnabled(False)
             panel.btn_native_vector_export.setEnabled(False)
             panel.btn_native_rubbing_export.setEnabled(False)
@@ -19850,6 +19952,7 @@ class MainWindow(QMainWindow):
         if not self._native_measurement_ready():
             panel.apply_native_workflow_progress(ArtifactWorkflowProgress.empty())
             panel.btn_native_tile_unwrap.setEnabled(False)
+            panel.btn_mandrel_align.setEnabled(False)
             panel.btn_native_condition.setEnabled(False)
             panel.btn_native_vector_export.setEnabled(False)
             panel.btn_native_rubbing_export.setEnabled(False)
@@ -19884,6 +19987,7 @@ class MainWindow(QMainWindow):
         )
         panel.apply_native_workflow_progress(workflow_progress)
         panel.btn_native_tile_unwrap.setEnabled(True)
+        panel.btn_mandrel_align.setEnabled(True)
         panel.btn_native_condition.setEnabled(True)
         # Unrolling about the canonical axis is only true of an artifact stood
         # on a measured axis, so the switch follows the active Align's kind.
@@ -20145,6 +20249,21 @@ class MainWindow(QMainWindow):
                 f"전개 탁본 기록 | 전개 {computation.development_record_id} · "
                 f"{computation.raster.width_pixels}×{computation.raster.height_pixels} px · "
                 f"ink {int(computation.qc.get('inked_pixel_count', 0))} px"
+            )
+        elif work_item.kind is MeasurementOperationKind.MANDREL_CYLINDER:
+            assert isinstance(computation, MandrelComputation)
+            status_text = (
+                f"와통 측정 기록 | 반지름 {float(computation.qc['radius_mm']):.2f} mm · "
+                f"잔차 rms {float(computation.qc['radial_rms_residual_mm']):.3f} mm · "
+                f"둘레 {float(computation.qc['arc_span_deg']):.1f}°"
+            )
+        elif work_item.kind is MeasurementOperationKind.UNROLLABLE_SELECTION:
+            assert isinstance(computation, UnrollableSelectionComputation)
+            status_text = (
+                f"펼 수 있는 면 기록 | 남긴 면 {int(computation.qc['kept_face_count']):,} · "
+                f"뺀 면 {int(computation.qc['excluded_face_count']):,} "
+                f"({float(computation.qc['excluded_area_share']):.2%}) · "
+                f"{int(computation.qc['place_count'])}곳"
             )
         else:  # pragma: no cover - closed enum guard
             raise ArtifactWorkbenchError(
@@ -22233,6 +22352,347 @@ class MainWindow(QMainWindow):
             f"안쪽 면 {int(qc['inward_face_count']):,}면 제외"
         )
 
+    def on_native_mandrel_align_requested(self) -> None:
+        """Measure the 와통 on the painted recording surface and stand the tile on it.
+
+        Two steps behind one button: the measurement is a record like any
+        other, run on the measurement worker and published by the same path;
+        the Align is then derived from that record, the way the circle
+        alignment derives one from two diameter records.
+        """
+
+        try:
+            obj = self.viewport.selected_obj
+            session = self._require_native_measurement_session(obj)
+            selected = tuple(
+                sorted(
+                    int(value)
+                    for value in (getattr(obj, "selected_faces", set()) or set())
+                )
+            )
+            if not selected:
+                raise ArtifactSessionError(
+                    "와통은 기록면에서 잽니다. 내면(오목면)을 칠해 선택한 뒤 누르세요"
+                )
+            preflight = self._capture_native_scene_preflight(
+                session,
+                allowed_selected_face_indices=selected,
+            )
+        except Exception as exc:
+            self.status_info.setText("와통 측정 준비 실패 | 기존 문서 유지")
+            QMessageBox.warning(
+                self, "와통 측정 준비 실패", f"{type(exc).__name__}: {exc}"
+            )
+            return
+
+        stale = sum(
+            1
+            for record in session.document.records
+            if session.document.record_freshness(record.id).value == "fresh"
+        )
+        answer = QMessageBox.question(
+            self,
+            "와통 축으로 정치",
+            "선택한 기록면에서 와통(기와를 만든 원통)을 재고, 그 축을 +Z로 "
+            "세웁니다.\n\n"
+            f"새 Align이 만들어지므로 지금 FRESH 상태인 기록 {stale}개는 "
+            "이전 정치 기준이 되어 다시 측정해야 합니다. 기록이 사라지지는 "
+            "않고 이력에 그대로 남습니다.\n\n계속할까요?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            controller = self._artifact_measurement_controller()
+            work_item = controller.begin_mandrel_cylinder(
+                selected_face_indices=selected,
+                record_id=f"record:mandrel:{uuid.uuid4()}",
+                created_at=self._utc_seconds_now(),
+                operator=self._current_operator(),
+            )
+        except Exception as exc:
+            self.status_info.setText("와통 측정 준비 실패 | 기존 문서 유지")
+            QMessageBox.warning(
+                self, "와통 측정 준비 실패", f"{type(exc).__name__}: {exc}"
+            )
+            return
+
+        def on_done(result: object) -> None:
+            if self._native_measurement_callback_is_terminal(
+                controller,
+                work_item,
+                label="와통 측정",
+            ):
+                return
+            try:
+                if not isinstance(result, ArtifactMeasurementResult):
+                    raise ArtifactWorkbenchError("mandrel worker result is invalid")
+                self._publish_native_measurement_result(work_item, result)
+            except Exception as exc:
+                if self._report_artifact_authority_callback_failure(
+                    context="와통 측정 결과 게시 중 권위 확인 실패",
+                    detail=f"{type(exc).__name__}: {exc}",
+                ):
+                    return
+                pending = self._native_measurement_publication_is_pending(work_item)
+                self.status_info.setText(
+                    "와통 측정 결과 게시 보류 | 재시도 버튼 사용"
+                    if pending
+                    else "늦은 와통 측정 결과 폐기 | 현재 문서 유지"
+                )
+                QMessageBox.warning(
+                    self,
+                    "와통 측정 결과 게시 보류" if pending else "와통 측정 결과 폐기",
+                    f"{type(exc).__name__}: {exc}",
+                )
+                return
+            measured = getattr(self, "_artifact_session", None)
+            try:
+                if (
+                    not isinstance(measured, ArtifactSession)
+                    or work_item.record_id not in measured.document.record_index
+                ):
+                    raise ArtifactSessionError("와통 측정 기록을 문서에서 찾지 못했습니다")
+                aligned = measured.commit_mandrel_axis_alignment(
+                    mandrel_record_id=work_item.record_id,
+                    operator=self._current_operator(),
+                )
+            except Exception as exc:
+                # The measurement is recorded; only standing the tile on it failed.
+                self.status_info.setText(f"와통 축 정치 실패 | 측정 기록은 남음: {exc}")
+                QMessageBox.warning(self, "와통 축 정치 실패", str(exc))
+                return
+            self._artifact_session = aligned
+            active_align_id = aligned.document.active_align_revision_id
+            assert isinstance(active_align_id, str)
+            revision = aligned.document.align_revision_index[active_align_id]
+            record_qc = aligned.document.record_index[work_item.record_id].qc
+            self._refresh_native_record_selectors(aligned)
+            self.status_info.setText(
+                "와통 축 정치 완료 | "
+                f"반지름 {float(record_qc['radius_mm']):.2f} mm · "
+                f"잔차 rms {float(record_qc['radial_rms_residual_mm']):.3f} mm · "
+                f"둘레 {float(record_qc['arc_span_deg']):.1f}° · "
+                f"길이 {float(record_qc['length_along_axis_mm']):.1f} mm | "
+                f"기울기 {float(revision.qc['axis_tilt_corrected_deg']):.3f}° 보정 | "
+                "이전 기록은 다시 측정해야 합니다"
+            )
+
+        def on_failed(message: str) -> None:
+            if self._report_artifact_authority_callback_failure(
+                context="와통 측정 worker 종료 콜백",
+                detail=str(message),
+            ):
+                return
+            if self._native_measurement_callback_is_terminal(
+                controller,
+                work_item,
+                label="와통 측정",
+            ):
+                return
+            self.status_info.setText("와통 측정 실패 | 기존 문서 유지")
+            QMessageBox.warning(
+                self,
+                "와통 측정 실패",
+                self._format_error_message("와통 측정 중 오류:", message),
+            )
+
+        self.status_info.setText("와통 측정 중 · 기록면 전체에 원통 적합...")
+        started = self._start_task(
+            title="와통 측정",
+            label="선택한 기록면의 모든 점으로 와통(원통)의 축과 반지름을 맞추는 중...",
+            thread=TaskThread(
+                "native_mandrel_cylinder",
+                lambda: self._execute_native_measurement_with_preflight(
+                    preflight,
+                    controller,
+                    work_item,
+                ),
+            ),
+            on_done=on_done,
+            on_failed=on_failed,
+            on_cancel_requested=lambda: self._request_native_measurement_cancel(
+                controller,
+                work_item,
+                label="와통 측정",
+            ),
+            on_shutdown_joined=lambda: self._verify_native_measurement_shutdown(
+                controller,
+                work_item,
+            ),
+        )
+        if not started:
+            controller.cancel(work_item, reason="task_not_started")
+
+    def on_native_unrollable_surface_requested(self) -> None:
+        """Leave out of the painted surface what its development cannot carry.
+
+        The answer is a record like any other - the request, the development
+        it was tested for, what was left out, how much and where - run on the
+        measurement worker and published by the same path, and the faces it
+        kept become the selection.  A development made from them depends on
+        that record, so what the paper could not reach is never left unsaid.
+        """
+
+        panel = self.section_panel
+        try:
+            obj = self.viewport.selected_obj
+            session = self._require_native_measurement_session(obj)
+            if not bool(panel.check_native_tile_axis_origin.isChecked()):
+                raise ArtifactSessionError(
+                    "종이가 어디에 닿는지는 측정한 축을 기준으로만 말할 수 있습니다. "
+                    "와통(또는 회전축)으로 정치하고 '측정한 축 기준 전개'를 켜세요"
+                )
+            options = self._native_tile_unwrap_options_from_panel()
+            selected = options["selected_face_indices"]
+            if not selected:
+                raise ArtifactSessionError(
+                    "기록 영역을 '현재 선택 면'으로 두고 기록면을 칠해 선택하세요"
+                )
+            preflight = self._capture_native_scene_preflight(
+                session,
+                allowed_selected_face_indices=selected,
+            )
+            controller = self._artifact_measurement_controller()
+            work_item = controller.begin_unrollable_selection(
+                selected_face_indices=selected,
+                longitudinal_axis=str(options["longitudinal_axis"]),
+                record_view=str(options["record_view"]),
+                n_sections=int(options["n_sections"]),
+                seam_angle_microdegrees=options["seam_angle_microdegrees"],
+                section_center_policy=str(options["section_center_policy"]),
+                station_policy=str(options["station_policy"]),
+                record_id=f"record:unrollable-selection:{uuid.uuid4()}",
+                created_at=self._utc_seconds_now(),
+                operator=self._current_operator(),
+            )
+        except Exception as exc:
+            self.status_info.setText("펼 수 있는 면 가리기 실패 | 기존 선택 유지")
+            QMessageBox.warning(
+                self, "펼 수 있는 면 가리기 실패", f"{type(exc).__name__}: {exc}"
+            )
+            return
+
+        def on_done(result: object) -> None:
+            if self._native_measurement_callback_is_terminal(
+                controller,
+                work_item,
+                label="펼 수 있는 면",
+            ):
+                return
+            try:
+                if not isinstance(result, ArtifactMeasurementResult) or not isinstance(
+                    result.computation, UnrollableSelectionComputation
+                ):
+                    raise ArtifactWorkbenchError("unrollable selection worker result is invalid")
+                computation = result.computation
+                self._publish_native_measurement_result(work_item, result)
+            except Exception as exc:
+                if self._report_artifact_authority_callback_failure(
+                    context="펼 수 있는 면 결과 게시 중 권위 확인 실패",
+                    detail=f"{type(exc).__name__}: {exc}",
+                ):
+                    return
+                pending = self._native_measurement_publication_is_pending(work_item)
+                self.status_info.setText(
+                    "펼 수 있는 면 결과 게시 보류 | 재시도 버튼 사용"
+                    if pending
+                    else "늦은 펼 수 있는 면 결과 폐기 | 현재 문서 유지"
+                )
+                QMessageBox.warning(
+                    self,
+                    "펼 수 있는 면 결과 게시 보류" if pending else "펼 수 있는 면 결과 폐기",
+                    f"{type(exc).__name__}: {exc}",
+                )
+                return
+            if obj is None or self.viewport.selected_obj is not obj:
+                self.status_info.setText(
+                    "대상이 바뀌어 선택은 그대로 둡니다 | 펼 수 있는 면 기록은 남음"
+                )
+                return
+            kept = [int(index) for index in computation.kept_face_indices]
+            try:
+                obj.selected_faces = set(kept)
+            except Exception as exc:
+                self.status_info.setText(
+                    "펼 수 있는 면을 현재 선택으로 옮기지 못했습니다 | 기록은 남음"
+                )
+                QMessageBox.warning(
+                    self, "펼 수 있는 면 가리기 실패", f"{type(exc).__name__}: {exc}"
+                )
+                return
+            self.viewport.update()
+            self.on_face_selection_count_changed(len(kept))
+            qc = computation.qc
+            excluded = int(qc["excluded_face_count"])
+            largest = "; ".join(
+                "({:.0f}, {:.0f}, {:.0f}) mm {:.1f} mm²".format(
+                    *(float(value) for value in place["centre_mm_decimal"]),
+                    float(place["area_mm2_decimal"]),
+                )
+                for place in list(computation.receipt["places"])[:3]
+            )
+            detail = (
+                "뺀 면 없음"
+                if excluded == 0
+                else (
+                    f"뺀 면 {excluded:,}면 · {float(qc['excluded_area_mm2']):.1f} mm² "
+                    f"({float(qc['excluded_area_share']):.2%}) · {int(qc['place_count'])}곳"
+                    + (f" | 큰 곳 {largest}" if largest else "")
+                )
+            )
+            self.status_info.setText(
+                f"펼 수 있는 면 {len(kept):,}면 선택 · 기록됨 | {detail} | "
+                "이 선택으로 전개하면 이 기록에 이어집니다"
+            )
+
+        def on_failed(message: str) -> None:
+            if self._report_artifact_authority_callback_failure(
+                context="펼 수 있는 면 worker 종료 콜백",
+                detail=str(message),
+            ):
+                return
+            if self._native_measurement_callback_is_terminal(
+                controller,
+                work_item,
+                label="펼 수 있는 면",
+            ):
+                return
+            self.status_info.setText("펼 수 있는 면 가리기 실패 | 기존 선택 유지")
+            QMessageBox.warning(
+                self,
+                "펼 수 있는 면 가리기 실패",
+                self._format_error_message("펼 수 있는 면 계산 중 오류:", message),
+            )
+
+        self.status_info.setText("펼 수 있는 면 가리는 중 · 전개와 같은 계산으로...")
+        started = self._start_task(
+            title="펼 수 있는 기록면",
+            label="전개가 할 매개화와 게이트를 그대로 돌려, 접히거나 가려지는 면을 가려내는 중...",
+            thread=TaskThread(
+                "native_unrollable_selection",
+                lambda: self._execute_native_measurement_with_preflight(
+                    preflight,
+                    controller,
+                    work_item,
+                ),
+            ),
+            on_done=on_done,
+            on_failed=on_failed,
+            on_cancel_requested=lambda: self._request_native_measurement_cancel(
+                controller,
+                work_item,
+                label="펼 수 있는 면",
+            ),
+            on_shutdown_joined=lambda: self._verify_native_measurement_shutdown(
+                controller,
+                work_item,
+            ),
+        )
+        if not started:
+            controller.cancel(work_item, reason="task_not_started")
+
     def on_native_developed_rubbing_requested(self) -> None:
         """Draw a rubbing on the tile-unwrap record chosen in the panel."""
 
@@ -22863,11 +23323,23 @@ class MainWindow(QMainWindow):
                 f"record:tile-unwrap:{options['record_view']}:{uuid.uuid4()}"
             )
             controller = self._artifact_measurement_controller()
+            # A development made from the faces a 펼 수 있는 면 record kept
+            # depends on that record, so what was left out travels with it.
+            exclusion = (
+                unrollable_selection_for_request(
+                    session.document,
+                    total_face_count=int(session.source_mesh.faces.shape[0]),
+                    **options,
+                )
+                if options["selected_face_indices"]
+                else None
+            )
             work_item = controller.begin_tile_unwrap(
                 **options,
                 record_id=record_id,
                 created_at=self._utc_seconds_now(),
                 operator=self._current_operator(),
+                depends_on_record_ids=(() if exclusion is None else (exclusion,)),
             )
         except Exception as exc:
             self.status_info.setText("기와 전개 준비 실패 | 기존 문서 유지")

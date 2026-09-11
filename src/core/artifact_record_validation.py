@@ -74,6 +74,14 @@ def validate_known_records(document: ArtifactDocument) -> None:
         ArtifactVectorRecordError,
         validate_vector_records,
     )
+    from .artifact_mandrel import (  # noqa: PLC0415
+        ArtifactMandrelError,
+        validate_mandrel_records,
+    )
+    from .artifact_unrollable_surface import (  # noqa: PLC0415
+        ArtifactUnrollableSurfaceError,
+        validate_unrollable_selection_records,
+    )
 
     try:
         validate_vector_records(document)
@@ -81,6 +89,8 @@ def validate_known_records(document: ArtifactDocument) -> None:
         validate_tile_unwrap_records(document)
         validate_geometry_metrics_records(document)
         validate_surface_measurement_records(document)
+        validate_mandrel_records(document)
+        validate_unrollable_selection_records(document)
         validate_condition_annotation_records(document)
         validate_developed_rubbing_records(document)
         validate_profile_groove_records(document)
@@ -99,6 +109,8 @@ def validate_known_records(document: ArtifactDocument) -> None:
         ArtifactTileUnwrapRecordError,
         ArtifactGeometryMetricsError,
         ArtifactSurfaceMeasurementError,
+        ArtifactMandrelError,
+        ArtifactUnrollableSurfaceError,
         ArtifactConditionAnnotationError,
         ArtifactDevelopedRubbingError,
         ArtifactProfileGrooveError,

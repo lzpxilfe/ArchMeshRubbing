@@ -22,7 +22,9 @@ from src.application.artifact_workflow_self_test import (
 #: still recompute to the bytes they were written with.  They moved again
 #: with vector sidecar 1.9.0, which holds the section mark in the line-kind
 #: vocabulary, and again with 1.10.0, which holds the presumed stretch of the
-#: cut: every export names the schema it was written under.
+#: cut: every export names the schema it was written under.  They moved once
+#: more with rubbing sidecar 1.5.0, which admits the pressed paper
+#: (contact_envelope/v2); the rasters themselves are unchanged.
 def test_complete_workflow_self_test_has_deterministic_offline_receipts() -> None:
     result = run_artifact_workflow_self_test()
     repeated = run_artifact_workflow_self_test()
@@ -49,7 +51,7 @@ def test_complete_workflow_self_test_has_deterministic_offline_receipts() -> Non
         "9516e4813185faf0781686871678400b83c9a9a6e5aaf74d1def42e93994fb03"
     )
     assert result.rubbing_set_sha256 == (
-        "4b81e1a1a408f34252c79d84b140d871bc21fbc0e4178dfff0fd92844a3bbb5a"
+        "d0cd70bcfe4b90e5e039e04c65fd954f4dc305450aa20b78089c91e4ea96ee1a"
     )
     assert result.tile_unwrap_source_sha256 == (
         "5d1432cc1c6fe601cd2777da86a255f07689fcbfa775d0c38ae3178b28661eb6"
@@ -66,10 +68,10 @@ def test_complete_workflow_self_test_has_deterministic_offline_receipts() -> Non
         == result.tile_unwrap_export_sha256
     )
     assert result.survey_manifest_sha256 == (
-        "ced818d9715fc152db5631d58d4751b1cd16b40a3011c399b10881cc59e609e3"
+        "c97b64f14167e3ad0384e8771907734f1e39a6fee89fcbb780f90b0a85eebc26"
     )
     assert result.survey_artifact_set_sha256 == (
-        "8785d1fba01168bbb2c500a5c67c853421d3198268c8bec9a0db0539464ea1ca"
+        "9e315d0182c8b665f07e76095856017b962e3242da7b7ff19e8a86a7ee280748"
     )
     for digest in (
         result.document_sha256,
@@ -89,7 +91,7 @@ def test_complete_workflow_self_test_has_deterministic_offline_receipts() -> Non
         "110eef61b0e33cbc936152b0ea338210a4e847caee07e0bb7cab34abdf72fd17"
     )
     assert result.png_sha256 == (
-        "b03ebe131be472d43145f66e59a26b6d3787a6ea5a1e019e05d5f180d446d68f"
+        "0088190f595226d2bcf7b87c281180c2500e423051528be97f69ddde16e4d305"
     )
     assert result.tile_unwrap_row_shift_max_um == 6364
     assert result.tile_unwrap_row_shift_station_count == 13
@@ -131,7 +133,7 @@ def test_complete_workflow_accepts_explicit_committed_directory_fsync_warning(
 
     assert result.record_count == 18
     assert result.survey_manifest_sha256 == (
-        "ced818d9715fc152db5631d58d4751b1cd16b40a3011c399b10881cc59e609e3"
+        "c97b64f14167e3ad0384e8771907734f1e39a6fee89fcbb780f90b0a85eebc26"
     )
     assert (
         result.tile_unwrap_sha256

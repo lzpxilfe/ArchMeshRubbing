@@ -79,9 +79,12 @@ from src.core.artifact_rubbing_extractor import (
     DEFAULT_RUBBING_PIXELS_PER_MM,
     DEFAULT_RUBBING_POLARITY,
     DEFAULT_RUBBING_REFERENCE_RADIUS_UM,
+    RECOMMENDED_RUBBING_CLOSING_BLACK_POINT_UM,
+    RECOMMENDED_RUBBING_CLOSING_REFERENCE_RADIUS_UM,
     RECOMMENDED_RUBBING_CONTACT_BLACK_POINT_UM,
     RECOMMENDED_RUBBING_CONTACT_REFERENCE_RADIUS_UM,
     RECOMMENDED_RUBBING_RELIEF_MODEL,
+    RELIEF_MODEL_CONTACT,
     RELIEF_MODEL_LOCAL_MEAN,
     commit_artifact_rubbing,
     compute_artifact_rubbing,
@@ -4461,27 +4464,58 @@ def test_native_rubbing_ui_exposes_physical_recipe_and_six_views() -> None:
         )
         assert panel.spin_native_rubbing_pixels_per_mm.suffix() == " px/mm"
         assert panel.spin_native_rubbing_margin_um.value() == DEFAULT_RUBBING_MARGIN_UM
-        # The panel opens on the contact model with its own recommended pair;
-        # the two models read the reference radius and the black point
-        # differently, so switching back to the shading restores the core
-        # defaults rather than carrying the paper's numbers across.
+        # The panel opens on the pressed paper with its own recommended pair;
+        # the models read the reference radius and the black point
+        # differently, so switching to the square window puts its pair in and
+        # switching to the shading restores the core defaults rather than
+        # carrying the paper's numbers across.
         model = panel.combo_native_rubbing_model
         assert model.currentData() == RECOMMENDED_RUBBING_RELIEF_MODEL
+        assert panel.spin_native_rubbing_reference_radius_um.value() == (
+            RECOMMENDED_RUBBING_CLOSING_REFERENCE_RADIUS_UM
+        )
+        assert panel.spin_native_rubbing_black_point_um.value() == (
+            RECOMMENDED_RUBBING_CLOSING_BLACK_POINT_UM
+        )
+        # The panel is disabled until a mesh is loaded, so read each spin's
+        # own enabled state rather than the effective one.  The pressed paper
+        # keeps the dabber's wash under everything, so its wash is offered.
+        assert not panel.spin_native_rubbing_contact_ink.testAttribute(_FORCE_DISABLED)
+        assert not panel.spin_native_rubbing_paper_tone.testAttribute(_FORCE_DISABLED)
+        # Paper touches one side, so a contact model opens on its own side -
+        # the pressed paper on the raised one, the paper rubbing a report's
+        # 기와 plates print, at that side's middle ink and with no wash, so
+        # pits and cracks stay white paper - and the two-sided entry is off
+        # the menu.
+        from src.core.artifact_rubbing_extractor import (  # noqa: PLC0415
+            RELIEF_MODEL_CONTACT_CLOSING,
+            RUBBING_TONE_MEDIUM,
+            rubbing_tone_settings,
+        )
+
+        middle = rubbing_tone_settings(
+            RUBBING_TONE_MEDIUM,
+            relief_model=RELIEF_MODEL_CONTACT_CLOSING,
+            relief_polarity="raised",
+        )
+        polarity = panel.combo_native_rubbing_polarity
+        assert polarity.currentData() == "raised"
+        assert not polarity.model().item(polarity.findData("bidirectional")).isEnabled()
+        assert panel.spin_native_rubbing_contact_ink.value() == (
+            middle["contact_ink_percent"]
+        )
+        assert panel.spin_native_rubbing_paper_tone.value() == middle["paper_tone_percent"] == 0
+        model.setCurrentIndex(model.findData(RELIEF_MODEL_CONTACT))
         assert panel.spin_native_rubbing_reference_radius_um.value() == (
             RECOMMENDED_RUBBING_CONTACT_REFERENCE_RADIUS_UM
         )
         assert panel.spin_native_rubbing_black_point_um.value() == (
             RECOMMENDED_RUBBING_CONTACT_BLACK_POINT_UM
         )
-        # The panel is disabled until a mesh is loaded, so read each spin's
-        # own enabled state rather than the effective one.
-        assert not panel.spin_native_rubbing_contact_ink.testAttribute(_FORCE_DISABLED)
-        assert panel.spin_native_rubbing_paper_tone.testAttribute(_FORCE_DISABLED)
-        # Paper touches one side, so the contact model opens on the raised
-        # polarity and the two-sided entry is off the menu.
-        polarity = panel.combo_native_rubbing_polarity
         assert polarity.currentData() == "raised"
         assert not polarity.model().item(polarity.findData("bidirectional")).isEnabled()
+        # The square window's paper never used a wash.
+        assert panel.spin_native_rubbing_paper_tone.testAttribute(_FORCE_DISABLED)
         model.setCurrentIndex(model.findData(RELIEF_MODEL_LOCAL_MEAN))
         assert polarity.currentData() == DEFAULT_RUBBING_POLARITY
         assert polarity.model().item(polarity.findData("bidirectional")).isEnabled()
@@ -4518,7 +4552,7 @@ def test_the_ink_tone_is_one_choice_that_means_what_it_says() -> None:
     """
 
     from src.core.artifact_rubbing_extractor import (  # noqa: PLC0415
-        RELIEF_MODEL_CONTACT,
+        RELIEF_MODEL_CONTACT_CLOSING,
         RUBBING_TONES,
         RUBBING_TONE_DARK,
         RUBBING_TONE_LIGHT,
@@ -4537,13 +4571,19 @@ def test_the_ink_tone_is_one_choice_that_means_what_it_says() -> None:
             *RUBBING_TONES,
             None,
         ]
-        # The panel opens on the contact model, whose measured recommendation
+        # The panel opens on the pressed paper, whose measured recommendation
         # is the middle step.
-        assert panel.combo_native_rubbing_model.currentData() == RELIEF_MODEL_CONTACT
+        assert (
+            panel.combo_native_rubbing_model.currentData() == RELIEF_MODEL_CONTACT_CLOSING
+        )
         assert combo.currentData() == RUBBING_TONE_MEDIUM
 
         combo.setCurrentIndex(combo.findData(RUBBING_TONE_DARK))
-        dark = rubbing_tone_settings(RUBBING_TONE_DARK, relief_model=RELIEF_MODEL_CONTACT)
+        dark = rubbing_tone_settings(
+            RUBBING_TONE_DARK,
+            relief_model=RELIEF_MODEL_CONTACT_CLOSING,
+            relief_polarity="raised",
+        )
         assert panel.spin_native_rubbing_contact_ink.value() == (
             dark["contact_ink_percent"]
         )
@@ -4558,9 +4598,11 @@ def test_the_ink_tone_is_one_choice_that_means_what_it_says() -> None:
         assert combo.currentData() is None
         combo.setCurrentIndex(combo.findData(RUBBING_TONE_LIGHT))
         assert panel.spin_native_rubbing_contact_ink.value() == (
-            rubbing_tone_settings(RUBBING_TONE_LIGHT, relief_model=RELIEF_MODEL_CONTACT)[
-                "contact_ink_percent"
-            ]
+            rubbing_tone_settings(
+                RUBBING_TONE_LIGHT,
+                relief_model=RELIEF_MODEL_CONTACT_CLOSING,
+                relief_polarity="raised",
+            )["contact_ink_percent"]
         )
 
         # Under the height model the same spins spell a tone from the ink

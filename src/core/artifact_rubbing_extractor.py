@@ -69,7 +69,7 @@ RECOMMENDED_RUBBING_INK_GAMMA = 1
 MAX_RUBBING_INK_GAMMA = 4
 _INK_CURVE_STEPS = 4095
 
-# Two ways of turning relief into ink.
+# Three ways of turning relief into ink.
 #
 # ``local_mean_height`` is the one every earlier recipe used: ink grows with
 # how far a point stands above the mean of its neighbourhood.  It is a relief
@@ -84,19 +84,112 @@ _INK_CURVE_STEPS = 4095
 # closeness to the local upper envelope of the detrended surface: a plain wall
 # takes the contact tone evenly, an incised line stays white, and a cord's
 # ridge takes ink while the valley between cords does not.
+#
+# Version 1 of it takes the paper to be the local maximum over a square
+# window.  That holds the paper up at the height of the highest point near it
+# instead of letting it come back down onto the surface, so every grain that
+# stands proud of the wall lifts the paper off a whole square round itself.
+# On a real scan every clay grain, and every facet of a decimated mesh, stands
+# a little proud of its neighbours, and the sheet fills with small white
+# squares and rings; a wider window only makes the squares bigger.  On a
+# 암키와 scan decimated to 0.66 mm facets every window from 0.7 to 4 mm left
+# the developed face covered in them.
+#
+# Version 2 presses the paper down.  The paper is the closing of the surface
+# by a round disk of the reference radius - the lowest sheet a disk of that
+# size, pressed on from above, cannot push any further in - so it lies on
+# every plane whatever its slope, on every ridge and every grain, and it
+# spans only the hollows narrower than the disk.  A grain takes ink and
+# leaves its neighbours alone, a groove narrower than the disk stays white,
+# and a hollow wider than it is followed to its floor.  Nothing is detrended
+# first: a closing leaves a plane of any slope where it lies, so there is no
+# reference mean to subtract, and no halo from one.
+#
+# Either side of that paper can take the ink.  Raised, the dabber inks what
+# the paper lies on - a rubbing: the ground dark, an impression pale.
+# Incised, the ink goes where the paper spans, as dark as the surface lies
+# deep below it - the incisions, cracks and impressions dark on a white
+# sheet, the way a drawing renders 음각.  It is the same paper and the same
+# depth below it, so one sheet is the other's complement in the same ink.
+#
+# Two more things a rubbing of a sherd shows, both from the same paper.  The
+# dabber leaves ink on the whole sheet, so with a paper wash nothing is left
+# bare: the wash lies under everything and the relief darkens from it.  And
+# the paper does not stop at the edge of the surface, it folds down over the
+# break, and the dabber strikes that fold hardest: within one disk of the
+# edge the ink ramps up to the full ink at the edge itself, so the sherd's
+# outline stands out whichever side is inked.
+RELIEF_CLOSING_EDGE_FILTER = "coverage_boundary_ramp_over_reference_radius/v1"
 RELIEF_MODEL_LOCAL_MEAN = "local_mean_height/v1"
 RELIEF_MODEL_CONTACT = "contact_envelope/v1"
-RELIEF_MODELS = (RELIEF_MODEL_LOCAL_MEAN, RELIEF_MODEL_CONTACT)
+RELIEF_MODEL_CONTACT_CLOSING = "contact_envelope/v2"
+RELIEF_MODELS = (
+    RELIEF_MODEL_LOCAL_MEAN,
+    RELIEF_MODEL_CONTACT,
+    RELIEF_MODEL_CONTACT_CLOSING,
+)
+# The models that ink what the paper touches.  They share the contact ink,
+# and paper has one side, so both refuse the two-sided polarity.
+CONTACT_RELIEF_MODELS: frozenset[str] = frozenset(
+    {RELIEF_MODEL_CONTACT, RELIEF_MODEL_CONTACT_CLOSING}
+)
+CONTACT_ENVELOPE_FILTERS: Mapping[str, str] = MappingProxyType(
+    {
+        RELIEF_MODEL_CONTACT: "masked_square_local_max/v1",
+        RELIEF_MODEL_CONTACT_CLOSING: "masked_disk_closing/v1",
+    }
+)
 DEFAULT_RUBBING_RELIEF_MODEL = RELIEF_MODEL_LOCAL_MEAN
 DEFAULT_RUBBING_CONTACT_INK_PERCENT = 70
 MAX_RUBBING_CONTACT_INK_PERCENT = 100
-# What the app offers for a rubbing on a developed pot surface.  Measured on
-# the corded and grooved synthetic profile: the paper conforms at about
-# 0.7 mm, the ink is gone 0.12 mm below the paper, and 70% contact ink leaves
-# a plain wall dark grey with the relief still readable inside it.
-RECOMMENDED_RUBBING_RELIEF_MODEL = RELIEF_MODEL_CONTACT
+# What version 1 was measured to want on the corded and grooved synthetic
+# profile: the paper conforms at about 0.7 mm, the ink is gone 0.12 mm below
+# the paper, and 70% contact ink leaves a plain wall dark grey with the relief
+# still readable inside it.
 RECOMMENDED_RUBBING_CONTACT_REFERENCE_RADIUS_UM = 700
 RECOMMENDED_RUBBING_CONTACT_BLACK_POINT_UM = 120
+# What the app offers for a rubbing on a developed surface: the pressed paper.
+# A 1.5 mm disk spans the 2 mm valleys between the synthetic profile's cords,
+# so they stay white while the cords take ink, and it follows a hollow wider
+# than itself down to the floor, which then reads as a lighter band rather
+# than a white line; the ink is gone 0.15 mm below the paper.  On a 암키와
+# scan's inner face this paper lies within 0.08 mm of nine tenths of the
+# surface, so the impressions there read in tone rather than going all black
+# or all white.
+RECOMMENDED_RUBBING_RELIEF_MODEL = RELIEF_MODEL_CONTACT_CLOSING
+RECOMMENDED_RUBBING_CLOSING_REFERENCE_RADIUS_UM = 1_500
+RECOMMENDED_RUBBING_CLOSING_BLACK_POINT_UM = 150
+# Which side of the paper each contact model opens on.  The pressed paper
+# opens raised: what an excavation report prints for a 기와 is the paper
+# rubbing - the ground inked, impressions, pits and cracks left white paper.
+# It opened incised for a while, after a drafter asked for the incisions dark
+# on a light sheet the way a drawing renders 음각; a report's plates settled
+# it the other way, and incised stays one choice away.  The square window
+# keeps the side every recipe of it used.
+RECOMMENDED_RUBBING_CONTACT_POLARITY: Mapping[str, str] = MappingProxyType(
+    {
+        RELIEF_MODEL_CONTACT: "raised",
+        RELIEF_MODEL_CONTACT_CLOSING: "raised",
+    }
+)
+# Each contact model's own window and black point.  The two read the window
+# differently, so switching from one to the other puts its own pair in.
+RECOMMENDED_RUBBING_CONTACT_SETTINGS: Mapping[str, Mapping[str, int]] = MappingProxyType(
+    {
+        RELIEF_MODEL_CONTACT: MappingProxyType(
+            {
+                "reference_radius_um": RECOMMENDED_RUBBING_CONTACT_REFERENCE_RADIUS_UM,
+                "black_point_um": RECOMMENDED_RUBBING_CONTACT_BLACK_POINT_UM,
+            }
+        ),
+        RELIEF_MODEL_CONTACT_CLOSING: MappingProxyType(
+            {
+                "reference_radius_um": RECOMMENDED_RUBBING_CLOSING_REFERENCE_RADIUS_UM,
+                "black_point_um": RECOMMENDED_RUBBING_CLOSING_BLACK_POINT_UM,
+            }
+        ),
+    }
+)
 
 # 탁본의 농담.  How dark a rubbing comes out is how hard and how often the
 # dabber was tapped, and a drafter says it as one thing - 연하게, 진하게 - not
@@ -129,6 +222,32 @@ RUBBING_TONE_LABELS_KO: Mapping[str, str] = {
     RUBBING_TONE_MEDIUM: "중간",
     RUBBING_TONE_DARK: "진하게",
 }
+# The pressed paper lies on nearly all of a surface, where the square
+# window's paper was held off a square round every grain, so the same ink
+# lays far more of it down: at 70% a 암키와's inner face took 143 of 255 on
+# average against the square window's 103, and a drafter called it too dark.
+# Its raised steps are lighter; the middle one, 45%, lays down about what the
+# square window's 70% did (92 there).
+#
+# The pressed paper can keep the dabber's wash under everything, so a tone
+# names its wash as well.  Raised, the wash is only what a recess keeps, and
+# on a report's plates a recess - a pit, a crack, an incision, what the
+# rubbing is read by - is white paper, so the raised steps keep none.  (They
+# kept 4, 8 and 12% at first, which greyed every crack.)
+_CLOSING_RAISED_TONES: Mapping[str, Mapping[str, int]] = {
+    RUBBING_TONE_LIGHT: {"contact_ink_percent": 30, "paper_tone_percent": 0},
+    RUBBING_TONE_MEDIUM: {"contact_ink_percent": 45, "paper_tone_percent": 0},
+    RUBBING_TONE_DARK: {"contact_ink_percent": 60, "paper_tone_percent": 0},
+}
+# Incised, the pressed paper inks what it spans, over the wash, so the ink
+# is how dark the deepest incision is - and an incision a drawing renders is
+# near black.  Here the wash is the whole plain surface: a sherd read only
+# through its rubbings needs an even ground where it has no pattern.
+RUBBING_RECESS_TONE_SETTINGS: Mapping[str, Mapping[str, int]] = {
+    RUBBING_TONE_LIGHT: {"contact_ink_percent": 60, "paper_tone_percent": 12},
+    RUBBING_TONE_MEDIUM: {"contact_ink_percent": 85, "paper_tone_percent": 20},
+    RUBBING_TONE_DARK: {"contact_ink_percent": 100, "paper_tone_percent": 30},
+}
 RUBBING_TONE_SETTINGS: Mapping[str, Mapping[str, Mapping[str, int]]] = {
     RELIEF_MODEL_CONTACT: {
         RUBBING_TONE_LIGHT: {"contact_ink_percent": 45},
@@ -137,6 +256,7 @@ RUBBING_TONE_SETTINGS: Mapping[str, Mapping[str, Mapping[str, int]]] = {
         },
         RUBBING_TONE_DARK: {"contact_ink_percent": 90},
     },
+    RELIEF_MODEL_CONTACT_CLOSING: _CLOSING_RAISED_TONES,
     RELIEF_MODEL_LOCAL_MEAN: {
         RUBBING_TONE_LIGHT: {
             "ink_strength_percent": 70,
@@ -185,8 +305,18 @@ class ArtifactRubbingError(ValueError):
     """An authoritative Digital Rubbing result cannot be produced safely."""
 
 
-def rubbing_tone_settings(tone: str, *, relief_model: str) -> dict[str, int]:
-    """The numbers a named tone stands for, in the model it is used in."""
+def rubbing_tone_settings(
+    tone: str,
+    *,
+    relief_model: str,
+    relief_polarity: str | None = None,
+) -> dict[str, int]:
+    """The numbers a named tone stands for, in the model it is used in.
+
+    The pressed paper inked on its incised side lays ink only where it spans
+    the surface, so there its steps are its own; ``relief_polarity`` says
+    which side is meant.
+    """
 
     by_tone = RUBBING_TONE_SETTINGS.get(str(relief_model))
     if by_tone is None:
@@ -194,6 +324,8 @@ def rubbing_tone_settings(tone: str, *, relief_model: str) -> dict[str, int]:
             f"unknown relief model {relief_model!r}; known models are "
             f"{', '.join(RELIEF_MODELS)}"
         )
+    if relief_model == RELIEF_MODEL_CONTACT_CLOSING and relief_polarity == "incised":
+        by_tone = RUBBING_RECESS_TONE_SETTINGS
     settings = by_tone.get(str(tone))
     if settings is None:
         raise ArtifactRubbingError(
@@ -202,7 +334,12 @@ def rubbing_tone_settings(tone: str, *, relief_model: str) -> dict[str, int]:
     return dict(settings)
 
 
-def rubbing_tone_of(values: Mapping[str, Any], *, relief_model: str) -> str | None:
+def rubbing_tone_of(
+    values: Mapping[str, Any],
+    *,
+    relief_model: str,
+    relief_polarity: str | None = None,
+) -> str | None:
     """Which named tone these settings are, or None if they are the drafter's.
 
     A drafter who has typed their own numbers has not chosen a tone, and the
@@ -211,7 +348,9 @@ def rubbing_tone_of(values: Mapping[str, Any], *, relief_model: str) -> str | No
     """
 
     for tone in RUBBING_TONES:
-        settings = rubbing_tone_settings(tone, relief_model=relief_model)
+        settings = rubbing_tone_settings(
+            tone, relief_model=relief_model, relief_polarity=relief_polarity
+        )
         if all(
             _is_integer(values.get(field)) and int(values[field]) == expected
             for field, expected in settings.items()
@@ -393,7 +532,7 @@ def rubbing_policy_blocks(
         minimum=1,
         maximum=MAX_RUBBING_CONTACT_INK_PERCENT,
     )
-    if relief_model == RELIEF_MODEL_CONTACT and polarity == "bidirectional":
+    if relief_model in CONTACT_RELIEF_MODELS and polarity == "bidirectional":
         raise ArtifactRubbingError(
             "the contact model inks what the paper touches, which has one side; "
             "use raised or incised polarity with it"
@@ -421,25 +560,37 @@ def rubbing_policy_blocks(
         "reference_radius_requested_um": radius_um,
         "tone_rounding": "nearest_half_up_integer/v1",
     }
+    if relief_model == RELIEF_MODEL_CONTACT_CLOSING:
+        # The pressed paper has no reference surface: a closing leaves a
+        # plane of any slope where it lies and reads every covered pixel, so
+        # neither the reference filter nor its sample floor takes part, and a
+        # recipe naming them would claim a step that never ran.
+        del relief_policy["minimum_reference_sample_count"]
+        del relief_policy["reference_filter"]
     if paper_tone:
         # Absent when the wash is off, so every recipe written before the
         # dabber was modelled rebuilds to the same bytes and the same raster.
         relief_policy["paper_tone_level"] = (255 * paper_tone + 50) // 100
         relief_policy["paper_tone_percent"] = paper_tone
-        relief_policy["recess_tone_retained_percent"] = RECESS_TONE_RETAINED_PERCENT
+        if relief_model != RELIEF_MODEL_CONTACT_CLOSING:
+            # The pressed paper keeps the whole wash under a recess too.
+            relief_policy["recess_tone_retained_percent"] = RECESS_TONE_RETAINED_PERCENT
     if gamma != 1:
         # Likewise absent when proportional, which is what every older recipe
         # was.
         relief_policy["ink_curve"] = "integer_power_of_normalised_response/v1"
         relief_policy["ink_curve_steps"] = _INK_CURVE_STEPS
         relief_policy["ink_gamma"] = gamma
-    if relief_model == RELIEF_MODEL_CONTACT:
+    if relief_model in CONTACT_RELIEF_MODELS:
         # And absent for the local-mean model, which every older recipe is.
         relief_policy["contact_ink_level"] = (255 * contact_ink + 50) // 100
         relief_policy["contact_ink_percent"] = contact_ink
-        relief_policy["envelope_filter"] = "masked_square_local_max/v1"
+        relief_policy["envelope_filter"] = CONTACT_ENVELOPE_FILTERS[relief_model]
         relief_policy["model"] = relief_model
-        relief_policy["residual_rounding"] = "floor_half_up_integer/v1"
+        if relief_model == RELIEF_MODEL_CONTACT:
+            relief_policy["residual_rounding"] = "floor_half_up_integer/v1"
+        else:
+            relief_policy["edge_filter"] = RELIEF_CLOSING_EDGE_FILTER
     return {
         "depth_policy": {
             "quantization_rounding": "nearest_ties_to_even/v1",
@@ -1090,16 +1241,60 @@ def _render_contact_relief(
     envelope = _sliding_maximum(residual, radius=reference_radius_pixels)
     raise_if_cancelled(cancellation_probe)
     below = np.where(usable, envelope - residual, 0)
+    return _contact_ink_raster(
+        below,
+        usable,
+        covered,
+        effective_black_point_ticks=effective_black_point_ticks,
+        contact_ink_level=contact_ink_level,
+        ink_gamma=ink_gamma,
+        maximum_tick=maximum_tick,
+        span_mm=span_mm,
+        cancellation_probe=cancellation_probe,
+    )
+
+
+def _contact_ink_raster(
+    below: np.ndarray,
+    usable: np.ndarray,
+    covered: np.ndarray,
+    *,
+    effective_black_point_ticks: int,
+    contact_ink_level: int,
+    ink_gamma: int,
+    maximum_tick: int,
+    span_mm: float,
+    cancellation_probe: CancellationProbe | None,
+    recess: bool = False,
+    wash_level: int = 0,
+    edge: np.ndarray | None = None,
+) -> tuple[np.ndarray, dict[str, int]]:
+    """Ink falling off with how far the surface sits below the paper.
+
+    Both contact models end here; they differ only in how the paper is found.
+    ``recess`` turns it round: the ink grows with the depth instead, so what
+    the paper spans is dark and what it lies on is white.  ``below`` is never
+    negative, so the two responses add up to the black point everywhere.
+    ``wash_level`` is ink every covered pixel takes before the relief adds
+    its own, and ``edge`` a response the pixel takes at least, on the
+    ``_INK_CURVE_STEPS`` scale; the square window's paper uses neither.
+    """
+
+    height, width = int(below.shape[0]), int(below.shape[1])
     black = np.int64(effective_black_point_ticks)
-    response = np.clip(black - below, 0, black)
+    reached = np.clip(below, 0, black)
+    response = reached if recess else black - reached
     steps = np.int64(_INK_CURVE_STEPS)
     normalised = (response * steps + black // 2) // black
+    if edge is not None:
+        normalised = np.maximum(normalised, edge)
+    relief_level = np.int64(contact_ink_level - wash_level)
     if ink_gamma == 1:
-        drop = (normalised * contact_ink_level + steps // 2) // steps
+        drop = (normalised * relief_level + steps // 2) // steps
     else:
         scale = steps**ink_gamma
-        drop = (normalised**ink_gamma * contact_ink_level + scale // 2) // scale
-    drop = np.where(usable, drop, 0)
+        drop = (normalised**ink_gamma * relief_level + scale // 2) // scale
+    drop = np.where(usable, drop + wash_level, 0)
     raise_if_cancelled(cancellation_probe)
     output = np.empty((height, width, 2), dtype=np.uint8)
     output[:, :, 0] = np.asarray(255 - drop, dtype=np.uint8)
@@ -1111,6 +1306,180 @@ def _render_contact_relief(
         "ink_sum": int(np.sum(drop[covered], dtype=np.int64)),
         "inked_pixel_count": int(np.count_nonzero(drop[covered] > 0)),
     }
+
+
+def _disk_dilation(
+    values: np.ndarray,
+    *,
+    radius: int,
+    cancellation_probe: CancellationProbe | None = None,
+) -> np.ndarray:
+    """The maximum over the integer disk ``dx*dx + dy*dy <= radius*radius``.
+
+    Exact in integers.  A disk is a stack of horizontal chords, one per row
+    offset, and a chord's half-width ``isqrt(r*r - dy*dy)`` only grows as the
+    row offset shrinks.  So one running maximum along the rows is widened a
+    cell at a time from the disk's top row down to its middle, and each row
+    offset takes it shifted up and down by that offset: about four passes
+    over the raster per pixel of radius.  Cells outside the array count as
+    the smallest value.
+    """
+
+    sentinel = np.iinfo(np.int64).min // 2
+    result = np.full_like(values, sentinel)
+    chord = values.copy()
+    half_width = 0
+    for dy in range(radius, -1, -1):
+        raise_if_cancelled(cancellation_probe)
+        needed = math.isqrt(radius * radius - dy * dy)
+        while half_width < needed:
+            half_width += 1
+            np.maximum(
+                chord[:, :-half_width],
+                values[:, half_width:],
+                out=chord[:, :-half_width],
+            )
+            np.maximum(
+                chord[:, half_width:],
+                values[:, :-half_width],
+                out=chord[:, half_width:],
+            )
+        if dy == 0:
+            np.maximum(result, chord, out=result)
+        else:
+            np.maximum(result[dy:, :], chord[:-dy, :], out=result[dy:, :])
+            np.maximum(result[:-dy, :], chord[dy:, :], out=result[:-dy, :])
+    return result
+
+
+def _disk_closing(
+    values: np.ndarray,
+    covered: np.ndarray,
+    *,
+    radius: int,
+    cancellation_probe: CancellationProbe | None = None,
+) -> np.ndarray:
+    """The pressed paper: the closing of the covered surface by a round disk.
+
+    The covered heights are dilated - uncovered cells take no part - and the
+    result is eroded, the erosion being minus the dilation of minus it.  A
+    cell whose disk held no covered cell is left out of the erosion rather
+    than read as a hole in the paper, so beyond the edge of the surface the
+    paper is what the surface holds up.  At every covered cell the result is
+    at least the height there, since every disk that reaches the cell holds
+    it.
+    """
+
+    sentinel = np.iinfo(np.int64).min // 2
+    lifted = _disk_dilation(
+        np.where(covered, values, sentinel),
+        radius=radius,
+        cancellation_probe=cancellation_probe,
+    )
+    lowered = _disk_dilation(
+        np.where(lifted > sentinel, -lifted, sentinel),
+        radius=radius,
+        cancellation_probe=cancellation_probe,
+    )
+    return -lowered
+
+
+def _edge_ramp(
+    covered: np.ndarray,
+    *,
+    radius: int,
+    cancellation_probe: CancellationProbe | None = None,
+) -> np.ndarray:
+    """How deep into the fold over the edge each covered cell lies.
+
+    The paper folds down over the break at the edge of the surface and the
+    dabber strikes the fold hardest.  A covered cell whose centre lies ``d``
+    cells from the nearest uncovered cell - or from the edge of the raster -
+    takes ``(radius - d) / radius`` of the full ink, on the
+    ``_INK_CURVE_STEPS`` scale, and none from one radius in.  Exact in
+    integers: the squared distance is the smallest of each row's horizontal
+    distance squared plus the row offset squared, and ``d`` is read from a
+    table of integer square roots.
+    """
+
+    height, width = int(covered.shape[0]), int(covered.shape[1])
+    uncovered = np.ones((height + 2, width + 2), dtype=bool)
+    uncovered[1:-1, 1:-1] = ~covered
+    far = radius + 1
+    columns = np.arange(width + 2, dtype=np.int64)[None, :]
+    left = np.where(uncovered, columns, -(far + width + 2))
+    np.maximum.accumulate(left, axis=1, out=left)
+    right = np.where(uncovered, columns, far + 2 * width + 4)
+    right = np.minimum.accumulate(right[:, ::-1], axis=1)[:, ::-1]
+    across = np.minimum(np.minimum(columns - left, right - columns), far)
+    squared = across * across
+    nearest = squared.copy()
+    for dy in range(1, far):
+        raise_if_cancelled(cancellation_probe)
+        offset = np.int64(dy * dy)
+        np.minimum(nearest[dy:], squared[:-dy] + offset, out=nearest[dy:])
+        np.minimum(nearest[:-dy], squared[dy:] + offset, out=nearest[:-dy])
+    limit = radius * radius
+    roots = np.array([math.isqrt(value) for value in range(limit + 1)], dtype=np.int64)
+    distance = roots[np.minimum(nearest[1:-1, 1:-1], limit)]
+    steps = np.int64(_INK_CURVE_STEPS)
+    ramp = ((radius - distance) * steps + radius // 2) // radius
+    return np.where(covered, ramp, 0)
+
+
+def _render_contact_closing_relief(
+    depth_buffer: np.ndarray,
+    *,
+    depth_quantization_um: int,
+    reference_radius_pixels: int,
+    effective_black_point_ticks: int,
+    relief_polarity: str,
+    contact_ink_level: int,
+    ink_gamma: int,
+    cancellation_probe: CancellationProbe | None,
+    paper_tone_level: int = 0,
+) -> tuple[np.ndarray, dict[str, int]]:
+    """Ink as closeness to the pressed paper: contact_envelope/v2 at the top."""
+
+    raise_if_cancelled(cancellation_probe)
+    covered = np.isfinite(depth_buffer)
+    covered_depths = depth_buffer[covered]
+    minimum_depth = float(np.min(covered_depths))
+    span_mm = float(np.max(covered_depths) - minimum_depth)
+    scaled = (covered_depths - minimum_depth) * (1000.0 / float(depth_quantization_um))
+    if not bool(np.isfinite(scaled).all()) or float(np.max(scaled)) > MAX_RUBBING_DEPTH_TICKS:
+        raise ArtifactRubbingError("rubbing depth span exceeds the quantized safety range")
+    height, width = int(depth_buffer.shape[0]), int(depth_buffer.shape[1])
+    ticks = np.zeros((height, width), dtype=np.int64)
+    ticks[covered] = np.rint(scaled).astype(np.int64)
+    maximum_tick = int(ticks[covered].max())
+    raise_if_cancelled(cancellation_probe)
+    paper = _disk_closing(
+        ticks,
+        covered,
+        radius=reference_radius_pixels,
+        cancellation_probe=cancellation_probe,
+    )
+    raise_if_cancelled(cancellation_probe)
+    below = np.where(covered, paper - ticks, 0)
+    edge = _edge_ramp(
+        covered, radius=reference_radius_pixels, cancellation_probe=cancellation_probe
+    )
+    return _contact_ink_raster(
+        below,
+        covered,
+        covered,
+        effective_black_point_ticks=effective_black_point_ticks,
+        contact_ink_level=contact_ink_level,
+        ink_gamma=ink_gamma,
+        maximum_tick=maximum_tick,
+        span_mm=span_mm,
+        cancellation_probe=cancellation_probe,
+        # Incised, the ink goes where the paper spans, not where it lies.
+        recess=relief_polarity == "incised",
+        wash_level=paper_tone_level,
+        edge=edge,
+    )
 
 
 def _render_local_relief(
@@ -1127,6 +1496,18 @@ def _render_local_relief(
     contact_ink_level: int = 0,
     cancellation_probe: CancellationProbe | None = None,
 ) -> tuple[np.ndarray, dict[str, int]]:
+    if relief_model == RELIEF_MODEL_CONTACT_CLOSING:
+        return _render_contact_closing_relief(
+            depth_buffer,
+            depth_quantization_um=depth_quantization_um,
+            reference_radius_pixels=reference_radius_pixels,
+            effective_black_point_ticks=effective_black_point_ticks,
+            relief_polarity=relief_polarity,
+            contact_ink_level=contact_ink_level,
+            ink_gamma=ink_gamma,
+            cancellation_probe=cancellation_probe,
+            paper_tone_level=paper_tone_level,
+        )
     if relief_model == RELIEF_MODEL_CONTACT:
         return _render_contact_relief(
             depth_buffer,
@@ -1322,8 +1703,9 @@ def extract_digital_rubbing(
         reference_radius_pixels=int(relief_policy["reference_radius_pixels"]),
         effective_black_point_ticks=int(relief_policy["effective_black_point_ticks"]),
         relief_polarity=str(relief_policy["polarity"]),
+        # The pressed paper has no reference filter, so no sample floor.
         minimum_reference_sample_count=int(
-            relief_policy["minimum_reference_sample_count"]
+            relief_policy.get("minimum_reference_sample_count", 0)
         ),
         paper_tone_level=int(relief_policy.get("paper_tone_level", 0)),
         ink_gamma=int(relief_policy.get("ink_gamma", DEFAULT_RUBBING_INK_GAMMA)),

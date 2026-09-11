@@ -858,6 +858,50 @@ class ArtifactSession:
         )
         return self.with_document(self.document.append_align_revision(revision))
 
+    def commit_mandrel_axis_alignment(
+        self,
+        *,
+        mandrel_record_id: str,
+        operator: str,
+        created_at: str | None = None,
+        revision_id: str | None = None,
+    ) -> "ArtifactSession":
+        """Commit an Align that stands a tile on its measured 와통.
+
+        The tile counterpart of `commit_axis_alignment`.  The recipe is of the
+        same kind, derived from the drum's own two end sections, so every
+        consumer that asks whether an artifact stands on a measured axis
+        accepts it unchanged - the canonical-axis development among them.
+        """
+
+        from .artifact_axis_alignment import (  # noqa: PLC0415
+            ArtifactAxisAlignmentError,
+            build_mandrel_axis_alignment,
+        )
+
+        parent_id = self.document.active_align_revision_id
+        if parent_id is None:
+            raise ArtifactSessionError("an active Align revision is required")
+        parent = self.document.align_revision_index[parent_id]
+        try:
+            matrix, recipe, qc = build_mandrel_axis_alignment(
+                self.document,
+                mandrel_record_id=mandrel_record_id,
+            )
+        except ArtifactAxisAlignmentError as exc:
+            raise ArtifactSessionError(str(exc)) from exc
+        revision = AlignRevision(
+            id=revision_id or _new_id("align"),
+            parent_id=parent.id,
+            source_metadata_revision_id=parent.source_metadata_revision_id,
+            matrix4x4=_matrix4x4_tuple(matrix),
+            recipe=recipe,
+            qc=qc,
+            created_at=str(created_at or _utc_now()),
+            operator=operator,
+        )
+        return self.with_document(self.document.append_align_revision(revision))
+
     def commit_mesh_repair(
         self,
         joins: "list[RingPairJoin | RingToRingJoin | DropFaces]",

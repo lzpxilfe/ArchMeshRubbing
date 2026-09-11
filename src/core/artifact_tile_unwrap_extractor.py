@@ -317,6 +317,34 @@ def selection_face_indices(selection: Mapping[str, Any]) -> np.ndarray:
     return indices
 
 
+def tile_unwrap_selection(
+    *,
+    total_face_count: int,
+    selected_face_indices: Sequence[int] | np.ndarray,
+) -> dict[str, Any]:
+    """The canonical recording-surface selection block, digest included.
+
+    Public so that another record measured on a recording surface - the 와통
+    it was formed on - is written in the same encoding and so carries the
+    same ``selection_sha256`` as a development of that surface: the two can
+    then be shown to name one face set.
+    """
+
+    total = _strict_int(
+        total_face_count,
+        name="selection.total_face_count",
+        minimum=1,
+        maximum=MAX_TILE_UNWRAP_FACES,
+    )
+    return _selection_value(
+        total_face_count=total,
+        face_ranges=_indices_to_ranges(
+            np.asarray(selected_face_indices, dtype=np.int64),
+            total_face_count=total,
+        ),
+    )
+
+
 def validate_tile_unwrap_selection(value: object) -> dict[str, Any]:
     selection = _exact_keys(
         value,
@@ -1751,6 +1779,7 @@ def commit_artifact_tile_unwrap(
 
 
 __all__ = [
+    "tile_unwrap_selection",
     "ArtifactTileUnwrapComputation",
     "ArtifactTileUnwrapError",
     "MAX_TILE_UNWRAP_COORDINATE_UM",

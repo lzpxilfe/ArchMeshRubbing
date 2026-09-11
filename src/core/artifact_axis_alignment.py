@@ -387,6 +387,111 @@ def build_axis_alignment(
     return matrix, recipe, qc
 
 
+def build_mandrel_axis_alignment(
+    document: ArtifactDocument,
+    *,
+    mandrel_record_id: str,
+) -> tuple[np.ndarray, dict[str, Any], dict[str, Any]]:
+    """Return the Align that stands a tile on its measured 와통.
+
+    A tile has no rim and base to give two circles, and two arc sections of
+    it do not fix a centre (see `artifact_mandrel`).  The 와통 record measures
+    the drum from the whole recording surface and states its own two end
+    sections - circles about one axis, centre on it and plane across it.
+    They are written into the same recipe two circle records would make, and
+    derived by the same Rodrigues arithmetic an offline verifier already
+    re-runs, so every consumer that asks whether an artifact stands on a
+    measured axis - the canonical-axis development among them - accepts it.
+
+    ``axis_source`` is ``circle_plane_normals/v1`` because that is what the
+    direction is taken from.  Both record ids name the 와통 record, and its
+    type says that the two circles are the drum's own sections from one
+    joint fit rather than two separate picks.
+    """
+
+    from .artifact_mandrel import (  # noqa: PLC0415
+        MANDREL_RECORD_TYPE,
+        ArtifactMandrelError,
+        mandrel_receipt_from_record,
+    )
+
+    if not isinstance(document, ArtifactDocument):
+        raise ArtifactAxisAlignmentError("document must be an ArtifactDocument")
+    record_id = str(mandrel_record_id)
+    record = document.record_index.get(record_id)
+    if record is None:
+        raise ArtifactAxisAlignmentError(
+            f"mandrel_record_id {record_id!r} does not exist in this document"
+        )
+    if record.type != MANDREL_RECORD_TYPE:
+        raise ArtifactAxisAlignmentError(
+            f"mandrel_record_id must name a {MANDREL_RECORD_TYPE} record, "
+            f"not {record.type!r}"
+        )
+    parent_id = document.active_align_revision_id
+    if parent_id is None:
+        raise ArtifactAxisAlignmentError("an active Align revision is required")
+    parent = document.align_revision_index[parent_id]
+    if record.align_revision_id != parent_id:
+        raise ArtifactAxisAlignmentError(
+            f"the 와통 was measured under a different Align "
+            f"({record.align_revision_id!r}); re-measure it under the active "
+            "Align before standing the tile on it"
+        )
+    try:
+        receipt = mandrel_receipt_from_record(record)
+    except ArtifactMandrelError as exc:
+        raise ArtifactAxisAlignmentError(f"mandrel record: {exc}") from exc
+    bottom = receipt["sections"]["bottom"]
+    top = receipt["sections"]["top"]
+    bottom_center = _decimal_vector(bottom["center_mm_decimal"], field_name="bottom section centre")
+    top_center = _decimal_vector(top["center_mm_decimal"], field_name="top section centre")
+    bottom_normal = _decimal_vector(bottom["normal_unit_decimal"], field_name="bottom section normal")
+    top_normal = _decimal_vector(top["normal_unit_decimal"], field_name="top section normal")
+    separation_vector = top_center - bottom_center
+    separation = float(np.linalg.norm(separation_vector))
+    if separation < MINIMUM_CENTER_SEPARATION_MM:
+        raise ArtifactAxisAlignmentError(
+            f"the recording surface runs {separation:.3f} mm along its 와통, too "
+            f"short to fix its direction (needs at least "
+            f"{MINIMUM_CENTER_SEPARATION_MM:.3f} mm)"
+        )
+
+    recipe = {
+        "axis_source": AXIS_SOURCE_CIRCLE_NORMALS,
+        "bottom_center_mm_decimal": list(bottom["center_mm_decimal"]),
+        "bottom_normal_unit_decimal": list(bottom["normal_unit_decimal"]),
+        "bottom_record_id": record_id,
+        "convention": AXIS_ALIGN_CONVENTION,
+        "kind": AXIS_ALIGN_RECIPE_KIND,
+        "top_center_mm_decimal": list(top["center_mm_decimal"]),
+        "top_normal_unit_decimal": list(top["normal_unit_decimal"]),
+        "top_record_id": record_id,
+    }
+    delta = axis_align_delta_from_recipe(recipe)
+    matrix = compose_align_matrices(delta, parent.matrix)
+    axis = _common_normal(top_normal, bottom_normal, separation_vector)
+    center_line = _unit(separation_vector, field_name="axis")
+    qc = {
+        "axis_source": AXIS_SOURCE_CIRCLE_NORMALS,
+        "axis_tilt_corrected_deg": _quantized(
+            _angle_between_deg(axis, np.asarray(CANONICAL_AXIS))
+        ),
+        "center_line_disagreement_deg": _quantized(
+            max(
+                _undirected_angle_deg(top_normal, center_line),
+                _undirected_angle_deg(bottom_normal, center_line),
+            )
+        ),
+        "center_separation_mm": _quantized(separation),
+        "circle_normal_disagreement_deg": _quantized(
+            _undirected_angle_deg(top_normal, bottom_normal)
+        ),
+        "proper_rigid": True,
+    }
+    return matrix, recipe, qc
+
+
 def verify_axis_alignment_matrix(
     *,
     recipe: Mapping[str, Any],
@@ -423,5 +528,6 @@ __all__ = [
     "MINIMUM_SEPARATION_TO_RADIUS_RATIO",
     "axis_align_delta_from_recipe",
     "build_axis_alignment",
+    "build_mandrel_axis_alignment",
     "verify_axis_alignment_matrix",
 ]

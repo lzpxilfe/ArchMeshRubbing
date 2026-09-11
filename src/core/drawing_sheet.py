@@ -43,7 +43,11 @@ from .artifact_developed_rubbing import (
     _largest_covered_rectangle,
     developed_rubbing_receipt_from_record,
 )
-from .artifact_rubbing_extractor import DigitalRubbingRaster
+from .artifact_rubbing_extractor import (
+    CONTACT_RELIEF_MODELS,
+    RELIEF_MODEL_CONTACT_CLOSING,
+    DigitalRubbingRaster,
+)
 from .artifact_rubbing_record import (
     ArtifactRubbingRecordError,
     RUBBING_RECORD_TYPE,
@@ -426,9 +430,16 @@ def computed_rubbing_caption(recipe: Mapping[str, Any], *, developed: bool) -> s
     try:
         window = _millimetre_token(relief["reference_radius_requested_um"])
         black = _millimetre_token(relief["black_point_requested_um"])
-        if relief.get("model") == "contact_envelope/v1":
+        if relief.get("model") in CONTACT_RELIEF_MODELS:
             ink = f"먹 {int(relief['contact_ink_percent'])}%"
             model = "접촉 모델"
+            if relief.get("model") == RELIEF_MODEL_CONTACT_CLOSING:
+                if relief.get("polarity") == "incised":
+                    # The ink is where the paper spans: a reader must not
+                    # take the dark strokes for what the paper touched.
+                    model = "접촉 모델 · 음각에 먹"
+                if int(relief.get("paper_tone_percent", 0) or 0):
+                    ink += f" · 기저 {int(relief['paper_tone_percent'])}%"
         else:
             ink = f"먹 {int(relief['ink_strength_percent'])}%"
             model = "높이 모델"

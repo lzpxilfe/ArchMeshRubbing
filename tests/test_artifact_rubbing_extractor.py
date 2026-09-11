@@ -544,8 +544,10 @@ def test_a_named_tone_is_the_ink_of_its_model_and_darker_means_more_ink() -> Non
     import pytest
 
     from src.core.artifact_rubbing_extractor import (
+        CONTACT_RELIEF_MODELS,
         RELIEF_MODELS,
         RELIEF_MODEL_CONTACT,
+        RELIEF_MODEL_CONTACT_CLOSING,
         RUBBING_TONES,
         RUBBING_TONE_DARK,
         RUBBING_TONE_LABELS_KO,
@@ -564,7 +566,15 @@ def test_a_named_tone_is_the_ink_of_its_model_and_darker_means_more_ink() -> Non
         assert {field for step in steps for field in step} == set(steps[0])
         for field in steps[0]:
             values = [step[field] for step in steps]
-            assert values == sorted(values) and len(set(values)) == 3, (model, field)
+            # No field lightens the sheet as the tone darkens ...
+            assert values == sorted(values), (model, field)
+        # ... and the one that says how dark it is rises at every step.  (The
+        # pressed paper's raised side keeps no wash at any step: on a report's
+        # plate a recess is white paper.)
+        darkness = (
+            "contact_ink_percent" if model in CONTACT_RELIEF_MODELS else "ink_strength_percent"
+        )
+        assert len({step[darkness] for step in steps}) == 3, (model, darkness)
         # The table and the reverse lookup are the same table.
         for tone, step in zip(RUBBING_TONES, steps, strict=True):
             assert rubbing_tone_of(step, relief_model=model) == tone
@@ -581,7 +591,7 @@ def test_a_named_tone_is_the_ink_of_its_model_and_darker_means_more_ink() -> Non
 
     def _ink(tone: str, *, model: str) -> float:
         settings = rubbing_tone_settings(tone, relief_model=model)
-        contact = model == RELIEF_MODEL_CONTACT
+        contact = model in CONTACT_RELIEF_MODELS
         raster, _qc = extract_digital_rubbing(
             vertices,
             faces,
@@ -607,3 +617,138 @@ def test_a_named_tone_is_the_ink_of_its_model_and_darker_means_more_ink() -> Non
     for model in RELIEF_MODELS:
         inks = [_ink(tone, model=model) for tone in RUBBING_TONES]
         assert inks[0] < inks[1] < inks[2], (model, inks)
+
+    # Incised, the pressed paper's steps are its own and darker: its ink is
+    # how dark the deepest incision is on an otherwise white sheet.
+    recess = [
+        rubbing_tone_settings(
+            tone, relief_model=RELIEF_MODEL_CONTACT_CLOSING, relief_polarity="incised"
+        )
+        for tone in RUBBING_TONES
+    ]
+    values = [step["contact_ink_percent"] for step in recess]
+    assert values == sorted(values) and len(set(values)) == 3
+    for tone, step in zip(RUBBING_TONES, recess, strict=True):
+        assert (
+            rubbing_tone_of(
+                step, relief_model=RELIEF_MODEL_CONTACT_CLOSING, relief_polarity="incised"
+            )
+            == tone
+        )
+    raised = rubbing_tone_settings(RUBBING_TONE_MEDIUM, relief_model=RELIEF_MODEL_CONTACT_CLOSING)
+    assert raised["contact_ink_percent"] < recess[1]["contact_ink_percent"]
+
+
+def test_the_disk_dilation_matches_a_brute_force_disk() -> None:
+    """The pressed paper's disk must be the integer disk on every cell,
+    including where it runs off the array and at radii wider than it."""
+
+    import numpy as np
+
+    from src.core.artifact_rubbing_extractor import _disk_dilation
+
+    rng = np.random.default_rng(11)
+    values = rng.integers(-1000, 1000, size=(23, 37), dtype=np.int64)
+    rows, columns = np.mgrid[0 : values.shape[0], 0 : values.shape[1]]
+    for radius in (0, 1, 2, 3, 5, 8, 13, 40):
+        fast = _disk_dilation(values, radius=radius)
+        slow = np.empty_like(values)
+        for y in range(values.shape[0]):
+            for x in range(values.shape[1]):
+                inside = (rows - y) ** 2 + (columns - x) ** 2 <= radius * radius
+                slow[y, x] = values[inside].max()
+        assert np.array_equal(fast, slow), radius
+
+
+def test_the_pressed_paper_lies_on_a_slope_and_a_grain_and_spans_a_narrow_groove() -> None:
+    """contact_envelope/v2 against what paper does, on depth fields made to
+    measure: 10 um ticks on a 0.1 mm pixel, a 1.5 mm disk, ink gone 0.15 mm
+    below the paper.
+
+    The square window of version 1 is drawn beside it on the one field where
+    they part: a single grain, which holds that paper up over a whole square.
+    """
+
+    import numpy as np
+
+    from src.core.artifact_rubbing_extractor import (
+        RELIEF_MODEL_CONTACT,
+        RELIEF_MODEL_CONTACT_CLOSING,
+        _render_local_relief,
+    )
+
+    contact_level = (255 * 70 + 50) // 100
+    contact_grey = 255 - contact_level
+
+    def grey(
+        depth_mm: np.ndarray, model: str, *, polarity: str = "raised", wash: int = 0
+    ) -> np.ndarray:
+        pixels, _qc = _render_local_relief(
+            depth_mm,
+            depth_quantization_um=10,
+            reference_radius_pixels=15,
+            effective_black_point_ticks=15,
+            relief_polarity=polarity,
+            minimum_reference_sample_count=3,
+            relief_model=model,
+            contact_ink_level=contact_level,
+            paper_tone_level=wash,
+        )
+        # The raster is stored top row first, the depth field bottom row first.
+        return np.flipud(pixels[:, :, 0]).astype(np.int64)
+
+    rows, columns = np.mgrid[0:120, 0:160]
+    # A wall sloping one tick a pixel one way and two the other, with bare
+    # paper round it: the paper lies on every pixel of it, edges included,
+    # since beyond the edge it is held up by the wall it covers.
+    slope = (columns + 2 * rows) * 0.01
+    slope[:20, :] = np.nan
+    slope[-20:, :] = np.nan
+    slope[:, :20] = np.nan
+    slope[:, -20:] = np.nan
+    on_slope = grey(slope, RELIEF_MODEL_CONTACT_CLOSING)
+    assert (on_slope[20:-20, 20:-20] == contact_grey).all()
+
+    # A level wall with one grain standing 0.3 mm proud, a groove 1 mm wide
+    # and a hollow 5 mm wide, both 0.3 mm deep.
+    wall = np.zeros((120, 160))
+    wall[60, 30] = 0.3
+    wall[:, 70:80] = -0.3
+    wall[:, 100:150] = -0.3
+    paper = grey(wall, RELIEF_MODEL_CONTACT_CLOSING)
+    square = grey(wall, RELIEF_MODEL_CONTACT)
+    # The grain takes ink and leaves its neighbours alone ...
+    around = (np.abs(rows - 60) <= 12) & (np.abs(columns - 30) <= 12)
+    assert (paper[around] == contact_grey).all()
+    # ... where the square window's paper, held up on it, leaves them white.
+    ring = around & ((rows - 60) ** 2 + (columns - 30) ** 2 >= 4)
+    assert (square[ring] == 255).all()
+    # The disk spans the groove, whose floor stays white, and fits the
+    # hollow, whose floor it follows.  (Within one disk of the raster's edge
+    # the paper folds over, below.)
+    assert (paper[16:-16, 70:80] == 255).all()
+    assert (paper[:, 100:150] == contact_grey).all()
+
+    # Incised, the ink goes where the paper spans: the groove's floor is
+    # black, and the wall, the grain, the hollow's floor and the slope, which
+    # the paper lies on, stay white.
+    incised = grey(wall, RELIEF_MODEL_CONTACT_CLOSING, polarity="incised")
+    assert (incised[:, 70:80] == contact_grey).all()
+    assert (incised[around] == 255).all()
+    assert (incised[16:-16, 100:144] == 255).all()
+    on_slope_incised = grey(slope, RELIEF_MODEL_CONTACT_CLOSING, polarity="incised")
+    assert (on_slope_incised[36:-36, 36:-36] == 255).all()
+
+    # The paper folds over the edge of the surface and takes the dabber
+    # hardest there: next to the edge fourteen fifteenths of the full ink,
+    # and nothing from one disk in.
+    fold = 255 - (14 * 4095 // 15 * contact_level + 2047) // 4095
+    assert (on_slope_incised[20, 40:120] == fold).all()
+    assert (on_slope_incised[35, 40:120] == 255).all()
+
+    # With the dabber's wash the flat takes the wash, and the groove still
+    # the full ink.
+    wash = (255 * 20 + 50) // 100
+    washed = grey(wall, RELIEF_MODEL_CONTACT_CLOSING, polarity="incised", wash=wash)
+    assert (washed[around] == 255 - wash).all()
+    assert (washed[:, 70:80] == contact_grey).all()

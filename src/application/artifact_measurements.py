@@ -105,6 +105,26 @@ from src.core.artifact_surface_measurement import (
     surface_measurement_selection_hash,
 )
 from src.core.artifact_axis_alignment import AXIS_ALIGN_RECIPE_KIND
+from src.core.artifact_mandrel import (
+    ArtifactMandrelError,
+    MandrelComputation,
+    commit_mandrel_measurement,
+    extract_mandrel,
+    mandrel_computation_matches_active_projection,
+    mandrel_recipe,
+    mandrel_selection_hash,
+    validate_mandrel_recipe,
+)
+from src.core.artifact_unrollable_surface import (
+    ArtifactUnrollableSurfaceError,
+    UnrollableSelectionComputation,
+    commit_unrollable_selection,
+    extract_unrollable_selection,
+    unrollable_selection_computation_matches_active_projection,
+    unrollable_selection_hash,
+    unrollable_selection_recipe,
+    validate_unrollable_selection_recipe,
+)
 from src.core.artifact_tile_unwrap_extractor import (
     SECTION_CENTER_CANONICAL_AXIS,
     SECTION_CENTER_FIT_PER_SECTION,
@@ -175,6 +195,8 @@ class MeasurementOperationKind(str, Enum):
     CONDITION_ANNOTATION = "condition_annotation"
     TECHNIQUE_ANNOTATION = "technique_annotation"
     DEVELOPED_RUBBING = "developed_rubbing"
+    MANDREL_CYLINDER = "mandrel_cylinder"
+    UNROLLABLE_SELECTION = "unrollable_selection"
 
 
 # Kinds that allocate a raster and therefore share the rubbing memory budget.
@@ -212,6 +234,8 @@ MeasurementComputation: TypeAlias = (
     | ConditionAnnotationComputation
     | TechniqueAnnotationComputation
     | DevelopedRubbingComputation
+    | MandrelComputation
+    | UnrollableSelectionComputation
 )
 CancellationProbe: TypeAlias = Callable[[], bool]
 MeasurementPublisher: TypeAlias = Callable[[RecordBindingTransition], None]
@@ -291,6 +315,10 @@ def _operation_kind_for_computation(
         return MeasurementOperationKind.TECHNIQUE_ANNOTATION
     if isinstance(computation, DevelopedRubbingComputation):
         return MeasurementOperationKind.DEVELOPED_RUBBING
+    if isinstance(computation, MandrelComputation):
+        return MeasurementOperationKind.MANDREL_CYLINDER
+    if isinstance(computation, UnrollableSelectionComputation):
+        return MeasurementOperationKind.UNROLLABLE_SELECTION
     if isinstance(computation, ArtifactVectorComputation):
         kind = VectorRecordKind(computation.payload.kind)
         if kind is VectorRecordKind.CUTLINE:
@@ -680,6 +708,44 @@ def execute_measurement_work_item(
             payload=technique_payload,
             recipe=recipe,
             qc=technique_payload.qc_summary(),
+        )
+    elif work_item.kind is MeasurementOperationKind.MANDREL_CYLINDER:
+        try:
+            mandrel_receipt, mandrel_qc = extract_mandrel(
+                projection.mesh.vertices,
+                projection.mesh.faces,
+                recipe,
+                cancellation_probe=cancellation_probe,
+            )
+        except ArtifactComputationCancelledError as exc:
+            raise MeasurementCancelledError(str(exc)) from exc
+        except ArtifactMandrelError as exc:
+            raise ArtifactMeasurementError(str(exc)) from exc
+        computation = MandrelComputation(
+            context=work_item.context,
+            projection_snapshot=work_item.projection_snapshot,
+            receipt=mandrel_receipt,
+            recipe=recipe,
+            qc=mandrel_qc,
+        )
+    elif work_item.kind is MeasurementOperationKind.UNROLLABLE_SELECTION:
+        try:
+            unrollable_receipt, unrollable_qc, kept_faces = extract_unrollable_selection(
+                projection.mesh,
+                recipe,
+                cancellation_probe=cancellation_probe,
+            )
+        except ArtifactComputationCancelledError as exc:
+            raise MeasurementCancelledError(str(exc)) from exc
+        except ArtifactUnrollableSurfaceError as exc:
+            raise ArtifactMeasurementError(str(exc)) from exc
+        computation = UnrollableSelectionComputation(
+            context=work_item.context,
+            projection_snapshot=work_item.projection_snapshot,
+            receipt=unrollable_receipt,
+            recipe=recipe,
+            qc=unrollable_qc,
+            kept_face_indices=kept_faces,
         )
     elif work_item.kind is MeasurementOperationKind.DEVELOPED_RUBBING:
         try:
@@ -1129,6 +1195,30 @@ class ArtifactMeasurementController:
             ):
                 raise StaleMeasurementOperationError(
                     "technique selection does not match the active source mesh"
+                )
+        if kind is MeasurementOperationKind.MANDREL_CYLINDER:
+            try:
+                mandrel_selection_block = validate_mandrel_recipe(recipe)["selection"]
+            except ArtifactMandrelError as exc:
+                raise ArtifactMeasurementError(str(exc)) from exc
+            if int(mandrel_selection_block["total_face_count"]) != int(
+                session.source_mesh.faces.shape[0]
+            ):
+                raise StaleMeasurementOperationError(
+                    "mandrel selection does not match the active source mesh"
+                )
+        if kind is MeasurementOperationKind.UNROLLABLE_SELECTION:
+            try:
+                unrollable_selection_block = validate_unrollable_selection_recipe(recipe)[
+                    "selection"
+                ]
+            except ArtifactUnrollableSurfaceError as exc:
+                raise ArtifactMeasurementError(str(exc)) from exc
+            if int(unrollable_selection_block["total_face_count"]) != int(
+                session.source_mesh.faces.shape[0]
+            ):
+                raise StaleMeasurementOperationError(
+                    "unrollable selection does not match the active source mesh"
                 )
         development_prerequisites: tuple[str, ...] = ()
         if kind is MeasurementOperationKind.DEVELOPED_RUBBING:
@@ -1619,6 +1709,106 @@ class ArtifactMeasurementController:
             created_at=created_at,
             operator=operator,
             selection_hash=surface_measurement_selection_hash(recipe),
+            depends_on_record_ids=depends_on_record_ids,
+        )
+
+    def begin_mandrel_cylinder(
+        self,
+        *,
+        selected_face_indices: Sequence[int],
+        record_id: str | None = None,
+        created_at: str | None = None,
+        operator: str = "local-user",
+        depends_on_record_ids: Sequence[str] = (),
+    ) -> ArtifactMeasurementWorkItem:
+        """Reserve one 와통 measurement on the selected recording surface.
+
+        The axis a tile is unrolled about has to be measured, not dragged,
+        and a tile has no rim and base to measure it from - so it is measured
+        from the surface itself.  The face set is fixed here in the encoding a
+        development uses, so the record can be shown to name the surface that
+        is later unrolled.
+        """
+
+        session = self._workbench.snapshot.session
+        if not isinstance(session, ArtifactSession):
+            raise ArtifactMeasurementError("no active ArtifactDocument session")
+        try:
+            recipe = mandrel_recipe(
+                total_face_count=int(session.source_mesh.faces.shape[0]),
+                selected_face_indices=selected_face_indices,
+            )
+        except ArtifactMandrelError as exc:
+            raise ArtifactMeasurementError(str(exc)) from exc
+        return self._begin(
+            kind=MeasurementOperationKind.MANDREL_CYLINDER,
+            recipe=recipe,
+            record_id=record_id,
+            created_at=created_at,
+            operator=operator,
+            selection_hash=mandrel_selection_hash(recipe),
+            depends_on_record_ids=depends_on_record_ids,
+        )
+
+    def begin_unrollable_selection(
+        self,
+        *,
+        selected_face_indices: Sequence[int],
+        longitudinal_axis: str,
+        record_view: str,
+        n_sections: int = 32,
+        seam_angle_microdegrees: int | None = None,
+        section_center_policy: str = SECTION_CENTER_CANONICAL_AXIS,
+        station_policy: str = STATION_CENTERLINE_ARC,
+        record_id: str | None = None,
+        created_at: str | None = None,
+        operator: str = "local-user",
+        depends_on_record_ids: Sequence[str] = (),
+    ) -> ArtifactMeasurementWorkItem:
+        """Reserve one 펼 수 있는 기록면 on the painted request.
+
+        The faces a development about the measured axis cannot carry are left
+        out by that development's own gates, and the record says which, how
+        many and where, so the development made from what is kept can depend
+        on it and a rubbing never leaves a place blank unsaid.
+        """
+
+        session = self._workbench.snapshot.session
+        if not isinstance(session, ArtifactSession):
+            raise ArtifactMeasurementError("no active ArtifactDocument session")
+        # Where the paper lies is a statement about the drum, so the artifact
+        # must stand on its measured axis, as a development about it must.
+        align_id = session.document.active_align_revision_id
+        align = (
+            session.document.align_revision_index.get(align_id)
+            if isinstance(align_id, str)
+            else None
+        )
+        if align is None or align.recipe.get("kind") != AXIS_ALIGN_RECIPE_KIND:
+            raise ArtifactMeasurementError(
+                "which faces the paper can reach needs an artifact positioned on "
+                "its measured rotation axis; the active Align was not made from one"
+            )
+        try:
+            recipe = unrollable_selection_recipe(
+                total_face_count=int(session.source_mesh.faces.shape[0]),
+                selected_face_indices=selected_face_indices,
+                longitudinal_axis=longitudinal_axis,
+                record_view=record_view,
+                n_sections=n_sections,
+                seam_angle_microdegrees=seam_angle_microdegrees,
+                section_center_policy=section_center_policy,
+                station_policy=station_policy,
+            )
+        except ArtifactUnrollableSurfaceError as exc:
+            raise ArtifactMeasurementError(str(exc)) from exc
+        return self._begin(
+            kind=MeasurementOperationKind.UNROLLABLE_SELECTION,
+            recipe=recipe,
+            record_id=record_id,
+            created_at=created_at,
+            operator=operator,
+            selection_hash=unrollable_selection_hash(recipe),
             depends_on_record_ids=depends_on_record_ids,
         )
 
@@ -2156,6 +2346,40 @@ class ArtifactMeasurementController:
                     depends_on_record_ids=work_item.depends_on_record_ids,
                 )
             except ArtifactDevelopedRubbingError as exc:
+                raise ArtifactMeasurementError(str(exc)) from exc
+        elif isinstance(computation, MandrelComputation):
+            if not mandrel_computation_matches_active_projection(current, computation):
+                raise StaleMeasurementOperationError(
+                    "mandrel measurement result is stale for the active projection"
+                )
+            try:
+                candidate = commit_mandrel_measurement(
+                    current,
+                    computation,
+                    record_id=work_item.record_id,
+                    created_at=work_item.created_at,
+                    operator=work_item.operator,
+                    depends_on_record_ids=work_item.depends_on_record_ids,
+                )
+            except ArtifactMandrelError as exc:
+                raise ArtifactMeasurementError(str(exc)) from exc
+        elif isinstance(computation, UnrollableSelectionComputation):
+            if not unrollable_selection_computation_matches_active_projection(
+                current, computation
+            ):
+                raise StaleMeasurementOperationError(
+                    "unrollable selection result is stale for the active projection"
+                )
+            try:
+                candidate = commit_unrollable_selection(
+                    current,
+                    computation,
+                    record_id=work_item.record_id,
+                    created_at=work_item.created_at,
+                    operator=work_item.operator,
+                    depends_on_record_ids=work_item.depends_on_record_ids,
+                )
+            except ArtifactUnrollableSurfaceError as exc:
                 raise ArtifactMeasurementError(str(exc)) from exc
         else:  # pragma: no cover - guarded by ArtifactMeasurementResult
             raise ArtifactMeasurementError("unsupported measurement computation")
